@@ -445,7 +445,7 @@ The session saves the section and filter.
 
 | Section | Contents |
 |---|---|
-| Sources | Descriptions, health, loading activity, and poll times; worst reported health first, unreported sources last |
+| Sources | Stopped data threads first (label, reason, and time; they stay until restart), then descriptions, health, loading activity, and poll times; worst reported health first, unreported sources last |
 | Data | Dataset and partition generations, with the resolved generation highlighted for a historical frame as-of |
 | Config | Current config-load diagnostics, data-layer diagnostics, prior load batches, and effective values with layer provenance |
 | Log | A bounded local tail of new records, with substring filtering and cursor following |
@@ -703,8 +703,12 @@ tile holds:
   it answers no (`sheet not removed` in the footer). `y` checks the name
   again: if a tile opened it, or a `:name` began retiring it, while the
   question stood, nothing is removed (`sheet 'x' not removed: it is open in
-  another tile` / `…: it is being removed`). A removal that fails says
-  so in the header. The name is reserved, as for `:name`, until the removal
+  another tile` / `…: it is being removed`). A removal the data service
+  refuses says so in the footer (`sheet 'x' not removed: the data service is
+  busy` / `…: has stopped`); one that fails after admission says so in the
+  header. When `:name` retires the old name and the service refuses that
+  removal, the header reads `old sheet 'x' not removed: …` with the same
+  reason, and the old document stays. The name is reserved, as for `:name`, until the removal
   is answered.
 
 A sheet name may not hold a control character: the store joins document key
@@ -741,14 +745,21 @@ Hiding a tile requests cancellation by key and defers further pricing until
 shown, keeping its stale marks. Cancellation is best effort and cannot retract
 emitted outcomes; matching deliveries can still apply while hidden.
 
-A refused submission (a full request queue, or a data service that is gone)
-paints `pricing request refused: …; retrying` over the header notice without
-replacing it, and retries: after one second, then doubling per consecutive
-refusal up to thirty seconds. The first refusal of a streak logs a warning on
+A submission refused because the request queue is full paints `pricing
+request refused: the data service is busy; retrying` over the header notice
+without replacing it, and retries: after one second, then doubling per
+consecutive refusal up to thirty seconds. The first refusal of a streak logs a warning on
 `geode::pricing` with the tile id; the rest of the streak logs nothing. The
 streak ends when a submission is admitted or when nothing is left to ask for
 (its lines were answered or deleted); the notice it covered then shows again,
 and the next refusal starts over at one second. `escape` does not clear it.
+
+A submission refused because the data service has stopped arms no retry: the
+service is declared stopped and never restarted, so every retry would repeat
+the refusal. The header shows `pricing request refused: the data service has
+stopped` for the rest of the tile's life, over any other notice, and the tile
+submits nothing further: no refresh tick, edit, or `:price` asks the service
+again. It logs one warning on `geode::pricing`.
 
 The refresh timer marks every line stale and resubmits while the tile is
 visible and the sheet has a line. `[pricing] refresh` sets the default
@@ -781,15 +792,22 @@ A sheet is saved as a whole document one idle second after its last change.
 Closing the tile saves any change not yet saved, whether it was still waiting
 on the idle timer, was refused by the store, or was queued and then reported
 failed. A save the store accepts is only queued; its outcome arrives later by
-sheet name. A refused save (`the store refused it`) or a failed one (the
-writer's reason) paints a notice in the header's own save slot, separate from
-pricing notices: a refused pricing request cannot overwrite it, a later
+sheet name. A refused save (`sheet not saved: the data service is busy; the
+next edit retries`) or a failed one (`sheet not saved: <the writer's reason>;
+the next edit retries`) paints a notice in the header's own save slot,
+separate from pricing notices: a refused pricing request cannot overwrite it, a later
 successful request cannot clear it, and `escape` does not clear it. Only a
 confirmed save does. Outcomes carry no link to the save that produced them;
 every one is delivered, in the writer's order, so the last to arrive is the
 latest queued save's. The next change and the close both retry. A close with
 a save queued but unconfirmed writes nothing extra: the write is already
 queued. An empty sheet publishes nothing.
+
+A save refused because the data service has stopped reads `sheet not saved:
+the data service has stopped`, and the tile stops asking for the rest of its
+life, across `:e`: later edits, the idle timer, `:name`, and the close do not
+call the store again, and each keeps that notice showing. The stopped save state and the stopped pricing state are
+separate; each is set by its own first `Stopped` refusal.
 
 Quitting the app attempts to queue every unsaved sheet before stopping the data
 service. The writer drains queued local saves and removals, subject to the
@@ -834,7 +852,9 @@ generations remain available only within the retention limit.
   generation.
 - If the data service fails to open, requests admitted before that never
   answer (for every request kind, not only sheets): a tile shows `loading…`
-  until it switches sheet, and a sheet with a save queued stays taken.
+  until it switches sheet, and a sheet with a save queued stays taken. Later
+  submissions are refused `Stopped`, and the status bar shows `data service
+  stopped — restart Geode`.
 
 Other known gaps: the underlying typeahead does not yet offer catalogue
 underlyings; result cells are not sign-colored; column widths are the

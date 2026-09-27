@@ -32,7 +32,7 @@ The tile:
 
 | Module | Holds |
 |---|---|
-| `store` | The `SheetStore` seam, addressed by key/tag with `Loaded::Refused` for a load that never went out; `MemorySheetStore` (in-memory, the tests' fake) and `DuckSheetStore` (the store `geode-app` wires: `pricer_sheets` document reads/writes over `DataHandle`, with a `known`-names cache fed from the diagnostics catalog and the store's own confirmed writes). |
+| `store` | The `SheetStore` seam, addressed by key/tag with `Loaded::Refused(Refusal)` for a load that never went out and `save`/`forget` returning `Result<(), Refusal>`; `MemorySheetStore` (in-memory, the tests' fake, whose `set_save_refusal`/`set_load_refusal`/`set_forget_refusal` choose the refusal kind and `set_refusing`/`set_load_refused` are `Busy` shorthands) and `DuckSheetStore` (the store `geode-app` wires: `pricer_sheets` document reads/writes over `DataHandle`, with a `known`-names cache fed from the diagnostics catalog and the store's own confirmed writes). |
 | `grid` | The prepared `GridModel`, rebuilt on change. |
 | `paint` | The per-theme paint memo, floored to a readable ratio. |
 | `delegate` | The table delegate: cells, the tree column (indent, chevron, template tag), editor, expiry date field. |
@@ -105,6 +105,10 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   notice without replacing it, log once per streak, and schedule retries from
   one second up to a thirty-second cap. Admission or a submit with no further
   work needed ends the streak. Only one retry timer is pending at a time.
+  That backoff is for `Refusal::Busy` only. A `Stopped` refusal arms no retry
+  and sets `stopped`: the header shows `STOPPED` over every other notice and
+  `submit` returns at once for the rest of the tile's life, so no refresh
+  tick, edit, or `:price` asks a service that will never come back.
 - Package expansion IDs survive edits because IDs are not reused, allowing
   undo to restore an open package. Loading prunes the set; session output
   includes only packages still present. Restoring a leg selects it and opens
@@ -164,11 +168,15 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   refusal streak.
 - `SheetStore::load` is addressed by the caller's `QueryKey`/tag so a
   DuckDB-backed answer can be routed back; a load the store never
-  submitted answers `Loaded::Refused`, which the tile treats as a failed
-  load (`save_blocked`), never as a `Pending` that will silently never
-  resolve. `save`/`forget` only queue a write — `true` means admitted,
-  not written — and the confirmed outcome reaches the tile separately, by
-  sheet name.
+  submitted answers `Loaded::Refused(Refusal)`, which the tile treats as a
+  failed load (`save_blocked`) naming the refusal's kind, never as a
+  `Pending` that will silently never resolve. `save`/`forget` only queue a
+  write — `Ok` means admitted, not written — and the confirmed outcome
+  reaches the tile separately, by sheet name. A `Busy` save refusal paints
+  `NOT_SAVED` and the next edit retries; a `Stopped` one sets `save_stopped`
+  and paints `SAVE_STOPPED`, after which `save_now` never calls the store
+  again (it repaints the notice, so `:name`, which clears the save slot,
+  still shows it).
 - `:e`/`:new` flush the outgoing sheet (a refused flush keeps the tile on
   it), release its name, cancel its pricing and retire its pricing tag (line
   ids restart per sheet), and reset undo, expansion, cursor and every
