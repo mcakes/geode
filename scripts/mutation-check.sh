@@ -20101,10 +20101,25 @@ run_mutation "pricer entry bar: an edit keeps a stale error" \
 # past a line that never went in.
 run_mutation "pricer entry bar: a refusal keeps the advanced place" \
   crates/geode-pricer/src/tile.rs \
-  '                    entry.place = at;
+  '                    entry.place = before;
                     entry.error = Some(e.to_string().into());' \
   '                    entry.error = Some(e.to_string().into());' \
   geode-pricer a_refused_line_puts_the_place_back
+
+# A package typed inside a package lands just after it rather than being
+# refused ("a package cannot hold a package").
+run_mutation "pricer entry: a package inside a package is refused" \
+  crates/geode-pricer/src/core/entry.rs \
+  '        (Place::Leg { package, .. }, RowSpec::Package { .. }) => Place::Root {' \
+  '        (Place::Leg { package, .. }, RowSpec::Package { .. }) if false => Place::Root {' \
+  geode-pricer a_package_typed_inside_a_package_lands_after_it
+
+# The bar must insert at the landing place, not the raw leg place.
+run_mutation "pricer entry bar: enter ignores the landing place" \
+  crates/geode-pricer/src/tile.rs \
+  '        let at = landing_place(&self.sheet, before, &spec);' \
+  '        let at = before;' \
+  geode-pricer a_package_typed_inside_a_package_lands_after_it
 
 # The label follows the place after each enter.
 run_mutation "pricer entry bar: the label stays on the first place" \
