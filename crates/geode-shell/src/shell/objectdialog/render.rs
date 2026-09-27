@@ -1499,7 +1499,9 @@ fn handle_edit_key_inner(
                         _ => {}
                     }
                 }
-                _ if on_named => set_notice(shell, "x drops a named expression's row".to_string()),
+                _ if on_named => {
+                    set_notice(shell, "select a named expression to drop it".to_string())
+                }
                 _ => set_notice(
                     shell,
                     "x drops a selected dimension — here, space unticks".to_string(),
