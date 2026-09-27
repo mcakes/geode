@@ -2119,7 +2119,7 @@ run_mutation "keymap: a reset counts a desk override as the user's" \
 run_mutation "keymap: a reset names the rendered key, not the file's spelling" \
   crates/geode-shell/src/keymap/build.rs \
   '                    key_source: spec.clone(),' \
-  '                    key_source: crate::palette::render_binding(&keystrokes),' \
+  '                    key_source: crate::palette::render_binding(&parse_binding(spec, mod_alias).unwrap_or_default()),' \
   geode-shell \
   the_override_carries_the_files_own_key_spelling
 
@@ -4195,7 +4195,7 @@ run_mutation "palette: extending a run outbids restarting at a word start" \
 run_mutation "palette: query words match in any order" \
   crates/geode-shell/src/palette.rs \
   '        combine_words(alone).or_else(|| align_words_disjoint(&words, candidate, title_len));' \
-  '        { let _ = alone; None };' \
+  '        { let _ = alone; None::<(u32, Vec<usize>)> };' \
   geode-shell words_typed_out_of_order_still_match
 
 # When the words' best alignments collide, each is placed again on the
@@ -5334,9 +5334,7 @@ run_mutation "objectdialog: a fork asks first" \
   '    match super::apply::commit_edit(shell, cx) {
         Some(refusal) => set_notice(shell, refusal),' \
   '    if fork.is_some() {
-        if let Some(draft) = draft_mut(shell) {
-            draft.confirm = Some(Confirm::Overwrite);
-        }
+        arm_confirm(shell, Confirm::Overwrite);
         return;
     }
     match super::apply::commit_edit(shell, cx) {
@@ -7718,7 +7716,7 @@ run_mutation "objectdialog: d/r ask for a presentation doc even when the domain 
             if let Some(presentation) = domain.presentation_doc() {
                 docs.push(presentation);
             }' \
-  '            let docs = [Destination::Doc.doc(domain), Destination::Presentation.doc(domain)];' \
+  '            let mut docs = vec![Destination::Doc.doc(domain), Destination::Presentation.doc(domain)];' \
   geode-shell deleting_a_forked_slot_does_not_look_for_a_presentation_doc_that_does_not_exist
 
 # ---- Phase 4c part 2a, Task 5: the Scopes adapter ----------------------
@@ -11581,7 +11579,7 @@ run_mutation "blotter: the colour cache invalidates on a changed anchor" \
 run_mutation "blotter: an unknown colour name resolves to none" \
   crates/geode-blotter/src/delegate.rs \
   '        self.colour_cache.get(&self.colours, name, anchors, tokens)' \
-  '        self.colour_cache.get(&self.colours, name, anchors, tokens).or(Some(gpui::Hsla::default()))' \
+  '        self.colour_cache.get(&self.colours, name, anchors, tokens).or(Some(ColourResolved::plain(gpui::Hsla::default())))' \
   geode-blotter \
   a_named_column_paints_its_resolved_colour
 
@@ -12266,13 +12264,12 @@ run_mutation "matrix: a hole in the pivot is an error, not a zero" \
                         spec.rows.column
                     ));
                 }' \
-  '                None => cells.push(Cell {
-                    text: SharedString::from(format_number(0.0, &spec.format).text),
-                    value: Some(0.0),
-                    edited: false,
-                    sent: false,
-                    cell_ref: (ri, ci),
-                }),' \
+  '                None => cells.push(cell_of(
+                    Some(Value::F64(0.0)),
+                    (ri, slice_columns + ci),
+                    &column_kinds[slice_columns + ci],
+                    draft,
+                )),' \
   geode-marketdata \
   a_missing_cell_is_a_hole_and_the_error_names_the_pair
 
@@ -14624,7 +14621,7 @@ run_mutation "picker: a values row double-click toggles its tick" \
 run_mutation "asof: the preset list takes the full nav set (spec §20.5)" \
   crates/geode-shell/src/shell/asof_view.rs \
   '    if let Some(cmd) = listfilter::nav_command(ks) {' \
-  '    if let Some(cmd) = listfilter::nav_command(ks).filter(|c| matches!(c, vimnav::NavCommand::Move(1 | -1))) {' \
+  '    if let Some(cmd) = listfilter::nav_command(ks).filter(|c| matches!(c, crate::vimnav::NavCommand::Move(1 | -1))) {' \
   geode-shell \
   nav_past_the_visible_rows_scrolls_the_highlight_into_view
 
