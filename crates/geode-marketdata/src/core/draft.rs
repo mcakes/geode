@@ -293,6 +293,22 @@ impl Draft {
         }
     }
 
+    /// Whether `self` holds the same unsent work as `other`: the same cell,
+    /// attribute and row edits at the same keys. The state, the base and
+    /// the captured group counts are ignored, since a delivery moves those
+    /// without touching the work (a held generation, or an automatic
+    /// rebase that re-placed every edit where it was). An undo that
+    /// snapshots the draft after its own last write uses this to tell
+    /// whether anything else has written since: restoring over a revert,
+    /// a replace or another edit would silently bring back work the
+    /// trader or the policy discarded.
+    pub fn same_work_as(&self, other: &Draft) -> bool {
+        self.edits == other.edits
+            && self.labels == other.labels
+            && self.attrs == other.attrs
+            && self.rows == other.rows
+    }
+
     /// Read an existing numeric edit; absent, date, and text edits return
     /// `None`. Callers use this before the painted document value so
     /// successive bumps compose, and the value keeps its type so an integer
@@ -2406,5 +2422,36 @@ mod tests {
         assert_eq!(now.len(), 1, "the step's edit is gone");
         assert_eq!(now.edits, before.edits, "the earlier edits are back");
         assert!(!now.is_behind(), "the stale delivery is not revived");
+    }
+
+    #[test]
+    fn same_work_ignores_state_base_and_group_counts_but_not_edits() {
+        let base = DocumentBase::default();
+        let mut after = Draft::default();
+        after.set((0, 0), ("a".into(), "x".into()), Value::F64(1.0), &base);
+        let mut now = after.clone();
+        now.on_delivered(&DocumentBase {
+            as_of: "2026-09-27T10:00:00Z".into(),
+            generation: Some(8),
+        });
+        now.base = Some(DocumentBase {
+            as_of: "2026-09-27T10:00:00Z".into(),
+            generation: Some(8),
+        });
+        now.groups.insert("2026-09-18".into(), 2);
+        assert!(now.same_work_as(&after), "a delivery moved no work");
+
+        let mut edited = after.clone();
+        edited.set((0, 1), ("a".into(), "y".into()), Value::F64(2.0), &base);
+        assert!(!edited.same_work_as(&after));
+        let mut reverted = after.clone();
+        reverted.revert();
+        assert!(!reverted.same_work_as(&after));
+        let mut attr = after.clone();
+        attr.set_attr("spot", Value::F64(1.0), &base);
+        assert!(!attr.same_work_as(&after));
+        let mut row = after.clone();
+        row.insert_row("new-1".into(), None, &base);
+        assert!(!row.same_work_as(&after));
     }
 }

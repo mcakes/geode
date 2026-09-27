@@ -19,7 +19,8 @@ pub(super) const STEPS_KEPT: &str = "steps kept: the document moved";
 /// What closing a selection editor did with its live steps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StepsUndo {
-    /// Nothing was stepped; the draft is as it was.
+    /// Nothing was stepped, or something else wrote the draft since the
+    /// last step; either way the draft is left as it is, silently.
     Nothing,
     /// The draft is back as `i` found it; the caller rebuilds.
     Restored,
@@ -371,6 +372,9 @@ impl MarketDataTile {
                 return Some(true);
             }
         };
+        // `rebuild_model` writes the notice only when the grid cannot be
+        // built; that failure outranks the step count.
+        self.notice = None;
         self.rebuild_model(cx);
         // The editor follows its own cell by label: the rebuild keeps rows
         // in place (a step never inserts or drops one), and a grid that
@@ -380,26 +384,37 @@ impl MarketDataTile {
         if let Some(text) = &text {
             state.update(cx, |s, cx| s.set_value(text.clone(), window, cx));
         }
+        let after = self.draft.clone();
         let bulk = self.editor.as_mut()?.bulk.as_mut()?;
         if let Some(text) = text {
             bulk.seeded = text;
         }
+        bulk.after = after;
         bulk.steps += steps;
         bulk.stepped = true;
-        self.notice = Some(bulk::step_notice(n, bulk.steps, &skips).into());
+        if self.notice.is_none() {
+            self.notice = Some(bulk::step_notice(n, bulk.steps, &skips).into());
+        }
         Some(true)
     }
 
     /// Take a closing selection editor's live steps back out of the
-    /// draft. Only while the generation it opened on is still painted:
-    /// after an automatic rebase or replace, `before` is keyed to a grid
-    /// no longer on screen, and restoring it would put edits on the wrong
-    /// cells, so the steps are kept and the notice says so. A delivery
-    /// held behind meanwhile stays news (`Draft::restore_from`), and an
-    /// empty restore is never behind, so the retained base is dropped.
-    /// Does not rebuild; on `Restored` the caller does.
+    /// draft, only while the steps are the last thing that wrote it.
+    ///
+    /// If the draft's work no longer matches `bulk.after`, something else
+    /// wrote it meanwhile (a palette revert, `:set`, a replace policy, a
+    /// single-cell commit once the selection cleared): restoring `before`
+    /// would silently bring back what that discarded or overwrite what it
+    /// wrote, so the draft is left alone and nothing is said. If the work
+    /// is unchanged but the painted generation moved (an automatic rebase
+    /// that re-placed every edit), `before` is keyed to a grid no longer
+    /// on screen and restoring it would put edits on the wrong cells, so
+    /// the steps are kept and the notice says so. Otherwise `before` comes
+    /// back; a delivery held behind meanwhile stays news
+    /// (`Draft::restore_from`). Does not rebuild; on `Restored` the
+    /// caller does.
     pub(super) fn undo_steps(&mut self, bulk: Bulk) -> StepsUndo {
-        if !bulk.stepped {
+        if !bulk.stepped || !self.draft.same_work_as(&bulk.after) {
             return StepsUndo::Nothing;
         }
         // Whole-pair equality: a generation this snapshot cannot vouch for
@@ -409,6 +424,12 @@ impl MarketDataTile {
             return StepsUndo::Kept;
         }
         self.draft.restore_from(bulk.before);
+        // Not behind, the retained base can only be one kept for a sent
+        // draft whose echo differs, and `held_refusal` refuses every edit
+        // (a step included) in that state, so no step reached a draft that
+        // retains one. Dropping it here is therefore a no-op except after
+        // an empty restore, which is never behind and must paint the
+        // newest delivered generation.
         if !self.draft.is_behind() {
             self.leave_behind();
         }
@@ -489,10 +510,11 @@ impl MarketDataTile {
         // half-step. The restore changes no row structure (a step never
         // inserts or drops a row), so the model's labels and `cell_ref`s
         // read below still hold.
-        let kept = match self.editor.as_mut().and_then(|e| e.bulk.take()) {
-            Some(bulk) => self.undo_steps(bulk) == StepsUndo::Kept,
-            None => false,
+        let undo = match self.editor.as_mut().and_then(|e| e.bulk.take()) {
+            Some(bulk) => self.undo_steps(bulk),
+            None => StepsUndo::Nothing,
         };
+        let kept = undo == StepsUndo::Kept;
         // Labels and `cell_ref`s are read from the model as it stands; it
         // is rebuilt only after every write, so no write shifts another's
         // target.
@@ -528,6 +550,11 @@ impl MarketDataTile {
             }
         }
         if n == 0 {
+            // The steps are gone from the draft; the grid must not keep
+            // painting them.
+            if undo == StepsUndo::Restored {
+                self.rebuild_model(cx);
+            }
             self.notice = Some(nothing_accepts(&skips).into());
             return true;
         }

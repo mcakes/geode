@@ -1057,3 +1057,160 @@ fn the_editor_stays_painted_in_its_cell_across_steps(cx: &mut gpui::TestAppConte
     type_keys(&mut vcx, "9");
     assert_eq!(h.editor_value(&vcx).as_deref(), Some("0.50029"));
 }
+
+/// A palette revert while the editor is open discards the draft; the
+/// escape that follows must not bring the reverted edits back.
+#[gpui::test]
+fn escape_after_a_revert_mid_step_leaves_the_draft_reverted(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    h.command(&mut vcx, "bump 1 col").unwrap(); // reverted below
+    select_two_nodes_by_two_terms(&h, &mut vcx);
+    h.dispatch(&mut vcx, "edit", None);
+    h.dispatch(&mut vcx, "insert_up", None);
+    h.dispatch(&mut vcx, "revert", None);
+    assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
+    h.dispatch(&mut vcx, "cancel", None);
+    assert!(
+        h.tile.read_with(&vcx, |t, _| t.draft().is_empty()),
+        "the reverted edits stay reverted"
+    );
+    assert_eq!(h.row_texts(&vcx, 0)[..1], ["4500.00"]);
+    assert_eq!(h.row_texts(&vcx, 1)[3..], ["0.4000", "0.5000", "0.6000"]);
+}
+
+/// The selection cleared while the editor was open: `enter` on typed
+/// text is a single-cell commit, and its close must not restore the
+/// pre-`i` draft over the value just written.
+#[gpui::test]
+fn a_typed_commit_after_the_selection_cleared_mid_step_keeps_the_value(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    select_two_nodes_by_two_terms(&h, &mut vcx);
+    h.dispatch(&mut vcx, "edit", None);
+    h.dispatch(&mut vcx, "insert_up", None);
+    h.dispatch(&mut vcx, "visual_block", None); // the same key again clears
+    assert!(resolved(&h, &vcx).is_none());
+    h.set_editor(&mut vcx, "0.25");
+    h.dispatch(&mut vcx, "commit", None);
+    assert!(h.editor_value(&vcx).is_none());
+    assert_eq!(
+        h.row_texts(&vcx, 1)[4],
+        "0.2500",
+        "the typed value stays written"
+    );
+}
+
+/// Under `:auto replace` a delivery reverts the draft and says so. The
+/// escape after it has no steps to keep and must not claim any, nor
+/// overwrite the replace disclosure.
+#[gpui::test]
+fn escape_after_an_auto_replace_says_nothing_about_steps(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "auto replace").unwrap();
+    let tag = h.with_document_tagged(&mut vcx);
+    select_two_nodes_by_two_terms(&h, &mut vcx);
+    h.dispatch(&mut vcx, "edit", None);
+    h.dispatch(&mut vcx, "insert_up", None);
+    h.deliver(&mut vcx, tag, Arc::new(document_of(&TERMS, &NODES, NEWER)));
+    let disclosure = notice_of(&h, &vcx).expect("the replace disclosure");
+    assert!(disclosure.contains("replaced"), "{disclosure}");
+    h.dispatch(&mut vcx, "cancel", None);
+    assert_eq!(notice_of(&h, &vcx), Some(disclosure));
+    assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
+    assert_eq!(h.row_texts(&vcx, 1)[3..], ["0.4000", "0.5000", "0.6000"]);
+}
+
+/// A flat panel with a free-text `note` beside a number `amount`, over
+/// two rows: a text cursor cell for the absolute-commit rule.
+const SCHEDULE_NOTE_AMOUNT: PanelSpec = PanelSpec {
+    kind: "sched_note_amount",
+    title: "Notes",
+    dataset: "div_schedule_note_amount",
+    document: "div_schedule_note_amount",
+    rows: RowAxis {
+        column: "dividend_id",
+        identity: RowIdentity::Minted,
+        label: RowLabel::Shown,
+    },
+    columns: Columns::Values(&[
+        ValueColumn {
+            column: "note",
+            label: "note",
+            ty: ColumnType::Utf8,
+            format: ColumnFormat::MEASURE,
+            choices: None,
+            required: false,
+        },
+        ValueColumn {
+            column: "amount",
+            label: "amount",
+            ty: ColumnType::F64,
+            format: ColumnFormat::MEASURE,
+            choices: None,
+            required: true,
+        },
+    ]),
+    header: &[],
+    slice_values: &[],
+    value_type: ColumnType::F64,
+    format: ColumnFormat::MEASURE,
+    actions: &[],
+};
+
+fn open_note_amount(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTestContext) {
+    let (h, mut vcx) = open_spec(cx, &SCHEDULE_NOTE_AMOUNT, None);
+    h.command(&mut vcx, "key SPX.Z").unwrap();
+    h.visible(&mut vcx, true);
+    let tag = h.document_request().unwrap().tag;
+    let snapshot = Snapshot::for_tests_with_provenance(
+        vec![
+            (
+                meta("underlying_ref", Attribution::Additive),
+                TestColumn::Dict(vec![Some("SPX.Z".into()), Some("SPX.Z".into())]),
+            ),
+            (
+                meta("dividend_id", Attribution::Additive),
+                TestColumn::Dict(vec![Some("D1".into()), Some("D2".into())]),
+            ),
+            (
+                meta("note", Attribution::DeterminedNonAdditive),
+                TestColumn::Dict(vec![Some("special".into()), Some("plain".into())]),
+            ),
+            (
+                meta("amount", Attribution::DeterminedNonAdditive),
+                TestColumn::F64(vec![Some(1.25), Some(0.5)]),
+            ),
+        ],
+        0,
+        provenance(BASE),
+    );
+    h.deliver(&mut vcx, tag, Arc::new(snapshot));
+    (h, vcx)
+}
+
+/// On a text cursor cell the selection edit is absolute from the start:
+/// an untouched `enter` writes the seeded text to every accepting cell.
+#[gpui::test]
+fn an_untouched_commit_on_a_text_cell_writes_the_seed_to_every_accepting_cell(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open_note_amount(cx);
+    h.dispatch(&mut vcx, "visual_rows", None); // cursor on D1's note
+    h.dispatch(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "edit", None);
+    assert_eq!(h.editor_value(&vcx).as_deref(), Some("plain"));
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.col_texts(&vcx, 0), vec!["plain", "plain"]);
+    assert_eq!(
+        h.col_texts(&vcx, 1),
+        vec!["1.25", "0.50"],
+        "amount refused the text"
+    );
+    assert_eq!(
+        notice_of(&h, &vcx).as_deref(),
+        Some("set 2 cells, skipped 2 (2 wrong type)")
+    );
+}

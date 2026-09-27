@@ -299,6 +299,12 @@ struct Editing {
 struct Bulk {
     /// The draft when `i` opened the editor.
     before: Draft,
+    /// The draft right after the last step landed (`before` until one
+    /// does). A draft whose work no longer matches it was written by
+    /// something else while the editor was open (a palette revert, a
+    /// `:set`, a replace policy, a single-cell commit once the selection
+    /// cleared), and restoring `before` over that would silently undo it.
+    after: Draft,
     /// The generation painted then. An automatic rebase or replace while
     /// the editor is open moves it, and `before` is then keyed to a grid
     /// that is no longer painted: restoring it would put edits on the
@@ -2549,13 +2555,19 @@ impl MarketDataTile {
             state.read(cx).focus_handle(cx).focus(window, cx);
             EditorState::Text(state)
         };
-        // A date cell has its own segment stepping and commits absolutely,
-        // so only a text cell editor steps the selection live.
+        // Only a number cursor cell steps the selection live. A text or
+        // date cursor cell commits absolutely: its untouched `enter` writes
+        // the seeded value to every accepting member.
         let bulk = (self.selection.is_some()
-            && matches!(target, EditTarget::Cell { .. })
-            && matches!(state, EditorState::Text(_)))
+            && matches!(state, EditorState::Text(_))
+            && matches!(
+                target,
+                EditTarget::Cell { cell: (_, col), .. }
+                    if matches!(self.model.kind_of(col), Some(CellKind::Number(_)))
+            ))
         .then(|| Bulk {
             before: self.draft.clone(),
+            after: self.draft.clone(),
             painted: self.model.base.clone(),
             seeded: text.to_string(),
             steps: 0,
