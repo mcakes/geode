@@ -73,6 +73,12 @@ cargo bench -p geode-timeseries
   press may already have swapped another popup in.
 - A pointer gesture ends at the same tail as its key: pan and zoom at
   `view_moved`, a split at `apply_changed`.
+- A view move with statistics on requeries only when no series request is in
+  flight; otherwise it waits and the answer (success or error) releases one
+  request for the latest view. Superseding would interrupt the running query
+  in the pool, so a pan faster than one query would leave the density strip
+  and percentiles frozen until the pan stopped. Any other query change still
+  supersedes at once.
 - The color picker writes to the slot number it was opened for, never to the
   cursor, through `Model::set_colour` and `apply_changed`, the same path as
   `:color`. The target and featured colors it writes against (`PickContext`)

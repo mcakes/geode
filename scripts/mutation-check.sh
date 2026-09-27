@@ -720,10 +720,127 @@ run_mutation "derived: a name inside a string literal is not a reference" \
 
 run_mutation "validation: views are checked when the service opens" \
   crates/geode-data/src/service.rs \
-  '            .flat_map(|v| v.validate(&config.schema, &config.dimensions))' \
-  '            .flat_map(|_v| Vec::<Diagnostic>::new())' \
+  '            validate_views(&config.views, &config.schema, &config.dimensions);' \
+  '            validate_views(&[], &config.schema, &config.dimensions);' \
   geode-data \
   a_misconfigured_view_is_a_diagnostic_at_open_not_a_binder_error_later
+
+# ---- view strictness: a view that cannot be honoured is refused, not painted
+#
+# Validation reported these situations for a long time and nothing acted on
+# them: the query compiled anyway, the columns it could not supply came back
+# absent, and an absent column paints blank forever with nothing on the tile
+# saying why. A trader reading a blank delta column has no way to tell it from
+# a genuine zero-risk row. These entries guard the refusal, the two new
+# checks, and the author's opt-out from it.
+
+run_mutation "views: an error diagnostic refuses the query" \
+  crates/geode-data/src/service.rs \
+  '        if let Some(why) = self.refused_views.get(view) {' \
+  '        if let Some(why) = None::<&String> {' \
+  geode-data \
+  a_view_with_an_error_diagnostic_is_refused_by_name_not_compiled
+
+# The refusals must come from the configuration in force, not the one the app
+# started with. Keeping the old set means a view the author has just corrected
+# stays refused until the desk restarts, and a view the author has just broken
+# keeps serving blank columns through the rest of the session.
+run_mutation "views: a reload replaces the refusals instead of keeping them" \
+  crates/geode-data/src/service.rs \
+  '        self.refused_views = refused_views;' \
+  '        let _ = refused_views;' \
+  geode-data \
+  a_reload_replaces_the_refusals_rather_than_keeping_the_ones_from_open
+
+# The compiler joins at the first grain of the joined dataset that carries
+# every key. With none, there is no table to read: without this check the join
+# is dropped and every reference column it was to supply is missing from the
+# row rather than NULL.
+run_mutation "views: a join's keys must be carried by a grain" \
+  crates/geode-core/src/view.rs \
+  '                .any(|g| keys.iter().all(|k| joined.carries(g, k)))' \
+  '                .any(|g| keys.iter().all(|k| joined.carries(g, k) || true))' \
+  geode-core \
+  a_join_whose_keys_no_grain_carries_refuses_the_view
+
+# A join can only run at a depth whose spine groups by its keys, so a key the
+# grouping never names puts it on the spine at no depth at all. Without this
+# check the join is silently never performed and the columns it feeds are blank
+# for the life of the view.
+run_mutation "views: a join keyed outside the grouping is refused" \
+  crates/geode-core/src/view.rs \
+  '            let Some(ungrouped) = j.on.iter().find(|k| !self.grouping.contains(k)) else {' \
+  '            let Some(ungrouped) = j.on.iter().find(|_k| false) else {' \
+  geode-core \
+  a_join_keyed_outside_the_grouping_refuses_the_view_when_it_supplies_a_column
+
+# The aggregate comes from the column's declared role. A column that is not a
+# measure of the primary dataset has no aggregate to take, and an attribute
+# repeats across every row of its grain — so the total on screen looks like a
+# number and is not one. `kind` defaults to "measure", so this is the mistake
+# the shorthand form makes.
+# A dimension reaches the row only by being grouped or by coming off a join;
+# the spine selects nothing else. Mutated so the grouping test never holds, a
+# dimension column the view declares but nothing supplies goes unreported, and
+# the blotter paints that column empty on every row forever with no diagnostic
+# anywhere the trader would look.
+run_mutation "views: a dimension column must be reachable" \
+  crates/geode-core/src/view.rs \
+  '                    if let ViewColumn::Dimension { required, .. } = other
+                        && !self.grouping.iter().any(|g| g == name)' \
+  '                    if let ViewColumn::Dimension { required, .. } = other
+                        && false' \
+  geode-core \
+  a_dimension_column_neither_grouped_nor_joined_refuses_the_view
+
+run_mutation "views: a measure column must really be a measure" \
+  crates/geode-core/src/view.rs \
+  '                            .is_some_and(|c| matches!(c.role, ColumnRole::Measure { .. }))' \
+  '                            .is_some_and(|_c| true)' \
+  geode-core \
+  a_measure_column_over_an_attribute_refuses_the_view
+
+# The author decides whether a declaration is load-bearing. Refusing an
+# optional one takes the whole blotter away over a column its author already
+# said was nice-to-have; the warning is what the trader gets instead.
+run_mutation "views: required = false is dropped rather than refused" \
+  crates/geode-core/src/view.rs \
+  '        let report = |required: bool, message: String| {
+            if required {' \
+  '        let report = |required: bool, message: String| {
+            if true {' \
+  geode-core \
+  an_optional_unreachable_column_is_dropped_with_a_warning_naming_it
+
+# The compiler's own backstop for the same defect, for a view that reaches it
+# without having been through validation: dropping the join here is what made
+# the joined columns paint blank in the first place.
+run_mutation "views: the compiler refuses a join naming an unknown dataset" \
+  crates/geode-data/src/query/compile.rs \
+  '            return Err(compile_error(
+                view,
+                format!("join names unknown dataset '"'"'{}'"'"'", join.dataset),
+            ));' \
+  '            continue;' \
+  geode-data \
+  a_join_the_compiler_cannot_honour_is_an_error_not_a_silent_drop
+
+# The other half of the same backstop. The joined dataset exists and its keys
+# are on the spine, but no grain of it is keyed by them, so there is no table
+# to read: dropping the join leaves every reference column it was to supply out
+# of the statement, blank on the row and indistinguishable from a real NULL.
+run_mutation "views: the compiler refuses a join no grain can serve" \
+  crates/geode-data/src/query/compile.rs \
+  '            return Err(compile_error(
+                view,
+                format!(
+                    "join on {:?} names keys no grain of dataset '"'"'{}'"'"' carries",
+                    join.on, join.dataset
+                ),
+            ));' \
+  '            continue;' \
+  geode-data \
+  a_join_no_grain_of_the_joined_dataset_can_serve_is_an_error_naming_its_keys
 
 run_mutation "validation: a scope column is checked against the dataset" \
   crates/geode-core/src/scope/mod.rs \
@@ -3597,8 +3714,8 @@ run_mutation "blotter: :filter narrows only this tile" \
 
 run_mutation "blotter: an unscoped tile keeps its own filter" \
   crates/geode-blotter/src/tile.rs \
-  '                self.tile_scope.clone()' \
-  '                Scope::default()' \
+  '                Ok(self.tile_scope.clone())' \
+  '                Ok(Scope::default())' \
   geode-blotter an_unscoped_tile_still_applies_its_own_filter
 
 run_mutation "blotter: filter validates against the dataset" \
@@ -7637,6 +7754,7 @@ run_mutation "objectdialog: an emptied Doc object removes the user's key instead
 run_mutation "objectdialog: unticking a Doc list's last entry is allowed again" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
   '                if included
+                    && !may_empty
                     && dest == Destination::Doc
                     && self.values.is_none()
                     && items.iter().filter(|i| i.included).count() == 1
@@ -8468,8 +8586,8 @@ run_mutation "scope-save: the save chip's savable gate" \
 # both in the palette and in `input.rs`'s `scope::<name>` dispatch arm.
 run_mutation "scope-save: save_current is a reserved scope name" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '            Domain::Scopes => &geode_core::scopes::RESERVED_NAMES,' \
-  '            Domain::Scopes => &[],' \
+  '            Domain::Scopes | Domain::Expressions => &geode_core::scopes::RESERVED_NAMES,' \
+  '            Domain::Scopes | Domain::Expressions => &[],' \
   geode-shell \
   scope_save_current_refuses_its_own_name_as_reserved
 
@@ -9079,14 +9197,26 @@ run_mutation "groupings: an unchanged chain is applied anyway" \
 # Re-anchored (30fcede gave this arm `.min_h_6()` — item 2 of the final
 # review's re-review — so the bare-`div()` text the old anchor matched
 # no longer exists). The three match arms together are still the
-# unique text: `confirm_row(confirm, &draft.name, entity, cx)` and
+# unique text: the edit stage's `confirm_row(` call on `&draft.name` and
 # `action_bar(shell, entity)` each occur nowhere else in this file.
 run_mutation "objectdialog: the action bar stays up under the chain field" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '        (true, _) => div().min_h_6().into_any_element(),
-        (false, Some(confirm)) => confirm_row(confirm, &draft.name, entity, cx),
+        (false, Some(confirm)) => confirm_row(
+            confirm,
+            &draft.name,
+            state.confirm_detail.as_deref(),
+            entity,
+            cx,
+        ),
         (false, None) => action_bar(shell, entity),' \
-  '        (_, Some(confirm)) => confirm_row(confirm, &draft.name, entity, cx),
+  '        (_, Some(confirm)) => confirm_row(
+            confirm,
+            &draft.name,
+            state.confirm_detail.as_deref(),
+            entity,
+            cx,
+        ),
         (_, None) => action_bar(shell, entity),' \
   geode-shell \
   i_opens_the_chain_field_tab_completes_and_enter_writes_the_chain
@@ -9223,7 +9353,7 @@ run_mutation "objectdialog: a tick click toggles through space's path" \
 # `Draft::toggle_selected`, which adds an empty selection instead.
 run_mutation "objectdialog: a tick on an available Scopes row opens its values" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    if !in_values_stage(shell) && is_scopes(shell) {' \
+  '    if !in_values_stage(shell) && is_scopes(shell) && !on_scopes_named_row(shell) {' \
   '    if false {' \
   geode-shell clicking_an_available_dimensions_tick_opens_its_values_stage
 
@@ -16885,6 +17015,147 @@ run_mutation "pricer views: an unknown column is only a warning" \
                         format!("unknown column '"'"'{col_name}'"'"'; dropped"),' \
   geode-pricer an_unknown_column_is_an_error_and_dropped
 
+# Strike numbers with a gap make `K1/K2/K3` ambiguous; such a template
+# must be dropped.
+run_mutation "pricer templates: a strike-number gap loads" \
+  crates/geode-pricer/src/core/template.rs \
+  '            if !covers(strikes, &|l| l.strike) || !covers(expiries, &|l| l.expiry) {' \
+  '            if !covers(expiries, &|l| l.expiry) {' \
+  geode-pricer each_rule_drops_only_its_own_entry_with_a_path
+
+# `C`, `P` and `CUSTOM` can never name a table.
+run_mutation "pricer templates: a reserved name loads" \
+  crates/geode-pricer/src/core/template.rs \
+  '    if matches!(upper.as_str(), "C" | "P" | "CUSTOM") {' \
+  '    if false {' \
+  geode-pricer each_rule_drops_only_its_own_entry_with_a_path
+
+# A builtin `RR` and a desk/user `rr` must not both survive: the later
+# spelling replaces the earlier one in place.
+run_mutation "pricer templates: a case-insensitive repeat is kept as two entries" \
+  crates/geode-pricer/src/core/template.rs \
+  '            if let Some((idx, earlier)) = seen.get(&upper) {' \
+  '            if let Some((idx, earlier)) = None::<&(usize, String)> {' \
+  geode-pricer a_case_insensitive_repeat_replaces_the_earlier_entry_in_place
+
+# A stored package whose template name is gone must still load; the
+# old code refused the whole sheet.
+run_mutation "pricer storage: an unknown template refuses the load" \
+  crates/geode-pricer/src/core/storage.rs \
+  '                RowKind::Package {
+                    template: Template::named(name),
+                }' \
+  '                return Err(format!("unknown template {name}"));' \
+  geode-pricer a_package_whose_template_is_unknown_loads_and_prints_its_legs
+
+# The interner must hand back the same name, or every parse leaks.
+run_mutation "pricer templates: the interner leaks a copy per call" \
+  crates/geode-pricer/src/core/template.rs \
+  '        if let Some(n) = names.iter().find(|n| **n == upper) {' \
+  '        if let Some(n) = names.iter().find(|_| false) {' \
+  geode-pricer a_name_interns_once_and_compares_by_name
+
+# A reload must reach the open sheet's tables, or the bar keeps parsing
+# with the templates the tile opened with.
+run_mutation "pricer templates: a reload leaves the sheet's tables stale" \
+  crates/geode-pricer/src/tile.rs \
+  '    pub(crate) fn config_changed(&mut self, cx: &mut Context<Self>) {
+        self.adopt_templates();' \
+  '    pub(crate) fn config_changed(&mut self, cx: &mut Context<Self>) {' \
+  geode-pricer a_reload_that_redefines_rr_changes_parsing_and_keeps_stored_rr_legs
+
+# A new tile's sheet is built on the builtin set; without adopting the
+# factory's, a config template never parses in a fresh tile.
+run_mutation "pricer templates: a new tile keeps the builtin set" \
+  crates/geode-pricer/src/tile.rs \
+  '        this.adopt_templates();
+        this.resolve_plan();' \
+  '        this.resolve_plan();' \
+  geode-pricer a_config_template_is_typed_in_the_bar_tagged_and_found
+
+# `:e` and `:new` build a fresh sheet on the builtin set.
+run_mutation "pricer templates: a sheet switch keeps the builtin set" \
+  crates/geode-pricer/src/tile.rs \
+  '        self.sheet = Sheet::new(&name);
+        self.adopt_templates();' \
+  '        self.sheet = Sheet::new(&name);' \
+  geode-pricer a_config_template_still_parses_after_switching_sheets
+
+# A loaded sheet comes from `from_rows` on the builtin set.
+run_mutation "pricer templates: a loaded sheet keeps the builtin set" \
+  crates/geode-pricer/src/tile.rs \
+  '                    self.sheet = s;
+                    self.adopt_templates();' \
+  '                    self.sheet = s;' \
+  geode-pricer a_config_template_still_parses_after_switching_sheets
+
+# The unknown-type list is `C P` then the set's names, single-spaced.
+run_mutation "pricer shorthand: the unknown-type list trails a space" \
+  crates/geode-pricer/src/core/shorthand.rs \
+  '            format!("unknown type '"'"'{}'"'"': {}", type_tok.text, names.join(" ")),' \
+  '            format!("unknown type '"'"'{}'"'"': {} ", type_tok.text, names.join(" ")),' \
+  geode-pricer every_error_names_the_offending_offset
+
+# Keep-last-valid per name: a bad entry keeps the previous definition.
+# Mutated, a typo in a desk `RR` makes RR vanish everywhere.
+run_mutation "pricer templates: a bad entry drops the previous definition" \
+  crates/geode-pricer/src/core/template.rs \
+  '                None => match previous.resolve(&upper) {' \
+  '                None => match None::<&TemplateDef> {' \
+  geode-pricer a_bad_entry_keeps_the_previous_definition_and_an_absent_one_is_removed
+
+# A stored package prints against whatever table the config now holds;
+# an unchecked `qty * weight` panics (debug) or wraps (release).
+run_mutation "pricer shorthand: render_package multiplies unchecked" \
+  crates/geode-pricer/src/core/shorthand.rs \
+  '        if Some(*leg_qty) != qty.checked_mul(spec.weight)' \
+  '        if Some(*leg_qty) != Some(qty * spec.weight)' \
+  geode-pricer a_huge_quantity_against_a_large_weight_does_not_render_or_panic
+
+# A reload with the bar open must reprint its history, or recall offers
+# a line printed with the old meaning of a redefined template.
+run_mutation "pricer templates: a reload leaves the open bar's history stale" \
+  crates/geode-pricer/src/tile.rs \
+  '        if let Some(entry) = self.entry.as_mut() {
+            entry.history = history(&self.sheet);
+            entry.history_ix = None;
+        }
+        self.resolve_plan();' \
+  '        self.resolve_plan();' \
+  geode-pricer a_reload_with_the_bar_open_reprints_its_history
+
+# The reload observer must hand the factory the configured set.
+run_mutation "pricer app: a reload hands the factory the builtin templates" \
+  crates/geode-app/src/bridge.rs \
+  '            };
+            pricer.reload(views, templates, refresh, stale_after, cx);' \
+  '            };
+            let _ = templates;
+            pricer.reload(views, TemplateSet::builtin(), refresh, stale_after, cx);' \
+  geode-app a_config_reload_hands_the_pricer_factory_its_templates
+
+# On a reload, "previous" is the running set, not an empty one.
+run_mutation "pricer app: a reload's bad entry has no previous to keep" \
+  crates/geode-app/src/bridge.rs \
+  '                    pricer_templates_from_config(config, &pricer.templates(), "previous");' \
+  '                    pricer_templates_from_config(config, &TemplateSet::default(), "previous");' \
+  geode-app a_config_reload_hands_the_pricer_factory_its_templates
+
+# Startup must build the factory from the configured set.
+run_mutation "pricer app: startup hands the factory the builtin templates" \
+  crates/geode-app/src/bridge.rs \
+  '        setup.pricer_templates.clone(),' \
+  '        TemplateSet::builtin(),' \
+  geode-app startup_hands_the_pricer_factory_its_templates
+
+# The reload key must see the templates doc, or an edit to it never
+# reaches the pricer.
+run_mutation "pricer config key: templates are not part of the key" \
+  crates/geode-app/src/bridge.rs \
+  '        templates: config.doc(PRICER_TEMPLATES_DOC).map(|d| d.value.clone()),' \
+  '        templates: None,' \
+  geode-app the_pricer_config_key_changes_only_with_what_the_pricer_reads
+
 run_mutation "pricer storage: an empty sheet publishes a zero-row document" \
   crates/geode-pricer/src/core/storage.rs \
   '    if sheet.is_empty() {
@@ -17179,9 +17450,11 @@ run_mutation "pricer sheets: a switch keeps the old sheet's failed-load block" \
 
 run_mutation "pricer sheets: a switch keeps the old sheet's undo" \
   crates/geode-pricer/src/tile.rs \
-  '        self.sheet = Sheet::new(&name);
-        self.undo.clear();' \
-  '        self.sheet = Sheet::new(&name);' \
+  '        self.adopt_templates();
+        self.undo.clear();
+        self.expansion = Expansion::default();' \
+  '        self.adopt_templates();
+        self.expansion = Expansion::default();' \
   geode-pricer colon_new_opens_the_next_untitled_sheet_empty
 
 run_mutation "pricer sheets: a switch keeps the old sheet's pricing tag" \
@@ -19867,8 +20140,8 @@ run_mutation "pricer cell: an empty shift commits zero" \
 
 run_mutation "pricer app: a config reload never reaches the pricer" \
   crates/geode-app/src/bridge.rs \
-  '            pricer.reload(views, refresh, stale_after, cx);' \
-  '            let _ = (views, refresh, stale_after);' \
+  '            pricer.reload(views, templates, refresh, stale_after, cx);' \
+  '            let _ = (views, templates, refresh, stale_after);' \
   geode-app a_config_reload_hands_the_pricer_factory_its_views
 
 # The free underlying typeahead: ranking is a subsequence match, so an
@@ -21748,6 +22021,23 @@ run_mutation "timeseries completion: nothing loaded says so" \
   '    if false {' \
   geode-timeseries the_expression_field_says_when_no_series_is_loaded
 
+# A view move under a running query waits for its answer. Superseding it
+# interrupts the query in the pool, so a pan faster than one query starves
+# the density strip and percentiles until the pan stops.
+run_mutation "timeseries: a view move waits for the query in flight" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '            if self.query_in_flight {' \
+  '            if false {' \
+  geode-timeseries a_view_move_while_a_query_is_out_waits_for_its_answer
+
+# …and the answer releases the waiting view; without it the statistics
+# stay on the window the pan started from.
+run_mutation "timeseries: an answer releases the waiting view" \
+  crates/geode-timeseries/src/tile/data.rs \
+  '        if !self.view_waiting || self.query_in_flight || self.staged.is_some() {' \
+  '        if true {' \
+  geode-timeseries a_view_move_while_a_query_is_out_waits_for_its_answer
+
 # ---- Scope expression suggestions: the caret reader.
 # After an operator the caret wants a value; reading it as a finished term
 # would offer and/or where values belong.
@@ -21920,6 +22210,217 @@ run_mutation "modal back: a click is ignored while a confirm is pending" \
   '        if self.confirm.is_some() || !self.has_previous_stage() {' \
   '        if !self.has_previous_stage() {' \
   geode-shell the_back_button_is_ignored_while_a_confirm_is_pending
+
+# ---- Named scope expressions.
+# The expressions document replaces whole objects by name across layers.
+run_mutation "named expr: the user layer replaces an object whole" \
+  crates/geode-core/src/config/merge.rs \
+  '        | "expressions" => Some(1),' \
+  '        | "expressions_off" => Some(1),' \
+  geode-core \
+  the_user_layer_replaces_a_desk_object_whole
+
+# A missing name must fail resolution; skipping it would widen the scope.
+run_mutation "named expr: a missing name fails resolution" \
+  crates/geode-core/src/scope/mod.rs \
+  "                None => return Err(format!(\"named expression '{name}' is missing\"))," \
+  "                None => continue," \
+  geode-core \
+  resolve_names_the_first_bad_reference
+
+# Composition never repeats an outer name.
+run_mutation "named expr: and_then skips a duplicate inner name" \
+  crates/geode-core/src/scope/mod.rs \
+  '.filter(|n| !self.named.contains(n))' \
+  '.filter(|_n| true)' \
+  geode-core \
+  and_then_keeps_outer_names_first_without_duplicates
+
+# A scope carrying names is refused, never compiled without them.
+run_mutation "named expr: the compiler refuses unresolved names" \
+  crates/geode-data/src/query/scope_sql.rs \
+  '    if !scope.named.is_empty() {' \
+  '    if false {' \
+  geode-data \
+  a_scope_with_unresolved_names_is_refused
+
+# The blotter shows an unresolved name as its error and submits nothing.
+run_mutation "named expr: the blotter submits an unresolved scope" \
+  crates/geode-blotter/src/tile.rs \
+  '                frame.effective_scope(&self.tile_scope)' \
+  '                Ok(frame.scope().and_then(&self.tile_scope))' \
+  geode-blotter \
+  an_unresolved_named_expression_errors_without_querying_and_a_definition_requeries
+
+# An expressions reload rebuilds the frame's named expressions.
+run_mutation "named expr: reload ignores an expressions change" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                changed(EXPRESSIONS_DOC) || changed("datasets") || changed("dimensions");' \
+  '                false || changed("datasets") || changed("dimensions");' \
+  geode-shell \
+  an_expressions_reload_redefines_the_frames_named_expressions
+
+# The picker never requests values under an unresolved scope.
+run_mutation "named expr: the picker requests an unresolved scope" \
+  crates/geode-shell/src/shell/picker.rs \
+  '    let minus_own = match minus_own.resolve(view.frame.read(cx).named_expressions()) {' \
+  '    let minus_own = match Ok::<_, String>(minus_own) {' \
+  geode-shell \
+  the_picker_shows_an_unresolved_named_expression_instead_of_requesting
+
+# The Scopes fold writes only ticked named expressions.
+run_mutation "named expr: the scopes fold writes unticked names" \
+  crates/geode-shell/src/shell/objectdialog/scopes.rs \
+  '                        .filter(|i| i.included)' \
+  '                        .filter(|_| true)' \
+  geode-shell \
+  unticking_every_named_expression_drops_the_key
+
+# A scope's named-expression list may be emptied by unticking.
+run_mutation "named expr: the last named untick is refused" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '                let may_empty = self.fields[field].key == "named";' \
+  '                let may_empty = false;' \
+  geode-shell \
+  unticking_every_named_expression_drops_the_key
+
+# Space on a named expression ticks it rather than opening Values.
+run_mutation "named expr: space on a named row takes the dimensions door" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '            ) => draft.fields.get(field).is_some_and(|f| f.key == "named"),' \
+  '            ) => false,' \
+  geode-shell \
+  space_on_a_named_expression_never_opens_values
+
+# Deleting a named expression names the saved scopes that tick it.
+run_mutation "named expr: the delete question's used-by scan finds no scope" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                        .is_some_and(|names| names.iter().any(|n| n.as_str() == Some(name)))' \
+  '                        .is_some_and(|_| false)' \
+  geode-shell \
+  deleting_a_named_expression_names_its_users
+
+# `c` on a named expression seeds the copy's field from the copied table.
+run_mutation "named expr: a copy's field is built empty" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            Domain::Expressions => expressions::fields_from_table(Some(table)),' \
+  '            Domain::Expressions => expressions::fields_from_table(None),' \
+  geode-shell \
+  c_copies_a_named_expression_with_its_text
+
+# Naming a fresh expression opens its field instead of creating an invalid one.
+run_mutation "named expr: naming a fresh expression creates it at once" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    let opens_expression = domain == Domain::Expressions && seed == NameSeed::Empty;' \
+  '    let opens_expression = false;' \
+  geode-shell \
+  a_new_named_expression_is_written_to_the_user_file
+
+# The Expressions dialog's expression field turns suggestions on.
+run_mutation "named expr: the expressions field has no suggestions" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '    matches!(state.domain, Domain::Scopes | Domain::Expressions)' \
+  '    state.domain == Domain::Scopes' \
+  geode-shell \
+  the_expressions_field_suggests_columns
+
+# The scope bar shows every name on the frame's scope, or it narrows
+# totals with nothing on screen saying so.
+run_mutation "named expr: the scope bar omits named chips" \
+  crates/geode-shell/src/scopebar.rs \
+  '        .map(|name| named_chip(name, frame.named_expressions()))' \
+  '        .filter(|_| false).map(|name| named_chip(name, frame.named_expressions()))' \
+  geode-shell \
+  a_loaded_scope_paints_a_chip_for_its_named_expression
+
+# A named chip's × removes that name through set_scope.
+run_mutation "named expr: a named chip's x removes nothing" \
+  crates/geode-shell/src/shell/render.rs \
+  '                    if f.drop_named(name) {' \
+  '                    if false && f.drop_named(name) {' \
+  geode-shell \
+  a_named_chips_close_glyph_drops_the_name_undoably
+
+# A missing name paints the danger chip.
+run_mutation "named expr: a missing name paints the plain chip" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '        let (fg, bg, close_states, broken_marker) = if named.broken {' \
+  '        let (fg, bg, close_states, broken_marker) = if false && named.broken {' \
+  geode-shell \
+  a_missing_name_paints_the_broken_chip
+
+# The document distinct arm compiles its scope by its own route, so the
+# names are refused before any arm.
+run_mutation "named expr: document distinct drops unresolved names" \
+  crates/geode-data/src/query/distinct.rs \
+  '    if !params.scope.named.is_empty() {' \
+  '    if false {' \
+  geode-data \
+  distinct_over_a_document_only_dimension_refuses_unresolved_names
+
+# A Scopes item's missing/invalid named note is danger text.
+run_mutation "named expr: a missing named note is muted" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                        && matches!(entry.note.as_deref(), Some("missing" | "invalid"));' \
+  '                        && matches!(entry.note.as_deref(), Some("never"));' \
+  geode-shell \
+  a_missing_named_expressions_note_paints_in_danger_text
+
+run_mutation "launch: a restored tile is launched" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '            let from_add = matched.is_none() && pending_factory.is_some();' \
+  '            let from_add = true;' \
+  geode-shell a_restored_tile_is_not_launched
+
+run_mutation "launch: an unfocused add is launched" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '            if active.contains(&id) && focused_tile == Some(id) {' \
+  '            if active.contains(&id) {' \
+  geode-shell an_add_that_is_not_focused_on_its_first_render_is_not_launched
+
+run_mutation "launch: open_with lists kinds that do not accept the context" \
+  crates/geode-shell/src/shell/input.rs \
+  '                            .is_some_and(|f| context.covered_by(f.accepts()))' \
+  '                            .is_some()' \
+  geode-shell g_m_lists_the_accepting_kinds_and_a_pick_creates_with_the_context
+
+run_mutation "launch: a pick reads the context at commit" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '                .and_then(|f| f.launch_state(&context));' \
+  '                .and_then(|f| f.launch_state(&geode_core::launch::LaunchContext { underlying: Some("NDX".into()) }));' \
+  geode-shell the_context_is_captured_when_the_dialog_opens
+
+run_mutation "launch: a panel with a key is prompted anyway" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.key.is_none() && self.popup.is_none() {' \
+  '        if self.popup.is_none() {' \
+  geode-marketdata a_launched_panel_on_an_underlying_opens_no_picker
+
+# The two entries below share an anchor (`--anchors-only` reports DUP as a
+# non-failing warning): they mutate different behaviours of the same line.
+run_mutation "launch: blotter reads a subtotal as its first child's underlying" \
+  crates/geode-blotter/src/core/launch.rs \
+  '    path.get(level)?.clone()' \
+  '    path.get(level).or(path.last())?.clone()' \
+  geode-blotter rows_above_the_level_and_groupings_without_it_are_empty
+
+run_mutation "launch: blotter turns a NULL underlying into text" \
+  crates/geode-blotter/src/core/launch.rs \
+  '    path.get(level)?.clone()' \
+  '    Some(path.get(level)?.clone().unwrap_or_else(|| "NULL".into()))' \
+  geode-blotter a_null_underlying_is_empty_not_a_made_up_key
+
+run_mutation "launch: a mixed package names its first leg's underlying" \
+  crates/geode-pricer/src/core/sheet.rs \
+  '                Some(_) => return None,' \
+  '                Some(_) => {}' \
+  geode-pricer a_package_across_two_underlyings_names_none
+
+run_mutation "launch: a shared factory stops forwarding accepts" \
+  crates/geode-shell/src/module.rs \
+  '        (**self).accepts()' \
+  '        &[]' \
+  geode-app the_production_roster_opens_market_data_on_an_underlying
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

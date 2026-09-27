@@ -138,6 +138,7 @@ pub(crate) fn opens_dialog(action: &crate::actions::ActionId) -> bool {
             | "config::schema"
             | "config::sources"
             | "config::colors"
+            | "config::expressions"
             | "frame::pick"
             | "scope::save_current"
             | "frame::as_of"
@@ -145,6 +146,7 @@ pub(crate) fn opens_dialog(action: &crate::actions::ActionId) -> bool {
             | "frame::add_expression"
             | "frame::grouping"
             | "tile::add"
+            | "tile::open_with"
             | "log::level"
     ) || action.0.starts_with("frame::pick_")
 }

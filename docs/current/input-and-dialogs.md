@@ -346,6 +346,7 @@ level stage.
 |---|---|
 | Grouping | View default, then filled slots 1–9; opens on the active choice. Empty-query digits commit directly, with zero choosing the default. Unfilled digits are consumed. Commit rechecks slot existence, reports removal if needed, then closes. |
 | Tile kind | Roster order excluding the placeholder. Closes before adding to the tile focused at commit time: fills a placeholder or splits a real tile using the configured placement. |
+| Tile kind with context (`tile::open_with`) | The same rows, pre-filtered to kinds whose factory accepts the focused tile's captured launch context, titled `Open {underlying} in…`. Commit always splits, passing the factory's translated `launch_state` as the new tile's restored record. |
 | Log level | Choose a logging target, then its level. Escape or the Back button from levels returns to a rebuilt target list and clears the filter; a level choice submits `Diagnostics::request_level`. |
 
 Closing and reopening creates fresh dialog state. These pickers apply on

@@ -425,14 +425,23 @@ pub(crate) fn compile_view_with_cache(
             .collect();
         let own_q = quoted(&own);
 
-        let measures: Vec<&ColumnSpec> = view
+        let measures: Vec<(&ColumnSpec, Aggregate)> = view
             .columns
             .iter()
             .filter_map(|c| match c {
-                ViewColumn::Measure { name } => ds.column(name),
+                ViewColumn::Measure { name, .. } => ds.column(name),
                 _ => None,
             })
-            .filter(|c| c.grain() == Some(grain))
+            .filter_map(|c| match c.role {
+                // The role carries the aggregate, so there is no default to
+                // fall back to. Validation refuses a measure column that is
+                // not a measure; anything else here would have been summed,
+                // and a grain-bearing attribute repeats across its rows, so
+                // the sum is plausible and wrong.
+                ColumnRole::Measure { aggregate, .. } => Some((c, aggregate)),
+                _ => None,
+            })
+            .filter(|(c, _)| c.grain() == Some(grain))
             .collect();
         if measures.is_empty() {
             continue;
@@ -440,13 +449,7 @@ pub(crate) fn compile_view_with_cache(
 
         let aggs: Vec<String> = measures
             .iter()
-            .map(|m| {
-                let agg = match m.role {
-                    ColumnRole::Measure { aggregate, .. } => aggregate,
-                    _ => Aggregate::Sum,
-                };
-                format!("{} as \"{}\"", agg.sql(&format!("\"{}\"", m.name)), m.name)
-            })
+            .map(|(m, agg)| format!("{} as \"{}\"", agg.sql(&format!("\"{}\"", m.name)), m.name))
             .collect();
 
         // How many of *this grain's* grouping columns are present at each
@@ -559,7 +562,7 @@ pub(crate) fn compile_view_with_cache(
         };
         agg_joins.push(format!("left join {alias} on {on}"));
 
-        for m in measures {
+        for (m, _) in measures {
             // Attribution per depth, from the schema alone.
             let by_depth: Vec<Attribution> = (0..=n)
                 .map(|d| attribution_of(ds, grain, &view.grouping[..d], dims))
@@ -706,7 +709,19 @@ pub(crate) fn compile_view_with_cache(
     let mut stalest_input = vec![view.dataset.clone()];
     for (i, join) in view.joins.iter().enumerate() {
         let Some(joined_ds) = schema.dataset(&join.dataset) else {
-            continue;
+            // A required join naming a dataset that does not exist refuses the
+            // view at load, so arriving here with one means the caller skipped
+            // the gate. An optional join is dropped here because its author
+            // asked for exactly that, and validation warned that it was
+            // dropped; dropping a required one silently is what made the
+            // joined columns paint blank forever.
+            if !join.required {
+                continue;
+            }
+            return Err(compile_error(
+                view,
+                format!("join names unknown dataset '{}'", join.dataset),
+            ));
         };
 
         // The key must be on the spine *as materialized*. Testing the
@@ -720,7 +735,22 @@ pub(crate) fn compile_view_with_cache(
             .into_iter()
             .find(|g| carries_all(joined_ds, *g, &join.on, dims))
         else {
-            continue;
+            // A required join whose key no grain of the joined dataset carries
+            // refuses the view at load, so arriving here with one means the
+            // caller skipped the gate. An optional join is dropped here because
+            // its author asked for exactly that, and validation warned that it
+            // was dropped; dropping a required one silently is what made the
+            // joined columns paint blank forever.
+            if !join.required {
+                continue;
+            }
+            return Err(compile_error(
+                view,
+                format!(
+                    "join on {:?} names keys no grain of dataset '{}' carries",
+                    join.on, join.dataset
+                ),
+            ));
         };
         // Only datasets actually read contribute to provenance and freshness.
         stalest_input.push(join.dataset.clone());
@@ -730,7 +760,7 @@ pub(crate) fn compile_view_with_cache(
             .columns
             .iter()
             .filter_map(|c| match c {
-                ViewColumn::Dimension { name } => Some(name),
+                ViewColumn::Dimension { name, .. } => Some(name),
                 _ => None,
             })
             .filter(|name| joined_ds.column(name).is_some() && !view.grouping.contains(*name))
@@ -813,7 +843,7 @@ pub(crate) fn compile_view_with_cache(
 
     // Derived columns are expressions over the columns already selected.
     for c in &view.columns {
-        if let ViewColumn::Derived { name, sql } = c {
+        if let ViewColumn::Derived { name, sql, .. } = c {
             // A derived expression inherits its inputs' attribution. It cannot
             // claim additive values at a depth where an input is non-attributable.
             let referenced = referenced_columns(sql, &columns);
@@ -1192,6 +1222,162 @@ sql = "delta01 / nullif(peak, 0)"
         assert!(!summable("low"), "a min measure must not total");
         assert!(!summable("ratio"), "a derived ratio must not total");
         assert!(!summable("lhu"), "a grouping column is not a measure");
+    }
+
+    #[test]
+    fn a_join_the_compiler_cannot_honour_is_an_error_not_a_silent_drop() {
+        // Validation is the gate now, so reaching the compiler with an
+        // unhonourable join is a bug in the caller, not a configuration
+        // mistake to absorb.
+        let (_d, store) = fixture();
+        let schema = joined_schema();
+        store
+            .apply_schema(schema.dataset("instrument_ref").unwrap())
+            .unwrap();
+
+        let mut unhonourable = joined_view();
+        unhonourable.joins[0].dataset = "no_such_dataset".to_string();
+
+        let err = compile_view(
+            store.writer(),
+            &unhonourable,
+            &schema,
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("no_such_dataset"),
+            "the error must name the unhonourable join: {message}"
+        );
+
+        // The middle `continue` still holds: a join key that IS in the
+        // grouping but below this query's max_depth is a depth fact, not a
+        // configuration error, so it still compiles and the rolled-up row
+        // carries NULL for the key rather than an arbitrary instrument's.
+        let q = joined_query(&store, &schema, 0);
+        let rows = run(&store, &q, &["row_depth", "instrument_ref"]);
+        assert_eq!(rows.len(), 1, "the grand total alone: {rows:?}");
+        assert_eq!(
+            rows[0][1], "None",
+            "a key below max_depth is NULL, not an error: {rows:?}"
+        );
+    }
+
+    /// The other half of the same refusal, and the arm the unknown-dataset case
+    /// above cannot reach: the joined dataset exists, its keys are on the
+    /// materialized spine, and still no grain of it is keyed by them. There is
+    /// no table to read, so dropping the join here would leave every column it
+    /// was to supply missing from the row — blank in the blotter, with nothing
+    /// on screen to distinguish it from a genuine NULL.
+    #[test]
+    fn a_join_no_grain_of_the_joined_dataset_can_serve_is_an_error_naming_its_keys() {
+        let (_d, store) = fixture();
+        let schema = joined_schema();
+        store
+            .apply_schema(schema.dataset("instrument_ref").unwrap())
+            .unwrap();
+
+        // `instrument_ref` declares one grain, instrument, whose dimension key
+        // stops at `instrument_ref`; `underlying_ref` is neither in that key nor
+        // a column of the dataset at all. Grouping by it puts it on the spine,
+        // so the depth guard passes and the missing grain is what fails.
+        let mut unservable = joined_view();
+        unservable.grouping = vec!["underlying_ref".to_string()];
+        unservable.joins[0].on = vec!["underlying_ref".to_string()];
+
+        let err = compile_view(
+            store.writer(),
+            &unservable,
+            &schema,
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("[\"underlying_ref\"]") && message.contains("instrument_ref"),
+            "the error must name the keys no grain carries and the dataset it \
+             tried to join: {message}"
+        );
+    }
+
+    /// The author's opt-out, honoured at the compiler. `required = false` asks
+    /// for the join to be dropped, not for the view to stop answering: erroring
+    /// here would leave the view open at load and dead at every query, which is
+    /// worse than the blank column this strictness removed.
+    #[test]
+    fn an_optional_join_naming_an_unknown_dataset_is_dropped_and_the_view_serves() {
+        let (_d, store) = fixture();
+        let schema = joined_schema();
+
+        let mut optional = joined_view();
+        optional.joins[0].dataset = "no_such_dataset".to_string();
+        optional.joins[0].required = false;
+
+        let q = compile_view(
+            store.writer(),
+            &optional,
+            &schema,
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap_or_else(|e| panic!("an optional join must be dropped, not refused: {e}"));
+
+        let rows = run(&store, &q, &["instrument_ref", "delta01", "strike"]);
+        assert!(
+            rows.iter().any(|r| r[1] == "Some(30.0)"),
+            "the view must still answer with its own measures: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|r| r[2] == "?"),
+            "a dropped join supplies nothing, so its column is absent: {rows:?}"
+        );
+    }
+
+    /// The same opt-out at the other arm: the joined dataset exists and its key
+    /// is on the spine, but no grain of it is keyed by that column.
+    #[test]
+    fn an_optional_join_no_grain_can_serve_is_dropped_and_the_view_serves() {
+        let (_d, store) = fixture();
+        let schema = joined_schema();
+        store
+            .apply_schema(schema.dataset("instrument_ref").unwrap())
+            .unwrap();
+
+        let mut optional = joined_view();
+        optional.grouping = vec!["underlying_ref".to_string()];
+        optional.joins[0].on = vec!["underlying_ref".to_string()];
+        optional.joins[0].required = false;
+
+        let q = compile_view(
+            store.writer(),
+            &optional,
+            &schema,
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap_or_else(|e| panic!("an optional join must be dropped, not refused: {e}"));
+
+        let rows = run(&store, &q, &["underlying_ref", "delta01", "strike"]);
+        assert!(
+            rows.iter()
+                .any(|r| r[0] == "Some(\"SPX\")" && r[1] == "Some(10.0)"),
+            "the view must still answer with its own measures: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|r| r[2] == "?"),
+            "a dropped join supplies nothing, so its column is absent: {rows:?}"
+        );
     }
 
     #[test]
@@ -2685,9 +2871,7 @@ kind = "measure"
         // instrument-level and coarser rows can aggregate it.
         let (_d, store) = pair_fixture();
         let mut v = view();
-        v.columns.push(ViewColumn::Measure {
-            name: "cross_gamma02".into(),
-        });
+        v.columns.push(ViewColumn::measure("cross_gamma02"));
         let q = compile_view(
             store.writer(),
             &v,
@@ -2727,9 +2911,7 @@ kind = "measure"
 
         let (_d, store) = pair_fixture();
         let mut v = view();
-        v.columns.push(ViewColumn::Measure {
-            name: "cross_gamma02".into(),
-        });
+        v.columns.push(ViewColumn::measure("cross_gamma02"));
         let q = compile_view(
             store.writer(),
             &v,
@@ -2807,13 +2989,11 @@ kind = "measure"
         // The renderer uses that marker to decide where values can be summed.
         let (_d, store) = pair_fixture();
         let mut v = view();
-        v.columns.push(ViewColumn::Measure {
-            name: "cross_gamma02".into(),
-        });
-        v.columns.push(ViewColumn::Derived {
-            name: "cg_per_delta".into(),
-            sql: "cross_gamma02 / nullif(delta01, 0)".into(),
-        });
+        v.columns.push(ViewColumn::measure("cross_gamma02"));
+        v.columns.push(ViewColumn::derived(
+            "cg_per_delta",
+            "cross_gamma02 / nullif(delta01, 0)",
+        ));
         let q = compile_view(
             store.writer(),
             &v,
@@ -2858,13 +3038,9 @@ kind = "measure"
         // the expression itself must be masked at non-attributable depths.
         let (_d, store) = pair_fixture();
         let mut v = view();
-        v.columns.push(ViewColumn::Measure {
-            name: "cross_gamma02".into(),
-        });
-        v.columns.push(ViewColumn::Derived {
-            name: "cg_copy".into(),
-            sql: "cross_gamma02".into(),
-        });
+        v.columns.push(ViewColumn::measure("cross_gamma02"));
+        v.columns
+            .push(ViewColumn::derived("cg_copy", "cross_gamma02"));
         let q = compile_view(
             store.writer(),
             &v,
@@ -2907,13 +3083,8 @@ kind = "measure"
             "cross_gamma02 * 2 -- can't total this",
         ] {
             let mut v = view();
-            v.columns.push(ViewColumn::Measure {
-                name: "cross_gamma02".into(),
-            });
-            v.columns.push(ViewColumn::Derived {
-                name: "scaled".into(),
-                sql: sql.into(),
-            });
+            v.columns.push(ViewColumn::measure("cross_gamma02"));
+            v.columns.push(ViewColumn::derived("scaled", sql));
             let q = compile_view(
                 store.writer(),
                 &v,
@@ -2946,13 +3117,11 @@ kind = "measure"
         // expression at depths where its actual input remains additive.
         let (_d, store) = pair_fixture();
         let mut v = view();
-        v.columns.push(ViewColumn::Measure {
-            name: "cross_gamma02".into(),
-        });
-        v.columns.push(ViewColumn::Derived {
-            name: "scaled_delta".into(),
-            sql: "-- the desk's own scaling\n delta01 * 2".into(),
-        });
+        v.columns.push(ViewColumn::measure("cross_gamma02"));
+        v.columns.push(ViewColumn::derived(
+            "scaled_delta",
+            "-- the desk's own scaling\n delta01 * 2",
+        ));
         let q = compile_view(
             store.writer(),
             &v,
@@ -2988,16 +3157,12 @@ kind = "measure"
         // one outcome that must not happen.
         let (_d, store) = pair_fixture();
         let mut v = view();
-        v.columns.push(ViewColumn::Measure {
-            name: "cross_gamma02".into(),
-        });
-        v.columns.push(ViewColumn::Derived {
-            name: "odd".into(),
-            // A lone apostrophe outside a comment. An unterminated block
-            // comment does *not* reach this guard — it is stripped — so
-            // the input has to be unbalanced quoting itself.
-            sql: "cross_gamma02 'unterminated".into(),
-        });
+        v.columns.push(ViewColumn::measure("cross_gamma02"));
+        // A lone apostrophe outside a comment. An unterminated block
+        // comment does *not* reach this guard — it is stripped — so
+        // the input has to be unbalanced quoting itself.
+        v.columns
+            .push(ViewColumn::derived("odd", "cross_gamma02 'unterminated"));
         let q = compile_view(
             store.writer(),
             &v,
@@ -3030,10 +3195,8 @@ kind = "measure"
         // level for level, including the levels where they are additive.
         let (_d, store) = fixture();
         let mut v = view();
-        v.columns.push(ViewColumn::Derived {
-            name: "delta_doubled".into(),
-            sql: "delta01 * 2".into(),
-        });
+        v.columns
+            .push(ViewColumn::derived("delta_doubled", "delta01 * 2"));
         let q = compile_with(&store, &v);
         let of = |name: &str| {
             q.columns
@@ -3060,10 +3223,7 @@ kind = "measure"
         // weaker marker than it has earned, nor a stronger one.
         let (_d, store) = fixture();
         let mut v = view();
-        v.columns.push(ViewColumn::Derived {
-            name: "one".into(),
-            sql: "1".into(),
-        });
+        v.columns.push(ViewColumn::derived("one", "1"));
         let q = compile_with(&store, &v);
         let derived = q.columns.iter().find(|c| c.name == "one").unwrap();
         assert!(
@@ -3088,10 +3248,8 @@ kind = "measure"
         // the mutation harness is what said so.
         let (_d, store) = fixture();
         let mut v = view();
-        v.columns.push(ViewColumn::Derived {
-            name: "label".into(),
-            sql: "'daily_trading_pnl per unit'".into(),
-        });
+        v.columns
+            .push(ViewColumn::derived("label", "'daily_trading_pnl per unit'"));
         let q = compile_with(&store, &v);
         let derived = q.columns.iter().find(|c| c.name == "label").unwrap();
         assert!(

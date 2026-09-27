@@ -522,6 +522,14 @@ pub(crate) fn compile_scope_cached(
         params: Vec::new(),
         semantics: ScopeSemantics::Direct,
     };
+    // A name must be resolved in the shell before the scope reaches here;
+    // compiling without it would drop that filter.
+    if !scope.named.is_empty() {
+        return Err(StoreError::Scope(
+            "scope carries unresolved named expressions".into(),
+        ));
+    }
+
     // A contradiction selects nothing, and must say so in SQL. Returning
     // early matters: the contradicted dimension has already been dropped
     // from `dimensions`, so compiling the rest would produce a predicate
@@ -982,6 +990,28 @@ grain = "position"
         assert_eq!(sql.predicate, "true");
         assert!(sql.params.is_empty());
         assert_eq!(sql.semantics, ScopeSemantics::Direct);
+    }
+
+    #[test]
+    fn a_scope_with_unresolved_names_is_refused() {
+        let (_dir, store) = store();
+        let scope = Scope {
+            named: vec!["liq".into()],
+            ..Scope::default()
+        };
+        let err = compile_scope(
+            store.writer(),
+            &scope,
+            &dataset(),
+            Grain::Underlying,
+            &dims(),
+            Era::live(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "scope: scope carries unresolved named expressions"
+        );
     }
 
     #[test]

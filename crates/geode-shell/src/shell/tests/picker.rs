@@ -180,6 +180,54 @@ fn the_picker_requests_values_minus_its_own_selection_and_applies_ticks_as_one_s
     assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
 }
 
+/// A frame scope naming an undefined expression is never sent as a
+/// distinct request: the picker's values area shows the resolution error,
+/// delivered on the picker's own key and latest tag.
+#[gpui::test]
+fn the_picker_shows_an_unresolved_named_expression_instead_of_requesting(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (window, mut vcx) = open_shell(cx, services_with_pickable());
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+
+    let requested = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    vcx.update(|_, cx| {
+        let requested = requested.clone();
+        cx.subscribe(&shell, move |_, e: &ShellEvent, _| {
+            if let ShellEvent::DistinctRequested(p) = e {
+                requested.borrow_mut().push(p.clone());
+            }
+        })
+        .detach();
+    });
+
+    frame.update(&mut vcx, |f, cx| {
+        f.set_scope(Scope {
+            named: vec!["gone".into()],
+            ..Scope::default()
+        });
+        cx.notify();
+    });
+
+    dispatch_action(&shell, "frame::pick_book", &mut vcx);
+    vcx.run_until_parked();
+
+    assert!(
+        requested.borrow().is_empty(),
+        "no request for an unresolved scope: {:?}",
+        requested.borrow()
+    );
+    let values = shell.read_with(&vcx, |s, _| s.picker.as_ref().unwrap().values.clone());
+    assert_eq!(
+        values,
+        Some(Err("named expression 'gone' is missing".to_string()))
+    );
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+}
+
 /// Clicking a scope chip's body opens its column's Values stage and emits a
 /// distinct-value request, matching the corresponding picker action. Click the rendered
 /// chip to exercise the mouse handler.

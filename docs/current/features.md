@@ -44,6 +44,10 @@ recompile columns or format the whole dataset. Publication watches are scoped
 to the datasets the view reads, and global frame changes are staged through
 the flip barrier.
 
+`g m` opens a panel on the cursor row's `underlying_ref` (the column name is
+fixed); a row above that level, a grouping without it, or a NULL value opens
+the plain tile picker.
+
 ### Selection
 
 `V` (`blotter::visual_rows`) selects whole rows from the cursor; `v`
@@ -151,6 +155,10 @@ The module supports numeric, date, text, and closed-choice
 cells, row insertion/deletion, and kind-specific actions. See the
 [crate guide](../../crates/geode-marketdata/README.md) for grid, popup, and
 command-parser contracts.
+
+A panel opened through an add (palette, tile picker, `open_with`, duplicate)
+with no underlying opens the underlying picker at once; a restored panel does
+not. Every panel kind accepts an underlying launch context.
 
 `[ui] line_numbers` adds a gutter beside the grid's pinned column: the row
 label when shown, otherwise the first value column. The column widens for the
@@ -523,6 +531,23 @@ package created in the session opens so its legs show; a restored tile opens
 the packages its session record names. Package rows are read-only in every
 column.
 
+The shorthand's package types come from the `pricer_templates` configuration
+document: the seven built-ins (`CS`, `PS`, `STRD`, `STRG`, `RR`, `FLY`,
+`CAL`) plus any the desk or user layer defines, such as a `CONDOR` (see
+[configuration](configuration.md#pricing)). A layer's entry of a built-in's
+name redefines it. `C` and `P` are single lines, not templates. A type the
+set does not know is a parse error that lists what is accepted, `C` and `P`
+first and then the templates in document order (`unknown type 'X': C P CS PS
+…`). A reload reaches every open tile: the entry bar parses against the new
+set at once.
+
+A stored package keeps its template's name whatever the configuration later
+says. When that template is removed, or redefined so the package's legs no
+longer fit its table, the package still loads with its name as its tag, and
+its shorthand (for `y y` and find) prints its legs one per line instead of
+the template form. Its legs, quantities, and prices are unchanged; only a
+package typed after the change uses the new table.
+
 Normal-mode keys:
 
 | Keys | Effect |
@@ -535,7 +560,11 @@ Normal-mode keys:
 | `p` / `shift+p` | Put the remembered row below / above; a package always lands at a root boundary |
 | `shift+j` / `shift+k` | Move the row within its parent |
 | `g p` / `g u` | Group the cursor row and the next `count − 1` roots into a custom package / ungroup |
+| `g m` | Open a panel on the cursor row's underlying |
 | `.` | Open the action menu |
+
+`g m` opens a panel on the cursor row's underlying: a line's or leg's own, a
+package's when its legs share one; otherwise the plain tile picker.
 
 The action menu offers repricing, grouping, ungrouping, undo, redo, deletion,
 and view selection. Key hints show default bindings and do not reflect

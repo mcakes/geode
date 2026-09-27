@@ -27,7 +27,7 @@ use gpui::{
 };
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
-use geode_core::query::DistinctParams;
+use geode_core::query::{DistinctOutcome, DistinctParams};
 use geode_core::scope::{DimensionSelection, Scope};
 
 use crate::fonts;
@@ -286,6 +286,23 @@ fn request_values(view: &mut ShellView, column: &str, cx: &mut Context<ShellView
     let mut minus_own = scope;
     minus_own.dimensions.retain(|d| d.column != column);
     let tag = p.tag;
+    // An unresolved name is shown in the values area, never sent: the data
+    // layer would refuse it, and dropping it would widen the counts.
+    let minus_own = match minus_own.resolve(view.frame.read(cx).named_expressions()) {
+        Ok(scope) => scope,
+        Err(message) => {
+            view.deliver_distinct(
+                DistinctOutcome {
+                    key: PICKER_KEY,
+                    tag,
+                    column: column.to_string(),
+                    values: Err(message),
+                },
+                cx,
+            );
+            return;
+        }
+    };
     cx.emit(ShellEvent::DistinctRequested(DistinctParams {
         key: PICKER_KEY,
         tag,

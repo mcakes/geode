@@ -50,7 +50,7 @@ for capacity, coalescing, and worker shutdown behavior.
 | `adapter` | Subscription, upload, and fetch capabilities; a registry, bounded message sink, and topic matching. Includes the in-process `ChannelAdapter`; the app can register additional implementations such as its demo series adapter. |
 | `ingest` | The discovery scheduler, the cold-start priority ladder, the per-file load pipeline, the grain split and conflict detector, the ingest runner (one thread, one writer connection, three queues), the subscribed-source receiver, the `Coalescer`, and the fetch worker. |
 | `store` | The DuckDB store: DDL generated from the schema, the per-file publish transaction and backfill guard, document publish, the series family's bitemporal append (`append_series`, the one door series rows enter by), retention, and the freshness catalog in source time. |
-| `query` | The query path: scope to bound SQL, the grain-aware view compiler, the read pool (latest-wins per key, stale results dropped), as-of routing against the archive, the picker's distinct values, the document request, the catalog request. |
+| `query` | The query path: scope to bound SQL, the grain-aware view compiler, the read pool (latest-wins per key, stale results dropped), as-of routing against the archive, the picker's distinct values, the document request, the catalog request. A scope still carrying a named-expression reference (`Scope.named` nonempty) is refused with `StoreError::Scope` rather than compiled — resolving a name is the shell's job, before a query ever reaches here. |
 | `documents` | The `DocumentKind` registry the app fills. |
 | `egress` | Startup target resolution, service-thread document serialization, and per-target upload workers with eight waiting jobs. Refusals and completed transport calls emit keyed/tagged upload outcomes. |
 | `health` | Re-export of `geode_core::health::Health`. |
@@ -80,6 +80,22 @@ often tripped:
 
 - `SUM` never double-counts: measures are split by grain at ingest and
   aggregated at their own grain by the compiler.
+- A view that `ViewSpec::validate` reports an error for is refused by name, not
+  compiled: `query` answers with that view's first error message. The check sits
+  after the unknown-view lookup and before the grouping override, so an unknown
+  view keeps its own message and a regroup cannot slip past a refusal. `open` and
+  `replace_views` share one `validate_views`, and the reload replaces the refusal
+  set rather than merging into it, so a view corrected in the configuration serves
+  again without a restart. A refused view stays registered so the dialogs can fix
+  it.
+- The view compiler errors rather than dropping a join it cannot honour: an
+  unknown join dataset, or keys no grain of the joined dataset carries. The one
+  remaining `continue` in that loop is a depth fact, not a configuration error —
+  a join runs only at depths whose spine materializes its keys, and at a coarser
+  depth the joined columns are left out of the statement entirely while the
+  grouping key itself is NULL from a separate path. A measure's aggregate comes
+  from its declared role with no fallback, so a non-measure column cannot reach
+  one.
 - Health is keyed by source, never by dataset; deciding and emitting a
   transition are one step under the lock.
 - `apply_schema` is `CREATE TABLE IF NOT EXISTS` and publish moves rows

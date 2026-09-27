@@ -239,12 +239,12 @@ pub fn to_rows(sheet: &Sheet) -> Option<DocumentRows> {
         line.push(sheet.id(row).0 as i64);
         order.push(row as i64);
         let (k, t) = match sheet.kind(row) {
-            RowKind::Line => ("line", ""),
+            RowKind::Line => ("line", String::new()),
             RowKind::Package { template } => ("package", template.storage_name()),
-            RowKind::Underlying => ("underlying", ""),
+            RowKind::Underlying => ("underlying", String::new()),
         };
         kind.push(k.to_string());
-        template.push(t.to_string());
+        template.push(t);
         parent.push(sheet.parent(row).map_or(-1, |p| sheet.id(p).0 as i64));
         qty.push(sheet.qty(row));
         match sheet.instrument(row) {
@@ -497,10 +497,18 @@ pub fn from_rows(name: &str, rows: &DocumentRows) -> Result<Sheet, String> {
         };
         let row_kind = match kind[i].as_str() {
             "line" => RowKind::Line,
-            "package" => RowKind::Package {
-                template: Template::parse(&template[i])
-                    .ok_or_else(|| format!("line {}: unknown template '{}'", id.0, template[i]))?,
-            },
+            "package" => {
+                let name = template[i].trim();
+                if name.is_empty() {
+                    return Err(format!("line {}: a package has no template", id.0));
+                }
+                // An unknown or since-removed name still loads: the legs
+                // are stored, so the package keeps its prices, and it
+                // prints its legs until a table of that name fits them.
+                RowKind::Package {
+                    template: Template::named(name),
+                }
+            }
             "underlying" => {
                 return Err(format!(
                     "line {}: kind 'underlying' is reserved and not readable by this build",
@@ -783,7 +791,7 @@ pub(crate) mod tests {
     use crate::core::edit::Edit;
     use crate::core::sheet::tests::{callspread, line, push, spx};
     use crate::core::sheet::{LineState, OwnShifts, Refresh, Sheet};
-    use crate::core::shorthand::parse;
+    use crate::core::shorthand::parse_builtin;
     use geode_core::config::{LayerDoc, merge_docs};
     use geode_core::pricing::OptionKind;
     use geode_core::schema::SchemaSpec;
@@ -810,8 +818,8 @@ pub(crate) mod tests {
         s.view = "barrier".into();
         let mut rows = vec![
             line(spx(5000.0, OptionKind::Call), 2),
-            parse("-3 SPX 20DEC26 5000 P DO 4200").unwrap(),
-            parse("NDX 3m 95% C UI 110").unwrap(),
+            parse_builtin("-3 SPX 20DEC26 5000 P DO 4200").unwrap(),
+            parse_builtin("NDX 3m 95% C UI 110").unwrap(),
         ];
         for text in [
             "-5 SPX Z26 95%/105% CS",
@@ -822,7 +830,7 @@ pub(crate) mod tests {
             "3 SPX Z26 4800/5000/5200 FLY",
             "SPX Z26/H27 5000 CAL",
         ] {
-            rows.push(parse(text).unwrap());
+            rows.push(parse_builtin(text).unwrap());
         }
         push(&mut s, rows);
         s.apply(Edit::SetShift {
@@ -1223,8 +1231,8 @@ pub(crate) mod tests {
         push(
             &mut s,
             vec![
-                parse("SPX 1m 100% P").unwrap(),
-                parse("SPX Z26 4800/5200 RR").unwrap(),
+                parse_builtin("SPX 1m 100% P").unwrap(),
+                parse_builtin("SPX Z26 4800/5200 RR").unwrap(),
             ],
         );
         s
@@ -1234,7 +1242,7 @@ pub(crate) mod tests {
         let mut s = Sheet::new("off sheet/with odd; name");
         push(
             &mut s,
-            vec![parse("-7 NDX 20DEC26 20000 C UO 23000").unwrap()],
+            vec![parse_builtin("-7 NDX 20DEC26 20000 C UO 23000").unwrap()],
         );
         s.refresh = Refresh::Off;
         s.apply(Edit::SetSheetShift(OwnShifts {
@@ -1333,5 +1341,30 @@ pub(crate) mod tests {
             assert_eq!(to_rows(&back), to_rows(&expected), "{}", s.name);
         }
         service.shutdown();
+    }
+
+    #[test]
+    fn a_package_whose_template_is_unknown_loads_and_prints_its_legs() {
+        let mut s = Sheet::new("t");
+        s.apply(Edit::Insert {
+            place: crate::core::sheet::Place::Root { at: 0 },
+            rows: vec![parse_builtin("SPX Z26 4800/5200 CS").unwrap()],
+        })
+        .unwrap();
+        let mut rows = to_rows(&s).unwrap();
+        // Rename the stored template to one no set defines.
+        if let Some((_, Column::Utf8(t))) = rows.values.iter_mut().find(|(n, _)| n == "template") {
+            for v in t.iter_mut().filter(|v| v.as_str() == "cs") {
+                *v = "gone".into();
+            }
+        }
+        let back = from_rows("t", &rows).expect("an unknown template no longer refuses the load");
+        assert_eq!(
+            back.kind(0),
+            RowKind::Package {
+                template: Template::named("GONE")
+            }
+        );
+        assert!(back.shorthand(0).contains('\n'), "legs one per line");
     }
 }

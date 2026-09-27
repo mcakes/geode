@@ -912,6 +912,18 @@ impl Render for ShellView {
                 });
             });
         };
+        // A named-expression chip's `×` drops that name alone, an undoable
+        // edit like the other chips' `×`. Its body has no click yet.
+        let named_close_entity = cx.entity();
+        let on_named_close = move |name: &str, _window: &mut Window, cx: &mut App| {
+            named_close_entity.update(cx, |view, cx| {
+                view.frame.update(cx, |f, cx| {
+                    if f.drop_named(name) {
+                        cx.notify();
+                    }
+                });
+            });
+        };
         // Whether the grouping picker is up: the readout holds its pressed
         // fill for exactly as long as it is (design guide: a control that
         // owns a popup stays visibly pressed until the popup closes). The
@@ -933,6 +945,7 @@ impl Render for ShellView {
             on_as_of,
             on_term_open,
             on_term_close,
+            on_named_close,
             cx,
         );
 

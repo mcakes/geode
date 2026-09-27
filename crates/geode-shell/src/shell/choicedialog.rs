@@ -11,14 +11,19 @@
 //! Escape or the title row's Back button returns from the level step to targets.
 //! Escape elsewhere closes; no other step paints a Back button.
 //! Each open starts fresh; stage transitions clear and refocus the Input.
+//!
+//! `tile::open_with` uses the same tile rows, filtered to kinds accepting
+//! the focused tile's launch context, titled `Open {underlying} in…`; a
+//! pick always splits.
 
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Entity, Focusable as _, Window, div};
+use gpui::{AnyElement, App, Context, Entity, Focusable as _, SharedString, Window, div};
 use gpui_component::{ActiveTheme as _, v_flex};
 
 use geode_core::groupings::GroupingSlots;
+use geode_core::launch::LaunchContext;
 use geode_core::log::{Level, LogLevels, TARGETS};
 
 use crate::choice::{self, ChoiceKey, ChoiceList};
@@ -48,6 +53,13 @@ pub enum Target {
     Grouping { slots: Vec<Option<u8>> },
     /// The module kind each declared option adds (`add_tile`).
     TileKind { kinds: Vec<String> },
+    /// `tile::open_with`: the kinds accepting `context`, which was captured
+    /// from the focused tile when the dialog opened (moving that tile's
+    /// cursor afterwards does not change what a pick opens).
+    TileKindWith {
+        kinds: Vec<String>,
+        context: LaunchContext,
+    },
     /// Log-level stage: `None` shows targets; `Some(target)` shows levels.
     LogLevel {
         targets: Vec<String>,
@@ -126,6 +138,36 @@ impl ChoiceDialogState {
         }
     }
 
+    /// The rows for `tile::open_with`: `kinds` (already filtered to those
+    /// accepting `context`), in roster order, the highlight on the first.
+    pub fn tile_kinds_with<'a>(
+        kinds: impl IntoIterator<Item = &'a str>,
+        context: LaunchContext,
+    ) -> Self {
+        let Self { list, target } = Self::tile_kinds(kinds);
+        let Target::TileKind { kinds } = target else {
+            unreachable!("tile_kinds builds a TileKind target")
+        };
+        Self {
+            list,
+            target: Target::TileKindWith { kinds, context },
+        }
+    }
+
+    /// The modal's title: the chrome's fixed words, or `Open {underlying}…`
+    /// for a context launch.
+    pub fn title(&self) -> SharedString {
+        match &self.target {
+            Target::TileKindWith { context, .. } => match &context.underlying {
+                Some(u) => format!("Open {u} in\u{2026}").into(),
+                None => chrome(&self.target).0.into(),
+            },
+            Target::Grouping { .. } | Target::TileKind { .. } | Target::LogLevel { .. } => {
+                chrome(&self.target).0.into()
+            }
+        }
+    }
+
     /// Step 1 of `Set log level…`: one row per `geode::` target suffix,
     /// `"{target} · {level}"`, the highlight on the first.
     pub fn log_targets(levels: &LogLevels) -> Self {
@@ -176,6 +218,9 @@ impl ChoiceDialogState {
         match &self.target {
             Target::Grouping { slots } => Pick::Slot(slots[declared]),
             Target::TileKind { kinds } => Pick::Kind(kinds[declared].clone()),
+            Target::TileKindWith { kinds, context } => {
+                Pick::KindWith(kinds[declared].clone(), context.clone())
+            }
             Target::LogLevel { targets, chosen } => match chosen {
                 None => Pick::LogTarget(targets[declared].clone()),
                 Some(target) => Pick::LogLevel(target.clone(), LEVEL_WORDS[declared].1),
@@ -201,7 +246,7 @@ impl ChoiceDialogState {
     pub fn highlighted_slot(&self) -> Option<Option<u8>> {
         match self.highlighted_pick()? {
             Pick::Slot(slot) => Some(slot),
-            Pick::Kind(_) | Pick::LogTarget(_) | Pick::LogLevel(..) => None,
+            Pick::Kind(_) | Pick::KindWith(..) | Pick::LogTarget(_) | Pick::LogLevel(..) => None,
         }
     }
 }
@@ -214,6 +259,9 @@ pub enum Pick {
     Slot(Option<u8>),
     /// `ShellView::add_tile` of this kind.
     Kind(String),
+    /// `ShellView::add_tile` of this kind, with the factory's
+    /// `launch_state` of this context.
+    KindWith(String, LaunchContext),
     /// Step 1 of `Set log level…`: replace the rows with the levels.
     LogTarget(String),
     /// Step 2: `Diagnostics::request_level`.
@@ -287,6 +335,10 @@ fn chrome(target: &Target) -> (&'static str, &'static str, &'static str, &'stati
     match target {
         Target::Grouping { .. } => ("Grouping", "grouping", "grouping-hints", GROUPING_HINTS),
         Target::TileKind { .. } => ("Add a tile", "tile", "tile-hints", TILE_HINTS),
+        // This fallback title shows only if the target is built with no
+        // underlying; `tile::open_with` never builds it that way. `title()`
+        // supplies `Open {underlying} in…` instead.
+        Target::TileKindWith { .. } => ("Open in\u{2026}", "tile", "tile-hints", TILE_HINTS),
         Target::LogLevel { .. } => ("Log level", "loglevel", "loglevel-hints", LOG_HINTS),
     }
 }
@@ -310,6 +362,19 @@ pub fn open_tile_kinds(view: &mut ShellView, window: &mut Window, cx: &mut Conte
     open(view, state, window, cx);
 }
 
+/// Open on the roster kinds accepting `context` — `tile::open_with` with a
+/// non-empty context. The caller has checked at least one kind accepts it.
+pub fn open_tile_kinds_with(
+    view: &mut ShellView,
+    kinds: Vec<&'static str>,
+    context: LaunchContext,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    let state = ChoiceDialogState::tile_kinds_with(kinds, context);
+    open(view, state, window, cx);
+}
+
 /// Open `Set log level…` on the target step (`log::level`, palette-only).
 pub fn open_log_level(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
     let state = ChoiceDialogState::log_targets(&view.diagnostics.read(cx).levels);
@@ -325,7 +390,7 @@ fn open(
     if !dialog::can_open(view, dialog::DialogKind::Choice) {
         return;
     }
-    let (title, ..) = chrome(&state.target);
+    let title = state.title();
     view.choice_dialog_scroll
         .scroll_to_item(state.list.ranked_highlighted());
     view.choice_dialog = Some(state);
@@ -405,6 +470,15 @@ fn commit(shell: &mut ShellView, pick: Pick, window: &mut Window, cx: &mut Conte
         Pick::Kind(kind) => {
             shell.close_modal(window, cx);
             shell.add_tile(&kind, AddPlacement::Split(None), None, window, cx);
+        }
+        Pick::KindWith(kind, context) => {
+            shell.close_modal(window, cx);
+            let state = shell
+                .services
+                .roster
+                .factory(&kind)
+                .and_then(|f| f.launch_state(&context));
+            shell.add_tile(&kind, AddPlacement::Split(None), state, window, cx);
         }
         Pick::LogTarget(target) => {
             // Step 2 replaces the rows in place; the modal stays open and
@@ -655,6 +729,30 @@ mod tests {
         assert_eq!(
             state.pick_at_ranked(0),
             Some(Pick::Kind("diagnostics".into()))
+        );
+    }
+
+    /// A context launch titles the dialog by the underlying and lists only
+    /// the pre-filtered kinds; a plain `tile_kinds` dialog keeps its fixed
+    /// title.
+    #[test]
+    fn kinds_with_a_context_title_the_dialog_by_it_and_pick_with_it() {
+        let ctx = geode_core::launch::LaunchContext {
+            underlying: Some("SPX".into()),
+        };
+        let state = ChoiceDialogState::tile_kinds_with(["cvi", "dividend"], ctx.clone());
+        assert_eq!(state.title().as_ref(), "Open SPX in\u{2026}");
+        assert_eq!(
+            state.list.options(),
+            &["Cvi".to_string(), "Dividend".to_string()]
+        );
+        assert_eq!(
+            state.highlighted_pick(),
+            Some(Pick::KindWith("cvi".into(), ctx))
+        );
+        assert_eq!(
+            ChoiceDialogState::tile_kinds(["rec"]).title().as_ref(),
+            "Add a tile"
         );
     }
 

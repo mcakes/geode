@@ -32,6 +32,9 @@ pub(super) const NOT_IN_A_STACK: &str = "not in a stack";
 /// (the command line, find, or the stack list) while a dialog is open.
 pub(super) const CLOSE_DIALOG_FIRST: &str = "close the dialog first";
 
+/// The notice when no registered kind accepts the focused tile's context.
+pub(crate) const NO_MODULE_OPENS: &str = "no module opens on the context at the cursor";
+
 impl ShellView {
     /// Active contexts, outermost first: workspace, then tile and occupant when
     /// an occupant is focused, then palette while open. Used for ordinary matching
@@ -198,6 +201,8 @@ impl ShellView {
             objectdialog::render::open(self, objectdialog::Domain::Sources, window, cx);
         } else if action.0 == "config::colors" {
             objectdialog::render::open(self, objectdialog::Domain::Colors, window, cx);
+        } else if action.0 == "config::expressions" {
+            objectdialog::render::open(self, objectdialog::Domain::Expressions, window, cx);
         } else if action.0 == "fontsize::increase" {
             // Clamped steps (ctrl+= / ctrl+-); render applies the rem size
             // on the notify, persistence mirrors the settings control's
@@ -329,6 +334,38 @@ impl ShellView {
         } else if action.0 == "tile::add" {
             // Open the same tile-kind picker as a placeholder double-click.
             choicedialog::open_tile_kinds(self, window, cx);
+        } else if action.0 == "tile::open_with" {
+            // Pull the focused tile's context now; the dialog keeps this copy.
+            let context = self
+                .services
+                .workspaces
+                .active()
+                .focused_tile()
+                .and_then(|t| self.occupants.get(&t))
+                .map(|o| o.content.launch_context(cx))
+                .unwrap_or_default();
+            if context.is_empty() {
+                choicedialog::open_tile_kinds(self, window, cx);
+            } else {
+                let kinds: Vec<&'static str> = self
+                    .services
+                    .roster
+                    .kinds()
+                    .into_iter()
+                    .filter(|k| {
+                        self.services
+                            .roster
+                            .factory(k)
+                            .is_some_and(|f| context.covered_by(f.accepts()))
+                    })
+                    .collect();
+                if kinds.is_empty() {
+                    self.notice = Some(NO_MODULE_OPENS);
+                    cx.notify();
+                } else {
+                    choicedialog::open_tile_kinds_with(self, kinds, context, window, cx);
+                }
+            }
         } else if action.0 == "log::level" {
             // Open the target-then-level picker for application logging.
             choicedialog::open_log_level(self, window, cx);
