@@ -427,7 +427,9 @@ running one on a reload and the built-in one at startup, so a typo in a
 desk `RR` never makes `RR` disappear. Unknown keys, on the entry
 or on a leg, warn and are ignored. Two spellings of one name in the same
 merged document keep the later entry, in the earlier one's position, with a
-warning.
+warning. When the later spelling is invalid, the name keeps its previous
+definition instead (at startup, its built-in one); only a name with no such
+definition falls back to the earlier spelling.
 
 Like other named objects, an entry in a higher layer replaces a lower-layer
 entry of the same name, including a built-in: a desk `RR` redefines the risk

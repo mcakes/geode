@@ -16774,6 +16774,26 @@ run_mutation "pricer templates: a bad entry drops the previous definition" \
   '                None => match None::<&TemplateDef> {' \
   geode-pricer a_bad_entry_keeps_the_previous_definition_and_an_absent_one_is_removed
 
+# A stored package prints against whatever table the config now holds;
+# an unchecked `qty * weight` panics (debug) or wraps (release).
+run_mutation "pricer shorthand: render_package multiplies unchecked" \
+  crates/geode-pricer/src/core/shorthand.rs \
+  '        if Some(*leg_qty) != qty.checked_mul(spec.weight)' \
+  '        if Some(*leg_qty) != Some(qty * spec.weight)' \
+  geode-pricer a_huge_quantity_against_a_large_weight_does_not_render_or_panic
+
+# A reload with the bar open must reprint its history, or recall offers
+# a line printed with the old meaning of a redefined template.
+run_mutation "pricer templates: a reload leaves the open bar's history stale" \
+  crates/geode-pricer/src/tile.rs \
+  '        if let Some(entry) = self.entry.as_mut() {
+            entry.history = history(&self.sheet);
+            entry.history_ix = None;
+        }
+        self.resolve_plan();' \
+  '        self.resolve_plan();' \
+  geode-pricer a_reload_with_the_bar_open_reprints_its_history
+
 # The reload observer must hand the factory the configured set.
 run_mutation "pricer app: a reload hands the factory the builtin templates" \
   crates/geode-app/src/bridge.rs \
@@ -16787,8 +16807,8 @@ run_mutation "pricer app: a reload hands the factory the builtin templates" \
 # On a reload, "previous" is the running set, not an empty one.
 run_mutation "pricer app: a reload's bad entry has no previous to keep" \
   crates/geode-app/src/bridge.rs \
-  '                    pricer_templates_from_config(config, &pricer.templates());' \
-  '                    pricer_templates_from_config(config, &TemplateSet::default());' \
+  '                    pricer_templates_from_config(config, &pricer.templates(), "previous");' \
+  '                    pricer_templates_from_config(config, &TemplateSet::default(), "previous");' \
   geode-app a_config_reload_hands_the_pricer_factory_its_templates
 
 # Startup must build the factory from the configured set.

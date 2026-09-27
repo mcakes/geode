@@ -141,7 +141,12 @@ pub struct TemplateSet {
     defs: Vec<TemplateDef>,
 }
 
-/// A template name as config and storage spell it: 1 to 8 characters, a
+/// The longest template name, in characters. The pricer tree column is
+/// sized so a tag this long fits.
+pub const MAX_TEMPLATE_NAME: usize = 8;
+
+/// A template name as config and storage spell it: 1 to
+/// [`MAX_TEMPLATE_NAME`] characters, a
 /// letter first, then letters or digits. `C` and `P` are single legs and
 /// `CUSTOM` is the grouped-package marker, so none of the three names a
 /// table. Answers the upper-cased name.
@@ -149,9 +154,9 @@ pub fn check_name(name: &str) -> Result<String, String> {
     let upper = name.to_ascii_uppercase();
     let mut chars = upper.chars();
     let first_ok = chars.next().is_some_and(|c| c.is_ascii_alphabetic());
-    if !first_ok || !chars.all(|c| c.is_ascii_alphanumeric()) || upper.len() > 8 {
+    if !first_ok || !chars.all(|c| c.is_ascii_alphanumeric()) || upper.len() > MAX_TEMPLATE_NAME {
         return Err(format!(
-            "'{name}' is not a template name (1 to 8 letters or digits, a letter first)"
+            "'{name}' is not a template name (1 to {MAX_TEMPLATE_NAME} letters or digits, a letter first)"
         ));
     }
     if matches!(upper.as_str(), "C" | "P" | "CUSTOM") {
@@ -171,7 +176,7 @@ impl TemplateSet {
     /// this is layer-override semantics for names TOML itself cannot fold
     /// together.
     pub fn from_doc(doc: &MergedDoc) -> (TemplateSet, Vec<Diagnostic>) {
-        TemplateSet::from_doc_over(doc, &TemplateSet::default())
+        TemplateSet::from_doc_over(doc, &TemplateSet::default(), "previous")
     }
 
     /// [`from_doc`](Self::from_doc), keeping the last valid state per
@@ -180,10 +185,13 @@ impl TemplateSet {
     /// with a Warning at the entry's path. A name absent from `doc` is
     /// removed as usual. `previous` is the running set on a reload and
     /// the builtin set at startup, so a bad desk `RR` falls back to the
-    /// builtin one instead of disappearing.
+    /// builtin one instead of disappearing. `previous_is` names that set
+    /// in the Warning ("keeping the {previous_is} definition"): "previous"
+    /// on a reload, "built-in" at startup.
     pub fn from_doc_over(
         doc: &MergedDoc,
         previous: &TemplateSet,
+        previous_is: &str,
     ) -> (TemplateSet, Vec<Diagnostic>) {
         let mut out = TemplateSet::default();
         let mut diags = Vec::new();
@@ -303,7 +311,7 @@ impl TemplateSet {
                         diags.push(report(
                             Severity::Warning,
                             "",
-                            "keeping the previous definition".into(),
+                            format!("keeping the {previous_is} definition"),
                         ));
                         kept.clone()
                     }
@@ -311,15 +319,11 @@ impl TemplateSet {
                 },
             };
             if let Some((idx, earlier)) = seen.get(&upper) {
-                diags.push(Diagnostic {
-                    severity: Severity::Warning,
-                    layer: None,
-                    file: None,
-                    message: format!(
-                        "'{name}' replaces '{earlier}' (template names are case-insensitive)"
-                    ),
-                    path: Some(path("")),
-                });
+                diags.push(report(
+                    Severity::Warning,
+                    "",
+                    format!("replaces '{earlier}' (template names are case-insensitive)"),
+                ));
                 out.defs[*idx] = def;
                 seen.insert(upper, (*idx, name.clone()));
             } else {
@@ -454,7 +458,7 @@ mod tests {
              [RR]\nlegs = [ { weight = 0, strike = 1, kind = \"P\" }, { weight = 1, strike = 2, kind = \"C\" } ]\n\
              [PS]\nlegs = [ { weight = 1, strike = 1, kind = \"P\" }, { weight = -1, strike = 2, kind = \"P\" } ]\n",
         );
-        let (s, diags) = TemplateSet::from_doc_over(&bad, &previous);
+        let (s, diags) = TemplateSet::from_doc_over(&bad, &previous, "previous");
         let names: Vec<&str> = s.iter().map(|d| d.name.as_str()).collect();
         assert_eq!(
             names,
@@ -490,6 +494,7 @@ mod tests {
                 "[CS]\nlegs = [ { weight = 1, strike = 1, kind = \"C\" }, { weight = -1, strike = 2, kind = \"C\" } ]\n",
             ),
             &previous,
+            "previous",
         );
         assert!(diags.is_empty(), "{diags:?}");
         assert!(s.resolve("RR").is_none());
@@ -632,6 +637,11 @@ legs = [ { weight = 1, strike = 100000000, kind = "C" }, { weight = -1, strike =
         assert_eq!(diags.len(), 1, "{diags:?}");
         assert_eq!(diags[0].severity, geode_core::config::Severity::Warning);
         assert_eq!(diags[0].path.as_deref(), Some("pricer_templates.rr"));
+        assert_eq!(
+            diags[0].message,
+            "pricer template 'rr': replaces 'RR' (template names are case-insensitive)",
+            "the same prefix as every other template diagnostic"
+        );
     }
 
     #[test]

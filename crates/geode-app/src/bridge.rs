@@ -138,7 +138,7 @@ pub fn data_setup(
     let (pricer_views, view_diags) = pricer_views_from_config(config);
     diagnostics.extend(view_diags);
     let (pricer_templates, template_diags) =
-        pricer_templates_from_config(config, &TemplateSet::builtin());
+        pricer_templates_from_config(config, &TemplateSet::builtin(), "built-in");
     diagnostics.extend(template_diags);
     let (refresh, refresh_diag) = pricing_refresh_from_config(config);
     diagnostics.extend(refresh_diag);
@@ -316,12 +316,14 @@ pub fn pricer_views_from_config(config: &Config) -> (Views, Vec<Diagnostic>) {
 /// (the builtin layer always does in the app; a test config may not).
 /// A bad entry keeps `previous`'s definition of its name (keep-last-valid,
 /// per name): the builtin set at startup, the running set on a reload.
+/// `previous_is` names that set in the warning: "built-in" or "previous".
 pub fn pricer_templates_from_config(
     config: &Config,
     previous: &TemplateSet,
+    previous_is: &str,
 ) -> (TemplateSet, Vec<Diagnostic>) {
     match config.doc(PRICER_TEMPLATES_DOC) {
-        Some(doc) => TemplateSet::from_doc_over(doc, previous),
+        Some(doc) => TemplateSet::from_doc_over(doc, previous, previous_is),
         None => (TemplateSet::builtin(), Vec::new()),
     }
 }
@@ -793,7 +795,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 let (refresh, refresh_diag) = pricing_refresh_from_config(config);
                 // A bad entry keeps the running definition of its name.
                 let (templates, template_diags) =
-                    pricer_templates_from_config(config, &pricer.templates());
+                    pricer_templates_from_config(config, &pricer.templates(), "previous");
                 let mut diags = diags;
                 diags.extend(template_diags);
                 diags.extend(refresh_diag);
@@ -1561,7 +1563,8 @@ role = "key"
             desk: None,
             user: None,
         });
-        let (set, diags) = pricer_templates_from_config(&config, &TemplateSet::builtin());
+        let (set, diags) =
+            pricer_templates_from_config(&config, &TemplateSet::builtin(), "built-in");
         assert!(diags.is_empty());
         assert_eq!(set, TemplateSet::builtin());
         assert_eq!(set.iter().count(), 7, "the seven built-ins");
@@ -1583,7 +1586,8 @@ role = "key"
             )
             .unwrap(),
         ]);
-        let (set, diags) = pricer_templates_from_config(&config, &TemplateSet::builtin());
+        let (set, diags) =
+            pricer_templates_from_config(&config, &TemplateSet::builtin(), "built-in");
         assert!(set.resolve("CONDOR").is_some());
         assert!(set.resolve("RR").is_some(), "the built-ins stay");
         assert!(set.resolve("BAD").is_none());
@@ -1736,7 +1740,7 @@ role = "key"
             setup
                 .diagnostics
                 .iter()
-                .any(|d| d.message.contains("keeping the previous definition")),
+                .any(|d| d.message.contains("keeping the built-in definition")),
             "{:?}",
             setup.diagnostics
         );

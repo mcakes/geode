@@ -31,8 +31,8 @@ pub use storage::{
     LINE_AXIS, PRICER_SHEETS_DATASET, PRICER_SHEETS_DECLARATION, SHEET_KEY, from_rows, to_rows,
 };
 pub use template::{
-    BUILTIN_TEMPLATES, LegSpec, PRICER_TEMPLATES_DOC, Template, TemplateDef, TemplateSet,
-    check_name,
+    BUILTIN_TEMPLATES, LegSpec, MAX_TEMPLATE_NAME, PRICER_TEMPLATES_DOC, Template, TemplateDef,
+    TemplateSet, check_name,
 };
 pub use tree::{Expansion, visible_rows};
 pub use undo::{UNDO_DEPTH, UndoStack};

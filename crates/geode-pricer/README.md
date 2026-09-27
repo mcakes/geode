@@ -65,7 +65,8 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   stale marking, and sheet metadata updates have separate paths.
 - Package rows derive from their legs; they are not independent instruments.
 - Shorthand rendering uses a template only while the legs still match its
-  current table; otherwise it prints the legs one per line. The grid keeps
+  current table (an overflowing quantity never matches); otherwise it prints
+  the legs one per line. The grid keeps
   the shorthand as the row's find key and paints only a package's template
   token. A package's template is a name, not a table: loading a sheet never
   fails on a name the configured set lacks.
@@ -77,7 +78,7 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   set. `PricerTile::adopt_templates` is the only place a tile's sheet gets
   the factory's configured set; it runs wherever a sheet is installed (open,
   load, `:e`, `:new`) and on every reload, so the entry bar parses against
-  the configured set.
+  the configured set. A reload also reprints an open bar's history.
 - Storage conversion preserves stable ordering and explicit ownership of
   inherited versus row-level shifts.
 - The `pricer_sheets` declaration is frozen: tables are created with

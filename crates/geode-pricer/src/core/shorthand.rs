@@ -478,10 +478,13 @@ pub fn render_package(def: &TemplateDef, legs: &[(i64, &Instrument)]) -> Option<
     }
     let first = table[0];
     let (q0, _) = legs[0];
-    if q0 % first.weight != 0 {
+    // Checked: a stored package prints against whatever table the config
+    // now holds, so `i64::MIN / -1` or a huge quantity times a large
+    // weight is reachable. Overflow means "does not fit": one leg per line.
+    if q0.checked_rem(first.weight)? != 0 {
         return None;
     }
-    let qty = q0 / first.weight;
+    let qty = q0.checked_div(first.weight)?;
     if qty == 0 {
         return None;
     }
@@ -492,7 +495,10 @@ pub fn render_package(def: &TemplateDef, legs: &[(i64, &Instrument)]) -> Option<
         let Instrument::Vanilla(v) = instrument else {
             return None;
         };
-        if *leg_qty != qty * spec.weight || v.kind != spec.kind || v.underlying != underlying {
+        if Some(*leg_qty) != qty.checked_mul(spec.weight)
+            || v.kind != spec.kind
+            || v.underlying != underlying
+        {
             return None;
         }
         match strikes[spec.strike] {
@@ -927,6 +933,51 @@ mod tests {
             render_package(
                 builtin().resolve("CS").unwrap(),
                 &[(1, &b.instrument), (-1, &c.instrument)]
+            ),
+            None
+        );
+    }
+
+    /// A stored package prints against whatever table the config now
+    /// holds, and config accepts any nonzero weight: arithmetic that
+    /// overflows means "does not fit", never a panic or a wrapped match.
+    #[test]
+    fn a_huge_quantity_against_a_large_weight_does_not_render_or_panic() {
+        use crate::core::{LegSpec, TemplateDef};
+        let table = |w0: i64, w1: i64| TemplateDef {
+            name: "BIG".into(),
+            legs: vec![
+                LegSpec {
+                    weight: w0,
+                    strike: 0,
+                    expiry: 0,
+                    kind: OptionKind::Call,
+                },
+                LegSpec {
+                    weight: w1,
+                    strike: 1,
+                    expiry: 0,
+                    kind: OptionKind::Call,
+                },
+            ],
+            strikes: 2,
+            expiries: 1,
+        };
+        let a = line("SPX Z26 4800 C");
+        let b = line("SPX Z26 5200 C");
+        // `qty * weight` overflows on the second leg.
+        assert_eq!(
+            render_package(
+                &table(1, i64::MAX),
+                &[(i64::MAX, &a.instrument), (-1, &b.instrument)]
+            ),
+            None
+        );
+        // `i64::MIN % -1` and `i64::MIN / -1` overflow on the first.
+        assert_eq!(
+            render_package(
+                &table(-1, 1),
+                &[(i64::MIN, &a.instrument), (i64::MIN, &b.instrument)]
             ),
             None
         );

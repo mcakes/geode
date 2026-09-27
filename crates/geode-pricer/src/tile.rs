@@ -1988,6 +1988,13 @@ impl PricerTile {
     /// A reload reached this tile (planning decision 20).
     pub(crate) fn config_changed(&mut self, cx: &mut Context<Self>) {
         self.adopt_templates();
+        // An open bar's history was printed with the old tables; a
+        // redefined template changes how stored lines print (or whether
+        // they fit one line at all), so recall must use the new ones.
+        if let Some(entry) = self.entry.as_mut() {
+            entry.history = history(&self.sheet);
+            entry.history_ix = None;
+        }
         self.resolve_plan();
         self.rebuild(cx);
         self.restart_timer(cx);
@@ -4700,6 +4707,45 @@ pub(crate) mod tests {
             t.sheet.qty(p + 1)
         });
         assert_eq!(first_leg_qty, 1, "the new RR is long the put");
+    }
+
+    /// A reload while the bar is open reprints its history with the new
+    /// tables: a stored RR that no longer fits one line drops out of
+    /// recall instead of offering the old meaning of `RR`.
+    #[gpui::test]
+    fn a_reload_with_the_bar_open_reprints_its_history(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "SPX Z26 4800/5200 RR"]);
+        h.dispatch(&mut vcx, "add_below", None);
+        let flipped = {
+            let builtin = geode_core::config::LayerDoc::builtin(
+                crate::core::PRICER_TEMPLATES_DOC,
+                crate::core::BUILTIN_TEMPLATES,
+            )
+            .unwrap();
+            let user = geode_core::config::LayerDoc::builtin(
+                crate::core::PRICER_TEMPLATES_DOC,
+                "[RR]\nlegs = [ { weight = 1, strike = 1, kind = \"P\" }, { weight = 1, strike = 2, kind = \"C\" } ]\n",
+            )
+            .unwrap();
+            TemplateSet::from_doc(&geode_core::config::merge_docs(
+                crate::core::PRICER_TEMPLATES_DOC,
+                &[builtin, user],
+            ))
+            .0
+        };
+        let (views, settings) = (h.factory.views_for_tests(), h.factory.settings());
+        vcx.update(|_, cx| {
+            h.factory
+                .reload(views, flipped, settings.refresh, settings.stale_after, cx)
+        });
+        h.draw(&mut vcx);
+        assert!(h.entry_text(&vcx).is_some(), "the bar stays open");
+        h.dispatch(&mut vcx, "insert_up", None);
+        assert_eq!(
+            h.entry_text(&vcx).as_deref(),
+            Some("SPX Z26 5000 C"),
+            "the stored RR no longer prints on one line, so recall skips it"
+        );
     }
 
     /// Entry-bar spec §4: `o`, a line, `enter` adds a row below the

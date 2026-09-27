@@ -724,7 +724,7 @@ mod width_tests {
         let pad = Size::XSmall.table_cell_padding();
         let padding = f32::from(pad.left) + f32::from(pad.right);
         // The longest name `check_name` allows.
-        let widest = 8;
+        let widest = crate::core::MAX_TEMPLATE_NAME;
         let need = (INDENT + CHEVRON_SLOT) * rem / geode_shell::shell::scale::DESIGN_REM
             + widest as f32 * advance
             + padding;
