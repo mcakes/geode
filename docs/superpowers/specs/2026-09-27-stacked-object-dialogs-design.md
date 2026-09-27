@@ -85,7 +85,7 @@ typing) need no change: they already act only when an Object entry is live.
 
 ## 4. Deliveries to a covered dialog
 
-The three paths that write to object-dialog state outside the key route must
+The four paths that write to object-dialog state outside the key route must
 reach parked states as well. A helper yields the live state and every parked
 one (`object_dialogs_mut`).
 
@@ -94,12 +94,18 @@ one (`object_dialogs_mut`).
 - **Distinct-values reply** (`expr_suggest.rs`, the delivery): offer the
   outcome to each dialog with an open expression field; `deliver` already
   matches on column and tag, so at most one accepts it.
+- **Scopes values reply** (`render.rs`, `deliver_values`): a Scopes Values
+  stage covered by another domain's dialog still owns its `SCOPES_KEY`
+  request; the reply goes to the Scopes dialog wherever it is in the stack,
+  not only when it is live.
 - **Failed-write revert** (`apply.rs`, `revert_failed_write`): today it
-  rebuilds whichever draft is on top. `PendingConfigWrite` records the domain
-  whose draft queued the batch, and only that domain's dialog — live or
-  parked — is rebuilt and given the "could not save" notice. Without this, a
-  Colors write failing after the trader returned to Views would replace their
-  unsaved Views draft with one rebuilt from config.
+  rebuilds whichever draft is on top. `PendingConfigWrite` records every
+  domain whose draft contributed edits to the batch (a debounced Views edit
+  and a Colors commit can share one batch), and exactly those dialogs — live
+  or parked — are rebuilt and given the "could not save" notice. A batch
+  queued from outside the object dialog (`queue_object`) rebuilds none.
+  Without this, a Colors write failing after the trader returned to Views
+  would replace their unsaved Views draft with one rebuilt from config.
 
 `expr_suggest`'s own request path (`completion_mut`, `values_scope`) keys on
 `top_kind()` and the live state, which is correct: only the visible dialog
@@ -128,7 +134,7 @@ This covers the committed-then-Escape case and a hot reload from disk alike.
 - Closing a stacked object dialog never discards the covered draft; only the
   popped entry's state is dropped.
 - A failed write reverts memory for the whole batch (unchanged) and rebuilds
-  only the writing domain's draft.
+  only the drafts that contributed to it.
 - Palette actions that run behind the stack are unchanged.
 
 ## 7. Testing
