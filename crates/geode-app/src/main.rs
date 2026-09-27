@@ -18,7 +18,6 @@ use std::time::Duration;
 use geode_core::config::{ConfigSources, Diagnostic, LayerDoc, Severity};
 use geode_core::log::{LevelControl, LogLevels, Ring, RingLayer};
 use geode_diagnostics::DiagnosticsFactory;
-use geode_marketdata::MarketDataFactory;
 use geode_shell::actions::ActionRegistry;
 use geode_shell::defaults::{
     BUILTIN_KEYMAP, mod_alias_from_config, modules_default_diagnostic, register_add_actions,
@@ -860,6 +859,7 @@ fn user_config_dir(appdata: Option<String>, home: Option<String>) -> Option<Path
 mod tests {
     use super::*;
     use geode_core::config::Config;
+    use geode_marketdata::MarketDataFactory;
 
     #[test]
     fn appdata_wins_when_set() {
