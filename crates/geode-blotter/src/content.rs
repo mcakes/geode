@@ -460,6 +460,9 @@ mod tests {
     fn v_and_shift_v_start_the_two_selections_and_h_moves_in_visual() {
         let doc = fragment_doc("blotter", DEFAULT_KEYMAP).unwrap();
         let mut registry = ActionRegistry::default();
+        // `g m` names the shell's `tile::open_with`; without the builtins
+        // registered the keymap build would warn and skip it.
+        geode_shell::defaults::register_builtin_actions(&mut registry);
         for (id, title) in ACTIONS {
             let _ = registry.register(ActionDef {
                 id: ActionId((*id).to_string()),
