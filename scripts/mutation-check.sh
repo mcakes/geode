@@ -6909,16 +6909,16 @@ run_mutation "expr-chips: a term edit replaces only that term" \
 # Appending joins with `and`; replacing loses the existing expression.
 run_mutation "expr-chips: append joins the existing expression with and" \
   crates/geode-shell/src/frame.rs \
-  '            Some(existing) => Expr::And(Box::new(existing), Box::new(term)),' \
-  '            Some(_) => term,' \
+  '        Some(existing) => Expr::And(Box::new(existing), Box::new(term)),' \
+  '        Some(_) => term,' \
   geode-shell \
-  append_expression_joins_with_and_or_sets_it
+  and_join_joins_with_and_or_sets_it
 
 # The dialog's add mode appends; committing as whole mode replaces.
 run_mutation "expr-chips: the add dialog appends rather than replaces" \
   crates/geode-shell/src/shell/scope_expr_view.rs \
-  '                    Some(existing) => Expr::And(Box::new(existing), Box::new(term)),' \
-  '                    Some(_) => term,' \
+  '                scope.expression = Some(crate::frame::and_join(scope.expression.take(), term));' \
+  '                scope.expression = Some(term);' \
   geode-shell \
   the_plus_menus_expression_row_appends_with_and
 
@@ -21986,6 +21986,14 @@ run_mutation "scope expr: backspace at the start unstages" \
   '        return false;' \
   geode-shell \
   backspace_at_the_start_unstages_the_last_name_and_undo_restores
+
+# A reload re-offers the new definitions under an open dialog.
+run_mutation "scope expr: a reload re-offers named expressions" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                super::scope_expr_view::sync_named_offers(self, cx);' \
+  '' \
+  geode-shell \
+  a_reload_offers_a_new_named_expression_under_an_open_dialog
 
 # A staged name is not offered again.
 run_mutation "scope expr: offers exclude staged names" \

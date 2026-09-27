@@ -369,7 +369,8 @@ fn a_moved_caret_is_followed_before_tab_writes(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// cmd-z takes an insertion back, which proves the write kept undo.
+/// The platform undo key (`secondary-z`: cmd-z, or ctrl-z off macOS) takes
+/// an insertion back, which proves the write kept undo.
 #[gpui::test]
 fn undo_takes_an_insertion_back(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) =
@@ -378,7 +379,7 @@ fn undo_takes_an_insertion_back(cx: &mut gpui::TestAppContext) {
     vcx.simulate_keystrokes("tab");
     vcx.run_until_parked();
     assert_eq!(field(&shell, &vcx), "npv ");
-    vcx.simulate_keystrokes("cmd-z");
+    vcx.simulate_keystrokes("secondary-z");
     vcx.run_until_parked();
     assert_eq!(field(&shell, &vcx), "np");
 }
@@ -601,7 +602,7 @@ fn term_mode_offers_no_named_rows(cx: &mut gpui::TestAppContext) {
             |d| matches!(d.mode, crate::shell::scope_expr_view::Mode::Term { .. })
         ))
     );
-    vcx.simulate_keystrokes("cmd-a backspace");
+    vcx.simulate_keystrokes("secondary-a backspace");
     vcx.run_until_parked();
     assert!(
         vcx.debug_bounds("scope-expr-row-book").is_some(),
@@ -657,4 +658,29 @@ fn a_named_row_and_a_column_row_of_one_name_click_apart(cx: &mut gpui::TestAppCo
     vcx.run_until_parked();
     assert_eq!(field(&shell, &vcx), "book ");
     assert!(vcx.debug_bounds("scope-expr-staged-book").is_some());
+}
+
+/// A reload that adds a named expression while the dialog is open offers
+/// it straight away.
+#[gpui::test]
+fn a_reload_offers_a_new_named_expression_under_an_open_dialog(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) =
+        dialog_test_shell_with(cx, services_with_named(), "frame::add_expression");
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("scope-expr-named-row-liq").is_some());
+    assert!(vcx.debug_bounds("scope-expr-named-row-fresh").is_none());
+    let reloaded = services_with_schema_and(vec![
+        LayerDoc::builtin(
+            "expressions",
+            "[liq]\nexpression = \"npv > 0\"\n[fresh]\nexpression = \"npv > 9\"\n",
+        )
+        .unwrap(),
+    ]);
+    shell.update(&mut vcx, |s, cx| s.apply_reload(reloaded.config, cx));
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("scope-expr-named-row-fresh").is_some());
+    assert!(
+        vcx.debug_bounds("scope-expr-named-row-hedges").is_none(),
+        "a removed definition is no longer offered"
+    );
 }

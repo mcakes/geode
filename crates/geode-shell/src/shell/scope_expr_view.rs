@@ -269,10 +269,7 @@ pub fn apply(
             let mut scope = frame.scope().clone();
             append_missing(&mut scope.named, staged);
             if let Some(term) = parsed {
-                scope.expression = Some(match scope.expression.take() {
-                    Some(existing) => Expr::And(Box::new(existing), Box::new(term)),
-                    None => term,
-                });
+                scope.expression = Some(crate::frame::and_join(scope.expression.take(), term));
             }
             Ok(frame.set_scope(scope))
         }
@@ -475,6 +472,7 @@ fn handle_key(
         return true;
     }
     if ks.mods == Modifiers::NONE && ks.key == "backspace" {
+        // False hands the key back to the field, which deletes text.
         return backspace_unstages(shell, cx);
     }
     if ks.mods != Modifiers::NONE || ks.key != "enter" {
@@ -983,6 +981,12 @@ mod tests {
         let offered: Vec<&str> = offers.iter().map(|o| o.name.as_str()).collect();
         assert_eq!(offered, vec!["bad", "liq"]);
         assert!(offers[0].broken);
+        // A broken offer previews WHY it is broken, not its text.
+        let Some(NamedExpr::Invalid { reason, .. }) = defined.get("bad") else {
+            panic!("bad is invalid");
+        };
+        assert_eq!(&offers[0].preview, reason);
+        assert_ne!(offers[0].preview, "npv >");
         assert_eq!(offers[1].preview, "npv > 0");
         assert!(!offers[1].broken);
         let offers = named_offers(&Mode::Whole, &defined, &names(&["liq"]));

@@ -2549,9 +2549,9 @@ fn the_scopes_expression_field_suggests_and_tab_inserts(cx: &mut gpui::TestAppCo
         && matches!(&f.kind, FieldKind::Text(t) if t == "npv > 0"))));
 }
 
-/// `cmd-z` takes a tab insertion back in the Scopes field, and the draft's
-/// query follows the input rather than restoring the insertion on the
-/// next text sync.
+/// The platform undo key (`secondary-z`) takes a tab insertion back in the
+/// Scopes field, and the draft's query follows the input rather than
+/// restoring the insertion on the next text sync.
 #[gpui::test]
 fn the_scopes_expression_field_undoes_an_insertion(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -2566,7 +2566,7 @@ fn the_scopes_expression_field_undoes_an_insertion(cx: &mut gpui::TestAppContext
     cx.simulate_keystrokes("tab");
     cx.run_until_parked();
     assert_eq!(edit_draft(&shell, &cx, |d| d.query.clone()), "npv ");
-    cx.simulate_keystrokes("cmd-z");
+    cx.simulate_keystrokes("secondary-z");
     cx.run_until_parked();
     let text = shell.read_with(&cx, |s, cx| s.dialog_input.read(cx).value().to_string());
     assert_eq!(text, "np");
