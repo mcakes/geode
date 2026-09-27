@@ -24,6 +24,12 @@ pub struct CompiledColumn {
     /// Indexed by depth, `0..=grouping.len()`.
     pub attribution_by_depth: Vec<Attribution>,
     pub scope_semantics: ScopeSemantics,
+    /// Whether the column's values add up across sibling rows: only a
+    /// plain measure whose schema aggregate is `sum`. A min/max/any
+    /// measure, a derived expression (a ratio of sums is not a sum), a
+    /// joined attribute, and a grouping column are not — a footer that
+    /// totalled them would print a plausible wrong number.
+    pub summable: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -582,6 +588,13 @@ pub(crate) fn compile_view_with_cache(
                 grain: Some(grain),
                 attribution_by_depth: by_depth,
                 scope_semantics: grain_scope.semantics.clone(),
+                summable: matches!(
+                    m.role,
+                    ColumnRole::Measure {
+                        aggregate: Aggregate::Sum,
+                        ..
+                    }
+                ),
             });
         }
     }
@@ -675,6 +688,7 @@ pub(crate) fn compile_view_with_cache(
             grain: None,
             attribution_by_depth: vec![Attribution::Additive; n + 1],
             scope_semantics: ScopeSemantics::Direct,
+            summable: false,
         });
     }
     selects.push("s.row_depth".to_string());
@@ -683,6 +697,7 @@ pub(crate) fn compile_view_with_cache(
         grain: None,
         attribution_by_depth: vec![Attribution::Additive; n + 1],
         scope_semantics: ScopeSemantics::Direct,
+        summable: false,
     });
     joins.extend(agg_joins);
     selects.extend(agg_selects);
@@ -821,6 +836,7 @@ pub(crate) fn compile_view_with_cache(
                     })
                     .collect(),
                 scope_semantics: ScopeSemantics::Direct,
+                summable: false,
             });
         }
     }
@@ -872,6 +888,7 @@ pub(crate) fn compile_view_with_cache(
                 grain: None,
                 attribution_by_depth,
                 scope_semantics,
+                summable: false,
             });
         }
     }
@@ -1115,6 +1132,96 @@ kind = "dimension"
 "#;
         let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
         ViewSpec::from_doc(&doc).0.into_iter().next().unwrap()
+    }
+
+    /// Only a plain `sum` measure adds up across sibling rows. A `max`
+    /// or `min` measure is additive in attribution (its value belongs to
+    /// its row) yet totalling two maxima is wrong, and a derived ratio of
+    /// sums is not a sum. The mark rides the snapshot's column metadata,
+    /// which is what the blotter's footer reads.
+    #[test]
+    fn only_a_plain_sum_measure_is_marked_summable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
+        let text = r#"
+[risk_snapshot.columns.book]
+type = "utf8"
+role = "dimension"
+[risk_snapshot.columns.lhu]
+type = "utf8"
+role = "dimension"
+[risk_snapshot.columns.position_ref]
+type = "utf8"
+role = "key"
+[risk_snapshot.columns.delta01]
+type = "f64"
+role = "measure"
+grain = "position"
+[risk_snapshot.columns.peak]
+type = "f64"
+role = "measure"
+grain = "position"
+aggregate = "max"
+[risk_snapshot.columns.low]
+type = "f64"
+role = "measure"
+grain = "position"
+aggregate = "min"
+"#;
+        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
+        let schema = SchemaSpec::from_doc(&doc).0;
+        store
+            .apply_schema(schema.dataset("risk_snapshot").unwrap())
+            .unwrap();
+        crate::store::Catalog::new(store.writer())
+            .ensure_tables()
+            .unwrap();
+        let text = r#"
+[v]
+dataset = "risk_snapshot"
+grouping = ["lhu"]
+[[v.columns]]
+name = "delta01"
+kind = "measure"
+[[v.columns]]
+name = "peak"
+kind = "measure"
+[[v.columns]]
+name = "low"
+kind = "measure"
+[[v.columns]]
+name = "ratio"
+kind = "derived"
+sql = "delta01 / nullif(peak, 0)"
+"#;
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
+        let view = ViewSpec::from_doc(&doc).0.into_iter().next().unwrap();
+        let q = compile_view(
+            store.writer(),
+            &view,
+            &schema,
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap();
+        let snap = crate::query::pool::run_snapshot(
+            store.writer(),
+            &q,
+            &view.grouping,
+            geode_core::snapshot::Provenance::default(),
+        )
+        .unwrap();
+        let summable = |name: &str| {
+            let i = snap.column_index(name).unwrap();
+            snap.meta_at(i).unwrap().summable
+        };
+        assert!(summable("delta01"), "a sum measure totals");
+        assert!(!summable("peak"), "a max measure must not total");
+        assert!(!summable("low"), "a min measure must not total");
+        assert!(!summable("ratio"), "a derived ratio must not total");
+        assert!(!summable("lhu"), "a grouping column is not a measure");
     }
 
     #[test]
@@ -2829,6 +2936,7 @@ kind = "measure"
                 name: c.name.clone(),
                 attribution_by_depth: c.attribution_by_depth.clone(),
                 scope_semantics: c.scope_semantics.clone(),
+                summable: c.summable,
             })
             .collect();
         // DuckDB emits `row_depth` as Int32, not Int64. Pinned here

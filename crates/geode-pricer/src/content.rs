@@ -96,7 +96,7 @@ pub const NO_DEFAULT_KEY: &[&str] = &["pricer::price"];
 /// a field. `y` alone is NOT bound (planning decision 16): an
 /// exact match dispatches at once, so it would make `y y` and `y c`
 /// unreachable. `g` alone is not bound for the same reason (`g g`, `g p`,
-/// `g u`).
+/// `g u`, `g m`).
 pub const DEFAULT_KEYMAP: &str = r#"
 [[bindings]]
 context = "pricer && mode == normal"
@@ -138,6 +138,7 @@ context = "pricer && mode == normal"
 "shift+k" = "pricer::move_up"
 "g p" = "pricer::group"
 "g u" = "pricer::ungroup"
+"g m" = "tile::open_with"
 "." = "pricer::menu"
 "space" = "pricer::toggle"
 "z a" = "pricer::toggle"
@@ -292,6 +293,10 @@ impl TileContent for PricerContent {
 
     fn holds_focus(&self, window: &Window, cx: &App) -> bool {
         self.tile.read(cx).holds_focus(window, cx)
+    }
+
+    fn launch_context(&self, cx: &App) -> geode_core::launch::LaunchContext {
+        self.tile.read(cx).launch_context()
     }
 }
 
@@ -635,6 +640,7 @@ mod tests {
 
     fn registry() -> ActionRegistry {
         let mut r = ActionRegistry::default();
+        geode_shell::defaults::register_builtin_actions(&mut r);
         for (id, title) in ACTIONS {
             r.register(ActionDef {
                 id: ActionId(id.to_string()),
@@ -730,5 +736,18 @@ mod tests {
     fn shift_o_is_unbound_and_add_above_is_gone() {
         assert!(!DEFAULT_KEYMAP.contains("shift+o"));
         assert!(!ACTIONS.iter().any(|(id, _)| *id == "pricer::add_above"));
+    }
+
+    #[test]
+    fn g_m_opens_with_context_in_normal_mode() {
+        let t: toml::Table = DEFAULT_KEYMAP.parse().unwrap();
+        let normal = t["bindings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["context"].as_str() == Some("pricer && mode == normal"))
+            .unwrap();
+        assert_eq!(normal["keys"]["g m"].as_str(), Some("tile::open_with"));
+        assert_eq!(normal["keys"]["g u"].as_str(), Some("pricer::ungroup"));
     }
 }

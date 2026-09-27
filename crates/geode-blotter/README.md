@@ -12,7 +12,7 @@ Current behavior and rationale:
 
 | Module | Holds |
 |---|---|
-| `core` | The pure half, no gpui: the column plan (every view column resolved to a snapshot index once, with kind, format, width and per-depth attribution), expansion as a set of paths that survive a requery, the visible-row flatten (a DFS that descends only into open nodes), the cursor, `/` find under both styles, yank as TSV, the `:` vocabulary as data, and the format cache filled for the visible window, never in `render_td`. |
+| `core` | The pure half, no gpui: the column plan (every view column resolved to a snapshot index once, with kind, format, width and per-depth attribution), expansion as a set of paths that survive a requery, the visible-row flatten (a DFS that descends only into open nodes), the cursor, `/` find under both styles, yank as TSV (rows or a cell block), `core::select`'s footer aggregate summary over a resolved selection's top-most rows, the `:` vocabulary as data, the format cache filled for the visible window (never in `render_td`), and `launch` (the cursor row's underlying, when the grouping carries `underlying_ref` at or below its level). |
 | `delegate` | The `TableDelegate` adapter over gpui-component's `DataTable`. Owns everything the table paints so every `render_td` is a lookup. Emits its own `ChevronClicked` event through a second `EventEmitter` impl on `TableState<BlotterDelegate>`. |
 | `tile` | `BlotterTile`, the entity per tile: requests through `DataHandle`, follows the frame's versions, stages under the flip barrier, applies snapshots. |
 | `content` | The `TileContent` wrapper and `BlotterFactory`, the roster entry the app builds with the data handle. |
@@ -38,6 +38,19 @@ cargo bench -p geode-blotter   # the pure core
 - A chevron click and a row double-click are `space`: both go through
   `expand_at_cursor`, the path `zo`/`zc`/`za` take. The chevron listener
   stops propagation and ignores `click_count() > 1`.
+- Every mouse selection gesture reaches the tile as a `CellPointer`, and
+  only through `pointer`. A cell or gutter press records `drag_origin`; the
+  row's own mouse-down (`render_tr`) reports a press at the cursor's column
+  only when no cell caught it, so a click on the filler beside the cells is
+  a plain click too. The table's `SelectRow` never touches the selection:
+  it arrives on mouse-up after the press already moved the cursor, and the
+  keyboard's echo carries the cursor's own row.
+- Summary totals, the `rows × cols` extent, and the `†`/`‡` legend flags
+  are prepared in `refresh_selection`; render only reads them. The strip's
+  per-column colors (header color for the label, the cells' sign colors
+  for totals) are memoized by `ensure_summary_paint` per summary
+  generation and theme; the tile's render calls it, and a steady frame
+  costs one compare.
 - `apply_snapshot` rebuilds the column plan on every delivery and swaps on
   inequality. Do not reinstate a cheaper gate.
 - Sorts store column names. `SortSpec.column` is resolved against the fresh

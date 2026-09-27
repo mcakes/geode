@@ -47,13 +47,17 @@ error diagnostics and are skipped. Unknown action IDs produce warnings and are
 skipped; `"none"` is accepted without registration. An action's owner may
 register a retired ID with `ActionRegistry::register_rename` (`config::colours`
 → `config::colors`, `timeseries::colour` → `timeseries::color`,
-`timeseries::pick_colour` → `timeseries::pick_color`). A binding naming a
+`timeseries::pick_colour` → `timeseries::pick_color`, `blotter::visual` →
+`blotter::visual_rows`). A binding naming a
 retired ID binds the current action and warns with both IDs, so an existing
 user keymap keeps working until the file is edited; the dialogs write only the
 current ID. `register` refuses a retired ID, so a later registration
 cannot be silently redirected. Startup can use the remaining
 compiled bindings. On reload, compilation errors participate in the shell's
 last-good acceptance gate; see [reload](configuration.md#hot-reload).
+
+`blotter::visual` is registered as a rename of `blotter::visual_rows`, the row
+selection it always was; the block selection, `blotter::visual_block`, is new.
 
 ## Key spelling and primary modifier
 
@@ -93,6 +97,13 @@ blotter && mode == normal
 !modal && (blotter || marketdata)
 mode != insert
 ```
+
+A module can push more than one key onto its own frame. The blotter's
+`key_context` pushes `mode == visual` while a grid selection is live (the
+same flag `mode == normal` above tests for its absence) and, only then, a
+second `select == rows` or `select == block` pair naming the selection's
+kind — `blotter && select == rows` reaches only while a `V` row selection is
+live, never a `v` block one.
 
 A flag matches when any stack frame carries it. A comparison uses the innermost
 frame defining its key. Both `==` and `!=` are false when the key is absent;
@@ -148,6 +159,11 @@ or filtered entries produce diagnostics without preventing the rest of the
 module roster from loading. Retained fragment-filter diagnostics are shown on
 reload but do not themselves reject a user edit; errors from the ordinary
 compiler still participate in the reload gate.
+
+A fragment may name any action, not only ones its own module registers, so
+long as its context is the module's own: both the blotter's and the pricer's
+default fragments bind `g m` to the shell's `tile::open_with` inside their own
+`mode == normal` context.
 
 See [input and dialogs](input-and-dialogs.md#keyboard-ownership) for surfaces
 that bypass sequences and counts while handling text, and for the limits of

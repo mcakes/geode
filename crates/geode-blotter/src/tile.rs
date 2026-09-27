@@ -3,14 +3,14 @@
 //! timing, and paints the header strip, the table, and the footer.
 
 use crate::core::commands::{AsOfArg, Command, Vocabulary, completions, parse, parse_as_of};
-use crate::core::cursor::{Mode, selection};
 use crate::core::find::FindState;
 use crate::core::flatten::{SortOrder, SortSpec};
 use crate::core::plan::ColumnKind;
 use crate::core::yank::tsv;
-use crate::delegate::{BlotterDelegate, ChevronClicked};
+use crate::delegate::{BlotterDelegate, CellPointer, ChevronClicked};
 use geode_core::colour::NamedColours;
 use geode_core::dimensions::DerivedDimensions;
+use geode_core::grid::selection::{Lost, SelectKind, UNSUMMABLE_LEGEND};
 use geode_core::groupings::GroupingSlots;
 use geode_core::query::{AsOf, QueryKey, QueryOutcome};
 use geode_core::schema::SchemaSpec;
@@ -24,6 +24,7 @@ use geode_shell::frame::{Frame, FrameVersions, PublicationWatch};
 use geode_shell::keymap::KeyContext;
 use geode_shell::linenumbers::{LineNumbers, UiSettings};
 use geode_shell::module::{FindEvent, StackHandle};
+use geode_shell::shell::aggregates;
 use geode_shell::shell::chip::{self, Tone};
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
@@ -73,9 +74,10 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("blotter::toggle", "Toggle node"),
     ("blotter::expand_all", "Expand all"),
     ("blotter::collapse_all", "Collapse all"),
-    ("blotter::visual", "Visual mode"),
-    ("blotter::escape", "Leave visual / clear narrowing"),
-    ("blotter::yank", "Yank rows as TSV"),
+    ("blotter::visual_rows", "Select rows"),
+    ("blotter::visual_block", "Select cells"),
+    ("blotter::escape", "Clear selection / narrowing"),
+    ("blotter::yank", "Yank selection as TSV"),
     ("blotter::find_next", "Next match"),
     ("blotter::find_prev", "Previous match"),
     ("blotter::sort_cycle", "Sort by cursor column"),
@@ -363,12 +365,30 @@ impl BlotterTile {
                 .sortable(true)
         });
         cx.subscribe(&table, |this, _, event: &TableEvent, cx| match event {
+            // Only the cursor row moves here: a live selection is the
+            // mouse doors' business (`pointer`, below) and a plain
+            // `SelectRow` — the table's own reaction to any press,
+            // selection gesture or not — must never clear one out from
+            // under a shift+click or drag that just started it.
             TableEvent::SelectRow(row) => {
-                this.table.update(cx, |t, _| {
-                    let d = t.delegate_mut();
-                    d.cursor.to_row(*row, d.shown.len());
+                // `set_selected_row` (`sync_cursor`, below) re-emits this
+                // same event unconditionally, row unchanged or not — and
+                // a live snapshot can call it too, on every tick, with
+                // the cursor's own row. Returning early when the row is
+                // already where the cursor is breaks that echo without a
+                // guard elsewhere, and keeps a live tick from scrolling a
+                // sideways-scrolled view back to the cursor's column.
+                let moved = this.with_delegate(cx, |d| {
+                    let len = d.shown.len();
+                    if (*row).min(len.saturating_sub(1)) == d.cursor.row {
+                        return false;
+                    }
+                    d.cursor.to_row(*row, len);
+                    true
                 });
-                cx.notify();
+                if moved {
+                    this.sync_cursor(cx);
+                }
             }
             // A double-click anywhere on a row is `space` on it. The
             // table selects the row before emitting this, so the cursor
@@ -379,6 +399,10 @@ impl BlotterTile {
         .detach();
         cx.subscribe(&table, |this, _, event: &ChevronClicked, cx| {
             this.toggle_row(event.0, cx);
+        })
+        .detach();
+        cx.subscribe(&table, |this, _, event: &CellPointer, cx| {
+            this.pointer(*event, cx)
         })
         .detach();
         cx.observe(&frame, |this, _, cx| this.on_frame_changed(cx))
@@ -441,6 +465,14 @@ impl BlotterTile {
         &self.table
     }
 
+    /// The launch context at the cursor: its underlying, when it has one.
+    /// In visual mode this is the cursor row, not the selection.
+    pub fn launch_context(&self, cx: &App) -> geode_core::launch::LaunchContext {
+        geode_core::launch::LaunchContext {
+            underlying: self.table.read(cx).delegate().cursor_underlying(),
+        }
+    }
+
     pub fn last_query(&self) -> Option<(u64, Vec<String>)> {
         (self.tag > 0).then(|| (self.tag, self.last_grouping.clone()))
     }
@@ -454,15 +486,19 @@ impl BlotterTile {
     }
 
     /// `:filter` narrows the tile's own scope layer, so it must be valid
-    /// against this tile's dataset (spec §10.1) the same way the frame's
-    /// own scope expression is validated in the shell's
-    /// `shell::scope_expr_view` (the `Set scope expression…` dialog; a
-    /// tile's `:scope` word reached a frame-wide version of the same
-    /// check until command-line locality closed that route 2026-09-20)
-    /// — an unknown column or a bad operator on a derived dimension is a
-    /// user error reported at the caret/column, not a silent no-op or a
-    /// compiler error surfaced far downstream. `Ok(())` when the view or
-    /// its dataset isn't resolvable
+    /// against this tile's dataset (spec §10.1) the same way a frame
+    /// expression is checked against the schema when it is entered in the
+    /// shell's expression dialogs (`shell::scope_expr_view`, the `Set
+    /// scope expression…` dialog, and the Scopes object dialog's
+    /// `expression` field) — an unknown column or a bad operator on a
+    /// derived dimension is a user error reported at the caret/column, not
+    /// a silent no-op or a compiler error surfaced far downstream. That
+    /// dialog check runs only when the field is entered; a frame restored
+    /// from a saved session is not re-checked here (a saved scope is
+    /// checked separately, by `Scope::validate`, wherever it is loaded).
+    /// A tile's `:scope` word never reaches this check: `:` lines are
+    /// tile-local, so the parser refuses it rather than change the frame.
+    /// `Ok(())` when the view or its dataset isn't resolvable
     /// (nothing to validate against yet — `requery`'s own "view is not
     /// configured" error already covers that case).
     fn validate_tile_scope(&self, scope: &Scope) -> Result<(), String> {
@@ -719,6 +755,7 @@ impl BlotterTile {
                     Tone::WarningText,
                 ));
             }
+            self.take_selection_notice(cx);
         }
         self.delivered_at = Some(Instant::now());
     }
@@ -894,11 +931,25 @@ impl BlotterTile {
     }
 
     pub fn key_context(&self, cx: &App) -> KeyContext {
-        let mode = match self.table.read(cx).delegate().mode {
-            Mode::Normal => "normal",
-            Mode::Visual { .. } => "visual",
-        };
-        KeyContext::new("blotter").pair("mode", mode).counts()
+        let d = self.table.read(cx).delegate();
+        let mut ctx = KeyContext::new("blotter").pair(
+            "mode",
+            if d.selection.is_some() {
+                "visual"
+            } else {
+                "normal"
+            },
+        );
+        if let Some(s) = &d.selection {
+            ctx = ctx.pair(
+                "select",
+                match s.kind {
+                    SelectKind::Rows => "rows",
+                    SelectKind::Block => "block",
+                },
+            );
+        }
+        ctx.counts()
     }
 
     fn with_delegate<R>(
@@ -931,13 +982,73 @@ impl BlotterTile {
         }
     }
 
-    fn sync_cursor(&self, cx: &mut Context<Self>) {
+    fn sync_cursor(&mut self, cx: &mut Context<Self>) {
+        self.with_delegate(cx, |d| d.refresh_selection());
         self.table.update(cx, |t, cx| {
             let (row, col) = (t.delegate().cursor.row, t.delegate().cursor.col);
+            // Unconditional, as before this door existed: it also clears
+            // `right_clicked_row`, and `TableEvent::SelectRow`'s own
+            // handler is what keeps its unconditional re-emit from
+            // recursing (its early return on an unchanged row).
             t.set_selected_row(row, cx);
             t.scroll_to_row(row, cx);
             t.scroll_to_col(col, cx);
         });
+        self.take_selection_notice(cx);
+        cx.notify();
+    }
+
+    /// Every mouse selection gesture (grid selection spec §5) lands here
+    /// and goes through the same `start_selection`/`clear_selection`
+    /// doors the keys use, so a shift+click or a drag can never put the
+    /// delegate in a state the keyboard vocabulary could not also reach.
+    /// A plain press clears; a shift press or a drag starts a selection
+    /// only when none is live yet (repeating either while one is live
+    /// just moves the cursor, exactly as holding `V`/`v` down and moving
+    /// does).
+    fn pointer(&mut self, event: CellPointer, cx: &mut Context<Self>) {
+        let kind_for = |gutter: bool| {
+            if gutter {
+                SelectKind::Rows
+            } else {
+                SelectKind::Block
+            }
+        };
+        self.with_delegate(cx, |d| {
+            let (row, col, start) = match event {
+                CellPointer::Press {
+                    row,
+                    col,
+                    shift: false,
+                    ..
+                } => {
+                    d.selection = None;
+                    (row, col, None)
+                }
+                CellPointer::Press {
+                    row,
+                    col,
+                    shift: true,
+                    gutter,
+                } => (row, col, Some(kind_for(gutter))),
+                CellPointer::Drag { row, col, gutter } => {
+                    if (row, col) == (d.cursor.row, d.cursor.col) {
+                        return;
+                    }
+                    (row, col, Some(kind_for(gutter)))
+                }
+            };
+            if let Some(kind) = start
+                && d.selection.is_none()
+            {
+                d.start_selection(kind);
+            }
+            let cols = d.plan.as_ref().map_or(0, |p| p.columns.len());
+            let len = d.shown.len();
+            d.cursor.to_row(row, len);
+            d.cursor.col = col.min(cols.saturating_sub(1));
+        });
+        self.sync_cursor(cx);
     }
 
     /// `zo`/`zc`/`za`/`space` on the cursor row, `n` times — and the one
@@ -998,8 +1109,9 @@ impl BlotterTile {
                 };
                 self.with_delegate(cx, |d| {
                     let len = d.shown.len();
-                    // Spec §20.5: a bare j/k wraps in normal mode only.
-                    let wrap = matches!(d.mode, Mode::Normal);
+                    // Spec §20.5: a bare j/k wraps outside a selection only —
+                    // wrapping past the anchor would silently invert it.
+                    let wrap = d.selection.is_none();
                     d.cursor.move_rows(len, cmd, count, wrap);
                 });
                 self.sync_cursor(cx);
@@ -1043,39 +1155,46 @@ impl BlotterTile {
                     self.requery(cx);
                 }
             }
-            "visual" => {
-                self.with_delegate(cx, |d| {
-                    d.mode = match d.mode {
-                        Mode::Normal => Mode::Visual {
-                            anchor: d.cursor.row,
-                        },
-                        Mode::Visual { .. } => Mode::Normal,
-                    };
-                });
+            "visual_rows" | "visual_block" => {
+                let kind = if name == "visual_rows" {
+                    SelectKind::Rows
+                } else {
+                    SelectKind::Block
+                };
+                self.with_delegate(cx, |d| d.start_selection(kind));
+                self.table.update(cx, |_, cx| cx.notify());
+                cx.notify();
             }
             "escape" => {
-                self.with_delegate(cx, |d| {
-                    d.mode = Mode::Normal;
-                    if d.narrowed.is_some() {
-                        d.set_narrowed(None);
-                    }
-                });
-                self.find = None;
-                self.table.update(cx, |t, cx| t.refresh(cx));
+                if self.with_delegate(cx, |d| d.selection.is_some()) {
+                    self.with_delegate(cx, |d| d.clear_selection());
+                } else {
+                    self.with_delegate(cx, |d| {
+                        if d.narrowed.is_some() {
+                            d.set_narrowed(None);
+                        }
+                    });
+                    self.find = None;
+                    self.table.update(cx, |t, cx| t.refresh(cx));
+                }
             }
             "yank" => {
                 let text = self.with_delegate(cx, |d| {
                     let (Some(snapshot), Some(plan)) = (&d.snapshot, &d.plan) else {
                         return None;
                     };
-                    let range = selection(&d.mode, &d.cursor);
-                    let out = tsv(snapshot, plan, &d.shown, range);
-                    d.mode = Mode::Normal;
+                    let (rows, cols) = match &d.resolved {
+                        Some(r) => (r.rows.clone(), r.cols.clone()),
+                        None => (d.cursor.row..d.cursor.row + 1, 0..plan.columns.len()),
+                    };
+                    let out = tsv(snapshot, plan, &d.shown, rows, cols);
+                    d.clear_selection();
                     Some(out)
                 });
                 if let Some(text) = text {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
                 }
+                cx.notify();
             }
             "find_next" | "find_prev" => {
                 let dir = if name == "find_next" {
@@ -1136,8 +1255,24 @@ impl BlotterTile {
             }
             _ => return false,
         }
+        self.take_selection_notice(cx);
         cx.notify();
         true
+    }
+
+    /// The tile's one-shot notice for `refresh_selection` clearing a
+    /// selection whose anchor row, or block anchor column, is no longer
+    /// shown — `selection_lost` is taken, not read, so the same loss is
+    /// never reported twice. The anchor is whichever end the selection
+    /// started from, not necessarily the range's first row.
+    fn take_selection_notice(&mut self, cx: &mut Context<Self>) {
+        if let Some(lost) = self.with_delegate(cx, |d| d.selection_lost.take()) {
+            let text = match lost {
+                Lost::Row => "selection cleared: anchor row no longer shown",
+                Lost::Column => "selection cleared: anchor column no longer shown",
+            };
+            self.error = Some((text.into(), Tone::WarningText));
+        }
     }
 
     pub fn command(&mut self, line: &str, cx: &mut Context<Self>) -> Result<(), String> {
@@ -1423,6 +1558,12 @@ impl BlotterTile {
             })
     }
 
+    /// The tile's current notice or error text, as the footer shows it.
+    #[cfg(test)]
+    pub fn error_text(&self) -> Option<String> {
+        self.error.as_ref().map(|(e, _)| e.clone())
+    }
+
     /// The per-dataset freshness readout exactly as `render` builds it —
     /// the `"{dataset} {short_time}"` strings, in the same `f.as_of`
     /// order, read through the SAME `try_global` door `render` uses —
@@ -1536,6 +1677,11 @@ impl gpui::Render for BlotterTile {
         {
             self.refresh_asof_chip(clock);
         }
+        // The footer strip's colors, memoized per summary and theme the
+        // way the table's own header resolves them (a compare per frame).
+        self.table.update(cx, |t, cx| {
+            t.delegate_mut().ensure_summary_paint(cx.theme());
+        });
         let theme = cx.theme();
         let delegate = self.table.read(cx).delegate();
         let snapshot = delegate.snapshot.clone();
@@ -1712,9 +1858,24 @@ impl gpui::Render for BlotterTile {
             .text_color(theme.muted_foreground)
             .border_t_1()
             .border_color(theme.border)
-            .child(div().child(format!("{} rows", delegate.shown.len())));
-        if delegate.any_determined {
+            .child(div().child(format!("{} rows", delegate.shown.len())))
+            .when(delegate.selection_extent.is_some(), |f| {
+                f.child(aggregates::strip(
+                    delegate.selection_extent.as_ref(),
+                    &delegate.summary,
+                    &delegate.summary_paint,
+                    theme,
+                ))
+            });
+        // The dagger legend also covers a selection summary that carries
+        // one: a per-row cell can be plain while the group it is folded
+        // into is not (e.g. a determined-non-additive column at depth 1).
+        let show_dagger = delegate.any_determined || delegate.summary_non_additive;
+        if show_dagger {
             footer = footer.child(div().child("† shown for this row, do not total"));
+        }
+        if delegate.summary_unsummable {
+            footer = footer.child(div().child(UNSUMMABLE_LEGEND));
         }
         if !delegate.semi_joined.is_empty() {
             footer = footer.child(div().child(format!(
@@ -1778,6 +1939,7 @@ mod tests {
     use geode_shell::tiling::TileId;
     use geode_shell::vimfind::FindStyle;
     use gpui::px;
+    use gpui::{Modifiers, MouseButton};
     use std::sync::Arc;
     use std::sync::mpsc::Receiver;
     use std::time::{Duration, Instant};
@@ -1855,6 +2017,8 @@ mod tests {
             name: n.into(),
             attribution_by_depth: by_depth,
             scope_semantics: ScopeSemantics::Direct,
+            // The fixture's measures are plain sum measures.
+            summable: matches!(n, "delta01" | "daily_trading_pnl"),
         };
         vec![
             (
@@ -1925,6 +2089,7 @@ mod tests {
             name: n.into(),
             attribution_by_depth: by_depth,
             scope_semantics: ScopeSemantics::Direct,
+            summable: matches!(n, "delta01" | "daily_trading_pnl"),
         };
         Arc::new(Snapshot::for_tests(
             vec![
@@ -1975,6 +2140,7 @@ mod tests {
             name: n.into(),
             attribution_by_depth: by_depth,
             scope_semantics: ScopeSemantics::Direct,
+            summable: matches!(n, "delta01" | "daily_trading_pnl"),
         };
         Arc::new(Snapshot::for_tests(
             vec![
@@ -2352,6 +2518,7 @@ mod tests {
             name: "lhu".into(),
             attribution_by_depth: vec![Attribution::Additive],
             scope_semantics: ScopeSemantics::Direct,
+            summable: false,
         };
         let provenance = Provenance {
             datasets: vec![Freshness {
@@ -2572,6 +2739,7 @@ mod tests {
             name: "lhu".into(),
             attribution_by_depth: vec![Attribution::Additive],
             scope_semantics: ScopeSemantics::Direct,
+            summable: false,
         };
         let stale_snapshot = Arc::new(Snapshot::for_tests(
             vec![(meta1, TestColumn::Dict(vec![Some("X".into())]))],
@@ -2595,6 +2763,509 @@ mod tests {
             error,
             Some(("binder error".to_string(), Tone::DangerText)),
             "a delivered error still paints danger"
+        );
+    }
+
+    fn act(h: &Harness, cx: &mut gpui::VisualTestContext, id: &str) -> bool {
+        h.tile
+            .update(cx, |t, cx| t.dispatch(&ActionId(id.into()), None, cx))
+    }
+    fn clip(cx: &mut gpui::VisualTestContext) -> Option<String> {
+        cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
+    }
+    fn delivered(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTestContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+        (h, cx)
+    }
+
+    /// The centre of a painted, `debug_selector`-tagged element — every
+    /// mouse-selection test's way of turning a cell's logical `(row,
+    /// col)` into the point a real press would land on. `debug_bounds`
+    /// wants a `'static str`: every call site here passes a literal, so
+    /// this takes one too rather than the brief's plain `&str`.
+    fn centre(cx: &mut gpui::VisualTestContext, sel: &'static str) -> gpui::Point<gpui::Pixels> {
+        cx.run_until_parked();
+        cx.debug_bounds(sel)
+            .unwrap_or_else(|| panic!("{sel} not painted"))
+            .center()
+    }
+
+    /// [`centre`]'s element bounds, for a point beside the element.
+    fn centre_bounds(
+        cx: &mut gpui::VisualTestContext,
+        sel: &'static str,
+    ) -> gpui::Bounds<gpui::Pixels> {
+        cx.run_until_parked();
+        cx.debug_bounds(sel)
+            .unwrap_or_else(|| panic!("{sel} not painted"))
+    }
+
+    #[gpui::test]
+    fn shift_click_extends_a_block_from_the_cursor(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        act(&h, &mut cx, "blotter::right"); // cursor (0, 1)
+        let at = centre(&mut cx, "blotter-cell-2-2");
+        cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::shift());
+        cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::shift());
+        let r = h
+            .tile
+            .read_with(&cx, |t, cx| t.table().read(cx).delegate().resolved.clone())
+            .unwrap();
+        assert_eq!((r.kind, r.rows, r.cols), (SelectKind::Block, 0..3, 1..3));
+        // The keyboard keeps extending what the mouse started.
+        act(&h, &mut cx, "blotter::up");
+        let r = h
+            .tile
+            .read_with(&cx, |t, cx| t.table().read(cx).delegate().resolved.clone())
+            .unwrap();
+        assert_eq!(r.rows, 0..2);
+    }
+
+    /// A plain press on a row's area outside every cell — the trailing
+    /// filler column past the last one — is still a plain click (spec §5):
+    /// it clears a live selection and moves the cursor to that row, on
+    /// the cursor's own row as much as on another. Only `render_td` cells
+    /// used to report a press, so the table's own `SelectRow` moved the
+    /// cursor under a selection that stayed live.
+    #[gpui::test]
+    fn a_plain_click_beside_the_cells_clears_the_selection(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        let last = h.tile.read_with(&cx, |t, cx| {
+            t.table()
+                .read(cx)
+                .delegate()
+                .plan
+                .as_ref()
+                .unwrap()
+                .columns
+                .len()
+                - 1
+        });
+        let beside = |cx: &mut gpui::VisualTestContext, row: usize| {
+            let sel: &'static str =
+                Box::leak(format!("blotter-cell-{row}-{last}").into_boxed_str());
+            let b = centre_bounds(cx, sel);
+            gpui::point(b.right() + gpui::px(40.), b.center().y)
+        };
+        let state = |cx: &mut gpui::VisualTestContext| {
+            h.tile.read_with(cx, |t, cx| {
+                let d = t.table().read(cx).delegate();
+                (d.selection.is_some(), d.cursor.row)
+            })
+        };
+        act(&h, &mut cx, "blotter::visual_rows");
+        act(&h, &mut cx, "blotter::down"); // rows 0..=1, cursor on 1
+        assert_eq!(state(&mut cx), (true, 1), "fixture");
+
+        let at = beside(&mut cx, 1);
+        cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+        assert_eq!(state(&mut cx), (false, 1), "same row: the click clears");
+
+        act(&h, &mut cx, "blotter::visual_rows");
+        let at = beside(&mut cx, 2);
+        cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+        assert_eq!(
+            state(&mut cx),
+            (false, 2),
+            "another row: the click clears and moves"
+        );
+    }
+
+    /// The tile's own paint resolves the footer's per-column colors: a
+    /// selection over a measure, once drawn, has one paint per group.
+    #[gpui::test]
+    fn painting_the_tile_resolves_the_footer_colors(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        act(&h, &mut cx, "blotter::visual_rows");
+        act(&h, &mut cx, "blotter::down");
+        cx.run_until_parked();
+        let (groups, paints) = h.tile.read_with(&cx, |t, cx| {
+            let d = t.table().read(cx).delegate();
+            (d.summary.len(), d.summary_paint.len())
+        });
+        assert!(groups > 0, "the selection covers a measure");
+        assert_eq!(paints, groups, "render memoized one paint per group");
+    }
+
+    /// Every live selection leads the footer with its extent — with or
+    /// without a measure to summarise — prepared when the selection
+    /// changes (render only reads it) and gone when the selection clears.
+    #[gpui::test]
+    fn a_selection_prepares_its_extent(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        act(&h, &mut cx, "blotter::visual_block"); // the tree column only
+        act(&h, &mut cx, "blotter::down");
+        let extent = |cx: &mut gpui::VisualTestContext| {
+            h.tile.read_with(cx, |t, cx| {
+                let d = t.table().read(cx).delegate();
+                (d.summary.is_empty(), d.selection_extent.clone())
+            })
+        };
+        assert_eq!(extent(&mut cx), (true, Some("2 rows × 1 col".into())));
+        act(&h, &mut cx, "blotter::right"); // into delta01: now summarised
+        assert_eq!(extent(&mut cx), (false, Some("2 rows × 2 cols".into())));
+        act(&h, &mut cx, "blotter::escape");
+        assert_eq!(extent(&mut cx), (true, None));
+    }
+
+    /// The keyboard's own `SelectRow` echo (`sync_cursor` →
+    /// `set_selected_row`) must never read as a plain click: `V j j`
+    /// keeps its selection through every echo.
+    #[gpui::test]
+    fn the_cursor_echo_never_clears_a_keyboard_selection(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        act(&h, &mut cx, "blotter::visual_rows");
+        act(&h, &mut cx, "blotter::down");
+        act(&h, &mut cx, "blotter::down");
+        cx.run_until_parked();
+        let r = h
+            .tile
+            .read_with(&cx, |t, cx| t.table().read(cx).delegate().resolved.clone())
+            .expect("the selection survives its echoes");
+        assert_eq!(r.rows, 0..3);
+    }
+
+    #[gpui::test]
+    fn a_drag_selects_a_block_and_a_plain_click_clears_it(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        let from = centre(&mut cx, "blotter-cell-0-1");
+        let to = centre(&mut cx, "blotter-cell-1-2");
+        cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(to, Some(MouseButton::Left), Modifiers::none());
+        cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+        let r = h
+            .tile
+            .read_with(&cx, |t, cx| t.table().read(cx).delegate().resolved.clone())
+            .unwrap();
+        assert_eq!((r.rows, r.cols), (0..2, 1..3));
+        let elsewhere = centre(&mut cx, "blotter-cell-2-1");
+        cx.simulate_mouse_down(elsewhere, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(elsewhere, MouseButton::Left, Modifiers::none());
+        let (sel, cursor) = h.tile.read_with(&cx, |t, cx| {
+            let d = t.table().read(cx).delegate();
+            (d.selection.is_some(), (d.cursor.row, d.cursor.col))
+        });
+        assert_eq!((sel, cursor), (false, (2, 1)));
+    }
+
+    /// A drag whose press landed outside every cell and gutter (the
+    /// header strip stands in for a scrollbar thumb, a header column
+    /// reorder, a tile-split divider, or another tile's own text
+    /// selection — anything that can hold the primary button down while
+    /// the pointer later crosses this table) must never start or move a
+    /// selection just because a later move happens to pass over a cell.
+    #[gpui::test]
+    fn a_drag_that_never_pressed_a_cell_selects_nothing(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        let outside = centre(&mut cx, "blotter-header-7");
+        let over = centre(&mut cx, "blotter-cell-1-2");
+        cx.simulate_mouse_down(outside, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(over, Some(MouseButton::Left), Modifiers::none());
+        cx.simulate_mouse_up(over, MouseButton::Left, Modifiers::none());
+        let (sel, cursor) = h.tile.read_with(&cx, |t, cx| {
+            let d = t.table().read(cx).delegate();
+            (d.selection.is_some(), (d.cursor.row, d.cursor.col))
+        });
+        assert_eq!(
+            (sel, cursor),
+            (false, (0, 0)),
+            "the press never landed on a cell or gutter, so a move over one starts nothing"
+        );
+    }
+
+    /// A drag's selection kind is decided once, by where the press
+    /// landed — a press on the gutter starts `Rows`, and dragging on from
+    /// there across ordinary cells must not flip it to `Block`.
+    #[gpui::test]
+    fn a_gutter_drag_stays_rows_after_leaving_the_gutter(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        cx.update(|_, cx| {
+            cx.set_global(UiSettings {
+                line_numbers: LineNumbers::On,
+            })
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let from = centre(&mut cx, "blotter-gutter-0");
+        let to = centre(&mut cx, "blotter-cell-2-2");
+        cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(to, Some(MouseButton::Left), Modifiers::none());
+        cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+        let r = h
+            .tile
+            .read_with(&cx, |t, cx| t.table().read(cx).delegate().resolved.clone())
+            .unwrap();
+        assert_eq!((r.kind, r.rows), (SelectKind::Rows, 0..3));
+    }
+
+    /// A gutter press means `Rows`, not `Block` — the same distinction
+    /// `V`/`v` draw with the keyboard — reached the same way a plain
+    /// cell's does: through `on_ui_settings`'s production route
+    /// (`UiSettings`, not a direct field write), which is what actually
+    /// paints `blotter-gutter-2` for `centre` to find.
+    #[gpui::test]
+    fn a_gutter_shift_click_selects_rows(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        cx.update(|_, cx| {
+            cx.set_global(UiSettings {
+                line_numbers: LineNumbers::On,
+            })
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let at = centre(&mut cx, "blotter-gutter-2");
+        cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::shift());
+        cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::shift());
+        let r = h
+            .tile
+            .read_with(&cx, |t, cx| t.table().read(cx).delegate().resolved.clone())
+            .unwrap();
+        assert_eq!((r.kind, r.rows), (SelectKind::Rows, 0..3));
+    }
+
+    #[gpui::test]
+    fn shift_v_selects_rows_and_y_copies_them_with_every_column(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        act(&h, &mut cx, "blotter::visual_rows");
+        act(&h, &mut cx, "blotter::down");
+        act(&h, &mut cx, "blotter::yank");
+        assert_eq!(
+            clip(&mut cx).as_deref(),
+            Some("lhu / underlying_ref\tdelta01\tdaily_trading_pnl\n\t9\t7\n  L1\t5\t7\n")
+        );
+        assert!(
+            h.tile.read_with(&cx, |t, cx| t
+                .table()
+                .read(cx)
+                .delegate()
+                .selection
+                .is_none()),
+            "yank ends the selection"
+        );
+    }
+
+    #[gpui::test]
+    fn v_selects_a_block_and_y_copies_only_the_block(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        act(&h, &mut cx, "blotter::right"); // cursor (0, delta01)
+        act(&h, &mut cx, "blotter::visual_block");
+        act(&h, &mut cx, "blotter::down");
+        act(&h, &mut cx, "blotter::right"); // block rows 0..2 × cols 1..3
+        act(&h, &mut cx, "blotter::yank");
+        assert_eq!(
+            clip(&mut cx).as_deref(),
+            Some("delta01\tdaily_trading_pnl\n9\t7\n5\t7\n")
+        );
+    }
+
+    #[gpui::test]
+    fn the_other_key_switches_kind_and_the_same_key_clears(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        let kind = |cx: &mut gpui::VisualTestContext| {
+            h.tile.read_with(cx, |t, cx| {
+                t.table()
+                    .read(cx)
+                    .delegate()
+                    .selection
+                    .as_ref()
+                    .map(|s| s.kind)
+            })
+        };
+        act(&h, &mut cx, "blotter::visual_rows");
+        act(&h, &mut cx, "blotter::down");
+        act(&h, &mut cx, "blotter::visual_block");
+        assert_eq!(kind(&mut cx), Some(SelectKind::Block));
+        let rows = h.tile.read_with(&cx, |t, cx| {
+            t.table().read(cx).delegate().resolved.clone().unwrap().rows
+        });
+        assert_eq!(rows, 0..2, "the anchor survived the switch");
+        act(&h, &mut cx, "blotter::visual_block");
+        assert_eq!(kind(&mut cx), None);
+    }
+
+    #[gpui::test]
+    fn escape_clears_the_selection_before_find(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        h.tile.update(&mut cx, |t, cx| {
+            t.table()
+                .update(cx, |t, _| t.delegate_mut().set_narrowed(Some(vec![1, 2])))
+        });
+        act(&h, &mut cx, "blotter::visual_rows");
+        act(&h, &mut cx, "blotter::escape");
+        let (sel, narrowed) = h.tile.read_with(&cx, |t, cx| {
+            let d = t.table().read(cx).delegate();
+            (d.selection.is_some(), d.narrowed.is_some())
+        });
+        assert_eq!(
+            (sel, narrowed),
+            (false, true),
+            "first escape: selection only"
+        );
+        act(&h, &mut cx, "blotter::escape");
+        assert!(h.tile.read_with(&cx, |t, cx| {
+            t.table().read(cx).delegate().narrowed.is_none()
+        }));
+    }
+
+    #[gpui::test]
+    fn the_footer_sums_a_group_and_its_child_once(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        act(&h, &mut cx, "blotter::down"); // L1
+        act(&h, &mut cx, "blotter::expand"); // shown: root, L1, SPX, L2
+        act(&h, &mut cx, "blotter::visual_rows");
+        act(&h, &mut cx, "blotter::down"); // L1 + SPX
+        let summary = h
+            .tile
+            .read_with(&cx, |t, cx| t.table().read(cx).delegate().summary.clone());
+        let delta = summary
+            .iter()
+            .find(|c| c.label.as_ref() == "delta01")
+            .expect("delta01 summarised");
+        assert_eq!(delta.text.as_ref(), "5.00", "{delta:?}");
+    }
+
+    #[gpui::test]
+    fn a_redelivery_keeps_the_selection_on_the_same_rows(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        act(&h, &mut cx, "blotter::down"); // L1
+        act(&h, &mut cx, "blotter::visual_rows");
+        act(&h, &mut cx, "blotter::down"); // L1..L2 = rows 1..3
+        // expand_all reflattens at once (SPX is materialised, so it lands
+        // between L1 and L2) and always requeries.
+        act(&h, &mut cx, "blotter::expand_all");
+        let before = h
+            .tile
+            .read_with(&cx, |t, cx| t.table().read(cx).delegate().resolved.clone());
+        assert_eq!(
+            before.as_ref().map(|r| r.rows.clone()),
+            Some(1..4),
+            "anchor L1, cursor L2, by path"
+        );
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+        let after = h
+            .tile
+            .read_with(&cx, |t, cx| t.table().read(cx).delegate().resolved.clone());
+        assert_eq!(
+            before, after,
+            "a redelivery keeps the selection on the same rows"
+        );
+    }
+
+    #[gpui::test]
+    fn a_selection_whose_anchor_row_vanishes_clears_with_a_notice(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        act(&h, &mut cx, "blotter::bottom"); // L2
+        act(&h, &mut cx, "blotter::visual_rows");
+        // Narrow to rows that exclude L2.
+        h.tile.update(&mut cx, |t, cx| {
+            t.table()
+                .update(cx, |t, _| t.delegate_mut().set_narrowed(Some(vec![0, 1])));
+            t.dispatch(&ActionId("blotter::up".into()), None, cx);
+        });
+        let (sel, err) = h.tile.read_with(&cx, |t, cx| {
+            (
+                t.table().read(cx).delegate().selection.is_some(),
+                t.error_text(),
+            )
+        });
+        assert!(!sel);
+        // The anchor here is the LAST row of the range (L2, with the
+        // cursor moved up): the notice names the anchor, not "its first
+        // row".
+        assert_eq!(
+            err.as_deref(),
+            Some("selection cleared: anchor row no longer shown")
+        );
+    }
+
+    /// A block whose anchor COLUMN is hidden by a view edit clears with a
+    /// notice naming the column — its anchor row is still shown, so a
+    /// row-worded notice would send the trader looking for the wrong
+    /// thing.
+    #[gpui::test]
+    fn a_block_whose_anchor_column_is_hidden_clears_with_a_column_notice(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let text = "[tree]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n\
+                     [[tree.columns]]\nname = \"model_code\"\nkind = \"dimension\"\n\
+                     [[tree.columns]]\nname = \"delta01\"\nkind = \"measure\"\n";
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
+        let views = ViewSpec::from_doc(&doc).0;
+        let (h, mut cx) = open_with_views(cx, None, views);
+        let meta = |n: &str| ColumnMeta {
+            name: n.into(),
+            attribution_by_depth: vec![Attribution::Additive; 2],
+            scope_semantics: ScopeSemantics::Direct,
+            summable: false,
+        };
+        let snap = Arc::new(Snapshot::for_tests(
+            vec![
+                (
+                    meta("lhu"),
+                    TestColumn::Dict(vec![None, Some("L1".into()), Some("L2".into())]),
+                ),
+                (meta("row_depth"), TestColumn::I32(vec![0, 1, 1])),
+                (
+                    meta("model_code"),
+                    TestColumn::Dict(vec![None, Some("A".into()), Some("B".into())]),
+                ),
+                (
+                    meta("delta01"),
+                    TestColumn::F64(vec![Some(9.0), Some(5.0), Some(4.0)]),
+                ),
+            ],
+            1,
+        ));
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snap.clone()));
+
+        // Anchor the block on model_code, then extend right onto delta01.
+        let model_ix = h.tile.update(&mut cx, |t, cx| {
+            t.with_delegate(cx, |d| {
+                d.plan.as_ref().unwrap().position_of("model_code").unwrap()
+            })
+        });
+        h.tile.update(&mut cx, |t, cx| {
+            t.with_delegate(cx, |d| d.cursor.col = model_ix);
+        });
+        act(&h, &mut cx, "blotter::visual_block");
+        act(&h, &mut cx, "blotter::right");
+
+        h.tile.update(&mut cx, |t, _| {
+            t.views
+                .borrow_mut()
+                .iter_mut()
+                .find(|v| v.name == "tree")
+                .unwrap()
+                .columns
+                .retain(|c| c.name() != "model_code");
+        });
+        h.frame.update(&mut cx, |f, cx| {
+            f.note_config_reloaded();
+            cx.notify();
+        });
+        let p2 = next_query(&h.requests);
+        deliver(&h, &mut cx, p2.tag, Ok(snap));
+
+        let (sel, err) = h.tile.read_with(&cx, |t, cx| {
+            (
+                t.table().read(cx).delegate().selection.is_some(),
+                t.error_text(),
+            )
+        });
+        assert!(!sel, "a block that lost its anchor column clears");
+        assert_eq!(
+            err.as_deref(),
+            Some("selection cleared: anchor column no longer shown")
         );
     }
 
@@ -2653,7 +3324,7 @@ mod tests {
         );
 
         act(&mut cx, "blotter::top", None);
-        act(&mut cx, "blotter::visual", None);
+        act(&mut cx, "blotter::visual_rows", None);
         act(&mut cx, "blotter::down", Some(1));
         act(&mut cx, "blotter::yank", None);
         let clip = cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
@@ -2662,11 +3333,12 @@ mod tests {
             Some("lhu / underlying_ref\tdelta01\tdaily_trading_pnl\n\t9\t7\n  L1\t5\t7\n")
         );
         assert!(
-            matches!(
-                h.tile
-                    .read_with(&cx, |t, cx| t.table().read(cx).delegate().mode),
-                Mode::Normal
-            ),
+            h.tile.read_with(&cx, |t, cx| t
+                .table()
+                .read(cx)
+                .delegate()
+                .selection
+                .is_none()),
             "yank leaves visual"
         );
         assert!(!act(&mut cx, "workspace::focus_left", None), "not ours");
@@ -2695,19 +3367,22 @@ mod tests {
         assert_eq!(cursor_row(&h, &cx), 0, "a bare j wraps in normal mode");
 
         assert!(act(&mut cx, "blotter::bottom"));
-        assert!(act(&mut cx, "blotter::visual"));
+        assert!(act(&mut cx, "blotter::visual_rows"));
         assert!(act(&mut cx, "blotter::down"));
         assert_eq!(
             cursor_row(&h, &cx),
             2,
             "in visual mode the same keystroke clamps at the last row"
         );
-        assert!(
-            matches!(
-                h.tile
-                    .read_with(&cx, |t, cx| t.table().read(cx).delegate().mode),
-                Mode::Visual { anchor: 2 }
-            ),
+        assert_eq!(
+            h.tile.read_with(&cx, |t, cx| t
+                .table()
+                .read(cx)
+                .delegate()
+                .resolved
+                .clone()
+                .map(|r| r.rows)),
+            Some(2..3),
             "and the selection anchor is intact"
         );
     }
@@ -2988,6 +3663,7 @@ mod tests {
             name: n.into(),
             attribution_by_depth: vec![Attribution::Additive; 2],
             scope_semantics: ScopeSemantics::Direct,
+            summable: false,
         };
         let snap = Arc::new(Snapshot::for_tests(
             vec![
@@ -3932,6 +4608,55 @@ mod tests {
         );
     }
 
+    /// The cell's own press listener (grid selection spec §5) fires for
+    /// every left press, a double-click's first press included; a plain
+    /// press always clears any live selection, so it leaves none behind
+    /// here either — there was none to clear, but the toggle itself must
+    /// not have started one.
+    #[gpui::test]
+    fn a_double_click_that_toggles_a_row_leaves_no_selection(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+
+        let at = centre_of(&mut cx, "blotter-cell-1-1");
+        click_at(&mut cx, at, 1);
+        click_at(&mut cx, at, 2);
+        assert_eq!(shown_rows(&h, &cx), vec![0, 1, 3, 2], "L1 opened once");
+        assert!(
+            !h.tile.read_with(&cx, |t, cx| t
+                .table()
+                .read(cx)
+                .delegate()
+                .selection
+                .is_some()),
+            "a double-click toggles the row; it never starts a selection"
+        );
+    }
+
+    /// Likewise for the chevron's own press, underneath its `on_click`.
+    #[gpui::test]
+    fn a_chevron_click_leaves_no_selection(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+
+        let at = centre_of(&mut cx, "blotter-chevron-1");
+        click_at(&mut cx, at, 1);
+        assert_eq!(shown_rows(&h, &cx), vec![0, 1, 3, 2], "L1 opened");
+        assert!(
+            !h.tile.read_with(&cx, |t, cx| t
+                .table()
+                .read(cx)
+                .delegate()
+                .selection
+                .is_some()),
+            "the chevron toggles the row; it never starts a selection"
+        );
+    }
+
     /// Fixture for the two painted-cell tests below: identical to
     /// `snapshot()` above, except `delta01` is also `DeterminedNonAdditive`
     /// at the leaf depth, so SPX (row id 3) carries both markers at once
@@ -3942,6 +4667,7 @@ mod tests {
             name: n.into(),
             attribution_by_depth: by_depth,
             scope_semantics: ScopeSemantics::Direct,
+            summable: false,
         };
         Arc::new(Snapshot::for_tests(
             vec![
@@ -3997,6 +4723,7 @@ mod tests {
             name: name.into(),
             attribution_by_depth: vec![Attribution::Additive; 2],
             scope_semantics: ScopeSemantics::Direct,
+            summable: false,
         };
         let mut lhu: Vec<Option<String>> = vec![None];
         let mut depth: Vec<i32> = vec![0];

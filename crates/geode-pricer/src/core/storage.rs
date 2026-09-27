@@ -1072,6 +1072,7 @@ pub(crate) mod tests {
             name: name.into(),
             attribution_by_depth: vec![Attribution::DeterminedNonAdditive],
             scope_semantics: ScopeSemantics::Direct,
+            summable: false,
         }
     }
 

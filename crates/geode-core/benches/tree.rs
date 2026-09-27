@@ -13,6 +13,7 @@ fn dim(name: &str) -> ColumnMeta {
         name: name.into(),
         attribution_by_depth: vec![Attribution::Additive; 4],
         scope_semantics: ScopeSemantics::Direct,
+        summable: false,
     }
 }
 
