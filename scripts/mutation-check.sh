@@ -13118,37 +13118,26 @@ run_mutation "mdedit: a committed edit closes the editor" \
 # edits, in the wrong cells, and nothing about the header or the edit
 # markers says so.
 #
-# The parse-side default (`commands.rs`'s `None | Some("row")`) is guarded
-# by that core's own `bump_reads_a_delta_and_an_optional_axis`; this entry
-# is the tile half, which is what Task 7 built.
+# The parse-side default (`commands.rs`'s `None` for no axis word) is
+# guarded by that core's own `bump_reads_a_delta_and_an_optional_axis`;
+# this entry is the tile half: with no selection, `None` walks the row.
 run_mutation "mdedit: bump walks the cursor's row by default" \
   crates/geode-marketdata/src/tile.rs \
-  '            BumpAxis::Row => {
-                let r = &self.model.rows[row];
-                r.cells
-                    .iter()
-                    .enumerate()
-                    .skip(self.model.slice_columns)
-                    .filter_map(|(ci, cell)| {
-                        if !matches!(self.model.kind_of(ci), Some(CellKind::Number(_))) {
-                            skipped += 1;
-                            return None;
-                        }
-                        numeric_value(r.state, cell).map(|v| ((row, ci), v, ty_of(ci)))
-                    })
-                    .collect()
-            }' \
-  '            BumpAxis::Row => self
-                .model
-                .rows
-                .iter()
-                .enumerate()
-                .filter(|(_, r)| r.state != RowState::Deleted)
-                .filter_map(|(ri, r)| {
-                    r.cells
-                        .get(col)
-                        .and_then(|cell| numeric_value(r.state, cell))
-                        .map(|v| ((ri, col), v, ty_of(col)))
+  '            BumpAxis::Row => (self.model.slice_columns..self.model.rows[row].cells.len())
+                .filter_map(|ci| {
+                    if !matches!(self.model.kind_of(ci), Some(CellKind::Number(_))) {
+                        skipped += 1;
+                        return None;
+                    }
+                    self.current_numeric(row, ci)
+                        .map(|v| ((row, ci), v, self.column_type(ci)))
+                })
+                .collect(),' \
+  '            BumpAxis::Row => (0..self.model.rows.len())
+                .filter(|&ri| self.model.rows[ri].state != RowState::Deleted)
+                .filter_map(|ri| {
+                    self.current_numeric(ri, col)
+                        .map(|v| ((ri, col), v, self.column_type(col)))
                 })
                 .collect(),' \
   geode-marketdata \
@@ -15596,8 +15585,8 @@ run_mutation "matrix: a slice label colliding with an axis label is refused" \
 # A row bump walks the ladder and skips the term's own forward/atm/skew.
 run_mutation "mdbump: a row bump skips the slice cells" \
   crates/geode-marketdata/src/tile.rs \
-  '                .skip(self.model.slice_columns)' \
-  '                .skip(0)' \
+  '            BumpAxis::Row => (self.model.slice_columns..self.model.rows[row].cells.len())' \
+  '            BumpAxis::Row => (0..self.model.rows[row].cells.len())' \
   geode-marketdata a_row_bump_skips_the_slice_cells_and_a_column_bump_on_fwd_moves_every_term
 
 # ---- shift-arrows reclaimed from the component's Input (2026-09-18) ----
@@ -16139,7 +16128,7 @@ run_mutation "draft: bump lands the declared integer type" \
                 .ok_or_else(|| format!("bump: {column} would be too large"))' \
   '                .map(|v| Value::F64(v as f64))
                 .ok_or_else(|| format!("bump: {column} would be too large"))' \
-  geode-marketdata bump_lands_the_declared_type
+  geode-marketdata a_selection_bump_lands_each_declared_type_and_composes
 
 # The arithmetic itself stays in `i64`. Mutated through an f64, a holding
 # above 2^53 comes back as a quantity nobody typed: 9007199254740993 + 1
@@ -16182,19 +16171,21 @@ run_mutation "draft: rebase refuses a deleted row in a changed same-day group" \
                         if false {' \
   geode-marketdata rebase_refuses_a_deleted_row_in_a_same_day_group_that_changed_size
 
-# `MarketDataTile::bump` checks every INSERTED-row cell's `bumped()`
-# result before either write door opens.
-# Mutated away, a mixed F64/I64 inserted row writes its F64 cell through
-# `set_row_cell` before the I64 cell's fractional-delta refusal is ever
-# reached — a partial bump the trader never asked for.
+# `write_steps` computes every cell's `bumped()` result before either
+# write door opens. Mutated to write what it computed before the first
+# refusal, a mixed F64/I64 inserted row writes its F64 cell through
+# `set_row_cell` and then refuses the I64 cell's fractional delta — a
+# partial bump the trader never asked for.
 run_mutation "mdedit: an inserted-row bump checks every cell before writing any" \
-  crates/geode-marketdata/src/tile.rs \
-  '        for (labels, value, ty) in &inserted {
-            bumped(value, delta, *ty, &labels.1)?;
-        }' \
-  '        for (labels, value, ty) in &inserted {
-            let _ = (labels, value, ty);
-        }' \
+  crates/geode-marketdata/src/tile/select.rs \
+  '            let value = bumped(&current, delta, ty, &labels.1)?;
+            writes.push((cell, labels, value));' \
+  '            let value = match bumped(&current, delta, ty, &labels.1) {
+                Ok(v) => v,
+                Err(e) if writes.is_empty() => return Err(e),
+                Err(_) => break,
+            };
+            writes.push((cell, labels, value));' \
   geode-marketdata a_fractional_row_bump_on_a_mixed_inserted_row_writes_nothing
 
 # `o` on a row that already has a follower re-hangs that follower onto
@@ -20132,7 +20123,7 @@ run_mutation "draft: bump refuses a fractional delta on an I64 column" \
             Err(format!("bump: {column} takes whole numbers"))
         }' \
   geode-marketdata \
-  bump_refuses_a_fractional_delta_on_an_integer_column_before_writing
+  a_fractional_bump_over_a_mixed_block_writes_nothing
 
 # DIVIDEND's announced/pay dates are required (ruling 2026-09-23): the
 # kind refuses a document without them. Mutated optional, an inserted row

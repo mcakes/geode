@@ -1461,7 +1461,7 @@ also commits through); every other path still calls `build`/
 insert/delete (`o`/`shift+o`/`d d`, since splicing a row shifts every
 row below it and `patch_cell` only re-prepares one already-positioned
 cell) — **and `:bump`, on purpose (controller ruling): a row or column
-bump touches many cells at once, `Draft::bump` and the model rebuild
+bump touches many cells at once, `write_steps` and the model rebuild
 together in one call, and patching each touched cell individually is a
 perf follow-up, not built here.** A column `:bump` on a 10,000-row
 schedule therefore still pays the full flat-build cost below, exactly

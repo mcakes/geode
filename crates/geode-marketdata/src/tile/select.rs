@@ -5,7 +5,13 @@
 //! neighbour.
 
 use super::*;
+use crate::core::bulk::{Skip, Skips};
+use crate::core::draft::bumped;
 use geode_core::grid::selection::{Lost, Selection};
+
+/// One stepped cell ready to write: its model position, the labels that
+/// make the edit portable across generations, and the new value.
+type StepWrite = ((usize, usize), (String, String), Value);
 
 impl MarketDataTile {
     /// `v`/`V`: start at the cursor cell, switch kind keeping the anchor,
@@ -97,7 +103,6 @@ impl MarketDataTile {
     /// term's forward/atm/skew never move with its ladder); a `Block` is
     /// exactly its rectangle. The row-label column is never a model
     /// column, so it is never here.
-    #[allow(dead_code)] // the selection-wide edits are its callers
     pub(super) fn selection_cells(&self) -> Vec<(usize, usize)> {
         let Some(r) = &self.resolved else {
             return Vec::new();
@@ -205,6 +210,101 @@ impl MarketDataTile {
         self.clear_selection();
         self.notice = None;
         self.rebuild_model(cx);
+        Ok(())
+    }
+
+    /// Write one step per cell, each `(cell, current, declared type,
+    /// delta)`, answering how many were written. Every result is computed
+    /// before any write, so one refusal (a fractional delta on an integer
+    /// column, an overflow) leaves the whole draft as it was: a partly
+    /// stepped block would be a plausible wrong state. A document row's
+    /// cell is keyed for `Draft::edits` by its `cell_ref` (the document
+    /// position — `commit_cell_value`'s rule); an inserted row's goes to
+    /// its `RowEdit.cells` by label, with the same arithmetic. Does not
+    /// rebuild the model; the caller does, once.
+    pub(super) fn write_steps(
+        &mut self,
+        values: Vec<((usize, usize), Value, ColumnType, f64)>,
+    ) -> Result<usize, String> {
+        let base = self.edit_base()?;
+        let mut writes: Vec<StepWrite> = Vec::with_capacity(values.len());
+        for (cell, current, ty, delta) in values {
+            let labels = self.model.label_of(cell);
+            let labels = (labels.0.to_string(), labels.1.to_string());
+            let value = bumped(&current, delta, ty, &labels.1)?;
+            writes.push((cell, labels, value));
+        }
+        let n = writes.len();
+        for (cell, (row_label, col_label), value) in writes {
+            let row = &self.model.rows[cell.0];
+            match row.state {
+                RowState::Inserted => {
+                    self.draft.set_row_cell(&row_label, &col_label, value);
+                }
+                RowState::Document | RowState::Deleted => {
+                    let cell_ref = row.cells[cell.1].cell_ref;
+                    self.draft
+                        .set(cell_ref, (row_label, col_label), value, &base);
+                }
+            }
+        }
+        Ok(n)
+    }
+
+    /// Collect and write one step over the selection: every member on a
+    /// live row whose column is a number and whose value is not NULL, each
+    /// moved by `delta_of(col, ty)` (`None` for a non-number column).
+    /// Answers how many were written and why the rest were not. Gates:
+    /// `held_refusal`, then `edit_base`. Shared by `:bump` and the live
+    /// step, so both apply the same arithmetic and the same skip rules.
+    pub(super) fn step_selection_cells(
+        &mut self,
+        delta_of: impl Fn(usize, ColumnType) -> Option<f64>,
+    ) -> Result<(usize, Skips), String> {
+        if let Some(refusal) = self.held_refusal() {
+            return Err(refusal.to_string());
+        }
+        self.edit_base()?;
+        let mut skips = Skips::default();
+        let mut values = Vec::new();
+        for (row, col) in self.selection_cells() {
+            if self.model.rows[row].state == RowState::Deleted {
+                skips.add(Skip::Deleted);
+                continue;
+            }
+            let ty = self.column_type(col);
+            let Some(delta) = delta_of(col, ty) else {
+                skips.add(Skip::NotNumeric);
+                continue;
+            };
+            match self.current_numeric(row, col) {
+                Some(v) => values.push(((row, col), v, ty, delta)),
+                None => skips.add(Skip::Empty),
+            }
+        }
+        if values.is_empty() {
+            return Err(format!("no numeric cells to step{}", skips.describe()));
+        }
+        let n = self.write_steps(values)?;
+        Ok((n, skips))
+    }
+
+    /// `:bump <delta>` with a selection live: every selected number moves
+    /// by `delta`, and the selection stays (a repeatable edit).
+    pub(super) fn bump_selection(
+        &mut self,
+        delta: f64,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let numbers: Vec<bool> = (0..self.model.columns.len())
+            .map(|c| matches!(self.model.kind_of(c), Some(CellKind::Number(_))))
+            .collect();
+        let (n, skips) = self.step_selection_cells(|col, _| {
+            numbers.get(col).copied().unwrap_or(false).then_some(delta)
+        })?;
+        self.rebuild_model(cx);
+        self.notice = Some(format!("bumped {n} cells{}", skips.describe()).into());
+        self.changed(cx);
         Ok(())
     }
 

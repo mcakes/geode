@@ -21,12 +21,12 @@
 
 use crate::commands::{self, BumpAxis, Command, KEY_DISPLAY_SEPARATOR};
 use crate::core::cursor::{self, Cursor, Grid, Motion};
-use crate::core::draft::{RowDelete, RowEdit, bumped, local_hhmm};
+use crate::core::draft::{RowDelete, RowEdit, local_hhmm};
 use crate::core::matrix::{RowState, base_of};
 use crate::core::menu::{self, MenuInputs, MenuRow};
 use crate::core::spec::RowIdentity;
 use crate::core::{
-    Cell, CellKind, Columns, DateTimeField, DocumentBase, Draft, DraftBadge, DraftState, FieldKey,
+    CellKind, Columns, DateTimeField, DocumentBase, Draft, DraftBadge, DraftState, FieldKey,
     MatrixModel, PanelSpec, Precision, Segment, SegmentText, UpdatePolicy, attr_text, parse_attr,
     parse_cell, route,
 };
@@ -281,11 +281,6 @@ const NOT_A_ROW: &str = "not a row";
 
 /// Refusal for deleting an already-Deleted row; revert is the recovery route.
 const ALREADY_DELETED: &str = "row is already deleted — :revert restores it";
-
-/// One cell a `:bump` writes: where it is, the labels that make the edit
-/// portable across generations, and the value being added to — the shape
-/// [`Draft::bump`] consumes.
-type BumpCell = ((usize, usize), (String, String), Value, ColumnType);
 
 /// Open cell or attribute editor, including its input and original target.
 struct Editing {
@@ -3611,22 +3606,33 @@ impl MarketDataTile {
 
     /// `:bump <delta> [row|col]` — add `delta` to every NUMBER cell along
     /// the cursor's ROW by default (a term's whole node ladder is the
-    /// shape a trader nudges) or down its column on request.
+    /// shape a trader nudges) or down its column on request. With no axis
+    /// word and a selection live, every selected number instead
+    /// (`bump_selection`); a typed `row` or `col` keeps its own meaning.
     ///
     /// Each cell's CURRENT painted value is what is added to, which is the
     /// draft's own value wherever one exists, so two bumps compose instead
     /// of the second reading through to the document underneath
-    /// (`Draft::bump`'s own contract). A NULL cell is skipped: there is no
-    /// number to add to, and inventing one would put a value on screen the
-    /// document never carried. A cell whose column is not `CellKind::Number`
-    /// (a flat panel's date or status column) is skipped the same way —
+    /// (`current_numeric`). A NULL cell is skipped: there is no number to
+    /// add to, and inventing one would put a value on screen the document
+    /// never carried. A cell whose column is not `CellKind::Number` (a
+    /// flat panel's date or status column) is skipped the same way —
     /// `:bump` is arithmetic, and a schedule's non-numeric columns have
     /// nothing to add to either.
-    fn bump(&mut self, delta: f64, axis: BumpAxis, cx: &mut Context<Self>) -> Result<(), String> {
+    fn bump(
+        &mut self,
+        delta: f64,
+        axis: Option<BumpAxis>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if axis.is_none() && self.selection.is_some() {
+            return self.bump_selection(delta, cx);
+        }
+        let axis = axis.unwrap_or_default();
         if let Some(refusal) = self.held_refusal() {
             return Err(refusal.to_string());
         }
-        let base = self.edit_base()?;
+        self.edit_base()?;
         let Cursor::Cell { row, col } = self.cursor else {
             // Bump requires grid cells; the attribute strip has no row or column
             // target.
@@ -3636,39 +3642,6 @@ impl MarketDataTile {
         if matches!(axis, BumpAxis::Row) && self.model.rows[row].state == RowState::Deleted {
             return Err(DELETED_REFUSED.to_string());
         }
-        // The draft's own edit for this cell, through `Draft::numeric_edit`
-        // — `:bump`'s own door onto it — falling back to the model's own
-        // painted value (the document's, or NULL) when there is no edit
-        // yet to read. An INSERTED row's cell_ref is a model position, not
-        // a document one, so `Draft::edits` is never asked about it: its
-        // painted value IS the draft's own (`RowEdit.cells`, which is all
-        // the model ever paints there).
-        let numeric_value = |state: RowState, cell: &Cell| -> Option<Value> {
-            let edit = match state {
-                RowState::Inserted => None,
-                RowState::Document | RowState::Deleted => {
-                    self.draft.numeric_edit(cell.cell_ref).cloned()
-                }
-            };
-            edit.or(match &cell.value {
-                Some(value @ (Value::F64(_) | Value::I64(_))) => Some(value.clone()),
-                Some(Value::Utf8(_) | Value::Date(_)) | None => None,
-            })
-        };
-        // Use each column's declared numeric type. Flat panels follow flat_columns
-        // order; pivot values use value_type, while a leading slice-value cell is F64.
-        let ty_of = |ci: usize| -> ColumnType {
-            match self.spec.columns {
-                Columns::Values(_) => self
-                    .spec
-                    .flat_columns()
-                    .get(ci)
-                    .map(|vc| vc.ty)
-                    .unwrap_or(self.spec.value_type),
-                Columns::Axis(_) if ci < self.model.slice_columns => ColumnType::F64,
-                Columns::Axis(_) => self.spec.value_type,
-            }
-        };
         let mut skipped = 0usize;
         // Each cell to bump as (model cell, its current value, its declared type).
         let values: Vec<((usize, usize), Value, ColumnType)> = match axis {
@@ -3677,37 +3650,27 @@ impl MarketDataTile {
             // term's vols must not move its forward with them. A column
             // bump on a slice column still bumps that column down every
             // term, which is what a bump on `fwd` means.
-            BumpAxis::Row => {
-                let r = &self.model.rows[row];
-                r.cells
-                    .iter()
-                    .enumerate()
-                    .skip(self.model.slice_columns)
-                    .filter_map(|(ci, cell)| {
-                        if !matches!(self.model.kind_of(ci), Some(CellKind::Number(_))) {
-                            skipped += 1;
-                            return None;
-                        }
-                        numeric_value(r.state, cell).map(|v| ((row, ci), v, ty_of(ci)))
-                    })
-                    .collect()
-            }
+            BumpAxis::Row => (self.model.slice_columns..self.model.rows[row].cells.len())
+                .filter_map(|ci| {
+                    if !matches!(self.model.kind_of(ci), Some(CellKind::Number(_))) {
+                        skipped += 1;
+                        return None;
+                    }
+                    self.current_numeric(row, ci)
+                        .map(|v| ((row, ci), v, self.column_type(ci)))
+                })
+                .collect(),
             BumpAxis::Col => {
                 if !matches!(self.model.kind_of(col), Some(CellKind::Number(_))) {
                     return Err("not a numeric column".to_string());
                 }
-                let ty = ty_of(col);
+                let ty = self.column_type(col);
                 self.model
                     .rows
                     .iter()
                     .enumerate()
                     .filter(|(_, r)| r.state != RowState::Deleted)
-                    .filter_map(|(ri, r)| {
-                        r.cells
-                            .get(col)
-                            .and_then(|cell| numeric_value(r.state, cell))
-                            .map(|v| ((ri, col), v, ty))
-                    })
+                    .filter_map(|(ri, _)| self.current_numeric(ri, col).map(|v| ((ri, col), v, ty)))
                     .collect()
             }
         };
@@ -3718,44 +3681,54 @@ impl MarketDataTile {
                 "no values to bump".to_string()
             });
         }
-        // Collected rather than handed to `Draft::bump` as a lazy iterator:
-        // the labels come off `self.model` while the draft is borrowed
-        // mutably, which the borrow checker refuses — and one `Vec` per
-        // `:bump` line is a keystroke's worth of work, not a per-frame one.
-        // A document row's cell is keyed for `Draft::edits` by its own
-        // `cell_ref` (the document position — `commit_cell_value`'s rule);
-        // an inserted row's goes to its `RowEdit.cells` by label instead,
-        // with the same arithmetic.
-        let mut document: Vec<BumpCell> = Vec::with_capacity(values.len());
-        let mut inserted: Vec<((String, String), Value, ColumnType)> = Vec::new();
-        for (cell, value, ty) in values {
-            let labels = self.model.label_of(cell);
-            let labels = (labels.0.to_string(), labels.1.to_string());
-            let r = &self.model.rows[cell.0];
-            match r.state {
-                RowState::Inserted => inserted.push((labels, value, ty)),
-                RowState::Document | RowState::Deleted => {
-                    document.push((r.cells[cell.1].cell_ref, labels, value, ty));
-                }
-            }
-        }
-        // Validate every document and inserted cell's bump before either write path. A
-        // fractional delta rejected by an I64 cell must not leave earlier F64 changes
-        // applied. The write pass recomputes the same pure bumped results.
-        for (_, labels, value, ty) in &document {
-            bumped(value, delta, *ty, &labels.1)?;
-        }
-        for (labels, value, ty) in &inserted {
-            bumped(value, delta, *ty, &labels.1)?;
-        }
-        self.draft.bump(document.into_iter(), delta, &base)?;
-        for ((row_label, col_label), value, ty) in inserted {
-            let value = bumped(&value, delta, ty, &col_label)?;
-            self.draft.set_row_cell(&row_label, &col_label, value);
-        }
+        self.write_steps(
+            values
+                .into_iter()
+                .map(|(cell, v, ty)| (cell, v, ty, delta))
+                .collect(),
+        )?;
         self.rebuild_model(cx);
         self.changed(cx);
         Ok(())
+    }
+
+    /// A model cell's current number: the draft's own edit through
+    /// `Draft::numeric_edit` — `:bump`'s door onto it — falling back to
+    /// the model's painted value (the document's, or NULL) when there is
+    /// no edit yet. An INSERTED row's `cell_ref` is a model position, not
+    /// a document one, so `Draft::edits` is never asked about it: its
+    /// painted value IS the draft's own (`RowEdit.cells`, which is all the
+    /// model ever paints there). `None` for NULL, text, a date, or a cell
+    /// out of range — nothing to add to.
+    pub(super) fn current_numeric(&self, row: usize, col: usize) -> Option<Value> {
+        let r = self.model.rows.get(row)?;
+        let cell = r.cells.get(col)?;
+        let edit = match r.state {
+            RowState::Inserted => None,
+            RowState::Document | RowState::Deleted => {
+                self.draft.numeric_edit(cell.cell_ref).cloned()
+            }
+        };
+        edit.or(match &cell.value {
+            Some(value @ (Value::F64(_) | Value::I64(_))) => Some(value.clone()),
+            Some(Value::Utf8(_) | Value::Date(_)) | None => None,
+        })
+    }
+
+    /// A model column's declared type, which picks a step's arithmetic.
+    /// Flat panels follow `flat_columns` order; pivot values use
+    /// `value_type`, while a leading slice-value cell (fwd/atm/skew) is F64.
+    pub(super) fn column_type(&self, col: usize) -> ColumnType {
+        match self.spec.columns {
+            Columns::Values(_) => self
+                .spec
+                .flat_columns()
+                .get(col)
+                .map(|vc| vc.ty)
+                .unwrap_or(self.spec.value_type),
+            Columns::Axis(_) if col < self.model.slice_columns => ColumnType::F64,
+            Columns::Axis(_) => self.spec.value_type,
+        }
     }
 
     /// Rebase edits by labels onto the newest document and begin painting it. Build the

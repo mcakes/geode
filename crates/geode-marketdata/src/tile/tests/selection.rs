@@ -361,3 +361,244 @@ fn d_over_rows_anchored_on_a_dropped_provisional_row_refuses_with_the_lost_ancho
     assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
     assert_eq!(resolved(&h, &vcx), None);
 }
+
+#[gpui::test]
+fn bump_with_no_axis_moves_every_selected_number_and_keeps_the_selection(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    h.dispatch(&mut vcx, "right", Some(SLICE as u32));
+    h.dispatch(&mut vcx, "visual_block", None);
+    h.dispatch(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "right", None);
+    h.command(&mut vcx, "bump 0.01").unwrap();
+    assert_eq!(h.row_texts(&vcx, 0)[3..], ["0.1100", "0.2100", "0.3000"]);
+    assert_eq!(h.row_texts(&vcx, 1)[3..], ["0.4100", "0.5100", "0.6000"]);
+    assert_eq!(h.mode(&vcx), "visual");
+    // `row` keeps today's meaning even with a selection live.
+    h.command(&mut vcx, "bump 1 row").unwrap();
+    assert_eq!(
+        h.row_texts(&vcx, 1)[0],
+        "4510.00",
+        "a row bump never moves the slice values"
+    );
+}
+
+#[gpui::test]
+fn a_rows_selection_bump_skips_the_slice_values(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.command(&mut vcx, "bump 0.01").unwrap();
+    assert_eq!(
+        h.row_texts(&vcx, 0),
+        vec!["4500.00", "0.1800", "-1.0000", "0.1100", "0.2100", "0.3100"]
+    );
+}
+
+/// A flat panel restored with one inserted row (`new-1`, after `D1`),
+/// whose amount is then typed — `a_commit_on_an_inserted_row_writes_its_own_cells`'s
+/// own setup. The inserted row is model row 1.
+fn open_with_inserted_row(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTestContext) {
+    let restored: toml::Table = format!(
+        r#"
+key = ["SPX.Z"]
+[draft]
+base = "{BASE}"
+edits = []
+[draft.rows.new-1]
+after = "D1"
+cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "text", value = "declared" }} }}
+"#
+    )
+    .parse()
+    .unwrap();
+    let (h, mut vcx) = open_spec(cx, &test_fixtures::SCHEDULE, Some(restored));
+    h.visible(&mut vcx, true);
+    let tag = h.document_request().unwrap().tag;
+    h.deliver(
+        &mut vcx,
+        tag,
+        Arc::new(test_fixtures::schedule_snapshot(&[
+            ("D1", "2026-12-18", 1.25, "declared"),
+            ("D2", "2027-03-19", 0.5, "estimated"),
+        ])),
+    );
+    h.tile.update(&mut vcx, |t, cx| t.cursor_to(1, Some(1), cx));
+    h.dispatch(&mut vcx, "edit", None);
+    h.set_editor(&mut vcx, "2.5");
+    h.dispatch(&mut vcx, "commit", None);
+    (h, vcx)
+}
+
+/// Two numeric columns of different declared types — `amount` (F64) and
+/// `units` (I64) — over one row, for the all-or-nothing and per-column
+/// step rules. `cell_ref`s are `(0, 0)` amount and `(0, 1)` units.
+const SCHEDULE_MIXED: PanelSpec = PanelSpec {
+    kind: "sched_mixed",
+    title: "Mixed",
+    dataset: "div_schedule_mixed",
+    document: "div_schedule_mixed",
+    rows: RowAxis {
+        column: "dividend_id",
+        identity: RowIdentity::Minted,
+        label: RowLabel::Shown,
+    },
+    columns: Columns::Values(&[
+        ValueColumn {
+            column: "amount",
+            label: "amount",
+            ty: ColumnType::F64,
+            format: ColumnFormat::MEASURE,
+            choices: None,
+            required: true,
+        },
+        ValueColumn {
+            column: "units",
+            label: "units",
+            ty: ColumnType::I64,
+            format: ColumnFormat::MEASURE,
+            choices: None,
+            required: true,
+        },
+    ]),
+    header: &[],
+    slice_values: &[],
+    value_type: ColumnType::F64,
+    format: ColumnFormat::MEASURE,
+    actions: &[],
+};
+
+fn open_mixed(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTestContext) {
+    let (h, mut vcx) = open_spec(cx, &SCHEDULE_MIXED, None);
+    h.command(&mut vcx, "key SPX.Z").unwrap();
+    h.visible(&mut vcx, true);
+    let tag = h.document_request().unwrap().tag;
+    let snapshot = Snapshot::for_tests_with_provenance(
+        vec![
+            (
+                meta("underlying_ref", Attribution::Additive),
+                TestColumn::Dict(vec![Some("SPX.Z".into())]),
+            ),
+            (
+                meta("dividend_id", Attribution::Additive),
+                TestColumn::Dict(vec![Some("D1".into())]),
+            ),
+            (
+                meta("amount", Attribution::DeterminedNonAdditive),
+                TestColumn::F64(vec![Some(1.25)]),
+            ),
+            (
+                meta("units", Attribution::DeterminedNonAdditive),
+                TestColumn::I64(vec![1]),
+            ),
+        ],
+        0,
+        provenance(BASE),
+    );
+    h.deliver(&mut vcx, tag, Arc::new(snapshot));
+    (h, vcx)
+}
+
+#[gpui::test]
+fn a_selection_bump_reaches_an_inserted_rows_cells(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with_inserted_row(cx);
+    h.dispatch(&mut vcx, "up", None); // D1
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "down", None); // D1 + new-1
+    h.command(&mut vcx, "bump 1").unwrap();
+    assert_eq!(h.cell(&vcx, 0, 1).0, "2.2500");
+    assert_eq!(h.cell(&vcx, 1, 1).0, "3.5000");
+    let inserted = h
+        .tile
+        .read_with(&vcx, |t, _| t.draft().row_state("new-1").cloned());
+    assert!(
+        matches!(&inserted, Some(RowEdit::Inserted { cells, .. }) if cells.get("amount") == Some(&Value::F64(3.5))),
+        "the inserted row's cell is written by label, not by position: {inserted:?}"
+    );
+}
+
+#[gpui::test]
+fn a_fractional_bump_over_a_mixed_block_writes_nothing(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_mixed(cx);
+    h.dispatch(&mut vcx, "visual_rows", None); // amount (F64) and units (I64)
+    let refused = h.command(&mut vcx, "bump 0.5").unwrap_err();
+    assert!(refused.contains("whole numbers"), "{refused}");
+    assert!(
+        h.tile.read_with(&vcx, |t, _| t.draft().is_empty()),
+        "amount accepted 0.5, but units refused it, so nothing is written"
+    );
+}
+
+/// A selection bump over document rows lands each column's declared type
+/// (`amount` stays F64, `units` stays I64) and adds to the CURRENT value,
+/// so a second bump composes with the first rather than reading through
+/// to the document underneath. The selection stays for the next one.
+#[gpui::test]
+fn a_selection_bump_lands_each_declared_type_and_composes(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_mixed(cx);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.command(&mut vcx, "bump 2").unwrap();
+    let edits = |h: &Harness, vcx: &gpui::VisualTestContext| {
+        h.tile.read_with(vcx, |t, _| {
+            (
+                t.draft().numeric_edit((0, 0)).cloned(),
+                t.draft().numeric_edit((0, 1)).cloned(),
+            )
+        })
+    };
+    assert_eq!(
+        edits(&h, &vcx),
+        (Some(Value::F64(3.25)), Some(Value::I64(3)))
+    );
+    assert_eq!(notice_of(&h, &vcx).as_deref(), Some("bumped 2 cells"));
+    assert_eq!(h.mode(&vcx), "visual");
+    h.command(&mut vcx, "bump 2").unwrap();
+    assert_eq!(
+        edits(&h, &vcx),
+        (Some(Value::F64(5.25)), Some(Value::I64(5)))
+    );
+}
+
+/// Every selected cell a bump cannot move is counted by reason: a deleted
+/// row's cells, and the date and status columns. The inserted row's
+/// amount is bumped beside the document row's.
+#[gpui::test]
+fn a_selection_bump_counts_what_it_skipped_by_reason(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with_inserted_row(cx);
+    h.dispatch(&mut vcx, "bottom", None); // D2
+    h.dispatch(&mut vcx, "delete_row", None);
+    h.dispatch(&mut vcx, "top", None);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "bottom", None);
+    h.command(&mut vcx, "bump 1").unwrap();
+    assert_eq!(
+        notice_of(&h, &vcx).as_deref(),
+        Some("bumped 2 cells, skipped 7 (3 deleted, 4 not numeric)")
+    );
+    assert_eq!(h.cell(&vcx, 0, 1).0, "2.2500");
+    assert_eq!(h.cell(&vcx, 1, 1).0, "3.5000");
+    assert_eq!(
+        h.cell(&vcx, 2, 1).0,
+        "0.5000",
+        "a deleted row is never stepped"
+    );
+}
+
+/// A selection with nothing numeric in it refuses, names why, and
+/// writes nothing.
+#[gpui::test]
+fn a_selection_bump_with_no_numbers_refuses(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with_inserted_row(cx);
+    h.dispatch(&mut vcx, "top", None);
+    h.dispatch(&mut vcx, "first_col", None); // ex_date
+    h.dispatch(&mut vcx, "visual_block", None);
+    let before = h.tile.read_with(&vcx, |t, _| t.draft().len());
+    let refused = h.command(&mut vcx, "bump 1").unwrap_err();
+    assert_eq!(
+        refused,
+        "no numeric cells to step, skipped 1 (1 not numeric)"
+    );
+    assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().len()), before);
+}

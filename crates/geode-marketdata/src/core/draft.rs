@@ -512,33 +512,6 @@ impl Draft {
         n
     }
 
-    /// Add `delta` to the supplied current values, returning the number of
-    /// writes. Validate all results before changing the draft so a fractional
-    /// bump refused by an integer column cannot leave a partially bumped row.
-    ///
-    /// The caller supplies numeric candidates and their declared types, with
-    /// existing edits already included in each current value. [`bumped`] chooses
-    /// the result's type and refuses fractional deltas for integer columns.
-    pub fn bump(
-        &mut self,
-        cells: impl Iterator<Item = ((usize, usize), (String, String), Value, ColumnType)>,
-        delta: f64,
-        base: &DocumentBase,
-    ) -> Result<usize, String> {
-        // Compute every result before writing any edit: a typing refusal
-        // partway through must leave the whole draft unchanged.
-        let mut writes = Vec::new();
-        for (cell, labels, current, ty) in cells {
-            let value = bumped(&current, delta, ty, &labels.1)?;
-            writes.push((cell, labels, value));
-        }
-        let n = writes.len();
-        for (cell, labels, value) in writes {
-            self.set(cell, labels, value, base);
-        }
-        Ok(n)
-    }
-
     /// Process a delivered generation and report whether state changed.
     /// An editing draft becomes `Behind` when the delivered generation differs
     /// from the base; a behind draft returns to `Editing` when its own base is
@@ -1613,81 +1586,6 @@ mod tests {
         assert_eq!(draft.state, DraftState::Clean);
         assert_eq!(draft.base, None);
         assert_eq!(draft.badge(), DraftBadge::Clean);
-    }
-
-    #[test]
-    fn bump_adds_the_delta_to_each_cells_current_value() {
-        let mut draft = Draft::default();
-        let cells = vec![
-            ((0, 0), pair("T1", "-20"), Value::F64(1.0), ColumnType::F64),
-            ((0, 1), pair("T1", "-1"), Value::F64(2.5), ColumnType::F64),
-        ];
-        assert_eq!(draft.bump(cells.into_iter(), 0.5, &at(BASE)), Ok(2));
-        assert_eq!(draft.edits.get(&(0, 0)), Some(&Value::F64(1.5)));
-        assert_eq!(draft.edits.get(&(0, 1)), Some(&Value::F64(3.0)));
-        assert_eq!(draft.state, DraftState::Editing);
-        // Bumping again reads the caller's *current* value, which is the
-        // draft's own by then — the tile passes what the model paints.
-        let again = vec![((0, 0), pair("T1", "-20"), Value::F64(1.5), ColumnType::F64)];
-        assert_eq!(draft.bump(again.into_iter(), 0.5, &at(BASE)), Ok(1));
-        assert_eq!(draft.edits.get(&(0, 0)), Some(&Value::F64(2.0)));
-    }
-
-    #[test]
-    fn bump_lands_the_declared_type() {
-        let mut draft = Draft::default();
-        let n = draft
-            .bump(
-                [
-                    (
-                        (0, 0),
-                        ("a".into(), "x".into()),
-                        Value::F64(1.5),
-                        ColumnType::F64,
-                    ),
-                    (
-                        (0, 1),
-                        ("a".into(), "y".into()),
-                        Value::I64(3),
-                        ColumnType::I64,
-                    ),
-                ]
-                .into_iter(),
-                2.0,
-                &at("t0"),
-            )
-            .unwrap();
-        assert_eq!(n, 2);
-        assert_eq!(draft.edits[&(0, 0)], Value::F64(3.5));
-        assert_eq!(draft.edits[&(0, 1)], Value::I64(5));
-    }
-
-    #[test]
-    fn bump_refuses_a_fractional_delta_on_an_integer_column_before_writing() {
-        let mut draft = Draft::default();
-        let err = draft
-            .bump(
-                [
-                    (
-                        (0, 0),
-                        ("a".into(), "x".into()),
-                        Value::F64(1.5),
-                        ColumnType::F64,
-                    ),
-                    (
-                        (0, 1),
-                        ("a".into(), "y".into()),
-                        Value::I64(3),
-                        ColumnType::I64,
-                    ),
-                ]
-                .into_iter(),
-                0.5,
-                &at("t0"),
-            )
-            .unwrap_err();
-        assert!(err.contains("whole numbers") && err.contains("y"), "{err}");
-        assert!(draft.is_empty(), "no cell written on a refusal");
     }
 
     #[test]
