@@ -8,13 +8,27 @@ use super::*;
 use crate::core::cell::READ_ONLY;
 use crate::core::package::{self, package_qty};
 use crate::core::select::{
-    RISK, Skip, Skips, group_plan, lines_of, move_plan, risk_totals, set_notice, top_most,
+    RISK, Skip, Skips, group_plan, lines_of, move_plan, risk_totals, set_notice, step_notice,
+    top_most,
 };
 use geode_core::grid::selection::Lost;
 use geode_core::pricing::Instrument;
 
 /// The refusal for `v`/`V` on a row with no line behind it.
 const NO_ANCHOR: &str = "select from a line or package row";
+
+/// Whether a column's cells step under the arrows: the kinds `cell::nudge`
+/// steps. A live step opens only on one of these.
+pub(crate) fn steppable(kind: ColumnKind) -> bool {
+    matches!(
+        kind,
+        ColumnKind::Qty
+            | ColumnKind::Strike
+            | ColumnKind::Barrier
+            | ColumnKind::SpotShift
+            | ColumnKind::VolShift
+    )
+}
 
 impl PricerTile {
     /// `v`/`V`: start at the cursor cell, switch kind keeping the anchor,
@@ -451,6 +465,298 @@ impl PricerTile {
             return Err(e.to_string());
         }
         Ok(())
+    }
+
+    /// The open editor's live-step state, taken out of it.
+    pub(crate) fn take_bulk(&mut self) -> Option<Bulk> {
+        match &mut self.editor {
+            Some(Editor::Text { bulk, .. }) => bulk.take(),
+            _ => None,
+        }
+    }
+
+    /// A sheet replace drops any live step unrecorded: its inverses
+    /// address the old sheet's rows, and replaying or recording them
+    /// against the new one would write into unrelated lines.
+    pub(crate) fn forget_steps(&mut self) {
+        self.take_bulk();
+        self.edit_seq += 1;
+    }
+
+    /// The editor's arrow keys with a selection live and its text
+    /// untouched: step every target cell by its own text's unit, in the
+    /// sheet, now — each press reprices through the ordinary path, and
+    /// the tile's in-flight bookkeeping supersedes the previous press's
+    /// batch. `None` when this is not that case (no selection, typed
+    /// text, a cursor cell that does not step, no step editor), so
+    /// `nudge` keeps its single-field behaviour; `Some` otherwise.
+    ///
+    /// A press is all or nothing: a cell whose stepped value the sheet
+    /// refuses (a qty stepping to zero) refuses the whole press, since
+    /// the rest landing without it would be a plausible wrong block.
+    /// Cells that cannot step at all (read-only, not a number, a barrier
+    /// on a vanilla) are skipped and counted.
+    ///
+    /// Under `V` the cursor's column steps; under `v` every block column.
+    /// A selected package's quantity steps as the PACKAGE quantity through
+    /// its template's weights: its legs stepped one by one would turn a
+    /// -5/+5 spread into -4/+6.
+    pub(crate) fn bulk_step(
+        &mut self,
+        steps: i64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<()> {
+        // A delivery that lost the anchor cleared the selection under the
+        // open editor: there are no targets, and the field is one cell's.
+        self.selection.as_ref()?;
+        let (line, kind, input, seeded) = match &self.editor {
+            Some(Editor::Text {
+                line,
+                kind,
+                input,
+                bulk: Some(b),
+                ..
+            }) => (*line, *kind, input.clone(), b.seeded.clone()),
+            _ => return None,
+        };
+        if input.read(cx).value().as_ref() != seeded || !steppable(kind) {
+            return None;
+        }
+        // The editor's cell is the one the trader watches: steps taken
+        // while the cursor sits elsewhere would move every target with no
+        // sign of it in the field.
+        if !self.cursor_on_editor(line, kind) {
+            return None;
+        }
+        let (lines, cols) = self.selection_targets();
+        let top = top_most(&self.sheet, &self.selected_sheet_rows());
+        let mut edits: Vec<Edit> = Vec::new();
+        let mut stepped = 0usize;
+        let mut skips = Skips::default();
+        for col in cols {
+            let Some(planned) = self.plan.columns.get(col) else {
+                continue;
+            };
+            let (ckind, editable, format) = (
+                planned.def.kind,
+                planned.def.editable,
+                planned.format.clone(),
+            );
+            let mut col_lines = lines.clone();
+            if ckind == ColumnKind::Qty && editable {
+                for &pkg in top.iter().filter(|&&r| self.sheet.is_package(r)) {
+                    let legs = self.sheet.children(pkg);
+                    col_lines.retain(|l| !legs.contains(l));
+                    // In list form the legs no longer fit the template, so
+                    // there are no weights to step them by.
+                    if package_qty(&self.sheet, pkg).is_none() {
+                        skips.add(Skip::Refused);
+                        continue;
+                    }
+                    let Some(text) = package::editor_text(&self.sheet, pkg, ckind, &format) else {
+                        skips.add(Skip::ReadOnly);
+                        continue;
+                    };
+                    let Ok(next) = cell::nudge(ckind, &text, steps) else {
+                        skips.add(Skip::NotNumeric);
+                        continue;
+                    };
+                    match package::commit(&self.sheet, pkg, ckind, &format, &next) {
+                        Ok(es) => {
+                            stepped += legs.filter(|&l| self.sheet.is_line(l)).count();
+                            edits.extend(es);
+                        }
+                        Err(why) => return self.refuse_step(why, cx),
+                    }
+                }
+            }
+            for &l in &col_lines {
+                if !editable {
+                    skips.add(Skip::ReadOnly);
+                    continue;
+                }
+                let text = match cell::editor_for(&self.sheet, l, ckind, &format) {
+                    Ok(CellEditor::Text(t)) => t,
+                    Ok(_) => {
+                        skips.add(Skip::NotNumeric);
+                        continue;
+                    }
+                    // `editor_for` answers `READ_ONLY` for a barrier cell on
+                    // a vanilla line too; the notice tells the two apart.
+                    Err(_) => {
+                        let vanilla =
+                            matches!(self.sheet.instrument(l), Some(Instrument::Vanilla(_)));
+                        skips.add(if ckind == ColumnKind::Barrier && vanilla {
+                            Skip::NotApplicable
+                        } else {
+                            Skip::ReadOnly
+                        });
+                        continue;
+                    }
+                };
+                let Ok(next) = cell::nudge(ckind, &text, steps) else {
+                    skips.add(Skip::NotNumeric);
+                    continue;
+                };
+                match cell::commit(&self.sheet, l, ckind, &next) {
+                    Ok(Some(e)) => {
+                        edits.push(e);
+                        stepped += 1;
+                    }
+                    Ok(None) => stepped += 1,
+                    Err(why) if why == READ_ONLY => skips.add(Skip::ReadOnly),
+                    Err(why) => return self.refuse_step(why, cx),
+                }
+            }
+        }
+        if edits.is_empty() {
+            return self.refuse_step(format!("no cells to step{}", skips.describe()), cx);
+        }
+        let touched: Vec<usize> = edits
+            .iter()
+            .filter_map(|e| match e {
+                Edit::SetQty { row, .. }
+                | Edit::SetInstrument { row, .. }
+                | Edit::SetShift { row, .. } => Some(*row),
+                _ => None,
+            })
+            .collect();
+        let undo = match self.apply_batch(edits) {
+            Ok(Some(u)) => u,
+            Ok(None) => return Some(()),
+            Err(e) => {
+                // Unreachable while every edit is validated above; should
+                // the sheet's checks outgrow the cell's, nothing half-lands
+                // and the rebuild shows whatever a refused rollback left.
+                self.after_edit(cx);
+                return self.refuse_step(e.to_string(), cx);
+            }
+        };
+        self.after_edit(cx);
+        let marks: Vec<(LineId, StepMark)> = touched
+            .into_iter()
+            .map(|r| (self.sheet.id(r), self.step_mark(r)))
+            .collect();
+        // The field follows its own cell: the step moved it too.
+        let reseed = self.sheet.index_of(line).and_then(|row| {
+            let format = &self.plan.columns.get(self.cursor.col)?.format;
+            match cell::editor_for(&self.sheet, row, kind, format) {
+                Ok(CellEditor::Text(t)) => Some(t),
+                _ => None,
+            }
+        });
+        if let Some(text) = &reseed {
+            input.update(cx, |s, cx| s.set_value(text.clone(), window, cx));
+        }
+        let seq = self.edit_seq;
+        let Some(Editor::Text {
+            bulk: Some(bulk),
+            opened,
+            ..
+        }) = &mut self.editor
+        else {
+            return Some(());
+        };
+        let mut inverse = undo.inverse;
+        inverse.append(&mut bulk.undo.inverse);
+        bulk.undo.inverse = inverse;
+        bulk.seq = seq;
+        bulk.steps += steps;
+        for (id, mark) in marks {
+            match bulk.after.iter_mut().find(|(m, _)| *m == id) {
+                Some(slot) => slot.1 = mark,
+                None => bulk.after.push((id, mark)),
+            }
+        }
+        if let Some(text) = reseed {
+            // A package cell's commit checks the text it opened on; the
+            // step changed that text, not the trader.
+            if opened.is_some() {
+                *opened = Some(text.clone());
+            }
+            bulk.seeded = text;
+        }
+        let notice: SharedString = step_notice(stepped, bulk.steps, &skips).into();
+        bulk.notice = Some(notice.clone());
+        self.notice = Some(notice);
+        self.sync_editor(cx);
+        Some(())
+    }
+
+    /// A refused press: the reason in the footer, nothing written, the
+    /// editor and its steps so far as they were.
+    fn refuse_step(&mut self, why: impl Into<SharedString>, cx: &mut Context<Self>) -> Option<()> {
+        self.footer = Some(why.into());
+        self.sync_editor(cx);
+        Some(())
+    }
+
+    /// What a step may have changed on `row`, to tell later whether the
+    /// sheet still holds the steps.
+    fn step_mark(&self, row: usize) -> StepMark {
+        (
+            self.sheet.qty(row),
+            self.sheet.instrument(row).cloned(),
+            self.sheet.shift(row),
+        )
+    }
+
+    /// End a live step. `keep` (an untouched `enter`) records the steps
+    /// as ONE undo entry; otherwise they come out of the sheet
+    /// ([`Self::take_back_steps`]) and the rebuild, reprice and re-armed
+    /// save follow — a save mid-step persisted the stepped values, and
+    /// the rollback's own save replaces them.
+    pub(crate) fn settle_bulk(&mut self, bulk: Bulk, keep: bool, cx: &mut Context<Self>) {
+        if keep {
+            if !bulk.undo.inverse.is_empty() {
+                self.undo.record(bulk.undo);
+            }
+            return;
+        }
+        let shown = bulk.notice.clone();
+        if self.take_back_steps(bulk) {
+            if shown.is_some() && self.notice == shown {
+                self.notice = None;
+            }
+            self.after_edit(cx);
+        }
+    }
+
+    /// Take the steps back out of the sheet, only while they are still
+    /// its last change: no recorded edit since (`edit_seq`) and every
+    /// stepped line still as the last step left it. Otherwise something
+    /// else wrote the sheet meanwhile, and replaying the inverses would
+    /// undo that write or land on moved rows, so the steps are recorded
+    /// as one undo entry instead and stay undoable. Answers whether the
+    /// sheet changed; the caller rebuilds.
+    pub(crate) fn take_back_steps(&mut self, bulk: Bulk) -> bool {
+        if bulk.undo.inverse.is_empty() {
+            return false;
+        }
+        let unchanged = bulk.seq == self.edit_seq
+            && bulk.after.iter().all(|(id, mark)| {
+                self.sheet
+                    .index_of(*id)
+                    .is_some_and(|r| self.step_mark(r) == *mark)
+            });
+        if !unchanged {
+            self.undo.record(bulk.undo);
+            return false;
+        }
+        if let Err(e) = self.sheet.undo(&bulk.undo) {
+            // A refused inverse leaves the sheet partly rolled back; the
+            // history's inverses assume the layout before it.
+            tracing::error!(
+                target: "geode::pricing",
+                tile = self.id.0,
+                error = %e,
+                "rolling back a live step failed; the sheet is partly rolled back \
+                 and the undo history is cleared"
+            );
+            self.undo.clear();
+        }
+        true
     }
 
     #[cfg(test)]

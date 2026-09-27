@@ -189,6 +189,9 @@ pub(crate) enum Editor {
         /// template weight only while the legs fit), so a commit whose
         /// cell would now open on other text refuses with `MOVED`.
         opened: Option<String>,
+        /// The live step's state, while a selection is live and the cell
+        /// steps; `None` otherwise.
+        bulk: Option<Bulk>,
     },
     Choice {
         line: LineId,
@@ -224,6 +227,38 @@ pub(crate) enum Editor {
         note: Option<SharedString>,
     },
 }
+
+/// A text editor opened on a steppable cursor cell over a live selection.
+/// While its text is untouched, arrows step every target cell in the
+/// sheet at once, each press repricing; `enter` keeps the steps as one
+/// undo entry and any other close takes them back — but only while they
+/// are still the sheet's last change, so a rollback never undoes another
+/// writer's edit.
+pub(crate) struct Bulk {
+    /// The text the tile last put in the editor. Any other value means
+    /// the trader typed, which turns the edit absolute.
+    pub(crate) seeded: String,
+    /// Signed steps since `i`, for the notice.
+    pub(crate) steps: i64,
+    /// The inverses of every step since `i`, the last step's first.
+    pub(crate) undo: Undo,
+    /// `edit_seq` right after the last step landed.
+    pub(crate) seq: u64,
+    /// Each stepped line's values right after the last step. A write that
+    /// bypassed the counter still shows here, and rolling back over it
+    /// would put the steps' inverses on cells something else wrote.
+    pub(crate) after: Vec<(LineId, StepMark)>,
+    /// The step notice last shown, withdrawn by a rollback: the count
+    /// would describe steps that are no longer in the sheet.
+    pub(crate) notice: Option<SharedString>,
+}
+
+/// What a step may change on a line: its quantity, instrument and shifts.
+pub(crate) type StepMark = (
+    i64,
+    Option<geode_core::pricing::Instrument>,
+    crate::core::sheet::OwnShifts,
+);
 
 /// What an `enter` in the cell editor means before the cell parses it.
 enum Choice {
@@ -425,7 +460,6 @@ pub struct PricerTile {
     pub(crate) totals: Vec<AggregateCell>,
     /// Counts recorded sheet changes, so an open step editor can tell
     /// whether its steps are still the sheet's last change.
-    #[allow(dead_code)]
     pub(crate) edit_seq: u64,
 }
 
@@ -919,14 +953,38 @@ impl PricerTile {
         Ok(())
     }
 
-    /// Apply several edits as one undo entry. On refusal, replay prior inverses in
-    /// reverse order without recording the batch. A refused rollback clears history and
-    /// leaves the partially rolled-back sheet for after_edit to rebuild.
+    /// Apply several edits as one undo entry through [`Self::apply_batch`];
+    /// a refused batch records nothing but still rebuilds, since a refused
+    /// rollback leaves a partly rolled-back sheet.
     pub(crate) fn apply_edits(
         &mut self,
         edits: Vec<Edit>,
         cx: &mut Context<Self>,
     ) -> Result<(), EditError> {
+        match self.apply_batch(edits) {
+            Err(e) => {
+                self.after_edit(cx);
+                Err(e)
+            }
+            Ok(undo) => {
+                if let Some(undo) = undo {
+                    self.undo.record(undo);
+                    self.after_edit(cx);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Apply several edits all or nothing, answering their combined
+    /// inverse (the last edit's first), or `None` for no edits. Records
+    /// nothing and rebuilds nothing: the caller decides whether the batch
+    /// is an undo entry of its own (a live step's is not until `enter`).
+    /// A refusal replays the landed inverses in reverse; a refused
+    /// replay clears history, since its remaining inverses address the
+    /// previous row layout, and leaves the partly rolled-back sheet for
+    /// the caller's rebuild.
+    pub(crate) fn apply_batch(&mut self, edits: Vec<Edit>) -> Result<Option<Undo>, EditError> {
         let mut undos: Vec<Undo> = Vec::new();
         for e in edits {
             match self.sheet.apply(e) {
@@ -949,20 +1007,17 @@ impl PricerTile {
                             break;
                         }
                     }
-                    self.after_edit(cx);
                     return Err(err);
                 }
             }
         }
         if undos.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         // Take back the LAST edit first.
-        self.undo.record(Undo {
+        Ok(Some(Undo {
             inverse: undos.into_iter().rev().flat_map(|u| u.inverse).collect(),
-        });
-        self.after_edit(cx);
-        Ok(())
+        }))
     }
 
     /// `o` opens the entry bar under the header and focuses its input.
@@ -1281,6 +1336,14 @@ impl PricerTile {
             }
             Ok(CellEditor::Text(text)) => {
                 let opened = self.sheet.is_package(row).then(|| text.clone());
+                let bulk = (self.selection.is_some() && select::steppable(kind)).then(|| Bulk {
+                    seeded: text.clone(),
+                    steps: 0,
+                    undo: Undo { inverse: vec![] },
+                    seq: self.edit_seq,
+                    after: Vec::new(),
+                    notice: None,
+                });
                 let input = cx.new(|cx| InputState::new(window, cx));
                 input.update(cx, |s, cx| s.set_value(text, window, cx));
                 Editor::Text {
@@ -1289,6 +1352,7 @@ impl PricerTile {
                     kind,
                     input,
                     opened,
+                    bulk,
                 }
             }
             Ok(CellEditor::Choice {
@@ -1358,6 +1422,28 @@ impl PricerTile {
         if matches!(self.editor, Some(Editor::Date { .. })) {
             self.commit_date(window, cx);
             return;
+        }
+        // A live step's editor: untouched text keeps the steps as one undo
+        // entry; typed text is absolute, so the steps come out first and
+        // the typed value replaces them rather than landing on top.
+        let stepped = match &self.editor {
+            Some(Editor::Text {
+                input,
+                bulk: Some(b),
+                ..
+            }) if !b.undo.inverse.is_empty() => Some(input.read(cx).value().as_ref() == b.seeded),
+            _ => None,
+        };
+        if let Some(untouched) = stepped
+            && let Some(bulk) = self.take_bulk()
+        {
+            self.settle_bulk(bulk, untouched, cx);
+            if untouched {
+                self.close_editor(window, cx);
+                self.rebuild_chrome();
+                cx.notify();
+                return;
+            }
         }
         // The editor's borrow ends inside this block, before any `self` call.
         let (value, (line, col, kind), opened) = {
@@ -1692,7 +1778,14 @@ impl PricerTile {
 
     /// Blur an editor that owns window focus before releasing its focus handle.
     /// Otherwise the shell cannot restore focus after the editor disappears.
+    ///
+    /// A live step's editor closed any way but a commit takes its steps
+    /// back (`settle_bulk`), after the field is gone so the rebuild never
+    /// paints a dead one. Every cancel comes here: `cancel`, a click
+    /// elsewhere, any verb (`dispatch` closes the editor first), the
+    /// menu, `:` and `/`.
     pub(crate) fn close_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let bulk = self.take_bulk();
         let Some(editor) = self.editor.take() else {
             return;
         };
@@ -1700,6 +1793,9 @@ impl PricerTile {
             window.blur(cx);
         }
         self.sync_editor(cx);
+        if let Some(bulk) = bulk {
+            self.settle_bulk(bulk, false, cx);
+        }
         cx.notify();
     }
 
@@ -1707,6 +1803,11 @@ impl PricerTile {
     /// precision; in a typeahead they move the
     /// highlight.
     fn nudge(&mut self, steps: i64, window: &mut Window, cx: &mut Context<Self>) {
+        // Over a live selection with the text untouched, the step goes to
+        // every target cell instead of the text alone.
+        if self.bulk_step(steps, window, cx).is_some() {
+            return;
+        }
         let id = self.id.0;
         let refused = match &mut self.editor {
             // The date field steps its active segment — the same step its
@@ -1782,6 +1883,7 @@ impl PricerTile {
     /// write-behind saving. Keep expansion IDs so undo can restore an open package.
     /// Periodic refresh keeps its own timer and skips empty sheets.
     pub(crate) fn after_edit(&mut self, cx: &mut Context<Self>) {
+        self.edit_seq += 1;
         self.rebuild(cx);
         self.submit(cx);
         self.arm_save(cx);
@@ -1810,7 +1912,16 @@ impl PricerTile {
     /// save left unsaved, and drop the timer. A close and the app's quit
     /// both come here: neither may leave edits behind a timer that will
     /// never fire.
+    ///
+    /// An open live step is abandoned first, as `escape` would: a close
+    /// or quit has no `escape` after it, and saving then would persist
+    /// steps the trader never kept.
     pub(crate) fn flush_save(&mut self) {
+        if let Some(bulk) = self.take_bulk()
+            && self.take_back_steps(bulk)
+        {
+            self.dirty = true;
+        }
         self.save_task = None;
         if self.dirty || self.save_failed {
             let _ = self.save_now();
@@ -2219,6 +2330,7 @@ impl PricerTile {
                     s.mark_all_stale();
                     // The anchor's line id names a line of the old sheet.
                     self.clear_selection();
+                    self.forget_steps();
                     self.sheet = s;
                     self.adopt_templates();
                     // Fallback edits have inverses against different rows. Replaying
@@ -3077,6 +3189,7 @@ impl PricerTile {
         self.in_flight.clear();
         // Line ids restart per sheet: the anchor would name a new line.
         self.clear_selection();
+        self.forget_steps();
         self.sheet = Sheet::new(&name);
         self.adopt_templates();
         self.undo.clear();
@@ -3417,6 +3530,14 @@ impl PricerTile {
     /// Retain its focus handle until deferred access to the opening window can blur it.
     /// Check that it still owns focus so a newer field is not blurred.
     fn drop_orphaned_editor(&mut self, cx: &mut Context<Self>) {
+        // Mid-rebuild a rollback would rebuild inside the rebuild: steps
+        // still in the sheet are recorded instead, so they stay undoable
+        // rather than landing with no history.
+        if let Some(bulk) = self.take_bulk()
+            && !bulk.undo.inverse.is_empty()
+        {
+            self.undo.record(bulk.undo);
+        }
         let Some(editor) = self.editor.take() else {
             return;
         };

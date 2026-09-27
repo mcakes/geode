@@ -794,3 +794,330 @@ fn a_package_in_list_form_is_refused_a_selection_qty(cx: &mut gpui::TestAppConte
     assert_eq!(leg_qtys(&h, &vcx, 1), [-5, 3], "no leg written");
     assert_eq!(h.tile.read_with(&vcx, |t, _| t.sheet.qty(0)), 4);
 }
+
+// ---- the live step ----
+
+/// Every line selected (`V`), the cursor on the 4000 P's strike, its
+/// editor open and untouched.
+fn step_setup(h: &Harness, vcx: &mut VisualTestContext) {
+    goto_column(h, vcx, "strike");
+    h.dispatch(vcx, "visual_rows", None);
+    h.dispatch(vcx, "bottom", None);
+    h.dispatch(vcx, "edit", None);
+}
+
+#[gpui::test]
+fn arrows_step_every_target_line_live_and_enter_keeps_them_as_one_undo(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    step_setup(&h, &mut vcx);
+    h.dispatch(&mut vcx, "insert_up", Some(2));
+    assert_eq!(
+        h.cell(&vcx, 0, "strike"),
+        "5002",
+        "the grid paints the step at once"
+    );
+    assert_eq!(
+        h.cell(&vcx, 1, "strike"),
+        "4802/5202",
+        "each leg by one unit per press"
+    );
+    assert_eq!(h.cell(&vcx, 2, "strike"), "4002");
+    assert_eq!(
+        editor_text(&h, &vcx).as_deref(),
+        Some("4002"),
+        "the editor follows its own cell"
+    );
+    assert_eq!(notice(&h, &vcx).as_deref(), Some("stepped 4 cells +2"));
+    assert!(!can_undo(&h, &vcx), "nothing recorded mid-edit");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(editor_text(&h, &vcx), None, "enter closes the editor");
+    assert_eq!(h.cell(&vcx, 0, "strike"), "5002", "enter keeps the steps");
+    assert!(can_undo(&h, &vcx));
+    h.dispatch(&mut vcx, "escape", None);
+    h.dispatch(&mut vcx, "undo", None);
+    assert_eq!(
+        h.cell(&vcx, 0, "strike"),
+        "5000",
+        "one undo takes every step back"
+    );
+    assert_eq!(h.cell(&vcx, 1, "strike"), "4800/5200");
+    assert_eq!(h.cell(&vcx, 2, "strike"), "4000");
+    assert!(!can_undo(&h, &vcx), "the steps were one entry");
+}
+
+#[gpui::test]
+fn escape_rolls_every_step_back(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    step_setup(&h, &mut vcx);
+    h.dispatch(&mut vcx, "insert_up_big", None);
+    h.dispatch(&mut vcx, "insert_down", None);
+    assert_eq!(h.cell(&vcx, 0, "strike"), "5009");
+    h.dispatch(&mut vcx, "cancel", None);
+    assert_eq!(editor_text(&h, &vcx), None, "the editor closed");
+    assert_eq!(h.cell(&vcx, 0, "strike"), "5000");
+    assert_eq!(h.cell(&vcx, 1, "strike"), "4800/5200");
+    assert_eq!(h.cell(&vcx, 2, "strike"), "4000");
+    assert!(!can_undo(&h, &vcx), "a rolled-back step leaves no history");
+    assert_eq!(notice(&h, &vcx), None, "the step count no longer holds");
+}
+
+#[gpui::test]
+fn escape_after_steps_rolls_back_even_after_prices_arrive(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    answer_all(&h, &mut vcx, 1.0);
+    step_setup(&h, &mut vcx);
+    h.dispatch(&mut vcx, "insert_up", None);
+    assert!(!h.prices().is_empty(), "the step repriced");
+    answer_all(&h, &mut vcx, 2.0); // outcomes for the stepped lines
+    h.dispatch(&mut vcx, "cancel", None);
+    assert_eq!(h.cell(&vcx, 0, "strike"), "5000");
+    assert_eq!(h.cell(&vcx, 1, "strike"), "4800/5200");
+    assert!(!can_undo(&h, &vcx));
+}
+
+#[gpui::test]
+fn a_step_that_zeroes_a_qty_writes_nothing(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "2 SPX Z26 4000 P"]);
+    goto_column(&h, &mut vcx, "qty");
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "edit", None);
+    h.prices(); // drains the opening requests
+    h.dispatch(&mut vcx, "insert_down", None); // 1 → 0 refuses; 2 → 1 must not land either
+    assert_eq!(h.cell(&vcx, 1, "qty"), "2");
+    assert_eq!(h.cell(&vcx, 0, "qty"), "1");
+    assert_eq!(
+        h.footer(&vcx).as_deref(),
+        Some("quantity must not be zero"),
+        "the refusal is shown"
+    );
+    assert_eq!(
+        editor_text(&h, &vcx).as_deref(),
+        Some("2"),
+        "the editor stays"
+    );
+    assert!(h.prices().is_empty(), "nothing repriced");
+}
+
+#[gpui::test]
+fn after_typing_arrows_nudge_only_the_text(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    step_setup(&h, &mut vcx);
+    set_editor(&h, &mut vcx, "4100");
+    h.dispatch(&mut vcx, "insert_up", None);
+    assert_eq!(editor_text(&h, &vcx).as_deref(), Some("4101"));
+    assert_eq!(h.cell(&vcx, 0, "strike"), "5000", "typed: nothing live");
+    assert_eq!(h.cell(&vcx, 2, "strike"), "4000");
+}
+
+#[gpui::test]
+fn typing_after_steps_replaces_them_in_one_undo(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    step_setup(&h, &mut vcx);
+    h.dispatch(&mut vcx, "insert_up", None);
+    set_editor(&h, &mut vcx, "4500");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.cell(&vcx, 0, "strike"), "4500");
+    assert_eq!(h.cell(&vcx, 1, "strike"), "4500");
+    h.dispatch(&mut vcx, "escape", None);
+    h.dispatch(&mut vcx, "undo", None);
+    assert_eq!(
+        h.cell(&vcx, 0, "strike"),
+        "5000",
+        "one undo: the steps were rolled back before the write"
+    );
+    assert_eq!(h.cell(&vcx, 1, "strike"), "4800/5200");
+    assert!(!can_undo(&h, &vcx));
+}
+
+#[gpui::test]
+fn a_block_step_steps_each_block_column_and_counts_what_does_not_step(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    goto_column(&h, &mut vcx, "strike");
+    h.dispatch(&mut vcx, "visual_block", None);
+    h.dispatch(&mut vcx, "right", Some(2)); // strike, type, spot_shift
+    h.dispatch(&mut vcx, "edit", None);
+    assert_eq!(
+        editor_text(&h, &vcx).as_deref(),
+        Some(""),
+        "no own spot shift"
+    );
+    h.dispatch(&mut vcx, "insert_up", None);
+    assert_eq!(
+        h.cell(&vcx, 0, "strike"),
+        "5001",
+        "the block's strike steps"
+    );
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.sheet.shift(0).spot_pct),
+        Some(1.0)
+    );
+    assert_eq!(editor_text(&h, &vcx).as_deref(), Some("1"));
+    assert_eq!(
+        notice(&h, &vcx).as_deref(),
+        Some("stepped 2 cells +1, skipped 1 (1 not numeric)")
+    );
+    assert_eq!(h.cell(&vcx, 1, "strike"), "4800/5200", "outside the block");
+}
+
+#[gpui::test]
+fn a_rows_step_moves_only_the_cursor_column(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    step_setup(&h, &mut vcx);
+    h.dispatch(&mut vcx, "insert_up", None);
+    let qtys = h.tile.read_with(&vcx, |t, _| {
+        (0..t.sheet.len())
+            .map(|r| t.sheet.qty(r))
+            .collect::<Vec<_>>()
+    });
+    let shifts = h.tile.read_with(&vcx, |t, _| {
+        (0..t.sheet.len())
+            .filter(|&r| t.sheet.is_line(r))
+            .all(|r| t.sheet.shift(r) == Default::default())
+    });
+    assert_eq!(&qtys[..1], [1], "V steps the strike alone");
+    assert_eq!(&qtys[2..], [-5, 5, 1]);
+    assert!(shifts, "no shift stepped");
+}
+
+#[gpui::test]
+fn a_package_qty_step_moves_its_legs_by_the_template_weights(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    let weights = h.tile.read_with(&vcx, |t, _| {
+        crate::core::package::package_qty(&t.sheet, 1).unwrap().1
+    });
+    goto_column(&h, &mut vcx, "qty");
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "down", None); // the 5000 C and the CS package
+    h.dispatch(&mut vcx, "edit", None);
+    assert_eq!(editor_text(&h, &vcx).as_deref(), Some("-5"));
+    h.dispatch(&mut vcx, "insert_up", None);
+    let want: Vec<i64> = weights.iter().map(|w| -4 * w).collect();
+    assert_eq!(leg_qtys(&h, &vcx, 1), want, "the package qty -5 → -4");
+    assert_ne!(
+        leg_qtys(&h, &vcx, 1),
+        [-4, 6],
+        "not each leg stepped on its own"
+    );
+    assert_eq!(h.tile.read_with(&vcx, |t, _| t.sheet.qty(0)), 2, "the line");
+    assert_eq!(editor_text(&h, &vcx).as_deref(), Some("-4"));
+    assert_eq!(notice(&h, &vcx).as_deref(), Some("stepped 3 cells +1"));
+    h.dispatch(&mut vcx, "commit", None);
+    h.dispatch(&mut vcx, "escape", None);
+    h.dispatch(&mut vcx, "undo", None);
+    assert_eq!(leg_qtys(&h, &vcx, 1), [-5, 5], "one undo entry");
+    assert_eq!(h.tile.read_with(&vcx, |t, _| t.sheet.qty(0)), 1);
+    assert!(!can_undo(&h, &vcx));
+}
+
+#[gpui::test]
+fn a_package_in_list_form_is_skipped_by_a_qty_step(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    // Put the CS in list form: its second leg's qty no longer fits.
+    h.dispatch(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "expand", None);
+    h.dispatch(&mut vcx, "down", Some(2));
+    goto_column(&h, &mut vcx, "qty");
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "3");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(leg_qtys(&h, &vcx, 1), [-5, 3]);
+    // The package, then the 5000 C above it, the cursor on the line.
+    h.dispatch(&mut vcx, "top", None);
+    h.dispatch(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "up", None);
+    h.dispatch(&mut vcx, "edit", None);
+    h.dispatch(&mut vcx, "insert_up", None);
+    assert_eq!(leg_qtys(&h, &vcx, 1), [-5, 3], "no leg stepped");
+    assert_eq!(h.tile.read_with(&vcx, |t, _| t.sheet.qty(0)), 2);
+    assert_eq!(
+        notice(&h, &vcx).as_deref(),
+        Some("stepped 1 cell +1, skipped 1 (1 refused)")
+    );
+}
+
+/// No verb reaches the sheet while the editor is open (each closes it
+/// first), so another writer is simulated here; the guard is what keeps
+/// a rollback from undoing that writer's edit.
+#[gpui::test]
+fn escape_after_another_recorded_edit_keeps_the_steps_undoable(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    step_setup(&h, &mut vcx);
+    h.dispatch(&mut vcx, "insert_up", None);
+    // The sheet-wide shift leaves every stepped cell as the step left it:
+    // only the counter can tell this edit happened.
+    let shift = crate::core::sheet::OwnShifts {
+        spot_pct: Some(2.0),
+        ..Default::default()
+    };
+    edit(&h, &mut vcx, Edit::SetSheetShift(shift));
+    let sheet_shift = |h: &Harness, vcx: &VisualTestContext| {
+        h.tile.read_with(vcx, |t, _| t.sheet.sheet_shift().spot_pct)
+    };
+    h.dispatch(&mut vcx, "cancel", None);
+    assert_eq!(h.cell(&vcx, 0, "strike"), "5001", "the steps stay");
+    assert_eq!(sheet_shift(&h, &vcx), Some(2.0));
+    h.dispatch(&mut vcx, "escape", None);
+    h.dispatch(&mut vcx, "undo", None);
+    assert_eq!(h.cell(&vcx, 0, "strike"), "5000", "the steps are one entry");
+    assert_eq!(h.cell(&vcx, 1, "strike"), "4800/5200");
+    assert_eq!(sheet_shift(&h, &vcx), Some(2.0));
+    h.dispatch(&mut vcx, "undo", None);
+    assert_eq!(sheet_shift(&h, &vcx), None);
+}
+
+/// The counter alone misses a sheet write that bypassed the recorded
+/// path; the stepped cells' own values are checked too.
+#[gpui::test]
+fn escape_after_a_stepped_cell_changed_underneath_keeps_the_steps(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    step_setup(&h, &mut vcx);
+    h.dispatch(&mut vcx, "insert_up", None);
+    let other = new_strike(&h, &vcx, 0, 4321.0);
+    h.tile
+        .update(&mut vcx, |t, _| t.sheet.apply(other).map(|_| ()))
+        .unwrap();
+    h.dispatch(&mut vcx, "cancel", None);
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.sheet.shorthand(4)),
+        "SPX Z26 4001 P",
+        "the steps stay"
+    );
+    assert!(can_undo(&h, &vcx), "recorded as one entry");
+}
+
+#[gpui::test]
+fn escape_rearms_the_save_a_mid_step_save_took(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    let seeded = stored(&h).shorthand(0);
+    step_setup(&h, &mut vcx);
+    h.dispatch(&mut vcx, "insert_up", None);
+    settle(&mut vcx, SAVE_IDLE);
+    assert_ne!(
+        stored(&h).shorthand(0),
+        seeded,
+        "a save mid-step took the step"
+    );
+    h.dispatch(&mut vcx, "cancel", None);
+    settle(&mut vcx, SAVE_IDLE);
+    assert_eq!(stored(&h).shorthand(0), seeded, "the rollback saves again");
+}
+
+#[gpui::test]
+fn a_flush_mid_step_saves_the_sheet_without_the_steps(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    let seeded = stored(&h).shorthand(0);
+    step_setup(&h, &mut vcx);
+    h.dispatch(&mut vcx, "insert_up", None);
+    vcx.update(|_, cx| h.factory.flush_all(cx));
+    assert_eq!(
+        stored(&h).shorthand(0),
+        seeded,
+        "a close or quit never persists steps escape would have taken back"
+    );
+}
