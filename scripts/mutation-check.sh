@@ -55,8 +55,8 @@ fi
 
 bak="$(mktemp -t mutate-bak)"
 log="$(mktemp -t mutate-log)"
-# --anchors-only collects (name, file, anchor, package, filter) NUL-separated
-# here and checks them all in one pass at the end.
+# --anchors-only collects (name, file, anchor, replacement, package, filter)
+# NUL-separated here and checks them all in one pass at the end.
 anchors="$(mktemp -t mutate-anchors)"
 in_flight=""
 
@@ -159,9 +159,10 @@ run_mutation() {
     target_flag="--bins"
   fi
   if (( anchors_only )); then
-    # Retain the package and test filter alongside the source anchor so the
-    # final source scan can validate both locations and intended tests.
-    printf '%s\0%s\0%s\0%s\0%s\0' "$name" "$file" "$from" "$pkg" "$filter" >> "$anchors"
+    # Retain the replacement, package and test filter alongside the source
+    # anchor so the final scan can validate locations and intended tests, and
+    # can recognise entries that repeat another's anchor and replacement.
+    printf '%s\0%s\0%s\0%s\0%s\0%s\0' "$name" "$file" "$from" "$to" "$pkg" "$filter" >> "$anchors"
     return 0
   fi
   # A moved or deleted file is a stale entry, reported by name, not a
@@ -21905,135 +21906,6 @@ if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
 if (( anchors_only )); then
-  # Check anchors and test-name filters in one pass with per-file caches.
-  # Missing/ambiguous anchors, invalid filters, and an empty selection fail;
-  # loose filters and overlapping anchors remain warnings.
-  python3 - "$anchors" <<'PY' || exit 1
-import collections, pathlib, re, sys
-
-raw = pathlib.Path(sys.argv[1]).read_bytes() if pathlib.Path(sys.argv[1]).exists() else b""
-fields = raw.split(b"\0")[:-1] if raw else []
-entries = [tuple(f.decode() for f in fields[i:i + 5]) for i in range(0, len(fields), 5)]
-if not entries:
-    print("checked 0 anchors (nothing selected)")
-    sys.exit(1)
-
-FN_DECL = re.compile(r"(?:pub\s*(?:\([^)]*\)\s*)?)?(?:async\s+)?fn\s+([A-Za-z0-9_]+)")
-TEST_ATTR = re.compile(r"^#\[(?:\w+::)*test(\]|\()")
-
-_fn_cache = {}
-
-
-def test_fns(pkg):
-    """Names of test-attributed functions in a package.
-
-    A filter is what cargo is handed, and cargo matches a substring against
-    the test's path. Matching against every `fn` would let a filter naming a
-    plain helper pass, so only functions carrying a `test` attribute count.
-    """
-    if pkg in _fn_cache:
-        return _fn_cache[pkg]
-    names = set()
-    for path in sorted((pathlib.Path("crates") / pkg / "src").rglob("*.rs")):
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            continue
-        saw_test_attr = False
-        for line in lines:
-            stripped = line.strip()
-            declared = FN_DECL.match(stripped)
-            if declared:
-                if saw_test_attr:
-                    names.add(declared.group(1))
-                saw_test_attr = False
-            elif stripped.startswith("#["):
-                if TEST_ATTR.match(stripped):
-                    saw_test_attr = True
-            elif stripped and not stripped.startswith("//"):
-                saw_test_attr = False
-    _fn_cache[pkg] = names
-    return names
-
-
-texts = {}
-stale = ambiguous = bad_filters = loose = 0
-for name, file, anchor, pkg, filt in entries:
-    if file not in texts:
-        try:
-            texts[file] = pathlib.Path(file).read_text(encoding="utf-8")
-        except OSError:
-            texts[file] = None
-    text = texts[file]
-    if text is None:
-        stale += 1
-        print(f"ANCHOR    {name}  <-- file missing: {file}")
-        continue
-    hits = text.count(anchor)
-    if hits == 0:
-        stale += 1
-        print(f"ANCHOR    {name}  <-- anchor no longer matches; mutation is stale")
-    elif hits > 1:
-        ambiguous += 1
-        print(f"AMBIG x{hits}  {name}  <-- anchor matches {hits} times; only the first is mutated")
-    if not filt:
-        continue
-    matched = sorted(n for n in test_fns(pkg) if filt in n)
-    if not matched:
-        bad_filters += 1
-        print(f"FILTER    {name}  <-- '{filt}' matches no test in {pkg}")
-    elif len(matched) > 1 and filt not in matched:
-        # Several function names match the substring but none is the exact
-        # requested name; require an unambiguous detecting-test declaration.
-        bad_filters += 1
-        print(f"FILTERx {len(matched)}  {name}  <-- '{filt}' matches {len(matched)} tests, none of them exactly")
-    elif len(matched) > 1:
-        # The named test does run; the siblings only make the entry slower and
-        # make "which test caught it" unanswerable.
-        loose += 1
-        print(f"FILTER? {len(matched)}  {name}  <-- '{filt}' also matches {len(matched) - 1} sibling test(s)")
-
-# Shared source anchors may carry different replacements. Report the overlap
-# for review without treating it as proof that the mutations are redundant.
-by_anchor = collections.defaultdict(list)
-for name, file, anchor, _pkg, _filt in entries:
-    by_anchor[(file, anchor)].append(name)
-dup_groups = {k: v for k, v in by_anchor.items() if len(v) > 1}
-dup_entries = sum(len(v) for v in dup_groups.values())
-for (file, _anchor), names in sorted(dup_groups.items()):
-    for shadowed_name in names[1:]:
-        print(f"DUP       {shadowed_name}  <-- shares (file, anchor) with {names[0]}")
-
-# An anchor that occurs once but sits inside a longer anchor another entry
-# uses. AMBIG counts occurrences of one anchor and cannot see this.
-anchors_by_file = collections.defaultdict(set)
-for _name, file, anchor, _pkg, _filt in entries:
-    anchors_by_file[file].add(anchor)
-shadowed_anchors = sorted(
-    (file, anchor)
-    for file, anchors in anchors_by_file.items()
-    for anchor in anchors
-    if any(other != anchor and anchor in other for other in anchors)
-)
-example_of = {}
-for name, file, anchor, _pkg, _filt in entries:
-    example_of.setdefault((file, anchor), name)
-for file, anchor in shadowed_anchors:
-    print(f"SHADOW    {example_of[(file, anchor)]}  <-- anchor is a substring of a longer anchor in {file}")
-
-print(f"checked {len(entries)} anchors: {stale} stale, {ambiguous} ambiguous, {bad_filters} bad filters")
-warnings = []
-if loose:
-    warnings.append(f"{loose} loose filters")
-if dup_entries:
-    warnings.append(f"{dup_entries} duplicate anchors in {len(dup_groups)} groups")
-if shadowed_anchors:
-    warnings.append(f"{len(shadowed_anchors)} shadowed anchors")
-if warnings:
-    print(f"  {', '.join(warnings)}")
-    print("  (warnings; see the anchor-uniqueness follow-up)")
-# Shared and overlapping anchors are advisory; only stale/ambiguous locations
-# and invalid test filters fail this check.
-sys.exit(1 if stale or ambiguous or bad_filters else 0)
-PY
+  # Static checks over every selected entry; see scripts/mutation_anchors.py.
+  python3 scripts/mutation_anchors.py "$anchors" || exit 1
 fi
