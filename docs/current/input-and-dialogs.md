@@ -388,9 +388,10 @@ no longer holds that term (gone, or a different term in its place), an edit
 or an empty (removing) commit refuses inline rather than touch whichever term
 now has that index. Escape applies nothing.
 `frame::clear_expression` drops the whole expression layer without a dialog;
-with no expression it does nothing. None of `frame::scope_expression`,
-`frame::add_expression` or `frame::clear_expression` has a default chord; all
-are in the palette. Named expressions have no entry of their own: the Add
+with no expression it does nothing. `frame::add_expression` is bound to
+`mod+x` by default, as `frame::pick` is to `mod+p`; neither
+`frame::scope_expression` nor `frame::clear_expression` has a default chord.
+All three are in the palette. Named expressions have no entry of their own: the Add
 dialog offers them beside typed text, and any expression is named at
 creation or later with `mod+s`.
 

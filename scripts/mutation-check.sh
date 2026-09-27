@@ -16628,6 +16628,14 @@ run_mutation "stack split: mod+s is bound" \
   geode-shell \
   mod_s_splits_the_stack_and_mod_shift_direction_pulls_it_back
 
+run_mutation "add expression: mod+x is bound" \
+  crates/geode-shell/src/defaults.rs \
+  '"mod+x" = "frame::add_expression"
+' \
+  '' \
+  geode-shell \
+  mod_x_opens_the_add_expression_dialog
+
 run_mutation "stack pull: mod+shift+k is bound" \
   crates/geode-shell/src/defaults.rs \
   '"mod+shift+k" = "stack::pull_up"
