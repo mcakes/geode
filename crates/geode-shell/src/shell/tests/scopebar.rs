@@ -814,12 +814,12 @@ fn press_and_drag(vcx: &mut gpui::VisualTestContext, at: gpui::Point<gpui::Pixel
     vcx.run_until_parked();
 }
 
-/// A point on bare title-bar space: left of the grouping readout, level
-/// with the scope field.
+/// A point on bare title-bar space: left of the readout's first control
+/// (the pin glyph), level with the scope field.
 fn bare_title_bar(vcx: &mut gpui::VisualTestContext) -> gpui::Point<gpui::Pixels> {
     let field = vcx.debug_bounds("scope-field").expect("field painted");
-    let readout = vcx.debug_bounds("scope-grouping").expect("readout painted");
-    gpui::point(readout.left() - gpui::px(24.), field.center().y)
+    let first = vcx.debug_bounds("scope-pin").expect("pin glyph painted");
+    gpui::point(first.left() - gpui::px(24.), field.center().y)
 }
 
 /// A drag that starts on a title-bar control belongs to the control —
@@ -845,6 +845,7 @@ fn dragging_from_a_toolbar_control_does_not_move_the_window(cx: &mut gpui::TestA
         "scope-chip-book",
         "scope-pick-chip",
         "scope-grouping",
+        "scope-pin",
     ] {
         let bounds = vcx
             .debug_bounds(selector)

@@ -23994,7 +23994,7 @@ run_mutation "pin: toggling ends the lane's text session" \
   '            f.view_mut(ws).end_scope_session();
             if !f.unpin(ws) {' \
   '            if !f.unpin(ws) {' \
-  geode-shell pinning_mid_session_leaves_the_shared_history_clean
+  geode-shell a_pin_mid_session_ends_the_shared_session
 
 run_mutation "pin: the action reaches the toggle" \
   crates/geode-shell/src/shell/input.rs \

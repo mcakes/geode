@@ -237,7 +237,7 @@ fn unpinning_mid_session_leaves_the_shared_history_clean(cx: &mut gpui::TestAppC
 /// to the pinned lane. A session whose edits returned to their base has
 /// pushed that base; only ending it pops the no-op entry again.
 #[gpui::test]
-fn pinning_mid_session_leaves_the_shared_history_clean(cx: &mut gpui::TestAppContext) {
+fn a_pin_mid_session_ends_the_shared_session(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx, shell, frame) = open_pinnable(cx);
     vcx.update(|window, _| window.activate_window());
     let _ = window;
