@@ -1121,3 +1121,22 @@ fn a_flush_mid_step_saves_the_sheet_without_the_steps(cx: &mut gpui::TestAppCont
         "a close or quit never persists steps escape would have taken back"
     );
 }
+
+#[gpui::test]
+fn a_package_qty_stepping_to_zero_refuses_the_whole_press(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "-1 SPX Z26 4800/5200 CS"]);
+    goto_column(&h, &mut vcx, "qty");
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "down", None); // the line and the package
+    h.dispatch(&mut vcx, "edit", None);
+    assert_eq!(editor_text(&h, &vcx).as_deref(), Some("-1"));
+    let legs = leg_qtys(&h, &vcx, 1);
+    h.dispatch(&mut vcx, "insert_up", None); // the package -1 → 0 refuses
+    assert_eq!(leg_qtys(&h, &vcx, 1), legs);
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.sheet.qty(0)),
+        1,
+        "the line's 1 → 2 does not land either"
+    );
+    assert_eq!(h.footer(&vcx).as_deref(), Some("quantity must not be zero"));
+}
