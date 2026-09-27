@@ -5966,7 +5966,9 @@ source_name = "NPV"
 
     /// A series dataset whose coverage row holds a timestamp past chrono's
     /// range: `from_micros` panics reading it, in the catalog and in a fetch.
-    fn out_of_range_coverage_service() -> (
+    fn out_of_range_coverage_service(
+        fail_once: bool,
+    ) -> (
         tempfile::TempDir,
         crate::handle::DataHandle,
         std::sync::mpsc::Receiver<DataEvent>,
@@ -5993,7 +5995,7 @@ source_name = "NPV"
         adapters.register(Arc::new(FakeFetchAdapter {
             calls: Default::default(),
             catalogue: None,
-            fail_once: false,
+            fail_once,
         }));
         let (tx, rx) = std::sync::mpsc::channel();
         let sink: EventSink = Arc::new(move |e| tx.send(e).is_ok());
@@ -6032,7 +6034,7 @@ source_name = "NPV"
 
     #[test]
     fn a_catalog_over_an_out_of_range_timestamp_answers_err_and_the_loop_serves_on() {
-        let (_d, handle, rx) = out_of_range_coverage_service();
+        let (_d, handle, rx) = out_of_range_coverage_service(false);
         handle
             .catalog(CatalogParams {
                 key: QueryKey(3),
@@ -6059,7 +6061,7 @@ source_name = "NPV"
 
     #[test]
     fn a_fetch_over_an_out_of_range_timestamp_fails_the_pair_and_the_loop_serves_on() {
-        let (_d, handle, rx) = out_of_range_coverage_service();
+        let (_d, handle, rx) = out_of_range_coverage_service(false);
         let now = Utc::now();
         handle
             .fetch(FetchParams {
@@ -6097,6 +6099,72 @@ source_name = "NPV"
             "{fetched:?}"
         );
         still_serves(&handle, &rx);
+        handle.shutdown();
+    }
+
+    /// The failure lands on the source's own lanes, the ones the fetch
+    /// worker and the runner report on: another pair failing and then
+    /// recovering must leave the source failed on the pair the loop could
+    /// not fetch, not report it clean.
+    #[test]
+    fn a_fetch_the_loop_could_not_run_keeps_its_source_failed_past_another_pairs_recovery() {
+        let (_d, handle, rx) = out_of_range_coverage_service(true);
+        let now = Utc::now();
+        let fetch = |identity: &str| {
+            handle
+                .fetch(FetchParams {
+                    key: QueryKey(3),
+                    source: "kdb_hist".into(),
+                    identity: identity.into(),
+                    from: now - chrono::Duration::days(1),
+                    to: now,
+                })
+                .unwrap()
+        };
+        let answered = |identity: &str| {
+            until(&rx, |e| match e {
+                DataEvent::SeriesFetched {
+                    source,
+                    identity: i,
+                    result,
+                } if source == "kdb_hist" && i == identity => Some(result),
+                DataEvent::ThreadStopped { thread, reason } => {
+                    panic!("{thread} stopped: {reason}")
+                }
+                _ => None,
+            })
+        };
+        fetch("SPX");
+        assert!(answered("SPX").is_err());
+        fetch("broken");
+        assert!(answered("broken").is_err());
+        // "broken" recovers on its second ask.
+        fetch("broken");
+        let mut last_health = None;
+        let recovered = until(&rx, |e| match e {
+            DataEvent::Health {
+                source,
+                worst,
+                detail,
+            } if source == "kdb_hist" => {
+                last_health = Some((worst, detail));
+                None
+            }
+            DataEvent::SeriesFetched {
+                source,
+                identity,
+                result,
+            } if source == "kdb_hist" && identity == "broken" => Some(result),
+            DataEvent::ThreadStopped { thread, reason } => panic!("{thread} stopped: {reason}"),
+            _ => None,
+        });
+        assert!(recovered.is_ok(), "{recovered:?}");
+        let (worst, detail) = last_health.expect("the recovery changed the source's health");
+        assert!(
+            matches!(&worst, Health::Failed { reason } if reason.contains("fetch request panicked")),
+            "{worst:?}"
+        );
+        assert!(detail.starts_with("SPX@kdb_hist"), "{detail}");
         handle.shutdown();
     }
 }
