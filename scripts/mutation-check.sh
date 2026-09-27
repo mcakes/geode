@@ -23156,15 +23156,15 @@ run_mutation "pricer package: shifts group by the own value" \
 # A shift group opens for editing on the plain number, not the signed cell.
 run_mutation "pricer package: a shift group edits as its display" \
   crates/geode-pricer/src/core/package.rs \
-  '                Some(v) => (signed(*v, format), plain(*v)),' \
-  '                Some(v) => (signed(*v, format), signed(*v, format)),' \
+  '                    .map(plain)' \
+  '                    .map(|v| signed(v, format))' \
   geode-pricer a_group_opens_for_editing_in_the_line_editors_spelling
 
 # Shifts group by their spelled text: 2.04 and 2.0 both paint +2.0, one part.
 run_mutation "pricer package: shifts group by the unspelled value" \
   crates/geode-pricer/src/core/package.rs \
-  '                |v| spell(v).0,' \
-  '                |v| *v,' \
+  $'                display,\n                |v| (display(v), String::new()),' \
+  $'                |v| *v,\n                |v| (display(v), String::new()),' \
   geode-pricer shifts_spelled_alike_show_once
 
 # A mixed shift cell paints an unset part as a dash, not an empty part.
@@ -23194,6 +23194,34 @@ run_mutation "pricer package: a wrong count quotes the raw parts" \
   '        return Err(format!("{n} value{s}: {}", painted(&gs)));' \
   '        return Err(format!("{n} value{s}: {}", gs.iter().map(|g| g.display.as_str()).collect::<Vec<_>>().join("/")));' \
   geode-pricer a_wrong_count_shows_the_painted_cell
+
+# A part typed back as its group opened is no change for the whole group.
+run_mutation "pricer package: an unchanged part rewrites its group" \
+  crates/geode-pricer/src/core/package.rs \
+  '        if part(i).trim() == g.edit {' \
+  '        if false {' \
+  geode-pricer a_merged_own_and_inherited_group_commits_unchanged_as_no_edit
+
+# A shift group whose legs all inherit opens empty, as the line editor does.
+run_mutation "pricer package: an inherited shift group opens on the sheet value" \
+  crates/geode-pricer/src/core/package.rs \
+  '                    .find_map(|&l| pick(sheet.shift(l)))' \
+  '                    .find_map(|&l| pick(sheet.shift(l)).or(sheet_value))' \
+  geode-pricer an_inherited_shift_opens_empty_and_enter_changes_nothing
+
+# A package cell with no leg the column reads refuses at open.
+run_mutation "pricer package: a barrier cell on vanillas opens empty" \
+  crates/geode-pricer/src/core/package.rs \
+  $'    if gs.is_empty() {\n        return None;' \
+  $'    if false {\n        return None;' \
+  geode-pricer the_editor_opens_on_the_line_editors_spellings
+
+# An underlying with a / would make its package's cell a list.
+run_mutation "pricer package: an underlying may contain a slash" \
+  crates/geode-pricer/src/core/cell.rs \
+  $'            if t.contains(\'/\') {\n                return Err(format!("underlying' \
+  $'            if false {\n                return Err(format!("underlying' \
+  geode-pricer a_bad_commit_is_refused_with_the_reason_and_names_the_text
 
 # Package qty rescales the legs by weight.
 run_mutation "pricer package: package qty sets every leg to q" \

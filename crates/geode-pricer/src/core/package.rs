@@ -158,19 +158,30 @@ pub(crate) fn groups(
         ColumnKind::SpotShift | ColumnKind::VolShift => {
             let pick = shift_pick(kind).expect("a shift column");
             let sheet_value = pick(sheet.sheet_shift());
-            let spell = |v: &Option<f64>| match v {
-                Some(v) => (signed(*v, format), plain(*v)),
-                None => (String::new(), String::new()),
-            };
+            let display = |v: &Option<f64>| v.map(|v| signed(v, format)).unwrap_or_default();
             // Shifts group by their spelled text (spec §2): an own 2.04 and
-            // an inherited 2.0 that both paint `+2.0` are one part.
-            group_by_key(
+            // an inherited 2.0 that both paint `+2.0` are one part. The
+            // edit spelling is set per group below.
+            let mut gs = group_by_key(
                 sheet
                     .children(row)
                     .map(|l| (l, pick(sheet.shift(l)).or(sheet_value))),
-                |v| spell(v).0,
-                spell,
-            )
+                display,
+                |v| (display(v), String::new()),
+            );
+            // The editor opens on an own value only, as the line editor
+            // does: a group whose legs all inherit opens empty, else on its
+            // first own leg's value. Opening on the effective value would
+            // make an unchanged Enter detach inherited legs.
+            for g in &mut gs {
+                g.edit = g
+                    .legs
+                    .iter()
+                    .find_map(|&l| pick(sheet.shift(l)))
+                    .map(plain)
+                    .unwrap_or_default();
+            }
+            gs
         }
         _ => Vec::new(),
     }
@@ -214,9 +225,14 @@ pub fn editor_text(sheet: &Sheet, row: usize, kind: ColumnKind) -> Option<String
     {
         return Some(q.to_string());
     }
+    // No leg the column reads (a barrier column on vanillas): the cell
+    // refuses at open, as a vanilla line's does.
+    let gs = groups(sheet, row, kind, format_for(kind)?);
+    if gs.is_empty() {
+        return None;
+    }
     Some(
-        groups(sheet, row, kind, format_for(kind)?)
-            .iter()
+        gs.iter()
             .map(|g| g.edit.as_str())
             .collect::<Vec<_>>()
             .join("/"),
@@ -276,6 +292,12 @@ pub fn commit(
     let part = |i: usize| -> &str { if parts.len() == 1 { parts[0] } else { parts[i] } };
     let mut edits = Vec::new();
     for (i, g) in gs.iter().enumerate() {
+        // A part typed back as the group opened is no change for the whole
+        // group: a merged shift group (own 2.04, inherited 2.0) must not
+        // rewrite its other legs to the first own value.
+        if part(i).trim() == g.edit {
+            continue;
+        }
         for &leg in &g.legs {
             let edit = crate::core::cell::edit_for(sheet, leg, kind, part(i))?;
             if let Some(edit) = crate::core::cell::changed(sheet, leg, edit) {
@@ -653,5 +675,79 @@ mod tests {
         );
         assert_eq!(editor_text(&s, 0, ColumnKind::Qty).as_deref(), Some("-5"));
         assert_eq!(editor_text(&s, 0, ColumnKind::Price), None);
+        assert_eq!(
+            editor_text(&s, 0, ColumnKind::Barrier),
+            None,
+            "no leg reads a barrier: the editor refuses at open"
+        );
+        assert_eq!(editor_text(&s, 0, ColumnKind::BarrierType), None);
+    }
+
+    /// Commits the text the editor opens on, unchanged.
+    fn enter_unchanged(s: &mut Sheet, name: &str) -> Result<usize, String> {
+        let kind = column(name).unwrap().kind;
+        let opened = editor_text(s, 0, kind).expect("the cell opens");
+        apply(s, 0, name, &opened)
+    }
+
+    #[test]
+    fn an_inherited_shift_opens_empty_and_enter_changes_nothing() {
+        let mut s = sheet_of(&["SPX Z26 7400/7800 CS"]);
+        s.apply(Edit::SetSheetShift(OwnShifts {
+            spot_pct: Some(2.0),
+            vol_pts: None,
+        }))
+        .unwrap();
+        assert_eq!(
+            editor_text(&s, 0, ColumnKind::SpotShift).as_deref(),
+            Some(""),
+            "no leg owns a shift: the line editor's rule"
+        );
+        assert_eq!(
+            enter_unchanged(&mut s, "spot_shift"),
+            Ok(0),
+            "no leg is detached"
+        );
+        assert_eq!(text(&s, 0, "spot_shift").1, CellState::Inherited);
+        assert_eq!(
+            apply(&mut s, 0, "spot_shift", "3"),
+            Ok(2),
+            "a new value sets every leg"
+        );
+    }
+
+    #[test]
+    fn a_merged_own_and_inherited_group_commits_unchanged_as_no_edit() {
+        let mut s = sheet_of(&["SPX Z26 7400/7800 CS"]);
+        s.apply(Edit::SetSheetShift(OwnShifts {
+            spot_pct: Some(2.0),
+            vol_pts: None,
+        }))
+        .unwrap();
+        s.apply(Edit::SetShift {
+            row: 2,
+            shift: OwnShifts {
+                spot_pct: Some(2.04),
+                vol_pts: None,
+            },
+        })
+        .unwrap();
+        assert_eq!(
+            editor_text(&s, 0, ColumnKind::SpotShift).as_deref(),
+            Some("2.04"),
+            "the first leg that owns one"
+        );
+        assert_eq!(
+            enter_unchanged(&mut s, "spot_shift"),
+            Ok(0),
+            "the inherited leg is not rewritten"
+        );
+        assert_eq!(s.shift(1).spot_pct, None);
+        assert_eq!(
+            apply(&mut s, 0, "spot_shift", ""),
+            Ok(1),
+            "empty clears the one own leg"
+        );
+        assert_eq!(s.shift(2).spot_pct, None);
     }
 }

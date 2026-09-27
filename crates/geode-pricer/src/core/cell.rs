@@ -212,6 +212,11 @@ pub(crate) fn edit_for(
             if t.is_empty() || t.contains(char::is_whitespace) {
                 return Err(format!("underlying '{t}': one word"));
             }
+            // `/` separates a package cell's parts: a leg named with one
+            // would make its package's underlying cell unparseable.
+            if t.contains('/') {
+                return Err(format!("underlying '{t}': one word, no /"));
+            }
             let u = t.to_ascii_uppercase();
             Ok(set(row, with_vanilla(i, |v| v.underlying = u)))
         }
@@ -526,6 +531,11 @@ mod tests {
         assert_eq!(
             commit(&s, 0, ColumnKind::Underlying, "S P"),
             Err("underlying 'S P': one word".into())
+        );
+        assert_eq!(
+            commit(&s, 0, ColumnKind::Underlying, "A/B"),
+            Err("underlying 'A/B': one word, no /".into()),
+            "a / would make a package's underlying cell a list"
         );
         assert_eq!(commit(&s, 0, ColumnKind::Price, "1"), Err(READ_ONLY.into()));
         let b = barrier_line();
