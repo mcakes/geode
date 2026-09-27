@@ -21785,6 +21785,30 @@ run_mutation "named expr: the picker requests an unresolved scope" \
   geode-shell \
   the_picker_shows_an_unresolved_named_expression_instead_of_requesting
 
+# The Scopes fold writes only ticked named expressions.
+run_mutation "named expr: the scopes fold writes unticked names" \
+  crates/geode-shell/src/shell/objectdialog/scopes.rs \
+  '                        .filter(|i| i.included)' \
+  '                        .filter(|_| true)' \
+  geode-shell \
+  unticking_every_named_expression_drops_the_key
+
+# A scope's named-expression list may be emptied by unticking.
+run_mutation "named expr: the last named untick is refused" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '                let may_empty = self.fields[field].key == "named";' \
+  '                let may_empty = false;' \
+  geode-shell \
+  unticking_every_named_expression_drops_the_key
+
+# Space on a named expression ticks it rather than opening Values.
+run_mutation "named expr: space on a named row takes the dimensions door" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    if !in_values_stage(shell) && is_scopes(shell) && !on_scopes_named_row(shell) {' \
+  '    if !in_values_stage(shell) && is_scopes(shell) {' \
+  geode-shell \
+  space_on_a_named_expression_never_opens_values
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
