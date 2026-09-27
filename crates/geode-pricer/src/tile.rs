@@ -12,7 +12,7 @@ use crate::core::columns::ColumnKind;
 use crate::core::commands::{self, Command, ShiftField};
 use crate::core::complete::{Completion, Inputs, Write};
 use crate::core::edit::{Edit, EditError, Undo};
-use crate::core::entry::{history, next_place, place_for, target_label};
+use crate::core::entry::{history, landing_place, next_place, place_for, target_label};
 use crate::core::sheet::{Delivered, LineId, Refresh, Sheet};
 use crate::core::shorthand::parse;
 use crate::core::shorthand::render_expiry;
@@ -1088,7 +1088,9 @@ impl PricerTile {
                 return;
             }
         };
-        let at = entry.place;
+        let before = entry.place;
+        // A package typed inside a package lands just after it.
+        let at = landing_place(&self.sheet, before, &spec);
         // Advance the place first so the edit's own rebuild labels what
         // comes next; put it back on a refusal.
         entry.place = next_place(at, &spec);
@@ -1118,7 +1120,7 @@ impl PricerTile {
             }
             Err(e) => {
                 if let Some(entry) = self.entry.as_mut() {
-                    entry.place = at;
+                    entry.place = before;
                     entry.error = Some(e.to_string().into());
                 }
                 self.rebuild(cx);
@@ -5080,21 +5082,39 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
-    fn a_package_typed_at_a_leg_place_is_refused_under_the_field(cx: &mut gpui::TestAppContext) {
+    /// A package cannot hold a package: one typed inside a package lands
+    /// as a root right after it, and the bar carries on from there.
+    #[gpui::test]
+    fn a_package_typed_inside_a_package_lands_after_it(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
         h.dispatch(&mut vcx, "down", None);
         h.dispatch(&mut vcx, "add_below", None); // a package row: its first leg
         assert_eq!(h.entry_label(&vcx).as_deref(), Some("into CS"));
-        typed(&h, &mut vcx, "SPX Z26 4800/5200 CS");
+        typed(&h, &mut vcx, "SPX Z26 4000/4400 PS");
         h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.entry_error(&vcx), None, "not refused");
+        let (roots, legs, cursor_on_new) = h.tile.read_with(&vcx, |t, _| {
+            let roots: Vec<String> = t.sheet.roots().map(|r| t.sheet.shorthand(r)).collect();
+            let legs = t.sheet.children(1).len();
+            let new = t.sheet.roots().nth(2).unwrap();
+            (roots, legs, t.cursor.line == Some(t.sheet.id(new)))
+        });
         assert_eq!(
-            h.entry_error(&vcx).as_deref(),
-            Some("a package cannot hold a package")
+            roots,
+            [
+                "SPX Z26 5000 C",
+                "-5 SPX Z26 4800/5200 CS",
+                "SPX Z26 4000/4400 PS",
+                "SPX Z26 4000 P",
+            ],
+            "after the enclosing package, before the next root"
         );
+        assert_eq!(legs, 2, "the enclosing package's legs are untouched");
+        assert!(cursor_on_new, "the cursor is on the new package");
         assert_eq!(
             h.entry_label(&vcx).as_deref(),
-            Some("into CS"),
-            "the place is restored"
+            Some("after SPX Z26 4000/4400 PS"),
+            "the bar carries on after it"
         );
         assert_eq!(h.mode(&mut vcx), "insert");
     }
