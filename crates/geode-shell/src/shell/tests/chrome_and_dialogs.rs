@@ -271,7 +271,7 @@ fn settings_open_opens_the_modal(cx: &mut gpui::TestAppContext) {
     });
 
     assert!(
-        shell.read_with(&cx, |shell, _| shell.modal.is_none()),
+        shell.read_with(&cx, |shell, _| !shell.modal_open()),
         "sanity: no modal is open before dispatch"
     );
     let quads_before = cx.update(|window, _cx| window.painted_quads().len());
@@ -283,7 +283,7 @@ fn settings_open_opens_the_modal(cx: &mut gpui::TestAppContext) {
     });
 
     assert!(
-        shell.read_with(&cx, |shell, _| shell.modal.is_some()),
+        shell.read_with(&cx, |shell, _| shell.modal_open()),
         "settings::open should have set ShellView's own modal state"
     );
 
@@ -348,15 +348,15 @@ fn mod_comma_keystroke_opens_the_settings_modal(cx: &mut gpui::TestAppContext) {
     cx.simulate_keystrokes("ctrl-,");
 
     assert!(
-        shell.read_with(&cx, |shell, _| shell.modal.is_some()),
+        shell.read_with(&cx, |shell, _| shell.modal_open()),
         "ctrl-, (settings::open) should have opened the settings modal"
     );
 }
 
 /// While settings is open, shell chords must not reach the workspace matcher. The
-/// fixture's `ctrl+v` must leave the tile layout unchanged, and `ctrl+k` must not open
-/// a palette through its earlier intercept. Modal painting alone does not prevent raw
-/// key events from reaching `ShellView`.
+/// fixture's `ctrl+v` must leave the tile layout unchanged. `ctrl+k` is the one
+/// non-dialog chord that passes: the palette opens over the dialog without closing
+/// it. Modal painting alone does not prevent raw key events from reaching `ShellView`.
 #[gpui::test]
 fn modal_open_swallows_shell_chords(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
@@ -389,7 +389,7 @@ fn modal_open_swallows_shell_chords(cx: &mut gpui::TestAppContext) {
     // has to guard against.
     cx.simulate_keystrokes("ctrl-,");
     assert!(
-        shell.read_with(&cx, |shell, _| shell.modal.is_some()),
+        shell.read_with(&cx, |shell, _| shell.modal_open()),
         "sanity: ctrl-, should have opened the settings modal"
     );
 
@@ -405,12 +405,12 @@ fn modal_open_swallows_shell_chords(cx: &mut gpui::TestAppContext) {
 
     cx.simulate_keystrokes("ctrl-k");
     assert!(
-        shell.read_with(&cx, |shell, _| shell.palette.is_none()),
-        "ctrl+k (palette::toggle) must not open the command palette while \
-         the settings modal is open"
+        shell.read_with(&cx, |shell, _| shell.palette.is_some()),
+        "ctrl+k (palette::toggle) opens the command palette over the \
+         settings modal"
     );
     assert!(
-        shell.read_with(&cx, |shell, _| shell.modal.is_some()),
+        shell.read_with(&cx, |shell, _| shell.modal_open()),
         "the settings modal should still be open — nothing here should \
          have closed it"
     );
@@ -450,13 +450,13 @@ fn escape_keystroke_closes_the_modal(cx: &mut gpui::TestAppContext) {
 
     cx.simulate_keystrokes("ctrl-,");
     assert!(
-        shell.read_with(&cx, |shell, _| shell.modal.is_some()),
+        shell.read_with(&cx, |shell, _| shell.modal_open()),
         "sanity: ctrl-, should have opened the settings modal"
     );
 
     cx.simulate_keystrokes("escape");
     assert!(
-        shell.read_with(&cx, |shell, _| shell.modal.is_none()),
+        shell.read_with(&cx, |shell, _| !shell.modal_open()),
         "escape should have closed the modal"
     );
 }
@@ -497,7 +497,7 @@ fn the_settings_dialog_opens_in_normal_mode_and_letters_do_not_type(cx: &mut gpu
         "a bare letter in normal mode must not reach the filter"
     );
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_some()),
+        shell.read_with(&cx, |s, _| s.modal_open()),
         "and the dialog is still open (a sanity check — the modal branch \
          returns whether or not the key was claimed, so this cannot tell \
          Drop from PassThrough; `route`'s own pure test pins that)"
@@ -595,7 +595,7 @@ fn settings_escape_walks_the_ladder_one_rung_at_a_time(cx: &mut gpui::TestAppCon
         "the second escape clears the query"
     );
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_some()),
+        shell.read_with(&cx, |s, _| s.modal_open()),
         "and does not close"
     );
     // The cleared query must have reached the Input too, not just the
@@ -612,7 +612,7 @@ fn settings_escape_walks_the_ladder_one_rung_at_a_time(cx: &mut gpui::TestAppCon
 
     cx.simulate_keystrokes("escape");
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_none()),
+        shell.read_with(&cx, |s, _| !s.modal_open()),
         "the third closes"
     );
 }
@@ -646,7 +646,7 @@ fn settings_escape_puts_back_the_query_filter_mode_was_entered_with(cx: &mut gpu
         "the field follows the restored query"
     );
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_some()),
+        shell.read_with(&cx, |s, _| s.modal_open()),
         "reverting a search never closes the dialog"
     );
 }
@@ -1274,7 +1274,7 @@ fn enter_does_nothing_in_the_settings_dialog(cx: &mut gpui::TestAppContext) {
             shell.font_size, before,
             "an unclaimed key must not step the value in normal mode"
         );
-        assert!(shell.modal.is_some(), "and must not close the dialog");
+        assert!(shell.modal_open(), "and must not close the dialog");
     });
 
     cx.simulate_keystrokes("/");
@@ -1285,7 +1285,7 @@ fn enter_does_nothing_in_the_settings_dialog(cx: &mut gpui::TestAppContext) {
             shell.font_size, before,
             "enter must not step the value in filter mode"
         );
-        assert!(shell.modal.is_some(), "and must not close the dialog");
+        assert!(shell.modal_open(), "and must not close the dialog");
     });
 }
 
@@ -1314,7 +1314,7 @@ fn enter_is_reserved_and_leaves_the_settings_dialog_untouched(cx: &mut gpui::Tes
             state.query.clone(),
             state.selected,
             shell.find_style,
-            shell.modal.is_some(),
+            shell.modal_open(),
         )
     });
     assert!(
@@ -1339,7 +1339,7 @@ fn escape_closes_the_settings_dialog(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
     cx.simulate_keystrokes("escape");
     shell.read_with(&cx, |shell, _| {
-        assert!(shell.modal.is_none());
+        assert!(!shell.modal_open());
         assert!(shell.settings.is_none(), "close_modal clears dialog state");
     });
     assert!(
@@ -1383,7 +1383,7 @@ fn backdrop_click_closes_the_modal(cx: &mut gpui::TestAppContext) {
 
     cx.simulate_keystrokes("ctrl-,");
     assert!(
-        shell.read_with(&cx, |shell, _| shell.modal.is_some()),
+        shell.read_with(&cx, |shell, _| shell.modal_open()),
         "sanity: ctrl-, should have opened the settings modal"
     );
     cx.update(|window, cx| {
@@ -1397,7 +1397,7 @@ fn backdrop_click_closes_the_modal(cx: &mut gpui::TestAppContext) {
     );
 
     assert!(
-        shell.read_with(&cx, |shell, _| shell.modal.is_none()),
+        shell.read_with(&cx, |shell, _| !shell.modal_open()),
         "a mouse-down on the backdrop, well outside the centered panel, \
          should have closed the modal"
     );
@@ -1442,7 +1442,7 @@ fn panel_click_does_not_close_the_modal(cx: &mut gpui::TestAppContext) {
         let _ = window.draw(cx);
     });
     assert!(
-        shell.read_with(&cx, |shell, _| shell.modal.is_some()),
+        shell.read_with(&cx, |shell, _| shell.modal_open()),
         "sanity: ctrl-, should have opened the settings modal"
     );
 
@@ -1457,7 +1457,7 @@ fn panel_click_does_not_close_the_modal(cx: &mut gpui::TestAppContext) {
     cx.simulate_mouse_down(inside_panel, MouseButton::Left, gpui::Modifiers::none());
 
     assert!(
-        shell.read_with(&cx, |shell, _| shell.modal.is_some()),
+        shell.read_with(&cx, |shell, _| shell.modal_open()),
         "a mouse-down inside the panel must not close the modal"
     );
 }
@@ -1512,7 +1512,7 @@ fn settings_content_paints_with_a_meaningful_height(cx: &mut gpui::TestAppContex
         let _ = window.draw(cx);
     });
     assert!(
-        shell.read_with(&cx, |shell, _| shell.modal.is_some()),
+        shell.read_with(&cx, |shell, _| shell.modal_open()),
         "sanity: ctrl-, should have opened the settings modal"
     );
 
@@ -2359,7 +2359,7 @@ fn modal_open_through_the_utility_clears_a_pending_sequence(cx: &mut gpui::TestA
     });
 
     assert!(
-        shell.read_with(&cx, |shell, _| shell.modal.is_some()),
+        shell.read_with(&cx, |shell, _| shell.modal_open()),
         "settings::open should have opened the modal"
     );
     assert!(
@@ -2415,9 +2415,14 @@ fn open_shell_dialog_closes_an_open_palette(cx: &mut gpui::TestAppContext) {
 
     cx.update(|window, cx| {
         shell.update(cx, |shell, cx| {
-            dialog::open_shell_dialog(shell, window, cx, "Test modal", |_shell, _window, _cx| {
-                div().into_any_element()
-            });
+            dialog::open_shell_dialog(
+                shell,
+                window,
+                cx,
+                dialog::DialogKind::Plain,
+                "Test modal",
+                |_shell, _window, _cx| div().into_any_element(),
+            );
         });
     });
 
@@ -2426,7 +2431,7 @@ fn open_shell_dialog_closes_an_open_palette(cx: &mut gpui::TestAppContext) {
         "open_shell_dialog should have closed the open palette"
     );
     assert!(
-        shell.read_with(&cx, |shell, _| shell.modal.is_some()),
+        shell.read_with(&cx, |shell, _| shell.modal_open()),
         "open_shell_dialog should have set ShellView's own modal state"
     );
 }

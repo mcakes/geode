@@ -2237,9 +2237,9 @@ run_mutation "keybindings: d performs its write without acknowledging it" \
 # is open the root must carry a context the reclaim names.
 run_mutation "dialog: tab escapes the modal in normal mode" \
   crates/geode-shell/src/shell/render.rs \
-  '            .key_context(if self.modal.is_some() {
+  '            .key_context(if self.modal_open() {
                 "GeodeShell GeodeModalOpen"' \
-  '            .key_context(if self.modal.is_some() {
+  '            .key_context(if self.modal_open() {
                 "GeodeModalUnreclaimed"' \
   geode-shell \
   tab_in_normal_mode_leaves_focus_on_the_shell_root
@@ -2514,8 +2514,20 @@ run_mutation "hosting: a closed tile drops its occupant" \
 
 run_mutation "field chords: a modified keystroke in the focused field dispatches its shell binding" \
   crates/geode-shell/src/shell/input.rs \
-  '                && ks.mods.is_chord()' \
-  '                && false' \
+  '            .filter_input
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window)
+        {
+            if let Some(ks) = convert_keystroke(&event.keystroke)
+                && ks.mods.is_chord()' \
+  '            .filter_input
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window)
+        {
+            if let Some(ks) = convert_keystroke(&event.keystroke)
+                && false' \
   geode-shell \
   a_chord_typed_into_the_focused_field_dispatches_and_a_shifted_letter_types
 
@@ -2528,8 +2540,14 @@ run_mutation "field chords: shift alone is typing, not a chord" \
 
 run_mutation "field chords: resolved against the workspace context alone, never the focused tile's" \
   crates/geode-shell/src/shell/input.rs \
-  '                let stack = [KeyContext::new("workspace")];' \
-  '                let stack = self.context_stack(cx);' \
+  '            if let Some(ks) = convert_keystroke(&event.keystroke)
+                && ks.mods.is_chord()
+            {
+                let stack = [KeyContext::new("workspace")];' \
+  '            if let Some(ks) = convert_keystroke(&event.keystroke)
+                && ks.mods.is_chord()
+            {
+                let stack = self.context_stack(cx);' \
   geode-shell \
   a_chord_in_the_focused_tiles_own_context_does_not_fire_from_the_field
 
@@ -2553,6 +2571,191 @@ run_mutation "field chords: a dispatched chord reflects the frame's text back in
   '' \
   geode-shell \
   a_scope_undo_chord_from_the_field_reflects_the_frames_text_into_it
+
+# ---- dialog stack: pop one level, route by the top kind, chords and palette
+#
+# A pop that clears every kind shows up only when a second dialog was open, and
+# routing by "first Some field" shows up only when two states coexist. Neither
+# single-dialog test can see these.
+
+run_mutation "dialog stack: close clears the whole stack instead of the top" \
+  crates/geode-shell/src/shell/mod.rs \
+  '        if let Some(top) = self.modals.pop() {' \
+  '        if let Some(top) = self.modals.drain(..).next() {' \
+  geode-shell \
+  a_pushed_dialog_owns_the_shared_input_until_it_pops
+
+run_mutation "dialog stack: typed queries route to the Object state regardless of the top" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            match view.top_kind() {' \
+  '            match view.top_kind().map(|_| dialog::DialogKind::Object) {' \
+  geode-shell \
+  a_pushed_dialog_owns_the_shared_input_until_it_pops
+
+run_mutation "dialog stack: sync writes the Object query whatever is on top" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '    let (mode, listening, query) = match shell.top_kind() {' \
+  '    let (mode, listening, query) = match shell.top_kind().map(|_| DialogKind::Object) {' \
+  geode-shell \
+  a_pushed_dialog_owns_the_shared_input_until_it_pops
+
+run_mutation "dialog stack: a pop does not restore the covered input" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '    if let Some(saved) = top.saved_input.take() {' \
+  '    if let Some(saved) = top.saved_input.take().filter(|_| false) {' \
+  geode-shell \
+  a_covered_expression_dialog_gets_its_typed_text_back
+
+run_mutation "dialog stack: a covered expression field refreshes from the top dialog's text" \
+  crates/geode-shell/src/shell/expr_suggest.rs \
+  '            Some(state.expr.get_or_insert_with(ExprCompletion::default))
+        }
+        _ => None,' \
+  '            Some(state.expr.get_or_insert_with(ExprCompletion::default))
+        }
+        _ => view.scope_expr_dialog.as_mut().map(|s| &mut s.completion),' \
+  geode-shell \
+  a_covered_expression_dialog_gets_its_typed_text_back
+
+run_mutation "dialog stack: a kind already in the stack is pushed again" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '    let Some(at) = view.modals.iter().position(|m| m.kind == kind) else {' \
+  '    let Some(at) = view.modals.iter().position(|_| false) else {' \
+  geode-shell \
+  a_kind_already_in_the_stack_is_refused
+
+run_mutation "dialog stack: a nested push overwrites the base's return-to-field flag" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '    if view.modals.is_empty() {' \
+  '    if true {' \
+  geode-shell \
+  the_last_pop_returns_to_the_field_after_a_palette_mid_stack
+
+run_mutation "dialog stack: a palette over the stack records the return-to-field flag" \
+  crates/geode-shell/src/shell/palette_ctl.rs \
+  '        if !self.modal_open() {' \
+  '        if true {' \
+  geode-shell \
+  the_last_pop_returns_to_the_field_after_a_palette_mid_stack
+
+run_mutation "dialog stack: every chord reaches through a dialog" \
+  crates/geode-shell/src/shell/input.rs \
+  '                        && dialog::opens_dialog(&action)' \
+  '                        && true' \
+  geode-shell \
+  a_non_dialog_chord_is_inert_behind_a_dialog
+
+# Task 4's render guard: an open dialog must own `pending_focus_restore`'s
+# focus hand-off, or a reload that closes a palette mid-stack leaves the
+# keyboard on the shell root instead of the top dialog. Mutated to always
+# skip the modal branch, `a_reload_closing_a_palette_over_the_stack_
+# refocuses_the_top_dialog` sees focus land on the root.
+run_mutation "dialog stack: render hands focus to the root under a dialog" \
+  crates/geode-shell/src/shell/render.rs \
+  '            if self.modal_open() {' \
+  '            if false {' \
+  geode-shell \
+  a_reload_closing_a_palette_over_the_stack_refocuses_the_top_dialog
+
+# ---- dialog stack: Normal-mode catch-alls decline an unrecognized chord
+#
+# Ruling 2026-09-26 (Task 3): a Normal-mode surface with a bare-key
+# catch-all must still let an unrecognized ctrl/alt/cmd chord fall through
+# to the shell, or a dialog-opening chord can never reach the shell while
+# that surface is on top. Each site's own claim (a bare key stays claimed)
+# is unaffected; only the chord's decline is mutated back to a claim.
+
+run_mutation "dialog stack: the object dialog's browse stage claims a chord instead of declining it" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '            // A bare key with no meaning is claimed and dropped: normal
+            // mode does nothing with it rather than falling through to the
+            // shell still listening underneath the modal. A chord
+            // (ctrl/alt/cmd) this vocabulary does not name is declined
+            // instead — that decline is how the shell reaches a
+            // dialog-opening action stacked over this dialog.
+            return !ks.mods.is_chord();' \
+  '            // A bare key with no meaning is claimed and dropped: normal
+            // mode does nothing with it rather than falling through to the
+            // shell still listening underneath the modal. A chord
+            // (ctrl/alt/cmd) this vocabulary does not name is declined
+            // instead — that decline is how the shell reaches a
+            // dialog-opening action stacked over this dialog.
+            return true;' \
+  geode-shell \
+  a_dialog_chord_pushes_over_an_open_dialog
+
+run_mutation "dialog stack: the object dialog's edit stage claims a chord instead of declining it" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        // See the matching branch in `handle_browse_key`: a bare key stays
+        // claimed, a chord is declined so a dialog-opening action stacked
+        // over this dialog can reach the shell.
+        return !ks.mods.is_chord();' \
+  '        // See the matching branch in `handle_browse_key`: a bare key stays
+        // claimed, a chord is declined so a dialog-opening action stacked
+        // over this dialog can reach the shell.
+        return true;' \
+  geode-shell \
+  a_dialog_chord_pushes_over_the_object_edit_stage
+
+run_mutation "dialog stack: keybindings Normal mode claims a chord instead of declining it" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '            // A bare key with no meaning is claimed and dropped, same as
+            // browse mode elsewhere. A chord is declined instead: capture
+            // (`state.listening`, above) already claims every key when a
+            // binding is being recorded, so this decline is reached only
+            // outside capture, and is how the shell reaches a
+            // dialog-opening action stacked over this dialog.
+            return !ks.mods.is_chord();' \
+  '            // A bare key with no meaning is claimed and dropped, same as
+            // browse mode elsewhere. A chord is declined instead: capture
+            // (`state.listening`, above) already claims every key when a
+            // binding is being recorded, so this decline is reached only
+            // outside capture, and is how the shell reaches a
+            // dialog-opening action stacked over this dialog.
+            return true;' \
+  geode-shell \
+  a_dialog_chord_pushes_over_keybindings_in_normal_mode
+
+run_mutation "dialog stack: settings route claims a chord instead of declining it" \
+  crates/geode-shell/src/shell/settings_view.rs \
+  '            None if ks.mods.is_chord() => KeyAction::PassThrough,' \
+  '            None if ks.mods.is_chord() => KeyAction::Drop,' \
+  geode-shell \
+  a_dialog_chord_pushes_over_settings_in_normal_mode
+
+# ---- final review (2026-09-27): the palette catcher over a dialog stack,
+# and palette-run transient chrome refused over a dialog
+#
+# gpui fires `on_mouse_down` for every hovered hitbox, not only the topmost.
+# Without `occlude()`, a click on the full-window palette click-catcher also
+# reaches whatever it covers: the modal backdrop beneath it (popping the
+# dialog) or a dialog row (committing or opening it).
+run_mutation "dialog stack: the palette click-catcher does not occlude an open dialog" \
+  crates/geode-shell/src/shell/render.rs \
+  '                        .when(self.modal_open(), |d| d.occlude())' \
+  '                        .when(false, |d| d.occlude())' \
+  geode-shell \
+  a_click_outside_the_palette_over_a_dialog_closes_only_the_palette
+
+# The palette reaches every action (ruling 5), including three that would
+# open real transient chrome behind the stack; they must be refused rather
+# than left running unreachable behind it.
+run_mutation "dialog stack: transient chrome runs behind the stack instead of being refused" \
+  crates/geode-shell/src/shell/input.rs \
+  '        if self.modal_open()
+            && matches!(
+                action.0.as_str(),
+                "tile::command_line" | "tile::find" | "stack::pick"
+            )
+        {' \
+  '        if false
+            && matches!(
+                action.0.as_str(),
+                "tile::command_line" | "tile::find" | "stack::pick"
+            )
+        {' \
+  geode-shell \
+  palette_transient_chrome_is_refused_over_a_dialog
 
 # ---- overlays return focus to the field they opened from (ruling 2026-09-12)
 
@@ -5013,8 +5216,8 @@ run_mutation "objectdialog: the browse list ignores the query it displays" \
 # records for `settings`.
 run_mutation "objectdialog: closing the modal leaves the dialog's state behind" \
   crates/geode-shell/src/shell/mod.rs \
-  '        self.object_dialog = None;' \
-  '' \
+  '            DialogKind::Object => self.object_dialog = None,' \
+  '            DialogKind::Object => {}' \
   geode-shell \
   slash_filters_and_escape_walks_the_ladder
 
@@ -7002,9 +7205,9 @@ run_mutation "add-filter: the menu's own close returns focus to the field" \
 # menu's record so closing that dialog returns to the field.
 run_mutation "add-filter: a row's dialog returns focus to the field" \
   crates/geode-shell/src/shell/addfilter.rs \
-  '            if self.modal.is_some() {
+  '            if self.modal_open() {
                 self.overlay_return_to_filter = true;' \
-  '            if self.modal.is_some() {
+  '            if self.modal_open() {
                 self.overlay_return_to_filter = false;' \
   geode-shell \
   focus_returns_to_the_text_field_after_the_menu
@@ -8036,8 +8239,8 @@ run_mutation "fullscreen: the double-click door runs ahead of the drag arm" \
 # restore, the frame after the press hands the keyboard to the shell root.
 run_mutation "focus: a tile in insert mode keeps focus through the mouse-down restore" \
   crates/geode-shell/src/shell/render.rs \
-  '            if !self.occupant_holds_insert_focus(window, cx) {' \
-  '            if true {' \
+  '            } else if !self.occupant_holds_insert_focus(window, cx) {' \
+  '            } else if true {' \
   geode-shell a_tile_in_insert_mode_keeps_focus_through_the_mouse_down_restore
 
 # Review C-1 on that rule: the skip keys on OWNERSHIP — the focused tile's
@@ -8630,9 +8833,9 @@ run_mutation "dialog: a click on the frozen filter row enters filter mode" \
 # reading `filter`.
 run_mutation "dialog: the frozen-row click cancels a capture in progress" \
   crates/geode-shell/src/shell/dialog.rs \
-  '        state.listening = None;
-        dialogmode::enter_filter(&mut state.mode, &mut state.filter_entry_query, &state.query);' \
-  '        dialogmode::enter_filter(&mut state.mode, &mut state.filter_entry_query, &state.query);' \
+  '            state.listening = None;
+            dialogmode::enter_filter(&mut state.mode, &mut state.filter_entry_query, &state.query);' \
+  '            dialogmode::enter_filter(&mut state.mode, &mut state.filter_entry_query, &state.query);' \
   geode-shell clicking_the_frozen_filter_row_while_listening_cancels_the_capture
 
 # ---- Task 8: the object dialog to the mock (§18.1) ---------------------
@@ -9447,8 +9650,8 @@ run_mutation "settings: filter mode drops printable keys instead of passing them
 # field blurred exactly as normal mode would.
 run_mutation "dialog: sync_dialog_text ignores the settings dialog" \
   crates/geode-shell/src/shell/dialog.rs \
-  '    } else if let Some(state) = shell.settings.as_ref() {' \
-  '    } else if let Some(state) = shell.settings.as_ref().filter(|_| false) {' \
+  '            let Some(state) = shell.settings.as_ref() else {' \
+  '            let Some(state) = shell.settings.as_ref().filter(|_| false) else {' \
   geode-shell \
   slash_enters_settings_filter_mode_and_typing_narrows
 
@@ -9456,8 +9659,8 @@ run_mutation "dialog: sync_dialog_text ignores the settings dialog" \
 # settings state, or the row paints as typeable and does nothing.
 run_mutation "dialog: enter_filter_by_mouse ignores the settings dialog" \
   crates/geode-shell/src/shell/dialog.rs \
-  '    } else if let Some(state) = shell.settings.as_mut() {' \
-  '    } else if let Some(state) = shell.settings.as_mut().filter(|_| false) {' \
+  '            let Some(state) = shell.settings.as_mut() else {' \
+  '            let Some(state) = shell.settings.as_mut().filter(|_| false) else {' \
   geode-shell \
   clicking_the_settings_frozen_filter_row_enters_filter_mode
 
@@ -14677,18 +14880,12 @@ run_mutation "asof: a DST-gap custom value is refused" \
 # the one under the highlight.
 run_mutation "asof: sync_dialog_text reconciles the shared Input" \
   crates/geode-shell/src/shell/dialog.rs \
-  '    if let Some(state) = shell.as_of_dialog.as_ref() {
-        let query = state.query();
-        let input = shell.dialog_input.clone();
-        if input.read(cx).text() != query {
-            input.update(cx, |i, cx| i.set_value(query, window, cx));
-        }
-        input.read(cx).focus_handle(cx).focus(window, cx);
-        return;
-    }' \
-  '    if false && shell.as_of_dialog.is_some() {
-        return;
-    }' \
+  '            let Some(state) = shell.as_of_dialog.as_ref() else {
+                return;
+            };' \
+  '            let Some(state) = shell.as_of_dialog.as_ref().filter(|_| false) else {
+                return;
+            };' \
   geode-shell \
   tab_then_escape_then_down_then_enter_commits_the_highlighted_row
 
@@ -15004,16 +15201,14 @@ run_mutation "objectdialog: the chip door refuses a read-only domain (spec §20.
 # the `Input` over the open question.
 run_mutation "dialog: the keybindings frozen-row click is dropped while a confirm is armed (spec §20.1)" \
   crates/geode-shell/src/shell/dialog.rs \
-  '    if let Some(state) = shell.keybindings.as_mut() {
-        // Keep the confirmation'"'"'s exclusive input route until it is answered.
-        if state.confirm.is_some() {
-            return;
-        }' \
-  '    if let Some(state) = shell.keybindings.as_mut() {
-        // Keep the confirmation'"'"'s exclusive input route until it is answered.
-        if false {
-            return;
-        }' \
+  '            // Keep the confirmation'"'"'s exclusive input route until it is answered.
+            if state.confirm.is_some() {
+                return;
+            }' \
+  '            // Keep the confirmation'"'"'s exclusive input route until it is answered.
+            if false {
+                return;
+            }' \
   geode-shell \
   a_row_click_while_a_confirm_is_armed_is_dropped
 
@@ -15022,18 +15217,16 @@ run_mutation "dialog: the keybindings frozen-row click is dropped while a confir
 # the click enters filter mode under a pending `d`/`r`.
 run_mutation "dialog: the object-dialog frozen-row click is dropped while a confirm is armed (spec §20.1)" \
   crates/geode-shell/src/shell/dialog.rs \
-  '    } else if let Some(state) = shell.object_dialog.as_mut() {
-        // `build_edit` still paints the frozen row during confirmation, so guard
-        // the transition here as well as in keyboard routing.
-        if state.confirm.is_some() {
-            return;
-        }' \
-  '    } else if let Some(state) = shell.object_dialog.as_mut() {
-        // `build_edit` still paints the frozen row during confirmation, so guard
-        // the transition here as well as in keyboard routing.
-        if false {
-            return;
-        }' \
+  '            // `build_edit` still paints the frozen row during confirmation, so guard
+            // the transition here as well as in keyboard routing.
+            if state.confirm.is_some() {
+                return;
+            }' \
+  '            // `build_edit` still paints the frozen row during confirmation, so guard
+            // the transition here as well as in keyboard routing.
+            if false {
+                return;
+            }' \
   geode-shell \
   an_edit_row_click_is_dropped_while_a_confirm_is_armed
 

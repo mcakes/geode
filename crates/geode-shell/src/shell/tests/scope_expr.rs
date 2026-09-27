@@ -20,7 +20,7 @@ fn expr_scope(text: &str) -> Scope {
 #[gpui::test]
 fn typing_an_expression_and_enter_sets_it_through_set_scope(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = dialog_test_shell(cx, "frame::scope_expression");
-    assert!(shell.read_with(&vcx, |s, _| s.modal.is_some()));
+    assert!(shell.read_with(&vcx, |s, _| s.modal_open()));
     assert!(dialog_filter_is_focused(&shell, &mut vcx));
     vcx.simulate_input("book = 'BK000'");
     vcx.simulate_keystrokes("enter");
@@ -33,7 +33,7 @@ fn typing_an_expression_and_enter_sets_it_through_set_scope(cx: &mut gpui::TestA
             .map(ToString::to_string)),
         Some("book = 'BK000'".to_string())
     );
-    assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
     dispatch_action(&shell, "frame::scope_undo", &mut vcx);
     assert!(
         frame.read_with(&vcx, |f, _| f.scope().expression.is_none()),
@@ -50,10 +50,7 @@ fn a_parse_error_paints_inline_and_leaves_the_frame_alone(cx: &mut gpui::TestApp
     vcx.simulate_input("book =");
     vcx.simulate_keystrokes("enter");
     vcx.run_until_parked();
-    assert!(
-        shell.read_with(&vcx, |s, _| s.modal.is_some()),
-        "stays open"
-    );
+    assert!(shell.read_with(&vcx, |s, _| s.modal_open()), "stays open");
     assert!(vcx.debug_bounds("scope-expr-error").is_some());
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
     assert!(frame.read_with(&vcx, |f, _| f.scope().expression.is_none()));
@@ -87,7 +84,7 @@ fn the_field_opens_seeded_and_an_empty_commit_clears(cx: &mut gpui::TestAppConte
     });
     vcx.simulate_keystrokes("enter");
     assert!(frame.read_with(&vcx, |f, _| f.scope().expression.is_none()));
-    assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
 }
 
 /// A click on the toolbar's expression chip opens the same dialog as
@@ -131,7 +128,7 @@ fn opened_from_the_text_field_focus_returns_to_it(cx: &mut gpui::TestAppContext)
     dispatch_action(&shell, "frame::scope_expression", &mut vcx);
     vcx.simulate_keystrokes("escape");
     vcx.run_until_parked();
-    assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
     assert!(
         filter_is_focused(&shell, &mut vcx),
         "focus went back to the field"
@@ -299,7 +296,7 @@ fn a_reply_after_close_is_ignored(cx: &mut gpui::TestAppContext) {
         )
     });
     vcx.run_until_parked();
-    assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
 }
 
 /// Add mode narrows by the frame's current expression.
@@ -414,7 +411,7 @@ fn enter_refuses_an_unknown_column(cx: &mut gpui::TestAppContext) {
     vcx.simulate_input("bokk = 'A'");
     vcx.simulate_keystrokes("enter");
     vcx.run_until_parked();
-    assert!(shell.read_with(&vcx, |s, _| s.modal.is_some()));
+    assert!(shell.read_with(&vcx, |s, _| s.modal_open()));
     assert_eq!(
         shell.read_with(&vcx, |s, _| s
             .scope_expr_dialog

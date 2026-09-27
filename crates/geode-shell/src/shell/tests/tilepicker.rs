@@ -53,7 +53,61 @@ fn double_clicking_a_placeholder_opens_the_picker_and_a_pick_fills_it(
 ) {
     let (mut cx, shell, tile) = shell_with_a_placeholder(cx);
     let at = main_tile_point(&mut cx, &shell, tile, 0.5, 0.5);
-    double_click(&mut cx, at, gpui::Modifiers::none());
+    // Drive the two presses of the double-click by hand (rather than the
+    // shared `double_click` helper) so `session_dirty` can be reset
+    // between them. The first press is an ordinary click (click_count 1):
+    // it does not match the door, falls through to the normal tail, and
+    // legitimately marks the session dirty by focusing the (already
+    // focused) tile. Only the *second* press's tail-skip is under test.
+    cx.update(|window, cx| {
+        window.dispatch_event(
+            gpui::PlatformInput::MouseDown(MouseDownEvent {
+                button: MouseButton::Left,
+                position: at,
+                modifiers: gpui::Modifiers::none(),
+                click_count: 1,
+                first_mouse: false,
+            }),
+            cx,
+        );
+        window.dispatch_event(
+            gpui::PlatformInput::MouseUp(MouseUpEvent {
+                button: MouseButton::Left,
+                position: at,
+                modifiers: gpui::Modifiers::none(),
+                click_count: 1,
+            }),
+            cx,
+        );
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    shell.update(&mut cx, |s, _| s.session_dirty = false);
+    cx.update(|window, cx| {
+        window.dispatch_event(
+            gpui::PlatformInput::MouseDown(MouseDownEvent {
+                button: MouseButton::Left,
+                position: at,
+                modifiers: gpui::Modifiers::none(),
+                click_count: 2,
+                first_mouse: false,
+            }),
+            cx,
+        );
+        window.dispatch_event(
+            gpui::PlatformInput::MouseUp(MouseUpEvent {
+                button: MouseButton::Left,
+                position: at,
+                modifiers: gpui::Modifiers::none(),
+                click_count: 2,
+            }),
+            cx,
+        );
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
     cx.run_until_parked();
 
     assert!(is_tile_picker(&shell, &cx), "the tile picker opened");
@@ -68,6 +122,17 @@ fn double_clicking_a_placeholder_opens_the_picker_and_a_pick_fills_it(
         dialog_filter_is_focused(&shell, &mut cx),
         "the field keeps focus through the rest of the double-click"
     );
+    // The door's early return must skip the click-to-focus tail entirely,
+    // not just leave focus looking right: falling through still calls
+    // `focus_main_tile`, which marks the session dirty even though the
+    // tile was already focused. A dialog-aware `pending_focus_restore`
+    // (see `dialog::refocus_top`) now re-focuses this same field either
+    // way, so the focus assertion above no longer catches a skipped
+    // early return on its own — this does.
+    assert!(
+        !shell.read_with(&cx, |s, _| s.session_dirty),
+        "opening the picker is not a workspace-mutating dispatch"
+    );
 
     cx.simulate_input("re");
     cx.simulate_keystrokes("enter");
@@ -76,7 +141,7 @@ fn double_clicking_a_placeholder_opens_the_picker_and_a_pick_fills_it(
         let _ = window.draw(cx);
     });
 
-    assert!(shell.read_with(&cx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&cx, |s, _| !s.modal_open()));
     let tiles = shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles());
     assert_eq!(tiles, vec![tile], "no split: the placeholder was filled");
     assert_eq!(
@@ -128,7 +193,7 @@ fn a_row_click_adds_that_kind(cx: &mut gpui::TestAppContext) {
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    assert!(shell.read_with(&cx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&cx, |s, _| !s.modal_open()));
     assert_eq!(
         shell.read_with(&cx, |s, _| s.occupant_kind(tile)),
         Some("rec")
@@ -253,7 +318,7 @@ fn a_second_click_on_an_unfocused_placeholder_is_a_plain_click(cx: &mut gpui::Te
     });
     cx.run_until_parked();
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_none()),
+        shell.read_with(&cx, |s, _| !s.modal_open()),
         "no picker: the placeholder was not the focused tile"
     );
     assert_eq!(
@@ -275,7 +340,7 @@ fn a_single_click_on_a_placeholder_opens_nothing(cx: &mut gpui::TestAppContext) 
     let at = main_tile_point(&mut cx, &shell, tile, 0.5, 0.5);
     cx.simulate_click(at, gpui::Modifiers::none());
     cx.run_until_parked();
-    assert!(shell.read_with(&cx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&cx, |s, _| !s.modal_open()));
     assert!(shell.read_with(&cx, |s, _| s.choice_dialog.is_none()));
 }
 
@@ -296,7 +361,7 @@ fn a_double_click_on_a_real_tile_or_with_a_modifier_opens_nothing(cx: &mut gpui:
     );
     cx.run_until_parked();
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_none()),
+        shell.read_with(&cx, |s, _| !s.modal_open()),
         "shift+double-click is not the door"
     );
 
@@ -309,7 +374,7 @@ fn a_double_click_on_a_real_tile_or_with_a_modifier_opens_nothing(cx: &mut gpui:
     double_click(&mut cx, at, gpui::Modifiers::none());
     cx.run_until_parked();
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_none()),
+        shell.read_with(&cx, |s, _| !s.modal_open()),
         "a real tile's double-click opens nothing"
     );
 }
@@ -349,7 +414,7 @@ fn double_clicking_the_empty_tree_hint_opens_the_picker_and_a_pick_fills_the_tre
         let _ = window.draw(cx);
     });
 
-    assert!(shell.read_with(&cx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&cx, |s, _| !s.modal_open()));
     let tiles = shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles());
     assert_eq!(tiles.len(), 1, "the pick is the tree's root tile");
     assert_eq!(
@@ -369,7 +434,7 @@ fn a_single_or_modified_click_on_the_empty_tree_hint_opens_nothing(cx: &mut gpui
         .expect("the empty hint painted");
     cx.simulate_click(hint.center(), gpui::Modifiers::none());
     cx.run_until_parked();
-    assert!(shell.read_with(&cx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&cx, |s, _| !s.modal_open()));
     double_click(
         &mut cx,
         hint.center(),
@@ -379,7 +444,7 @@ fn a_single_or_modified_click_on_the_empty_tree_hint_opens_nothing(cx: &mut gpui
         },
     );
     cx.run_until_parked();
-    assert!(shell.read_with(&cx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&cx, |s, _| !s.modal_open()));
     assert!(shell.read_with(&cx, |s, _| {
         s.services.workspaces.active().tree().tiles().is_empty()
     }));
@@ -466,7 +531,7 @@ fn clicking_an_empty_dock_focuses_it_and_double_clicking_adds_into_it(
         "a click on an empty dock focuses it"
     );
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_none()),
+        shell.read_with(&cx, |s, _| !s.modal_open()),
         "a single click opens nothing"
     );
     assert!(

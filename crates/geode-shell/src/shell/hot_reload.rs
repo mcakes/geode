@@ -278,12 +278,22 @@ impl ShellView {
 
             if pickable_changed {
                 self.pickable = pickable_columns(&self.services.config);
-                // An open expression field re-ranks against the new
-                // columns at once, not at its next keystroke.
+                // Every open expression field re-ranks against the new columns
+                // at once, not at its next keystroke — including one covered
+                // by another dialog. `expr_suggest::completion_mut` reaches
+                // only `top_kind()`'s field, so a covered `ScopeExpr` dialog
+                // or a covered `Object` dialog's open expression field is
+                // rebuilt directly here instead, and shows fresh suggestions
+                // the moment it is revealed rather than at its own next edit.
                 self.expr_vocab = std::rc::Rc::new(super::expr_vocab(&self.services.config));
                 let vocab = self.expr_vocab.clone();
-                if let Some(c) = super::expr_suggest::completion_mut(self) {
-                    c.rebuild(&vocab);
+                if let Some(state) = self.scope_expr_dialog.as_mut() {
+                    state.completion.rebuild(&vocab);
+                }
+                if let Some(state) = self.object_dialog.as_mut()
+                    && let Some(expr) = state.expr.as_mut()
+                {
+                    expr.rebuild(&vocab);
                 }
             }
 

@@ -27,7 +27,7 @@ fn terms(frame: &Entity<crate::frame::Frame>, vcx: &gpui::VisualTestContext) -> 
 }
 
 fn modal_title(shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext) -> Option<String> {
-    shell.read_with(vcx, |s, _| s.modal.as_ref().map(|m| m.title.to_string()))
+    shell.read_with(vcx, |s, _| s.top_modal().map(|m| m.title.to_string()))
 }
 
 fn dialog_text(shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext) -> String {
@@ -101,7 +101,7 @@ fn the_plus_menus_expression_row_appends_with_and(cx: &mut gpui::TestAppContext)
     );
     vcx.simulate_keystrokes("enter");
     vcx.run_until_parked();
-    assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
     assert_eq!(terms(&frame, &vcx), vec!["book = 'BK000'", "lhu = 'L1'"]);
     assert!(
         vcx.debug_bounds("scope-expr-chip-1").is_some(),
@@ -119,7 +119,7 @@ fn the_plus_menu_answers_j_k_enter_and_escape(cx: &mut gpui::TestAppContext) {
     vcx.simulate_keystrokes("escape");
     vcx.run_until_parked();
     assert!(shell.read_with(&vcx, |s, _| s.add_filter_menu.is_none()));
-    assert!(shell.read_with(&vcx, |s, _| s.modal.is_none() && s.picker.is_none()));
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open() && s.picker.is_none()));
 
     click(&mut vcx, "scope-pick-chip");
     vcx.simulate_keystrokes("k");
@@ -199,7 +199,7 @@ fn a_terms_close_glyph_drops_only_that_term(cx: &mut gpui::TestAppContext) {
     click(&mut vcx, "scope-expr-chip-close-1");
     assert_eq!(terms(&frame, &vcx), vec!["a = 1", "c = 3"]);
     assert!(
-        shell.read_with(&vcx, |s, _| s.modal.is_none()
+        shell.read_with(&vcx, |s, _| !s.modal_open()
             && s.scope_expr_dialog.is_none()),
         "dropping a term must not also open the dialog its body opens"
     );
@@ -236,7 +236,7 @@ fn a_terms_body_edits_that_term_alone(cx: &mut gpui::TestAppContext) {
     );
     vcx.simulate_keystrokes("enter");
     vcx.run_until_parked();
-    assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
     assert_eq!(
         terms(&frame, &vcx),
         vec!["a = 1", "(b = 2) or (x = 9)", "c = 3"]
@@ -255,10 +255,7 @@ fn a_term_gone_at_commit_refuses_inline(cx: &mut gpui::TestAppContext) {
     });
     vcx.simulate_keystrokes("enter");
     vcx.run_until_parked();
-    assert!(
-        shell.read_with(&vcx, |s, _| s.modal.is_some()),
-        "stays open"
-    );
+    assert!(shell.read_with(&vcx, |s, _| s.modal_open()), "stays open");
     assert!(vcx.debug_bounds("scope-expr-error").is_some());
     assert_eq!(terms(&frame, &vcx), vec!["a = 1"], "nothing edited");
 }
@@ -277,10 +274,7 @@ fn a_term_replaced_underneath_refuses_edit_and_removal(cx: &mut gpui::TestAppCon
     vcx.simulate_input(" or z = 3");
     vcx.simulate_keystrokes("enter");
     vcx.run_until_parked();
-    assert!(
-        shell.read_with(&vcx, |s, _| s.modal.is_some()),
-        "stays open"
-    );
+    assert!(shell.read_with(&vcx, |s, _| s.modal_open()), "stays open");
     assert!(vcx.debug_bounds("scope-expr-error").is_some());
     assert_eq!(
         terms(&frame, &vcx),
@@ -294,10 +288,7 @@ fn a_term_replaced_underneath_refuses_edit_and_removal(cx: &mut gpui::TestAppCon
     });
     vcx.simulate_keystrokes("enter");
     vcx.run_until_parked();
-    assert!(
-        shell.read_with(&vcx, |s, _| s.modal.is_some()),
-        "stays open"
-    );
+    assert!(shell.read_with(&vcx, |s, _| s.modal_open()), "stays open");
     assert_eq!(
         terms(&frame, &vcx),
         vec!["x = 1", "y = 2"],
@@ -343,7 +334,7 @@ fn focus_returns_to_the_text_field_after_the_menu(cx: &mut gpui::TestAppContext)
     assert!(shell.read_with(&vcx, |s, _| s.picker.is_some()));
     vcx.simulate_keystrokes("escape");
     vcx.run_until_parked();
-    assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
     assert!(
         filter_is_focused(&shell, &mut vcx),
         "the picker a row opened returns to the field"
