@@ -13,7 +13,7 @@ Current behavior and rationale:
 | Module | Holds |
 |---|---|
 | `core` | The pure half, no gpui: the column plan (every view column resolved to a snapshot index once, with kind, format, width and per-depth attribution), expansion as a set of paths that survive a requery, the visible-row flatten (a DFS that descends only into open nodes), the cursor, `/` find under both styles, yank as TSV (rows or a cell block), `core::select`'s footer aggregate summary over a resolved selection's top-most rows, the `:` vocabulary as data, the format cache filled for the visible window (never in `render_td`), and `launch` (the cursor row's underlying, when the grouping carries `underlying_ref` at or below its level). |
-| `delegate` | The `TableDelegate` adapter over gpui-component's `DataTable`. Owns everything the table paints so every `render_td` is a lookup. Emits its own `ChevronClicked` event through a second `EventEmitter` impl on `TableState<BlotterDelegate>`. |
+| `delegate` | The `TableDelegate` adapter over gpui-component's `DataTable`. Owns everything the table paints so every `render_td` is a lookup. Holds `:autosize`'s fitted widths by column name, which `column()` prefers over the plan's; `fit_columns` measures the header and the format cache's window only. Emits its own `ChevronClicked` event through a second `EventEmitter` impl on `TableState<BlotterDelegate>`. |
 | `tile` | `BlotterTile`, the entity per tile: requests through `DataHandle`, follows the frame's versions, stages under the flip barrier, applies snapshots. |
 | `content` | The `TileContent` wrapper and `BlotterFactory`, the roster entry the app builds with the data handle. |
 | `colour_cache` | One OKLCH resolve per named color per `(Anchors, Tokens)` pair, so a cell color is a lookup. |
@@ -26,6 +26,13 @@ cargo bench -p geode-blotter   # the pure core
 ```
 
 ## Rules this crate pins
+
+- `:autosize` and the shell's `tile::autosize_columns` run one method,
+  `BlotterTile::autosize_columns`. It measures only rows in the format
+  cache (the window the table last asked for), never the whole snapshot. A
+  wider value outside that window does not widen the column. A view switch
+  clears the fitted widths; the session record keeps them under
+  `column_widths`.
 
 - `geode_blotter::init` binds `DataTable`'s key context to `NoAction` and
   the table is never focused, so it cannot swallow the vim keys the
