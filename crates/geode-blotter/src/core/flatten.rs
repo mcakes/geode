@@ -211,14 +211,13 @@ fn sort_siblings(snapshot: &Snapshot, plan: &ColumnPlan, spec: &SortSpec, rows: 
                 (None, Some(_)) => Ordering::Greater,
                 (None, None) => Ordering::Equal,
             },
-            Some(i) => match (snapshot.text_at(i, a), snapshot.text_at(i, b)) {
-                (Some(x), Some(y)) => x.cmp(y),
-                (Some(_), None) => Ordering::Less,
-                (None, Some(_)) => Ordering::Greater,
-                (None, None) => Ordering::Equal,
+            Some(i) => match (text_key(snapshot, i, a), text_key(snapshot, i, b)) {
+                (TextKey::Value(x), TextKey::Value(y)) => x.cmp(y),
+                (x, y) => x.rank().cmp(&y.rank()),
             },
         };
-        // NULL last in both directions; ties keep row order (stable sort).
+        // NULL last in both directions (a mixed cell just ahead of the
+        // blanks); ties keep row order (stable sort).
         match (spec.order.descending(), ord) {
             (_, Ordering::Equal) => Ordering::Equal,
             (true, o)
@@ -246,7 +245,38 @@ fn is_null(snapshot: &Snapshot, idx: Option<usize>, numeric: bool, row: usize) -
     match idx {
         None => true,
         Some(i) if numeric => number_at(snapshot, i, row).is_none(),
-        Some(i) => snapshot.text_at(i, row).is_none(),
+        Some(i) => !matches!(text_key(snapshot, i, row), TextKey::Value(_)),
+    }
+}
+
+/// A text cell as the comparator sees it. An ungrouped dimension whose
+/// rows disagree is NULL in the data plus a mixed flag; it is not a value,
+/// so it sorts after every value like a blank, but it is not a blank
+/// either, so it sorts ahead of the blanks rather than among them. The
+/// order — values, then mixed, then blank — holds in both directions.
+enum TextKey<'a> {
+    Value(&'a str),
+    Mixed,
+    Blank,
+}
+
+impl TextKey<'_> {
+    fn rank(&self) -> u8 {
+        match self {
+            TextKey::Value(_) => 0,
+            TextKey::Mixed => 1,
+            TextKey::Blank => 2,
+        }
+    }
+}
+
+fn text_key(snapshot: &Snapshot, i: usize, row: usize) -> TextKey<'_> {
+    if snapshot.is_mixed_at(i, row) {
+        return TextKey::Mixed;
+    }
+    match snapshot.text_at(i, row) {
+        Some(v) => TextKey::Value(v),
+        None => TextKey::Blank,
     }
 }
 
@@ -266,6 +296,7 @@ mod tests {
             attribution_by_depth: vec![Attribution::Additive; 4],
             scope_semantics: ScopeSemantics::Direct,
             summable: false,
+            mixed_flag: None,
         }
     }
 
@@ -505,6 +536,72 @@ mod tests {
             by(SortOrder::AbsAsc),
             vec![0, 3, 2, 1, 4],
             "|10|, |40|, |-60|, NULL"
+        );
+    }
+
+    /// An ungrouped dimension: values first, then the rows that are mixed,
+    /// then the blank ones — in both directions. A mixed cell is NULL in the
+    /// data, so reading only the value would tie it with the blanks.
+    #[test]
+    fn a_mixed_dimension_sorts_after_values_and_before_blanks_both_ways() {
+        let snap = Snapshot::for_tests(
+            vec![
+                (
+                    dim("lhu"),
+                    TestColumn::Dict(vec![None, s("A"), s("B"), s("C"), s("D"), s("E")]),
+                ),
+                (dim("row_depth"), TestColumn::I32(vec![0, 1, 1, 1, 1, 1])),
+                (
+                    ColumnMeta {
+                        mixed_flag: Some(3),
+                        ..dim("expiry")
+                    },
+                    TestColumn::Str(vec![
+                        None,
+                        None,
+                        Some("2027-06"),
+                        None,
+                        Some("2027-03"),
+                        None,
+                    ]),
+                ),
+                (
+                    dim("expiry#mixed"),
+                    TestColumn::Bool(vec![
+                        Some(true),
+                        Some(false),
+                        Some(false),
+                        Some(true),
+                        Some(false),
+                        Some(false),
+                    ]),
+                ),
+            ],
+            1,
+        );
+        let text = "[t]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n[[t.columns]]\nname = \"expiry\"\nkind = \"dimension\"\n";
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
+        let view = ViewSpec::from_doc(&doc).0.remove(0);
+        let plan = ColumnPlan::build(&view, snap.grouping(), &snap);
+        let sorted = |order| {
+            let spec = SortSpec {
+                column: "expiry".to_string(),
+                order,
+            };
+            let mut out = Vec::new();
+            flatten(&snap, &plan, &Expansion::default(), Some(&spec), &mut out);
+            out
+        };
+        // Row 1 blank, 2 "2027-06", 3 mixed, 4 "2027-03", 5 blank.
+        assert_eq!(
+            sorted(SortOrder::Asc),
+            vec![0, 4, 2, 3, 1, 5],
+            "values, mixed, blanks"
+        );
+        assert_eq!(
+            sorted(SortOrder::Desc),
+            vec![0, 2, 4, 3, 1, 5],
+            "values reversed; mixed and blanks stay last"
         );
     }
 

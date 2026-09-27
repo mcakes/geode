@@ -2663,6 +2663,7 @@ role = "key"
             attribution_by_depth: vec![Attribution::Additive; 2],
             scope_semantics: ScopeSemantics::Direct,
             summable: n == "delta01",
+            mixed_flag: None,
         };
         let snap = Arc::new(Snapshot::for_tests(
             vec![

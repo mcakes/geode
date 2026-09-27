@@ -27,7 +27,7 @@ Reader defaults, partial validation, and presentation rules are described in
 | `scopes` | Saved scopes (`scopes.toml`), including each scope's ticked named-expression references. Names are read and persisted without checking them against `expressions.toml`; `Scope::resolve` is where a missing or invalid one fails. |
 | `groupings` | The nine numbered grouping slots. |
 | `dimensions` | Derived dimensions the desk groups by that are not in the source files (`desk` from `book`). |
-| `view` | View definitions: dataset, joins, columns, derived columns, grouping and sort, as config. `ViewSpec::validate` resolves every reference the compiler will resolve: the primary and join datasets, each join's keys against the joined dataset's grains and against the grouping, selected columns, a measure column's role, a dimension column's reachability, and grouping columns. Derived SQL and sort keys remain the compiler's. |
+| `view` | View definitions: dataset, joins, columns, derived columns, grouping and sort, as config. `ViewSpec::validate` resolves every reference the compiler will resolve: the primary and join datasets, each join's keys against the joined dataset's grains and against the grouping, selected columns, a measure column's role, a dimension column's reachability (grouped, joined, or carried by a declared grain alongside the whole grouping — `ungrouped_dimensions` and `unanimity_grain` are shared with the compiler), and grouping columns. Derived SQL and sort keys remain the compiler's. |
 | `attribution` | Whether a measure can be summed at a grouping level, and how a scope predicate reached it. |
 | `grid` | `grid::selection`: a grid selection (whole rows or a cell block) anchored by row and column identity rather than display index, resolved to display ranges against the current order, the top-most-rows rule for summing a group without double-counting its children, and the accumulator and formatter behind a selection's footer summary. Shared by any module hosting a selectable grid; the blotter is its first user. |
 | `query` | Requests and outcomes for views, distinct values, catalogs, and documents; request keys, tags, and as-of parsing. |
@@ -84,6 +84,9 @@ for its readiness strategy; the data service checks those boundaries.
 - `Snapshot` and `DocumentRows` store columns; the tree index stores parallel
   arrays. Snapshot construction prepares concatenated columns and the tree
   before UI delivery.
+- An ungrouped dimension's mixed state is a boolean companion column linked by
+  `ColumnMeta::mixed_flag`; its value is NULL there. Read it with
+  `Snapshot::is_mixed_at` before the value, or a mixed cell reads as blank.
 - Cell access preserves NULL separately from zero. Raw value slices omit null
   bitmaps and are suitable only when the caller has established null handling.
   Dictionary codes are local to a column; code-based grouping requires one

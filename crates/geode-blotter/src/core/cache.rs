@@ -17,7 +17,16 @@ pub struct CachedCell {
     /// `Some` for a number; drives the sign colour.
     pub sign: Option<Sign>,
     pub attribution: Attribution,
+    /// The cell is an ungrouped dimension whose rows disagree: `text` is
+    /// [`MIXED`] and paints muted. Distinct from a blank cell (no value at
+    /// all), which is not cached.
+    pub mixed: bool,
 }
+
+/// What an ungrouped dimension cell says when the rows under it disagree
+/// (the compiler's unanimity rule). A word rather than a glyph: it is read
+/// as text, and it must not look like a value or like a blank.
+pub const MIXED: &str = "mixed";
 
 #[derive(Debug, Default)]
 pub struct FormatCache {
@@ -81,6 +90,7 @@ pub fn cell(snapshot: &Snapshot, plan: &ColumnPlan, row: usize, col: usize) -> O
             text: t.into(),
             sign: None,
             attribution,
+            mixed: false,
         }),
         ColumnKind::Measure => {
             let idx = column.index?;
@@ -90,15 +100,28 @@ pub fn cell(snapshot: &Snapshot, plan: &ColumnPlan, row: usize, col: usize) -> O
                 text: f.text.into(),
                 sign: Some(f.sign),
                 attribution,
+                mixed: false,
             })
         }
         ColumnKind::Dimension => {
             let idx = column.index?;
+            // Checked before the value: a mixed cell is NULL in the data,
+            // and reading the value first would paint it blank — the one
+            // thing it must not look like.
+            if snapshot.is_mixed_at(idx, row) {
+                return Some(CachedCell {
+                    text: MIXED.into(),
+                    sign: None,
+                    attribution,
+                    mixed: true,
+                });
+            }
             let text = snapshot.display_at(idx, row)?;
             Some(CachedCell {
                 text: text.into(),
                 sign: None,
                 attribution,
+                mixed: false,
             })
         }
     }
@@ -124,6 +147,7 @@ mod tests {
                 text: format!("r{r}").into(),
                 sign: None,
                 attribution: Attribution::Additive,
+                mixed: false,
             })
         };
         c.set_window(0..10, 2, fill);
@@ -149,6 +173,7 @@ mod tests {
             attribution_by_depth: by_depth,
             scope_semantics: ScopeSemantics::Direct,
             summable: false,
+            mixed_flag: None,
         };
         let snap = Snapshot::for_tests(
             vec![
@@ -218,5 +243,64 @@ mod tests {
         );
         assert_eq!(cell(&snap, &plan, 9, 1), None, "past the end");
         assert_eq!(cell(&snap, &plan, 0, 9), None, "no such column");
+    }
+
+    /// Root plus three LHUs whose ungrouped `strike` is a value (A), mixed
+    /// (B, and the root) and blank (C). The value column is NULL wherever
+    /// the flag is set, as the compiler emits it.
+    fn unanimity_fixture() -> (Snapshot, ColumnPlan) {
+        let meta = |n: &str| ColumnMeta {
+            name: n.into(),
+            attribution_by_depth: vec![Attribution::Additive; 2],
+            scope_semantics: ScopeSemantics::Direct,
+            summable: false,
+            mixed_flag: None,
+        };
+        let snap = Snapshot::for_tests(
+            vec![
+                (
+                    meta("lhu"),
+                    TestColumn::Str(vec![None, Some("A"), Some("B"), Some("C")]),
+                ),
+                (meta("row_depth"), TestColumn::I32(vec![0, 1, 1, 1])),
+                (
+                    ColumnMeta {
+                        mixed_flag: Some(3),
+                        ..meta("strike")
+                    },
+                    TestColumn::Str(vec![None, Some("100.0"), None, None]),
+                ),
+                (
+                    meta("strike#mixed"),
+                    TestColumn::Bool(vec![Some(true), Some(false), Some(true), Some(false)]),
+                ),
+            ],
+            1,
+        );
+        let text = "[t]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n[[t.columns]]\nname = \"strike\"\nkind = \"dimension\"\n";
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
+        let view = ViewSpec::from_doc(&doc).0.remove(0);
+        let plan = ColumnPlan::build(&view, snap.grouping(), &snap);
+        (snap, plan)
+    }
+
+    /// Mixed and blank are different facts and must not look alike: a mixed
+    /// cell paints the marker, flagged so the delegate mutes it, and a blank
+    /// one paints nothing. The companion flag column is not a view column,
+    /// so the plan never shows it.
+    #[test]
+    fn a_mixed_dimension_cell_paints_the_marker_and_a_blank_one_paints_nothing() {
+        let (snap, plan) = unanimity_fixture();
+        assert_eq!(
+            plan.columns.len(),
+            2,
+            "tree and strike; the flag is not shown"
+        );
+        let value = cell(&snap, &plan, 1, 1).unwrap();
+        assert_eq!((&*value.text, value.mixed), ("100.0", false));
+        let mixed = cell(&snap, &plan, 2, 1).unwrap();
+        assert_eq!((&*mixed.text, mixed.mixed), (MIXED, true));
+        assert_eq!(cell(&snap, &plan, 3, 1), None, "blank is not mixed");
+        assert!(cell(&snap, &plan, 0, 1).unwrap().mixed, "the root too");
     }
 }

@@ -344,6 +344,7 @@ fn meta(name: &str) -> CompiledColumn {
         attribution_by_depth: vec![Attribution::Additive],
         scope_semantics: ScopeSemantics::Direct,
         summable: false,
+        mixed_flag: None,
     }
 }
 
