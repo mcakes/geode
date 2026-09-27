@@ -337,6 +337,30 @@ fn shift_j_moves_the_selected_block_as_a_unit_and_keeps_the_selection(
 }
 
 #[gpui::test]
+fn shift_j_moves_selected_legs_inside_an_open_package(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &["SPX Z26 4800/5000/5200 FLY"]);
+    h.dispatch(&mut vcx, "expand", None);
+    h.dispatch(&mut vcx, "down", None); // the first leg
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "down", None); // the first two legs
+    assert_eq!(
+        h.tree(&vcx)[1..],
+        ["SPX Z26 4800 C", "-2 SPX Z26 5000 C", "SPX Z26 5200 C"]
+    );
+    h.dispatch(&mut vcx, "move_down", None);
+    assert_eq!(
+        h.tree(&vcx)[1..],
+        ["SPX Z26 5200 C", "SPX Z26 4800 C", "-2 SPX Z26 5000 C"],
+        "the two legs moved down one step, in their order"
+    );
+    assert_eq!(
+        resolved(&h, &vcx).map(|r| r.1),
+        Some(2..4),
+        "the selection still covers the same two legs"
+    );
+}
+
+#[gpui::test]
 fn g_p_over_root_lines_groups_them_and_u_restores(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "SPX Z26 4000 P", "SPX Z26 3000 P"]);
     h.dispatch(&mut vcx, "visual_rows", None);
@@ -344,6 +368,8 @@ fn g_p_over_root_lines_groups_them_and_u_restores(cx: &mut gpui::TestAppContext)
     h.dispatch(&mut vcx, "group", None);
     assert_eq!(h.tree(&vcx)[0], "CUSTOM SPX Z26");
     assert_eq!(h.mode(&mut vcx), "normal", "g p ends the selection");
+    assert_eq!(h.tree(&vcx).len(), 4, "the new package is open on its legs");
+    assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(0), "the cursor is on it");
     h.dispatch(&mut vcx, "undo", None);
     assert_eq!(h.tile.read_with(&vcx, |t, _| t.sheet.roots().count()), 3);
 }
@@ -382,6 +408,15 @@ fn g_u_ungroups_every_selected_package_in_one_undo_entry(cx: &mut gpui::TestAppC
             .filter(|&r| t.sheet.is_package(r))
             .count()),
         2
+    );
+    assert_eq!(
+        h.tree(&vcx),
+        vec![
+            "-5 SPX Z26 4800/5200 CS",
+            "SPX Z26 5000 C",
+            "2 SPX Z26 4000/3800 PS"
+        ],
+        "undo brings the templates back, not custom packages"
     );
 }
 

@@ -240,8 +240,11 @@ impl PricerTile {
         self.clear_selection();
         if let Err(e) = self.apply_edits(edits, cx) {
             // A refused batch leaves the sheet as it was, so the selection
-            // still names what the user picked.
+            // still names what the user picked — re-resolved, or the footer
+            // would show no extent or totals over a live selection.
             self.selection = kept;
+            self.refresh_selection();
+            self.rebuild_chrome();
             return Err(e.to_string());
         }
         let n = specs.len();
@@ -280,7 +283,11 @@ impl PricerTile {
             id: None,
         };
         if let Err(e) = self.apply_edit(edit, cx) {
+            // Re-resolved as well as restored: a bare restore leaves the
+            // footer's extent and totals empty over a live selection.
             self.selection = kept;
+            self.refresh_selection();
+            self.rebuild_chrome();
             return Err(e.to_string());
         }
         let id = self.sheet.id(first);
@@ -311,8 +318,11 @@ impl PricerTile {
         let kept = self.selection.take();
         self.clear_selection();
         if let Err(e) = self.apply_edits(edits, cx) {
-            // A refused batch leaves the sheet as it was.
+            // A refused batch leaves the sheet as it was; the kept
+            // selection is re-resolved so its footer strip comes back.
             self.selection = kept;
+            self.refresh_selection();
+            self.rebuild_chrome();
             return Err(e.to_string());
         }
         Ok(())
