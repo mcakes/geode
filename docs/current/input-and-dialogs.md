@@ -355,29 +355,70 @@ Enter; they do not use Normal/Filter mode's keep-query Enter.
 ## Frame expression
 
 [`shell/scope_expr_view.rs`](../../crates/geode-shell/src/shell/scope_expr_view.rs)
-edits the frame's expression in one of three modes, chosen by the door that
+edits the frame's expression, and in two of its modes the frame's
+named-expression references, in one of three modes chosen by the door that
 opens it. Bare Enter trims and parses the draft in every mode.
 
-| Mode | Opened by | Seed | Enter | Empty Enter |
+| Mode | Opened by | Seed | Enter | Empty Enter, nothing staged |
 |---|---|---|---|---|
-| Scope expression (whole) | `frame::scope_expression` | The whole expression | Replaces the expression | Clears it |
+| Scope expression (whole) | `frame::scope_expression` | The whole expression; the frame's names staged | Sets the names to the staged list and replaces the expression | Clears the expression and the names |
 | Edit scope term | A click on a toolbar term chip | That top-level `and` term | Replaces that term; the other terms keep their order | Removes that term |
-| Add scope expression | `frame::add_expression`, the `+` menu's "Expression…" row | Empty | Joins it to the current expression with `and`, or sets it when there is none | Closes without a change |
+| Add scope expression | `frame::add_expression` (the `+` menu's "Expression…" row), `frame::add_named_expression` (its "Named expression…" row) | Empty, nothing staged | Appends the staged names the frame lacks and joins the text to the current expression with `and`, or sets it when there is none | Closes without a change |
+
+Whole and Add stage named expressions beside the text. Each staged name
+paints as a `≡ name` chip above the field, in staged order, with a `×` that
+unstages it; a name the frame cannot resolve (missing or invalid) takes the
+danger tone, as its scope-bar chip does. Backspace with the caret at the
+field's start and no selection removes the last staged chip; anywhere else
+backspace edits the text. A name is staged by accepting its suggestion row
+(see [Suggestions](#suggestions)). Enter applies the staged names and the
+text in one `set_scope`, so one undo takes back both. An empty field with
+names staged applies the names alone: Whole sets them and clears the
+expression, Add appends them. Term mode stages nothing.
 
 The term and add modes show a muted note under the field saying what the
-commit touches. A successful commit changes only the expression in the frame
-scope, through undoable `set_scope`, then closes. Parse errors remain inline
+commit touches. A successful commit changes only the expression and, in
+Whole and Add, the named references in the frame scope, through undoable
+`set_scope`, then closes. Parse errors remain inline
 in every mode and typing clears the error. The term dialog remembers the term
 it was seeded with; if the scope changed while it was open so that its index
 no longer holds that term (gone, or a different term in its place), an edit
 or an empty (removing) commit refuses inline rather than touch whichever term
 now has that index. Escape applies nothing.
 `frame::clear_expression` drops the whole expression layer without a dialog;
-with no expression it does nothing. Neither new action has a default chord.
+with no expression it does nothing. None of `frame::scope_expression`,
+`frame::add_expression`, `frame::add_named_expression` ("Add named
+expression…", which opens the same Add dialog) or `frame::clear_expression`
+has a default chord; all are in the palette.
 
-The toolbar's `+` opens a two-row menu, "Dimension…" (`frame::pick`) and
-"Expression…" (`frame::add_expression`), each row showing its action's live
-binding through `kbd::menu_binding`. It owns the keyboard while open: `j`/`k`
+In Whole and Add, `mod+s` (the configured `mod` key, Alt by default, with
+`s`; the footer's chip shows the user's own alias) saves the typed text as a
+named expression. On an empty or whitespace-only field it refuses at once
+with `nothing to save — the expression is empty` and opens nothing.
+Otherwise the field becomes a name entry labelled `Save this expression as a
+named expression · name`, with the suggestion list off and the staged chips
+kept. Escape leaves the entry and puts the text back. Enter checks the name
+first, then the text, and refuses inline with the entry still open for:
+
+- a malformed name (`name: <reason>`, from `check_object_name`);
+- a reserved name (`'<name>' is reserved`);
+- a name the Expressions domain already holds (`'<name>' already exists`);
+- text that the dialog's own Enter would refuse (a syntax or schema error);
+- no writable user config directory (`no writable user config directory —
+  nothing was changed`).
+
+A save writes `[name] expression = "<text>"` to the user layer of
+`expressions.toml` through the object dialog's write path, rebuilds the
+frame's named expressions from the pending configuration at once (so the new
+name resolves before the write reaches disk), empties the field, and stages
+the name. Nothing reaches the frame scope until Enter. In Term mode `mod+s`
+changes nothing and shows `save a named expression from the whole or add
+dialog`.
+
+The toolbar's `+` opens a three-row menu, "Dimension…" (`frame::pick`),
+"Expression…" (`frame::add_expression`) and "Named expression…"
+(`frame::add_named_expression`), each row showing its action's live binding
+through `kbd::menu_binding`. It owns the keyboard while open: `j`/`k`
 or the arrows move with wrap, Enter commits the highlighted row, Escape
 closes, and other bare keys are consumed. A chord passes to the matcher, and
 any dispatch closes the menu. A row click commits; a press of any button
@@ -403,12 +444,26 @@ The rows depend on the caret's position in the grammar:
 
 | Caret is after | Rows offered |
 |---|---|
-| Nothing, `(`, `and`, `or`, `not` | Every column, then `not` and `(` |
+| Nothing, `(`, `and`, `or`, `not` | In the frame dialog's Whole and Add modes, the unstaged named expressions; then every column, then `not` and `(` |
 | A column | The operators valid for that column's type |
 | An operator, or inside an open `in (` list | Values for that column, when there are any to list |
 | A complete term | `and`, `or`, plus `)` when a paren is open (or `,` / `)` inside an `in` list) |
 
 Right after typing `in` and before its `(`, the only row offered is `(` itself.
+
+Named rows appear only at that column position, only in the frame dialog's
+Whole and Add modes: never in Term mode, never in the name entry, and never
+in the Scopes or Expressions object dialogs' `expression` field. They rank
+with the other rows by their name. A row paints as `≡ name` under its own
+selector (`scope-expr-named-row-{name}`), so a name equal to a column's name
+is a separate row. Its detail is an elided preview of the definition's text;
+a definition that is invalid shows its reason instead, in danger text.
+Accepting a named row (tab or a click) erases the typed token, through the
+same range replace as an insertion so cmd+z restores the text, and stages the
+name as a chip above the field instead of writing it. A staged name is not
+offered again until it is unstaged. Add mode also leaves out the names the
+frame already has, since Enter would add nothing for them. A configuration
+reload re-offers the current definitions under an open dialog.
 
 Operators are filtered by the column's type: text offers `= != in like`;
 number, date, and timestamp offer `= != < <= > >= in`; bool offers `= !=`;
@@ -434,9 +489,14 @@ make the typed prefix an unsound filter):
 
 | Mode | Values narrowed by |
 |---|---|
-| Whole | The frame's dimension selections, text filter and as-of. Its own expression is excluded, since the dialog replaces it. |
-| Add | The frame's full current scope, including its expression. |
+| Whole | The frame's dimension selections, text filter and as-of, with the staged names in place of the frame's. Its own expression is excluded, since the dialog replaces it. |
+| Add | The frame's full current scope, including its expression, plus the staged names. |
 | Term | The frame's scope with the edited term removed. |
+
+Staging or unstaging a name, saving one with `mod+s`, or a reload that
+changes the definitions changes that scope, so the frame dialog drops every
+cached column and asks again for the one under the caret; a reply to a
+request made before the change is dropped.
 
 A reply whose tag is not that column's latest is dropped, so a superseded
 request never overwrites a newer one.

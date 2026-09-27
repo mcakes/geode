@@ -393,18 +393,6 @@ impl Frame {
         Ok(self.set_scope(s))
     }
 
-    /// Join `term` to the expression with `and` (`existing and term`), or
-    /// make it the expression when there is none — an undoable edit
-    /// through `set_scope`.
-    pub fn append_expression(&mut self, term: Expr) -> bool {
-        let mut s = self.scope.clone();
-        s.expression = Some(match s.expression.take() {
-            Some(existing) => Expr::And(Box::new(existing), Box::new(term)),
-            None => term,
-        });
-        self.set_scope(s)
-    }
-
     /// Remove the whole expression layer through the undoable `set_scope`
     /// path; false (and no history entry) when there is none.
     pub fn clear_expression(&mut self) -> bool {
@@ -789,6 +777,16 @@ impl Frame {
     fn release(&mut self) {
         self.barrier = None;
         self.versions.flip += 1;
+    }
+}
+
+/// `term` joined to `existing` with `and` (`existing and term`), or `term`
+/// alone when there is no expression. Appending never replaces: the
+/// existing expression keeps narrowing.
+pub fn and_join(existing: Option<Expr>, term: Expr) -> Expr {
+    match existing {
+        Some(existing) => Expr::And(Box::new(existing), Box::new(term)),
+        None => term,
     }
 }
 
@@ -1211,10 +1209,6 @@ mod tests {
         }
     }
 
-    fn expr_text(f: &Frame) -> Option<String> {
-        f.scope().expression.as_ref().map(ToString::to_string)
-    }
-
     fn term_texts(f: &Frame) -> Vec<String> {
         f.scope()
             .expression
@@ -1281,20 +1275,16 @@ mod tests {
     }
 
     #[test]
-    fn append_expression_joins_with_and_or_sets_it() {
-        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+    fn and_join_joins_with_and_or_sets_it() {
         let a = geode_core::scope::parse_expr("a = 1").unwrap();
         let b = geode_core::scope::parse_expr("b = 2 or c = 3").unwrap();
-        assert!(f.append_expression(a));
-        assert_eq!(expr_text(&f).as_deref(), Some("a = 1"), "none: it is set");
-        assert!(f.append_expression(b));
+        let joined = and_join(None, a);
+        assert_eq!(joined.to_string(), "a = 1", "none: it is set");
         assert_eq!(
-            expr_text(&f).as_deref(),
-            Some("(a = 1) and ((b = 2) or (c = 3))"),
+            and_join(Some(joined), b).to_string(),
+            "(a = 1) and ((b = 2) or (c = 3))",
             "existing and (new)"
         );
-        assert!(f.undo_scope());
-        assert_eq!(expr_text(&f).as_deref(), Some("a = 1"));
     }
 
     #[test]

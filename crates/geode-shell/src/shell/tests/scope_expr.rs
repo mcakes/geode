@@ -140,6 +140,22 @@ fn opened_from_the_text_field_focus_returns_to_it(cx: &mut gpui::TestAppContext)
 /// the derived `desk`. The keymap doc is re-added because the config is
 /// rebuilt from these layers alone.
 fn services_with_schema() -> ShellServices {
+    services_with_schema_and(Vec::new())
+}
+
+/// [`services_with_schema`] plus two named expressions, `liq` and `hedges`.
+fn services_with_named() -> ShellServices {
+    services_with_schema_and(vec![
+        LayerDoc::builtin(
+            "expressions",
+            "[liq]\nexpression = \"npv > 0\"\n[hedges]\nexpression = \"npv < 0\"\n",
+        )
+        .unwrap(),
+    ])
+}
+
+/// [`services_with_schema`] with `extra` builtin layers after its own.
+fn services_with_schema_and(extra: Vec<LayerDoc>) -> ShellServices {
     let mut services = test_services();
     let datasets = LayerDoc::builtin(
         "datasets",
@@ -154,12 +170,14 @@ fn services_with_schema() -> ShellServices {
         "[desk]\nfrom = \"book\"\n[desk.values]\nEQ = [\"BK000\"]\n",
     )
     .unwrap();
+    let mut builtin = vec![
+        LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+        datasets,
+        dims,
+    ];
+    builtin.extend(extra);
     (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
-        builtin: vec![
-            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
-            datasets,
-            dims,
-        ],
+        builtin,
         desk: None,
         user: None,
     });
@@ -348,7 +366,8 @@ fn a_moved_caret_is_followed_before_tab_writes(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// cmd-z takes an insertion back, which proves the write kept undo.
+/// The platform undo key (`secondary-z`: cmd-z, or ctrl-z off macOS) takes
+/// an insertion back, which proves the write kept undo.
 #[gpui::test]
 fn undo_takes_an_insertion_back(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) =
@@ -357,7 +376,7 @@ fn undo_takes_an_insertion_back(cx: &mut gpui::TestAppContext) {
     vcx.simulate_keystrokes("tab");
     vcx.run_until_parked();
     assert_eq!(field(&shell, &vcx), "npv ");
-    vcx.simulate_keystrokes("cmd-z");
+    vcx.simulate_keystrokes("secondary-z");
     vcx.run_until_parked();
     assert_eq!(field(&shell, &vcx), "np");
 }
@@ -450,4 +469,614 @@ fn a_reload_rebuilds_the_vocab_under_an_open_dialog(cx: &mut gpui::TestAppContex
     shell.update(&mut vcx, |s, cx| s.apply_reload(config, cx));
     vcx.run_until_parked();
     assert!(vcx.debug_bounds("scope-expr-row-region").is_some());
+}
+
+fn named_of(shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext) -> Vec<String> {
+    let frame = shell.read_with(vcx, |s, _| s.frame().clone());
+    frame.read_with(vcx, |f, _| f.scope().named.clone())
+}
+
+/// A shell over [`services_with_named`] whose frame scope names `named`
+/// and holds `expression`.
+fn named_shell(
+    cx: &mut gpui::TestAppContext,
+    named: &[&str],
+    expression: Option<&str>,
+) -> (Entity<ShellView>, gpui::VisualTestContext) {
+    let (window, mut vcx) = open_shell(cx, services_with_named());
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    frame.update(&mut vcx, |f, cx| {
+        f.set_scope(Scope {
+            named: named.iter().map(ToString::to_string).collect(),
+            expression: expression.map(|t| parse_expr(t).unwrap()),
+            ..Scope::default()
+        });
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    (shell, vcx)
+}
+
+/// Tab on a named row erases the typed prefix and stages the name as a
+/// chip; Enter on the then-empty field applies the name alone.
+#[gpui::test]
+fn tab_stages_a_named_row_and_enter_applies_it(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = named_shell(cx, &[], None);
+    dispatch_action(&shell, "frame::add_expression", &mut vcx);
+    vcx.simulate_input("liq");
+    vcx.simulate_keystrokes("tab");
+    vcx.run_until_parked();
+    assert_eq!(field(&shell, &vcx), "", "the token is erased");
+    assert!(
+        vcx.debug_bounds("scope-expr-staged-liq").is_some(),
+        "the staged chip paints"
+    );
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
+    assert_eq!(named_of(&shell, &vcx), vec!["liq".to_string()]);
+}
+
+/// Whole mode opens with the frame's names staged. Backspace at offset 0
+/// removes the last chip, Enter applies names and text in one undoable
+/// step, and one `frame::scope_undo` brings both names back.
+#[gpui::test]
+fn backspace_at_the_start_unstages_the_last_name_and_undo_restores(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = named_shell(cx, &["liq", "hedges"], Some("npv > 5"));
+    dispatch_action(&shell, "frame::scope_expression", &mut vcx);
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("scope-expr-staged-liq").is_some());
+    assert!(vcx.debug_bounds("scope-expr-staged-hedges").is_some());
+    vcx.simulate_keystrokes("home backspace");
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("scope-expr-staged-hedges").is_none());
+    assert!(vcx.debug_bounds("scope-expr-staged-liq").is_some());
+    assert_eq!(field(&shell, &vcx), "npv > 5", "the text is untouched");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert_eq!(named_of(&shell, &vcx), vec!["liq".to_string()]);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f
+            .scope()
+            .expression
+            .as_ref()
+            .map(ToString::to_string)),
+        Some("npv > 5".to_string())
+    );
+    dispatch_action(&shell, "frame::scope_undo", &mut vcx);
+    assert_eq!(
+        named_of(&shell, &vcx),
+        vec!["liq".to_string(), "hedges".to_string()],
+        "one undo restores both names"
+    );
+}
+
+/// Backspace away from offset 0 stays the field's: it deletes a
+/// character and every staged chip stays.
+#[gpui::test]
+fn backspace_past_the_start_edits_the_text(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = named_shell(cx, &["liq"], Some("npv > 5"));
+    dispatch_action(&shell, "frame::scope_expression", &mut vcx);
+    vcx.simulate_keystrokes("backspace");
+    vcx.run_until_parked();
+    assert_eq!(field(&shell, &vcx), "npv > ");
+    assert!(vcx.debug_bounds("scope-expr-staged-liq").is_some());
+}
+
+/// A staged name is no longer offered.
+#[gpui::test]
+fn a_staged_name_leaves_the_named_rows(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = named_shell(cx, &[], None);
+    dispatch_action(&shell, "frame::add_expression", &mut vcx);
+    vcx.run_until_parked();
+    let row = vcx
+        .debug_bounds("scope-expr-named-row-liq")
+        .expect("liq is offered");
+    vcx.simulate_click(row.center(), gpui::Modifiers::none());
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("scope-expr-staged-liq").is_some());
+    assert!(
+        vcx.debug_bounds("scope-expr-named-row-liq").is_none(),
+        "staged, so not offered"
+    );
+    assert!(vcx.debug_bounds("scope-expr-named-row-hedges").is_some());
+    assert_eq!(field(&shell, &vcx), "");
+}
+
+/// Term mode edits one term: it offers no named rows and stages nothing.
+#[gpui::test]
+fn term_mode_offers_no_named_rows(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = named_shell(cx, &["liq"], Some("npv > 5 and live = true"));
+    let chip = vcx
+        .debug_bounds("scope-expr-chip-0")
+        .expect("the term chip paints");
+    vcx.simulate_click(chip.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+    assert!(
+        shell.read_with(&vcx, |s, _| s.scope_expr_dialog.as_ref().is_some_and(
+            |d| matches!(d.mode, crate::shell::scope_expr_view::Mode::Term { .. })
+        ))
+    );
+    vcx.simulate_keystrokes("secondary-a backspace");
+    vcx.run_until_parked();
+    assert!(
+        vcx.debug_bounds("scope-expr-row-book").is_some(),
+        "a column position"
+    );
+    assert!(vcx.debug_bounds("scope-expr-named-row-liq").is_none());
+    assert!(vcx.debug_bounds("scope-expr-named-row-hedges").is_none());
+    assert!(vcx.debug_bounds("scope-expr-staged-liq").is_none());
+}
+
+/// A click on a staged chip's `×` removes that name alone.
+#[gpui::test]
+fn clicking_a_staged_chips_close_unstages_it(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = named_shell(cx, &["liq", "hedges"], None);
+    dispatch_action(&shell, "frame::scope_expression", &mut vcx);
+    vcx.run_until_parked();
+    let close = vcx
+        .debug_bounds("scope-expr-staged-close-liq")
+        .expect("the close paints");
+    vcx.simulate_click(close.center(), gpui::Modifiers::none());
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("scope-expr-staged-liq").is_none());
+    assert!(vcx.debug_bounds("scope-expr-staged-hedges").is_some());
+    assert!(
+        vcx.debug_bounds("scope-expr-named-row-liq").is_some(),
+        "unstaged, so offered again"
+    );
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert_eq!(named_of(&shell, &vcx), vec!["hedges".to_string()]);
+}
+
+/// A named expression sharing a column's name: its named row stages it,
+/// and the column row still inserts the column.
+#[gpui::test]
+fn a_named_row_and_a_column_row_of_one_name_click_apart(cx: &mut gpui::TestAppContext) {
+    let services = services_with_schema_and(vec![
+        LayerDoc::builtin("expressions", "[book]\nexpression = \"npv > 0\"\n").unwrap(),
+    ]);
+    let (shell, mut vcx) = dialog_test_shell_with(cx, services, "frame::add_expression");
+    vcx.run_until_parked();
+    let named = vcx
+        .debug_bounds("scope-expr-named-row-book")
+        .expect("the named row paints");
+    vcx.simulate_click(named.center(), gpui::Modifiers::none());
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("scope-expr-staged-book").is_some());
+    assert_eq!(field(&shell, &vcx), "", "a named row writes no text");
+    let column = vcx
+        .debug_bounds("scope-expr-row-book")
+        .expect("the column row paints");
+    vcx.simulate_click(column.center(), gpui::Modifiers::none());
+    vcx.run_until_parked();
+    assert_eq!(field(&shell, &vcx), "book ");
+    assert!(vcx.debug_bounds("scope-expr-staged-book").is_some());
+}
+
+/// A reload that adds a named expression while the dialog is open offers
+/// it straight away.
+#[gpui::test]
+fn a_reload_offers_a_new_named_expression_under_an_open_dialog(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) =
+        dialog_test_shell_with(cx, services_with_named(), "frame::add_expression");
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("scope-expr-named-row-liq").is_some());
+    assert!(vcx.debug_bounds("scope-expr-named-row-fresh").is_none());
+    let reloaded = services_with_schema_and(vec![
+        LayerDoc::builtin(
+            "expressions",
+            "[liq]\nexpression = \"npv > 0\"\n[fresh]\nexpression = \"npv > 9\"\n",
+        )
+        .unwrap(),
+    ]);
+    shell.update(&mut vcx, |s, cx| s.apply_reload(reloaded.config, cx));
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("scope-expr-named-row-fresh").is_some());
+    assert!(
+        vcx.debug_bounds("scope-expr-named-row-hedges").is_none(),
+        "a removed definition is no longer offered"
+    );
+}
+
+fn expr_hint(shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext) -> String {
+    shell.read_with(vcx, |s, _| {
+        s.scope_expr_dialog
+            .as_ref()
+            .map(|d| d.completion.hint().to_string())
+            .unwrap_or_default()
+    })
+}
+
+/// Staging a name changes the scope values are narrowed by, so a column
+/// asked for before the staging is asked for again under the new names.
+#[gpui::test]
+fn staging_a_name_requests_values_again_under_it(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = named_shell(cx, &[], None);
+    let seen = requests(&shell, &mut vcx);
+    dispatch_action(&shell, "frame::add_expression", &mut vcx);
+    vcx.simulate_input("book = ");
+    vcx.run_until_parked();
+    let first = seen.borrow().last().cloned().expect("a request");
+    assert_eq!(first.scope.expression, None);
+    vcx.simulate_keystrokes("secondary-a backspace");
+    vcx.simulate_input("liq");
+    vcx.simulate_keystrokes("tab");
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("scope-expr-staged-liq").is_some());
+    vcx.simulate_input("book = ");
+    vcx.run_until_parked();
+    let second = seen.borrow().last().cloned().expect("a request");
+    assert_ne!(second.tag, first.tag, "book is asked for again");
+    assert_eq!(second.column, "book");
+    // The request carries the resolved scope: `liq` is folded into the
+    // expression, so its text is what narrows.
+    assert!(second.scope.named.is_empty());
+    assert_eq!(
+        second.scope.expression.map(|e| e.to_string()),
+        Some("npv > 0".to_string())
+    );
+}
+
+/// A missing staged name is the value position's error; removing its
+/// chip asks for the values again, and the error goes with it.
+#[gpui::test]
+fn unstaging_a_missing_name_clears_its_values_error(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = named_shell(cx, &["gone"], None);
+    let seen = requests(&shell, &mut vcx);
+    dispatch_action(&shell, "frame::scope_expression", &mut vcx);
+    vcx.simulate_input("book = ");
+    vcx.run_until_parked();
+    assert!(seen.borrow().is_empty(), "a missing name never requests");
+    assert!(
+        expr_hint(&shell, &vcx).contains("gone"),
+        "{}",
+        expr_hint(&shell, &vcx)
+    );
+    let close = vcx
+        .debug_bounds("scope-expr-staged-close-gone")
+        .expect("the close paints");
+    vcx.simulate_click(close.center(), gpui::Modifiers::none());
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("secondary-a backspace");
+    vcx.simulate_input("book = ");
+    vcx.run_until_parked();
+    let req = seen.borrow().last().cloned().expect("asked again");
+    assert_eq!(req.column, "book");
+    assert!(req.scope.named.is_empty());
+    assert!(
+        !expr_hint(&shell, &vcx).contains("gone"),
+        "{}",
+        expr_hint(&shell, &vcx)
+    );
+}
+
+/// Add mode joins the frame's names, so a name the frame already has is
+/// not offered: staging it would change nothing.
+#[gpui::test]
+fn add_mode_leaves_out_the_frames_own_names(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = named_shell(cx, &["liq"], None);
+    dispatch_action(&shell, "frame::add_expression", &mut vcx);
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("scope-expr-named-row-liq").is_none());
+    assert!(vcx.debug_bounds("scope-expr-named-row-hedges").is_some());
+}
+
+/// Let the zero-delay config write promote and reach the file.
+fn flush_config_write(vcx: &mut gpui::VisualTestContext) {
+    vcx.executor().advance_clock(
+        crate::shell::objectdialog::apply::WRITE_DEBOUNCE + std::time::Duration::from_millis(10),
+    );
+    vcx.run_until_parked();
+}
+
+fn expr_error(shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext) -> Option<String> {
+    shell.read_with(vcx, |s, _| {
+        s.scope_expr_dialog.as_ref().and_then(|d| d.error.clone())
+    })
+}
+
+/// A frame dialog over [`services_with_named`] with a writable user dir.
+fn saving_shell(
+    cx: &mut gpui::TestAppContext,
+    dir: &tempfile::TempDir,
+) -> (Entity<ShellView>, gpui::VisualTestContext) {
+    dialog_test_shell_in_dir(
+        cx,
+        services_with_named(),
+        dir.path(),
+        "frame::scope_expression",
+    )
+}
+
+/// `mod+s` (the test config's alias is alt) names the typed text: Enter
+/// writes `[liq2] expression = "npv > 0"` to the user file, empties the
+/// field and stages the name. The frame knows the name at once, so the
+/// Enter that applies it resolves before the write has even flushed.
+#[gpui::test]
+fn mod_s_saves_the_text_as_a_named_expression_and_stages_it(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut vcx) = saving_shell(cx, &dir);
+    vcx.simulate_input("npv > 0");
+    vcx.simulate_keystrokes("alt-s");
+    vcx.run_until_parked();
+    assert!(
+        vcx.debug_bounds("dialog-name-row").is_some(),
+        "the name entry paints"
+    );
+    assert_eq!(field(&shell, &vcx), "", "the name entry starts empty");
+    vcx.simulate_input("liq2");
+    // The write promotes on a timer the test executor runs while parking,
+    // which rebuilds the definitions anyway; the frame must already know
+    // the name at the notify that stages it, before any timer runs.
+    let known_when_staged = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    vcx.update(|_, cx| {
+        let seen = known_when_staged.clone();
+        let frame = shell.read(cx).frame().clone();
+        cx.observe(&shell, move |shell, cx| {
+            let staged = shell
+                .read(cx)
+                .scope_expr_dialog
+                .as_ref()
+                .is_some_and(|d| d.staged.iter().any(|s| s == "liq2"));
+            if staged {
+                let known = matches!(
+                    frame.read(cx).named_expressions().get("liq2"),
+                    Some(geode_core::named::NamedExpr::Valid { .. })
+                );
+                seen.borrow_mut().push(known);
+            }
+        })
+        .detach();
+    });
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert_eq!(
+        known_when_staged.borrow().first(),
+        Some(&true),
+        "the frame resolves the name the moment it is staged"
+    );
+    assert_eq!(expr_error(&shell, &vcx), None);
+    assert!(vcx.debug_bounds("dialog-name-row").is_none());
+    assert_eq!(field(&shell, &vcx), "", "the field is cleared");
+    assert!(
+        vcx.debug_bounds("scope-expr-staged-liq2").is_some(),
+        "the saved name is staged"
+    );
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
+    assert_eq!(named_of(&shell, &vcx), vec!["liq2".to_string()]);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    let resolved = frame.read_with(&vcx, |f, _| f.effective_scope(&Scope::default()));
+    assert!(
+        resolved.is_ok(),
+        "the new name resolves before the write flushes: {resolved:?}"
+    );
+    flush_config_write(&mut vcx);
+    let written = std::fs::read_to_string(dir.path().join("expressions.toml")).unwrap();
+    assert!(
+        written.contains("[liq2]\nexpression = \"npv > 0\""),
+        "{written}"
+    );
+}
+
+/// `mod+s` on an empty field refuses at once: the error line says the
+/// expression is empty, no name entry opens, and nothing is written.
+#[gpui::test]
+fn mod_s_on_an_empty_field_refuses_and_writes_nothing(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut vcx) = saving_shell(cx, &dir);
+    vcx.simulate_input("   ");
+    vcx.simulate_keystrokes("alt-s");
+    vcx.run_until_parked();
+    assert_eq!(
+        expr_error(&shell, &vcx).as_deref(),
+        Some("nothing to save — the expression is empty")
+    );
+    assert!(vcx.debug_bounds("scope-expr-error").is_some());
+    assert!(
+        vcx.debug_bounds("dialog-name-row").is_none(),
+        "no name entry opens"
+    );
+    assert_eq!(field(&shell, &vcx), "   ", "the field is left alone");
+    flush_config_write(&mut vcx);
+    assert!(!dir.path().join("expressions.toml").exists());
+}
+
+/// A reserved name refuses inline, the entry stays open, nothing is written.
+#[gpui::test]
+fn mod_s_refuses_a_reserved_name(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut vcx) = saving_shell(cx, &dir);
+    let reserved = geode_core::scopes::RESERVED_NAMES[0];
+    vcx.simulate_input("npv > 0");
+    vcx.simulate_keystrokes("alt-s");
+    vcx.simulate_input(reserved);
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert_eq!(
+        expr_error(&shell, &vcx),
+        Some(format!("'{reserved}' is reserved"))
+    );
+    assert!(
+        vcx.debug_bounds("dialog-name-row").is_some(),
+        "naming stays open"
+    );
+    assert!(shell.read_with(&vcx, |s, _| {
+        s.scope_expr_dialog
+            .as_ref()
+            .is_some_and(|d| d.staged.is_empty())
+    }));
+    flush_config_write(&mut vcx);
+    assert!(!dir.path().join("expressions.toml").exists());
+}
+
+/// Without a writable user config directory a save refuses inline with
+/// the object dialog's wording; nothing is staged and the frame's named
+/// expressions are unchanged.
+#[gpui::test]
+fn mod_s_without_a_user_dir_refuses(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) =
+        dialog_test_shell_with(cx, services_with_named(), "frame::scope_expression");
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    let before = frame.read_with(&vcx, |f, _| f.named_expressions().clone());
+    vcx.simulate_input("npv > 0");
+    vcx.simulate_keystrokes("alt-s");
+    vcx.simulate_input("liq2");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert_eq!(
+        expr_error(&shell, &vcx).as_deref(),
+        Some("no writable user config directory — nothing was changed")
+    );
+    assert!(
+        vcx.debug_bounds("dialog-name-row").is_some(),
+        "naming stays open"
+    );
+    assert!(vcx.debug_bounds("scope-expr-staged-liq2").is_none());
+    assert!(shell.read_with(&vcx, |s, _| {
+        s.scope_expr_dialog
+            .as_ref()
+            .is_some_and(|d| d.staged.is_empty())
+    }));
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.named_expressions().clone()),
+        before
+    );
+}
+
+/// The `mod+s` footer chip paints in Whole and Add modes, and is gone in
+/// Term mode and while naming.
+#[gpui::test]
+fn the_save_chip_paints_only_where_saving_works(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut vcx) = saving_shell(cx, &dir);
+    vcx.run_until_parked();
+    assert!(
+        vcx.debug_bounds("scope-expr-save-hint").is_some(),
+        "whole mode"
+    );
+    vcx.simulate_input("npv > 0");
+    vcx.simulate_keystrokes("alt-s");
+    vcx.run_until_parked();
+    assert!(
+        vcx.debug_bounds("scope-expr-save-hint").is_none(),
+        "not while naming"
+    );
+    vcx.simulate_keystrokes("escape escape");
+    vcx.run_until_parked();
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
+    dispatch_action(&shell, "frame::add_expression", &mut vcx);
+    vcx.run_until_parked();
+    assert!(
+        vcx.debug_bounds("scope-expr-save-hint").is_some(),
+        "add mode"
+    );
+
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    frame.update(&mut vcx, |f, cx| {
+        f.set_scope(expr_scope("npv > 5 and live = true"));
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    let chip = vcx
+        .debug_bounds("scope-expr-chip-0")
+        .expect("the term chip paints");
+    vcx.simulate_click(chip.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+    assert!(
+        shell.read_with(&vcx, |s, _| s.scope_expr_dialog.as_ref().is_some_and(
+            |d| matches!(d.mode, crate::shell::scope_expr_view::Mode::Term { .. })
+        ))
+    );
+    assert!(
+        vcx.debug_bounds("scope-expr-save-hint").is_none(),
+        "term mode"
+    );
+}
+
+/// A name already defined refuses inline and the entry stays open.
+#[gpui::test]
+fn mod_s_refuses_a_taken_name(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut vcx) = saving_shell(cx, &dir);
+    vcx.simulate_input("npv > 0");
+    vcx.simulate_keystrokes("alt-s");
+    vcx.simulate_input("liq");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert_eq!(
+        expr_error(&shell, &vcx).as_deref(),
+        Some("'liq' already exists")
+    );
+    assert!(vcx.debug_bounds("dialog-name-row").is_some());
+    assert!(vcx.debug_bounds("scope-expr-staged-liq").is_none());
+    flush_config_write(&mut vcx);
+    assert!(!dir.path().join("expressions.toml").exists());
+}
+
+/// Escape leaves the name entry and restores the text; the dialog stays.
+#[gpui::test]
+fn escape_while_naming_restores_the_text(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut vcx) = saving_shell(cx, &dir);
+    vcx.simulate_input("npv > 0");
+    vcx.simulate_keystrokes("alt-s");
+    vcx.simulate_input("half");
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    assert!(shell.read_with(&vcx, |s, _| s.modal_open()), "stays open");
+    assert!(vcx.debug_bounds("dialog-name-row").is_none());
+    assert_eq!(field(&shell, &vcx), "npv > 0");
+    assert!(
+        dialog_filter_is_focused(&shell, &mut vcx),
+        "the field keeps the keyboard"
+    );
+}
+
+/// The name entry offers no suggestions: a name is not an expression.
+#[gpui::test]
+fn naming_offers_no_suggestions(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (_shell, mut vcx) = saving_shell(cx, &dir);
+    // Text at a column position: an empty field would refuse `mod+s`.
+    vcx.simulate_input("npv > 0 and ");
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("scope-expr-row-book").is_some());
+    vcx.simulate_keystrokes("alt-s");
+    vcx.simulate_input("bo");
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("dialog-name-row").is_some());
+    assert!(
+        vcx.debug_bounds("scope-expr-row-book").is_none(),
+        "no column rows on a name"
+    );
+    assert!(vcx.debug_bounds("scope-expr-named-row-liq").is_none());
+}
+
+/// Term mode edits one term, so `mod+s` there only says where saving
+/// lives and changes nothing.
+#[gpui::test]
+fn mod_s_in_term_mode_shows_the_notice(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = named_shell(cx, &[], Some("npv > 5 and live = true"));
+    let chip = vcx
+        .debug_bounds("scope-expr-chip-0")
+        .expect("the term chip paints");
+    vcx.simulate_click(chip.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("alt-s");
+    vcx.run_until_parked();
+    assert_eq!(
+        expr_error(&shell, &vcx).as_deref(),
+        Some("save a named expression from the whole or add dialog")
+    );
+    assert!(vcx.debug_bounds("dialog-name-row").is_none());
+    assert_eq!(field(&shell, &vcx), "npv > 5");
+    assert!(shell.read_with(&vcx, |s, _| s.modal_open()));
 }
