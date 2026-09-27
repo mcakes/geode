@@ -16,8 +16,9 @@ use gpui::{AssetSource, Result, SharedString};
 gpui_kit_assets::icon_assets!(
     ExtraIcons,
     [
-        // The scope bar's save chip (`shell::toolbar`).
-        Save,
+        // The scope bar's save chip and the frame readout's workspace pin
+        // glyph (`shell::toolbar`).
+        Save, Pin,
     ]
 );
 
@@ -45,12 +46,18 @@ impl AssetSource for AppAssets {
 mod tests {
     use super::*;
 
-    /// The save icon selected for the scope bar must resolve to nonempty bytes.
+    /// The extra icons the scope bar paints (save, pin) must resolve to
+    /// nonempty bytes; an unserved icon paints as an empty box.
     #[test]
     fn the_extra_icons_the_shell_paints_are_served() {
-        let path = gpui_kit_assets::IconName::Save.path();
-        let bytes = AppAssets.load(&path).unwrap();
-        assert!(bytes.is_some_and(|b| !b.is_empty()), "{path} is not served");
+        for icon in [
+            gpui_kit_assets::IconName::Save,
+            gpui_kit_assets::IconName::Pin,
+        ] {
+            let path = icon.path();
+            let bytes = AppAssets.load(&path).unwrap();
+            assert!(bytes.is_some_and(|b| !b.is_empty()), "{path} is not served");
+        }
     }
 
     /// Default component icons remain loadable, and listings include extras.

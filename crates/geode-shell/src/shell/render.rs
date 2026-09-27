@@ -951,6 +951,19 @@ impl Render for ShellView {
             self.choice_dialog.as_ref().map(|d| &d.target),
             Some(choicedialog::Target::Grouping { .. })
         );
+        // The pin glyph names the active workspace, whose tiles are the
+        // ones on screen, not a dialog's target.
+        let ws = self.active_ix();
+        let pin = toolbar::PinState {
+            ws,
+            pinned: self.frame.read(cx).is_pinned(ws),
+        };
+        let on_pin = {
+            let entity = cx.entity();
+            move |window: &mut Window, cx: &mut App| {
+                entity.update(cx, |view, cx| view.toggle_workspace_pin(window, cx));
+            }
+        };
         let toolbar = toolbar::toolbar(
             &self.filter_input,
             &bar_model,
@@ -966,6 +979,8 @@ impl Render for ShellView {
             on_term_close,
             on_named_open,
             on_named_close,
+            pin,
+            on_pin,
             cx,
         );
 

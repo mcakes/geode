@@ -28,6 +28,7 @@ mod occupants;
 mod palette_ctl;
 pub mod perf_overlay;
 pub mod picker;
+mod pin;
 #[cfg(feature = "profiling")]
 pub mod profiling_hook;
 mod render;

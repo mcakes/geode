@@ -214,13 +214,21 @@ impl ShellView {
         }
 
         // The workspace router ignores counts; the module fallback receives them.
+        let before = self.active_ix();
         let handled = apply_workspace_action(&mut self.services.workspaces, action);
         if handled {
             self.session_dirty = true;
+            // A switch shows another workspace's lane: the flip baseline and
+            // the scope field must follow it before anything reads them.
+            if self.active_ix() != before {
+                self.on_workspace_switched(before, window, cx);
+            }
             // Reconcile focus after every recognized workspace action, including no-ops
             // and geometry-only changes. A separate list of focus-moving action ids
             // would have to track the workspace router exactly.
             self.note_keyboard_focus_move(window, cx);
+        } else if action.0 == "frame::pin_workspace" {
+            self.toggle_workspace_pin(window, cx);
         } else if action.0 == "palette::toggle" {
             self.toggle_palette(window, cx);
         } else if action.0 == "settings::open" {

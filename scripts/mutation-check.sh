@@ -23968,6 +23968,40 @@ run_mutation "autosize: the trait default accepts a fit" \
   '        Ok(())' \
   geode-shell autosize_on_a_tile_without_a_table_shows_the_refusal
 
+# A workspace switch shows another lane; without re-seeding the flip
+# baseline the next frame notification compares against the old lane's
+# numbers and opens a barrier for a change nobody made.
+run_mutation "pin: a switch re-seeds the flip baseline" \
+  crates/geode-shell/src/shell/pin.rs \
+  '        self.last_flip_versions = self.active_frame().read(cx).versions();' \
+  '        {}' \
+  geode-shell switching_workspace_reseeds_the_barrier_without_opening_one
+
+# Without the rebind, the focused field keeps the old lane's text and the
+# next session opens on it, so typing lands stale text in the new lane.
+run_mutation "pin: a switch rebinds the scope field" \
+  crates/geode-shell/src/shell/pin.rs \
+  '        self.rebind_scope_field(window, cx);
+        cx.notify();' \
+  '        cx.notify();' \
+  geode-shell typing_across_a_workspace_switch_lands_in_each_lane
+
+# A shared session left open across a pin keeps its pushed base: edits that
+# returned to the base leave a no-op undo entry in the shared lane.
+run_mutation "pin: toggling ends the lane's text session" \
+  crates/geode-shell/src/shell/pin.rs \
+  '            f.view_mut(ws).end_scope_session();
+            if !f.unpin(ws) {' \
+  '            if !f.unpin(ws) {' \
+  geode-shell pinning_mid_session_leaves_the_shared_history_clean
+
+run_mutation "pin: the action reaches the toggle" \
+  crates/geode-shell/src/shell/input.rs \
+  '            self.toggle_workspace_pin(window, cx);
+        } else if action.0 == "palette::toggle" {' \
+  '        } else if action.0 == "palette::toggle" {' \
+  geode-shell the_pin_action_toggles_the_active_workspace
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

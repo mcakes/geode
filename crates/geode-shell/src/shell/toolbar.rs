@@ -3,7 +3,10 @@
 //! frame readout, and scope text [`Input`]. `ShellView` owns the input and
 //! its editing session; this module renders the cached [`ScopeBarModel`].
 //!
-//! The readout separates as-of, grouping, and scope with inset hairlines.
+//! The readout's first control is the pin glyph, which toggles whether the
+//! active workspace holds its own frame lane; it paints as a selected
+//! neutral chip while pinned and as a bare verb otherwise. The readout
+//! then separates pin, as-of, grouping, and scope with inset hairlines.
 //! The as-of chip alone uses warning colors. Grouping opens a picker and
 //! stays visibly pressed while it is open. Filled selection chips contain
 //! a separate, occluding close target; add/save actions are bare glyphs.
@@ -36,6 +39,7 @@ use super::control::{self, ControlPaint, PointerStates as _};
 use super::scale;
 use crate::fonts;
 use crate::scopebar::ScopeBarModel;
+use crate::tiling::WorkspaceIx;
 use crate::tips;
 
 /// Compact width of the filter field in design pixels.
@@ -50,6 +54,40 @@ pub(super) const GLYPH_BOX: f32 = 14.0;
 /// than the row so it reads as a segment boundary inside the bar, not a
 /// pane divider through it.
 const DIVIDER_HEIGHT: f32 = 14.0;
+
+/// Whether the active workspace holds its own frame lane.
+#[derive(Clone, Copy)]
+pub struct PinState {
+    pub ws: WorkspaceIx,
+    pub pinned: bool,
+}
+
+/// Tooltip titles by workspace, static so hovering allocates nothing.
+const PIN_TITLES: [&str; 9] = [
+    "Pin the frame to workspace 1",
+    "Pin the frame to workspace 2",
+    "Pin the frame to workspace 3",
+    "Pin the frame to workspace 4",
+    "Pin the frame to workspace 5",
+    "Pin the frame to workspace 6",
+    "Pin the frame to workspace 7",
+    "Pin the frame to workspace 8",
+    "Pin the frame to workspace 9",
+];
+const PINNED_TITLES: [&str; 9] = [
+    "Frame pinned to workspace 1",
+    "Frame pinned to workspace 2",
+    "Frame pinned to workspace 3",
+    "Frame pinned to workspace 4",
+    "Frame pinned to workspace 5",
+    "Frame pinned to workspace 6",
+    "Frame pinned to workspace 7",
+    "Frame pinned to workspace 8",
+    "Frame pinned to workspace 9",
+];
+const PIN_HINT: &str = "scope, grouping, and as-of changes here stay here";
+const PINNED_HINT: &str =
+    "scope, grouping, and as-of changes stay here · click to rejoin the shared frame";
 
 /// A labeled chip with stable identity for tooltips and pointer state.
 /// The lazy debug selector allocates only when test instrumentation reads
@@ -147,7 +185,8 @@ fn divider(selector: &'static str, colour: Hsla) -> impl IntoElement {
 /// ([`super::addfilter::render`]); the `+` hangs it under itself and holds
 /// its pressed fill for as long as it is there. `on_term_open` and
 /// `on_term_close` take the expression term's index; `on_named_open` and
-/// `on_named_close` take the named expression's name.
+/// `on_named_close` take the named expression's name. `pin` is the active
+/// workspace and whether it is pinned; `on_pin` toggles that pin.
 #[allow(clippy::too_many_arguments)]
 pub fn toolbar(
     filter_input: &Entity<InputState>,
@@ -164,6 +203,8 @@ pub fn toolbar(
     on_term_close: impl Fn(usize, &mut Window, &mut App) + Clone + 'static,
     on_named_open: impl Fn(&str, &mut Window, &mut App) + Clone + 'static,
     on_named_close: impl Fn(&str, &mut Window, &mut App) + Clone + 'static,
+    pin: PinState,
+    on_pin: impl Fn(&mut Window, &mut App) + Clone + 'static,
     cx: &App,
 ) -> impl IntoElement {
     let theme = cx.theme();
@@ -545,10 +586,52 @@ pub fn toolbar(
                 .debug_selector(|| "scope-grouping-chevron".to_string())
         });
 
-    // The frame readout: AS OF first when scoped to a snapshot
-    // rather than the live data, then the grouping, then the scope, a
-    // hairline between neighbours. Mono face, matching every other
-    // data-adjacent readout in the shell.
+    let i = usize::from(pin.ws.get() - 1);
+    let (title, hint) = if pin.pinned {
+        (PINNED_TITLES[i], PINNED_HINT)
+    } else {
+        (PIN_TITLES[i], PIN_HINT)
+    };
+    // Pinned paints as a selected, hazard-free state (the Neutral chip);
+    // unpinned is a bare verb like `+` and save.
+    let pinned_paint = chip::chip_paint(theme, chip::Tone::Neutral);
+    let (pin_fg, pin_bg, pin_states) = if pin.pinned {
+        (
+            pinned_paint.text,
+            pinned_paint.fill,
+            control::for_chip(theme, &pinned_paint, theme.title_bar),
+        )
+    } else {
+        (chip_fg, None, glyph_states)
+    };
+    let pin_glyph = div()
+        .id("scope-pin")
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(scale::design(GLYPH_BOX))
+        .rounded(glyph_radius)
+        .text_color(pin_fg)
+        .when_some(pin_bg, |el, bg| el.bg(bg))
+        .child(Icon::new(CatalogIcon::Pin).small())
+        .debug_selector(|| "scope-pin".to_string())
+        // A title-bar control (module doc: title-bar controls).
+        .occlude()
+        .pointer_states(pin_states)
+        .tooltip(tips::tip_with(
+            SharedString::new_static("tip-scope-pin"),
+            SharedString::new_static(title),
+            Some("frame::pin_workspace"),
+            Some(SharedString::new_static(hint)),
+        ))
+        .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+            on_pin(window, cx)
+        });
+
+    // The frame readout: the pin glyph, then AS OF when scoped to a
+    // snapshot rather than the live data, then the grouping, then the
+    // scope, a hairline between neighbours. Mono face, matching every
+    // other data-adjacent readout in the shell.
     let readout = h_flex()
         .flex_1()
         .justify_center()
@@ -557,6 +640,8 @@ pub fn toolbar(
         .font_family(fonts::MONO)
         .text_sm()
         .debug_selector(|| "frame-readout".to_string())
+        .child(pin_glyph)
+        .child(divider("scope-divider-pin", theme.title_bar_border))
         .when_some(
             model.as_of_badge.as_ref().zip(model.as_of_full.as_ref()),
             |el, (badge, full)| {
