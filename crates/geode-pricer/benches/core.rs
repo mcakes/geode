@@ -9,8 +9,8 @@ use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use geode_core::clock::Clock;
 use geode_core::pricing::PriceResult;
 use geode_pricer::core::{
-    ColumnPlan, Edit, Expansion, LineId, OwnShifts, Place, RowSpec, Sheet, Views, from_rows, parse,
-    to_rows,
+    ColumnPlan, Edit, Expansion, LineId, OwnShifts, Place, RowSpec, Sheet, TemplateSet, Views,
+    from_rows, parse, to_rows,
 };
 use geode_pricer::grid::GridModel;
 use std::hint::black_box;
@@ -41,9 +41,10 @@ fn texts(n: usize) -> Vec<String> {
 
 fn sheet(n: usize) -> Sheet {
     let mut s = Sheet::new("bench");
+    let templates = TemplateSet::builtin();
     let rows: Vec<RowSpec> = texts(n)
         .iter()
-        .map(|t| parse(t).expect("bench text parses"))
+        .map(|t| parse(t, &templates).expect("bench text parses"))
         .collect();
     s.apply(Edit::Insert {
         place: Place::Root { at: 0 },
@@ -54,13 +55,14 @@ fn sheet(n: usize) -> Sheet {
 }
 
 fn bench(c: &mut Criterion) {
+    let templates = TemplateSet::builtin();
     let mut g = c.benchmark_group("pricer_core");
 
     let lines = texts(1_000);
     g.bench_function("parse_1000_lines", |b| {
         b.iter(|| {
             for t in &lines {
-                black_box(parse(t).expect("parses"));
+                black_box(parse(t, &templates).expect("parses"));
             }
         })
     });
@@ -82,7 +84,7 @@ fn bench(c: &mut Criterion) {
 
     let mut s = sheet(1_000);
     let instrument = s.instrument(500).expect("a line").clone();
-    let other = parse("SPX Z26 9999 P").expect("parses");
+    let other = parse("SPX Z26 9999 P", &templates).expect("parses");
     let other = match other {
         RowSpec::Line(l) => l.instrument,
         RowSpec::Package { .. } => unreachable!(),

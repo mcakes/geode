@@ -166,6 +166,8 @@ impl ShellView {
     /// Create missing occupants, notify removed occupants that they are hidden,
     /// then drop them. Reusable tile sets retain capacity between frames and
     /// are temporarily taken out of `self` while factory calls borrow services.
+    /// A fresh `add_tile` occupant that is on screen and focused hears
+    /// `TileContent::launched` once, deferred after the render.
     pub(super) fn ensure_occupants(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut all = std::mem::take(&mut self.scratch_all_tiles);
         self.fill_all_tiles(&mut all);
@@ -195,6 +197,7 @@ impl ShellView {
         let mut creation_order: Vec<TileId> = all.iter().copied().collect();
         creation_order.sort();
 
+        let mut fresh: Vec<TileId> = Vec::new();
         for id in &creation_order {
             if self.occupants.contains_key(id) {
                 continue;
@@ -237,6 +240,9 @@ impl ShellView {
                 (None, Some(f)) => (Some(f), pending_state),
                 (None, None) => (None, None),
             };
+            // Only an `add_tile` request (no matching restored record) may be
+            // told it was launched: a restore must never take focus.
+            let from_add = matched.is_none() && pending_factory.is_some();
             let occupant = match factory {
                 Some(f) => f.create(
                     *id,
@@ -259,6 +265,9 @@ impl ShellView {
             // or inactive workspaces that the later visibility diff cannot see.
             occupant.content.set_visible(active.contains(id), cx);
             self.occupants.insert(*id, occupant);
+            if from_add {
+                fresh.push(*id);
+            }
             // A fresh occupant under this id must hear its stack position
             // even when a previous occupant under the SAME id already did
             // — `add_tile` fills a placeholder in place by removing its
@@ -296,6 +305,22 @@ impl ShellView {
         for id in active.difference(&self.visible_tiles) {
             if let Some(o) = self.occupants.get(id) {
                 o.content.set_visible(true, cx);
+            }
+        }
+
+        // Tell a fresh `add_tile` occupant it was launched, once, if it is
+        // on screen and the focused tile on this frame. Deferred: this runs
+        // inside render, and `launched` may move focus (the market-data
+        // panel opens its picker), which must follow any modal focus return
+        // the add itself came from.
+        let focused_tile = self.services.workspaces.active().focused_tile();
+        for id in fresh {
+            if active.contains(&id) && focused_tile == Some(id) {
+                cx.defer_in(window, move |view, window, cx| {
+                    if let Some(o) = view.occupants.get(&id) {
+                        o.content.launched(window, cx);
+                    }
+                });
             }
         }
 

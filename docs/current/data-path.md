@@ -278,10 +278,50 @@ the grouping cardinality. The result is an immutable columnar `Snapshot`:
 expanding a tree node works on the prepared result rather than issuing another
 database query. User supplied scope values are bound as parameters.
 
+A scope reaching compilation still carrying a named-expression reference
+(`Scope.named` nonempty) is refused outright, with `StoreError::Scope("scope
+carries unresolved named expressions")`, rather than compiled with that
+reference silently dropped. Resolving a name against `expressions.toml` is
+the shell's job, before a query is ever submitted (see
+[the shared frame](shell.md#the-shared-frame)); this refusal is the safety net
+behind that call site, not a path meant to be exercised in normal use.
+
 The [typed-document reference](typed-documents.md) describes schema and view
 validation, grain meaning, scope composition, and checks deferred to query
 compilation. A typed reader returning a value does not prove every requested
 query can be served by the dataset's actual storage grains.
+
+Every view is validated when the service opens and again on every reload,
+through one helper both paths call, so open and a reload cannot disagree about
+which views can be honoured. A view carrying an error diagnostic is **refused by
+name** when queried: `query` answers with that view's first error message
+instead of compiling it. The refusal is decided before a grouping override is
+considered, so regrouping a refused view is not a way in, and a reload replaces
+the refusal set rather than merging into it, so a view the author has just
+corrected serves again without a restart. A refused view stays registered and
+its siblings still serve; one unhonourable view does not take the desk down or
+disappear from the dialogs that would fix it.
+
+A refused view reports an error instead of returning an absent column that
+would look like a genuine NULL. Measure aggregation follows the schema's
+explicit role; a grain-bearing attribute cannot fall through to a default sum
+and produce a misleading total.
+
+`required = false` downgrades unusable joins, measure-role mismatches, and
+unreachable dimension columns to warnings, allowing those declarations to be
+dropped. Unknown columns and invalid derived-dimension sources remain errors.
+A join keyed outside the grouping that supplies no selected column only warns,
+regardless of `required`, because no selected value depends on it.
+
+A per-query grouping override validates a copy of the view with the requested
+grouping. Removing a grouping needed by a required dimension column refuses
+that query. Grouping by the column again or making that column optional lets
+the query proceed; an override cannot rescue a view already refused at load.
+
+The compiler also checks joins against available datasets and grains. An
+unusable required join produces an error naming the dataset; an optional join
+is omitted. These checks protect callers that bypass service-level validation.
+Derived SQL remains subject to compilation errors.
 
 The read pool coalesces by the **caller's key**, usually a tile, rather than
 by view name. Two tiles showing one view therefore do not supersede each

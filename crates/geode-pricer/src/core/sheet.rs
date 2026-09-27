@@ -7,10 +7,11 @@
 //! view, and refresh policy are independent metadata.
 
 use crate::core::shorthand::{render_line, render_package};
-use crate::core::template::Template;
+use crate::core::template::{Template, TemplateSet};
 use chrono::{DateTime, Utc};
 use geode_core::pricing::{Instrument, MarketOverrides, PriceRequest, PriceResult, Shifts};
 use std::ops::Range;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Per-sheet identity, allocated monotonically and never reused for a new row. Pricing
@@ -143,6 +144,17 @@ pub struct Sheet {
     state: Vec<LineState>,
     priced_at: Vec<Option<DateTime<Utc>>>,
     next_id: u64,
+    /// The template tables `shorthand` prints against; not persisted. The
+    /// builtin set until the tile sets the configured one.
+    templates: Arc<TemplateSet>,
+}
+
+/// One parsed builtin set per thread, shared by every new sheet on it.
+fn builtin_templates() -> Arc<TemplateSet> {
+    thread_local! {
+        static BUILTIN: Arc<TemplateSet> = Arc::new(TemplateSet::builtin());
+    }
+    BUILTIN.with(Arc::clone)
 }
 
 impl Sheet {
@@ -164,7 +176,16 @@ impl Sheet {
             state: Vec::new(),
             priced_at: Vec::new(),
             next_id: 1,
+            templates: builtin_templates(),
         }
+    }
+
+    pub fn set_templates(&mut self, templates: Arc<TemplateSet>) {
+        self.templates = templates;
+    }
+
+    pub fn templates(&self) -> &Arc<TemplateSet> {
+        &self.templates
     }
 
     pub fn len(&self) -> usize {
@@ -197,6 +218,26 @@ impl Sheet {
 
     pub fn instrument(&self, row: usize) -> Option<&Instrument> {
         self.instrument[row].as_ref()
+    }
+
+    /// The one underlying `row` is on: its own instrument's for a line or a
+    /// leg, the legs' shared one for a package. `None` for a package across
+    /// several underlyings (or none), or a row with no instrument; a launch
+    /// context names one underlying or nothing.
+    pub fn sole_underlying(&self, row: usize) -> Option<String> {
+        if !self.is_package(row) {
+            return self.instrument(row).map(|i| i.underlying().to_string());
+        }
+        let mut found: Option<&str> = None;
+        for leg in self.children(row) {
+            let u = self.instrument(leg)?.underlying();
+            match found {
+                None => found = Some(u),
+                Some(f) if f == u => {}
+                Some(_) => return None,
+            }
+        }
+        found.map(str::to_string)
     }
 
     pub fn qty(&self, row: usize) -> i64 {
@@ -463,12 +504,15 @@ impl Sheet {
                     .children(row)
                     .filter_map(|l| self.instrument[l].as_ref().map(|i| (self.qty[l], i)))
                     .collect();
-                render_package(template, &legs).unwrap_or_else(|| {
-                    legs.iter()
-                        .map(|(q, i)| render_line(*q, i))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                })
+                self.templates
+                    .resolve(template.token())
+                    .and_then(|def| render_package(def, &legs))
+                    .unwrap_or_else(|| {
+                        legs.iter()
+                            .map(|(q, i)| render_line(*q, i))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
             }
         }
     }
@@ -640,7 +684,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn callspread(qty: i64) -> RowSpec {
-        crate::core::shorthand::parse(&format!("{qty} SPX Z26 4800/5200 CS")).unwrap()
+        crate::core::shorthand::parse_builtin(&format!("{qty} SPX Z26 4800/5200 CS")).unwrap()
     }
 
     pub(crate) fn result(price: f64) -> PriceResult {
@@ -667,6 +711,51 @@ pub(crate) mod tests {
                 rows,
             })
             .unwrap();
+    }
+
+    fn ndx(strike: f64, kind: OptionKind) -> Instrument {
+        let Instrument::Vanilla(mut v) = spx(strike, kind) else {
+            unreachable!()
+        };
+        v.underlying = "NDX".into();
+        Instrument::Vanilla(v)
+    }
+
+    #[test]
+    fn a_line_and_a_leg_name_their_own_underlying() {
+        let mut s = Sheet::new("t");
+        push(
+            &mut s,
+            vec![line(spx(5000.0, OptionKind::Call), 1), callspread(-5)],
+        );
+        assert_eq!(s.sole_underlying(0), Some("SPX".into()), "a line");
+        let leg = s.children(1).start;
+        assert_eq!(s.sole_underlying(leg), Some("SPX".into()), "a leg");
+        assert_eq!(
+            s.sole_underlying(1),
+            Some("SPX".into()),
+            "a package on one underlying"
+        );
+    }
+
+    #[test]
+    fn a_package_across_two_underlyings_names_none() {
+        let mut s = Sheet::new("t");
+        push(
+            &mut s,
+            vec![
+                line(spx(1.0, OptionKind::Call), 1),
+                line(ndx(2.0, OptionKind::Call), 1),
+            ],
+        );
+        s.apply(Edit::Group {
+            first: 0,
+            count: 2,
+            template: Template::CUSTOM,
+            id: None,
+        })
+        .unwrap();
+        assert_eq!(s.sole_underlying(0), None);
     }
 
     #[test]

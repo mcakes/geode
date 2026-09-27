@@ -1077,7 +1077,12 @@ impl ShellView {
             // Report saved-scope diagnostics here. Startup action registration
             // loads the same scopes with reporting disabled to avoid duplicate logs.
             let saved = hot_reload::rebuild_saved_scopes(&services.config, true);
-            cx.new(|_| Frame::new(slots, saved, user_dir.clone()))
+            let named = hot_reload::rebuild_named_expressions(&services.config);
+            cx.new(|_| {
+                let mut frame = Frame::new(slots, saved, user_dir.clone());
+                frame.replace_named_expressions(named);
+                frame
+            })
         };
         // Observe the frame before creating occupants. GPUI notifies observers
         // in registration order, so `on_frame_changed` opens the flip barrier

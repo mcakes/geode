@@ -8,7 +8,8 @@
 //! stays visibly pressed while it is open. Filled selection chips contain
 //! a separate, occluding close target; add/save actions are bare glyphs.
 //!
-//! Scope chips show dimensions, top-level expression terms, and any
+//! Scope chips show dimensions, named expressions, top-level expression
+//! terms, and any
 //! contradiction. The add action opens [`super::addfilter`]. The text input
 //! shows the frame's text and supplies its own clear glyph.
 //!
@@ -55,7 +56,7 @@ const DIVIDER_HEIGHT: f32 = 14.0;
 /// it. Horizontal layout keeps a selection's close target inside its frame.
 fn chip(
     id: ElementId,
-    label: impl Into<SharedString>,
+    label: impl IntoElement,
     fg: Hsla,
     bg: Hsla,
     radius: Pixels,
@@ -73,7 +74,7 @@ fn chip(
         .rounded(radius)
         .bg(bg)
         .text_color(fg)
-        .child(label.into())
+        .child(label)
         .debug_selector(selector)
 }
 
@@ -145,7 +146,8 @@ fn divider(selector: &'static str, colour: Hsla) -> impl IntoElement {
 /// `add_menu` is the add-a-filter menu's painted panel while it is open
 /// ([`super::addfilter::render`]); the `+` hangs it under itself and holds
 /// its pressed fill for as long as it is there. `on_term_open` and
-/// `on_term_close` take the expression term's index.
+/// `on_term_close` take the expression term's index; `on_named_close`
+/// takes the named expression's name.
 #[allow(clippy::too_many_arguments)]
 pub fn toolbar(
     filter_input: &Entity<InputState>,
@@ -160,6 +162,7 @@ pub fn toolbar(
     on_as_of: impl Fn(&mut Window, &mut App) + Clone + 'static,
     on_term_open: impl Fn(usize, &mut Window, &mut App) + Clone + 'static,
     on_term_close: impl Fn(usize, &mut Window, &mut App) + Clone + 'static,
+    on_named_close: impl Fn(&str, &mut Window, &mut App) + Clone + 'static,
     cx: &App,
 ) -> impl IntoElement {
     let theme = cx.theme();
@@ -251,6 +254,82 @@ pub fn toolbar(
                     ))
                     .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                         on_close(&column, window, cx)
+                    }),
+            ),
+        );
+    }
+    // Broken names (missing or invalid) take the danger chip: a tile
+    // scoped by one refuses to query, so it must read as an error. Its
+    // `×` pairs with the danger fill as the muted chips' `×` pairs with
+    // theirs.
+    let broken = chip::chip_paint(theme, chip::Tone::Danger);
+    let broken_fill = broken.fill.unwrap_or(theme.danger);
+    let broken_states = control::for_chip(theme, &broken, theme.title_bar);
+    for named in &model.named {
+        has_chips = true;
+        // One chip per named expression, after the dimension chips and
+        // before the expression terms. The body carries no listener and no
+        // hover fill: a hover fill promises a click, and the body's click
+        // (open the Expressions dialog) is not wired yet. The `×` drops
+        // the name and occludes the body's hitbox, as a dimension chip's
+        // does. Ids derive from the name, so a chip keeps its pointer
+        // state when a neighbour is removed.
+        //
+        // A broken chip's label carries its own selector, chosen in the same
+        // branch as the danger paint, so a window test that finds the
+        // selector has found the danger tone.
+        let (fg, bg, close_states, broken_marker) = if named.broken {
+            let marker = named.name.clone();
+            (broken.text, broken_fill, broken_states, Some(marker))
+        } else {
+            (chip_fg, chip_bg, chip_states, None)
+        };
+        let on_close = on_named_close.clone();
+        let name = named.name.clone();
+        let body_selector = named.selector.clone();
+        let named_close_selector = named.close_selector.clone();
+        let label = div()
+            .child(named.label.clone())
+            .when_some(broken_marker, |el, marker| {
+                el.debug_selector(move || format!("scope-named-chip-broken-{marker}"))
+            });
+        chips_row = chips_row.child(
+            chip(
+                ElementId::Name(named.selector.clone()),
+                label,
+                fg,
+                bg,
+                chip_radius,
+                move || body_selector.to_string(),
+            )
+            .pr_0p5()
+            .tooltip(tips::tip_with(
+                named.tip_selector.clone(),
+                named.full.clone(),
+                None,
+                None,
+            ))
+            .child(
+                div()
+                    .id(ElementId::Name(named.close_selector.clone()))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(scale::design(GLYPH_BOX))
+                    .rounded(glyph_radius)
+                    .text_color(fg)
+                    .child(Icon::new(IconName::Close).small())
+                    .debug_selector(move || named_close_selector.to_string())
+                    .occlude()
+                    .pointer_states(close_states)
+                    .tooltip(tips::tip_with(
+                        named.close_tip_selector.clone(),
+                        named.close_title.clone(),
+                        None,
+                        None,
+                    ))
+                    .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                        on_close(&name, window, cx)
                     }),
             ),
         );

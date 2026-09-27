@@ -6,7 +6,7 @@
 
 use crate::core::plan::{ColumnKind, ColumnPlan};
 use geode_core::attribution::Attribution;
-use geode_core::grid::selection::{Accumulator, Resolved, StatPart, describe, top_most};
+use geode_core::grid::selection::{Accumulator, Resolved, Total, describe, top_most};
 use geode_core::snapshot::Snapshot;
 
 /// One selected measure column's summary. `col` is its display index
@@ -15,7 +15,7 @@ use geode_core::snapshot::Snapshot;
 pub struct ColumnSummary {
     pub col: usize,
     pub label: String,
-    pub parts: Vec<StatPart>,
+    pub total: Total,
 }
 
 pub fn summarize(
@@ -38,14 +38,13 @@ pub fn summarize(
                 .is_some_and(|p| p.kind == ColumnKind::Measure)
         })
         .collect();
-    let extremes = measures.len() == 1;
     measures
         .into_iter()
         .map(|c| {
             let column = &plan.columns[c];
             // Attribution says whether a value belongs to its row, not
             // whether the column adds up: only the compiler's summable
-            // mark may produce a Σ.
+            // mark permits a footer total.
             let mut acc = if column.summable {
                 Accumulator::default()
             } else {
@@ -60,7 +59,7 @@ pub fn summarize(
             ColumnSummary {
                 col: c,
                 label: column.label.clone(),
-                parts: describe(&acc.finish(), &column.format, extremes),
+                total: describe(&acc.finish(), &column.format),
             }
         })
         .collect()
@@ -70,20 +69,11 @@ pub fn summarize(
 mod tests {
     use super::*;
 
-    /// Each summary as `(label, "Σ 5.00 · μ 5.00 · n 1")`, for the tests
-    /// that pin the text.
+    /// Each summary as `(label, total text)`, for the tests that pin it.
     fn lines(summaries: Vec<ColumnSummary>) -> Vec<(String, String)> {
         summaries
             .into_iter()
-            .map(|c| {
-                let text = c
-                    .parts
-                    .iter()
-                    .map(|p| format!("{} {}", p.stat.symbol(), p.text))
-                    .collect::<Vec<_>>()
-                    .join(" · ");
-                (c.label, text)
-            })
+            .map(|c| (c.label, c.total.text))
             .collect()
     }
     use geode_core::attribution::{Attribution, ScopeSemantics};
@@ -169,7 +159,7 @@ mod tests {
             .iter()
             .find(|(l, _)| l == &plan.columns[delta].label)
             .unwrap();
-        assert!(text.starts_with("Σ 5.00 "), "{text}");
+        assert_eq!(text, "5.00");
     }
 
     #[test]
@@ -183,7 +173,7 @@ mod tests {
             .iter()
             .find(|(l, _)| l == &plan.columns[det].label)
             .unwrap();
-        assert!(text.starts_with("Σ —†"), "{text}");
+        assert_eq!(text, "—†");
     }
 
     fn text_of(name: &str, rows: (usize, usize)) -> String {
@@ -205,41 +195,31 @@ mod tests {
     #[test]
     fn a_max_measure_over_sibling_groups_shows_no_sum() {
         // L1 and L2 (display rows 1..=3; SPX folds into L1). Their maxima
-        // are 5 and 4: a footer printing Σ 9.00 would total two maxima.
+        // are 5 and 4: a footer printing 9.00 would total two maxima.
         let text = text_of("peak", (1, 3));
-        assert!(text.starts_with("Σ —‡"), "{text}");
-        assert!(!text.contains("μ"), "{text}");
-        assert!(
-            text.contains("min 4.00") && text.contains("max 5.00"),
-            "{text}"
-        );
+        assert_eq!(text, "—‡");
     }
 
     #[test]
     fn a_derived_column_shows_no_sum() {
         // `delta01 / det` over L1 and L2: the ratios 2.5 and 2.0 do not add.
         let text = text_of("ratio", (1, 3));
-        assert!(text.starts_with("Σ —‡"), "{text}");
-        assert!(!text.contains("4.50"), "{text}");
+        assert_eq!(text, "—‡");
     }
 
     #[test]
     fn a_sum_measure_still_sums_beside_unsummable_columns() {
         let text = text_of("delta01", (1, 3));
-        assert!(text.starts_with("Σ 9.00 · μ 4.50"), "{text}");
+        assert_eq!(text, "9.00");
     }
 
     #[test]
-    fn a_block_over_one_measure_adds_extremes_and_skips_text_columns() {
+    fn a_block_skips_text_columns() {
         let (snap, plan, shown) = fixture();
         let delta = plan.position_of("delta01").unwrap();
         let r = resolve(SelectKind::Block, (1, 0), (3, delta), plan.columns.len());
         let s = lines(summarize(&snap, &plan, &shown, &r));
         assert_eq!(s.len(), 1, "the tree column is not numeric: {s:?}");
-        assert!(
-            s[0].1.contains("min") && s[0].1.contains("max"),
-            "{:?}",
-            s[0]
-        );
+        assert_eq!(s[0].1, "9.00", "L1 + L2 (SPX folds into L1)");
     }
 }

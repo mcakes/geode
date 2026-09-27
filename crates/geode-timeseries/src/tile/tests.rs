@@ -3659,3 +3659,44 @@ fn an_as_of_change_refreshes_an_open_frequency_menus_cap_reasons(cx: &mut gpui::
         "clipped to five months, 5m fits"
     );
 }
+
+/// A view move while the stats query is out does not supersede it: the
+/// pool interrupts a superseded query, so wheel events arriving faster
+/// than one query runs would starve the density strip until the pan
+/// stopped. The latest view is asked once the running answer lands.
+#[gpui::test]
+fn a_view_move_while_a_query_is_out_waits_for_its_answer(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_loaded(cx, 100);
+    h.dispatch(&mut vcx, "zoom_in", None);
+    let first = h.series_request().expect("an idle tile asks at once");
+    let at = plot_point(&mut vcx, 0.);
+    h.wheel(&mut vcx, at, -40., 0.);
+    h.wheel(&mut vcx, at, -40., 0.);
+    assert!(
+        h.series_request().is_none(),
+        "a pan under a running query supersedes nothing"
+    );
+    h.deliver_series(&mut vcx, first.tag, result_with(&[1], 100));
+    let next = h
+        .series_request()
+        .expect("the answer releases the latest view");
+    assert!(
+        next.window.0 > first.window.0,
+        "the deferred request carries both pans: {:?} → {:?}",
+        first.window,
+        next.window
+    );
+    assert!(h.series_request().is_none(), "exactly one");
+    h.deliver_series(&mut vcx, next.tag, result_with(&[1], 100));
+    assert!(h.series_request().is_none(), "nothing moved since");
+    // A failed answer releases a waiting view too.
+    h.wheel(&mut vcx, at, -40., 0.);
+    let third = h.series_request().expect("idle again: at once");
+    h.wheel(&mut vcx, at, -40., 0.);
+    h.deliver_series_err(&mut vcx, third.tag, "boom");
+    assert!(h.series_request().is_some(), "an error answers too");
+    // A setting change is not a view move: it supersedes at once.
+    h.wheel(&mut vcx, at, -40., 0.);
+    h.dispatch(&mut vcx, "rule", None);
+    assert!(h.series_request().is_some(), "a query change never waits");
+}

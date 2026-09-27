@@ -82,6 +82,23 @@ often tripped:
 - View column metadata marks only plain `sum` measures as summable.
   Selection summaries also check per-cell attribution: a value belonging to
   a row does not imply that its column can be totalled across rows.
+- A view that `ViewSpec::validate` reports an error for is refused by name, not
+  compiled: `query` answers with that view's first error message. The check sits
+  after the unknown-view lookup and before the grouping override, so an unknown
+  view keeps its own message and a regroup cannot slip past a refusal. `open` and
+  `replace_views` share one `validate_views`, and the reload replaces the refusal
+  set rather than merging into it, so a view corrected in the configuration serves
+  again without a restart. A refused view stays registered so the dialogs can fix
+  it.
+- The view compiler errors for a required join with an unknown dataset or
+  keys no grain carries, and skips such optional joins. A join runs only when
+  the query's materialized grouping contains all its keys; at coarser depths
+  its selected attributes are absent and deeper grouping keys are NULL.
+  Measures use the aggregate from their declared role, with no fallback for
+  columns of another role.
+- Scope lowering and distinct queries refuse unresolved named-expression
+  references with `StoreError::Scope`. The shell resolves names before
+  submission so a missing definition cannot silently widen a query.
 - Health is keyed by source, never by dataset; deciding and emitting a
   transition are one step under the lock.
 - `apply_schema` is `CREATE TABLE IF NOT EXISTS` and publish moves rows

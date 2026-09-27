@@ -6,7 +6,7 @@
 //! `Expiry::tenor` and left unresolved for the pricing library's calendar.
 
 use crate::core::sheet::{LineSpec, OwnShifts, RowSpec};
-use crate::core::template::Template;
+use crate::core::template::{Template, TemplateDef, TemplateSet};
 use chrono::{Datelike, NaiveDate, Weekday};
 use geode_core::pricing::{Barrier, BarrierKind, Expiry, Instrument, OptionKind, Strike, Vanilla};
 
@@ -168,8 +168,9 @@ fn err(offset: usize, message: impl Into<String>) -> ParseError {
     }
 }
 
-/// One line of shorthand to a line or a package.
-pub fn parse(text: &str) -> Result<RowSpec, ParseError> {
+/// One line of shorthand to a line or a package. A package's
+/// type token must name a table in `templates`; `C` and `P` need none.
+pub fn parse(text: &str, templates: &TemplateSet) -> Result<RowSpec, ParseError> {
     let toks = tokens(text);
     let end = text.len();
     if toks.is_empty() {
@@ -312,38 +313,40 @@ pub fn parse(text: &str) -> Result<RowSpec, ParseError> {
         }));
     }
 
-    let template = Template::parse(&type_upper)
-        .filter(|t| *t != Template::Custom)
-        .ok_or_else(|| {
-            err(
-                type_tok.offset,
-                format!(
-                    "unknown type '{}': C P CS PS STRD STRG RR FLY CAL",
-                    type_tok.text
-                ),
-            )
-        })?;
+    let def = templates.resolve(&type_upper).ok_or_else(|| {
+        // `C`, `P`, then the set's names, single-spaced: an empty set
+        // leaves no trailing space.
+        let names: Vec<&str> = ["C", "P"]
+            .into_iter()
+            .chain(templates.iter().map(|d| d.name.as_str()))
+            .collect();
+        err(
+            type_tok.offset,
+            format!("unknown type '{}': {}", type_tok.text, names.join(" ")),
+        )
+    })?;
+    let template = Template::named(&def.name);
     // Checked in token order (expiry precedes strikes in the grammar):
     // `SPX DEC26/MAR27 5000 CS` has both a wrong expiry count and a wrong
     // strike count, and the trader's cursor is still on the expiry token.
-    if expiries.len() != template.expiries() {
+    if expiries.len() != def.expiries {
         return Err(err(
             expiry_tok.offset,
             format!(
                 "{} takes {}, got {}",
-                template.token(),
-                count(template.expiries(), "expiry"),
+                def.name,
+                count(def.expiries, "expiry"),
                 expiries.len()
             ),
         ));
     }
-    if strikes.len() != template.strikes() {
+    if strikes.len() != def.strikes {
         return Err(err(
             strikes_tok.offset,
             format!(
                 "{} takes {}, got {}",
-                template.token(),
-                count(template.strikes(), "strike"),
+                def.name,
+                count(def.strikes, "strike"),
                 strikes.len()
             ),
         ));
@@ -361,8 +364,8 @@ pub fn parse(text: &str) -> Result<RowSpec, ParseError> {
     // named at the quantity token (which is `toks[0]` whenever one was
     // read; with no quantity the weight multiplies 1 and cannot overflow).
     let qty_offset = toks[0].offset;
-    let legs = template
-        .legs()
+    let legs = def
+        .legs
         .iter()
         .map(|l| {
             Ok(LineSpec {
@@ -459,33 +462,39 @@ pub fn render_line(qty: i64, instrument: &Instrument) -> String {
 }
 
 /// The template form (`-5 SPX Z26 95%/105% CS`) when `legs` still match
-/// `template`'s table: same count, every leg a vanilla on one
+/// `def`'s table: same count, every leg a vanilla on one
 /// underlying, each leg's qty the package qty times its weight, each
 /// leg's kind the table's, and one strike per strike index and one
 /// expiry per expiry index across the legs. `None` otherwise — the
 /// caller prints the legs one per line.
-pub fn render_package(template: Template, legs: &[(i64, &Instrument)]) -> Option<String> {
-    let table = template.legs();
+pub fn render_package(def: &TemplateDef, legs: &[(i64, &Instrument)]) -> Option<String> {
+    let table = &def.legs;
     if table.is_empty() || table.len() != legs.len() {
         return None;
     }
     let first = table[0];
     let (q0, _) = legs[0];
-    if q0 % first.weight != 0 {
+    // Checked: a stored package prints against whatever table the config
+    // now holds, so `i64::MIN / -1` or a huge quantity times a large
+    // weight is reachable. Overflow means "does not fit": one leg per line.
+    if q0.checked_rem(first.weight)? != 0 {
         return None;
     }
-    let qty = q0 / first.weight;
+    let qty = q0.checked_div(first.weight)?;
     if qty == 0 {
         return None;
     }
     let underlying = legs[0].1.underlying();
-    let mut strikes: Vec<Option<Strike>> = vec![None; template.strikes()];
-    let mut expiries: Vec<Option<&Expiry>> = vec![None; template.expiries()];
+    let mut strikes: Vec<Option<Strike>> = vec![None; def.strikes];
+    let mut expiries: Vec<Option<&Expiry>> = vec![None; def.expiries];
     for (spec, (leg_qty, instrument)) in table.iter().zip(legs) {
         let Instrument::Vanilla(v) = instrument else {
             return None;
         };
-        if *leg_qty != qty * spec.weight || v.kind != spec.kind || v.underlying != underlying {
+        if Some(*leg_qty) != qty.checked_mul(spec.weight)
+            || v.kind != spec.kind
+            || v.underlying != underlying
+        {
             return None;
         }
         match strikes[spec.strike] {
@@ -513,8 +522,18 @@ pub fn render_package(template: Template, legs: &[(i64, &Instrument)]) -> Option
         underlying,
         expiries.join("/"),
         strikes.join("/"),
-        template.token()
+        def.name
     ))
+}
+
+/// `parse` against the built-in tables, for tests. `TemplateSet::builtin`
+/// parses TOML, so each test thread builds it once.
+#[cfg(test)]
+pub(crate) fn parse_builtin(text: &str) -> Result<RowSpec, ParseError> {
+    thread_local! {
+        static BUILTIN: TemplateSet = TemplateSet::builtin();
+    }
+    BUILTIN.with(|set| parse(text, set))
 }
 
 #[cfg(test)]
@@ -523,19 +542,23 @@ mod tests {
     use chrono::NaiveDate;
     use geode_core::pricing::{BarrierKind, OptionKind, Strike};
 
+    fn builtin() -> TemplateSet {
+        TemplateSet::builtin()
+    }
+
     fn d(y: i32, m: u32, day: u32) -> Expiry {
         Expiry::Date(NaiveDate::from_ymd_opt(y, m, day).unwrap())
     }
 
     fn line(text: &str) -> LineSpec {
-        match parse(text).unwrap() {
+        match parse_builtin(text).unwrap() {
             RowSpec::Line(l) => l,
             other => panic!("{text:?} parsed as a package: {other:?}"),
         }
     }
 
     fn package(text: &str) -> (Template, Vec<LineSpec>) {
-        match parse(text).unwrap() {
+        match parse_builtin(text).unwrap() {
             RowSpec::Package { template, legs } => (template, legs),
             other => panic!("{text:?} parsed as a line: {other:?}"),
         }
@@ -656,15 +679,15 @@ mod tests {
                 other => panic!("{other:?}"),
             }
         }
-        let e = parse("SPX DEC26 95%/105% CS DO 4200").unwrap_err();
+        let e = parse_builtin("SPX DEC26 95%/105% CS DO 4200").unwrap_err();
         assert_eq!(e.offset, 22, "the barrier token: {e:?}");
         assert!(e.message.contains("barrier"), "{e:?}");
-        let e = parse("SPX DEC26 5000 C DO").unwrap_err();
+        let e = parse_builtin("SPX DEC26 5000 C DO").unwrap_err();
         assert_eq!(e.offset, 19, "a missing level points past the end: {e:?}");
-        let e = parse("SPX DEC26 5000 C XX 4200").unwrap_err();
+        let e = parse_builtin("SPX DEC26 5000 C XX 4200").unwrap_err();
         assert_eq!(e.offset, 17, "{e:?}");
         assert!(e.message.contains("barrier"), "{e:?}");
-        let e = parse("SPX DEC26 5000 C DO abc").unwrap_err();
+        let e = parse_builtin("SPX DEC26 5000 C DO abc").unwrap_err();
         assert_eq!(e.offset, 20, "{e:?}");
     }
 
@@ -726,59 +749,64 @@ mod tests {
 
     #[test]
     fn every_error_names_the_offending_offset() {
-        let e = parse("").unwrap_err();
+        let e = parse_builtin("").unwrap_err();
         assert_eq!(e.offset, 0);
         assert!(e.message.contains("empty"), "{e:?}");
-        let e = parse("   ").unwrap_err();
+        let e = parse_builtin("   ").unwrap_err();
         assert!(e.message.contains("empty"), "{e:?}");
 
-        let e = parse("0 SPX DEC26 5000 C").unwrap_err();
+        let e = parse_builtin("0 SPX DEC26 5000 C").unwrap_err();
         assert_eq!(e.offset, 0, "{e:?}");
         assert!(e.message.contains("zero"), "{e:?}");
 
-        let e = parse("SPX").unwrap_err();
+        let e = parse_builtin("SPX").unwrap_err();
         assert_eq!(e.offset, 3, "missing expiry points past the end: {e:?}");
         assert!(e.message.contains("expiry"), "{e:?}");
 
-        let e = parse("SPX DEX26 5000 C").unwrap_err();
+        let e = parse_builtin("SPX DEX26 5000 C").unwrap_err();
         assert_eq!(e.offset, 4, "{e:?}");
         assert!(e.message.contains("expiry"), "{e:?}");
 
-        let e = parse("SPX DEC26 abc C").unwrap_err();
+        let e = parse_builtin("SPX DEC26 abc C").unwrap_err();
         assert_eq!(e.offset, 10, "{e:?}");
         assert!(e.message.contains("strike"), "{e:?}");
 
-        let e = parse("SPX DEC26 5000").unwrap_err();
+        let e = parse_builtin("SPX DEC26 5000").unwrap_err();
         assert_eq!(e.offset, 14, "missing type: {e:?}");
         assert!(e.message.contains("type"), "{e:?}");
 
-        let e = parse("SPX DEC26 5000 XYZ").unwrap_err();
+        let e = parse_builtin("SPX DEC26 5000 XYZ").unwrap_err();
         assert_eq!(e.offset, 15, "{e:?}");
         assert!(e.message.contains("unknown type"), "{e:?}");
+        let e = parse("SPX DEC26 5000 X", &TemplateSet::default()).unwrap_err();
+        assert_eq!(
+            e.message, "unknown type 'X': C P",
+            "an empty set lists only C and P, with no trailing space"
+        );
 
-        let e = parse("SPX DEC26 95%/105%/110% CS").unwrap_err();
+        let e = parse_builtin("SPX DEC26 95%/105%/110% CS").unwrap_err();
         assert_eq!(e.offset, 10, "the strikes token: {e:?}");
         assert!(e.message.contains("CS takes 2 strikes"), "{e:?}");
 
-        let e = parse("SPX DEC26 5000/5200 C").unwrap_err();
+        let e = parse_builtin("SPX DEC26 5000/5200 C").unwrap_err();
         assert_eq!(e.offset, 10, "{e:?}");
         assert!(e.message.contains("1 strike"), "{e:?}");
 
-        let e = parse("SPX DEC26/MAR27 5000 CS").unwrap_err();
+        let e = parse_builtin("SPX DEC26/MAR27 5000 CS").unwrap_err();
         assert_eq!(e.offset, 4, "the expiries token: {e:?}");
         assert!(e.message.contains("CS takes 1 expiry"), "{e:?}");
 
-        let e = parse("SPX DEC26 5000 CAL").unwrap_err();
+        let e = parse_builtin("SPX DEC26 5000 CAL").unwrap_err();
         assert_eq!(e.offset, 4, "{e:?}");
         assert!(e.message.contains("CAL takes 2 expiries"), "{e:?}");
 
-        let e = parse("SPX DEC26 5000 C extra").unwrap_err();
+        let e = parse_builtin("SPX DEC26 5000 C extra").unwrap_err();
         assert_eq!(e.offset, 17, "{e:?}");
         assert!(e.message.contains("unexpected"), "{e:?}");
 
         // A quantity a template weight cannot multiply: the error names
         // the quantity token, not the leg it would have built.
-        let e = parse("9223372036854775807 SPX Z26 4800/5000/5200 FLY").unwrap_err();
+        let e = parse_builtin("9223372036854775807 SPX Z26 4800/5000/5200 FLY").unwrap_err();
         assert_eq!(e.offset, 0, "{e:?}");
         assert!(e.message.contains("out of range"), "{e:?}");
     }
@@ -788,7 +816,7 @@ mod tests {
         // "1.5" is not an integer, so it is read as an underlying named
         // "1.5" — the grammar has no fractional quantity, and the trader
         // sees the error at the next token.
-        let e = parse("1.5 SPX DEC26 5000 C").unwrap_err();
+        let e = parse_builtin("1.5 SPX DEC26 5000 C").unwrap_err();
         assert_eq!(e.offset, 4, "{e:?}");
         assert!(e.message.contains("expiry"), "{e:?}");
         // "+3" is a quantity.
@@ -854,7 +882,8 @@ mod tests {
             let (template, legs) = package(text);
             let pairs: Vec<(i64, &Instrument)> =
                 legs.iter().map(|l| (l.qty, &l.instrument)).collect();
-            let rendered = render_package(template, &pairs).expect(text);
+            let rendered =
+                render_package(builtin().resolve(template.token()).unwrap(), &pairs).expect(text);
             assert_eq!(rendered, text);
             assert_eq!(package(&rendered), (template, legs), "round trip");
         }
@@ -866,14 +895,20 @@ mod tests {
         // A 1×2 ratio: the second leg's qty edited.
         legs[1].qty = -2;
         let pairs: Vec<(i64, &Instrument)> = legs.iter().map(|l| (l.qty, &l.instrument)).collect();
-        assert_eq!(render_package(template, &pairs), None);
+        assert_eq!(
+            render_package(builtin().resolve(template.token()).unwrap(), &pairs),
+            None
+        );
         // Legs on two underlyings.
         let (template, mut legs) = package("SPX Z26 4800/5200 CS");
         if let Instrument::Vanilla(v) = &mut legs[1].instrument {
             v.underlying = "NDX".into();
         }
         let pairs: Vec<(i64, &Instrument)> = legs.iter().map(|l| (l.qty, &l.instrument)).collect();
-        assert_eq!(render_package(template, &pairs), None);
+        assert_eq!(
+            render_package(builtin().resolve(template.token()).unwrap(), &pairs),
+            None
+        );
         // A wrong leg count.
         let (template, legs) = package("SPX Z26 4800/5200 CS");
         let pairs: Vec<(i64, &Instrument)> = legs
@@ -881,16 +916,102 @@ mod tests {
             .take(1)
             .map(|l| (l.qty, &l.instrument))
             .collect();
-        assert_eq!(render_package(template, &pairs), None);
-        // Custom never renders as a template.
-        let pairs: Vec<(i64, &Instrument)> = legs.iter().map(|l| (l.qty, &l.instrument)).collect();
-        assert_eq!(render_package(Template::Custom, &pairs), None);
+        assert_eq!(
+            render_package(builtin().resolve(template.token()).unwrap(), &pairs),
+            None
+        );
+        // Custom has no table, so it never renders as a template.
+        assert!(builtin().resolve(Template::CUSTOM.token()).is_none());
         // A barrier leg is never a template leg.
         let b = line("SPX Z26 5000 C DO 4200");
         let c = line("SPX Z26 5200 C");
         assert_eq!(
-            render_package(Template::CS, &[(1, &b.instrument), (-1, &c.instrument)]),
+            render_package(
+                builtin().resolve("CS").unwrap(),
+                &[(1, &b.instrument), (-1, &c.instrument)]
+            ),
             None
+        );
+    }
+
+    /// A stored package prints against whatever table the config now
+    /// holds, and config accepts any nonzero weight: arithmetic that
+    /// overflows means "does not fit", never a panic or a wrapped match.
+    #[test]
+    fn a_huge_quantity_against_a_large_weight_does_not_render_or_panic() {
+        use crate::core::{LegSpec, TemplateDef};
+        let table = |w0: i64, w1: i64| TemplateDef {
+            name: "BIG".into(),
+            legs: vec![
+                LegSpec {
+                    weight: w0,
+                    strike: 0,
+                    expiry: 0,
+                    kind: OptionKind::Call,
+                },
+                LegSpec {
+                    weight: w1,
+                    strike: 1,
+                    expiry: 0,
+                    kind: OptionKind::Call,
+                },
+            ],
+            strikes: 2,
+            expiries: 1,
+        };
+        let a = line("SPX Z26 4800 C");
+        let b = line("SPX Z26 5200 C");
+        // `qty * weight` overflows on the second leg.
+        assert_eq!(
+            render_package(
+                &table(1, i64::MAX),
+                &[(i64::MAX, &a.instrument), (-1, &b.instrument)]
+            ),
+            None
+        );
+        // `i64::MIN % -1` and `i64::MIN / -1` overflow on the first.
+        assert_eq!(
+            render_package(
+                &table(-1, 1),
+                &[(i64::MIN, &a.instrument), (i64::MIN, &b.instrument)]
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_config_template_parses_and_prints_back() {
+        let doc = geode_core::config::LayerDoc::builtin(
+            crate::core::PRICER_TEMPLATES_DOC,
+            "[CONDOR]\nlegs = [ { weight = 1, strike = 1, kind = \"C\" }, { weight = -1, strike = 2, kind = \"C\" }, { weight = -1, strike = 3, kind = \"C\" }, { weight = 1, strike = 4, kind = \"C\" } ]\n",
+        )
+        .unwrap();
+        let set = TemplateSet::from_doc(&geode_core::config::merge_docs(
+            crate::core::PRICER_TEMPLATES_DOC,
+            &[doc],
+        ))
+        .0;
+        let spec = parse("-2 SPX Z26 4800/4900/5100/5200 condor", &set).unwrap();
+        let RowSpec::Package { template, legs } = spec else {
+            panic!("a package")
+        };
+        assert_eq!(template, Template::named("CONDOR"));
+        assert_eq!(
+            legs.iter().map(|l| l.qty).collect::<Vec<_>>(),
+            [-2, 2, 2, -2]
+        );
+        let pairs: Vec<(i64, &Instrument)> = legs.iter().map(|l| (l.qty, &l.instrument)).collect();
+        assert_eq!(
+            render_package(set.resolve("CONDOR").unwrap(), &pairs).as_deref(),
+            Some("-2 SPX Z26 4800/4900/5100/5200 CONDOR")
+        );
+        assert!(
+            parse("SPX Z26 5000 CS", &set).is_err(),
+            "only the set's names parse"
+        );
+        assert!(
+            parse("SPX Z26 5000 C", &TemplateSet::default()).is_ok(),
+            "C and P need no set"
         );
     }
 }

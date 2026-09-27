@@ -830,7 +830,7 @@ mod tests {
     #[test]
     fn a_spot_override_stales_every_line_on_that_underlying_and_only_a_changed_level_does() {
         let mut s = Sheet::new("t");
-        let ndx = crate::core::shorthand::parse("NDX Z26 20000 C").unwrap();
+        let ndx = crate::core::shorthand::parse_builtin("NDX Z26 20000 C").unwrap();
         push(
             &mut s,
             vec![line(spx(5000.0, OptionKind::Call), 1), ndx, callspread(1)],
@@ -1038,7 +1038,7 @@ mod tests {
             .apply(Edit::Group {
                 first: 0,
                 count: 2,
-                template: Template::Custom,
+                template: Template::CUSTOM,
                 id: None,
             })
             .unwrap();
@@ -1046,7 +1046,7 @@ mod tests {
         assert_eq!(
             s.kind(0),
             RowKind::Package {
-                template: Template::Custom
+                template: Template::CUSTOM
             }
         );
         assert_eq!(s.id(0), LineId(4), "a fresh id");
@@ -1068,7 +1068,7 @@ mod tests {
             vec![Edit::Group {
                 first: 0,
                 count: 2,
-                template: Template::Custom,
+                template: Template::CUSTOM,
                 id: Some(LineId(4))
             }]
         );
@@ -1096,7 +1096,7 @@ mod tests {
             s.apply(Edit::Group {
                 first: 0,
                 count: 2,
-                template: Template::Custom,
+                template: Template::CUSTOM,
                 id: None
             })
             .unwrap_err(),
@@ -1107,7 +1107,7 @@ mod tests {
             s.apply(Edit::Group {
                 first: 2,
                 count: 1,
-                template: Template::Custom,
+                template: Template::CUSTOM,
                 id: None
             })
             .unwrap_err(),
@@ -1118,7 +1118,7 @@ mod tests {
             s.apply(Edit::Group {
                 first: 4,
                 count: 2,
-                template: Template::Custom,
+                template: Template::CUSTOM,
                 id: None
             })
             .unwrap_err(),
@@ -1128,7 +1128,7 @@ mod tests {
             s.apply(Edit::Group {
                 first: 0,
                 count: 0,
-                template: Template::Custom,
+                template: Template::CUSTOM,
                 id: None
             })
             .unwrap_err(),
@@ -1138,7 +1138,7 @@ mod tests {
             s.apply(Edit::Group {
                 first: 9,
                 count: 1,
-                template: Template::Custom,
+                template: Template::CUSTOM,
                 id: None
             })
             .unwrap_err(),
@@ -1149,7 +1149,7 @@ mod tests {
             s.apply(Edit::Group {
                 first: 0,
                 count: 1,
-                template: Template::Custom,
+                template: Template::CUSTOM,
                 id: Some(LineId(1))
             })
             .unwrap_err(),
@@ -1160,7 +1160,7 @@ mod tests {
         s.apply(Edit::Group {
             first: 4,
             count: 1,
-            template: Template::Custom,
+            template: Template::CUSTOM,
             id: None,
         })
         .unwrap();
@@ -1297,7 +1297,7 @@ mod tests {
             Edit::Group {
                 first: 4,
                 count: 2,
-                template: Template::Custom,
+                template: Template::CUSTOM,
                 id: None,
             },
             Edit::Ungroup { row: 1 },

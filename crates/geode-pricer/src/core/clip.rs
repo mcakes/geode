@@ -51,7 +51,7 @@ pub fn put_place(sheet: &Sheet, row: Option<usize>, below: bool, spec: &RowSpec)
 mod tests {
     use super::*;
     use crate::core::sheet::tests::{callspread, line, push, spx};
-    use crate::core::shorthand::parse;
+    use crate::core::shorthand::parse_builtin;
     use geode_core::pricing::OptionKind;
 
     fn sheet() -> Sheet {
@@ -76,8 +76,8 @@ mod tests {
     #[test]
     fn a_put_package_lands_at_a_root_boundary_and_a_line_follows_o() {
         let s = sheet();
-        let cs = parse("SPX Z26 4800/5200 CS").unwrap();
-        let one = parse("SPX Z26 5000 C").unwrap();
+        let cs = parse_builtin("SPX Z26 4800/5200 CS").unwrap();
+        let one = parse_builtin("SPX Z26 5000 C").unwrap();
         assert_eq!(
             put_place(&s, Some(2), true, &cs),
             Place::Root { at: 4 },

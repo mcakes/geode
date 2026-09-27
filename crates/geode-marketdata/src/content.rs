@@ -6,6 +6,7 @@
 
 use crate::core::PanelSpec;
 use crate::tile::MarketDataTile;
+use geode_core::launch::{ContextField, LaunchContext};
 use geode_data::DataHandle;
 use geode_shell::actions::{ActionDef, ActionId, ActionRegistry};
 use geode_shell::diagnostics::Diagnostics;
@@ -203,6 +204,9 @@ impl TileContent for MarketDataContent {
     fn holds_focus(&self, window: &Window, cx: &App) -> bool {
         self.tile.read(cx).holds_focus(window, cx)
     }
+    fn launched(&self, window: &mut Window, cx: &mut App) {
+        self.tile.update(cx, |t, cx| t.launched(window, cx))
+    }
 }
 
 /// Builds one panel's tiles. One factory per [`PanelSpec`] — the roster
@@ -296,6 +300,25 @@ impl ModuleFactory for MarketDataFactory {
 
     fn default_keymap(&self) -> Option<&'static str> {
         self.ships_keymap.then_some(DEFAULT_KEYMAP)
+    }
+
+    /// Every panel is one document per underlying, so every panel kind
+    /// opens on one.
+    fn accepts(&self) -> &'static [ContextField] {
+        &[ContextField::Underlying]
+    }
+
+    /// `{ underlying = ["<u>"] }`: the one-element display key
+    /// `MarketDataTile::new` already restores from, so a launched panel
+    /// starts exactly as a restored one on that key would.
+    fn launch_state(&self, ctx: &LaunchContext) -> Option<toml::Table> {
+        let u = ctx.underlying.clone()?;
+        let mut t = toml::Table::new();
+        t.insert(
+            "underlying".into(),
+            toml::Value::Array(vec![toml::Value::String(u)]),
+        );
+        Some(t)
     }
 
     /// Registered once per factory. `let _ =`: a second panel spec would
@@ -450,6 +473,29 @@ mod tests {
         assert_eq!(factory.kind(), "cvi");
         assert_eq!(factory.contexts(), vec!["marketdata"]);
         assert_eq!(factory.default_keymap(), Some(DEFAULT_KEYMAP));
+    }
+
+    /// Every panel kind opens on an underlying, and translates it to the
+    /// same one-element `underlying` key `MarketDataTile::new` restores
+    /// from — a context launch starts exactly where a restore would.
+    #[test]
+    fn a_panel_accepts_an_underlying_and_translates_it_to_its_restored_key() {
+        let (data, _rx) = DataHandle::for_tests();
+        let f = MarketDataFactory::new(data, &CVI, Duration::from_secs(900));
+        assert_eq!(f.accepts(), &[geode_core::launch::ContextField::Underlying]);
+        let state = f
+            .launch_state(&geode_core::launch::LaunchContext {
+                underlying: Some("SPX".into()),
+            })
+            .expect("a state for an underlying");
+        assert_eq!(
+            state.get("underlying"),
+            Some(&toml::Value::Array(vec![toml::Value::String("SPX".into())]))
+        );
+        assert_eq!(
+            f.launch_state(&geode_core::launch::LaunchContext::default()),
+            None
+        );
     }
 
     /// An additional panel factory contributes no duplicate keymap fragment,

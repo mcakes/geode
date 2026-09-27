@@ -56,6 +56,10 @@ Restored filters are parsed for syntax, with malformed expressions dropped and
 logged. Interactive `:filter` commands also validate column names against the
 current schema and derived dimensions.
 
+`g m` opens a panel on the cursor row's `underlying_ref` (the column name is
+fixed); a row above that level, a grouping without it, or a NULL value opens
+the plain tile picker.
+
 ### Selection
 
 `V` (`blotter::visual_rows`) selects whole rows from the cursor; `v`
@@ -80,28 +84,26 @@ No neighbouring row or column is guessed. A row selection never depends on a
 column, so hiding one leaves it in place.
 
 While a selection is live, the footer leads with its extent (`12 rows × 3
-cols`) and then shows one group per selected measure column, parted by
-hairlines. A group's label takes the column's own color, as its header does;
-its sum and mean use the column's resolved cell colors, including bullish
-and bearish colors for sign-based columns and sign-tinted named colors.
-Counts and extremes use the foreground color; statistic names and refusal
-marks use muted text. Values use the grid's monospace face. Each
-aggregate is computed over the selection's top-most rows only: a group row
-already carries its children's total, so counting a child as well would double
-it. NULL and NaN values do not contribute. A summable column with values
-reports sum, mean, and count, plus min and max when the selection includes a
-single measure column. If any contributing value is `DeterminedNonAdditive`,
-the column shows `Σ —†` instead of sum and mean. An empty summable column
-shows only a zero count.
+cols`) and then shows each selected measure column's label and total, parted
+by hairlines. The label takes the column's own color, as its header does; the
+total is painted the way that column's cells paint the same number (bullish or
+bearish for a `sign` column, the sign variant of a sign-tinted named color), in
+the grid's monospace face. The footer shows the total only — no count, mean,
+or extremes. The total is computed over the selection's top-most rows only: a
+group row already carries its children's total, so counting a child as well
+would double it. NULL and NaN values do not contribute. A contributing
+`DeterminedNonAdditive` value produces a muted `—†`; a summable column with
+no contributing values shows `—`.
 
 Whether a column adds up at all is a separate fact, decided by the query
 compiler and carried on the snapshot's column metadata (`ColumnMeta::summable`):
 only a plain measure whose schema aggregate is `sum` is summable. A `min`,
 `max`, or `any` measure, a derived expression (a ratio of sums is not a sum),
-a joined column, and anything unmarked are not. Such a column shows `Σ —‡`
-with its count and, when values exist, min and max. The footer adds
-"‡ this column does not add up". This refusal takes precedence over `†`. Attribution alone cannot decide this: a `max` measure's values belong to
-their rows, yet the total of two maxima is meaningless.
+a joined column, and anything unmarked are not. Such a column shows a muted
+`—‡`, and the footer adds "‡ this column does not add up". This refusal takes
+precedence over `†`. Attribution alone
+cannot decide this: a `max` measure's values belong to their rows, yet the
+total of two maxima is meaningless.
 
 The mouse reaches the same states the keyboard does. A plain click anywhere
 on a row, including the empty space beside its cells, clears any selection
@@ -175,6 +177,10 @@ validated before any edit is written. Bump deltas themselves are parsed as
 `f64`, so their precision is limited by that representation. See the
 [crate guide](../../crates/geode-marketdata/README.md) for grid, popup, and
 command-parser contracts.
+
+A panel opened through an add (palette, tile picker, `open_with`, duplicate)
+with no underlying opens the underlying picker at once; a restored panel does
+not. Every panel kind accepts an underlying launch context.
 
 `[ui] line_numbers` adds a gutter beside the grid's pinned column: the row
 label when shown, otherwise the first value column. The column widens for the
@@ -560,6 +566,23 @@ the packages its session record names. Package rows are read-only in every
 column. Their pricing timestamp is the oldest present leg-attempt timestamp,
 including failed attempts; it does not establish that every leg priced successfully.
 
+The shorthand's package types come from the `pricer_templates` configuration
+document: the seven built-ins (`CS`, `PS`, `STRD`, `STRG`, `RR`, `FLY`,
+`CAL`) plus any the desk or user layer defines, such as a `CONDOR` (see
+[configuration](configuration.md#pricing)). A layer's entry of a built-in's
+name redefines it. `C` and `P` are single lines, not templates. A type the
+set does not know is a parse error that lists what is accepted, `C` and `P`
+first and then the templates in document order (`unknown type 'X': C P CS PS
+…`). A reload reaches every open tile: the entry bar parses against the new
+set at once.
+
+A stored package keeps its template's name whatever the configuration later
+says. When that template is removed, or redefined so the package's legs no
+longer fit its table, the package still loads with its name as its tag, and
+its shorthand (for `y y` and find) prints its legs one per line instead of
+the template form. Its legs, quantities, and prices are unchanged; only a
+package typed after the change uses the new table.
+
 Normal-mode keys:
 
 | Keys | Effect |
@@ -572,7 +595,11 @@ Normal-mode keys:
 | `p` / `shift+p` | Put the remembered row below / above; a package always lands at a root boundary |
 | `shift+j` / `shift+k` | Move the row within its parent |
 | `g p` / `g u` | Group the cursor row and the next `count − 1` roots into a custom package / ungroup |
+| `g m` | Open a panel on the cursor row's underlying |
 | `.` | Open the action menu |
+
+`g m` opens a panel on the cursor row's underlying: a line's or leg's own, a
+package's when its legs share one; otherwise the plain tile picker.
 
 The action menu offers repricing, grouping, ungrouping, undo, redo, deletion,
 and view selection. Key hints show default bindings and do not reflect

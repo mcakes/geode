@@ -493,7 +493,8 @@ mod tests {
     #[test]
     fn instrument_cells_render_the_grammar_and_a_package_paints_them_blank() {
         let mut s = Sheet::new("t");
-        let barrier = crate::core::shorthand::parse("-3 SPX 20DEC26 5000 P DO 4200").unwrap();
+        let barrier =
+            crate::core::shorthand::parse_builtin("-3 SPX 20DEC26 5000 P DO 4200").unwrap();
         push(
             &mut s,
             vec![

@@ -16,30 +16,26 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use geode_blotter::BlotterFactory;
 use geode_core::config::{ConfigSources, Diagnostic, LayerDoc, Severity};
 use geode_core::log::{LevelControl, LogLevels, Ring, RingLayer};
 use geode_diagnostics::DiagnosticsFactory;
-use geode_marketdata::MarketDataFactory;
 use geode_shell::actions::ActionRegistry;
 use geode_shell::defaults::{
     BUILTIN_KEYMAP, mod_alias_from_config, modules_default_diagnostic, register_add_actions,
     register_builtin_actions, register_pick_actions, register_scope_actions,
 };
-use geode_shell::diagnostics::{ActionTail, Diagnostics};
+use geode_shell::diagnostics::ActionTail;
 use geode_shell::fonts;
-use geode_shell::frame::Frame;
 use geode_shell::keymap::build_keymap;
 use geode_shell::keymap::fragments;
-use geode_shell::module::{ModuleFactory, ModuleRoster, TileOccupant};
+use geode_shell::module::ModuleRoster;
 use geode_shell::session;
 use geode_shell::shell::{LogServices, ShellServices, ShellView, pickable_columns, saved_scopes};
 use geode_shell::theme;
-use geode_shell::tiling::{TileId, Workspaces};
+use geode_shell::tiling::Workspaces;
 use geode_shell::vimfind::FindStyle;
 use gpui::App;
 use gpui::prelude::*;
-use gpui::{Entity, Window};
 use gpui_component::{Root, TitleBar};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -381,170 +377,23 @@ fn usage(reason: &str) -> String {
     format!("{reason}\nusage: geode [--demo [rows]]")
 }
 
-/// Forward the roster's owned [`ModuleFactory`] interface to a shared blotter
-/// factory. The bridge retains the same factory to apply configuration reloads.
-/// Forward actions, contexts, keymaps, and creation so trait defaults cannot
-/// silently replace the wrapped factory's behavior.
-struct BlotterFactoryHandle(Rc<BlotterFactory>);
-
-impl ModuleFactory for BlotterFactoryHandle {
-    fn kind(&self) -> &'static str {
-        self.0.kind()
-    }
-    fn register_actions(&self, registry: &mut ActionRegistry) {
-        self.0.register_actions(registry)
-    }
-    // Forward context and keymap declarations alongside actions; inheriting
-    // trait defaults could silently remove or mis-scope the factory's bindings.
-    fn contexts(&self) -> Vec<&'static str> {
-        self.0.contexts()
-    }
-    fn default_keymap(&self) -> Option<&'static str> {
-        self.0.default_keymap()
-    }
-    fn create(
-        &self,
-        tile: TileId,
-        restored: Option<&toml::Table>,
-        frame: Entity<Frame>,
-        diagnostics: Entity<Diagnostics>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> TileOccupant {
-        self.0
-            .create(tile, restored, frame, diagnostics, window, cx)
-    }
-}
-
-/// Share a market-data factory between the roster and bridge. Forward its
-/// contexts explicitly: document kind `cvi` uses key context `marketdata`, so
-/// the trait's kind-based default would reject the panel's bindings.
-struct MarketDataFactoryHandle(Rc<MarketDataFactory>);
-
-impl ModuleFactory for MarketDataFactoryHandle {
-    fn kind(&self) -> &'static str {
-        self.0.kind()
-    }
-    fn register_actions(&self, registry: &mut ActionRegistry) {
-        self.0.register_actions(registry)
-    }
-    fn contexts(&self) -> Vec<&'static str> {
-        self.0.contexts()
-    }
-    fn default_keymap(&self) -> Option<&'static str> {
-        self.0.default_keymap()
-    }
-    fn create(
-        &self,
-        tile: TileId,
-        restored: Option<&toml::Table>,
-        frame: Entity<Frame>,
-        diagnostics: Entity<Diagnostics>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> TileOccupant {
-        self.0
-            .create(tile, restored, frame, diagnostics, window, cx)
-    }
-}
-
-/// Share a timeseries factory between the roster and bridge reload handler.
-/// All trait methods forward to the factory so its actions, contexts, keymap,
-/// and creation behavior remain consistent.
-struct TimeseriesFactoryHandle(Rc<geode_timeseries::content::TimeseriesFactory>);
-
-impl ModuleFactory for TimeseriesFactoryHandle {
-    fn kind(&self) -> &'static str {
-        self.0.kind()
-    }
-    fn register_actions(&self, registry: &mut ActionRegistry) {
-        self.0.register_actions(registry)
-    }
-    fn contexts(&self) -> Vec<&'static str> {
-        self.0.contexts()
-    }
-    fn default_keymap(&self) -> Option<&'static str> {
-        self.0.default_keymap()
-    }
-    fn create(
-        &self,
-        tile: TileId,
-        restored: Option<&toml::Table>,
-        frame: Entity<Frame>,
-        diagnostics: Entity<Diagnostics>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> TileOccupant {
-        self.0
-            .create(tile, restored, frame, diagnostics, window, cx)
-    }
-}
-
-/// Share a pricer factory between the roster and bridge reload handler.
-struct PricerFactoryHandle(Rc<geode_pricer::content::PricerFactory>);
-
-impl ModuleFactory for PricerFactoryHandle {
-    fn kind(&self) -> &'static str {
-        self.0.kind()
-    }
-    fn register_actions(&self, registry: &mut ActionRegistry) {
-        self.0.register_actions(registry)
-    }
-    fn contexts(&self) -> Vec<&'static str> {
-        self.0.contexts()
-    }
-    fn default_keymap(&self) -> Option<&'static str> {
-        self.0.default_keymap()
-    }
-    fn create(
-        &self,
-        tile: TileId,
-        restored: Option<&toml::Table>,
-        frame: Entity<Frame>,
-        diagnostics: Entity<Diagnostics>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> TileOccupant {
-        self.0
-            .create(tile, restored, frame, diagnostics, window, cx)
-    }
-}
-
-/// Share a diagnostics factory between the roster and the frame-config
-/// observer installed after window creation.
-struct DiagnosticsFactoryHandle(Rc<geode_diagnostics::DiagnosticsFactory>);
-
-impl ModuleFactory for DiagnosticsFactoryHandle {
-    fn kind(&self) -> &'static str {
-        self.0.kind()
-    }
-    fn register_actions(&self, registry: &mut ActionRegistry) {
-        self.0.register_actions(registry)
-    }
-    // Forwarded for the reason [`BlotterFactoryHandle::contexts`] gives.
-    fn contexts(&self) -> Vec<&'static str> {
-        self.0.contexts()
-    }
-    fn default_keymap(&self) -> Option<&'static str> {
-        self.0.default_keymap()
-    }
-    fn create(
-        &self,
-        tile: TileId,
-        restored: Option<&toml::Table>,
-        frame: Entity<Frame>,
-        diagnostics: Entity<Diagnostics>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> TileOccupant {
-        self.0
-            .create(tile, restored, frame, diagnostics, window, cx)
-    }
+/// Register modules backed by the bridge's shared factories and data handle.
+/// The roster's `Rc` forwarding exposes every factory method, including launch
+/// context acceptance, while the bridge retains the factories for live reloads.
+fn add_bridge_modules(roster: &mut ModuleRoster, bridge: &bridge::Bridge) {
+    roster.add(Box::new(bridge.factory.clone()));
+    roster.add(Box::new(bridge.marketdata.clone()));
+    // Dividend shares the marketdata key context. Its factory disables its
+    // keymap fragment to avoid installing the same bindings twice.
+    roster.add(Box::new(bridge.dividend.clone()));
+    roster.add(Box::new(bridge.timeseries.clone()));
+    roster.add(Box::new(bridge.pricer.clone()));
 }
 
 /// Every builtin config doc: the shell's keymap, the pricer's two bundled
-/// views (a desk or user layer overrides a view by name), the pricer's
-/// `pricer_sheets` dataset, and the `--demo` layer.
+/// views and seven package templates (a desk or user layer overrides a
+/// view or a template by name), the pricer's `pricer_sheets` dataset, and
+/// the `--demo` layer.
 fn builtin_layer(demo_root: Option<&Path>) -> Vec<LayerDoc> {
     let mut builtin = vec![
         LayerDoc::builtin("keymap", BUILTIN_KEYMAP).expect("builtin keymap TOML is well-formed"),
@@ -553,6 +402,11 @@ fn builtin_layer(demo_root: Option<&Path>) -> Vec<LayerDoc> {
             geode_pricer::core::BUILTIN_VIEWS,
         )
         .expect("BUILTIN_VIEWS is well-formed TOML"),
+        LayerDoc::builtin(
+            geode_pricer::core::PRICER_TEMPLATES_DOC,
+            geode_pricer::core::BUILTIN_TEMPLATES,
+        )
+        .expect("BUILTIN_TEMPLATES is well-formed TOML"),
         // The pricer's sheets, a local document dataset every build
         // declares. `datasets` merges per dataset name, so a demo, desk or
         // user `datasets` doc adds its own datasets beside this one.
@@ -633,9 +487,7 @@ fn build_shell_services(
     // Diagnostics needs no data handle and is always registered. Return its
     // shared factory so the window's frame-config observer can refresh it.
     let diagnostics_factory = Rc::new(DiagnosticsFactory::new(log_ring.clone(), config.clone()));
-    roster.add(Box::new(DiagnosticsFactoryHandle(
-        diagnostics_factory.clone(),
-    )));
+    roster.add(Box::new(diagnostics_factory.clone()));
 
     // Data-backed factories require a successful data setup. If setup is absent,
     // those kinds have no add-tile actions and restored tiles remain placeholders.
@@ -650,16 +502,7 @@ fn build_shell_services(
         let find_style = FindStyle::from_config(&config);
         let stale_after = bridge::stale_after_from_config(&config);
         let bridge = bridge::start(setup, find_style, stale_after, cx);
-        roster.add(Box::new(BlotterFactoryHandle(bridge.factory.clone())));
-        // Register each data-backed module with the bridge's shared handle.
-        roster.add(Box::new(MarketDataFactoryHandle(bridge.marketdata.clone())));
-        // Dividend shares the marketdata key context. Its factory disables its
-        // fragment to avoid installing the same bindings twice.
-        roster.add(Box::new(MarketDataFactoryHandle(bridge.dividend.clone())));
-        // The shared factory receives series configuration reloads through the bridge.
-        roster.add(Box::new(TimeseriesFactoryHandle(bridge.timeseries.clone())));
-        // The shared pricer factory receives pricing and local-write outcomes.
-        roster.add(Box::new(PricerFactoryHandle(bridge.pricer.clone())));
+        add_bridge_modules(&mut roster, &bridge);
         bridge
     });
 
@@ -773,6 +616,7 @@ fn user_config_dir(appdata: Option<String>, home: Option<String>) -> Option<Path
 mod tests {
     use super::*;
     use geode_core::config::Config;
+    use geode_marketdata::MarketDataFactory;
 
     #[test]
     fn appdata_wins_when_set() {
@@ -842,6 +686,24 @@ mod tests {
         );
     }
 
+    /// The seven built-in templates are a builtin-layer doc a desk or user
+    /// layer merges over, and they read clean.
+    #[test]
+    fn the_builtin_layer_carries_the_seven_pricer_templates() {
+        let config = Config::load(&ConfigSources {
+            builtin: builtin_layer(None),
+            desk: None,
+            user: None,
+        });
+        let (set, diags) = geode_pricer::core::TemplateSet::from_doc(
+            config
+                .doc(geode_pricer::core::PRICER_TEMPLATES_DOC)
+                .expect("the doc"),
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(set, geode_pricer::core::TemplateSet::builtin());
+    }
+
     /// The pricer's sheets live in a local document dataset every build
     /// declares, demo or not: the builtin layer carries it, clean.
     #[test]
@@ -904,14 +766,15 @@ mod tests {
 
         let mut roster = ModuleRoster::new();
         let (data, _rx) = DataHandle::for_tests();
-        roster.add(Box::new(PricerFactoryHandle(Rc::new(
+        roster.add(Box::new(Rc::new(
             geode_pricer::content::PricerFactory::new(
                 data,
                 Rc::new(geode_pricer::store::MemorySheetStore::default()),
                 geode_pricer::core::Views::builtin(),
+                geode_pricer::core::TemplateSet::builtin(),
                 geode_pricer::content::PricerSettings::default(),
             ),
-        ))));
+        )));
         assert!(roster.kinds().contains(&"pricer"));
         let mut registry = ActionRegistry::default();
         register_add_actions(&mut registry, &roster.kinds());
@@ -944,12 +807,14 @@ mod tests {
 
         let mut roster = ModuleRoster::new();
         let (data, _rx) = DataHandle::for_tests();
-        roster.add(Box::new(MarketDataFactoryHandle(Rc::new(
-            MarketDataFactory::new(data.clone(), &CVI, Duration::from_secs(60)),
+        roster.add(Box::new(Rc::new(MarketDataFactory::new(
+            data.clone(),
+            &CVI,
+            Duration::from_secs(60),
         ))));
-        roster.add(Box::new(MarketDataFactoryHandle(Rc::new(
+        roster.add(Box::new(Rc::new(
             MarketDataFactory::new(data, &DIVIDEND, Duration::from_secs(60)).without_keymap(),
-        ))));
+        )));
 
         let (docs, diags) = roster.keymap_fragments();
         assert!(diags.is_empty(), "{diags:?}");
@@ -984,9 +849,9 @@ mod tests {
 
         let mut roster = ModuleRoster::new();
         let (data, _rx) = DataHandle::for_tests();
-        roster.add(Box::new(TimeseriesFactoryHandle(Rc::new(
+        roster.add(Box::new(Rc::new(
             geode_timeseries::content::TimeseriesFactory::new(data, Default::default()),
-        ))));
+        )));
         assert!(roster.kinds().contains(&"timeseries"));
 
         let mut registry = ActionRegistry::default();
@@ -1045,14 +910,11 @@ mod tests {
         let bridge =
             cx.update(|cx| bridge::start(setup, FindStyle::default(), Duration::from_secs(60), cx));
         let mut roster = ModuleRoster::new();
-        roster.add(Box::new(DiagnosticsFactoryHandle(Rc::new(
-            DiagnosticsFactory::new(Arc::new(Ring::new(16)), config.clone()),
+        roster.add(Box::new(Rc::new(DiagnosticsFactory::new(
+            Arc::new(Ring::new(16)),
+            config.clone(),
         ))));
-        roster.add(Box::new(BlotterFactoryHandle(bridge.factory.clone())));
-        roster.add(Box::new(MarketDataFactoryHandle(bridge.marketdata.clone())));
-        roster.add(Box::new(MarketDataFactoryHandle(bridge.dividend.clone())));
-        roster.add(Box::new(TimeseriesFactoryHandle(bridge.timeseries.clone())));
-        roster.add(Box::new(PricerFactoryHandle(bridge.pricer.clone())));
+        add_bridge_modules(&mut roster, &bridge);
         register_add_actions(&mut registry, &roster.kinds());
         roster.register_actions(&mut registry);
 
@@ -1067,6 +929,54 @@ mod tests {
             "every shipped binding must name a parseable keystroke and a \
              registered action: {keymap_diags:?}"
         );
+    }
+
+    /// The production roster exposes underlying-based launch state for CVI and
+    /// dividend. Exercising startup's registration path checks that shared
+    /// factory forwarding preserves `accepts` and `launch_state`.
+    #[gpui::test]
+    fn the_production_roster_opens_market_data_on_an_underlying(cx: &mut gpui::TestAppContext) {
+        use geode_core::launch::{ContextField, LaunchContext};
+        let dir = tempfile::tempdir().unwrap();
+        let (config, _) = ShellServices::config_and_builtin(ConfigSources {
+            builtin: builtin_layer(Some(dir.path())),
+            ..ConfigSources::default()
+        });
+        let setup = bridge::data_setup(
+            &config,
+            dir.path().join("geode.duckdb"),
+            geode_data::adapter::AdapterRegistry::default(),
+            geode_data::PricerRegistry::default(),
+        )
+        .expect("the demo layer declares datasets and views");
+        let bridge =
+            cx.update(|cx| bridge::start(setup, FindStyle::default(), Duration::from_secs(60), cx));
+        let mut roster = ModuleRoster::new();
+        add_bridge_modules(&mut roster, &bridge);
+
+        let spx = LaunchContext {
+            underlying: Some("SPX".into()),
+        };
+        let accepting: Vec<&str> = roster
+            .kinds()
+            .into_iter()
+            .filter(|k| {
+                roster
+                    .factory(k)
+                    .is_some_and(|f| spx.covered_by(f.accepts()))
+            })
+            .collect();
+        assert_eq!(accepting, vec!["cvi", "dividend"]);
+        for kind in ["cvi", "dividend"] {
+            let f = roster.factory(kind).unwrap();
+            assert_eq!(f.accepts(), &[ContextField::Underlying], "{kind}");
+            let state = f.launch_state(&spx).expect("a state for an underlying");
+            assert_eq!(
+                state.get("underlying"),
+                Some(&toml::Value::Array(vec![toml::Value::String("SPX".into())])),
+                "{kind}"
+            );
+        }
     }
 
     /// Production workspace source uses tracing so level filters and the

@@ -70,9 +70,14 @@ legs = [
 ### 2.2 Validation
 
 Each entry is checked on its own. A bad entry is skipped with a
-diagnostic under `pricer_templates.<NAME>`, and the rest still load. A
-reload that fails validation entirely keeps the last valid set (the
-configuration guide's rule).
+diagnostic under `pricer_templates.<NAME>`, and the rest still load.
+Keep-last-valid applies per name. An entry dropped with an error keeps the
+previous definition of that name, if there is one, in the entry's own
+doc-order position, and adds a warning at the entry's path ("keeping the
+previous definition"). "Previous" is the running set on a reload and the
+builtin set at startup. A layer's whole-entry replacement therefore
+cannot make a name such as `RR` vanish because of a typo. A name absent
+from the merged document is removed as normal.
 
 - **Name:** 1 to 8 characters, a letter first, then letters or digits.
   Stored and matched upper-case. `C`, `P` and `CUSTOM` are reserved.
@@ -200,12 +205,12 @@ pub trait UnderlyingSource {
 }
 ```
 
-- `PricerFactory::new` takes `Rc<dyn UnderlyingSource>`. The tile reads
+- `PricerFactory::with_underlyings(Rc<dyn UnderlyingSource>)` sets it (default: an empty list). The tile reads
   it when the bar opens and when `revision` has moved since the last
   read (checked on each text change). There is no subscription and no
   new global.
-- `geode-app` backs it today with `[pricer] underlyings = [...]` from the
-  app config, upper-cased, deduplicated in order, and refreshed on
+- `geode-app` backs it today with `[pricing] underlyings = [...]` from
+  `app.toml` (beside `adapter` and `refresh`), upper-cased, deduplicated in order, and refreshed on
   config reload (bumping the revision).
 - The trait lives in `geode-pricer`. When watchlists land, the app
   implements it over the active watchlist. If another module needs the
@@ -248,4 +253,4 @@ unknown-name load fallback, and Tab's replacement range.
 
 `docs/current/features.md` (pricer section: templates, the entry bar's
 completion), `docs/current/configuration.md` (the `pricer_templates`
-document and `[pricer] underlyings`), and `crates/geode-pricer/README.md`.
+document and `[pricing] underlyings`), and `crates/geode-pricer/README.md`.

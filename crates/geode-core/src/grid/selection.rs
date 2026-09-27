@@ -194,108 +194,50 @@ impl Accumulator {
 pub const UNSUMMABLE_MARK: char = '‡';
 pub const UNSUMMABLE_LEGEND: &str = "‡ this column does not add up";
 
-/// One statistic of a column's footer summary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Stat {
-    Sum,
-    Mean,
-    Count,
-    Min,
-    Max,
-}
-
-impl Stat {
-    /// The footer's name for the statistic, painted beside its value.
-    pub fn symbol(self) -> &'static str {
-        match self {
-            Stat::Sum => "Σ",
-            Stat::Mean => "μ",
-            Stat::Count => "n",
-            Stat::Min => "min",
-            Stat::Max => "max",
-        }
-    }
-}
-
-/// One formatted statistic. `sign` is set only on a total (`Σ`, `μ`),
-/// the values a grid paints by sign, so the footer can paint them the
-/// way the column's own cells paint the same number; a count or an
-/// extreme carries `None`. `refused` marks a `Σ` whose text is a refusal
-/// mark (`—†`, `—‡`) rather than a number.
+/// A column's footer total, formatted. `sign` is the total's sign, so the
+/// footer can paint it the way the column's own cells paint the same
+/// number. `refused` marks text that is not a number: a refusal mark
+/// (`—†`, `—‡`) or `—` for a selection with no values in the column.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StatPart {
-    pub stat: Stat,
+pub struct Total {
     pub text: String,
     pub sign: Option<Sign>,
     pub refused: bool,
 }
 
-/// The footer summary for one column, formatted with its `ColumnFormat`.
-/// `extremes` includes `min`/`max` when values are present; an unsummable
-/// column includes them regardless of that flag. Count is always included.
+/// The footer total for one column, formatted with its `ColumnFormat`.
+/// The footer displays the sum without counts, means, or extremes.
 ///
 /// Two markers refuse a total, each with its own footer legend: `†` for
 /// a column whose selected cells are shown for their row but must not be
 /// totalled (the grid marks those cells `†` too), and `‡` for a column
 /// that does not add up at all. `‡` wins: a max column is unsummable
 /// whatever its cells' attribution.
-pub fn describe(
-    agg: &ColumnAggregate,
-    format: &crate::view::ColumnFormat,
-    extremes: bool,
-) -> Vec<StatPart> {
-    use crate::format::format_number;
-    let value = |stat: Stat, v: f64, signed: bool| {
-        let f = format_number(v, format);
-        StatPart {
-            stat,
-            text: f.text,
-            sign: signed.then_some(f.sign),
-            refused: false,
-        }
-    };
-    let refusal = |mark: char| StatPart {
-        stat: Stat::Sum,
-        text: format!("—{mark}"),
+pub fn describe(agg: &ColumnAggregate, format: &crate::view::ColumnFormat) -> Total {
+    let refusal = |text: String| Total {
+        text,
         sign: None,
         refused: true,
     };
-    let mut parts: Vec<StatPart> = Vec::new();
     if agg.unsummable {
-        parts.push(refusal(UNSUMMABLE_MARK));
+        refusal(format!("—{UNSUMMABLE_MARK}"))
     } else if agg.non_additive {
-        parts.push(refusal('†'));
-    } else if let (Some(s), Some(m)) = (agg.sum, agg.mean) {
-        parts.push(value(Stat::Sum, s, true));
-        parts.push(value(Stat::Mean, m, true));
+        refusal("—†".into())
+    } else if let Some(sum) = agg.sum {
+        let f = crate::format::format_number(sum, format);
+        Total {
+            text: f.text,
+            sign: Some(f.sign),
+            refused: false,
+        }
+    } else {
+        refusal("—".into())
     }
-    parts.push(StatPart {
-        stat: Stat::Count,
-        text: agg.count.to_string(),
-        sign: None,
-        refused: false,
-    });
-    if (extremes || agg.unsummable)
-        && let (Some(lo), Some(hi)) = (agg.min, agg.max)
-    {
-        parts.push(value(Stat::Min, lo, false));
-        parts.push(value(Stat::Max, hi, false));
-    }
-    parts
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The parts as one line, for the tests that pin their text.
-    fn joined(parts: &[StatPart]) -> String {
-        parts
-            .iter()
-            .map(|p| format!("{} {}", p.stat.symbol(), p.text))
-            .collect::<Vec<_>>()
-            .join(" · ")
-    }
 
     #[test]
     fn rows_span_anchor_to_cursor_either_way_and_every_column() {
@@ -431,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unsummable_column_never_totals_and_always_shows_extremes() {
+    fn an_unsummable_column_never_totals() {
         use crate::view::ColumnFormat;
         let mut a = Accumulator::unsummable();
         a.add(Some(5.0), true);
@@ -439,10 +381,8 @@ mod tests {
         let g = a.finish();
         assert!(g.unsummable);
         assert_eq!((g.sum, g.mean), (None, None));
-        assert_eq!(
-            joined(&describe(&g, &ColumnFormat::MEASURE, false)),
-            "Σ —‡ · n 2 · min 4.00 · max 5.00"
-        );
+        let t = describe(&g, &ColumnFormat::MEASURE);
+        assert_eq!((t.text.as_str(), t.refused), ("—‡", true));
     }
 
     #[test]
@@ -452,49 +392,25 @@ mod tests {
     }
 
     #[test]
-    fn describe_uses_the_column_format_and_marks_non_additive() {
+    fn describe_shows_the_sum_in_the_column_format_and_marks_refusals() {
         use crate::view::ColumnFormat;
-        let mut a = Accumulator::default();
-        a.add(Some(1000.0), true);
-        a.add(Some(2000.0), true);
         let f = ColumnFormat::MEASURE;
+        let mut a = Accumulator::default();
+        a.add(Some(-1000.0), true);
+        a.add(Some(-2000.0), true);
         assert_eq!(
-            joined(&describe(&a.finish(), &f, false)),
-            "Σ 3,000.00 · μ 1,500.00 · n 2"
-        );
-        assert_eq!(
-            joined(&describe(&a.finish(), &f, true)),
-            "Σ 3,000.00 · μ 1,500.00 · n 2 · min 1,000.00 · max 2,000.00"
+            describe(&a.finish(), &f),
+            Total {
+                text: "-3,000.00".into(),
+                sign: Some(Sign::Negative),
+                refused: false,
+            }
         );
         let mut b = Accumulator::default();
         b.add(Some(1.0), false);
-        assert_eq!(joined(&describe(&b.finish(), &f, false)), "Σ —† · n 1");
-        assert_eq!(
-            joined(&describe(&Accumulator::default().finish(), &f, false)),
-            "n 0"
-        );
-    }
-
-    #[test]
-    fn only_totals_carry_a_sign_and_a_refusal_is_marked() {
-        let f = crate::view::ColumnFormat::MEASURE;
-        let mut a = Accumulator::default();
-        a.add(Some(-3.0), true);
-        a.add(Some(-1.0), true);
-        let parts = describe(&a.finish(), &f, true);
-        let sign_of = |stat: Stat| parts.iter().find(|p| p.stat == stat).unwrap().sign;
-        assert_eq!(sign_of(Stat::Sum), Some(Sign::Negative));
-        assert_eq!(sign_of(Stat::Mean), Some(Sign::Negative));
-        assert_eq!(sign_of(Stat::Count), None);
-        assert_eq!(sign_of(Stat::Min), None, "an extreme paints plain");
-        assert!(parts.iter().all(|p| !p.refused));
-
-        let mut b = Accumulator::unsummable();
-        b.add(Some(2.0), true);
-        let refused = &describe(&b.finish(), &f, false)[0];
-        assert_eq!(
-            (refused.stat, refused.refused, refused.sign),
-            (Stat::Sum, true, None)
-        );
+        let t = describe(&b.finish(), &f);
+        assert_eq!((t.text.as_str(), t.refused, t.sign), ("—†", true, None));
+        let empty = describe(&Accumulator::default().finish(), &f);
+        assert_eq!((empty.text.as_str(), empty.refused), ("—", true));
     }
 }

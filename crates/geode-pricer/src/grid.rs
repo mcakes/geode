@@ -271,7 +271,7 @@ mod tests {
         s.apply(crate::core::Edit::Group {
             first: 0,
             count: 2,
-            template: crate::core::Template::Custom,
+            template: crate::core::Template::CUSTOM,
             id: None,
         })
         .unwrap();

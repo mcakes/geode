@@ -14,10 +14,11 @@ The pure core (`core`, no element, entity, window, or data service):
 
 | Module | Holds |
 |---|---|
-| `sheet` | Struct-of-arrays rows, packages, inherited shifts, and stable line IDs. |
+| `sheet` | Struct-of-arrays rows, packages, inherited shifts, stable line IDs, and `sole_underlying` (a row's own underlying, or a package's when its legs share one). |
 | `edit` | The one mutation door and undo records. |
 | `undo` | The tile's bounded, strictly last-in first-out undo/redo stack. |
-| `shorthand`, `template` | Parsing and rendering custom lines and package templates. |
+| `shorthand` | Parsing and rendering lines and packages against a `TemplateSet`. |
+| `template` | Template names, the `pricer_templates` reader and `TemplateSet`. |
 | `columns`, `views` | Column vocabulary, prepared column plans, and cell text. |
 | `cell` | Cell commit validation, the typeahead vocabularies, the expiry date commit, and nudging. |
 | `entry` | Where `o` lands, the entry bar's label, and the entry history. |
@@ -65,9 +66,20 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 - Package rows derive from their legs; they are not independent instruments.
   Their pricing timestamp is the oldest present leg-attempt timestamp,
   including failed attempts.
-- Shorthand rendering uses a template only while the legs still match it; the
-  grid keeps it as the row's find key and paints only a package's template
-  token.
+- Shorthand rendering uses a template only while the legs still match its
+  current table (an overflowing quantity never matches); otherwise it prints
+  the legs one per line. The grid keeps the shorthand as the row's find key
+  and paints only a package's template token. Loading accepts unresolved
+  template names because stored instruments remain sufficient for repricing.
+- `TemplateSet::from_doc_over` keeps the last valid definition per name.
+  An entry dropped with an error keeps the previous set's definition of
+  its name, in the entry's own position. A name absent from the document
+  is removed.
+- A sheet built by `Sheet::new` or `from_rows` carries the builtin template
+  set. `PricerTile::adopt_templates` is the only place a tile's sheet gets
+  the factory's configured set; it runs wherever a sheet is installed (open,
+  load, `:e`, `:new`) and on every reload, so the entry bar parses against
+  the configured set. A reload also reprints an open bar's history.
 - Storage conversion preserves stable ordering and explicit ownership of
   inherited versus row-level shifts.
 - The `pricer_sheets` declaration is frozen: tables are created with
@@ -127,6 +139,9 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   column disappears, the field closes with `MOVED`; deferred window access
   blurs its retained input only if it still owns focus. Chrome rebuilds
   refresh open-menu rows and keep the highlight on an action or view.
+- `g m` opens the module picker with the cursor row's underlying as launch
+  context. A package contributes an underlying only when all its legs share
+  one; an empty sheet or mixed-underlying package contributes none.
 - The tile arrives at flip barriers itself; it submits no view query.
 - An empty sheet is never saved. A sheet whose load failed is never saved
   (`save_blocked`); a change not yet queued by the store (`dirty`), or whose

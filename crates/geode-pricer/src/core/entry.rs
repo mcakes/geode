@@ -112,7 +112,7 @@ pub fn history(sheet: &Sheet) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::core::sheet::tests::{callspread, line, push, spx};
-    use crate::core::shorthand::parse;
+    use crate::core::shorthand::parse_builtin;
     use geode_core::pricing::OptionKind;
 
     /// [A, P(L1, L2), B] — flat rows 0..5.
@@ -161,8 +161,8 @@ mod tests {
 
     #[test]
     fn the_next_place_follows_what_was_just_inserted() {
-        let one = parse("SPX Z26 5000 C").unwrap();
-        let cs = parse("SPX Z26 4800/5200 CS").unwrap();
+        let one = parse_builtin("SPX Z26 5000 C").unwrap();
+        let cs = parse_builtin("SPX Z26 4800/5200 CS").unwrap();
         assert_eq!(
             next_place(Place::Root { at: 1 }, &one),
             Place::Root { at: 2 }
@@ -238,14 +238,14 @@ mod tests {
         s.apply(crate::core::Edit::Group {
             first: 0,
             count: 2,
-            template: crate::core::Template::Custom,
+            template: crate::core::Template::CUSTOM,
             id: None,
         })
         .unwrap();
         assert_eq!(target_label(&s, Place::Root { at: 3 }), "at end");
         s.apply(crate::core::Edit::Insert {
             place: Place::Root { at: 3 },
-            rows: vec![parse("SPX Z26 3000 P").unwrap()],
+            rows: vec![parse_builtin("SPX Z26 3000 P").unwrap()],
         })
         .unwrap();
         assert_eq!(target_label(&s, Place::Root { at: 3 }), "after CUSTOM");
@@ -259,7 +259,7 @@ mod tests {
         s.apply(crate::core::Edit::Group {
             first: 0,
             count: 2,
-            template: crate::core::Template::Custom,
+            template: crate::core::Template::CUSTOM,
             id: None,
         })
         .unwrap();

@@ -85,11 +85,21 @@ one lookup, so chained derived dimensions are not recursively resolved.
 
 [`ViewSpec`](../../crates/geode-core/src/view.rs) reads dataset, joins,
 selected columns, grouping, sort, and per-column display properties. Parsing
-and schema validation are separate. `validate` checks the primary dataset,
-join datasets, selected-column references, and grouping references. Derived
-dimensions must resolve to a source column in the primary dataset. It does
-not validate derived SQL, join keys, sort keys, or every column's role;
-query compilation performs further checks.
+and schema validation are separate. `validate` checks the primary dataset, join
+datasets, each join's keys against both the joined dataset's grains and the
+view's own grouping, selected-column references, a `measure` column's role in the
+primary dataset, a `dimension` column's reachability through the grouping or a
+join, and grouping references. Derived dimensions must resolve to a source column
+in the primary dataset. It does not validate derived SQL or sort keys. The
+compiler emits them into SQL; DuckDB binding and execution can reject them.
+
+The data service refuses a view by name when validation reports an error.
+A column's `kind` defaults to `measure`; joins and columns default to
+`required = true`. Setting `required = false` downgrades unusable joins,
+measure-role mismatches, and unreachable dimension columns to warnings and
+allows those declarations to be omitted. Unknown columns and invalid source
+columns for derived dimensions remain errors. The flag does not affect
+validation of derived SQL during compilation.
 
 A top-level string `default = "name"` marks that view when present. A table
 named `default` is an ordinary view. Without a string default, parsed views
@@ -134,12 +144,29 @@ that a column is groupable or that one dataset carries the entire sequence.
 Editors use the narrower `DatasetSpec::groupable_columns` vocabulary.
 
 [`Scope`](../../crates/geode-core/src/scope/mod.rs) contains dimension
-selections, text, an expression, and an `impossible` flag. Within a query,
-these predicates combine with AND. Across scope layers, selections on the
-same dimension intersect, expressions combine with AND, and inner text
-replaces outer text when supplied. Empty selections represent no constraint
-unless `impossible` is set. Disjoint intersections set that flag and retain
-the dimension name so the UI can explain the contradiction.
+selections, named-expression references (`named`), text, an expression, and
+an `impossible` flag. Within a query, these predicates combine with AND.
+Across scope layers, selections on the same dimension intersect, named
+references append without repeating one already present, expressions combine
+with AND, and inner text replaces outer text when supplied. Empty selections
+represent no constraint unless `impossible` is set. Disjoint intersections
+set that flag and retain the dimension name so the UI can explain the
+contradiction.
+
+`Scope::resolve` folds every name in `named` into `expression` (list order,
+ANDed together, then ANDed with whatever expression was already there)
+against a [`geode_core::named::NamedExpressions`](../../crates/geode-core/src/named.rs)
+read from `expressions.toml`, and returns a scope whose `named` is empty. The
+first name that document cannot supply — absent, or kept `Invalid` because it
+failed to parse — is an error naming that reference rather than a skip;
+skipping it would silently widen the scope. This is a caller-driven step, not
+part of `and_then`: a scope can carry unresolved names for as long as it is
+pure shell state, and every place a scope reaches a query resolves it first
+(see [the shared frame](shell.md#the-shared-frame)). `NamedExpressions` itself
+is built at startup and rebuilt whenever `expressions`, `datasets`, or
+`dimensions` changes on reload; an entry naming a column the schema lacks
+stays `Valid` and only warns, the same as any other scope expression's
+unknown-column check.
 
 Composition currently handles empty selections asymmetrically: empty inner
 entries are skipped, but outer entries are copied before intersection. An
@@ -172,10 +199,16 @@ scope. Empty selections also have the composition limitation above.
 
 The reader does not reject reserved action names; creation paths reserve
 `save_current`, and action registration separately skips occupied action IDs.
+`named` is read as an ordered, deduplicated array of strings; a non-array
+value warns and is ignored, but, like a malformed dimension field, does not
+drop the scope. Names are not checked against `expressions.toml` here —
+`Scope::resolve` is where a missing or invalid one fails — so a scope
+naming an expression not yet defined anywhere is kept rather than dropped.
 
-Saved-scope serialization writes selections, text, and expression. It omits
-empty selections and does not persist `impossible`, so it is not a lossless
-format for every composed scope. The
+Saved-scope serialization writes selections, named-expression references,
+text, and expression. It omits empty selections and an empty `named` list,
+and does not persist `impossible`, so it is not a lossless format for every
+composed scope. The
 [expression parser](../../crates/geode-core/src/scope/expr.rs) accepts
 comparisons, membership, boolean operators, and parentheses. Parsing is
 schema-free; statements, comments, functions, and subqueries are outside its

@@ -101,6 +101,9 @@ changes still rebuild.
   run in each pixel column. Gaps can increase output beyond two points per
   column. Warm paints still allocate for path submission, labels, and tooltips.
 - Density bars are uncached but capped at 2,000 quads per chart paint.
+- A timeseries view move keeps at most one statistics request in flight and
+  asks for the latest window when it answers, so statistics refresh at the
+  query's own rate during a pan rather than being interrupted by each event.
 - A pricer grid model is rebuilt on edit, delivery, expansion, view, clock or
   entry change, never in render; paints are a per-theme memo.
 - Config dialogs derive rows at each render, key-handling, and click-resolution
@@ -118,6 +121,9 @@ changes still rebuild.
   density. It remains within budget for measured ranges; a shared materialized
   result or grouping-set query is the next step if wider statistics become
   expensive.
+- A timeseries statistics request also recomputes the points over the whole
+  range, which a view move does not change. A statistics-only request would
+  shorten each refresh during a pan.
 - Series append deduplication reads every stored version for the pair. Large
   historical pairs may need a narrower live-value index.
 - Measure and feed-document live/archive retention has no production

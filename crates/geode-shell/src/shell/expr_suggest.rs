@@ -40,15 +40,22 @@ fn values_scope(view: &ShellView, cx: &App) -> Option<Scope> {
     if let Some(state) = view.scope_expr_dialog.as_ref() {
         return Some(scope_expr_view::request_scope(&state.mode, current));
     }
-    if let Some(state) = view.object_dialog.as_ref()
-        && super::objectdialog::expression_entry_open(state)
-        && let Some(draft) = state.draft.as_ref()
-    {
-        let pending = super::objectdialog::apply::config_with_pending(view);
-        let config = pending.as_ref().unwrap_or(&view.services.config);
-        return Some(super::objectdialog::scopes::expression_scope(draft, config));
+    let state = view
+        .object_dialog
+        .as_ref()
+        .filter(|state| super::objectdialog::expression_entry_open(state))?;
+    match state.domain {
+        // A named expression has no enclosing scope: it is ANDed into
+        // whichever scope ticks it, so its values are the whole dataset's.
+        super::objectdialog::Domain::Expressions => Some(Scope::default()),
+        super::objectdialog::Domain::Scopes => {
+            let draft = state.draft.as_ref()?;
+            let pending = super::objectdialog::apply::config_with_pending(view);
+            let config = pending.as_ref().unwrap_or(&view.services.config);
+            Some(super::objectdialog::scopes::expression_scope(draft, config))
+        }
+        _ => None,
     }
-    None
 }
 
 /// Re-read the field's text and caret from input notifications, on open,
@@ -85,9 +92,20 @@ fn request_values(view: &mut ShellView, column: String, cx: &mut Context<ShellVi
     view.next_picker_tag += 1;
     let tag = view.next_picker_tag;
     let vocab = view.expr_vocab.clone();
-    if let Some(c) = completion_mut(view) {
-        c.mark_loading(&column, tag, &vocab);
-    }
+    let resolved = scope.resolve(view.frame.read(cx).named_expressions());
+    let Some(c) = completion_mut(view) else {
+        return;
+    };
+    c.mark_loading(&column, tag, &vocab);
+    // An unresolved name is the column's error row, never a request:
+    // dropping it would widen the suggestions to values outside the scope.
+    let scope = match resolved {
+        Ok(scope) => scope,
+        Err(message) => {
+            c.deliver(&column, tag, Err(message), &vocab);
+            return;
+        }
+    };
     cx.emit(ShellEvent::DistinctRequested(DistinctParams {
         key: EXPR_KEY,
         tag,

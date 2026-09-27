@@ -22,7 +22,7 @@ Config directories:
 
 | Layer | Where |
 |---|---|
-| Builtin | compiled in (`geode_shell::defaults`, plus `builtin_layer`'s keymap, the pricer's bundled views and its `pricer_sheets` dataset) |
+| Builtin | compiled in (`geode_shell::defaults`, plus `builtin_layer`'s keymap, the pricer's bundled views and templates, and its `pricer_sheets` dataset) |
 | Desk | `$GEODE_DESK_CONFIG`, if set |
 | User | `$APPDATA/geode` when set, otherwise `$HOME/.config/geode` |
 

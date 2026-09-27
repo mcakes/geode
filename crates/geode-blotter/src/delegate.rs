@@ -18,7 +18,7 @@ use geode_core::snapshot::Snapshot;
 use geode_core::view::{Colour, ViewSpec};
 use geode_shell::fonts;
 use geode_shell::linenumbers::{GUTTER_GAP_PX, LineNumbers, gutter_number};
-use geode_shell::shell::aggregates::{AggregateCell, AggregatePart, CellPaint};
+use geode_shell::shell::aggregates::{AggregateCell, CellPaint};
 use geode_shell::shell::colours::{anchors_from_theme, theme_signature, tokens_from_theme};
 use geode_shell::shell::control::{self, PointerStates as _};
 use gpui::prelude::*;
@@ -473,6 +473,13 @@ impl BlotterDelegate {
         self.shown.get(self.cursor.row).map(|r| *r as usize)
     }
 
+    /// The cursor row's underlying under the applied grouping, or `None`
+    /// (see [`crate::core::launch::underlying_at`]).
+    pub fn cursor_underlying(&self) -> Option<String> {
+        let plan = self.plan.as_ref()?;
+        crate::core::launch::underlying_at(&self.cursor_path()?, &plan.grouping)
+    }
+
     /// Start a selection of `kind` at the cursor. With a live selection,
     /// switch kind while keeping the anchor, or clear when the kind matches.
     pub fn start_selection(&mut self, kind: SelectKind) {
@@ -556,8 +563,7 @@ impl BlotterDelegate {
         let refuses = |mark: char| {
             summaries
                 .iter()
-                .flat_map(|c| &c.parts)
-                .any(|p| p.refused && p.text.contains(mark))
+                .any(|c| c.total.refused && c.total.text.contains(mark))
         };
         self.summary_non_additive = refuses('†');
         self.summary_unsummable = refuses(UNSUMMABLE_MARK);
@@ -566,16 +572,9 @@ impl BlotterDelegate {
             .into_iter()
             .map(|c| AggregateCell {
                 label: c.label.into(),
-                parts: c
-                    .parts
-                    .into_iter()
-                    .map(|p| AggregatePart {
-                        stat: p.stat.symbol(),
-                        text: p.text.into(),
-                        sign: p.sign,
-                        refused: p.refused,
-                    })
-                    .collect(),
+                text: c.total.text.into(),
+                sign: c.total.sign,
+                refused: c.total.refused,
             })
             .collect();
         self.summary_generation = self.summary_generation.wrapping_add(1);
@@ -1496,6 +1495,32 @@ mod tests {
             "open: BLACK DOWN-POINTING SMALL TRIANGLE"
         );
         assert_eq!(DETERMINED_MARK, "\u{2020}", "the determined mark is DAGGER");
+    }
+
+    /// The root is always in `shown` (`flatten` pushes every root before
+    /// descending), so the grand-total row is reachable by the cursor too.
+    #[test]
+    fn the_cursor_underlying_follows_the_cursor_row() {
+        let mut d = BlotterDelegate::new();
+        d.apply_snapshot(snapshot(), &view(), &grouping());
+        d.expansion
+            .toggle(path_of(&snapshot(), d.plan.as_ref().unwrap(), 1));
+        d.reflatten();
+        let at = |d: &BlotterDelegate, snap_row: u32| {
+            d.shown.iter().position(|r| *r == snap_row).unwrap()
+        };
+        d.cursor.row = at(&d, 1);
+        assert_eq!(
+            d.cursor_underlying(),
+            None,
+            "L1 is above the underlying level"
+        );
+        d.cursor.row = at(&d, 3);
+        assert_eq!(d.cursor_underlying(), Some("SPX".into()));
+        d.cursor.row = at(&d, 4);
+        assert_eq!(d.cursor_underlying(), Some("NDX".into()));
+        d.cursor.row = at(&d, 0);
+        assert_eq!(d.cursor_underlying(), None, "the grand total");
     }
 
     /// The pinned table does not record visible ranges of length zero or

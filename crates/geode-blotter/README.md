@@ -12,7 +12,7 @@ Current behavior and rationale:
 
 | Module | Holds |
 |---|---|
-| `core` | Column plans, expansion paths, visible-row traversal, cursor movement, find, selection summaries, TSV export, command parsing, and visible-window formatting without GPUI. |
+| `core` | Column plans, expansion paths, visible-row traversal, cursor movement, find, selection summaries, cursor-row launch context, TSV export, command parsing, and visible-window formatting without GPUI. |
 | `delegate` | `TableDelegate` adapter with prepared rows and cached cell text. Owns selection and paint caches; reports cell gestures and chevron clicks to the tile. |
 | `tile` | `BlotterTile`, the entity per tile: local query overrides, requests through `DataHandle`, frame observation, snapshot staging and application, header and footer rendering. |
 | `content` | The `TileContent` wrapper and `BlotterFactory`, the roster entry the app builds with the data handle. |
@@ -51,8 +51,15 @@ cargo bench -p geode-blotter   # the pure core
   `blotter::visual_rows` with a warning.
 - Selection summaries include only the selected rows without a selected
   ancestor, avoiding double-counted group totals. Only compiler-marked
-  summable columns with additive values produce a sum and mean; `†` marks
+  summable columns with additive values produce a footer total; `†` marks
   non-additive values and `‡` marks unsummable columns.
+- `g m` opens another module using the cursor row's underlying. The grouping
+  must contain `underlying_ref`, and the cursor must be at or below its level
+  with a non-NULL value. A visual selection does not change the launch context.
+- Frame scope names resolve against current expression definitions before a
+  query is submitted. Missing names show an error, invalidate older pending
+  results, and release the tile's flip-barrier wait. Updating definitions
+  triggers a retry; unscoped tiles use only their local filter.
 - Every mouse selection gesture reaches the tile as a `CellPointer`, and
   only through `pointer`. A cell or gutter press records `drag_origin`; the
   row's own mouse-down (`render_tr`) reports a press at the cursor's column
@@ -60,7 +67,7 @@ cargo bench -p geode-blotter   # the pure core
   a plain click too. The table's `SelectRow` never touches the selection:
   it arrives on mouse-up after the press already moved the cursor, and the
   keyboard's echo carries the cursor's own row.
-- Summary parts, the `rows × cols` extent, and the `†`/`‡` legend flags
+- Summary totals, the `rows × cols` extent, and the `†`/`‡` legend flags
   are prepared in `refresh_selection`; render only reads them. The strip's
   per-column colors (header color for the label, the cells' sign colors
   for totals) are memoized by `ensure_summary_paint` per summary
