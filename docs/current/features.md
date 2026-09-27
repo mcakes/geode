@@ -557,8 +557,10 @@ Lines and packages are rows of one table; a package row sums its legs and opens 
 package created in the session opens so its legs show; a restored tile opens
 the packages its session record names. A package row's text columns show
 its legs' distinct values in leg order joined with `/` (a call spread reads
-`SPX`, `Z26`, `7400/7800`, `C`); barrier columns read only its barrier legs,
-and shift columns paint muted only when every leg inherits the sheet's. Its
+`SPX`, `Z26`, `7400/7800`, `C`); barrier columns read only its barrier legs.
+Shift columns group legs by the shift as the cell spells it, show a leg with
+no shift as `—` beside set ones (`+2.0/—`), and paint muted only when every
+leg inherits the sheet's. Its
 qty is the package quantity while the legs fit the template, otherwise the
 list of distinct leg quantities. Package rows are read-only in every
 column.

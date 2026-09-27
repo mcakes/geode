@@ -23121,7 +23121,7 @@ run_mutation "pricer package: text cells paint blank" \
 # Repeated values collapse: a fly's body is one strike, not two.
 run_mutation "pricer package: repeats are not collapsed" \
   crates/geode-pricer/src/core/package.rs \
-  '        match keys.iter().position(|k| *k == v) {' \
+  '        match keys.iter().position(|seen| *seen == k) {' \
   '        match None::<usize> {' \
   geode-pricer distinct_values_keep_leg_order_and_collapse_repeats
 
@@ -23156,8 +23156,22 @@ run_mutation "pricer package: shifts group by the own value" \
 # A shift group opens for editing on the plain number, not the signed cell.
 run_mutation "pricer package: a shift group edits as its display" \
   crates/geode-pricer/src/core/package.rs \
-  '                    Some(v) => (signed(*v, format), plain(*v)),' \
-  '                    Some(v) => (signed(*v, format), signed(*v, format)),' \
+  '                Some(v) => (signed(*v, format), plain(*v)),' \
+  '                Some(v) => (signed(*v, format), signed(*v, format)),' \
+  geode-pricer a_group_opens_for_editing_in_the_line_editors_spelling
+
+# Shifts group by their spelled text: 2.04 and 2.0 both paint +2.0, one part.
+run_mutation "pricer package: shifts group by the unspelled value" \
+  crates/geode-pricer/src/core/package.rs \
+  '                |v| spell(v).0,' \
+  '                |v| *v,' \
+  geode-pricer shifts_spelled_alike_show_once
+
+# A mixed shift cell paints an unset part as a dash, not an empty part.
+run_mutation "pricer package: an unset shift part paints empty" \
+  crates/geode-pricer/src/core/package.rs \
+  $'                UNSET\n            } else {' \
+  $'                ""\n            } else {' \
   geode-pricer a_group_opens_for_editing_in_the_line_editors_spelling
 
 if [[ -n "$changed_ref" ]]; then

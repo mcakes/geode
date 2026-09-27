@@ -75,8 +75,9 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 - A package row's qty and eight text columns aggregate its legs: the
   distinct values, compared as values, in leg order joined with `/` and
   spelled as a line's cell spells them. Barrier columns read only barrier
-  legs; shifts group by the effective value and paint inherited only when
-  every leg inherits. Qty is the package quantity (first leg qty over the
+  legs. Shifts group by the spelled effective value (an own 2.04 and an
+  inherited 2.0 are one `+2.0`), an unset part among set ones paints `—`,
+  and the cell paints inherited only when every leg inherits. Qty is the package quantity (first leg qty over the
   template's first weight) while the legs fit the template, else the list
   of distinct leg quantities.
 - Shorthand rendering uses a template only while the legs still match its

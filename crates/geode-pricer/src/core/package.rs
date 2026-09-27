@@ -29,8 +29,10 @@ pub fn aggregates(kind: ColumnKind) -> bool {
 
 /// The legs of a package grouped by one column's value, groups in the
 /// order their first leg appears. `display` is the cell's spelling of a
-/// group; `edit` is the spelling the line editor would open on, so a list
-/// typed back parses as the line cell parses it.
+/// group (empty for an unset shift, which a mixed cell paints as
+/// [`UNSET`]); `edit` is the spelling the line editor would open on, taken
+/// from the group's first leg, so a list typed back parses as the line cell
+/// parses it (an empty part clears that group's shift).
 pub(crate) struct Group {
     pub display: String,
     #[cfg_attr(
@@ -41,14 +43,28 @@ pub(crate) struct Group {
     pub legs: Vec<usize>,
 }
 
-fn group_by<T: PartialEq>(
+/// An unset shift's part in a cell whose other legs set one: `+2.0/—`.
+pub(crate) const UNSET: &str = "—";
+
+/// Groups legs by their value: values compare as values, not as text.
+fn group_by<T: PartialEq + Clone>(
     legs: impl Iterator<Item = (usize, T)>,
     spell: impl Fn(&T) -> (String, String),
 ) -> Vec<Group> {
-    let mut keys: Vec<T> = Vec::new();
+    group_by_key(legs, T::clone, spell)
+}
+
+/// Groups legs by `key`; the group's spelling is its first leg's.
+fn group_by_key<T, K: PartialEq>(
+    legs: impl Iterator<Item = (usize, T)>,
+    key: impl Fn(&T) -> K,
+    spell: impl Fn(&T) -> (String, String),
+) -> Vec<Group> {
+    let mut keys: Vec<K> = Vec::new();
     let mut out: Vec<Group> = Vec::new();
     for (leg, v) in legs {
-        match keys.iter().position(|k| *k == v) {
+        let k = key(&v);
+        match keys.iter().position(|seen| *seen == k) {
             Some(i) => out[i].legs.push(leg),
             None => {
                 let (display, edit) = spell(&v);
@@ -57,7 +73,7 @@ fn group_by<T: PartialEq>(
                     edit,
                     legs: vec![leg],
                 });
-                keys.push(v);
+                keys.push(k);
             }
         }
     }
@@ -145,14 +161,18 @@ pub(crate) fn groups(
         ColumnKind::SpotShift | ColumnKind::VolShift => {
             let pick = shift_pick(kind).expect("a shift column");
             let sheet_value = pick(sheet.sheet_shift());
-            group_by(
+            let spell = |v: &Option<f64>| match v {
+                Some(v) => (signed(*v, format), plain(*v)),
+                None => (String::new(), String::new()),
+            };
+            // Shifts group by their spelled text (spec §2): an own 2.04 and
+            // an inherited 2.0 that both paint `+2.0` are one part.
+            group_by_key(
                 sheet
                     .children(row)
                     .map(|l| (l, pick(sheet.shift(l)).or(sheet_value))),
-                |v| match v {
-                    Some(v) => (signed(*v, format), plain(*v)),
-                    None => (String::new(), String::new()),
-                },
+                |v| spell(v).0,
+                spell,
             )
         }
         _ => Vec::new(),
@@ -171,8 +191,8 @@ pub fn aggregate(sheet: &Sheet, row: usize, kind: ColumnKind, format: &ColumnFor
     }
     let gs = groups(sheet, row, kind, format);
     // Only when every group is empty (no leg the column reads, or a shift
-    // nobody sets) is the cell blank; an empty group among set ones keeps
-    // its empty part, so the parts still line up with the legs' values.
+    // nobody sets) is the cell blank; an unset group among set ones paints
+    // `UNSET`, so the parts still line up with the legs' values.
     if gs.iter().all(|g| g.display.is_empty()) {
         return CellText {
             text: String::new(),
@@ -181,7 +201,13 @@ pub fn aggregate(sheet: &Sheet, row: usize, kind: ColumnKind, format: &ColumnFor
     }
     let text = gs
         .iter()
-        .map(|g| g.display.as_str())
+        .map(|g| {
+            if g.display.is_empty() {
+                UNSET
+            } else {
+                g.display.as_str()
+            }
+        })
         .collect::<Vec<_>>()
         .join("/");
     let state = match shift_pick(kind) {
@@ -331,9 +357,39 @@ mod tests {
         );
         assert_eq!(
             aggregate(&s, 0, def.kind, &def.default_format).text,
-            "+2.0/",
-            "a leg with no shift keeps its empty part"
+            "+2.0/—",
+            "a leg with no shift paints its part as a dash"
         );
+    }
+
+    #[test]
+    fn shifts_spelled_alike_show_once() {
+        let mut s = sheet_of(&["SPX Z26 7400/7800 CS"]);
+        s.apply(Edit::SetSheetShift(OwnShifts {
+            spot_pct: Some(2.0),
+            vol_pts: None,
+        }))
+        .unwrap();
+        s.apply(Edit::SetShift {
+            row: 1,
+            shift: OwnShifts {
+                spot_pct: Some(2.04),
+                vol_pts: None,
+            },
+        })
+        .unwrap();
+        let def = column("spot_shift").unwrap();
+        let gs = groups(&s, 0, def.kind, &def.default_format);
+        let parts: Vec<_> = gs
+            .iter()
+            .map(|g| (g.display.as_str(), g.edit.as_str(), g.legs.clone()))
+            .collect();
+        assert_eq!(
+            parts,
+            vec![("+2.0", "2.04", vec![1, 2])],
+            "an own 2.04 and an inherited 2.0 both paint +2.0: one group, edited as its first leg's value"
+        );
+        assert_eq!(text(&s, 0, "spot_shift"), ("+2.0".into(), CellState::Own));
     }
 
     #[test]
