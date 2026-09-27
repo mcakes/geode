@@ -568,8 +568,9 @@ impl ShellView {
     ) {
         // Both shell modals and component dialogs exclude the ordinary matcher,
         // preventing actions from reaching tiles behind the overlay. A shell modal
-        // gets first refusal through its key handler; an unclaimed Escape closes it.
-        // Component dialogs retain their own handling.
+        // gets first refusal through its key handler; a declined chord that opens a
+        // dialog pushes it; an unclaimed Escape closes the top dialog. Component
+        // dialogs retain their own handling.
         if self.modal_open() || window.has_active_dialog(cx) {
             if self.modal_open() {
                 // Clone the handler before calling it so the modal borrow ends before
@@ -591,6 +592,26 @@ impl ShellView {
                     cx.stop_propagation();
                     cx.notify();
                     return;
+                }
+                // An unclaimed chord that opens a dialog pushes it over this one,
+                // resolved against the workspace context as the scope field's
+                // chords are. Every other chord stays inert: an action behind
+                // the modal would change tiles the trader cannot see.
+                if let Some(ks) = convert_keystroke(&event.keystroke)
+                    && ks.mods.is_chord()
+                {
+                    let stack = [KeyContext::new("workspace")];
+                    let action = self
+                        .single_keystroke_binding(&ks, &stack)
+                        .map(|binding| binding.action.clone());
+                    if let Some(action) = action
+                        && dialog::opens_dialog(&action)
+                    {
+                        self.dispatch(&action, None, window, cx);
+                        cx.stop_propagation();
+                        cx.notify();
+                        return;
+                    }
                 }
                 if event.keystroke.key == "escape" {
                     self.close_modal(window, cx);

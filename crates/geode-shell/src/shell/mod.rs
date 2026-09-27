@@ -1308,7 +1308,7 @@ impl ShellView {
     }
 
     /// How many modals are stacked.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn modal_depth(&self) -> usize {
         self.modals.len()
     }

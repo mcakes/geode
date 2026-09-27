@@ -101,6 +101,33 @@ pub(crate) fn can_open(view: &mut ShellView, kind: DialogKind) -> bool {
     false
 }
 
+/// Whether dispatching `action` opens a shell dialog. With a dialog open, an
+/// unclaimed chord reaches the shell only for these actions and the palette
+/// toggle, so a stray chord cannot change tiles hidden behind the modal. Mirrors
+/// the dialog-opening arms of `ShellView::dispatch`;
+/// `opens_dialog_matches_what_dispatch_pushes` holds the two together.
+pub(crate) fn opens_dialog(action: &crate::actions::ActionId) -> bool {
+    matches!(
+        action.0.as_str(),
+        "settings::open"
+            | "keybindings::open"
+            | "config::views"
+            | "config::groupings"
+            | "config::scopes"
+            | "config::schema"
+            | "config::sources"
+            | "config::colors"
+            | "frame::pick"
+            | "scope::save_current"
+            | "frame::as_of"
+            | "frame::scope_expression"
+            | "frame::add_expression"
+            | "frame::grouping"
+            | "tile::add"
+            | "log::level"
+    ) || action.0.starts_with("frame::pick_")
+}
+
 /// The shared input's text and caret as the entry beneath a push left them.
 /// The input is one entity reused at every depth, and some dialogs (the
 /// expression dialog) keep their value only in it.

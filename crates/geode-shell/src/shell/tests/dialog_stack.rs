@@ -251,3 +251,122 @@ fn accept_in_a_pushed_dialog_does_not_touch_a_covered_object_draft(cx: &mut gpui
         "the revealed field has its typed text back, not the top field's accepted text"
     );
 }
+
+/// A dialog-opening chord pushes over an open dialog: `mod+t` (alt under the test
+/// mod alias) opens as-of, and `ctrl+,` opens Settings.
+#[gpui::test]
+fn a_dialog_chord_pushes_over_an_open_dialog(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = dialog_test_shell(cx, "config::views");
+    vcx.simulate_keystrokes("alt-t");
+    assert_eq!(
+        kinds(&shell, &mut vcx),
+        vec![DialogKind::Object, DialogKind::AsOf]
+    );
+    vcx.simulate_keystrokes("ctrl-,");
+    assert_eq!(
+        kinds(&shell, &mut vcx),
+        vec![DialogKind::Object, DialogKind::AsOf, DialogKind::Settings]
+    );
+}
+
+/// Any other chord stays inert behind a dialog: `ctrl+=` must not grow the font.
+#[gpui::test]
+fn a_non_dialog_chord_is_inert_behind_a_dialog(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = dialog_test_shell(cx, "config::views");
+    let before = shell.read_with(&vcx, |s, _| s.font_size);
+    vcx.simulate_keystrokes("ctrl-=");
+    assert_eq!(shell.read_with(&vcx, |s, _| s.font_size), before);
+    assert_eq!(kinds(&shell, &mut vcx), vec![DialogKind::Object]);
+}
+
+/// `opens_dialog` matches dispatch in both directions. Over a stateless base modal,
+/// every registered action is dispatched: a flagged action must push, and an
+/// unflagged one must not.
+#[gpui::test]
+fn opens_dialog_matches_what_dispatch_pushes(cx: &mut gpui::TestAppContext) {
+    // Flagged actions that legitimately refuse in this fixture, each with the reason.
+    const REFUSES_IN_FIXTURE: &[&str] = &[];
+    let (window, mut vcx) = open_shell(cx, super::picker::services_with_pickable());
+    let shell = shell_of(&window, &mut vcx);
+    let ids: Vec<crate::actions::ActionId> = shell.read_with(&vcx, |s, _| {
+        s.services.registry.iter().map(|d| d.id.clone()).collect()
+    });
+    let mut wrong = Vec::new();
+    for id in ids {
+        vcx.update(|window, cx| {
+            shell.update(cx, |s, cx| {
+                s.close_palette(window, cx);
+                s.cancel_command_line(window, cx);
+                while s.modal_open() {
+                    s.close_modal(window, cx);
+                }
+                crate::shell::dialog::open_shell_dialog(
+                    s,
+                    window,
+                    cx,
+                    DialogKind::Plain,
+                    "Base",
+                    |_, _, _| gpui::div().into_any_element(),
+                );
+                s.dispatch(&id, None, window, cx);
+            });
+        });
+        let pushed = shell.read_with(&vcx, |s, _| s.modal_depth() > 1);
+        let flagged = crate::shell::dialog::opens_dialog(&id);
+        if pushed != flagged && !(flagged && REFUSES_IN_FIXTURE.contains(&id.0.as_str())) {
+            wrong.push(format!("{} pushed={pushed} flagged={flagged}", id.0));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "opens_dialog disagrees with dispatch: {wrong:#?}"
+    );
+}
+
+/// A dialog-opening chord pushes over Settings in Normal mode too: the
+/// Object dialog is not the only Normal-mode catch-all that must decline an
+/// unrecognized chord.
+#[gpui::test]
+fn a_dialog_chord_pushes_over_settings_in_normal_mode(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = dialog_test_shell(cx, "settings::open");
+    vcx.simulate_keystrokes("alt-t");
+    assert_eq!(
+        kinds(&shell, &mut vcx),
+        vec![DialogKind::Settings, DialogKind::AsOf]
+    );
+}
+
+/// Keybindings capture claims every key, chords included, so recording a
+/// dialog-opening chord captures it as the new binding rather than
+/// dispatching it and pushing another dialog over this one.
+#[gpui::test]
+fn capture_records_a_dialog_opening_chord_instead_of_pushing_over_it(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (shell, mut vcx) = dialog_test_shell(cx, "keybindings::open");
+    vcx.simulate_keystrokes("enter");
+    assert!(
+        shell.read_with(&vcx, |s, _| s
+            .keybindings
+            .as_ref()
+            .unwrap()
+            .listening
+            .is_some()),
+        "enter should start listening on the selected row"
+    );
+
+    vcx.simulate_keystrokes("ctrl-,");
+    assert_eq!(
+        kinds(&shell, &mut vcx),
+        vec![DialogKind::Keybindings],
+        "ctrl-, must be captured, not dispatched as settings::open"
+    );
+    let pending = shell.read_with(&vcx, |s, _| {
+        s.keybindings.as_ref().unwrap().listening.clone()
+    });
+    assert_eq!(
+        pending.as_deref().map(<[_]>::len),
+        Some(1),
+        "the chord must land in the pending binding"
+    );
+}

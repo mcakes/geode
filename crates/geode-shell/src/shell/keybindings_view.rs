@@ -515,10 +515,13 @@ fn handle_key(
             }
         }
         let Some(cmd) = dialogmode::normal_command(ks) else {
-            // Claimed and dropped: in normal mode a key with no meaning
-            // does nothing at all, rather than falling through to the
-            // shell (which is still listening underneath the modal).
-            return true;
+            // A bare key with no meaning is claimed and dropped, same as
+            // browse mode elsewhere. A chord is declined instead: capture
+            // (`state.listening`, above) already claims every key when a
+            // binding is being recorded, so this decline is reached only
+            // outside capture, and is how the shell reaches a
+            // dialog-opening action stacked over this dialog.
+            return !ks.mods.is_chord();
         };
         match cmd {
             NormalCommand::Nav(nav) => {

@@ -310,10 +310,13 @@ fn handle_browse_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<She
             }
         }
         let Some(cmd) = dialogmode::normal_command(ks) else {
-            // Claimed and dropped: in normal mode a key with no meaning
-            // does nothing at all, rather than falling through to the
-            // shell still listening underneath the modal.
-            return true;
+            // A bare key with no meaning is claimed and dropped: normal
+            // mode does nothing with it rather than falling through to the
+            // shell still listening underneath the modal. A chord
+            // (ctrl/alt/cmd) this vocabulary does not name is declined
+            // instead — that decline is how the shell reaches a
+            // dialog-opening action stacked over this dialog.
+            return !ks.mods.is_chord();
         };
         match cmd {
             NormalCommand::Nav(nav) => {
@@ -1371,7 +1374,10 @@ fn handle_edit_key_inner(
     }
 
     let Some(cmd) = dialogmode::normal_command(ks) else {
-        return true;
+        // See the matching branch in `handle_browse_key`: a bare key stays
+        // claimed, a chord is declined so a dialog-opening action stacked
+        // over this dialog can reach the shell.
+        return !ks.mods.is_chord();
     };
 
     // every verb that would change the object is refused here, in one place, on a
