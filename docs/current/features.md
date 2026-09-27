@@ -975,9 +975,12 @@ default key.
 - A double-click on the name replaces it with a rename field holding the
   name, all selected. `enter` renames through `:name`'s parse and route; a
   refusal shows in the footer and keeps the field; `escape` or a press
-  outside cancels without renaming. A double-click renames only when both
-  presses reached the name: one whose first press landed on something
-  painted over the name is a single click. A rename refused whatever the
+  outside cancels without renaming; `tab` keeps the keyboard in the field.
+  A double-click renames only when both presses reached the name: one whose
+  first press landed anywhere else (the open picker, another surface painted
+  over the tile) is a single click. A press on the name with a modifier held
+  is the shell's (a tile drag, a fullscreen double-click) and opens nothing.
+  A rename refused whatever the
   name (loading, a failed load, an unconfirmed rename) never opens the
   field; the footer says why, and the menu's row is greyed with the reason.
 - The menu's `Remove sheet…` opens the same picker to remove: a pick arms

@@ -229,9 +229,13 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   header whose `on_key_down` consumes every key (bare `y` confirms), the
   tile in `insert` mode while armed, cancelled by focus leaving or a pointer
   press, blurred before it drops. Its Yes/No buttons (`confirm_clicked`) are
-  `y` and "any other key"; the pointer cancel is the buttons' own
-  outside-press listener, so a press on a button reaches its click (gpui's
-  `Button` stops its press and prevents the focus move) instead of first
+  `y` and "any other key". The pointer cancel is the button group's own
+  listeners: outside-press (capture phase) for presses off the group, and a
+  group mouse-down for presses in the gap between the buttons, which skips a
+  press whose default a `Button` prevented. gpui's `Button` only prevents
+  the focus move on a left press; the press still bubbles to the shell's
+  tile listener, whose focus restore keeps the prompt because the prompt
+  holds focus. So a press on a button reaches its click instead of first
   cancelling the question.
 - The sheet picker and the rename field are pointer forms of `:e`/`:rm` and
   `:name`: a pick goes through `edit_sheet`/`arm_remove`, and the field's
@@ -242,9 +246,13 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   its reason). The name's press listener runs in the capture phase (a
   second click toggles the picker closed before its outside-press closer
   runs) and prevents default so no focus-tracking ancestor takes the new
-  field's focus; the tile root's capture listener (`note_press`) records
-  whether the previous press hit the name, so a double-click renames only
-  when both presses did.
+  field's focus. The name's outside-press listener (not hover-gated, so it
+  hears presses on surfaces painted over the tile) clears
+  `last_press_on_name`, so a double-click renames only when both presses
+  hit the name. A press with any modifier opens nothing and leaves default
+  alone: mod+drag and mod+double-click fullscreen stay the shell's.
+  `lib::init` reclaims `tab` in the rename field's `PricerRename` context,
+  and the field consumes it, so the keyboard never leaves the open field.
 - Known names are the store's (`set_known` from the diagnostics catalog,
   which only adds and never re-adds a name confirmed forgotten until a
   save of it is confirmed; confirmed saves; less confirmed forgets) plus

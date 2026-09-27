@@ -2296,6 +2296,65 @@ role = "key"
         );
     }
 
+    /// A mod+double-click on the pricer's sheet name is the shell's
+    /// fullscreen gesture and nothing else: no picker, no rename field.
+    #[gpui::test]
+    fn a_mod_double_click_on_the_pricer_sheet_name_fullscreens_and_opens_no_field(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use geode_shell::diagnostics::fnv1a;
+        let (handle, _rx) = DataHandle::for_tests();
+        let services = test_shell_services();
+        let tail = services.action_tail.clone();
+        let alias = services.mod_alias;
+        let modifiers = gpui::Modifiers {
+            control: alias.ctrl,
+            alt: alias.alt,
+            platform: alias.cmd,
+            ..Default::default()
+        };
+        let (services, tiles) = with_a_pricer_tile_on(services, test_pricer(&handle), "a");
+        let window = open_pricer_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let tile = tiles.borrow()[0].clone();
+        let name = vcx
+            .debug_bounds("pricer-sheet-name")
+            .expect("the sheet name is painted")
+            .center();
+        for click_count in [1, 2] {
+            vcx.simulate_event(gpui::MouseDownEvent {
+                position: name,
+                modifiers,
+                button: gpui::MouseButton::Left,
+                click_count,
+                first_mouse: false,
+            });
+            vcx.simulate_event(gpui::MouseUpEvent {
+                position: name,
+                modifiers,
+                button: gpui::MouseButton::Left,
+                click_count,
+            });
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+        let h = fnv1a("workspace::fullscreen_tile");
+        assert!(
+            tail.lock().unwrap().recent().any(|x| x == h),
+            "the shell's mod+double-click fullscreened the tile"
+        );
+        assert_eq!(
+            tile.read_with(&vcx, |t, cx| t.sheet_field_text(cx)),
+            None,
+            "the pricer opened no picker or rename field"
+        );
+    }
+
     /// "Add lines…" committed from the shell palette while the bar is open
     /// leaves the bar, its text, and focus in its field. The palette's
     /// commit returns focus to the shell root before it dispatches, so an

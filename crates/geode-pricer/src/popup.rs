@@ -342,7 +342,7 @@ pub(crate) fn render_sheet_picker(
                 .flex()
                 .items_center()
                 .text_color(paints.menu_muted)
-                .child("no sheet matches"),
+                .child(crate::tile::NO_SHEET_MATCHES),
         );
     }
     let lit = p.list.highlighted();

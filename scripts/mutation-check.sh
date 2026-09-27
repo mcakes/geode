@@ -21830,15 +21830,26 @@ run_mutation "pricer init: DataTable keeps its own escape" \
 # field instead of completing.
 run_mutation "pricer init: the entry bar does not reclaim tab" \
   crates/geode-pricer/src/lib.rs \
-  '    for context in [header::ENTRY_CONTEXT, popup::SHEET_PICKER_CONTEXT] {' \
-  '    for context in [popup::SHEET_PICKER_CONTEXT] {' \
+  '        header::ENTRY_CONTEXT,
+        popup::SHEET_PICKER_CONTEXT,' \
+  '        popup::SHEET_PICKER_CONTEXT,' \
   geode-pricer tab_writes_the_lit_underlying_and_cycles
 
 run_mutation "pricer init: the sheet picker does not reclaim tab" \
   crates/geode-pricer/src/lib.rs \
-  '    for context in [header::ENTRY_CONTEXT, popup::SHEET_PICKER_CONTEXT] {' \
-  '    for context in [header::ENTRY_CONTEXT] {' \
+  '        popup::SHEET_PICKER_CONTEXT,
+        header::RENAME_CONTEXT,' \
+  '        header::RENAME_CONTEXT,' \
   geode-pricer the_picker_steps_completes_commits_and_escape_closes
+
+# Unreclaimed, `tab` in the rename field is gpui-component's focus cycling:
+# the keyboard leaves the field while it stays open in insert mode.
+run_mutation "pricer init: the rename field does not reclaim tab" \
+  crates/geode-pricer/src/lib.rs \
+  '        header::RENAME_CONTEXT,
+    ] {' \
+  '    ] {' \
+  geode-pricer tab_in_the_rename_field_keeps_the_keyboard_in_it
 
 # An empty hint must keep its row, or the table jumps as the caret enters
 # the last slot.
@@ -24254,15 +24265,34 @@ run_mutation "pricer sheets: the name press lets an ancestor take focus" \
 # A double-click renames only when both its presses reached the name.
 run_mutation "pricer sheets: a double-click renames whatever its first press hit" \
   crates/geode-pricer/src/tile.rs \
-  '        let verb = if click_count >= 2 && follows_name {' \
-  '        let verb = if click_count >= 2 {' \
+  '        let verb = if event.click_count >= 2 && follows_name {' \
+  '        let verb = if event.click_count >= 2 {' \
   geode-pricer a_double_click_whose_first_press_missed_the_name_opens_the_picker
 
 run_mutation "pricer sheets: no press is remembered as the name's" \
   crates/geode-pricer/src/tile.rs \
-  '        self.last_press_on_name = std::mem::take(&mut self.press_on_name);' \
-  '        self.last_press_on_name = false;' \
+  '        let follows_name = std::mem::replace(&mut self.last_press_on_name, true);' \
+  '        let follows_name = std::mem::replace(&mut self.last_press_on_name, false);' \
   geode-pricer a_double_click_on_the_sheet_name_renames_in_place
+
+# A press on a surface painted over the tile (here its own picker) never
+# reaches a hover-gated listener; the name's outside-press listener still
+# hears it, so the next press on the name follows no press of it.
+run_mutation "pricer sheets: a press off the name is not heard" \
+  crates/geode-pricer/src/header.rs \
+  '                move |_, _, cx| tile.update(cx, |t, _| t.name_press_elsewhere())' \
+  '                move |_, _, _| {
+                    let _ = &tile;
+                }' \
+  geode-pricer a_double_click_whose_first_press_hit_the_picker_does_not_rename
+
+# A modified press on the name is the shell's (mod+drag, mod+double-click
+# fullscreen). Mutated, the pricer opens its picker and rename field too.
+run_mutation "pricer sheets: a modified press opens the picker" \
+  crates/geode-pricer/src/tile.rs \
+  '        if event.modifiers.modified() {' \
+  '        if false {' \
+  geode-app a_mod_double_click_on_the_pricer_sheet_name_fullscreens_and_opens_no_field
 
 # A click on the name with the picker open closes it; mutated, it reopens.
 run_mutation "pricer sheets: the name click does not toggle the picker" \
@@ -24345,16 +24375,17 @@ run_mutation "pricer sheets: the Yes button cancels" \
   '        if !yes {' \
   geode-pricer the_prompts_yes_button_removes_and_no_cancels
 
-run_mutation "pricer sheets: any press on the tile cancels the prompt first" \
-  crates/geode-pricer/src/tile.rs \
-  '            .capture_any_mouse_down(move |_, _, cx| {
-                press_tile.update(cx, |t, _| t.note_press());' \
-  '            .capture_any_mouse_down(move |_, window, cx| {
-                press_tile.update(cx, |t, cx| {
-                    t.note_press();
-                    t.cancel_remove_on_pointer(window, cx)
-                });' \
+run_mutation "pricer sheets: a press on a Yes/No button cancels the prompt first" \
+  crates/geode-pricer/src/header.rs \
+  '                                    if !window.default_prevented() {' \
+  '                                    if true {' \
   geode-pricer the_prompts_yes_button_removes_and_no_cancels
+
+run_mutation "pricer sheets: a press between Yes and No leaves the prompt standing" \
+  crates/geode-pricer/src/header.rs \
+  '                                    if !window.default_prevented() {' \
+  '                                    if false {' \
+  geode-pricer a_press_between_the_prompts_buttons_cancels_it
 
 run_mutation "pricer sheets: a press off the buttons leaves the prompt standing" \
   crates/geode-pricer/src/header.rs \

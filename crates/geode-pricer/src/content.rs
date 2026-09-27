@@ -101,10 +101,12 @@ pub const NO_DEFAULT_KEY: &[&str] = &[
 ];
 
 /// The module's keymap fragment. Every predicate is a
-/// plain conjunction whose first identifier is `pricer`. Both text fields
-/// (the entry field and the cell editor) report `mode == insert` — the one
-/// word the shell's insert-focus predicate reads — and share one block;
-/// the tile routes `commit`/`cancel`/`insert_*` by which field is open. No
+/// plain conjunction whose first identifier is `pricer`. Every field (the
+/// entry field, the cell editor, the sheet picker's filter and the rename
+/// field) and the armed `:rm` prompt report `mode == insert` — the one word
+/// the shell's insert-focus predicate reads — and share one block; the tile
+/// routes `commit`/`cancel`/`insert_*` by which field is open (the prompt
+/// consumes its keys before they reach the block). No
 /// chord is bound there, so `ctrl+k` keeps opening the palette from inside
 /// a field. `y` alone is unbound: an
 /// exact match dispatches at once, so it would make `y y` and `y c`

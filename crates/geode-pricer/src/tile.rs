@@ -436,14 +436,12 @@ pub struct PricerTile {
     pub(crate) rename_field: Option<Entity<InputState>>,
     /// The tooltip selector of the header's sheet name, built once.
     name_tip: SharedString,
-    /// Whether the latest pointer press on this tile landed on the
-    /// sheet name, and whether the press before it did. The tile root's
-    /// capture listener shifts the first into the second on every press
-    /// (`note_press`) before the name's own listener runs, so a
-    /// double-click renames only when BOTH its presses reached the name:
-    /// a first press that hit something painted over it (another
-    /// surface's popup) leaves the second an ordinary single click.
-    press_on_name: bool,
+    /// Whether the latest pointer press in the window landed on the sheet
+    /// name (unmodified). The name's own listener sets it; its
+    /// outside-press listener clears it for every other press, including
+    /// one on a surface painted over the tile. A double-click renames only
+    /// when BOTH its presses reached the name: a first press that hit
+    /// anything else leaves the second an ordinary single click.
     last_press_on_name: bool,
     /// The line a press that closed the entry bar resolved. Closing the
     /// bar moves the table up on screen, so the second press of the same
@@ -725,7 +723,6 @@ impl PricerTile {
             sheet_picker: None,
             rename_field: None,
             name_tip: format!("tip-pricer-sheet-name-{}", id.0).into(),
-            press_on_name: false,
             last_press_on_name: false,
             click_anchor: None,
             pressed: None,
@@ -3480,6 +3477,9 @@ impl PricerTile {
             self.footer = Some(why.into());
             return;
         }
+        // The name is not painted while the field is: no press is recorded
+        // against it until it is back.
+        self.last_press_on_name = false;
         let name = self.sheet.name.clone();
         let input = cx.new(|cx| InputState::new(window, cx).default_value(name));
         input.update(cx, |s, cx| {
@@ -3523,11 +3523,10 @@ impl PricerTile {
         cx.notify();
     }
 
-    /// Every pointer press on the tile, from the root's capture listener,
-    /// which runs before the sheet name's own: shift whether the previous
-    /// press landed on the name into `last_press_on_name`.
-    pub(crate) fn note_press(&mut self) {
-        self.last_press_on_name = std::mem::take(&mut self.press_on_name);
+    /// A press anywhere off the sheet name (the name's outside-press
+    /// listener, which sees presses on surfaces painted over the tile too).
+    pub(crate) fn name_press_elsewhere(&mut self) {
+        self.last_press_on_name = false;
     }
 
     /// A left press on the header's sheet name, in the capture phase so
@@ -3539,16 +3538,23 @@ impl PricerTile {
     /// press opened. Default is prevented so no focus-tracking ancestor
     /// takes the keyboard from the field just focused; propagation
     /// continues so the shell's click-to-focus still runs.
+    ///
+    /// A press with any modifier is the shell's gesture (a mod+drag, a
+    /// mod+double-click fullscreen): it opens nothing here and leaves
+    /// default alone.
     pub(crate) fn name_pressed(
         &mut self,
-        click_count: usize,
+        event: &gpui::MouseDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let follows_name = self.last_press_on_name;
-        self.press_on_name = true;
+        let follows_name = std::mem::replace(&mut self.last_press_on_name, true);
+        if event.modifiers.modified() {
+            self.last_press_on_name = false;
+            return;
+        }
         window.prevent_default();
-        let verb = if click_count >= 2 && follows_name {
+        let verb = if event.click_count >= 2 && follows_name {
             "pricer::rename_sheet"
         } else if self.sheet_picker.is_some() {
             self.close_sheet_picker(window, cx);
@@ -3991,16 +3997,9 @@ impl gpui::Render for PricerTile {
             )
         });
         let footer = header::render_footer(self.footer_text.as_ref(), theme);
-        // Every press on the tile shifts the sheet name's double-click
-        // record (`note_press`): capture phase, so it runs before the
-        // name's own listener, and it never stops propagation.
-        let press_tile = tile.clone();
         v_flex()
             .size_full()
             .debug_selector(|| format!("tile-content-{}", self.id.0))
-            .capture_any_mouse_down(move |_, _, cx| {
-                press_tile.update(cx, |t, _| t.note_press());
-            })
             .child(header)
             .children(bar)
             .child(body)
@@ -10248,6 +10247,87 @@ pub(crate) mod tests {
         click(&mut vcx, "pricer-remove-yes-5", 1);
         assert_eq!(prompt(&h, &vcx), None);
         assert_eq!(h.store.forgets(), vec!["old".to_string()]);
+        assert_eq!(h.mode(&mut vcx), "normal");
+    }
+
+    /// A press in the gap between Yes and No answers no, like a press
+    /// anywhere else but on the two buttons.
+    #[gpui::test]
+    fn a_press_between_the_prompts_buttons_cancels_it(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx, _second) = sheets_fixture(cx);
+        h.command(&mut vcx, "rm old").unwrap();
+        h.draw(&mut vcx);
+        let yes = vcx
+            .debug_bounds("pricer-remove-yes-5")
+            .expect("Yes painted");
+        let no = vcx.debug_bounds("pricer-remove-no-5").expect("No painted");
+        assert!(
+            yes.right() < no.left(),
+            "fixture: a gap between the buttons"
+        );
+        let gap = gpui::point((yes.right() + no.left()) / 2.0, yes.center().y);
+        click_at(&mut vcx, gap, 1);
+        assert_eq!(prompt(&h, &vcx), None);
+        assert_eq!(h.footer(&vcx).as_deref(), Some(NOT_REMOVED));
+        assert!(h.store.forgets().is_empty());
+    }
+
+    /// `tab` in the rename field stays in it: gpui-component's focus
+    /// cycling would otherwise take the keyboard while the field stays
+    /// open, and later typing would reach nothing.
+    #[gpui::test]
+    fn tab_in_the_rename_field_keeps_the_keyboard_in_it(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx, _second) = sheets_fixture(cx);
+        h.dispatch(&mut vcx, "rename_sheet", None);
+        h.draw(&mut vcx);
+        vcx.simulate_keystrokes("tab");
+        h.draw(&mut vcx);
+        assert!(vcx.update(|window, cx| h.content.holds_focus(window, cx)));
+        typed(&h, &mut vcx, "zz");
+        assert_eq!(rename_text(&h, &vcx).as_deref(), Some("zz"));
+    }
+
+    /// A double-click's first press on this tile's own picker (a surface
+    /// painted over the tile, so the tile root never hears the press)
+    /// still counts as a press off the name: the second press toggles the
+    /// picker closed and renames nothing.
+    #[gpui::test]
+    fn a_double_click_whose_first_press_hit_the_picker_does_not_rename(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx, _second) = sheets_fixture(cx);
+        click(&mut vcx, "pricer-sheet-name", 1);
+        click(&mut vcx, "pricer-sheet-picker-field", 1);
+        assert!(picker_rows(&h, &vcx).is_some(), "fixture: still open");
+        click(&mut vcx, "pricer-sheet-name", 2);
+        assert_eq!(rename_text(&h, &vcx), None);
+        assert!(picker_rows(&h, &vcx).is_none(), "a single click's toggle");
+    }
+
+    /// A modified press on the name is the shell's gesture (a drag, a
+    /// fullscreen double-click), never the pricer's.
+    #[gpui::test]
+    fn a_modified_press_on_the_sheet_name_opens_nothing(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx, _second) = sheets_fixture(cx);
+        let at = centre_of(&mut vcx, "pricer-sheet-name");
+        for click_count in [1, 2] {
+            vcx.simulate_event(gpui::MouseDownEvent {
+                position: at,
+                modifiers: gpui::Modifiers::alt(),
+                button: gpui::MouseButton::Left,
+                click_count,
+                first_mouse: false,
+            });
+            vcx.simulate_event(gpui::MouseUpEvent {
+                position: at,
+                modifiers: gpui::Modifiers::alt(),
+                button: gpui::MouseButton::Left,
+                click_count,
+            });
+            h.draw(&mut vcx);
+        }
+        assert!(picker_rows(&h, &vcx).is_none());
+        assert_eq!(rename_text(&h, &vcx), None);
         assert_eq!(h.mode(&mut vcx), "normal");
     }
 }

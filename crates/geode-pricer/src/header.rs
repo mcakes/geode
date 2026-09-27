@@ -198,6 +198,11 @@ pub(crate) struct HeaderChrome<'a> {
     pub picker: Option<AnyElement>,
 }
 
+/// The rename field's key context: `lib::init` reclaims `tab`/`shift-tab`
+/// in it from gpui-component's focus cycling, which would otherwise take
+/// the keyboard out of the field while it stays open.
+pub const RENAME_CONTEXT: &str = "PricerRename";
+
 /// The rename field's width: room for a long sheet name in the header's
 /// text size without pushing the rest of the header about as it grows.
 const RENAME_WIDTH: f32 = 160.0;
@@ -214,6 +219,14 @@ fn sheet_name(name: SharedString, c: &mut HeaderChrome, tile_id: u64, theme: &Th
             .font_weight(FontWeight::BOLD)
             .text_color(theme.foreground)
             .debug_selector(|| "pricer-rename-field".into())
+            .key_context(RENAME_CONTEXT)
+            // `lib::init` unbinds `tab` here from gpui-component's focus
+            // cycling; consuming it keeps the keyboard in the one-line field.
+            .on_key_down(|event: &gpui::KeyDownEvent, _, cx| {
+                if event.keystroke.key == "tab" {
+                    cx.stop_propagation();
+                }
+            })
             .on_mouse_down_out({
                 let tile = c.tile.clone();
                 move |_, window, cx| tile.update(cx, |t, cx| t.close_rename_field(window, cx))
@@ -242,8 +255,15 @@ fn sheet_name(name: SharedString, c: &mut HeaderChrome, tile_id: u64, theme: &Th
                     if event.button != gpui::MouseButton::Left {
                         return;
                     }
-                    tile.update(cx, |t, cx| t.name_pressed(event.click_count, window, cx));
+                    tile.update(cx, |t, cx| t.name_pressed(event, window, cx));
                 }
+            })
+            // Every press off the name, wherever it lands (this listener is
+            // not hover-gated, so a press on a surface painted over the tile
+            // counts too): the next press on the name follows no press of it.
+            .on_mouse_down_out({
+                let tile = c.tile.clone();
+                move |_, _, cx| tile.update(cx, |t, _| t.name_press_elsewhere())
             })
             .tooltip(tips::tip_with(
                 c.name_tip.clone(),
@@ -326,11 +346,16 @@ pub(crate) fn render(h: &HeaderModel, mut c: HeaderChrome, theme: &Theme) -> imp
         // also invoke a shell or tile action.
         //
         // Its Yes/No buttons are the pointer's `y` and "anything else". A
-        // press anywhere but on them cancels, in the capture phase ahead
-        // of whatever the press was aimed at (the question text included).
-        // A press on a button neither cancels nor moves focus: gpui's
-        // `Button` stops its own press and prevents the focus change, so
-        // the prompt keeps the keyboard until the click lands.
+        // press anywhere but on them cancels: outside their group in the
+        // capture phase, ahead of whatever the press was aimed at (the
+        // question text included), and in the gap between them from the
+        // group's own listener. A left press on a button cancels nothing
+        // and moves no focus: gpui's `Button` prevents the default focus
+        // change (which is how the group's listener tells it apart), and
+        // the press that bubbles on to the shell's tile listener only
+        // re-arms its focus restore, which keeps the prompt because the
+        // prompt holds focus. The prompt keeps the keyboard until the
+        // click lands.
         .when_some(h.prompt.clone().zip(c.confirm), |el, (p, focus)| {
             let tile = c.tile.clone();
             let answer = |yes: bool| {
@@ -362,6 +387,16 @@ pub(crate) fn render(h: &HeaderModel, mut c: HeaderChrome, theme: &Theme) -> imp
                                 let tile = c.tile.clone();
                                 move |_, window, cx| {
                                     tile.update(cx, |t, cx| t.cancel_remove_on_pointer(window, cx))
+                                }
+                            })
+                            .on_any_mouse_down({
+                                let tile = c.tile.clone();
+                                move |_, window, cx| {
+                                    if !window.default_prevented() {
+                                        tile.update(cx, |t, cx| {
+                                            t.cancel_remove_on_pointer(window, cx)
+                                        })
+                                    }
                                 }
                             })
                             .child(
