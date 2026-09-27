@@ -4,20 +4,23 @@
 # detect the broken behavior. A surviving mutation identifies a behavior the
 # selected package's tests did not distinguish from the original code.
 #
-# Usage: zsh scripts/mutation-check.sh [--anchors-only] [--changed[=REF]] [substring]
+# Usage: zsh scripts/mutation-check.sh [--anchors-only | --build-check] [--changed[=REF]] [substring]
 #
 # --anchors-only runs no Cargo commands and changes no source files. It checks
 # every selected anchor for exactly one match, reports ANCHOR or AMBIG, and
 # exits nonzero for either finding or an empty selection. Run the unfiltered
 # anchor check before merging and after editing an anchored source block.
-# Nonempty test filters are checked against test-attributed function names under
+# Test filters are checked against test-attributed function names under
 # the selected package's src directory. FILTER means no match; FILTERx means
 # several matches without an exact function name and is also an error. FILTER?
 # means an exact name plus other substring matches and is a warning. This is a
 # source scan, not Cargo test discovery: it does not evaluate cfg attributes,
 # expand macros, or distinguish identical function names in different modules.
-# DUP and SHADOW report shared or overlapping anchors as warnings. They do not
-# by themselves establish that the mutations test the same behavior.
+# REDUNDANT (an entry repeating another's anchor, replacement, package and
+# filter), NOFILTER (an empty test filter) and NOOP (a replacement equal to
+# its anchor) are errors. ALSO is information: a second test detecting the same mutation.
+# A shared anchor with a different replacement, or an anchor nested in a
+# longer one, is a different mutation and is not reported.
 #
 # --changed defaults to main. It selects files changed versus REF, changed in
 # the working tree, or untracked. The set is captured before mutation so the
@@ -37,10 +40,24 @@
 # means the declared filter matched no tests. Correct either mismatch before
 # relying on the entry as evidence for its named test.
 #
-# A failed Cargo command is reported as caught; this script does not distinguish
-# compilation failure from a failing assertion. Inspect the failure when
-# validating an entry. Repeating a deterministic fixture does not add coverage;
-# the fixture must exercise the behavior the mutation changes.
+# A mutation that does not compile is reported as BUILD, not caught: cargo
+# failed before any test ran, so the entry defends nothing. BUILD is an error
+# and makes the run exit 1, as does a stale entry (ANCHOR: file missing or
+# anchor unmatched) in a mutation run or build check. --build-check applies each selected mutation and
+# compiles it with `cargo check --profile test` on the target a mutation run
+# tests (the lib, or geode-app's bins, with their unit tests; not integration
+# tests) without running tests. It audits for replacements left stale by
+# signature changes, which --anchors-only cannot see because it never
+# compiles anything. A mutation run or build check that selects no entry
+# prints "ran 0 entries (nothing selected)" and exits 1, so a mistyped
+# substring does not read as a pass; --changed skipping every candidate
+# because no anchored file changed exits 0. Repeating a deterministic fixture
+# does not add coverage; the fixture must exercise the behavior the mutation
+# changes.
+#
+# The exit status reports harness errors only (a BUILD, a stale entry, an
+# empty selection, bad arguments); SURVIVED, caught* and FILTER are verdicts
+# read from the output lines and do not change the exit status.
 set -e
 cd "$(git rev-parse --show-toplevel)"
 
@@ -55,8 +72,8 @@ fi
 
 bak="$(mktemp -t mutate-bak)"
 log="$(mktemp -t mutate-log)"
-# --anchors-only collects (name, file, anchor, package, filter) NUL-separated
-# here and checks them all in one pass at the end.
+# --anchors-only collects (name, file, anchor, replacement, package, filter)
+# NUL-separated here and checks them all in one pass at the end.
 anchors="$(mktemp -t mutate-anchors)"
 in_flight=""
 
@@ -96,6 +113,10 @@ trap 'cleanup; exit 143' TERM
 #                                           a test other than '$test_filter'"
 #     (the "caught for the wrong reason" case the header above warns
 #     about, now visible — fix it by naming the right test)
+#   - any failing cargo run whose log
+#     says "could not compile"          -> "BUILD     $name  <-- mutation does
+#                                           not compile; no test ran" in place
+#                                           of caught or caught*; an error
 #   - the filtered run passes and the
 #     full suite also passes            -> "SURVIVED  $name  <-- no test
 #                                           sees this"
@@ -106,8 +127,12 @@ trap 'cleanup; exit 143' TERM
 #                                           plain caught/SURVIVED verdict
 # Omitting `test_filter` runs the full crate suite.
 anchors_only=0
+build_only=0
 if [[ "${1:-}" == --anchors-only ]]; then
   anchors_only=1
+  shift
+elif [[ "${1:-}" == --build-check ]]; then
+  build_only=1
   shift
 fi
 changed_ref=""
@@ -118,16 +143,33 @@ elif [[ "${1:-}" == --changed=* ]]; then
   changed_ref="${1#--changed=}"
   shift
 fi
+usage="usage: zsh scripts/mutation-check.sh [--anchors-only | --build-check] [--changed[=REF]] [substring]"
 only="${1:-}"
 if [[ "$only" == --* ]]; then
-  # Flags are positional: --anchors-only first, then --changed, then the
+  # Flags are positional: a mode flag first, then --changed, then the
   # substring. A flag in the wrong slot used to become the substring, match
   # no entry, and exit 0 having checked nothing.
-  echo "usage: zsh scripts/mutation-check.sh [--anchors-only] [--changed[=REF]] [substring]" >&2
+  echo "$usage" >&2
   echo "unexpected argument in the substring slot: $only" >&2
   exit 2
 fi
+if (( $# > 1 )); then
+  # An argument after the substring used to be ignored, so a trailing
+  # `--anchors-only` started a real mutation run that edits source.
+  echo "$usage" >&2
+  echo "unexpected extra argument: $2" >&2
+  exit 2
+fi
 skipped=0
+# Entries past the substring and --changed filters, whatever their verdict.
+selected=0
+build_failures=0
+# Stale entries in a mutation run or build check: a missing file, an
+# unreadable one, or an anchor that no longer matches. Each defends nothing,
+# so any of them fails the run; otherwise a substring selecting only stale
+# entries would read as a pass.
+anchor_failures=0
+built=0
 changed_files=""
 
 if [[ -n "$changed_ref" ]]; then
@@ -141,6 +183,27 @@ if [[ -n "$changed_ref" ]]; then
   )
 fi
 
+# A mutation that does not compile fails cargo before any test runs.
+# Reading that exit as a catch reports success for an entry that defends
+# nothing, forever: the anchor still matches, so no static gate sees it.
+# Keyed on cargo's compile-failure line, not the exit status: a failing
+# assertion also exits nonzero and is a genuine catch.
+compile_failed() {
+  grep -q "could not compile" "$log"
+}
+
+# Prints the verdict for a failed cargo run: BUILD if it never compiled,
+# otherwise the catch line given.
+report_failure() {
+  local name="$1" caught_line="$2"
+  if compile_failed; then
+    echo "BUILD     $name  <-- mutation does not compile; no test ran"
+    build_failures=$((build_failures + 1))
+  else
+    echo "$caught_line"
+  fi
+}
+
 run_mutation() {
   local name="$1" file="$2" from="$3" to="$4" pkg="${5:-geode-data}" filter="${6:-}"
   if [[ -n "$only" && "$name" != *"$only"* ]]; then
@@ -150,6 +213,7 @@ run_mutation() {
     skipped=$((skipped + 1))
     return 0
   fi
+  selected=$((selected + 1))
   # geode-app is bin-only (no [lib] target — see its Cargo.toml), so
   # `--lib` fails outright with "no library targets found"; `--bins`
   # is the equivalent for it. Every other package here is lib-only, so
@@ -159,15 +223,17 @@ run_mutation() {
     target_flag="--bins"
   fi
   if (( anchors_only )); then
-    # Retain the package and test filter alongside the source anchor so the
-    # final source scan can validate both locations and intended tests.
-    printf '%s\0%s\0%s\0%s\0%s\0' "$name" "$file" "$from" "$pkg" "$filter" >> "$anchors"
+    # Retain the replacement, package and test filter alongside the source
+    # anchor so the final scan can validate locations and intended tests, and
+    # can recognise entries that repeat another's anchor and replacement.
+    printf '%s\0%s\0%s\0%s\0%s\0%s\0' "$name" "$file" "$from" "$to" "$pkg" "$filter" >> "$anchors"
     return 0
   fi
   # A moved or deleted file is a stale entry, reported by name, not a
   # traceback that ends the run (`set -e` would otherwise stop here).
   if [[ ! -f "$file" ]]; then
     echo "ANCHOR    $name  <-- file missing: $file"
+    anchor_failures=$((anchor_failures + 1))
     return 0
   fi
   # How many times the anchor occurs, checked before anything is written.
@@ -183,6 +249,7 @@ PY
   ) || hits=-1
   if (( hits < 0 )); then
     echo "ANCHOR    $name  <-- could not read $file"
+    anchor_failures=$((anchor_failures + 1))
     return 0
   fi
   if (( hits == 0 )); then
@@ -190,6 +257,7 @@ PY
     # names live code. It is not a reason to abort mid-run with the tree
     # half-mutated.
     echo "ANCHOR    $name  <-- anchor no longer matches; mutation is stale"
+    anchor_failures=$((anchor_failures + 1))
     return 0
   fi
   if (( hits > 1 )); then
@@ -202,6 +270,20 @@ import sys, pathlib
 p = pathlib.Path(sys.argv[1]); s = p.read_text(encoding="utf-8")
 p.write_text(s.replace(sys.argv[2], sys.argv[3], 1))
 PY
+  if (( build_only )); then
+    # The same target a mutation run tests ($target_flag) under the test
+    # profile, i.e. with cfg(test) and its unit tests, and nothing more.
+    # Integration tests are excluded because a mutation run never builds
+    # them: a replacement that broke only one would read BUILD here but
+    # compile and be tested in a real run.
+    built=$((built + 1))
+    if ! cargo check -p "$pkg" $target_flag --profile test >"$log" 2>&1; then
+      echo "BUILD     $name  <-- mutation does not compile; no test ran"
+      build_failures=$((build_failures + 1))
+    fi
+    restore
+    return 0
+  fi
   if [[ -n "$filter" ]]; then
     if cargo test -p "$pkg" $target_flag -- "$filter" >"$log" 2>&1; then
       if grep -q "running 0 tests" "$log"; then
@@ -209,7 +291,7 @@ PY
         filter=""
       fi
     else
-      echo "caught    $name"
+      report_failure "$name" "caught    $name"
       restore
       return 0
     fi
@@ -220,13 +302,13 @@ PY
     if cargo test -p "$pkg" $target_flag >"$log" 2>&1; then
       echo "SURVIVED  $name  <-- no test sees this"
     else
-      echo "caught*   $name  <-- caught by a test other than '$filter'"
+      report_failure "$name" "caught*   $name  <-- caught by a test other than '$filter'"
     fi
   else
     if cargo test -p "$pkg" $target_flag >"$log" 2>&1; then
       echo "SURVIVED  $name  <-- no test sees this"
     else
-      echo "caught    $name"
+      report_failure "$name" "caught    $name"
     fi
   fi
   restore
@@ -2155,7 +2237,7 @@ run_mutation "keymap: a reset counts a desk override as the user's" \
 run_mutation "keymap: a reset names the rendered key, not the file's spelling" \
   crates/geode-shell/src/keymap/build.rs \
   '                    key_source: spec.clone(),' \
-  '                    key_source: crate::palette::render_binding(&keystrokes),' \
+  '                    key_source: crate::palette::render_binding(&parse_binding(spec, mod_alias).unwrap_or_default()),' \
   geode-shell \
   the_override_carries_the_files_own_key_spelling
 
@@ -2686,7 +2768,7 @@ run_mutation "field chords: a dispatched chord reflects the frame's text back in
 run_mutation "dialog stack: close clears the whole stack instead of the top" \
   crates/geode-shell/src/shell/mod.rs \
   '        if let Some(top) = self.modals.pop() {' \
-  '        if let Some(top) = self.modals.drain(..).next() {' \
+  '        if let Some(top) = std::mem::take(&mut self.modals).pop() {' \
   geode-shell \
   a_pushed_dialog_owns_the_shared_input_until_it_pops
 
@@ -4434,7 +4516,7 @@ run_mutation "palette: extending a run outbids restarting at a word start" \
 run_mutation "palette: query words match in any order" \
   crates/geode-shell/src/palette.rs \
   '        combine_words(alone).or_else(|| align_words_disjoint(&words, candidate, title_len));' \
-  '        { let _ = alone; None };' \
+  '        { let _ = alone; None::<(u32, Vec<usize>)> };' \
   geode-shell words_typed_out_of_order_still_match
 
 # When the words' best alignments collide, each is placed again on the
@@ -5573,9 +5655,7 @@ run_mutation "objectdialog: a fork asks first" \
   '    match super::apply::commit_edit(shell, cx) {
         Some(refusal) => set_notice(shell, refusal),' \
   '    if fork.is_some() {
-        if let Some(draft) = draft_mut(shell) {
-            draft.confirm = Some(Confirm::Overwrite);
-        }
+        arm_confirm(shell, Confirm::Overwrite);
         return;
     }
     match super::apply::commit_edit(shell, cx) {
@@ -7958,7 +8038,7 @@ run_mutation "objectdialog: d/r ask for a presentation doc even when the domain 
             if let Some(presentation) = domain.presentation_doc() {
                 docs.push(presentation);
             }' \
-  '            let docs = [Destination::Doc.doc(domain), Destination::Presentation.doc(domain)];' \
+  '            let mut docs = vec![Destination::Doc.doc(domain), Destination::Presentation.doc(domain)];' \
   geode-shell deleting_a_forked_slot_does_not_look_for_a_presentation_doc_that_does_not_exist
 
 # ---- Phase 4c part 2a, Task 5: the Scopes adapter ----------------------
@@ -11833,7 +11913,7 @@ run_mutation "blotter: the colour cache invalidates on a changed anchor" \
 run_mutation "blotter: an unknown colour name resolves to none" \
   crates/geode-blotter/src/delegate.rs \
   '        self.colour_cache.get(&self.colours, name, anchors, tokens)' \
-  '        self.colour_cache.get(&self.colours, name, anchors, tokens).or(Some(gpui::Hsla::default()))' \
+  '        self.colour_cache.get(&self.colours, name, anchors, tokens).or(Some(ColourResolved::plain(gpui::Hsla::default())))' \
   geode-blotter \
   a_named_column_paints_its_resolved_colour
 
@@ -12518,13 +12598,12 @@ run_mutation "matrix: a hole in the pivot is an error, not a zero" \
                         spec.rows.column
                     ));
                 }' \
-  '                None => cells.push(Cell {
-                    text: SharedString::from(format_number(0.0, &spec.format).text),
-                    value: Some(0.0),
-                    edited: false,
-                    sent: false,
-                    cell_ref: (ri, ci),
-                }),' \
+  '                None => cells.push(cell_of(
+                    Some(Value::F64(0.0)),
+                    (ri, slice_columns + ci),
+                    &column_kinds[slice_columns + ci],
+                    draft,
+                )),' \
   geode-marketdata \
   a_missing_cell_is_a_hole_and_the_error_names_the_pair
 
@@ -14876,7 +14955,7 @@ run_mutation "picker: a values row double-click toggles its tick" \
 run_mutation "asof: the preset list takes the full nav set (spec §20.5)" \
   crates/geode-shell/src/shell/asof_view.rs \
   '    if let Some(cmd) = listfilter::nav_command(ks) {' \
-  '    if let Some(cmd) = listfilter::nav_command(ks).filter(|c| matches!(c, vimnav::NavCommand::Move(1 | -1))) {' \
+  '    if let Some(cmd) = listfilter::nav_command(ks).filter(|c| matches!(c, crate::vimnav::NavCommand::Move(1 | -1))) {' \
   geode-shell \
   nav_past_the_visible_rows_scrolls_the_highlight_into_view
 
@@ -15131,19 +15210,39 @@ run_mutation "ingest: a failed load still ends the strip" \
   geode-data \
   a_failed_load_still_ends_the_strip
 
-# Final whole-branch review, finding 1 (2026-09-19): a file re-queued
-# after it already loaded must not even announce `Started` — one with
-# nothing to end it would stick the status bar's strip forever.
+# A file re-queued after it already loaded must not even announce
+# `Started`: one with nothing to end it would stick the status bar's strip
+# forever. The mutation keeps the skip and moves the announcement above it.
 run_mutation "ingest: a stale skip does not start the strip" \
   crates/geode-data/src/ingest/runner.rs \
   '        if stale {
             clear_in_flight(&queue);
             continue;
+        }
+
+        // Announce Started only after the stale check, so every announcement has a
+        // terminal operation outcome.
+        if !sink(IngestEvent::Started {
+            source: item.source.clone(),
+            path: item.candidate.csv_path.to_string_lossy().into_owned(),
+            queued,
+        }) {
+            log_refused_event(&refusal_logged, "a load-started announcement");
         }' \
-  '        if false {
+  '        if !sink(IngestEvent::Started {
+            source: item.source.clone(),
+            path: item.candidate.csv_path.to_string_lossy().into_owned(),
+            queued,
+        }) {
+            log_refused_event(&refusal_logged, "a load-started announcement");
+        }
+        if stale {
             clear_in_flight(&queue);
             continue;
-        }' \
+        }
+
+        // Announce Started only after the stale check, so every announcement has a
+        // terminal operation outcome.' \
   geode-data \
   a_queued_item_whose_file_was_loaded_meanwhile_is_skipped_at_pop_time
 
@@ -22596,8 +22695,8 @@ run_mutation "launch: a panel with a key is prompted anyway" \
   '        if self.popup.is_none() {' \
   geode-marketdata a_launched_panel_on_an_underlying_opens_no_picker
 
-# The two entries below share an anchor (`--anchors-only` reports DUP as a
-# non-failing warning): they mutate different behaviours of the same line.
+# The two entries below share an anchor on purpose: their replacements
+# mutate different behaviours of the same line.
 run_mutation "launch: blotter reads a subtotal as its first child's underlying" \
   crates/geode-blotter/src/core/launch.rs \
   '    path.get(level)?.clone()' \
@@ -22670,136 +22769,31 @@ run_mutation "pricer entry bar: a history step leaves the list stale" \
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
+if (( ! anchors_only && selected == 0 )); then
+  # A mistyped substring selects nothing, and a run that checked nothing
+  # must not read as a pass. --changed skipping every candidate is the one
+  # legitimate empty run: nothing anchored changed, and the skipped line
+  # above says so.
+  if [[ -n "$changed_ref" ]] && (( skipped > 0 )); then
+    exit 0
+  fi
+  echo "ran 0 entries (nothing selected)" >&2
+  exit 1
+fi
+if (( build_only )); then
+  noun="mutations"
+  verb="do"
+  (( built == 1 )) && noun="mutation"
+  (( build_failures == 1 )) && verb="does"
+  echo "build-checked $built $noun: $build_failures $verb not compile"
+  if (( anchor_failures )); then
+    echo "stale entries not built: $anchor_failures (see ANCHOR lines)"
+  fi
+fi
+if (( build_failures || anchor_failures )); then
+  exit 1
+fi
 if (( anchors_only )); then
-  # Check anchors and test-name filters in one pass with per-file caches.
-  # Missing/ambiguous anchors, invalid filters, and an empty selection fail;
-  # loose filters and overlapping anchors remain warnings.
-  python3 - "$anchors" <<'PY' || exit 1
-import collections, pathlib, re, sys
-
-raw = pathlib.Path(sys.argv[1]).read_bytes() if pathlib.Path(sys.argv[1]).exists() else b""
-fields = raw.split(b"\0")[:-1] if raw else []
-entries = [tuple(f.decode() for f in fields[i:i + 5]) for i in range(0, len(fields), 5)]
-if not entries:
-    print("checked 0 anchors (nothing selected)")
-    sys.exit(1)
-
-FN_DECL = re.compile(r"(?:pub\s*(?:\([^)]*\)\s*)?)?(?:async\s+)?fn\s+([A-Za-z0-9_]+)")
-TEST_ATTR = re.compile(r"^#\[(?:\w+::)*test(\]|\()")
-
-_fn_cache = {}
-
-
-def test_fns(pkg):
-    """Names of test-attributed functions in a package.
-
-    A filter is what cargo is handed, and cargo matches a substring against
-    the test's path. Matching against every `fn` would let a filter naming a
-    plain helper pass, so only functions carrying a `test` attribute count.
-    """
-    if pkg in _fn_cache:
-        return _fn_cache[pkg]
-    names = set()
-    for path in sorted((pathlib.Path("crates") / pkg / "src").rglob("*.rs")):
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            continue
-        saw_test_attr = False
-        for line in lines:
-            stripped = line.strip()
-            declared = FN_DECL.match(stripped)
-            if declared:
-                if saw_test_attr:
-                    names.add(declared.group(1))
-                saw_test_attr = False
-            elif stripped.startswith("#["):
-                if TEST_ATTR.match(stripped):
-                    saw_test_attr = True
-            elif stripped and not stripped.startswith("//"):
-                saw_test_attr = False
-    _fn_cache[pkg] = names
-    return names
-
-
-texts = {}
-stale = ambiguous = bad_filters = loose = 0
-for name, file, anchor, pkg, filt in entries:
-    if file not in texts:
-        try:
-            texts[file] = pathlib.Path(file).read_text(encoding="utf-8")
-        except OSError:
-            texts[file] = None
-    text = texts[file]
-    if text is None:
-        stale += 1
-        print(f"ANCHOR    {name}  <-- file missing: {file}")
-        continue
-    hits = text.count(anchor)
-    if hits == 0:
-        stale += 1
-        print(f"ANCHOR    {name}  <-- anchor no longer matches; mutation is stale")
-    elif hits > 1:
-        ambiguous += 1
-        print(f"AMBIG x{hits}  {name}  <-- anchor matches {hits} times; only the first is mutated")
-    if not filt:
-        continue
-    matched = sorted(n for n in test_fns(pkg) if filt in n)
-    if not matched:
-        bad_filters += 1
-        print(f"FILTER    {name}  <-- '{filt}' matches no test in {pkg}")
-    elif len(matched) > 1 and filt not in matched:
-        # Several function names match the substring but none is the exact
-        # requested name; require an unambiguous detecting-test declaration.
-        bad_filters += 1
-        print(f"FILTERx {len(matched)}  {name}  <-- '{filt}' matches {len(matched)} tests, none of them exactly")
-    elif len(matched) > 1:
-        # The named test does run; the siblings only make the entry slower and
-        # make "which test caught it" unanswerable.
-        loose += 1
-        print(f"FILTER? {len(matched)}  {name}  <-- '{filt}' also matches {len(matched) - 1} sibling test(s)")
-
-# Shared source anchors may carry different replacements. Report the overlap
-# for review without treating it as proof that the mutations are redundant.
-by_anchor = collections.defaultdict(list)
-for name, file, anchor, _pkg, _filt in entries:
-    by_anchor[(file, anchor)].append(name)
-dup_groups = {k: v for k, v in by_anchor.items() if len(v) > 1}
-dup_entries = sum(len(v) for v in dup_groups.values())
-for (file, _anchor), names in sorted(dup_groups.items()):
-    for shadowed_name in names[1:]:
-        print(f"DUP       {shadowed_name}  <-- shares (file, anchor) with {names[0]}")
-
-# An anchor that occurs once but sits inside a longer anchor another entry
-# uses. AMBIG counts occurrences of one anchor and cannot see this.
-anchors_by_file = collections.defaultdict(set)
-for _name, file, anchor, _pkg, _filt in entries:
-    anchors_by_file[file].add(anchor)
-shadowed_anchors = sorted(
-    (file, anchor)
-    for file, anchors in anchors_by_file.items()
-    for anchor in anchors
-    if any(other != anchor and anchor in other for other in anchors)
-)
-example_of = {}
-for name, file, anchor, _pkg, _filt in entries:
-    example_of.setdefault((file, anchor), name)
-for file, anchor in shadowed_anchors:
-    print(f"SHADOW    {example_of[(file, anchor)]}  <-- anchor is a substring of a longer anchor in {file}")
-
-print(f"checked {len(entries)} anchors: {stale} stale, {ambiguous} ambiguous, {bad_filters} bad filters")
-warnings = []
-if loose:
-    warnings.append(f"{loose} loose filters")
-if dup_entries:
-    warnings.append(f"{dup_entries} duplicate anchors in {len(dup_groups)} groups")
-if shadowed_anchors:
-    warnings.append(f"{len(shadowed_anchors)} shadowed anchors")
-if warnings:
-    print(f"  {', '.join(warnings)}")
-    print("  (warnings; see the anchor-uniqueness follow-up)")
-# Shared and overlapping anchors are advisory; only stale/ambiguous locations
-# and invalid test filters fail this check.
-sys.exit(1 if stale or ambiguous or bad_filters else 0)
-PY
+  # Static checks over every selected entry; see scripts/mutation_anchors.py.
+  python3 scripts/mutation_anchors.py "$anchors" || exit 1
 fi
