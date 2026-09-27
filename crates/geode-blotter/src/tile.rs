@@ -770,8 +770,11 @@ impl BlotterTile {
         let (grouping, scope, as_of, versions) = {
             let frame = self.frame.read(cx);
             let grouping = self.grouping(frame, &view);
+            // A tile scope comes from `:filter` and never names an
+            // expression, so the unscoped branch needs no resolution; the
+            // compiler refuses one that somehow does.
             let scope = if self.unscoped {
-                self.tile_scope.clone()
+                Ok(self.tile_scope.clone())
             } else {
                 frame.effective_scope(&self.tile_scope)
             };
@@ -785,6 +788,32 @@ impl BlotterTile {
                 as_of,
                 frame.versions_for(&self.publications),
             )
+        };
+        let scope = match scope {
+            Ok(scope) => scope,
+            Err(message) => {
+                // An unresolved named expression is this tile's error, never
+                // a query: dropping the name would widen the scope into
+                // plausible wrong totals. Nothing will arrive for these
+                // versions, so acknowledge the barrier now or every other
+                // following tile waits out `FLIP_DEADLINE`. `acted` stays
+                // set: redefining the name bumps the config version, which
+                // is the retry.
+                self.error = Some((message, Tone::DangerText));
+                // Supersede any query still in flight: its outcome is for the
+                // previous scope and must not paint over this error.
+                self.tag += 1;
+                self.in_flight = None;
+                self.acted = Some(versions);
+                let key = QueryKey(self.tile.0);
+                self.frame.update(cx, |f, cx| {
+                    if f.arrived(key, versions) {
+                        cx.notify();
+                    }
+                });
+                cx.notify();
+                return;
+            }
         };
         let max_depth = self.table.update(cx, |t, _| {
             let d = t.delegate_mut();
@@ -2704,6 +2733,84 @@ mod tests {
             h.tile.read_with(&vcx, |t, _| t.acted.is_none()),
             "`acted` is cleared, so the next frame change is a real retry"
         );
+    }
+
+    fn named(text: &str) -> geode_core::named::NamedExpressions {
+        let doc = LayerDoc::builtin(geode_core::config::EXPRESSIONS_DOC, text).unwrap();
+        let merged = merge_docs(geode_core::config::EXPRESSIONS_DOC, &[doc]);
+        geode_core::named::NamedExpressions::from_doc(
+            &merged,
+            &geode_core::scope::complete::ExprVocab::default(),
+        )
+        .0
+    }
+
+    /// A frame scope naming an undefined expression is the tile's error,
+    /// never a query: the barrier is answered (nothing is coming for it),
+    /// an outcome still in flight for the previous scope cannot paint over
+    /// it, and defining the name requeries with the expression folded in.
+    #[gpui::test]
+    fn an_unresolved_named_expression_errors_without_querying_and_a_definition_requeries(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.tile.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        let first = next_query(&h.requests);
+        deliver(&h, &mut vcx, first.tag, Ok(snapshot()));
+
+        h.frame.update(&mut vcx, |f, cx| {
+            f.set_text(Some("A".into()));
+            cx.notify();
+        });
+        let in_flight = next_query(&h.requests);
+
+        h.frame.update(&mut vcx, |f, cx| {
+            f.set_scope(Scope {
+                named: vec!["gone".into()],
+                ..Scope::default()
+            });
+            f.open_flip([QueryKey(7)], std::time::Instant::now());
+            cx.notify();
+        });
+        assert!(
+            h.requests.recv_timeout(Duration::from_millis(200)).is_err(),
+            "an unresolved scope is never submitted"
+        );
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.error.clone()),
+            Some((
+                "named expression 'gone' is missing".to_string(),
+                Tone::DangerText
+            ))
+        );
+        assert!(
+            !h.frame.read_with(&vcx, |f, _| f.barrier_open()),
+            "nothing is coming for the barrier, so the tile answers it"
+        );
+        deliver(&h, &mut vcx, in_flight.tag, Ok(snapshot2()));
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.error.clone()).map(|e| e.0),
+            Some("named expression 'gone' is missing".to_string()),
+            "the previous scope's outcome is stale"
+        );
+
+        h.frame.update(&mut vcx, |f, cx| {
+            assert!(f.replace_named_expressions(named("[gone]\nexpression = \"npv > 0\"\n")));
+            cx.notify();
+        });
+        let retry = next_query(&h.requests);
+        assert!(retry.scope.named.is_empty(), "{:?}", retry.scope);
+        assert_eq!(
+            retry
+                .scope
+                .expression
+                .as_ref()
+                .map(|e| e.to_string())
+                .as_deref(),
+            Some("npv > 0")
+        );
+        deliver(&h, &mut vcx, retry.tag, Ok(snapshot()));
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.error.clone()), None);
     }
 
     #[gpui::test]

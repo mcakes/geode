@@ -1015,6 +1015,25 @@ fn enter_values_stage(shell: &mut ShellView, column: &str, cx: &mut Context<Shel
     state.disarm();
     state.values_tag = tag;
     shell.object_dialog_scroll.scroll_to_item(0);
+    // An unresolved name paints as the stage's failed row, never a request:
+    // dropping it would widen the counts. The tag is recorded above, so the
+    // delivery is accepted.
+    let scope = match scope.resolve(shell.frame.read(cx).named_expressions()) {
+        Ok(scope) => scope,
+        Err(message) => {
+            deliver_values(
+                shell,
+                DistinctOutcome {
+                    key: SCOPES_KEY,
+                    tag,
+                    column: column.to_string(),
+                    values: Err(message),
+                },
+                cx,
+            );
+            return;
+        }
+    };
     cx.emit(ShellEvent::DistinctRequested(DistinctParams {
         key: SCOPES_KEY,
         tag,

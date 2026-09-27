@@ -138,6 +138,18 @@ impl FrameRecord {
         if let Some(e) = &self.scope.expression {
             t.insert("expression".into(), toml::Value::String(e.to_string()));
         }
+        if !self.scope.named.is_empty() {
+            t.insert(
+                "named".into(),
+                toml::Value::Array(
+                    self.scope
+                        .named
+                        .iter()
+                        .map(|n| toml::Value::String(n.clone()))
+                        .collect(),
+                ),
+            );
+        }
         if let Some(n) = self.active_slot {
             t.insert("slot".into(), toml::Value::Integer(n as i64));
         }
@@ -190,6 +202,22 @@ impl FrameRecord {
                     None
                 }
             });
+        // Names are kept without checking they are defined; the frame's
+        // `effective_scope` reports a missing one when a tile queries.
+        let mut named: Vec<String> = Vec::new();
+        match t.get("named") {
+            None => {}
+            Some(toml::Value::Array(a)) => {
+                for s in a.iter().filter_map(|v| v.as_str()) {
+                    if !named.iter().any(|n| n == s) {
+                        named.push(s.to_string());
+                    }
+                }
+            }
+            Some(_) => {
+                warnings.push("frame: named must be an array of strings; ignored".to_string())
+            }
+        }
         let active_slot = match t.get("slot") {
             None => None,
             Some(v) => match v.as_integer() {
@@ -216,7 +244,7 @@ impl FrameRecord {
                 text,
                 expression,
                 impossible: false,
-                named: Vec::new(),
+                named,
             },
             active_slot,
             as_of,
@@ -2309,6 +2337,38 @@ members = [1, -4]
         let restored = FrameRecord::from_toml(&table, &mut warnings);
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(restored, record);
+    }
+
+    #[test]
+    fn frame_named_expressions_round_trip_in_order_and_a_missing_name_is_kept() {
+        // Restore does not validate names: "liq" need not be defined anywhere.
+        let mut record = sample_frame_record();
+        record.scope.named = vec!["liq".into(), "hedges".into()];
+        let table = record.to_toml();
+        let mut warnings = Vec::new();
+        let restored = FrameRecord::from_toml(&table, &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(restored, record);
+        assert!(
+            !sample_frame_record().to_toml().contains_key("named"),
+            "an empty list is omitted"
+        );
+    }
+
+    #[test]
+    fn frame_named_is_deduplicated_and_a_non_array_warns_and_is_ignored() {
+        let table: toml::Table = toml::from_str("named = [\"liq\", \"liq\", \"b\"]").unwrap();
+        let mut warnings = Vec::new();
+        let restored = FrameRecord::from_toml(&table, &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(restored.scope.named, ["liq", "b"]);
+
+        let table: toml::Table = toml::from_str("named = \"liq\"\ntext = \"spx\"").unwrap();
+        let mut warnings = Vec::new();
+        let restored = FrameRecord::from_toml(&table, &mut warnings);
+        assert!(restored.scope.named.is_empty());
+        assert_eq!(restored.scope.text.as_deref(), Some("spx"), "rest kept");
+        assert!(warnings.iter().any(|w| w.contains("named")), "{warnings:?}");
     }
 
     #[test]

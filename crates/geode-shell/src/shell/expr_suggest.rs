@@ -85,9 +85,20 @@ fn request_values(view: &mut ShellView, column: String, cx: &mut Context<ShellVi
     view.next_picker_tag += 1;
     let tag = view.next_picker_tag;
     let vocab = view.expr_vocab.clone();
-    if let Some(c) = completion_mut(view) {
-        c.mark_loading(&column, tag, &vocab);
-    }
+    let resolved = scope.resolve(view.frame.read(cx).named_expressions());
+    let Some(c) = completion_mut(view) else {
+        return;
+    };
+    c.mark_loading(&column, tag, &vocab);
+    // An unresolved name is the column's error row, never a request:
+    // dropping it would widen the suggestions to values outside the scope.
+    let scope = match resolved {
+        Ok(scope) => scope,
+        Err(message) => {
+            c.deliver(&column, tag, Err(message), &vocab);
+            return;
+        }
+    };
     cx.emit(ShellEvent::DistinctRequested(DistinctParams {
         key: EXPR_KEY,
         tag,
