@@ -913,7 +913,11 @@ tile holds:
   unless its load failed (`did not load`): then `:e` of it asks again,
   which is the way to retry a refused or failed load in place. Retrying
   discards edits made in the unsaved fallback sheet.
-- `:new` does the same into the next free `untitled-N`, empty, with no load.
+- `:new [sheet]` does the same into an empty sheet with no load: under the
+  given name, else the next free `untitled-N`. A name that already exists
+  (open in any tile, this one included, a known document, a queued save, or
+  a sheet being removed) is refused with `sheet 'x' already exists; :e x
+  opens it`, and the tile stays where it is.
 - `:name <sheet>` is refused if the name is open, is a known document, or has
   a save still queued (`sheet 'x' already exists`), and while the sheet is
   loading or after its load failed. Otherwise the tile takes the new name at

@@ -18195,15 +18195,15 @@ run_mutation "pricer sheets: :name renames a sheet whose load failed" \
   geode-pricer colon_name_refuses_a_sheet_that_did_not_load
 
 run_mutation "pricer sheets: :name takes a known name" \
-  crates/geode-pricer/src/tile.rs \
-  '        if self.shared.open.borrow().contains(&name) || self.shared.taken(&name) {' \
-  '        if self.shared.open.borrow().contains(&name) {' \
+  crates/geode-pricer/src/content.rs \
+  '        self.open.borrow().contains(name) || self.taken(name)' \
+  '        self.open.borrow().contains(name)' \
   geode-pricer colon_name_renames_and_forgets_the_old_name_only_once_saved
 
 run_mutation "pricer sheets: :name takes a name with a queued save" \
-  crates/geode-pricer/src/tile.rs \
-  '        if self.shared.open.borrow().contains(&name) || self.shared.taken(&name) {' \
-  '        if self.shared.open.borrow().contains(&name) || self.shared.store.contains(&name) {' \
+  crates/geode-pricer/src/content.rs \
+  '        self.open.borrow().contains(name) || self.taken(name)' \
+  '        self.open.borrow().contains(name) || self.store.contains(name)' \
   geode-pricer colon_name_refuses_a_name_with_a_queued_save
 
 run_mutation "pricer rm: the tile's own sheet can be removed" \
@@ -21913,6 +21913,14 @@ run_mutation "pricer rm: y forgets a sheet retiring since the question" \
   '        } else if self.shared.retiring.borrow().contains(&pending.sheet) {' \
   '        } else if false {' \
   geode-pricer y_refuses_a_sheet_opened_or_retiring_since_the_rm_armed
+
+# A named `:new` must refuse an existing sheet, or a typo shows it empty
+# and a later save writes over it.
+run_mutation "pricer sheets: :new opens an existing name" \
+  crates/geode-pricer/src/tile.rs \
+  $'                    return Err(format!("sheet \'{name}\' already exists; :e {name} opens it"));' \
+  '                    let _ = &name;' \
+  geode-pricer colon_new_with_a_name_opens_it_empty_and_refuses_an_existing_one
 
 run_mutation "pricer sheets: :e of a blocked sheet's own name does nothing" \
   crates/geode-pricer/src/tile.rs \
