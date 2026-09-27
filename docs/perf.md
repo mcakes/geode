@@ -1679,6 +1679,7 @@ of record.
 Aggregation does not show above the earlier 1.85 ms reading; the two runs
 differ by machine load more than by the change. Well inside the 8 ms
 budget.
+
 ## Timeseries chart (spec §8, Part 3)
 
 What one **cache miss** costs the render thread in `geode-chart`: the
