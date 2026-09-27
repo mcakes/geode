@@ -864,16 +864,7 @@ fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<Shel
     // stage opened during debounce must not overwrite a value it cannot yet see.
     let pending = apply::config_with_pending(shell);
     let config = pending.as_ref().unwrap_or(&shell.services.config);
-    let colours: Vec<String> = config
-        .doc(colours::DOC)
-        .map(|doc| {
-            geode_core::colour::NamedColours::from_doc(doc)
-                .0
-                .names()
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
+    let colours = colours::names(config);
     let Some(state) = shell.object_dialog.as_ref() else {
         return;
     };
@@ -5006,6 +4997,22 @@ pub(in crate::shell) fn on_row_dropped(
     }
     dialog::sync_dialog_text(shell, window, cx);
     cx.notify();
+}
+
+/// After a reload, every open object dialog's `color` choices follow the configured
+/// named colors, including a dialog covered by the Colors dialog that just created
+/// one.
+pub(in crate::shell) fn refresh_color_choices(shell: &mut ShellView) {
+    let names = colours::names(&shell.services.config);
+    for state in shell
+        .object_dialog
+        .iter_mut()
+        .chain(dialog::parked_objects_mut(&mut shell.modals))
+    {
+        if let Some(draft) = state.draft.as_mut() {
+            draft.refresh_color_options(&names);
+        }
+    }
 }
 
 /// A `DistinctOutcome` addressed to `SCOPES_KEY`, routed here by

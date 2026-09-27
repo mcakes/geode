@@ -302,6 +302,10 @@ impl ShellView {
                 }
             }
 
+            // Named colors may have changed; open column stages, covered or not,
+            // offer the new set.
+            super::objectdialog::render::refresh_color_choices(self);
+
             if theme_changed {
                 self.services
                     .theme

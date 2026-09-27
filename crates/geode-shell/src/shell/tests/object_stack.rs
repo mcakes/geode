@@ -401,3 +401,56 @@ fn a_reload_refreshes_a_covered_object_expression_field(cx: &mut gpui::TestAppCo
         "the covered field re-ranks at reload, not at its next keystroke"
     );
 }
+
+/// The flow the feature exists for: a column needs a color that does not exist yet.
+/// Create it in a stacked Colors dialog, come back, and it is among the column's
+/// color choices, with the column stage exactly where it was and nothing dirtied.
+#[gpui::test]
+fn a_color_created_in_a_stacked_dialog_is_offered_to_the_covered_column(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage_with(cx, views_with_colors(), dir.path());
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let stage = dialog_state(&shell, &cx, |s| s.stage.clone());
+    let color_options = |shell: &Entity<ShellView>, cx: &gpui::VisualTestContext| {
+        edit_draft(shell, cx, |d| {
+            d.fields
+                .iter()
+                .find(|f| f.key == "color")
+                .and_then(|f| match &f.kind {
+                    objectdialog::FieldKind::Choice { options, .. } => Some(options.clone()),
+                    _ => None,
+                })
+                .unwrap()
+        })
+    };
+    assert!(!color_options(&shell, &cx).contains(&"ember".to_string()));
+
+    open_palette_action(&mut cx, "Edit colors");
+    cx.simulate_keystrokes("n");
+    cx.simulate_input("ember");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+    // Escape out of Colors, however many stages it takes, and no further.
+    for _ in 0..3 {
+        if domains(&shell, &cx) == vec![Domain::Views] {
+            break;
+        }
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+    }
+    assert_eq!(domains(&shell, &cx), vec![Domain::Views]);
+    assert_eq!(dialog_state(&shell, &cx, |s| s.stage.clone()), stage);
+    assert!(
+        color_options(&shell, &cx).contains(&"ember".to_string()),
+        "{:?}",
+        color_options(&shell, &cx)
+    );
+    assert!(
+        !edit_draft(&shell, &cx, |d| d.is_dirty()),
+        "and the column is not dirtied"
+    );
+}

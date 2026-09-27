@@ -2916,6 +2916,27 @@ run_mutation "object stack: a reload leaves a covered expression field stale" \
   geode-shell \
   a_reload_refreshes_a_covered_object_expression_field
 
+run_mutation "object stack: a color refresh leaves the baseline behind" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        for fields in [&mut self.fields, &mut self.baseline] {' \
+  '        for fields in [&mut self.fields] {' \
+  geode-shell \
+  refreshing_color_options_keeps_the_draft_clean
+
+run_mutation "object stack: a reload never refreshes covered color choices" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '            super::objectdialog::render::refresh_color_choices(self);' \
+  '            {}' \
+  geode-shell \
+  a_color_created_in_a_stacked_dialog_is_offered_to_the_covered_column
+
+run_mutation "object stack: an open color typeahead keeps the old options" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            *list = rebuilt;' \
+  '            let _ = rebuilt;' \
+  geode-shell \
+  refreshing_rebuilds_an_open_color_typeahead
+
 run_mutation "dialog stack: every chord reaches through a dialog" \
   crates/geode-shell/src/shell/input.rs \
   '                        && dialog::opens_dialog(&action)' \
