@@ -174,6 +174,8 @@ fn mod_s_splits_the_focused_stack_and_stacks_it_back(cx: &mut gpui::TestAppConte
             s.services.workspaces.active().tree().visible_tiles()
         })
     };
+    // The fixture's own adds dirtied the session; only the chord may now.
+    shell.update(&mut cx, |shell, _| shell.session_dirty = false);
     cx.simulate_keystrokes("alt-s");
     cx.update(|window, cx| {
         let _ = window.draw(cx);
