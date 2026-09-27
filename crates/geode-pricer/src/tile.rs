@@ -1740,8 +1740,11 @@ impl PricerTile {
             return true;
         }
         // A stopped store refuses every save; asking again on each edit only
-        // repeats the refusal.
+        // repeats the refusal. It still paints the notice: a route that
+        // cleared the save slot first (`:name`) would otherwise show nothing.
         if self.save_stopped {
+            self.save_refused = true;
+            self.save_notice = Some(SAVE_STOPPED.into());
             return false;
         }
         let Some(rows) = to_rows(&self.sheet) else {
@@ -7156,6 +7159,27 @@ pub(crate) mod tests {
             "no later edit asks a stopped store again"
         );
         assert_eq!(h.save_notice(&vcx).as_deref(), Some(SAVE_STOPPED));
+    }
+
+    /// `:name` clears the save slot before it saves under the new name; on a
+    /// stopped store that save is never asked, and the slot must still say
+    /// why nothing persists.
+    #[gpui::test]
+    fn a_rename_on_a_stopped_store_keeps_the_stopped_notice(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        let base = h.store.save_count();
+        h.store.set_save_refusal(Some(Refusal::Stopped));
+        edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 2 });
+        settle(&mut vcx, SAVE_IDLE);
+        assert_eq!(h.save_notice(&vcx).as_deref(), Some(SAVE_STOPPED));
+        assert_eq!(h.command(&mut vcx, "name fresh"), Ok(()));
+        assert_eq!(h.title(&mut vcx), "Pricer · fresh");
+        assert_eq!(h.store.save_count(), base, "nothing persists");
+        assert_eq!(
+            h.save_notice(&vcx).as_deref(),
+            Some(SAVE_STOPPED),
+            "the rename's save says the store has stopped"
+        );
     }
 
     #[gpui::test]

@@ -23191,10 +23191,20 @@ run_mutation "pricer tile: a stopped overlay is not shown" \
 run_mutation "pricer tile: a stopped store is asked again on the next edit" \
   crates/geode-pricer/src/tile.rs \
   '        if self.save_stopped {
+            self.save_refused = true;
+            self.save_notice = Some(SAVE_STOPPED.into());
             return false;
         }' \
   '' \
   geode-pricer a_stopped_service_stops_save_retries
+
+run_mutation "pricer tile: a stopped store's early return paints nothing" \
+  crates/geode-pricer/src/tile.rs \
+  '            self.save_refused = true;
+            self.save_notice = Some(SAVE_STOPPED.into());
+            return false;' \
+  '            return false;' \
+  geode-pricer a_rename_on_a_stopped_store_keeps_the_stopped_notice
 
 run_mutation "pricer tile: a stopped save is not marked stopped" \
   crates/geode-pricer/src/tile.rs \
