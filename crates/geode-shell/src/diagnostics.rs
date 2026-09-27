@@ -21,8 +21,94 @@ pub use geode_core::health::Health;
 use geode_core::log::{Level, LogLevels};
 use geode_core::query::{CatalogSnapshot, DatasetCatalog};
 pub use geode_core::source_config::SourceShape;
+use gpui::SharedString;
 
 use crate::perf::FrameHistogram;
+
+/// The request loop's thread name as the data layer spawns it. The shell
+/// cannot depend on the data crate, so it is repeated here.
+const REQUEST_LOOP: &str = "geode-data";
+
+/// A data thread that died despite containment. It stays dead until the app
+/// restarts, so nothing clears it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoppedThread {
+    /// The spawn name the data layer reported.
+    pub thread: String,
+    /// What the status bar and the diagnostics tile call it.
+    pub label: String,
+    pub reason: String,
+    pub at: SystemTime,
+}
+
+/// The status bar's stopped segment, prepared when a thread stops so paint
+/// formats nothing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoppedSegment {
+    pub text: SharedString,
+    pub detail: SharedString,
+}
+
+/// A readable name for a data thread's spawn name.
+pub fn thread_label(thread: &str) -> String {
+    if let Some(n) = thread.strip_prefix("geode-query-") {
+        return format!("query worker {n}");
+    }
+    if let Some(source) = thread.strip_prefix("geode-fetch-") {
+        return format!("fetch {source}");
+    }
+    if let Some(source) = thread.strip_prefix("geode-subscribe-") {
+        return format!("subscription {source}");
+    }
+    if let Some(target) = thread.strip_prefix("geode-egress-") {
+        return format!("egress {target}");
+    }
+    match thread {
+        REQUEST_LOOP => "data service",
+        "geode-ingest" => "ingest",
+        "geode-discovery" => "discovery",
+        "geode-pricing" => "pricing",
+        other => other,
+    }
+    .to_string()
+}
+
+/// One segment for every stopped thread. The request loop outranks the
+/// rest: once it is gone, nothing else the bar says describes a live
+/// service. Two or more other threads collapse to a count.
+fn stopped_segment(stopped: &[StoppedThread]) -> Option<StoppedSegment> {
+    let first = stopped.first()?;
+    if let Some(service) = stopped.iter().find(|t| t.thread == REQUEST_LOOP) {
+        let others: Vec<&str> = stopped
+            .iter()
+            .filter(|t| t.thread != REQUEST_LOOP)
+            .map(|t| t.label.as_str())
+            .collect();
+        let mut detail = service.reason.clone();
+        if !others.is_empty() {
+            detail.push_str(&format!("; also stopped: {}", others.join(", ")));
+        }
+        return Some(StoppedSegment {
+            text: SharedString::new_static("data service stopped — restart Geode"),
+            detail: detail.into(),
+        });
+    }
+    if stopped.len() == 1 {
+        return Some(StoppedSegment {
+            text: format!("{} stopped", first.label).into(),
+            detail: first.reason.clone().into(),
+        });
+    }
+    let detail = stopped
+        .iter()
+        .map(|t| format!("{}: {}", t.label, t.reason))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(StoppedSegment {
+        text: format!("{} data threads stopped", stopped.len()).into(),
+        detail: detail.into(),
+    })
+}
 
 /// Why the bridge should read the catalog. Explicit requests (for example an
 /// identity picker) remain valid without a visible diagnostics tile.
@@ -169,6 +255,13 @@ pub struct Diagnostics {
     /// are skipped. A config reload cannot clear these conditions.
     pub data_diagnostics: VecDeque<(SystemTime, Diagnostic)>,
     pub dropped_events: u64,
+    /// Submissions the data handle refused because its queue was full, since
+    /// launch (the handle's own counter, read by the bridge each drain).
+    pub refused: u64,
+    /// Data threads that died, in the order they were reported.
+    pub stopped: Vec<StoppedThread>,
+    /// The status segment for `stopped`, rebuilt when a thread stops.
+    stopped_segment: Option<StoppedSegment>,
     pub restart_required: Option<String>,
     /// A copy of `ShellView::perf`, refreshed by [`Self::refresh_frame_hist`]
     /// on the reload-poll tick — see that method's own doc comment for
@@ -203,6 +296,9 @@ impl Diagnostics {
             config_history: VecDeque::new(),
             data_diagnostics: VecDeque::new(),
             dropped_events: 0,
+            refused: 0,
+            stopped: Vec::new(),
+            stopped_segment: None,
             restart_required: None,
             frame_hist: FrameHistogram::new(),
             catalog: None,
@@ -376,6 +472,39 @@ impl Diagnostics {
         self.versions.perf += 1;
     }
 
+    /// Record a data thread's death. A thread already recorded is a no-op:
+    /// each dies once, and a redelivered event must not duplicate it.
+    pub fn note_thread_stopped(&mut self, thread: &str, reason: String, at: SystemTime) {
+        if self.stopped.iter().any(|t| t.thread == thread) {
+            return;
+        }
+        self.stopped.push(StoppedThread {
+            thread: thread.to_string(),
+            label: thread_label(thread),
+            reason,
+            at,
+        });
+        self.stopped_segment = stopped_segment(&self.stopped);
+        self.version += 1;
+        // `sections::sources_rows` renders the stopped threads.
+        self.versions.sources += 1;
+    }
+
+    /// The data handle's running total of `Busy` refusals. The same total
+    /// again does not bump.
+    pub fn note_refused(&mut self, total: u64) {
+        if self.refused == total {
+            return;
+        }
+        self.refused = total;
+        self.version += 1;
+    }
+
+    /// The prepared stopped segment, `None` while every data thread lives.
+    pub fn stopped_segment(&self) -> Option<&StoppedSegment> {
+        self.stopped_segment.as_ref()
+    }
+
     /// `None` clears it. A no-op (the same message, or already `None`)
     /// does not bump.
     pub fn set_restart_required(&mut self, message: Option<String>) {
@@ -543,7 +672,8 @@ impl Diagnostics {
     }
 
     /// Status summary, with optional source-health, current config-error,
-    /// retained data-error, and dropped-event segments. Zero counts are omitted;
+    /// retained data-error, dropped-event, and refused-submission segments.
+    /// Stopped data threads have their own segment ([`Self::stopped_segment`]). Zero counts are omitted;
     /// an empty string means there is nothing to show. A cache hit shares the
     /// existing `Rc<str>` buffer.
     ///
@@ -610,6 +740,9 @@ impl Diagnostics {
 
         if self.dropped_events > 0 {
             parts.push(format!("{} dropped", self.dropped_events));
+        }
+        if self.refused > 0 {
+            parts.push(format!("{} refused", self.refused));
         }
 
         parts.join(" · ")
@@ -1303,5 +1436,72 @@ mod tests {
         d.note_load_ended();
         assert!(d.ingest.is_none());
         assert_eq!(d.versions().sources, v1 + 1);
+    }
+
+    #[test]
+    fn one_stopped_thread_is_named_with_its_reason_in_the_tooltip() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.note_thread_stopped("geode-ingest", "boom".into(), SystemTime::UNIX_EPOCH);
+        let seg = d.stopped_segment().expect("a segment");
+        assert_eq!(seg.text.as_ref(), "ingest stopped");
+        assert_eq!(seg.detail.as_ref(), "boom");
+        assert_eq!(d.stopped[0].label, "ingest");
+    }
+
+    #[test]
+    fn two_stopped_threads_collapse_to_a_count_listing_each() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.note_thread_stopped("geode-discovery", "a".into(), SystemTime::UNIX_EPOCH);
+        d.note_thread_stopped("geode-query-2", "b".into(), SystemTime::UNIX_EPOCH);
+        let seg = d.stopped_segment().unwrap();
+        assert_eq!(seg.text.as_ref(), "2 data threads stopped");
+        assert_eq!(seg.detail.as_ref(), "discovery: a; query worker 2: b");
+    }
+
+    #[test]
+    fn a_stopped_request_loop_outranks_the_other_threads() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.note_thread_stopped("geode-ingest", "a".into(), SystemTime::UNIX_EPOCH);
+        d.note_thread_stopped("geode-data", "the loop died".into(), SystemTime::UNIX_EPOCH);
+        let seg = d.stopped_segment().unwrap();
+        assert_eq!(seg.text.as_ref(), "data service stopped — restart Geode");
+        assert_eq!(seg.detail.as_ref(), "the loop died; also stopped: ingest");
+    }
+
+    #[test]
+    fn a_thread_reported_twice_is_recorded_once() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.note_thread_stopped("geode-ingest", "boom".into(), SystemTime::UNIX_EPOCH);
+        let version = d.version();
+        d.note_thread_stopped("geode-ingest", "boom".into(), SystemTime::UNIX_EPOCH);
+        assert_eq!(d.stopped.len(), 1);
+        assert_eq!(d.version(), version, "a repeat changes nothing");
+    }
+
+    #[test]
+    fn refused_submissions_show_in_the_summary_and_are_omitted_at_zero() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.note_refused(0);
+        assert_eq!(d.summary().as_ref(), "");
+        d.note_refused(3);
+        d.note_dropped(2);
+        assert_eq!(d.summary().as_ref(), "2 dropped · 3 refused");
+    }
+
+    #[test]
+    fn thread_labels_are_readable() {
+        for (thread, label) in [
+            ("geode-data", "data service"),
+            ("geode-ingest", "ingest"),
+            ("geode-discovery", "discovery"),
+            ("geode-pricing", "pricing"),
+            ("geode-query-0", "query worker 0"),
+            ("geode-fetch-kdb", "fetch kdb"),
+            ("geode-subscribe-cvi", "subscription cvi"),
+            ("geode-egress-sophis", "egress sophis"),
+            ("something-else", "something-else"),
+        ] {
+            assert_eq!(thread_label(thread), label);
+        }
     }
 }

@@ -891,6 +891,8 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
     }
 
     let diagnostics_for_drain = diagnostics.clone();
+    // The handle's `Busy` refusal total, read once per drained event.
+    let refused_handle = handle.clone();
     let catalog_refresh_for_drain = catalog_refresh.clone();
     // Retain local dataset names for the drain task after attach's borrow ends.
     let local_datasets = Rc::clone(&bridge.local_datasets);
@@ -901,8 +903,10 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
         let catalog_refresh = catalog_refresh_for_drain;
         let catalog_window = window;
         let mut last_dropped = 0u64;
+        let mut last_refused = 0u64;
         while let Ok(event) = rx.recv().await {
             let now_dropped = dropped.load(Ordering::Relaxed);
+            let now_refused = refused_handle.dropped_requests();
             // Check window liveness for every event variant. Updating a retained shell
             // entity alone would keep succeeding after the window closes and retain this
             // task's captures. With no new event, the task can remain awaiting the mailbox.
@@ -914,6 +918,15 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     diagnostics.update(cx, |d, cx| {
                         let before = d.version();
                         d.note_dropped(now_dropped);
+                        if d.version() != before {
+                            cx.notify();
+                        }
+                    });
+                }
+                if now_refused != last_refused {
+                    diagnostics.update(cx, |d, cx| {
+                        let before = d.version();
+                        d.note_refused(now_refused);
                         if d.version() != before {
                             cx.notify();
                         }
@@ -1159,8 +1172,19 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             s.deliver(Delivery::Price(outcome), window, cx)
                         });
                     }
+                    // A data thread died despite containment, or the request
+                    // loop never opened. Its segment and the diagnostics row
+                    // stay until restart. Logging is not repeated here: the
+                    // supervisor logs a death, and an open failure also
+                    // arrives as an error Diagnostic.
                     DataEvent::ThreadStopped { thread, reason } => {
-                        tracing::error!(target: "geode::shell", "data thread {thread} stopped: {reason}");
+                        diagnostics.update(cx, |d, cx| {
+                            let before = d.version();
+                            d.note_thread_stopped(&thread, reason, SystemTime::now());
+                            if d.version() != before {
+                                cx.notify();
+                            }
+                        });
                     }
                 }
             });
@@ -1168,6 +1192,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 return; // the window is gone
             }
             last_dropped = now_dropped;
+            last_refused = now_refused;
         }
     })
     .detach();
@@ -4969,6 +4994,60 @@ role = "key"
                 }),
             }))
             .unwrap();
+    }
+
+    #[gpui::test]
+    fn a_thread_stopped_event_reaches_the_status_segment(cx: &mut gpui::TestAppContext) {
+        let f = catalog_fixture(cx);
+        let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let shell = f.window.root(&mut vcx).unwrap().read_with(&vcx, |r, _| {
+            r.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+        f.events
+            .try_send(DataEvent::ThreadStopped {
+                thread: "geode-ingest".into(),
+                reason: "boom".into(),
+            })
+            .unwrap();
+        vcx.run_until_parked();
+        assert_eq!(
+            diagnostics.read_with(&vcx, |d, _| d.stopped_segment().map(|s| s.text.to_string())),
+            Some("ingest stopped".to_string())
+        );
+    }
+
+    #[gpui::test]
+    fn refused_submissions_reach_the_status_summary(cx: &mut gpui::TestAppContext) {
+        let f = catalog_fixture(cx);
+        let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let shell = f.window.root(&mut vcx).unwrap().read_with(&vcx, |r, _| {
+            r.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+        f.bridge.handle.fill_for_tests();
+        assert_eq!(
+            f.bridge.handle.query(geode_data::QueryParams {
+                key: QueryKey(1),
+                tag: 1,
+                submitted: std::time::Instant::now(),
+                view: "tree".into(),
+                grouping: None,
+                scope: Default::default(),
+                as_of: AsOf::Live,
+                max_depth: 1,
+            }),
+            Err(geode_data::Refusal::Busy)
+        );
+        let refused = f.bridge.handle.dropped_requests();
+        assert!(refused > 0);
+        // Any drained event carries the handle's refusal total with it.
+        f.events.try_send(DataEvent::LoadEnded).unwrap();
+        vcx.run_until_parked();
+        assert_eq!(diagnostics.read_with(&vcx, |d, _| d.refused), refused);
+        assert!(diagnostics.read_with(&vcx, |d, _| {
+            d.summary().contains(&format!("{refused} refused"))
+        }));
     }
 
     #[gpui::test]

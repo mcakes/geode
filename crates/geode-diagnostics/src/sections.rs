@@ -77,6 +77,22 @@ pub fn sources_rows(d: &Diagnostics, now: SystemTime, clock: Clock) -> Vec<Row> 
     unreported.sort_by(|a, b| a.0.cmp(b.0));
 
     let mut out = Vec::new();
+    // A stopped data thread leads the section the status segment opens:
+    // it is why the bar went red, and it outlives every source row below.
+    if !d.stopped.is_empty() {
+        out.push(row(
+            "stopped threads — restart Geode to recover them",
+            0,
+            Tone::Error,
+        ));
+        for t in &d.stopped {
+            out.push(row(
+                format!("{}: {} (at {})", t.label, t.reason, local_hms(t.at, clock)),
+                1,
+                Tone::Error,
+            ));
+        }
+    }
     for (name, state) in reported.into_iter().chain(unreported) {
         // Computed once per source, ahead of the reported/unreported
         // split, and pushed in BOTH arms below: an ingest `Started` can
@@ -510,6 +526,28 @@ mod tests {
     use geode_shell::diagnostics::SourceSummary;
     use std::path::PathBuf;
     use std::time::Duration;
+
+    #[test]
+    fn stopped_threads_lead_the_sources_section() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.note_health("risk", Health::Ok, String::new(), SystemTime::UNIX_EPOCH);
+        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(3_600);
+        d.note_thread_stopped("geode-ingest", "boom".into(), at);
+        let rows = sources_rows(&d, at, Clock::utc());
+        assert_eq!(rows[0].tone, Tone::Error);
+        assert!(
+            rows[0].text.contains("stopped threads"),
+            "{:?}",
+            rows[0].text
+        );
+        assert_eq!(rows[1].depth, 1);
+        assert_eq!(rows[1].tone, Tone::Error);
+        assert_eq!(
+            rows[1].text.as_ref(),
+            format!("ingest: boom (at {})", local_hms(at, Clock::utc()))
+        );
+        assert!(rows[2].text.starts_with("risk"), "sources follow");
+    }
 
     #[test]
     fn sources_are_sorted_worst_first_with_their_detail() {

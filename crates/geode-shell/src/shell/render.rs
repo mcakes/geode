@@ -771,6 +771,8 @@ impl Render for ShellView {
         // increments a reference count without copying its buffer.
         let diagnostics_read = self.diagnostics.read(cx);
         let diagnostics_summary = diagnostics_read.summary();
+        // Prepared when a thread stops; borrowed, never formatted here.
+        let stopped = diagnostics_read.stopped_segment();
         // Borrow ingest activity through the status-bar call without cloning.
         // Nothing before that call needs a mutable context.
         let ingest = diagnostics_read.ingest.as_ref();
@@ -803,6 +805,7 @@ impl Render for ShellView {
             self.config_write_error.as_deref(),
             self.restart_required.as_deref(),
             self.notice,
+            stopped,
             (!diagnostics_summary.is_empty()).then_some(diagnostics_summary.as_ref()),
             on_diagnostics_click,
             ingest,
