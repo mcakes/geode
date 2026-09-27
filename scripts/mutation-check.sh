@@ -22955,7 +22955,7 @@ run_mutation "serve: a panicking view replacement ends the loop" \
   '            probe(ServePoint::Views);
             let replaced: std::thread::Result<Vec<Diagnostic>> =
                 Ok(service.replace_views(views, dimensions));' \
-  geode-data a_panicking_view_replacement_keeps_the_previous_views_and_serves_on
+  geode-data a_panicking_view_replacement_is_one_diagnostic_and_serves_on
 
 # Unset, a dying loop admits submissions to a queue nothing will read for as
 # long as it takes to join its slowest worker.
@@ -23010,7 +23010,7 @@ run_mutation "service: a distinct answer without its columns panics" \
 
 # The event is built inside its own boundary; without it a build panic
 # propagates to the pool worker and its key is never answered.
-run_mutation "service: a panic building a result event ends its worker" \
+run_mutation "service: a panic building a result event propagates" \
   crates/geode-data/src/service.rs \
   '    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         geode_core::panic::contained(|| build(r))

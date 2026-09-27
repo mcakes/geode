@@ -190,6 +190,10 @@ its `value` or `n` column is that key's error rather than a panic.
 
 - Nothing restarts a stopped thread. The work it served stays undone until the
   app restarts, and the status bar says so for that whole time.
+- A request already queued to, or claimed by, a data thread when it dies is
+  never answered. The asking tile's loading or in-flight state (a market-data
+  upload "in flight", for example) stays until restart; the status bar's
+  stopped segment is the signal that it will not resolve.
 - The channel adapter's dispatcher (`geode-channel-<name>`) and the demo bus
   thread are not supervised. They are transport-tier threads that stand in for
   a vendor client's own threads, which Geode will not own either, and they are

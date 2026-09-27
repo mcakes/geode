@@ -1793,15 +1793,6 @@ impl DataService {
         self.pricing.cancel(key);
     }
 
-    /// The on-demand fetch: subtract what the
-    /// coverage table already holds and queue one job per gap on the
-    /// source's fetch worker. Every early exit is a `SeriesFetched`, so
-    /// the asking tile always hears back.
-    ///
-    /// Coverage is read through `self.conn`, the service's own reader:
-    /// `append_series` commits its rows and its coverage row in one
-    /// transaction on the ingest thread, so a span this sees as covered
-    /// is a span whose rows are queryable.
     /// Answer a fetch the request loop could not run the way the fetch worker
     /// answers its own panic: the pair's load lane goes `Failed`, then
     /// `SeriesFetched` carries the error, so the asking tile and every other
@@ -1834,6 +1825,15 @@ impl DataService {
         });
     }
 
+    /// The on-demand fetch: subtract what the
+    /// coverage table already holds and queue one job per gap on the
+    /// source's fetch worker. Every early exit is a `SeriesFetched`, so
+    /// the asking tile always hears back.
+    ///
+    /// Coverage is read through `self.conn`, the service's own reader:
+    /// `append_series` commits its rows and its coverage row in one
+    /// transaction on the ingest thread, so a span this sees as covered
+    /// is a span whose rows are queryable.
     pub fn fetch(&self, params: &FetchParams) {
         let answer = |result: Result<u64, String>| {
             let _ = (self.sink)(DataEvent::SeriesFetched {

@@ -368,7 +368,8 @@ pairs joined by `; ` for several; or the loop's reason followed by `; also
 stopped: …` naming the others. Its detail line reads `click to open
 diagnostics`. A click takes the diagnostics summary's route: it focuses an
 existing diagnostics tile or adds one, which opens on its Sources section.
-That section's first rows, ahead of every source, read `stopped threads —
+An existing tile keeps whatever section it is showing; the stopped block
+leads Sources. That section's first rows, ahead of every source, read `stopped threads —
 restart Geode to recover them` and then one error row per thread, `<label>:
 <reason> (at HH:MM:SS)`, timed through the display clock.
 

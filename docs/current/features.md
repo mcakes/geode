@@ -705,7 +705,7 @@ tile holds:
   question stood, nothing is removed (`sheet 'x' not removed: it is open in
   another tile` / `…: it is being removed`). A removal the data service
   refuses says so in the footer (`sheet 'x' not removed: the data service is
-  busy` / `…: has stopped`); one that fails after admission says so in the
+  busy` / `sheet 'x' not removed: the data service has stopped`); one that fails after admission says so in the
   header. When `:name` retires the old name and the service refuses that
   removal, the header reads `old sheet 'x' not removed: …` with the same
   reason, and the old document stays. The name is reserved, as for `:name`, until the removal

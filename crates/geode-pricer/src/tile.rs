@@ -1877,8 +1877,10 @@ impl PricerTile {
             self.end_refusals();
             self.stopped = true;
         } else {
-            // Retry independently of periodic refresh. Log once per streak so a closed
-            // channel does not produce a warning on every attempt.
+            // Busy: the queue is full, so retry independently of periodic
+            // refresh. Log once per streak so a full queue that stays full does
+            // not produce a warning on every attempt. A closed channel refuses
+            // `Stopped` and never reaches this branch.
             if self.refusals == 0 {
                 tracing::warn!(
                     target: "geode::pricing",

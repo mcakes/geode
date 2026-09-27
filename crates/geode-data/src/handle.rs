@@ -352,7 +352,9 @@ impl DataHandle {
 
     /// Fill the request queue so the next submission is refused `Busy`, the
     /// refusal a burst produces. The test holding the paired receiver drains
-    /// it to admit again.
+    /// it to admit again. Expects a live, undrained `for_tests` handle: the
+    /// loop ends only when `cancel` is refused, which a closed receiver does
+    /// at once and a receiver drained concurrently may never do.
     #[cfg(any(test, feature = "test-support"))]
     pub fn fill_for_tests(&self) {
         while self.cancel(QueryKey(u64::MAX)) {}
@@ -733,7 +735,10 @@ fn serve(
             break;
         }
         // One request's panic is that request's error, answered once through
-        // its own door; the next request is still served.
+        // its own door; the next request is still served. The answer is taken
+        // before the arm runs, so every arm must make its own answer (or its
+        // handoff to a worker) its last step: a panic after an arm has already
+        // answered would answer the same key a second time.
         let (kind, answer) = PanicAnswer::of(&req);
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             geode_core::panic::contained(|| {
@@ -2073,7 +2078,7 @@ mod tests {
     }
 
     #[test]
-    fn a_panicking_view_replacement_keeps_the_previous_views_and_serves_on() {
+    fn a_panicking_view_replacement_is_one_diagnostic_and_serves_on() {
         fn panic_views(point: ServePoint<'_>) {
             if let ServePoint::Views = point {
                 panic!("injected view panic");
