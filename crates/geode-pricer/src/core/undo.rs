@@ -1,10 +1,9 @@
-//! The tile's undo history (line-pricer spec §6.2, §8.5's `u`/`ctrl+r`):
-//! at most [`UNDO_DEPTH`] entries, strictly LIFO. Every inverse is
-//! recorded against the exact rows the edit left, so NOTHING may edit
-//! the sheet except through a recorded `apply` — a `Restore` trusts its
-//! records' state and revision (spec §17's Part 3 obligation). When an
-//! inverse is refused anyway, `Sheet::undo` is not atomic, so the whole
-//! history is dropped rather than left pointing at rows that moved.
+//! LIFO undo/redo history bounded by [`UNDO_DEPTH`]. Each inverse addresses the rows
+//! left by its edit, so
+//! all user edits must be recorded and sheet replacement must clear history. Restored
+//! records retain their state and revision. If an inverse fails, both stacks are
+//! cleared: `Sheet::undo` may already have applied earlier steps and cannot roll them
+//! back.
 
 use crate::core::edit::{EditError, Undo};
 use crate::core::sheet::Sheet;
@@ -188,10 +187,8 @@ mod tests {
         assert_eq!(s.qty(0), 11, "the oldest eleven edits fell off the bottom");
     }
 
-    /// Why every tile edit goes through the stack (Part 3 global
-    /// constraints): an inverse recorded against rows that moved behind
-    /// the stack's back is refused, `Sheet::undo` is not atomic, and the
-    /// only safe state afterwards is an empty history.
+    /// An unrecorded structural edit can invalidate an inverse. A refused replay clears
+    /// history because `Sheet::undo` is not atomic.
     #[test]
     fn an_inverse_refused_mid_undo_clears_both_sides() {
         let mut s = Sheet::new("t");

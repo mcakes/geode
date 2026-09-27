@@ -1,23 +1,21 @@
-//! Which nodes are open (Phase 3 spec §6.1): a set of *paths* — the
-//! grouping values from the root to the node — never row indices, so
-//! expansion survives a requery, a regroup, and a snapshot that
-//! reorders siblings. Built at keypress time; never touched per frame.
+//! Expansion state keyed by grouping-value paths from the root to each node.
+//! Paths survive requery and sibling reordering when the grouping values stay
+//! the same. Regrouping prunes paths beyond the new depth; paths contain no
+//! column names, so it does not remap values to new grouping dimensions.
 
 use crate::core::plan::ColumnPlan;
 use geode_core::snapshot::Snapshot;
 use std::collections::HashSet;
 
-/// Grouping values root → node. `None` is NULL, which is its own value
-/// (a blanked ENUM, P2 §3.6), distinct from the empty string.
+/// Grouping values from root to node, excluding the root. `None` represents
+/// NULL and is distinct from the empty string.
 pub type Path = Vec<Option<String>>;
 
 #[derive(Debug, Default, Clone)]
 pub struct Expansion {
     open: HashSet<Path>,
-    /// Consulted only while `all` is set: nodes `zc`'d shut after `zR`.
-    /// Vim closes just the named fold and leaves the rest of `zR` open
-    /// (spec §6.1), so "all open" needs its own carve-out set rather
-    /// than degrading to "all closed" the moment one node is closed.
+    /// Nodes explicitly closed while `all` is set. Closing one node after `zR`
+    /// leaves the other nodes open.
     closed: HashSet<Path>,
     /// `zR`: every materialised node is open until `close_all`, except
     /// what `closed` names.
@@ -102,8 +100,9 @@ pub fn path_of(snapshot: &Snapshot, plan: &ColumnPlan, row: usize) -> Path {
     path
 }
 
-/// One more than the deepest open node, so a single expand is already in
-/// hand; never past the grouping (§6.1, `docs/perf.md`).
+/// The query depth needed to show children of the deepest open node, capped
+/// at the grouping depth. With all nodes closed, request the first level;
+/// with `open_all`, request every grouping level.
 pub fn depth_bound(expansion: &Expansion, grouping_len: usize) -> usize {
     expansion
         .deepest_open_depth()
@@ -155,8 +154,7 @@ mod tests {
 
     #[test]
     fn close_under_open_all_closes_only_that_node() {
-        // vim's own behaviour: `zR` then `zc` on one fold closes just
-        // that fold, not every fold `zR` opened (spec §6.1).
+        // `zR` followed by `zc` closes only the named node; siblings stay open.
         let mut e = Expansion::default();
         e.open_all();
         assert!(e.close(&p(&[Some("L1")])));

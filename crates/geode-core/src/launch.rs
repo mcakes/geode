@@ -1,9 +1,7 @@
-//! What a source tile knows at its cursor that another module may open
-//! on. The shell pulls it from the focused tile (`TileContent::
-//! launch_context`) and lists the kinds whose factory accepts it; the
-//! factory translates it into its own restored-state table. Typed, not a
-//! table, so a source and a target agree on the words without depending
-//! on each other.
+//! Typed cursor context for opening another module on the selected entity.
+//! The shell reads the focused tile's `TileContent::launch_context`, offers
+//! factories that accept it, and lets the target factory construct restored
+//! state. Shared types keep source and target modules independent.
 
 /// The context at a source tile's cursor. Every field is `None` when the
 /// cursor names no single value: an ambiguous or NULL value is empty, never

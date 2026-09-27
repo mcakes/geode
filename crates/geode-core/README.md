@@ -21,15 +21,16 @@ Reader defaults, partial validation, and presentation rules are described in
 |---|---|
 | `config` | Builtin → Desk → User TOML loading, recursive merging with whole-object exceptions, and path provenance. File loading collects diagnostics; typed readers validate separately. `load_views` applies dataset and view presentation without rewriting definitions. TOML key order is preserved. |
 | `schema` | Dataset families (`measures`, `document`, `series`), columns, roles, grains, and family-specific validation. Readers may retain corrected objects with diagnostics. Grain `Ord` reads coarse < fine. |
-| `scope` | Dimension selections, text, expressions, named-expression references (`named`), and impossible-state tracking. Components combine with AND within a query; across layers, dimensions intersect, named references append without duplicates, expressions AND, and inner text replaces outer text. Expression parsing and schema validation are separate. `Expr::conjuncts` splits an expression into its top-level `and` terms and `Expr::from_conjuncts` rebuilds a left-folded chain from them, which is how the toolbar edits one term at a time. `Scope::resolve` folds every named reference into `expression` (list order, ANDed), against a `named::NamedExpressions`; the first missing or invalid name is an error rather than a skip, since skipping would widen the scope. |
-| `named` | `NamedExpressions`, the `expressions.toml` reader: an expression text saved under a name (`NamedExpr::Valid`/`Invalid`), so a saved scope or the frame can refer to it by name instead of copying it. An entry that fails to parse is kept `Invalid` with its reason rather than dropped, so a reference to it reports "invalid" rather than "missing"; an unknown column only warns and leaves the entry `Valid`. |
-| `scope::complete` | Pure, I/O-free reading of a partially typed scope expression for the shell's suggestion lists: `lex` tokenizes forgivingly (an unterminated string, a dangling operator, an open paren all lex without failing); `context_at` replays the grammar up to the caret and names what may come next (`Column`, `Operator`, `Value`, `Connective`, or `Invalid`) plus the token a suggestion would replace; `ExprVocab` is every column an expression may name, across datasets then derived dimensions; `check` produces the live schema warnings a typed draft raises (an unknown column, with did-you-mean; ordering or `like` on a derived dimension), which the shell's expression dialogs also use to refuse Enter; its derived-operator rule is `expr::derived_op_error`, the same primitive `Scope::validate` calls, so the two checks cannot drift apart on that rule. Its one invariant, held by test: `context_at` agrees with the parser on every prefix of a valid expression — where the parser stops wanting some particular thing, `context_at` reports that same position. |
-| `scopes` | Saved scopes (`scopes.toml`), including each scope's ticked named-expression references. Names are read and persisted without checking them against `expressions.toml`; `Scope::resolve` is where a missing or invalid one fails. |
+| `scope` | Dimension selections, text, expressions, named references, and impossible-state tracking. Composition intersects dimensions, deduplicates names, ANDs expressions, and takes inner text. `Scope::resolve` ANDs named expressions in list order with the existing expression and errors on the first missing or invalid name. Parsing and schema validation are separate; conjunct helpers let the toolbar edit individual terms. |
+| `named` | Named expressions from `expressions.toml`. Parse failures remain as invalid entries with reasons so references distinguish broken definitions from missing ones. Unknown columns warn while retaining a parsed expression. |
+| `scope::complete` | Forgiving expression tokens, caret context and replacement ranges, schema vocabulary, and warnings for unknown columns or unsupported derived-dimension comparisons. Callers parse separately before accepting expressions. Completion requires a caret on a UTF-8 boundary and does not support column names starting with an ASCII digit. |
+| `scopes` | Saved scopes from `scopes.toml`, including named-expression references. Reading and persistence retain names; `Scope::resolve` validates their definitions when used. |
 | `groupings` | The nine numbered grouping slots. |
 | `dimensions` | Derived dimensions the desk groups by that are not in the source files (`desk` from `book`). |
-| `view` | View definitions: dataset, joins, columns, derived columns, grouping and sort, as config. `ViewSpec::validate` resolves every reference the compiler will resolve: the primary and join datasets, each join's keys against the joined dataset's grains and against the grouping, selected columns, a measure column's role, a dimension column's reachability (grouped, joined, or carried by a declared grain alongside the whole grouping — `ungrouped_dimensions` and `unanimity_grain` are shared with the compiler), and grouping columns. Derived SQL and sort keys remain the compiler's. |
+| `view` | View definitions, presentation, and validation of datasets, joins, column roles, reachability, and grouping. Ungrouped primary dimensions use the coarsest declared grain carrying the column and the entire grouping, shared by validation and compilation. Required failures refuse the view; supported optional failures warn. Derived SQL and sort keys are checked when the generated SQL is bound and executed. |
 | `attribution` | Whether a measure can be summed at a grouping level, and how a scope predicate reached it. |
-| `grid` | `grid::selection`: a grid selection (whole rows or a cell block) anchored by row and column identity rather than display index, resolved to display ranges against the current order, the top-most-rows rule for summing a group without double-counting its children, and the accumulator and formatter behind a selection's footer summary. Shared by any module hosting a selectable grid; the blotter is its first user. |
+| `grid` | Row and cell-block selections anchored by identity and resolved against current display order. Selection summaries exclude descendants of selected parents to avoid double-counting, and suppress totals for non-additive cells or unsummable columns. |
+| `launch` | Typed cursor context shared between feature modules. Missing or ambiguous values remain absent; the shell offers targets that accept every populated field. |
 | `query` | Requests and outcomes for views, distinct values, catalogs, and documents; request keys, tags, and as-of parsing. |
 | `snapshot` | Immutable, `Arc`-shared columnar results, attribution and freshness metadata, and typed cell access. Feature modules can read cells without an Arrow dependency; construction and raw array access also expose Arrow types. |
 | `tree` | The parent/child index of a rollup result, built once on the query worker. |
@@ -73,14 +74,13 @@ for its readiness strategy; the data service checks those boundaries.
 - Configuration readers return diagnostics with usable values. Depending on
   the rule, invalid input is skipped, defaulted, or retained with a warning;
   a diagnostic does not imply that the entire document was rejected.
-- `ViewSpec::validate` is the exception, and it is a gate rather than advice: an
-  error there means the view cannot be honoured, and the data service refuses it
-  by name instead of querying it. A warning means the author declared the failing
-  join or column `required = false` and it was dropped, or that a join supplies
-  no column and is dead weight; the view still serves. A column's `kind` defaults
-  to `measure` and `required` defaults to true, so a declaration that says
-  nothing says "I meant this". What validate still leaves to the compiler is
-  derived SQL, which DuckDB's binder rejects, and sort keys.
+- `ViewSpec::validate` errors cause the data service to refuse the view by
+  name. Joins and columns default to `required = true`. An optional join's
+  validation failure warns; optional columns warn for a measure-role mismatch
+  or an unreachable dimension. Unknown columns and invalid derived-dimension
+  sources still error. A join outside the grouping that supplies no selected
+  column warns even when required. Derived SQL and sort keys remain compiler
+  concerns; `required = false` does not exempt derived SQL from binding errors.
 - `Snapshot` and `DocumentRows` store columns; the tree index stores parallel
   arrays. Snapshot construction prepares concatenated columns and the tree
   before UI delivery.

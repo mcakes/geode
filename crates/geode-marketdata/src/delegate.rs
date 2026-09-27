@@ -14,6 +14,7 @@ use crate::header;
 use crate::popup::{ChoicePaint, render_choice};
 use crate::tile::{DateFieldPaint, FlooredTones, MarketDataTile};
 use geode_core::grid::selection::{Resolved, SelectKind};
+use geode_shell::colfit::{FitMetrics, FittedWidths};
 use geode_shell::fonts;
 use geode_shell::linenumbers::{GUTTER_GAP_PX, LineNumbers, gutter_number, gutter_px};
 use gpui::prelude::*;
@@ -26,12 +27,17 @@ use gpui_component::table::{Column, ColumnFixed, TableDelegate, TableState};
 use gpui_component::{ActiveTheme as _, Theme};
 use std::rc::Rc;
 
-/// Fixed pixel widths for the label and value columns. Columns cannot be
-/// resized or moved: there is no persisted width state, and table refresh would
-/// replace transient widths on the next model install. These widths are not
-/// rem-scaled because column() has no Window from which to read the rem size.
+/// Default pixel widths for the label and value columns. Columns cannot be
+/// dragged: a dragged width has nowhere to live and table refresh would
+/// replace it on the next model install. `:autosize` replaces them with
+/// fitted widths (`MatrixDelegate::fitted`), which do persist. These widths
+/// are not rem-scaled because column() has no Window from which to read the
+/// rem size.
 const LABEL_WIDTH: f32 = 128.0;
 const CELL_WIDTH: f32 = 84.0;
+
+/// The row-label column's stable key, in `column()` and in fitted widths.
+pub(crate) const ROW_AXIS_KEY: &str = "__row_axis";
 
 /// Index of the fixed row-label column when labels are shown. Hidden-label
 /// panels instead pin their first value column; offset() owns that distinction.
@@ -180,6 +186,12 @@ pub struct MatrixDelegate {
     /// press at the cursor column, which is the editor's cell, and so
     /// cancel the edit the press was aimed into.
     editor_press: bool,
+    /// Widths `:autosize` fitted, keyed by column key ([`ROW_AXIS_KEY`] for
+    /// the row labels, the column's label for a value column), in pixels
+    /// without the gutter. `column()` prefers an entry over the default, so
+    /// every model install's refresh keeps it; a key the current model no
+    /// longer has is ignored and a new column gets the default.
+    pub(crate) fitted: FittedWidths,
 }
 
 impl MatrixDelegate {
@@ -206,7 +218,43 @@ impl MatrixDelegate {
             drag_last: None,
             drag_origin: None,
             editor_press: false,
+            fitted: FittedWidths::new(),
         }
+    }
+
+    /// Fit the row-label column (when shown) and every value column to its
+    /// header and every row's prepared text. The whole model is measured:
+    /// a document grid is small and already formatted.
+    ///
+    /// `None` with no rows to measure (no document yet, or an empty one).
+    pub(crate) fn fit_columns(&self, m: &FitMetrics) -> Option<FittedWidths> {
+        if self.model.rows.is_empty() {
+            return None;
+        }
+        let mut out = FittedWidths::new();
+        if self.label_column {
+            out.insert(
+                ROW_AXIS_KEY.to_string(),
+                m.fit_text(
+                    &self.row_axis,
+                    self.model.rows.iter().map(|r| r.label.as_ref()),
+                ),
+            );
+        }
+        for (col, name) in self.model.columns.iter().enumerate() {
+            let cells = self
+                .model
+                .rows
+                .iter()
+                .filter_map(|r| r.cells.get(col).map(|c| c.text.as_ref()));
+            out.insert(name.to_string(), m.fit_text(name, cells));
+        }
+        Some(out)
+    }
+
+    /// The fitted width for `key`, else `default`.
+    fn width_of(&self, key: &str, default: f32) -> f32 {
+        self.fitted.get(key).copied().unwrap_or(default)
     }
 
     /// The gutter's width in px — `0` when off. Read by `column` (the
@@ -437,12 +485,12 @@ impl TableDelegate for MatrixDelegate {
     fn column(&self, col_ix: usize, _cx: &App) -> Column {
         let Some(model_col) = self.model_col(col_ix) else {
             return Column {
-                key: SharedString::from("__row_axis"),
+                key: SharedString::from(ROW_AXIS_KEY),
                 name: self.row_axis.clone(),
                 align: TextAlign::Left,
                 // Preserve document row order and column identity: no sorting or movement.
                 sort: None,
-                width: px(LABEL_WIDTH + self.gutter_px()),
+                width: px(self.width_of(ROW_AXIS_KEY, LABEL_WIDTH) + self.gutter_px()),
                 fixed: Some(ColumnFixed::Left),
                 movable: false,
                 // See `LABEL_WIDTH`'s own note: a dragged width has
@@ -457,6 +505,7 @@ impl TableDelegate for MatrixDelegate {
             .get(model_col)
             .cloned()
             .unwrap_or_default();
+        let width = self.width_of(&name, CELL_WIDTH);
         Column {
             key: name.clone(),
             name,
@@ -464,7 +513,7 @@ impl TableDelegate for MatrixDelegate {
             // including typed text/date/choice columns in flat panels.
             align: TextAlign::Right,
             sort: None,
-            width: px(CELL_WIDTH
+            width: px(width
                 + if col_ix == PINNED_COL {
                     self.gutter_px()
                 } else {

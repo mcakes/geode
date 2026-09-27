@@ -1,5 +1,5 @@
-//! The pricing seam's data-tier side (line-pricer spec §5.3, §5.5): which
-//! `Pricer` this build has, and the worker that runs it.
+//! Pricing implementation registry, selected configuration, and worker.
+//! The app supplies concrete pricers through the shared geode-core trait.
 
 pub mod worker;
 
@@ -9,10 +9,10 @@ use std::sync::Arc;
 
 pub use worker::{PRICE_BOUND, PriceSink, PricingWorker};
 
-/// The pricer the service runs. `pricer: None` is a configured name this
-/// build cannot serve — every line answers [`PricerConfig::missing_reason`],
-/// never a startup failure (spec §4, roadmap ruling 3 applied to a
-/// library).
+/// The service's selected pricer. With `pricer: None`, each processed line
+/// returns [`Self::missing_reason`] instead of preventing service startup.
+/// An empty name means unconfigured; a nonempty name identifies a missing
+/// implementation.
 #[derive(Clone, Default)]
 pub struct PricerConfig {
     pub name: String,

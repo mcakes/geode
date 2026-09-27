@@ -159,6 +159,14 @@ pub enum DataEvent {
         batch: String,
         reason: String,
     },
+    /// A data thread unwound past every containment boundary and has ended.
+    /// Emitted once per thread; nothing restarts it. `thread` is the spawn
+    /// name (`geode-data`, `geode-ingest`, `geode-query-2`, ...), `reason` the
+    /// panic payload, or the open error for a request loop that never started.
+    ThreadStopped {
+        thread: String,
+        reason: String,
+    },
 }
 
 /// Forget one document of a `local = true` dataset: every generation, live
@@ -217,6 +225,116 @@ fn view_snapshot(payload: Payload) -> Result<geode_core::snapshot::Snapshot, Str
         Payload::Snapshot(s) => Ok(s),
         Payload::Series(_) => Err("internal: a view query answered with a series".to_string()),
     }
+}
+
+/// The event a pool result becomes. A payload of the wrong kind, or a
+/// distinct snapshot missing its `value`/`n` columns, is that key's error,
+/// never a panic: this runs on a query worker.
+fn result_event(r: QueryResult, health_tracker: &HealthTracker) -> DataEvent {
+    match r.kind {
+        RequestKind::Query => DataEvent::Query(QueryOutcome {
+            key: r.key,
+            tag: r.tag,
+            snapshot: r.payload.and_then(view_snapshot).map(Arc::new),
+            submitted: r.submitted,
+        }),
+        RequestKind::Distinct { column } => DataEvent::Distinct(DistinctOutcome {
+            key: r.key,
+            tag: r.tag,
+            column,
+            values: r.payload.and_then(view_snapshot).and_then(|s| {
+                let (Some(v), Some(n)) = (s.column_index("value"), s.column_index("n")) else {
+                    return Err(
+                        "internal: a distinct answer without its value and n columns".to_string(),
+                    );
+                };
+                Ok((0..s.rows())
+                    .filter_map(|row| {
+                        Some((s.text_at(v, row)?.to_string(), s.i64_at(n, row)? as u64))
+                    })
+                    .collect())
+            }),
+        }),
+        // Match health to source slots by slot number. Expression slots leave gaps,
+        // so positional zipping would attach health to the wrong result.
+        RequestKind::Series { pairs } => {
+            let result = match r.payload {
+                Ok(Payload::Series(mut res)) => {
+                    for (slot, source, identity) in &pairs {
+                        let key = format!("{identity}@{source}");
+                        if let Some(s) = res.slots.iter_mut().find(|s| s.slot == *slot) {
+                            s.provenance.health = health_tracker.load_lane(source, &key);
+                        }
+                    }
+                    Ok(res)
+                }
+                // Report a mismatched worker payload as an error rather than panicking.
+                Ok(Payload::Snapshot(_)) => {
+                    Err("internal: a series request answered with a snapshot".to_string())
+                }
+                Err(e) => Err(e),
+            };
+            DataEvent::Series(SeriesOutcome {
+                key: r.key,
+                tag: r.tag,
+                submitted: r.submitted,
+                result,
+            })
+        }
+    }
+}
+
+/// Build `r`'s event inside a panic boundary. The pool worker sends what
+/// this returns outside its own boundary, so a panic here would end the
+/// worker; instead the key is answered with an error of its own kind.
+fn contained_result_event(
+    r: QueryResult,
+    build: impl FnOnce(QueryResult) -> DataEvent,
+) -> DataEvent {
+    let (key, tag, submitted, kind) = (r.key, r.tag, r.submitted, r.kind.clone());
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        geode_core::panic::contained(|| build(r))
+    })) {
+        Ok(event) => event,
+        Err(payload) => {
+            let reason = format!(
+                "result delivery panicked: {}",
+                crate::ingest::runner::panic_payload_message(payload.as_ref())
+            );
+            match kind {
+                RequestKind::Query => DataEvent::Query(QueryOutcome {
+                    key,
+                    tag,
+                    snapshot: Err(reason),
+                    submitted,
+                }),
+                RequestKind::Distinct { column } => DataEvent::Distinct(DistinctOutcome {
+                    key,
+                    tag,
+                    column,
+                    values: Err(reason),
+                }),
+                RequestKind::Series { .. } => DataEvent::Series(SeriesOutcome {
+                    key,
+                    tag,
+                    submitted,
+                    result: Err(reason),
+                }),
+            }
+        }
+    }
+}
+
+/// A fetch source's identity listing panicked. Nobody asked for it, so the
+/// only door is an error diagnostic naming the source and the payload.
+fn identity_listing_panicked(source: &str, payload: &str) -> DataEvent {
+    DataEvent::Diagnostics(vec![Diagnostic {
+        severity: Severity::Error,
+        layer: None,
+        file: None,
+        message: format!("identity listing for {source} panicked: {payload}"),
+        path: None,
+    }])
 }
 
 /// Convert a poll result to its diagnostic event. A user-configured interval
@@ -543,9 +661,8 @@ impl HealthTracker {
 /// Validate every view once, returning the diagnostics to publish and the
 /// refusals to enforce.
 ///
-/// One function because `open` and a reload must never disagree about which
-/// views are honourable: a view refused at open and served after a reload would
-/// be a blotter that works until the next config write.
+/// Opening and reloading use the same validation rules, so a configuration's
+/// acceptance does not depend on when it was loaded.
 fn validate_views(
     views: &[ViewSpec],
     schema: &SchemaSpec,
@@ -576,15 +693,17 @@ pub struct DataService {
     /// every early exit of a fetch is a `SeriesFetched`, and the ones
     /// decided here never reach a worker or the runner.
     sink: EventSink,
+    /// The source-health lanes, shared with every worker sink, so a fetch
+    /// the request loop could not run is failed on the same load lane the
+    /// fetch worker reports on.
+    health: Arc<HealthTracker>,
     /// Config errors found at open. Held rather than
     /// returned so `open` keeps its signature and a caller that does not
     /// surface diagnostics still gets a working service.
     diagnostics: Vec<Diagnostic>,
-    /// Views whose configuration cannot be honoured, by name, each with the
-    /// first error explaining why. A query for one is refused instead of
-    /// compiled: the compiler would return the columns it cannot supply as
-    /// absent, and an absent column paints blank with nothing on screen to say
-    /// why.
+    /// Views that failed validation, keyed by name with their first error.
+    /// Refusing them before compilation keeps configuration failures visible
+    /// even when no diagnostics panel is open.
     refused_views: std::collections::BTreeMap<String, String>,
     /// One worker per upload target. They only answer the sink, so they
     /// stop first and depend on nothing below.
@@ -710,66 +829,28 @@ impl DataService {
 
         let result_sink: ResultSink = {
             let sink = Arc::clone(&sink);
-            // The tracker rides into the sink so a series result can
-            // carry each pair's load-lane word
-            // without a second trip through the service thread.
+            // The tracker rides into the sink so a series result can carry
+            // each pair's load-lane word without a second trip through the
+            // service thread.
             let health_tracker = Arc::clone(&health_tracker);
-            Arc::new(move |r: QueryResult| match r.kind {
-                RequestKind::Query => sink(DataEvent::Query(QueryOutcome {
-                    key: r.key,
-                    tag: r.tag,
-                    snapshot: r.payload.and_then(view_snapshot).map(Arc::new),
-                    submitted: r.submitted,
-                })),
-                RequestKind::Distinct { column } => sink(DataEvent::Distinct(DistinctOutcome {
-                    key: r.key,
-                    tag: r.tag,
-                    column,
-                    values: r.payload.and_then(view_snapshot).map(|s| {
-                        let v = s.column_index("value").expect("distinct selects value");
-                        let n = s.column_index("n").expect("distinct selects n");
-                        (0..s.rows())
-                            .filter_map(|row| {
-                                Some((s.text_at(v, row)?.to_string(), s.i64_at(n, row)? as u64))
-                            })
-                            .collect()
-                    }),
-                })),
-                // Match health to source slots by slot number. Expression slots leave gaps,
-                // so positional zipping would attach health to the wrong result.
-                RequestKind::Series { pairs } => {
-                    let result = match r.payload {
-                        Ok(Payload::Series(mut res)) => {
-                            for (slot, source, identity) in &pairs {
-                                let key = format!("{identity}@{source}");
-                                if let Some(s) = res.slots.iter_mut().find(|s| s.slot == *slot) {
-                                    s.provenance.health = health_tracker.load_lane(source, &key);
-                                }
-                            }
-                            Ok(res)
-                        }
-                        // Report a mismatched worker payload as an error rather than panicking.
-                        Ok(Payload::Snapshot(_)) => {
-                            Err("internal: a series request answered with a snapshot".to_string())
-                        }
-                        Err(e) => Err(e),
-                    };
-                    sink(DataEvent::Series(SeriesOutcome {
-                        key: r.key,
-                        tag: r.tag,
-                        submitted: r.submitted,
-                        result,
-                    }))
-                }
+            Arc::new(move |r: QueryResult| {
+                sink(contained_result_event(r, |r| {
+                    result_event(r, &health_tracker)
+                }))
             })
         };
-        let pool = QueryPool::spawn_with_sink(&store, config.query_workers.max(1), result_sink)?;
+        let pool = QueryPool::spawn_with_sink(
+            &store,
+            config.query_workers.max(1),
+            result_sink,
+            Arc::clone(&sink),
+        )?;
 
         let price_sink: PriceSink = {
             let sink = Arc::clone(&sink);
             Arc::new(move |o| sink(DataEvent::Price(o)))
         };
-        let pricing = PricingWorker::spawn(config.pricer.clone(), price_sink);
+        let pricing = PricingWorker::spawn(config.pricer.clone(), price_sink, Arc::clone(&sink));
 
         let ingest_sink: IngestSink = {
             let sink = Arc::clone(&sink);
@@ -1003,6 +1084,10 @@ impl DataService {
                         reason,
                     }) && delivered
                 }
+                // A condition the runner reports without failing a job: a
+                // stale check that could not read the catalog, a local sweep
+                // that panicked.
+                IngestEvent::Diagnostic(d) => sink(DataEvent::Diagnostics(vec![d])),
                 // A drained runner also ends progress. The runner does not retry refused
                 // events; the app mailbox coalesces progress state.
                 IngestEvent::PlanComplete => sink(DataEvent::LoadEnded),
@@ -1012,6 +1097,7 @@ impl DataService {
             store,
             config.schema.clone(),
             ingest_sink,
+            Arc::clone(&sink),
         ));
 
         // Resolve adapters after the ingest runner exists and before discovery
@@ -1136,9 +1222,12 @@ impl DataService {
                             // failure (`Fetch::catalogue`'s own doc): the
                             // picker simply has no typeahead for it.
                             FetchOutcome::Identities(None) => {}
+                            FetchOutcome::IdentitiesPanicked(payload) => {
+                                let _ = sink(identity_listing_panicked(&source, &payload));
+                            }
                         })
                     };
-                    match FetchWorker::spawn(&spec.name, fetch, outcome_sink) {
+                    match FetchWorker::spawn(&spec.name, fetch, outcome_sink, Arc::clone(&sink)) {
                         Ok(worker) => {
                             // Use the actual delivery verdict when reporting a clean connection.
                             let source = spec.name.clone();
@@ -1272,6 +1361,7 @@ impl DataService {
                 Arc::clone(&ingest),
                 report_load,
                 on_connection,
+                Arc::clone(&sink),
             ) {
                 Ok(worker) => subscriptions.push(worker),
                 Err(e) => report_unservable(e.message),
@@ -1322,6 +1412,7 @@ impl DataService {
             discovery_conn,
             Arc::clone(&ingest),
             scheduler_sink,
+            Arc::clone(&sink),
         );
 
         // Validate views at open so diagnostics name the configuration before any
@@ -1338,6 +1429,7 @@ impl DataService {
             }),
             config,
             sink: stored_sink,
+            health: Arc::clone(&health_tracker),
             diagnostics,
             refused_views,
             egress,
@@ -1382,13 +1474,14 @@ impl DataService {
         views: Vec<ViewSpec>,
         dimensions: DerivedDimensions,
     ) -> Vec<Diagnostic> {
+        // Validate before assigning anything: if validation panics, the
+        // previous views, dimensions and refusals stay in force together.
+        let (diagnostics, refused_views) = validate_views(&views, &self.config.schema, &dimensions);
         self.read_config = Arc::new(ReadConfig {
             schema: Arc::clone(&self.read_config.schema),
             dimensions: dimensions.clone(),
         });
         self.config.dimensions = dimensions;
-        let (diagnostics, refused_views) =
-            validate_views(&views, &self.config.schema, &self.config.dimensions);
         self.config.views = views;
         self.diagnostics = diagnostics.clone();
         self.refused_views = refused_views;
@@ -1695,6 +1788,38 @@ impl DataService {
     pub fn cancel(&self, key: QueryKey) {
         self.pool.cancel(key);
         self.pricing.cancel(key);
+    }
+
+    /// Answer a fetch the request loop could not run the way the fetch worker
+    /// answers its own panic: the pair's load lane goes `Failed`, then
+    /// `SeriesFetched` carries the error, so the asking tile and every other
+    /// tile watching the pair hear back.
+    pub(crate) fn fail_fetch(&self, source: &str, identity: &str, reason: String) {
+        let pair = format!("{identity}@{source}");
+        self.health.report_load_and_emit(
+            source,
+            &pair,
+            Health::Failed {
+                reason: reason.clone(),
+            },
+            format!("{pair}: {reason}"),
+            |reported| match reported {
+                Some((worst, detail)) => {
+                    log_health_event(source, &worst, &detail);
+                    (self.sink)(DataEvent::Health {
+                        source: source.to_string(),
+                        worst,
+                        detail,
+                    })
+                }
+                None => true,
+            },
+        );
+        let _ = (self.sink)(DataEvent::SeriesFetched {
+            source: source.to_string(),
+            identity: identity.to_string(),
+            result: Err(reason),
+        });
     }
 
     /// The on-demand fetch: subtract what the
@@ -2636,6 +2761,212 @@ mod tests {
         (dir, calls, service, rx)
     }
 
+    struct PanickingCatalogueAdapter;
+    impl crate::adapter::Adapter for PanickingCatalogueAdapter {
+        fn name(&self) -> &'static str {
+            "fake_kdb"
+        }
+        fn subscription(&self) -> Option<Box<dyn crate::adapter::Subscription>> {
+            None
+        }
+        fn egress(&self) -> Option<Box<dyn crate::adapter::Egress>> {
+            None
+        }
+        fn fetch(&self) -> Option<Box<dyn crate::adapter::Fetch>> {
+            struct Listing;
+            impl crate::adapter::Fetch for Listing {
+                fn fetch(
+                    &mut self,
+                    _: &crate::adapter::FetchRequest,
+                ) -> Result<crate::adapter::SeriesRows, crate::adapter::AdapterError>
+                {
+                    unreachable!("only the catalogue is asked")
+                }
+                fn catalogue(&mut self) -> Option<Vec<String>> {
+                    panic!("the listing fell over")
+                }
+            }
+            Some(Box::new(Listing))
+        }
+    }
+
+    /// Nobody asked for the listing (open asks), so the only door is an
+    /// error diagnostic naming the source and the payload.
+    #[test]
+    fn a_panicking_identity_listing_is_an_error_diagnostic_naming_the_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapters = AdapterRegistry::default();
+        adapters.register(Arc::new(PanickingCatalogueAdapter));
+        let mut schema = SchemaSpec::default();
+        schema
+            .datasets
+            .push(crate::store::ddl::tests_support::series_dataset());
+        let (_service, rx) = DataService::open_channel(DataServiceConfig {
+            db_path: dir.path().join("geode.duckdb"),
+            schema,
+            views: Vec::new(),
+            dimensions: DerivedDimensions::default(),
+            query_workers: 1,
+            sources: vec![crate::source::SourceSpec {
+                adapter: "fake_kdb".to_string(),
+                ..crate::source::SourceSpec::directory("kdb_hist", "series", Vec::new())
+            }],
+            adapters,
+            documents: Default::default(),
+            egress: Vec::new(),
+            pricer: PricerConfig::default(),
+        })
+        .unwrap();
+        let message = until(&rx, |e| match e {
+            DataEvent::Diagnostics(d) => d
+                .into_iter()
+                .find(|d| d.severity == Severity::Error && d.message.contains("identity listing")),
+            _ => None,
+        });
+        assert!(
+            message
+                .message
+                .contains("identity listing for kdb_hist panicked: the listing fell over"),
+            "{message:?}"
+        );
+    }
+
+    /// The stale check fails open (a failed lookup must not discard the
+    /// load) and is reported: an error naming the file reaches the sink,
+    /// since a catalog row the lookup cannot read is corruption.
+    #[test]
+    fn a_failed_stale_check_is_an_error_diagnostic_through_the_service() {
+        let (db, src, store, ds, _emitted) = crate::ingest::load::tests_support::fixture();
+        let spec = crate::source::SourceSpec {
+            pending_timeout: Duration::from_secs(3600),
+            batch_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<batch>.+)$".into()),
+            ..crate::source::SourceSpec::directory(
+                "risk",
+                "risk_snapshot",
+                vec![format!("{}/*.csv", src.path().display())],
+            )
+        };
+        let found =
+            crate::source::discover(&spec, &Catalog::new(store.writer()), SystemTime::now())
+                .unwrap();
+        let plan = crate::ingest::build_plan(&[(spec, found)]);
+        let poisoned = plan.items[0].clone();
+        // A NULL mtime makes the catalog lookup's row read panic.
+        store
+            .writer()
+            .execute_batch(&format!(
+                "insert into file_generations
+                     (file_id, dataset, batch, path, size, mtime, source_time,
+                      gen_id, loaded_at, row_count, health, health_reason,
+                      archived_only)
+                 values
+                     (-1, '{}', '{}', '{}', {}, NULL, '{}'::timestamptz, -1,
+                      now(), 1, 'ok', NULL, false);",
+                poisoned.dataset,
+                poisoned.batch,
+                poisoned.candidate.csv_path.display(),
+                poisoned.candidate.size,
+                poisoned.source_time.to_rfc3339(),
+            ))
+            .unwrap();
+        drop(store);
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(ds);
+        let (service, rx) = DataService::open_channel(DataServiceConfig {
+            db_path: db.path().join("geode.duckdb"),
+            schema,
+            views: Vec::new(),
+            dimensions: DerivedDimensions::default(),
+            query_workers: 1,
+            sources: Vec::new(),
+            adapters: Default::default(),
+            documents: Default::default(),
+            egress: Vec::new(),
+            pricer: PricerConfig::default(),
+        })
+        .unwrap();
+        service.ingest.submit(crate::ingest::WorkPlan {
+            items: vec![poisoned.clone()],
+        });
+        let error = until(&rx, |e| match e {
+            DataEvent::Diagnostics(d) => d.into_iter().find(|d| d.severity == Severity::Error),
+            _ => None,
+        });
+        assert!(
+            error
+                .message
+                .contains(&poisoned.candidate.csv_path.display().to_string())
+                && error.message.contains("panicked"),
+            "{error:?}"
+        );
+        service.shutdown();
+    }
+
+    #[test]
+    fn a_distinct_answer_without_its_columns_is_an_err_for_its_key() {
+        let empty = geode_core::snapshot::Snapshot::from_batches(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            geode_core::snapshot::Provenance::default(),
+        )
+        .unwrap();
+        let event = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            result_event(
+                crate::query::pool::QueryResult {
+                    id: 1,
+                    key: QueryKey(3),
+                    tag: 2,
+                    submitted: Instant::now(),
+                    view: crate::query::pool::ViewId("distinct".into()),
+                    payload: Ok(Payload::Snapshot(empty)),
+                    kind: RequestKind::Distinct {
+                        column: "book".into(),
+                    },
+                },
+                &HealthTracker::default(),
+            )
+        }))
+        .expect("a distinct answer without its columns is an Err, not a panic");
+        match event {
+            DataEvent::Distinct(o) => {
+                assert_eq!((o.key, o.tag, o.column.as_str()), (QueryKey(3), 2, "book"));
+                assert!(
+                    o.values.is_err_and(|e| e.contains("value")),
+                    "an Err for the key, not a panic"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_panic_building_a_result_event_answers_its_key_with_an_error() {
+        let event = std::panic::catch_unwind(|| {
+            contained_result_event(
+                crate::query::pool::QueryResult {
+                    id: 1,
+                    key: QueryKey(4),
+                    tag: 7,
+                    submitted: Instant::now(),
+                    view: crate::query::pool::ViewId("v".into()),
+                    payload: Err("unused".into()),
+                    kind: RequestKind::Query,
+                },
+                |_| panic!("the event builder fell over"),
+            )
+        })
+        .expect("the build's panic is contained, not propagated");
+        match event {
+            DataEvent::Query(o) => {
+                assert_eq!((o.key, o.tag), (QueryKey(4), 7));
+                let reason = o.snapshot.expect_err("a panicking build is an error");
+                assert!(reason.contains("the event builder fell over"), "{reason}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
     fn next_series_fetched(
         rx: &std::sync::mpsc::Receiver<DataEvent>,
     ) -> (String, String, Result<u64, String>) {
@@ -2869,7 +3200,7 @@ mod tests {
         );
         let mut p = series_params("X");
         p.dataset = "nope".into();
-        assert!(handle.series(p));
+        assert!(handle.series(p).is_ok());
         let o = next_series(&rx);
         assert_eq!((o.key, o.tag), (QueryKey(7), 5));
         assert!(o.result.unwrap_err().contains("unknown dataset 'nope'"));
@@ -3535,10 +3866,8 @@ mod tests {
         );
         let ndx_generation = ndx.provenance().datasets[0].generation;
 
-        // NDX.Z was published before the third publish (SPX.Z's second), so
-        // a dataset-wide maximum would answer with SPX.Z's newest generation
-        // for NDX.Z too. The fixture's single document could not catch that:
-        // this pair is what tells the two apart.
+        // NDX.Z predates SPX.Z's second publish. A dataset-wide maximum
+        // would incorrectly report SPX.Z's generation for both documents.
         assert!(spx_generation.is_some() && ndx_generation.is_some());
         assert_ne!(spx_generation, ndx_generation);
         assert!(
@@ -3677,9 +4006,8 @@ mod tests {
 
     #[test]
     fn a_view_with_an_error_diagnostic_is_refused_by_name_not_compiled() {
-        // A diagnostic nobody has a panel open for is not a remedy. Before the
-        // refusal, this query compiled: `nosuchcolumn` came back absent, and an
-        // absent column paints blank with nothing on screen to say why.
+        // Invalid views must produce a query refusal naming the problem,
+        // even when the caller does not inspect configuration diagnostics.
         let (db, _src, _svc, _rx) = service();
         let ds = crate::ingest::load::tests_support::fixture().3;
         let mut schema = SchemaSpec::default();
@@ -5908,5 +6236,209 @@ source_name = "NPV"
         assert_eq!(records[0].target, "geode::ingest");
         assert!(records[0].message.contains("risk_snapshot/b1"));
         assert!(records[0].message.contains("bad header"));
+    }
+
+    /// A series dataset whose coverage row holds a timestamp past chrono's
+    /// range: `from_micros` panics reading it, in the catalog and in a fetch.
+    fn out_of_range_coverage_service(
+        fail_once: bool,
+    ) -> (
+        tempfile::TempDir,
+        crate::handle::DataHandle,
+        std::sync::mpsc::Receiver<DataEvent>,
+    ) {
+        const PAST_CHRONO: i64 = 9_000_000_000_000_000_000;
+        assert!(chrono::DateTime::<Utc>::from_timestamp_micros(PAST_CHRONO).is_none());
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
+        let ds = crate::store::ddl::tests_support::series_dataset();
+        store.apply_schema(&ds).unwrap();
+        Catalog::new(store.writer()).ensure_tables().unwrap();
+        store
+            .writer()
+            .execute_batch(&format!(
+                "insert into series_series_coverage values \
+                 ('kdb_hist', 'SPX', make_timestamp({PAST_CHRONO}::BIGINT), \
+                  make_timestamp({PAST_CHRONO}::BIGINT), now()::timestamp);"
+            ))
+            .unwrap();
+        drop(store);
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(ds);
+        let mut adapters = AdapterRegistry::default();
+        adapters.register(Arc::new(FakeFetchAdapter {
+            calls: Default::default(),
+            catalogue: None,
+            fail_once,
+        }));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let sink: EventSink = Arc::new(move |e| tx.send(e).is_ok());
+        let handle = DataService::spawn(
+            DataServiceConfig {
+                db_path: dir.path().join("geode.duckdb"),
+                schema,
+                views: Vec::new(),
+                dimensions: DerivedDimensions::default(),
+                query_workers: 1,
+                sources: vec![crate::source::SourceSpec {
+                    adapter: "fake_kdb".to_string(),
+                    ..crate::source::SourceSpec::directory("kdb_hist", "series", Vec::new())
+                }],
+                adapters,
+                documents: Default::default(),
+                egress: Vec::new(),
+                pricer: PricerConfig::default(),
+            },
+            sink,
+        );
+        (dir, handle, rx)
+    }
+
+    /// An unknown view answers at once: proof the loop is still serving.
+    fn still_serves(handle: &crate::handle::DataHandle, rx: &std::sync::mpsc::Receiver<DataEvent>) {
+        handle
+            .query(params(4242, "nonesuch", &Scope::default(), AsOf::Live, 1))
+            .unwrap();
+        until(rx, |e| match e {
+            DataEvent::Query(o) if o.key == QueryKey(4242) => Some(()),
+            DataEvent::ThreadStopped { thread, reason } => panic!("{thread} stopped: {reason}"),
+            _ => None,
+        });
+    }
+
+    #[test]
+    fn a_catalog_over_an_out_of_range_timestamp_answers_err_and_the_loop_serves_on() {
+        let (_d, handle, rx) = out_of_range_coverage_service(false);
+        handle
+            .catalog(CatalogParams {
+                key: QueryKey(3),
+                tag: 9,
+                as_of: AsOf::Live,
+            })
+            .unwrap();
+        let answer = until(&rx, |e| match e {
+            DataEvent::Catalog(o) if o.tag == 9 => Some(o),
+            DataEvent::ThreadStopped { thread, reason } => panic!("{thread} stopped: {reason}"),
+            _ => None,
+        });
+        let reason = answer
+            .snapshot
+            .expect_err("a panicking catalog read is an error");
+        assert!(reason.contains("catalog request panicked"), "{reason}");
+        assert!(
+            reason.contains("a stored timestamp is in range"),
+            "{reason}"
+        );
+        still_serves(&handle, &rx);
+        handle.shutdown();
+    }
+
+    #[test]
+    fn a_fetch_over_an_out_of_range_timestamp_fails_the_pair_and_the_loop_serves_on() {
+        let (_d, handle, rx) = out_of_range_coverage_service(false);
+        let now = Utc::now();
+        handle
+            .fetch(FetchParams {
+                key: QueryKey(3),
+                source: "kdb_hist".into(),
+                identity: "SPX".into(),
+                from: now - chrono::Duration::days(1),
+                to: now,
+            })
+            .unwrap();
+        let health = until(&rx, |e| match e {
+            DataEvent::Health {
+                source,
+                worst: Health::Failed { reason },
+                detail,
+            } if source == "kdb_hist" => Some((reason, detail)),
+            DataEvent::ThreadStopped { thread, reason } => panic!("{thread} stopped: {reason}"),
+            _ => None,
+        });
+        assert!(health.0.contains("fetch request panicked"), "{health:?}");
+        assert!(health.1.starts_with("SPX@kdb_hist"), "{health:?}");
+        let fetched = until(&rx, |e| match e {
+            DataEvent::SeriesFetched {
+                source,
+                identity,
+                result,
+            } if source == "kdb_hist" && identity == "SPX" => Some(result),
+            DataEvent::ThreadStopped { thread, reason } => panic!("{thread} stopped: {reason}"),
+            _ => None,
+        });
+        assert!(
+            fetched
+                .as_ref()
+                .is_err_and(|r| r.contains("a stored timestamp is in range")),
+            "{fetched:?}"
+        );
+        still_serves(&handle, &rx);
+        handle.shutdown();
+    }
+
+    /// The failure lands on the source's own lanes, the ones the fetch
+    /// worker and the runner report on: another pair failing and then
+    /// recovering must leave the source failed on the pair the loop could
+    /// not fetch, not report it clean.
+    #[test]
+    fn a_fetch_the_loop_could_not_run_keeps_its_source_failed_past_another_pairs_recovery() {
+        let (_d, handle, rx) = out_of_range_coverage_service(true);
+        let now = Utc::now();
+        let fetch = |identity: &str| {
+            handle
+                .fetch(FetchParams {
+                    key: QueryKey(3),
+                    source: "kdb_hist".into(),
+                    identity: identity.into(),
+                    from: now - chrono::Duration::days(1),
+                    to: now,
+                })
+                .unwrap()
+        };
+        let answered = |identity: &str| {
+            until(&rx, |e| match e {
+                DataEvent::SeriesFetched {
+                    source,
+                    identity: i,
+                    result,
+                } if source == "kdb_hist" && i == identity => Some(result),
+                DataEvent::ThreadStopped { thread, reason } => {
+                    panic!("{thread} stopped: {reason}")
+                }
+                _ => None,
+            })
+        };
+        fetch("SPX");
+        assert!(answered("SPX").is_err());
+        fetch("broken");
+        assert!(answered("broken").is_err());
+        // "broken" recovers on its second ask.
+        fetch("broken");
+        let mut last_health = None;
+        let recovered = until(&rx, |e| match e {
+            DataEvent::Health {
+                source,
+                worst,
+                detail,
+            } if source == "kdb_hist" => {
+                last_health = Some((worst, detail));
+                None
+            }
+            DataEvent::SeriesFetched {
+                source,
+                identity,
+                result,
+            } if source == "kdb_hist" && identity == "broken" => Some(result),
+            DataEvent::ThreadStopped { thread, reason } => panic!("{thread} stopped: {reason}"),
+            _ => None,
+        });
+        assert!(recovered.is_ok(), "{recovered:?}");
+        let (worst, detail) = last_health.expect("the recovery changed the source's health");
+        assert!(
+            matches!(&worst, Health::Failed { reason } if reason.contains("fetch request panicked")),
+            "{worst:?}"
+        );
+        assert!(detail.starts_with("SPX@kdb_hist"), "{detail}");
+        handle.shutdown();
     }
 }

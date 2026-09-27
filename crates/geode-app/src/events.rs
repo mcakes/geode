@@ -8,8 +8,8 @@
 //! An upload outcome keys on `(tile, tag)` rather than the tile alone, so two
 //! distinct uploads from the same tile remain separate. Coalescing by tile
 //! alone could hide an earlier upload's failure behind a later success.
-//! Local-write outcomes never coalesce at all (`Key::Local`): each is some
-//! writer's answer, delivered in the writer's order.
+//! Local-write outcomes never coalesce (`Key::Local`): each writer's answer
+//! retains its own place in admission order.
 //!
 //! A one-slot channel carries only wakeups. Full wakeup capacity does not refuse
 //! state, but pending entries have no fixed key-count cap. Sender acceptance
@@ -33,14 +33,10 @@ enum Key {
     /// still-undelivered outcome (e.g. a failure) when a later upload from
     /// the same tile answers before the first is read.
     Upload(QueryKey, u64),
-    /// A local-write outcome — saved, save failed, forgotten, forget failed
-    /// — keyed by its arrival sequence, so none coalesces: every one is
-    /// delivered, in the writer's order. Its writer may be waiting on that
-    /// exact outcome (a sheet load deferred behind a queued save resumes only
-    /// on the save's answer), and a later forget or save of the same document
-    /// replacing it would leave that writer waiting forever. The count is
-    /// bounded by the writes the app queued, each one a user's edit burst
-    /// or command, not by an external feed's rate.
+    /// An arrival sequence keeps every local-write answer distinct and in
+    /// admission order. A load may be waiting for one specific save to settle;
+    /// coalescing it with another write could leave that load waiting forever.
+    /// Pending local outcomes have no fixed cap and grow with undelivered writes.
     Local(u64),
     Published(String, String),
     Fetched(String, String, bool),
@@ -48,6 +44,9 @@ enum Key {
     Health(String),
     Polled(String),
     Diagnostics,
+    /// `ThreadStopped`, keyed by thread: each thread stops once, and two
+    /// stopping before a drain must both be delivered.
+    Stopped(String),
 }
 
 /// `seq` numbers local-write outcomes (see `Key::Local`); every other
@@ -73,6 +72,7 @@ fn key(event: &DataEvent, seq: u64) -> Key {
             result,
         } => Key::Fetched(source.clone(), identity.clone(), result.is_ok()),
         DataEvent::Loading { .. } | DataEvent::LoadEnded => Key::Load,
+        DataEvent::ThreadStopped { thread, .. } => Key::Stopped(thread.clone()),
         DataEvent::Health { source, .. } => Key::Health(source.clone()),
         DataEvent::Polled { source, .. } => Key::Polled(source.clone()),
         DataEvent::Diagnostics(_) => Key::Diagnostics,
@@ -126,6 +126,10 @@ pub(crate) fn channel() -> (Sender, Receiver) {
 }
 
 impl Sender {
+    /// Merge an event into pending state and signal the receiver. A stale tagged
+    /// outcome is accepted but discarded; full wakeup capacity is also accepted.
+    /// Only observed receiver closure returns an error. Acceptance does not
+    /// guarantee consumption if the receiver closes concurrently or afterward.
     pub(crate) fn try_send(&self, mut event: DataEvent) -> Result<(), Closed> {
         let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         if self.wake.is_closed() {
@@ -197,6 +201,8 @@ impl Sender {
 }
 
 impl Receiver {
+    /// Take the oldest pending key before awaiting a wakeup. Sender closure is
+    /// reported only after retained entries have drained.
     pub(crate) async fn recv(&self) -> Result<DataEvent, async_channel::RecvError> {
         loop {
             {
@@ -411,5 +417,25 @@ mod tests {
         assert!(matches!(rx.recv().await.unwrap(), DataEvent::Query(o) if o.tag == 4095));
         assert!(matches!(rx.recv().await.unwrap(), DataEvent::LoadEnded));
         assert!(rx.recv().await.is_err());
+    }
+
+    /// Each thread stops once, and two different ones stopping between two
+    /// drains must both reach the status bar.
+    #[gpui::test]
+    async fn two_threads_stopping_between_drains_are_both_delivered() {
+        let (tx, rx) = channel();
+        for thread in ["geode-ingest", "geode-discovery"] {
+            tx.try_send(DataEvent::ThreadStopped {
+                thread: thread.into(),
+                reason: "boom".into(),
+            })
+            .unwrap();
+        }
+        for expected in ["geode-ingest", "geode-discovery"] {
+            assert!(matches!(
+                rx.recv().await.unwrap(),
+                DataEvent::ThreadStopped { thread, .. } if thread == expected
+            ));
+        }
     }
 }

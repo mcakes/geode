@@ -1,15 +1,16 @@
-//! TableDelegate over a prepared Rc<GridModel> installed by the tile. Cursor, loading
+//! Table delegate over a prepared `Rc<GridModel>` installed by the tile. Cursor, loading
 //! state, and cell editor are read-only mirrors of tile state. Column zero
 //! is a pinned tree column with indentation, a fixed chevron slot, and a
 //! package's template tag; the cell cursor does not enter it.
 //!
-//! Package backgrounds belong to render_tr. The table replaces row
+//! Package backgrounds belong to `render_tr`. The table replaces row
 //! backgrounds for hover and selection; per-cell fills would obscure those states.
 
 use crate::grid::{GridModel, GridRowKind};
 use crate::paint::Paints;
 use crate::popup::{ChoicePaint, render_choice};
 use crate::tile::PricerTile;
+use geode_shell::colfit::{FitMetrics, FittedWidths};
 use geode_shell::fonts;
 use geode_shell::linenumbers::{GUTTER_GAP_PX, LineNumbers, gutter_number, gutter_px};
 use geode_shell::shell::control::{self, PointerStates as _};
@@ -39,6 +40,8 @@ const CHEVRON_SLOT: f32 = 14.0;
 pub(crate) const EMPTY_TEXT: &str = "No lines — press o to add one";
 pub(crate) const LOADING_TEXT: &str = "Loading sheet…";
 pub(crate) const TREE_COL: usize = 0;
+/// The tree column's stable key, in `column()` and in fitted widths.
+pub(crate) const TREE_KEY: &str = "__tree";
 
 /// The gutter number of every painted grid row. Relative mode measures
 /// from the cursor row; with no cursor row it numbers absolutely. Off
@@ -60,9 +63,8 @@ pub(crate) fn number_rows(
 /// the cursor row (relative mode only), and the mode.
 type NumbersStamp = (usize, Option<usize>, LineNumbers);
 
-/// A chevron click, re-implemented from the blotter (spec §8.2: "the
-/// blotter's idiom re-implemented, nothing lifted"); the tile toggles
-/// the package at this grid row.
+/// Requests a package expansion toggle at a grid row. Emitted by the table after
+/// selecting the clicked row; the tile owns the expansion state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChevronClicked(pub usize);
 
@@ -194,6 +196,12 @@ pub struct SheetDelegate {
     numbers: Vec<SharedString>,
     gutter: f32,
     numbers_stamp: Option<NumbersStamp>,
+    /// Widths `:autosize` fitted, keyed by the vocabulary's column name
+    /// ([`TREE_KEY`] for the tree), in pixels without the gutter.
+    /// `column()` prefers an entry over the view's width, so every
+    /// `install_model` refresh keeps it; a name the current view lacks is
+    /// ignored and a column with no entry keeps the view's width.
+    pub(crate) fitted: FittedWidths,
 }
 
 impl SheetDelegate {
@@ -210,7 +218,40 @@ impl SheetDelegate {
             numbers: Vec::new(),
             gutter: 0.0,
             numbers_stamp: None,
+            fitted: FittedWidths::new(),
         }
+    }
+
+    /// Fit the tree column and every plan column to its header and every
+    /// grid row's prepared text. The tree column adds each row's indent and
+    /// the chevron slot, both on the rem scale as `render_cell` paints them.
+    ///
+    /// `None` with nothing to measure: the sheet is still loading, or has
+    /// no rows.
+    pub(crate) fn fit_columns(&self, m: &FitMetrics) -> Option<FittedWidths> {
+        if self.loading || self.model.rows.is_empty() {
+            return None;
+        }
+        let design = |px: f32| px * m.rem_px / scale::DESIGN_REM;
+        let mut out = FittedWidths::new();
+        out.insert(
+            TREE_KEY.to_string(),
+            m.fit(
+                self.model
+                    .rows
+                    .iter()
+                    .map(|r| design(r.depth as f32 * INDENT + CHEVRON_SLOT) + m.text_px(&r.tag)),
+            ),
+        );
+        for (col, c) in self.model.columns.iter().enumerate() {
+            let cells = self
+                .model
+                .rows
+                .iter()
+                .filter_map(|r| r.cells.get(col).map(|cell| cell.text.as_ref()));
+            out.insert(c.name.to_string(), m.fit_text(&c.label, cells));
+        }
+        Some(out)
     }
 
     /// Re-derive the gutter text and width when the model's shape, the
@@ -316,11 +357,13 @@ impl TableDelegate for SheetDelegate {
     fn column(&self, col_ix: usize, _cx: &App) -> Column {
         let Some(c) = Self::plan_col(col_ix).and_then(|i| self.model.columns.get(i)) else {
             return Column {
-                key: SharedString::from("__tree"),
+                key: SharedString::from(TREE_KEY),
                 name: SharedString::from(""),
                 align: TextAlign::Left,
                 sort: None,
-                width: px(TREE_WIDTH + self.gutter_px()),
+                width: px(
+                    self.fitted.get(TREE_KEY).copied().unwrap_or(TREE_WIDTH) + self.gutter_px()
+                ),
                 fixed: Some(ColumnFixed::Left),
                 movable: false,
                 resizable: false,
@@ -336,7 +379,7 @@ impl TableDelegate for SheetDelegate {
                 TextAlign::Left
             },
             sort: None,
-            width: px(c.width),
+            width: px(self.fitted.get(c.name).copied().unwrap_or(c.width)),
             movable: false,
             resizable: false,
             ..Column::default()
@@ -446,11 +489,10 @@ impl TableDelegate for SheetDelegate {
 }
 
 impl SheetDelegate {
-    /// One prepared cell. Nothing is formatted or allocated here beyond
-    /// the `debug_selector` closure (dropped unevaluated outside tests):
-    /// the text is a `SharedString` refcount out of the model, the colours
-    /// `Copy` reads of the `Paints` memo, which the tile re-derives on a
-    /// theme change rather than per cell.
+    /// Build a cell's elements from prepared text and colours. Cell values are
+    /// `SharedString` clones; palette values are copied from the tile's theme cache.
+    /// Chevron pointer colours have their own input-keyed cache. An editing cell
+    /// builds its field and optional typeahead from the tile's prepared editor state.
     fn render_cell(
         &mut self,
         row_ix: usize,
@@ -536,11 +578,9 @@ impl SheetDelegate {
         let el = base
             .when(right, |el| el.justify_end())
             .when(at_cursor, |el| el.border_1().border_color(active_border));
-        // The open editor paints its field in place of the text (a
-        // refcount clone at most). The typeahead hangs under THIS cell: a
-        // zero-size absolute child at the cell's bottom-left is the anchor
-        // `render_choice`'s `TopLeft` positions against (the market-data
-        // delegate's arrangement).
+        // The editor replaces this cell's text. Its typeahead anchors its top-left
+        // corner to a zero-size absolute child at the cell's bottom-left, so the
+        // popup follows the edited cell when the table scrolls.
         let editing = self
             .editor
             .as_ref()

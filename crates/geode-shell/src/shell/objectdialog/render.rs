@@ -2288,18 +2288,9 @@ fn commit_change(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     }
 }
 
-/// Put the edit list's viewport back over the draft's cursor.
-///
-/// Every verb that moves the row the cursor is on has to call this, not
-/// just the ones that look like motions: `space`/`shift+space` promote a
-/// row to the end of the object's own list and `x` demotes one to the
-/// end of the available catalogue, both of which are routinely a
-/// screenful away on a list with more rows than the panel can show — and
-/// a cursor left off screen makes the next `j` look like a jump.
-/// `shift+j`'s arm was the
-/// only one that did call it, inline; all four go through here now, so
-/// the next verb that moves a row has one obvious thing to call rather
-/// than a snippet to copy from whichever arm happens to have it.
+/// Keep the draft's cursor visible after motion or row reordering. Promotion
+/// and demotion can move a row beyond the viewport just as navigation can;
+/// each route must scroll to the resulting selection.
 fn scroll_to_cursor(shell: &mut ShellView) {
     let selected = shell
         .object_dialog

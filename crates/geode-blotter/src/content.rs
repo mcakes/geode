@@ -1,7 +1,6 @@
-//! What the shell hosts (Phase 3 spec §3.1, §3.2): the `TileContent`
-//! wrapper over a `BlotterTile` entity, and the factory the app puts in
-//! the roster. The factory carries the data handle (§2.1); the shell
-//! never sees it.
+//! Shell integration through a [`TileContent`] wrapper and [`BlotterFactory`].
+//! The app supplies the factory's data handle; the shell creates and hosts
+//! tiles through the module contract without depending on the data service.
 
 use crate::tile::{ACTIONS, BlotterTile};
 use geode_core::colour::NamedColours;
@@ -25,33 +24,24 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Retired action ids and their successors: a user keymap that still names
-/// an old id binds the new one, with a warning (`ActionRegistry::renamed`).
-/// `blotter::visual` selected whole rows, which is exactly what
-/// `blotter::visual_rows` does; `blotter::visual_block` is new.
+/// Compatibility aliases for user keymaps. `blotter::visual` resolves to
+/// `blotter::visual_rows` with a rename warning, preserving whole-row
+/// selection. `blotter::visual_block` selects a rectangular cell range.
 pub const RENAMED_ACTIONS: &[(&str, &str)] = &[("blotter::visual", "blotter::visual_rows")];
 
-/// This module's default bindings (market-data documents §8.4), handed to
-/// the app through [`ModuleFactory::default_keymap`] and spliced above the
-/// shell's own `BUILTIN_KEYMAP` — where, until Part 3, these very two
-/// `[[bindings]]` sections lived, beside a mirrored copy of
-/// `crate::tile::ACTIONS` the shell had to carry because it cannot depend
-/// on this crate. Both copies are gone: the ids a binding names and the
-/// ids `register_actions` registers are now the same list in the same
-/// crate, so they cannot drift, and a desk or user keymap still overrides
-/// any of this exactly as it always did (a fragment sits below every layer
-/// a trader edits).
+/// Default bindings returned through [`ModuleFactory::default_keymap`].
+/// The app combines this fragment with the shell's built-ins; desk and user
+/// layers can override it. This crate owns both the fragment and the actions
+/// registered by its factory.
 ///
-/// Two contexts, matching what `BlotterTile::key_context` actually
-/// pushes: `normal` is the full grammar, `visual` the subset that makes
-/// sense while a selection is live — motions (both axes), `y`, `v`/`V` to
-/// switch or leave, and `escape`.
-/// `^`/`$` sit beside `home`/`end` as the column-extreme pair (user ruling
-/// 2026-09-12: a general navigation grammar, the blotter its first
-/// surface); both are shifted punctuation on a US layout, so they bind as
-/// the bare character with no `shift` modifier. `g m` binds the shell's
-/// `tile::open_with`: a fragment may name any action, only its context
-/// must be the module's own.
+/// The contexts match `BlotterTile::key_context`: `normal` has the full grammar;
+/// `visual` has motions on both axes, yank, selection toggles, and Escape.
+/// `v` selects a block and `V` selects rows. Pressing the active kind again
+/// clears the selection; pressing the other kind switches it, keeping the anchor.
+/// `^`/`$` and `home`/`end` move to the first/last column. Shifted punctuation
+/// binds as the bare character without a separate `shift` modifier.
+/// `g m` invokes the shell's `tile::open_with` using the cursor row's context.
+/// Module fragments may bind shell actions within the module's own context.
 pub const DEFAULT_KEYMAP: &str = r#"
 [[bindings]]
 context = "blotter && mode == normal"
@@ -117,6 +107,15 @@ pub struct BlotterContent {
     tile: Entity<BlotterTile>,
 }
 
+impl BlotterContent {
+    /// The content wrapper over an existing tile, so a test drives the
+    /// shell's own door (`TileContent`) rather than the tile's methods.
+    #[cfg(test)]
+    pub(crate) fn for_tile(tile: Entity<BlotterTile>) -> BlotterContent {
+        BlotterContent { tile }
+    }
+}
+
 impl TileContent for BlotterContent {
     fn key_context(&self, cx: &App) -> KeyContext {
         self.tile.read(cx).key_context(cx)
@@ -130,8 +129,18 @@ impl TileContent for BlotterContent {
     ) -> bool {
         self.tile.update(cx, |t, cx| t.dispatch(action, count, cx))
     }
-    fn command(&self, line: &str, _window: &mut Window, cx: &mut App) -> Result<(), String> {
-        self.tile.update(cx, |t, cx| t.command(line, cx))
+    fn command(&self, line: &str, window: &mut Window, cx: &mut App) -> Result<(), String> {
+        self.tile.update(cx, |t, cx| t.command(line, window, cx))
+    }
+    /// The same route as `:autosize [reset]`.
+    fn autosize_columns(
+        &self,
+        reset: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<(), &'static str> {
+        self.tile
+            .update(cx, |t, cx| t.autosize_columns(reset, window, cx))
     }
     fn completions(&self, line: &str, cursor: usize, cx: &App) -> Vec<String> {
         self.tile.read(cx).completions(line, cursor, cx)
@@ -161,7 +170,7 @@ impl TileContent for BlotterContent {
         self.tile.read(cx).title()
     }
     fn serialize(&self, cx: &App) -> toml::Table {
-        self.tile.read(cx).serialize()
+        self.tile.read(cx).serialize(cx)
     }
     fn launch_context(&self, cx: &App) -> geode_core::launch::LaunchContext {
         self.tile.read(cx).launch_context(cx)
@@ -171,17 +180,12 @@ impl TileContent for BlotterContent {
 pub struct BlotterFactory {
     data: DataHandle,
     views: Rc<RefCell<Vec<ViewSpec>>>,
-    /// `colours.toml`'s definitions (Part 2c §6.2), shared with every
-    /// tile exactly as `views` is and refreshed by the same
-    /// `ConfigReloaded` handler in the app's bridge. An `Arc` inside the
-    /// cell rather than the value itself: a tile hands it straight to
-    /// its delegate, where a pointer compare is what tells "same
-    /// definitions" from "reloaded" without a deep compare per snapshot.
+    /// Named colors shared with every tile and replaced by the app on reload.
+    /// Delegates use the inner `Arc`'s identity to invalidate resolved colors
+    /// without comparing the definitions on every snapshot.
     colours: Rc<RefCell<Arc<NamedColours>>>,
-    /// The schema and derived dimensions `:filter` validates against
-    /// (Phase 4a §3.7; `:scope` validated against the same schema until
-    /// command-line locality closed that route 2026-09-20) — set
-    /// alongside `views` and refreshed the same way on `ConfigReloaded`.
+    /// Shared schema and derived dimensions used to validate tile-local
+    /// `:filter` commands. The app replaces them on configuration reload.
     schema: Rc<RefCell<SchemaSpec>>,
     dims: Rc<RefCell<DerivedDimensions>>,
     find_style: Rc<Cell<FindStyle>>,
@@ -209,37 +213,31 @@ impl BlotterFactory {
         }
     }
 
-    /// A safe reload (foundation §8): every tile sees the new set on its
-    /// next requery, which the frame's config counter triggers.
+    /// Replace the shared views. Existing tiles read them on their next
+    /// requery; the app's reload handler advances the frame's config counter
+    /// to trigger that work.
     pub fn set_views(&self, views: Vec<ViewSpec>) {
         *self.views.borrow_mut() = views;
     }
 
-    /// A reloaded `colours` doc (Part 2c §6.2), same sharing as
-    /// `set_views` — every tile picks the new definitions up on its next
-    /// applied snapshot, which the reload's own config bump already
-    /// triggers. A fresh `Arc` every time, deliberately: that is the
-    /// pointer change a delegate reads as "these are new definitions,
-    /// drop what you resolved from the old ones".
+    /// Replace named colors with a fresh `Arc` so delegates invalidate their
+    /// resolved colors. Existing tiles pick up the definitions on their next
+    /// applied snapshot, triggered by the reload handler's config bump.
     pub fn set_colours(&self, colours: NamedColours) {
         *self.colours.borrow_mut() = Arc::new(colours);
     }
 
-    /// What the factory is currently handing new tiles — the app's
-    /// bridge tests read it to prove a reload actually landed.
+    /// Current named color definitions shared with tiles.
     pub fn colours(&self) -> Arc<NamedColours> {
         Arc::clone(&self.colours.borrow())
     }
 
-    /// A reloaded `datasets` doc (Phase 4a §3.7): every open tile's next
-    /// `:filter` validates against the new schema, same sharing as
-    /// `set_views` (`:scope` validated against it too until command-line
-    /// locality closed that route 2026-09-20).
+    /// Replace the shared schema used by every tile's next `:filter` command.
     pub fn set_schema(&self, schema: SchemaSpec) {
         *self.schema.borrow_mut() = schema;
     }
 
-    /// A reloaded `dimensions` doc, same sharing as `set_schema`.
+    /// Replace the shared derived dimensions used by filter validation.
     pub fn set_dims(&self, dims: DerivedDimensions) {
         *self.dims.borrow_mut() = dims;
     }
@@ -248,9 +246,9 @@ impl BlotterFactory {
         self.find_style.set(style);
     }
 
-    /// `[app] blotter.stale_after` (spec §6.5), read by the app in Task
-    /// 8 and applied here; every existing tile picks it up immediately
-    /// since they all share this `Rc<Cell<_>>`, same as `find_style`.
+    /// Set `[app] blotter.stale_after` for existing and future tiles.
+    /// Tiles read the shared threshold when evaluating freshness; this
+    /// setter does not itself request a repaint.
     pub fn set_stale_after(&self, d: Duration) {
         self.stale_after.set(d);
     }
@@ -327,15 +325,9 @@ mod tests {
     use geode_shell::keymap::fragments::{check_fragment, fragment_doc};
     use geode_shell::keymap::{KeyContext, MatchResult, Matcher, build_keymap, parse_keystroke};
 
-    /// What the retired `the_shells_reserved_blotter_actions_match_ours`
-    /// and the shell's own `every_blotter_binding_target_is_reserved`
-    /// together used to guarantee, now provable inside this crate and
-    /// without a mirrored copy of anything: every id
-    /// [`DEFAULT_KEYMAP`] binds is an id `register_actions` registers
-    /// (`build_keymap` warns and drops otherwise, so a clean diagnostic
-    /// list IS that check), and every registered action is reachable from
-    /// some key (the direction a mirror of the id list could never
-    /// cover: it compared two lists, not a list against the bindings).
+    /// Every default binding targets a registered action, and every action
+    /// is reachable from a default key. Unknown targets produce diagnostics
+    /// and are dropped by `build_keymap`.
     #[test]
     fn the_default_keymap_binds_exactly_the_actions_this_module_registers() {
         let doc = fragment_doc("blotter", DEFAULT_KEYMAP).expect("the fragment parses");
@@ -380,11 +372,9 @@ mod tests {
         }
     }
 
-    /// Moved here from the shell's own `defaults.rs` with the bindings
-    /// (user ruling 2026-09-12: `^`/`$` are the column-extreme pair
-    /// beside `home`/`end`). Both are shifted punctuation on a US layout,
-    /// so they bind as the bare character with `shift` cleared — a
-    /// regression here would be silent, since the keystroke still parses.
+    /// `^`/`$` move to the first/last column. Both are shifted punctuation
+    /// on a US layout, so they bind as bare characters with `shift` cleared.
+    /// Parsing alone cannot detect a binding with the wrong modifier.
     #[test]
     fn caret_and_dollar_resolve_to_the_column_extremes() {
         let doc = fragment_doc("blotter", DEFAULT_KEYMAP).unwrap();
@@ -413,11 +403,9 @@ mod tests {
         }
     }
 
-    /// A user keymap written before the selection split still binds:
-    /// the old `blotter::visual` WAS the row selection (grid selection
-    /// spec ruling 1), so the factory registers it as a rename of
-    /// `blotter::visual_rows` and the binding resolves there with a
-    /// warning instead of being dropped.
+    /// The compatibility alias `blotter::visual` binds whole-row selection
+    /// and reports the current action id in a warning, rather than dropping
+    /// the user's binding.
     #[test]
     fn a_user_binding_on_the_retired_visual_id_binds_visual_rows() {
         let (handle, _rx) = geode_data::DataHandle::for_tests();
@@ -498,10 +486,8 @@ mod tests {
         }
     }
 
-    /// The factory is what the app asks, so the fragment has to reach the
-    /// roster through it — a `DEFAULT_KEYMAP` nothing returns is a
-    /// blotter with no keys at all, and no diagnostic anywhere would say
-    /// so.
+    /// The app obtains the keymap through the factory. A valid fragment
+    /// must also be exposed through that interface to install any bindings.
     #[test]
     fn the_factory_ships_the_fragment_and_declares_the_blotter_context() {
         let (data, _rx) = DataHandle::for_tests();
@@ -553,11 +539,8 @@ mod tests {
         (tile, vcx)
     }
 
-    /// review round 1, Finding 2: `render` used to hardcode 15 minutes;
-    /// this proves the factory's own configured `stale_after` is what a
-    /// tile it creates actually uses, at a short (1s) threshold and at
-    /// the spec default (15m) — the very same freshness reading is
-    /// stale under one and not the other.
+    /// Created tiles use their factory's configured freshness threshold.
+    /// The same reading is stale at one second and fresh at fifteen minutes.
     #[gpui::test]
     fn a_tiles_stale_threshold_is_the_factorys_configured_value(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);

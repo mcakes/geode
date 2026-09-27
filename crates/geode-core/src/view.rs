@@ -15,17 +15,17 @@ pub struct JoinSpec {
     pub dataset: String,
     /// Join key columns declared by the view.
     pub on: Vec<String>,
-    /// Whether the view needs this join to mean what it says. A required join
-    /// that cannot be honoured refuses the view; an optional one is dropped
-    /// with an informational diagnostic naming it. Defaults to true, the same
-    /// way `ColumnSpec::required` does, so silence means "I meant this".
+    /// Whether a failed join validation refuses the view. Configuration defaults
+    /// to true. Optional failures warn and the compiler skips unusable joins;
+    /// a join outside the grouping that supplies no column only warns either way.
     pub required: bool,
 }
 
-/// Whether a column needs to be honoured to mean what it says. A required
-/// column that cannot be honoured refuses the view; an optional one is
-/// dropped with an informational diagnostic naming it. Defaults to true, the
-/// same way `ColumnSpec::required` does, so silence means "I meant this".
+/// A selected dimension, measure, or SQL expression. Configuration defaults
+/// `required` to true. Setting it false downgrades measure-role and dimension-
+/// reachability failures to warnings; unknown columns and invalid derived-
+/// dimension sources still error. Derived SQL is checked by DuckDB regardless
+/// of `required`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ViewColumn {
     Dimension {
@@ -53,8 +53,7 @@ impl ViewColumn {
         }
     }
 
-    /// A required measure. `required` is a field rather than a defaulted
-    /// builder step because a declaration that omits it means required.
+    /// A measure column with validation failures treated as errors.
     pub fn measure(name: impl Into<String>) -> ViewColumn {
         ViewColumn::Measure {
             name: name.into(),
@@ -470,21 +469,17 @@ impl ViewSpec {
         self.presentation.get(column).cloned().unwrap_or_default()
     }
 
-    /// Check that every reference the compiler will resolve can be resolved:
-    /// the dataset and each join's dataset exist, each join's keys are carried
-    /// by some grain of the dataset it joins and named by the grouping that
-    /// puts them on the spine, each selected column exists, a column declared
-    /// a measure is a measure of the primary dataset, a column
-    /// declared a dimension is reachable through the grouping or a join, and
-    /// each grouping column exists. Derived dimensions resolve through their
-    /// source column in the primary dataset. Derived SQL and sort keys are
-    /// still left to the compiler.
+    /// Validate dataset, join, column-role, reachability, and grouping references.
+    /// Join keys need a grain that carries them and a grouping that materializes
+    /// them. Measures must come from the primary dataset; dimensions need a
+    /// grouping or join path. Derived dimensions resolve through a source column
+    /// in the primary dataset. Required failures return errors; supported optional
+    /// failures return warnings. Derived SQL and sort keys are checked when the
+    /// generated SQL is bound and executed.
     pub fn validate(&self, schema: &SchemaSpec, dims: &DerivedDimensions) -> Vec<Diagnostic> {
         let mut diags = Vec::new();
-        // Addressed to the view, so a dialog can open the object the refusal
-        // is about. The message names the column or join within it; carrying a
-        // deeper path would mean threading an index through every check here,
-        // and the object is enough to reach the place to edit.
+        // The path opens the view in its dialog; the message identifies the
+        // failing column or join within that object.
         let at = || Some(format!("views.{}", self.name));
         let bad = |m: String| Diagnostic {
             severity: Severity::Error,
@@ -500,11 +495,8 @@ impl ViewSpec {
             message: format!("view '{}': {m}", self.name),
             path: at(),
         };
-        // A required declaration that cannot be honoured refuses the view; an
-        // optional one is dropped and said so. The author chose which, so
-        // nothing here guesses per kind, and neither case is silent: an
-        // optional drop the trader never hears about is the blank column this
-        // check exists to remove.
+        // Optional failures remain visible as warnings so omitted columns or
+        // joins cannot look like successfully supplied values.
         let report = |required: bool, message: String| {
             if required {
                 bad(message)
@@ -533,10 +525,8 @@ impl ViewSpec {
                 ));
                 continue;
             };
-            // The compiler joins at the first grain of the joined dataset
-            // that carries every key. With no such grain there is no table to
-            // read, so it drops the join silently and every column the join
-            // was to supply is absent from the row rather than NULL.
+            // The compiler needs a grain that carries every key. With no such
+            // grain it refuses a required join or skips an optional one.
             let keys =
                 j.on.iter()
                     .map(|k| dims.base_column(k))
@@ -635,11 +625,9 @@ impl ViewSpec {
                         diags.push(bad(format!("unknown column '{name}'")));
                         continue;
                     }
-                    // A measure is read from the primary dataset alone, and
-                    // aggregated by its declared role. A column with any other
-                    // role reaches `sum` by default, and an attribute repeats
-                    // across the rows of its grain, so the total looks right
-                    // and is not.
+                    // Measures must have a measure role in the primary dataset.
+                    // An attribute can repeat across rows of its grain, so
+                    // aggregating it as a measure could produce a wrong total.
                     if let ViewColumn::Measure { required, .. } = other
                         && !ds
                             .column(name)
@@ -1655,9 +1643,8 @@ dataset = "risk_snapshot"
         );
     }
 
-    /// A join key no grain of the joined dataset carries cannot be honoured:
-    /// the compiler finds no grain to read and drops the whole join, so every
-    /// column it was to supply paints blank.
+    /// A required join with no grain carrying its keys must fail validation;
+    /// otherwise its selected columns cannot be supplied.
     #[test]
     fn a_join_whose_keys_no_grain_carries_refuses_the_view() {
         let text = r#"

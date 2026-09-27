@@ -178,10 +178,9 @@ mod tests {
         Box::leak(s.into_boxed_str())
     }
 
-    /// Spec §8.2: every paint the pricer adds, swept over every bundled
-    /// theme with NO exception list — each text colour against the ground
-    /// it actually paints on (the table over the window background for a
-    /// line row, `secondary` over that for a package row).
+    /// Check each prepared text colour against its painted backgrounds for every
+    /// bundled theme. Include row hover and selection, menu highlights, and date
+    /// segment fills composited over the possible row backgrounds.
     #[gpui::test]
     fn every_pricer_paint_is_readable_on_every_bundled_theme(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);

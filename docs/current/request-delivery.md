@@ -7,15 +7,26 @@ bridge. [The data path](data-path.md) covers ingestion and storage;
 ## Admission and completion
 
 Ordinary `DataHandle` methods offer work to a 64-entry request channel under
-a mutex. They do not wait for channel space. `false` means no request was
-queued, increments the refusal counter, and creates no obligation to reply.
-`true` means admission, not successful execution or storage publication.
-The channel bound does not bound work already dispatched to other workers.
+a mutex. They do not wait for channel space, and return `Result<(), Refusal>`.
+`Err(Busy)` means the queue was full: nothing was queued, the refusal counter
+(`dropped_requests`) increments, and a later submission can succeed.
+`Err(Stopped)` means the request loop has ended — it panicked, failed to open,
+or was shut down: nothing was queued, the counter does not change, and no
+retry can succeed. Neither creates an obligation to reply. `Ok` means
+admission, not successful execution or storage publication. `cancel` still
+answers `bool` (`true` means queued); its refusals follow the same counting
+rule. The channel bound does not bound work already dispatched to other
+workers.
 
 The service opens its database and schema on its own thread. Opening failure
-emits a diagnostic and closes the receiver; requests admitted during startup
-do not receive individual failure outcomes. After open, query compilation and
-validation failures return the original request key and tag. Supersession and
+emits an error diagnostic and `ThreadStopped` for `geode-data`, marks the
+handle stopped, and closes the receiver; requests admitted during startup do
+not receive individual failure outcomes, and later submissions are refused
+`Stopped`. After open, query compilation and validation failures return the
+original request key and tag. An admitted request whose arm panics is answered
+once with `<kind> request panicked: <payload>` through its completion route
+below, and the loop serves on (see
+[containment and liveness](data-path.md#the-request-loop)). Supersession and
 cancellation can suppress query outcomes, and UI delivery may coalesce them.
 
 | Request | Completion route |
@@ -27,9 +38,16 @@ cancellation can suppress query outcomes, and UI delivery may coalesce them.
 | Pricing | `Price`, addressed by key/tag; downstream queue refusal produces per-line errors. |
 | Local publish | Storage produces `Published` then `LocalPublished`. Any refusal or failure — the service refusing a dataset that is not local, the writer's validation or store error, a contained panic — produces an error diagnostic and `LocalPublishFailed`. Every admitted local publish answers exactly once. |
 | Local forget | `Forgotten` (including a key that held nothing) or `ForgetFailed`. The service refuses a dataset that is not local or a key of the wrong arity with an error diagnostic and `ForgetFailed`; nothing is queued. |
-| Document upload | `Upload`, addressed by tile key and upload tag; target validation, serialization, target-queue refusal, and transport results use the same outcome. |
+| Document upload | `Upload`, addressed by tile key and upload tag; target validation and target-queue refusal (from the service thread), and encoding and transport results (from the target's worker) use the same outcome. |
 | History fetch | `SeriesFetched` identifies the source/identity pair, including zero-row completion. |
 | Identity refresh | Updates a cache read by a later catalog request; worker refusal is logged, with no dedicated completion event. |
+
+Tiles word a refusal by its kind, for example `query refused: the data
+service is busy` or `upload refused: the data service has stopped`. The
+blotter, market-data, and timeseries tiles do not retry on their own: the next
+frame change or command submits again and repeats the notice. The pricer
+retries a busy pricing refusal with backoff and stops asking altogether after
+a stopped one (see [the line pricer](features.md#pricing-and-the-line-pricer)).
 
 Cancellation is itself an ordinary queued request and can be refused. It
 targets query-pool and pricing work by key, does not cancel uploads, fetch,
@@ -42,19 +60,22 @@ Receivers still need stale-result checks. See
 Upload admission has two stages. `DataHandle::upload` first offers the request
 to the ordinary service queue. A refusal has no outcome. Once serviced,
 `EgressWorkers` resolves the target and document kind, expands the address,
-and serializes the complete document on the service thread. It then offers
-the bytes to the target's eight-entry queue. Each target has one worker that
-runs transport calls serially; serialization can still delay other service
-requests.
+and offers the rows and kind, not yet encoded, to the target's eight-entry
+queue. Each target has one worker that encodes and sends its jobs serially,
+so encoding no longer delays other service requests.
 
-Validation, serialization, and target-queue failures emit an error with the
-original tile key and tag. Transport results and contained transport panics
-use the same outcome path; a panic produces a target-named error and leaves the
-worker available for subsequent jobs.
+Validation and target-queue failures emit an error with the original tile key
+and tag from the service thread. Encoding errors, transport results, and
+contained encoding or transport panics use the same outcome path from the
+worker; a panic produces a target-named error naming the step and leaves the
+worker available for subsequent jobs. Because encoding follows queue
+admission, a document that cannot be encoded occupies a queue slot until the
+worker reaches it, and one sent to a full or unavailable target answers with
+that refusal rather than its write error.
 
-This is not a durable delivery receipt: startup failure, a blocked serializer
-or transport, an uncontained serialization panic, or event-sink refusal can
-prevent delivery. Egress has no automatic retry. An `Ok` acknowledges transport
+This is not a durable delivery receipt: startup failure, a blocked encoder or
+transport, a worker that dies outside its boundaries (its queued jobs are
+never answered), or event-sink refusal can prevent delivery. Egress has no automatic retry. An `Ok` acknowledges transport
 success, not a new local generation; subscription ingestion and the panel's
 echo check are separate. See [document egress](data-path.md#egress-and-uploads)
 for configuration and worker details.
@@ -62,11 +83,14 @@ for configuration and worker details.
 ## View replacement and shutdown
 
 `replace_views` stores the latest views and dimensions outside the request
-queue, then offers a wakeup. A full queue still returns `true`: the service
+queue, then offers a wakeup. A full queue still returns `Ok`: the service
 checks the pending replacement before dispatching every dequeued request.
-Multiple pending replacements collapse to the latest one. `false` means
-admission is closed or the receiver is disconnected, not temporary queue
-pressure. Acceptance does not acknowledge validation or application.
+Multiple pending replacements collapse to the latest one. Its only refusal is
+`Err(Stopped)` — the loop has ended, admission is closed, or the receiver is
+disconnected — never temporary queue pressure; the bridge reports it as an
+error diagnostic, because the service is then left on the old views while the
+tile factory builds against the new ones. Acceptance does not acknowledge
+validation or application.
 
 `shutdown` closes admission for every handle clone, offers a best-effort
 shutdown sentinel, drops the sender, and joins. Already queued requests run
@@ -102,6 +126,7 @@ delivery, not applied to a window.
 | Loading / load ended | One shared progress entry; later state replaces earlier state. |
 | Health / poll result | Latest entry per event kind and source. |
 | Diagnostics | Merge distinct diagnostics and retain the latest 256 in history order. |
+| Thread stopped | One entry per thread name. Each thread stops once, so two different threads stopping before a drain are both delivered. |
 
 Replacing a pending entry keeps its original position among pending keys.
 This preserves state and invalidations, not every intermediate transition or
@@ -122,7 +147,16 @@ absent occupants are ignored. Fetch completion broadcasts to visible
 occupants, whose modules decide whether they watch that source/identity.
 Distinct results go to the picker, which checks its current tag, column, and
 open state. If submitting the picker's request fails, the bridge immediately
-delivers a matching synthetic error rather than leaving it loading.
+delivers a matching synthetic error rather than leaving it loading: `the data
+service is busy — try again` or `the data service has stopped`.
+
+`ThreadStopped` records the thread in `Diagnostics` for the status bar and the
+diagnostics tile. On every drained event the bridge also reads the handle's
+`Busy` refusal total into `Diagnostics`, so the status summary's `N refused`
+changes only when some event arrives: a refusal made while no events flow
+appears at the next event. The catalog refresh retries a `Busy` refusal after
+a delay and drops its demand on `Stopped`, since no retry can succeed and the
+stopped segment already says why.
 
 Every publication updates diagnostics. Non-local publications also advance
 the frame's global data revision, matching dataset/document watches, and

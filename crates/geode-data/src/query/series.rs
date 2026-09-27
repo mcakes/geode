@@ -1,14 +1,14 @@
-//! The series query compiler (timeseries spec §6.2): one plan per
-//! request — a points statement over every slot, a percentile and a
-//! bins statement per slot, a coverage statement per source slot — all
-//! pure string-in string-out with every value bound. The rows it reads
-//! are Part 1's: live is `arg_max(value, received_at)` per `ts`, as-of
-//! is `received_at <= t` (and `ts <= t`), there is no generation.
+//! Compile and execute series queries. Each request produces a points
+//! statement across all slots, optional percentile and bin statements per
+//! slot, and a coverage statement per source slot.
 //!
-//! Every stats statement carries the same CTE prefix as the points
-//! statement and so re-runs the bucketing; `docs/perf.md` records what
-//! that costs at a million rows and where a single grouping-sets
-//! statement would take it if it ever matters.
+//! Source points select `arg_max(value, received_at)` per timestamp before
+//! bucketing. Historical reads also require `received_at <= t` and `ts <= t`;
+//! series do not use generation IDs. Source identities and time bounds use
+//! bound parameters; validated numeric literals and bucket intervals form SQL.
+//!
+//! Statistics repeat the points statement's CTEs and bucketing. All statements
+//! execute in one read transaction. See `docs/current/performance.md` for budgets and benchmark guidance.
 
 use crate::store::StoreError;
 use crate::store::series::{coverage_table, from_micros, micros, series_table};
@@ -68,7 +68,7 @@ fn aggregate(rule: BucketRule) -> &'static str {
 /// one pair of parentheses, so the tree's shape — not SQL's precedence —
 /// decides what binds to what; a division carries its own zero guard
 /// inside that pair, because a NULL is the only honest answer for a
-/// bucket whose denominator vanished (spec §7).
+/// bucket whose denominator is zero.
 fn lower(e: &Expr) -> Result<String, StoreError> {
     Ok(match e {
         Ast::Ref(n) => format!("s{n}.v"),
@@ -248,9 +248,8 @@ fn ctes(params: &SeriesParams, order: &[u8]) -> Result<(String, Vec<Value>), Sto
     Ok((format!("with {}", parts.join(",\n")), bound))
 }
 
-/// Compile one request into the statements that answer it. Pure: no
-/// connection, no clock, nothing mutated — Task 4's `run_series` is what
-/// puts these on a connection.
+/// Compile a request without database access, clock reads or mutation.
+/// [`run_series`] executes the returned statements on a worker connection.
 pub fn compile_series(
     schema: &SchemaSpec,
     params: &SeriesParams,
@@ -469,9 +468,8 @@ fn run_series_with(
             }
         }
 
-        // An expression slot has no coverage statement and so keeps the
-        // all-`None` provenance; `health` is the service's to fill
-        // (Task 6), never this function's.
+        // Expression slots have no coverage statement and retain empty provenance.
+        // The service attaches source-slot health after query execution.
         let mut provenance = SlotProvenance {
             loaded: None,
             latest_received_at: None,

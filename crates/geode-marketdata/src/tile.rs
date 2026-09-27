@@ -45,6 +45,9 @@ use geode_core::schema::ColumnType;
 use geode_core::snapshot::Snapshot;
 use geode_data::DataHandle;
 use geode_shell::actions::ActionId;
+use geode_shell::colfit::{
+    FitMetrics, FittedWidths, NOTHING_TO_FIT, SESSION_KEY, widths_from_record, widths_to_toml,
+};
 use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::{Frame, FrameVersions, PublicationWatch};
 use geode_shell::keymap::KeyContext;
@@ -240,16 +243,10 @@ enum Echo {
     /// `sent HH:MM, confirmed HH:MM` — the draft has cleared; dropped by
     /// [`MarketDataTile::rebuild_chrome`] at the next edit.
     Confirmed(SharedString),
-    /// The generation that was compared and found different (`newer`) and
-    /// the line naming how many rows differ. The panel keeps painting the
-    /// base while this stands, and a redelivery of `newer` is not compared
-    /// again. Keyed by the whole generation, not its source time alone, so
-    /// a corrected republish cannot reuse the previous republish's
-    /// comparison — exact equality rather than
-    /// [`DocumentBase::differs_from`], because re-running a comparison costs
-    /// one build while reusing a stale verdict reports an echo nothing
-    /// checked. Dropped the moment the draft leaves `Sent` (`:rebase`,
-    /// `:revert`, a further edit).
+    /// The compared delivery's full base and the difference notice. Keep the
+    /// Sent draft over its base and reuse this verdict only for an exactly equal
+    /// `DocumentBase`. A changed generation, including known versus unknown,
+    /// requires another comparison. Clear the verdict when the draft leaves Sent.
     Differs {
         newer: DocumentBase,
         text: SharedString,
@@ -724,6 +721,8 @@ impl MarketDataTile {
         let table = cx.new(|cx| {
             let mut delegate = MatrixDelegate::new(spec, weak_tile, id.0, tones);
             delegate.line_numbers = line_numbers;
+            // A missing or garbled record is an empty map, never a refusal.
+            delegate.fitted = widths_from_record(restored);
             TableState::new(delegate, window, cx)
                 .row_selectable(true)
                 .col_selectable(false)
@@ -1084,9 +1083,9 @@ impl MarketDataTile {
             document_key,
             as_of,
         });
-        self.query_in_flight = queued;
-        if !queued {
-            self.notice = Some("document request refused: the data service is busy or gone".into());
+        self.query_in_flight = queued.is_ok();
+        if let Err(refusal) = queued {
+            self.notice = Some(format!("document request refused: {refusal}").into());
             // A refused submission has no future delivery. Arrive before clearing
             // acted, which arrival reads; clearing then permits a later frame change to
             // retry.
@@ -1442,8 +1441,8 @@ impl MarketDataTile {
             document: self.spec.document.into(),
             rows: pending.rows,
         });
-        if !queued {
-            self.notice = Some("upload refused: the data service is busy or gone".into());
+        if let Err(refusal) = queued {
+            self.notice = Some(format!("upload refused: {refusal}").into());
             self.sent = None;
             self.submitted = None;
             self.in_flight = None;
@@ -1516,10 +1515,8 @@ impl MarketDataTile {
         // committing either. An unbuildable generation changes only the notice, keeping
         // the last usable snapshot, draft state, and model together.
         let mut draft = self.draft.clone();
-        // The generation the edits were made against, taken before anything
-        // below is allowed to move the draft onto another one: an automatic
-        // rebase overwrites `draft.base` with the delivered pair, and a base
-        // read after that would be compared with itself.
+        // Capture the original base before policy handling: automatic rebase
+        // replaces it with the delivered pair, which would compare equal to itself.
         let held = draft.base.clone();
         let mut moved = base.as_ref().is_some_and(|b| draft.on_delivered(b));
         // Evaluate the upload echo on the same draft copy before committing state.
@@ -1590,19 +1587,10 @@ impl MarketDataTile {
                 }
             }
         }
-        // A republish at the SAME source time moves nothing a trader can
-        // see: the `update HH:MM` badge and the header's source-time chip
-        // both carry that time already, and under an automatic rebase even
-        // the badge returns to the plain dirty dot. The document changed
-        // underneath the draft, so say so however the delivery was handled —
-        // silence here is the whole defect this identity exists to remove.
-        //
-        // `held` differing from the delivered pair at an equal source time is
-        // exactly the republish case: a redelivery of the same generation, or
-        // the base generation coming back, does not differ and says nothing.
-        // Only when no policy notice already speaks for this delivery: a
-        // `Replace` disclosure of lost work, or a dropped-edit report,
-        // outranks this one.
+        // Disclose a same-time republish when it changes draft state. The timestamp
+        // cannot show the change, and automatic rebase leaves no Behind badge.
+        // A replacement or dropped-edit notice takes precedence. Redelivery and
+        // returning to the base do not produce a republish notice.
         if moved
             && notice.is_none()
             && let Some(delivered) = &base
@@ -1621,17 +1609,10 @@ impl MarketDataTile {
                 format!("republished at {when} — your edits moved onto it").into()
             });
         }
-        // Retain the outgoing snapshot only when it is the draft's actual base and the
-        // new state still needs it. Restored drafts may have no delivered base; never
-        // pin their newest-snapshot fallback as if it were that base.
-        //
-        // Whole-pair equality here, deliberately, not `DocumentBase::differs_from`:
-        // that method is permissive because it decides whether to DISTURB unsent
-        // work, and an unknown generation must not disturb it. This decides
-        // whether to TRUST a snapshot AS the base, where the permissive answer
-        // is the dangerous one — it would pin a snapshot whose generation the
-        // draft's base cannot vouch for, and the edits would then paint over
-        // another document's grid.
+        // Retain an outgoing snapshot only when its full base equals the draft's
+        // and the new state still needs it. `differs_from` permits unknown-generation
+        // fallbacks; using it here could pin another grid beneath position-keyed
+        // edits. A restored draft's latest painted fallback is not proof of its base.
         let retained = if draft.is_behind() || matches!(echo, EchoStep::Held(_)) {
             match &self.base_snapshot {
                 Some(base) => Some(Arc::clone(base)),
@@ -1860,11 +1841,9 @@ impl MarketDataTile {
         let Some(base) = self.painted_snapshot() else {
             return;
         };
-        // Whole-pair inequality, not `DocumentBase::differs_from`: the
-        // permissive answer would let a generation this base cannot vouch for
-        // overwrite a restored draft's stored group sizes with another
-        // document's, and rebase's same-day guard would then compare counts
-        // taken from a document the edits were never made against.
+        // Capture group sizes only from an exactly matching base. The source-time
+        // fallback in `differs_from` cannot establish that a snapshot belongs to
+        // the draft and must not replace restored group guards.
         if base_of(&base) != draft.base {
             return;
         }
@@ -4249,7 +4228,45 @@ impl MarketDataTile {
                 self.toggle_menu(window, cx);
                 Ok(())
             }
+            Command::Autosize { reset } => self
+                .autosize_columns(reset, window, cx)
+                .map_err(str::to_string),
         }
+    }
+
+    /// Fit every column to its header and every row's prepared text
+    /// (`reset`: drop the fitted widths), then refresh so the table
+    /// re-reads `column()`. The one route behind both `:autosize` and the
+    /// shell's `tile::autosize_columns`; measured on the UI thread at the
+    /// window's current rem, never in render. The widths persist in the
+    /// session record; a column a later document lacks is ignored and a new
+    /// one gets the default width.
+    ///
+    /// With no rows (no document yet, or an empty one) a fit refuses with
+    /// [`NOTHING_TO_FIT`] and the widths already held stay; a reset always
+    /// runs.
+    pub fn autosize_columns(
+        &mut self,
+        reset: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), &'static str> {
+        let fitted = if reset {
+            FittedWidths::new()
+        } else {
+            let metrics = FitMetrics::xsmall_mono(window.rem_size());
+            self.table
+                .read(cx)
+                .delegate()
+                .fit_columns(&metrics)
+                .ok_or(NOTHING_TO_FIT)?
+        };
+        self.table.update(cx, |t, cx| {
+            t.delegate_mut().fitted = fitted;
+            t.refresh(cx);
+        });
+        cx.notify();
+        Ok(())
     }
 
     /// Set the policy used by a future new generation. Existing Behind state and
@@ -4472,7 +4489,7 @@ impl MarketDataTile {
         self.request_catalog(cx);
     }
 
-    pub fn serialize(&self) -> toml::Table {
+    pub fn serialize(&self, cx: &App) -> toml::Table {
         let mut t = toml::Table::new();
         if let Some(key) = &self.key {
             t.insert(
@@ -4512,6 +4529,9 @@ impl MarketDataTile {
                 "auto".into(),
                 toml::Value::String(self.policy.as_str().to_string()),
             );
+        }
+        if let Some(w) = widths_to_toml(&self.table.read(cx).delegate().fitted) {
+            t.insert(SESSION_KEY.into(), w);
         }
         t
     }
@@ -6423,6 +6443,19 @@ mod tests {
         assert!(second.tag > first.tag);
     }
 
+    #[gpui::test]
+    fn a_busy_document_refusal_says_busy(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.data.fill_for_tests();
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some("document request refused: the data service is busy".to_string())
+        );
+    }
+
     /// A refused submission has no future outcome. It answers the barrier immediately
     /// and clears acted so the next frame change retries.
     #[gpui::test]
@@ -6443,7 +6476,7 @@ mod tests {
         assert_eq!(
             h.tile
                 .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
-            Some("document request refused: the data service is busy or gone".to_string())
+            Some("document request refused: the data service has stopped".to_string())
         );
         // The next frame change tries again rather than reading as
         // already-answered.
@@ -6567,12 +6600,14 @@ mod tests {
         assert!(h.tile.read_with(&vcx, |t, _| t.header_dirty()));
 
         assert_eq!(h.command(&mut vcx, "underlying NKY.Z"), Ok(()));
-        let (dirty, len, parked, key) = h.tile.read_with(&vcx, |t, _| {
+        let (dirty, len, parked, key) = h.tile.read_with(&vcx, |t, cx| {
             (
                 t.header_dirty(),
                 t.draft().len(),
                 t.parked(),
-                t.serialize()["underlying"][0].as_str().map(str::to_string),
+                t.serialize(cx)["underlying"][0]
+                    .as_str()
+                    .map(str::to_string),
             )
         });
         assert!(!dirty, "the dot reads the current draft, which is empty");
@@ -6773,7 +6808,7 @@ mod tests {
         h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
         h.command(&mut vcx, "set spot_ref 4520").unwrap();
 
-        let written = h.tile.read_with(&vcx, |t, _| t.serialize());
+        let written = h.tile.read_with(&vcx, |t, cx| t.serialize(cx));
         assert!(
             written.get("draft").is_none(),
             "the legacy key is not written"
@@ -6865,9 +6900,10 @@ mod tests {
         h.set_picker_text(&mut vcx, "sp");
         h.dispatch(&mut vcx, "commit", None);
         assert_eq!(
-            h.tile.read_with(&vcx, |t, _| t.serialize()["underlying"][0]
-                .as_str()
-                .map(str::to_string)),
+            h.tile
+                .read_with(&vcx, |t, cx| t.serialize(cx)["underlying"][0]
+                    .as_str()
+                    .map(str::to_string)),
             Some("SPX.Z".to_string()),
             "`sp` ranked the bare key and enter loaded it"
         );
@@ -7141,7 +7177,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         .parse()
         .unwrap();
         let (h, vcx) = open_with(cx, Some(restored.clone()));
-        let written = h.tile.read_with(&vcx, |t, _| t.serialize());
+        let written = h.tile.read_with(&vcx, |t, cx| t.serialize(cx));
         assert_eq!(
             written, restored,
             "the underlying and the draft survive a restart, labels and all"
@@ -7165,7 +7201,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         let (h, vcx) = open_with(cx, Some(legacy.clone()));
         let (len, written) = h
             .tile
-            .read_with(&vcx, |t, _| (t.draft().len(), t.serialize()));
+            .read_with(&vcx, |t, cx| (t.draft().len(), t.serialize(cx)));
         assert_eq!(len, 1, "the legacy draft is the current draft");
         assert!(written.get("draft").is_none());
         assert_eq!(written["drafts"]["SPX.Z"], legacy["draft"]);
@@ -7718,9 +7754,8 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert_eq!(cells.get("n"), Some(&Value::I64(2)), "n is untouched");
     }
 
-    /// An integer cell commits the exact integer that was typed. Through the
-    /// old `parse_cell` → f64 → `as i64` path the value below silently became
-    /// 9007199254740992, while the same text in an ATTRIBUTE was exact.
+    /// An integer cell preserves the typed `i64` through commit, whole-number
+    /// bump, and upload assembly, including values above exact `f64` precision.
     #[gpui::test]
     fn a_typed_integer_above_2_pow_53_reaches_the_draft_exactly(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_spec(cx, &test_fixtures::MIXED, None);
@@ -9163,10 +9198,9 @@ deleted = true
         );
     }
 
-    /// A corrected republish keeps its source time and takes a new store
-    /// generation. Before the base was a pair, `on_delivered` saw no change,
-    /// `apply_snapshot` installed the new grid anyway, and this edit — keyed
-    /// by grid position — landed on whatever node now held that column.
+    /// A same-time republish with a changed generation puts an edited draft
+    /// Behind and retains its base grid. Removing a term in the new document
+    /// must not move a position-keyed edit to the term now at that index.
     #[gpui::test]
     fn a_republish_at_the_same_source_time_holds_the_draft_instead_of_repointing_it(
         cx: &mut gpui::TestAppContext,
@@ -9223,12 +9257,9 @@ deleted = true
         );
     }
 
-    /// The same defect in the shape that names it: a corrected republish at
-    /// the SAME source time whose node ladder GREW. An axis panel's column
-    /// order is the document's own node order and `Draft::edits` is keyed by
-    /// model column, so painting the republished grid under a position-keyed
-    /// edit would move that edit one column along — onto the node the
-    /// republish inserted, at a value the trader never typed there.
+    /// A same-time republish that inserts a node before the existing ladder
+    /// must not shift a held edit onto the inserted node. Axis columns follow
+    /// document order, while the edit retains its original grid position.
     #[gpui::test]
     fn a_republish_that_reorders_the_nodes_keeps_the_edit_on_its_own_node(
         cx: &mut gpui::TestAppContext,
@@ -9296,11 +9327,9 @@ deleted = true
         assert_eq!(cells[SLICE].text.to_string(), "0.9000", "its own value");
     }
 
-    /// Under `:auto rebase` a corrected republish is resolved without the
-    /// trader touching a key — and nothing on screen moves, because the
-    /// source time did not: no `update HH:MM` badge, the same time chip. The
-    /// notice is the only disclosure that the document changed under the
-    /// draft, so it fires here too, naming no key since nothing is pending.
+    /// Automatic rebase onto a same-time republish reports that the edits moved.
+    /// The source-time chip is unchanged and no Behind badge remains, so the
+    /// notice supplies the update feedback without offering a pending action.
     #[gpui::test]
     fn auto_rebase_still_discloses_a_same_time_republish(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -11924,11 +11953,11 @@ auto = "replace"
             UpdatePolicy::Replace,
             "read from the session"
         );
-        let written = h.tile.read_with(&vcx, |t, _| t.serialize());
+        let written = h.tile.read_with(&vcx, |t, cx| t.serialize(cx));
         assert_eq!(written, restored);
 
         h.command(&mut vcx, "auto hold").unwrap();
-        let written = h.tile.read_with(&vcx, |t, _| t.serialize());
+        let written = h.tile.read_with(&vcx, |t, cx| t.serialize(cx));
         assert!(
             !written.contains_key("auto"),
             "the default writes no key: {written:?}"
@@ -12306,6 +12335,8 @@ edits = [["2026-11-20", "-1", 9.5]]
             "set spot 100",
             "auto hold",
             "menu",
+            "autosize",
+            "autosize reset",
         ];
         for word in crate::commands::VERBS {
             assert!(
@@ -12336,6 +12367,106 @@ edits = [["2026-11-20", "-1", 9.5]]
             // revert); the rule is about what it did NOT touch.
         }
     }
+    /// The width the delegate hands the table for the column headed `name`.
+    fn width_of_column(h: &Harness, vcx: &gpui::VisualTestContext, name: &str) -> f32 {
+        let ix = h
+            .headers(vcx)
+            .iter()
+            .position(|n| n == name)
+            .unwrap_or_else(|| panic!("no column '{name}'"));
+        h.tile.read_with(vcx, |t, cx| {
+            f32::from(
+                gpui_component::table::TableDelegate::column(t.table().read(cx).delegate(), ix, cx)
+                    .width,
+            )
+        })
+    }
+
+    const LONG_STATUS: &str = "provisionally estimated by the desk";
+
+    /// `:autosize` through the content's command route fits a column whose
+    /// text outgrows the default width; the fit survives the refresh every
+    /// model install runs; `:autosize reset` returns to the default.
+    #[gpui::test]
+    fn autosize_fits_every_row_survives_a_model_install_and_resets(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_flat(cx);
+        h.with_flat_document_with(
+            &mut vcx,
+            test_fixtures::schedule_snapshot(&[
+                ("D1", "2026-12-18", 1.25, "declared"),
+                ("D2", "2027-03-19", 0.5, LONG_STATUS),
+            ]),
+        );
+        let default = width_of_column(&h, &vcx, "status");
+        h.command(&mut vcx, "autosize").unwrap();
+        let fitted = width_of_column(&h, &vcx, "status");
+        let rem = vcx.update(|window, _| f32::from(window.rem_size()));
+        let text = LONG_STATUS.chars().count() as f32 * rem * 0.875 * 0.6;
+        assert!(fitted > default, "{fitted} > {default}");
+        assert!(fitted >= text, "{fitted} holds the last row's {text}px");
+
+        h.tile.update(&mut vcx, |t, cx| t.install_model(cx));
+        assert_eq!(width_of_column(&h, &vcx, "status"), fitted);
+
+        h.command(&mut vcx, "autosize reset").unwrap();
+        assert_eq!(width_of_column(&h, &vcx, "status"), default);
+    }
+
+    /// Before any document, `:autosize` refuses and keeps the restored
+    /// widths; `:autosize reset` still drops them.
+    #[gpui::test]
+    fn autosize_with_no_document_refuses_and_keeps_the_widths(cx: &mut gpui::TestAppContext) {
+        let mut widths = toml::Table::new();
+        widths.insert("status".into(), toml::Value::Float(200.0));
+        let mut record = toml::Table::new();
+        record.insert(
+            geode_shell::colfit::SESSION_KEY.into(),
+            toml::Value::Table(widths),
+        );
+        let (h, mut vcx) = open_spec(cx, &test_fixtures::SCHEDULE, Some(record));
+        let fitted = |h: &Harness, vcx: &gpui::VisualTestContext| {
+            h.tile
+                .read_with(vcx, |t, cx| t.table().read(cx).delegate().fitted.clone())
+        };
+        let before = fitted(&h, &vcx);
+        assert_eq!(before.len(), 1);
+        assert_eq!(
+            h.command(&mut vcx, "autosize"),
+            Err(geode_shell::colfit::NOTHING_TO_FIT.to_string())
+        );
+        assert_eq!(fitted(&h, &vcx), before);
+        h.command(&mut vcx, "autosize reset").unwrap();
+        assert!(fitted(&h, &vcx).is_empty());
+    }
+
+    /// Fitted widths ride the session record. On restore a key the model
+    /// still has is used, one it lacks is ignored, and a column with no
+    /// entry keeps the default.
+    #[gpui::test]
+    fn autosize_widths_round_trip_the_session(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_flat(cx);
+        h.with_flat_document_with(
+            &mut vcx,
+            test_fixtures::schedule_snapshot(&[("D1", "2026-12-18", 1.25, LONG_STATUS)]),
+        );
+        let default_amount = width_of_column(&h, &vcx, "amount");
+        h.command(&mut vcx, "autosize").unwrap();
+        let fitted = width_of_column(&h, &vcx, "status");
+        let mut record = h.tile.read_with(&vcx, |t, cx| t.serialize(cx));
+        let widths = record
+            .get_mut(geode_shell::colfit::SESSION_KEY)
+            .and_then(|v| v.as_table_mut())
+            .expect("widths persisted");
+        widths.remove("amount");
+        widths.insert("gone".into(), toml::Value::Float(300.0));
+
+        let (h2, mut vcx2) = open_spec(cx, &test_fixtures::SCHEDULE, Some(record));
+        h2.with_flat_document(&mut vcx2);
+        assert_eq!(width_of_column(&h2, &vcx2, "status"), fitted);
+        assert_eq!(width_of_column(&h2, &vcx2, "amount"), default_amount);
+        assert_eq!(h2.headers(&vcx2).len(), h.headers(&vcx).len());
+    }
+
     // ---- Row insertion and deletion ----------------------------------
 
     /// The model's row labels in painted order.
@@ -12726,7 +12857,7 @@ edits = [["2026-11-20", "-1", 9.5]]
             "{yanked:?}"
         );
 
-        let written = h.tile.read_with(&vcx, |t, _| t.serialize());
+        let written = h.tile.read_with(&vcx, |t, cx| t.serialize(cx));
         let rows = written["drafts"]["SPX.Z"]["rows"]
             .as_table()
             .expect("a rows table");
@@ -13600,9 +13731,29 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         assert_eq!(
             h.tile
                 .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
-            Some("upload refused: the data service is busy or gone".into())
+            Some("upload refused: the data service has stopped".into())
         );
         assert!(h.tile.read_with(&vcx, |t, _| t.sent.is_none()));
+    }
+
+    #[gpui::test]
+    fn a_busy_upload_refusal_says_busy_and_clears_in_flight(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        h.command(&mut vcx, "upload").unwrap();
+        draw(&mut vcx);
+        h.data.fill_for_tests();
+        type_keys(&mut vcx, "y");
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some("upload refused: the data service is busy".into())
+        );
+        assert!(
+            h.tile
+                .read_with(&vcx, |t, _| t.sent.is_none() && t.in_flight.is_none())
+        );
     }
 
     #[gpui::test]
@@ -13933,14 +14084,10 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         );
     }
 
-    /// A routine same-generation requery (any publish anywhere bumps the
-    /// frame, and the demo bus redelivers every few seconds) must not be
-    /// read as the echo: `echo_of`'s own guard compares the delivered
-    /// source time with `draft.base`, not with `sent`, before it ever
-    /// looks at `self.sent`. Content that plainly differs from what was
-    /// sent proves the short-circuit rather than a coincidental match —
-    /// mutated away, this delivery would build and compare against
-    /// `sent` and read as a difference within seconds of every upload.
+    /// Redelivery of the draft's base while Sent does not trigger echo comparison.
+    /// The base check uses source time and known generation IDs before inspecting
+    /// submitted rows. Deliberately different contents prove the short-circuit:
+    /// if compared, this fixture would report a differing echo.
     #[gpui::test]
     fn a_redelivery_of_the_base_while_sent_is_not_read_as_the_echo(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_upload(cx);
@@ -14233,7 +14380,7 @@ cells = {{ ex = {{ type = "date", value = "2027-06-18" }}, amount = 0.75, status
         h.with_document(&mut vcx);
         h.edit_one_cell(&mut vcx);
         h.upload_ok(&mut vcx);
-        let written = h.tile.read_with(&vcx, |t, _| t.serialize());
+        let written = h.tile.read_with(&vcx, |t, cx| t.serialize(cx));
 
         let (h, mut vcx) = open_spec_with_egress(
             cx,

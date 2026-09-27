@@ -17,6 +17,7 @@ use geode_data::documents::DocumentRegistry;
 use geode_data::source::SourceSpec;
 use geode_data::{
     DataEvent, DataHandle, DataService, DataServiceConfig, EventSink, PricerConfig, PricerRegistry,
+    Refusal,
 };
 use geode_marketdata::MarketDataFactory;
 use geode_marketdata::core::{CVI, DIVIDEND};
@@ -95,13 +96,10 @@ pub fn data_setup(
         .map(|doc| SourceSpec::from_doc(doc, &schema))
         .unwrap_or_default();
     diagnostics.extend(d);
-    // `egress.toml` (egress spec §4, §10 amendments 1/2): typed, then
-    // resolved against `adapters` — the same registry this function's
-    // caller ultimately hands to `DataServiceConfig.adapters` below, read
-    // here (by reference) before that move. An unknown adapter or one
-    // with no egress side drops the target with a diagnostic; the
-    // survivors are what `DataServiceConfig.egress` carries and what
-    // `bridge::start` narrows per document for the market-data factories.
+    // Resolve typed egress targets against the service's adapter registry.
+    // An unknown adapter or one without egress support drops the target with
+    // a diagnostic. The resolved list feeds both the service and each
+    // market-data factory's document-specific target choices.
     let (egress_specs, d) = config
         .doc("egress")
         .map(|doc| egress_config::from_doc(doc, &schema))
@@ -115,8 +113,8 @@ pub fn data_setup(
         .unwrap_or_default();
     diagnostics.extend(colour_diags);
     // Resolve the configured pricer, defaulting to mock. An unavailable name
-    // warns and installs a missing-pricer implementation that fails each line,
-    // allowing the rest of the service to open.
+    // warns and leaves the implementation absent; the pricing worker returns
+    // an error for each line while the rest of the service can still open.
     let pricer_name = config
         .get("app", "pricing.adapter")
         .and_then(|v| v.as_str())
@@ -279,11 +277,13 @@ pub fn stale_after_from_config(config: &Config) -> Duration {
         .unwrap_or(geode_blotter::tile::DEFAULT_STALE_AFTER)
 }
 
-/// `[pricing] refresh` (spec §5.5, §9.4): the app default periodic
-/// reprice. Absent is 30 s, `"off"` disables it, a duration is that; an
-/// unreadable value keeps 30 s and says so (planning decision 21).
+/// Default periodic repricing interval when `app.pricing.refresh` is absent
+/// or invalid.
 pub const DEFAULT_PRICING_REFRESH: Duration = Duration::from_secs(30);
 
+/// Read `app.pricing.refresh`: `"off"` disables periodic repricing; a nonzero
+/// duration sets the interval. Invalid values, including zero, warn and use
+/// the 30-second default. An absent value uses the default without a warning.
 pub fn pricing_refresh_from_config(config: &Config) -> (Option<Duration>, Option<Diagnostic>) {
     let Some(value) = config.get("app", "pricing.refresh") else {
         return (Some(DEFAULT_PRICING_REFRESH), None);
@@ -312,8 +312,9 @@ pub fn pricing_refresh_from_config(config: &Config) -> (Option<Duration>, Option
 
 /// `[pricing] underlyings`: the names the pricer's entry bar suggests,
 /// as written and in order (`UnderlyingList::set` upper-cases and drops
-/// repeats). Absent is an empty list. A non-array value, or a non-string
-/// element, warns and is skipped.
+/// repeats). An absent setting clears the list. A non-array value returns `None`
+/// with a warning, preserving the running list on reload; startup uses an empty
+/// list. Non-string elements warn and are omitted from an otherwise valid array.
 pub fn pricing_underlyings_from_config(config: &Config) -> (Option<Vec<String>>, Vec<Diagnostic>) {
     let Some(value) = config.get("app", "pricing.underlyings") else {
         return (Some(Vec::new()), Vec::new());
@@ -373,13 +374,11 @@ pub fn pricer_templates_from_config(
     }
 }
 
-/// Exactly what the pricer reads out of a config: the merged
-/// `pricer_views` and `pricer_templates` docs, the raw `[pricing] refresh`
-/// and `[pricing] underlyings` values and the resolved stale threshold.
-/// Two equal keys resolve to the same views and settings, so the reload
-/// observer skips a reload whose key is unchanged — a theme or keymap edit
-/// must not restart every tile's refresh timer or repeat a bad value's
-/// warning.
+/// Inputs to the pricer's live reload: merged `pricer_views` and
+/// `pricer_templates`, raw `app.pricing.refresh` and `app.pricing.underlyings`,
+/// and the resolved stale threshold. Equal keys leave factory views, templates,
+/// suggestions, and timers alone and avoid repeating invalid-value warnings.
+/// The selected pricing adapter is fixed at service startup and excluded here.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PricerConfigKey {
     views: Option<toml::Table>,
@@ -479,11 +478,9 @@ pub fn start(
     let dimensions = setup.dimensions.clone();
     let sources = source_shapes(&setup.config.sources, &schema);
     let local_datasets = Rc::new(setup.local_datasets);
-    // Target name → accepted document names, in `egress.toml`
-    // order — captured before `DataService::spawn` moves `setup.config`,
-    // and shared unmodified between the CVI and dividend factories built
-    // below over the SAME resolved list (`MarketDataFactory::create`
-    // narrows it per document with its own `targets_for`).
+    // Target names and accepted documents in `egress.toml` order. Both document
+    // factories share the resolved list; each narrows it to its document kind
+    // when creating a tile.
     let egress_targets: Arc<Vec<(String, Vec<String>)>> = Arc::new(
         setup
             .config
@@ -536,19 +533,14 @@ pub fn start(
             MarketDataFactory::new(
                 handle.clone(),
                 &CVI,
-                // One threshold, one config key: a document's own
-                // freshness means exactly what a dataset's does to the
-                // blotter, and two keys for one idea would be two things
-                // to keep in step.
+                // Document panels and blotters use the same configured stale threshold.
                 stale_after,
             )
             .with_egress(egress_targets.clone()),
         ),
-        // The second document kind, over the same shared `marketdata`
-        // context: `.without_keymap()` is what keeps `keymap_fragments`
-        // from splicing a second, identical `<module:{kind}>` layer. The
-        // same `egress_targets` `Arc`, narrowed to its own document by
-        // `create`.
+        // Both document kinds share the marketdata keymap context. Register its
+        // fragment once, while each factory keeps its own actions and filters the
+        // shared egress targets to its document kind.
         dividend: Rc::new(
             MarketDataFactory::new(handle.clone(), &DIVIDEND, stale_after)
                 .without_keymap()
@@ -574,13 +566,14 @@ fn pricer_sheet<'a>(dataset: &str, batch: &'a str) -> Option<&'a str> {
     (dataset == PRICER_SHEETS_DATASET).then_some(batch)
 }
 
-/// At quit: save every pricer tile's unsaved sheet, then stop the data
-/// service. The flush runs in the same hook, before the shutdown is
-/// spawned, so its publishes are admitted ahead of the service's
-/// `Shutdown` request, and the ingest runner stores queued local writes
-/// before it stops. The shutdown joins the service's threads, which may
-/// wait out an in-flight load, so it runs off the UI thread; gpui waits
-/// for it only up to its own quit timeout.
+/// Flush unsaved pricer sheets before requesting data-service shutdown.
+/// Accepted saves enter the queue ahead of `Shutdown`, and the ingest runner
+/// processes queued local writes before stopping. Submission or write failures
+/// can still leave a sheet unsaved.
+///
+/// Joining the service may wait for an in-flight load, so it runs off the UI
+/// thread. GPUI waits only until its quit timeout; completion is not guaranteed
+/// before process exit.
 pub fn stop_at_quit(bridge: &Bridge, cx: &mut App) {
     let handle = bridge.handle.clone();
     let pricer = Rc::clone(&bridge.pricer);
@@ -703,18 +696,22 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
             let tag = refresh.tag.get() + 1;
             refresh.tag.set(tag);
             let as_of = shell.read(cx).frame().read(cx).as_of().clone();
-            if handle.catalog(CatalogParams {
+            match handle.catalog(CatalogParams {
                 key: DIAGNOSTICS_KEY,
                 tag,
                 as_of,
             }) {
-                refresh.in_flight.set(Some((tag, request)));
-            } else {
-                tracing::warn!(
-                    target: "geode::query",
-                    "catalog request refused — the data service is busy or gone"
-                );
-                refresh.retry(&diagnostics, request, window, cx);
+                Ok(()) => refresh.in_flight.set(Some((tag, request))),
+                Err(Refusal::Busy) => {
+                    tracing::warn!(
+                        target: "geode::query",
+                        "catalog request refused: the data service is busy; retrying"
+                    );
+                    refresh.retry(&diagnostics, request, window, cx);
+                }
+                // Nothing will serve a retry, and the stopped segment already
+                // says why: keeping the demand would re-ask on every notify.
+                Err(Refusal::Stopped) => {}
             }
         }
     })
@@ -779,12 +776,29 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     factory.set_schema(schema);
                 }
                 factory.set_dims(dims.clone());
-                handle.replace_views(views, dims);
+                // A refused hand-off leaves the service on the old views while
+                // the factory builds tiles against the new ones: say so.
+                let handoff = match handle.replace_views(views, dims) {
+                    Ok(()) => None,
+                    Err(refusal) => Some(Diagnostic {
+                        severity: match refusal {
+                            Refusal::Busy => Severity::Warning,
+                            Refusal::Stopped => Severity::Error,
+                        },
+                        layer: None,
+                        file: None,
+                        message: format!(
+                            "the reloaded views did not reach the data service: {refusal}"
+                        ),
+                        path: None,
+                    }),
+                };
                 // The config borrow has ended; diagnostics can now be updated through cx.
                 let reload_diags: Vec<Diagnostic> = presentation_diags
                     .into_iter()
                     .chain(colour_diags)
                     .chain(pin_diags)
+                    .chain(handoff)
                     .collect();
                 if !reload_diags.is_empty() {
                     diagnostics.update(cx, |dg, cx| {
@@ -801,12 +815,15 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
             // a synthetic error with the same key/tag/column so the picker stops waiting.
             ShellEvent::DistinctRequested(params) => {
                 let queued = handle.distinct(params.clone());
-                if !queued {
+                if let Err(refusal) = queued {
                     let outcome = DistinctOutcome {
                         key: params.key,
                         tag: params.tag,
                         column: params.column.clone(),
-                        values: Err("the data service is busy or gone — try again".into()),
+                        values: Err(match refusal {
+                            Refusal::Busy => "the data service is busy — try again".into(),
+                            Refusal::Stopped => "the data service has stopped".into(),
+                        }),
                     };
                     shell.update(cx, |s, cx| s.deliver_distinct(outcome, cx));
                 }
@@ -818,12 +835,10 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
     })
     .detach();
 
-    // The pricer watches EVERY applied reload (planning decision 20):
-    // `ShellEvent::ConfigReloaded` fires only for five named docs, and a
-    // `pricer_views` or `[pricing] refresh` edit is neither. The frame's
-    // `config` counter is the ungated signal (`main.rs`'s diagnostics
-    // factory observes it the same way); `pricer_config_key` then gates
-    // it down to the reloads that change what the pricer reads.
+    // The frame's config revision advances on every applied reload, including
+    // pricer views and pricing settings that do not emit ConfigReloaded.
+    // Compare pricer_config_key before updating the factory so unrelated edits
+    // leave its views and refresh timers alone.
     {
         let pricer = bridge.pricer.clone();
         let underlyings = bridge.underlyings.clone();
@@ -888,6 +903,8 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
     }
 
     let diagnostics_for_drain = diagnostics.clone();
+    // The handle's `Busy` refusal total, read once per drained event.
+    let refused_handle = handle.clone();
     let catalog_refresh_for_drain = catalog_refresh.clone();
     // Retain local dataset names for the drain task after attach's borrow ends.
     let local_datasets = Rc::clone(&bridge.local_datasets);
@@ -898,8 +915,10 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
         let catalog_refresh = catalog_refresh_for_drain;
         let catalog_window = window;
         let mut last_dropped = 0u64;
+        let mut last_refused = 0u64;
         while let Ok(event) = rx.recv().await {
             let now_dropped = dropped.load(Ordering::Relaxed);
+            let now_refused = refused_handle.dropped_requests();
             // Check window liveness for every event variant. Updating a retained shell
             // entity alone would keep succeeding after the window closes and retain this
             // task's captures. With no new event, the task can remain awaiting the mailbox.
@@ -911,6 +930,15 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     diagnostics.update(cx, |d, cx| {
                         let before = d.version();
                         d.note_dropped(now_dropped);
+                        if d.version() != before {
+                            cx.notify();
+                        }
+                    });
+                }
+                if now_refused != last_refused {
+                    diagnostics.update(cx, |d, cx| {
+                        let before = d.version();
+                        d.note_refused(now_refused);
                         if d.version() != before {
                             cx.notify();
                         }
@@ -1105,14 +1133,11 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             }
                         });
                     }
-                    // Local-write answers (a save stored or refused, a document
-                    // forgotten or not), addressed by dataset and document key.
-                    // Every one for `pricer_sheets` goes to the pricer factory,
-                    // which routes it to the tile that asked: a tile may be
-                    // waiting on it with no timeout (a load deferred behind a
-                    // queued save), so none may be dropped. No other dataset
-                    // has a local writer. Failures also reached diagnostics as
-                    // error `Diagnostics` events.
+                    // Route local-write outcomes by dataset and document key. The pricer
+                    // factory uses the sheet name to find the originating tile, including
+                    // loads deferred until a queued save settles. Every such outcome must
+                    // survive mailbox coalescing. Other datasets have no local-write recipient
+                    // here; failures also reach diagnostics as separate error events.
                     DataEvent::LocalPublished { dataset, batch, .. } => {
                         if let Some(sheet) = pricer_sheet(&dataset, &batch) {
                             pricer.save_answered(sheet, Ok(()), cx);
@@ -1156,12 +1181,27 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             s.deliver(Delivery::Price(outcome), window, cx)
                         });
                     }
+                    // A data thread died despite containment, or the request
+                    // loop never opened. Its segment and the diagnostics row
+                    // stay until restart. Logging is not repeated here: the
+                    // supervisor logs a death, and an open failure also
+                    // arrives as an error Diagnostic.
+                    DataEvent::ThreadStopped { thread, reason } => {
+                        diagnostics.update(cx, |d, cx| {
+                            let before = d.version();
+                            d.note_thread_stopped(&thread, reason, SystemTime::now());
+                            if d.version() != before {
+                                cx.notify();
+                            }
+                        });
+                    }
                 }
             });
             if handled.is_err() {
                 return; // the window is gone
             }
             last_dropped = now_dropped;
+            last_refused = now_refused;
         }
     })
     .detach();
@@ -1268,8 +1308,7 @@ family = "series"
         );
     }
 
-    /// Records logged while `f` runs, on this thread only — the same
-    /// scoped-subscriber pattern `geode-data`'s own test modules use.
+    /// Capture logs emitted by `f` on this thread with a scoped subscriber.
     fn logged(f: impl FnOnce()) -> Vec<geode_core::log::Record> {
         use tracing_subscriber::layer::SubscriberExt;
         let ring = Arc::new(Ring::new(16));
@@ -1329,18 +1368,13 @@ family = "series"
         assert_eq!(gone[0].level, tracing::Level::WARN);
     }
 
-    /// The minimal real `ShellServices` a window needs to open — same
-    /// shape as `geode-shell`'s own `test_services()` (not reachable
-    /// from here: it is `pub(super)` inside that crate's test module),
-    /// built from public items only.
+    /// Minimal shell services built through public APIs, with no module roster
+    /// or persisted session.
     fn test_shell_services() -> ShellServices {
         test_shell_services_with_sources(ConfigSources::default())
     }
 
-    /// A trimmed `datasets` doc making `book` pickable (categorical
-    /// dimension) — same shape as `geode-shell::shell::tests::picker`'s
-    /// own `DATASETS_DOC`, reproduced here since that module is private
-    /// to its crate.
+    /// A categorical book dimension that the shell can offer in its picker.
     const PICKABLE_DATASETS_DOC: &str = r#"
 [risk_snapshot.columns.book]
 type = "utf8"
@@ -1399,17 +1433,9 @@ role = "key"
         }
     }
 
-    /// [`test_shell_services`] with one `RecordingFactory` of kind "rec"
-    /// in the roster (`geode_shell::module::recording`, `test-support`
-    /// feature) — the neighbour the `Price` delivery test below opens
-    /// through `ShellView::open_module` so it has a real, focused,
-    /// non-placeholder tile whose id it can read back and whose log it
-    /// can inspect (the view type behind a roster's `&dyn ModuleFactory`
-    /// is private, so the recording factory's own `log` is the only
-    /// window into what a delivery actually did). No add actions are
-    /// registered for "rec" — `open_module` calls `ShellView::add_tile`
-    /// directly rather than through action dispatch, so nothing here
-    /// needs a keymap binding or a registry entry for the kind.
+    /// Shell services with a recording factory and its delivery log. Opening
+    /// "rec" through ShellView::open_module creates a real occupant without an
+    /// add action or key binding; the log exposes deliveries to that occupant.
     fn test_shell_services_with_rec_roster() -> (ShellServices, Rc<RefCell<Vec<Recorded>>>) {
         let (config, builtin) = ShellServices::config_and_builtin(ConfigSources::default());
         let mut registry = ActionRegistry::default();
@@ -1607,8 +1633,8 @@ role = "key"
         assert!(diags.is_empty(), "{diags:?}");
     }
 
-    /// The reload gate's key moves with each thing the pricer reads and
-    /// with nothing else.
+    /// The reload key changes with live pricer settings; unrelated application
+    /// settings leave it unchanged.
     #[test]
     fn the_pricer_config_key_changes_only_with_what_the_pricer_reads() {
         let config = |app: &str, views: &str, templates: &str| {
@@ -1730,9 +1756,8 @@ role = "key"
         );
     }
 
-    /// Planning decision 20: a reload reaches the pricer through the
-    /// frame's `config` counter — `ShellEvent::ConfigReloaded` never fires
-    /// for a `pricer_views`-only edit.
+    /// Pricer view reloads follow the frame's config revision. An edit confined
+    /// to `pricer_views` does not emit `ShellEvent::ConfigReloaded`.
     #[gpui::test]
     fn a_config_reload_hands_the_pricer_factory_its_views(cx: &mut gpui::TestAppContext) {
         let services = test_shell_services_with_sources(ConfigSources {
@@ -2393,7 +2418,7 @@ role = "key"
         vcx.simulate_keystrokes("k");
         vcx.run_until_parked();
         let cursor = |vcx: &gpui::VisualTestContext| {
-            tile.read_with(vcx, |t, _| t.serialize().get("cursor").cloned())
+            tile.read_with(vcx, |t, cx| t.serialize(cx).get("cursor").cloned())
         };
         let before = cursor(&vcx);
         vcx.simulate_keystrokes("j");
@@ -2563,12 +2588,9 @@ role = "key"
         }
     }
 
-    /// Grid selection spec §5: a mouse-started selection leaves keyboard
-    /// focus on the tile. The click lands on a painted cell through the
-    /// real window, and the `j` after it travels the shell's real keymap
-    /// matcher and focus route — not `BlotterTile::dispatch` — so the
-    /// selection extending proves both that the press kept focus where
-    /// the shell looks for it and that the key reached the blotter.
+    /// A pointer-started selection must retain tile focus. Click a painted
+    /// cell, then type `j` through the shell's keymap and focus routing;
+    /// the resulting extension proves the next key reaches the blotter.
     #[gpui::test]
     fn a_shift_click_selection_keeps_focus_so_a_typed_key_extends_it(
         cx: &mut gpui::TestAppContext,
@@ -2984,10 +3006,9 @@ role = "key"
         (bridge, window, tiles)
     }
 
-    /// At quit every unsaved sheet is saved before the data service stops:
-    /// a line typed a moment ago, its idle timer not yet fired, is in the
-    /// database after the app has gone. The test holds the tile past the
-    /// window's teardown, so only the quit hook can save it.
+    /// A pending sheet save reaches the database before service shutdown when
+    /// submission and storage succeed. Holding the tile past window teardown
+    /// isolates the quit hook from the tile's own close-time flush.
     #[gpui::test]
     fn quitting_saves_every_unsaved_sheet_before_the_data_service_stops(
         cx: &mut gpui::TestAppContext,
@@ -3030,14 +3051,18 @@ role = "key"
         .unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         let handle = DataService::spawn(setup.config, Arc::new(move |e| tx.send(e).is_ok()));
-        assert!(handle.document(geode_core::query::DocumentParams {
-            key: QueryKey(7),
-            tag: 1,
-            submitted: std::time::Instant::now(),
-            dataset: PRICER_SHEETS_DATASET.into(),
-            document_key: vec!["book".into()],
-            as_of: AsOf::Live,
-        }));
+        assert!(
+            handle
+                .document(geode_core::query::DocumentParams {
+                    key: QueryKey(7),
+                    tag: 1,
+                    submitted: std::time::Instant::now(),
+                    dataset: PRICER_SHEETS_DATASET.into(),
+                    document_key: vec!["book".into()],
+                    as_of: AsOf::Live,
+                })
+                .is_ok()
+        );
         let rows = loop {
             if let DataEvent::Query(o) = rx.recv_timeout(Duration::from_secs(30)).unwrap() {
                 break o.snapshot.unwrap().rows();
@@ -3058,8 +3083,8 @@ role = "key"
     fn a_typed_sheet_is_stored_in_duckdb_and_loads_back_in_a_new_tile_and_after_a_restart(
         cx: &mut gpui::TestAppContext,
     ) {
-        // The data service's threads wake the drain from outside the test
-        // scheduler; that is the route under test, not non-determinism.
+        // Allow the test scheduler to wait for mailbox wakeups from the data
+        // service's worker threads.
         cx.executor().allow_parking();
         let dir = tempfile::tempdir().unwrap();
         let sources = || ConfigSources {
@@ -3386,20 +3411,9 @@ role = "key"
             root.view().clone().downcast::<ShellView>().unwrap()
         });
 
-        // A fresh `Workspaces::new()` has no tiles at all yet (its tree
-        // is empty, not a lone placeholder); `open_module` finds nothing
-        // of kind "rec" and falls through to `add_tile`'s "empty region"
-        // branch, which splits the empty tree and hands the new root
-        // tile straight to the factory — no add action or keymap
-        // binding needed, since this calls the method directly rather
-        // than dispatching. `Workspaces::split_active`'s `next_tile`
-        // counter starts at 0 and is pre-incremented, so the very first
-        // tile a fresh workspace ever creates is deterministically
-        // `TileId(1)` (the same assumption every low-level tiling-tree
-        // test in `geode-shell` already makes); `occupant_kind` — the
-        // one tile accessor this crate can actually reach (`current_
-        // tiles` is `pub(super)`) — confirms it rather than trusting it
-        // blindly.
+        // Opening the recording module creates the first tile in the empty
+        // workspace. Its allocated id is 1; verify the occupant before using that
+        // id as the pricing outcome's destination.
         vcx.update(|window, cx| {
             shell.update(cx, |s, cx| {
                 s.open_module("rec", window, cx);
@@ -3546,12 +3560,8 @@ role = "key"
         );
     }
 
-    /// [`test_shell_services`] with the shell's own recording module in
-    /// the roster and one tile of that kind restored into workspace 1.
-    /// `ModuleRoster::default()` holds no factory at all, so the plain
-    /// fixture's shell has nothing a broadcast could reach; this one has
-    /// exactly one live, visible occupant, and hands back the log it
-    /// writes every delivery into.
+    /// Shell services with one visible recording occupant restored into
+    /// workspace 1, plus its delivery log for checking broadcast routing.
     fn test_shell_services_with_a_recording_tile() -> (
         ShellServices,
         Rc<std::cell::RefCell<Vec<geode_shell::module::recording::Recorded>>>,
@@ -3564,8 +3574,7 @@ role = "key"
         roster.register_actions(&mut services.registry);
         services.roster = roster;
 
-        // The one public door onto a workspace holding a tile — the same
-        // route `geode-shell`'s own occupant tests restore through.
+        // Restore the recording occupant through the public session format.
         let mut table = geode_shell::session::to_toml(
             &Workspaces::new(),
             &TileRecords::new(),
@@ -3876,6 +3885,27 @@ role = "key"
     /// Verify the bridge delivers an error so the picker cannot remain loading.
     #[gpui::test]
     fn a_refused_distinct_request_errors_the_picker(cx: &mut gpui::TestAppContext) {
+        assert_eq!(
+            distinct_refused(cx, DataHandle::shutdown),
+            Some(Err("the data service has stopped".to_string())),
+            "a refused request must error the picker, not leave it loading forever"
+        );
+    }
+
+    #[gpui::test]
+    fn a_busy_distinct_request_says_try_again(cx: &mut gpui::TestAppContext) {
+        assert_eq!(
+            distinct_refused(cx, DataHandle::fill_for_tests),
+            Some(Err("the data service is busy — try again".to_string()))
+        );
+    }
+
+    /// The picker's values after a distinct request against a handle that
+    /// `refuse` has made refuse.
+    fn distinct_refused(
+        cx: &mut gpui::TestAppContext,
+        refuse: fn(&DataHandle),
+    ) -> Option<Result<Vec<(String, u64)>, String>> {
         let window = open_test_window(cx, test_shell_services_with_pickable_book());
         let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
         vcx.update(|window, cx| {
@@ -3883,7 +3913,7 @@ role = "key"
         });
 
         let (handle, _rx) = DataHandle::for_tests();
-        handle.shutdown();
+        refuse(&handle);
         let factory = Rc::new(BlotterFactory::new(
             handle.clone(),
             Vec::new(),
@@ -3930,19 +3960,12 @@ role = "key"
         });
         vcx.run_until_parked();
 
-        let values = shell.read_with(&vcx, |s, _| {
+        shell.read_with(&vcx, |s, _| {
             s.picker()
                 .expect("the picker is still open — nothing here closes it")
                 .values
                 .clone()
-        });
-        assert_eq!(
-            values,
-            Some(Err(
-                "the data service is busy or gone — try again".to_string()
-            )),
-            "a refused request must error the picker, not leave it loading forever"
-        );
+        })
     }
 
     /// Reload presentation diagnostics must reach the retained diagnostics model,
@@ -4328,10 +4351,8 @@ role = "key"
                 cx,
             )
         });
-        // Becoming visible watches — the same first `Request::Catalog`
-        // `watch_reaching_the_bridge_drain_requires_the_callers_own_notify`
-        // proves above; drained here so only the as-of-driven second
-        // request is left to observe.
+        // Visibility starts the initial catalog request. Drain it before checking
+        // that subsequent as-of changes submit the current frame value.
         vcx.update(|_window, cx| {
             occupant.content.set_visible(true, cx);
         });
@@ -4861,8 +4882,7 @@ role = "key"
         let bridge =
             cx.update(|cx| start(setup, FindStyle::default(), Duration::from_secs(60), cx));
         assert_eq!(bridge.timeseries.kind(), "timeseries");
-        // The neighbours, so a future edit that swaps one factory for
-        // another is caught here rather than at a painted tile.
+        // Each factory must retain the kind used for roster and session lookup.
         assert_eq!(bridge.factory.kind(), "blotter");
         assert_eq!(bridge.marketdata.kind(), "cvi");
         assert_eq!(bridge.dividend.kind(), "dividend");
@@ -4959,6 +4979,60 @@ role = "key"
                 }),
             }))
             .unwrap();
+    }
+
+    #[gpui::test]
+    fn a_thread_stopped_event_reaches_the_status_segment(cx: &mut gpui::TestAppContext) {
+        let f = catalog_fixture(cx);
+        let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let shell = f.window.root(&mut vcx).unwrap().read_with(&vcx, |r, _| {
+            r.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+        f.events
+            .try_send(DataEvent::ThreadStopped {
+                thread: "geode-ingest".into(),
+                reason: "boom".into(),
+            })
+            .unwrap();
+        vcx.run_until_parked();
+        assert_eq!(
+            diagnostics.read_with(&vcx, |d, _| d.stopped_segment().map(|s| s.text.to_string())),
+            Some("ingest stopped".to_string())
+        );
+    }
+
+    #[gpui::test]
+    fn refused_submissions_reach_the_status_summary(cx: &mut gpui::TestAppContext) {
+        let f = catalog_fixture(cx);
+        let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let shell = f.window.root(&mut vcx).unwrap().read_with(&vcx, |r, _| {
+            r.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+        f.bridge.handle.fill_for_tests();
+        assert_eq!(
+            f.bridge.handle.query(geode_data::QueryParams {
+                key: QueryKey(1),
+                tag: 1,
+                submitted: std::time::Instant::now(),
+                view: "tree".into(),
+                grouping: None,
+                scope: Default::default(),
+                as_of: AsOf::Live,
+                max_depth: 1,
+            }),
+            Err(geode_data::Refusal::Busy)
+        );
+        let refused = f.bridge.handle.dropped_requests();
+        assert!(refused > 0);
+        // Any drained event carries the handle's refusal total with it.
+        f.events.try_send(DataEvent::LoadEnded).unwrap();
+        vcx.run_until_parked();
+        assert_eq!(diagnostics.read_with(&vcx, |d, _| d.refused), refused);
+        assert!(diagnostics.read_with(&vcx, |d, _| {
+            d.summary().contains(&format!("{refused} refused"))
+        }));
     }
 
     #[gpui::test]
@@ -5128,6 +5202,62 @@ role = "key"
             16
         );
         assert!(f.requests.try_recv().is_err());
+    }
+
+    #[gpui::test]
+    fn a_stopped_service_does_not_retry_the_catalog(cx: &mut gpui::TestAppContext) {
+        let f = catalog_fixture(cx);
+        let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let shell = f.window.root(&mut vcx).unwrap().read_with(&vcx, |r, _| {
+            r.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+        f.bridge.handle.shutdown();
+        diagnostics.update(&mut vcx, |d, cx| {
+            d.watch();
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        vcx.executor().advance_clock(CATALOG_RETRY_DELAY * 3);
+        vcx.run_until_parked();
+        assert!(
+            !diagnostics.read_with(&vcx, |d, _| d.pending_catalog_request()),
+            "a stopped service keeps no retry demand; the stopped segment says why"
+        );
+    }
+
+    #[gpui::test]
+    fn a_reload_into_a_stopped_service_is_an_error_diagnostic(cx: &mut gpui::TestAppContext) {
+        let services = test_shell_services_with_sources(ConfigSources {
+            builtin: vec![LayerDoc::builtin("views", "[tree]\ndataset = \"risk\"\n").unwrap()],
+            desk: None,
+            user: None,
+        });
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let (handle, _rx) = DataHandle::for_tests();
+        handle.shutdown();
+        let bridge = test_bridge(handle);
+        cx.update(|cx| attach(&bridge, window, cx));
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        vcx.update(|_, cx| {
+            shell.update(cx, |_, cx| cx.emit(ShellEvent::ConfigReloaded));
+        });
+        vcx.run_until_parked();
+        let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+        assert!(diagnostics.read_with(&vcx, |d, _| {
+            d.data_diagnostics.iter().any(|(_, d)| {
+                d.severity == Severity::Error
+                    && d.message
+                        == "the reloaded views did not reach the data service: \
+                            the data service has stopped"
+            })
+        }));
     }
 
     #[gpui::test]

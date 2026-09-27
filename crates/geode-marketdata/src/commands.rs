@@ -3,7 +3,7 @@
 //!
 //! Vocabulary: `underlying <value>` (`key` is an unlisted alias), `revert`,
 //! `bump <delta> [row|col]`, `rebase`, `upload [target]`, `set <attr> [value...]`,
-//! `auto [hold|rebase|replace]`, and `menu`. Upload arms confirmation rather than
+//! `auto [hold|rebase|replace]`, `menu`, and `autosize [reset]`. Upload arms confirmation rather than
 //! sending immediately. Completion returns candidates for the shell to rank.
 
 use crate::core::UpdatePolicy;
@@ -56,11 +56,16 @@ pub enum Command {
     },
     /// Set the new-document policy, or ask the tile for its current value.
     Auto(Option<UpdatePolicy>),
+    /// Fit every column to its content, or with `reset` return to the
+    /// default widths.
+    Autosize {
+        reset: bool,
+    },
 }
 
 /// Completion verbs in declared order. The parser also accepts `key` as an
 /// alias, but never suggests it. Rebase is offered only when `behind` is true.
-pub(crate) const VERBS: [&str; 8] = [
+pub(crate) const VERBS: [&str; 9] = [
     "underlying",
     "revert",
     "bump",
@@ -69,6 +74,7 @@ pub(crate) const VERBS: [&str; 8] = [
     "set",
     "auto",
     "menu",
+    "autosize",
 ];
 
 /// `auto`'s second word: the three policies, as [`UpdatePolicy::as_str`]
@@ -168,6 +174,17 @@ pub fn parse(line: &str) -> Result<Command, String> {
             Ok(Command::Auto(policy))
         }
         Some("menu") => Ok(Command::Menu),
+        Some("autosize") => {
+            let reset = match words.next() {
+                None => false,
+                Some("reset") => true,
+                Some(_) => return Err("usage: autosize [reset]".to_string()),
+            };
+            if words.next().is_some() {
+                return Err("usage: autosize [reset]".to_string());
+            }
+            Ok(Command::Autosize { reset })
+        }
         Some(other) => Err(format!("unknown command '{other}'")),
         None => Err("empty command".to_string()),
     }
@@ -213,6 +230,7 @@ pub fn completions(
         ["set"] => attrs.to_vec(),
         ["upload"] => targets.to_vec(),
         ["auto"] => policy_words(),
+        ["autosize"] => vec!["reset".to_string()],
         // `bump`'s delta is a number nothing can complete; its axis is a
         // two-word vocabulary.
         ["bump", _] => vec!["row".to_string(), "col".to_string()],
@@ -287,6 +305,21 @@ mod tests {
     }
 
     #[test]
+    fn autosize_parses_an_optional_reset_and_completes_it() {
+        assert_eq!(parse("autosize"), Ok(Command::Autosize { reset: false }));
+        assert_eq!(
+            parse("autosize reset"),
+            Ok(Command::Autosize { reset: true })
+        );
+        assert!(parse("autosize wide").is_err());
+        assert!(parse("autosize reset now").is_err());
+        assert_eq!(
+            completions("autosize ", 9, &[], false, &[], &[]),
+            vec!["reset".to_string()]
+        );
+    }
+
+    #[test]
     fn completions_offer_the_verbs_then_the_catalog_keys() {
         let keys = vec!["NDX.Z".to_string(), "SPX.Z".to_string()];
         assert_eq!(
@@ -298,7 +331,8 @@ mod tests {
                 "upload",
                 "set",
                 "auto",
-                "menu"
+                "menu",
+                "autosize"
             ],
             "rebase is offered only while behind"
         );
@@ -312,7 +346,8 @@ mod tests {
                 "upload",
                 "set",
                 "auto",
-                "menu"
+                "menu",
+                "autosize"
             ]
         );
         assert_eq!(completions("key ", 4, &keys, false, &[], &[]), keys);

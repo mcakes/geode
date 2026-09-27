@@ -1,14 +1,11 @@
-//! Spec §8.4: 500,000 points into 1,600 columns plus the path rebuild —
-//! the two halves of what one cache MISS costs on the UI thread.
+//! Decimation and path rebuilding for 500,000 points across 1,600 columns.
 //!
-//! A hit costs neither: both the decimation and the tessellation sit
-//! behind gpui-component's `PathCache`, so a frame that changed nothing
-//! pays for neither (`geode_chart::rebuilds`). This is the price of the
-//! frame after a pan, a zoom or a delivery, at the widest shape the
-//! spec names: the series cap's 500,000 points across a 1,600-pixel-wide
-//! plot, with a NaN hole every 5,000 points so the polyline breaks.
+//! The fixture includes a NaN gap every 5,000 points. The first benchmark
+//! isolates decimation; the second includes stroke tessellation. These are
+//! parts of a path-cache miss after a pan, zoom or model change; scale and
+//! tick derivation, coordinate conversion and painting are not timed here.
 //!
-//! Medians are recorded in `docs/perf.md` under "Timeseries chart".
+//! Measurement context: `docs/current/performance.md`.
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use geode_chart::core::Point;
@@ -16,9 +13,8 @@ use geode_chart::core::decimate::decimate;
 use gpui::{PathBuilder, point, px};
 use std::hint::black_box;
 
-/// The element's own line build (`element.rs`'s `slot_path`), lifted so
-/// the bench tessellates exactly what a frame does: one stroke path,
-/// a fresh subpath after every break.
+/// Tessellate the decimator's output using the element's `polyline` stroke
+/// convention: one path with a fresh subpath after every break.
 fn build_path(pts: &[Point]) -> Option<gpui::Path<gpui::Pixels>> {
     let mut b = PathBuilder::stroke(px(1.5));
     let mut pen_up = true;

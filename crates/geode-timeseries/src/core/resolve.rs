@@ -1,14 +1,12 @@
-//! Series names against THIS tile's slots: the module's half of the
-//! expression language, and the targets of the `:` commands that take a
-//! series. The parser (`geode_core::series::expr`) knows references as
-//! typed; this turns them into slot numbers. Nothing is sent until every
-//! reference resolves.
+//! Resolve expression references and `:` command targets against loaded
+//! source slots. The shared expression parser retains references as typed;
+//! this module converts each reference to a slot number and refuses the
+//! expression if any reference is missing or ambiguous.
 //!
-//! A name is a source series' label — its identity, `@source` when the
-//! source is not the default — or its identity alone when that is
-//! unambiguous. An expression has no name, so an expression can never
-//! reference another expression, and a name that fits two series is
-//! refused rather than guessed.
+//! An explicit `identity@source` selects an exact pair. A bare identity
+//! prefers the default source, otherwise it must identify one loaded slot.
+//! Duplicate matches are errors, even when their bucket rules differ.
+//! Expressions have no referenceable name and cannot depend on each other.
 
 use geode_core::series::SlotKind;
 use geode_core::series::expr::{self, Expr, RefName};

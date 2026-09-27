@@ -1,10 +1,11 @@
-//! Min-max decimation (spec §8.1; the spike's "lyon's collapse is not
-//! decimation"): the polyline through the output has every column's
-//! extremes, so no spike between two pixels is lost.
+//! Min-max decimation that preserves each pixel column's extremes in input
+//! order. Non-finite values break the polyline, including within a column.
 
 use super::Point;
 
-/// See the module doc. `out` is cleared, never shrunk.
+/// Emit up to two extrema per finite run within each pixel column, with
+/// breaks between runs. `x` must be ordered; only the shared length of `x`
+/// and `y` is read. `out` is cleared without shrinking its capacity.
 pub fn decimate(x: &[f32], y: &[f64], columns: usize, out: &mut Vec<Point>) {
     out.clear();
     let n = x.len().min(y.len());
@@ -13,9 +14,8 @@ pub fn decimate(x: &[f32], y: &[f64], columns: usize, out: &mut Vec<Point>) {
     }
     let last_col = columns - 1;
     let column_of = |px: f32| -> usize {
-        // `px <= 0.0` catches the non-positive columns; `is_nan` catches
-        // the one value `<=`/`>` both answer `false` for (clippy flags
-        // `!(px > 0.0)` on a partially-ordered `f32` — same columns out).
+        // Non-positive and NaN coordinates use the first column; the
+        // remaining coordinates are floored and capped at the last.
         if px <= 0.0 || px.is_nan() {
             0
         } else {

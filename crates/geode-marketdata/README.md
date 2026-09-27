@@ -10,12 +10,12 @@ painted document with its draft and asks for confirmation. Bare `y` submits;
 any other key cancels and is consumed. The frame and painted generation must
 both be live, and the tile allows only one outstanding upload.
 
-Transport success marks an unchanged Editing draft Sent. A later document
-generation — a different source time, or the same time at a different store
-generation — is compared separately: a matching echo clears the draft, while a
-different echo retains it over its base. Switching underlying gives up that
-draft's echo check; an outstanding outcome for another underlying is only a
-notice. Request admission and transport success do not establish publication.
+Transport success marks an unchanged Editing draft Sent. A delivery with a
+different source time, or the same time and a different known generation,
+is checked separately against the sent document: a matching echo clears the
+draft, while a different echo retains it over its base. Switching underlying
+gives up that draft's echo check; an outstanding outcome for another
+underlying is only a notice. Request admission and transport success do not establish publication.
 
 Current behavior and rationale:
 [`docs/current/features.md`](../../docs/current/features.md#market-data-documents).
@@ -25,15 +25,15 @@ Current behavior and rationale:
 | Module | Holds |
 |---|---|
 | `core::spec`, `core::matrix` | Panel vocabulary and prepared grids built from a snapshot plus draft. |
-| `core::draft` | Edits restored/rebased by row and column labels, including same-date group sizes that guard dividend rebases. `DocumentBase` (source time and store generation) is the base a delivery is compared against. |
+| `core::draft` | Typed edits, label-based rebase, same-date group guards, and `DocumentBase` identity (source time plus optional store generation). |
 | `core::upload` | Typed whole-document assembly and row-order-independent echo comparison; minted labels are ignored and floats allow one ULP. |
 | `core::cursor`, `core::menu` | Grid navigation (wrapping, and `step_clamped` for a live selection) and available actions. Numeric nudging and date fields are re-exported from `geode-core` and `geode-widgets`. |
 | `core::bulk` | Selection-wide edit rules: whether a typed value lands in a cell of each kind, one arrow step's delta per column, and the `set`/`stepped` notices that count skips by reason. |
-| `commands` | The `:` line: `:rebase`, `:revert`, `:auto`, `:bump`, `:upload` and the rest, parsed to data. |
+| `commands` | The `:` line: `:rebase`, `:revert`, `:auto`, `:bump`, `:upload`, `:autosize [reset]` and the rest, parsed to data. |
 | `header` | Prepared identity, attributes, draft/upload feedback, source time, shared date-field rendering, and the menu control. |
 | `tile` | `MarketDataTile`: requests one document by key through `DataHandle`, stages under the barrier, owns the cursor, the editor, the draft and the parked drafts per underlying. |
 | `tile::select` | The `V`/`v` grid selection: its state doors, label-anchored resolution, and every verb that takes it as operand (`y`, `d`, `:bump`, the bulk commit, the live step and its undo). |
-| `delegate` | `MatrixDelegate`, the `TableDelegate` over gpui-component's table. |
+| `delegate` | `MatrixDelegate`, the `TableDelegate` over gpui-component's table. Holds `:autosize`'s fitted widths by column label (`__row_axis` for the row labels), which `column()` prefers over the fixed defaults. |
 | `popup` | Action menu, underlying picker, and cell-choice state and rendering. Menu/picker anchor at the header; choices anchor beneath their target cell. |
 | `content` | The `TileContent` wrapper and `MarketDataFactory`, one per `PanelSpec`, plus the module's `ACTIONS` and `DEFAULT_KEYMAP` fragment. |
 
@@ -45,6 +45,14 @@ cargo bench -p geode-marketdata    # matrix model and draft
 ```
 
 ## Rules this crate pins
+
+- `:autosize` and the shell's `tile::autosize_columns` run one method,
+  `MarketDataTile::autosize_columns`, which measures every prepared row.
+  With no document or no rows, a fit refuses with "nothing loaded to fit"
+  and keeps its widths. The widths persist in the session record's
+  `column_widths`. On a later
+  document, a label that is no longer present is ignored and a new column
+  takes the default width. Columns remain non-resizable by drag.
 
 - `MatrixModel::build` refuses holes, repeats, NULL axes and more than one
   value column under `Columns::Axis`. Structural changes rebuild the prepared
@@ -60,6 +68,15 @@ cargo bench -p geode-marketdata    # matrix model and draft
   redelivery or the first usable delivery after a restore. Without the saved
   base snapshot, a restored Behind draft paints the delivered grid while its
   unresolved cell edits remain withheld.
+- `DocumentBase::differs_from` compares source time and, when both are known,
+  store generations. Unknown generations fall back to source time, so they
+  cannot detect a same-time republish. Retaining a base snapshot, capturing
+  its group sizes, and reusing an echo verdict require exact pair equality.
+  Sessions and parked drafts preserve known IDs in `base_generation`.
+- Numeric cells keep their declared type through editing, draft persistence,
+  and upload assembly. Integer parsing avoids a floating-point round trip;
+  integer bumps validate all results before applying any edits and refuse
+  fractional deltas or addition overflow. Bump deltas are parsed as `f64`.
 - `close_popup_with_window` is the one popup closer; it and `close_editor`
   blur only when their own field is focused, and `close_editor` blurs
   before dropping the `InputState`, in that order and both halves.
@@ -85,8 +102,10 @@ cargo bench -p geode-marketdata    # matrix model and draft
   while the cursor is in the attribute strip, all numbers are absolute.
 - Cell editors share the text's alignment: row labels left, values right.
   Text inputs omit their own frame and horizontal padding. Grid date fields
-  use flush segments inside the cursor border; header date fields retain
-  their separate padded frame. Fixed column widths can still constrain dates.
+  use flush segments inside the cursor border. Header attribute editors use
+  the value box's existing frame, preserving its top and height; date fields
+  also preserve its width, while text fields may grow. Fixed column widths
+  can still constrain dates.
 - `LABEL_WIDTH`/`CELL_WIDTH` are not on the rem scale, a known gap:
   `TableDelegate::column` has no window to read a rem from.
 - A panel opened through an add (palette, tile picker, `open_with`,

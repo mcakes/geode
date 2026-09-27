@@ -1,6 +1,5 @@
-//! What the database holds (Phase 4b spec §4.5): `Request::Catalog`'s
-//! implementation, built from the `generations` summary table,
-//! `file_generations`, and DuckDB's own introspection functions.
+//! Build database catalog snapshots from the generation summary, file-load
+//! metadata, and DuckDB introspection. Payload tables are not scanned.
 
 use crate::query::as_of::{AsOf, resolve_generations};
 use crate::store::StoreError;
@@ -10,14 +9,11 @@ use geode_core::query::{CatalogSnapshot, DatasetCatalog, GenerationInfo, Partiti
 use geode_core::schema::{DatasetSpec, SchemaSpec};
 use std::collections::HashMap;
 
-/// What the database holds, as of the moment it is read.
+/// Read dataset history and database usage in one transaction.
 ///
-/// **Runs on the data service thread** (the plan's ruling, not a pool
-/// worker): every query below is catalog-sized — the `generations`
-/// summary table, `file_generations`, and DuckDB's own introspection
-/// functions (`duckdb_tables()`, `pragma_database_size()`,
-/// `duckdb_memory()`) — none of which scans a data table's rows. A
-/// data-table scan here would stall the request loop and is forbidden.
+/// Runs on the data service thread. Reads must remain limited to metadata:
+/// `generations`, `file_generations`, and DuckDB introspection functions.
+/// Scanning payload rows here would stall the service request loop.
 pub fn build_catalog(
     conn: &Connection,
     schema: &SchemaSpec,
@@ -52,9 +48,8 @@ fn build_catalog_with(
         block_size,
         memory_bytes,
         threads,
-        // Filled by `DataService::catalog` from the fetch workers'
-        // answers: nothing about a source's catalogue is in the
-        // database, so this read cannot know it (timeseries spec §5.5).
+        // The service fills source identities from fetch-worker catalog results;
+        // the database does not contain the source's available-identity catalog.
         identities: Vec::new(),
     })
 }
@@ -96,22 +91,13 @@ fn dataset_catalog(
         }
     }
 
-    // Per TABLE, not per grain. A document dataset has no grain at all
-    // (`grains()` is empty for it), so summing over grains reported 0
-    // live and 0 archive rows however many rows the dataset held — the
-    // diagnostics data section painted `0` beside a real list of live
-    // partitions, which reads as "the partitions are empty" rather than
-    // "this counter cannot see them". `table_pairs` is the one place
-    // either family's table set is named (`store::ddl`), the same list
-    // `apply_schema` created and `history_of` resolves over, so this
-    // count cannot drift from what exists.
+    // Count the tables declared by `table_pairs`, including grainless document
+    // datasets. Series use a separate storage layout and are handled below.
     let mut live_rows = 0u64;
     let mut archive_rows = 0u64;
     if ds.is_series() {
-        // A series dataset has no live/archive pair at all (timeseries
-        // spec §4.4), so `table_pairs` is empty for it and the loop
-        // below would report 0 rows however much history it holds. Its
-        // one table is the live side; there is no archive.
+        // Series store their history in one table with no archive partner.
+        // Report that table's estimate as live rows.
         live_rows = sizes
             .get(&crate::store::series::series_table(&ds.name))
             .copied()
@@ -192,29 +178,16 @@ fn partitions_for(conn: &Connection, dataset: &str) -> Result<Vec<PartitionCatal
     Ok(partitions)
 }
 
-/// `gen_id -> (loaded_at, row_count)`, bounded to the generations
-/// `generations` still names for `dataset` — never every row
-/// `file_generations` has ever recorded.
+/// Map retained generation IDs to file load times and row counts.
 ///
-/// `file_generations` is never pruned (`generations` is, by
-/// `retention::sweep`'s reconciliation): one row per file ever loaded,
-/// forever. An unqualified `select … from file_generations where
-/// dataset = ?` is still catalog-*shaped* SQL, but its cost grows with
-/// the database's whole history rather than with what the snapshot can
-/// display, which is what "catalog-sized" is supposed to rule out — on
-/// a multi-year desk this can be orders of magnitude more rows than the
-/// handful of generations any partition actually keeps. The `exists`
-/// join below bounds the read to exactly the generations already
-/// surviving in `partitions_for`'s result, and it survives retention
-/// pruning for free since it reads the swept table as the boundary.
+/// File-load records survive retention. The `exists` join restricts returned
+/// metadata to generations still present in the summary, avoiding materializing
+/// the full load history for a catalog snapshot.
 ///
-/// A legacy database written before the `gen_id` sequence existed can
-/// hold two generations of one partition sharing an id
-/// (`query::as_of::resolve_generations`'s doc comment); on such a
-/// database `out.insert` is last-write-wins over an unordered read, so
-/// this map is not authoritative about *which* of the two a shared
-/// `gen_id` reports `loaded_at`/`file_rows` for. Not worth a query
-/// change — a caller needing that precision should join by `file_id`.
+/// Legacy storage can contain reused generation IDs. This map retains whichever
+/// matching row is read last, so load metadata is ambiguous for those IDs.
+/// Consumers needing exact file identity must resolve the corresponding file
+/// record instead of relying on this generation-keyed map.
 fn file_generations_for(
     conn: &Connection,
     dataset: &str,
@@ -273,18 +246,9 @@ fn table_sizes(conn: &Connection) -> Result<HashMap<String, u64>, StoreError> {
     Ok(out)
 }
 
-/// `(database_bytes, used_blocks, block_size)` from
-/// `pragma_database_size()`.
-///
-/// `pragma_database_size()` returns one row **per attached database**
-/// (its first column, `database_name`, is why) — `query_row` on the raw
-/// three-column select would silently take whichever row DuckDB happens
-/// to return first, with no `where` and no ordering. Geode attaches
-/// exactly one database today, so that was latent, not wrong yet; a
-/// future second `ATTACH` (a read replica, an extension) would have
-/// retargeted the number without changing a single call site. Summing
-/// is stable regardless of how many rows come back, and costs nothing
-/// extra for the one-row case this runs against today.
+/// Database bytes, used blocks and maximum block size across all attached
+/// databases. `pragma_database_size()` returns one row per database, so sums
+/// cover the whole connection instead of selecting an arbitrary database.
 fn database_size(conn: &Connection) -> Result<(u64, u64, u64), StoreError> {
     let sql = "select coalesce(sum(block_size * total_blocks), 0), \
                coalesce(sum(used_blocks), 0), coalesce(max(block_size), 0) \
@@ -413,19 +377,12 @@ grain = "position"
     }
 
     /// BK000: gen 1 archived (2 rows), gen 2 live (3 rows). BK001: gen 3
-    /// live only (2 rows). `generations` and `file_generations` are
-    /// populated directly (not through `publish_file`) so the test
-    /// controls `gen_id`, `source_time`, `loaded_at` and `row_count`
-    /// exactly.
+    /// live only (2 rows). Direct metadata inserts control generation IDs,
+    /// source times, load times and row counts independently.
     ///
-    /// `file_generations`' own `file_id`s (11, 12, 13) are deliberately
-    /// **not** the same as the `gen_id`s (1, 2, 3) they name: review
-    /// round 1 MAJ-1 found that with `file_id == gen_id`, a join keyed
-    /// on the wrong column still happened to line up, and no assertion
-    /// checked the actual `loaded_at`/`file_rows` *values* to notice.
-    /// One more `file_generations` row (file_id 199, gen_id 99) has no
-    /// matching `generations` row at all — an orphan `file_generations`
-    /// never reconciled away, the shape MAJ-2's bound exists for.
+    /// File IDs (11, 12, 13) differ from generation IDs (1, 2, 3), exposing a
+    /// join on the wrong key. File 199 names absent generation 99, so the
+    /// catalog must exclude its orphaned load record.
     fn fixture_with_two_generations() -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
@@ -509,9 +466,8 @@ grain = "position"
             vec![(1, false), (2, true)]
         );
         assert_eq!(bk000.resolved_gen, None, "live: nothing resolved");
-        // By value, not just presence (review round 1 MAJ-1): both
-        // generations, so a join that takes "any row" rather than the
-        // one keyed by this exact `gen_id` cannot pass by accident.
+        // Check both generations' values so joining an arbitrary file-load row
+        // instead of matching the generation cannot pass.
         assert_eq!(
             bk000.generations[0].loaded_at,
             Some(ts("2026-08-01T00:05:00Z")),
@@ -556,22 +512,11 @@ grain = "position"
 
     #[test]
     fn the_row_counts_agree_with_duckdb_by_execution() {
-        // `estimated_size` is an estimate; on a freshly checkpointed
-        // table it equals `count(*)` (verified by execution 2026-09-08).
-        // This only verifies the easy direction: the fixture never
-        // deletes, so it says nothing about `estimated_size` diverging
-        // from `count(*)` after a delete that has not been vacuumed —
-        // exactly what a republish does (`store::publish`'s outgoing
-        // generation is deleted from live before the incoming one is
-        // inserted). That gap is consistent with the field being
-        // documented as an estimate, not a defect this test should
-        // close.
+        // The estimate equals the exact count for this checkpointed fixture,
+        // which performs no deletes. Deletes and republishes may leave estimates
+        // above the surviving row count; this test does not require exactness there.
         let f = fixture_with_two_generations();
-        // Redundant with `fixture_with_two_generations`'s own
-        // up-front checkpoint (kept for this test's own documentation
-        // value: this is the assertion that specifically depends on a
-        // checkpointed table, so it states the precondition itself
-        // rather than relying on the fixture silently having done it).
+        // Checkpoint explicitly: this comparison requires persisted table metadata.
         f.store.writer().execute_batch("checkpoint;").unwrap();
         let snap = build_catalog(f.store.writer(), &f.schema, &AsOf::Live).unwrap();
         let live: i64 = f
@@ -584,18 +529,13 @@ grain = "position"
             )
             .unwrap();
         assert_eq!(snap.datasets[0].live_rows, live as u64);
-        // MIN-1: `archive_rows` had no assertion anywhere and no
-        // harness entry defended it — the fixture's own oracle is the 2
-        // rows inserted into `risk_snapshot_position_archive`.
+        // The fixture inserted two archived rows.
         assert_eq!(snap.datasets[0].archive_rows, 2);
     }
 
-    /// Review round 1 MAJ-2: `file_generations_for` must read only the
-    /// generations `generations` still names, not every row
-    /// `file_generations` has ever accumulated. The fixture's orphan
-    /// row (`gen_id` 99, `file_id` 199) has no matching `generations`
-    /// row; a correct read excludes it, so the map holds exactly the
-    /// three surviving generations, not four.
+    /// File metadata must be limited to retained generations. The orphaned
+    /// file record (generation 99, file 199) is excluded, leaving exactly the
+    /// three generations present in the summary.
     #[test]
     fn file_generations_for_excludes_a_row_whose_generation_no_longer_exists() {
         let f = fixture_with_two_generations();
@@ -614,8 +554,8 @@ grain = "position"
     /// The production shape (`store::publish`'s `generation_summary_insert`):
     /// one file publishes every book it touches under a single `gen_id`
     /// and `source_time`, and `book` can be NULL — a real partition, not
-    /// a missing one (review round 1 MAJ-3). Two batches so a test can
-    /// isolate either half of the `(batch, book)` partition key:
+    /// a missing one. Two batches isolate either half of the `(batch, book)`
+    /// partition key:
     ///
     /// - `EOD/BK000` (2 generations), `EOD/BK001`, and `EOD/NULL` all
     ///   share batch `"EOD"` — comparing `batch` alone collapses these
@@ -625,9 +565,8 @@ grain = "position"
     ///   batch, `"EOD" < "FOLLOWUP"`) — comparing `book` alone collapses
     ///   these two into one partition instead.
     ///
-    /// No live/archive data rows: `partitions_for` and `resolve_
-    /// generations` read only `generations`, so this fixture populates
-    /// nothing else.
+    /// Only summary rows are needed: both `partitions_for` and
+    /// `resolve_generations` read `generations` without scanning payloads.
     fn fixture_one_batch_many_books() -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
@@ -711,12 +650,9 @@ grain = "position"
         assert_eq!(bookless.resolved_gen, Some(2));
     }
 
-    /// Step 6: `partitions_for` already lists one partition per document
-    /// batch with `book: None` (it reads the `generations` summary the
-    /// same way for both families) — this pins that against two real
-    /// documents published through `publish_document`, splitting each
-    /// partition's `batch` back to the key that produced it
-    /// (`geode_core::document::split_key`, `join_key`'s exact inverse).
+    /// Each published document appears as a partition with `book: None`.
+    /// Decode each partition's batch with `split_key` to verify that the catalog
+    /// reports the two original document keys.
     #[test]
     fn a_document_datasets_partitions_split_back_to_their_keys() {
         let dir = tempfile::tempdir().unwrap();
@@ -761,10 +697,8 @@ grain = "position"
         store.writer().execute_batch("checkpoint;").unwrap();
         let snap = build_catalog(store.writer(), &schema, &AsOf::Live).unwrap();
         let ds_catalog = &snap.datasets[0];
-        // Important 1 (final fix wave): the row counts are per table, not
-        // per grain, and a document dataset has no grain — summed over
-        // `grains()` this dataset reported 0 live rows beside two live
-        // partitions. Two keys x six rows, both live, nothing archived.
+        // Document counts come from their tables despite having no grains:
+        // two keys with six live rows each and no archived rows.
         assert_eq!(
             (ds_catalog.live_rows, ds_catalog.archive_rows),
             (12, 0),
@@ -787,11 +721,9 @@ grain = "position"
         );
     }
 
-    /// The series family's catalog rows (timeseries spec §4.6): one per
-    /// `(identity, source)` pair, the hull of its fetched spans, and a
-    /// `live_rows` that comes from the series table — a series dataset
-    /// has no live/archive pair, so the `table_pairs` loop alone would
-    /// report 0 rows beside a real list of pairs.
+    /// Series catalog entries group coverage by `(identity, source)` and
+    /// report the hull of fetched spans. Row estimates come from the series
+    /// table even though the dataset has no live/archive table pair.
     #[test]
     fn a_series_datasets_catalog_lists_its_pairs_from_coverage() {
         use crate::store::ddl::tests_support::{series_dataset, series_rows};

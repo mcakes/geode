@@ -320,10 +320,8 @@ pub fn forget_document(store: &Store, ds: &DatasetSpec, batch: &str) -> Result<u
     Ok(deleted)
 }
 
-/// How many generations (live and archived) the generation summary holds for
-/// one document. A small indexed-by-nothing read of the summary table, not of
-/// payload rows — what lets a local save decide whether it crossed the
-/// retention bound without sweeping.
+/// Count a document's live and archived generations from the summary table.
+/// Local publication uses this metadata-only read to check its retention bound.
 pub fn document_generation_count(
     store: &Store,
     ds: &DatasetSpec,
@@ -387,12 +385,9 @@ fn value(v: &Value) -> duckdb::types::Value {
     }
 }
 
-/// DuckDB's `DATE` is days since the epoch (`duckdb_date { days }`), which
-/// `duckdb::types::Value::Date32` binds directly through the appender.
-/// Staging a date as text and casting in the publish insert is the
-/// alternative, and it is worse: `publish_file` moves staged rows with
-/// `select *`, so a cast would force it to project column by column for
-/// one family only.
+/// Convert a cell to the DuckDB appender's owned value. Dates bind as epoch-day
+/// `Date32` values, preserving the declared DATE type without requiring a cast
+/// in the positional `select *` publication statement.
 fn days_since_epoch(d: chrono::NaiveDate) -> i32 {
     (d - chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("1970-01-01 is a date")).num_days()
         as i32

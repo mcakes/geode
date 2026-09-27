@@ -126,7 +126,9 @@ impl ShellView {
     /// Capture the selected item, close and restore focus, then dispatch it.
     /// Keyboard Enter and row clicks share this route so actions opening another
     /// overlay start after the palette is gone. Empty results simply close. Over
-    /// a dialog stack the action runs behind it and the top dialog keeps focus.
+    /// a dialog stack, dialog actions may push another entry; other actions run
+    /// behind it and restore focus to the top dialog. Tile command-line, find,
+    /// and stack-list actions refuse while a dialog remains open.
     pub(super) fn commit_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let selected = self.palette.as_ref().and_then(PaletteState::selected_item);
         self.close_palette(window, cx);

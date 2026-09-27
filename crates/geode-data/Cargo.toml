@@ -13,41 +13,26 @@ test-support = []
 [dependencies]
 geode-core.workspace = true
 chrono = "0.4.42"
-# `bundled` compiles DuckDB from C++ source: a multi-minute first build,
-# cached thereafter, but with no system-install dependency (spec §9.4).
-# `chrono` because duckdb-rs has ToSql/FromSql impls for chrono only.
+# Build DuckDB from bundled C++ sources without requiring a system install.
+# The chrono feature enables timestamp conversions at the SQL boundary.
 duckdb = { version = "1.10505.0", features = ["bundled", "chrono"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.151"
 glob = "0.3.3"
-# Phase 4b Task 2: publish/health/poll events emit through this rather
-# than the crate staying silent (it had no `eprintln!` before this task).
+# Emit publication, health, polling, and worker diagnostics.
 tracing.workspace = true
 
 [dev-dependencies]
-# Test-feature parity (2026-09-19): same reasoning as geode-shell's self
-# dev-dependency — geode-app's and the modules' dev-dependencies enable
-# this crate's `test-support`, so `-p geode-data` and `--workspace` must
-# resolve the same geode-data.
+# Match the test-support feature used by downstream consumers so crate-only
+# and workspace tests share the same geode-data feature configuration.
 geode-data = { path = ".", features = ["test-support"] }
-# Test-feature parity (2026-09-19): `cargo test --workspace` resolves
-# geode-core WITH `test-support` (geode-shell's dev-dependencies turn it
-# on, and cargo unifies features across every member it builds together),
-# so a `cargo test -p` of this crate alone must ask for the same thing or
-# it builds a second geode-core — and everything above it — that differs
-# only in that feature. One artifact per crate per profile is the rule;
-# `cargo tree -p <member> -i geode-core --format '{p} [{f}]'` must agree
-# with `cargo tree --workspace` for every member.
+# Use geode-core's fixture API and match its workspace-test features.
 geode-core = { workspace = true, features = ["test-support"] }
 criterion = "0.8.2"
 geode-demo-data = { path = "../geode-demo-data" }
 tempfile = "3.27.0"
 proptest = "1"
-# Phase 4b Task 2 fix round 1 (MAJ-1): a scoped `tracing_subscriber::
-# registry().with(RingLayer::new(...))` default dispatcher is how
-# `log_health_event`'s test proves what level actually lands in the ring
-# — geode-core's own `Ring`/`RingLayer` are ordinary (non-test-support)
-# public items, so only the subscriber machinery itself is dev-only here.
+# Capture emitted log levels through a scoped subscriber in health tests.
 tracing-subscriber.workspace = true
 
 [[bench]]

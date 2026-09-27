@@ -140,6 +140,7 @@ fn fetch_panic_delivers_a_failure_outcome() {
         Arc::new(move |outcome| {
             tx.send(outcome).unwrap();
         }),
+        crate::supervise::unwatched(),
     )
     .unwrap();
     assert!(worker.request(FetchWork::Span {

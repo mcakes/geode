@@ -1,7 +1,7 @@
-//! The tile's pure state (spec §9.2). Every verb returns a [`Changed`]
-//! bitset so the tile knows what to do next — fetch, requery, repaint,
-//! persist — and the tests can assert it. The key table and the `:`
-//! line are two front ends over these methods.
+//! Tile state for slots, query settings, selection, and viewport bounds.
+//! Model operations report [`Changed`] flags for the tile to fetch, requery,
+//! rebuild presentation, or persist. Keyboard, pointer, and `:` routes share
+//! these operations; the model itself performs no I/O.
 
 use std::ops::{BitOr, BitOrAssign};
 
@@ -25,8 +25,9 @@ pub const ZOOM_FACTOR: f64 = 1.25;
 pub const DEFAULT_BINS: u32 = 40;
 pub const DEFAULT_PERCENTILES: [f64; 3] = [0.05, 0.5, 0.95];
 
-/// What a verb changed: the QUERY (requery), a FETCH (the range moved),
-/// the CHROME (repaint, rebuild the chart model), the SESSION (persist).
+/// Work required after a model operation: query cached data, fetch source
+/// data, refresh presentation, or persist session settings. Flags combine
+/// when an operation affects more than one of these.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Changed(u8);
 
@@ -191,8 +192,8 @@ impl Model {
     pub fn slots(&self) -> &[Slot] {
         &self.slots
     }
-    /// For `session::from_table`, to clear a restored slot's state
-    /// (§9.11: slot state is not persisted).
+    /// Access for session restoration to reset transient slot states.
+    /// Failed legacy slots retain their rewrite errors.
     pub(crate) fn slots_mut(&mut self) -> &mut [Slot] {
         &mut self.slots
     }
@@ -253,7 +254,8 @@ impl Model {
         self.source_slots()
             .any(|(_, s, i)| s == source && i == identity)
     }
-    /// `1y · 1d` or `2025-01-01 → 2026-09-19 · 1h` (§9.3).
+    /// Range and frequency for the header, such as `1y · 1d` or
+    /// `2025-01-01 → 2026-09-19 · 1h`.
     pub fn header_text(&self) -> String {
         format!("{} · {}", self.range.label(), self.frequency.as_str())
     }
@@ -439,10 +441,9 @@ impl Model {
         })
     }
 
-    /// A cleared tile is a fresh tile, numbering included: no slot
-    /// remains for slot 1 to collide with, and `take_number`'s own
-    /// exhaustion message ("`:clear` starts again") is only true
-    /// because of this line.
+    /// Remove every slot and release the dataset, restarting slot numbering.
+    /// Range, display settings, and viewport bounds remain unchanged. With no
+    /// remaining expressions, reusing slot numbers cannot retarget an operand.
     pub fn clear(&mut self) -> Changed {
         self.slots.clear();
         self.cursor = None;
@@ -477,9 +478,8 @@ impl Model {
         }
         changed
     }
-    /// By slot number rather than by cursor, which is what the
-    /// session restore needs: it replays a recorded `visible` onto a
-    /// slot it has just added, with no cursor anywhere near it.
+    /// Set visibility by stable slot number, independently of selection.
+    /// Showing a slot may disable density if it exceeds the quad budget.
     pub fn set_visible(&mut self, number: u8, visible: bool) -> Result<Changed, String> {
         let i = self.index_of(number).ok_or_else(Self::gone)?;
         self.slots[i].visible = visible;
@@ -689,9 +689,8 @@ impl Model {
             )
         })
     }
-    /// After an add or a show: density turns OFF, with a notice, when the
-    /// visible slots at the current bin count would overrun the chart's
-    /// per-frame quad bound (§8.5: "Part 4 owns the slot count").
+    /// Disable density with a notice when adding or showing a slot would
+    /// exceed the chart's per-paint quad bound at the current bin count.
     fn enforce_density_budget(&mut self) -> Changed {
         let Some(bins) = self.density else {
             return Changed::NONE;
@@ -821,9 +820,7 @@ impl Model {
     }
 }
 
-/// `2_000` → `"2,000"`. `geode_core::series::group_thousands` and
-/// `geode_core::format::group_thousands` are both private, and neither is
-/// worth exporting for one message.
+/// Format the density bar limit with thousands separators: `2_000` → `"2,000"`.
 fn thousands(n: usize) -> String {
     let s = n.to_string();
     let mut out = String::with_capacity(s.len() + s.len() / 3);
@@ -892,7 +889,7 @@ mod tests {
             "each new slot takes the next palette colour"
         );
         assert_eq!(m.cursor(), Some(1));
-        // The same pair twice is legitimate (§9.6: a second rule).
+        // Duplicate source pairs can carry different bucket rules.
         assert_eq!(m.add_source("VIX", "demo_kdb", "series").unwrap().0, 3);
         assert!(m.holds_pair("demo_kdb", "VIX"));
         assert!(!m.holds_pair("demo_rest", "VIX"));
@@ -1018,9 +1015,8 @@ mod tests {
         );
         assert_eq!(m.frequency(), Frequency::H1, "asking writes nothing");
         m.set_frequency(Frequency::W1, now(), &AsOf::Live).unwrap();
-        // (Controller ruling 4) both source slots are Fetching from
-        // add_source already; drop to Idle so the assertion below is
-        // meaningful, then check set_range puts them back.
+        // Start both source slots Idle so the assertion proves that a
+        // range change marks them Fetching again.
         m.set_pair_state("demo_kdb", "SPX.close", SlotState::Idle);
         m.set_pair_state("demo_kdb", "VIX", SlotState::Idle);
         let ch = m

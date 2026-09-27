@@ -7,20 +7,16 @@ publish.workspace = true
 [lib]
 bench = false
 
-# Shared widgets: a pure core per widget plus a colour-parameterised gpui
-# painter (as-of dialog spec 2026-09-20 §4). Below the shell on purpose —
-# `geode-shell` and every module depend on this crate, never the reverse —
-# so two hosts paint one widget through one door and cannot drift.
+# Reusable widget state and host-styled GPUI painters. Shell and feature crates
+# share these controls without depending on one another.
 [dependencies]
-# The layering anchor: a widget that needs the shared vocabulary (a
-# `Clock`, a colour) reaches it here, never through the shell.
+# Shared application vocabulary comes from core, never from a widget's host.
 geode-core.workspace = true
 gpui.workspace = true
 gpui-component.workspace = true
 chrono = "0.4.42"
 
 [dev-dependencies]
-# Test-feature parity (2026-09-19): match the workspace's `geode-*`
-# features so `cargo test -p geode-widgets` shares the workspace graph.
+# Match the workspace test features so crate-local tests share its dependency graph.
 geode-core = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }

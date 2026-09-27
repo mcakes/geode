@@ -1,15 +1,18 @@
-//! The pricing worker (line-pricer spec §5.3): one thread, its own
-//! queue, separate from the DuckDB query pool.
+//! One pricing thread with its own queue, independent of the DuckDB read pool.
 //!
-//! Rules, each pinned by a test below:
-//! * latest wins per key — a queued batch for a key is replaced by a
-//!   newer one in place; a batch arriving while its key is running queues
-//!   behind it;
-//! * cancel by key drops the queued batch and stops a running one at the
-//!   next line boundary, delivering the lines already priced;
-//! * every `price` call runs under `catch_unwind` + `panic::contained`,
-//!   so a panic is one line's error and the worker keeps going;
-//! * no pricer configured answers every line with the configured name.
+//! At most [`PRICE_BOUND`] distinct keys can wait. A newer queued batch replaces
+//! that key's pending batch in place. Submitting while the same key runs queues
+//! another batch; it does not cancel the running one.
+//!
+//! Cancellation removes queued work and stops a running batch at the next line
+//! boundary, returning any lines already processed. Overrides are set once per
+//! batch; failure makes each processed line an error. Individual pricing panics
+//! become line errors and leave the worker available. An unavailable pricer
+//! returns the configured missing-pricer reason for each processed line.
+//!
+//! A refused sink delivery logs once and does not stop the worker. Shutdown
+//! cancels running work at a line boundary and drops queued work; it joins the
+//! thread, so a blocked pricer can delay shutdown.
 
 use super::PricerConfig;
 use geode_core::pricing::{PriceOutcome, PriceParams};
@@ -38,14 +41,18 @@ pub struct PricingWorker {
 }
 
 impl PricingWorker {
-    pub fn spawn(config: PricerConfig, sink: PriceSink) -> PricingWorker {
+    pub fn spawn(
+        config: PricerConfig,
+        sink: PriceSink,
+        stop: crate::service::EventSink,
+    ) -> PricingWorker {
         let queue: Arc<(Mutex<Queue>, Condvar)> = Arc::default();
         let thread = {
             let queue = Arc::clone(&queue);
-            std::thread::Builder::new()
-                .name("geode-pricing".into())
-                .spawn(move || run(queue, config, sink))
-                .expect("spawn the pricing worker")
+            crate::supervise::spawn_supervised("geode-pricing".to_string(), stop, move || {
+                run(queue, config, sink)
+            })
+            .expect("spawn the pricing worker")
         };
         PricingWorker {
             queue,
@@ -137,9 +144,8 @@ fn run(queue: Arc<(Mutex<Queue>, Condvar)>, config: PricerConfig, sink: PriceSin
         let started = std::time::Instant::now();
         let mut results = Vec::with_capacity(params.lines.len());
         let mut failures = 0usize;
-        // Spec §5.3 "Overrides once per batch": a refusal or a panic here
-        // fails the whole batch — a line priced against the wrong data
-        // source is worse than no price.
+        // Apply overrides once per batch. If refused or panicking, price no lines
+        // against the wrong inputs; report the failure for each processed line.
         let overrides_failed: Option<String> = match &config.pricer {
             None => None,
             Some(pricer) => {
@@ -345,6 +351,7 @@ pub(crate) mod tests {
                 overrides_seen: Default::default(),
             })),
             sink,
+            crate::supervise::unwatched(),
         );
         (w, asked, rx)
     }
@@ -492,7 +499,11 @@ pub(crate) mod tests {
     fn no_pricer_answers_every_line_with_the_configured_name() {
         let (tx, rx) = channel();
         let sink: PriceSink = Arc::new(move |o| tx.send(o).is_ok());
-        let w = PricingWorker::spawn(PricerConfig::missing("vendor"), sink);
+        let w = PricingWorker::spawn(
+            PricerConfig::missing("vendor"),
+            sink,
+            crate::supervise::unwatched(),
+        );
         assert!(w.request(params(4, 1, &["SPX", "NDX"])));
         let o = next(&rx);
         for (_, _, r) in &o.results {
@@ -537,6 +548,7 @@ pub(crate) mod tests {
                 overrides_seen: seen.clone(),
             })),
             sink,
+            crate::supervise::unwatched(),
         );
         let mut o = MarketOverrides::default();
         o.spot.insert("SPX".into(), 5000.0);
@@ -568,6 +580,7 @@ pub(crate) mod tests {
                 overrides_seen: Default::default(),
             })),
             sink,
+            crate::supervise::unwatched(),
         );
         let mut bad = MarketOverrides::default();
         bad.spot.insert("REFUSE".into(), 1.0);
@@ -604,6 +617,7 @@ pub(crate) mod tests {
                 overrides_seen: Default::default(),
             })),
             sink,
+            crate::supervise::unwatched(),
         );
         let mut boom = MarketOverrides::default();
         boom.spot.insert("BOOM".into(), 1.0);
@@ -628,6 +642,18 @@ pub(crate) mod tests {
             "the worker is still alive"
         );
         assert!(next(&rx).results[0].2.is_ok());
+        w.shutdown();
+    }
+
+    #[test]
+    fn a_pricing_worker_that_dies_is_declared() {
+        let (stop, stops) = crate::supervise::tests_support::recording();
+        let sink: PriceSink = Arc::new(|_| panic!("the price sink fell over"));
+        let w = PricingWorker::spawn(PricerConfig::missing("vendor"), sink, stop);
+        assert!(w.request(params(1, 1, &["SPX"])));
+        let (thread, reason) = crate::supervise::tests_support::next_stop(&stops);
+        assert_eq!(thread, "geode-pricing");
+        assert!(reason.contains("the price sink fell over"), "{reason}");
         w.shutdown();
     }
 }

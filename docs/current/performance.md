@@ -76,9 +76,9 @@ the measurement log for fixture and hardware details.
 | Market-data pivot build | 20 × 30 CVI grid | 285 µs |
 | Market-data flat build | 10,000 × five values | 8.18 ms |
 | Market-data cell patch | 10,000 × five values | 116 ns |
-| Line-pricer sheet shift + undo | 1,000 rows | 1.52 ms |
-| Line-pricer single cell edit + undo | 1,000 rows | 6.66 µs |
-| Line-pricer grid build | 1,000 rows, every package open | 1.85 ms |
+| Line-pricer sheet shift + undo | 1,000 entries / 1,200 sheet rows | 1.52 ms |
+| Line-pricer single cell edit + undo | 1,000 entries / 1,200 sheet rows | 6.66 µs |
+| Line-pricer grid build | 1,000 entries / 1,200 sheet rows, every package open, each package row's `/`-joined leg values | 1.42 ms |
 | Scope expression suggestion refresh | 20,000 cached values, ranked and capped at 50 | 6.82 ms |
 
 The flat 10,000-row market-data build sits at the UI budget boundary. Ordinary
@@ -91,13 +91,16 @@ changes still rebuild.
   `render_td`.
 - A market-data delivery or structural edit builds a `MatrixModel`; an
   ordinary cell commit patches it.
-- `ChartKey` contains everything timeseries chart preparation reads. Cursor,
-  fetch-state, and visibility changes do not copy the value vectors.
+- `ChartKey` contains everything timeseries chart preparation reads. Cursor
+  movement and fetch-state changes reuse value vectors. Per-slot visibility
+  changes rebuild the model; theme and named-color changes can trigger that
+  rebuild during render.
 - Chart data paths and chrome are cached. A view move invalidates geometry but
   does not rebuild the module's data model.
-- Chart decimation reuses buffers. GPUI path submission still clones the
-  decimated path, and component axis painters allocate small tick vectors.
-- Density bars are uncached but capped at 2,000 quads per frame.
+- Chart decimation reuses buffers and retains up to two extrema per finite
+  run in each pixel column. Gaps can increase output beyond two points per
+  column. Warm paints still allocate for path submission, labels, and tooltips.
+- Density bars are uncached but capped at 2,000 quads per chart paint.
 - A timeseries view move keeps at most one statistics request in flight and
   asks for the latest window when it answers, so statistics refresh at the
   query's own rate during a pan rather than being interrupted by each event.

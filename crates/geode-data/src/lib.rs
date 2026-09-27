@@ -14,9 +14,10 @@ pub mod query;
 pub mod service;
 pub mod source;
 pub mod store;
+pub mod supervise;
 
 pub use egress::{UploadOutcome, UploadParams};
-pub use handle::{DataHandle, REQUEST_BOUND, Request};
+pub use handle::{DataHandle, REQUEST_BOUND, Refusal, Request};
 pub use pricing::{PricerConfig, PricerRegistry};
 pub use service::{
     DataEvent, DataService, DataServiceConfig, EventSink, FetchParams, LocalForget, QueryParams,

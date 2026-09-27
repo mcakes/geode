@@ -1,8 +1,7 @@
-//! The one mutation door (line-pricer spec §6.2): every change to a
-//! sheet is an [`Edit`], `apply` answers the inverse as an [`Undo`], and
-//! decides which lines are re-requested by comparing `Sheet::request`
-//! before and after (spec §9.3). Undo of a removal reinstates ids and
-//! results (a `Restore`), so it requests nothing.
+//! Row edits and their inverses. [`Sheet::apply`] compares affected line requests
+//! before and after an edit, increments changed revisions, and folds packages. Spot
+//! overrides are carried separately in pricing parameters and explicitly stale their
+//! affected lines. Restoring removed rows preserves their identities and pricing state.
 
 use crate::core::sheet::{LineId, LineSpec, OwnShifts, Place, RowKind, RowRecord, RowSpec, Sheet};
 use crate::core::template::Template;
@@ -11,7 +10,7 @@ use std::fmt;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Edit {
-    /// A line, or a package with its legs, or several roots (decision 1).
+    /// A line, or a package with its legs, or several roots.
     Insert {
         place: Place,
         rows: Vec<RowSpec>,
@@ -20,9 +19,8 @@ pub enum Edit {
     Remove {
         at: usize,
     },
-    /// The inverse of `Remove`: rows back with their ids, results and
-    /// states (decision 3). A caller other than `undo` has no reason to
-    /// build one.
+    /// Restore row records with their identities and pricing state. Used by undo and by
+    /// document loading, which validates and seeds records before applying them.
     Restore {
         at: usize,
         rows: Vec<RowRecord>,
@@ -56,7 +54,7 @@ pub enum Edit {
         row: usize,
     },
     SetSheetShift(OwnShifts),
-    /// `None` clears (spec ruling 1).
+    /// `None` clears.
     SetSpotOverride {
         underlying: String,
         level: Option<f64>,
@@ -76,7 +74,7 @@ pub enum EditError {
     NotALine(usize),
     /// A `Place::Root { at }` inside a package's leg run.
     NotARootBoundary(usize),
-    /// A package spec at a leg place: depth is at most two (ruling 5).
+    /// A package cannot be inserted as another package's leg.
     PackageInsidePackage,
     LegOutOfRange {
         package: usize,
@@ -91,7 +89,7 @@ pub enum EditError {
 }
 
 impl fmt::Display for EditError {
-    /// The footer's text (spec §6.2, §8.3).
+    /// The footer's text.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             EditError::NoSuchRow(r) => write!(f, "no row {r}"),
@@ -115,9 +113,9 @@ impl fmt::Display for EditError {
 }
 
 impl Sheet {
-    /// The one door (spec §6.2). Bumps `revision` and sets `Stale` on
-    /// every line whose `request()` changed (spec §9.3), folds packages,
-    /// and answers the inverse. On an error nothing has changed.
+    /// Apply a row edit and return its inverse. Increment the revision and mark stale
+    /// each line whose request changed; spot override edits explicitly touch matching
+    /// lines. Fold packages after success. A refused edit leaves the sheet unchanged.
     pub fn apply(&mut self, edit: Edit) -> Result<Undo, EditError> {
         let touched = self.touched_by(&edit);
         let before: Vec<(LineId, Option<PriceRequest>)> = touched
@@ -136,10 +134,9 @@ impl Sheet {
         Ok(undo)
     }
 
-    /// The lines whose request an edit CAN change, by id (so the compare
-    /// survives the edit moving rows). `SetSpotOverride` is not here: its
-    /// request is unchanged by design (§9.3) and `apply_inner` stales
-    /// its lines explicitly (decision 4).
+    /// IDs whose requests may change, retained across row movement for the before/after
+    /// comparison. `SetSpotOverride` carries data in batch parameters, so `apply_inner`
+    /// touches matching lines explicitly.
     fn touched_by(&self, edit: &Edit) -> Vec<LineId> {
         match edit {
             Edit::SetInstrument { row, .. } | Edit::SetShift { row, .. } => (*row < self.len())
@@ -235,9 +232,9 @@ impl Sheet {
                             self.overrides.spot.remove(&key);
                         }
                     }
-                    // The request is unchanged by design (§9.3: overrides
-                    // ride in `PriceParams`), so the compare in `apply`
-                    // cannot see this; stale the lines explicitly.
+                    // Overrides travel in `PriceParams`, outside each line's request.
+                    // Touch matching lines explicitly so revision checks reject answers
+                    // priced with an old override.
                     for row in 0..self.len() {
                         if self.is_line(row)
                             && self.instrument(row).is_some_and(|i| i.underlying() == key)
@@ -358,12 +355,10 @@ impl Sheet {
         })
     }
 
-    /// Each record's `state` and `revision` are TRUSTED: they are
-    /// reinstated as stored, which is what makes undo of a removal
-    /// re-request nothing. That is safe only under Part 3's strictly
-    /// LIFO undo stack — a `Restore` replayed after an intervening
-    /// request-changing edit would paint a stale result as `Fresh` at a
-    /// revision the sheet has moved past.
+    /// Restore trusts each record's structure, state, and revision. Undo supplies
+    /// records from a strictly LIFO history; document loading validates records and
+    /// initializes them stale. Replaying saved results after an unrelated request
+    /// change could incorrectly mark an old price fresh.
     fn restore(&mut self, at: usize, rows: Vec<RowRecord>) -> Result<Undo, EditError> {
         if rows.is_empty() {
             return Err(EditError::EmptyInsert);
@@ -374,7 +369,8 @@ impl Sheet {
         if let Some(rec) = rows.iter().find(|r| self.has_id(r.id)) {
             return Err(EditError::IdInUse(rec.id));
         }
-        // Every leg's parent must be a package in the sheet or in this batch.
+        // Refuse missing parent IDs. Callers supply valid package/leg ordering;
+        // `reindex_parents` derives the actual parent from that order.
         for rec in &rows {
             if let Some(pid) = rec.parent
                 && !self.has_id(pid)
@@ -520,7 +516,7 @@ impl Sheet {
         for r in legs {
             self.set_leg_marker(r, false);
         }
-        // An empty package (planning decision 8) has no legs to re-group:
+        // An empty package has no legs to re-group:
         // `group` refuses `count == 0` (`EmptyInsert`), so `Group` cannot
         // be its inverse. Restore the package's own row instead — a
         // plain `Restore` whose own inverse, `Remove { at: row }`,
@@ -659,7 +655,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(s.revision(0), 2);
-        // Undo restores the old instrument, which IS a request change: re-requested (spec §9.3).
+        // Undo restores the old instrument, which IS a request change: re-requested.
         for e in undo.inverse {
             s.apply(e).unwrap();
         }
@@ -700,7 +696,7 @@ mod tests {
         assert_eq!(s.revision(0), 1);
         assert_eq!(s.state(0), &LineState::Fresh);
         assert_eq!(undo.inverse, vec![Edit::SetQty { row: 0, qty: 1 }]);
-        // A leg's qty re-sums the package at once (a 1×2 ratio, spec §6.4).
+        // A leg's qty re-sums the package at once (a 1×2 ratio).
         s.apply(Edit::SetQty { row: 3, qty: -2 }).unwrap();
         assert_eq!(s.result(1).unwrap().price, 10.0 - 20.0);
         assert_eq!(s.state(1), &LineState::Fresh);
@@ -1229,7 +1225,7 @@ mod tests {
         assert_eq!(redo.inverse, vec![Edit::Remove { at: 1 }]);
     }
 
-    /// Spec §12: `apply` then its `Undo` is identity for every `Edit`.
+    /// Each edit and its inverse restore row contents; request changes still advance revisions.
     #[test]
     fn apply_then_undo_is_identity_for_every_edit() {
         fn fixture() -> Sheet {
@@ -1254,7 +1250,7 @@ mod tests {
             for r in [0, 2, 3, 4, 5] {
                 s.deliver(s.id(r), 2, Ok(result(r as f64)), at(10 + r as i64));
             }
-            // An empty package (decision 8), at row 6: push one more
+            // An empty package, at row 6: push one more
             // callspread then remove both its legs, leaving the package
             // row with no children.
             push(&mut s, vec![callspread(1)]);

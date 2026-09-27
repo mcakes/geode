@@ -33,8 +33,10 @@ over fetched series, and both priority over queued files; it finishes a file
 already in flight before taking another job. This puts trader-requested work
 ahead of background discovery without attempting concurrent writes.
 
-Ordinary requests use a bounded channel. `DataHandle` returns `false` when
-submission was refused; callers must handle that rather than wait for a reply.
+Ordinary requests use a bounded channel. `DataHandle` returns `Err(Refusal)`
+when submission was refused — `Busy` for a full queue, `Stopped` once the
+request loop has ended — and callers must handle that rather than wait for a
+reply.
 Acceptance is not completion: startup failure, cancellation, and supersession
 can leave an admitted request without an individual outcome. View replacements
 use a separate latest-value mailbox. The app's event sink must not wait for
@@ -48,7 +50,7 @@ The ingestion boundaries have different capacity and replacement rules:
 
 | Boundary | Accepted work and refusal |
 |---|---|
-| `DataHandle` request channel | Bounded; `try_send` refuses without waiting when full or disconnected. |
+| `DataHandle` request channel | Bounded; `try_send` refuses `Busy` without waiting when full, and `Stopped` when the request loop has ended or admission is closed. |
 | Adapter message sink | Bounded; refused messages are counted and dropped. |
 | Subscription coalescer | One pending document per key; newer documents replace it without moving its release deadline. Already submitted jobs are unaffected. |
 | Fetch worker | Up to 64 waiting requests per source; a refused fetch is reported as an outcome. |
@@ -92,6 +94,113 @@ panic containment does not cancel them. See
 [`runner.rs`](../../crates/geode-data/src/ingest/runner.rs),
 [`subscribe.rs`](../../crates/geode-data/src/ingest/subscribe.rs), and
 [`fetch.rs`](../../crates/geode-data/src/ingest/fetch.rs).
+
+## Containment and liveness
+
+No contained panic in the data layer ends as only a log line: a panicking
+request is answered, a dying thread is declared, and a refused submission says
+whether a retry can succeed.
+
+### Supervised threads
+
+Every long-lived data thread is spawned through
+[`supervise::spawn_supervised`](../../crates/geode-data/src/supervise.rs): the
+request loop (`geode-data`), the ingest writer (`geode-ingest`), discovery
+(`geode-discovery`), each read-pool worker (`geode-query-N`), pricing
+(`geode-pricing`), and one thread per fetch source (`geode-fetch-<source>`),
+subscribed source (`geode-subscribe-<source>`), and egress target
+(`geode-egress-<target>`). A body that unwinds past every containment boundary
+emits one `DataEvent::ThreadStopped { thread, reason }` carrying the panic
+payload, logs an error, and ends. Nothing restarts it, because a panic that
+repeats on every request would otherwise crash-loop. The body runs outside the
+`contained` marker, so the app's panic hook still writes a crash file for it. A
+body that returns — a deliberate shutdown — declares nothing.
+
+A request loop that fails to open emits `ThreadStopped` for `geode-data`
+(reason `data service failed to open: <error>`) beside its error diagnostic,
+although nothing unwound. The app mailbox keys `ThreadStopped` by thread, so
+two threads stopping before one UI drain are both delivered. The status bar
+shows every stopped thread until the app restarts; see
+[stopped threads and refusals](shell.md#stopped-threads-and-refusals).
+
+### The request loop
+
+The loop contains each request's arm, and the view-replacement step, in its
+own boundary. A panicking request is answered exactly once, with the error
+`<kind> request panicked: <payload>`, through the route that answers its
+success, and the loop goes on to the next request:
+
+| Request | Answer to a panic |
+|---|---|
+| Query, document | `Query` error for its key and tag |
+| Distinct values | `Distinct` error for its key, tag, and column |
+| Series | `Series` error for its key and tag |
+| Catalog | `Catalog` error for its key and tag |
+| Pricing | `Price` outcome with the error on every submitted line |
+| Upload | `Upload` error for its key, tag, and target |
+| History fetch | The pair's load lane reports `Failed`, then `SeriesFetched` carries the error |
+| Local publish | Error diagnostic and `LocalPublishFailed` |
+| Local forget | Error diagnostic and `ForgetFailed` |
+| Identity refresh, cancellation | One error diagnostic |
+
+A panicking view replacement is one error diagnostic (`view replacement
+panicked: …; the previous views stay in force`). The service validates new
+views before assigning any of them, so the previous views, dimensions, and
+refusals stay in force together.
+
+The answer is sent after the arm's boundary. An event sink that itself panics
+while delivering that answer unwinds the loop, which is then declared stopped
+like any other thread death.
+
+### Refusals
+
+Submissions return `Result<(), Refusal>`. `Refusal::Busy` (`the data service
+is busy`) means the request queue was full; it is counted in
+`DataHandle::dropped_requests`, and a later submission can succeed.
+`Refusal::Stopped` (`the data service has stopped`) means the request loop has
+ended — it panicked, it failed to open, or it was shut down — and no retry can
+succeed; it is not counted. The handle's stopped flag is set when open fails
+and when the loop starts to unwind, before the dying loop joins its workers.
+That join can take as long as the slowest running job; a submission made in
+that window is refused `Stopped` instead of being admitted to a queue nothing
+will read. A clean shutdown never sets the flag and never emits
+`ThreadStopped`; submissions after it are refused `Stopped` because admission
+is closed.
+
+### Panics with no requester
+
+Five paths run work nobody is waiting on. Each reports its panic where a
+trader can see it:
+
+| Path | Report |
+|---|---|
+| A fetch source's identity listing | Error diagnostic `identity listing for <source> panicked: <payload>` |
+| The pop-time stale check before a file load | Error diagnostic naming the file (`the stale check for <file> could not read the catalog (…); loading it anyway`); counts in the status bar's `data N errors` |
+| The local-dataset sweep after a save | Error diagnostic `local sweep panicked: <payload>`; the save it follows is already stored |
+| Discovery | The source's health goes `Failed` with reason `discovery panicked: <payload>` |
+| Building a read-pool result's event | Built inside its own boundary; a panic answers that key with `result delivery panicked: <payload>` in the result's own kind |
+
+The stale check fails open: a lookup that errors or panics loads the file
+anyway, so no rows are lost and the worst cost is a redundant reload of the
+same rows as a new generation. A catalog row the lookup cannot read is still
+corruption, so the report is an error rather than a warning. A distinct answer missing
+its `value` or `n` column is that key's error rather than a panic.
+
+### Limits
+
+- Nothing restarts a stopped thread. The work it served stays undone until the
+  app restarts, and the status bar says so for that whole time.
+- A request already queued to, or claimed by, a data thread when it dies is
+  never answered. The asking tile's loading or in-flight state (a market-data
+  upload "in flight", for example) stays until restart; the status bar's
+  stopped segment is the signal that it will not resolve.
+- The channel adapter's dispatcher (`geode-channel-<name>`) and the demo bus
+  thread are not supervised. They are transport-tier threads that stand in for
+  a vendor client's own threads, which Geode will not own either, and they are
+  created without an event sink. An unwind there leaves the crash file and the
+  log, not a status segment.
+- Containment does not interrupt a blocked call. A thread stuck in adapter,
+  filesystem, or DuckDB I/O is neither stopped nor declared.
 
 ## Ingestion and publication
 
@@ -221,7 +330,7 @@ callbacks must return promptly without panicking. See
 
 ## Egress and uploads
 
-An upload serializes a whole document and sends it through a configured
+An upload encodes a whole document and sends it through a configured
 adapter. Targets resolve at startup from
 [`egress.toml`](configuration.md#egress-configuration). Each usable target has
 one worker thread and its own `Egress` handle. Adapter resolution probes
@@ -230,25 +339,38 @@ adapters must support repeated capability requests. A worker-start failure
 leaves the target unavailable and later requests receive a named refusal.
 
 There are two admission boundaries. `DataHandle::upload` uses the bounded
-service channel: `false` means nothing was admitted and no outcome is owed.
-Once dispatched, the service validates the target and accepted document name,
-looks up its `DocumentKind`, and calls `write` before submitting bytes to the
-target worker. Serialization runs on the service thread and can delay other
-requests. Transport calls run separately, one at a time in each target's FIFO
-queue, with up to eight waiting jobs behind the running call. A full or stopped
-worker queue is refused without waiting for transport capacity.
+service channel: an `Err(Refusal)` means nothing was admitted and no outcome
+is owed. Once dispatched, the service validates the target and accepted
+document name, looks up its `DocumentKind`, and queues the rows, the kind, and
+the expanded address on the target worker, without encoding them. The worker
+queue holds up to eight waiting jobs behind the running one; a full or stopped
+queue is refused at once. The worker takes one job at a time, in submission
+order, and runs the encoder (`kind.write`) and then the transport, each inside
+its own panic boundary, so neither a slow encoder nor a slow transport holds
+up the request loop.
 
-Ordinary refusal paths and completed transport calls each emit one
-`DataEvent::Upload`, echoing the requester's key, tag, and target. Errors name
-the target, including unknown targets, unsupported documents, missing writers,
-write errors, unavailable workers, queue refusal, and transport errors.
-A transport panic becomes `egress '<target>': transport panicked: …`; the
-worker then continues with the next queued job using the same transport handle.
+Because encoding happens after queue admission, a document that cannot be
+encoded still takes a queue slot until the worker reaches it, and a bad
+document sent to a full or unavailable target answers `queue full` or the
+unavailable reason rather than its write error.
+
+Refusal paths and completed jobs each emit one `DataEvent::Upload`, echoing
+the requester's key, tag, and target. Errors name the target, including
+unknown targets, unsupported documents, missing document kinds, unavailable
+workers, queue refusal, write errors, and transport errors. Validation and queue
+refusals answer from the service thread; write errors, transport results, and
+panics answer from the worker. An encoding panic becomes `egress '<target>':
+encoding panicked: …` and a transport panic `egress '<target>': transport
+panicked: …`; either way the worker continues with the next queued job using
+the same transport handle. A panic in the service's own upload step is
+answered by the request loop (see [the request loop](#the-request-loop)), and
+a worker that dies outside both boundaries is declared stopped
+(`geode-egress-<target>`): jobs still queued behind it are never answered,
+and later uploads to that target answer `egress '<target>': stopped`.
 
 Completion still has limits: service startup can fail after channel admission,
-serialization has no panic boundary, and serializer or transport calls can
-block indefinitely. Event-sink refusal has no retry. Uploads have no timeout,
-automatic retry, or keyed cancellation.
+and encoder or transport calls can block indefinitely. Event-sink refusal has
+no retry. Uploads have no timeout, automatic retry, or keyed cancellation.
 
 A successful outcome means the adapter's `upload` call returned successfully;
 the adapter defines what that acknowledges. It does not establish that a
@@ -302,22 +424,16 @@ corrected serves again without a restart. A refused view stays registered and
 its siblings still serve; one unhonourable view does not take the desk down or
 disappear from the dialogs that would fix it.
 
-The refusal replaced two worse outcomes. Previously the query compiled
-regardless: a column the view could not supply came back **absent** from the row,
-which paints blank in the blotter — indistinguishable from a genuine NULL, and
-with no diagnostic anywhere a trader would be looking. And a column declared a
-measure that was really a grain-bearing attribute reached a `Sum` default and was
-totalled: because an attribute repeats across every row of its grain, that total
-was plausible and wrong, which is worse than blank because the desk would have
-acted on it. The aggregate now comes from the column's own declared role, so
-there is no default left to fall into. The error names the view and the reason,
-which is the whole remedy.
+A refused view reports an error instead of returning an absent column that
+would look like a genuine NULL. Measure aggregation follows the schema's
+explicit role; a grain-bearing attribute cannot fall through to a default sum
+and produce a misleading total.
 
-A join or a column may declare `required = false`. Its failure is then a warning
-saying the declaration was dropped because it is optional, and the view still
-opens; only an **error** refuses. A join keyed outside the grouping that supplies
-no column of the view warns whichever way `required` is set: nothing is denied,
-the join is simply never performed.
+`required = false` downgrades unusable joins, measure-role mismatches, and
+unreachable dimension columns to warnings, allowing those declarations to be
+dropped. Unknown columns and invalid derived-dimension sources remain errors.
+A join keyed outside the grouping that supplies no selected column only warns,
+regardless of `required`, because no selected value depends on it.
 
 The same checks run against a **per-query grouping override**, which validates a
 copy of the view with the override's grouping in place. Regrouping away from a
@@ -326,61 +442,12 @@ dimension (below): it is shown by the unanimity rule when a grain carries it
 alongside the new grouping, and otherwise the query is refused rather than
 painting the column blank for as long as the override lasts. The remedy is in
 the message: group by the column again, or declare it `required = false`.
+An override cannot rescue a view already refused during load validation.
 
-### Ungrouped dimension columns
-
-A view may show a `dimension` column it does not group by — `strike` or
-`expiry` beside an `lhu → underlying_ref → position_ref` tree. When the column
-is declared with the dimension role in the primary (measure-family) dataset, is
-not a derived dimension, and no join supplies it, the compiler computes it by
-the **unanimity rule**, at every depth including the grand total:
-
-- the value, when every stored row under the tree row has that one non-NULL
-  value;
-- **mixed**, when they disagree — including a NULL beside a value, since
-  showing the value would claim it for rows that have none;
-- blank (NULL), when no row under it has a value.
-
-It is never `any_value`: a position holds several instruments with their own
-strikes, and an arbitrary leg's strike is a plausible wrong value.
-
-The column is read from one table: the coarsest declared grain of the dataset
-that carries it and every column of the view's grouping (`unanimity_grain` in
-`geode-core`'s `view` module). The whole grouping, not a query's bounded prefix,
-so one grain serves every depth and a view that validates compiles at every
-`max_depth`. Per column the aggregate is `case when count(c) = count(*) and
-min(c) = max(c) then min(c) end` plus a flag `count(c) > 0 and (count(c) <
-count(*) or min(c) <> max(c))`, over the same grouping sets and level marker as
-a measure aggregate at that grain, joined to the spine the same way, with the
-grain's scope predicate and era. When a measure aggregate already reads that
-grain the two aggregates ride its scan; otherwise one `dim_<table>` CTE per grain
-holds them. That CTE is joined to the spine but never feeds it, so adding a
-display column never adds or removes tree rows, and a view declaring no
-ungrouped dimension compiles to the statement it always did.
-
-The result carries the value in the column's own type, so a numeric dimension
-sorts as a number and paints its shortest exact form (`4250`, `4250.5`), and a
-boolean companion column named `<column>#mixed` (false where the grain has no
-rows under the spine row). `ColumnMeta::mixed_flag` links the value to its
-companion by index and `Snapshot::from_batches` refuses a flag that is not a
-boolean column of the batch; `Snapshot::is_mixed_at` reads it. The column is not
-summable and is `Additive` at every depth, because the rule is already exact,
-and takes the chosen grain's scope semantics. A consumer reading the snapshot
-without the flag sees NULL, not a value.
-
-Known limitations: the unanimity is over the chosen grain table's rows, so an
-instrument with no row in that table (a cash instrument absent from the
-underlying table when the grouping forces the underlying grain) does not take
-part; choosing the coarsest carrying grain minimises this. A derived
-column over the dimension sees only the value column, so where the input is
-mixed the derived cell is blank, not marked.
-
-The compiler no longer absorbs the same defects itself. A join naming an unknown
-dataset, or keyed on columns no grain of the joined dataset carries, is a
-compile error naming the dataset; validation refuses both earlier, so reaching
-them means a caller skipped the gate. A measure's aggregate comes from its
-declared role with no fallback, so a column that is not a measure cannot reach
-one.
+The compiler also checks joins against available datasets and grains. An
+unusable required join produces an error naming the dataset; an optional join
+is omitted. These checks protect callers that bypass service-level validation.
+Derived SQL remains subject to compilation errors.
 
 The read pool coalesces by the **caller's key**, usually a tile, rather than
 by view name. Two tiles showing one view therefore do not supersede each
@@ -421,10 +488,58 @@ Attribution says whether a value belongs to its row; it does not say whether
 a column adds up. The compiler records that separately as
 `ColumnMeta::summable`, true only for a plain measure whose schema aggregate
 is `sum`. Min, max, and any measures, derived expressions, joined columns,
-and grouping columns are not summable, and anything that builds a snapshot
-without the compiler defaults to not summable. A consumer that totals a
-selection (the blotter footer) must gate on it, because a total of maxima or
-of ratios is a plausible wrong number.
+and grouping columns are not summable. Document-query and catalog snapshot
+builders mark their columns false; custom builders must supply the flag
+explicitly. Selection totals require this flag and additive contributing
+values. Attribution alone cannot justify a total of maxima or ratios.
+
+### Ungrouped dimension columns
+
+A view may show a `dimension` column it does not group by — `strike` or
+`expiry` beside an `lhu → underlying_ref → position_ref` tree. When the column
+is declared with the dimension role in the primary (measure-family) dataset, is
+not a derived dimension, and no join supplies it, the compiler computes it by
+the **unanimity rule**, at every depth including the grand total:
+
+- the value, when every stored row under the tree row has that one non-NULL
+  value;
+- **mixed**, when they disagree — including a NULL beside a value, since
+  showing the value would claim it for rows that have none;
+- blank (NULL), when no row under it has a value.
+
+Unanimity prevents an arbitrary leg's strike from appearing as the strike
+for a position containing several instruments.
+
+The column is read from one table: the coarsest declared grain of the dataset
+that carries it and every column of the view's grouping (`unanimity_grain` in
+`geode-core`'s `view` module). The whole grouping, not a query's bounded prefix,
+so one grain serves every depth and a view that validates compiles at every
+`max_depth`. Per column the aggregate is `case when count(c) = count(*) and
+min(c) = max(c) then min(c) end` plus a flag `count(c) > 0 and (count(c) <
+count(*) or min(c) <> max(c))`, over the same grouping sets and level marker as
+a measure aggregate at that grain, joined to the spine the same way, with the
+grain's scope predicate and era. When a measure aggregate already reads that
+grain the two aggregates ride its scan; otherwise one `dim_<table>` CTE per grain
+holds them. That CTE is joined to the spine but never feeds it, so adding a
+display column never adds or removes tree rows. Views without ungrouped
+dimension columns do not add this aggregation.
+
+The result carries the value in the column's own type, so a numeric dimension
+sorts as a number and paints its shortest exact form (`4250`, `4250.5`), and a
+boolean companion column named `<column>#mixed` (false where the grain has no
+rows under the spine row). `ColumnMeta::mixed_flag` links the value to its
+companion by index and `Snapshot::from_batches` refuses a flag that is not a
+boolean column of the batch; `Snapshot::is_mixed_at` reads it. The column is not
+summable and is `Additive` at every depth, because the rule is already exact,
+and takes the chosen grain's scope semantics. A consumer reading the snapshot
+without the flag sees NULL, not a value.
+
+Known limitations: the unanimity is over the chosen grain table's rows, so an
+instrument with no row in that table (a cash instrument absent from the
+underlying table when the grouping forces the underlying grain) does not take
+part; choosing the coarsest carrying grain minimises this. A derived
+column over the dimension sees only the value column, so where the input is
+mixed the derived cell is blank, not marked.
 
 ## Retention and maintenance
 
@@ -492,16 +607,26 @@ contributing file, and a view with multiple inputs is as fresh as its stalest
 input. That avoids labeling a partial or joined answer with the newest
 contributor's timestamp.
 
-Provenance also reports the generation each dataset was read from. A live read
-names the newest live generation of the partition asked about (a document read)
-or of the whole dataset (a view read); a historical document read names the
-generation its as-of pinned. A historical view read reports no generation,
-because its era resolves one generation per partition and no single ID names
-that answer. An absent generation means unknown — a dataset that has never
-loaded, or a read that cannot name one — never unchanged: a reader deciding
-whether the data under it moved then falls back to source time, and must treat
-that as the weaker test it is, because a corrected republish keeps its source
-time and differs only by generation.
+Provenance reports source time and generation separately. Corrected republishes
+can share a source time while taking different generation IDs. Planning,
+provenance lookup, and row execution share one reader transaction, so these
+values describe the same database snapshot.
+
+| Read | Generation reported |
+|---|---|
+| Live document | Newest live-published generation of the requested key's partition. |
+| Historical document | Generation selected for that key at the requested instant. |
+| Live view | Greatest live-published generation ID across each input dataset, regardless of query scope. |
+| Historical view | `None`; each partition resolves independently. |
+
+A live view's dataset-wide value is a publication change marker; it does not
+name every partition's generation. Archive-only arrivals do not advance live
+markers. Document reads report no generation when none matches, including a
+historical request before the document's first retained generation.
+
+An absent generation means unknown, not unchanged. The document panel compares
+known generation IDs as well as source times. Its source-time fallback cannot
+distinguish corrected republishes at the same source time.
 
 Health is keyed by **source**. Discovery and load outcomes occupy separate
 lanes because a clean, content-blind poll cannot prove that the last publish

@@ -1512,9 +1512,9 @@ run_mutation "pool: a worker releases a transaction left behind" \
   crates/geode-data/src/query/pool.rs \
   '        release_transaction(&conn);
 
-        // The stale check' \
+        // Check staleness' \
   '
-        // The stale check' \
+        // Check staleness' \
   geode-data \
   a_transaction_left_aborted_does_not_wedge_the_worker
 
@@ -1668,10 +1668,10 @@ run_mutation "pool: the tag is echoed, not regenerated" \
 # covered by `a_distinct_query_returns_value_counts_on_the_distinct_event`.
 run_mutation "service: an outcome carries the caller's key" \
   crates/geode-data/src/service.rs \
-  '                RequestKind::Query => sink(DataEvent::Query(QueryOutcome {
-                    key: r.key,' \
-  '                RequestKind::Query => sink(DataEvent::Query(QueryOutcome {
-                    key: QueryKey(0),' \
+  '        RequestKind::Query => DataEvent::Query(QueryOutcome {
+            key: r.key,' \
+  '        RequestKind::Query => DataEvent::Query(QueryOutcome {
+            key: QueryKey(0),' \
   geode-data \
   an_outcome_is_addressed_to_the_key_that_asked
 
@@ -1775,35 +1775,35 @@ run_mutation "egress config: a config_version header is not a spurious diagnosti
 
 run_mutation "egress: a write error answers Err" \
   crates/geode-data/src/egress.rs \
-  '            Err(e) => return refuse(e.to_string()),' \
-  '            Err(_) => Vec::new(),' \
+  '        Ok(Err(e)) => return Err(format!("egress '"'"'{name}'"'"': {e}")),' \
+  '        Ok(Err(_)) => Vec::new(),' \
   geode-data \
   a_write_error_an_unknown_target_and_a_closed_bus_each_answer_err_naming_the_target
 
 run_mutation "egress: an adapter error answers Err naming the target" \
   crates/geode-data/src/egress.rs \
-  '            Ok(outcome) => outcome.map_err(|e| format!("egress '"'"'{name}'"'"': {e}")),' \
-  '            Ok(outcome) => outcome.map_err(|e| e.to_string()),' \
+  '        Ok(outcome) => outcome.map_err(|e| format!("egress '"'"'{name}'"'"': {e}")),' \
+  '        Ok(outcome) => outcome.map_err(|e| e.to_string()),' \
   geode-data \
   a_write_error_an_unknown_target_and_a_closed_bus_each_answer_err_naming_the_target
 
 # A transport panic must fail its own upload, not the worker. Mutated, it
-# unwinds past `answer`, so the job is never answered and the dropped
-# receiver strands every queued upload.
+# unwinds the worker, so the job is never answered and the queued uploads
+# behind it are stranded.
 run_mutation "egress: a panicking transport is contained" \
   crates/geode-data/src/egress.rs \
-  '        let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            geode_core::panic::contained(|| egress.upload(&job.address, job.bytes))
-        })) {
-            Ok(outcome) => outcome.map_err(|e| format!("egress '"'"'{name}'"'"': {e}")),
-            Err(payload) => Err(format!(
-                "egress '"'"'{name}'"'"': transport panicked: {}",
-                crate::ingest::runner::panic_payload_message(&*payload)
-            )),
-        };' \
-  '        let result = egress
-            .upload(&job.address, job.bytes)
-            .map_err(|e| format!("egress '"'"'{name}'"'"': {e}"));' \
+  '    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        geode_core::panic::contained(|| egress.upload(&job.address, bytes))
+    })) {
+        Ok(outcome) => outcome.map_err(|e| format!("egress '"'"'{name}'"'"': {e}")),
+        Err(payload) => Err(format!(
+            "egress '"'"'{name}'"'"': transport panicked: {}",
+            crate::ingest::runner::panic_payload_message(&*payload)
+        )),
+    }' \
+  '    egress
+        .upload(&job.address, bytes)
+        .map_err(|e| format!("egress '"'"'{name}'"'"': {e}"))' \
   geode-data \
   a_panicking_transport_answers_the_upload_and_keeps_the_worker
 
@@ -1889,8 +1889,8 @@ run_mutation "handle: a refused request is counted" \
 
 run_mutation "handle: a compile failure is delivered as the key's outcome" \
   crates/geode-data/src/handle.rs \
-  '                if let Err(e) = service.query(&params) {' \
-  '                if let Err(e) = service.query(&params) && false {' \
+  '            if let Err(e) = service.query(&params) {' \
+  '            if let Err(e) = service.query(&params) && false {' \
   geode-data \
   the_real_service_answers_through_the_sink_and_reports_open_failures
 
@@ -3680,13 +3680,13 @@ run_mutation "delegate: the cursor is re-derived by column name across a move" \
         {
             self.cursor.col = i;
         }
-        // `TableState::move_column` (gpui-component) calls this directly' \
+        // The component calls this hook without `visible_rows_changed`, so' \
   '        if let Some(name) = None::<String>
             && let Some(i) = self.plan.as_ref().and_then(|p| p.position_of(&name))
         {
             self.cursor.col = i;
         }
-        // `TableState::move_column` (gpui-component) calls this directly' \
+        // The component calls this hook without `visible_rows_changed`, so' \
   geode-blotter \
   the_cursor_follows_its_column_across_a_move
 
@@ -3958,12 +3958,12 @@ run_mutation "blotter: filter validates against the dataset" \
 
 run_mutation "delegate: move_column refills the window it already had" \
   crates/geode-blotter/src/delegate.rs \
-  '        // same tree, and the window is only ever tens of rows.
+  '        // column movement leaves their values unchanged because the tree stays fixed.
         self.invalidate_cells();
         self.refresh_selection();
         cx.notify();
     }' \
-  '        // same tree, and the window is only ever tens of rows.
+  '        // column movement leaves their values unchanged because the tree stays fixed.
         self.refresh_selection();
         cx.notify();
     }' \
@@ -4075,16 +4075,20 @@ run_mutation "bridge: every event branch, not just Query, ends the drain task on
         let catalog_refresh = catalog_refresh_for_drain;
         let catalog_window = window;
         let mut last_dropped = 0u64;
+        let mut last_refused = 0u64;
         while let Ok(event) = rx.recv().await {
-            let now_dropped = dropped.load(Ordering::Relaxed);' \
+            let now_dropped = dropped.load(Ordering::Relaxed);
+            let now_refused = refused_handle.dropped_requests();' \
   '    let shell_direct = shell.clone();
     cx.spawn(async move |cx: &mut AsyncApp| {
         let diagnostics = diagnostics_for_drain;
         let catalog_refresh = catalog_refresh_for_drain;
         let catalog_window = window;
         let mut last_dropped = 0u64;
+        let mut last_refused = 0u64;
         while let Ok(event) = rx.recv().await {
             let now_dropped = dropped.load(Ordering::Relaxed);
+            let now_refused = refused_handle.dropped_requests();
             if let DataEvent::Health { source, worst, detail } = &event {
                 shell_direct.update(cx, |s, cx| {
                     s.diagnostics().update(cx, |d, cx| {
@@ -4093,6 +4097,7 @@ run_mutation "bridge: every event branch, not just Query, ends the drain task on
                     });
                 });
                 last_dropped = now_dropped;
+                last_refused = now_refused;
                 continue;
             }' \
   geode-app \
@@ -4460,16 +4465,19 @@ run_mutation "distinct: a derived dimension groups by its own labels, not the so
 # payload actually looks like.
 run_mutation "distinct: the sink maps a Distinct result to a Distinct event" \
   crates/geode-data/src/service.rs \
-  '                    values: r.payload.and_then(view_snapshot).map(|s| {
-                        let v = s.column_index("value").expect("distinct selects value");
-                        let n = s.column_index("n").expect("distinct selects n");
-                        (0..s.rows())
-                            .filter_map(|row| {
-                                Some((s.text_at(v, row)?.to_string(), s.i64_at(n, row)? as u64))
-                            })
-                            .collect()
-                    }),' \
-  '                    values: Ok(Vec::new()),' \
+  '            values: r.payload.and_then(view_snapshot).and_then(|s| {
+                let (Some(v), Some(n)) = (s.column_index("value"), s.column_index("n")) else {
+                    return Err(
+                        "internal: a distinct answer without its value and n columns".to_string(),
+                    );
+                };
+                Ok((0..s.rows())
+                    .filter_map(|row| {
+                        Some((s.text_at(v, row)?.to_string(), s.i64_at(n, row)? as u64))
+                    })
+                    .collect())
+            }),' \
+  '            values: Ok(Vec::new()),' \
   geode-data a_distinct_query_returns_value_counts_on_the_distinct_event
 
 # --- Phase 4a Task 3: frame undo/redo, previous as-of, recent
@@ -5136,8 +5144,8 @@ run_mutation "as-of: HH:MM resolves on the trader's local date, not UTC's" \
 # synthetic error outcome is now delivered right at the refusal site.
 run_mutation "bridge: a refused distinct request errors the picker instead of leaving it loading forever" \
   crates/geode-app/src/bridge.rs \
-  '                if !queued {' \
-  '                if false {' \
+  '                if let Err(refusal) = queued {' \
+  '                if let (false, Err(refusal)) = (true, queued) {' \
   geode-app a_refused_distinct_request_errors_the_picker
 
 # ---- Phase 4c Task 3: view presentation (spec §5.6, §4.1) -------------
@@ -6399,14 +6407,14 @@ run_mutation "diagnostics: MAJ-3 — refresh_frame_hist copies an unchanged hist
 
 run_mutation "diagnostics: MAJ-4 — restart_required re-embedded in the summary" \
   crates/geode-shell/src/diagnostics.rs \
-  '        if self.dropped_events > 0 {
-            parts.push(format!("{} dropped", self.dropped_events));
+  '        if self.refused > 0 {
+            parts.push(format!("{} refused", self.refused));
         }
 
         parts.join(" · ")
     }' \
-  '        if self.dropped_events > 0 {
-            parts.push(format!("{} dropped", self.dropped_events));
+  '        if self.refused > 0 {
+            parts.push(format!("{} refused", self.refused));
         }
 
         if let Some(message) = &self.restart_required {
@@ -6835,12 +6843,12 @@ run_mutation "blotter: the tree column is pinned left while the measures scroll"
 
 run_mutation "blotter gutter: the tree column widens by the gutter" \
   crates/geode-blotter/src/delegate.rs \
-  '            width: px(if c.kind == ColumnKind::Tree {
-                c.width + self.gutter_px()
-            } else {
-                c.width
-            }),' \
-  '            width: px(c.width),' \
+  '                if c.kind == ColumnKind::Tree {
+                    width + self.gutter_px()
+                } else {' \
+  '                if c.kind == ColumnKind::Tree {
+                    width
+                } else {' \
   geode-blotter the_line_numbers_global_paints_a_gutter_on_the_next_draw
 
 run_mutation "blotter gutter: a changed setting refreshes the table's column groups" \
@@ -15763,11 +15771,9 @@ run_mutation "dialog: the object-dialog frozen-row click is dropped while a conf
   geode-shell \
   an_edit_row_click_is_dropped_while_a_confirm_is_armed
 
-# Spec §20.5 at the blotter tile's own derivation (the final review's
-# I2): `Cursor::move_rows` takes `wrap` from the caller, and the tile is
-# what decides it from whether a selection is live (grid selection spec
-# §3, replacing the old `Mode` enum). Mutated to always wrap, a bare `j`
-# with a selection live leaps from the last row to row 0 and inverts it.
+# The tile enables row wrapping only when no selection is active.
+# Forcing wrap on makes a bare j jump from the last row to the first
+# and reverses the selected range across its anchor.
 run_mutation "tile: a bare step wraps in normal mode only (spec §20.5)" \
   crates/geode-blotter/src/tile.rs \
   '                    let wrap = d.selection.is_none();' \
@@ -16919,6 +16925,14 @@ run_mutation "stack split: mod+s is bound" \
   geode-shell \
   mod_s_splits_the_stack_and_mod_shift_direction_pulls_it_back
 
+run_mutation "add expression: mod+x is bound" \
+  crates/geode-shell/src/defaults.rs \
+  '"mod+x" = "frame::add_expression"
+' \
+  '' \
+  geode-shell \
+  mod_x_opens_the_add_expression_dialog
+
 run_mutation "stack pull: mod+shift+k is bound" \
   crates/geode-shell/src/defaults.rs \
   '"mod+shift+k" = "stack::pull_up"
@@ -17370,8 +17384,8 @@ run_mutation "series: dedupe ignores the pair filter" \
 # an empty fetch, the coverage row is never written.
 run_mutation "series: coverage is not recorded for an empty fetch" \
   crates/geode-data/src/store/series.rs \
-  '    // 4. Coverage, always.' \
-  '    // 4. Coverage, always.
+  '    // Record coverage even when deduplication leaves no new rows.' \
+  '    // Record coverage even when deduplication leaves no new rows.
     if req.rows.is_empty() {
         return Ok(SeriesAppended { appended, swept: 0 });
     }' \
@@ -17875,10 +17889,9 @@ run_mutation "pricer storage: an answer for another sheet installs under this na
 
 run_mutation "pricer store: a refused submission answers Refused, not Pending" \
   crates/geode-pricer/src/store.rs \
-  '        if queued {
-            Loaded::Pending
-        } else {
-            Loaded::Refused
+  '        match queued {
+            Ok(()) => Loaded::Pending,
+            Err(refusal) => Loaded::Refused(refusal),
         }' \
   '        let _ = queued;
         Loaded::Pending' \
@@ -18229,10 +18242,8 @@ run_mutation "pricer rm: a modified y confirms" \
 
 run_mutation "pricer rm: y forgets nothing" \
   crates/geode-pricer/src/tile.rs \
-  '        } else if self.shared.store.forget(&pending.sheet) {
-            // Reserved until the forget is answered.' \
-  '        } else if false {
-            // Reserved until the forget is answered.' \
+  '            match self.shared.store.forget(&pending.sheet) {' \
+  '            match Err::<(), Refusal>(Refusal::Busy) {' \
   geode-pricer colon_rm_asks_and_y_forgets
 
 run_mutation "pricer rm: the confirm is not insert mode" \
@@ -18335,12 +18346,12 @@ run_mutation "pricer retiring: an answered forget keeps its name reserved" \
 
 run_mutation "pricer retiring: an rm's forget does not reserve its name" \
   crates/geode-pricer/src/tile.rs \
-  '            self.shared
-                .retiring
-                .borrow_mut()
-                .insert(pending.sheet.clone());
-            self.forgetting.push(pending.sheet);' \
-  '            self.forgetting.push(pending.sheet);' \
+  '                    self.shared
+                        .retiring
+                        .borrow_mut()
+                        .insert(pending.sheet.clone());
+                    self.forgetting.push(pending.sheet);' \
+  '                    self.forgetting.push(pending.sheet);' \
   geode-pricer a_name_removed_by_rm_is_reserved_until_answered
 
 run_mutation "pricer deferred load: :e reads past a queued save" \
@@ -18670,8 +18681,8 @@ run_mutation "series query: the cap is never checked" \
 # nothing on the chart says why.
 run_mutation "series query: the pair's health is not attached" \
   crates/geode-data/src/service.rs \
-  '                                    s.provenance.health = health_tracker.load_lane(source, &key);' \
-  '                                    let _ = (&key, &health_tracker, &mut s.provenance);' \
+  '                            s.provenance.health = health_tracker.load_lane(source, &key);' \
+  '                            let _ = (&key, &health_tracker, &mut s.provenance);' \
   geode-data \
   a_failed_pairs_health_rides_its_slot
 
@@ -18683,12 +18694,12 @@ run_mutation "series query: the pair's health is not attached" \
 # stays green through it.
 run_mutation "series query: health is filed by position, not slot" \
   crates/geode-data/src/service.rs \
-  '                            for (slot, source, identity) in &pairs {
-                                let key = format!("{identity}@{source}");
-                                if let Some(s) = res.slots.iter_mut().find(|s| s.slot == *slot) {' \
-  '                            for (i, (_slot, source, identity)) in pairs.iter().enumerate() {
-                                let key = format!("{identity}@{source}");
-                                if let Some(s) = res.slots.iter_mut().nth(i) {' \
+  '                    for (slot, source, identity) in &pairs {
+                        let key = format!("{identity}@{source}");
+                        if let Some(s) = res.slots.iter_mut().find(|s| s.slot == *slot) {' \
+  '                    for (i, (_slot, source, identity)) in pairs.iter().enumerate() {
+                        let key = format!("{identity}@{source}");
+                        if let Some(s) = res.slots.iter_mut().nth(i) {' \
   geode-data \
   health_is_attached_by_slot_number_not_position
 
@@ -20476,62 +20487,23 @@ run_mutation "egress: an unknown target answers Err" \
   a_write_error_an_unknown_target_and_a_closed_bus_each_answer_err_naming_the_target
 
 # One worker per target runs uploads in submission order: the later of two
-# uploads of one document must land last. Mutated to drain what is queued
-# and run each drained batch newest first, the order inverts.
+# uploads of one document must land last. Mutated to run a second queued
+# job ahead of the first, the order inverts.
 run_mutation "egress: uploads to one target run in submission order" \
   crates/geode-data/src/egress.rs \
   '    while let Ok(job) = jobs.recv() {
-        // Convert transport panics into this upload'"'"'s error and keep servicing the
-        // queue. Mark the catch boundary so the app logs a contained panic without
-        // creating a crash report.
-        let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            geode_core::panic::contained(|| egress.upload(&job.address, job.bytes))
-        })) {
-            Ok(outcome) => outcome.map_err(|e| format!("egress '"'"'{name}'"'"': {e}")),
-            Err(payload) => Err(format!(
-                "egress '"'"'{name}'"'"': transport panicked: {}",
-                crate::ingest::runner::panic_payload_message(&*payload)
-            )),
-        };
-        answer(
-            &sink,
-            &name,
-            &job.document,
-            &job.document_key,
-            job.key,
-            job.tag,
-            result,
-        );
-    }
-}' \
+        let result = run_job(&name, egress.as_mut(), &job);' \
   '    while let Ok(first) = jobs.recv() {
         std::thread::sleep(std::time::Duration::from_millis(50));
-        let mut batch = vec![first];
-        while let Ok(more) = jobs.try_recv() {
-            batch.push(more);
-        }
-        for job in batch.into_iter().rev() {
-        let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            geode_core::panic::contained(|| egress.upload(&job.address, job.bytes))
-        })) {
-            Ok(outcome) => outcome.map_err(|e| format!("egress '"'"'{name}'"'"': {e}")),
-            Err(payload) => Err(format!(
-                "egress '"'"'{name}'"'"': transport panicked: {}",
-                crate::ingest::runner::panic_payload_message(&*payload)
-            )),
+        let job = match jobs.try_recv() {
+            Ok(second) => {
+                let result = run_job(&name, egress.as_mut(), &second);
+                answer(&sink, &name, &second.document, &second.document_key, second.key, second.tag, result);
+                first
+            }
+            Err(_) => first,
         };
-        answer(
-            &sink,
-            &name,
-            &job.document,
-            &job.document_key,
-            job.key,
-            job.tag,
-            result,
-        );
-        }
-    }
-}' \
+        let result = run_job(&name, egress.as_mut(), &job);' \
   geode-data \
   uploads_to_one_target_run_in_submission_order
 
@@ -20558,8 +20530,8 @@ run_mutation "pricer tile: a batch carries only the lines not in flight" \
 
 run_mutation "pricer tile: a hidden tile still submits" \
   crates/geode-pricer/src/tile.rs \
-  '        if !self.visible || self.loading {' \
-  '        if self.loading {' \
+  '        if !self.visible || self.loading || self.stopped {' \
+  '        if self.loading || self.stopped {' \
   geode-pricer hide_cancels_by_key_and_prices_nothing_until_shown
 
 run_mutation "pricer tile: a hide does not cancel by key" \
@@ -20659,18 +20631,18 @@ run_mutation "pricer tile: a sheet edit lands on the fallback while loading" \
 
 run_mutation "pricer tile: a load keeps undo recorded against the fallback" \
   crates/geode-pricer/src/tile.rs \
-  '                    // over it. Nothing to undo into is the safe state.
+  '                    // them could overwrite loaded values, so discard their history.
                     self.undo.clear();' \
-  '                    // over it. Nothing to undo into is the safe state.' \
+  '                    // them could overwrite loaded values, so discard their history.' \
   geode-pricer shift_spot_group_ungroup_refuse_while_loading_and_loaded_clears_any_undo
 
 run_mutation "pricer tile: put onto a collapsed package's leg slot hides the line" \
   crates/geode-pricer/src/tile.rs \
-  '        // to wherever it was (review finding).
+  '        // cursor reconciliation can select it.
         if let Place::Leg { package, .. } = place {
             self.expansion.set(self.sheet.id(package), true);
         }' \
-  '        // to wherever it was (review finding).
+  '        // cursor reconciliation can select it.
         let _ = &place;' \
   geode-pricer put_below_onto_a_collapsed_packages_leg_slot_opens_it
 
@@ -20894,8 +20866,8 @@ run_mutation "pricer tile: a failed load's fallback is saved over the document" 
   '        if self.save_blocked {
             return true;
         }
-        let Some(rows) = to_rows(&self.sheet) else {' \
-  '        let Some(rows) = to_rows(&self.sheet) else {' \
+        // A stopped store refuses every save; asking again on each edit only' \
+  '        // A stopped store refuses every save; asking again on each edit only' \
   geode-pricer a_failed_load_blocks_every_save_and_says_so_past_escape
 
 # After a refused save the idle task has already fired: a close that
@@ -21651,7 +21623,7 @@ run_mutation "runner: every local save sweeps" \
 
 run_mutation "runner: a local sweep leaves evicted provenance" \
   crates/geode-data/src/ingest/runner.rs \
-  '            prune_orphan_provenance(store, dataset).map_err(|e| e.to_string())?;' \
+  '    prune_orphan_provenance(store, dataset).map_err(|e| e.to_string())?;' \
   '' \
   geode-data a_local_sweep_runs_only_past_the_bound_and_prunes_provenance
 
@@ -21997,8 +21969,8 @@ run_mutation "mdlines: a mode change refreshes the table" \
 # The label column widens by the gutter.
 run_mutation "mdlines: the label column widens by the gutter" \
   crates/geode-marketdata/src/delegate.rs \
-  '                width: px(LABEL_WIDTH + self.gutter_px()),' \
-  '                width: px(LABEL_WIDTH),' \
+  '                width: px(self.width_of(ROW_AXIS_KEY, LABEL_WIDTH) + self.gutter_px()),' \
+  '                width: px(self.width_of(ROW_AXIS_KEY, LABEL_WIDTH)),' \
   geode-marketdata the_line_numbers_global_paints_a_gutter_beside_the_row_label
 
 # Under a hidden label the first value column widens instead.
@@ -22185,8 +22157,8 @@ run_mutation "pricer gutter: the settings observer applies the mode" \
 # The tree column widens by the gutter, so the tree text keeps its room.
 run_mutation "pricer gutter: the tree column's width includes the gutter" \
   crates/geode-pricer/src/delegate.rs \
-  '                width: px(TREE_WIDTH + self.gutter_px()),' \
-  '                width: px(TREE_WIDTH),' \
+  '                    self.fitted.get(TREE_KEY).copied().unwrap_or(TREE_WIDTH) + self.gutter_px()' \
+  '                    self.fitted.get(TREE_KEY).copied().unwrap_or(TREE_WIDTH)' \
   geode-pricer the_line_numbers_global_paints_a_gutter_beside_the_tree_column
 
 # Relative numbers are re-derived when the cursor row moves. Mutated, the
@@ -22406,7 +22378,7 @@ run_mutation "action rename: register refuses a retired id" \
   '        if let Some(new) = None::<&ActionId> {' \
   geode-shell a_retired_id_cannot_be_registered
 
-# ---- grid selection (grid selection spec) ---------------------------------
+# ---- grid selection ------------------------------------------------------
 
 run_mutation "grid selection: an ancestor in the selection hides the row" \
   crates/geode-core/src/grid/selection.rs \
@@ -22443,7 +22415,7 @@ run_mutation "grid selection: a lost anchor column is named as the column" \
   geode-core \
   resolution_goes_through_identity_and_names_the_lost_anchor
 
-# ---- blotter selection (grid selection spec) -------------------------------
+# ---- blotter selection ---------------------------------------------------
 
 run_mutation "blotter selection: escape clears the selection before find" \
   crates/geode-blotter/src/tile.rs \
@@ -23393,6 +23365,845 @@ run_mutation "pricer entry bar: a history step leaves the list stale" \
   $'        // `set_value` emits no Change: the recalled line re-ranks here.\n        self.refresh_entry_completion(cx);' \
   '' \
   geode-pricer up_walks_history_with_the_list_open_and_the_list_follows
+
+# ---- containment and liveness
+
+# A body that unwinds must be declared: otherwise a dead data thread is
+# invisible and every tile waits on it forever.
+run_mutation "supervise: an unwinding body is not declared" \
+  crates/geode-data/src/supervise.rs \
+  '            let _ = sink(DataEvent::ThreadStopped { thread, reason });' \
+  '            let _ = (&sink, thread, reason);' \
+  geode-data a_panicking_supervised_body_emits_one_thread_stopped
+
+# Marked contained, the crash hook would log the death and write no crash
+# file: the one bug report an uncontained death leaves.
+run_mutation "supervise: the body runs contained" \
+  crates/geode-data/src/supervise.rs \
+  '        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));' \
+  '        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| geode_core::panic::contained(body)));' \
+  geode-data the_supervised_body_is_not_marked_contained
+
+run_mutation "handle: a full queue is refused Stopped" \
+  crates/geode-data/src/handle.rs \
+  '                Err(TrySendError::Full(_)) => {
+                    self.dropped.fetch_add(1, Ordering::Relaxed);
+                    Err(Refusal::Busy)' \
+  '                Err(TrySendError::Full(_)) => {
+                    self.dropped.fetch_add(1, Ordering::Relaxed);
+                    Err(Refusal::Stopped)' \
+  geode-data a_full_channel_refuses_and_counts_rather_than_blocking
+
+run_mutation "handle: a disconnected queue is refused Busy" \
+  crates/geode-data/src/handle.rs \
+  '                Err(TrySendError::Disconnected(_)) => Err(Refusal::Stopped),' \
+  '                Err(TrySendError::Disconnected(_)) => Err(Refusal::Busy),' \
+  geode-data a_gone_service_thread_refuses_every_request
+
+run_mutation "handle: a shut-down handle is refused Busy" \
+  crates/geode-data/src/handle.rs \
+  '            None => Err(Refusal::Stopped),' \
+  '            None => Err(Refusal::Busy),' \
+  geode-data the_real_service_answers_through_the_sink_and_reports_open_failures
+
+run_mutation "serve: an open failure is not declared" \
+  crates/geode-data/src/handle.rs \
+  '            let _ = sink(DataEvent::ThreadStopped {
+                thread: REQUEST_LOOP.to_string(),
+                reason,
+            });' \
+  '            let _ = reason;' \
+  geode-data an_unopenable_database_is_a_diagnostic_and_a_stopped_request_loop
+
+run_mutation "events: two threads stopping coalesce into one" \
+  crates/geode-app/src/events.rs \
+  '        DataEvent::ThreadStopped { thread, .. } => Key::Stopped(thread.clone()),' \
+  '        DataEvent::ThreadStopped { .. } => Key::Stopped(String::new()),' \
+  geode-app two_threads_stopping_between_drains_are_both_delivered
+
+# A worker spawned without the service's sink is still caught, but its death
+# is announced to no one: the status bar stays green over a dead thread.
+run_mutation "supervise: a query worker's death is announced to no one" \
+  crates/geode-data/src/query/pool.rs \
+  '                    format!("geode-query-{i}"),
+                    Arc::clone(&stop),' \
+  '                    format!("geode-query-{i}"),
+                    crate::supervise::unwatched(),' \
+  geode-data a_query_worker_that_dies_is_declared_by_its_thread_name
+
+run_mutation "supervise: the pricing worker's death is announced to no one" \
+  crates/geode-data/src/pricing/worker.rs \
+  '            crate::supervise::spawn_supervised("geode-pricing".to_string(), stop, move || {' \
+  '            crate::supervise::spawn_supervised("geode-pricing".to_string(), crate::supervise::unwatched(), move || {' \
+  geode-data a_pricing_worker_that_dies_is_declared
+
+run_mutation "supervise: the ingest runner's death is announced to no one" \
+  crates/geode-data/src/ingest/runner.rs \
+  '            crate::supervise::spawn_supervised("geode-ingest".to_string(), stop, move || {' \
+  '            crate::supervise::spawn_supervised("geode-ingest".to_string(), crate::supervise::unwatched(), move || {' \
+  geode-data an_ingest_runner_that_dies_is_declared
+
+run_mutation "supervise: discovery's death is announced to no one" \
+  crates/geode-data/src/ingest/scheduler.rs \
+  '            crate::supervise::spawn_supervised("geode-discovery".to_string(), stopped, move || {' \
+  '            crate::supervise::spawn_supervised("geode-discovery".to_string(), crate::supervise::unwatched(), move || {' \
+  geode-data a_discovery_thread_that_dies_is_declared
+
+run_mutation "supervise: a fetch worker's death is announced to no one" \
+  crates/geode-data/src/ingest/fetch.rs \
+  '            crate::supervise::spawn_supervised(name.clone(), stop, move || run(fetch, rx, sink))' \
+  '            crate::supervise::spawn_supervised(name.clone(), crate::supervise::unwatched(), move || run(fetch, rx, sink))' \
+  geode-data a_fetch_worker_that_dies_is_declared
+
+run_mutation "supervise: a receiver's death is announced to no one" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '            format!("geode-subscribe-{}", spec.name),
+            stopped,' \
+  '            format!("geode-subscribe-{}", spec.name),
+            crate::supervise::unwatched(),' \
+  geode-data a_receiver_that_dies_is_declared
+
+run_mutation "supervise: an egress worker's death is announced to no one" \
+  crates/geode-data/src/egress.rs \
+  '                        format!("geode-egress-{}", spec.name),
+                        EventSink::clone(&sink),' \
+  '                        format!("geode-egress-{}", spec.name),
+                        crate::supervise::unwatched(),' \
+  geode-data an_egress_worker_that_dies_is_declared
+
+# An encoder panic must fail its own upload. Mutated, it unwinds the worker
+# (now declared by supervision), the upload is never answered, and the one
+# queued behind it is stranded.
+run_mutation "egress: an encoding panic is contained" \
+  crates/geode-data/src/egress.rs \
+  '    let bytes = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        geode_core::panic::contained(|| job.kind.write(&job.rows))
+    })) {' \
+  '    let bytes = match Ok::<_, Box<dyn std::any::Any + Send>>(job.kind.write(&job.rows)) {' \
+  geode-data an_encoding_panic_answers_the_upload_and_keeps_the_worker
+
+# A panicking arm must not end the loop: every later submission would be
+# admitted and never served.
+run_mutation "serve: a panicking arm ends the loop" \
+  crates/geode-data/src/handle.rs \
+  '        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            geode_core::panic::contained(|| {
+                probe(ServePoint::Arm(&req));
+                dispatch(&service, &sink, req);
+            })
+        }));' \
+  '        probe(ServePoint::Arm(&req));
+        dispatch(&service, &sink, req);
+        let outcome: std::thread::Result<()> = Ok(());' \
+  geode-data a_panicking_query_is_answered_on_its_key_and_the_loop_serves_on
+
+# Each answer below turned into a discarded tuple swallows its arm: the tile
+# that asked waits forever on a request the loop already dropped.
+run_mutation "serve: a panicking query is swallowed" \
+  crates/geode-data/src/handle.rs \
+  '                let _ = sink(DataEvent::Query(QueryOutcome {
+                    key,' \
+  '                let _ = (sink, DataEvent::Query(QueryOutcome {
+                    key,' \
+  geode-data a_panicking_query_is_answered_on_its_key_and_the_loop_serves_on
+
+run_mutation "serve: a panicking document request is answered as another kind" \
+  crates/geode-data/src/handle.rs \
+  '            Request::Document(p) => (
+                "document",
+                PanicAnswer::Query {
+                    key: p.key,
+                    tag: p.tag,
+                    submitted: p.submitted,
+                },
+            ),' \
+  '            Request::Document(_) => ("document", PanicAnswer::Unanswered),' \
+  geode-data a_panicking_document_request_is_answered_on_its_key
+
+run_mutation "serve: a panicking distinct request is swallowed" \
+  crates/geode-data/src/handle.rs \
+  '                let _ = sink(DataEvent::Distinct(DistinctOutcome {
+                    key,' \
+  '                let _ = (sink, DataEvent::Distinct(DistinctOutcome {
+                    key,' \
+  geode-data a_panicking_distinct_request_is_answered_on_its_key_and_column
+
+run_mutation "serve: a panicking series request is swallowed" \
+  crates/geode-data/src/handle.rs \
+  '                let _ = sink(DataEvent::Series(SeriesOutcome {
+                    key,' \
+  '                let _ = (sink, DataEvent::Series(SeriesOutcome {
+                    key,' \
+  geode-data a_panicking_series_request_is_answered_on_its_key
+
+run_mutation "serve: a panicking catalog request is swallowed" \
+  crates/geode-data/src/handle.rs \
+  '                let _ = sink(DataEvent::Catalog(CatalogOutcome {' \
+  '                let _ = (sink, DataEvent::Catalog(CatalogOutcome {' \
+  geode-data a_panicking_catalog_request_is_answered_on_its_key
+
+run_mutation "serve: a panicking price request is swallowed" \
+  crates/geode-data/src/handle.rs \
+  '                let _ = sink(DataEvent::Price(PriceOutcome {' \
+  '                let _ = (sink, DataEvent::Price(PriceOutcome {' \
+  geode-data a_panicking_price_request_answers_every_line
+
+run_mutation "serve: a panicking upload is swallowed" \
+  crates/geode-data/src/handle.rs \
+  '                let _ = sink(DataEvent::Upload(UploadOutcome {' \
+  '                let _ = (sink, DataEvent::Upload(UploadOutcome {' \
+  geode-data a_panicking_upload_is_answered_on_its_key_and_target
+
+run_mutation "serve: a panicking publish leaves its writer waiting" \
+  crates/geode-data/src/handle.rs \
+  '                let _ = sink(DataEvent::LocalPublishFailed {' \
+  '                let _ = (sink, DataEvent::LocalPublishFailed {' \
+  geode-data a_panicking_publish_is_a_diagnostic_and_its_writers_failure
+
+run_mutation "serve: a panicking forget leaves its asker waiting" \
+  crates/geode-data/src/handle.rs \
+  '                let _ = sink(DataEvent::ForgetFailed {' \
+  '                let _ = (sink, DataEvent::ForgetFailed {' \
+  geode-data a_panicking_forget_is_a_diagnostic_and_its_askers_failure
+
+run_mutation "serve: a panic with no answer path is silent" \
+  crates/geode-data/src/handle.rs \
+  '                let _ = sink(DataEvent::Diagnostics(vec![error_diagnostic(reason)]));' \
+  '                let _ = (sink, reason);' \
+  geode-data a_panicking_identities_request_is_one_error_diagnostic
+
+run_mutation "serve: a panicking view replacement ends the loop" \
+  crates/geode-data/src/handle.rs \
+  '            let replaced = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                geode_core::panic::contained(|| {
+                    probe(ServePoint::Views);
+                    service.replace_views(views, dimensions)
+                })
+            }));' \
+  '            probe(ServePoint::Views);
+            let replaced: std::thread::Result<Vec<Diagnostic>> =
+                Ok(service.replace_views(views, dimensions));' \
+  geode-data a_panicking_view_replacement_is_one_diagnostic_and_serves_on
+
+# Unset, a dying loop admits submissions to a queue nothing will read for as
+# long as it takes to join its slowest worker.
+run_mutation "serve: a dying loop still admits submissions" \
+  crates/geode-data/src/handle.rs \
+  '            self.0.store(true, Ordering::Release);' \
+  '            let _ = &self.0;' \
+  geode-data a_submission_while_the_dying_loop_joins_its_workers_is_refused_stopped
+
+run_mutation "serve: a clean quit is declared stopped" \
+  crates/geode-data/src/handle.rs \
+  '        if std::thread::panicking() {' \
+  '        if true {' \
+  geode-data a_clean_shutdown_declares_nothing
+
+run_mutation "serve: a panicking fetch leaves the pair unfailed" \
+  crates/geode-data/src/handle.rs \
+  '            PanicAnswer::Fetch { source, identity } => {
+                service.fail_fetch(&source, &identity, reason)
+            }' \
+  '            PanicAnswer::Fetch { .. } => {}' \
+  geode-data a_fetch_over_an_out_of_range_timestamp_fails_the_pair_and_the_loop_serves_on
+
+# A fresh tracker still emits the pair's Failed, but the source's own lanes
+# never learn it: another pair's recovery then reports the source clean.
+run_mutation "service: a failed fetch skips the load lane" \
+  crates/geode-data/src/service.rs \
+  '        self.health.report_load_and_emit(
+            source,
+            &pair,' \
+  '        let _ = &self.health;
+        HealthTracker::default().report_load_and_emit(
+            source,
+            &pair,' \
+  geode-data a_fetch_the_loop_could_not_run_keeps_its_source_failed_past_another_pairs_recovery
+
+# The service must hand its own sink to each supervised worker as the stop
+# sink; the pricing worker is the one a delivery panic can reach from here.
+run_mutation "service: the pricing worker's stop sink is unwatched" \
+  crates/geode-data/src/service.rs \
+  '        let pricing = PricingWorker::spawn(config.pricer.clone(), price_sink, Arc::clone(&sink));' \
+  '        let pricing = PricingWorker::spawn(config.pricer.clone(), price_sink, crate::supervise::unwatched());' \
+  geode-data a_supervised_worker_death_reaches_the_services_own_sink
+
+# A distinct snapshot missing its columns is that key's Err. An `.expect`
+# here panics on a query worker, outside the pool's boundary.
+run_mutation "service: a distinct answer without its columns panics" \
+  crates/geode-data/src/service.rs \
+  '                let (Some(v), Some(n)) = (s.column_index("value"), s.column_index("n")) else {' \
+  '                let (Some(v), Some(n)) = (Some(s.column_index("value").expect("value")), Some(s.column_index("n").expect("n"))) else {' \
+  geode-data a_distinct_answer_without_its_columns_is_an_err_for_its_key
+
+# The event is built inside its own boundary; without it a build panic
+# propagates to the pool worker and its key is never answered.
+run_mutation "service: a panic building a result event propagates" \
+  crates/geode-data/src/service.rs \
+  '    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        geode_core::panic::contained(|| build(r))
+    })) {' \
+  '    match Ok::<_, Box<dyn std::any::Any + Send>>(build(r)) {' \
+  geode-data a_panic_building_a_result_event_answers_its_key_with_an_error
+
+# A listing panic has no identity to fail, so without its own outcome it is
+# only a log line.
+run_mutation "fetch: a panicking identity listing is only logged" \
+  crates/geode-data/src/ingest/fetch.rs \
+  '                    sink(FetchOutcome::IdentitiesPanicked(message));' \
+  '                    let _ = message;' \
+  geode-data a_panicking_identity_listing_is_an_outcome_not_a_log_line
+
+run_mutation "service: a panicking identity listing reaches no one" \
+  crates/geode-data/src/service.rs \
+  '                                let _ = sink(identity_listing_panicked(&source, &payload));' \
+  '                                let _ = (&sink, &source, &payload);' \
+  geode-data a_panicking_identity_listing_is_an_error_diagnostic_naming_the_source
+
+# The stale check fails open; the report is the only trace the load went
+# unchecked.
+run_mutation "runner: a failed stale check is silent" \
+  crates/geode-data/src/ingest/runner.rs \
+  '    let delivered = sink(IngestEvent::Diagnostic(Diagnostic {
+        severity: Severity::Error,' \
+  '    let delivered = true || sink(IngestEvent::Diagnostic(Diagnostic {
+        severity: Severity::Error,' \
+  geode-data a_malformed_catalog_row_panics_the_pop_time_lookup_without_killing_the_runner
+
+# An unreadable catalog row is corruption: an error, counted in the status
+# bar's `data N errors`, not a warning the summary ignores.
+run_mutation "runner: a failed stale check is only a warning" \
+  crates/geode-data/src/ingest/runner.rs \
+  '        severity: Severity::Error,
+        layer: None,
+        file: None,
+        message: format!(
+            "the stale check for {} could not read the catalog ({what}); loading it anyway",' \
+  '        severity: Severity::Warning,
+        layer: None,
+        file: None,
+        message: format!(
+            "the stale check for {} could not read the catalog ({what}); loading it anyway",' \
+  geode-data a_failed_stale_check_is_an_error_diagnostic_through_the_service
+
+run_mutation "service: a runner diagnostic reaches no one" \
+  crates/geode-data/src/service.rs \
+  '                IngestEvent::Diagnostic(d) => sink(DataEvent::Diagnostics(vec![d])),' \
+  '                IngestEvent::Diagnostic(_) => true,' \
+  geode-data a_failed_stale_check_is_an_error_diagnostic_through_the_service
+
+run_mutation "runner: a panicking local sweep is only logged" \
+  crates/geode-data/src/ingest/runner.rs \
+  '            let delivered = sink(IngestEvent::Diagnostic(Diagnostic {
+                severity: Severity::Error,' \
+  '            let delivered = true || sink(IngestEvent::Diagnostic(Diagnostic {
+                severity: Severity::Error,' \
+  geode-data a_panicking_local_sweep_is_an_error_diagnostic
+
+run_mutation "scheduler: a discovery panic drops its payload" \
+  crates/geode-data/src/ingest/scheduler.rs \
+  '                    "discovery panicked: {}",
+                    crate::ingest::runner::panic_payload_message(payload.as_ref())' \
+  '                    "discovery panicked{}",
+                    { let _ = payload; "" }' \
+  geode-data a_panicking_discovery_poll_names_its_payload
+
+run_mutation "diagnostics: a stopped thread gets no segment" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        self.stopped_segment = stopped_segment(&self.stopped);' \
+  '        self.stopped_segment = None;' \
+  geode-shell one_stopped_thread_is_named_with_its_reason_in_the_tooltip
+
+run_mutation "diagnostics: the request loop does not outrank" \
+  crates/geode-shell/src/diagnostics.rs \
+  '    if let Some(service) = stopped.iter().find(|t| t.thread == REQUEST_LOOP) {' \
+  '    if let Some(service) = stopped.iter().find(|_| false) {' \
+  geode-shell a_stopped_request_loop_outranks_the_other_threads
+
+run_mutation "diagnostics: several stopped threads are not collapsed" \
+  crates/geode-shell/src/diagnostics.rs \
+  '    if stopped.len() == 1 {' \
+  '    if !stopped.is_empty() {' \
+  geode-shell two_stopped_threads_collapse_to_a_count_listing_each
+
+run_mutation "diagnostics: a thread reported twice is recorded twice" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        if self.stopped.iter().any(|t| t.thread == thread) {' \
+  '        if false {' \
+  geode-shell a_thread_reported_twice_is_recorded_once
+
+run_mutation "diagnostics: refused submissions are not summarised" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        if self.refused > 0 {' \
+  '        if false {' \
+  geode-shell refused_submissions_show_in_the_summary_and_are_omitted_at_zero
+
+run_mutation "status: the stopped segment is not painted" \
+  crates/geode-shell/src/shell/status.rs \
+  '    if let Some(segment) = stopped {' \
+  '    if let Some(segment) = stopped.filter(|_| false) {' \
+  geode-shell a_stopped_thread_paints_the_stopped_segment_first
+
+run_mutation "status: the stopped segment's click does nothing" \
+  crates/geode-shell/src/shell/status.rs \
+  '                    stopped_click(window, cx);' \
+  '                    let _ = (&stopped_click, window, cx);' \
+  geode-shell clicking_the_stopped_segment_opens_the_diagnostics_tile
+
+run_mutation "sections: stopped threads are not listed" \
+  crates/geode-diagnostics/src/sections.rs \
+  '    if !d.stopped.is_empty() {' \
+  '    if false {' \
+  geode-diagnostics stopped_threads_lead_the_sources_section
+
+run_mutation "bridge: a stopped thread never reaches diagnostics" \
+  crates/geode-app/src/bridge.rs \
+  '                            d.note_thread_stopped(&thread, reason, SystemTime::now());' \
+  '                            let _ = (&thread, reason);' \
+  geode-app a_thread_stopped_event_reaches_the_status_segment
+
+run_mutation "bridge: refused submissions are not read" \
+  crates/geode-app/src/bridge.rs \
+  '                        d.note_refused(now_refused);' \
+  '                        let _ = now_refused;' \
+  geode-app refused_submissions_reach_the_status_summary
+
+run_mutation "blotter: a stopped query refusal reads as something else" \
+  crates/geode-blotter/src/tile.rs \
+  '            self.error = Some((format!("query refused: {refusal}"), Tone::DangerText));' \
+  '            self.error = Some(({ let _ = refusal; "query refused".to_string() }, Tone::DangerText));' \
+  geode-blotter a_refused_query_says_busy_or_stopped
+
+run_mutation "mdtile: a document refusal loses its kind" \
+  crates/geode-marketdata/src/tile.rs \
+  '            self.notice = Some(format!("document request refused: {refusal}").into());' \
+  '            self.notice = Some({ let _ = refusal; "document request refused".into() });' \
+  geode-marketdata a_busy_document_refusal_says_busy
+
+run_mutation "mdtile: an upload refusal loses its kind" \
+  crates/geode-marketdata/src/tile.rs \
+  '            self.notice = Some(format!("upload refused: {refusal}").into());' \
+  '            self.notice = Some({ let _ = refusal; "upload refused".into() });' \
+  geode-marketdata a_busy_upload_refusal_says_busy_and_clears_in_flight
+
+run_mutation "timeseries: a refused fetch loses its kind" \
+  crates/geode-timeseries/src/tile/data.rs \
+  '                        SlotState::Failed(format!("fetch refused: {refusal}")),' \
+  '                        SlotState::Failed({ let _ = refusal; "fetch refused".to_string() }),' \
+  geode-timeseries a_refused_fetch_fails_the_chip_by_kind
+
+run_mutation "timeseries: a refused series request loses its kind" \
+  crates/geode-timeseries/src/tile/data.rs \
+  '                    self.notice = Some(format!("series request refused: {refusal}").into());' \
+  '                    self.notice = Some({ let _ = refusal; "series request refused".into() });' \
+  geode-timeseries a_refused_submit_notices_and_still_answers_the_barrier
+
+run_mutation "pricer tile: a stopped service still backs off" \
+  crates/geode-pricer/src/tile.rs \
+  '        } else if queued == Err(Refusal::Stopped) {' \
+  '        } else if false {' \
+  geode-pricer a_stopped_service_stops_the_pricing_backoff
+
+run_mutation "pricer tile: a stopped service is asked again on a tick" \
+  crates/geode-pricer/src/tile.rs \
+  '        if !self.visible || self.loading || self.stopped {' \
+  '        if !self.visible || self.loading {' \
+  geode-pricer a_stopped_service_stops_the_pricing_backoff
+
+run_mutation "pricer tile: a stopped overlay is not shown" \
+  crates/geode-pricer/src/tile.rs \
+  '        let notice = if self.stopped {' \
+  '        let notice = if false {' \
+  geode-pricer a_stopped_service_stops_the_pricing_backoff
+
+run_mutation "pricer tile: a stopped store is asked again on the next edit" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.save_stopped {
+            self.save_refused = true;
+            self.save_notice = Some(SAVE_STOPPED.into());
+            return false;
+        }' \
+  '' \
+  geode-pricer a_stopped_service_stops_save_retries
+
+run_mutation "pricer tile: a stopped store's early return paints nothing" \
+  crates/geode-pricer/src/tile.rs \
+  '            self.save_refused = true;
+            self.save_notice = Some(SAVE_STOPPED.into());
+            return false;' \
+  '            return false;' \
+  geode-pricer a_rename_on_a_stopped_store_keeps_the_stopped_notice
+
+run_mutation "pricer tile: a stopped save is not marked stopped" \
+  crates/geode-pricer/src/tile.rs \
+  '            if saved == Err(Refusal::Stopped) {' \
+  '            if false {' \
+  geode-pricer a_stopped_service_stops_save_retries
+
+run_mutation "pricer tile: a refused load loses its kind" \
+  crates/geode-pricer/src/tile.rs \
+  '    format!("the store refused the load: {refusal}")' \
+  '    { let _ = refusal; "the store refused the load".to_string() }' \
+  geode-pricer a_stopped_load_names_the_stopped_service
+
+run_mutation "pricer tile: a refused remove loses its kind" \
+  crates/geode-pricer/src/tile.rs \
+  '                        Some(format!("sheet '"'"'{}'"'"' not removed: {refused}", pending.sheet).into());' \
+  '                        Some({ let _ = refused; format!("sheet '"'"'{}'"'"' not removed", pending.sheet).into() });' \
+  geode-pricer a_stopped_remove_names_the_stopped_service
+
+run_mutation "pricer tile: a refused rename forget loses its kind" \
+  crates/geode-pricer/src/tile.rs \
+  '                                    format!("old sheet '"'"'{old}'"'"' not removed: {refused}").into(),' \
+  '                                    { let _ = refused; format!("old sheet '"'"'{old}'"'"' not removed").into() },' \
+  geode-pricer a_stopped_rename_forget_names_the_stopped_service
+
+run_mutation "bridge: a stopped distinct reads as busy" \
+  crates/geode-app/src/bridge.rs \
+  '                            Refusal::Stopped => "the data service has stopped".into(),' \
+  '                            Refusal::Stopped => "the data service is busy — try again".into(),' \
+  geode-app a_refused_distinct_request_errors_the_picker
+
+run_mutation "catalog refresh: a stopped service is retried" \
+  crates/geode-app/src/bridge.rs \
+  '                Err(Refusal::Stopped) => {}' \
+  '                Err(Refusal::Stopped) => refresh.retry(&diagnostics, request, window, cx),' \
+  geode-app a_stopped_service_does_not_retry_the_catalog
+
+run_mutation "bridge: a view hand-off refusal is silent" \
+  crates/geode-app/src/bridge.rs \
+  '                    .chain(handoff)' \
+  '                    .chain({ let _ = handoff; None::<Diagnostic> })' \
+  geode-app a_reload_into_a_stopped_service_is_an_error_diagnostic
+
+run_mutation "bridge: a stopped view hand-off is only a warning" \
+  crates/geode-app/src/bridge.rs \
+  '                            Refusal::Stopped => Severity::Error,' \
+  '                            Refusal::Stopped => Severity::Warning,' \
+  geode-app a_reload_into_a_stopped_service_is_an_error_diagnostic
+# A package's cells aggregate its legs; without the route they paint blank.
+run_mutation "pricer package: text cells paint blank" \
+  crates/geode-pricer/src/core/columns.rs \
+  '    if sheet.is_package(row) && crate::core::package::aggregates(def.kind) {' \
+  '    if false && crate::core::package::aggregates(def.kind) {' \
+  geode-pricer instrument_cells_render_the_grammar_and_a_package_aggregates_them
+
+# Repeated values collapse: a fly's body is one strike, not two.
+run_mutation "pricer package: repeats are not collapsed" \
+  crates/geode-pricer/src/core/package.rs \
+  '        match keys.iter().position(|seen| *seen == k) {' \
+  '        match None::<usize> {' \
+  geode-pricer distinct_values_keep_leg_order_and_collapse_repeats
+
+# Barrier columns read only barrier legs: a vanilla leg must not add a part.
+run_mutation "pricer package: a vanilla leg counts in a barrier column" \
+  crates/geode-pricer/src/core/package.rs \
+  '            Instrument::Vanilla(_) => None,' \
+  '            Instrument::Vanilla(v) => Some((l, &*Box::leak(Box::new(geode_core::pricing::Barrier { vanilla: v.clone(), level: 0.0, barrier: geode_core::pricing::BarrierKind::DownIn })))),' \
+  geode-pricer barrier_columns_read_only_barrier_legs
+
+# The package quantity shows only while the legs fit the template.
+run_mutation "pricer package: qty ignores whether the legs fit" \
+  crates/geode-pricer/src/core/package.rs \
+  '    render_package(def, &legs)?;' \
+  '' \
+  geode-pricer qty_falls_back_to_the_leg_list_when_the_legs_do_not_fit
+
+# A shift paints muted only when every leg inherits.
+run_mutation "pricer package: a shift reads inherited while a leg sets its own" \
+  crates/geode-pricer/src/core/package.rs \
+  '        Some(pick) if sheet.children(row).all(|l| pick(sheet.shift(l)).is_none()) => {' \
+  '        Some(_) => {' \
+  geode-pricer shifts_group_by_effective_value_and_mute_when_all_inherit
+
+# Shifts group by the effective value: an own 2 and an inherited 2 are one.
+run_mutation "pricer package: shifts group by the own value" \
+  crates/geode-pricer/src/core/package.rs \
+  '                    .map(|l| (l, pick(sheet.shift(l)).or(sheet_value))),' \
+  '                    .map(|l| (l, pick(sheet.shift(l)))),' \
+  geode-pricer shifts_group_by_effective_value_and_mute_when_all_inherit
+
+# A shift group opens for editing on the plain number, not the signed cell.
+run_mutation "pricer package: a shift group edits as its display" \
+  crates/geode-pricer/src/core/package.rs \
+  '                    .map(plain)' \
+  '                    .map(|v| signed(v, format))' \
+  geode-pricer a_group_opens_for_editing_in_the_line_editors_spelling
+
+# Shifts group by their spelled text: 2.04 and 2.0 both paint +2.0, one part.
+run_mutation "pricer package: shifts group by the unspelled value" \
+  crates/geode-pricer/src/core/package.rs \
+  $'                display,\n                |v| (display(v), String::new()),' \
+  $'                |v| *v,\n                |v| (display(v), String::new()),' \
+  geode-pricer shifts_spelled_alike_show_once
+
+# A mixed shift cell paints an unset part as a dash, not an empty part.
+run_mutation "pricer package: an unset shift part paints empty" \
+  crates/geode-pricer/src/core/package.rs \
+  $'                UNSET\n            } else {' \
+  $'                ""\n            } else {' \
+  geode-pricer a_group_opens_for_editing_in_the_line_editors_spelling
+
+# A list maps by position onto the groups.
+run_mutation "pricer package: a list edit uses the first part for every group" \
+  crates/geode-pricer/src/core/package.rs \
+  '    let part = |i: usize| -> &str { if parts.len() == 1 { parts[0] } else { parts[i] } };' \
+  '    let part = |_: usize| -> &str { parts[0] };' \
+  geode-pricer a_list_maps_by_position_and_a_fly_body_moves_once
+
+# A list whose count matches neither one nor the groups is refused.
+run_mutation "pricer package: a wrong count is accepted" \
+  crates/geode-pricer/src/core/package.rs \
+  '    if parts.len() != 1 && parts.len() != gs.len() {' \
+  '    if false {' \
+  geode-pricer a_wrong_count_or_a_bad_part_refuses_and_changes_nothing
+
+# The wrong-count refusal quotes the cell as painted: an unset part is a dash.
+run_mutation "pricer package: a wrong count quotes the raw parts" \
+  crates/geode-pricer/src/core/package.rs \
+  '        return Err(format!("{n} value{s}: {}", painted(&gs)));' \
+  '        return Err(format!("{n} value{s}: {}", gs.iter().map(|g| g.display.as_str()).collect::<Vec<_>>().join("/")));' \
+  geode-pricer a_wrong_count_shows_the_painted_cell
+
+# A part typed back as its group opened is no change for the whole group.
+run_mutation "pricer package: an unchanged part rewrites its group" \
+  crates/geode-pricer/src/core/package.rs \
+  '        if part(i).trim() == g.edit {' \
+  '        if false {' \
+  geode-pricer a_merged_own_and_inherited_group_commits_unchanged_as_no_edit
+
+# A shift group whose legs all inherit opens empty, as the line editor does.
+run_mutation "pricer package: an inherited shift group opens on the sheet value" \
+  crates/geode-pricer/src/core/package.rs \
+  '                    .find_map(|&l| pick(sheet.shift(l)))' \
+  '                    .find_map(|&l| pick(sheet.shift(l)).or(sheet_value))' \
+  geode-pricer an_inherited_shift_opens_empty_and_enter_changes_nothing
+
+# A package cell with no leg the column reads refuses at open.
+run_mutation "pricer package: a barrier cell on vanillas opens empty" \
+  crates/geode-pricer/src/core/package.rs \
+  $'    if gs.is_empty() {\n        return None;' \
+  $'    if false {\n        return None;' \
+  geode-pricer the_editor_opens_on_the_line_editors_spellings
+
+# An underlying with a / would make its package's cell a list.
+run_mutation "pricer package: an underlying may contain a slash" \
+  crates/geode-pricer/src/core/cell.rs \
+  $'            if t.contains(\'/\') {\n                return Err(format!("underlying' \
+  $'            if false {\n                return Err(format!("underlying' \
+  geode-pricer a_bad_commit_is_refused_with_the_reason_and_names_the_text
+
+# Package qty rescales the legs by weight.
+run_mutation "pricer package: package qty sets every leg to q" \
+  crates/geode-pricer/src/core/package.rs \
+  '            let qty = q.checked_mul(w).ok_or("quantity out of range")?;' \
+  '            let qty = q.checked_mul(w.signum()).ok_or("quantity out of range")?;' \
+  geode-pricer package_qty_rescales_legs_by_weight
+
+# A package cell opens a text editor on its groups, not the line's editor.
+run_mutation "pricer package: a package cell opens no editor" \
+  crates/geode-pricer/src/core/cell.rs \
+  $'    if sheet.is_package(row) {\n        return crate::core::package::editor_text(sheet, row, kind, format)' \
+  $'    if false {\n        return crate::core::package::editor_text(sheet, row, kind, format)' \
+  geode-pricer a_package_opens_a_text_editor_even_for_expiry_and_type_and_a_list_does_not_nudge
+
+# A `/` list has no one number to step.
+run_mutation "pricer package: a list nudges its first number" \
+  crates/geode-pricer/src/core/cell.rs \
+  $'    if t.contains(\'/\') {\n        return Err("a list does not nudge".into());' \
+  $'    if false {\n        return Err("a list does not nudge".into());' \
+  geode-pricer a_package_opens_a_text_editor_even_for_expiry_and_type_and_a_list_does_not_nudge
+
+# A package commit's edits apply as one undo entry.
+run_mutation "pricer tile: a package commit applies only its first edit" \
+  crates/geode-pricer/src/tile.rs \
+  '                    self.apply_edits(edits, cx)' \
+  '                    self.apply_edit(edits.remove(0), cx)' \
+  geode-pricer editing_a_package_strike_moves_both_legs_in_one_undo_step
+
+# Several package edits as several undo entries: one undo must restore all.
+run_mutation "pricer tile: a package commit applies its edits one undo entry each" \
+  crates/geode-pricer/src/tile.rs \
+  '                    self.apply_edits(edits, cx)' \
+  '                    edits.into_iter().try_for_each(|e| self.apply_edit(e, cx))' \
+  geode-pricer editing_a_package_strike_moves_both_legs_in_one_undo_step
+
+# A package row's commit goes through package::commit, not the line's.
+run_mutation "pricer package: a package commit takes the line route" \
+  crates/geode-pricer/src/core/cell.rs \
+  $'    if sheet.is_package(row) {\n        return crate::core::package::commit(sheet, row, kind, format, text);' \
+  $'    if false {\n        return crate::core::package::commit(sheet, row, kind, format, text);' \
+  geode-pricer commit_edits_routes_a_package_and_wraps_a_line
+
+# The editor groups a shift cell by the view's format, as the cell paints
+# it: the column default would open two painted parts as one.
+run_mutation "pricer package: the editor groups by the column default format" \
+  crates/geode-pricer/src/core/package.rs \
+  $'    let gs = groups(sheet, row, kind, format);\n    if gs.is_empty() {\n        return None;' \
+  $'    let gs = groups(sheet, row, kind, &crate::core::columns::COLUMNS.iter().find(|c| c.kind == kind)?.default_format);\n    if gs.is_empty() {\n        return None;' \
+  geode-pricer a_view_precision_groups_the_cell_the_editor_and_the_commit_alike
+
+# The commit counts groups by the view's format, so its refusal quotes the
+# cell on screen.
+run_mutation "pricer package: the commit groups by the column default format" \
+  crates/geode-pricer/src/core/package.rs \
+  $'    let gs = groups(sheet, row, kind, format);\n    if gs.is_empty() {\n        return Err(read_only());' \
+  $'    let gs = groups(sheet, row, kind, &crate::core::columns::COLUMNS.iter().find(|c| c.kind == kind).ok_or_else(read_only)?.default_format);\n    if gs.is_empty() {\n        return Err(read_only());' \
+  geode-pricer a_view_precision_groups_the_cell_the_editor_and_the_commit_alike
+
+# A template reload under an open package editor changes what its text
+# means: the commit re-checks the opening text and refuses with MOVED.
+run_mutation "pricer tile: a package commit ignores a changed opening text" \
+  crates/geode-pricer/src/tile.rs \
+  '            && cell::editor_for(&self.sheet, row, kind, format) != Ok(CellEditor::Text(opened))' \
+  '            && opened.is_empty()' \
+  geode-pricer a_template_reload_under_an_open_package_qty_editor_refuses_the_commit
+
+# The fit is the widest content, not whichever cell comes first.
+run_mutation "autosize: the fit measures the first text, not the widest" \
+  crates/geode-shell/src/colfit.rs \
+  '        let widest = content.into_iter().fold(0.0_f32, f32::max);' \
+  '        let widest = content.into_iter().next().unwrap_or(0.0);' \
+  geode-shell the_widest_cell_decides_the_width
+
+# tile::autosize_columns reaches the focused occupant, not another tile.
+run_mutation "autosize: the palette action reaches a tile other than the focused one" \
+  crates/geode-shell/src/shell/input.rs \
+  $'                .focused_tile()\n                .and_then(|t| self.occupants.get(&t))\n            {\n                Some(o) => o.content.autosize_columns(false, window, cx),' \
+  $'                .tree()\n                .tiles()\n                .first()\n                .copied()\n                .and_then(|t| self.occupants.get(&t))\n            {\n                Some(o) => o.content.autosize_columns(false, window, cx),' \
+  geode-shell the_autosize_action_reaches_only_the_focused_tile
+
+# column() must prefer the fitted width, or the next refresh undoes a fit.
+run_mutation "autosize: the blotter delegate ignores the fitted width" \
+  crates/geode-blotter/src/delegate.rs \
+  '                let width = self.fitted.get(&c.name).copied().unwrap_or(c.width);' \
+  '                let width = c.width;' \
+  geode-blotter autosize_fits_the_loaded_rows_survives_a_redelivery_and_resets
+
+run_mutation "autosize: the market-data delegate ignores the fitted width" \
+  crates/geode-marketdata/src/delegate.rs \
+  '        self.fitted.get(key).copied().unwrap_or(default)' \
+  '        default' \
+  geode-marketdata autosize_fits_every_row_survives_a_model_install_and_resets
+
+run_mutation "autosize: the pricer delegate ignores the fitted width" \
+  crates/geode-pricer/src/delegate.rs \
+  '            width: px(self.fitted.get(c.name).copied().unwrap_or(c.width)),' \
+  '            width: px(c.width),' \
+  geode-pricer autosize_fits_every_row_survives_a_rebuild_and_resets
+
+# A view switch is another column set: its fitted widths go.
+run_mutation "autosize: the blotter keeps widths across a view switch" \
+  crates/geode-blotter/src/tile.rs \
+  '                    d.fitted.clear();' \
+  '                    let _ = &d.fitted;' \
+  geode-blotter autosize_widths_round_trip_the_session_and_a_view_switch_clears_them
+
+# Each module restores its fitted widths from the session record.
+run_mutation "autosize: the blotter restores no widths" \
+  crates/geode-blotter/src/tile.rs \
+  '                delegate.fitted = widths_from_record(restored);' \
+  '                delegate.fitted = FittedWidths::new();' \
+  geode-blotter autosize_widths_round_trip_the_session_and_a_view_switch_clears_them
+
+run_mutation "autosize: the blotter restores widths for a missing view" \
+  crates/geode-blotter/src/tile.rs \
+  '            if restored_view_kept {' \
+  '            if true {' \
+  geode-blotter a_restored_record_for_a_missing_view_drops_its_widths
+
+run_mutation "autosize: the blotter writes no widths" \
+  crates/geode-blotter/src/tile.rs \
+  '        if let Some(w) = widths_to_toml(&self.table.read(cx).delegate().fitted) {' \
+  '        if let Some(w) = None::<toml::Value> {' \
+  geode-blotter autosize_widths_round_trip_the_session_and_a_view_switch_clears_them
+
+run_mutation "autosize: the blotter reset fits instead" \
+  crates/geode-blotter/src/tile.rs \
+  '        let fitted = if reset {' \
+  '        let fitted = if false {' \
+  geode-blotter autosize_fits_the_loaded_rows_survives_a_redelivery_and_resets
+
+# Nothing to measure refuses and keeps the widths already held.
+run_mutation "autosize: the blotter fits an empty table" \
+  crates/geode-blotter/src/tile.rs \
+  '                .ok_or(NOTHING_TO_FIT)?' \
+  '                .unwrap_or_default()' \
+  geode-blotter autosize_with_nothing_loaded_refuses_and_keeps_the_widths
+
+run_mutation "autosize: a regroup keeps the tree column's width" \
+  crates/geode-blotter/src/delegate.rs \
+  '            self.fitted.remove("");' \
+  '            let _ = &self.fitted;' \
+  geode-blotter a_regroup_drops_only_the_tree_columns_fitted_width
+
+run_mutation "autosize: the market-data panel restores no widths" \
+  crates/geode-marketdata/src/tile.rs \
+  '            delegate.fitted = widths_from_record(restored);' \
+  '            delegate.fitted = FittedWidths::new();' \
+  geode-marketdata autosize_widths_round_trip_the_session
+
+run_mutation "autosize: the market-data panel writes no widths" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if let Some(w) = widths_to_toml(&self.table.read(cx).delegate().fitted) {' \
+  '        if let Some(w) = None::<toml::Value> {' \
+  geode-marketdata autosize_widths_round_trip_the_session
+
+run_mutation "autosize: the market-data reset fits instead" \
+  crates/geode-marketdata/src/tile.rs \
+  '        let fitted = if reset {' \
+  '        let fitted = if false {' \
+  geode-marketdata autosize_fits_every_row_survives_a_model_install_and_resets
+
+run_mutation "autosize: the market-data panel fits an empty table" \
+  crates/geode-marketdata/src/tile.rs \
+  '                .ok_or(NOTHING_TO_FIT)?' \
+  '                .unwrap_or_default()' \
+  geode-marketdata autosize_with_no_document_refuses_and_keeps_the_widths
+
+run_mutation "autosize: the pricer tile restores no widths" \
+  crates/geode-pricer/src/tile.rs \
+  '        delegate.fitted = record.widths.clone();' \
+  '        delegate.fitted = FittedWidths::new();' \
+  geode-pricer autosize_widths_round_trip_the_session
+
+run_mutation "autosize: the pricer record reads no widths" \
+  crates/geode-pricer/src/session.rs \
+  '            widths: widths_from_record(Some(t)),' \
+  '            widths: FittedWidths::new(),' \
+  geode-pricer a_record_round_trips_through_its_table
+
+run_mutation "autosize: the pricer writes no widths" \
+  crates/geode-pricer/src/tile.rs \
+  '            widths: self.table.read(cx).delegate().fitted.clone(),' \
+  '            widths: FittedWidths::new(),' \
+  geode-pricer autosize_widths_round_trip_the_session
+
+run_mutation "autosize: the pricer reset fits instead" \
+  crates/geode-pricer/src/tile.rs \
+  '        let fitted = if reset {' \
+  '        let fitted = if false {' \
+  geode-pricer autosize_fits_every_row_survives_a_rebuild_and_resets
+
+run_mutation "autosize: the pricer fits an empty sheet" \
+  crates/geode-pricer/src/tile.rs \
+  '                .ok_or(NOTHING_TO_FIT)?' \
+  '                .unwrap_or_default()' \
+  geode-pricer autosize_on_an_empty_sheet_refuses
+
+# A hand-edited width is clamped to what a fit can produce.
+run_mutation "autosize: a restored width is not clamped" \
+  crates/geode-shell/src/colfit.rs \
+  '                        .then(|| (k.clone(), w.clamp(RESTORED_MIN_PX, RESTORED_MAX_PX)))' \
+  '                        .then(|| (k.clone(), w))' \
+  geode-shell a_restored_width_is_clamped_to_what_a_fit_can_produce
+
+# An occupant without a table refuses by default.
+run_mutation "autosize: the trait default accepts a fit" \
+  crates/geode-shell/src/module.rs \
+  '        Err(crate::colfit::NO_TABLE)' \
+  '        Ok(())' \
+  geode-shell autosize_on_a_tile_without_a_table_shows_the_refusal
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

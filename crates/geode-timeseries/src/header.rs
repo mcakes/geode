@@ -1,19 +1,14 @@
-//! The tile's chrome (spec §9.3): the header strip — stack marker, kind
-//! badge, the range and frequency triggers, one chip per slot — the
-//! notice line and the footer hint row.
+//! Header chips, range and frequency triggers, notices, footer hints, and the
+//! inline expression editor for the timeseries tile.
 //!
-//! [`HeaderModel::prepare`] is the "prepare, never format per frame"
-//! rule this crate shares with the market-data panel: every string the
-//! header paints is built once, in the tile's `rebuild_chrome`, and
-//! `render_header` only clones `SharedString`s and `Hsla`s.
+//! `HeaderModel::prepare` retains labels, tooltip selectors, and resolved
+//! swatches. The tile refreshes this model through `rebuild_chrome` when its
+//! inputs change; ordinary header painting reuses those values.
 //!
-//! A slot's swatch COLOR is prepared here too, which is why `prepare`
-//! takes a resolver: deriving one costs a `Palette::from_theme` (five
-//! readability floors, each a possible OKLab bisection) plus twenty-eight
-//! `Hsla -> Rgb` conversions for the named-color wheel, and doing that
-//! in `render` would pay it every frame for a value that only moves when
-//! the model or the theme does. The tile rebuilds the header on both, the
-//! theme behind `theme_signature`.
+//! The tile supplies one color resolver for header swatches, series-list rows,
+//! and chart lines. This shares the palette's readability adjustment and the
+//! named-color wheel instead of deriving them for each slot or each paint.
+//! Theme and named-color changes invalidate the prepared colors.
 
 use geode_core::series::SlotKind;
 use geode_shell::actions::ActionId;
@@ -45,9 +40,8 @@ use crate::tile::TimeseriesTile;
 pub(crate) const HEADER_HEIGHT: f32 = 26.0;
 pub(crate) const FOOTER_HEIGHT: f32 = 20.0;
 
-/// What a tile with no slots paints in place of the chart. Names the two
-/// keys that end the state, per the design guide's empty-state rule.
-/// Backtick-quoted runs are keys, painted as chips by `kbd::marked`.
+/// Guidance shown instead of the chart when no slots exist. Backtick-quoted
+/// keys name the add and compose actions and paint as chips via `kbd::marked`.
 pub(crate) const EMPTY_HINT: &str = "no series — `a` adds one, `x` composes";
 
 /// The swatch beside a chip's label, in pixels at the design rem.
@@ -56,18 +50,14 @@ const SWATCH: f32 = 8.0;
 /// control so the dot continues to show the series color.
 const SWATCH_TARGET: f32 = 16.0;
 
-/// The empty state's two doors, as the button labels and the actions
-/// they dispatch.
+/// Empty-state button labels and their registered actions.
 pub(crate) const EMPTY_ACTIONS: [(&str, &str); 2] = [
     ("Add series…", "timeseries::add"),
     ("Compose expression…", "timeseries::expr"),
 ];
 
-/// One slot's chip, prepared. `tone` is what the chip MEANS; `filled`
-/// is whether it paints that tone's tint — an idle slot away from the
-/// cursor is bare text, so the strip stays quiet and the cursor, a
-/// fetch and a failure are the only things with a fill (the design
-/// guide's emphasis budget).
+/// Prepared slot chip. `tone` carries fetch state; `filled` highlights fetching,
+/// failure, or the selected idle slot. Other idle slots use bare text.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Chip {
     pub label: SharedString,
@@ -150,7 +140,7 @@ impl HeaderModel {
     }
 }
 
-/// The tile's title for the stack list and the window (ruling 4):
+/// The tile's title for the stack list and window:
 /// `timeseries · 1y · 1d`, plus ` · n series` once it holds any.
 pub(crate) fn title_text(model: &Model) -> SharedString {
     let n = model.slots().len();
@@ -230,20 +220,13 @@ pub(crate) struct HeaderPopups {
     pub under_freq: Option<AnyElement>,
 }
 
-/// One bare trigger that owns a popup (the range and the frequency
-/// triggers): its prepared text and a `▾`, the bare-control hover and
-/// press at rest, and while its popup is up the neutral chip's fill as a
-/// persistent open state that answers the pointer with nothing (the
-/// design guide's "Open / pressed" row, and the `⋯` button's own rule).
+/// Range or frequency trigger with a popup anchored at its bottom-left.
+/// Closed triggers use bare-control hover and press states. An open trigger
+/// keeps a neutral fill without additional pointer feedback.
 ///
-/// It toggles in the CAPTURE phase: the open popup's own
-/// `on_mouse_down_out` is a capture listener that would close it before
-/// a bubble handler here could see it open, so the click meant to close
-/// would reopen it instead. It does not stop propagation, so the
-/// shell's tile press still focuses the tile.
-///
-/// `popup` hangs off a zero-size point at the trigger's bottom-left, so
-/// the menu opens under the control that owns it.
+/// Toggle during capture, before the popup's outside-press listener can close
+/// it; toggling during bubble would reopen the popup on the same click.
+/// Propagation continues so the shell can focus the clicked tile.
 #[allow(clippy::too_many_arguments)]
 fn trigger(
     theme: &Theme,
@@ -316,11 +299,10 @@ pub(crate) fn render_header(
         .border_color(theme.border)
         .debug_selector(move || format!("timeseries-header-{tile_id}"));
 
-    // 0. The stack marker, first in the strip, through the one builder
-    //    every module uses (tile-stacks spec §5.1).
+    // Stack position and interaction come from the shell's shared marker.
     row = row.children(stack.and_then(|s| s.marker(theme, TileId(tile_id))));
 
-    // 1. Kind badge — the market-data badge's `secondary` pill.
+    // The module badge uses the secondary surface and its paired text color.
     row = row.child(
         div()
             .px_1p5()
@@ -331,8 +313,6 @@ pub(crate) fn render_header(
             .child("Timeseries"),
     );
 
-    // 2. Range and frequency triggers, each the mouse door onto its own menu
-    //    (`r` and `f` are the keys), through `dispatch` on the verb's own id.
     // Derive shared bare-control pointer states once for the triggers, the swatch
     // targets, and the menu button, avoiding repeated contrast calculations.
     let bare_states = control::paint(
@@ -371,17 +351,11 @@ pub(crate) fn render_header(
             under_freq,
         ));
 
-    // 3. One chip per slot.
+    // One chip per slot, including hidden series.
     for (index, chip) in h.chips.iter().enumerate() {
-        // An unfilled chip is a BARE control, and it drops the TEXT
-        // with the fill: `for_chip` reads the fill to pick the hover
-        // token, so clearing it is what makes a quiet chip's hover
-        // borrow `accent` rather than the secondary button's; and
-        // `Tone::Neutral`'s own 3:1 guarantee is measured over its fill,
-        // so `secondary_foreground` painted straight on the tile
-        // background is covered by no sweep at all (review round 1,
-        // I-1). `muted_foreground` on `background` is the bare pairing
-        // `control::shipped()` already carries.
+        // Clear both fill and text styling for an unfilled chip. `for_chip`
+        // then chooses bare-control hover colors, and muted text pairs with the
+        // tile background rather than relying on contrast over a missing fill.
         let mut paint = chip_paint(theme, chip.tone);
         if !chip.filled {
             paint.fill = None;
@@ -457,21 +431,9 @@ pub(crate) fn render_header(
                     .text_color(theme.muted_foreground)
                     .child(chip.axis),
             )
-            // The mouse's form of `tab`: a click moves the cursor.
-            //
-            // Deliberately no `cx.stop_propagation()` — the shell's own
-            // tile-level mouse-down (`leave_command_line`,
-            // `focus_main_tile`, the `pending_focus_restore` re-arm) must
-            // still run. Stopping here suppressed the shell's whole
-            // bubble phase for this click, so a chip click on an
-            // UNFOCUSED tile moved that tile's cursor while shell focus
-            // stayed elsewhere, and every bare key after it drove
-            // whichever tile the shell still had focused. Same finding,
-            // same fix as the market-data `⋯` button:
-            // `crates/geode-marketdata/src/header.rs:528-537`. The
-            // popup ROWS keep theirs — they sit on a `deferred`,
-            // occluding surface of their own, the market-data popup's
-            // shape.
+            // Select this slot and let the press reach the shell's tile handler.
+            // That handler dismisses the command line, focuses the clicked tile,
+            // and arms focus restoration so subsequent keys reach this selection.
             .on_mouse_down(MouseButton::Left, {
                 let tile = tile.clone();
                 move |_: &MouseDownEvent, _window, cx| {
@@ -496,7 +458,7 @@ pub(crate) fn render_header(
         row = row.child(el);
     }
 
-    // 4. Action-menu toggle. Handle the press in capture phase before the open
+    // Handle the action-menu toggle in capture phase before the open
     // popup's outside-press listener can close it; otherwise a second click would
     // reopen it. Keep propagation so the shell focuses the tile receiving the click.
     let muted = theme.muted_foreground;
@@ -544,11 +506,9 @@ pub(crate) fn render_notice(notice: &SharedString, theme: &Theme) -> impl IntoEl
         .child(notice.clone())
 }
 
-/// The expression field's strip (spec §9.7), between the header and the
-/// chart: a one-line borderless `Input` with its parse error under it —
-/// inline, in the notice line's own danger text, because a bad
-/// expression keeps the field open and the reason belongs beside what
-/// caused it rather than in the tile's standing notice.
+/// Inline expression editor between the header and chart. Parse and reference
+/// errors appear beneath the one-line Input and leave the draft open. Model
+/// refusals after resolution close the editor and use the tile's notice.
 ///
 /// The loaded-name completion list hangs from the strip's bottom-left
 /// corner over the chart, so the chart does not reflow as it grows and

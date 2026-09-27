@@ -241,6 +241,10 @@ mod tests {
                 "diagnostics segment",
             ),
             (
+                ControlInputs::new(theme, Rest::Bare, theme.status_bar, theme.danger),
+                "stopped segment",
+            ),
+            (
                 ControlInputs::new(theme, muted, theme.popover, theme.muted_foreground),
                 "value chip",
             ),

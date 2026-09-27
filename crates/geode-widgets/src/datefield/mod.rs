@@ -1,11 +1,11 @@
-//! The segmented date-time field (as-of dialog spec 2026-09-20 §4.2;
-//! originally the market-data header's date field, header spec §5.2):
-//! a value, a precision, an active segment and the digits typed into it
-//! this visit. Pure — a host routes keys here through [`route`] and
-//! paints what [`DateTimeField::segments`] answers. The value is a valid
-//! [`NaiveDateTime`] at every moment: a step rolls, clamps, wraps or
-//! saturates, a digit that would make an impossible segment is refused,
-//! and `enter` therefore has nothing to refuse.
+//! Segmented date and date-time editing with separate state, key routing, and
+//! painting. Hosts retain [`DateTimeField`], route keys through [`route`], and
+//! prepare display text with [`DateTimeField::segments`].
+//!
+//! The stored [`NaiveDateTime`] is always valid. Partial digits remain separate
+//! until completed; a host must call [`DateTimeField::complete_pending`] before
+//! committing and handle an incomplete segment. The host owns persistence,
+//! cancellation, focus, and any timezone conversion or domain validation.
 
 mod paint;
 
@@ -14,9 +14,8 @@ pub use paint::{SegmentPaint, paint};
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use gpui::SharedString;
 
-/// How many segments the field shows: a date alone (the market-data
-/// attribute strip) or a date with a time to the second (the as-of
-/// dialog's Custom row).
+/// Visible and editable segments: year/month/day, or those three plus
+/// hour/minute/second. Date precision preserves the value's hidden time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Precision {
     Date,
@@ -89,13 +88,9 @@ impl Segment {
     }
 }
 
-/// What one segment paints: its text, whether it carries the cursor, and
-/// whether the text is digits mid-typing rather than the committed value.
-/// `text` is a [`SharedString`] (cheap to clone — an inline copy of a
-/// refcounted or inlined buffer) so a host that paints every segment
-/// every frame (the panel's header, [`paint::paint`]) does not allocate
-/// one `String` per segment per frame — PHILOSOPHY's per-frame heap
-/// churn rule.
+/// Prepared segment text and its active/typing state. `text` is a
+/// [`SharedString`] so a painter can clone cached text without formatting it.
+/// [`DateTimeField::segments`] allocates this presentation; the host owns caching.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SegmentText {
     pub text: SharedString,
@@ -116,11 +111,10 @@ pub enum FieldKey {
     Cancel,
 }
 
-/// The ONE key table every host consults (spec §4.2): `left`/`right`
-/// move, `up`/`down` step (`shift` = ten), a digit types, `backspace`
-/// clears, `enter` commits, `escape` cancels. `chord` is "ctrl, alt or
-/// cmd held" — such a keystroke is never the field's, so a shell chord
-/// keeps working while a field is open.
+/// Map arrows to navigation or stepping, digits to entry, Backspace to clearing
+/// pending digits, and Enter/Escape to host-owned commit/cancel requests. Shift
+/// changes the step from one to ten. `chord` means Ctrl, Alt, or Cmd is held;
+/// those keys, Tab, and unrecognized keys return `None` for the host to handle.
 pub fn route(key: &str, shift: bool, chord: bool) -> Option<FieldKey> {
     if chord {
         return None;
@@ -144,9 +138,9 @@ pub fn route(key: &str, shift: bool, chord: bool) -> Option<FieldKey> {
     })
 }
 
-/// The field's state: the committed value, the precision, the active
-/// segment, and the digits typed into that segment since it became
-/// active.
+/// Host-owned editing state: a valid value, precision, active segment, and
+/// pending digits. Completed edits update this value immediately; committing it
+/// to the application and restoring an earlier value on cancel belong to the host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DateTimeField {
     value: NaiveDateTime,
@@ -159,9 +153,9 @@ pub struct DateTimeField {
 }
 
 impl DateTimeField {
-    /// Open on `value` with `segment` active (both hosts open on the DAY,
-    /// user ruling 2026-09-19: the segment a trader changes most). A
-    /// `segment` past the precision falls back to the precision's last.
+    /// Start editing `value` at `segment` with no pending digits. A segment outside
+    /// `precision` falls back to its last visible segment. The host chooses the
+    /// initial segment; the supplied date and time are preserved.
     pub fn open(value: NaiveDateTime, precision: Precision, segment: Segment) -> Self {
         let segment = if segment.fits(precision) {
             segment
@@ -184,20 +178,15 @@ impl DateTimeField {
         self.segment
     }
 
-    /// Whether digits are pending in the active segment — [`Self::typed`]
-    /// non-empty, which is exactly when [`Self::segments`] paints that
-    /// segment mid-entry rather than showing the committed value.
-    ///
-    /// The field itself never needs to ask; a HOST does, when it gives a
-    /// bare digit a second meaning of its own (the timeseries range
-    /// popup's preset shortcut, spec §9.8) and has to tell "this digit
-    /// starts a segment" from "this digit finishes the one being typed".
+    /// Whether the active segment has pending digits. Its display then shows
+    /// those digits instead of the stored value. Hosts with digit shortcuts can
+    /// use this to distinguish a new entry from continuation of an existing one.
     pub fn typing(&self) -> bool {
         !self.typed.is_empty()
     }
 
     /// Move to the segment on the left, clamped at the year. Leaving a
-    /// segment drops its partial digits: the committed value shows again.
+    /// segment drops its partial digits: the stored value shows again.
     pub fn left(&mut self) {
         let next = self.segment.left();
         self.select(next);
@@ -222,13 +211,11 @@ impl DateTimeField {
         true
     }
 
-    /// Step the active segment by `n`. Date segments as before: days roll
-    /// over into the next month, months clamp the day to the new month's
-    /// length, years clamp Feb 29 to Feb 28, and all three saturate at
-    /// chrono's bounds rather than panicking. Time segments WRAP within
-    /// their own range without carrying — `23 ↑` is `00` on the same day
-    /// (the "step this segment" reading; a trader who wants the next day
-    /// moves to the day). Drops partial digits.
+    /// Step the active segment by `n` and discard pending digits. Days cross
+    /// month and year boundaries; month and year steps clamp the day to the
+    /// resulting month's length. Date arithmetic saturates at chrono's bounds.
+    /// Time segments wrap within their own range without carrying: stepping the
+    /// hour from 23 to 00 leaves the date, minute, and second unchanged.
     pub fn step(&mut self, n: i64) {
         self.typed.clear();
         let date = self.value.date();
@@ -284,27 +271,25 @@ impl DateTimeField {
         }
     }
 
-    /// Type digit `d` into the active segment. A typed digit REPLACES the
-    /// segment's value rather than appending to it. Answers whether the
-    /// segment COMPLETED — its value applied (the day clamped if the month
-    /// changed) and the next segment made active. The day is the one
-    /// segment that does not advance under `Precision::Date` (the panel's
-    /// contract: the day stays the day); under `DateTime` it advances to
-    /// the hour like any other.
+    /// Enter a digit into the active segment, clamping `d` to 9. A new entry
+    /// replaces the segment's stored value; pending digits build that replacement.
+    /// Return `true` when the segment completes and its value is applied. Completion
+    /// advances to the next visible segment, staying put at the last one. Month
+    /// and year changes clamp the day to the resulting month's length.
     ///
     /// - Year: four digits complete.
-    /// - Month: a first digit `2`–`9` completes as `0d` at once; `0`/`1`
-    ///   waits for a second digit; a second digit making `00` or more
-    ///   than `12` is refused (the first digit stays).
-    /// - Day: a first digit `4`–`9` completes as `0d`; `0`–`3` waits; a
-    ///   second digit making `00` or more than the month holds is refused.
-    /// - Hour: `3`–`9` completes as `0d`; `0`–`2` waits; a second digit
-    ///   past `23` is refused.
-    /// - Minute, second: `6`–`9` completes as `0d`; `0`–`5` waits; a
-    ///   second digit past `59` is refused.
+    /// - Month: a first digit `2`–`9` completes immediately; `0`/`1` waits.
+    ///   A second digit making `00` or more than `12` is refused.
+    /// - Day: a first digit `4`–`9` completes immediately; `0`–`3` waits.
+    ///   A second digit making `00` or exceeding the month's length is refused.
+    /// - Hour: `3`–`9` completes immediately; `0`–`2` waits.
+    ///   A second digit exceeding `23` is refused.
+    /// - Minute and second: `6`–`9` completes immediately; `0`–`5` waits.
+    ///   A second digit exceeding `59` is refused.
     ///
-    /// A digit left WAITING is not lost at `enter`: the commit runs
-    /// [`Self::complete_pending`] first.
+    /// `false` means entry is pending or the digit was refused; a refused digit
+    /// leaves the previous pending digits intact. Before committing, the host
+    /// calls [`Self::complete_pending`] to resolve a remaining partial entry.
     pub fn digit(&mut self, d: u8) -> bool {
         let d = d.min(9);
         let segment = self.segment;
@@ -355,15 +340,14 @@ impl DateTimeField {
         true
     }
 
-    /// Finish whatever is still typed into the active segment, as a commit
-    /// must before it reads [`Self::value`] (user ruling 2026-09-19): a
-    /// trader who typed `1` in the day and pressed `enter` meant the 1st.
-    /// A single waiting digit that can stand alone completes as `0d`;
-    /// `Ok(())` too when nothing is pending. A pending entry that cannot
-    /// complete — `0` in the month or day, a year of fewer than four
-    /// digits — is `Err(segment)` with nothing changed, for the caller to
-    /// refuse the commit and name the segment. A lone `0` in a TIME
-    /// segment completes (`00` is a valid hour, minute and second).
+    /// Complete pending digits before the host reads [`Self::value`] for commit.
+    /// A single nonzero digit completes a month or day; a single digit including
+    /// zero completes a time segment. Success clears pending digits without moving
+    /// the active segment. Nothing pending also returns `Ok(())`.
+    ///
+    /// Zero in a month or day, or fewer than four year digits, returns
+    /// `Err(segment)` without changing the field. The host keeps the editor open
+    /// and reports the incomplete segment.
     pub fn complete_pending(&mut self) -> Result<(), Segment> {
         if self.typed.is_empty() {
             return Ok(());
@@ -383,13 +367,13 @@ impl DateTimeField {
         Ok(())
     }
 
-    /// Clear what was typed into the active segment; the committed value
+    /// Clear what was typed into the active segment; the stored value
     /// shows again.
     pub fn backspace(&mut self) {
         self.typed.clear();
     }
 
-    /// The committed value: `YYYY-MM-DD` under `Date`, `YYYY-MM-DD
+    /// The stored value: `YYYY-MM-DD` under `Date`, `YYYY-MM-DD
     /// HH:MM:SS` under `DateTime`. Partial digits are not part of it.
     pub fn text(&self) -> String {
         match self.precision {
@@ -398,7 +382,9 @@ impl DateTimeField {
         }
     }
 
-    /// What each shown segment paints, year first.
+    /// Allocate display text for each visible segment in year-first order.
+    /// The active segment shows pending digits when present. Hosts should prepare
+    /// and cache this after state changes for reuse by the painter.
     pub fn segments(&self) -> Vec<SegmentText> {
         let typing = !self.typed.is_empty();
         let v = self.value;
@@ -429,14 +415,14 @@ impl DateTimeField {
             .collect()
     }
 
-    /// The committed value. Partial digits are not in it — which is why a
+    /// The stored value. Partial digits are not in it — which is why a
     /// commit calls [`Self::complete_pending`] first and reads this only
     /// on `Ok`.
     pub fn value(&self) -> NaiveDateTime {
         self.value
     }
 
-    /// The committed date — the `Date` precision's whole answer.
+    /// The stored date — the `Date` precision's whole answer.
     pub fn date(&self) -> NaiveDate {
         self.value.date()
     }
@@ -497,9 +483,9 @@ impl DateTimeField {
     }
 }
 
-/// `year-month-day`, with the day clamped to the month's length when it
-/// would not exist there (Jan 31 → Feb 28/29, Feb 29 → Feb 28 in a common
-/// year). `None` only when the year is outside chrono's range.
+/// Construct a date, clamping the day to the month's length. Return `None`
+/// for an out-of-range year, invalid month, or zero day. Callers supply valid
+/// months and nonzero days, so only the year range can fail on those paths.
 fn clamped_ymd(year: i32, month: u32, day: u32) -> Option<NaiveDate> {
     let first = NaiveDate::from_ymd_opt(year, month, 1)?;
     let last = days_in_month(first);
@@ -553,8 +539,7 @@ mod tests {
             .collect()
     }
 
-    /// A host's own key table asks this to tell a digit that STARTS a
-    /// segment from one that finishes it (the range popup's presets).
+    /// Hosts can distinguish a pending segment entry from a new digit shortcut.
     #[test]
     fn typing_reports_the_digits_pending_in_the_active_segment() {
         let mut f = DateTimeField::open(
@@ -563,8 +548,8 @@ mod tests {
             Segment::Day,
         );
         assert!(!f.typing(), "nothing typed on open");
-        // `1` cannot stand alone in the day — it waits for a second
-        // digit, which is exactly the pending state.
+        // A leading `1` waits for a possible second digit. It can also complete
+        // as day 1 when the host calls `complete_pending`.
         assert!(!f.digit(1), "the day waits");
         assert!(f.typing());
         f.backspace();

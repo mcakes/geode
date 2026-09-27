@@ -156,6 +156,111 @@ fn clicking_the_diagnostics_summary_opens_a_tile(cx: &mut gpui::TestAppContext) 
     );
 }
 
+/// A stopped data thread paints its own segment ahead of the diagnostics
+/// summary: it outranks every count after it.
+#[gpui::test]
+fn a_stopped_thread_paints_the_stopped_segment_first(cx: &mut gpui::TestAppContext) {
+    let (window, mut cx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut cx);
+    let diagnostics = shell.read_with(&cx, |s, _| s.diagnostics().clone());
+    assert!(cx.debug_bounds("data-stopped").is_none());
+    diagnostics.update(&mut cx, |d, cx| {
+        d.note_health(
+            "risk",
+            Health::Degraded { reason: "x".into() },
+            "x".into(),
+            SystemTime::now(),
+        );
+        d.note_thread_stopped("geode-ingest", "boom".into(), SystemTime::now());
+        cx.notify();
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let stopped = cx
+        .debug_bounds("data-stopped")
+        .expect("the stopped segment is painted");
+    let summary = cx
+        .debug_bounds("diagnostics-summary")
+        .expect("the summary is painted");
+    assert!(
+        stopped.origin.x < summary.origin.x,
+        "the stopped segment leads"
+    );
+}
+
+/// Hovering the stopped segment shows the prepared reason in its tooltip.
+#[gpui::test]
+fn hovering_the_stopped_segment_shows_its_reason(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+    diagnostics.update(&mut vcx, |d, cx| {
+        d.note_thread_stopped("geode-ingest", "boom".into(), SystemTime::now());
+        cx.notify();
+    });
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let seg = vcx
+        .debug_bounds("data-stopped")
+        .expect("the stopped segment is painted");
+    vcx.simulate_mouse_move(
+        seg.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    vcx.executor()
+        .advance_clock(std::time::Duration::from_millis(600));
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("tip-data-stopped").is_some());
+}
+
+/// Clicking the stopped segment opens the diagnostics tile through the
+/// summary's own route. No health is reported, so the summary is absent and
+/// the click can only land on the stopped segment.
+#[gpui::test]
+fn clicking_the_stopped_segment_opens_the_diagnostics_tile(cx: &mut gpui::TestAppContext) {
+    let (mut services, _log) = services_with_recorder();
+    services
+        .roster
+        .add(Box::new(crate::module::recording::RecordingFactory::new(
+            "diagnostics",
+        )));
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    let diagnostics = shell.read_with(&cx, |s, _| s.diagnostics().clone());
+    diagnostics.update(&mut cx, |d, cx| {
+        d.note_thread_stopped("geode-data", "boom".into(), SystemTime::now());
+        cx.notify();
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(cx.debug_bounds("diagnostics-summary").is_none());
+    let bounds = cx
+        .debug_bounds("data-stopped")
+        .expect("the stopped segment is painted");
+    cx.simulate_mouse_down(
+        bounds.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::default(),
+    );
+    cx.simulate_mouse_up(
+        bounds.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::default(),
+    );
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let tile = shell.read_with(&cx, |s, _| s.services.workspaces.active().focused_tile());
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.occupant_kind(tile.expect("a tile opened"))),
+        Some("diagnostics")
+    );
+}
+
 /// A changed `[log]` table applies through `LevelControl::set` exactly once and updates
 /// `Diagnostics.levels`. Reloading reads existing configuration; it must not queue
 /// another persistence write. A real user directory makes this observable: `app.toml`

@@ -41,8 +41,8 @@ type ModalBuilder = Rc<dyn Fn(&ShellView, &mut Window, &mut App) -> AnyElement>;
 
 /// A modal's optional handler for normalized shell keystrokes. Runs before the shell's
 /// Escape-close fallback; `true` consumes the key, including Escape. `false` permits
-/// the modal fallback and text-input handling, but never resumes shell chord matching
-/// while the modal is open.
+/// the modal fallback and text-input handling. Declined chords may open another
+/// dialog or the palette; other shell actions remain blocked on this key route.
 ///
 /// The caller already holds `&mut ShellView`. Use that borrow: synchronously updating
 /// its entity here would be reentrant access.

@@ -311,7 +311,7 @@ provides narrower counters so each tile can ignore unrelated updates:
 
 | Counter | Changes |
 |---|---|
-| `sources` | Source description, health/detail, poll times, ingest activity |
+| `sources` | Source description, health/detail, poll times, ingest activity, stopped data threads |
 | `data` | Publication events and catalog snapshots |
 | `config` | Current config-load batch, batch history, retained data conditions |
 | `log_levels` | Target-level settings |
@@ -345,13 +345,57 @@ explicit demand, preserving its retry policy.
 
 Demand changes do not advance data versions. Callers must still notify in the
 same entity update so the bridge observes them. The bridge allows one catalog
-request in flight, coalesces follow-up demand, and retries refused or failed
-requests with a delay. It reads the current frame as-of when submitting.
+request in flight, coalesces follow-up demand, and retries busy-refused or
+failed requests with a delay. A request refused because the data service has
+stopped drops its demand instead: nothing can serve a retry. It reads the
+current frame as-of when submitting.
 
 Histogram copying is limited to watched diagnostics and changes in sample
 count or maximum. This keeps idle polling from causing needless repaints,
 but misses changes solely to discarded-idle counts or a reset/refill that
 reproduces the same count and maximum.
+
+### Stopped threads and refusals
+
+`Diagnostics::stopped` lists data threads that died despite containment (a
+`DataEvent::ThreadStopped`), in report order, each with its spawn name, a
+readable label (`thread_label`: `data service`, `ingest`, `discovery`,
+`pricing`, `query worker N`, `fetch <source>`, `subscription <source>`,
+`egress <target>`), the reason, and the arrival time. `note_thread_stopped`
+records each thread once — a redelivered report is a no-op — rebuilds the
+prepared `StoppedSegment`, and advances the `sources` counter. Nothing
+removes an entry: a stopped thread stays stopped until Geode restarts, so the
+segment never clears.
+
+The stopped segment is the first thing on the status bar's left side, before
+the count prefix, in the danger tone. Its text is one of:
+
+- `<label> stopped` for one thread, for example `ingest stopped`;
+- `N data threads stopped` for two or more;
+- `data service stopped — restart Geode` whenever the request loop
+  (`geode-data`) is among them, including a service that failed to open. The
+  loop outranks the rest, because every other count on the bar then
+  describes a service that no longer runs.
+
+The tooltip carries the reason: the one thread's reason; `label: reason`
+pairs joined by `; ` for several; or the loop's reason followed by `; also
+stopped: …` naming the others. Its detail line reads `click to open
+diagnostics`. A click takes the diagnostics summary's route: it focuses an
+existing diagnostics tile or adds one, which opens on its Sources section.
+An existing tile keeps whatever section it is showing; the stopped block
+leads Sources. That section's first rows, ahead of every source, read `stopped threads —
+restart Geode to recover them` and then one error row per thread, `<label>:
+<reason> (at HH:MM:SS)`, timed through the display clock.
+
+`Diagnostics::refused` holds the data handle's cumulative count of `Busy`
+refusals since launch (submissions turned away by a full request queue);
+`Stopped` refusals are not counted: they describe a service that is gone,
+not one that is behind, and the stopped segment already says so. The status summary shows it as `N refused` after `N dropped`
+(dropped app-bridge events), omitted at zero. `note_refused` advances only the
+combined version; no diagnostics-tile section shows the count.
+
+**Known limitation:** the bridge reads the refusal total only when it drains
+an event, so a refusal made while no events flow appears at the next event.
 
 ## Persistence and configuration
 

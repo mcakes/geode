@@ -1,7 +1,7 @@
-//! Yank as TSV (Phase 3 spec §6.4): a header line of labels, then one
-//! line per selected visible row — tree text indented two spaces per
-//! depth, numbers raw and unscaled, blanks for NULL, and the `mixed`
-//! marker for an ungrouped dimension whose rows disagree.
+//! TSV export of selected visible rows and columns, with a header of display
+//! labels. Tree text is indented two spaces per depth; numeric values are
+//! unscaled. Mixed dimensions export the `mixed` marker; other NULL cells are
+//! blank. Fields are joined without escaping embedded tabs or newlines.
 
 use crate::core::cache::MIXED;
 use crate::core::plan::{ColumnKind, ColumnPlan};
@@ -170,8 +170,7 @@ mod tests {
         (snap, plan)
     }
 
-    /// A mixed cell yanks its marker; a blank one yanks nothing, as a NULL
-    /// always has.
+    /// A mixed cell exports its marker; a blank cell exports an empty field.
     #[test]
     fn a_mixed_dimension_yanks_its_marker_and_a_blank_one_yanks_nothing() {
         let (snap, plan) = unanimity_fixture();

@@ -142,6 +142,9 @@ struct Harness {
     /// which is exactly what [`Harness::close_channel`] does on
     /// purpose, and why this is an `Option`.
     rx: RefCell<Option<Receiver<Request>>>,
+    /// The tile's own handle: `fill_for_tests` on it makes the next
+    /// submission refused `Busy`.
+    data: DataHandle,
 }
 
 /// A `Box<dyn ModuleFactory>` over the harness's own `Rc` — the
@@ -176,9 +179,6 @@ impl ModuleFactory for Handle {
     }
 }
 
-/// A `colors.toml` holding one name, `spx`, at `degrees` on the
-/// wheel — what `:color SPX.close spx` resolves against, and what a
-/// reload redefines.
 /// `n` HOURLY buckets ending an hour before the current hour, one
 /// `SlotResult` per number. Hourly and recent on purpose: every
 /// range this module's tests use (`1y`, `1w`) contains the span, and
@@ -324,7 +324,7 @@ fn open_full(
         })
     });
     let (data, rx) = DataHandle::for_tests();
-    let factory = Rc::new(TimeseriesFactory::new(data, named_colors(0.0)));
+    let factory = Rc::new(TimeseriesFactory::new(data.clone(), named_colors(0.0)));
     let keymap = Rc::new(app_keymap(&factory));
     let slot: Rc<RefCell<Option<Built>>> = Rc::new(RefCell::new(None));
     let window = cx
@@ -385,6 +385,7 @@ fn open_full(
             shell_focus: built.shell_focus,
             factory,
             rx: RefCell::new(Some(rx)),
+            data,
         },
         vcx,
     )
@@ -683,10 +684,8 @@ impl Harness {
             })
             .expect("a field popup is open")
     }
-    /// Write the field the way nothing in the app does — through
-    /// `InputState::set_value`, which emits NO `Change` event
-    /// (CLAUDE.md's trap): every commit path has to re-feed the
-    /// field's live text itself, and this is what proves it does.
+    /// Set input text without emitting Change, proving commits read live text
+    /// rather than relying only on the input's change subscription.
     fn set_input_text(&self, vcx: &mut gpui::VisualTestContext, text: &str) {
         let text = text.to_string();
         vcx.update(|window, cx| {
@@ -1452,6 +1451,20 @@ fn a_delivery_becomes_the_chart_model_and_a_stale_tag_is_dropped(cx: &mut gpui::
 }
 
 #[gpui::test]
+fn a_refused_fetch_fails_the_chip_by_kind(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.visible(&mut vcx, true);
+    h.data.fill_for_tests();
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    assert!(matches!(&h.model(&vcx).slots()[0].state,
+        SlotState::Failed(e) if e == "fetch refused: the data service is busy"));
+    h.close_channel();
+    h.command(&mut vcx, "add NDX.close").unwrap();
+    assert!(matches!(&h.model(&vcx).slots()[1].state,
+        SlotState::Failed(e) if e == "fetch refused: the data service has stopped"));
+}
+
+#[gpui::test]
 fn a_refused_submit_notices_and_still_answers_the_barrier(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     h.visible(&mut vcx, true);
@@ -1464,12 +1477,10 @@ fn a_refused_submit_notices_and_still_answers_the_barrier(cx: &mut gpui::TestApp
     h.close_channel();
     let at = chrono::Utc::now() - chrono::Duration::days(30);
     open_barrier_on_as_of(&h, &mut vcx, &[QueryKey(TILE)], at);
-    assert!(
-        h.notice(&vcx)
-            .unwrap()
-            .starts_with("series request refused"),
-        "the refusal is named, not swallowed: {:?}",
-        h.notice(&vcx)
+    assert_eq!(
+        h.notice(&vcx).as_deref(),
+        Some("series request refused: the data service has stopped"),
+        "the refusal is named, not swallowed"
     );
     assert!(
         !h.frame.read_with(&vcx, |f, _| f.barrier_open()),
@@ -2743,11 +2754,9 @@ fn every_closer_blurs_before_dropping_the_focused_handle(cx: &mut gpui::TestAppC
         vcx.update(|w, cx| w.focused(cx).is_none()),
         "expression field: blurred, then dropped"
     );
-    // The dates editor holds a bare handle rather than an
-    // `InputState`, and the rule is the same: an unblurred dead
-    // handle leaves `Window::focused` pointing at nothing and the
-    // shell's own focus-return net never fires (CLAUDE.md). Its
-    // `escape` goes back to the range menu, through the closer.
+    // The dates editor's bare focus handle needs the same blur-before-drop
+    // cleanup as an InputState. Otherwise the shell can mistake a dead handle
+    // for retained focus. Escape returns to the range menu through that cleanup.
     h.dispatch(&mut vcx, "range_custom", None);
     assert!(vcx.update(|w, cx| w.focused(cx).is_some()));
     h.dispatch(&mut vcx, "cancel", None);
@@ -2894,8 +2903,8 @@ fn chart_bounds(vcx: &mut gpui::VisualTestContext) -> gpui::Bounds<gpui::Pixels>
         .expect("the chart surface is painted")
 }
 
-/// A point inside the upper plot: the surface's centre is always in
-/// it (the axis column is 44 px wide, the x strip 18 px tall).
+/// A point near the top of the upper plot, horizontally offset from the
+/// surface's center. These fixtures leave this position clear of the axes.
 fn plot_point(vcx: &mut gpui::VisualTestContext, dx: f32) -> gpui::Point<gpui::Pixels> {
     let b = chart_bounds(vcx);
     gpui::point(b.center().x + gpui::px(dx), b.origin.y + gpui::px(20.))

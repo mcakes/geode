@@ -10,10 +10,7 @@ path = "src/main.rs"
 bench = false
 
 [features]
-# Profiler support (spec §7.4), off by default — turns on geode-shell's
-# same-named feature (which is gpui's own `profiler` feature; see that
-# Cargo.toml's comment). Build with `cargo run -p geode-app --features
-# profiling`; verified by `cargo check -p geode-app --features profiling`.
+# Enable the shell's GPUI profiler integration. Off by default.
 profiling = ["geode-shell/profiling"]
 
 [dependencies]
@@ -28,49 +25,31 @@ gpui-base.workspace = true
 gpui-component-macros.workspace = true
 geode-shell = { path = "../geode-shell" }
 geode-core.workspace = true
-# The data bridge (spec §5.1, src/bridge.rs) is the one place the shell
-# and the data layer meet — it replaced the throwaway probe deleted in
-# Phase 3c.
+# The app bridge connects shell state to data services without a dependency
+# between those crates.
 geode-data = { path = "../geode-data" }
-# Every build has the mock pricer registered into the PricerRegistry
-# beside the AdapterRegistry (line-pricer spec §5.5); a vendor crate,
-# when one exists, registers itself behind its own feature gate.
+# Register the mock implementation in the shared pricing registry at startup.
 geode-pricing.workspace = true
 geode-blotter = { path = "../geode-blotter" }
-# The market-data panel (market-data spec §8): one roster factory per
-# panel spec, built beside the blotter's in `bridge::start` because it
-# needs the same `DataHandle`.
+# Market-data factories share the bridge's DataHandle for document requests.
 geode-marketdata = { path = "../geode-marketdata" }
-# The timeseries viewer (timeseries spec §9): one roster factory, built
-# beside the blotter's and the panels' in `bridge::start` for the same
-# reason — it asks for its series through the same `DataHandle`, and the
-# reload handler needs a clone to hand it a reparsed `colours` doc.
+# The bridge owns the series factory's data handle and config reload routing.
 geode-timeseries.workspace = true
-# The line pricer (line-pricer spec §8): one roster factory, built beside
-# the others in `bridge::start` because it needs the same `DataHandle`.
+# The bridge routes pricing and local-sheet outcomes to this factory.
 geode-pricer.workspace = true
 geode-diagnostics = { path = "../geode-diagnostics" }
 geode-demo-data = { path = "../geode-demo-data" }
-# The demo bus (`src/demo_bus.rs`, market-data-documents plan Task 10)
-# writes the CVI documents it generates onto a `ChannelAdapter` feed
-# through the same `DocumentKind::write` door a real subscribed source's
-# receiver thread reads through — `geode-app` is the one crate that
-# registers document kinds into the data service (§6.4), so it is the
-# one crate outside `geode-documents` itself that needs this dependency.
+# Register concrete document parsers at the application boundary. Demo producers
+# also use their writers to serialize documents for ChannelAdapter ingestion.
 geode-documents = { path = "../geode-documents" }
-# `demo_bus::run`'s cadence jitter — same version every other crate that
-# draws randomness (`geode-demo-data`) already pins.
+# Seeded demo cadence jitter and series generation.
 rand = "0.9"
-# `DataEvent::Published` carries no timestamp of its own; the bridge
-# stamps the arrival instant onto the `Publish` record a "recent
-# publishes" preset needs (Phase 4a §3.12).
+# Stamp publication arrival times and construct demo dates and series spans.
 chrono = "0.4.42"
-# The bridge's event channel (spec §5.1): bounded, `try_send`-only, and
-# awaited on the foreground executor so the drain task wakes on arrival
-# rather than polling.
+# One-slot wakeup channel for the coalescing event mailbox. Producers use
+# try_send; the foreground drain awaits notifications instead of polling.
 async-channel = "2.5"
-# Phase 4b Task 2: the tracing foundation, installed first thing in
-# `main.rs` — stderr, ring and daily-file layers, `LogLevels` reload.
+# Startup tracing with stderr, ring, and daily-file sinks and reloadable levels.
 tracing.workspace = true
 tracing-subscriber.workspace = true
 # The daily rolling log file layer (`tracing_appender::rolling::daily`).
@@ -81,26 +60,13 @@ tracing-appender.workspace = true
 toml = "1.1.4"
 
 [dev-dependencies]
-# Test-feature parity (2026-09-19): `cargo test --workspace` resolves
-# geode-core WITH `test-support` (geode-shell's dev-dependencies turn it
-# on, and cargo unifies features across every member it builds together),
-# so a `cargo test -p` of this crate alone must ask for the same thing or
-# it builds a second geode-core — and everything above it — that differs
-# only in that feature. One artifact per crate per profile is the rule;
-# `cargo tree -p <member> -i geode-core --format '{p} [{f}]'` must agree
-# with `cargo tree --workspace` for every member.
+# Match workspace test features to reuse the same dependency artifacts.
 geode-core = { workspace = true, features = ["test-support"] }
 tempfile = "3.27.0"
-# `#[gpui::test]` / `TestAppContext` / `VisualTestContext` for the bridge's
-# window-close drain-task test (`src/bridge.rs`), and `DataHandle::
-# for_tests()` for a service-thread-free handle — same pattern as
-# `geode-blotter`'s dev-dependencies re-declaring the same crates with
-# `test-support` turned on.
+# GPUI window tests and data handles without a running service.
 gpui = { workspace = true, features = ["test-support"] }
 geode-data = { path = "../geode-data", features = ["test-support"] }
-# `ShellView::picker()` (test-support-only accessor, `geode-shell::shell`)
-# — the bridge's own picker test needs to see a picker's `values` land
-# without a `dispatch` call of its own to drive from.
+# Inspect shell state after bridge delivery through production routes.
 geode-shell = { path = "../geode-shell", features = ["test-support"] }
 # `PricerTile::sheet()`/`is_loading()` (test-support-only accessors): the
 # bridge's end-to-end tests read what a sheet load installed.

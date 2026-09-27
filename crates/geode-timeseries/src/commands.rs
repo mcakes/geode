@@ -1,5 +1,6 @@
-//! The `:` vocabulary (spec §9.9), pure. Every word is tile-local
-//! (command-line locality); completions are the bare word per position.
+//! Parsing and completion for tile-local `:` commands. Parsing validates
+//! command syntax; the tile resolves series names and applies model changes.
+//! Completions return unfiltered words for the shell to rank.
 
 use crate::core::{Color, Range, Rgb8};
 use geode_chart::core::layout::{SPLIT_MAX, SPLIT_MIN};
@@ -211,10 +212,8 @@ pub fn parse(line: &str) -> Result<Command, String> {
 /// value, so position 1 offers both; position 2 follows a name and
 /// offers the values.
 ///
-/// `sources` is accepted for symmetry with the `:add` form but the
-/// identity position offers nothing (the picker owns identities); keep
-/// the parameter — the tile's own `completions` passes it and a later
-/// catalogue-backed completion is one arm away.
+/// `sources` is unused: `:add` offers no identity or source completions.
+/// The add picker provides catalogue-backed identity selection.
 pub fn completions(
     line: &str,
     cursor: usize,
@@ -224,11 +223,8 @@ pub fn completions(
 ) -> Vec<String> {
     let _ = sources;
     let mut cursor = cursor.min(line.len());
-    // The caller's cursor should always be on a char boundary, but this
-    // pure core must not depend on that — clamp down to the nearest
-    // boundary at or before it rather than panicking on the slice below
-    // (mirrors `commandline::word_at`'s guard for the same case, and
-    // `geode-blotter`'s `commands::completions`).
+    // Clamp to a UTF-8 boundary so a cursor inside a character cannot
+    // panic when slicing the command prefix.
     while !line.is_char_boundary(cursor) {
         cursor -= 1;
     }
@@ -418,7 +414,7 @@ mod tests {
                 .unwrap_err()
                 .starts_with("unknown command 'bogus'")
         );
-        // The old spelling is not kept as an alias.
+        // Only `color` is accepted; `colour` is not an alias.
         assert!(
             parse("colour 2")
                 .unwrap_err()

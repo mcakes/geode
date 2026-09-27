@@ -1,19 +1,12 @@
-//! One resolve per named colour per theme (Part 2c spec §6.3). The pure
-//! resolver ([`geode_core::colour::resolve`]) walks OKLCH for a `hue`
-//! definition — interpolation plus a gamut clip — which is far too much
-//! to redo for every painted cell, and a blotter repaints every one of
-//! them on every frame. So a definition is resolved once per
-//! `(anchors, tokens)` pair and reused until the theme actually changes.
+//! Cached named colours for the theme's resolved inputs.
 //!
-//! Deliberately pure: it takes [`Anchors`]/[`Tokens`], never a
-//! `gpui_component::Theme`, so the only gpui type in sight is the `Hsla`
-//! it hands back. The caller (`BlotterDelegate::cell_colour`) reads the
-//! theme once per `render_td`/`render_th` through
-//! `geode_shell::shell::colours` and passes the pair down — which is
-//! also what makes the invalidation honest: the key IS the theme's own
-//! resolved inputs, so a theme swap, a light/dark pick or a hot-reloaded
-//! theme file all empty the map by construction, with nothing to
-//! remember to call.
+//! Each defined name resolves its base and sign variants once per cache fill.
+//! Hue definitions require interpolation and gamut clipping; cell painting
+//! reuses the result. A changed [`Anchors`]/[`Tokens`] pair clears the map on
+//! lookup. Definition changes require an explicit [`ColourCache::invalidate`].
+//!
+//! The delegate memoizes theme-to-input conversion separately and supplies
+//! these plain values, so this cache has no dependency on a GPUI theme object.
 
 use geode_core::colour::{Anchors, NamedColours, Sign, Tokens, resolve_signed};
 use geode_shell::shell::colours::to_hsla;
@@ -67,18 +60,13 @@ impl ColourCache {
         ColourCache::default()
     }
 
-    /// The colour for `name` under `(anchors, tokens)` — all three sign
-    /// variants — resolved once and reused until they change. `None`
-    /// when the doc does not define `name` at all — the caller paints
-    /// such a cell in the theme's foreground (§6.3), so a name the trader
-    /// deleted from `colours.toml` is never left showing a stale colour.
+    /// Resolve all three sign variants for `name`, reusing the result while
+    /// the theme inputs and definitions remain unchanged. Undefined names
+    /// return `None`; the delegate uses the theme foreground as fallback.
+    /// Call [`Self::invalidate`] whenever the definitions change.
     ///
-    /// A miss costs one `String` (the key); a hit costs a hash lookup by
-    /// `&str` and nothing else — the name is never cloned on the hit
-    /// path, which is the one this runs on per cell per frame. An
-    /// *undefined* name allocates nothing at all, so a view naming a
-    /// colour that no longer exists is not a per-frame allocation
-    /// either.
+    /// A defined-name miss allocates one key string. Hits borrow the name
+    /// for lookup, and undefined names allocate nothing and are not cached.
     pub fn get(
         &mut self,
         colours: &NamedColours,
@@ -116,10 +104,9 @@ impl ColourCache {
         self.by_name.clear();
     }
 
-    /// Test hook: how many times the map has been emptied and refilled
-    /// from scratch — one at the first resolve, one more per theme
-    /// change. A steady theme must never bump it, which is the whole
-    /// point of the cache.
+    /// Count theme-key changes observed by `get`, including its first call
+    /// and the first call after `invalidate`. Undefined-name lookups also
+    /// count when they change the key; individual name resolutions do not.
     pub fn misses(&self) -> u64 {
         self.misses
     }

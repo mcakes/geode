@@ -1,21 +1,18 @@
 //! The default series colours: the theme's five chart colours, each
-//! floored to 3:1 against the background (spec §8.1).
+//! adjusted toward the foreground for contrast against the background.
 
 use geode_core::colour::{Rgb, readable_on};
 use gpui::Hsla;
 
-/// Per-slot line colour assignment over a theme's five chart colours,
-/// each floored to 3:1 against the background (moved toward
-/// `foreground`) before being handed out. Spec §8.1 named this
-/// `default_for(slot, theme_chart, background)`; the floor's
-/// `readable_on` needs the direction to move in, so `from_theme` takes
-/// the foreground too — recorded as an as-built amendment.
+/// Cyclic assignment of five theme chart colours to series slots.
+/// Colours below the 3:1 contrast target move toward the foreground's
+/// lightness through [`readable_on`]. If that lightness path cannot meet the
+/// target, its endpoint is returned without a contrast guarantee.
 pub struct Palette {
     colours: [Hsla; 5],
 }
 
-/// Mirrors `geode_shell::shell::colours::to_rgb` — the shell is not a
-/// dependency of this crate.
+/// Convert a GPUI colour to the RGB value used by contrast calculations.
 pub fn to_rgb(hsla: Hsla) -> Rgb {
     let c = hsla.to_rgb();
     Rgb {
@@ -25,8 +22,7 @@ pub fn to_rgb(hsla: Hsla) -> Rgb {
     }
 }
 
-/// Mirrors `geode_shell::shell::colours::to_hsla` — the shell is not a
-/// dependency of this crate.
+/// Convert an RGB value to an opaque GPUI colour.
 pub fn to_hsla(rgb: Rgb) -> Hsla {
     gpui::Rgba {
         r: rgb.r,

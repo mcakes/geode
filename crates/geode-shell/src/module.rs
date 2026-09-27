@@ -257,6 +257,26 @@ pub trait TileContent {
     /// focused tile on that render. A module that is useless without some
     /// state asks for it here; the default does nothing.
     fn launched(&self, _window: &mut Window, _cx: &mut App) {}
+    /// Fit every column of this tile's table to its content, or with
+    /// `reset` drop the fitted widths and return to the configured ones.
+    /// The shell's `tile::autosize_columns` action calls this on the
+    /// focused tile; a table module's own `:autosize [reset]` command runs
+    /// the same code. Measure on the UI thread here, never in render (see
+    /// [`crate::colfit`]), and read the rem from `window`.
+    ///
+    /// `Err` is a refusal the shell paints as a status notice. The default
+    /// refuses with [`crate::colfit::NO_TABLE`], so an occupant without a
+    /// table needs no override. A table with no rows to measure refuses a
+    /// fit with [`crate::colfit::NOTHING_TO_FIT`] and keeps its widths; a
+    /// `reset` never refuses.
+    fn autosize_columns(
+        &self,
+        _reset: bool,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Result<(), &'static str> {
+        Err(crate::colfit::NO_TABLE)
+    }
     /// Expose the last stack handle to hosting tests. Content is stored as
     /// `Box<dyn TileContent>`, so tests cannot access the concrete occupant's
     /// fields. Defaults to `None`; [`recording::RecordingContent`] returns its
@@ -576,6 +596,8 @@ pub mod recording {
         SeriesFetched(TileId, String),
         Stack(TileId, Option<(usize, usize)>),
         Launched(TileId),
+        /// `autosize_columns(reset)` reached this tile.
+        Autosize(TileId, bool),
     }
 
     pub struct RecordingFactory {
@@ -872,6 +894,20 @@ pub mod recording {
         }
         fn launch_context(&self, _cx: &App) -> LaunchContext {
             self.launch_context.borrow().clone()
+        }
+        /// Recorded and accepted: the fixture stands in for a table
+        /// module. The trait default's refusal is tested on the
+        /// placeholder occupant, which does not override it.
+        fn autosize_columns(
+            &self,
+            reset: bool,
+            _: &mut Window,
+            _: &mut App,
+        ) -> Result<(), &'static str> {
+            self.log
+                .borrow_mut()
+                .push(Recorded::Autosize(self.tile, reset));
+            Ok(())
         }
         fn launched(&self, window: &mut Window, cx: &mut App) {
             self.log.borrow_mut().push(Recorded::Launched(self.tile));
