@@ -1612,3 +1612,39 @@ fn a_double_click_with_a_selection_opens_a_single_cell_editor(cx: &mut gpui::Tes
     assert_eq!(h.row_texts(&vcx, 1)[3..], ["0.4000", "0.2500", "0.6000"]);
     assert_eq!(h.row_texts(&vcx, 0)[3..], ["0.1000", "0.2000", "0.3000"]);
 }
+
+/// A row selection's members skip the slice values, so `i` on one of them
+/// has no selection edit to open: it refuses and names `v`, rather than
+/// writing the typed value (or the arrows' steps) into the ladder.
+#[gpui::test]
+fn i_on_a_slice_value_in_a_rows_selection_is_refused(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    h.dispatch(&mut vcx, "visual_rows", None); // cursor on fwd
+    h.dispatch(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "edit", None);
+    assert!(h.editor_value(&vcx).is_none(), "no editor opens");
+    assert_eq!(h.mode(&vcx), "visual");
+    assert_eq!(
+        notice_of(&h, &vcx).as_deref(),
+        Some("slice values are not in a row selection — use v")
+    );
+    assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
+}
+
+/// A block includes the slice columns it covers, so `i` on `fwd` inside
+/// one opens and its typed value lands in the block's cells.
+#[gpui::test]
+fn i_on_a_slice_value_in_a_block_edits_it(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    h.dispatch(&mut vcx, "right", None); // atm
+    h.dispatch(&mut vcx, "visual_block", None);
+    h.dispatch(&mut vcx, "left", None); // cursor on fwd
+    h.dispatch(&mut vcx, "edit", None);
+    assert_eq!(h.editor_value(&vcx).as_deref(), Some("4500.00"));
+    h.set_editor(&mut vcx, "4600");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.row_texts(&vcx, 0)[..2], ["4600.00", "4600.0000"]);
+    assert_eq!(notice_of(&h, &vcx).as_deref(), Some("set 2 cells"));
+}

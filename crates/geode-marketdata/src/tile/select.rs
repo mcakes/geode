@@ -16,6 +16,10 @@ type StepWrite = ((usize, usize), (String, String), Value);
 /// The notice when a selection editor closes over steps it cannot undo.
 pub(super) const STEPS_KEPT: &str = "steps kept: the document moved";
 
+/// The refusal for a selection edit whose cursor cell is not a member: on
+/// a pivot row selection, a term's slice values (fwd/atm/skew).
+pub(super) const NOT_A_MEMBER: &str = "slice values are not in a row selection — use v";
+
 /// What closing a selection editor did with its live steps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StepsUndo {
@@ -136,6 +140,22 @@ impl MarketDataTile {
                     .map(move |c| (row, c))
             })
             .collect()
+    }
+
+    /// Whether a selection edit may act from `cell`: it must be one of
+    /// [`Self::selection_cells`], or the value typed there (or the steps
+    /// taken from it) would land in cells of another kind while the cell
+    /// itself stays unchanged — a row selection's ladder taking a forward.
+    /// Called once per edit, never from render.
+    pub(super) fn selection_holds(&self, cell: (usize, usize)) -> bool {
+        self.selection_cells().contains(&cell)
+    }
+
+    fn cursor_in_selection(&self) -> bool {
+        match self.cursor {
+            Cursor::Cell { row, col } => self.selection_holds((row, col)),
+            Cursor::Attr(_) => false,
+        }
     }
 
     /// `y` in visual mode: tab-separated, a header line first. `Rows`
@@ -352,6 +372,13 @@ impl MarketDataTile {
         if !matches!(self.model.kind_of(cell.1), Some(CellKind::Number(_))) {
             return None;
         }
+        // `begin_edit`'s member check, again: steps taken from a cell that
+        // is not a member would move every member while the editor's own
+        // cell stood still.
+        if !self.selection_holds(cell) {
+            self.notice = Some(NOT_A_MEMBER.into());
+            return Some(true);
+        }
         let precisions: Vec<Option<u8>> = (0..self.model.columns.len())
             .map(|c| match self.model.kind_of(c) {
                 Some(CellKind::Number(f)) => Some(f.precision),
@@ -452,6 +479,14 @@ impl MarketDataTile {
     ) -> bool {
         if let Some(refusal) = self.held_refusal() {
             self.notice = Some(refusal.into());
+            return true;
+        }
+        // `begin_edit` refuses to open on a cell that is not a member; the
+        // cursor is still the editor's cell (motions refuse while one is
+        // open over a selection). Checked again here so no route can write
+        // one cell's typed value into members of another kind.
+        if !self.cursor_in_selection() {
+            self.notice = Some(NOT_A_MEMBER.into());
             return true;
         }
         let base = match self.edit_base() {

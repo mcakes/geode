@@ -2608,6 +2608,14 @@ impl MarketDataTile {
                     self.notice = Some(e.into());
                     return;
                 }
+                // With a selection live every commit and step goes to its
+                // members; opened on a cell that is not one, the typed
+                // value would land in the members while this cell stayed
+                // as it was.
+                if self.selection.is_some() && !self.selection_holds((row, col)) {
+                    self.notice = Some(select::NOT_A_MEMBER.into());
+                    return;
+                }
                 // Reject Deleted rows before creating either an editor or choice popup.
                 if self.model.rows[row].state == RowState::Deleted {
                     self.notice = Some(DELETED_REFUSED.into());
