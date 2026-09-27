@@ -22673,6 +22673,24 @@ run_mutation "scope expr: mod+s on an empty field opens the name entry" \
   geode-shell \
   mod_s_on_an_empty_field_refuses_and_writes_nothing
 
+# Naming a term checks the term before the write: a term changed underneath
+# would otherwise save a definition the refused swap then never uses.
+run_mutation "scope expr: naming a changed term writes the definition anyway" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '        && !shell.frame.read(cx).expression_term_is(*index, seeded)' \
+  '        && (false && !shell.frame.read(cx).expression_term_is(*index, seeded))' \
+  geode-shell \
+  naming_a_changed_term_refuses_and_writes_nothing
+
+# The name joins the frame's named list in the same set_scope that drops the
+# term; without it the term's filter silently vanishes from the scope.
+run_mutation "scope expr: naming a term drops it without joining the name" \
+  crates/geode-shell/src/frame.rs \
+  '            s.named.push(name.to_string());' \
+  '            let _ = name;' \
+  geode-shell \
+  mod_s_in_term_mode_names_the_term
+
 # A reserved name belongs to a built-in row; saving under it would shadow it.
 run_mutation "scope expr: saving refuses a reserved name" \
   crates/geode-shell/src/shell/scope_expr_view.rs \

@@ -342,14 +342,6 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         "Add scope expression…",
         "Frame",
     );
-    // The same add dialog, named for the `+` menu's "Named expression…"
-    // row: the dialog opens with the named rows first.
-    action(
-        reg,
-        "frame::add_named_expression",
-        "Add named expression…",
-        "Frame",
-    );
     action(
         reg,
         "frame::clear_expression",
