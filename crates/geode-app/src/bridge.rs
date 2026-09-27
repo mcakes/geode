@@ -146,6 +146,7 @@ pub fn data_setup(
     let (refresh, refresh_diag) = pricing_refresh_from_config(config);
     diagnostics.extend(refresh_diag);
     let (pricer_underlyings, underlying_diags) = pricing_underlyings_from_config(config);
+    let pricer_underlyings = pricer_underlyings.unwrap_or_default();
     diagnostics.extend(underlying_diags);
     let pricer_settings = PricerSettings {
         pricer: pricer_name.clone(),
@@ -313,9 +314,9 @@ pub fn pricing_refresh_from_config(config: &Config) -> (Option<Duration>, Option
 /// as written and in order (`UnderlyingList::set` upper-cases and drops
 /// repeats). Absent is an empty list. A non-array value, or a non-string
 /// element, warns and is skipped.
-pub fn pricing_underlyings_from_config(config: &Config) -> (Vec<String>, Vec<Diagnostic>) {
+pub fn pricing_underlyings_from_config(config: &Config) -> (Option<Vec<String>>, Vec<Diagnostic>) {
     let Some(value) = config.get("app", "pricing.underlyings") else {
-        return (Vec::new(), Vec::new());
+        return (Some(Vec::new()), Vec::new());
     };
     let warn = |message: String| Diagnostic {
         severity: Severity::Warning,
@@ -324,11 +325,13 @@ pub fn pricing_underlyings_from_config(config: &Config) -> (Vec<String>, Vec<Dia
         message,
         path: Some("app.pricing.underlyings".to_string()),
     };
+    // A value that is not an array answers `None`: a reload keeps the list
+    // it had (hot reload keeps the last valid state), startup has none.
     let Some(items) = value.as_array() else {
         return (
-            Vec::new(),
+            None,
             vec![warn(format!(
-                "[pricing] underlyings = {value} is not an array of names; no underlyings are suggested"
+                "[pricing] underlyings = {value} is not an array of names; ignored"
             ))],
         );
     };
@@ -342,7 +345,7 @@ pub fn pricing_underlyings_from_config(config: &Config) -> (Vec<String>, Vec<Dia
             ))),
         }
     }
-    (names, diags)
+    (Some(names), diags)
 }
 
 /// The `pricer_views` doc, or the bundled two when no layer has one (the
@@ -852,7 +855,9 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 let (templates, template_diags) =
                     pricer_templates_from_config(config, &pricer.templates(), "previous");
                 let (names, underlying_diags) = pricing_underlyings_from_config(config);
-                underlyings.set(&names);
+                if let Some(names) = names {
+                    underlyings.set(&names);
+                }
                 let mut diags = diags;
                 diags.extend(template_diags);
                 diags.extend(refresh_diag);
@@ -1579,20 +1584,26 @@ role = "key"
         let (names, diags) = pricing_underlyings_from_config(&config(
             "[pricing]\nunderlyings = [\"spx\", 3, \"SX5E\"]\n",
         ));
-        assert_eq!(names, ["spx", "SX5E"]);
+        assert_eq!(
+            names.as_deref(),
+            Some(&["spx".to_string(), "SX5E".to_string()][..])
+        );
         assert_eq!(diags.len(), 1, "{diags:?}");
         assert_eq!(diags[0].path.as_deref(), Some("app.pricing.underlyings"));
         assert_eq!(diags[0].severity, Severity::Warning);
 
         let (names, diags) =
             pricing_underlyings_from_config(&config("[pricing]\nunderlyings = \"SPX\"\n"));
-        assert!(names.is_empty(), "{names:?}");
+        assert_eq!(
+            names, None,
+            "not an array: ignored, so a reload keeps its list"
+        );
         assert_eq!(diags.len(), 1, "{diags:?}");
         assert_eq!(diags[0].path.as_deref(), Some("app.pricing.underlyings"));
 
         let (names, diags) =
             pricing_underlyings_from_config(&config("[pricing]\nrefresh = \"10s\"\n"));
-        assert!(names.is_empty());
+        assert_eq!(names, Some(Vec::new()), "absent: an empty list");
         assert!(diags.is_empty(), "{diags:?}");
     }
 
@@ -1864,6 +1875,50 @@ role = "key"
             let list = source.underlyings(cx);
             assert_eq!(list.iter().map(|s| s.as_ref()).collect::<Vec<_>>(), ["NDX"]);
             assert_ne!(source.revision(cx), before, "the revision moved");
+        });
+    }
+
+    /// A reload whose `[pricing] underlyings` is not an array keeps the
+    /// list the bar had (hot reload keeps the last valid state) rather
+    /// than emptying it.
+    #[gpui::test]
+    fn a_malformed_underlyings_reload_keeps_the_last_list(cx: &mut gpui::TestAppContext) {
+        let services = test_shell_services_with_sources(ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin("views", "[tree]\ndataset = \"risk\"\n").unwrap(),
+                LayerDoc::builtin("app", "[pricing]\nunderlyings = \"NDX\"\n").unwrap(),
+            ],
+            desk: None,
+            user: None,
+        });
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let (handle, _rx) = DataHandle::for_tests();
+        let bridge = test_bridge(handle);
+        bridge.underlyings.set(&["SPX".to_string()]);
+        let source = bridge.pricer.underlying_source();
+        cx.update(|cx| attach(&bridge, window, cx));
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        vcx.update(|_, cx| {
+            let frame = shell.read(cx).frame().clone();
+            frame.update(cx, |f, cx| {
+                f.note_config_reloaded();
+                cx.notify();
+            });
+        });
+        vcx.run_until_parked();
+        vcx.update(|_, cx| {
+            let list = source.underlyings(cx);
+            assert_eq!(
+                list.iter().map(|s| s.as_ref()).collect::<Vec<_>>(),
+                ["SPX"],
+                "the malformed value was ignored"
+            );
         });
     }
 
@@ -2264,6 +2319,45 @@ role = "key"
             mode(&mut vcx),
             "normal",
             "the first escape after a committed line left the entry field open"
+        );
+    }
+
+    /// The cell editor lives inside the table, so `DataTable`'s own
+    /// `escape` (clear the selection, stop the key) must not beat the
+    /// tile's cancel: the first escape closes the editor.
+    #[gpui::test]
+    fn escape_closes_the_cell_editor_inside_the_table(cx: &mut gpui::TestAppContext) {
+        let (handle, _rx) = DataHandle::for_tests();
+        let (services, tiles) =
+            with_a_pricer_tile_on(test_shell_services(), test_pricer(&handle), "a");
+        let window = open_pricer_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let tile = tiles.borrow()[0].clone();
+        let mode = |vcx: &mut gpui::VisualTestContext| {
+            tile.read_with(vcx, |t, _| {
+                t.key_context().get("mode").unwrap_or("").to_string()
+            })
+        };
+        type_a_line(&mut vcx, "-5 SPX Z26 5000 C");
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+        assert_eq!(mode(&mut vcx), "normal", "fixture: the bar closed");
+        vcx.simulate_keystrokes("i");
+        vcx.run_until_parked();
+        assert_eq!(
+            mode(&mut vcx),
+            "insert",
+            "fixture: `i` opened the cell editor"
+        );
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+        assert_eq!(
+            mode(&mut vcx),
+            "normal",
+            "the first escape left the cell editor open"
         );
     }
 

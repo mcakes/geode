@@ -20963,13 +20963,51 @@ run_mutation "pricer rm: a key under the confirm reaches the tile too" \
   geode-app a_key_answering_the_rm_confirm_reaches_nothing_else
 
 # The table's own escape would clear its selection and stop the key before
-# the tile's cancel closes the entry field.
+# the tile's cancel closes the cell editor, which lives inside the table.
+# (The entry bar sits outside the table, so it no longer sees this.)
 run_mutation "pricer init: DataTable keeps its own escape" \
   crates/geode-pricer/src/lib.rs \
   '            "escape",
 ' \
   '' \
-  geode-app escape_after_a_committed_line_closes_the_entry_field
+  geode-app escape_closes_the_cell_editor_inside_the_table
+
+# gpui-component's Root binds tab to focus cycling, and a matched action
+# runs before the bar's key listener: without the reclaim, Tab leaves the
+# field instead of completing.
+run_mutation "pricer init: the entry bar does not reclaim tab" \
+  crates/geode-pricer/src/lib.rs \
+  '        ["tab", "shift-tab"]
+            .map(|key| gpui::KeyBinding::new(key, gpui::NoAction, Some(header::ENTRY_CONTEXT))),' \
+  '        ["f24"]
+            .map(|key| gpui::KeyBinding::new(key, gpui::NoAction, Some(header::ENTRY_CONTEXT))),' \
+  geode-pricer tab_writes_the_lit_underlying_and_cycles
+
+# An empty hint must keep its row, or the table jumps as the caret enters
+# the last slot.
+run_mutation "pricer entry bar: an empty hint drops its row" \
+  crates/geode-pricer/src/header.rs \
+  '            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .font_family(fonts::MONO)
+                .debug_selector(|| "pricer-entry-hint".into())' \
+  '            div()
+                .when(hint.is_empty(), |d| d.hidden())
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .font_family(fonts::MONO)
+                .debug_selector(|| "pricer-entry-hint".into())' \
+  geode-pricer the_hint_and_list_follow_the_slot
+
+# A malformed [pricing] underlyings on reload keeps the last list.
+run_mutation "pricer app: a malformed underlyings reload empties the list" \
+  crates/geode-app/src/bridge.rs \
+  '                if let Some(names) = names {
+                    underlyings.set(&names);
+                }' \
+  '                underlyings.set(&names.unwrap_or_default());' \
+  geode-app a_malformed_underlyings_reload_keeps_the_last_list
 
 run_mutation "pricer retiring: a restore opens a sheet being removed" \
   crates/geode-pricer/src/tile.rs \

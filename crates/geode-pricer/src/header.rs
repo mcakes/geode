@@ -417,16 +417,21 @@ pub(crate) fn render_entry_bar(
                         .child(Input::new(input).appearance(false).w_full()),
                 ),
         )
-        .when(!hint.is_empty(), |el| {
-            el.child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .font_family(fonts::MONO)
-                    .debug_selector(|| "pricer-entry-hint".into())
-                    .child(hint.clone()),
-            )
-        })
+        // Always painted, a no-break space when there is no hint, so the
+        // bar keeps its height and the table under it never jumps as the
+        // caret crosses into the last slot.
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .font_family(fonts::MONO)
+                .debug_selector(|| "pricer-entry-hint".into())
+                .child(if hint.is_empty() {
+                    SharedString::new_static("\u{a0}")
+                } else {
+                    hint.clone()
+                }),
+        )
         .when_some(error.cloned(), |el, e| {
             el.child(
                 div()

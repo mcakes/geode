@@ -5245,10 +5245,17 @@ pub(crate) mod tests {
         h.draw(&mut vcx);
         assert!(vcx.debug_bounds("pricer-entry-hint").is_some());
         assert!(vcx.debug_bounds("pricer-entry-list").is_some());
+        let height = vcx.debug_bounds("pricer-entry").unwrap().size.height;
         typed(&h, &mut vcx, "CS ");
         assert!(h.entry_rows(&vcx).is_empty(), "past the end: no list");
+        assert_eq!(h.entry_hint(&vcx).as_deref(), Some(""));
         h.draw(&mut vcx);
         assert!(vcx.debug_bounds("pricer-entry-list").is_none());
+        assert_eq!(
+            vcx.debug_bounds("pricer-entry").unwrap().size.height,
+            height,
+            "an empty hint keeps the bar's height, so the table does not jump"
+        );
     }
 
     #[gpui::test]

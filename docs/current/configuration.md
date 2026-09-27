@@ -426,9 +426,10 @@ it.
 
 `underlyings` lists the underlyings the pricer's entry bar suggests, in the
 order it offers them: an array of strings, upper-cased, with blank entries
-and repeats dropped. A non-array value or a non-string element warns at
-`app.pricing.underlyings` and is skipped. A reload applies it to open tiles
-without a restart. An edit to `underlyings` alone still runs the pricer's
+and repeats dropped. A non-string element warns at
+`app.pricing.underlyings` and is skipped. A value that is not an array warns
+and is ignored: on a reload the bar keeps the list it had. A reload applies a
+valid list to open tiles without a restart. An edit to `underlyings` alone still runs the pricer's
 full reload, which restarts every open tile's refresh timer. Without it the
 bar says no underlyings are configured.
 
