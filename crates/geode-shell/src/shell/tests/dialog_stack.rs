@@ -693,3 +693,31 @@ fn palette_transient_chrome_is_refused_over_a_dialog(cx: &mut gpui::TestAppConte
         });
     }
 }
+
+/// Regression guard for a reviewed finding that turned out not to reproduce:
+/// `dispatch_palette_item`'s `is_toggle` guard already skips dispatch for the
+/// palette's own "Toggle command palette" row, so picking it over a dialog
+/// just closes the palette — it does not re-dispatch `palette::toggle` and
+/// reopen it, so `commit_selected`'s post-dispatch `refocus_top` has nothing
+/// to steal focus from.
+#[gpui::test]
+fn picking_the_toggle_row_over_a_dialog_does_not_reopen_the_palette(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = dialog_test_shell(cx, "config::views");
+    vcx.simulate_keystrokes("/ a b");
+    vcx.simulate_keystrokes("ctrl-k");
+    vcx.simulate_input("Toggle command palette");
+    let selected = shell.read_with(&vcx, |s, _| s.palette.as_ref().unwrap().selected_item());
+    assert!(
+        matches!(&selected, Some(crate::palette::PaletteItem::Action(id, ..)) if id.0 == "palette::toggle"),
+        "{selected:?}"
+    );
+    vcx.simulate_keystrokes("enter");
+    draw(&mut vcx);
+    assert!(
+        shell.read_with(&vcx, |s, _| s.palette.is_none()),
+        "the palette must not reopen"
+    );
+    assert_eq!(kinds(&shell, &mut vcx), vec![DialogKind::Object]);
+    assert_eq!(input_text(&shell, &mut vcx), "ab");
+    assert!(dialog_filter_is_focused(&shell, &mut vcx));
+}
