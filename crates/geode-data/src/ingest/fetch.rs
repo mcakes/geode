@@ -56,15 +56,15 @@ impl FetchWorker {
         source: &str,
         fetch: Box<dyn Fetch>,
         sink: FetchOutcomeSink,
+        stop: crate::service::EventSink,
     ) -> Result<FetchWorker, AdapterError> {
         let (tx, rx) = sync_channel(FETCH_BOUND);
         let name = format!("geode-fetch-{source}");
-        let thread = std::thread::Builder::new()
-            .name(name.clone())
-            .spawn(move || run(fetch, rx, sink))
-            .map_err(|e| AdapterError {
-                message: format!("spawning {name}: {e}"),
-            })?;
+        let thread =
+            crate::supervise::spawn_supervised(name.clone(), stop, move || run(fetch, rx, sink))
+                .map_err(|e| AdapterError {
+                    message: format!("spawning {name}: {e}"),
+                })?;
         Ok(FetchWorker {
             source: source.to_string(),
             tx: Some(tx),
@@ -239,6 +239,7 @@ pub(crate) mod tests {
                 fail_once: false,
             }),
             sink,
+            crate::supervise::unwatched(),
         )
         .unwrap();
         assert!(w.request(FetchWork::Span {
@@ -282,6 +283,7 @@ pub(crate) mod tests {
                 fail_once: false,
             }),
             sink,
+            crate::supervise::unwatched(),
         )
         .unwrap();
         w.request(FetchWork::Span {
@@ -314,6 +316,7 @@ pub(crate) mod tests {
                 fail_once: false,
             }),
             sink,
+            crate::supervise::unwatched(),
         )
         .unwrap();
         w.request(FetchWork::Identities);
@@ -326,5 +329,28 @@ pub(crate) mod tests {
             !w.request(FetchWork::Identities),
             "a stopped worker refuses"
         );
+    }
+
+    #[test]
+    fn a_fetch_worker_that_dies_is_declared() {
+        let (stop, stops) = crate::supervise::tests_support::recording();
+        let sink: FetchOutcomeSink = Arc::new(|_| panic!("the fetch sink fell over"));
+        let mut w = FetchWorker::spawn(
+            "demo_kdb",
+            Box::new(FakeFetch {
+                calls: Default::default(),
+                n: 1,
+                catalogue: None,
+                fail_once: false,
+            }),
+            sink,
+            stop,
+        )
+        .unwrap();
+        assert!(w.request(FetchWork::Identities));
+        let (thread, reason) = crate::supervise::tests_support::next_stop(&stops);
+        assert_eq!(thread, "geode-fetch-demo_kdb");
+        assert!(reason.contains("the fetch sink fell over"), "{reason}");
+        w.shutdown();
     }
 }

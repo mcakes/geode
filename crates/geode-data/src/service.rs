@@ -771,13 +771,18 @@ impl DataService {
                 }
             })
         };
-        let pool = QueryPool::spawn_with_sink(&store, config.query_workers.max(1), result_sink)?;
+        let pool = QueryPool::spawn_with_sink(
+            &store,
+            config.query_workers.max(1),
+            result_sink,
+            Arc::clone(&sink),
+        )?;
 
         let price_sink: PriceSink = {
             let sink = Arc::clone(&sink);
             Arc::new(move |o| sink(DataEvent::Price(o)))
         };
-        let pricing = PricingWorker::spawn(config.pricer.clone(), price_sink);
+        let pricing = PricingWorker::spawn(config.pricer.clone(), price_sink, Arc::clone(&sink));
 
         let ingest_sink: IngestSink = {
             let sink = Arc::clone(&sink);
@@ -1020,6 +1025,7 @@ impl DataService {
             store,
             config.schema.clone(),
             ingest_sink,
+            Arc::clone(&sink),
         ));
 
         // Resolve adapters after the ingest runner exists and before discovery
@@ -1146,7 +1152,7 @@ impl DataService {
                             FetchOutcome::Identities(None) => {}
                         })
                     };
-                    match FetchWorker::spawn(&spec.name, fetch, outcome_sink) {
+                    match FetchWorker::spawn(&spec.name, fetch, outcome_sink, Arc::clone(&sink)) {
                         Ok(worker) => {
                             // Use the actual delivery verdict when reporting a clean connection.
                             let source = spec.name.clone();
@@ -1280,6 +1286,7 @@ impl DataService {
                 Arc::clone(&ingest),
                 report_load,
                 on_connection,
+                Arc::clone(&sink),
             ) {
                 Ok(worker) => subscriptions.push(worker),
                 Err(e) => report_unservable(e.message),
@@ -1330,6 +1337,7 @@ impl DataService {
             discovery_conn,
             Arc::clone(&ingest),
             scheduler_sink,
+            Arc::clone(&sink),
         );
 
         // Validate views at open so diagnostics name the configuration before any

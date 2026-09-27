@@ -38,14 +38,18 @@ pub struct PricingWorker {
 }
 
 impl PricingWorker {
-    pub fn spawn(config: PricerConfig, sink: PriceSink) -> PricingWorker {
+    pub fn spawn(
+        config: PricerConfig,
+        sink: PriceSink,
+        stop: crate::service::EventSink,
+    ) -> PricingWorker {
         let queue: Arc<(Mutex<Queue>, Condvar)> = Arc::default();
         let thread = {
             let queue = Arc::clone(&queue);
-            std::thread::Builder::new()
-                .name("geode-pricing".into())
-                .spawn(move || run(queue, config, sink))
-                .expect("spawn the pricing worker")
+            crate::supervise::spawn_supervised("geode-pricing".to_string(), stop, move || {
+                run(queue, config, sink)
+            })
+            .expect("spawn the pricing worker")
         };
         PricingWorker {
             queue,
@@ -345,6 +349,7 @@ pub(crate) mod tests {
                 overrides_seen: Default::default(),
             })),
             sink,
+            crate::supervise::unwatched(),
         );
         (w, asked, rx)
     }
@@ -492,7 +497,11 @@ pub(crate) mod tests {
     fn no_pricer_answers_every_line_with_the_configured_name() {
         let (tx, rx) = channel();
         let sink: PriceSink = Arc::new(move |o| tx.send(o).is_ok());
-        let w = PricingWorker::spawn(PricerConfig::missing("vendor"), sink);
+        let w = PricingWorker::spawn(
+            PricerConfig::missing("vendor"),
+            sink,
+            crate::supervise::unwatched(),
+        );
         assert!(w.request(params(4, 1, &["SPX", "NDX"])));
         let o = next(&rx);
         for (_, _, r) in &o.results {
@@ -537,6 +546,7 @@ pub(crate) mod tests {
                 overrides_seen: seen.clone(),
             })),
             sink,
+            crate::supervise::unwatched(),
         );
         let mut o = MarketOverrides::default();
         o.spot.insert("SPX".into(), 5000.0);
@@ -568,6 +578,7 @@ pub(crate) mod tests {
                 overrides_seen: Default::default(),
             })),
             sink,
+            crate::supervise::unwatched(),
         );
         let mut bad = MarketOverrides::default();
         bad.spot.insert("REFUSE".into(), 1.0);
@@ -604,6 +615,7 @@ pub(crate) mod tests {
                 overrides_seen: Default::default(),
             })),
             sink,
+            crate::supervise::unwatched(),
         );
         let mut boom = MarketOverrides::default();
         boom.spot.insert("BOOM".into(), 1.0);
@@ -628,6 +640,18 @@ pub(crate) mod tests {
             "the worker is still alive"
         );
         assert!(next(&rx).results[0].2.is_ok());
+        w.shutdown();
+    }
+
+    #[test]
+    fn a_pricing_worker_that_dies_is_declared() {
+        let (stop, stops) = crate::supervise::tests_support::recording();
+        let sink: PriceSink = Arc::new(|_| panic!("the price sink fell over"));
+        let w = PricingWorker::spawn(PricerConfig::missing("vendor"), sink, stop);
+        assert!(w.request(params(1, 1, &["SPX"])));
+        let (thread, reason) = crate::supervise::tests_support::next_stop(&stops);
+        assert_eq!(thread, "geode-pricing");
+        assert!(reason.contains("the price sink fell over"), "{reason}");
         w.shutdown();
     }
 }

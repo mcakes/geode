@@ -208,22 +208,29 @@ type LoadFn = fn(&Store, &LoadRequest) -> Result<LoadOutcome, LoadError>;
 type PublishFn = fn(&Store, &DocumentPublishRequest) -> Result<DocumentPublished, StoreError>;
 
 impl IngestRunner {
-    pub fn spawn(store: Store, schema: SchemaSpec, sink: IngestSink) -> IngestHandle {
-        Self::spawn_with(store, schema, sink, load_file, publish_document)
+    pub fn spawn(
+        store: Store,
+        schema: SchemaSpec,
+        sink: IngestSink,
+        stop: crate::service::EventSink,
+    ) -> IngestHandle {
+        Self::spawn_with(store, schema, sink, stop, load_file, publish_document)
     }
 
     fn spawn_with(
         store: Store,
         schema: SchemaSpec,
         sink: IngestSink,
+        stop: crate::service::EventSink,
         load: LoadFn,
         publish: PublishFn,
     ) -> IngestHandle {
         let queue = Arc::new((Mutex::new(Queue::default()), Condvar::new()));
         let worker_queue = Arc::clone(&queue);
-        let thread = std::thread::Builder::new()
-            .name("geode-ingest".into())
-            .spawn(move || run(store, schema, worker_queue, sink, load, publish))
+        let thread =
+            crate::supervise::spawn_supervised("geode-ingest".to_string(), stop, move || {
+                run(store, schema, worker_queue, sink, load, publish)
+            })
             .expect("spawning the ingest thread");
         IngestHandle {
             queue,
@@ -239,7 +246,10 @@ impl IngestRunner {
     ) -> (IngestHandle, Receiver<IngestEvent>) {
         let (tx, rx) = channel();
         let sink: IngestSink = Arc::new(move |e| tx.send(e).is_ok());
-        (Self::spawn(store, schema, sink), rx)
+        (
+            Self::spawn(store, schema, sink, crate::supervise::unwatched()),
+            rx,
+        )
     }
 }
 
@@ -1162,7 +1172,7 @@ mod tests {
                 IngestEvent::Published { .. } | IngestEvent::Failed { .. }
             )
         });
-        let handle = IngestRunner::spawn(store, schema_of(ds), sink);
+        let handle = IngestRunner::spawn(store, schema_of(ds), sink, crate::supervise::unwatched());
         handle.submit(WorkPlan { items: vec![first] });
         wait_for_count(&refusals, 1, "refused terminal events");
 
@@ -1185,7 +1195,7 @@ mod tests {
     fn a_refused_plan_complete_does_not_stop_the_runner() {
         let (_db, _src, store, ds, plan) = harness();
         let (sink, rx, refusals) = refusing_sink(|e| matches!(e, IngestEvent::PlanComplete));
-        let handle = IngestRunner::spawn(store, schema_of(ds), sink);
+        let handle = IngestRunner::spawn(store, schema_of(ds), sink, crate::supervise::unwatched());
         // The runner idles immediately with an empty queue, announces
         // once, and that announcement is refused.
         wait_for_count(&refusals, 1, "refused PlanComplete events");
@@ -1213,7 +1223,7 @@ mod tests {
         let good = plan.items[1].clone();
 
         let (sink, rx, refusals) = refusing_sink(|e| matches!(e, IngestEvent::Failed { .. }));
-        let handle = IngestRunner::spawn(store, schema_of(ds), sink);
+        let handle = IngestRunner::spawn(store, schema_of(ds), sink, crate::supervise::unwatched());
         handle.submit(WorkPlan {
             items: vec![undeclared],
         });
@@ -1544,7 +1554,14 @@ mod tests {
         let (tx, rx) = channel();
         let sink: IngestSink = Arc::new(move |e| tx.send(e).is_ok());
         (
-            IngestRunner::spawn_with(store, schema, sink, load, publish_document),
+            IngestRunner::spawn_with(
+                store,
+                schema,
+                sink,
+                crate::supervise::unwatched(),
+                load,
+                publish_document,
+            ),
             rx,
         )
     }
@@ -2107,7 +2124,14 @@ mod tests {
         let (tx, rx) = channel();
         let sink: IngestSink = Arc::new(move |e| tx.send(e).is_ok());
         (
-            IngestRunner::spawn_with(store, schema, sink, load_file, publish),
+            IngestRunner::spawn_with(
+                store,
+                schema,
+                sink,
+                crate::supervise::unwatched(),
+                load_file,
+                publish,
+            ),
             rx,
         )
     }
@@ -2608,5 +2632,17 @@ mod tests {
             LOCAL_KEEP_GENERATIONS as i64 + 1,
             "provenance is pruned with the sweep"
         );
+    }
+
+    #[test]
+    fn an_ingest_runner_that_dies_is_declared() {
+        let (_dir, store) = document_store();
+        let (stop, stops) = crate::supervise::tests_support::recording();
+        let sink: IngestSink = Arc::new(|_| panic!("the ingest sink fell over"));
+        let handle = IngestRunner::spawn(store, schema_of(cvi_dataset()), sink, stop);
+        let (thread, reason) = crate::supervise::tests_support::next_stop(&stops);
+        assert_eq!(thread, "geode-ingest");
+        assert!(reason.contains("the ingest sink fell over"), "{reason}");
+        handle.shutdown();
     }
 }

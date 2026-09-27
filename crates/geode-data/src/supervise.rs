@@ -36,6 +36,13 @@ pub(crate) fn spawn_supervised(
     })
 }
 
+/// The stop sink for constructors that deliver into a channel (tests,
+/// benches): they have no event sink, so a death is still caught and logged
+/// by [`spawn_supervised`] but announced to no one.
+pub(crate) fn unwatched() -> EventSink {
+    std::sync::Arc::new(|_| false)
+}
+
 #[cfg(test)]
 pub(crate) mod tests_support {
     use crate::service::{DataEvent, EventSink};

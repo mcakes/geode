@@ -187,9 +187,11 @@ impl EgressWorkers {
                     let (tx, rx) = sync_channel::<Job>(EGRESS_QUEUE_BOUND);
                     let name = spec.name.clone();
                     let worker_sink = EventSink::clone(&sink);
-                    let spawned = std::thread::Builder::new()
-                        .name(format!("geode-egress-{}", spec.name))
-                        .spawn(move || work(name, egress, rx, worker_sink));
+                    let spawned = crate::supervise::spawn_supervised(
+                        format!("geode-egress-{}", spec.name),
+                        EventSink::clone(&sink),
+                        move || work(name, egress, rx, worker_sink),
+                    );
                     match spawned {
                         Ok(handle) => {
                             target.tx = Mutex::new(Some(tx));
@@ -730,5 +732,21 @@ mod tests {
             ]
         );
         assert!(diags.iter().all(|d| d.severity == Severity::Error));
+    }
+
+    #[test]
+    fn an_egress_worker_that_dies_is_declared() {
+        let (adapters, _adapter, _feed) = channel_registry();
+        let (tx, rx) = channel();
+        let tx = Mutex::new(tx);
+        let sink: EventSink = Arc::new(move |e| match e {
+            DataEvent::Upload(_) => panic!("the upload answer fell over"),
+            other => tx.lock().unwrap().send(other).is_ok(),
+        });
+        let workers = EgressWorkers::spawn(&[dividend_spec()], &adapters, sink);
+        workers.upload(params(1, TARGET, DIVIDEND, "XYZ"), &documents());
+        let (thread, reason) = crate::supervise::tests_support::next_stop(&rx);
+        assert_eq!(thread, "geode-egress-sophis");
+        assert!(reason.contains("the upload answer fell over"), "{reason}");
     }
 }

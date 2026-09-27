@@ -48,12 +48,14 @@ impl Scheduler {
         conn: duckdb::Connection,
         ingest: Arc<IngestHandle>,
         sink: SchedulerSink,
+        stopped: crate::service::EventSink,
     ) -> Scheduler {
         let stop = Arc::new((Mutex::new(false), Condvar::new()));
         let worker_stop = Arc::clone(&stop);
-        let thread = std::thread::Builder::new()
-            .name("geode-discovery".into())
-            .spawn(move || run(sources, conn, ingest, sink, worker_stop))
+        let thread =
+            crate::supervise::spawn_supervised("geode-discovery".to_string(), stopped, move || {
+                run(sources, conn, ingest, sink, worker_stop)
+            })
             .expect("spawning the discovery thread");
         Scheduler {
             stop,
@@ -476,7 +478,13 @@ mod tests {
             harness(poll, Duration::from_secs(3600));
         let (sink, sched_rx, refusals) =
             refusing_events_sink(|e| matches!(e, SchedulerEvent::Polled { .. }));
-        let sched = Scheduler::spawn(vec![spec], conn, Arc::clone(&ingest), sink);
+        let sched = Scheduler::spawn(
+            vec![spec],
+            conn,
+            Arc::clone(&ingest),
+            sink,
+            crate::supervise::unwatched(),
+        );
 
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         while std::time::Instant::now() < deadline
@@ -575,7 +583,13 @@ mod tests {
             harness(Duration::from_millis(20), Duration::from_secs(3600));
         let (sink, sched_rx, refusals) =
             refusing_events_sink(|e| matches!(e, SchedulerEvent::Health { .. }));
-        let sched = Scheduler::spawn(vec![spec], conn, Arc::clone(&ingest), sink);
+        let sched = Scheduler::spawn(
+            vec![spec],
+            conn,
+            Arc::clone(&ingest),
+            sink,
+            crate::supervise::unwatched(),
+        );
 
         let first = sched_rx.recv_timeout(Duration::from_secs(30));
         sched.shutdown();
@@ -597,7 +611,13 @@ mod tests {
         let (_db, dir, ingest, ingest_rx, conn, spec, _ds) =
             harness(Duration::from_millis(50), Duration::from_secs(3600));
         let (sink, sched_rx) = events_sink();
-        let sched = Scheduler::spawn(vec![spec], conn, Arc::clone(&ingest), sink);
+        let sched = Scheduler::spawn(
+            vec![spec],
+            conn,
+            Arc::clone(&ingest),
+            sink,
+            crate::supervise::unwatched(),
+        );
 
         // Skip the first clean health report while waiting for poll completion.
         let mut first = sched_rx.recv_timeout(Duration::from_secs(10)).unwrap();
@@ -647,7 +667,13 @@ mod tests {
         let (_db, _dir, ingest, ingest_rx, conn, spec, _ds) =
             harness(poll, Duration::from_secs(3600));
         let (sink, sched_rx) = events_sink();
-        let sched = Scheduler::spawn(vec![spec], conn, Arc::clone(&ingest), sink);
+        let sched = Scheduler::spawn(
+            vec![spec],
+            conn,
+            Arc::clone(&ingest),
+            sink,
+            crate::supervise::unwatched(),
+        );
         let mut polls = 0;
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         while polls < 5 && std::time::Instant::now() < deadline {
@@ -677,7 +703,13 @@ mod tests {
         )
         .unwrap();
         let (sink, sched_rx) = events_sink();
-        let sched = Scheduler::spawn(vec![spec], conn, ingest, sink);
+        let sched = Scheduler::spawn(
+            vec![spec],
+            conn,
+            ingest,
+            sink,
+            crate::supervise::unwatched(),
+        );
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let mut seen = None;
         while std::time::Instant::now() < deadline {
@@ -705,7 +737,13 @@ mod tests {
         )
         .unwrap();
         let (sink, sched_rx) = events_sink();
-        let sched = Scheduler::spawn(vec![spec], conn, ingest, sink);
+        let sched = Scheduler::spawn(
+            vec![spec],
+            conn,
+            ingest,
+            sink,
+            crate::supervise::unwatched(),
+        );
 
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let mut degraded = false;
@@ -752,7 +790,13 @@ mod tests {
         let (_db, _dir, ingest, _ingest_rx, conn, spec, _ds) =
             harness(poll, Duration::from_secs(3600));
         let (sink, sched_rx) = events_sink();
-        let sched = Scheduler::spawn(vec![spec], conn, ingest, sink);
+        let sched = Scheduler::spawn(
+            vec![spec],
+            conn,
+            ingest,
+            sink,
+            crate::supervise::unwatched(),
+        );
         let mut polls = 0;
         let mut ok_count = 0;
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
@@ -779,7 +823,13 @@ mod tests {
         let (_db, _dir, ingest, _rx, conn, _spec, _ds) =
             harness(Duration::from_secs(1), Duration::from_secs(1));
         let (sink, _sched_rx) = events_sink();
-        let sched = Scheduler::spawn(Vec::new(), conn, ingest, sink);
+        let sched = Scheduler::spawn(
+            Vec::new(),
+            conn,
+            ingest,
+            sink,
+            crate::supervise::unwatched(),
+        );
         sched.shutdown();
         sched.shutdown();
     }
@@ -822,7 +872,13 @@ mod tests {
         // into the scheduler, for the honest check below.
         let query_conn = conn.try_clone().unwrap();
         let (sink, _sched_rx) = events_sink();
-        let sched = Scheduler::spawn(vec![spec], conn, Arc::clone(&ingest), sink);
+        let sched = Scheduler::spawn(
+            vec![spec],
+            conn,
+            Arc::clone(&ingest),
+            sink,
+            crate::supervise::unwatched(),
+        );
 
         // Allow time for real CSV loads and publication transactions under parallel
         // test load. Duplicate publication is checked separately before this timeout.
@@ -879,5 +935,18 @@ mod tests {
         for (path, c) in &counts {
             assert_eq!(*c, 1, "{path} has {c} generations, expected exactly one");
         }
+    }
+
+    #[test]
+    fn a_discovery_thread_that_dies_is_declared() {
+        let (_db, _dir, ingest, _ingest_rx, conn, spec, _ds) =
+            harness(Duration::from_millis(50), Duration::ZERO);
+        let (stop, stops) = crate::supervise::tests_support::recording();
+        let sink: SchedulerSink = Arc::new(|_| panic!("the scheduler sink fell over"));
+        let sched = Scheduler::spawn(vec![spec], conn, ingest, sink, stop);
+        let (thread, reason) = crate::supervise::tests_support::next_stop(&stops);
+        assert_eq!(thread, "geode-discovery");
+        assert!(reason.contains("the scheduler sink fell over"), "{reason}");
+        sched.shutdown();
     }
 }
