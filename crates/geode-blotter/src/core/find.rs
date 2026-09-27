@@ -1,6 +1,5 @@
-//! `/` under both find styles (Phase 3 spec §6.1, §2.2). The shell owns
-//! the input; this decides what typing into it does, over the tree
-//! column's text of each visible row. Vim jumps, fzf narrows.
+//! Find state over the tree-column text of visible rows. The shell owns the
+//! input; Vim-style find jumps to a match and fzf-style find narrows the list.
 
 use geode_shell::vimfind::{FindDirection, FindStyle, filter_matches, find_match};
 

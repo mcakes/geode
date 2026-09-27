@@ -1,6 +1,7 @@
-//! Yank as TSV (Phase 3 spec §6.4): a header line of labels, then one
-//! line per selected visible row — tree text indented two spaces per
-//! depth, numbers raw and unscaled, blanks for NULL.
+//! TSV export of selected visible rows and columns, with a header of display
+//! labels. Tree text is indented two spaces per depth; numeric values are
+//! unscaled and NULL cells are blank. Fields are joined without escaping
+//! embedded tabs or newlines.
 
 use crate::core::plan::{ColumnKind, ColumnPlan};
 use geode_core::snapshot::Snapshot;

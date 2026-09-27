@@ -1,8 +1,7 @@
-//! The `TableDelegate` adapter (Phase 3 spec §6.6). Owns everything the
-//! table renders — snapshot, plan, expansion, the flattened and shown
-//! row lists, cursor, mode, sort, the format cache — so every
-//! `render_td` is a lookup. The pure core does the work; this file only
-//! sequences it and paints.
+//! Table adapter owning the snapshot, column plan, expansion, visible rows,
+//! cursor, selection, sort, and display caches. Pure core helpers prepare the
+//! rows and aggregates; render reads cached text, glyphs, and selection state.
+//! Theme and gutter presentation use separate memos to avoid repeated work.
 
 use crate::colour_cache::{ColourCache, Resolved as ColourResolved};
 use crate::core::cache::{FormatCache, cell};
@@ -102,8 +101,8 @@ pub struct BlotterDelegate {
     /// Bumped whenever `summary` is rebuilt, so the paint memo knows the
     /// groups it colored are stale.
     summary_generation: u64,
-    /// Each `summary` group's colors, index-aligned with it; rebuilt by
-    /// `ensure_summary_paint` only when the summary or the theme moved.
+    /// Colours aligned with `summary`, memoized until the summary, theme
+    /// inputs, or named-colour definitions change.
     pub summary_paint: Vec<CellPaint>,
     summary_paint_stamp: Option<(u64, [Hsla; 28])>,
     /// The footer's `"{rows} rows × {cols} cols"` readout, leading the
@@ -137,20 +136,9 @@ pub struct BlotterDelegate {
     /// Whether any painted cell carried the dagger, for the footer.
     pub any_determined: bool,
     pub semi_joined: Vec<String>,
-    /// The last window `refill_window` was actually asked to fill,
-    /// *not* `cache.window()`. `TableState` (`update_visible_range_if_need`,
-    /// pinned release, `gpui-component-0.6.2/src/table/state.rs`) only
-    /// records a new visible range when it has more than one row — a
-    /// filter/narrow that shrinks the table to 0 or 1 rows leaves
-    /// `TableState`'s own recorded range stale, so when the rows return
-    /// to the same count as before, it never fires
-    /// `visible_rows_changed` again. `invalidate_cells` must
-    /// refill *this* field, not the (possibly shrunken) format cache's
-    /// own window, or the cache stays stuck at the shrunken size forever
-    /// — every cell outside it paints blank with nothing left to ever
-    /// refill it. `invalidate_cells` itself fills through the private
-    /// `fill_window`, not `refill_window`, so its own clamped refill
-    /// (after e.g. an empty snapshot) never shrinks this field.
+    /// Last window requested by the table, retained even when fewer rows
+    /// remain. Invalidation refills this range because an unchanged numeric
+    /// range may produce no table callback; see `invalidate_cells`.
     requested_window: Range<usize>,
     /// The tree column's disclosure glyph for each *shown* row in
     /// `cache`'s current window, aligned index-for-index with it
@@ -159,47 +147,29 @@ pub struct BlotterDelegate {
     /// painting the tree column never calls `path_of` (an allocating
     /// ancestor walk) per cell. Empty until the first `refill_window`.
     glyphs: Vec<&'static str>,
-    /// `[ui] line_numbers` (user ruling 2026-09-11), mirrored from the
-    /// `linenumbers::UiSettings` global by the tile (`BlotterTile::
-    /// on_ui_settings`) — the delegate has no `App` of its own in the
-    /// paths that need it (`column`, `fill_window`).
+    /// `[ui] line_numbers`, mirrored from `linenumbers::UiSettings` by the
+    /// tile. `column` and `fill_window` need this value without an `App`.
     pub line_numbers: LineNumbers,
-    /// The gutter text for each *shown* row in `numbers_stamp`'s range,
-    /// aligned index-for-index like `glyphs` — rebuilt by
-    /// `ensure_numbers` only when the window, the cursor row or the mode
-    /// changed since the last build (`numbers_stamp`), so painting the
-    /// gutter never formats a number per frame: a scroll or a cursor
-    /// move costs one small `String` per visible row, once.
+    /// Gutter text aligned with the format-cache window. `ensure_numbers`
+    /// rebuilds it when the window or mode changes, or when the cursor moves
+    /// in relative mode. Painting otherwise reuses these strings.
     numbers: Vec<SharedString>,
     numbers_stamp: Option<(Range<usize>, usize, LineNumbers)>,
-    /// The named colours a `Colour::Named` column resolves against
-    /// (Part 2c §6.2), handed down by the tile out of the one `Arc` the
-    /// factory shares with every tile — refreshed on every plan the tile
-    /// applies, which is every delivered snapshot, and a config reload
-    /// makes every visible tile requery (`Frame::note_config_reloaded`).
-    /// So a reloaded `colours.toml` reaches the paint one query later,
-    /// exactly as a reloaded view definition does.
+    /// Named-colour definitions supplied by the tile from the factory's
+    /// shared `Arc`. Snapshot delivery refreshes this reference; config
+    /// reload requeries visible tiles, so changed definitions reach this
+    /// delegate with the next applied snapshot.
     colours: Arc<NamedColours>,
     /// One resolve per name per theme; see `colour_cache`'s module doc.
     colour_cache: ColourCache,
-    /// The theme's own colours as `Anchors`/`Tokens`, memoised behind the
-    /// signature they were derived from — the final review's I-1.
-    ///
-    /// `render_td` runs per visible cell, so deriving the pair at the
-    /// paint site cost N x 28 `Hsla -> Rgb` conversions per named column
-    /// per frame, where N is the visible row count; spec §6.3 promises
-    /// one comparison a frame. `None` until the first named cell paints,
-    /// which is what keeps the lazy read: a blotter naming no colour
-    /// never builds it at all. See [`BlotterDelegate::ensure_theme_inputs`].
+    /// Theme-derived `Anchors`/`Tokens`, memoized behind all 28 input colours.
+    /// Named-cell, header, and footer lookups compare the signature on each
+    /// call, but convert colours only when it changes. Remains empty while
+    /// no named-colour lookup occurs; see [`Self::ensure_theme_inputs`].
     theme_inputs: Option<([Hsla; 28], Anchors, Tokens)>,
-    /// The `(row, col)` a mouse-move handler last emitted a `CellPointer`
-    /// for, so a move that stays within the same cell (gpui fires one per
-    /// pixel, not per cell) never re-emits — the tile's `pointer` handler
-    /// would otherwise re-run `start_selection`'s no-op-if-already-live
-    /// branch and move the cursor to where it already is, harmlessly but
-    /// on every frame of a held drag. Stale once a drag ends without a
-    /// mouse-up any cell caught (see `drag_origin`), but harmless: a
-    /// mismatched value only ever costs one extra emission.
+    /// Last cell reported by a drag, suppressing repeated events while the
+    /// pointer stays within it. A press resets this memo; it has no effect
+    /// when `drag_origin` is absent.
     drag_last: Option<(usize, usize)>,
     /// Whether the primary button is currently down because of a press
     /// this delegate's own cell or gutter caught, and if so, which of the
@@ -217,14 +187,9 @@ pub struct BlotterDelegate {
     /// `on_mouse_up`/`on_mouse_up_out` pair sees every release exactly
     /// once regardless of where it lands).
     drag_origin: Option<bool>,
-    /// The chevron's pointer states, memoised behind every colour the
-    /// derivation reads (`control::ControlInputs` is that key by
-    /// construction). `control_paint` costs three `Hsla -> Rgb`
-    /// conversions and five contrast checks when nothing needs moving,
-    /// and an OKLab bisection when a text does — on 19 bundled themes it
-    /// does — so per visible row per frame it would break the steady
-    /// path `ensure_theme_inputs` documents. See
-    /// [`BlotterDelegate::chevron_states`].
+    /// Chevron pointer states memoized by all inputs read by the contrast
+    /// calculation. Reusing the result avoids conversions and contrast
+    /// correction for every visible row on every frame.
     chevron: Option<(control::ControlInputs, control::ControlPaint)>,
 }
 
@@ -309,12 +274,10 @@ impl BlotterDelegate {
         }
     }
 
-    /// The resolved named colour of column `col_ix` — its base and two
-    /// sign variants — or `None` for `none`, `sign` and a name the doc
-    /// lacks, all three painted in the theme's foreground (§6.3). The one
-    /// door both `render_td` and `render_th` go through, so a cell and
-    /// its header can never disagree about a column's colour; the cell
-    /// picks its variant by sign, the header takes the base.
+    /// Named colour of column `col_ix`, including its base and sign variants.
+    /// Returns `None` for plain/sign columns and undefined names. Paint sites
+    /// handle plain and sign settings separately and use the foreground for
+    /// undefined names. Named cells use the sign variant; headers use the base.
     pub fn cell_colour(
         &mut self,
         col_ix: usize,
@@ -331,12 +294,8 @@ impl BlotterDelegate {
         self.colour_cache.get(&self.colours, name, anchors, tokens)
     }
 
-    /// [`BlotterDelegate::cell_colour`] against the theme's own colours,
-    /// derived at most once per theme rather than once per painted cell
-    /// (Part 2c final review, I-1).
-    ///
-    /// The one door both paint sites use, so a cell and its header can no
-    /// more disagree about the memo than they can about the colour.
+    /// Resolve a column's named colour using memoized theme inputs. Cells,
+    /// headers, and footer totals share this lookup and its invalidation.
     pub fn themed_cell_colour(&mut self, col_ix: usize, theme: &Theme) -> Option<ColourResolved> {
         self.ensure_theme_inputs(theme);
         // Four disjoint field borrows in one body — `plan` and `colours`
@@ -377,14 +336,11 @@ impl BlotterDelegate {
         }
     }
 
-    /// Resolve each footer summary group's colors against `theme`: the
-    /// label takes the column's header color (a named color's base) and a
-    /// total takes what that column's signed cell would paint — a named
-    /// color's sign variant, `sign`'s bullish/bearish, or the foreground
-    /// for an uncolored column. Rebuilt only when the summary was rebuilt
-    /// or the theme moved, so the footer's per-frame cost is one compare.
-    /// Called from the tile's render, like `render_th`'s own lookup: it
-    /// writes nothing but this memo.
+    /// Resolve footer label and total colours. Labels use a named colour's
+    /// base; totals use its sign variants, the bullish/bearish pair for `sign`,
+    /// or foreground otherwise. Rebuild after a summary change, a theme-input
+    /// change, or `set_colours` invalidating the stamp. Render only updates this
+    /// presentation memo.
     pub fn ensure_summary_paint(&mut self, theme: &Theme) {
         let signature = theme_signature(theme);
         if self.summary_paint_stamp == Some((self.summary_generation, signature)) {
@@ -472,9 +428,8 @@ impl BlotterDelegate {
         let window = self.cache.window();
         let mode = self.line_numbers;
         let cursor = self.cursor.row;
-        // Only `rel` reads the cursor, so only `rel` stamps it: an `on`
-        // gutter must not rebuild identical strings on every `j`/`k`
-        // (review Minor 1).
+        // Only relative numbers depend on the cursor; absolute numbers must
+        // rebuild only when their window or mode changes.
         let stamped_cursor = match mode {
             LineNumbers::Relative => cursor,
             _ => usize::MAX,
@@ -632,16 +587,15 @@ impl BlotterDelegate {
         self.resolved = resolved;
     }
 
-    /// Installs a snapshot and answers whether the column plan was
-    /// replaced. The plan is always built afresh from `view` — it is
-    /// where a column's label, width, format and colour live, and a
-    /// Views-dialog presentation edit (2c §5) arrives as a requery whose
-    /// snapshot has the SAME columns at the same indices, so a gate on
-    /// "grouping or column set changed" kept the stale plan painting until
-    /// the next regroup (found on a display 2026-09-13). Building costs a
-    /// walk over the view's columns, nothing against the snapshot; the
-    /// old plan is kept only when the fresh one is equal in every field the
-    /// paint reads, so an unchanged redelivery still moves nothing.
+    /// Install a snapshot and return whether its column plan was replaced.
+    /// Build a fresh plan from the view and snapshot metadata on every
+    /// delivery: labels, widths, formats, or colours may change while column
+    /// names and indices stay the same. Keep the existing plan when equal.
+    ///
+    /// Restore cursor identity by row path and column name, prune expansion
+    /// to the grouping depth, clear narrowing, and rebuild displayed rows.
+    /// If the sorted column disappears, clear the sort and record its name
+    /// in `dropped_sort` for the tile's notice.
     pub fn apply_snapshot(
         &mut self,
         snapshot: Arc<Snapshot>,
@@ -754,48 +708,19 @@ impl BlotterDelegate {
         self.refresh_selection();
     }
 
-    /// Invalidate the format cache and the cached tree glyphs together,
-    /// then immediately refill whatever window was on screen.
+    /// Clear formatted cells and glyphs together, then refill the last
+    /// requested window, clamped to the rows still shown. An empty result
+    /// leaves both caches clear. All format-cache invalidation goes here.
     ///
-    /// `FormatCache::invalidate` clears its rows but leaves `start`
-    /// unchanged, so `render_td`'s `glyphs` lookup (keyed off
-    /// `cache.window().start`) would otherwise keep serving a stale
-    /// glyph for a row whose text just went blank — exactly when the
-    /// visible row *range* doesn't change across a regroup/sort/narrow
-    /// (so `TableState` never calls `visible_rows_changed` to refill
-    /// either of them). Clearing alone was C1 (final review): with more
-    /// rows than the viewport the visible range essentially never
-    /// changes, so `visible_rows_changed` was the *only* refill path and
-    /// it never fired again — every `render_td` after the first
-    /// regroup/sort/narrow/expand/collapse painted blank forever.
-    /// `move_column` (gpui-component calls it directly, bypassing
-    /// `visible_rows_changed` too) already captured its window and
-    /// refilled immediately; this generalises that fix to every call
-    /// site instead of just that one. `end` clamps to `self.shown.len()`
-    /// because a narrow/regroup can shrink `shown` out from under the
-    /// old window — nothing to refill then, and the cache/glyphs stay
-    /// cleared, which is correct (there's nothing there to paint).
-    /// Every `self.cache.invalidate()` call site must go through this
-    /// instead.
+    /// The table only reports a changed numeric visible range. Sorting,
+    /// regrouping, narrowing, or moving columns may leave that range equal,
+    /// so waiting for another callback would leave cells blank indefinitely.
     ///
-    /// Refills `requested_window`, not `self.cache.window()`: gpui-
-    /// component's `TableState::update_visible_range_if_need` stops
-    /// reporting a new visible range once it has length ≤ 1 (`if
-    /// visible_range.len() <= 1 { return; }`, pinned release,
-    /// `gpui-component-0.6.2/src/table/state.rs`), so a filter/narrow
-    /// that shrinks the table to 0 or 1 rows leaves the *cache's*
-    /// window stuck at that shrunken size — when the row count later
-    /// returns to what `TableState` last recorded, it sees no change
-    /// and never fires `visible_rows_changed` again, so a
-    /// `cache.window()`-based refill here would have nothing
-    /// to widen back out from. `requested_window` is what the table last
-    /// actually asked to see (remembered by `refill_window`, the only
-    /// place that writes it), independent of how small the cache
-    /// happened to shrink to since. The fill below goes through the
-    /// private `fill_window`, not `refill_window` itself, so this
-    /// clamped refill can never shrink `requested_window` back down —
-    /// only a real `refill_window` call (`visible_rows_changed`,
-    /// `move_column`, or a test standing in for either) may do that.
+    /// Refill `requested_window`, not the cache's clamped range: the pinned
+    /// `TableState::update_visible_range_if_need` does not record ranges of
+    /// length zero or one. When rows return, its recorded range may still
+    /// match, producing no callback. `fill_window` preserves the original
+    /// request so the cache can widen again without a new table event.
     fn invalidate_cells(&mut self) {
         let w = self.requested_window.clone();
         self.cache.invalidate();
@@ -849,14 +774,10 @@ impl BlotterDelegate {
             .collect()
     }
 
-    /// The tree text of every *un-narrowed* visible row — the domain
-    /// `set_narrowed`'s positions are into. An fzf `/` session must match
-    /// against this on every keystroke rather than `shown_texts()`:
-    /// after the first narrow, `shown` is already the previous match
-    /// subset, so re-matching against it would return positions in that
-    /// subset's own index space, not in `visible`'s — silently narrowing
-    /// into the wrong rows and making backspace unable to widen back out
-    /// (review round 1, Finding 1).
+    /// Tree text of every un-narrowed visible row, matching the positional
+    /// domain accepted by `set_narrowed`. Match against this full list on
+    /// every search edit: using the previous subset would misinterpret its
+    /// indices and prevent backspace from restoring excluded rows.
     pub fn visible_texts(&self) -> Vec<String> {
         let (Some(snapshot), Some(plan)) = (&self.snapshot, &self.plan) else {
             return Vec::new();
@@ -925,14 +846,9 @@ impl BlotterDelegate {
             && !snapshot.tree().has_children(row)
     }
 
-    /// Fill the cache for a window of *shown* rows, and remember it as
-    /// `requested_window` — the window the table actually asked to see,
-    /// which `invalidate_cells` falls back to refilling when `TableState`
-    /// itself won't call this again (see `requested_window`'s own doc
-    /// comment). This is the entry point `visible_rows_changed` and
-    /// `move_column` call; `invalidate_cells`'s own (possibly clamped)
-    /// refill goes through the private `fill_window` below instead, so
-    /// it never shrinks what's remembered here.
+    /// Record and fill the window requested by `visible_rows_changed`.
+    /// Invalidation refills through `fill_window` without changing this
+    /// request, even when fewer rows are temporarily available.
     pub fn refill_window(&mut self, window: Range<usize>) {
         self.requested_window = window.clone();
         self.fill_window(window);
@@ -985,12 +901,9 @@ impl BlotterDelegate {
     }
 }
 
-/// The tree column's disclosure glyph for one *shown* row (§6.5's blank/
-/// dagger/⋈ markers are separate; this is only the `▸`/`▾`/`…`/`·`
-/// expand-state glyph). Resolved once per window fill
-/// (`BlotterDelegate::refill_window`) rather than per paint, since
-/// `path_of` walks and allocates one `Option<String>` per ancestor —
-/// exactly the per-frame heap churn `render_td` must never do.
+/// Disclosure glyph for a shown row: `▸`, `▾`, `…`, or `·`. Attribution
+/// and semi-join markers are independent. Compute during window fill because
+/// `path_of` walks and allocates ancestor strings; paint only reads the result.
 fn tree_glyph(
     snapshot: &Snapshot,
     plan: &ColumnPlan,
@@ -1164,13 +1077,9 @@ impl TableDelegate for BlotterDelegate {
                 c.width
             }),
             movable: c.kind != ColumnKind::Tree,
-            // The tree column is pinned at the left (user ruling
-            // 2026-09-12): the row's identity must stay readable however
-            // far right the measures scroll. gpui-component renders a
-            // `ColumnFixed::Left` column in its own unscrolled region
-            // (`TableState::col_fixed`, on by default) and `scroll_to_col`
-            // already subtracts the fixed count, so `sync_cursor`'s
-            // absolute column index still lands where it should.
+            // The tree column stays visible while measures scroll horizontally.
+            // `ColumnFixed::Left` uses the component's unscrolled region, and
+            // `scroll_to_col` accounts for fixed columns when positioning the cursor.
             fixed: if c.kind == ColumnKind::Tree {
                 Some(ColumnFixed::Left)
             } else {
@@ -1187,11 +1096,8 @@ impl TableDelegate for BlotterDelegate {
         window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) {
-        // The tree column paints no sort icon (`column()` hands it
-        // `sort: None`) and the component returns early on that, so this
-        // is unreachable for it today; the guard keeps the hook honest
-        // should the component ever call through anyway, matching the
-        // keyboard path's own `col == 0` refusal.
+        // Reject tree and missing columns, matching keyboard sorting. The tree
+        // header has no sort icon, but the delegate also guards direct calls.
         if self
             .plan
             .as_ref()
@@ -1200,21 +1106,12 @@ impl TableDelegate for BlotterDelegate {
         {
             return;
         }
-        // gpui-component proposes the next of ITS three states, computed
-        // from the arrow it cached for this column; the blotter has five
-        // (spec §6.3), so the proposal is ignored and the click steps the
-        // delegate's own cycle from the delegate's own state. The
-        // component's cache (`col_groups`: the arrow, and the header name
-        // the drag preview shows — the painted label itself is read live
-        // through `render_th`) is now stale, and only `refresh` re-reads
-        // `column()` — deferred, because `TableState` is the entity
-        // currently on the stack. gpui drains effects FIFO and paints only
-        // once the queue is empty, so no frame shows the component's
-        // proposed arrow. The closure relies on the `cx.notify()` below
-        // (and the component's own, after this hook returns) for the
-        // repaint; it does not notify itself. The row highlight follows
-        // the cursor the way `sync_cursor` does after a keyboard sort:
-        // `reflatten` keeps the cursor by path, so its row index moves.
+        // The component proposes a three-state sort, but measures have a
+        // five-state cycle including absolute sorts. Advance from the delegate's
+        // state using the column kind, shared with keyboard sorting.
+        // Refresh the component's cached arrow and drag-preview header after this
+        // entity update returns. Deferred effects run before paint. Restore the
+        // component's selected row to the cursor, which `reflatten` keeps by path.
         let name = match self.plan.as_ref().and_then(|p| p.columns.get(col_ix)) {
             Some(c) => c.name.clone(),
             None => return,
@@ -1263,15 +1160,9 @@ impl TableDelegate for BlotterDelegate {
         {
             self.cursor.col = i;
         }
-        // `TableState::move_column` (gpui-component) calls this directly
-        // and never fires `visible_rows_changed`, so this needs its own
-        // immediate refill rather than waiting for the next scroll —
-        // `invalidate_cells` now does exactly that (C1 fix; this method
-        // is what the fix generalised from). Recomputing the glyphs here
-        // too is unnecessary work (the tree column never moves —
-        // `ColumnPlan::move_column` refuses `from == 0 || to == 0`) but
-        // harmless: `refill_window` recomputes the same values from the
-        // same tree, and the window is only ever tens of rows.
+        // The component calls this hook without `visible_rows_changed`, so
+        // refill immediately. The shared invalidation path also recomputes glyphs;
+        // column movement leaves their values unchanged because the tree stays fixed.
         self.invalidate_cells();
         self.refresh_selection();
         cx.notify();
@@ -1286,13 +1177,8 @@ impl TableDelegate for BlotterDelegate {
         self.refill_window(visible_range);
     }
 
-    /// The default's element (`div().size_full().child(name)`) plus the
-    /// column's own named colour (§6.3), so a coloured column is
-    /// identifiable from its header and not only from cells that happen
-    /// to be additive. Everything around it — the sort arrow, the
-    /// header cell's padding, borders and drag handle — is the
-    /// component's own (`TableState::render_th` wraps this), so
-    /// overriding here loses none of it.
+    /// Paint the header label in a named colour's base variant. The component
+    /// owns the surrounding padding, borders, sort arrow, and drag handle.
     fn render_th(
         &mut self,
         col_ix: usize,
@@ -1300,10 +1186,8 @@ impl TableDelegate for BlotterDelegate {
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let name = self.column(col_ix, cx).name.clone();
-        // Same lazy read as `render_td`'s named arm, for the same
-        // reason: an uncoloured column touches the theme's twelve+fifteen
-        // colours not at all — `themed_cell_colour` derives them only
-        // when this arm is the one taken, and only when the theme moved.
+        // Only named columns request theme-derived colour inputs. Conversion is
+        // memoized; plain and sign-column headers use the inherited foreground.
         let colour = match self.colour_kind(col_ix) {
             Some(ColourKind::Named) => self.themed_cell_colour(col_ix, cx.theme()),
             _ => None,
@@ -1378,13 +1262,8 @@ impl TableDelegate for BlotterDelegate {
             .items_center()
             .px_1()
             .font_family(fonts::MONO)
-            // I4 (final review): lets a test locate this exact cell with
-            // `cx.debug_bounds` and, via `TableDelegate::cache`, read
-            // back what was painted into it. `debug_selector` is a
-            // gpui-provided no-op in a non-test/non-`test-support` build
-            // (the closure is dropped unevaluated, pinned release,
-            // `gpui-pre-0.3.5/src/elements/div.rs`), so this costs
-            // nothing on the render thread in release.
+            // Expose cell geometry to UI tests without formatting a selector in
+            // production: GPUI drops this closure when test support is disabled.
             .debug_selector(|| format!("blotter-cell-{row_ix}-{col_ix}"));
         let mut el = Self::wire_pointer(el, cx, row_ix, col_ix, false)
             .when(kind == Some(ColumnKind::Measure), |el| el.justify_end())
@@ -1409,22 +1288,16 @@ impl TableDelegate for BlotterDelegate {
                 .unwrap_or("·");
             let indent = px(depth as f32 * INDENT);
             let chevron_states = self.chevron_states(theme);
-            // The line-number gutter (`[ui] line_numbers`, user ruling
-            // 2026-09-11) sits at the cell's leading edge, before the
-            // indent, right-aligned in a slot sized to the row total's
-            // digit count — a *gutter*, not a column: `h`/`l`, sort,
-            // yank and the column plan never see it. The cursor row's
-            // number is painted in the full foreground (in `rel` mode
-            // it is the row's absolute number, the hybrid), every other
-            // row's in the muted one. Its text comes from `numbers`,
-            // rebuilt only when `ensure_numbers`'s stamp changes.
+            // The gutter precedes indentation and uses the shown row count to size
+            // its right-aligned text. It is outside the column plan, so navigation,
+            // sort, and yank do not treat it as a column. The cursor row uses full
+            // foreground and, in relative mode, its absolute number; other rows use
+            // muted text. `ensure_numbers` prepares strings only when its stamp changes.
             if self.line_numbers != LineNumbers::Off {
                 let (fg, muted) = (theme.foreground, theme.muted_foreground);
-                // The off branch's `pl(indent)` replaces the root's
-                // `px_1` left padding (a depth-0 row sits flush); the
-                // gutter must start flush too, or the tree text loses
-                // that padding's worth of the room `column()` widened
-                // by (review Minor 2).
+                // Start the gutter flush, matching the no-gutter branch's `pl(indent)`.
+                // Keeping the inherited left padding would consume room reserved for
+                // text when `column()` widens the tree column.
                 el = el.pl(px(0.));
                 self.ensure_numbers();
                 let text = row_ix
@@ -1499,33 +1372,11 @@ impl TableDelegate for BlotterDelegate {
                     (Some(ColourKind::Sign), Some(Sign::Positive)) => {
                         el.text_color(theme.chart_bullish)
                     }
-                    // A named colour never paints bullish/bearish (§6.3):
-                    // `sign` and a name are alternatives, not layers —
-                    // but a `tint_sign` colour carries its own two sign
-                    // variants, and `ColourResolved::for_sign` picks by the
-                    // cell's sign (the base for an untinted colour, for
-                    // zero and for a cell with no number). An unknown
-                    // name falls back to the theme's own foreground —
-                    // the same thing an uncoloured cell paints in, so a
-                    // deleted definition is invisible rather than wrong
-                    // (`load_views` warns about it).
-                    //
-                    // The theme is read into the resolver's vocabulary
-                    // *here*, inside the arm, rather than once at the top
-                    // of the method: it is twelve plus fifteen
-                    // `Hsla -> Rgb` conversions, and a blotter whose
-                    // columns name no colour (every one of them today)
-                    // must not pay them at all. `themed_cell_colour`
-                    // keeps that laziness and adds the memo the final
-                    // review's I-1 asked for: this arm runs per visible
-                    // cell, so the conversions themselves happen once per
-                    // theme, behind a 28-value signature compare, not
-                    // once per cell per frame. The cache's invalidation
-                    // stays free either way — the derived pair IS its
-                    // key, so a theme swap empties it with nothing to
-                    // remember to call, and the signature is what makes
-                    // sure the memo hands it a *fresh* pair to be keyed
-                    // on.
+                    // Named colours supply their own sign variants; `sign` colouring is a
+                    // separate setting. Zero and nonnumeric cells use the named base, and an
+                    // undefined name falls back to the foreground. Theme conversion is lazy
+                    // and memoized behind the full signature, so repeated cells only look
+                    // up the prepared colour.
                     (Some(ColourKind::Named), sign) => el.text_color(
                         self.themed_cell_colour(col_ix, theme)
                             .map_or(theme.foreground, |c| c.for_sign(sign)),
@@ -1591,13 +1442,9 @@ mod tests {
         vec!["lhu".into(), "underlying_ref".into(), "position_ref".into()]
     }
 
-    /// A single-level grouping (`["lhu"]`): the root plus `n - 1` direct
-    /// children, all visible with no explicit expand (`flatten`'s root is
-    /// always open, and a node's direct children are always shown —
-    /// `crate::core::flatten`'s own
-    /// `collapsed_shows_the_root_and_its_children_only_when_the_root_is_open`).
-    /// `n == 1` gives just the root: the "a filter emptied the table"
-    /// shape the C1-successor defect below reproduces.
+    /// A root with `n - 1` direct children in a single-level grouping. All
+    /// rows are visible without explicit expansion because the root stays
+    /// open. `n == 1` represents a table reduced to its root.
     fn snapshot_with_rows(n: usize) -> Arc<Snapshot> {
         let mut lhu = vec![None];
         let mut row_depth = vec![0i32];
@@ -1626,14 +1473,9 @@ mod tests {
         vec!["lhu".into()]
     }
 
-    /// The disclosure glyphs and the determined-attribution mark are the
-    /// code points the design names, spelled here as ASCII escapes on
-    /// purpose. On 2026-09-13 this file was committed with every
-    /// non-ASCII character double-encoded through Latin-1 (`▸` became
-    /// `â–¸`, painted verbatim in the tree column), and the suite stayed
-    /// green because the tests' own literal `"▸"` expectations were
-    /// corrupted identically. An escape cannot be re-encoded, so this
-    /// test fails the moment the literals are.
+    /// Use ASCII escapes for expected disclosure and attribution code points.
+    /// Encoding damage to source glyphs must fail the test even if a text
+    /// conversion also changes every non-ASCII expectation in this file.
     #[test]
     fn tree_glyphs_are_the_code_points_the_design_names() {
         let mut d = BlotterDelegate::new();
@@ -1656,20 +1498,11 @@ mod tests {
         assert_eq!(DETERMINED_MARK, "\u{2020}", "the determined mark is DAGGER");
     }
 
-    /// Regression for the successor to C1: `TableState::
-    /// update_visible_range_if_need` (pinned release,
-    /// `gpui-component-0.6.2/src/table/state.rs`) only records a new
-    /// visible range when it has more than one row, so a snapshot
-    /// that shrinks the table to 0 or 1 rows leaves
-    /// `TableState`'s own recorded range stale. When rows return to a
-    /// count `TableState` has already seen, it never fires
-    /// `visible_rows_changed` again — a refill keyed off the format
-    /// cache's own (possibly still-shrunken) window would then have no
-    /// path back to the full window ever again. `refill_window` here
-    /// stands in for what `visible_rows_changed` itself does (it records
-    /// `requested_window` on the way); the middle `apply_snapshot`
-    /// deliberately does not call it, matching `TableState` never firing
-    /// on the way back.
+    /// The pinned table does not record visible ranges of length zero or
+    /// one. After the row count recovers, its recorded range can match again
+    /// without firing a callback. `apply_snapshot` must refill the complete
+    /// last request itself; only the initial call here simulates a table
+    /// visible-range notification.
     #[test]
     fn a_window_shrunk_by_an_empty_snapshot_grows_back_when_rows_return() {
         let mut d = BlotterDelegate::new();
@@ -1711,10 +1544,10 @@ mod tests {
         assert!(d.cache.get(9, 0).is_some());
     }
 
-    /// `[ui] line_numbers`: off paints nothing and costs no width; `on`
-    /// is the 1-based shown index; `rel` is the distance from the cursor
-    /// with the cursor row showing its own absolute number (the hybrid,
-    /// by ruling), and a cursor move re-derives it without a refill.
+    /// Off mode paints no numbers and reserves no width. Absolute mode uses
+    /// one-based shown indices. Relative mode uses cursor distance except at
+    /// the cursor, where it shows the absolute index. Cursor moves update
+    /// relative numbers without requiring a format-cache refill.
     #[test]
     fn the_gutter_follows_the_mode_and_the_cursor() {
         let mut d = BlotterDelegate::new();
@@ -1851,10 +1684,8 @@ mod tests {
         );
         d.set_narrowed(None);
         assert_eq!(d.shown, vec![0, 1, 3, 4, 2]);
-        // C1 (final review): `set_narrowed` still invalidates the stale
-        // narrowed-window cache, but `invalidate_cells` now also refills
-        // the window it had immediately (against the un-narrowed
-        // `shown` list here) — it is not simply left blank.
+        // Clearing narrowing must replace cached subset values immediately,
+        // without waiting for the table to report a different numeric range.
         assert_eq!(
             d.cache.get(1, 0).map(|c| c.text.to_string()),
             Some("L1".to_string()),
@@ -1864,13 +1695,9 @@ mod tests {
 
     #[test]
     fn narrowing_uses_positions_into_visible_not_row_ids_even_when_they_differ() {
-        // Regression for a reviewer-caught defect: `set_narrowed`'s
-        // argument is *positions* into `visible` (what `FindState`'s
-        // fzf narrowing returns — positions into `shown_texts()`, which
-        // is `visible`'s texts when narrowing begins), not raw row ids.
-        // Pick a fixture where a row's position in `visible` differs
-        // from its row id, so a row-id-based (wrong) implementation and
-        // a position-based (right) one disagree.
+        // `set_narrowed` accepts positions into `visible`, not snapshot row IDs.
+        // This fixture places L2 at different indices in those two domains so an
+        // incorrect direct row-ID lookup cannot pass.
         let mut d = BlotterDelegate::new();
         d.apply_snapshot(snapshot(), &view(), &grouping());
         d.cursor.row = 1; // L1
@@ -1937,18 +1764,9 @@ mod tests {
 
     #[test]
     fn apply_snapshot_invalidates_the_cache_and_refills_it() {
-        // The cache-invalidation entry the reviewer asked for: distinct
-        // from `narrowing_changes_what_is_shown_and_the_cache_window_follows_shown_rows`,
-        // whose final assertion goes through `set_narrowed`'s own
-        // `invalidate()` call, not `apply_snapshot`'s.
-        //
-        // C1 (final review) updated this test's shape: `apply_snapshot`
-        // still invalidates the stale cache on its own, but
-        // `invalidate_cells` now also refills the window it had
-        // immediately — so this proves invalidation actually happened
-        // by re-applying a snapshot whose grand-total value genuinely
-        // changed and checking the cache holds the *new* value, not a
-        // stale (or blank) one.
+        // A snapshot replacement must invalidate and refill its own cached
+        // values. Changing the grand total distinguishes a fresh refill from
+        // both stale content and an empty cache, without calling `set_narrowed`.
         let mut d = BlotterDelegate::new();
         d.apply_snapshot(snapshot(), &view(), &grouping());
         d.refill_window(0..3);
@@ -1988,20 +1806,9 @@ mod tests {
 
     #[test]
     fn a_regroup_that_keeps_the_window_refills_it_immediately() {
-        // C1 (final review): the previous shape of this test asserted
-        // that a regroup/sort/narrow whose visible row range doesn't
-        // change (gpui-component's `TableState` only calls
-        // `visible_rows_changed` when the numeric range differs, which
-        // it never does once there are more rows than the viewport)
-        // left the window blank — and called that correct. It wasn't:
-        // with `visible_rows_changed` as the *only* other refill path,
-        // "blank until invalidated" meant "blank forever" for any tile
-        // with a scrollbar. `invalidate_cells` now captures the window
-        // it had and refills it immediately (the same fix `move_column`
-        // already needed on its own, generalised here), so this asserts
-        // the glyph AND the cell text are back with no explicit
-        // `refill_window` call in between — this doubles as test (a)
-        // from I4.
+        // An unchanged numeric window produces no table callback. Reapplying
+        // the snapshot must therefore restore cell text and disclosure glyphs
+        // immediately, with no intervening `refill_window` call.
         let mut d = BlotterDelegate::new();
         d.apply_snapshot(snapshot(), &view(), &grouping());
         // shown = [0, 1, 2]; row 1 (L1) has children (SPX, NDX) and is
@@ -2034,16 +1841,9 @@ mod tests {
 
     #[test]
     fn invalidate_cells_clears_stale_glyphs_when_shown_shrinks_past_the_old_window() {
-        // The half of the old defect that's still real: `invalidate_
-        // cells`'s refill only reaches rows `shown` still has (`end =
-        // w.end.min(shown.len())`) — when the old window's start is at
-        // or past the new, shorter `shown.len()` there is nothing left
-        // to refill, and the explicit `self.glyphs.clear()` is what
-        // stops a stale glyph surviving that. `render_td` itself would
-        // never surface this (a row index past `shown.len()` is never
-        // painted), so this reaches directly for `glyph_at`, which
-        // (like `render_td`) only guards against an empty cache window,
-        // not against `shown` having shrunk.
+        // When the requested window starts past the new shown-row count, no
+        // refill can replace its glyphs. Invalidation must clear them explicitly.
+        // Read `glyph_at` directly because the table would not paint these rows.
         let mut d = BlotterDelegate::new();
         d.apply_snapshot(snapshot(), &view(), &grouping());
         d.refill_window(0..3);
@@ -2152,15 +1952,9 @@ mod tests {
         );
     }
 
-    /// Ruled-in fix (Task 6 review, applied here): gpui-component's
-    /// `TableState::move_column` calls `self.delegate.move_column(..)`
-    /// directly and never fires `visible_rows_changed`, so a bare
-    /// `self.cache.invalidate()` in `move_column` left the window blank
-    /// — no `refill_window` call was coming until the next scroll. The
-    /// glyphs stay valid across a column reorder (the tree column never
-    /// moves — `ColumnPlan::move_column` refuses `from == 0 || to ==
-    /// 0`), so only the cell cache needs to be repainted, immediately,
-    /// for the window that was already on screen.
+    /// The component calls `move_column` without a visible-range callback.
+    /// The hook must refill the current window immediately so reordered
+    /// columns paint their new values before any subsequent scroll.
     #[gpui::test]
     fn a_header_column_move_keeps_a_block_on_its_column_names(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
@@ -2264,16 +2058,9 @@ mod tests {
             d.refill_window(0..2);
         });
 
-        // Assert inside the same `update_in` call that performs the move,
-        // immediately after it returns and before anything else runs —
-        // deliberately not a separate `read_with` afterwards, since the
-        // test window's own effect-flushing can trigger a real layout
-        // pass between two top-level calls, and a first-ever real draw
-        // would establish `TableState`'s own visible range and refill
-        // the cache on its own, independent of whether `move_column`
-        // itself refills — which would make the test pass regardless of
-        // the fix. Checking synchronously inside the same call isolates
-        // exactly what `move_column` itself did.
+        // Assert within the update that moves the column. Flushing effects
+        // between updates can trigger the window's first layout and refill the
+        // cache independently, masking a missing refill in `move_column`.
         table.update_in(&mut vcx, |t, window, cx| {
             let d = t.delegate_mut();
             assert_eq!(
@@ -2358,12 +2145,9 @@ mod tests {
         });
     }
 
-    /// §6.3: a column naming a colour paints that colour, resolved
-    /// against the theme's own anchors/tokens; `none`, `sign` and a name
-    /// `colours.toml` does not define all resolve to nothing, which the
-    /// paint sites read as "the theme's foreground" — never a stale or
-    /// invented colour. Drives the one door both `render_td` and
-    /// `render_th` go through, so this covers the header label too.
+    /// Named colours use the theme's anchors and tokens for both cells and
+    /// headers. Plain/sign settings and unknown names return no named colour;
+    /// their paint sites choose the appropriate fallback.
     #[test]
     fn a_named_column_paints_its_resolved_colour() {
         let grey = Rgb {
@@ -2655,19 +2439,10 @@ mod tests {
         assert_eq!(d.summary_paint.len(), 1, "a rebuilt summary repaints");
     }
 
-    /// I-1 (Part 2c final review): the theme -> `Anchors`/`Tokens`
-    /// derivation is memoised behind the full 28-value signature, so a
-    /// steady theme re-derives NOTHING across paints and a moved theme
-    /// colour re-derives on the next one.
-    ///
-    /// Both halves are asserted through a deliberately poisoned memo,
-    /// because that is the only way the difference is observable: a
-    /// re-derivation under an unchanged theme produces a pair equal to
-    /// the one it replaced, so an assertion on the pair's *value* would
-    /// pass whether the memo works or not. The anchor moved in the
-    /// second half is `red` — neither `background` nor `foreground`, so
-    /// this also pins the reason the signature is 28 values rather than
-    /// the two-sentinel sketch.
+    /// Theme inputs use all 28 colour values as their memo key. Poisoning the
+    /// cached result exposes unwanted recomputation under an unchanged theme;
+    /// ordinary value equality would hide it. Changing a red anchor then
+    /// proves invalidation does not depend only on foreground/background.
     #[test]
     fn the_theme_input_memo_re_derives_only_when_a_theme_colour_moves() {
         let mut theme = Theme::default();
@@ -2700,13 +2475,10 @@ mod tests {
         );
     }
 
-    /// The trader edits a column's presentation in the Views dialog (label,
-    /// width, colour — 2c §5); the reload requeries and the SAME columns
-    /// come back at the same indices. The plan is where those settings
-    /// live, so it must be rebuilt anyway — the old gate (grouping or
-    /// column set changed) kept the stale label, width and colour painting
-    /// until the next regroup, which is what a trader reported on
-    /// 2026-09-13. A same-view redelivery still rebuilds nothing.
+    /// Presentation edits must replace the column plan even when the next
+    /// snapshot has the same column names and indices. An unchanged view
+    /// keeps the existing plan; changed labels, widths, colours, or hidden
+    /// columns take effect on redelivery.
     #[test]
     fn a_presentation_change_rebuilds_the_plan_on_a_same_column_snapshot() {
         let mut d = BlotterDelegate::new();

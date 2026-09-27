@@ -1,5 +1,5 @@
-//! The cursor (Phase 3 spec §6.1): a visible-row and column pair driven
-//! by the shell's `vimnav` vocabulary, multiplied by the engine's count.
+//! A visible-row and column cursor driven by the shell's `vimnav` commands
+//! and the input engine's count.
 
 use crate::core::expansion::path_of;
 use crate::core::plan::ColumnPlan;
@@ -13,12 +13,11 @@ pub struct Cursor {
 }
 
 impl Cursor {
-    /// Move the row by `cmd`, `count` times. `wrap` is whether a BARE
-    /// ±1 wraps at the ends (spec §20.5, `vimnav::apply`'s rule) — the
-    /// tile passes `true` in normal mode and `false` in visual mode,
-    /// where a wrap would carry the cursor past the anchor and invert
-    /// the selection. A counted step is multiplied in before the rule
-    /// is applied, so `2j` clamps and `1j` wraps exactly as `j` does.
+    /// Move the row by `cmd`, applying the count before navigation. With `wrap`,
+    /// an effective step of ±1 wraps at the ends; larger steps clamp. The tile
+    /// enables wrapping in normal mode and disables it during selection, where
+    /// crossing an end would invert the selection relative to its anchor.
+    /// A counted `G` addresses a one-based row; `1j` behaves like bare `j`.
     pub fn move_rows(&mut self, len: usize, cmd: NavCommand, count: Option<u32>, wrap: bool) {
         let n = count.unwrap_or(1) as i64;
         let cmd = match (cmd, count) {
@@ -37,9 +36,7 @@ impl Cursor {
         };
     }
 
-    /// Columns clamp whatever the count: the ruling behind `apply`'s
-    /// wrap was about rows, and a horizontal wrap is a separate question
-    /// left as it was.
+    /// Move horizontally by the counted delta, clamping at either end.
     pub fn move_cols(&mut self, cols: usize, delta: i64, count: Option<u32>) {
         let n = count.unwrap_or(1) as i64;
         self.col = apply_clamped(self.col, cols, NavCommand::Move(delta * n));
@@ -285,13 +282,10 @@ mod tests {
         );
     }
 
-    /// I3 (final review): 500 rows of mixed depth-1/depth-2 filler precede
-    /// the target, none of them at the target's own depth — a fixture
-    /// built exactly so the O(1) `tree.depth(row) == path.len()` check
-    /// must reject every one of them before `path_of` ever runs on a
-    /// row that couldn't possibly match, and the outward-from-`fallback`
-    /// search must still land on the right index when `fallback` is
-    /// nowhere near the target (row 0 here, target near the end).
+    /// A depth-1 target follows 500 rows of mixed depth-1 and depth-2 filler.
+    /// Restoration must find its path even when the fallback is at the root.
+    /// Depth-1 filler exercises path mismatches; depth-2 filler cannot match
+    /// the target's depth.
     #[test]
     fn restore_by_path_finds_the_row_when_many_precede_it_at_other_depths() {
         use crate::core::plan::ColumnPlan;

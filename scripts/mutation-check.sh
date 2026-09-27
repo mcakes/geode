@@ -3128,13 +3128,13 @@ run_mutation "delegate: the cursor is re-derived by column name across a move" \
         {
             self.cursor.col = i;
         }
-        // `TableState::move_column` (gpui-component) calls this directly' \
+        // The component calls this hook without `visible_rows_changed`, so' \
   '        if let Some(name) = None::<String>
             && let Some(i) = self.plan.as_ref().and_then(|p| p.position_of(&name))
         {
             self.cursor.col = i;
         }
-        // `TableState::move_column` (gpui-component) calls this directly' \
+        // The component calls this hook without `visible_rows_changed`, so' \
   geode-blotter \
   the_cursor_follows_its_column_across_a_move
 
@@ -3406,12 +3406,12 @@ run_mutation "blotter: filter validates against the dataset" \
 
 run_mutation "delegate: move_column refills the window it already had" \
   crates/geode-blotter/src/delegate.rs \
-  '        // same tree, and the window is only ever tens of rows.
+  '        // column movement leaves their values unchanged because the tree stays fixed.
         self.invalidate_cells();
         self.refresh_selection();
         cx.notify();
     }' \
-  '        // same tree, and the window is only ever tens of rows.
+  '        // column movement leaves their values unchanged because the tree stays fixed.
         self.refresh_selection();
         cx.notify();
     }' \

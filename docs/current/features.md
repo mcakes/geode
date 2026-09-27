@@ -30,19 +30,31 @@ Every module follows these interaction rules:
 ## Blotter
 
 `geode-blotter` renders any configured view as a collapsible hierarchy. The
-data service returns every grouping depth in one `Snapshot`; the pure blotter
-core resolves columns, builds visible rows, retains expansion by path, formats
+data service returns grouped rows and attribution metadata in a `Snapshot`;
+the pure blotter core resolves columns, builds visible rows, retains expansion by path, formats
 the visible window, and handles cursor, find, and yank behavior.
 
 Attribution metadata decides whether a measure is meaningful at each depth. A
 non-attributable cell is shown as NULL rather than a plausible but incorrect
-sum. Pinned grouping, unscoped mode, local as-of, filtering, and named colors
-are tile state and survive through the module's session record.
+sum. The selected view, pinned grouping, unscoped mode, local as-of, and
+filtering survive through the module's session record. Named colors come from
+shared configuration; cursor, selection, expansion, and sort state are not
+persisted by the tile.
 
 The `DataTable` delegate paints a prepared row model. Rendering does not
-recompile columns or format the whole dataset. Publication watches are scoped
-to the datasets the view reads, and global frame changes are staged through
-the flip barrier.
+recompile columns or format the whole dataset. Each delivered snapshot builds
+a candidate column plan so presentation changes are recognized even when the
+column names and indices are unchanged. The format cache holds the visible
+window; named colors reuse resolved base and sign variants until their
+definitions or theme inputs change.
+
+Publication watches are scoped to the datasets the view reads. Global frame
+changes use the flip barrier: promotion requires the staged snapshot's followed
+counters to match, including watched data and configuration. Local pins exempt
+the corresponding frame changes; tile-local requeries clear any staged result.
+Restored filters are parsed for syntax, with malformed expressions dropped and
+logged. Interactive `:filter` commands also validate column names against the
+current schema and derived dimensions.
 
 ### Selection
 

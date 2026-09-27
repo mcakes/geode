@@ -1,20 +1,16 @@
-//! The visible-row list (Phase 3 spec §6.1, §6.3): a DFS over the tree
-//! index that descends only into open nodes, so its cost tracks the
-//! output, not the materialised rows. Runs on snapshot arrival, expand,
-//! collapse and sort — never per frame. Siblings are sorted here when a
-//! sort is set; view-shaping in-app (PHILOSOPHY §1) that leaves the
-//! compiler's order untouched.
+//! Visible snapshot rows in depth-first order. Roots are always included;
+//! descendants are visited only through open nodes. Sorting ranks each visited
+//! sibling set without changing the snapshot. Rebuild after snapshot,
+//! expansion, or sort changes; rendering reads the prepared list.
 
 use crate::core::expansion::{Expansion, Path};
 use crate::core::plan::{ColumnKind, ColumnPlan};
 use geode_core::snapshot::Snapshot;
 use std::cmp::Ordering;
 
-/// How siblings are ranked on the sort column (spec §6.3). The two
-/// absolute orders compare magnitudes — a trader hunting the biggest
-/// exposure does not care which way it points — and only mean anything
-/// on a measure: on a text column they fall back to their signed
-/// direction rather than refusing or doing something odd.
+/// Sibling ordering on a named column. Absolute orders compare measure
+/// magnitudes so large exposures rank independently of sign; text columns
+/// use the corresponding ascending or descending order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SortOrder {
     #[default]
@@ -71,14 +67,9 @@ impl SortOrder {
         }
     }
 
-    /// What a header click does to a column whose current order is
-    /// `current`: one cycle through every order the column can show,
-    /// desc first because that is where gpui-component's own click cycle
-    /// started before this crate took it over (user ruling 2026-09-12:
-    /// clicking through the header reaches the absolute orders too). A
-    /// measure walks cleared → desc → asc → abs desc → abs asc → cleared;
-    /// a column with no magnitude skips the absolute pair. A click on a
-    /// column that is not the sorted one starts at desc.
+    /// Header clicks cycle a measure through desc → asc → abs desc → abs asc
+    /// → clear. Text columns skip the absolute orders. Clicking a different
+    /// column starts its cycle at desc.
     pub fn click_cycle(current: Option<SortOrder>, measure: bool) -> Option<SortOrder> {
         match current {
             Some(SortOrder::Desc) => Some(SortOrder::Asc),
@@ -112,8 +103,8 @@ pub fn flatten(
     let tree = snapshot.tree();
     let mut path: Path = Vec::new();
     let mut scratch: Vec<u32> = Vec::new();
-    // The root is always open: a blotter showing one row is not a
-    // blotter. Several roots (a flat result) are all listed.
+    // Roots and their immediate children remain visible even when every
+    // expansion path is closed. Flat results include every root.
     for &root in tree.roots() {
         out.push(root);
         descend(
@@ -232,12 +223,9 @@ fn sort_siblings(snapshot: &Snapshot, plan: &ColumnPlan, spec: &SortSpec, rows: 
     });
 }
 
-/// A measure cell as the comparator sees it: NULL (a `NonAttributable`
-/// cell included) and NaN are both `None`. NaN — a `SUM` over a source
-/// column holding one — would otherwise compare `Equal` to everything
-/// while everything else orders, which is not a total order, and
-/// `sort_by` panics on one of those (Rust ≥ 1.81); as `None` it sorts
-/// last like a NULL and the remaining values compare totally.
+/// Measure sort key: NULL and NaN both become `None` and sort last in
+/// either direction. Treating NaN as missing avoids an inconsistent ordering
+/// in which it compares equal to every number while numbers order normally.
 fn number_at(snapshot: &Snapshot, i: usize, row: usize) -> Option<f64> {
     snapshot.f64_at(i, row).filter(|v| !v.is_nan())
 }
@@ -369,8 +357,8 @@ mod tests {
 
     #[test]
     fn collapsed_shows_the_root_and_its_children_only_when_the_root_is_open() {
-        // The grand total is always open: a blotter that shows one row is
-        // not a blotter. Its children are the first level.
+        // The grand total and first grouping level remain visible with all
+        // expansion paths closed.
         assert_eq!(visible(&Expansion::default(), None), vec![0, 1, 2]);
     }
 
@@ -508,9 +496,8 @@ mod tests {
         );
     }
 
-    /// Forty siblings, every fourth one NaN: enough for `sort_by`'s
-    /// total-order check to trip if NaN compared `Equal` to everything.
-    /// NaN sorts last like NULL, in both directions.
+    /// Forty siblings with interleaved NaN values exercise sorting across
+    /// missing and numeric values. NaN sorts last like NULL in both directions.
     #[test]
     fn nan_sorts_last_like_null_and_never_panics_the_sort() {
         let n = 40usize;

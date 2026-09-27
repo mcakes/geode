@@ -1,8 +1,7 @@
-//! The column plan (Phase 3 spec §6.1): every view column resolved to a
-//! snapshot index once, with its kind, format, width and per-depth
-//! attribution. Built when a snapshot arrives whose column set differs
-//! from the last; never touched per cell. The probe's five name searches
-//! per cell are what this replaces.
+//! Resolved display columns: snapshot indices, kinds, formats, widths,
+//! attribution, and scope markers. The delegate builds a candidate on each
+//! snapshot delivery and retains the existing plan when all fields match.
+//! Resolving names here keeps name searches out of per-cell rendering.
 
 use geode_core::attribution::{Attribution, ScopeSemantics};
 use geode_core::groupings::GroupingSlots;
@@ -33,9 +32,10 @@ pub struct PlannedColumn {
     pub kind: ColumnKind,
     pub format: ColumnFormat,
     pub width: f32,
-    /// Indexed by row depth (§6.5).
+    /// Compiler attribution indexed by row depth.
     pub attribution: Vec<Attribution>,
-    /// Dimensions applied by membership rather than directly.
+    /// Dimensions whose selections use membership filtering or cannot be
+    /// applied to the column's grain. Both use the same scope marker.
     pub semi_joined: Vec<String>,
     /// Whether the column adds up across sibling rows — the compiler's
     /// `ColumnMeta::summable`. False when the snapshot lacks the column.
@@ -68,11 +68,9 @@ impl ColumnPlan {
         for column in &view.columns {
             let name = column.name();
             let presentation = view.presentation_of(name);
-            // Hiding is presentation, not the column set (spec §5.6): the
-            // column stays in `view.columns` and the compiler still
-            // selects it, so unhiding costs no requery — but the plan is
-            // what the blotter paints, so this is the one place a hidden
-            // column has to disappear.
+            // Hidden columns stay in the query's column set but are omitted from
+            // this display plan. Their values remain available in the snapshot
+            // when presentation makes them visible again.
             if presentation.hidden.unwrap_or(false) {
                 continue;
             }
@@ -108,9 +106,8 @@ impl ColumnPlan {
             let attribution = meta
                 .map(|m| m.attribution_by_depth.clone())
                 .unwrap_or_default();
-            // `NotApplicable` paints the same marker as `SemiJoined`: a
-            // dropped selection is the weaker case (core spec §3.4), and
-            // Part 1 has no separate style for it.
+            // Membership filtering and unapplied selections share the scope marker;
+            // retain the affected dimensions for either case.
             let semi_joined = match meta.map(|m| &m.scope_semantics) {
                 Some(ScopeSemantics::SemiJoined { dimensions })
                 | Some(ScopeSemantics::NotApplicable { dimensions }) => dimensions.clone(),
@@ -143,10 +140,10 @@ impl ColumnPlan {
         snapshot.text_at(col, row)
     }
 
-    /// The marker for a cell (§6.5). Absent columns and depths past what
-    /// the compiler declared are `Additive`, which paints the value plain
-    /// — the compiler blanks a `NonAttributable` cell itself, so this can
-    /// only ever err towards showing a number that is really there.
+    /// Attribution for a cell, defaulting to `Additive` when column or depth
+    /// metadata is absent. This does not alter snapshot values: the compiler
+    /// supplies NULL for `NonAttributable` values, and the cache preserves
+    /// that blank.
     pub fn attribution(&self, col: usize, depth: usize) -> Attribution {
         self.columns
             .get(col)
@@ -169,7 +166,8 @@ impl ColumnPlan {
         self.columns.insert(to, column);
     }
 
-    /// Whether this plan still describes `snapshot`'s columns.
+    /// Whether the stored column and grouping indices still match `snapshot`.
+    /// This checks name resolution only, not presentation or column metadata.
     pub fn same_columns(&self, snapshot: &Snapshot) -> bool {
         self.columns.iter().all(|c| match c.kind {
             ColumnKind::Tree => true,
@@ -320,15 +318,8 @@ name = "missing_in_snapshot"
         assert_eq!(plan.grouping_indices, vec![Some(0), Some(1)]);
     }
 
-    /// A column the trader hid in `view_presentation.toml` is not planned,
-    /// so the blotter cannot paint it (spec §5.6, §1.3).
-    ///
-    /// Built through `ViewPresentationSpec::apply` rather than by poking
-    /// `ViewSpec.presentation` directly, because the whole chain is what
-    /// is under test: the doc reader, the merge over the view, and the
-    /// plan. A hidden column deliberately stays in `ViewSpec::columns` —
-    /// the compiler still selects it, so unhiding costs no requery — which
-    /// is exactly why dropping it has to happen here and nowhere else.
+    /// Presentation document parsing and application preserve hidden columns
+    /// in the query specification while excluding them from the display plan.
     #[test]
     fn a_hidden_column_is_not_planned() {
         let mut views = vec![view()];
@@ -411,10 +402,8 @@ name = "missing_in_snapshot"
         assert!(plan.columns[2].semi_joined.is_empty());
     }
 
-    /// A dropped selection (market-data spec §3.4) paints the same marker
-    /// a semi-join does: Part 1 has no separate style for it, so
-    /// `NotApplicable`'s dimensions must reach `semi_joined` exactly the
-    /// way `SemiJoined`'s do.
+    /// Unapplied selections retain their affected dimensions and use the
+    /// same marker as membership-filtered selections.
     #[test]
     fn not_applicable_paints_the_same_marker_as_semi_joined() {
         let snap = snapshot_with_pnl_semantics(ScopeSemantics::NotApplicable {

@@ -1,8 +1,9 @@
-//! Any view definition as a collapsible, keyboard-driven hierarchy with
-//! honest markers. The
-//! pure core in `core` has no `gpui`; `delegate` adapts it to
-//! gpui-component's `DataTable`; `tile` is the entity per tile;
-//! `content` is what the shell hosts.
+//! Configured views rendered as collapsible, keyboard-driven hierarchies.
+//!
+//! [`core`] owns column planning, navigation, selection, and formatting
+//! without GPUI. [`delegate`] adapts that model to gpui-component's
+//! `DataTable`; [`tile`] owns requests and frame synchronization;
+//! [`content`] exposes the tile and its factory to the shell.
 
 pub mod colour_cache;
 pub mod content;
@@ -12,10 +13,10 @@ pub mod tile;
 
 pub use content::BlotterFactory;
 
-/// Reclaim `DataTable`'s own key bindings. The blotter
-/// never gives the table focus, but a row click moves gpui focus there
-/// for one frame, and these must not act during it. Same door and same
-/// reasoning as `geode_shell::shell::dialog::init_reclaimed_keybindings`.
+/// Suppress `DataTable` navigation while the shell owns blotter key routing.
+/// Call after `gpui_component::init` so these bindings take precedence.
+/// A row click can focus the table for one frame; its component actions
+/// must remain inactive until the shell restores focus.
 pub fn init(cx: &mut gpui::App) {
     const CONTEXT: Option<&str> = Some("DataTable");
     cx.bind_keys(
