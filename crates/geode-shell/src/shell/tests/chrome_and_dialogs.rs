@@ -354,9 +354,9 @@ fn mod_comma_keystroke_opens_the_settings_modal(cx: &mut gpui::TestAppContext) {
 }
 
 /// While settings is open, shell chords must not reach the workspace matcher. The
-/// fixture's `ctrl+v` must leave the tile layout unchanged, and `ctrl+k` must not open
-/// a palette through its earlier intercept. Modal painting alone does not prevent raw
-/// key events from reaching `ShellView`.
+/// fixture's `ctrl+v` must leave the tile layout unchanged. `ctrl+k` is the one
+/// non-dialog chord that passes: the palette opens over the dialog without closing
+/// it. Modal painting alone does not prevent raw key events from reaching `ShellView`.
 #[gpui::test]
 fn modal_open_swallows_shell_chords(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
@@ -405,9 +405,9 @@ fn modal_open_swallows_shell_chords(cx: &mut gpui::TestAppContext) {
 
     cx.simulate_keystrokes("ctrl-k");
     assert!(
-        shell.read_with(&cx, |shell, _| shell.palette.is_none()),
-        "ctrl+k (palette::toggle) must not open the command palette while \
-         the settings modal is open"
+        shell.read_with(&cx, |shell, _| shell.palette.is_some()),
+        "ctrl+k (palette::toggle) opens the command palette over the \
+         settings modal"
     );
     assert!(
         shell.read_with(&cx, |shell, _| shell.modal_open()),

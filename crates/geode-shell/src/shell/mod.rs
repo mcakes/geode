@@ -478,8 +478,9 @@ pub struct ShellView {
     /// Whether the scope input held focus when an overlay opened. Closing the
     /// overlay consumes this flag and restores either the input or shell focus.
     /// Palette selection closes before dispatching, so a dialog launched from
-    /// the palette records the restored focus itself. One flag suffices because
-    /// the palette and modal are mutually exclusive.
+    /// the palette records the restored focus itself. One flag suffices: it
+    /// belongs to the first overlay opened, and a palette or dialog opened over
+    /// an open dialog neither records nor consumes it.
     overlay_return_to_filter: bool,
     /// Active divider drag. Mouse moves resize the layout immediately; release
     /// or cancellation preserves those changes and marks the session dirty if

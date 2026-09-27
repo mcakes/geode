@@ -572,6 +572,19 @@ impl ShellView {
         // dialog pushes it; an unclaimed Escape closes the top dialog. Component
         // dialogs retain their own handling.
         if self.modal_open() || window.has_active_dialog(cx) {
+            // A palette opened over the stack owns the keyboard until it closes,
+            // exactly as it does with no dialog open.
+            if self.palette.is_some() && self.modal_open() {
+                if let Some(ks) = convert_keystroke(&event.keystroke)
+                    && self.is_palette_toggle(&ks, cx)
+                {
+                    self.toggle_palette(window, cx);
+                } else {
+                    self.handle_palette_key(event, window, cx);
+                }
+                cx.notify();
+                return;
+            }
             if self.modal_open() {
                 // Clone the handler before calling it so the modal borrow ends before
                 // the closure receives mutable access to the shell.
@@ -600,6 +613,14 @@ impl ShellView {
                 if let Some(ks) = convert_keystroke(&event.keystroke)
                     && ks.mods.is_chord()
                 {
+                    // The palette opens above the stack; it is how any action,
+                    // not only a dialog, is reached while dialogs are open.
+                    if self.is_palette_toggle(&ks, cx) {
+                        self.toggle_palette(window, cx);
+                        cx.stop_propagation();
+                        cx.notify();
+                        return;
+                    }
                     let stack = [KeyContext::new("workspace")];
                     let action = self
                         .single_keystroke_binding(&ks, &stack)

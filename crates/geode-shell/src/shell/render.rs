@@ -78,7 +78,12 @@ impl Render for ShellView {
         // Hidden-tile focus is reconciled separately by `ensure_occupants`.
         if self.pending_focus_restore {
             self.pending_focus_restore = false;
-            if !self.occupant_holds_insert_focus(window, cx) {
+            // An open dialog owns focus: the flag must not pull it to the shell
+            // root, and a palette dropped over the stack (a reload closing it)
+            // must not leave it on the orphaned palette input either.
+            if self.modal_open() {
+                super::dialog::refocus_top(self, window, cx);
+            } else if !self.occupant_holds_insert_focus(window, cx) {
                 self.focus_handle.focus(window, cx);
             }
         }
@@ -1243,6 +1248,22 @@ impl Render for ShellView {
                         })),
                 )
             })
+            // Paint the modal below the palette: a palette opened over the stack
+            // must be visible and take clicks above the dialog it covers.
+            .when_some(modal, |el, (title, title_extra, build)| {
+                let extra = title_extra.map(|f| f(self, cx));
+                let show_back = dialog::back_available(self);
+                let content = build(self, window, cx);
+                el.child(dialog::render_modal(
+                    title,
+                    extra,
+                    show_back,
+                    content,
+                    width,
+                    viewport_height,
+                    cx,
+                ))
+            })
             // The palette overlay paints above the tiles/status bar (later
             // children paint above earlier siblings) but below gpui-
             // component's own dialog/notification layers below.
@@ -1299,34 +1320,15 @@ impl Render for ShellView {
                         .child(panel),
                 )
             })
-            // Paint modals above the palette layer and below component overlays.
-            // The modal opening path closes the palette, so these are mutually
-            // exclusive in normal operation.
-            .when_some(modal, |el, (title, title_extra, build)| {
-                let extra = title_extra.map(|f| f(self, cx));
-                let show_back = dialog::back_available(self);
-                let content = build(self, window, cx);
-                el.child(dialog::render_modal(
-                    title,
-                    extra,
-                    show_back,
-                    content,
-                    width,
-                    viewport_height,
-                    cx,
-                ))
-            })
-            // Painted after (so above) the modal for the same reason as the
-            // modal-vs-palette ordering above: never both `Some` in the same
-            // frame, but the ordering here is what would govern it if that
-            // ever changed. This one, though, is a real invariant rather
-            // than an incidental one — while the modal is open, `self.
-            // matcher` can never go pending at all: `open_shell_dialog`
+            // Painted after (so above) the modal and the palette. Never
+            // `Some` in the same frame as a modal: while the modal is open,
+            // `self.matcher` can never go pending at all — `open_shell_dialog`
             // cancels it on open, and `handle_key_down`'s modal branch
             // returns before ever reaching `self.matcher.press` for as long
             // as `self.modals` stays non-empty, so `which_key_continuations`
             // (computed from `self.matcher.pending()`, just above) is always
-            // `None` whenever `modal` is `Some`.
+            // `None` whenever `modal` is `Some`. Opening the palette cancels
+            // the matcher too.
             .when_some(which_key_continuations, |el, continuations| {
                 el.child(whichkey::render(
                     &continuations,

@@ -370,3 +370,150 @@ fn capture_records_a_dialog_opening_chord_instead_of_pushing_over_it(
         "the chord must land in the pending binding"
     );
 }
+
+/// The palette opens above a dialog and paints above it. Escape closes only the
+/// palette, and the dialog has its focus back.
+#[gpui::test]
+fn the_palette_opens_over_a_dialog_and_escape_returns_to_it(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = dialog_test_shell(cx, "config::views");
+    vcx.simulate_keystrokes("/ a b");
+    vcx.simulate_keystrokes("ctrl-k");
+    draw(&mut vcx);
+    assert!(shell.read_with(&vcx, |s, _| s.palette.is_some()));
+    assert_eq!(kinds(&shell, &mut vcx), vec![DialogKind::Object]);
+    assert!(vcx.debug_bounds("palette-click-catcher").is_some());
+
+    vcx.simulate_keystrokes("escape");
+    draw(&mut vcx);
+    assert!(shell.read_with(&vcx, |s, _| s.palette.is_none()));
+    assert_eq!(kinds(&shell, &mut vcx), vec![DialogKind::Object]);
+    assert_eq!(input_text(&shell, &mut vcx), "ab");
+    assert!(dialog_filter_is_focused(&shell, &mut vcx));
+}
+
+/// A dialog-opening palette entry pushes its dialog over the stack.
+#[gpui::test]
+fn a_palette_dialog_entry_pushes(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = dialog_test_shell(cx, "config::views");
+    vcx.simulate_keystrokes("ctrl-k");
+    vcx.simulate_input("Open settings");
+    let selected = shell.read_with(&vcx, |s, _| s.palette.as_ref().unwrap().selected_item());
+    assert!(
+        matches!(&selected, Some(crate::palette::PaletteItem::Action(id, ..)) if id.0 == "settings::open"),
+        "{selected:?}"
+    );
+    vcx.simulate_keystrokes("enter");
+    assert_eq!(
+        kinds(&shell, &mut vcx),
+        vec![DialogKind::Object, DialogKind::Settings]
+    );
+}
+
+/// A non-dialog palette action runs behind the stack. The stack stays, and the
+/// top dialog keeps focus even though the action armed a tile focus restore.
+#[gpui::test]
+fn a_palette_action_behind_the_stack_leaves_focus_on_the_top_dialog(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = dialog_test_shell(cx, "config::views");
+    vcx.simulate_keystrokes("/ a b");
+    let before = shell.read_with(&vcx, |s, _| s.line_numbers);
+    vcx.simulate_keystrokes("ctrl-k");
+    vcx.simulate_input("line numbers");
+    let selected = shell.read_with(&vcx, |s, _| s.palette.as_ref().unwrap().selected_item());
+    assert!(
+        matches!(&selected, Some(crate::palette::PaletteItem::Action(id, ..)) if id.0 == "ui::line_numbers_cycle"),
+        "{selected:?}"
+    );
+    vcx.simulate_keystrokes("enter");
+    draw(&mut vcx);
+    assert_ne!(
+        shell.read_with(&vcx, |s, _| s.line_numbers),
+        before,
+        "the action ran"
+    );
+    assert_eq!(kinds(&shell, &mut vcx), vec![DialogKind::Object]);
+    assert!(dialog_filter_is_focused(&shell, &mut vcx));
+
+    // A workspace action runs through the tile focus reconciliation behind the
+    // stack; the renders after it leave focus on the top dialog. (The palette
+    // closes and refocuses the dialog before dispatch, so this route cannot arm
+    // `pending_focus_restore`; the reload test below covers that flag.)
+    vcx.simulate_keystrokes("ctrl-k");
+    vcx.simulate_input("Focus left");
+    let selected = shell.read_with(&vcx, |s, _| s.palette.as_ref().unwrap().selected_item());
+    assert!(
+        matches!(&selected, Some(crate::palette::PaletteItem::Action(id, ..)) if id.0 == "workspace::focus_left"),
+        "{selected:?}"
+    );
+    vcx.simulate_keystrokes("enter");
+    draw(&mut vcx);
+    draw(&mut vcx);
+    assert!(dialog_filter_is_focused(&shell, &mut vcx));
+}
+
+/// The first dialog was opened from the scope-bar field. A pushed dialog and a
+/// palette opened and closed mid-stack must not overwrite that. The last pop
+/// returns focus to the field.
+#[gpui::test]
+fn the_last_pop_returns_to_the_field_after_a_palette_mid_stack(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    dispatch_action(&shell, "frame::focus_text", &mut vcx);
+    assert!(filter_is_focused(&shell, &mut vcx));
+    vcx.simulate_keystrokes("alt-t");
+    vcx.simulate_keystrokes("ctrl-,");
+    vcx.simulate_keystrokes("ctrl-k");
+    vcx.simulate_keystrokes("escape");
+    assert_eq!(
+        kinds(&shell, &mut vcx),
+        vec![DialogKind::AsOf, DialogKind::Settings]
+    );
+    vcx.simulate_keystrokes("escape");
+    assert_eq!(kinds(&shell, &mut vcx), vec![DialogKind::AsOf]);
+    vcx.simulate_keystrokes("escape");
+    draw(&mut vcx);
+    assert!(!shell.read_with(&vcx, |s, _| s.modal_open()));
+    assert!(filter_is_focused(&shell, &mut vcx));
+}
+
+/// A reload that closes a palette opened over the stack has no `Window`, so it
+/// arms `pending_focus_restore`. The next render hands focus back to the top
+/// dialog, not to the shell root, and not left on the dropped palette input.
+#[gpui::test]
+fn a_reload_closing_a_palette_over_the_stack_refocuses_the_top_dialog(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (shell, mut vcx) = dialog_test_shell(cx, "config::views");
+    vcx.simulate_keystrokes("/ a b");
+    vcx.simulate_keystrokes("ctrl-k");
+    assert!(shell.read_with(&vcx, |s, _| s.palette.is_some()));
+
+    shell.update(&mut vcx, |s, cx| s.apply_reload(config_with_mod("cmd"), cx));
+    assert!(shell.read_with(&vcx, |s, _| s.palette.is_none()));
+    draw(&mut vcx);
+    draw(&mut vcx);
+    assert_eq!(kinds(&shell, &mut vcx), vec![DialogKind::Object]);
+    assert_eq!(input_text(&shell, &mut vcx), "ab");
+    assert!(dialog_filter_is_focused(&shell, &mut vcx));
+}
+
+/// A palette action behind the stack that moves focus itself (to the scope-bar
+/// field) still leaves the keyboard on the top dialog once the palette closes.
+#[gpui::test]
+fn a_focus_moving_palette_action_behind_the_stack_is_refocused_to_the_dialog(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (shell, mut vcx) = dialog_test_shell(cx, "config::views");
+    vcx.simulate_keystrokes("/ a b");
+    vcx.simulate_keystrokes("ctrl-k");
+    vcx.simulate_input("Focus the scope text");
+    let selected = shell.read_with(&vcx, |s, _| s.palette.as_ref().unwrap().selected_item());
+    assert!(
+        matches!(&selected, Some(crate::palette::PaletteItem::Action(id, ..)) if id.0 == "frame::focus_text"),
+        "{selected:?}"
+    );
+    vcx.simulate_keystrokes("enter");
+    draw(&mut vcx);
+    assert_eq!(kinds(&shell, &mut vcx), vec![DialogKind::Object]);
+    assert!(!filter_is_focused(&shell, &mut vcx));
+    assert!(dialog_filter_is_focused(&shell, &mut vcx));
+}
