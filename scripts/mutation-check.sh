@@ -968,10 +968,35 @@ run_mutation "unanimity: a mixed cell paints the marker, not blank" \
 
 run_mutation "unanimity: a mixed cell sorts ahead of the blanks" \
   crates/geode-blotter/src/core/flatten.rs \
-  '            TextKey::Mixed => 1,' \
   '            TextKey::Mixed => 2,' \
+  '            TextKey::Mixed => 3,' \
   geode-blotter \
   a_mixed_dimension_sorts_after_values_and_before_blanks_both_ways
+
+# As text "100" sorts before "95". A numeric dimension must reach the blotter
+# as a number and be compared as one.
+run_mutation "unanimity: a numeric dimension keeps its type in the result" \
+  crates/geode-data/src/query/compile.rs \
+  '        unanimity_selects.push(format!("{alias}.\"{name}\" as \"{name}\""));' \
+  '        unanimity_selects.push(format!("{alias}.\"{name}\"::varchar as \"{name}\""));' \
+  geode-data \
+  the_mixed_flag_reaches_the_snapshot_beside_a_null_value
+
+run_mutation "unanimity: a numeric dimension sorts by number" \
+  crates/geode-blotter/src/core/flatten.rs \
+  '                (TextKey::Number(x), TextKey::Number(y)) => x.total_cmp(&y),' \
+  '                (TextKey::Number(x), TextKey::Number(y)) => x.to_string().cmp(&y.to_string()),' \
+  geode-blotter \
+  a_numeric_dimension_sorts_by_number_with_mixed_and_blanks_last
+
+# The text format's precision is 0: through it 4250.5 paints as a strike of
+# 4251 that does not exist.
+run_mutation "unanimity: a numeric dimension paints its exact value" \
+  crates/geode-blotter/src/core/cache.rs \
+  '        Some(v) => Some(v.to_string()),' \
+  '        Some(v) => Some(format!("{v:.0}")),' \
+  geode-blotter \
+  a_mixed_dimension_cell_paints_the_marker_and_a_blank_one_paints_nothing
 
 run_mutation "unanimity: a mixed cell yanks the marker, not blank" \
   crates/geode-blotter/src/core/yank.rs \
@@ -16533,6 +16558,99 @@ run_mutation "stacks: stacking onto a fullscreen tile exits fullscreen" \
   '        // hidden — `Tree::layout` paints it (any tile `contains(fs)`).' \
   geode-shell \
   stacking_onto_a_fullscreen_tile_exits_fullscreen
+
+# Toggle stack: the split-to-stack direction takes every tile under the
+# focused leaf's parent split and acts on the innermost container only;
+# the stack-to-split direction gives equal ratios. (The new stack's
+# `active` index is also set by `set_focus`, so neither alone is
+# observable and no entry defends it.)
+run_mutation "toggle stack: a nested split and its stacks flatten" \
+  crates/geode-shell/src/tiling/tree.rs \
+  '                    let mut members = Vec::new();
+                    collect_leaves(node, &mut members);' \
+  '                    let mut members = Vec::new();
+                    for c in children.iter() {
+                        if let Node::Leaf(id) = c {
+                            members.push(*id);
+                        }
+                    }' \
+  geode-shell \
+  toggle_stack_flattens_a_nested_split_and_its_stacks
+
+run_mutation "toggle stack: only the innermost container converts" \
+  crates/geode-shell/src/tiling/tree.rs \
+  '                    if !matches!(slot, Node::Leaf(_)) {
+                        return toggle_at(slot, focused, orientation);' \
+  '                    if matches!(slot, Node::Stack { .. }) {
+                        return toggle_at(slot, focused, orientation);' \
+  geode-shell \
+  toggle_stack_converts_only_the_innermost_split
+
+run_mutation "toggle stack: exits fullscreen" \
+  crates/geode-shell/src/tiling/tree.rs \
+  '            // layout operation trumps a stale fullscreen.
+            self.fullscreen = None;' \
+  '            // layout operation trumps a stale fullscreen.' \
+  geode-shell \
+  toggle_stack_exits_fullscreen
+
+run_mutation "toggle stack: a split stack gets equal ratios" \
+  crates/geode-shell/src/tiling/tree.rs \
+  '                    let share = 1.0 / children.len() as f32;' \
+  '                    let share = 0.5;' \
+  geode-shell \
+  toggle_stack_round_trip_gives_an_equal_flat_split
+
+run_mutation "toggle stack: mod+s is bound" \
+  crates/geode-shell/src/defaults.rs \
+  '"mod+s" = "workspace::toggle_stack"
+' \
+  '' \
+  geode-shell \
+  mod_s_splits_the_focused_stack_and_stacks_it_back
+
+run_mutation "toggle stack: a conversion dirties the session" \
+  crates/geode-shell/src/shell/input.rs \
+  '                .toggle_stack(orientation)
+            {
+                self.session_dirty = true;' \
+  '                .toggle_stack(orientation)
+            {' \
+  geode-shell \
+  mod_s_splits_the_focused_stack_and_stacks_it_back
+
+run_mutation "toggle stack: a split stack takes the add direction" \
+  crates/geode-shell/src/shell/input.rs \
+  '            let orientation = self.add_direction.resolve(None, rect);
+            if self
+                .services
+                .workspaces
+                .active_mut()
+                .toggle_stack(orientation)' \
+  '            let _ = rect;
+            let orientation = crate::tiling::Orientation::Horizontal;
+            if self
+                .services
+                .workspaces
+                .active_mut()
+                .toggle_stack(orientation)' \
+  geode-shell \
+  mod_s_splits_the_focused_stack_and_stacks_it_back
+
+run_mutation "toggle stack: acts in the focused region" \
+  crates/geode-shell/src/tiling/workspaces.rs \
+  '        let region = self.region;
+        self.tree_for_mut(region).toggle_stack(orientation)' \
+  '        self.tree_for_mut(FocusRegion::Main).toggle_stack(orientation)' \
+  geode-shell \
+  toggle_stack_acts_in_the_focused_dock_and_leaves_main_alone
+
+run_mutation "toggle stack: a refusal leaves a notice" \
+  crates/geode-shell/src/shell/input.rs \
+  '                self.notice = Some(NOTHING_TO_STACK);' \
+  '                {}' \
+  geode-shell \
+  mod_s_on_a_lone_tile_leaves_a_notice
 
 # Brief's original pick (drop the `ix < active` branch entirely) turned
 # out unreachable: both `remove_focused` and `pop_out` always target

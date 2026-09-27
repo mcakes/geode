@@ -358,7 +358,8 @@ holds them. That CTE is joined to the spine but never feeds it, so adding a
 display column never adds or removes tree rows, and a view declaring no
 ungrouped dimension compiles to the statement it always did.
 
-The result carries the value cast to text, as a grouping column is, and a
+The result carries the value in the column's own type, so a numeric dimension
+sorts as a number and paints its shortest exact form (`4250`, `4250.5`), and a
 boolean companion column named `<column>#mixed` (false where the grain has no
 rows under the spine row). `ColumnMeta::mixed_flag` links the value to its
 companion by index and `Snapshot::from_batches` refuses a flag that is not a
@@ -370,8 +371,7 @@ without the flag sees NULL, not a value.
 Known limitations: the unanimity is over the chosen grain table's rows, so an
 instrument with no row in that table (a cash instrument absent from the
 underlying table when the grouping forces the underlying grain) does not take
-part; choosing the coarsest carrying grain minimises this. A numeric column
-arrives as text, like a numeric grouping column, so it sorts as text. A derived
+part; choosing the coarsest carrying grain minimises this. A derived
 column over the dimension sees only the value column, so where the input is
 mixed the derived cell is blank, not marked.
 

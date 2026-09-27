@@ -357,6 +357,13 @@ impl Workspace {
         self.tree_for_mut(region).unstack_focused(orientation)
     }
 
+    /// Convert the focused region's innermost container between split and
+    /// stack; return false for an empty region or a lone tile.
+    pub fn toggle_stack(&mut self, orientation: Orientation) -> bool {
+        let region = self.region;
+        self.tree_for_mut(region).toggle_stack(orientation)
+    }
+
     /// Find `id`'s member index and stack length across this workspace's trees.
     pub fn stack_position(&self, id: TileId) -> Option<(usize, usize)> {
         let region = self.region_of(id)?;
@@ -1590,6 +1597,20 @@ mod tests {
         assert!(approx(rects[0].1.w, 0.3) && approx(rects[1].1.w, 0.7));
         assert_eq!(ws.active().focused_tile(), focused_before);
         assert_eq!(ws.active().region(), FocusRegion::Main);
+    }
+
+    #[test]
+    fn toggle_stack_acts_in_the_focused_dock_and_leaves_main_alone() {
+        let mut ws = two_tiles();
+        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        let remaining = ws.active().tree().focused().expect("one tile left in main");
+        assert!(ws.active_mut().focus_main_tile(remaining));
+        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        let main_before = ws.active().tree().clone();
+        assert!(ws.active_mut().toggle_stack(Orientation::Vertical));
+        let dock = ws.active().docks().get(DockSide::Left).tree();
+        assert_eq!(dock.visible_tiles().len(), 1, "the dock's split stacked");
+        assert_eq!(ws.active().tree(), &main_before);
     }
 
     #[test]

@@ -212,6 +212,7 @@ fn sort_siblings(snapshot: &Snapshot, plan: &ColumnPlan, spec: &SortSpec, rows: 
                 (None, None) => Ordering::Equal,
             },
             Some(i) => match (text_key(snapshot, i, a), text_key(snapshot, i, b)) {
+                (TextKey::Number(x), TextKey::Number(y)) => x.total_cmp(&y),
                 (TextKey::Value(x), TextKey::Value(y)) => x.cmp(y),
                 (x, y) => x.rank().cmp(&y.rank()),
             },
@@ -245,27 +246,37 @@ fn is_null(snapshot: &Snapshot, idx: Option<usize>, numeric: bool, row: usize) -
     match idx {
         None => true,
         Some(i) if numeric => number_at(snapshot, i, row).is_none(),
-        Some(i) => !matches!(text_key(snapshot, i, row), TextKey::Value(_)),
+        Some(i) => !matches!(
+            text_key(snapshot, i, row),
+            TextKey::Number(_) | TextKey::Value(_)
+        ),
     }
 }
 
-/// A text cell as the comparator sees it. An ungrouped dimension whose
-/// rows disagree is NULL in the data plus a mixed flag; it is not a value,
-/// so it sorts after every value like a blank, but it is not a blank
-/// either, so it sorts ahead of the blanks rather than among them. The
-/// order — values, then mixed, then blank — holds in both directions.
+/// A dimension cell as the comparator sees it. A numeric dimension (an
+/// ungrouped `strike` arrives as a number) compares by number, since as
+/// text "100" sorts before "95"; any other dimension compares by text. An
+/// ungrouped dimension whose rows disagree is NULL in the data plus a mixed
+/// flag; it is not a value, so it sorts after every value like a blank, but
+/// it is not a blank either, so it sorts ahead of the blanks rather than
+/// among them. The order — values, then mixed, then blank — holds in both
+/// directions. NaN is blank, as it is for a measure.
 enum TextKey<'a> {
+    Number(f64),
     Value(&'a str),
     Mixed,
     Blank,
 }
 
 impl TextKey<'_> {
+    /// One column holds one type, so a number and a text value never meet;
+    /// ranking numbers first keeps the order total if they did.
     fn rank(&self) -> u8 {
         match self {
-            TextKey::Value(_) => 0,
-            TextKey::Mixed => 1,
-            TextKey::Blank => 2,
+            TextKey::Number(_) => 0,
+            TextKey::Value(_) => 1,
+            TextKey::Mixed => 2,
+            TextKey::Blank => 3,
         }
     }
 }
@@ -273,6 +284,13 @@ impl TextKey<'_> {
 fn text_key(snapshot: &Snapshot, i: usize, row: usize) -> TextKey<'_> {
     if snapshot.is_mixed_at(i, row) {
         return TextKey::Mixed;
+    }
+    if let Some(v) = snapshot.f64_at(i, row) {
+        return if v.is_nan() {
+            TextKey::Blank
+        } else {
+            TextKey::Number(v)
+        };
     }
     match snapshot.text_at(i, row) {
         Some(v) => TextKey::Value(v),
@@ -602,6 +620,72 @@ mod tests {
             sorted(SortOrder::Desc),
             vec![0, 2, 4, 3, 1, 5],
             "values reversed; mixed and blanks stay last"
+        );
+    }
+
+    /// A numeric ungrouped dimension sorts by number, not by its text:
+    /// as text "100" would come before "95". Mixed and blank still follow
+    /// the values in both directions.
+    #[test]
+    fn a_numeric_dimension_sorts_by_number_with_mixed_and_blanks_last() {
+        let snap = Snapshot::for_tests(
+            vec![
+                (
+                    dim("lhu"),
+                    TestColumn::Dict(vec![None, s("A"), s("B"), s("C"), s("D"), s("E")]),
+                ),
+                (dim("row_depth"), TestColumn::I32(vec![0, 1, 1, 1, 1, 1])),
+                (
+                    ColumnMeta {
+                        mixed_flag: Some(3),
+                        ..dim("strike")
+                    },
+                    TestColumn::F64(vec![
+                        None,
+                        Some(100.0),
+                        Some(95.0),
+                        None,
+                        Some(1000.0),
+                        None,
+                    ]),
+                ),
+                (
+                    dim("strike#mixed"),
+                    TestColumn::Bool(vec![
+                        Some(false),
+                        Some(false),
+                        Some(false),
+                        Some(true),
+                        Some(false),
+                        Some(false),
+                    ]),
+                ),
+            ],
+            1,
+        );
+        let text = "[t]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n[[t.columns]]\nname = \"strike\"\nkind = \"dimension\"\n";
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
+        let view = ViewSpec::from_doc(&doc).0.remove(0);
+        let plan = ColumnPlan::build(&view, snap.grouping(), &snap);
+        let sorted = |order| {
+            let spec = SortSpec {
+                column: "strike".to_string(),
+                order,
+            };
+            let mut out = Vec::new();
+            flatten(&snap, &plan, &Expansion::default(), Some(&spec), &mut out);
+            out
+        };
+        // Row 1 100, 2 95, 3 mixed, 4 1000, 5 blank.
+        assert_eq!(
+            sorted(SortOrder::Asc),
+            vec![0, 2, 1, 4, 3, 5],
+            "95, 100, 1000, mixed, blank"
+        );
+        assert_eq!(
+            sorted(SortOrder::Desc),
+            vec![0, 4, 1, 2, 3, 5],
+            "1000, 100, 95, mixed, blank"
         );
     }
 

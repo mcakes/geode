@@ -758,9 +758,9 @@ pub(crate) fn compile_view_with_cache(
         unanimity_at.push((grain, alias, grain_scope.semantics));
     }
 
-    // The outer select's unanimity columns, in view order: the value, cast to
-    // text as a grouping column is (the blotter reads a dimension as text),
-    // then its flag. A spine row the grain's table has no rows under matches
+    // The outer select's unanimity columns, in view order: the value, in the
+    // column's own type so a numeric dimension sorts as a number, then its
+    // flag. A spine row the grain's table has no rows under matches
     // nothing, so its value and flag are NULL: blank, not mixed.
     let mut unanimity_selects: Vec<String> = Vec::new();
     let mut unanimity_columns: Vec<CompiledColumn> = Vec::new();
@@ -769,7 +769,7 @@ pub(crate) fn compile_view_with_cache(
             continue;
         };
         let flag = mixed_flag_name(name);
-        unanimity_selects.push(format!("{alias}.\"{name}\"::varchar as \"{name}\""));
+        unanimity_selects.push(format!("{alias}.\"{name}\" as \"{name}\""));
         unanimity_selects.push(format!("coalesce({alias}.\"{flag}\", false) as \"{flag}\""));
         unanimity_columns.push(CompiledColumn {
             name: name.clone(),
@@ -4322,7 +4322,14 @@ grain = "underlying"
                     })
                     .collect::<Result<_, _>>()?;
                 let shown = |col: &str| -> duckdb::Result<Shown> {
-                    let value: Option<String> = r.get(col)?;
+                    // In the column's own type: `strike` is a DOUBLE,
+                    // `expiry` text.
+                    let value = match r.get::<_, duckdb::types::Value>(col)? {
+                        duckdb::types::Value::Null => None,
+                        duckdb::types::Value::Double(v) => Some(v.to_string()),
+                        duckdb::types::Value::Text(v) => Some(v),
+                        other => panic!("{col} arrived as {other:?}"),
+                    };
                     let flag: bool = r.get(mixed_flag_name(col).as_str())?;
                     Ok(match (value, flag) {
                         (Some(v), false) => Shown::Value(v),
@@ -4359,7 +4366,7 @@ grain = "underlying"
         let rows = unanimity_rows(&store, &compile_unanimity(&store, &view, usize::MAX));
 
         assert_eq!(shown_at(&rows, "L0/P1").0, Shown::Mixed, "100 and 110");
-        assert_eq!(shown_at(&rows, "L0/P2").0, value("100.0"), "one strike");
+        assert_eq!(shown_at(&rows, "L0/P2").0, value("100"), "one strike");
         assert_eq!(shown_at(&rows, "L0").0, Shown::Mixed, "P1 disagrees");
         assert_eq!(
             shown_at(&rows, "L0"),
@@ -4416,8 +4423,8 @@ grain = "underlying"
         );
         let full = unanimity_rows(&store, &compile_unanimity(&store, &view, usize::MAX));
         assert_eq!(shown_at(&full, "L0/SPX/P1").0, Shown::Mixed);
-        assert_eq!(shown_at(&full, "L0/RUT/P2").0, value("100.0"));
-        assert_eq!(shown_at(&full, "L0/RUT").0, value("100.0"));
+        assert_eq!(shown_at(&full, "L0/RUT/P2").0, value("100"));
+        assert_eq!(shown_at(&full, "L0/RUT").0, value("100"));
         assert_eq!(shown_at(&full, "L0/SPX").0, Shown::Mixed);
         for max_depth in 0..=3 {
             let bounded = unanimity_rows(&store, &compile_unanimity(&store, &view, max_depth));
@@ -4516,6 +4523,12 @@ grain = "underlying"
             .unwrap();
         assert!(snap.is_mixed_at(strike, root));
         assert_eq!(snap.display_at(strike, root), None, "NULL beneath the flag");
+        // A numeric dimension reaches the blotter as a number, so it sorts
+        // as one: as text "100" would sort before "95".
+        assert!(
+            (0..snap.rows()).any(|r| snap.f64_at(strike, r) == Some(100.0)),
+            "strike arrives as a number"
+        );
         assert!(snap.meta_at(flag).unwrap().mixed_flag.is_none());
     }
 

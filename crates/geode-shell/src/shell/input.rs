@@ -28,6 +28,10 @@ use super::{
 /// The notice produced when a stack verb targets a tile outside a stack.
 pub(super) const NOT_IN_A_STACK: &str = "not in a stack";
 
+/// The notice produced when `workspace::toggle_stack` finds no split or stack
+/// around focus: an empty region or a lone tile.
+pub(super) const NOTHING_TO_STACK: &str = "nothing to stack";
+
 /// The notice produced when a palette action tries to open transient chrome
 /// (the command line, find, or the stack list) while a dialog is open.
 pub(super) const CLOSE_DIALOG_FIRST: &str = "close the dialog first";
@@ -140,6 +144,28 @@ impl ShellView {
                 self.note_keyboard_focus_move(window, cx);
             } else {
                 self.notice = Some(NOT_IN_A_STACK);
+            }
+            return;
+        }
+        if action.0 == "workspace::toggle_stack" {
+            // A stack becomes a split shaped like `stack::unstack`'s: the
+            // configured add direction resolved against the focused slot.
+            let rect = self
+                .services
+                .workspaces
+                .active()
+                .focused_tile_rect(super::render::content_area(window));
+            let orientation = self.add_direction.resolve(None, rect);
+            if self
+                .services
+                .workspaces
+                .active_mut()
+                .toggle_stack(orientation)
+            {
+                self.session_dirty = true;
+                self.note_keyboard_focus_move(window, cx);
+            } else {
+                self.notice = Some(NOTHING_TO_STACK);
             }
             return;
         }

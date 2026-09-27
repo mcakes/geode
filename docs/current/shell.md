@@ -48,7 +48,10 @@ A stack occupies one layout slot and keeps two or more leaf tiles alive. Only
 its active member is visible. Focusing a member activates it, so structural
 focus cannot point at a hidden member. The shell sends each occupant a
 `StackHandle`; modules paint its marker through the shared builder and use it
-to open the shell-owned member list.
+to open the shell-owned member list. `workspace::toggle_stack` converts the
+focused tile's split into a stack and back; the shell dispatches it rather
+than the pure workspace router because the new split's orientation needs the
+slot's geometry.
 
 A fullscreen tile paints with the same chrome as a workspace's only tile,
 so the status bar marks it instead. The bar's right region is its
