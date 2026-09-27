@@ -100,10 +100,30 @@ fn the_footer_totals_position_risk_over_top_most_rows(cx: &mut gpui::TestAppCont
 #[gpui::test]
 fn the_footer_totals_count_an_open_packages_legs_once(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &BOOK);
-    answer_all(&h, &mut vcx, 1.0);
+    // A distinct price per line: equal leg prices would make the spread's
+    // legs cancel, and a doubled zero reads the same as a single one.
+    for b in h.prices() {
+        h.deliver(
+            &mut vcx,
+            PriceOutcome {
+                key: b.key,
+                tag: b.tag,
+                submitted: std::time::Instant::now(),
+                results: b
+                    .lines
+                    .iter()
+                    .enumerate()
+                    .map(|(i, l)| (l.id, l.revision, Ok(result(1.0 + i as f64))))
+                    .collect(),
+            },
+        );
+    }
     h.dispatch(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "expand", None);
     assert_eq!(h.tree(&vcx).len(), 5, "fixture: the package is open");
+    let cell = |row| -> f64 { h.cell(&vcx, row, "price").parse().unwrap() };
+    let (a, package, b) = (cell(0), cell(1), cell(4));
+    assert!(package.abs() > 0.5, "fixture: the legs do not cancel");
     h.dispatch(&mut vcx, "top", None);
     h.dispatch(&mut vcx, "visual_rows", None);
     h.dispatch(&mut vcx, "bottom", None);
@@ -113,8 +133,7 @@ fn the_footer_totals_count_an_open_packages_legs_once(cx: &mut gpui::TestAppCont
             .find(|c| c.label.as_ref() == "price")
             .map(|c| c.text.to_string())
     });
-    let package: f64 = h.cell(&vcx, 1, "price").parse().unwrap();
-    assert_eq!(price, Some(format!("{:.2}", 1.0 + 1.0 + package)));
+    assert_eq!(price, Some(format!("{:.2}", a + package + b)));
 }
 
 #[gpui::test]
