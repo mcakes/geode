@@ -685,6 +685,89 @@ fn a_reload_offers_a_new_named_expression_under_an_open_dialog(cx: &mut gpui::Te
     );
 }
 
+fn expr_hint(shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext) -> String {
+    shell.read_with(vcx, |s, _| {
+        s.scope_expr_dialog
+            .as_ref()
+            .map(|d| d.completion.hint().to_string())
+            .unwrap_or_default()
+    })
+}
+
+/// Staging a name changes the scope values are narrowed by, so a column
+/// asked for before the staging is asked for again under the new names.
+#[gpui::test]
+fn staging_a_name_requests_values_again_under_it(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = named_shell(cx, &[], None);
+    let seen = requests(&shell, &mut vcx);
+    dispatch_action(&shell, "frame::add_expression", &mut vcx);
+    vcx.simulate_input("book = ");
+    vcx.run_until_parked();
+    let first = seen.borrow().last().cloned().expect("a request");
+    assert_eq!(first.scope.expression, None);
+    vcx.simulate_keystrokes("secondary-a backspace");
+    vcx.simulate_input("liq");
+    vcx.simulate_keystrokes("tab");
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("scope-expr-staged-liq").is_some());
+    vcx.simulate_input("book = ");
+    vcx.run_until_parked();
+    let second = seen.borrow().last().cloned().expect("a request");
+    assert_ne!(second.tag, first.tag, "book is asked for again");
+    assert_eq!(second.column, "book");
+    // The request carries the resolved scope: `liq` is folded into the
+    // expression, so its text is what narrows.
+    assert!(second.scope.named.is_empty());
+    assert_eq!(
+        second.scope.expression.map(|e| e.to_string()),
+        Some("npv > 0".to_string())
+    );
+}
+
+/// A missing staged name is the value position's error; removing its
+/// chip asks for the values again, and the error goes with it.
+#[gpui::test]
+fn unstaging_a_missing_name_clears_its_values_error(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = named_shell(cx, &["gone"], None);
+    let seen = requests(&shell, &mut vcx);
+    dispatch_action(&shell, "frame::scope_expression", &mut vcx);
+    vcx.simulate_input("book = ");
+    vcx.run_until_parked();
+    assert!(seen.borrow().is_empty(), "a missing name never requests");
+    assert!(
+        expr_hint(&shell, &vcx).contains("gone"),
+        "{}",
+        expr_hint(&shell, &vcx)
+    );
+    let close = vcx
+        .debug_bounds("scope-expr-staged-close-gone")
+        .expect("the close paints");
+    vcx.simulate_click(close.center(), gpui::Modifiers::none());
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("secondary-a backspace");
+    vcx.simulate_input("book = ");
+    vcx.run_until_parked();
+    let req = seen.borrow().last().cloned().expect("asked again");
+    assert_eq!(req.column, "book");
+    assert!(req.scope.named.is_empty());
+    assert!(
+        !expr_hint(&shell, &vcx).contains("gone"),
+        "{}",
+        expr_hint(&shell, &vcx)
+    );
+}
+
+/// Add mode joins the frame's names, so a name the frame already has is
+/// not offered: staging it would change nothing.
+#[gpui::test]
+fn add_mode_leaves_out_the_frames_own_names(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = named_shell(cx, &["liq"], None);
+    dispatch_action(&shell, "frame::add_expression", &mut vcx);
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("scope-expr-named-row-liq").is_none());
+    assert!(vcx.debug_bounds("scope-expr-named-row-hedges").is_some());
+}
+
 /// Let the zero-delay config write promote and reach the file.
 fn flush_config_write(vcx: &mut gpui::VisualTestContext) {
     vcx.executor().advance_clock(

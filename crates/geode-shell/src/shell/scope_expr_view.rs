@@ -182,14 +182,23 @@ pub fn seed_staged(mode: &Mode, current: &Scope) -> Vec<String> {
 /// The named rows the field offers: every defined name not already
 /// staged, previewed by its text (or, when invalid, by its reason). Term
 /// mode edits one term of the text, where a name has no place, so it
-/// offers none.
-pub fn named_offers(mode: &Mode, defined: &NamedExpressions, staged: &[String]) -> Vec<NamedOffer> {
-    if matches!(mode, Mode::Term { .. }) {
-        return Vec::new();
-    }
+/// offers none. Add mode joins `frame_named`, so it leaves those out too:
+/// staging one would change nothing at Enter. Whole mode replaces them,
+/// and opens with them staged.
+pub fn named_offers(
+    mode: &Mode,
+    defined: &NamedExpressions,
+    staged: &[String],
+    frame_named: &[String],
+) -> Vec<NamedOffer> {
+    let joined: &[String] = match mode {
+        Mode::Term { .. } => return Vec::new(),
+        Mode::Add => frame_named,
+        Mode::Whole => &[],
+    };
     defined
         .names()
-        .filter(|name| !staged.iter().any(|s| s == name))
+        .filter(|name| !staged.iter().chain(joined).any(|s| s == name))
         .filter_map(|name| {
             let (preview, broken) = match defined.get(name)? {
                 NamedExpr::Valid { text, .. } => (text.clone(), false),
@@ -429,6 +438,12 @@ pub fn open(view: &mut ShellView, mode: Mode, window: &mut Window, cx: &mut Cont
 /// Re-offer every defined name the open dialog has not staged. Runs
 /// whenever the staged list or the frame's definitions change, so a
 /// staged name is never offered twice and an unstaged one comes back.
+///
+/// Both changes also change the scope values are narrowed by
+/// ([`request_scope`] resolves the staged names), so the cached values
+/// are dropped and the field re-read at once: a kept column would list
+/// values from the old narrowing, or keep a missing name's error after
+/// its chip is gone.
 pub(crate) fn sync_named_offers(view: &mut ShellView, cx: &mut Context<ShellView>) {
     let vocab = view.expr_vocab.clone();
     let Some(state) = view.scope_expr_dialog.as_mut() else {
@@ -438,12 +453,16 @@ pub(crate) fn sync_named_offers(view: &mut ShellView, cx: &mut Context<ShellView
     if state.naming.is_some() {
         return;
     }
+    let frame = view.frame.read(cx);
     let offers = named_offers(
         &state.mode,
-        view.frame.read(cx).named_expressions(),
+        frame.named_expressions(),
         &state.staged,
+        &frame.scope().named,
     );
     state.completion.set_named_offers(offers, &vocab);
+    state.completion.forget_values(&vocab);
+    super::expr_suggest::refresh(view, cx);
     cx.notify();
 }
 
@@ -1216,7 +1235,7 @@ mod tests {
         .unwrap();
         let (defined, _) =
             NamedExpressions::from_doc(&merge_docs("expressions", &[doc]), &ExprVocab::default());
-        let offers = named_offers(&Mode::Add, &defined, &[]);
+        let offers = named_offers(&Mode::Add, &defined, &[], &[]);
         let offered: Vec<&str> = offers.iter().map(|o| o.name.as_str()).collect();
         assert_eq!(offered, vec!["bad", "liq"]);
         assert!(offers[0].broken);
@@ -1228,12 +1247,16 @@ mod tests {
         assert_ne!(offers[0].preview, "npv >");
         assert_eq!(offers[1].preview, "npv > 0");
         assert!(!offers[1].broken);
-        let offers = named_offers(&Mode::Whole, &defined, &names(&["liq"]));
+        let offers = named_offers(&Mode::Whole, &defined, &names(&["liq"]), &names(&["liq"]));
         assert_eq!(offers.len(), 1);
         assert_eq!(offers[0].name, "bad");
         let e = parse_expr("a = 1").unwrap();
         let term = Mode::term(0, Some(&e)).unwrap();
-        assert!(named_offers(&term, &defined, &[]).is_empty());
+        assert!(named_offers(&term, &defined, &[], &[]).is_empty());
+        // Add joins the frame's names, so it leaves them out.
+        let offers = named_offers(&Mode::Add, &defined, &[], &names(&["liq"]));
+        assert_eq!(offers.len(), 1);
+        assert_eq!(offers[0].name, "bad");
     }
 
     #[test]

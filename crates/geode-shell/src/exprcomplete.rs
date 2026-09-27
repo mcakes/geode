@@ -199,6 +199,19 @@ impl ExprCompletion {
         true
     }
 
+    /// Drop every column's values, in flight or not, because the scope
+    /// they were narrowed by has changed; kept, they would suggest values
+    /// the new scope excludes, miss ones it admits, or keep an error that
+    /// no longer holds. A reply still on its way no longer matches a
+    /// `Loading` tag, so `deliver` drops it. The last text is forgotten
+    /// too, so the next `refresh` at the same caret asks again rather
+    /// than answering `Unchanged`.
+    pub fn forget_values(&mut self, vocab: &ExprVocab) {
+        self.values.clear();
+        self.rebuild(vocab);
+        self.last = None;
+    }
+
     /// Rebuild the context, rows, hint and warning from the last text and
     /// caret. The highlight is kept, clamped to the new rows.
     pub fn rebuild(&mut self, vocab: &ExprVocab) {
@@ -544,6 +557,31 @@ mod tests {
             Refresh::Changed,
             "a delivered column is kept"
         );
+    }
+
+    #[test]
+    fn forgotten_values_are_asked_again_and_a_late_reply_is_dropped() {
+        let v = vocab();
+        let mut c = ExprCompletion::default();
+        c.refresh("book = ", 7, &v);
+        c.mark_loading("book", 1, &v);
+        assert!(c.deliver("book", 1, Ok(vec![("A".into(), 1)]), &v));
+        c.refresh("book = '", 8, &v);
+        c.mark_loading("book", 2, &v);
+        c.forget_values(&v);
+        assert_eq!(c.hint(), "value for book · loading values…");
+        assert_eq!(
+            c.refresh("book = '", 8, &v),
+            Refresh::Request("book".into()),
+            "the same text and caret ask again"
+        );
+        c.mark_loading("book", 3, &v);
+        assert!(
+            !c.deliver("book", 2, Ok(vec![("OLD".into(), 1)]), &v),
+            "a reply to the forgotten request is dropped"
+        );
+        assert!(c.deliver("book", 3, Ok(vec![("NEW".into(), 1)]), &v));
+        assert_eq!(labels(&c), ["'NEW'"]);
     }
 
     #[test]

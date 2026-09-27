@@ -417,8 +417,9 @@ a definition that is invalid shows its reason instead, in danger text.
 Accepting a named row (tab or a click) erases the typed token, through the
 same range replace as an insertion so cmd+z restores the text, and stages the
 name as a chip above the field instead of writing it. A staged name is not
-offered again until it is unstaged. A configuration reload re-offers the
-current definitions under an open dialog.
+offered again until it is unstaged. Add mode also leaves out the names the
+frame already has, since Enter would add nothing for them. A configuration
+reload re-offers the current definitions under an open dialog.
 
 Operators are filtered by the column's type: text offers `= != in like`;
 number, date, and timestamp offer `= != < <= > >= in`; bool offers `= !=`;
@@ -447,6 +448,11 @@ make the typed prefix an unsound filter):
 | Whole | The frame's dimension selections, text filter and as-of, with the staged names in place of the frame's. Its own expression is excluded, since the dialog replaces it. |
 | Add | The frame's full current scope, including its expression, plus the staged names. |
 | Term | The frame's scope with the edited term removed. |
+
+Staging or unstaging a name, saving one with `mod+s`, or a reload that
+changes the definitions changes that scope, so the frame dialog drops every
+cached column and asks again for the one under the caret; a reply to a
+request made before the change is dropped.
 
 A reply whose tag is not that column's latest is dropped, so a superseded
 request never overwrites a newer one.

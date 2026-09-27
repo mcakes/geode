@@ -22273,6 +22273,15 @@ run_mutation "named expr: document distinct drops unresolved names" \
   geode-data \
   distinct_over_a_document_only_dimension_refuses_unresolved_names
 
+# Staging a name changes the values' narrowing, so the cached column is
+# dropped and asked for again under the new scope.
+run_mutation "named expr: staging keeps the old values" \
+  crates/geode-shell/src/exprcomplete.rs \
+  '    pub fn forget_values(&mut self, vocab: &ExprVocab) {' \
+  '    pub fn forget_values(&mut self, vocab: &ExprVocab) { return;' \
+  geode-shell \
+  staging_a_name_requests_values_again_under_it
+
 # A Scopes item's missing/invalid named note is danger text.
 run_mutation "named expr: a missing named note is muted" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
