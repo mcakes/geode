@@ -371,7 +371,9 @@ Known limitations: the unanimity is over the chosen grain table's rows, so an
 instrument with no row in that table (a cash instrument absent from the
 underlying table when the grouping forces the underlying grain) does not take
 part; choosing the coarsest carrying grain minimises this. A numeric column
-arrives as text, like a numeric grouping column, so it sorts as text.
+arrives as text, like a numeric grouping column, so it sorts as text. A derived
+column over the dimension sees only the value column, so where the input is
+mixed the derived cell is blank, not marked.
 
 The compiler no longer absorbs the same defects itself. A join naming an unknown
 dataset, or keyed on columns no grain of the joined dataset carries, is a
