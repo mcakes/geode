@@ -2206,6 +2206,237 @@ fn saved_scope_books(
     })
 }
 
+/// [`services_with_a_saved_scope`] plus an `expressions` doc defining
+/// `liq` and `hedges`, with `mine` naming `named` (a name the doc may
+/// not define).
+fn services_with_named_expressions(named: &str) -> ShellServices {
+    let mut services = test_services();
+    let datasets = LayerDoc::builtin(
+        "datasets",
+        "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+         [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n\
+         [risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n",
+    )
+    .unwrap();
+    let scopes = LayerDoc::builtin(
+        "scopes",
+        &format!("[mine]\nnamed = [\"{named}\"]\n[mine.dimensions]\nbook = [\"BK001\"]\n"),
+    )
+    .unwrap();
+    let expressions = LayerDoc::builtin(
+        "expressions",
+        "[liq]\nexpression = \"npv > 0\"\n[hedges]\nexpression = \"npv < 0\"\n",
+    )
+    .unwrap();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            datasets,
+            scopes,
+            expressions,
+        ],
+        desk: None,
+        user: None,
+    });
+    services
+}
+
+/// Walk the open scope's edit cursor with `j` to the `named` list's row
+/// for `name` (a ticked item or an available one). Production keys only.
+fn select_named_row(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContext, name: &str) {
+    for _ in 0..12 {
+        let on_row = edit_draft(shell, cx, |d| match d.selected_row() {
+            Some(
+                row @ (objectdialog::EditRow::Item { field, .. }
+                | objectdialog::EditRow::Available { field, .. }),
+            ) => d.fields[field].key == "named" && d.row_label(row) == name,
+            _ => false,
+        });
+        if on_row {
+            return;
+        }
+        cx.simulate_keystrokes("j");
+        cx.run_until_parked();
+    }
+    panic!("no named row {name}");
+}
+
+/// `mine`'s named-expression items as `(name, ticked)`.
+fn named_items(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> Vec<(String, bool)> {
+    edit_draft(shell, cx, |d| {
+        d.list_items("named")
+            .unwrap_or_default()
+            .iter()
+            .map(|i| (i.name.clone(), i.included))
+            .collect()
+    })
+}
+
+/// Opening a scope shows its named expressions: its own reference
+/// ticked under its section header, every other defined name available.
+#[gpui::test]
+fn a_scope_shows_its_named_expressions(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_named_expressions("liq"),
+        dir.path(),
+        "config::scopes",
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-section-members-named")
+            .is_some(),
+        "the Named expressions section is painted"
+    );
+    assert_eq!(named_items(&shell, &cx), [("liq".to_string(), true)]);
+    let available: Vec<String> = edit_draft(&shell, &cx, |d| {
+        let Some(FieldKind::OrderedList { available, .. }) = d
+            .fields
+            .iter()
+            .find(|f| f.key == "named")
+            .map(|f| f.kind.clone())
+        else {
+            panic!("named is a list");
+        };
+        available
+            .unwrap_or_default()
+            .into_iter()
+            .map(|i| i.name)
+            .collect()
+    });
+    assert_eq!(available, ["hedges"]);
+    assert!(cx.debug_bounds("objectdialog-item-liq").is_some());
+    assert!(cx.debug_bounds("objectdialog-item-hedges").is_some());
+}
+
+/// `space` on an available named expression ticks it, and the write
+/// carries both names in list order.
+#[gpui::test]
+fn space_ticks_an_available_named_expression_into_the_file(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_named_expressions("liq"),
+        dir.path(),
+        "config::scopes",
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    select_named_row(&shell, &mut cx, "hedges");
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    assert_eq!(
+        named_items(&shell, &cx),
+        [("liq".to_string(), true), ("hedges".to_string(), true)]
+    );
+    flush_config_write(&mut cx);
+    let written = std::fs::read_to_string(dir.path().join("scopes.toml")).unwrap();
+    assert!(
+        written.contains("named = [\"liq\", \"hedges\"]"),
+        "{written}"
+    );
+}
+
+/// Unticking every named expression is allowed — the list has no
+/// "keep at least one" rule — and the write drops the key.
+#[gpui::test]
+fn unticking_every_named_expression_drops_the_key(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_named_expressions("liq"),
+        dir.path(),
+        "config::scopes",
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    select_named_row(&shell, &mut cx, "hedges");
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    select_named_row(&shell, &mut cx, "liq");
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    select_named_row(&shell, &mut cx, "hedges");
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    assert_eq!(
+        named_items(&shell, &cx),
+        [("liq".to_string(), false), ("hedges".to_string(), false)],
+        "notice: {:?}",
+        dialog_state(&shell, &cx, |s| s.notice.clone())
+    );
+    flush_config_write(&mut cx);
+    let written = std::fs::read_to_string(dir.path().join("scopes.toml")).unwrap();
+    assert!(written.contains("[mine"), "{written}");
+    assert!(!written.contains("named"), "{written}");
+}
+
+/// `space` on a named expression ticks it; it never opens the Values
+/// stage, which belongs to the dimensions list alone.
+#[gpui::test]
+fn space_on_a_named_expression_never_opens_values(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_named_expressions("liq"),
+        dir.path(),
+        "config::scopes",
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    select_named_row(&shell, &mut cx, "liq");
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| d.values().is_none()));
+    assert_eq!(named_items(&shell, &cx), [("liq".to_string(), false)]);
+    select_named_row(&shell, &mut cx, "hedges");
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| d.values().is_none()));
+    assert_eq!(
+        named_items(&shell, &cx),
+        [("liq".to_string(), false), ("hedges".to_string(), true)]
+    );
+    select_named_row(&shell, &mut cx, "liq");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        edit_draft(&shell, &cx, |d| d.values().is_none()),
+        "enter on a named expression opens nothing either"
+    );
+}
+
+/// A reference to an undefined name paints the warning glyph on its own
+/// row, and a warning never blocks the write.
+#[gpui::test]
+fn a_missing_named_expression_warns_on_its_row_and_still_commits(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_named_expressions("gone"),
+        dir.path(),
+        "config::scopes",
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-diag-objectdialog-item-gone")
+            .is_some(),
+        "the glyph on gone's row"
+    );
+    select_named_row(&shell, &mut cx, "hedges");
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+    let written = std::fs::read_to_string(dir.path().join("scopes.toml")).unwrap();
+    assert!(
+        written.contains("named = [\"gone\", \"hedges\"]"),
+        "{written}"
+    );
+}
+
 /// Walk the Scopes edit cursor to the Expression row with `j` and open it
 /// with `i`. Production keys only.
 fn open_expression_field(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContext) {

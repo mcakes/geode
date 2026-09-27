@@ -1478,9 +1478,14 @@ fn handle_edit_key_inner(
         // stage's ticks — but only on the dimensions list itself; on an available row
         // there is nothing to drop (`enter` picks its values instead), and inside the
         // Values stage a value's own row answers with `space`'s own wording rather than
-        // this domain's.
+        // this domain's. A named expression drops back to its catalogue the same way,
+        // with notices that name it rather than a dimension.
         NormalCommand::Verb('x') if is_scopes(shell) => {
+            let on_named = on_scopes_named_row(shell);
             match draft_ref(shell).map(Draft::selected_row) {
+                Some(Some(EditRow::Available { .. })) if on_named => {
+                    set_notice(shell, "not included — space adds it".to_string())
+                }
                 Some(Some(EditRow::Available { .. })) => {
                     set_notice(shell, "not selected — enter picks its values".to_string())
                 }
@@ -1494,6 +1499,7 @@ fn handle_edit_key_inner(
                         _ => {}
                     }
                 }
+                _ if on_named => set_notice(shell, "x drops a named expression's row".to_string()),
                 _ => set_notice(
                     shell,
                     "x drops a selected dimension — here, space unticks".to_string(),
@@ -1923,8 +1929,9 @@ fn step_selected_row(
     // state this domain can save — and on a selected one it names the door, since the
     // values themselves are the Values stage's to change. Checked ahead of the ordinary
     // step below and never inside the Values stage itself, where a tick is exactly what
-    // `space` already means.
-    if !in_values_stage(shell) && is_scopes(shell) {
+    // `space` already means. A named expression's row is an ordinary tick list, so
+    // it takes the ordinary step.
+    if !in_values_stage(shell) && is_scopes(shell) && !on_scopes_named_row(shell) {
         match draft_ref(shell).and_then(Draft::selected_row) {
             Some(EditRow::Available { .. }) => {
                 if let Some(column) = values_stage_target(shell) {
@@ -2109,6 +2116,21 @@ fn is_scopes(shell: &ShellView) -> bool {
         .object_dialog
         .as_ref()
         .is_some_and(|state| state.domain == Domain::Scopes)
+}
+
+/// Is the cursor on a row of a scope's `named` list? Those rows tick like any
+/// list's, so the dimensions-only doors (Values, `x`'s dimension wording) must
+/// not answer for them.
+fn on_scopes_named_row(shell: &ShellView) -> bool {
+    is_scopes(shell)
+        && draft_ref(shell).is_some_and(|draft| match draft.selected_row() {
+            Some(
+                EditRow::Item { field, .. }
+                | EditRow::Available { field, .. }
+                | EditRow::Field(field),
+            ) => draft.fields.get(field).is_some_and(|f| f.key == "named"),
+            None => false,
+        })
 }
 
 /// The one answer for a verb the column stage does not own: `x`, `shift+j` and
@@ -3513,7 +3535,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                         // the Values stage installs its own list under the very same
                         // field key (`"values"`) the ordinary edit stage's `dimensions`
                         // list would carry, so `own` alone cannot tell the two apart —
-                        // `section_header_text(Domain::Scopes, true)` would paint
+                        // `section_header_text(Domain::Scopes, "dimensions", true)` would paint
                         // "DIMENSIONS" over a values list. `draft.values().is_some()`
                         // is the stage-aware override every other Values-stage site
                         // already reads by.
@@ -3523,7 +3545,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                                 "members",
                             )
                         } else {
-                            section_header_text(domain, own)
+                            section_header_text(domain, &draft.fields[field].key, own)
                         };
                         let field_key = draft.fields[field].key.clone();
                         section_header = Some(
@@ -4147,8 +4169,14 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
 /// as `Kbd` chips by `kbd::marked`. `own` distinguishes Views' own columns
 /// from the rest of its dataset's; Groupings' `dimensions` has no catalogue at all
 /// (`groupings.rs`'s own module doc), so only the first arm there is ever reached.
-fn section_header_text(domain: Domain, own: bool) -> (&'static str, &'static str) {
+/// `key` separates a scope's two lists: only `dimensions` opens a Values stage;
+/// `named` is a plain tick list.
+fn section_header_text(domain: Domain, key: &str, own: bool) -> (&'static str, &'static str) {
     match (domain, own) {
+        (Domain::Scopes, true) if key == "named" => {
+            ("NAMED EXPRESSIONS — `space` ticks", "members")
+        }
+        (Domain::Scopes, false) if key == "named" => ("AVAILABLE — `space` adds", "available"),
         (Domain::Views, true) => (
             "COLUMNS — `space` hides · `shift+j` / `shift+k` reorder · `x` removes",
             "members",

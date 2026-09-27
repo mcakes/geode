@@ -1,13 +1,16 @@
 //! Object-dialog adapter for saved scopes.
 //!
-//! A scope draft owns ordered dimension selections plus optional text and
-//! expression filters. The values stage edits one dimension's selected values.
-//! Expressions are parsed before persistence, so invalid text is refused with
+//! A scope draft owns ordered dimension selections, ticked named-expression
+//! references, and optional text and expression filters. The values stage
+//! edits one dimension's selected values. Expressions are parsed before persistence, so invalid text is refused with
 //! its parser diagnostic instead of being written and dropped on reload.
 //! Folding always updates the draft's source table before validation or write.
 
-use geode_core::config::{Config, Diagnostic, Layer, LayerDoc, merge_docs};
+use geode_core::config::{
+    Config, Diagnostic, EXPRESSIONS_DOC, Layer, LayerDoc, Severity, merge_docs,
+};
 use geode_core::dimensions::DerivedDimensions;
+use geode_core::named::{NamedExpr, NamedExpressions};
 use geode_core::schema::SchemaSpec;
 use geode_core::scope::Scope;
 use geode_core::scopes::{saved_scopes_from_doc, scope_to_table};
@@ -64,6 +67,10 @@ fn selects_summary(table: &toml::Table) -> String {
     {
         parts.push(expr.to_string());
     }
+    let named = named_of(Some(table));
+    if !named.is_empty() {
+        parts.push(format!("≡ {}", named.join(", ")));
+    }
     if parts.is_empty() {
         "everything".to_string()
     } else {
@@ -109,8 +116,8 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
 }
 
 /// The shared body of [`fields`] and [`overwrite_with`]: both need the
-/// same three rows built from a raw scope table and the live `Config`
-/// (for the dimensions list's available catalogue), one read off
+/// same four rows built from a raw scope table and the live `Config`
+/// (for the two lists' available catalogues), one read off
 /// `Config` itself, the other freshly rendered from the frame's own
 /// scope.
 ///
@@ -155,6 +162,7 @@ pub(super) fn fields_from_table(config: &Config, table: Option<&toml::Table>) ->
             .unwrap_or_default()
             .to_string()
     };
+    let (named_items, named_available) = named_lists(config, table);
     vec![
         Field {
             key: "dimensions".to_string(),
@@ -162,6 +170,16 @@ pub(super) fn fields_from_table(config: &Config, table: Option<&toml::Table>) ->
             kind: FieldKind::OrderedList {
                 items,
                 available: Some(available),
+            },
+            dest: Destination::Doc,
+            layer: None,
+        },
+        Field {
+            key: "named".to_string(),
+            label: "Named expressions".to_string(),
+            kind: FieldKind::OrderedList {
+                items: named_items,
+                available: Some(named_available),
             },
             dest: Destination::Doc,
             layer: None,
@@ -181,6 +199,62 @@ pub(super) fn fields_from_table(config: &Config, table: Option<&toml::Table>) ->
             layer: None,
         },
     ]
+}
+
+/// The merged `expressions` doc, read against the current schema's vocabulary.
+/// The entry diagnostics are dropped: the loader already logs them, and this
+/// dialog reports only the references its own scope makes.
+fn named_expressions(config: &Config) -> NamedExpressions {
+    let vocab = crate::shell::expr_vocab(config);
+    config
+        .doc(EXPRESSIONS_DOC)
+        .map(|doc| NamedExpressions::from_doc(doc, &vocab).0)
+        .unwrap_or_default()
+}
+
+/// The names a raw scope table references, in file order.
+fn named_of(table: Option<&toml::Table>) -> Vec<String> {
+    table
+        .and_then(|t| t.get("named"))
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The `named` list: the scope's references ticked, in order, each noted
+/// `missing` or `invalid` when the expressions doc cannot supply it, and
+/// every other defined name available. A dangling reference stays listed
+/// so it can be seen and unticked rather than silently vanishing.
+fn named_lists(config: &Config, table: Option<&toml::Table>) -> (Vec<ListItem>, Vec<ListItem>) {
+    let defined = named_expressions(config);
+    let item = |name: String, included: bool, note: Option<&str>| ListItem {
+        name,
+        included,
+        presentation: Default::default(),
+        kind: None,
+        note: note.map(str::to_string),
+    };
+    let items: Vec<ListItem> = named_of(table)
+        .into_iter()
+        .map(|name| {
+            let note = match defined.get(&name) {
+                None => Some("missing"),
+                Some(NamedExpr::Invalid { .. }) => Some("invalid"),
+                Some(NamedExpr::Valid { .. }) => None,
+            };
+            item(name, true, note)
+        })
+        .collect();
+    let available = defined
+        .names()
+        .filter(|name| !items.iter().any(|i| i.name == *name))
+        .map(|name| item(name.to_string(), false, None))
+        .collect();
+    (items, available)
 }
 
 /// Scope selections have no meaningful order; reorder requests return this notice.
@@ -245,8 +319,35 @@ pub fn validate(draft: &Draft, config: &Config) -> Vec<Diagnostic> {
         .doc("dimensions")
         .map(DerivedDimensions::from_doc)
         .unwrap_or_default();
-    let (_saved, diags) = saved_scopes_from_doc(&doc, &schema, &dims);
+    let (_saved, mut diags) = saved_scopes_from_doc(&doc, &schema, &dims);
+    diags.extend(named_reference_warnings(draft, config));
     diags
+}
+
+/// One warning per ticked name the expressions doc cannot supply. A warning,
+/// not an error: the reference is legitimate to save (the definition may be
+/// written next), and the query reports it when the scope is applied.
+fn named_reference_warnings(draft: &Draft, config: &Config) -> Vec<Diagnostic> {
+    let defined = named_expressions(config);
+    named_of(Some(&draft.source))
+        .into_iter()
+        .filter_map(|name| {
+            let message = match defined.get(&name) {
+                None => format!("named expression '{name}' is missing"),
+                Some(NamedExpr::Invalid { reason, .. }) => {
+                    format!("named expression '{name}' is invalid: {reason}")
+                }
+                Some(NamedExpr::Valid { .. }) => return None,
+            };
+            Some(Diagnostic {
+                severity: Severity::Warning,
+                layer: None,
+                file: None,
+                message,
+                path: Some(format!("{DOC}.{}.named.{name}", draft.name)),
+            })
+        })
+        .collect()
 }
 
 /// The draft's `scopes.toml` entry, rendered and parsed back the way the
@@ -321,6 +422,8 @@ pub fn fold(draft: &mut Draft) {
     // stage has stashed it — so the fold never retains against an empty
     // list and wipes every selection (the trap CLAUDE.md records).
     let mut kept: Option<Vec<String>> = None;
+    // `None` for the same reason: the Values stage stashes this list too.
+    let mut named: Option<Vec<String>> = None;
     for field in &draft.fields {
         match (field.key.as_str(), &field.kind) {
             ("text", FieldKind::Text(t)) => text = Some(t.clone()),
@@ -328,8 +431,31 @@ pub fn fold(draft: &mut Draft) {
             ("dimensions", FieldKind::OrderedList { items, .. }) => {
                 kept = Some(items.iter().map(|i| i.name.clone()).collect());
             }
+            ("named", FieldKind::OrderedList { items, .. }) => {
+                named = Some(
+                    items
+                        .iter()
+                        .filter(|i| i.included)
+                        .map(|i| i.name.clone())
+                        .collect(),
+                );
+            }
             _ => {}
         }
+    }
+    // Only ticked names are written; none ticked removes the key, since the
+    // reader and `scope_to_table` both treat an absent key as the empty list.
+    match named {
+        Some(named) if named.is_empty() => {
+            draft.source.remove("named");
+        }
+        Some(named) => {
+            draft.source.insert(
+                "named".into(),
+                toml::Value::Array(named.into_iter().map(toml::Value::String).collect()),
+            );
+        }
+        None => {}
     }
     if let Some(text) = text {
         draft
@@ -536,6 +662,10 @@ pub fn help(key: &str) -> &'static str {
         "dimensions" => {
             "The dimensions this scope narrows — open one to tick its values, x drops it"
         }
+        // One footer line holds at most 90 characters (`help_fits`).
+        "named" => {
+            "Named expressions ANDed with this scope; editing one changes every scope that ticks it"
+        }
         "text" => "A text filter matched against every textual column; empty for none",
         "expression" => {
             "A filter expression over the scope's columns, checked when applied; empty for none"
@@ -603,17 +733,18 @@ mod tests {
         })
     }
 
-    /// Three fields: the selected dimensions as a list with the other
-    /// pickable columns available, then the text filter and the
-    /// expression as editable text.
+    /// Four fields: the selected dimensions as a list with the other
+    /// pickable columns available, the named-expression list, then the
+    /// text filter and the expression as editable text.
     #[test]
     fn fields_are_the_dimensions_list_the_text_filter_and_the_expression() {
         let config = config_with_scope(
             "[mine]\ntext = \"spx\"\nexpression = \"npv > 0\"\n[mine.dimensions]\nbook = [\"BK001\", \"BK003\"]\n\n[bare]\n",
         );
         let fields = Domain::Scopes.fields(&config, Some("mine"));
-        assert_eq!(fields.len(), 3);
+        assert_eq!(fields.len(), 4);
         assert_eq!(fields[0].key, "dimensions");
+        assert_eq!(fields[1].key, "named");
         let FieldKind::OrderedList { items, available } = &fields[0].kind else {
             panic!("dimensions is a list");
         };
@@ -630,10 +761,10 @@ mod tests {
             .map(|i| i.name.as_str())
             .collect();
         assert_eq!(available_names, ["lhu"]);
-        assert_eq!(fields[1].key, "text");
-        assert_eq!(fields[1].kind, FieldKind::Text("spx".to_string()));
-        assert_eq!(fields[2].key, "expression");
-        assert_eq!(fields[2].kind, FieldKind::Text("npv > 0".to_string()));
+        assert_eq!(fields[2].key, "text");
+        assert_eq!(fields[2].kind, FieldKind::Text("spx".to_string()));
+        assert_eq!(fields[3].key, "expression");
+        assert_eq!(fields[3].kind, FieldKind::Text("npv > 0".to_string()));
 
         let bare = Domain::Scopes.fields(&config, Some("bare"));
         let FieldKind::OrderedList { items, available } = &bare[0].kind else {
@@ -647,8 +778,8 @@ mod tests {
             .map(|i| i.name.as_str())
             .collect();
         assert_eq!(bare_names, ["book", "lhu"]);
-        assert_eq!(bare[1].kind, FieldKind::Text(String::new()));
         assert_eq!(bare[2].kind, FieldKind::Text(String::new()));
+        assert_eq!(bare[3].kind, FieldKind::Text(String::new()));
     }
 
     #[test]
@@ -659,7 +790,7 @@ mod tests {
             assert!(
                 matches!(&fields[0].kind, FieldKind::OrderedList { items, .. } if items.is_empty())
             );
-            assert_eq!(fields[1].kind, FieldKind::Text(String::new()));
+            assert_eq!(fields[2].kind, FieldKind::Text(String::new()));
         }
     }
 
@@ -713,8 +844,8 @@ mod tests {
         );
         let mut draft = Domain::Scopes.draft(&config, "mine");
         // Type a new filter and an expression.
-        draft.fields[1].kind = FieldKind::Text("ndx".to_string());
-        draft.fields[2].kind = FieldKind::Text("npv > 0".to_string());
+        draft.fields[2].kind = FieldKind::Text("ndx".to_string());
+        draft.fields[3].kind = FieldKind::Text("npv > 0".to_string());
         // Drop `lhu` from the list, as `x` does.
         if let FieldKind::OrderedList { items, .. } = &mut draft.fields[0].kind {
             items.retain(|i| i.name != "lhu");
@@ -835,7 +966,7 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].name, "book");
         assert_eq!(items[0].note.as_deref(), Some("BK002, BK003"));
-        assert_eq!(draft.fields[1].kind, FieldKind::Text("spx".to_string()));
+        assert_eq!(draft.fields[2].kind, FieldKind::Text("spx".to_string()));
 
         let item = to_table(&draft, Destination::Doc);
         let text = super::super::object_text("mine", item);
@@ -1072,5 +1203,163 @@ mod tests {
         assert_eq!(scope.dimensions[0].values, ["BK001"]);
         assert_eq!(scope.text.as_deref(), Some("spx"));
         assert!(scope.expression.is_none());
+    }
+
+    fn config_with_scope_and_expressions(scopes: &str, expressions: &str) -> Config {
+        let datasets = LayerDoc::builtin(
+            "datasets",
+            "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\ncategorical = true\n\
+             [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n\
+             [risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n",
+        )
+        .unwrap();
+        let scopes = LayerDoc::builtin("scopes", scopes).unwrap();
+        let expressions =
+            LayerDoc::builtin(geode_core::config::EXPRESSIONS_DOC, expressions).unwrap();
+        Config::load(&ConfigSources {
+            builtin: vec![datasets, scopes, expressions],
+            desk: None,
+            user: None,
+        })
+    }
+
+    fn list_rows(list: &[ListItem]) -> Vec<(&str, bool, Option<&str>)> {
+        list.iter()
+            .map(|i| (i.name.as_str(), i.included, i.note.as_deref()))
+            .collect()
+    }
+
+    /// The named list holds the scope's own references in order, each
+    /// ticked, a dangling one noted `missing` and an unparseable one
+    /// `invalid`; every other defined name is available, unticked.
+    #[test]
+    fn the_named_field_notes_missing_and_invalid_names_and_offers_the_rest() {
+        let config = config_with_scope_and_expressions(
+            "[mine]\nnamed = [\"liq\", \"gone\", \"broken\"]\n",
+            "[liq]\nexpression = \"npv > 0\"\n[broken]\nexpression = \"npv >\"\n\
+             [hedges]\nexpression = \"npv < 0\"\n",
+        );
+        let fields = Domain::Scopes.fields(&config, Some("mine"));
+        assert_eq!(fields[0].key, "dimensions");
+        assert_eq!(fields[1].key, "named");
+        assert_eq!(fields[1].label, "Named expressions");
+        let FieldKind::OrderedList { items, available } = &fields[1].kind else {
+            panic!("named is a list");
+        };
+        assert_eq!(
+            list_rows(items),
+            [
+                ("liq", true, None),
+                ("gone", true, Some("missing")),
+                ("broken", true, Some("invalid")),
+            ]
+        );
+        assert_eq!(
+            list_rows(available.as_deref().unwrap()),
+            [("hedges", false, None)]
+        );
+    }
+
+    /// `fold` writes the ticked names, in list order, and drops the key
+    /// outright once none is ticked.
+    #[test]
+    fn fold_writes_only_ticked_names_and_drops_the_key_when_none_is() {
+        let config = config_with_scope_and_expressions(
+            "[mine]\nnamed = [\"liq\", \"hedges\"]\n",
+            "[liq]\nexpression = \"npv > 0\"\n[hedges]\nexpression = \"npv < 0\"\n",
+        );
+        let mut draft = Domain::Scopes.draft(&config, "mine");
+        let set_ticks = |draft: &mut Draft, liq: bool, hedges: bool| {
+            let FieldKind::OrderedList { items, .. } = &mut draft.fields[1].kind else {
+                panic!("named is a list");
+            };
+            items[0].included = liq;
+            items[1].included = hedges;
+        };
+        set_ticks(&mut draft, false, true);
+        fold(&mut draft);
+        let written: Vec<&str> = draft.source["named"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(written, ["hedges"]);
+        set_ticks(&mut draft, false, false);
+        fold(&mut draft);
+        assert!(!draft.source.contains_key("named"));
+    }
+
+    /// While the Values stage has stashed the object's fields, `fold`
+    /// leaves `source.named` alone rather than dropping it.
+    #[test]
+    fn fold_leaves_named_alone_while_the_values_stage_is_open() {
+        let config = config_with_scope_and_expressions(
+            "[mine]\nnamed = [\"liq\"]\n[mine.dimensions]\nbook = [\"BK001\"]\n",
+            "[liq]\nexpression = \"npv > 0\"\n",
+        );
+        let mut draft = Domain::Scopes.draft(&config, "mine");
+        assert!(draft.enter_values("book", Vec::new()));
+        fold(&mut draft);
+        assert!(draft.source.contains_key("named"));
+    }
+
+    /// The browse summary names the scope's named expressions after its
+    /// selections.
+    #[test]
+    fn the_summary_names_the_named_expressions() {
+        assert_eq!(
+            summary(&value(
+                "named = [\"liq\", \"hedges\"]\n[dimensions]\nbook = [\"BK001\"]\n"
+            )),
+            "book ∈ BK001; ≡ liq, hedges"
+        );
+    }
+
+    /// A ticked name that is missing or invalid warns at its own path and
+    /// flags its own row; neither blocks the commit.
+    #[test]
+    fn validate_warns_for_a_missing_or_invalid_ticked_name() {
+        let config = config_with_scope_and_expressions(
+            "[mine]\nnamed = [\"liq\", \"gone\", \"broken\"]\n",
+            "[liq]\nexpression = \"npv > 0\"\n[broken]\nexpression = \"npv >\"\n",
+        );
+        let mut draft = Domain::Scopes.draft(&config, "mine");
+        fold(&mut draft);
+        let diags = validate(&draft, &config);
+        let named: Vec<(&str, &str)> = diags
+            .iter()
+            .filter(|d| {
+                d.path
+                    .as_deref()
+                    .is_some_and(|p| p.starts_with("scopes.mine.named."))
+            })
+            .map(|d| (d.path.as_deref().unwrap(), d.message.as_str()))
+            .collect();
+        assert_eq!(named.len(), 2, "{diags:?}");
+        assert_eq!(
+            named[0],
+            (
+                "scopes.mine.named.gone",
+                "named expression 'gone' is missing"
+            )
+        );
+        assert_eq!(named[1].0, "scopes.mine.named.broken");
+        assert!(
+            named[1]
+                .1
+                .starts_with("named expression 'broken' is invalid: "),
+            "{}",
+            named[1].1
+        );
+        assert!(
+            diags
+                .iter()
+                .all(|d| d.severity == geode_core::config::Severity::Warning)
+        );
+        assert_eq!(
+            draft.row_for_path(DOC, "scopes.mine.named.gone"),
+            Some(super::super::EditRow::Item { field: 1, item: 1 })
+        );
     }
 }

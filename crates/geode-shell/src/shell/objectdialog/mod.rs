@@ -2160,6 +2160,9 @@ impl Draft {
                 // list is representable at all (see this function's doc).
                 let dest = self.fields[field].dest;
                 let label = self.fields[field].label.clone();
+                // A scope's named expressions may be emptied: no reference at all
+                // is an ordinary scope, written without the key.
+                let may_empty = self.fields[field].key == "named";
                 let FieldKind::OrderedList { items, .. } = &mut self.fields[field].kind else {
                     return Step::Inert;
                 };
@@ -2169,6 +2172,7 @@ impl Draft {
                 // The Values stage may empty its list — that is "drop this dimension",
                 // folded by the adapter; the guard is a Groupings/Views rule.
                 if included
+                    && !may_empty
                     && dest == Destination::Doc
                     && self.values.is_none()
                     && items.iter().filter(|i| i.included).count() == 1
@@ -2508,10 +2512,8 @@ impl Draft {
             } else {
                 rest.strip_prefix(&format!("{}.", field.key))?
             };
-            let raw_index = after
-                .split('.')
-                .next()
-                .and_then(|s| s.parse::<usize>().ok());
+            let segment = after.split('.').next().filter(|s| !s.is_empty());
+            let raw_index = segment.and_then(|s| s.parse::<usize>().ok());
             match (&field.kind, raw_index) {
                 (FieldKind::OrderedList { items, .. }, Some(raw_index)) => {
                     let item = self
@@ -2523,6 +2525,14 @@ impl Draft {
                         Some(EditRow::Field(i))
                     }
                 }
+                // A list keyed by member name (a scope's `named.<name>` or
+                // `dimensions.<column>`) flags that member's row; a name the list
+                // no longer holds falls back to the field row.
+                (FieldKind::OrderedList { items, .. }, None) => Some(
+                    segment
+                        .and_then(|name| items.iter().position(|item| item.name == name))
+                        .map_or(EditRow::Field(i), |item| EditRow::Item { field: i, item }),
+                ),
                 _ => Some(EditRow::Field(i)),
             }
         })
