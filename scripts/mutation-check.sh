@@ -3394,8 +3394,8 @@ run_mutation "blotter: :filter narrows only this tile" \
 
 run_mutation "blotter: an unscoped tile keeps its own filter" \
   crates/geode-blotter/src/tile.rs \
-  '                self.tile_scope.clone()' \
-  '                Scope::default()' \
+  '                Ok(self.tile_scope.clone())' \
+  '                Ok(Scope::default())' \
   geode-blotter an_unscoped_tile_still_applies_its_own_filter
 
 run_mutation "blotter: filter validates against the dataset" \
