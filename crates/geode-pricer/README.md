@@ -22,11 +22,11 @@ The pure core (`core`, no element, entity, window, or data service):
 | `columns`, `views` | Column vocabulary, prepared column plans, and cell text. |
 | `package` | A package row's aggregated cells: its legs' distinct values in leg order joined with `/`, and the package quantity while the legs fit its template; how an edit to one of those cells maps onto its legs. |
 | `cell` | Cell commit validation, the typeahead vocabularies, the expiry date commit, and nudging. |
-| `entry` | Where `o` lands, the entry bar's label, and the entry history. |
+| `entry` | Where `o` lands, lifting a typed package out of a leg position, the entry bar's label, and entry history. |
 | `complete` | Entry-bar completion: the slot at the caret, suggestions, hint, and the Tab cycle. |
 | `clip` | The yank register and where `p`/`shift+p` land. |
 | `tree` | Package expansion and the visible-row walk. |
-| `commands` | The `:` vocabulary: parse and completions. |
+| `commands` | The `:` vocabulary (including `:autosize [reset]`): parse and completions. |
 | `storage` | The frozen `pricer_sheets` declaration; conversion between sheets, document rows, and a document answer. |
 
 The tile:
@@ -39,7 +39,7 @@ The tile:
 | `delegate` | The table delegate: cells, the tree column (indent, chevron, template tag), editor, expiry date field. |
 | `header` | The prepared header row and footer. |
 | `popup` | The typeahead, the entry bar's completion list, and the `.` action menu. |
-| `session` | The tile's session record. |
+| `session` | The tile's session record, including `:autosize`'s fitted widths (`column_widths`, read leniently). |
 | `content` | The factory, keymap fragment, actions, settings, and the read-only `UnderlyingSource` seam. |
 | `tile` | `PricerTile`: modes, verbs, repricing, write-behind, load. |
 
@@ -59,7 +59,7 @@ a tile through (`PricerTile::sheet`, `PricerTile::is_loading`). `geode-app`'s
 dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 `--workspace` builds on one feature set.
 
-## Rules this crate pins
+## Invariants
 
 - Completion never runs in render; the tile refreshes it on every text change,
   history step, commit and reload, and a Tab at a moved caret re-ranks first.
@@ -67,11 +67,27 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   is skipped as its echo, so the Tab cycle survives it. `lib::init` reclaims
   `tab`/`shift-tab` in the bar's `PricerEntry` context from gpui-component's
   focus cycling.
+- Entry completion suggests configured underlyings, upcoming monthly expiries,
+  tenors, option types, templates, and barrier kinds. It replaces the token at
+  the caret (one slash-separated part for expiries or strikes); quantities,
+  strikes, and barrier levels have hints but no suggestions. Tab/Shift-Tab
+  cycle candidates, a pointer press accepts a row, and Enter parses the typed
+  line without implicitly accepting the highlight.
+- The app supplies `[pricing] underlyings` through `UnderlyingList`, which trims
+  and uppercases names, drops blanks and duplicates, and preserves first occurrence
+  order. Tiles cache names by provider revision. An absent setting clears the list;
+  a non-array value warns and keeps the previous list on reload, while non-string
+  array elements warn and are skipped. Suggestions do not restrict typed names.
+- A package typed at a leg position becomes a root after the containing package;
+  a single line still becomes a leg. After insertion the bar advances from the
+  actual landing place, so further rows follow the new root.
 - Every edit passes through `Sheet::apply`, which returns the undo operation.
   New tile edits use `PricerTile::apply_edit`/`apply_edits`; undo and redo
   apply through the LIFO history. Loading replaces the sheet. Deliveries,
   stale marking, and sheet metadata updates have separate paths.
 - Package rows derive from their legs; they are not independent instruments.
+  Their pricing timestamp is the oldest present leg-attempt timestamp,
+  including failed attempts.
 - A package row's qty and eight text columns aggregate its legs: the
   distinct values, compared as values, in leg order joined with `/` and
   spelled as a line's cell spells them. Barrier columns read only barrier
@@ -92,10 +108,9 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   changes whether a qty rescales by weight) closes with `MOVED`.
 - Shorthand rendering uses a template only while the legs still match its
   current table (an overflowing quantity never matches); otherwise it prints
-  the legs one per line. The grid keeps
-  the shorthand as the row's find key and paints only a package's template
-  token. A package's template is a name, not a table: loading a sheet never
-  fails on a name the configured set lacks.
+  the legs one per line. The grid keeps the shorthand as the row's find key
+  and paints only a package's template token. Loading accepts unresolved
+  template names because stored instruments remain sufficient for repricing.
 - `TemplateSet::from_doc_over` keeps the last valid definition per name.
   An entry dropped with an error keeps the previous set's definition of
   its name, in the entry's own position. A name absent from the document
@@ -143,12 +158,12 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   field: the palette's commit focuses the shell root first, and an open bar
   without focus reads `insert` while shell bindings take shifted letters.
 - A line's expiry edits in `geode_widgets::datefield`'s pure field (a
-  package row's expiry edits as text, above); the tile owns its focus
-  handle (what `holds_focus` and the shell's insert predicate read) and
-  routes keys through `datefield::route` in `date_field_key` before they
-  bubble to the shell. The painter and key
-  routing are a local copy of market-data's grid pattern (a module may not
-  depend on a sibling). A tenor seeds from the app clock's today, never
+  package row's expiry edits as text, above); the
+  tile owns its focus handle (what `holds_focus` and the shell's insert
+  predicate read) and routes keys through `datefield::route` in
+  `date_field_key` before they bubble to the shell. The painter and key
+  routing use the shared widget without depending on sibling feature modules.
+  A tenor seeds from the app clock's today, never
   `chrono::Local`. The tenor note is kept on the editor and restored after
   any key or refusal until the field commits or cancels.
 - `cell::commit_edits` answers an empty `Vec` (and `cell::commit_date`
@@ -166,6 +181,9 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   column disappears, the field closes with `MOVED`; deferred window access
   blurs its retained input only if it still owns focus. Chrome rebuilds
   refresh open-menu rows and keep the highlight on an action or view.
+- `g m` opens the module picker with the cursor row's underlying as launch
+  context. A package contributes an underlying only when all its legs share
+  one; an empty sheet or mixed-underlying package contributes none.
 - The tile arrives at flip barriers itself; it submits no view query.
 - An empty sheet is never saved. A sheet whose load failed is never saved
   (`save_blocked`); a change not yet queued by the store (`dirty`), or whose
@@ -260,4 +278,10 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   the same limitation.
 - Column widths are fixed pixels and do not follow font size. The defaults
   fit the tested samples at the largest font step and leave more space at
-  smaller steps.
+  smaller steps. `:autosize` (or the palette's "Autosize columns") fits
+  every column to the visible grid rows at the current rem size, so a
+  collapsed package's legs are not measured. It refuses with "nothing loaded
+  to fit" while the sheet loads or has no rows. It stores the widths by
+  vocabulary name (`__tree` for the tree) in the session record. A font
+  change does not rescale fitted widths; run `:autosize` again. A fitted
+  width also overrides a view width changed later, until `:autosize reset`.

@@ -1,4 +1,4 @@
-//! The blotter's selection summary (grid selection spec §3.3, §4.3):
+//! Selection summaries:
 //! per selected measure column, the aggregate over the selection's
 //! top-most rows only — a group row already carries its children's
 //! total — with non-additive cells, and columns that do not add up
@@ -44,7 +44,7 @@ pub fn summarize(
             let column = &plan.columns[c];
             // Attribution says whether a value belongs to its row, not
             // whether the column adds up: only the compiler's summable
-            // mark may produce a Σ.
+            // mark permits a footer total.
             let mut acc = if column.summable {
                 Accumulator::default()
             } else {
@@ -196,7 +196,7 @@ mod tests {
     #[test]
     fn a_max_measure_over_sibling_groups_shows_no_sum() {
         // L1 and L2 (display rows 1..=3; SPX folds into L1). Their maxima
-        // are 5 and 4: a footer printing Σ 9.00 would total two maxima.
+        // are 5 and 4: a footer printing 9.00 would total two maxima.
         let text = text_of("peak", (1, 3));
         assert_eq!(text, "—‡");
     }

@@ -310,11 +310,9 @@ pub fn commit_date(sheet: &Sheet, row: usize, date: NaiveDate) -> Result<Option<
     Ok(changed(sheet, row, edit))
 }
 
-/// `up`/`down` in an open numeric editor (spec §8.4): `steps` units of the
-/// TEXT's own precision (planning decision 2), a strike's trailing `%`
-/// kept, an empty shift nudged from `0`. A barrier level is absolute
-/// (`commit` refuses a `%` on one), so a barrier's `%` is not a number to
-/// nudge either — the two answer the same text the same way.
+/// Nudge numeric editor text by `steps` units of its written precision. Preserve a
+/// strike's trailing `%` and start empty shifts at zero. Barrier levels must be
+/// absolute, so both nudging and committing refuse a percent suffix.
 pub fn nudge(kind: ColumnKind, text: &str, steps: i64) -> Result<String, String> {
     let t = text.trim();
     // A package cell's `/` list has no one number to step.
@@ -590,7 +588,7 @@ mod tests {
         assert!(nudge(ColumnKind::Expiry, "Z26", 1).is_err());
     }
 
-    /// Review finding: a barrier level is absolute. `commit` refuses
+    /// A barrier level is absolute. `commit` refuses
     /// `4200%`, so `nudge` must not step it into another `%` text that
     /// only a later commit would refuse.
     #[test]

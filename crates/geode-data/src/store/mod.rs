@@ -1,9 +1,7 @@
-//! The store: one persistent DuckDB database that is the system of record.
-//! History survives relaunch and CSV ingest is paid once.
+//! Persistent DuckDB storage for payloads, history, and publication metadata.
 //!
-//! One dedicated writer connection serves ingest; readers are independent
-//! connections on the same database. No in-memory mirror: a
-//! dual store doubles the coherency surface for a win nothing has measured.
+//! One dedicated writer connection serves ingest. Query workers use independent
+//! connections on the same database; no separate in-memory copy is maintained.
 
 pub mod catalog;
 pub mod ddl;
@@ -36,17 +34,10 @@ pub enum StoreError {
     /// panicked, so the pool can shut down the workers it already spawned
     /// instead of leaving them detached.
     SpawnWorker { source: std::io::Error },
-    /// A document was refused before it reached SQL at all: the message
-    /// disagreed with the dataset it claims to be (`DocumentRows::validate`,
-    /// market-data spec §6.2). A variant of its own rather than a `Sql`
-    /// with a fabricated statement, because there is no statement — and a
-    /// caller that wants to report "the feed sent something malformed"
-    /// separately from "the database refused a statement" can match on it.
+    /// Document validation or staging could not match the declared dataset.
+    /// The message describes a document error rather than a SQL statement.
     Document(String),
-    /// Series rows were refused before they reached SQL at all
-    /// (`SeriesRows::validate`, timeseries spec §4.6) — a variant of its
-    /// own for the same reason `Document` is: there is no statement to
-    /// report.
+    /// Series rows failed `SeriesRows::validate` before any SQL was issued.
     Series(String),
     /// A scope was refused before it reached SQL at all — a variant of its
     /// own for the same reason `Document` and `Series` are: there is no
@@ -109,8 +100,8 @@ impl Store {
         Ok(Store { writer, path })
     }
 
-    /// The single writer connection. DuckDB is single-writer/multi-reader,
-    /// so every publish transaction serializes through this (spec §5.6).
+    /// The ingest writer connection. Callers serialize publication and maintenance
+    /// through this connection so transactions and shared staging tables do not overlap.
     pub fn writer(&self) -> &Connection {
         &self.writer
     }
@@ -127,21 +118,15 @@ impl Store {
         &self.path
     }
 
-    /// Create the tables a dataset owns, one family at a time: a live and
-    /// archive pair per grain for the measure family (every grain it
-    /// declares a measure or an attribute at), one such pair for the whole
-    /// dataset for the document family, and for the series family no pair
-    /// at all — its one append-only table plus the coverage table beside
-    /// it (timeseries spec §4.4). Idempotent.
+    /// Create missing tables for a dataset: one live/archive pair per declared
+    /// measure grain, one pair per document dataset, or one series table and its
+    /// coverage table. Repeated calls leave existing tables unchanged.
     ///
-    /// `CREATE TABLE IF NOT EXISTS` never migrates an existing table, so a
-    /// dataset whose column set grew since the database was written keeps
-    /// the old table and fails at publish with a column-count mismatch —
-    /// see `CLAUDE.md` on deleting the demo database after a schema change.
+    /// This does not migrate payload schemas. An existing table with different
+    /// columns can therefore fail publication with a column-count mismatch.
     pub fn apply_schema(&self, ds: &DatasetSpec) -> Result<(), StoreError> {
         if ds.is_series() {
-            // No live/archive pair: one table plus its coverage table
-            // (timeseries spec §4.4), created once for both "kinds".
+            // Series and coverage tables are created once; neither has a live/archive pair.
             for sql in series::create_series_tables_sql(ds) {
                 self.writer
                     .execute_batch(&sql)

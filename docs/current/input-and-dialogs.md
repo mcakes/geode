@@ -257,6 +257,22 @@ module owns how those events affect its selection and search state. Opening
 the palette remains available through its effective toggle binding and uses
 the command line's cancellation path.
 
+### Autosize columns
+
+Two doors reach one route. `:autosize` in a blotter, market-data, or pricer
+tile fits every column of that tile's table to its content, and
+`:autosize reset` drops the fitted widths and returns to the configured or
+default ones; both are in each module's completions. The palette's
+"Autosize columns" (`tile::autosize_columns`, category Tile, unbound by
+default) calls `TileContent::autosize_columns` on the focused tile's
+occupant alone, which in the three table modules is the same method the
+command runs. The trait default refuses with "this tile has no table", and
+the shell paints a refusal, or the same text when no tile is focused, as a
+status notice that clears on the next dispatch. A table tile with no rows to
+measure refuses a fit with "nothing loaded to fit" and keeps its widths.
+`:autosize reset` never refuses. Measurement and storage are
+described in [features](features.md#autosized-columns).
+
 ## Scope text and stack selection
 
 The toolbar scope field edits `Frame::scope().text` live. Focus captures the
@@ -386,7 +402,8 @@ in every mode and typing clears the error. The term dialog remembers the term
 it was seeded with; if the scope changed while it was open so that its index
 no longer holds that term (gone, or a different term in its place), an edit
 or an empty (removing) commit refuses inline rather than touch whichever term
-now has that index. Escape applies nothing.
+now has that index. Escape discards the scope draft; definitions already
+saved with `mod+s` remain.
 `frame::clear_expression` drops the whole expression layer without a dialog;
 with no expression it does nothing. `frame::add_expression` is bound to
 `mod+x` by default, as `frame::pick` is to `mod+p`; neither
@@ -415,7 +432,8 @@ A save writes `[name] expression = "<text>"` to the user layer of
 `expressions.toml` through the object dialog's write path, rebuilds the
 frame's named expressions from the pending configuration at once (so the new
 name resolves before the write reaches disk), empties the field, and stages
-the name. In Whole and Add nothing reaches the frame scope until Enter.
+the name. In Whole and Add nothing reaches the frame scope until Enter;
+Escape cancels that draft without removing the saved definition.
 
 In Term mode the save names the term (the entry reads `Name this term ·
 name`, the footer chip `name this term`): Enter on a name writes the field's
@@ -451,7 +469,10 @@ pure state in
 [`exprcomplete.rs`](../../crates/geode-shell/src/exprcomplete.rs)) shows what
 fits at the caret, reading the partial text through
 [`geode_core::scope::complete`](../../crates/geode-core/src/scope/complete.rs).
-It updates on every keystroke and every caret move, not only on a full parse.
+It refreshes when text or caret changes without requiring a full parse. Rows
+are ranked against the token prefix and capped at 50. The vocabulary combines
+columns across datasets, then derived dimensions; the first declaration of a
+name determines its role and type.
 
 The rows depend on the caret's position in the grammar:
 
@@ -483,17 +504,13 @@ number, date, and timestamp offer `= != < <= > >= in`; bool offers `= !=`;
 a derived dimension offers `= != in`. `<>` still parses but is never offered;
 it is a synonym for `!=`.
 
-A value list is offered only for a categorical text column (a dimension's
-dictionary): a distinct query returns its values with row counts, requested
-once per column per dialog opening — the cache resets each time the field
-opens, and a failed request is not retried again within that opening. Every
-column is requested under one query-pool key, and the pool keeps only the
-newest request per key, so at most one request is outstanding: asking for a
-second column forgets a first that has not answered, and returning to it
-asks again rather than showing `loading values…` for good. A dialog pushed
-over an expression field can replace that field's request the same way, so a
-revealed field drops its values and asks again. The
-hint reads `loading values…` while the request is in flight and `values
+Categorical text values come from a distinct query with row counts. Ready
+results and failures are cached per column until the field closes; a failure
+is not retried within that opening. All requests use one query-pool key, so
+requesting another column supersedes an unanswered request and removes its
+loading entry. Returning to that column requests it again. A dialog pushed
+over an expression field can supersede its request under the same key.
+Revealing the field clears cached values and requests them again. The hint reads `loading values…` while the request is in flight and `values
 unavailable: <reason>` if it fails. A derived dimension lists its configured
 labels with no query, and a bool column lists `true`/`false`. Every other
 kind — non-categorical text such as a key, and number, date, or timestamp
@@ -521,9 +538,9 @@ the new position; shift+tab moves the highlight back one row; the arrows and
 ctrl+p/ctrl+n move it by exactly one (page keys and ctrl+u/d/b/f stay the
 field's own caret keys). A row click inserts without moving focus out of the
 field. The click names its row by label, found in the list as it stands at
-the press, so a list rebuilt since paint never inserts a different row; the
-second press of a double-click is ignored, so it inserts once. Enter never inserts a suggestion; as the mode table above says, it
-always applies the whole draft. Every insertion is a range replace on the
+the press; if its label is absent, nothing is inserted. The second press of
+a double-click is ignored. Enter applies the draft according to the mode
+table above; it does not insert a suggestion. Every insertion is a range replace on the
 field's own text, so cmd+z undoes it like any other edit.
 
 A warning line under the rows names the first schema problem in the text — an
@@ -534,10 +551,13 @@ Syntax errors stay silent while typing; they surface only on Enter.
 
 Enter refuses a syntax error or a schema error (the same check the warning
 line uses) with its message, and the text stays in the field. With no schema
-loaded (an empty vocabulary), the schema check does nothing and Enter
-accepts the text.
+loaded (an empty vocabulary), Enter still parses syntax but skips schema
+checks.
 
-Known limitations: the grammar has no date literal, so a malformed date is
-only caught at query time; values are not narrowed by the text already typed;
-ordering on a text column is not checked; and the blotter's own `:filter`
-command-line completion is unchanged by any of this.
+Validation checks names against the combined vocabulary rather than an
+individual tile's dataset. It checks forbidden derived-dimension operators,
+but does not enforce every type-specific operator restriction shown in the
+suggestions. Dates are quoted strings, so malformed dates can still fail at
+query time. Typed prefixes rank value suggestions without narrowing the
+underlying distinct request. The blotter's `:filter` command uses its separate
+command-line completion.

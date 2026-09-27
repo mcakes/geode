@@ -1,31 +1,10 @@
-//! `publish_document`'s store-side cost (spec §5.4 step 3) at the same two
-//! CVI grid shapes `geode-documents`'s own `cvi` bench uses — 20 terms ×
-//! 30 nodes (600 rows, a single underlying's surface, the shape a panel
-//! shows) and 200 × 300 (60,000 rows, well past anything the desk sends).
-//! Read the two benches side by side: `cvi` measures parse + write (the
-//! receiver thread's cost, before a document ever reaches the runner),
-//! this one measures stage + publish (the runner's cost, after).
+//! Document staging and publication for 600-row and 60,000-row CVI grids.
+//! The `geode-documents` CVI benchmark separately measures parsing and writing.
 //!
-//! The CVI `DatasetSpec` is read from the real `examples/demo-config/
-//! datasets.toml` (`include_str!`, the whole file — `SchemaSpec::from_doc`
-//! tolerates the sibling `risk_snapshot` declaration in it fine) rather
-//! than a hand-typed copy, so this bench can never quietly drift from the
-//! schema `--demo` actually runs on. `crate::store::ddl::tests_support::
-//! cvi_dataset` is the crate's own such fixture, but a bench cannot see a
-//! `#[cfg(test)]` item, hence this file's own copy of the *building*, not
-//! the schema text.
-//!
-//! Each criterion iteration gets its own temp store (`iter_batched`,
-//! `PerIteration`) — the same per-iteration-store shape `benches/
-//! ingest.rs` uses — so a hundred-odd publishes never share one growing
-//! archive that would skew later samples. The untimed setup half of each
-//! iteration publishes the document once already; the TIMED half
-//! publishes it again over the same key with a later `source_time`. That
-//! is deliberate: the demo bus's steady state is exactly this — every
-//! key republishes on its own cadence — so what this bench reports is
-//! the cost of a live document overwriting a live document, not the
-//! one-off, less interesting cost of the first insert into an empty
-//! table.
+//! The dataset schema comes from `examples/demo-config/datasets.toml`. Each
+//! iteration gets a fresh temporary store and an untimed initial publication.
+//! The timed publication replaces the same key at a later source time, including
+//! archiving the outgoing document without accumulating history across samples.
 
 use chrono::{DateTime, Utc};
 use criterion::{Criterion, criterion_group, criterion_main};

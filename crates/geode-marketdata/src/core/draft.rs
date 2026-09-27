@@ -18,25 +18,17 @@ use geode_core::schema::ColumnType;
 use gpui::SharedString;
 use std::collections::{BTreeMap, HashMap};
 
-/// The document generation an open draft's edits were made against: the
-/// document's source time, and the store generation that delivered it when
-/// one was reported.
+/// Source time and optional store generation identifying the document a draft
+/// was edited against. Both are needed to detect a corrected republish that
+/// keeps its source time but changes the positions addressed by cell edits.
 ///
-/// Source time alone is not an identity. A corrected republish keeps its
-/// source time, and `Draft::edits` is keyed by grid position — so a same-time
-/// republish that reorders or adds a node would re-point every edit onto a
-/// different node, paint it there, and `:upload` would send it. The
-/// generation is what tells the two apart.
-///
-/// `generation` is `None` only where nothing named one. Two cases reach it:
-/// a session file written before `base_generation` was persisted, or without
-/// it — a restored draft otherwise carries the generation it was written
-/// with; and a historical *view* read, whose era pins one generation per
-/// partition, so no scalar names it. A document read names a generation under
-/// both live and historical as-of, which is why an open market-data draft
-/// normally has one. An unknown generation is not evidence of movement, so
-/// identity falls back to the source time — the behaviour before this pair
-/// existed.
+/// Production document reads report a generation for live and historical
+/// results. A restored draft may omit `base_generation`; other snapshots may
+/// also omit generation provenance. [`Self::differs_from`] then compares only
+/// source time, which cannot detect a same-time republish. Exact equality of
+/// the pair is stricter: it also distinguishes known from unknown generations.
+/// The tile uses exact equality when retaining a base snapshot or reusing an
+/// echo comparison.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DocumentBase {
     /// RFC 3339.
@@ -241,12 +233,9 @@ impl Draft {
         matches!(self.state, DraftState::Behind { .. })
     }
 
-    /// Record one edit. `base` is the whole identity of the generation on
-    /// screen — source time *and* store generation, never the time alone,
-    /// because a corrected republish keeps the time and only the pair tells
-    /// the two apart. It is stored only while the draft is empty, because
-    /// every edit in one draft is against one generation and a later
-    /// keystroke must never quietly restamp the set.
+    /// Record an edit and its labels against the supplied document base. Capture
+    /// the base when the draft is empty or has none; subsequent edits keep it so
+    /// one draft cannot silently span multiple document generations.
     pub fn set(
         &mut self,
         cell: (usize, usize),
@@ -267,11 +256,9 @@ impl Draft {
         }
     }
 
-    /// Read an existing numeric edit; absent, date, and text edits return
-    /// `None`. Callers use this before the painted document value so
-    /// successive bumps compose, and the value keeps its type so an integer
-    /// column's holding is never widened on the way through. The caller also
-    /// filters eligible numeric columns; this method only reads.
+    /// Borrow an existing `F64` or `I64` edit without converting its type.
+    /// Other values and absent edits return `None`. Callers prefer this value
+    /// over the underlying document so successive bumps compose.
     pub fn numeric_edit(&self, cell: (usize, usize)) -> Option<&Value> {
         match self.edits.get(&cell)? {
             value @ (Value::F64(_) | Value::I64(_)) => Some(value),
@@ -513,17 +500,15 @@ impl Draft {
         Ok(n)
     }
 
-    /// Process a delivered generation and report whether state changed.
-    /// An editing draft becomes `Behind` when the delivered generation differs
-    /// from the base; a behind draft returns to `Editing` when its own base is
-    /// delivered again. Clean and sent drafts are unchanged; the tile checks
-    /// sent echoes.
+    /// Process delivery and report whether the draft state changed. Editing
+    /// becomes Behind when the delivery differs from the base; Behind returns
+    /// to Editing when the base is delivered again. Further differing deliveries
+    /// update the Behind target. Clean and Sent states are unchanged here.
     ///
-    /// Identity is [`DocumentBase`]: source time *and*, when both are known,
-    /// generation. A corrected republish at the same source time therefore
-    /// reaches `Behind`, where before it was invisible and could re-point
-    /// position-keyed edits onto other nodes. When either generation is
-    /// unknown the comparison falls back to source time alone.
+    /// [`DocumentBase::differs_from`] compares source times and, when both are
+    /// known, store generations. Missing generations fall back to source time,
+    /// so a same-time republish is detectable only when both generations are known.
+    /// The tile handles Sent echoes separately.
     pub fn on_delivered(&mut self, delivered: &DocumentBase) -> bool {
         match &self.state {
             DraftState::Editing
@@ -816,13 +801,9 @@ impl Draft {
         let mut table = toml::Table::new();
         if let Some(base) = &self.base {
             table.insert("base".into(), toml::Value::String(base.as_of.clone()));
-            // Only when known — but write it whenever it is, because this
-            // is also the parked-draft route: an underlying switch round
-            // trips a live draft through this table in session, and dropping
-            // the generation here would silently return those edits to
-            // time-only identity. A table without the key is a session file
-            // predating it, and `DocumentBase::differs_from` treats a missing
-            // generation as unknown, not as "unchanged".
+            // Preserve known generations in both saved sessions and parked drafts.
+            // Omit unknown generations rather than inventing an ID. Losing a known
+            // ID would prevent detection of same-time republishes after restoration.
             if let Some(generation) = base.generation {
                 table.insert("base_generation".into(), toml::Value::Integer(generation));
             }
@@ -1064,13 +1045,14 @@ pub(crate) fn local_hhmm(rfc3339: &str, clock: geode_core::clock::Clock) -> Stri
     }
 }
 
-/// Add `delta` to `current` at the column's declared type.
+/// Add `delta` using the column's declared numeric type.
 ///
-/// An integer column does integer arithmetic: neither the value nor the
-/// result passes through an `f64`, so a holding above 2^53 survives a bump.
-/// A fractional delta, a fractional value already sitting in an integer
-/// column, a non-numeric value, and an overflowing result are all refused
-/// by name — a plausible wrong quantity is worse than a refusal.
+/// For an `I64` current value, checked integer addition preserves values above
+/// 2^53 without conversion to `f64`. Fractional deltas, fractional current
+/// values, nonnumeric values, and integer addition overflow are refused.
+/// Whole finite `F64` current values are also accepted for integer columns.
+/// The delta arrives as `f64`, so precision already lost while parsing it
+/// cannot be recovered here. Floating columns use floating-point addition.
 pub fn bumped(current: &Value, delta: f64, ty: ColumnType, column: &str) -> Result<Value, String> {
     match ty {
         ColumnType::F64 => match current {
@@ -1093,9 +1075,8 @@ pub fn bumped(current: &Value, delta: f64, ty: ColumnType, column: &str) -> Resu
                 }
                 other => return Err(format!("bump: {column} holds {other:?}, not a number")),
             };
-            // `delta as i64` is exact for every whole delta a trader can
-            // type that an f64 represents exactly; beyond that the delta
-            // was already imprecise when it was parsed.
+            // Convert the already-parsed whole delta to `i64`. Precision lost in
+            // its `f64` representation cannot be recovered by this conversion.
             current
                 .checked_add(delta as i64)
                 .map(Value::I64)
@@ -1128,11 +1109,10 @@ pub fn group_sizes(model: &MatrixModel) -> BTreeMap<String, usize> {
     sizes
 }
 
-/// Parse a numeric cell at its declared type, refusing nonnumeric types and
-/// nonfinite floating values. An integer column parses as `i64` and STAYS
-/// one: a round trip through a double loses every integer above 2^53,
-/// silently. Callers dispatch text, choice, and date cells separately.
-/// Errors retain the refused input.
+/// Parse trimmed text as the declared numeric type. Integer columns parse
+/// directly to `I64`, preserving values that `f64` cannot represent exactly.
+/// Floating columns require a finite `F64`. Refuse nonnumeric types; callers
+/// route text, choice, and date cells separately. Errors retain the input.
 pub fn parse_cell(text: &str, ty: ColumnType) -> Result<Value, String> {
     let trimmed = text.trim();
     match ty {
@@ -1259,16 +1239,15 @@ mod tests {
 
     #[test]
     fn a_same_time_republish_is_a_different_generation_when_both_ids_are_known() {
-        // The defect this branch closes: identical source times, different
-        // generations. Position-keyed edits must not be re-pointed silently.
+        // Equal source times with different known generations identify a
+        // republish. Position-keyed edits must not follow the changed grid.
         assert!(at_gen(BASE, 7).differs_from(&at_gen(BASE, 8)));
         assert!(!at_gen(BASE, 7).differs_from(&at_gen(BASE, 7)));
         // A different time always differs, generations or not.
         assert!(at_gen(BASE, 7).differs_from(&at_gen(NEWER, 7)));
         assert!(at(BASE).differs_from(&at(NEWER)));
-        // An unknown generation is not evidence of movement: a session
-        // file predating `base_generation` and a historical view read fall
-        // back to the source time, the behaviour before the pair.
+        // When either generation is unknown, only a source-time difference
+        // can establish a change. Equal times cannot rule out a republish.
         assert!(!at(BASE).differs_from(&at_gen(BASE, 9)));
         assert!(!at_gen(BASE, 9).differs_from(&at(BASE)));
     }
@@ -1378,8 +1357,8 @@ mod tests {
         );
     }
 
-    /// An as-of round trip back to the base timestamp restores `Editing`
-    /// without moving or dropping edits.
+    /// With unknown generation IDs, returning to the base source time restores
+    /// Editing without moving or dropping edits.
     #[test]
     fn the_base_generation_redelivered_brings_a_behind_draft_back_to_editing() {
         let mut draft = Draft::default();
@@ -1981,8 +1960,8 @@ mod tests {
 
     #[test]
     fn a_bump_of_an_integer_column_stays_an_integer_above_2_pow_53() {
-        // The f64 path turned 9007199254740993 + 1 into ...92, losing both
-        // the bump and the original value.
+        // An integer above 2^53 must retain its value through the bump; routing
+        // it through `f64` would round before the addition.
         assert_eq!(
             bumped(&Value::I64(9007199254740993), 1.0, ColumnType::I64, "lots"),
             Ok(Value::I64(9007199254740994))
@@ -2212,7 +2191,7 @@ mod tests {
     }
 
     /// Inserting and then deleting the only pending row leaves a clean draft
-    /// with no base timestamp, so later deliveries cannot mark it behind.
+    /// with no base, so later deliveries cannot mark it behind.
     #[test]
     fn dropping_the_only_inserted_row_leaves_a_clean_draft() {
         let mut d = Draft::default();

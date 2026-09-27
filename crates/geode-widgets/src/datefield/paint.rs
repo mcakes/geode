@@ -27,15 +27,10 @@ pub struct SegmentPaint {
     pub flush: bool,
 }
 
-/// The separator painted BEFORE segment `i`: none before the year, `-`
-/// inside the date, a space between date and time, `:` inside the time.
-/// `i` is the PAINTED index, and it equals `Segment::index()` only
-/// because every `Precision` shows a PREFIX of the six segments (year
-/// through some cutoff, never a gap) — the same assumption `paint`'s
-/// click callback makes calling `Segment::at(i)`. A non-prefix precision
-/// (a segment shown alone, say, or two shown with a gap between) would
-/// need `SegmentText` to carry its own `Segment` rather than relying on
-/// its position in the slice.
+/// Separator before a segment's painted index: dashes within the date,
+/// a space before the hour, and colons within the time. The slice must be a
+/// prefix of year/month/day/hour/minute/second; separators and click targets
+/// both derive segment identity from that position.
 fn separator_before(i: usize) -> Option<&'static str> {
     match i {
         0 => None,
@@ -45,15 +40,17 @@ fn separator_before(i: usize) -> Option<&'static str> {
     }
 }
 
-/// Paint `segments` (already in painted order, as
-/// [`super::DateTimeField::segments`] answers them) with `paint`'s
-/// colours, `suffix` after a gap when given, and a left mouse-down on
-/// segment `i` calling `on_segment(Segment::at(i))` and stopping
-/// propagation — the host's own container mouse-down (a click "elsewhere"
-/// that cancels an editor, say) must not also fire for a click aimed
-/// into a segment. Each segment carries the selector `"{selector}-{i}"`
-/// and the suffix `"{selector}-suffix"`, so a window test can find them.
-/// The font face is the caller's: set `font_family` on the container.
+/// Paint prepared segments in the prefix order returned by
+/// [`super::DateTimeField::segments`], followed by an optional suffix. Typing
+/// colors take precedence over active colors, then rest colors apply.
+///
+/// Left mouse-down invokes `on_segment` synchronously, then stops propagation
+/// so an enclosing editor does not also treat it as an outside click. The
+/// callback owns state changes, focus, and repaint notification; this painter
+/// installs no keyboard handler. The host sets the container's font family.
+///
+/// Debug selectors are `"{selector}-{i}"` for segments and
+/// `"{selector}-suffix"` for the suffix.
 pub fn paint(
     segments: &[SegmentText],
     suffix: Option<SharedString>,
@@ -177,20 +174,15 @@ mod tests {
         });
         let mut bounds = Vec::new();
         for i in 0..6 {
-            // `debug_bounds` takes `&'static str`, not `&str` — a dynamic
-            // selector has to leak to satisfy that, and the leak is
-            // bounded to these six loop iterations, never per-run or
-            // per-window.
+            // `debug_bounds` requires static selectors. This test leaks six short
+            // strings per invocation to provide them.
             let b = vcx.debug_bounds(Box::leak(format!("probe-seg-{i}").into_boxed_str()));
             assert!(b.is_some(), "segment {i}");
             bounds.push(b.unwrap());
         }
         assert!(vcx.debug_bounds("probe-seg-suffix").is_some());
-        // The painted order holds all the way across — a scrambled
-        // separator between two segments (the space before the hour, the
-        // colons inside the time) would still leave segment 0 left of
-        // segment 5, so the sweep checks every consecutive pair, not just
-        // the two ends.
+        // Check every adjacent pair: checking only the endpoints would miss
+        // an internal segment appearing out of order.
         for pair in bounds.windows(2) {
             assert!(
                 pair[1].origin.x > pair[0].origin.x,

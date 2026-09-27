@@ -7,8 +7,8 @@ use super::expansion::Path;
 /// identifier; market-data keys use the same one.
 pub const UNDERLYING_COLUMN: &str = "underlying_ref";
 
-/// The underlying on `path` (the cursor row's ancestors' tree texts, root
-/// excluded) under `grouping`, or `None`:
+/// The underlying on `path` (tree texts from the first grouping level through
+/// the cursor row, excluding the root) under `grouping`, or `None`:
 /// - when the grouping lacks the column;
 /// - for a row above that level (a subtotal, or the grand total's empty path);
 /// - for a NULL value, which is `None` in the path, never the text "NULL".

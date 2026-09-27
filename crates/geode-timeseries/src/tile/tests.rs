@@ -176,9 +176,6 @@ impl ModuleFactory for Handle {
     }
 }
 
-/// A `colors.toml` holding one name, `spx`, at `degrees` on the
-/// wheel — what `:color SPX.close spx` resolves against, and what a
-/// reload redefines.
 /// `n` HOURLY buckets ending an hour before the current hour, one
 /// `SlotResult` per number. Hourly and recent on purpose: every
 /// range this module's tests use (`1y`, `1w`) contains the span, and
@@ -683,10 +680,8 @@ impl Harness {
             })
             .expect("a field popup is open")
     }
-    /// Write the field the way nothing in the app does — through
-    /// `InputState::set_value`, which emits NO `Change` event
-    /// (CLAUDE.md's trap): every commit path has to re-feed the
-    /// field's live text itself, and this is what proves it does.
+    /// Set input text without emitting Change, proving commits read live text
+    /// rather than relying only on the input's change subscription.
     fn set_input_text(&self, vcx: &mut gpui::VisualTestContext, text: &str) {
         let text = text.to_string();
         vcx.update(|window, cx| {
@@ -2743,11 +2738,9 @@ fn every_closer_blurs_before_dropping_the_focused_handle(cx: &mut gpui::TestAppC
         vcx.update(|w, cx| w.focused(cx).is_none()),
         "expression field: blurred, then dropped"
     );
-    // The dates editor holds a bare handle rather than an
-    // `InputState`, and the rule is the same: an unblurred dead
-    // handle leaves `Window::focused` pointing at nothing and the
-    // shell's own focus-return net never fires (CLAUDE.md). Its
-    // `escape` goes back to the range menu, through the closer.
+    // The dates editor's bare focus handle needs the same blur-before-drop
+    // cleanup as an InputState. Otherwise the shell can mistake a dead handle
+    // for retained focus. Escape returns to the range menu through that cleanup.
     h.dispatch(&mut vcx, "range_custom", None);
     assert!(vcx.update(|w, cx| w.focused(cx).is_some()));
     h.dispatch(&mut vcx, "cancel", None);
@@ -2894,8 +2887,8 @@ fn chart_bounds(vcx: &mut gpui::VisualTestContext) -> gpui::Bounds<gpui::Pixels>
         .expect("the chart surface is painted")
 }
 
-/// A point inside the upper plot: the surface's centre is always in
-/// it (the axis column is 44 px wide, the x strip 18 px tall).
+/// A point near the top of the upper plot, horizontally offset from the
+/// surface's center. These fixtures leave this position clear of the axes.
 fn plot_point(vcx: &mut gpui::VisualTestContext, dx: f32) -> gpui::Point<gpui::Pixels> {
     let b = chart_bounds(vcx);
     gpui::point(b.center().x + gpui::px(dx), b.origin.y + gpui::px(20.))

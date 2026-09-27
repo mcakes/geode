@@ -1,28 +1,24 @@
-//! The one-line shorthand (line-pricer spec §6.3), parsed here and
-//! rendered here, so the two halves share one table of tokens.
+//! Parse and render the shared one-line shorthand grammar.
 //!
-//! `[qty] UNDERLYING EXPIRY STRIKES TYPE [BARRIER level]`, whitespace-
-//! separated, case-insensitive. A month form (`Z26`, `DEC26`) resolves to
-//! the third Friday of its month at parse time: a date CONVENTION, not a
-//! financial calculation (the spec says so); holidays are not considered.
-//! A tenor (`3m`) is validated by `Expiry::tenor` and never resolved —
-//! that is the library's calendar.
+//! `[qty] UNDERLYING EXPIRY STRIKES TYPE [BARRIER level]` is whitespace-separated and
+//! case-insensitive. Month forms such as `Z26` and `DEC26` resolve to the third Friday
+//! at parse time without holiday adjustment. Tenors such as `3m` are validated by
+//! `Expiry::tenor` and left unresolved for the pricing library's calendar.
 
 use crate::core::sheet::{LineSpec, OwnShifts, RowSpec};
 use crate::core::template::{Template, TemplateDef, TemplateSet};
 use chrono::{Datelike, NaiveDate, Weekday};
 use geode_core::pricing::{Barrier, BarrierKind, Expiry, Instrument, OptionKind, Strike, Vanilla};
 
-/// `offset` is the byte offset of the offending token in the text the
-/// caller passed (`text.len()` when a token is missing), for the footer's
-/// caret (spec §8.3).
+/// A parse error with a byte offset into the caller's original text. Missing tokens
+/// point to `text.len()`; the footer uses the offset to position its caret.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
     pub offset: usize,
     pub message: String,
 }
 
-/// IMM month codes, January to December (spec §6.3). One constant, one test.
+/// IMM month codes, January to December.
 pub const IMM_MONTHS: [char; 12] = ['F', 'G', 'H', 'J', 'K', 'M', 'N', 'Q', 'U', 'V', 'X', 'Z'];
 pub const MONTH_NAMES: [&str; 12] = [
     "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
@@ -43,7 +39,7 @@ fn month_index(name: &str) -> Option<u32> {
         .map(|i| i as u32 + 1)
 }
 
-/// A two-digit year is `20yy` (spec §6.3).
+/// A two-digit year is `20yy`.
 fn year_of(two: &str) -> Option<i32> {
     if two.len() != 2 || !two.bytes().all(|b| b.is_ascii_digit()) {
         return None;
@@ -172,7 +168,7 @@ fn err(offset: usize, message: impl Into<String>) -> ParseError {
     }
 }
 
-/// One line of shorthand to a line or a package (spec §6.3). A package's
+/// One line of shorthand to a line or a package. A package's
 /// type token must name a table in `templates`; `C` and `P` need none.
 pub fn parse(text: &str, templates: &TemplateSet) -> Result<RowSpec, ParseError> {
     let toks = tokens(text);
@@ -399,7 +395,7 @@ pub fn imm_code(date: NaiveDate) -> Option<String> {
 }
 
 /// A third Friday as its IMM code, any other date as `20DEC26`, a tenor
-/// as stored (spec §6.3).
+/// as stored.
 pub fn render_expiry(expiry: &Expiry) -> String {
     match expiry {
         Expiry::Date(d) => imm_code(*d).unwrap_or_else(|| {
@@ -470,7 +466,7 @@ pub fn render_line(qty: i64, instrument: &Instrument) -> String {
 /// underlying, each leg's qty the package qty times its weight, each
 /// leg's kind the table's, and one strike per strike index and one
 /// expiry per expiry index across the legs. `None` otherwise — the
-/// caller prints the legs one per line (planning decision 11).
+/// caller prints the legs one per line.
 pub fn render_package(def: &TemplateDef, legs: &[(i64, &Instrument)]) -> Option<String> {
     let table = &def.legs;
     if table.is_empty() || table.len() != legs.len() {
@@ -896,7 +892,7 @@ mod tests {
     #[test]
     fn a_package_whose_legs_left_the_table_does_not_render_as_the_template() {
         let (template, mut legs) = package("SPX Z26 4800/5200 CS");
-        // A 1×2 ratio: the second leg's qty edited (spec §6.4).
+        // A 1×2 ratio: the second leg's qty edited.
         legs[1].qty = -2;
         let pairs: Vec<(i64, &Instrument)> = legs.iter().map(|l| (l.qty, &l.instrument)).collect();
         assert_eq!(

@@ -1,8 +1,7 @@
-//! The fixed column vocabulary (line-pricer spec §6.5) and the pure
-//! text of one cell — the half of §8.2's grid model that needs no theme,
-//! so it is tested here without one (planning decision 10). Part 3 wraps
-//! each `CellText` in a `SharedString` and picks the paint from its
-//! `CellState`.
+//! Fixed column definitions and pure cell formatting. [`cell_text`] returns text plus a
+//! semantic [`CellState`]; the table delegate caches that text and resolves state to
+//! theme colours. Formatting takes the configured clock explicitly and needs no GPUI
+//! context.
 
 use crate::core::sheet::{LineState, Sheet};
 use crate::core::shorthand::{render_barrier_kind, render_expiry, render_strike};
@@ -31,7 +30,7 @@ pub enum ColumnKind {
     Status,
 }
 
-/// Which rows a column has a value for (spec §6.5's "Applies to").
+/// Which rows a column can display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Applies {
     EveryLine,
@@ -50,16 +49,15 @@ pub struct ColumnDef {
     pub editable: bool,
     pub applies_to: Applies,
     pub default_format: ColumnFormat,
-    /// Pixels — the `view_presentation.toml` contract the blotter's
-    /// widths follow; not on the rem scale (the known gap CLAUDE.md
-    /// records for `TableDelegate::column`).
+    /// Default width in logical pixels, matching view presentation widths. The delegate
+    /// applies it directly rather than scaling it with rem.
     pub default_width: f32,
 }
 
 /// Text columns: no grouping, no sign colour.
 const TEXT: ColumnFormat = ColumnFormat::TEXT;
-/// A strike or barrier level: two places, no thousands separator (a
-/// strike reads as `5000`, not `5,000`).
+/// Default presentation for strike and barrier columns. Their cell text uses
+/// shorthand's round-trip spelling, without grouping or fixed decimal padding.
 const LEVEL: ColumnFormat = ColumnFormat {
     precision: 2,
     thousands: false,
@@ -111,10 +109,9 @@ const fn def(
 
 use Applies::{BarrierLines, EveryLine, EveryRow};
 
-/// Spec §6.5's table, in its order. A `static`, not a `const`:
-/// `column()` answers `&'static ColumnDef` into it, and a `const` whose
-/// type carries a `String` (`Colour::Named`) is not promotable to a
-/// `'static` borrow.
+/// The fixed column vocabulary. A static allocation lets `column()` return references
+/// with a `'static` lifetime even though formats can contain owned named-colour
+/// strings.
 pub static COLUMNS: [ColumnDef; 17] = [
     def("qty", "qty", ColumnKind::Qty, true, EveryLine, TEXT, 56.0),
     def(
@@ -265,9 +262,9 @@ pub enum CellState {
     Blank,
     /// A value of the row's own.
     Own,
-    /// A shift inherited from the sheet (paints muted, spec ruling 8).
+    /// A shift inherited from the sheet (paints muted).
     Inherited,
-    /// A result the row is repricing (paints muted, spec §8.2).
+    /// A result the row is repricing (paints muted).
     Stale,
     /// A failed row's result cells and status (paints danger text).
     Failed,
@@ -293,11 +290,9 @@ fn own(text: impl Into<String>) -> CellText {
     }
 }
 
-/// `+2.0` / `-1.5` at the format's precision: a shift is a delta from
-/// the market, so its sign is the information. The minus is the ASCII
-/// hyphen-minus every other number in the table carries
-/// (`format_number`'s `Negative::Minus`), so one sheet spells a negative
-/// one way — cells, header chips and the yanked text alike.
+/// Format a shift with an explicit ASCII sign, such as `+2.0` or `-1.5`.
+/// Cells and header chips share this function; precision, grouping, and scale
+/// come from the supplied format.
 pub(crate) fn signed(value: f64, format: &ColumnFormat) -> String {
     let n = format_number(value.abs(), format).text;
     if value < 0.0 {
@@ -332,11 +327,9 @@ fn number(
     }
 }
 
-/// The text and state of one cell (spec §6.5, §8.2). `clock` is the
-/// trader's configured clock (`[time] zone`, as-of dialog Part 2) — Part
-/// 3's tile reads it off the `AppClock` global and hands it in here,
-/// since the core reads no global (its one gpui type is `SharedString`,
-/// in `complete`).
+/// Format one cell and classify its presentation state. The tile supplies its
+/// configured `AppClock` value; this pure function does not read globals. Columns that
+/// do not apply to the row return blank text.
 pub fn cell_text(
     sheet: &Sheet,
     row: usize,
@@ -393,8 +386,7 @@ pub fn cell_text(
         ColumnKind::Theta => number(sheet, row, |r| r.theta, format),
         ColumnKind::Rho => number(sheet, row, |r| r.rho, format),
         ColumnKind::PricedAt => match sheet.priced_at(row) {
-            // The trader's configured clock, like every displayed time
-            // (Phase 4a ruling, as-of dialog Part 2).
+            // Use the configured clock for the recorded pricing attempt time.
             Some(t) => own(clock.hms(t)),
             None => blank(),
         },

@@ -1,8 +1,8 @@
-//! `--demo` (Phase 3 spec §7.1): boot on generated data with no real
-//! source. Emits the generator's directory once per row count, layers
-//! the compiled-in demo config under any desk/user config, and points
-//! the database at the same temp directory so a demo never touches a
-//! real one.
+//! Generated inputs and builtin configuration for `--demo`.
+//!
+//! Source files and the demo database share a temporary directory keyed by
+//! row count and seed. The compiled-in demo layer sits below desk and user
+//! configuration, which can override its source and view definitions.
 
 use geode_core::config::LayerDoc;
 use std::path::{Path, PathBuf};
@@ -15,8 +15,10 @@ pub fn demo_dir(rows: usize) -> PathBuf {
         .join(format!("{rows}-{SEED}"))
 }
 
-/// The source directory, emitted if absent. Idempotent: a directory
-/// with files in it is reused, so a second run is a warm start.
+/// Returns `dir/src`, generating source files when it has no directory entries.
+/// Any existing entry suppresses generation; existing contents are reused
+/// without checking completeness so repeated launches can use a warm store.
+/// Directory creation and emission errors propagate to the caller.
 pub fn ensure_emitted(dir: &Path, rows: usize) -> std::io::Result<PathBuf> {
     let src = dir.join("src");
     let populated = std::fs::read_dir(&src)
@@ -36,17 +38,13 @@ pub fn ensure_emitted(dir: &Path, rows: usize) -> std::io::Result<PathBuf> {
     Ok(src)
 }
 
-/// The demo layer: every doc under `examples/demo-config`, compiled in,
-/// plus a `sources` doc over `source_dir` polled every two seconds so a
-/// file dropped into it shows up while you watch, a `[cvi]` source
-/// subscribing to `geode_app::demo_bus`'s CVI documents (market-data-
-/// documents plan, Task 10), a `[dividend]` source subscribing to its
-/// dividend-schedule documents (dividend-schedule plan, Task 11) — both
-/// subscribed sources, so none of the directory-only keys `[demo]` carries
-/// applies to either — and two fetch sources, `demo_kdb` and `demo_rest`,
-/// over the timeseries demo's `series` dataset (Task 9:
-/// `geode_app::demo_series::DemoSeries`), one with a catalogue and one
-/// without.
+/// Builds the builtin demo layer from compiled-in example documents and
+/// source paths rooted at `source_dir`.
+///
+/// The risk CSV source polls every two seconds using sentinel readiness.
+/// CVI and dividend sources subscribe to `demo_bus`, coalescing updates per
+/// key over 500 ms. `demo_kdb` and `demo_rest` fetch the `series` dataset;
+/// the former offers a catalogue and the latter requires entered identities.
 pub fn layer(source_dir: &Path) -> Vec<LayerDoc> {
     let sources = format!(
         "config_version = 1\n[demo]\ndataset = \"risk_snapshot\"\npaths = [{:?}]\n\
@@ -62,15 +60,10 @@ pub fn layer(source_dir: &Path) -> Vec<LayerDoc> {
          [demo_rest]\nadapter = \"demo_rest\"\ndataset = \"series\"\n",
         source_dir.join("*.csv").to_string_lossy()
     );
-    // The demo layer's own egress target (egress spec §4, §10
-    // amendment 1): `[sophis]` on `demo_bus` — the same adapter the
-    // `[cvi]`/`[dividend]` sources above already subscribe through —
-    // accepting both document kinds this crate builds, at an address per
-    // document key so the demo `ChannelAdapter`'s echo lands back on the
-    // same topic its source subscribes to. No `config_version` header:
-    // builtin docs are exempt from the version check (`config/mod.rs`),
-    // so there is nothing this doc needs the key for (`from_doc` would
-    // skip one, as `sources` does).
+    // The `sophis` target publishes both document kinds through the same
+    // adapter as their subscribed sources. Per-key addresses route uploads
+    // back to those sources for an echo. Builtin documents are exempt from
+    // the config-version check, so this generated document needs no header.
     let egress = "[sophis]\nadapter = \"demo_bus\"\n\
          [sophis.documents]\ncvi_params = \"marketdata/cvi/{key}\"\n\
          dividend_schedule = \"marketdata/dividend/{key}\"\n"
@@ -130,12 +123,8 @@ mod tests {
         assert_eq!(sources.table["demo"]["poll_interval"].as_str(), Some("2s"));
     }
 
-    /// Egress spec §4, §10 amendments 1/2: the demo layer's own
-    /// `[sophis]` egress target parses into two documents via
-    /// `egress_config::from_doc`, with the per-key address shape
-    /// amendment 1 settled on, and survives `egress::resolve` once
-    /// `demo_bus` is registered — the same adapter the demo bus's
-    /// `[cvi]`/`[dividend]` sources already name.
+    /// The `sophis` target preserves both document kinds and their per-key
+    /// addresses through config parsing and resolves against `demo_bus`.
     #[test]
     fn the_demo_layers_egress_doc_reads_two_documents_for_sophis_and_resolves_against_demo_bus() {
         let docs = layer(std::path::Path::new("/tmp/geode-demo/100-42/src"));
@@ -184,10 +173,8 @@ mod tests {
         assert_eq!(kept[0].name, "sophis");
     }
 
-    /// Task 10 (the demo bus): the `[cvi]` source is declared with every
-    /// field a subscribed source needs, and — the reader's own
-    /// vocabulary, not just well-formed TOML — `SourceSpec::from_doc`
-    /// accepts both `[demo]` and `[cvi]` with no diagnostics at all.
+    /// The CVI source declares the subscription fields accepted by the
+    /// source reader, and the full demo source document parses cleanly.
     #[test]
     fn the_demo_layer_declares_the_cvi_source() {
         let docs = layer(std::path::Path::new("/tmp/geode-demo/100-42/src"));
@@ -219,11 +206,8 @@ mod tests {
         assert_eq!(sources.len(), 5);
     }
 
-    /// Task 11 (the demo bus's second producer): the `[dividend]` source
-    /// is declared with every field a subscribed source needs, alongside
-    /// `[demo]` and `[cvi]` — same shape as
-    /// `the_demo_layer_declares_the_cvi_source`, over the dividend
-    /// vocabulary.
+    /// The dividend source declares its document kind, topic, coalescing,
+    /// and priority alongside the other demo sources without diagnostics.
     #[test]
     fn the_demo_layer_declares_the_dividend_source() {
         let docs = layer(std::path::Path::new("/tmp/geode-demo/100-42/src"));
@@ -252,11 +236,8 @@ mod tests {
         assert!(sources.iter().any(|s| s.name == "dividend"));
     }
 
-    /// Task 9 (the demo adapter): `demo_kdb` and `demo_rest` are declared
-    /// over the `series` dataset, with no diagnostics at all, and both
-    /// name a fetch shape once `SourceSpec::shape` sees the demo schema
-    /// (`series` is `family = "series"`, and both name an adapter other
-    /// than the directory default).
+    /// Both timeseries sources resolve to the fetch shape over the demo
+    /// `series` dataset and use their named adapters.
     #[test]
     fn the_demo_layer_declares_the_two_fetch_sources() {
         let docs = layer(std::path::Path::new("/tmp/geode-demo/100-42/src"));
@@ -336,18 +317,11 @@ mod demo_config_integration {
         pricers
     }
 
-    /// A registry holding `demo_bus`, matching what `main.rs` registers
-    /// under `--demo` before calling `data_setup` — without it, the demo
-    /// layer's own `[sophis]` egress target (egress spec §4) would be
-    /// dropped with an "adapter … is not in this build" diagnostic and
-    /// every fixture below asserting `setup.diagnostics.is_empty()` would
-    /// fail on that spurious entry.
+    /// Registers the demo bus required by the `sophis` egress target.
     ///
-    /// Returns the `ChannelFeed` too, and the caller must keep it alive
-    /// through `data_setup`/`egress::resolve`: `ChannelAdapter::egress`
-    /// upgrades a `Weak` reference to the feed's sender, so a feed
-    /// dropped before `resolve` runs answers "has no egress side" —
-    /// exactly the failure this helper exists to avoid.
+    /// Keep the returned feed alive through `data_setup`: egress resolution
+    /// upgrades a weak sender reference, and a dropped feed makes the
+    /// adapter report that it has no egress side.
     fn test_adapters() -> (
         geode_data::adapter::AdapterRegistry,
         geode_data::adapter::ChannelFeed,
@@ -358,21 +332,9 @@ mod demo_config_integration {
         (adapters, feed)
     }
 
-    /// Self-review / headless verification (Task 8): the demo layer's
-    /// docs are not just individually well-formed TOML (`layer` already
-    /// panics otherwise) — merged through the real `Config` loader and
-    /// fed to `data_setup`, they produce a servable `DataServiceConfig`
-    /// with the same views the blotter is meant to run.
-    ///
-    /// **Fix round 1, Finding 2:** `ViewSpec::from_doc` and
-    /// `DerivedDimensions::from_doc` used to iterate every top-level key
-    /// of the doc without skipping `config_version` (unlike
-    /// `GroupingSlots::from_doc`, which already did), so `views.toml`/
-    /// `dimensions.toml`'s `config_version = 1` header — the same
-    /// convention every other config doc uses — produced one spurious
-    /// "not a table" diagnostic apiece. Both `from_doc`s now skip it
-    /// (`crates/geode-core/src/{view,dimensions}.rs`), so this asserts
-    /// zero diagnostics rather than the two it used to tolerate.
+    /// The demo documents produce a usable data-service configuration
+    /// through the normal config loader and setup path. Typed readers must
+    /// skip `config_version` headers without reporting invalid entries.
     #[test]
     fn the_demo_layer_produces_a_servable_data_setup() {
         let src = std::path::Path::new("/tmp/geode-demo/100000-42/src");
@@ -394,38 +356,15 @@ mod demo_config_integration {
         assert_eq!(names, vec!["tree", "wide"]);
         let wide = setup.views.iter().find(|v| v.name == "wide").unwrap();
         assert_eq!(wide.columns.len(), 100, "spec §6.6's 100-column view");
-        // [demo] (a csv_dir source over risk_snapshot), [cvi] (a
-        // subscribed source over cvi_params, Task 10) and [dividend] (a
-        // subscribed source over cvi_params, Task 10), [dividend] (a
-        // subscribed source over dividend_schedule, Task 11), and the two
-        // fetch sources [demo_kdb]/[demo_rest] over series (Task 9) — all
-        // five parse with no diagnostics, per this same fixture's own
-        // the_demo_layer_declares_the_cvi_source,
-        // the_demo_layer_declares_the_dividend_source and
-        // the_demo_layer_declares_the_two_fetch_sources.
+        // All five source definitions survive setup: risk CSVs, CVI and
+        // dividend subscriptions, and the two timeseries fetch adapters.
         assert_eq!(setup.config.sources.len(), 5);
-        // The demo layer's own `[sophis]` egress target must reach
-        // `DataServiceConfig.egress` — `data_setup` reads and resolves
-        // `egress.toml` rather than leaving the list empty (this same
-        // fixture's own
-        // the_demo_layers_egress_doc_reads_two_documents_for_sophis_and_resolves_against_demo_bus
-        // pins `from_doc`/`resolve` in isolation; this pins the wiring).
+        // Setup must carry the resolved egress target into the service config.
         assert_eq!(setup.config.egress.len(), 1);
         assert_eq!(setup.config.egress[0].name, "sophis");
-        // The demo schema's own `cvi_params` and `dividend_schedule`
-        // datasets must each agree with their built-in kind's column set
-        // (spec §6.4) — the same check `DataService::open` runs per
-        // subscribed source at open time, pinned here so a demo-config
-        // edit that drifts the two apart fails this fixture rather than
-        // only ever failing silently as a discovery-lane `Failed` a
-        // trader has to notice at runtime.
-        // Task 11 carry-in: the demo schema's own `cvi_params` dataset
-        // must agree with the built-in `CviKind`'s column set (spec
-        // §6.4) — the same check `DataService::open` runs per subscribed
-        // source at open time, pinned here so a demo-config edit that
-        // drifts the two apart fails this fixture rather than only ever
-        // failing silently as a discovery-lane `Failed` a trader has to
-        // notice at runtime.
+        // Each document dataset must match its registered kind's columns.
+        // A mismatch would fail the subscribed source's discovery health
+        // when the service opens.
         geode_core::document::check_kind_against(
             &geode_documents::CviKind,
             setup.config.schema.dataset("cvi_params").unwrap(),
@@ -438,19 +377,9 @@ mod demo_config_integration {
         .unwrap();
     }
 
-    /// Task 5 (timeseries spec §10): the demo layer's own `[timeseries]
-    /// default_source = "demo_kdb"` must name a fetch source the demo
-    /// layer actually declares. `geode_shell::series::
-    /// default_source_diagnostic` is what `ShellView::new` folds into
-    /// its startup diagnostics, so anything else here would boot the
-    /// demo with a config warning about the demo's own config — and one
-    /// naming a source `:add` could not use, since a default that
-    /// resolves to nothing makes every `@source` explicit again.
-    ///
-    /// The one assertion that catches a renamed `[demo_kdb]` source, a
-    /// renamed key, or a `default_source` typed as anything but a
-    /// string; the sources themselves are pinned by
-    /// `the_demo_layer_declares_the_two_fetch_sources` next door.
+    /// The default timeseries source must name a declared fetch source.
+    /// The shell uses this validation at startup; an invalid default would
+    /// warn and require an explicit `@source` for added series.
     #[test]
     fn the_demo_layers_default_timeseries_source_names_one_of_its_own() {
         let src = std::path::Path::new("/tmp/geode-demo/100000-42/src");
@@ -463,11 +392,8 @@ mod demo_config_integration {
         assert!(diags.is_empty(), "{diags:?}");
     }
 
-    /// Task 1 (Phase 4 spec §3.3): `currency`, `model_code` and `expiry`
-    /// are carried dimensions in the demo schema now, not lookup-only
-    /// attributes — `categorical_columns` is what the picker and the
-    /// interning loop both read, and this is the compiled-in doc's own
-    /// promise that the flag reaches them.
+    /// The compiled-in schema exposes `currency`, `model_code`, and `expiry`
+    /// as categorical columns used by both the picker and dictionary interning.
     #[test]
     fn the_demo_schema_declares_currency_model_code_and_expiry_as_categorical() {
         let src = std::path::Path::new("/tmp/geode-demo/100000-42/src");

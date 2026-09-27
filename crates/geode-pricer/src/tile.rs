@@ -1,6 +1,6 @@
 //! Line-pricer tile state and prepared rendering models.
 //!
-//! The tile owns one Sheet, an Rc<GridModel> installed into a DataTable, and prepared
+//! The tile owns one `Sheet`, an `Rc<GridModel>` installed into a `DataTable`, and prepared
 //! header/footer state. Request-changing edits use apply_edit or apply_edits to record
 //! undo; deliveries use deliver and refresh ticks use tick. These paths rebuild and
 //! install the model on change, outside rendering.
@@ -36,6 +36,7 @@ use geode_core::query::{QueryKey, QueryOutcome};
 use geode_data::DataHandle;
 use geode_shell::actions::ActionId;
 use geode_shell::choice::{ChoiceList, DEFAULT_CAP};
+use geode_shell::colfit::{FitMetrics, FittedWidths, NOTHING_TO_FIT};
 use geode_shell::frame::Frame;
 use geode_shell::keymap::KeyContext;
 use geode_shell::linenumbers::{LineNumbers, UiSettings};
@@ -74,9 +75,8 @@ fn retry_delay(refusals: u32) -> Duration {
 pub(crate) const REFUSED: &str =
     "pricing request refused: the data service is busy or gone; retrying";
 
-/// Spec §7.3: how long a change waits before the write-behind save fires.
-/// A change inside the window re-arms it (replacing the task drops the
-/// old one), so a burst saves once.
+/// Idle delay before saving changed sheet rows. Replacing the timer on each
+/// change cancels the previous task, so a burst produces one save.
 pub(crate) const SAVE_IDLE: Duration = Duration::from_secs(1);
 pub(crate) const NOT_SAVED: &str = "sheet not saved: the store refused it; the next edit retries";
 
@@ -111,14 +111,13 @@ pub(crate) struct PendingRemove {
     _blur: Subscription,
 }
 
-/// `ctrl+d`/`ctrl+u` and `ctrl+f`/`ctrl+b` steps — `vimnav`'s fixed ±5
-/// and ±10, the market-data panel's own constants, times the count.
+/// Fixed row steps for `ctrl+d`/`ctrl+u` and `ctrl+f`/`ctrl+b`, multiplied
+/// by the command count.
 pub(crate) const HALF_PAGE: usize = 5;
 pub(crate) const FULL_PAGE: usize = 10;
 
-/// `/` over the tree column's text (spec §8.5): the vim jump model — a
-/// sheet's rows are the trader's own order, so find moves the cursor and
-/// never narrows.
+/// Incremental search over visible tree labels. Find moves the cursor without
+/// filtering or reordering the sheet.
 struct FindState {
     /// Where `/` opened; `escape` returns here.
     origin: Cursor,
@@ -126,9 +125,8 @@ struct FindState {
     committed: Option<String>,
 }
 
-/// The cursor by line identity (planning decision 10): an edit elsewhere,
-/// a delivery or an expansion never moves it. `last_row` is where it was,
-/// for the fallback when its line goes away.
+/// Cursor anchored by line identity across edits, deliveries, and expansion changes.
+/// If the line leaves the visible grid, `last_row` supplies the fallback position.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Cursor {
     pub line: Option<LineId>,
@@ -137,8 +135,8 @@ pub(crate) struct Cursor {
     pub last_row: usize,
 }
 
-/// The entry bar (entry-bar spec §4): where its rows will land, the
-/// field, and the sheet's own lines to walk with `up`/`down`.
+/// Entry bar state: insertion position, focused input, and existing sheet lines
+/// available through `up`/`down` history.
 pub(crate) struct Entry {
     pub place: Place,
     pub input: Entity<InputState>,
@@ -168,9 +166,9 @@ const ENTRY_HINT: &str = "-5 SPX DEC26 95%/105% CS";
 /// on other text (a template reload), refuses with this.
 pub(crate) const MOVED: &str = "the cell moved; edit refused";
 
-/// The open cell editor (spec §8.4): its target by line identity and
-/// column kind — re-checked at commit, so a line deleted or a view
-/// switched under an open editor refuses rather than writing elsewhere.
+/// Cell editor attached to a line identity and column kind. Rebuilds follow the
+/// target across movement and close the editor if it disappears; commit checks
+/// the target again before writing.
 pub(crate) enum Editor {
     Text {
         line: LineId,
@@ -189,7 +187,7 @@ pub(crate) enum Editor {
         kind: ColumnKind,
         input: Entity<InputState>,
         list: ChoiceList,
-        /// An unmatched query commits as typed (planning decision 17).
+        /// Allow typed values outside the suggested vocabulary.
         free: bool,
         /// The trader moved the highlight (`up`/`down`, a row click) since
         /// the query last changed. In a `free` list, `enter` takes the
@@ -271,8 +269,8 @@ impl Editor {
 
 pub struct PricerTile {
     pub(crate) id: TileId,
-    // Nothing reads it yet: the flip-barrier observer in `new` holds its
-    // own handle.
+    // Retain the frame alongside the tile; the flip-barrier observer in `new`
+    // receives its own handle for updates.
     #[allow(dead_code)]
     frame: Entity<Frame>,
     pub(crate) data: DataHandle,
@@ -297,16 +295,14 @@ pub struct PricerTile {
     refusals: u32,
     /// The view fallback's standing notice (`resolve_plan`).
     view_notice: Option<SharedString>,
-    /// The save state's own header slot (spec §7.3): `NOT_SAVED` after a
-    /// refused save, or `blocked_notice` after a failed load. Pricing
-    /// notices never write it and `escape` does not clear it; only an
-    /// accepted save does.
+    /// Save status in a separate header slot: admission refusal, failed save, or
+    /// blocked load. Pricing notices and `escape` leave it intact. A successful
+    /// save outcome clears it unless a newer attempt was refused admission.
     save_notice: Option<SharedString>,
-    /// A load FAILED (undecodable rows, or `loaded(Err(..))`): the sheet
-    /// shown is the fallback, and saving it would publish it over the real
-    /// document as the latest generation. `save_now` publishes nothing for
-    /// the life of the tile. A genuinely absent document (`Missing`,
-    /// `Ok(None)`) does not set this: §7.4 opens it empty under its name.
+    /// A failed or refused load leaves a fallback that must not overwrite the stored
+    /// document. Block saves until another sheet is opened or a load is retried.
+    /// A genuinely absent document (`Missing`, `Ok(None)`) opens empty under its
+    /// name and may be saved.
     save_blocked: bool,
     /// A change not yet in any queued save. Cleared only when the store
     /// accepts a save (queues it), so `on_release` flushes a refused save
@@ -346,7 +342,7 @@ pub struct PricerTile {
     /// now could return the generation before it. The factory's
     /// `save_answered` starts the load.
     pub(crate) load_waiting: bool,
-    /// A user error for the footer (spec §8.3); cleared by the next verb.
+    /// A user error for the footer; cleared by the next verb.
     pub(crate) footer: Option<SharedString>,
     /// What the footer paints: `footer`, else the cursor row's failure.
     pub(crate) footer_text: Option<SharedString>,
@@ -359,12 +355,11 @@ pub struct PricerTile {
     /// What `p`/`shift+p` put: the last `y y` or `d d`.
     pub(crate) register: Option<crate::core::RowSpec>,
     find: Option<FindState>,
-    /// The latest submission's tag: an outcome with any other is dropped
-    /// whole (spec §9.2).
+    /// Latest pricing submission tag. An outcome with any other tag is dropped whole.
     pub(crate) tag: u64,
-    /// `id → revision` of the latest batch (planning decision 4): decides
-    /// WHETHER to submit, never what — a batch always carries every stale
-    /// line.
+    /// `id → revision` of the latest batch. Submit when at least one stale line
+    /// lacks an in-flight request at its current revision; each batch carries all
+    /// stale lines so it can supersede the previous batch.
     in_flight: HashMap<LineId, u64>,
     /// Undo records depend on the rows left by their edits. New recorded edits use
     /// apply_edit/apply_edits; history_step replays their inverses. Other structural
@@ -372,14 +367,13 @@ pub struct PricerTile {
     pub(crate) undo: UndoStack,
     refresh_task: Option<Task<()>>,
     retry_task: Option<Task<()>>,
-    /// The write-behind idle timer (spec §7.3): armed by every change,
-    /// re-armed by the next one, flushed by `on_release`.
+    /// Save timer replaced by each edit. Release flushes pending or failed saves.
     save_task: Option<Task<()>>,
-    /// The entry bar (entry-bar spec §4): `o` opens it, `enter` parses and
+    /// The entry bar: `o` opens it, `enter` parses and
     /// inserts through `apply_edit`, `escape`, a click or another verb
     /// drops it. `None` in normal mode.
     pub(crate) entry: Option<Entry>,
-    /// The open cell editor (spec §8.4): `i`/`enter`/double-click open it,
+    /// The open cell editor: `i`/`enter`/double-click open it,
     /// `enter` commits one `Edit` through `apply_edit`, `escape` or a click
     /// drops it. `None` outside insert mode.
     pub(crate) editor: Option<Editor>,
@@ -530,6 +524,8 @@ impl PricerTile {
         };
 
         let mut delegate = SheetDelegate::new(cx.theme(), cx.weak_entity());
+        // A missing or garbled record is an empty map, never a refusal.
+        delegate.fitted = record.widths.clone();
         delegate.line_numbers = cx
             .try_global::<UiSettings>()
             .map_or(LineNumbers::Off, |s| s.line_numbers);
@@ -554,7 +550,8 @@ impl PricerTile {
             |this, _, event: &ChevronClicked, window, cx| this.chevron_clicked(event.0, window, cx),
         )
         .detach();
-        // Planning decision 6: arrive at every flip barrier at once.
+        // Pricing does not follow frame queries, so there is no result to wait for.
+        // Arrive immediately to avoid holding other tiles behind the flip barrier.
         cx.observe(&frame, |this, frame, cx| {
             let key = QueryKey(this.id.0);
             let now = frame.read(cx).versions();
@@ -567,8 +564,7 @@ impl PricerTile {
             }
         })
         .detach();
-        // The paints are a per-theme memo (planning decision 14): re-derived
-        // here, once per theme change, never per cell.
+        // Derive shared paints once per theme change, outside cell rendering.
         cx.observe_global::<gpui_component::Theme>(|this, cx| {
             let paints = crate::paint::Paints::derive(cx.theme());
             this.table.update(cx, |t, cx| {
@@ -590,11 +586,9 @@ impl PricerTile {
         // Release flushes a dirty sheet once, cancels pricing, and releases its name
         // for another tile to open.
         cx.on_release(|this: &mut PricerTile, _cx| {
-            // Spec §7.3: the sheet is not lost until the tile is — a save
-            // still waiting on its idle timer, or one the store refused,
-            // runs now (`save_now` itself refuses a blocked sheet).
-            // A save queued and still unconfirmed is already on the
-            // writer: nothing extra.
+            // Flush edits still waiting on the timer and retry failed or refused
+            // saves. Queued, unanswered saves already belong to the writer.
+            // `save_now` leaves a blocked fallback unpublished.
             this.flush_save();
             this.data.cancel(QueryKey(this.id.0));
             this.shared.open.borrow_mut().remove(&this.sheet.name);
@@ -694,9 +688,9 @@ impl PricerTile {
     /// editor (the expiry's date field included, though it is no text
     /// input). The shell treats a key as typing only when the focused
     /// tile holds focus AND its context reads `mode == insert`
-    /// (`ShellView::occupant_insert_stack`); any other word lets a bare or
-    /// shifted letter reach the shell's own bindings (`shift+d` duplicated
-    /// the tile). `dispatch` tells the two fields apart by which is open.
+    /// (`ShellView::occupant_insert_stack`). This keeps typed letters from
+    /// triggering shell bindings. `dispatch` distinguishes the fields by
+    /// which one is open.
     ///
     /// An armed `:rm` confirm is `insert` too: its prompt holds the
     /// keyboard exactly as a field does.
@@ -710,9 +704,8 @@ impl PricerTile {
         }
     }
 
-    /// Does one of THIS tile's own fields (the entry field, the cell
-    /// editor, the typeahead's field or the date field) hold window focus? Answered from
-    /// the focus handles, never from the mode.
+    /// Whether an entry field, cell editor, or removal prompt owns window focus.
+    /// The focus handles determine this independently of the key context.
     pub fn holds_focus(&self, window: &Window, cx: &App) -> bool {
         let entry = self
             .entry
@@ -764,8 +757,9 @@ impl PricerTile {
             .map(|e| e.input.read(cx).value().to_string())
     }
 
-    pub fn serialize(&self) -> toml::Table {
+    pub fn serialize(&self, cx: &App) -> toml::Table {
         Record {
+            widths: self.table.read(cx).delegate().fitted.clone(),
             sheet: Some(self.sheet.name.clone()),
             view: Some(self.sheet.view.clone()),
             refresh: Some(self.sheet.refresh),
@@ -784,7 +778,7 @@ impl PricerTile {
     }
 
     /// A show reprices what is stale and starts the timer; a hide cancels
-    /// in flight by key and stops it, keeping the stale marks (spec §9.5).
+    /// in flight by key and stops it, keeping the stale marks.
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         if self.visible == visible {
             return;
@@ -811,13 +805,12 @@ impl PricerTile {
         cx.notify();
     }
 
-    /// `/` (spec §8.5): every keystroke searches from the ORIGIN, so a
-    /// lengthening query walks forward and a shortened one walks back
-    /// (vim's incsearch); `escape` returns to the origin.
+    /// Incremental `/` search starts each changed query from the saved origin.
+    /// Shortening the query can therefore return to an earlier match; `escape`
+    /// restores the origin.
     pub fn find(&mut self, event: FindEvent, window: &mut Window, cx: &mut Context<Self>) {
-        // `/` is a shell-owned binding, so `dispatch`'s own "any other
-        // verb closes the menu and the fields" guard never sees it
-        // (the market-data rule).
+        // The shell routes `/` directly here, bypassing `dispatch` and its
+        // field/menu cleanup.
         self.close_menu(cx);
         self.close_entry(window, cx);
         self.close_editor(window, cx);
@@ -924,8 +917,8 @@ impl PricerTile {
         Ok(())
     }
 
-    /// `o`: the entry bar under the header, the field focused (entry-bar
-    /// spec §4.1). Lines land below the cursor row; a leg place opens
+    /// `o` opens the entry bar under the header and focuses its input.
+    /// Lines land below the cursor row; a leg place opens
     /// its package so what lands is visible. With the bar already open
     /// (a palette dispatch) the typed text and place stay and the field
     /// takes focus back.
@@ -1134,9 +1127,8 @@ impl PricerTile {
         }
     }
 
-    /// Blur only if OUR field holds focus, then drop it (the market-data
-    /// rule, CLAUDE.md): an unblurred dead handle leaves the window
-    /// focused on nothing and the shell's focus return never fires.
+    /// Blur the entry input if it owns window focus before releasing its handle.
+    /// Otherwise the shell cannot restore focus after the field disappears.
     pub(crate) fn close_entry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(entry) = self.entry.take() else {
             return;
@@ -1180,7 +1172,7 @@ impl PricerTile {
         cx.notify();
     }
 
-    // ---- the cell editor (spec §8.4) -----------------------------------
+    // ---- the cell editor ----------------------------------------------
 
     /// `i`/`enter`/double-click: a text field on the cell's grammar
     /// spelling, or a typeahead over its vocabulary; a cell that does not
@@ -1502,8 +1494,8 @@ impl PricerTile {
     /// `geode_widgets::datefield::route` is the one key table: arrows move
     /// and step (`shift`: ten), digits type, `backspace` clears the
     /// segment, `enter` commits, `escape` cancels. A chord, or any key the
-    /// table does not name, answers `false` and bubbles on. A handled key
-    /// retires a standing footer (a refusal, the tenor note).
+    /// table does not name, answers `false` and bubbles on. Navigation clears a
+    /// refusal and restores the tenor note; commit or cancel clears the note.
     pub(crate) fn date_field_key(
         &mut self,
         event: &gpui::KeyDownEvent,
@@ -1615,9 +1607,8 @@ impl PricerTile {
         }
     }
 
-    /// Blur only if OUR field holds focus, then drop it (the market-data
-    /// rule, CLAUDE.md): an unblurred dead handle leaves the window
-    /// focused on nothing and the shell's focus return never fires.
+    /// Blur an editor that owns window focus before releasing its focus handle.
+    /// Otherwise the shell cannot restore focus after the editor disappears.
     pub(crate) fn close_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(editor) = self.editor.take() else {
             return;
@@ -1630,7 +1621,7 @@ impl PricerTile {
     }
 
     /// `up`/`down` (`shift`: ten) step a numeric editor by its text's own
-    /// precision (planning decision 2); in a typeahead they move the
+    /// precision; in a typeahead they move the
     /// highlight.
     fn nudge(&mut self, steps: i64, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.id.0;
@@ -1713,10 +1704,9 @@ impl PricerTile {
         self.arm_save(cx);
     }
 
-    /// Spec §7.3: every change arms a one-second idle timer; a change
-    /// inside the window re-arms it (replacing the task drops the old
-    /// one). A pending load owns the sheet until `loaded` swaps it in, so
-    /// the empty fallback is never armed to save over it.
+    /// Mark the sheet dirty and replace the one-second save timer. A pending load
+    /// owns the sheet until `loaded` installs it, so the empty fallback never
+    /// schedules a save over that document.
     fn arm_save(&mut self, cx: &mut Context<Self>) {
         if self.loading {
             return;
@@ -1745,7 +1735,7 @@ impl PricerTile {
     }
 
     /// The whole sheet, once. An empty sheet publishes nothing (the last
-    /// non-empty generation stays as history, spec §7.2); a refusal paints
+    /// non-empty generation stays as history); a refusal paints
     /// the save slot and stays `dirty`, so the next burst or the close
     /// retries. A sheet whose load failed publishes nothing at all: the
     /// fallback would become the document's latest generation.
@@ -1803,8 +1793,8 @@ impl PricerTile {
                 if let Some(old) = self.rename_from.take() {
                     if self.shared.open.borrow().contains(&old) {
                         // A tile holds the old name: forgetting would
-                        // delete a sheet in use. `:e` and a restore refuse
-                        // a retiring name, so no route reaches this today.
+                        // delete a sheet in use. This guard also protects against
+                        // callers bypassing the retiring-name checks in `:e` and restore.
                         self.shared.retiring.borrow_mut().remove(&old);
                     } else if self.shared.store.forget(&old) {
                         // Reserved until the forget is answered.
@@ -1826,9 +1816,9 @@ impl PricerTile {
         cx.notify();
     }
 
-    /// One `PriceParams` of every stale line, when some stale line is not
-    /// already in flight at its current revision (spec §9.1, planning
-    /// decision 4). A hidden or loading tile submits nothing.
+    /// Submit all stale lines when at least one lacks an in-flight request at its
+    /// current revision. Hidden and loading tiles submit nothing. Admission refusal
+    /// retains stale state and schedules retry independently of periodic refresh.
     pub(crate) fn submit(&mut self, cx: &mut Context<Self>) {
         if !self.visible || self.loading {
             return;
@@ -1911,7 +1901,8 @@ impl PricerTile {
         }));
     }
 
-    /// `Delivery::Price` for this tile (spec §9.2).
+    /// Accept pricing results only for this tile's latest submission. The sheet
+    /// checks line revisions; stale work left after delivery is resubmitted.
     pub fn deliver(&mut self, outcome: PriceOutcome, cx: &mut Context<Self>) {
         if outcome.key != QueryKey(self.id.0) || outcome.tag != self.tag {
             return;
@@ -1931,13 +1922,13 @@ impl PricerTile {
         for ((id, rev), answer) in ids.into_iter().zip(answers) {
             match answer {
                 Delivered::Installed | Delivered::OldRevision { .. } => {}
-                // Deleted mid-round-trip: ordinary (planning decision 19).
+                // A line can be deleted while its request is in flight.
                 Delivered::UnknownLine => tracing::debug!(
                     target: "geode::pricing",
                     tile = self.id.0, id, rev,
                     "price result for a line no longer on the sheet"
                 ),
-                // Bugs (spec §10.1): dropped and logged with the ids.
+                // Impossible targets or future revisions are dropped and logged with IDs.
                 Delivered::NotALine | Delivered::FutureRevision { .. } => tracing::warn!(
                     target: "geode::pricing",
                     tile = self.id.0, id, rev, answer = ?answer,
@@ -1961,9 +1952,8 @@ impl PricerTile {
         }
     }
 
-    /// The periodic reprice (spec §9.4): running only while visible;
-    /// every tick marks every line stale and submits. Dropping the task
-    /// stops it.
+    /// Restart periodic repricing at the sheet's effective interval while visible.
+    /// Ticks stale and submit nonempty, loaded sheets. Dropping the task stops it.
     pub(crate) fn restart_timer(&mut self, cx: &mut Context<Self>) {
         self.refresh_task = None;
         if !self.visible {
@@ -2115,11 +2105,8 @@ impl PricerTile {
                     s.mark_all_stale();
                     self.sheet = s;
                     self.adopt_templates();
-                    // The undo stack's inverses were recorded against the
-                    // fallback sheet's rows (review finding): once it is
-                    // gone, replaying one would either refuse against the
-                    // real document or, worse, write a fallback value
-                    // over it. Nothing to undo into is the safe state.
+                    // Fallback edits have inverses against different rows. Replaying
+                    // them could overwrite loaded values, so discard their history.
                     self.undo.clear();
                 }
                 Err(e) => self.block_saves(&name, &e),
@@ -2154,7 +2141,8 @@ impl PricerTile {
         });
     }
 
-    /// A reload reached this tile (planning decision 20).
+    /// Apply reloaded views, templates, and settings to the model, entry history,
+    /// chrome, and refresh timer.
     pub(crate) fn config_changed(&mut self, cx: &mut Context<Self>) {
         self.adopt_templates();
         // An open bar's history was printed with the old tables; a
@@ -2195,7 +2183,7 @@ impl PricerTile {
         }
         // Any verb but the fields' own closes an open field first (a
         // palette dispatch can arrive while one is open). `add_below`
-        // keeps an open bar: it is the bar's own opener (spec §4.1).
+        // keeps an open bar: it is the bar's own opener.
         let field_verb = matches!(
             verb,
             "commit" | "cancel" | "insert_up" | "insert_down" | "insert_up_big" | "insert_down_big"
@@ -2379,8 +2367,8 @@ impl PricerTile {
         self.cursor_row().and_then(|r| self.model.rows[r].row)
     }
 
-    /// `d d` (spec §8.5): no confirm — `u` is one key away. What was
-    /// deleted is what `p` puts.
+    /// `d d` removes the cursor row as an undoable edit and copies it into the
+    /// register for `p`. No confirmation is required.
     fn delete_row(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
         let row = self.cursor_sheet_row().ok_or("no row")?;
         let spec = spec_of(&self.sheet, row);
@@ -2435,15 +2423,13 @@ impl PricerTile {
         }
     }
 
-    /// `p` / `shift+p`: the register as fresh rows (fresh ids, fresh
-    /// requests) where `put_place` says (planning decision 12).
+    /// `p` / `shift+p` insert register contents with fresh IDs and requests at
+    /// `put_place`'s position, then select the first inserted row.
     fn put(&mut self, below: bool, cx: &mut Context<Self>) -> Result<(), String> {
         let spec = self.register.clone().ok_or("nothing to put")?;
         let place = put_place(&self.sheet, self.cursor_sheet_row(), below, &spec);
-        // A line landing on a leg slot of a collapsed package (`o`'s own
-        // rule) must open it first, the way `open_entry` does — otherwise
-        // the new leg paints into a hidden row and the cursor falls back
-        // to wherever it was (review finding).
+        // Open the parent before inserting a leg so the new row is visible and
+        // cursor reconciliation can select it.
         if let Place::Leg { package, .. } = place {
             self.expansion.set(self.sheet.id(package), true);
         }
@@ -2520,7 +2506,7 @@ impl PricerTile {
             .map_err(|e| e.to_string())
     }
 
-    /// `:spot` (ruling 1): one underlying set or cleared, or every
+    /// `:spot`: one underlying set or cleared, or every
     /// override cleared as ONE undo entry.
     fn set_spot(
         &mut self,
@@ -2778,9 +2764,8 @@ impl PricerTile {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        // `:` is a shell-owned binding, so `dispatch`'s own "any other
-        // verb closes the menu and the fields" guard never sees it (the
-        // market-data rule).
+        // The shell routes `:` directly here, bypassing `dispatch` and its
+        // field/menu cleanup.
         self.close_menu(cx);
         self.close_entry(window, cx);
         self.close_editor(window, cx);
@@ -2804,11 +2789,8 @@ impl PricerTile {
                 self.arm_save(cx);
                 Ok(())
             }
-            // These four edit the sheet (Shift/Spot through `apply_edit`
-            // or `apply_edits`, Group/Ungroup through `apply_edit`):
-            // refused while a load is pending, or the edit would land on
-            // the empty fallback sheet and be lost when `loaded` swaps it
-            // out from under the recorded undo (review finding).
+            // A pending load would replace edits to the fallback and invalidate
+            // their undo records. Refuse sheet mutations until loading finishes.
             Command::Shift { field, value } => {
                 self.refuse_while_loading()?;
                 self.set_sheet_shift(field, value, cx)
@@ -2834,7 +2816,44 @@ impl PricerTile {
             }
             Command::Name(name) => self.rename(name, cx),
             Command::Remove(name) => self.arm_remove(name, window, cx),
+            Command::Autosize { reset } => self
+                .autosize_columns(reset, window, cx)
+                .map_err(str::to_string),
         }
+    }
+
+    /// Fit every column to its header and every grid row's prepared text
+    /// (`reset`: drop the fitted widths), then refresh so the table
+    /// re-reads `column()`. The one route behind both `:autosize` and the
+    /// shell's `tile::autosize_columns`; measured on the UI thread at the
+    /// window's current rem, never in render. The widths ride the session
+    /// record, not the sheet's stored document.
+    ///
+    /// While the sheet loads or has no rows a fit refuses with
+    /// [`NOTHING_TO_FIT`] and the widths already held stay; a reset always
+    /// runs.
+    pub fn autosize_columns(
+        &mut self,
+        reset: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), &'static str> {
+        let fitted = if reset {
+            FittedWidths::new()
+        } else {
+            let metrics = FitMetrics::xsmall_mono(window.rem_size());
+            self.table
+                .read(cx)
+                .delegate()
+                .fit_columns(&metrics)
+                .ok_or(NOTHING_TO_FIT)?
+        };
+        self.table.update(cx, |t, cx| {
+            t.delegate_mut().fitted = fitted;
+            t.refresh(cx);
+        });
+        cx.notify();
+        Ok(())
     }
 
     // ---- sheets: `:e`, `:new`, `:name`, `:rm` -------------------------
@@ -2842,9 +2861,8 @@ impl PricerTile {
     /// `:e <sheet>` is refused when another tile
     /// holds `name` (two writers would race) or its document is being
     /// removed; the tile's own name is a no-op, unless its load failed
-    /// (`save_blocked`): then it reloads, the in-place retry of a refused
-    /// or failed load (nothing on a blocked sheet was ever saved, so
-    /// nothing is lost). A name with a save queued
+    /// (`save_blocked`): then it retries loading and discards unsaved fallback
+    /// edits. A name with a save queued
     /// and not yet answered is claimed at once but its load waits for
     /// that answer (`start_load`): reads run on the query pool and saves
     /// on the ingest writer, unordered, so a read now could return the
@@ -2931,14 +2949,14 @@ impl PricerTile {
     /// `:name <new>` is refused when `new` is open or
     /// already a document (or about to be one: a queued save). Otherwise
     /// the tile takes the new name at once and saves the whole sheet under
-    /// it now. The OLD name's document is forgotten only once a save under
+    /// it now. The old name's document is forgotten only once a save under
     /// the new name is confirmed (`save_answered`). If that save FAILS the
     /// tile keeps the new name (the trader asked for it), the save notice
     /// paints the reason, the old document is left alone, and the next
     /// edit retries — its confirmation retires the old name then. An empty
     /// sheet writes nothing, so its old document stays as it
     /// was. A tile closed or switched before the confirmation leaves the
-    /// old document too: nothing is ever lost to a rename.
+    /// old document too. Save failures remain visible for retry.
     fn rename(&mut self, name: String, cx: &mut Context<Self>) -> Result<(), String> {
         if name == self.sheet.name {
             return Ok(());
@@ -3194,7 +3212,7 @@ impl PricerTile {
         cx.notify();
     }
 
-    /// The only way a model reaches the table (spec §8.2).
+    /// Install the prepared model, refresh table layout, and reconcile editor and cursor.
     pub(crate) fn install_model(&mut self, cx: &mut Context<Self>) {
         let model = Rc::clone(&self.model);
         let loading = self.loading;
@@ -3320,7 +3338,7 @@ impl PricerTile {
     }
 
     /// A cursor whose line went away falls back to the row at its old
-    /// index (planning decision 10).
+    /// index, clamped to the visible grid.
     /// While a load is pending the model is the empty fallback, so the
     /// record's cursor line is kept as is for `loaded` to resolve.
     fn reconcile_cursor(&mut self) {
@@ -3333,8 +3351,8 @@ impl PricerTile {
         }
     }
 
-    /// Mirror the cursor into the table: column before row, so the
-    /// component ends in row mode (the market-data order).
+    /// Mirror the cursor into the table: column before row, so the component ends
+    /// in row mode. The delegate paints the cell cursor separately.
     pub(crate) fn sync_cursor(&mut self, cx: &mut Context<Self>) {
         self.reconcile_cursor();
         let row = self.cursor_row();
@@ -3397,7 +3415,7 @@ impl PricerTile {
         match event {
             TableEvent::SelectCell(row, col) => {
                 // A click anywhere cancels an open entry or editor, never
-                // commits it (global constraints). `SelectRow`/
+                // commits it. `SelectRow`/
                 // `SelectColumn` are what `sync_cursor` itself emits when
                 // it mirrors the cursor into the table (including from
                 // inside `open_entry`'s and `begin_edit`'s own rebuilds),
@@ -3460,7 +3478,7 @@ impl PricerTile {
 
 impl gpui::Render for PricerTile {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Staleness is a compare per frame, never a format (spec §9.4).
+        // Compare the prepared timestamp each frame; time labels are already formatted.
         let stale_after = self.shared.settings.borrow().stale_after;
         let stale = self.header.last_priced.is_some_and(|at| {
             chrono::Utc::now()
@@ -3485,10 +3503,8 @@ impl gpui::Render for PricerTile {
             theme,
         );
         let paints = self.table.read(cx).delegate().paints;
-        // The menu is anchored off a zero-size, absolutely positioned
-        // sibling at the header's own right edge (the market-data
-        // arrangement) — `relative` on the wrapper is what makes that
-        // positioning read against the header rather than the window.
+        // Anchor the menu at the header's right edge. The relative wrapper
+        // makes absolute positioning resolve against the header, not the window.
         let header =
             div()
                 .relative()
@@ -4027,16 +4043,15 @@ pub(crate) mod tests {
         let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
         assert_eq!(h.notice(&vcx).as_deref(), Some("loading…"));
         assert_eq!(h.sheet_len(&vcx), 0);
-        // Part 4's `Delivery::Query` arm calls exactly this.
+        // `query_answered` passes decoded query results to `loaded`.
         h.tile
             .update(&mut vcx, |t, cx| t.loaded(Ok(Some(rows)), cx));
         assert_eq!(h.sheet_len(&vcx), 1);
         assert!(h.notice(&vcx).is_none());
     }
 
-    /// The pending path is Part 4's production restore (planning decision
-    /// 7): the record's cursor and expansion wait for the rows, and a
-    /// session save while loading writes them back unchanged.
+    /// A pending restore retains the record's cursor and expansion until rows arrive.
+    /// A session save during loading writes those identities back unchanged.
     #[gpui::test]
     fn a_pending_load_keeps_the_records_cursor_and_expansion(cx: &mut gpui::TestAppContext) {
         let (store, mut record) = seeded(&[
@@ -4155,9 +4170,8 @@ pub(crate) mod tests {
         assert_eq!(h.factory.settings().refresh, None);
     }
 
-    /// Planning decision 6: a visible pricer submits no view query, so it
-    /// must arrive at a flip barrier itself or every other following tile
-    /// waits out the deadline (`geode-diagnostics`' own test, copied).
+    /// A pricer has no frame query result to await. It acknowledges the flip barrier
+    /// immediately so other following tiles need not wait for the deadline.
     #[gpui::test]
     fn the_tile_answers_a_flip_barrier_it_has_nothing_coming_for(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -4598,8 +4612,8 @@ pub(crate) mod tests {
         assert!(again[0].tag > b.tag);
     }
 
-    /// Planning decision 4: a newer batch carries every stale line, so
-    /// dropping the older batch's outcome whole loses nothing.
+    /// Each new batch carries every stale line, so discarding an older outcome
+    /// cannot lose work needed by the sheet.
     #[gpui::test]
     fn an_older_submissions_outcome_is_dropped_whole(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
@@ -4631,8 +4645,8 @@ pub(crate) mod tests {
         let e = new_strike(&h, &vcx, 0, 5100.0);
         edit(&h, &mut vcx, e);
         let second = h.prices().remove(0);
-        // The CURRENT tag, but line 1 answered at the revision before the
-        // edit (an edit landed during the round trip, spec §9.2).
+        // Use the current tag with line 1's revision from before the edit to
+        // exercise per-line rejection independently of the batch tag check.
         h.deliver(
             &mut vcx,
             PriceOutcome {
@@ -5006,7 +5020,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// Entry-bar spec §4: `o`, a line, `enter` adds a row below the
+    /// `o`, a line, `enter` adds a row below the
     /// cursor and keeps the bar open; the next `enter` lands below that.
     #[gpui::test]
     fn o_then_lines_then_enter_adds_each_below_the_last_and_keeps_the_bar_open(
@@ -5155,7 +5169,7 @@ pub(crate) mod tests {
         assert_eq!(h.mode(&mut vcx), "insert");
     }
 
-    /// Spec §4.1: `o` (here a palette dispatch) while the bar is open
+    /// `o` (here a palette dispatch) while the bar is open
     /// keeps its text and place, and its field keeps focus.
     #[gpui::test]
     fn a_palette_add_while_the_bar_is_open_keeps_it_and_its_text(cx: &mut gpui::TestAppContext) {
@@ -5168,11 +5182,9 @@ pub(crate) mod tests {
         assert_eq!(h.entry_text(&vcx).as_deref(), Some("half typed"));
     }
 
-    /// A refused insert puts the place back even when the refused spec
-    /// would have advanced it. `place_for` answers no such place today
-    /// (its one reachable refusal, a package at a leg place, never
-    /// advances), so the place is planted: a root boundary inside a
-    /// package's leg run, which `apply` refuses.
+    /// A refused insert restores its insertion position after provisional advancement.
+    /// Seed an invalid root boundary inside a package's leg run to exercise rollback;
+    /// `place_for` does not produce this position.
     #[gpui::test]
     fn a_refused_line_puts_the_place_back(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
@@ -5508,13 +5520,13 @@ pub(crate) mod tests {
                 Some(Editor::Text { input, .. } | Editor::Choice { input, .. }) => input.clone(),
                 Some(Editor::Date { .. }) | None => panic!("a text editor is open"),
             };
-            // `set_value` emits no `Change` (CLAUDE.md's trap): every commit
-            // path must re-read the live text, and this proves it does.
+            // `set_value` emits no `Change`; commit must read the live input
+            // rather than rely on state updated by that event.
             input.update(cx, |s, cx| s.set_value(text.clone(), window, cx));
         });
     }
 
-    /// Spec §12: editing the strike marks it stale and resubmits.
+    /// Editing the strike marks its line stale and resubmits it.
     #[gpui::test]
     fn i_on_a_strike_edits_it_and_enter_reprices_that_line(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
@@ -5757,7 +5769,7 @@ pub(crate) mod tests {
         h.draw(&mut vcx);
         h.dispatch(&mut vcx, "commit", None);
         assert_eq!(h.cell(&vcx, 0, "type"), "P");
-        // An unknown underlying commits as typed (planning decision 17).
+        // An unknown underlying commits as typed.
         h.dispatch(&mut vcx, "first_col", None);
         h.dispatch(&mut vcx, "right", None); // underlying
         h.dispatch(&mut vcx, "edit", None);
@@ -5775,7 +5787,7 @@ pub(crate) mod tests {
         assert_eq!(h.mode(&mut vcx), "insert");
     }
 
-    /// Spec §12 ("the editor blurs before it drops"), both closers.
+    /// Commit and cancel both release editor focus before dropping its handle.
     #[gpui::test]
     fn the_editor_gives_up_focus_before_it_is_dropped(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
@@ -6445,7 +6457,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// Spec §12: `:shift spot 2` reprices only the lines that inherit it.
+    /// `:shift spot 2` reprices only the lines that inherit it.
     #[gpui::test]
     fn colon_shift_spot_reprices_only_inheriting_lines(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
@@ -6606,6 +6618,8 @@ pub(crate) mod tests {
             "name fresh",
             "new",
             "e book",
+            "autosize",
+            "autosize reset",
         ];
         for word in crate::core::commands::VERBS {
             assert!(
@@ -6635,14 +6649,135 @@ pub(crate) mod tests {
         }
     }
 
+    /// The width the delegate hands the table for the column named `name`
+    /// (the vocabulary's name, or `__tree`).
+    fn width_of_column(h: &Harness, vcx: &VisualTestContext, name: &str) -> f32 {
+        use gpui_component::table::TableDelegate as _;
+        h.tile.read_with(vcx, |t, cx| {
+            let d = t.table.read(cx).delegate();
+            let ix = if name == crate::delegate::TREE_KEY {
+                crate::delegate::TREE_COL
+            } else {
+                1 + d
+                    .model
+                    .columns
+                    .iter()
+                    .position(|c| c.name == name)
+                    .unwrap_or_else(|| panic!("no column '{name}'"))
+            };
+            f32::from(d.column(ix, cx).width)
+        })
+    }
+
+    const WIDE_QTY: [&str; 2] = ["-1234567890 SPX Z26 5000 C", "SPX Z26 4000 P"];
+
+    /// `:autosize` through the content's command route fits a column whose
+    /// text outgrows the view's width; the fit survives the refresh every
+    /// rebuild runs; `:autosize reset` returns to the view's width.
+    #[gpui::test]
+    fn autosize_fits_every_row_survives_a_rebuild_and_resets(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &WIDE_QTY);
+        let default = width_of_column(&h, &vcx, "qty");
+        h.command(&mut vcx, "autosize").unwrap();
+        let fitted = width_of_column(&h, &vcx, "qty");
+        let rem = vcx.update(|window, _| f32::from(window.rem_size()));
+        let text = "-1234567890".chars().count() as f32 * rem * 0.875 * 0.6;
+        assert!(fitted > default, "{fitted} > {default}");
+        assert!(fitted >= text, "{fitted} holds {text}px");
+
+        h.tile.update(&mut vcx, |t, cx| t.rebuild(cx));
+        assert_eq!(width_of_column(&h, &vcx, "qty"), fitted);
+
+        h.command(&mut vcx, "autosize reset").unwrap();
+        assert_eq!(width_of_column(&h, &vcx, "qty"), default);
+    }
+
+    fn fitted_of(h: &Harness, vcx: &VisualTestContext) -> geode_shell::colfit::FittedWidths {
+        h.tile
+            .read_with(vcx, |t, cx| t.table.read(cx).delegate().fitted.clone())
+    }
+
+    /// While the sheet loads, `:autosize` refuses and keeps the restored
+    /// widths; `:autosize reset` still drops them.
+    #[gpui::test]
+    fn autosize_while_loading_refuses_and_keeps_the_widths(cx: &mut gpui::TestAppContext) {
+        let (store, mut record) = seeded(&BOOK);
+        store.set_pending(true);
+        let mut widths = toml::Table::new();
+        widths.insert("qty".into(), toml::Value::Float(90.0));
+        record.insert(
+            geode_shell::colfit::SESSION_KEY.into(),
+            toml::Value::Table(widths),
+        );
+        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.is_loading()),
+            "not loaded yet"
+        );
+        let before = fitted_of(&h, &vcx);
+        assert_eq!(before.len(), 1);
+        assert_eq!(
+            h.command(&mut vcx, "autosize"),
+            Err(geode_shell::colfit::NOTHING_TO_FIT.to_string())
+        );
+        assert_eq!(fitted_of(&h, &vcx), before);
+        h.command(&mut vcx, "autosize reset").unwrap();
+        assert!(fitted_of(&h, &vcx).is_empty());
+    }
+
+    /// An empty sheet has nothing to fit either.
+    #[gpui::test]
+    fn autosize_on_an_empty_sheet_refuses(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.visible(&mut vcx, true);
+        assert!(!h.tile.read_with(&vcx, |t, _| t.is_loading()));
+        assert_eq!(
+            h.command(&mut vcx, "autosize"),
+            Err(geode_shell::colfit::NOTHING_TO_FIT.to_string())
+        );
+        assert!(fitted_of(&h, &vcx).is_empty());
+    }
+
+    /// Fitted widths ride the session record and come back on restore; a
+    /// name the view lacks is ignored and a garbled value restores none.
+    #[gpui::test]
+    fn autosize_widths_round_trip_the_session(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &WIDE_QTY);
+        h.command(&mut vcx, "autosize").unwrap();
+        let fitted = width_of_column(&h, &vcx, "qty");
+        let tree = width_of_column(&h, &vcx, crate::delegate::TREE_KEY);
+        let saved = h.serialize(&mut vcx);
+        let mut widths = saved[geode_shell::colfit::SESSION_KEY]
+            .as_table()
+            .expect("widths persisted")
+            .clone();
+        widths.insert("gone".into(), toml::Value::Float(300.0));
+
+        let (store, mut record) = seeded(&BOOK);
+        record.insert(
+            geode_shell::colfit::SESSION_KEY.into(),
+            toml::Value::Table(widths),
+        );
+        let (h2, mut vcx2) = open_full(cx, Some(record), store, PricerSettings::default());
+        h2.visible(&mut vcx2, true);
+        assert_eq!(width_of_column(&h2, &vcx2, "qty"), fitted);
+        assert_eq!(width_of_column(&h2, &vcx2, crate::delegate::TREE_KEY), tree);
+
+        let (store, mut record) = seeded(&BOOK);
+        record.insert(
+            geode_shell::colfit::SESSION_KEY.into(),
+            toml::Value::String("wide".into()),
+        );
+        let (h3, mut vcx3) = open_full(cx, Some(record), store, PricerSettings::default());
+        let saved = h3.serialize(&mut vcx3);
+        assert!(!saved.contains_key(geode_shell::colfit::SESSION_KEY));
+    }
+
     // ---- loading guards, put into a closed package, menu clicks ----
 
-    /// Review finding: `:shift`/`:spot`/`:group`/`:ungroup` must not edit
-    /// the empty fallback sheet while a load is pending — the edit would
-    /// be lost, undo included, the moment `loaded` swaps the real
-    /// document in. And even if something else bypassed that guard,
-    /// `loaded` clears the undo stack rather than trust inverses recorded
-    /// against rows that are about to disappear.
+    /// Sheet commands refuse edits while loading because installing the document
+    /// would discard them. Loading also clears any fallback undo records, whose
+    /// inverses cannot safely apply to the loaded rows.
     #[gpui::test]
     fn shift_spot_group_ungroup_refuse_while_loading_and_loaded_clears_any_undo(
         cx: &mut gpui::TestAppContext,
@@ -6657,7 +6792,7 @@ pub(crate) mod tests {
         assert_eq!(h.command(&mut vcx, "group"), loading);
         assert_eq!(h.command(&mut vcx, "ungroup"), loading);
         // `:view` and `:refresh` change the sheet as well: `loaded` would
-        // replace what they set, so they refuse too (whole-branch review).
+        // replace what they set, so they refuse too.
         assert_eq!(h.command(&mut vcx, "view barrier"), loading);
         assert_eq!(h.command(&mut vcx, "refresh 10s"), loading);
         // The menu's view rows: Price all, Group, Ungroup, Undo, Redo,
@@ -6670,10 +6805,8 @@ pub(crate) mod tests {
             Some("the sheet is still loading")
         );
         assert!(!h.columns(&vcx).contains(&"barrier".to_string()));
-        // Seed the undo stack directly — every production edit path
-        // already refuses while loading, this one included once fixed —
-        // so `loaded` swapping the sheet has something to lose if it did
-        // not clear it.
+        // Bypass command guards to seed fallback history and verify that loading
+        // clears it independently of those guards.
         h.tile.update(&mut vcx, |t, cx| {
             t.apply_edit(
                 Edit::SetSheetShift(crate::core::OwnShifts {
@@ -6691,9 +6824,8 @@ pub(crate) mod tests {
         assert_eq!(h.footer(&vcx).as_deref(), Some("nothing to undo"));
     }
 
-    /// Review finding: a line put onto a collapsed package's leg slot
-    /// (`put_place`'s own rule) must open the package first, the way `o`
-    /// does — otherwise the new leg paints into a hidden row.
+    /// Putting a leg into a collapsed package opens its parent so the new row
+    /// is visible and receives the cursor.
     #[gpui::test]
     fn put_below_onto_a_collapsed_packages_leg_slot_opens_it(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
@@ -6722,8 +6854,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// Review finding: the menu's row must paint clickable above the
-    /// `DataTable` (a later sibling), not be occluded by it.
+    /// Menu rows paint above the table and receive clicks without table occlusion.
     #[gpui::test]
     fn a_click_on_a_menu_row_picks_it_and_paints_above_the_table(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
@@ -6889,7 +7020,7 @@ pub(crate) mod tests {
         );
     }
 
-    // ---- whole-branch review fixes ----
+    // ---- typeahead choices, save failures, and field cleanup ----
 
     /// Three underlyings the sheet already holds: HSCEI, NKY, SPX.
     const UNDERLYINGS: [&str; 3] = ["SPX Z26 5000 C", "HSCEI Z26 9000 C", "NKY Z26 30000 C"];
@@ -6904,10 +7035,8 @@ pub(crate) mod tests {
         );
     }
 
-    /// Review finding: ranking is a subsequence match, so `HSI` ranks
-    /// `HSCEI` first. An untouched highlight is a guess: `enter` commits
-    /// the typed text unless the query IS the option or the trader moved
-    /// the highlight.
+    /// Subsequence ranking can suggest `HSCEI` for `HSI`. A free typeahead commits
+    /// typed text unless it exactly matches the option or the user moved the highlight.
     #[gpui::test]
     fn a_free_typeahead_commits_the_typed_underlying_unless_it_is_an_option_or_the_highlight_moved(
         cx: &mut gpui::TestAppContext,
@@ -6956,8 +7085,8 @@ pub(crate) mod tests {
         assert_eq!(h.footer(&vcx), None);
     }
 
-    /// Review finding: after a FAILED load, the next edit's save would
-    /// publish the near-empty fallback over the real document.
+    /// Failed loads block saving so edits to the fallback cannot overwrite the
+    /// stored document. Escape leaves the blocking notice visible.
     #[gpui::test]
     fn a_failed_load_blocks_every_save_and_says_so_past_escape(cx: &mut gpui::TestAppContext) {
         let (store, record) = seeded(&BOOK);
@@ -6989,8 +7118,8 @@ pub(crate) mod tests {
         );
     }
 
-    /// The same block through a pending load answered with an error (Part
-    /// 4's store), and none for a genuinely absent document.
+    /// An asynchronous load failure blocks saves; a confirmed absent document
+    /// opens an empty sheet that can be saved normally.
     #[gpui::test]
     fn a_pending_load_answered_with_an_error_blocks_saves_and_an_absent_one_does_not(
         cx: &mut gpui::TestAppContext,
@@ -7028,8 +7157,7 @@ pub(crate) mod tests {
         assert!(h2.store.get("gone").is_some(), "an absent document saves");
     }
 
-    /// Review finding: after a refused save the idle task has fired, so a
-    /// close that flushed only a pending task dropped the unsaved sheet.
+    /// Closing retries a refused save even after its idle task has completed.
     #[gpui::test]
     fn closing_after_a_refused_save_flushes_the_unsaved_sheet(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
@@ -7047,8 +7175,8 @@ pub(crate) mod tests {
         assert_eq!(saved.qty(0), 7, "the dirty sheet was saved on close");
     }
 
-    /// Review finding: the save state had shared the pricing notice's
-    /// slot, so `REFUSED` overwrote it and a later good submit cleared it.
+    /// Save notices occupy their own slot and survive pricing refusals, successful
+    /// pricing submissions, and Escape.
     #[gpui::test]
     fn a_refused_saves_notice_outlives_pricing_notices_and_escape(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
@@ -7076,8 +7204,8 @@ pub(crate) mod tests {
         assert_eq!(h.save_notice(&vcx).as_deref(), Some(NOT_SAVED));
     }
 
-    /// Review finding: `:` and `/` are shell-owned and bypass `dispatch`,
-    /// so they must close the menu and the fields themselves.
+    /// Shell-owned `:` and `/` bypass `dispatch` and perform field/menu cleanup
+    /// through their own tile entry points.
     #[gpui::test]
     fn colon_and_find_close_the_menu_and_an_open_editor(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
@@ -7095,8 +7223,7 @@ pub(crate) mod tests {
         assert_eq!(h.cell(&vcx, 0, "strike"), "5000", "nothing was committed");
     }
 
-    /// Review finding: a chevron click is a click — it cancels an open
-    /// editor before it toggles.
+    /// A chevron click cancels the open editor before toggling its package.
     #[gpui::test]
     fn a_chevron_click_cancels_an_open_editor(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
@@ -7786,10 +7913,8 @@ pub(crate) mod tests {
         assert_eq!(h.store.loads().len(), 2);
     }
 
-    /// Decision 15: nothing prices while loading, so a standing refusal
-    /// streak would say `REFUSED` over a load with no retry to end it —
-    /// proved through `:e`, the production route into a load with a
-    /// streak standing.
+    /// Starting a load clears pricing refusal state. Pricing is suspended during
+    /// loading, so no retry could otherwise clear the overlay hiding the load notice.
     #[gpui::test]
     fn a_load_starting_clears_a_refusal_streak(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
@@ -8886,10 +9011,9 @@ pub(crate) mod tests {
         assert_eq!(h.store.forgets(), vec!["book".to_string()]);
     }
 
-    /// If a tile holds the old name when the rename's save is confirmed,
-    /// the forget is skipped. No route opens a retiring name today (`:e`
-    /// and a restore both refuse it); the guard keeps a future one from
-    /// deleting a sheet in use, so the test opens the name directly.
+    /// A confirmed rename must not forget a sheet held by another tile. Seed the
+    /// open-name set directly to test this guard independently of the retiring-name
+    /// checks in `:e` and restore.
     #[gpui::test]
     fn a_rename_never_forgets_a_sheet_a_tile_has_open(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);

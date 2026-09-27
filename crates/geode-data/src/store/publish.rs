@@ -78,24 +78,13 @@ fn partition_predicate(partitions: &[Partition]) -> String {
     }
 }
 
-/// The `generations` summary insert for one publish: one `values` row per
-/// `req.partitions` entry, guarded by `where not exists` so it is
-/// idempotent across the grains that call `publish_file` for the same
-/// file -- every grain names the identical (dataset, batch, book, gen_id,
-/// source_time) tuple, and only the first grain's call actually inserts
-/// it. Literals are quoted the same way `partition_predicate` quotes
-/// them: these values come from the catalog and the sentinel, not user
-/// input.
+/// Insert one summary row per distinct partition and generation identity.
+/// The `where not exists` guard makes repeated calls for different grains of
+/// the same file idempotent. Literals are escaped as in `partition_predicate`.
 ///
-/// `select distinct v.*`, not `select v.*`: the `where not exists` guard
-/// is correlated against `generations` as of statement start, so two
-/// identical rows *within* one `values` list both pass it and both
-/// insert. `PublishRequest::partitions` is a public field on a public
-/// type, so a caller repeating a partition is not this crate's to rule
-/// out by construction -- `distinct` closes it instead. Unreachable
-/// through `load_file` today (`partitions` derives from
-/// `distinct_books`), which is exactly why nothing here would have
-/// caught it.
+/// `select distinct` also removes repeated partitions within a request: every
+/// row in the VALUES list checks the summary as of statement start, so the
+/// existence guard alone cannot deduplicate that list.
 fn generation_summary_insert(req: &PublishRequest) -> String {
     let dataset = req.dataset.replace('\'', "''");
     let time = req.source_time.to_rfc3339();
@@ -167,14 +156,9 @@ pub(crate) fn publish_in_transaction(
         });
     }
 
-    // The backfill guard: a file *older* than what is already live becomes
-    // history directly. Without this a backfill would overwrite this
-    // morning's risk with last Tuesday's.
-    //
-    // Strictly older, deliberately. Discovery only queues a file whose
-    // (size, source_time) differs from what was loaded, so a file arriving
-    // with a source time equal to the live one is a *corrected* republish
-    // of the same generation — it must replace, not be filed as history.
+    // A strictly older source time routes the incoming generation directly to
+    // archive. Equal source times replace live too, allowing corrected republishes;
+    // their distinct generation IDs preserve both versions in history.
     let superseded = req
         .live_source_time
         .is_some_and(|live_t| req.source_time < live_t);
@@ -304,15 +288,9 @@ mod tests {
             .unwrap();
     }
 
-    /// A staging table shaped like `staging_position` plus one extra
-    /// column, so `insert into {live or archive} select *, {gen}, '{time}'
-    /// from {staging}` fails with a column-count mismatch -- the "table
-    /// has N columns but N+1 values were supplied" class `CLAUDE.md`
-    /// warns about after a schema change -- *inside* the publish
-    /// transaction, after `begin`. `staging_table = "no_such_table"`
-    /// fails at the row-count query that runs before any `begin`, which
-    /// proves nothing about whether the summary insert is covered by the
-    /// rollback; this fails at the statement immediately before it.
+    /// A staging table with an extra column. Counting its rows succeeds, but
+    /// inserting into live or archive fails inside the publication transaction.
+    /// This exercises rollback after earlier statements have run.
     fn stage_with_a_mismatched_column_count(
         store: &Store,
         book: &str,
@@ -433,9 +411,8 @@ mod tests {
 
     #[test]
     fn a_corrected_republish_at_the_same_source_time_replaces_live() {
-        // Discovery only queues a file whose (size, source_time) differs
-        // from what was loaded, so a file arriving with the *same* source
-        // time is a correction of that generation and must replace it.
+        // A correction with the same source time must replace live under its new
+        // generation ID, preserving the outgoing version in archive.
         let (_d, store) = fixture();
         stage(&store, "BK000", 10.0, "BK000", 1);
         publish_file(
@@ -555,10 +532,8 @@ mod tests {
 
     #[test]
     fn the_bookless_partition_is_replaced_like_any_other() {
-        // Rows with no book are kept and reported, not dropped, so they
-        // are live data. `book = '…'` never matched them, so every
-        // republish appended another copy: live no longer held one
-        // generation per partition, and the total drifted upward.
+        // Rows with no book form their own partition. Replacement must match NULL
+        // books explicitly to avoid accumulating duplicate live rows.
         let (_d, store) = fixture();
         let publish = |generation: i64, t: &str, live_t: Option<&str>| {
             store

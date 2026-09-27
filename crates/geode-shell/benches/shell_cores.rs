@@ -398,9 +398,9 @@ const BENCH_VIEWS: &str = "[tree]\ndataset = \"risk_snapshot\"\ngrouping = [\"bo
      [[tree.columns]]\nname = \"delta\"\n\
      [[tree.columns]]\nname = \"vega\"\n";
 
-/// One keystroke's refresh with 20,000 categorical values loaded: lex,
-/// context, rank and cap. A categorical column's dictionary bounds its
-/// size, and 20,000 is well past the demo's largest.
+/// One text-change refresh with 20,000 cached categorical values: context
+/// analysis, candidate construction, ranking, row capping and schema checks.
+/// Value fetching and GPUI rendering are outside the timed work.
 fn bench_expr_complete(c: &mut Criterion) {
     use geode_core::config::{LayerDoc, merge_docs};
     use geode_core::dimensions::DerivedDimensions;

@@ -2164,9 +2164,8 @@ mod tests {
 
     #[test]
     fn move_from_main_into_an_occupied_dock_inserts_into_the_docks_tree() {
-        // Dock-trees semantics: the old occupied-target *swap* rule is
-        // gone — moving into an occupied dock splits the moved tile in at
-        // the dock tree's focused leaf, so the dock simply holds both.
+        // Moving into an occupied dock inserts beside its focused leaf,
+        // preserving both tiles in the destination tree.
         let mut ws = two_tiles();
         apply_workspace_action(&mut ws, &act("dock::move_left"));
         let parked = ws.active().docks().get(DockSide::Left).tree().focused();
@@ -2775,9 +2774,8 @@ mod tests {
 
     #[test]
     fn splits_while_a_dock_is_focused_grow_the_docks_tree() {
-        // Dock-trees semantics: the old "splits are refused in a dock"
-        // rule is gone — a split lands within the focused dock's tree,
-        // allocating from the same app-wide id counter.
+        // Splits land within the focused dock's tree and allocate from the
+        // same app-wide tile ID counter as main-region splits.
         let mut ws = two_tiles();
         apply_workspace_action(&mut ws, &act("dock::move_left"));
         let main_before = ws.active().tree().layout(Rect::UNIT);

@@ -1956,6 +1956,6 @@ the pairs as a same-run ratio, not as reference values.
 
 The depth-2 shapes the blotter opens with stay under the 50 ms requery
 budget with both columns even under this load. The added cost is the two
-`min`/`max`/`count` pairs per underlying row and two more text plus two
-boolean columns across the Arrow boundary. An unloaded re-measure is still
+`min`/`max`/`count` pairs per underlying row and one numeric, one text, and
+two boolean columns across the Arrow boundary. An unloaded re-measure is still
 owed before these become reference values.

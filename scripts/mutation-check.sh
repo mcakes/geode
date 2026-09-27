@@ -1512,9 +1512,9 @@ run_mutation "pool: a worker releases a transaction left behind" \
   crates/geode-data/src/query/pool.rs \
   '        release_transaction(&conn);
 
-        // The stale check' \
+        // Check staleness' \
   '
-        // The stale check' \
+        // Check staleness' \
   geode-data \
   a_transaction_left_aborted_does_not_wedge_the_worker
 
@@ -3680,13 +3680,13 @@ run_mutation "delegate: the cursor is re-derived by column name across a move" \
         {
             self.cursor.col = i;
         }
-        // `TableState::move_column` (gpui-component) calls this directly' \
+        // The component calls this hook without `visible_rows_changed`, so' \
   '        if let Some(name) = None::<String>
             && let Some(i) = self.plan.as_ref().and_then(|p| p.position_of(&name))
         {
             self.cursor.col = i;
         }
-        // `TableState::move_column` (gpui-component) calls this directly' \
+        // The component calls this hook without `visible_rows_changed`, so' \
   geode-blotter \
   the_cursor_follows_its_column_across_a_move
 
@@ -3958,12 +3958,12 @@ run_mutation "blotter: filter validates against the dataset" \
 
 run_mutation "delegate: move_column refills the window it already had" \
   crates/geode-blotter/src/delegate.rs \
-  '        // same tree, and the window is only ever tens of rows.
+  '        // column movement leaves their values unchanged because the tree stays fixed.
         self.invalidate_cells();
         self.refresh_selection();
         cx.notify();
     }' \
-  '        // same tree, and the window is only ever tens of rows.
+  '        // column movement leaves their values unchanged because the tree stays fixed.
         self.refresh_selection();
         cx.notify();
     }' \
@@ -6835,12 +6835,12 @@ run_mutation "blotter: the tree column is pinned left while the measures scroll"
 
 run_mutation "blotter gutter: the tree column widens by the gutter" \
   crates/geode-blotter/src/delegate.rs \
-  '            width: px(if c.kind == ColumnKind::Tree {
-                c.width + self.gutter_px()
-            } else {
-                c.width
-            }),' \
-  '            width: px(c.width),' \
+  '                if c.kind == ColumnKind::Tree {
+                    width + self.gutter_px()
+                } else {' \
+  '                if c.kind == ColumnKind::Tree {
+                    width
+                } else {' \
   geode-blotter the_line_numbers_global_paints_a_gutter_on_the_next_draw
 
 run_mutation "blotter gutter: a changed setting refreshes the table's column groups" \
@@ -15474,11 +15474,9 @@ run_mutation "dialog: the object-dialog frozen-row click is dropped while a conf
   geode-shell \
   an_edit_row_click_is_dropped_while_a_confirm_is_armed
 
-# Spec §20.5 at the blotter tile's own derivation (the final review's
-# I2): `Cursor::move_rows` takes `wrap` from the caller, and the tile is
-# what decides it from whether a selection is live (grid selection spec
-# §3, replacing the old `Mode` enum). Mutated to always wrap, a bare `j`
-# with a selection live leaps from the last row to row 0 and inverts it.
+# The tile enables row wrapping only when no selection is active.
+# Forcing wrap on makes a bare j jump from the last row to the first
+# and reverses the selected range across its anchor.
 run_mutation "tile: a bare step wraps in normal mode only (spec §20.5)" \
   crates/geode-blotter/src/tile.rs \
   '                    let wrap = d.selection.is_none();' \
@@ -17087,8 +17085,8 @@ run_mutation "series: dedupe ignores the pair filter" \
 # an empty fetch, the coverage row is never written.
 run_mutation "series: coverage is not recorded for an empty fetch" \
   crates/geode-data/src/store/series.rs \
-  '    // 4. Coverage, always.' \
-  '    // 4. Coverage, always.
+  '    // Record coverage even when deduplication leaves no new rows.' \
+  '    // Record coverage even when deduplication leaves no new rows.
     if req.rows.is_empty() {
         return Ok(SeriesAppended { appended, swept: 0 });
     }' \
@@ -20376,18 +20374,18 @@ run_mutation "pricer tile: a sheet edit lands on the fallback while loading" \
 
 run_mutation "pricer tile: a load keeps undo recorded against the fallback" \
   crates/geode-pricer/src/tile.rs \
-  '                    // over it. Nothing to undo into is the safe state.
+  '                    // them could overwrite loaded values, so discard their history.
                     self.undo.clear();' \
-  '                    // over it. Nothing to undo into is the safe state.' \
+  '                    // them could overwrite loaded values, so discard their history.' \
   geode-pricer shift_spot_group_ungroup_refuse_while_loading_and_loaded_clears_any_undo
 
 run_mutation "pricer tile: put onto a collapsed package's leg slot hides the line" \
   crates/geode-pricer/src/tile.rs \
-  '        // to wherever it was (review finding).
+  '        // cursor reconciliation can select it.
         if let Place::Leg { package, .. } = place {
             self.expansion.set(self.sheet.id(package), true);
         }' \
-  '        // to wherever it was (review finding).
+  '        // cursor reconciliation can select it.
         let _ = &place;' \
   geode-pricer put_below_onto_a_collapsed_packages_leg_slot_opens_it
 
@@ -21714,8 +21712,8 @@ run_mutation "mdlines: a mode change refreshes the table" \
 # The label column widens by the gutter.
 run_mutation "mdlines: the label column widens by the gutter" \
   crates/geode-marketdata/src/delegate.rs \
-  '                width: px(LABEL_WIDTH + self.gutter_px()),' \
-  '                width: px(LABEL_WIDTH),' \
+  '                width: px(self.width_of(ROW_AXIS_KEY, LABEL_WIDTH) + self.gutter_px()),' \
+  '                width: px(self.width_of(ROW_AXIS_KEY, LABEL_WIDTH)),' \
   geode-marketdata the_line_numbers_global_paints_a_gutter_beside_the_row_label
 
 # Under a hidden label the first value column widens instead.
@@ -21902,8 +21900,8 @@ run_mutation "pricer gutter: the settings observer applies the mode" \
 # The tree column widens by the gutter, so the tree text keeps its room.
 run_mutation "pricer gutter: the tree column's width includes the gutter" \
   crates/geode-pricer/src/delegate.rs \
-  '                width: px(TREE_WIDTH + self.gutter_px()),' \
-  '                width: px(TREE_WIDTH),' \
+  '                    self.fitted.get(TREE_KEY).copied().unwrap_or(TREE_WIDTH) + self.gutter_px()' \
+  '                    self.fitted.get(TREE_KEY).copied().unwrap_or(TREE_WIDTH)' \
   geode-pricer the_line_numbers_global_paints_a_gutter_beside_the_tree_column
 
 # Relative numbers are re-derived when the cursor row moves. Mutated, the
@@ -22123,7 +22121,7 @@ run_mutation "action rename: register refuses a retired id" \
   '        if let Some(new) = None::<&ActionId> {' \
   geode-shell a_retired_id_cannot_be_registered
 
-# ---- grid selection (grid selection spec) ---------------------------------
+# ---- grid selection ------------------------------------------------------
 
 run_mutation "grid selection: an ancestor in the selection hides the row" \
   crates/geode-core/src/grid/selection.rs \
@@ -22160,7 +22158,7 @@ run_mutation "grid selection: a lost anchor column is named as the column" \
   geode-core \
   resolution_goes_through_identity_and_names_the_lost_anchor
 
-# ---- blotter selection (grid selection spec) -------------------------------
+# ---- blotter selection ---------------------------------------------------
 
 run_mutation "blotter selection: escape clears the selection before find" \
   crates/geode-blotter/src/tile.rs \
@@ -23288,6 +23286,152 @@ run_mutation "pricer tile: a package commit ignores a changed opening text" \
   '            && cell::editor_for(&self.sheet, row, kind, format) != Ok(CellEditor::Text(opened))' \
   '            && opened.is_empty()' \
   geode-pricer a_template_reload_under_an_open_package_qty_editor_refuses_the_commit
+
+# The fit is the widest content, not whichever cell comes first.
+run_mutation "autosize: the fit measures the first text, not the widest" \
+  crates/geode-shell/src/colfit.rs \
+  '        let widest = content.into_iter().fold(0.0_f32, f32::max);' \
+  '        let widest = content.into_iter().next().unwrap_or(0.0);' \
+  geode-shell the_widest_cell_decides_the_width
+
+# tile::autosize_columns reaches the focused occupant, not another tile.
+run_mutation "autosize: the palette action reaches a tile other than the focused one" \
+  crates/geode-shell/src/shell/input.rs \
+  $'                .focused_tile()\n                .and_then(|t| self.occupants.get(&t))\n            {\n                Some(o) => o.content.autosize_columns(false, window, cx),' \
+  $'                .tree()\n                .tiles()\n                .first()\n                .copied()\n                .and_then(|t| self.occupants.get(&t))\n            {\n                Some(o) => o.content.autosize_columns(false, window, cx),' \
+  geode-shell the_autosize_action_reaches_only_the_focused_tile
+
+# column() must prefer the fitted width, or the next refresh undoes a fit.
+run_mutation "autosize: the blotter delegate ignores the fitted width" \
+  crates/geode-blotter/src/delegate.rs \
+  '                let width = self.fitted.get(&c.name).copied().unwrap_or(c.width);' \
+  '                let width = c.width;' \
+  geode-blotter autosize_fits_the_loaded_rows_survives_a_redelivery_and_resets
+
+run_mutation "autosize: the market-data delegate ignores the fitted width" \
+  crates/geode-marketdata/src/delegate.rs \
+  '        self.fitted.get(key).copied().unwrap_or(default)' \
+  '        default' \
+  geode-marketdata autosize_fits_every_row_survives_a_model_install_and_resets
+
+run_mutation "autosize: the pricer delegate ignores the fitted width" \
+  crates/geode-pricer/src/delegate.rs \
+  '            width: px(self.fitted.get(c.name).copied().unwrap_or(c.width)),' \
+  '            width: px(c.width),' \
+  geode-pricer autosize_fits_every_row_survives_a_rebuild_and_resets
+
+# A view switch is another column set: its fitted widths go.
+run_mutation "autosize: the blotter keeps widths across a view switch" \
+  crates/geode-blotter/src/tile.rs \
+  '                    d.fitted.clear();' \
+  '                    let _ = &d.fitted;' \
+  geode-blotter autosize_widths_round_trip_the_session_and_a_view_switch_clears_them
+
+# Each module restores its fitted widths from the session record.
+run_mutation "autosize: the blotter restores no widths" \
+  crates/geode-blotter/src/tile.rs \
+  '                delegate.fitted = widths_from_record(restored);' \
+  '                delegate.fitted = FittedWidths::new();' \
+  geode-blotter autosize_widths_round_trip_the_session_and_a_view_switch_clears_them
+
+run_mutation "autosize: the blotter restores widths for a missing view" \
+  crates/geode-blotter/src/tile.rs \
+  '            if restored_view_kept {' \
+  '            if true {' \
+  geode-blotter a_restored_record_for_a_missing_view_drops_its_widths
+
+run_mutation "autosize: the blotter writes no widths" \
+  crates/geode-blotter/src/tile.rs \
+  '        if let Some(w) = widths_to_toml(&self.table.read(cx).delegate().fitted) {' \
+  '        if let Some(w) = None::<toml::Value> {' \
+  geode-blotter autosize_widths_round_trip_the_session_and_a_view_switch_clears_them
+
+run_mutation "autosize: the blotter reset fits instead" \
+  crates/geode-blotter/src/tile.rs \
+  '        let fitted = if reset {' \
+  '        let fitted = if false {' \
+  geode-blotter autosize_fits_the_loaded_rows_survives_a_redelivery_and_resets
+
+# Nothing to measure refuses and keeps the widths already held.
+run_mutation "autosize: the blotter fits an empty table" \
+  crates/geode-blotter/src/tile.rs \
+  '                .ok_or(NOTHING_TO_FIT)?' \
+  '                .unwrap_or_default()' \
+  geode-blotter autosize_with_nothing_loaded_refuses_and_keeps_the_widths
+
+run_mutation "autosize: a regroup keeps the tree column's width" \
+  crates/geode-blotter/src/delegate.rs \
+  '            self.fitted.remove("");' \
+  '            let _ = &self.fitted;' \
+  geode-blotter a_regroup_drops_only_the_tree_columns_fitted_width
+
+run_mutation "autosize: the market-data panel restores no widths" \
+  crates/geode-marketdata/src/tile.rs \
+  '            delegate.fitted = widths_from_record(restored);' \
+  '            delegate.fitted = FittedWidths::new();' \
+  geode-marketdata autosize_widths_round_trip_the_session
+
+run_mutation "autosize: the market-data panel writes no widths" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if let Some(w) = widths_to_toml(&self.table.read(cx).delegate().fitted) {' \
+  '        if let Some(w) = None::<toml::Value> {' \
+  geode-marketdata autosize_widths_round_trip_the_session
+
+run_mutation "autosize: the market-data reset fits instead" \
+  crates/geode-marketdata/src/tile.rs \
+  '        let fitted = if reset {' \
+  '        let fitted = if false {' \
+  geode-marketdata autosize_fits_every_row_survives_a_model_install_and_resets
+
+run_mutation "autosize: the market-data panel fits an empty table" \
+  crates/geode-marketdata/src/tile.rs \
+  '                .ok_or(NOTHING_TO_FIT)?' \
+  '                .unwrap_or_default()' \
+  geode-marketdata autosize_with_no_document_refuses_and_keeps_the_widths
+
+run_mutation "autosize: the pricer tile restores no widths" \
+  crates/geode-pricer/src/tile.rs \
+  '        delegate.fitted = record.widths.clone();' \
+  '        delegate.fitted = FittedWidths::new();' \
+  geode-pricer autosize_widths_round_trip_the_session
+
+run_mutation "autosize: the pricer record reads no widths" \
+  crates/geode-pricer/src/session.rs \
+  '            widths: widths_from_record(Some(t)),' \
+  '            widths: FittedWidths::new(),' \
+  geode-pricer a_record_round_trips_through_its_table
+
+run_mutation "autosize: the pricer writes no widths" \
+  crates/geode-pricer/src/tile.rs \
+  '            widths: self.table.read(cx).delegate().fitted.clone(),' \
+  '            widths: FittedWidths::new(),' \
+  geode-pricer autosize_widths_round_trip_the_session
+
+run_mutation "autosize: the pricer reset fits instead" \
+  crates/geode-pricer/src/tile.rs \
+  '        let fitted = if reset {' \
+  '        let fitted = if false {' \
+  geode-pricer autosize_fits_every_row_survives_a_rebuild_and_resets
+
+run_mutation "autosize: the pricer fits an empty sheet" \
+  crates/geode-pricer/src/tile.rs \
+  '                .ok_or(NOTHING_TO_FIT)?' \
+  '                .unwrap_or_default()' \
+  geode-pricer autosize_on_an_empty_sheet_refuses
+
+# A hand-edited width is clamped to what a fit can produce.
+run_mutation "autosize: a restored width is not clamped" \
+  crates/geode-shell/src/colfit.rs \
+  '                        .then(|| (k.clone(), w.clamp(RESTORED_MIN_PX, RESTORED_MAX_PX)))' \
+  '                        .then(|| (k.clone(), w))' \
+  geode-shell a_restored_width_is_clamped_to_what_a_fit_can_produce
+
+# An occupant without a table refuses by default.
+run_mutation "autosize: the trait default accepts a fit" \
+  crates/geode-shell/src/module.rs \
+  '        Err(crate::colfit::NO_TABLE)' \
+  '        Ok(())' \
+  geode-shell autosize_on_a_tile_without_a_table_shows_the_refusal
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

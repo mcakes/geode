@@ -258,9 +258,8 @@ pub fn range_rows(current: &Range) -> Vec<MenuRow> {
 /// The frequency menu: the six frequencies, finest first, each with its
 /// short label trailing and the one in force ticked. `refusal` is the
 /// model's own point-cap check over the range in force, asked once per
-/// row when the menu is built: a frequency it refuses is a disabled row
-/// carrying that refusal as its reason, never a row that looks pickable
-/// and then fails.
+/// row when the menu is built. Frequencies rejected by that check are
+/// disabled and carry its refusal as their reason.
 pub fn frequency_rows(
     current: Frequency,
     refusal: impl Fn(Frequency) -> Result<(), String>,

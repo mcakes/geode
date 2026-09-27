@@ -5,9 +5,9 @@
 //! tokens before the caret and names what may come next. Tokens after the
 //! caret are ignored, so a half-edited middle still gets suggestions.
 //!
-//! One known divergence from the parser: a word starting with a digit
-//! reads as a number here. The parser would accept it as a column name, but
-//! no schema column starts with a digit.
+//! Unlike the expression parser, this lexer starts a number token at an
+//! ASCII digit. Completion therefore does not support column names that
+//! start with an ASCII digit, even though the parser accepts them.
 
 use std::ops::Range;
 
@@ -271,7 +271,8 @@ pub(crate) fn walk(text: &str, tokens: &[Token], on_term: &mut impl FnMut(Term))
 }
 
 /// What may come next at byte `caret` of `text` (clamped to its length),
-/// and the token a suggestion replaces.
+/// and the token a suggestion replaces. The clamped caret must lie on a
+/// UTF-8 character boundary.
 pub fn context_at(text: &str, caret: usize) -> Context {
     let caret = caret.min(text.len());
     let tokens = lex(text);
@@ -452,7 +453,8 @@ pub struct Warning {
 /// With `caret`, a problem whose range touches the caret is left out,
 /// because that word is still being typed. An empty vocab checks nothing.
 /// The walk stops where the text stops being a valid prefix, so a syntax
-/// error hides later warnings, and Enter reports the syntax error first.
+/// error hides later warnings. Callers must parse separately before using
+/// these warnings to accept or refuse a complete expression.
 pub fn check(text: &str, vocab: &ExprVocab, caret: Option<usize>) -> Vec<Warning> {
     if vocab.is_empty() {
         return Vec::new();
@@ -680,12 +682,9 @@ mod tests {
     use crate::dimensions::DerivedDimensions;
     use crate::schema::SchemaSpec;
 
-    // `live` and `expiry` are declared as `attribute` (grain "position",
-    // matching `npv`), not a bare `dimension`: a bare dimension must be a
-    // built-in grain-key column (schema/mod.rs's `bare_outside_key` check),
-    // and neither name is one, so a `role = "dimension"` declaration would
-    // be dropped before `ExprVocab` ever saw it. The attribute role keeps
-    // both columns present with their declared `ValueKind` unchanged.
+    // `live` and `expiry` are position-grain attributes. Bare dimensions
+    // must be built-in grain-key columns; the attribute role keeps these
+    // fixture columns valid with their declared bool and date kinds.
     fn vocab() -> ExprVocab {
         let datasets = LayerDoc::builtin(
             "datasets",

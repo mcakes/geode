@@ -2,12 +2,16 @@
 //! controller in `shell::expr_suggest` feeds it the field's text and
 //! caret and paints what it holds.
 //!
-//! `refresh` re-reads the caret position (`geode_core::scope::complete::
-//! context_at`), then rebuilds the rows, hint and warning. Rows are ranked
-//! with the shared fuzzy matcher and capped at [`MAX_ROWS`]. Categorical
-//! values come from an async distinct query: `refresh` asks for a column
-//! once (`Refresh::Request`), and `deliver` accepts only the latest tag
-//! for that column, so a reply from a superseded request is never shown.
+//! [`ExprCompletion::refresh`] derives context from the text and caret through
+//! [`context_at`], then rebuilds rows, hints and warnings when either changes.
+//! Rows use the shared fuzzy matcher and are capped at [`MAX_ROWS`]. Categorical
+//! values come from asynchronous distinct queries and remain cached per column
+//! for this completion state. Only a reply matching the column's current
+//! loading tag is accepted. Superseded loading entries are discarded so returning
+//! to their columns can request values again; ready and failed entries remain
+//! until invalidated. A narrowing-scope change clears all values. Frame Whole/Add
+//! dialogs can also offer named expressions: accepting one stages its name and
+//! erases the typed prefix without inserting a column reference.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -17,7 +21,7 @@ use geode_core::scope::complete::{Context, ExprVocab, Position, ValueKind, check
 use crate::listfilter;
 use crate::vimnav::{self, NavCommand};
 
-/// At most this many ranked rows are kept. The hint still names the total.
+/// Maximum ranked rows retained. Categorical-value hints report the full cached count.
 pub const MAX_ROWS: usize = 50;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -31,9 +35,10 @@ pub enum Values {
 pub struct Row {
     /// What the row shows and what ranking matches against.
     pub label: String,
-    /// What accepting the row writes over the token.
+    /// Replacement text for an insert row; named rows use [`Accept::Stage`].
     pub insert: String,
-    /// Right-aligned detail: a role and type, a count, or what an operator does.
+    /// Right-aligned detail: role/type, count, operator meaning, or a named
+    /// expression's preview or validation error.
     pub detail: String,
     /// Matched char offsets within `label`.
     pub indices: Vec<usize>,
@@ -45,7 +50,7 @@ pub enum RowKind {
     /// Accepting writes `insert` over the token.
     Insert,
     /// A named expression: accepting stages the name beside the text and
-    /// writes nothing. `broken` is a missing or invalid definition.
+    /// erases the typed token. `broken` is a missing or invalid definition.
     Named { broken: bool },
 }
 
@@ -166,12 +171,10 @@ impl ExprCompletion {
         }
     }
 
-    /// Every column's values are requested under one pool key, and the
-    /// pool keeps only the newest request per key: a replaced pending
-    /// request or an interrupted running one never replies. So at most one
-    /// request is outstanding; any other column still `Loading` is
-    /// forgotten here, or it would say "loading values…" forever and
-    /// `refresh` would never ask again. Ready and Failed entries stay.
+    /// Track the latest request and discard other columns' loading entries.
+    /// All columns share one pool key, so superseded work may never reply.
+    /// Keeping its loading entry would prevent a later visit from requesting
+    /// values again. Ready and failed entries remain cached.
     pub fn mark_loading(&mut self, column: &str, tag: u64, vocab: &ExprVocab) {
         self.values
             .retain(|c, v| c == column || !matches!(v, Values::Loading { .. }));

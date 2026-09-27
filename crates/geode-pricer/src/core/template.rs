@@ -1,19 +1,16 @@
-//! Package templates (line-pricer spec §6.3): a template is a TABLE — for
-//! each leg, its weight, which strike and expiry index it takes and its
-//! option kind. The tables load from the `pricer_templates` document (the
-//! seven built-ins live in its builtin layer); a package names its
-//! template, and a `TemplateSet` resolves the name to its table. The
-//! parser expands a table over the typed strikes and expiries; the
-//! renderer recognises legs that still match a table and prints the
-//! template form back. A name no table resolves still names the package:
-//! it prints its legs one per line.
+//! Configurable package templates define each leg's weight, strike and expiry index,
+//! and option kind. The `pricer_templates` document supplies the tables, with seven
+//! templates in its builtin layer. Packages retain their template names independently
+//! of the configured tables. Parsing expands the resolved table over typed values;
+//! shorthand rendering uses the name only while the legs still match its current
+//! table, otherwise printing each leg on a separate line.
 
 use geode_core::config::{Diagnostic, MergedDoc, Severity};
 use geode_core::pricing::OptionKind;
 
-/// A package's template, by name. `Copy` so `RowKind` stays `Copy`; the
-/// name is interned, so each distinct name is allocated once for the
-/// process (names come from config and stored sheets and are few).
+/// A package's template name, independent of the configured tables.
+/// Names from configuration and stored sheets are interned for the process lifetime,
+/// allowing this type and `RowKind` to remain `Copy`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Template(&'static str);
 
@@ -24,7 +21,8 @@ impl std::fmt::Debug for Template {
 }
 
 impl Template {
-    /// A `Group` over a run of roots; never a table.
+    /// A package formed by grouping root lines, rendered as individual legs.
+    /// This reserved name has no template table.
     pub const CUSTOM: Template = Template("CUSTOM");
     pub const CS: Template = Template("CS");
     pub const PS: Template = Template("PS");
@@ -145,11 +143,10 @@ pub struct TemplateSet {
 /// sized so a tag this long fits.
 pub const MAX_TEMPLATE_NAME: usize = 8;
 
-/// A template name as config and storage spell it: 1 to
-/// [`MAX_TEMPLATE_NAME`] characters, a
-/// letter first, then letters or digits. `C` and `P` are single legs and
-/// `CUSTOM` is the grouped-package marker, so none of the three names a
-/// table. Answers the upper-cased name.
+/// Validate a configured table name and return its uppercase spelling.
+/// Names contain 1 to [`MAX_TEMPLATE_NAME`] ASCII letters or digits and start
+/// with a letter. `C`, `P`, and `CUSTOM` are reserved for single legs and grouped
+/// packages. Storage accepts unresolved names without this validation.
 pub fn check_name(name: &str) -> Result<String, String> {
     let upper = name.to_ascii_uppercase();
     let mut chars = upper.chars();
@@ -166,15 +163,11 @@ pub fn check_name(name: &str) -> Result<String, String> {
 }
 
 impl TemplateSet {
-    /// Each entry is checked alone: a bad one is dropped with an error
-    /// naming its path, the rest load. Unknown keys warn and are ignored,
-    /// so a later key (strike arithmetic) does not make an older binary
-    /// refuse the template. A name that repeats an earlier one case-
-    /// insensitively (the merge matches document keys case-sensitively, so
-    /// `RR` and `rr` both reach here) replaces the earlier entry in place,
-    /// keeping its doc-order position, with a warning naming both spellings;
-    /// this is layer-override semantics for names TOML itself cannot fold
-    /// together.
+    /// Read entries independently, dropping invalid entries with path-specific
+    /// errors and ignoring unknown keys with warnings. Names compare without case:
+    /// a later valid `rr` replaces an earlier `RR` in its original document position
+    /// and emits a warning. The document merge preserves both spellings because
+    /// its own keys are case-sensitive.
     pub fn from_doc(doc: &MergedDoc) -> (TemplateSet, Vec<Diagnostic>) {
         TemplateSet::from_doc_over(doc, &TemplateSet::default(), "previous")
     }
@@ -334,8 +327,8 @@ impl TemplateSet {
         (out, diags)
     }
 
-    /// `BUILTIN_TEMPLATES` parsed; `the_builtin_document_is_exactly_the_seven_tables`
-    /// pins that it loads clean, so the `expect` cannot fire in a shipped build.
+    /// Parse the seven builtin tables from [`BUILTIN_TEMPLATES`].
+    /// Malformed embedded TOML is a programming error and panics.
     pub fn builtin() -> TemplateSet {
         let doc = geode_core::config::LayerDoc::builtin(PRICER_TEMPLATES_DOC, BUILTIN_TEMPLATES)
             .expect("BUILTIN_TEMPLATES is well-formed TOML");
@@ -507,7 +500,7 @@ mod tests {
         assert_eq!(s, TemplateSet::builtin());
         let names: Vec<&str> = s.iter().map(|d| d.name.as_str()).collect();
         assert_eq!(names, ["CS", "PS", "STRD", "STRG", "RR", "FLY", "CAL"]);
-        // The pre-config tables, literally: (name, legs, strikes, expiries).
+        // Builtin definitions: (name, legs, strikes, expiries).
         use OptionKind::{Call, Put};
         let want: [(&str, Vec<LegSpec>, usize, usize); 7] = [
             ("CS", vec![leg(1, 0, 0, Call), leg(-1, 1, 0, Call)], 2, 1),

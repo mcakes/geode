@@ -1,7 +1,8 @@
-//! The tile's one dense header row and its footer (line-pricer spec §8.3).
-//! `prepare` formats everything once per change; `render` paints the
-//! prepared strings and compares the last priced time against
-//! `stale_after` (a compare, never a format, per frame).
+//! Header, footer, and shorthand entry bar for the pricer tile.
+//!
+//! `prepare` formats header strings when state changes, including both fresh and stale
+//! time labels. The tile compares the latest priced time with `stale_after` each frame;
+//! `render` selects the prepared label using that result.
 
 use crate::content::PricerSettings;
 use crate::core::columns::{SHIFT, signed};
@@ -47,8 +48,8 @@ pub(crate) enum NoticeTone {
 
 pub(crate) struct HeaderInputs<'a> {
     pub sheet: &'a Sheet,
-    /// The tile's own notice, already chosen by precedence (a transient
-    /// notice, then a view fallback); `None` lets a missing pricer speak.
+    /// The tile's notice, chosen in order from a pricing submission refusal, a
+    /// transient notice, or a view fallback. `None` allows the missing-pricer notice.
     pub notice: Option<SharedString>,
     /// The armed `:rm` confirm's question.
     pub prompt: Option<SharedString>,
@@ -142,7 +143,8 @@ pub(crate) fn prepare(i: HeaderInputs) -> HeaderModel {
 }
 
 impl HeaderModel {
-    /// Everything the header paints, for tests.
+    /// Prepared text used by header tests, including the fresh time label.
+    /// Stale-time selection and the action trigger are rendered separately.
     #[cfg(test)]
     pub(crate) fn texts(&self) -> Vec<String> {
         let mut out = vec![
@@ -171,8 +173,8 @@ fn pair(label: &'static str, value: SharedString, muted: Hsla, text: Hsla) -> im
         .child(div().text_color(text).child(value))
 }
 
-/// What `render` needs beyond the prepared model: the `⋯` trigger's
-/// owner and state.
+/// Live rendering inputs: freshness, stack marker, menu trigger, and confirmation
+/// focus. The tile retains their state; the header only installs their handlers.
 pub(crate) struct HeaderChrome<'a> {
     /// Whether the last priced time is older than `stale_after` —
     /// computed by the caller per frame and passed in, so rendering never
@@ -249,12 +251,10 @@ pub(crate) fn render(h: &HeaderModel, c: HeaderChrome, theme: &Theme) -> impl In
                     .child(n),
             )
         })
-        // The armed `:rm` confirm: the question in
-        // the primary text tone — a decision awaiting the trader, not a
-        // warning — on the element that holds the keyboard while it
-        // stands. Its `on_key_down` sits on the focused element and so
-        // runs before the shell root's listener; every key is the
-        // confirm's (`PricerTile::confirm_key`), so propagation stops.
+        // The removal prompt owns keyboard focus. Its key listener runs before
+        // the shell root: bare `y` submits removal and every other key cancels.
+        // Stop propagation while the confirmation is armed so that key cannot
+        // also invoke a shell or tile action.
         .when_some(h.prompt.clone().zip(c.confirm), |el, (p, focus)| {
             let tile = c.tile.clone();
             el.child(
@@ -356,11 +356,9 @@ pub(crate) fn render_footer(text: Option<&SharedString>, theme: &Theme) -> impl 
         .children(text.cloned())
 }
 
-/// The entry bar (entry-bar spec §4) between the header and the table:
-/// where `enter` lands, muted, then a one-line borderless field, and a
-/// refused `enter`'s reason under it in danger text. The reason sits
-/// beside the text that caused it rather than in the footer, as the
-/// timeseries expression strip does.
+/// Shorthand entry between the header and table. A muted label identifies the
+/// insertion destination; the borderless field holds the draft. Submission errors
+/// appear below that draft in danger text so the failure stays beside its input.
 pub(crate) fn render_entry_bar(
     input: &Entity<InputState>,
     label: &SharedString,

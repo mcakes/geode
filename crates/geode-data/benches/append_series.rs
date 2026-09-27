@@ -1,27 +1,9 @@
-//! `append_series`'s store-side cost (timeseries spec §4.4) at two
-//! shapes: one day of minute bars (390 rows, the widening a chart asks
-//! for when the day rolls) and two years of them (196,560 rows, a first
-//! load).
+//! Series append cost for 390 minute bars and 196,560 minute bars.
 //!
-//! The series `DatasetSpec` is read from the real `examples/demo-config/
-//! datasets.toml` (`include_str!`, the whole file — `SchemaSpec::from_doc`
-//! tolerates its sibling declarations fine), the same way
-//! `benches/publish_document.rs` reads the CVI one, so this bench cannot
-//! quietly drift from the schema `--demo` actually runs on. That dataset
-//! declares `retention = "7d"`, so the timed half also pays for the
-//! per-pair retention sweep `append_series` runs inside its own
-//! transaction (§4.7 as built) — which is the honest figure, because
-//! there is no other place a sweep happens.
-//!
-//! Each criterion iteration gets its own temp store (`iter_batched`,
-//! `PerIteration`), the shape `benches/ingest.rs` and
-//! `benches/publish_document.rs` both use. The untimed setup half
-//! appends the same span once already; the TIMED half appends a second
-//! set of values over the same timestamps. That is deliberate: what a
-//! fetch source does all day is offer a span that partly overlaps what
-//! is stored, so the cost worth reporting is dedupe-against-live plus
-//! the insert, not the one-off cost of the first insert into an empty
-//! table.
+//! The dataset uses `examples/demo-config/datasets.toml`, including its retention
+//! window. Each iteration creates a temporary store and appends the span once
+//! outside timing. The timed append writes new values at the same timestamps,
+//! measuring duplicate checks, insertion, and retention in one transaction.
 
 use chrono::{DateTime, Duration, Utc};
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};

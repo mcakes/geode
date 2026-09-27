@@ -1,48 +1,30 @@
-//! One `Plot` element painting a [`ChartModel`] (spec §8.3).
+//! Chart painting with cached scales, labels and data paths.
 //!
-//! Per frame: solve the layout at a ZERO origin (`PathCache` translates
-//! every cached path to the frame's origin; quads and labels add
-//! `bounds.origin` themselves), then per pane — grid, axes, each visible
-//! slot's decimated polyline through `PathCaches("geode-chart-lines")`,
-//! its percentile lines as dashed paths through
-//! `PathCaches("geode-chart-percentiles")`, its density bars as quads —
-//! then the one shared x axis under the lowest pane and, through the
-//! component's own tooltip plumbing, the crosshair and its readout.
+//! Layout uses a zero origin so cached paths can be translated to the
+//! element's current bounds. Each pane paints its grid and axes, then all
+//! visible polylines, percentile rules and tags, and density bars. One x axis
+//! sits below the lowest pane. The component supplies crosshair and tooltip
+//! handling; the readout includes all visible slots.
 //!
-//! **Nothing that is O(the data) is REBUILT on a frame that changed
-//! nothing.** Two caches, both in element state ([`Buffers`]), stand
-//! between the model and the frame:
+//! State lives under the element's stable, unique ID. Two caches avoid
+//! repeating data-dependent preparation on unchanged paints:
 //!
-//! * the **chrome**, behind `chrome_key` — `(model.version,
-//!   view.key(), offset_secs, buckets.len(), bounds width, bounds
-//!   height, rem)` — the four sides' [`LinearScale`]s (each a scan of
-//!   every visible value on that side), their y ticks and the tick
-//!   LABELS, and the x ticks. [`chrome_rebuilds`] counts the
-//!   derivations;
-//! * the **paths**, behind gpui-component's own `PathCache` — the `xs`
-//!   refill, the decimation and the tessellation. A polyline's key is
-//!   `(model.version, slot.number, pane, view.key())` plus the plot
-//!   rect's `x`, `y`, `w`, `h`; a percentile's is `(model.version,
-//!   slot.number, percentile index)` plus its own `y` and the plot's
-//!   `x` and `w`. Neither carries a rem or a bounds term of its own —
-//!   the rem reaches them through the plot rect the layout solved with
-//!   it — and neither carries `axis_mode` or `step_us`, which is why
-//!   the module MUST bump `ChartModel::version` on any model change.
-//!   [`rebuilds`] counts the misses.
+//! * `Buffers` caches side scales, y ticks and labels, and x ticks. Its key
+//!   includes model version, view, clock offset, bucket count, bounds size and
+//!   rem. Changing one of these inputs derives the chart chrome again.
+//! * [`PathCaches`] caches decimation and tessellation. Polyline keys include
+//!   model version, slot number, pane, view and plot geometry. Percentile keys
+//!   include model version, slot number, percentile index and line geometry.
 //!
-//! So a repaint of an unchanged chart rebuilds nothing: no decimation,
-//! no tessellation, no `xs` refill, no tick, no tick label, no scan of
-//! the values. It does not, however, allocate nothing. The pinned
-//! `Window::paint_path` takes its path BY VALUE, so `PathCache::get`
-//! clones and translates the cached path on every call, hit or miss:
-//! one vertex `Vec` per painted path per frame, bounded by the
-//! DECIMATED point count (two per pixel column) rather than by the
-//! data, and unavoidable without forking the component. Beside it sit
-//! the chrome `Vec`s the component's own painters take — `Grid` takes
-//! its lines as `Vec`s, `PlotAxis`/`PlotLabel` each collect a small one
-//! — bounded by the tick count. Those two classes are the whole
-//! per-frame allocation budget, and both are the pinned API's price,
-//! shared with every chart gpui-component ships.
+//! Callers must bump [`ChartModel::version`] whenever model contents change:
+//! the path keys do not independently include every model field.
+//!
+//! Warm paints still allocate. The component clones and translates cached
+//! paths before painting, and its grid, axis and label interfaces collect
+//! vectors. Tooltip readouts also format values. Path size follows decimated
+//! output: up to two extrema per finite run per pixel column, plus breaks.
+//! Numerous gaps can therefore exceed two points per column. Density bars
+//! remain uncached, with [`MAX_DENSITY_QUADS`] limiting each chart paint.
 
 use std::cell::Cell;
 use std::sync::Arc;
@@ -72,8 +54,7 @@ thread_local! {
     /// Per THREAD, not per process: the counter is read as a delta
     /// across a few frames, and two window tests running in parallel on
     /// their own threads would otherwise each see the other's paints.
-    /// Painting is a UI-thread act, so a thread-local is also the exact
-    /// scope a caller means by "this window's rebuilds".
+    /// Windows on the same UI thread contribute to the same counter.
     static REBUILDS: Cell<usize> = const { Cell::new(0) };
     /// The same, for the chrome derivation (the four side scales, their
     /// ticks and labels, the x ticks) — the O(n) work that is invisible
@@ -85,8 +66,7 @@ thread_local! {
     static DENSITY_QUADS: Cell<usize> = const { Cell::new(0) };
 }
 
-/// How many times a slot's polyline or percentile path was rebuilt on
-/// this thread since it started — a test's window onto the path cache.
+/// Polyline and percentile path rebuilds on this thread since it started.
 pub fn rebuilds() -> usize {
     REBUILDS.with(|c| c.get())
 }
@@ -99,8 +79,8 @@ pub fn chrome_rebuilds() -> usize {
 }
 
 /// How many density bars were painted on this thread since it started.
-/// One frame's delta can never exceed [`MAX_DENSITY_QUADS`], however
-/// many slots and bins the model carries.
+/// Each chart paint contributes at most [`MAX_DENSITY_QUADS`]. Multiple
+/// charts or paint calls on this thread contribute to the same total.
 pub fn density_quads() -> usize {
     DENSITY_QUADS.with(|c| c.get())
 }
@@ -128,7 +108,7 @@ const MAX_PERCENTILES: usize = 8;
 /// The polyline's stroke width, in device pixels (not on the rem scale:
 /// a hairline is a hairline).
 const LINE_WIDTH: f32 = 1.5;
-/// How much of the density strip's width a bar's fill carries.
+/// Opacity of a density bar's fill.
 const BAR_OPACITY: f32 = 0.45;
 /// A percentile tag's right edge, inside the plot's right edge, how far
 /// above its own line it sits, and how far BELOW it sits instead when
@@ -213,17 +193,10 @@ pub struct ChartElement {
 }
 
 impl ChartElement {
-    /// **`id` must be unique among the chart elements in one window.**
-    /// Every scrap of cross-frame state this element keeps hangs off it:
-    /// the reused [`Buffers`] (`window.use_keyed_state(BUFFERS, …)`) and
-    /// both sets of [`PathCaches`], all stored under the element's
-    /// `GlobalElementId`, which gpui-component's `Plot` takes straight
-    /// from this id. Two charts sharing one id therefore share one
-    /// chrome key — which thrashes between their models every frame —
-    /// and one set of path caches, so two models that happen to agree on
-    /// `(version, slot.number, pane, view, plot rect)` serve each other's
-    /// paths and paint the wrong line with every assertion still green.
-    /// A tile passes its own `TileId`, never a literal.
+    /// Create a chart with a stable ID unique among chart elements in the
+    /// window. Buffers and both path caches live under this ID across frames.
+    /// Reusing it for another chart can serve paths from the wrong model when
+    /// their version and geometry keys coincide. Tile callers use their tile ID.
     pub fn new(model: Arc<ChartModel>, view: View, rem_px: f32, id: impl Into<ElementId>) -> Self {
         Self {
             model,
@@ -320,16 +293,13 @@ impl ChartElement {
         }
     }
 
-    /// One pane: grid, its two axes, then per visible slot the polyline,
-    /// the percentile lines and the density bars. Paint is batched BY
-    /// KIND rather than per slot (amends §8.3's per-slot order): all the
-    /// polylines, then all the percentile paths, then one `PlotLabel`
-    /// carrying every tag, then the bars — two cache `update`s and one
-    /// label batch for the pane instead of three per slot, at the price
-    /// of a z-order where every line sits under every percentile.
+    /// Paint one pane in layers: grid, axes, polylines, percentile rules,
+    /// percentile labels, then density bars. Batching by kind uses two cache
+    /// updates and one label batch per pane; all percentile rules cover all
+    /// polylines regardless of slot order.
     ///
-    /// `painted` is the FRAME's density-bar count, carried across both
-    /// panes so [`MAX_DENSITY_QUADS`] bounds the frame and not the pane.
+    /// `painted` carries the density-bar count across both panes, so
+    /// [`MAX_DENSITY_QUADS`] limits the entire chart paint.
     #[allow(clippy::too_many_arguments)]
     fn paint_pane(
         &self,
@@ -351,8 +321,8 @@ impl ChartElement {
 
         // Grid: the x ticks of the shared axis, the y ticks of whichever
         // side the pane has (left wins when it has both — one grid, not
-        // two overlaid ones). `Grid` takes its lines as `Vec`s, so the
-        // two collects here are the component's own API, not work.
+        // two overlaid ones). The two collects allocate the line vectors
+        // required by `Grid`.
         let grid = if left.scale.is_some() { left } else { right };
         let gx: Vec<Pixels> = ctx.x_ticks.iter().map(|t| px(t.x - plot.x)).collect();
         let gy: Vec<Pixels> = grid
@@ -423,17 +393,10 @@ impl ChartElement {
 
             // Percentile lines, then their tags in one label batch.
             //
-            // A percentile is computed over the QUERY window while the
-            // side scale's domain comes from the VISIBLE slice, so a
-            // zoom into a quiet stretch can put p5 or p95 outside the
-            // pane entirely. A slot's percentiles draw in its own pane
-            // or not at all (spec §8.3), so one outside it is SKIPPED,
-            // line and tag together — the mask above would clip it, but
-            // a level the pane's domain does not contain has no business
-            // being built, and skipping BEFORE the cache `get` is what
-            // makes "never built" mean "never painted" and is the half
-            // the harness can see. Clamping instead would park it on the
-            // pane's edge and read as a real level at that value.
+            // Percentiles describe the query window; the y domain uses the
+            // visible slice. Skip both line and tag when a percentile falls
+            // outside its pane, before accessing the path cache. Clamping
+            // it to an edge would display a false level at that edge.
             let dash = design_px(DASH, self.rem_px);
             let gap = design_px(GAP, self.rem_px);
             let caches = PathCaches::for_paint((PERCENTILES, pane_ix), window, cx);
@@ -503,7 +466,7 @@ impl ChartElement {
         // Density bars: one strip shared by the pane's visible slots,
         // clipped to the strip (its own column, beside the plot rather
         // than inside it) and counted against `MAX_DENSITY_QUADS`, which
-        // is the whole FRAME's budget across both panes. A bar is an
+        // is this chart paint's budget across both panes. A bar is an
         // uncached `paint_quad` and nothing in the model bounds the
         // product of slots and bins, so past the bound this pane simply
         // stops drawing them, in slot order.
@@ -554,8 +517,7 @@ impl ChartElement {
         self.model.slots.iter().filter(|s| s.visible)
     }
 
-    /// `%Y-%m-%d %H:%M` at the model's own offset — every displayed time
-    /// is the trader's local clock (Phase 4a ruling).
+    /// Format the bucket time as `%Y-%m-%d %H:%M` at the model's UTC offset.
     fn bucket_title(&self, index: usize) -> Option<String> {
         let us = *self.model.buckets.get(index)?;
         let offset = FixedOffset::east_opt(self.model.offset_secs)
@@ -598,10 +560,10 @@ impl Plot for ChartElement {
         .f32(rem)
         .finish();
 
-        // `Buffers` and the `PathCaches` are both entities, and two
-        // `Entity::update`s cannot nest: take the buffers out for the
-        // duration of the frame and put them back at the end. `Vec`s and
-        // an array of `Vec`s, so this moves no data.
+        // Move buffer ownership out for painting, then return it after
+        // the path-cache updates. `mem::take` preserves vector allocations
+        // without copying their contents or holding the buffer entity update
+        // open while the painters update their own state.
         let buffers = window.use_keyed_state(BUFFERS, cx, |_, _| Buffers::default());
         let (mut scratch, mut x_ticks, mut sides, warm) = buffers.update(cx, |b, _| {
             let warm = b.chrome_key == Some(chrome_key);

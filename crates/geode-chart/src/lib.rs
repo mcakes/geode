@@ -1,9 +1,9 @@
 //! Reusable chart preparation and painting for the timeseries viewer.
 //!
 //! `core` is window-free geometry over slices; `model` is the immutable
-//! input a tile builds per delivery; `element` paints it through
-//! gpui-component's `Plot` trait. Nothing here knows a series, a source
-//! or the shell — the rem scale is a parameter.
+//! input a caller prepares when data or presentation changes; `element`
+//! paints it through gpui-component's `Plot` trait. Series identities, source
+//! access and shell state belong to the caller; the rem scale is a parameter.
 
 pub mod core;
 pub mod element;

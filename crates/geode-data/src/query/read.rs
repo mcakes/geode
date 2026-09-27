@@ -95,9 +95,8 @@ impl ReadQuery {
                             as_of: catalog.dataset_as_of(dataset, &[])?.map(|t| t.to_rfc3339()),
                             generation: catalog.dataset_generation(dataset)?,
                         },
-                        // A historical view read pins one generation per
-                        // partition; no scalar names that, and a placeholder
-                        // integer would be a lie now the field has a reader.
+                        // Historical views resolve each partition independently;
+                        // no single generation ID identifies the whole result.
                         AsOf::At(_) => Freshness {
                             dataset: dataset.clone(),
                             as_of: compiled.resolved_as_of.get(dataset).map(|t| t.to_rfc3339()),
@@ -310,8 +309,7 @@ mod tests {
             "a same-time republish must be distinguishable from its predecessor"
         );
 
-        // A historical read of the same document reports the generation it
-        // pinned, not a placeholder.
+        // Historical provenance identifies the selected document generation.
         let mut at = params;
         at.as_of = AsOf::At(ts("2026-09-12T14:30:00Z"));
         let historical = ReadQuery::document(config, at);

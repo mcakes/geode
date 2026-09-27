@@ -1,9 +1,6 @@
-//! The `pricer_views` doc (line-pricer spec §6.5): named column sets
-//! over the fixed vocabulary in `columns`, with the blotter's
-//! presentation keys, resolved through `geode_core::view::
-//! {ColumnFormat, ColumnPresentation}` so formatting code is shared.
-//! Two bundled views ship as [`BUILTIN_VIEWS`]; desk and user layers
-//! override by name (`merge::atomic_depth`).
+//! Named column sets over the fixed pricer vocabulary. Shared `ColumnPresentation` and
+//! `ColumnFormat` types resolve presentation options. [`BUILTIN_VIEWS`] supplies
+//! defaults; configuration layers replace views by name.
 
 use crate::core::columns::{ColumnDef, column};
 use geode_core::config::{Diagnostic, MergedDoc, Severity};
@@ -43,8 +40,9 @@ pub struct Views {
 }
 
 impl Views {
-    /// Every diagnostic carries `path` (`pricer_views.<view>…`); `layer`
-    /// and `file` are `None`, as every reader's are.
+    /// Parse views with diagnostic paths rooted at `pricer_views.<view>`. This reader
+    /// leaves layer and file attribution unset; configuration diagnostics can resolve
+    /// them from the merged document.
     pub fn from_doc(doc: &MergedDoc) -> (Views, Vec<Diagnostic>) {
         let mut out = Views::default();
         let mut diags = Vec::new();
@@ -80,7 +78,7 @@ impl Views {
             };
             let mut columns: Vec<ViewColumn> = Vec::with_capacity(cols.len());
             // `enumerate()` before any filtering, so an index in a path is
-            // the element's real position in the file (4c §19.5).
+            // the element's real position in the file.
             for (i, c) in cols.iter().enumerate() {
                 let (col_name, table) = match (c.as_str(), c.as_table()) {
                     (Some(s), _) => (s, None),
@@ -160,9 +158,8 @@ impl Views {
         (out, diags)
     }
 
-    /// `BUILTIN_VIEWS` parsed. The constant is authored with the binary;
-    /// `the_two_bundled_views_load_clean` pins that it parses with no
-    /// diagnostic, so the `expect`s cannot fire in a shipped build.
+    /// Parse the bundled views. Invalid TOML is a programmer error; tests require these
+    /// definitions to produce no diagnostics.
     pub fn builtin() -> Views {
         let doc = geode_core::config::LayerDoc::builtin(PRICER_VIEWS_DOC, BUILTIN_VIEWS)
             .expect("BUILTIN_VIEWS is well-formed TOML");
@@ -193,9 +190,8 @@ pub struct PlannedColumn {
     pub format: ColumnFormat,
 }
 
-/// The table's columns in view order, after the tree column (which is the
-/// delegate's own, Part 3). Takes no sheet: the column set never depends
-/// on the rows (planning decision 7).
+/// Columns in view order, excluding the delegate's tree column. The plan depends on the
+/// view alone, so an empty sheet retains the same columns.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ColumnPlan {
     pub columns: Vec<PlannedColumn>,

@@ -1,3 +1,7 @@
+//! Models and transformations for timeseries state, queries, menus, and
+//! persistence. The tile owns I/O, focus, and retained entities; these modules
+//! prepare data and validate operations without accessing a window.
+
 pub mod chart;
 pub mod complete;
 pub mod menu;

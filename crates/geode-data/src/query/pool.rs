@@ -1,15 +1,13 @@
-//! The read pool (spec §6.7, §7.3). Owns the read connections so the UI
-//! thread never holds one, coalesces latest-wins per **key**, tags every
-//! request and result so a stale arrival can be dropped, and interrupts a
-//! superseded query rather than awaiting it.
+//! Read workers own their connections, keeping database work off the UI
+//! thread. Pending requests coalesce to the latest request per caller key;
+//! superseded queries are interrupted and stale results are discarded.
 //!
-//! The key is the caller's (spec §2.4) — a tile id in practice — not the
-//! view name. Two tiles showing one view must not supersede each other.
+//! The key belongs to the caller, usually a tile. Two tiles showing the
+//! same view use different keys and cannot supersede each other.
 //!
-//! Results leave through a sink closure rather than a channel the pool
-//! owns (spec §5.1): the service hands the pool a closure onto its one
-//! outbound channel, so no forwarding thread sits between a worker and
-//! the UI. `spawn` still builds a channel for callers that want one.
+//! Workers deliver directly through a sink closure. The service routes those
+//! results into its event sink without a forwarding thread. `spawn` supplies
+//! a channel for callers that need to receive results synchronously.
 
 use crate::query::compile::CompiledQuery;
 use crate::query::series::{SeriesPlan, run_series};
@@ -29,22 +27,17 @@ pub struct ViewId(pub String);
 
 pub type QueryId = u64;
 
-/// Where results go. `false` means "this result was not delivered" — the
-/// caller's bounded channel was full, or its receiver is gone. It never
-/// stops the worker (Phase 4b follow-up, Task 1: one refused result used
-/// to end a worker for the session, and with `query_workers = 1` that
-/// left the app with none); `Queue::shutdown` is the stop.
+/// Nonblocking result delivery. `false` means the sink refused the result;
+/// the worker continues and does not retry it. Shutdown stops the workers.
 ///
-/// Called with the queue's own lock held (see the worker's delivery site),
-/// so a sink must not block and must not call back into this pool:
-/// `submit`/`cancel` take the same lock, and std `Mutex` is not re-entrant.
-/// The service's sink does take one other lock — the health tracker's,
-/// to attach a series slot's load-lane word (timeseries spec §6.4) — and
-/// that is a LEAF: nothing reachable from it takes a pool lock, so the
-/// order is queue lock → tracker lock and no sink may take any third one.
+/// Called while the queue lock is held, so a sink must not wait for a consumer
+/// or call back into this pool: `submit` and `cancel` take the same lock.
+/// Any locks acquired by the sink must preserve that order and must not
+/// lead back to a pool operation. The service reads series load-lane health
+/// under the tracker lock, releases it, then invokes its event sink.
 pub type ResultSink = Arc<dyn Fn(QueryResult) -> bool + Send + Sync>;
 
-/// What a worker produced (timeseries spec §6.4): a view or document
+/// What a worker produced: a view or document
 /// query's `Snapshot`, or a series query's struct-of-arrays result. Two
 /// kinds rather than a series `Snapshot` because the chart wants arrays
 /// and a series has no tree, grouping or attribution to put in one.
@@ -60,9 +53,10 @@ pub enum Payload {
     Series(SeriesResult),
 }
 
-/// The work a request carries: a compiled statement that yields a
-/// `Snapshot`, or a series plan that yields a `SeriesResult`. The pool's
-/// coalescing, interruption and containment never look inside.
+/// Work yielding a snapshot or a series result. Snapshot work can be a
+/// compiled statement or a request whose database-dependent compilation runs
+/// inside the worker's read transaction. Coalescing, interruption and panic
+/// containment apply to every variant.
 #[derive(Debug)]
 pub enum Work {
     Query(CompiledQuery),
@@ -73,7 +67,7 @@ pub enum Work {
 
 /// What kind of request this is, carried through to the result so the
 /// service's sink can route it to the right `DataEvent` variant without
-/// re-deriving it from the compiled SQL (spec §3.4).
+/// re-deriving it from the compiled SQL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestKind {
     Query,
@@ -97,7 +91,7 @@ pub struct QueryRequest {
     pub view: ViewId,
     pub work: Work,
     /// The grouping columns in order; the snapshot builds its tree from
-    /// them (spec §5.5).
+    /// them.
     pub grouping: Vec<String>,
     pub provenance: Provenance,
     pub kind: RequestKind,
@@ -110,7 +104,7 @@ pub struct QueryResult {
     pub submitted: Instant,
     pub view: ViewId,
     /// `Err` carries the failure: a bad query degrades its own key and
-    /// leaves the pool running (spec §10.1).
+    /// leaves the pool running.
     pub payload: Result<Payload, String>,
     pub kind: RequestKind,
 }
@@ -128,14 +122,9 @@ struct Queue {
     /// query failure paints an error on a tile the user simply navigated
     /// away from.
     cancelled: std::collections::HashSet<QueryId>,
-    /// The last id handed out. Lives in the queue rather than beside it so
-    /// that allocating outside the lock is not expressible: ids and
-    /// insertion order cannot disagree if they are produced under the same
-    /// guard. It was an `AtomicU64` incremented before the lock was taken,
-    /// which let two concurrent submits for one key insert out of id
-    /// order and leave the *older* request pending — a race no test can
-    /// force reliably (measured: caught on 2 runs in 8), so making it
-    /// unrepresentable beats testing for it.
+    /// The last request ID handed out. Allocation and insertion both hold the
+    /// queue lock, so concurrent submissions cannot insert an older request
+    /// after its replacement and leave the wrong request pending.
     next_id: QueryId,
     shutdown: bool,
 }
@@ -231,7 +220,7 @@ impl QueryPool {
         if q.shutdown {
             return id;
         }
-        // A superseded query is interrupted, not awaited (spec §7.3).
+        // Interrupt the superseded query so its replacement can run promptly.
         if let Some((running_id, handle)) = q.running.get(&req.key)
             && *running_id < id
         {
@@ -290,10 +279,8 @@ fn worker(
     run: RunFn,
 ) {
     let handle = conn.interrupt_handle();
-    // One line per worker, not one per refused result (final review,
-    // MIN-3): before Task 1 a refusal ended this worker, so the warning
-    // could not repeat. `dropped` on the caller's side remains the
-    // authoritative count of what was lost.
+    // Log at most one refused result per worker to avoid repeated warnings
+    // while a receiver is unavailable. The caller owns the dropped-result count.
     let refusal_logged = AtomicBool::new(false);
 
     loop {
@@ -304,7 +291,7 @@ fn worker(
                 if q.shutdown {
                     return;
                 }
-                // One in-flight query per key (spec §7.3). Without this,
+                // One in-flight query per key. Without this,
                 // several workers can run the same key concurrently and
                 // finish in any order, so a superseded result can land
                 // after the one that replaced it.
@@ -325,13 +312,8 @@ fn worker(
             }
         };
 
-        // A panic in the query must not escape this loop. Unwinding out of
-        // `worker` would leave this key's entry in `running` forever —
-        // no later request for it is ever scheduled, so the tile silently
-        // stops updating for the rest of the session — and would take the
-        // worker with it, shrinking the pool with nothing reported. §10.1
-        // says a bad query degrades its own view; a panicking one is a bad
-        // query.
+        // Contain a query panic so the key leaves `running` and the worker can
+        // serve later requests. Report the panic as this request's failure.
         let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             geode_core::panic::contained(|| run(&conn, &req))
         })) {
@@ -340,28 +322,21 @@ fn worker(
         };
         release_transaction(&conn);
 
-        // The stale check and the send happen under one lock. Releasing it
-        // between them let a newer request land in the gap and the older
-        // result still be delivered, so a tile briefly painted data it had
-        // already superseded. Holding the lock across the sink call cannot
-        // deadlock — provided the sink does not block and does not call
-        // back into this pool (`submit`/`cancel` take the same lock; std
-        // `Mutex` is not re-entrant). The app sink records pending state and
-        // signals its receiver without waiting for the UI to process it.
+        // Check staleness and deliver under the same lock, preventing a newer
+        // submission from landing between those steps. The sink must not wait
+        // for a consumer or reenter the pool. The app sink records pending state
+        // and signals its receiver without waiting for the UI to process it.
         let (lock, _) = &*queue;
         let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
         if q.running.get(&req.key).is_some_and(|(rid, _)| *rid == id) {
             q.running.remove(&req.key);
         }
         // A newer request for this key arrived while we ran: our result is
-        // stale, so drop it rather than delivering it out of order (§7.3).
+        // stale, so drop it rather than delivering it out of order.
         let stale = q.pending.get(&req.key).is_some_and(|(pid, _)| *pid > id);
         let cancelled = q.cancelled.remove(&id);
-        // `shutdown` interrupts every running query exactly as `cancel`
-        // does, so its `Interrupted` is equally self-inflicted. Delivering
-        // it hands the UI a query failure the pool caused while closing —
-        // the same defect `cancel` was fixed for, left standing on the
-        // neighbouring path.
+        // Shutdown and cancellation deliberately interrupt running queries.
+        // Discard their results instead of reporting these interrupts as failures.
         if stale || cancelled || q.shutdown {
             continue;
         }
@@ -383,16 +358,10 @@ fn worker(
     }
 }
 
-/// A refused result is one dropped frame of data, not the end of this
-/// worker. The app mailbox retains results while its UI is busy; alternate
-/// sinks own their recovery from refusals. Nothing is retried here. Logged once per worker — `latched` (final
-/// review, MIN-3) — and a free function so a test can reach it without a
-/// pool thread.
-/// How many `ROLLBACK`s a worker tries before it gives up on a transaction.
-/// Each attempt starts a new statement, which clears a pending interrupt, so
-/// a second attempt already outlasts one stray supersession. Defence in
-/// depth: without the retry, an interrupted release is still repaired after
-/// the worker's next run, at the cost of that run's failure reaching its view.
+/// Maximum rollback attempts before reporting a connection cleanup failure.
+/// Each new statement clears a pending interrupt, so retries can recover from
+/// supersession interrupting the preceding rollback. Cleanup runs after every
+/// request; a later cleanup may recover a connection that remains aborted.
 const ROLLBACK_ATTEMPTS: usize = 3;
 
 /// Leave the connection outside any transaction before the worker's next
@@ -426,6 +395,8 @@ fn release_transaction(conn: &duckdb::Connection) {
 /// that rewords it fails a test instead of logging on every query.
 const NO_TRANSACTION: &str = "no transaction is active";
 
+/// Log a refusal once per worker. Results are not retried; each sink owns
+/// its recovery policy. The app mailbox retains results while the UI is busy.
 fn log_refused_result(latched: &AtomicBool, view: &str) {
     if latched.swap(true, Ordering::Relaxed) {
         return;
@@ -554,8 +525,7 @@ mod tests {
         }
     }
 
-    /// The snapshot half of a result, for the tests written before a
-    /// second payload kind existed.
+    /// Extract a snapshot payload for view-query assertions.
     fn snapshot(r: QueryResult) -> Result<Snapshot, String> {
         r.payload.map(|p| match p {
             Payload::Snapshot(s) => s,
@@ -598,8 +568,7 @@ mod tests {
 
     #[test]
     fn a_refusal_is_logged_once_per_worker_not_once_per_result() {
-        // Unlatched, a gone receiver turns every requery into another
-        // copy of this line (final review, MIN-3).
+        // Repeated refusals produce one warning for this worker.
         let latch = AtomicBool::new(false);
         let records = logged(|| {
             log_refused_result(&latch, "positions");
@@ -613,17 +582,14 @@ mod tests {
 
     #[test]
     fn a_refused_result_does_not_stop_the_worker() {
-        // One refused result used to end the worker for the session —
-        // with `query_workers = 1`, the app then had no query worker at
-        // all. `false` means "not delivered", never "stop" (Phase 4b
-        // follow-up, Task 1); `q.shutdown` is the stop.
+        // A refused delivery must leave the worker available for the next query,
+        // even with only one worker. Shutdown is the only stop signal.
         let (_d, store) = fixture(100);
         let (tx, rx) = channel();
         let refusals = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = Arc::clone(&refusals);
         let sink: ResultSink = Arc::new(move |r: QueryResult| {
-            // Claimed atomically (fix round 1, nit): one refusal, no
-            // matter how many workers call this.
+            // Claim exactly one refusal across concurrent worker calls.
             if counter
                 .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
                 .is_ok()
@@ -654,9 +620,8 @@ mod tests {
 
     #[test]
     fn two_keys_on_one_view_do_not_coalesce() {
-        // Two tiles showing the same view (spec §2.4). Keyed on the view
-        // name, the second submit replaced the first and the first tile
-        // never got its result.
+        // Two tiles showing the same view have independent request keys.
+        // Each must receive its result without superseding the other.
         let (_d, store) = fixture(1_000);
         let (pool, rx) = QueryPool::spawn(&store, 2).unwrap();
         pool.submit(request(1, "tree", "select sum(v) as v from t"));
@@ -725,7 +690,7 @@ mod tests {
     #[test]
     fn results_for_a_view_never_arrive_out_of_order() {
         // Generation-tagged: a result superseded while it ran is dropped
-        // rather than delivered after a newer one (spec §7.3).
+        // rather than delivered after a newer one.
         let (_d, store) = fixture(200_000);
         let (pool, rx) = QueryPool::spawn(&store, 4).unwrap();
         for _ in 0..6 {
@@ -798,13 +763,9 @@ mod tests {
         pool.shutdown();
     }
 
-    /// A dataset whose dimension has more than 255 distinct values, read
-    /// back through the snapshot boundary.
-    ///
-    /// DuckDB sizes an ENUM's dictionary key to the vocabulary: UInt8 up
-    /// to 255 values, UInt16 above. Every real underlying list is past
-    /// that cliff, so this is the first realistic dataset's behaviour, not
-    /// an edge case.
+    /// Read a dimension with more than 255 distinct values through the
+    /// snapshot boundary. DuckDB promotes the ENUM dictionary key from UInt8
+    /// to UInt16 at this size; the snapshot must support both widths.
     fn enum_fixture(distinct: usize, pick: &str) -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("g.duckdb")).unwrap();
@@ -914,11 +875,8 @@ mod tests {
 
     #[test]
     fn a_panicking_query_degrades_its_view_without_wedging_it() {
-        // A panic used to unwind out of the worker, leaving the view's
-        // entry in `running` forever. Nothing was ever scheduled for that
-        // view again: the tile stopped updating, with no error and no
-        // reason shown, for the rest of the session. The pool also lost a
-        // worker each time, silently.
+        // A panic must report a failure, clear this key's running entry, and
+        // leave the worker available to execute later requests.
         fn boom(_: &duckdb::Connection, _: &QueryRequest) -> Result<Payload, duckdb::Error> {
             panic!("injected panic");
         }
@@ -937,7 +895,7 @@ mod tests {
             "the panic must be reported as this view's failure: {message}"
         );
 
-        // The same view is still schedulable: this is the wedge.
+        // The key remains schedulable after its preceding query panics.
         pool.submit(request(1, "v1", "select sum(v) as v from t"));
         let second = rx.recv_timeout(Duration::from_secs(30)).unwrap();
         assert_eq!(second.view, ViewId("v1".into()));
@@ -947,12 +905,9 @@ mod tests {
 
     #[test]
     fn interrupts_on_the_transaction_statements_do_not_wedge_the_connection() {
-        // A supersession interrupt can land on the read transaction's own
-        // `BEGIN`, `COMMIT` or `ROLLBACK`; DuckDB then leaves the connection
-        // inside an aborted transaction that no guard rolls back, and every
-        // later query failed with "Current transaction is aborted" (seen as
-        // `p` pressed repeatedly on a timeseries tile). A thread interrupting
-        // continuously makes those landings certain.
+        // Interrupts on transaction statements can leave the connection aborted.
+        // Repeated interrupts exercise cleanup around BEGIN, COMMIT and ROLLBACK;
+        // a later request must remain executable after the interrupting thread stops.
         use crate::query::series::{SeriesPlan, Statement, run_series};
         let conn = duckdb::Connection::open_in_memory().unwrap();
         conn.execute_batch("create table t as select 1::bigint i, 1.0::double v")
@@ -1005,12 +960,9 @@ mod tests {
 
     #[test]
     fn a_transaction_left_aborted_does_not_wedge_the_worker() {
-        // A read transaction ends in a `ROLLBACK` that duckdb-rs issues on
-        // drop and whose error it discards. A supersession interrupt landing
-        // on that `ROLLBACK` leaves the connection inside an aborted
-        // transaction, and every later query on the worker failed with
-        // "Current transaction is aborted". The first run here leaves the
-        // connection in that state directly.
+        // duckdb-rs discards rollback errors when dropping a transaction. An
+        // interrupt during rollback can leave the connection aborted, so inject
+        // that state directly and verify cleanup before the next request.
         fn abort_then_run(
             conn: &duckdb::Connection,
             req: &QueryRequest,
@@ -1096,10 +1048,8 @@ mod tests {
 
     #[test]
     fn shutdown_does_not_deliver_its_own_interrupt_as_a_failure() {
-        // `shutdown` interrupts every running query exactly as `cancel`
-        // does, so its `Interrupted` is equally self-inflicted. It used to
-        // be delivered: a query failure the pool caused while closing,
-        // handed to whatever drains the channel on teardown.
+        // Shutdown interrupts must not appear as query failures to a receiver
+        // draining results during teardown.
         fn gated(_: &duckdb::Connection, _: &QueryRequest) -> Result<Payload, duckdb::Error> {
             while !SHUTDOWN_GATE.load(Ordering::SeqCst) {
                 std::thread::sleep(Duration::from_millis(1));
