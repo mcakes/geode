@@ -274,6 +274,9 @@ pub struct Diagnostics {
     pub frame_hist: FrameHistogram,
     /// The latest catalog outcome, including its as-of and resource metrics.
     pub catalog: Option<CatalogSnapshot>,
+    /// When `catalog` was stored, as the caller of [`Self::set_catalog`]
+    /// supplied it. `None` until the first snapshot.
+    pub catalog_at: Option<SystemTime>,
     pub levels: LogLevels,
     /// Visible diagnostics tile count, maintained by `watch`/`unwatch`.
     /// Watched catalog refreshes and histogram copies require at least one
@@ -310,6 +313,7 @@ impl Diagnostics {
             restart_required: None,
             frame_hist: FrameHistogram::new(),
             catalog: None,
+            catalog_at: None,
             levels,
             watchers: 0,
             version: 0,
@@ -527,8 +531,11 @@ impl Diagnostics {
     /// Store a changed catalog snapshot and refresh the per-dataset slices.
     /// Dataset names remain in the map, but a dataset omitted from the new
     /// snapshot has its catalog cleared so stale generations cannot linger.
-    /// An equal snapshot leaves versions unchanged.
-    pub fn set_catalog(&mut self, snapshot: CatalogSnapshot) {
+    /// An equal snapshot leaves versions unchanged, and `catalog_at` with
+    /// them: `at` is the time the stored snapshot arrived, not the time the
+    /// database was last asked, so a repeat answer that changes nothing does
+    /// not move it either.
+    pub fn set_catalog(&mut self, snapshot: CatalogSnapshot, at: SystemTime) {
         if self.catalog.as_ref() == Some(&snapshot) {
             return;
         }
@@ -539,6 +546,7 @@ impl Diagnostics {
             self.datasets.entry(ds.name.clone()).or_default().catalog = Some(ds.clone());
         }
         self.catalog = Some(snapshot);
+        self.catalog_at = Some(at);
         self.version += 1;
         self.versions.data += 1;
     }
@@ -1178,9 +1186,9 @@ mod tests {
     fn set_catalog_is_a_no_op_for_a_byte_identical_snapshot() {
         let mut d = Diagnostics::new(LogLevels::default());
         let snap = CatalogSnapshot::default();
-        d.set_catalog(snap.clone());
+        d.set_catalog(snap.clone(), SystemTime::UNIX_EPOCH);
         let v = d.version();
-        d.set_catalog(snap);
+        d.set_catalog(snap, SystemTime::UNIX_EPOCH);
         assert_eq!(d.version(), v, "identical snapshot, no rebuild");
     }
 
@@ -1188,19 +1196,25 @@ mod tests {
     #[test]
     fn set_catalog_drops_a_dataset_missing_from_a_newer_snapshot() {
         let mut d = Diagnostics::new(LogLevels::default());
-        d.set_catalog(CatalogSnapshot {
-            datasets: vec![DatasetCatalog {
-                name: "risk".into(),
+        d.set_catalog(
+            CatalogSnapshot {
+                datasets: vec![DatasetCatalog {
+                    name: "risk".into(),
+                    ..Default::default()
+                }],
                 ..Default::default()
-            }],
-            ..Default::default()
-        });
+            },
+            SystemTime::UNIX_EPOCH,
+        );
         assert!(d.datasets["risk"].catalog.is_some());
-        d.set_catalog(CatalogSnapshot {
-            datasets: vec![],
-            threads: 1,
-            ..Default::default()
-        });
+        d.set_catalog(
+            CatalogSnapshot {
+                datasets: vec![],
+                threads: 1,
+                ..Default::default()
+            },
+            SystemTime::UNIX_EPOCH,
+        );
         assert!(
             d.datasets["risk"].catalog.is_none(),
             "a dataset missing from the newer snapshot is cleared"

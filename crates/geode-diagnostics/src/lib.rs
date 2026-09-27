@@ -3,6 +3,9 @@
 //! `[` and `]` cycle. Log level and overlay changes use palette actions.
 
 pub mod commands;
+pub mod log;
+pub mod model;
+pub mod section;
 pub mod sections;
 mod tile;
 

@@ -867,11 +867,14 @@ mod tests {
         let mut d = Diagnostics::new(LogLevels::default());
         let as_of = AsOf::At(chrono::DateTime::UNIX_EPOCH);
         // A matching catalog and frame as-of allow the resolved marker to show.
-        d.set_catalog(CatalogSnapshot {
-            as_of: as_of.clone(),
-            datasets: vec![dataset_catalog()],
-            ..Default::default()
-        });
+        d.set_catalog(
+            CatalogSnapshot {
+                as_of: as_of.clone(),
+                datasets: vec![dataset_catalog()],
+                ..Default::default()
+            },
+            SystemTime::UNIX_EPOCH,
+        );
         let rows = data_rows(&d, &as_of, &BTreeSet::new(), Clock::utc());
         let gen1 = rows.iter().find(|r| r.text.contains("gen 1")).unwrap();
         assert_eq!(gen1.tone, Tone::Marked);
@@ -886,11 +889,14 @@ mod tests {
     fn data_rows_suppresses_the_marker_when_the_snapshot_as_of_does_not_match_the_frames() {
         let mut d = Diagnostics::new(LogLevels::default());
         let stale = AsOf::At(chrono::DateTime::UNIX_EPOCH);
-        d.set_catalog(CatalogSnapshot {
-            as_of: stale,
-            datasets: vec![dataset_catalog()],
-            ..Default::default()
-        });
+        d.set_catalog(
+            CatalogSnapshot {
+                as_of: stale,
+                datasets: vec![dataset_catalog()],
+                ..Default::default()
+            },
+            SystemTime::UNIX_EPOCH,
+        );
         let current = AsOf::At(chrono::DateTime::UNIX_EPOCH + chrono::Duration::hours(1));
         let rows = data_rows(&d, &current, &BTreeSet::new(), Clock::utc());
         let gen1 = rows.iter().find(|r| r.text.contains("gen 1")).unwrap();
@@ -904,10 +910,13 @@ mod tests {
     #[test]
     fn a_collapsed_dataset_shows_only_its_header_row() {
         let mut d = Diagnostics::new(LogLevels::default());
-        d.set_catalog(CatalogSnapshot {
-            datasets: vec![dataset_catalog()],
-            ..Default::default()
-        });
+        d.set_catalog(
+            CatalogSnapshot {
+                datasets: vec![dataset_catalog()],
+                ..Default::default()
+            },
+            SystemTime::UNIX_EPOCH,
+        );
         let mut collapsed = BTreeSet::new();
         collapsed.insert("risk".to_string());
         let rows = data_rows(&d, &AsOf::Live, &collapsed, Clock::utc());
@@ -1159,15 +1168,18 @@ mod tests {
         let joined: String = rows.iter().map(|r| r.text.to_string()).collect();
         assert!(!joined.contains("database"), "{joined}");
 
-        d.set_catalog(CatalogSnapshot {
-            datasets: Vec::new(),
-            database_bytes: 12_345_678,
-            used_blocks: 10,
-            block_size: 262_144,
-            memory_bytes: 987_654,
-            threads: 8,
-            ..Default::default()
-        });
+        d.set_catalog(
+            CatalogSnapshot {
+                datasets: Vec::new(),
+                database_bytes: 12_345_678,
+                used_blocks: 10,
+                block_size: 262_144,
+                memory_bytes: 987_654,
+                threads: 8,
+                ..Default::default()
+            },
+            SystemTime::UNIX_EPOCH,
+        );
         let rows = perf_rows(&d, &requery);
         let joined: String = rows
             .iter()

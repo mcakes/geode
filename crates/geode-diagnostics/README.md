@@ -15,6 +15,9 @@ Current behavior and rationale:
 | [`sections`](src/sections.rs) | Pure row builders for `sources` (led by any stopped data threads), `data`, `config`, `log`, and `perf`; time and clock values are explicit inputs. |
 | [`commands`](src/commands.rs) | Parser and word completions for `:section <name>`, plus refusals for application-wide commands. No GPUI or I/O. |
 | [`tile`](src/tile.rs) | Observers, selected section, filter, cursor, log tail, and prepared rows rendered through `uniform_list`. |
+| [`section`](src/section.rs) | The page's five sections in rail order: names, titles, and cycling. |
+| [`model`](src/model.rs) | Typed row models per section for the page (`SourceRow`, `DatasetRow`, `DiagnosticRow`, `ConfigDoc`, `LogRow`, `PerfModel`), plus badges and header chips. Pure: explicit time and clock inputs. |
+| [`log`](src/log.rs) | The page's retained log tail (`LogTail`, capped at 4,096 records, loss gap measured per drain) and `LogFilter` over level, target, and text. |
 
 ## Interaction and persistence
 

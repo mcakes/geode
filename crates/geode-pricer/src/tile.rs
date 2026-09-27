@@ -8328,7 +8328,7 @@ pub(crate) mod tests {
 
     fn set_catalog(h: &Harness, vcx: &mut VisualTestContext, names: &[&str]) {
         h.diagnostics.update(vcx, |d, cx| {
-            d.set_catalog(catalog(names));
+            d.set_catalog(catalog(names), std::time::SystemTime::UNIX_EPOCH);
             cx.notify();
         });
         vcx.run_until_parked();
@@ -8410,7 +8410,7 @@ pub(crate) mod tests {
         h.diagnostics.update(&mut vcx, |d, cx| {
             let mut c = catalog(&["gamma"]);
             c.datasets[0].name = "cvi_params".into();
-            d.set_catalog(c);
+            d.set_catalog(c, std::time::SystemTime::UNIX_EPOCH);
             cx.notify();
         });
         vcx.run_until_parked();

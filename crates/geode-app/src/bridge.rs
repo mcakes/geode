@@ -1056,7 +1056,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                                     // does not starve presentation of consistent snapshots.
                                     // An old as-of, however, must never replace the current one.
                                     if snapshot.as_of == current_as_of {
-                                        d.set_catalog(snapshot);
+                                        d.set_catalog(snapshot, SystemTime::now());
                                     } else {
                                         // Explicit consumers need a current answer even when
                                         // no diagnostics tile observes the frame's as-of.
