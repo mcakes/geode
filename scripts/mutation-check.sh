@@ -22242,8 +22242,8 @@ run_mutation "named expr: a named chip's x removes nothing" \
 # A missing name paints the danger chip.
 run_mutation "named expr: a missing name paints the plain chip" \
   crates/geode-shell/src/shell/toolbar.rs \
-  '        let (fg, bg, close_states, broken_marker) = if named.broken {' \
-  '        let (fg, bg, close_states, broken_marker) = if false && named.broken {' \
+  '        let (fg, bg, states, broken_marker) = if named.broken {' \
+  '        let (fg, bg, states, broken_marker) = if false && named.broken {' \
   geode-shell \
   a_missing_name_paints_the_broken_chip
 
