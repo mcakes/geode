@@ -1111,55 +1111,39 @@ fn escape_after_a_revert_mid_step_leaves_the_draft_reverted(cx: &mut gpui::TestA
     assert_eq!(h.row_texts(&vcx, 1)[3..], ["0.4000", "0.5000", "0.6000"]);
 }
 
-/// The selection cleared while the editor was open: `enter` on typed
-/// text is a single-cell commit, and its close must not restore the
-/// pre-`i` draft over the value just written.
+/// The selection cleared while the editor was open — an automatic rebase
+/// onto a generation without the anchor's term: `enter` on typed text is
+/// a single-cell commit, and its close must not take the value back out.
 #[gpui::test]
 fn a_typed_commit_after_the_selection_cleared_mid_step_keeps_the_value(
     cx: &mut gpui::TestAppContext,
 ) {
     let (h, mut vcx) = open(cx);
-    h.with_document(&mut vcx);
-    select_two_nodes_by_two_terms(&h, &mut vcx);
+    h.command(&mut vcx, "auto rebase").unwrap();
+    let tag = h.with_document_tagged(&mut vcx);
+    h.dispatch(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "right", Some(SLICE as u32 + 1));
+    h.dispatch(&mut vcx, "visual_block", None); // anchor on the second term
+    h.dispatch(&mut vcx, "up", None); // cursor on the first term's 0.2000
     h.dispatch(&mut vcx, "edit", None);
     h.dispatch(&mut vcx, "insert_up", None);
-    h.dispatch(&mut vcx, "visual_block", None); // the same key again clears
-    assert!(resolved(&h, &vcx).is_none());
+    h.deliver(
+        &mut vcx,
+        tag,
+        Arc::new(document_of(&TERMS[..1], &NODES, NEWER)),
+    );
+    assert!(
+        resolved(&h, &vcx).is_none(),
+        "the premise: the anchor is gone"
+    );
     h.set_editor(&mut vcx, "0.25");
     h.dispatch(&mut vcx, "commit", None);
     assert!(h.editor_value(&vcx).is_none());
     assert_eq!(
-        h.row_texts(&vcx, 1)[4],
+        h.row_texts(&vcx, 0)[4],
         "0.2500",
         "the typed value stays written"
     );
-}
-
-/// A typed value equal to the one the step already wrote leaves the
-/// draft looking exactly as the steps left it; the commit must still
-/// keep the typed cell and the other cells' steps, not restore the
-/// pre-`i` draft on close.
-#[gpui::test]
-fn a_typed_commit_equal_to_the_stepped_value_keeps_every_step(cx: &mut gpui::TestAppContext) {
-    let (h, mut vcx) = open(cx);
-    h.with_document(&mut vcx);
-    select_two_nodes_by_two_terms(&h, &mut vcx);
-    h.dispatch(&mut vcx, "edit", None);
-    h.dispatch(&mut vcx, "insert_up", None);
-    assert_eq!(h.row_texts(&vcx, 1)[3..], ["0.4001", "0.5001", "0.6000"]);
-    h.dispatch(&mut vcx, "visual_block", None); // the same key again clears
-    assert!(resolved(&h, &vcx).is_none());
-    // Not the seeded text (which is the untouched-steps path), but the
-    // same number the step wrote.
-    h.set_editor(&mut vcx, "0.50010");
-    h.dispatch(&mut vcx, "commit", None);
-    assert!(h.editor_value(&vcx).is_none());
-    assert_eq!(
-        h.row_texts(&vcx, 1)[3..],
-        ["0.4001", "0.5001", "0.6000"],
-        "the typed cell and its stepped neighbour keep their values"
-    );
-    assert_eq!(h.row_texts(&vcx, 0)[3..], ["0.1001", "0.2001", "0.3000"]);
 }
 
 /// Under `:auto replace` a delivery reverts the draft and says so. The
@@ -1570,30 +1554,6 @@ fn a_click_inside_a_row_label_editor_keeps_it_open(cx: &mut gpui::TestAppContext
     assert_eq!(h.tile.read_with(&vcx, |t, _| t.model().rows.len()), rows);
 }
 
-/// With the selection cleared mid-step the commit is single-cell; its
-/// parse refusal keeps the editor open, and the `escape` after it is a
-/// cancel that undoes the steps.
-#[gpui::test]
-fn escape_after_a_refused_single_cell_commit_mid_step_undoes_the_steps(
-    cx: &mut gpui::TestAppContext,
-) {
-    let (h, mut vcx) = open(cx);
-    h.with_document(&mut vcx);
-    select_two_nodes_by_two_terms(&h, &mut vcx);
-    h.dispatch(&mut vcx, "edit", None);
-    h.dispatch(&mut vcx, "insert_up", None);
-    h.dispatch(&mut vcx, "visual_block", None); // clears
-    h.set_editor(&mut vcx, "abc");
-    h.dispatch(&mut vcx, "commit", None);
-    assert_eq!(h.mode(&vcx), "insert", "the refusal keeps the editor");
-    assert_eq!(h.row_texts(&vcx, 1)[3..], ["0.4001", "0.5001", "0.6000"]);
-    h.dispatch(&mut vcx, "cancel", None);
-    assert!(h.editor_value(&vcx).is_none());
-    assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
-    assert_eq!(h.row_texts(&vcx, 1)[3..], ["0.4000", "0.5000", "0.6000"]);
-    assert_eq!(h.row_texts(&vcx, 0)[3..], ["0.1000", "0.2000", "0.3000"]);
-}
-
 /// A double-click with a selection live: the first press clears it, so
 /// the editor that opens is a single-cell one and a commit writes only
 /// its cell.
@@ -1686,5 +1646,86 @@ fn an_upload_of_live_steps_alone_is_refused_as_empty(cx: &mut gpui::TestAppConte
     h.dispatch(&mut vcx, "upload", None);
     assert_eq!(notice_of(&h, &vcx).as_deref(), Some("nothing to upload"));
     assert_eq!(h.upload_prompt(&vcx), None, "nothing armed");
+    assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
+}
+
+/// Steps on a `Sent` draft make it `Editing`, which lets go of the rows
+/// that were sent. The `escape` that takes the steps back restores them
+/// with the `Sent` state, so the upstream's echo still confirms.
+#[gpui::test]
+fn escape_after_steps_on_a_sent_draft_keeps_its_echo_check(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_upload(cx);
+    h.with_document(&mut vcx);
+    h.edit_one_cell(&mut vcx);
+    let sent = h.upload_ok(&mut vcx);
+    let at = h.sent_at(&vcx);
+    h.dispatch(&mut vcx, "visual_block", None); // on the sent fwd
+    h.dispatch(&mut vcx, "edit", None);
+    h.dispatch(&mut vcx, "insert_up", None);
+    assert!(
+        !h.tile.read_with(&vcx, |t, _| t.draft().is_sent()),
+        "the premise: the step left Sent"
+    );
+    h.dispatch(&mut vcx, "cancel", None);
+    assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_sent()));
+    assert_eq!(h.sent_rows(&vcx), Some(sent.clone()));
+    h.echo(&mut vcx, test_fixtures::snapshot_of_at(&CVI, &sent, NEWER));
+    let draft = h.tile.read_with(&vcx, |t, _| t.draft().clone());
+    assert_eq!(draft.state, DraftState::Clean, "{draft:?}");
+    let confirmed = format!("sent {at}, confirmed ");
+    assert!(
+        h.header_texts(&vcx)
+            .iter()
+            .any(|t| t.starts_with(&confirmed)),
+        "{:?}",
+        h.header_texts(&vcx)
+    );
+}
+
+/// While a selection editor is open its members are the edit's operand:
+/// a palette motion, `V`/`v`, `escape` or `y` would change them under
+/// the open editor, so each refuses and the selection stays as it was.
+#[gpui::test]
+fn selection_changing_verbs_refuse_while_a_selection_editor_is_open(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    select_two_nodes_by_two_terms(&h, &mut vcx);
+    h.dispatch(&mut vcx, "edit", None);
+    let shape = resolved(&h, &vcx);
+    let cursor = h.tile.read_with(&vcx, |t, _| t.cursor());
+    for verb in ["down", "visual_rows", "visual_block", "escape", "yank"] {
+        h.dispatch(&mut vcx, verb, None);
+        assert_eq!(resolved(&h, &vcx), shape, "{verb}");
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor()), cursor, "{verb}");
+        assert_eq!(h.editor_value(&vcx).as_deref(), Some("0.5000"), "{verb}");
+        assert_eq!(
+            notice_of(&h, &vcx).as_deref(),
+            Some("finish the edit first — enter or escape"),
+            "{verb}"
+        );
+    }
+}
+
+/// A delivery that loses the anchor clears the selection under an open
+/// selection editor; the arrows then nudge the editor's text as they do
+/// for any single cell, rather than refusing a step over no members.
+#[gpui::test]
+fn arrows_nudge_the_text_once_a_delivery_drops_the_selection(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    let tag = h.with_document_tagged(&mut vcx);
+    h.dispatch(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "right", Some(SLICE as u32 + 1));
+    h.dispatch(&mut vcx, "visual_block", None); // anchor on the second term
+    h.dispatch(&mut vcx, "up", None); // cursor on the first term's 0.2000
+    h.dispatch(&mut vcx, "edit", None);
+    h.deliver(
+        &mut vcx,
+        tag,
+        Arc::new(document_of(&TERMS[..1], &NODES, NEWER)),
+    );
+    assert_eq!(resolved(&h, &vcx), None, "the premise: the anchor is gone");
+    h.dispatch(&mut vcx, "insert_up", None);
+    assert_eq!(h.editor_value(&vcx).as_deref(), Some("0.2001"));
+    assert_eq!(notice_of(&h, &vcx), None, "nothing refused");
     assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
 }

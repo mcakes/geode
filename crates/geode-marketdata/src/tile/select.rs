@@ -20,6 +20,10 @@ pub(super) const STEPS_KEPT: &str = "steps kept: the document moved";
 /// a pivot row selection, a term's slice values (fwd/atm/skew).
 pub(super) const NOT_A_MEMBER: &str = "slice values are not in a row selection — use v";
 
+/// The refusal for a verb that would move or end the selection under an
+/// open selection editor.
+pub(super) const FINISH_EDIT_FIRST: &str = "finish the edit first — enter or escape";
+
 /// What closing a selection editor did with its live steps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StepsUndo {
@@ -149,6 +153,29 @@ impl MarketDataTile {
     /// Called once per edit, never from render.
     pub(super) fn selection_holds(&self, cell: (usize, usize)) -> bool {
         self.selection_cells().contains(&cell)
+    }
+
+    /// An editor whose commit or steps go to the selection: open while a
+    /// selection is live, or a stepping editor whose selection a delivery
+    /// has since cleared (its steps are still undone on close).
+    pub(super) fn selection_editor_open(&self) -> bool {
+        self.editor
+            .as_ref()
+            .is_some_and(|e| e.bulk.is_some() || self.selection.is_some())
+    }
+
+    /// The verbs that move or end the selection: every motion (the cursor
+    /// is its moving corner), `V`/`v`, the `escape` verb, and `y` over a
+    /// selection, which consumes it. `cancel` (insert mode's `escape`)
+    /// closes the editor and is not among them.
+    pub(super) fn changes_selection(&self, verb: &str) -> bool {
+        match verb {
+            "down" | "up" | "left" | "right" | "page_down" | "page_up" | "page_down_full"
+            | "page_up_full" | "top" | "bottom" | "first_col" | "last_col" | "visual_rows"
+            | "visual_block" | "escape" => true,
+            "yank" => self.selection.is_some(),
+            _ => false,
+        }
     }
 
     fn cursor_in_selection(&self) -> bool {
@@ -347,8 +374,8 @@ impl MarketDataTile {
     /// The editor's arrow keys with a selection live and its text
     /// untouched: step every selected number by its own column's unit, in
     /// the draft, now, so the grid shows the block as it moves. `None`
-    /// when this is not that case (typed text, a cursor cell that is not
-    /// a number, no selection editor), so `nudge` keeps its own
+    /// when this is not that case (no selection, typed text, a cursor
+    /// cell that is not a number, no selection editor), so `nudge` keeps its own
     /// single-cell behaviour; `Some(chrome)` otherwise. A refusal (behind,
     /// no numbers) writes nothing and leaves the editor as it was.
     pub(super) fn bulk_step(
@@ -357,6 +384,10 @@ impl MarketDataTile {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<bool> {
+        // A delivery that lost the anchor cleared the selection under the
+        // open editor: there are no members to step, and the editor is a
+        // single cell's again.
+        self.selection.as_ref()?;
         let editing = self.editor.as_ref()?;
         let bulk = editing.bulk.as_ref()?;
         let EditorState::Text(state) = &editing.state else {
@@ -451,6 +482,19 @@ impl MarketDataTile {
             return StepsUndo::Kept;
         }
         self.draft.restore_from(bulk.before);
+        // The upload state goes back with the draft it described; each
+        // only where nothing has replaced it meanwhile, and the next
+        // `rebuild_chrome` drops any the restored draft does not bear out.
+        let marks = bulk.upload;
+        if self.sent.is_none() && self.draft.is_sent() {
+            self.sent = marks.sent;
+        }
+        if self.echo.is_none() {
+            self.echo = marks.echo;
+        }
+        if self.upload_error.is_none() {
+            self.upload_error = marks.upload_error;
+        }
         // Not behind, the retained base can only be one kept for a sent
         // draft whose echo differs, and `held_refusal` refuses every edit
         // (a step included) in that state, so no step reached a draft that
@@ -590,7 +634,17 @@ impl MarketDataTile {
             if undo == StepsUndo::Restored {
                 self.rebuild_model(cx);
             }
-            self.notice = Some(nothing_accepts(&skips).into());
+            // Kept steps are still in the draft; the refusal must not hide
+            // that the close could not take them back.
+            let refused = nothing_accepts(&skips);
+            self.notice = Some(
+                if kept {
+                    format!("{refused}; {STEPS_KEPT}")
+                } else {
+                    refused
+                }
+                .into(),
+            );
             return true;
         }
         self.close_editor(window, cx);

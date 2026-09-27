@@ -71,7 +71,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 mod select;
-use select::StepsUndo;
+use select::{FINISH_EDIT_FIRST, StepsUndo};
 
 /// How many rows `ctrl+d`/`ctrl+u` step — `vimnav`'s own ±5, the same
 /// fixed offset every list in this codebase uses, multiplied by the count
@@ -323,6 +323,23 @@ struct Bulk {
     steps: i64,
     /// Whether any step reached the draft, so a close must undo it.
     stepped: bool,
+    /// The upload state `i` found beside `before`; see [`UploadMarks`].
+    upload: UploadMarks,
+}
+
+/// What the upload and echo machinery holds about the draft, which
+/// `rebuild_chrome` lets go of once a step makes the draft `Editing`: the
+/// rows a `Sent` draft's echo is compared with, the echo line, and a
+/// failed upload's error. Restoring `before` without them would bring
+/// back `Sent` with nothing to compare, so a matching echo would land as
+/// `Behind` instead of confirming. `submitted` is not here: a step never
+/// drops it (only the outcome, a refused submit or a key switch does),
+/// and bringing back one the outcome consumed would resurrect a question
+/// already answered.
+struct UploadMarks {
+    sent: Option<DocumentRows>,
+    echo: Option<Echo>,
+    upload_error: Option<(SharedString, Draft)>,
 }
 
 /// Text and segmented-date editor states, chosen by cell kind or attribute type.
@@ -2257,6 +2274,16 @@ impl MarketDataTile {
         let Some(verb) = action.0.strip_prefix("marketdata::") else {
             return false;
         };
+        // An open selection editor's members are its operand. The palette
+        // reaches these verbs in insert mode, and each would move or end
+        // the selection under the editor, so the commit or the steps would
+        // land on cells the trader did not open it over.
+        if self.selection_editor_open() && self.changes_selection(verb) {
+            self.notice = Some(FINISH_EDIT_FIRST.into());
+            self.rebuild_chrome();
+            cx.notify();
+            return true;
+        }
         // Close popups before unrelated actions. Menu commands, commit/cancel, and
         // insert navigation retain their active popup so they can act on it. Use the
         // window-aware close to blur a focused picker or choice field before dropping
@@ -2701,6 +2728,11 @@ impl MarketDataTile {
             seeded: text.to_string(),
             steps: 0,
             stepped: false,
+            upload: UploadMarks {
+                sent: self.sent.clone(),
+                echo: self.echo.clone(),
+                upload_error: self.upload_error.clone(),
+            },
         });
         self.editor = Some(Editing {
             state,
@@ -3140,7 +3172,11 @@ impl MarketDataTile {
         }
         // A written value is kept: the close below must never restore the
         // pre-`i` draft over it, even when the write left the draft equal
-        // to what the steps had made it.
+        // to what the steps had made it. A stepping editor reaches this
+        // single-cell commit only after a delivery cleared its selection,
+        // which also moves the painted generation, so `undo_steps` would
+        // keep the steps anyway; the take states the rule rather than
+        // relying on that.
         drop(self.editor.as_mut().and_then(|e| e.bulk.take()));
         self.close_editor(window, cx);
         self.notice = None;
