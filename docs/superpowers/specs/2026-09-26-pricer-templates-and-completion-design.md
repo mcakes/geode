@@ -205,12 +205,12 @@ pub trait UnderlyingSource {
 }
 ```
 
-- `PricerFactory::new` takes `Rc<dyn UnderlyingSource>`. The tile reads
+- `PricerFactory::with_underlyings(Rc<dyn UnderlyingSource>)` sets it (default: an empty list). The tile reads
   it when the bar opens and when `revision` has moved since the last
   read (checked on each text change). There is no subscription and no
   new global.
-- `geode-app` backs it today with `[pricer] underlyings = [...]` from the
-  app config, upper-cased, deduplicated in order, and refreshed on
+- `geode-app` backs it today with `[pricing] underlyings = [...]` from
+  `app.toml` (beside `adapter` and `refresh`), upper-cased, deduplicated in order, and refreshed on
   config reload (bumping the revision).
 - The trait lives in `geode-pricer`. When watchlists land, the app
   implements it over the active watchlist. If another module needs the
@@ -253,4 +253,4 @@ unknown-name load fallback, and Tab's replacement range.
 
 `docs/current/features.md` (pricer section: templates, the entry bar's
 completion), `docs/current/configuration.md` (the `pricer_templates`
-document and `[pricer] underlyings`), and `crates/geode-pricer/README.md`.
+document and `[pricing] underlyings`), and `crates/geode-pricer/README.md`.
