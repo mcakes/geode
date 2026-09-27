@@ -8522,15 +8522,13 @@ run_mutation "focus: the no-focus net never steals from a live focused element" 
 # the backstop is the only thing left.
 run_mutation "focus: a departed tile's focus returns to the shell root" \
   crates/geode-shell/src/shell/occupants.rs \
-  '        if any_tile_left_the_screen
-            && let Some(focused) = window.focused(cx)
-            && !self.holds_shell_focus(&focused, cx)
+  '                    .is_some_and(|o| o.content.holds_focus(window, cx))
+            })
         {
             self.focus_handle.focus(window, cx);
         }' \
-  '        if any_tile_left_the_screen
-            && let Some(focused) = window.focused(cx)
-            && !self.holds_shell_focus(&focused, cx)
+  '                    .is_some_and(|o| o.content.holds_focus(window, cx))
+            })
         {
             let _ = &focused;
         }' \
@@ -16559,7 +16557,6 @@ run_mutation "stacks: stacking onto a fullscreen tile exits fullscreen" \
   geode-shell \
   stacking_onto_a_fullscreen_tile_exits_fullscreen
 
-
 # Split and pull: `stack::split` (mod+s) turns the focused stack into an
 # equal split in its own slot; `stack::pull_*` (mod+shift+h/j/k/l) pulls
 # the visible neighbour into the focused tile's slot in screen order.
@@ -16681,6 +16678,13 @@ run_mutation "stack pull: dirties the session" \
   '            if self.services.workspaces.active_mut().pull(dir) {' \
   geode-shell \
   mod_s_splits_the_stack_and_mod_shift_direction_pulls_it_back
+
+run_mutation "occupants: a tile leaving keeps a painted tile's input focused" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '                    .is_some_and(|o| o.content.holds_focus(window, cx))' \
+  '                    .is_some_and(|_| false)' \
+  geode-shell \
+  a_pull_from_insert_mode_leaves_the_typing_tile_its_input
 
 run_mutation "stack pull: a refusal leaves a notice" \
   crates/geode-shell/src/shell/input.rs \
