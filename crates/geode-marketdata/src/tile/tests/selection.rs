@@ -165,4 +165,36 @@ fn the_block_tints_its_cells_and_the_footer_shows_the_extent(cx: &mut gpui::Test
             .as_deref(),
         Some("2 rows × 2 cols")
     );
+    // Escape takes both away: the delegate's tint and the footer.
+    h.dispatch(&mut vcx, "escape", None);
+    let selected = h
+        .tile
+        .read_with(&vcx, |t, cx| t.table.read(cx).delegate().selected.clone());
+    assert_eq!(selected, None, "the delegate paints no tint");
+    draw(&mut vcx);
+    assert!(
+        vcx.debug_bounds("aggregate-extent").is_none(),
+        "the footer strip is gone"
+    );
+}
+
+/// A click on a header attribute leaves the grid, and the strip is never
+/// a member: the selection ends there, without the lost-anchor notice (the
+/// anchor is still painted).
+#[gpui::test]
+fn an_attribute_click_clears_the_selection_without_a_notice(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    h.dispatch(&mut vcx, "visual_block", None);
+    h.dispatch(&mut vcx, "down", None);
+    let at = centre_of(&mut vcx, &format!("marketdata-attr-{TILE}-1"));
+    click_at(&mut vcx, at, 1);
+    assert_eq!(resolved(&h, &vcx), None);
+    assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor()), Cursor::Attr(1));
+    assert_eq!(h.mode(&vcx), "normal");
+    let texts = h.header_texts(&vcx);
+    assert!(
+        !texts.iter().any(|t| t.starts_with("selection cleared")),
+        "{texts:?}"
+    );
 }

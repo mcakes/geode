@@ -60,9 +60,14 @@ impl MarketDataTile {
                 |label| self.model.rows.iter().position(|r| &r.label == label),
                 |name| self.model.columns.iter().position(|c| c == name),
             ),
-            // Keyed motions clamp out of the strip and `v` refuses there,
-            // so a strip cursor here means the grid no longer holds it.
-            Cursor::Attr(_) => Err(Lost::Row),
+            // Unreachable: every door into the strip (`cursor_to_attr`)
+            // clears the selection first, motions clamp, and `v` refuses
+            // there. Should one be missed, clear without a notice — the
+            // anchor is still painted, so "no longer shown" would be false.
+            Cursor::Attr(_) => {
+                self.clear_selection();
+                return false;
+            }
         };
         match outcome {
             Ok(r) => {

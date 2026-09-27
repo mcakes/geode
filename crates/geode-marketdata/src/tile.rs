@@ -2003,6 +2003,10 @@ impl MarketDataTile {
         if self.editor.is_some() {
             self.close_editor(window, cx);
         }
+        // The strip is never a selection member: leaving the grid ends the
+        // selection here, before `sync_cursor` would read the strip cursor
+        // as a lost anchor and say so.
+        self.clear_selection();
         self.cursor = Cursor::Attr(i.min(attrs - 1));
         self.sync_cursor(cx);
         self.rebuild_chrome();
