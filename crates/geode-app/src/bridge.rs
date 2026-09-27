@@ -20,7 +20,7 @@ use geode_data::{
 };
 use geode_marketdata::MarketDataFactory;
 use geode_marketdata::core::{CVI, DIVIDEND};
-use geode_pricer::content::{PricerFactory, PricerSettings};
+use geode_pricer::content::{PricerFactory, PricerSettings, UnderlyingList};
 use geode_pricer::core::{
     PRICER_SHEETS_DATASET, PRICER_SHEETS_DECLARATION, PRICER_TEMPLATES_DOC, PRICER_VIEWS_DOC,
     TemplateSet, Views,
@@ -57,6 +57,9 @@ pub struct DataSetup {
     pub pricer_views: Views,
     pub pricer_templates: TemplateSet,
     pub pricer_settings: PricerSettings,
+    /// `[pricing] underlyings` as written (`UnderlyingList::set`
+    /// normalises it).
+    pub pricer_underlyings: Vec<String>,
     /// What the pricer read out of this config (`pricer_config_key`), so
     /// the reload observer can tell a reload that changed none of it.
     pub pricer_key: PricerConfigKey,
@@ -142,6 +145,8 @@ pub fn data_setup(
     diagnostics.extend(template_diags);
     let (refresh, refresh_diag) = pricing_refresh_from_config(config);
     diagnostics.extend(refresh_diag);
+    let (pricer_underlyings, underlying_diags) = pricing_underlyings_from_config(config);
+    diagnostics.extend(underlying_diags);
     let pricer_settings = PricerSettings {
         pricer: pricer_name.clone(),
         pricer_missing: pricer.pricer.is_none(),
@@ -181,6 +186,7 @@ pub fn data_setup(
         pricer_views,
         pricer_templates,
         pricer_settings,
+        pricer_underlyings,
         pricer_key: pricer_config_key(config),
     })
 }
@@ -303,6 +309,42 @@ pub fn pricing_refresh_from_config(config: &Config) -> (Option<Duration>, Option
     )
 }
 
+/// `[pricing] underlyings`: the names the pricer's entry bar suggests,
+/// as written and in order (`UnderlyingList::set` upper-cases and drops
+/// repeats). Absent is an empty list. A non-array value, or a non-string
+/// element, warns and is skipped.
+pub fn pricing_underlyings_from_config(config: &Config) -> (Vec<String>, Vec<Diagnostic>) {
+    let Some(value) = config.get("app", "pricing.underlyings") else {
+        return (Vec::new(), Vec::new());
+    };
+    let warn = |message: String| Diagnostic {
+        severity: Severity::Warning,
+        layer: config.explain("app", "pricing.underlyings"),
+        file: None,
+        message,
+        path: Some("app.pricing.underlyings".to_string()),
+    };
+    let Some(items) = value.as_array() else {
+        return (
+            Vec::new(),
+            vec![warn(format!(
+                "[pricing] underlyings = {value} is not an array of names; no underlyings are suggested"
+            ))],
+        );
+    };
+    let mut names = Vec::with_capacity(items.len());
+    let mut diags = Vec::new();
+    for item in items {
+        match item.as_str() {
+            Some(name) => names.push(name.to_string()),
+            None => diags.push(warn(format!(
+                "[pricing] underlyings: {item} is not a name; skipped"
+            ))),
+        }
+    }
+    (names, diags)
+}
+
 /// The `pricer_views` doc, or the bundled two when no layer has one (the
 /// builtin layer always does in the app; a test config may not).
 pub fn pricer_views_from_config(config: &Config) -> (Views, Vec<Diagnostic>) {
@@ -330,7 +372,7 @@ pub fn pricer_templates_from_config(
 
 /// Exactly what the pricer reads out of a config: the merged
 /// `pricer_views` and `pricer_templates` docs, the raw `[pricing] refresh`
-/// value and the resolved stale threshold. Two equal keys resolve to the
+/// and `[pricing] underlyings` values and the resolved stale threshold. Two equal keys resolve to the
 /// same views and settings, so the reload observer skips a reload whose
 /// key is unchanged — a theme or keymap edit must not restart every tile's
 /// refresh timer or repeat a bad value's warning.
@@ -339,6 +381,7 @@ pub struct PricerConfigKey {
     views: Option<toml::Table>,
     templates: Option<toml::Table>,
     refresh: Option<toml::Value>,
+    underlyings: Option<toml::Value>,
     stale_after: Duration,
 }
 
@@ -347,6 +390,7 @@ pub fn pricer_config_key(config: &Config) -> PricerConfigKey {
         views: config.doc(PRICER_VIEWS_DOC).map(|d| d.value.clone()),
         templates: config.doc(PRICER_TEMPLATES_DOC).map(|d| d.value.clone()),
         refresh: config.get("app", "pricing.refresh").cloned(),
+        underlyings: config.get("app", "pricing.underlyings").cloned(),
         stale_after: stale_after_from_config(config),
     }
 }
@@ -386,6 +430,9 @@ pub struct Bridge {
     /// The line pricer's factory, sharing the handle. Retained so a reload
     /// reaches its views and settings.
     pub pricer: Rc<PricerFactory>,
+    /// The list behind the pricer's entry-bar underlyings; the reload
+    /// observer sets it from `[pricing] underlyings`.
+    pub underlyings: Rc<UnderlyingList>,
     events: crate::events::Receiver,
     dropped: Arc<AtomicU64>,
     /// Startup source descriptions paired with their schema-derived pipeline.
@@ -464,17 +511,22 @@ pub fn start(
     let mut pricer_settings = setup.pricer_settings.clone();
     let pricer_key = setup.pricer_key.clone();
     pricer_settings.stale_after = stale_after;
+    let underlyings = Rc::new(UnderlyingList::default());
+    underlyings.set(&setup.pricer_underlyings);
     // Sheets live in the local `pricer_sheets` dataset the builtin layer
     // declares. The store only queues reads and writes; their answers come
     // back through the drain (a load's as the tile's `Delivery::Query`, a
     // save's or forget's to the factory by sheet name).
-    let pricer = Rc::new(PricerFactory::new(
-        handle.clone(),
-        Rc::new(DuckSheetStore::new(handle.clone())),
-        setup.pricer_views.clone(),
-        setup.pricer_templates.clone(),
-        pricer_settings,
-    ));
+    let pricer = Rc::new(
+        PricerFactory::new(
+            handle.clone(),
+            Rc::new(DuckSheetStore::new(handle.clone())),
+            setup.pricer_views.clone(),
+            setup.pricer_templates.clone(),
+            pricer_settings,
+        )
+        .with_underlyings(underlyings.clone()),
+    );
     Bridge {
         marketdata: Rc::new(
             MarketDataFactory::new(
@@ -500,6 +552,7 @@ pub fn start(
         ),
         timeseries,
         pricer,
+        underlyings,
         handle,
         factory,
         events: rx,
@@ -769,6 +822,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
     // it down to the reloads that change what the pricer reads.
     {
         let pricer = bridge.pricer.clone();
+        let underlyings = bridge.underlyings.clone();
         let diagnostics = diagnostics.clone();
         let shell = shell.clone();
         let frame = shell.read(cx).frame().clone();
@@ -796,9 +850,12 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 // A bad entry keeps the running definition of its name.
                 let (templates, template_diags) =
                     pricer_templates_from_config(config, &pricer.templates(), "previous");
+                let (names, underlying_diags) = pricing_underlyings_from_config(config);
+                underlyings.set(&names);
                 let mut diags = diags;
                 diags.extend(template_diags);
                 diags.extend(refresh_diag);
+                diags.extend(underlying_diags);
                 (
                     views,
                     templates,
@@ -1434,6 +1491,19 @@ role = "key"
     /// one factory's reload path.
     fn test_bridge(handle: DataHandle) -> Bridge {
         let (_tx, rx) = crate::events::channel();
+        // The factory reads the same list the reload observer sets, as
+        // `start` wires them.
+        let underlyings = Rc::new(UnderlyingList::default());
+        let pricer = Rc::new(
+            PricerFactory::new(
+                handle.clone(),
+                Rc::new(MemorySheetStore::default()),
+                Views::builtin(),
+                TemplateSet::builtin(),
+                PricerSettings::default(),
+            )
+            .with_underlyings(underlyings.clone()),
+        );
         Bridge {
             factory: Rc::new(BlotterFactory::new(
                 handle.clone(),
@@ -1457,13 +1527,14 @@ role = "key"
                 handle.clone(),
                 NamedColours::default(),
             )),
-            pricer: test_pricer(&handle),
+            pricer,
             handle,
             events: rx,
             dropped: Arc::new(AtomicU64::new(0)),
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            underlyings,
         }
     }
 
@@ -1493,6 +1564,35 @@ role = "key"
         assert_eq!(refresh, Some(DEFAULT_PRICING_REFRESH));
         let diag = diag.expect("a bad value warns");
         assert_eq!(diag.path.as_deref(), Some("app.pricing.refresh"));
+    }
+
+    #[test]
+    fn pricing_underlyings_reads_an_array_and_warns_on_bad_values() {
+        let config = |text: &str| {
+            Config::load(&ConfigSources {
+                builtin: vec![LayerDoc::builtin("app", text).unwrap()],
+                desk: None,
+                user: None,
+            })
+        };
+        let (names, diags) = pricing_underlyings_from_config(&config(
+            "[pricing]\nunderlyings = [\"spx\", 3, \"SX5E\"]\n",
+        ));
+        assert_eq!(names, ["spx", "SX5E"]);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].path.as_deref(), Some("app.pricing.underlyings"));
+        assert_eq!(diags[0].severity, Severity::Warning);
+
+        let (names, diags) =
+            pricing_underlyings_from_config(&config("[pricing]\nunderlyings = \"SPX\"\n"));
+        assert!(names.is_empty(), "{names:?}");
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].path.as_deref(), Some("app.pricing.underlyings"));
+
+        let (names, diags) =
+            pricing_underlyings_from_config(&config("[pricing]\nrefresh = \"10s\"\n"));
+        assert!(names.is_empty());
+        assert!(diags.is_empty(), "{diags:?}");
     }
 
     /// The reload gate's key moves with exactly the four things the
@@ -1553,6 +1653,15 @@ role = "key"
             pricer_config_key(&config(&app.replace("\"5m\"", "\"6m\""), views, templates)),
             base,
             "a stale_after edit"
+        );
+        assert_ne!(
+            pricer_config_key(&config(
+                &app.replace("[blotter]", "underlyings = [\"NDX\"]\n[blotter]"),
+                views,
+                templates
+            )),
+            base,
+            "a [pricing] underlyings edit"
         );
     }
 
@@ -1710,6 +1819,53 @@ role = "key"
         );
     }
 
+    /// A reload hands the entry bar's underlying list its new
+    /// `[pricing] underlyings`, and the list's revision moves so open
+    /// tiles re-read it.
+    #[gpui::test]
+    fn a_config_reload_hands_the_pricer_factory_its_underlyings(cx: &mut gpui::TestAppContext) {
+        let services = test_shell_services_with_sources(ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin("views", "[tree]\ndataset = \"risk\"\n").unwrap(),
+                LayerDoc::builtin("app", "[pricing]\nunderlyings = [\"ndx\"]\n").unwrap(),
+            ],
+            desk: None,
+            user: None,
+        });
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let (handle, _rx) = DataHandle::for_tests();
+        let bridge = test_bridge(handle);
+        let source = bridge.pricer.underlying_source();
+        let before = vcx.update(|_, cx| {
+            assert!(
+                source.underlyings(cx).is_empty(),
+                "fixture: built with no underlyings"
+            );
+            source.revision(cx)
+        });
+        cx.update(|cx| attach(&bridge, window, cx));
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        vcx.update(|_, cx| {
+            let frame = shell.read(cx).frame().clone();
+            frame.update(cx, |f, cx| {
+                f.note_config_reloaded();
+                cx.notify();
+            });
+        });
+        vcx.run_until_parked();
+        vcx.update(|_, cx| {
+            let list = source.underlyings(cx);
+            assert_eq!(list.iter().map(|s| s.as_ref()).collect::<Vec<_>>(), ["NDX"]);
+            assert_ne!(source.revision(cx), before, "the revision moved");
+        });
+    }
+
     /// At startup the configured templates reach the factory, and a broken
     /// entry falls back to the builtin definition of its name.
     #[gpui::test]
@@ -1725,6 +1881,7 @@ role = "key"
             LayerDoc::builtin("views", "[v]\ndataset = \"risk\"\ngrouping = [\"book\"]\n").unwrap(),
         ];
         builtin.extend(desk_templates());
+        builtin.push(LayerDoc::builtin("app", "[pricing]\nunderlyings = [\"spx\"]\n").unwrap());
         let config = Config::load(&ConfigSources {
             builtin,
             ..ConfigSources::default()
@@ -1747,7 +1904,13 @@ role = "key"
         let bridge =
             cx.update(|cx| start(setup, FindStyle::default(), Duration::from_secs(60), cx));
         let names = bridge.pricer.template_names();
+        let underlyings = cx.update(|cx| bridge.pricer.underlying_source().underlyings(cx));
         bridge.handle.shutdown();
+        assert_eq!(
+            underlyings.iter().map(|s| s.as_ref()).collect::<Vec<_>>(),
+            ["SPX"],
+            "[pricing] underlyings reaches the factory at startup"
+        );
         assert!(names.contains(&"CONDOR".into()), "{names:?}");
         assert_eq!(
             bridge.pricer.templates().resolve("RR"),
@@ -3075,6 +3238,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Rc::new(["pricer_sheets".to_string()].into_iter().collect()),
             pricer_key: None,
+            underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
         let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
@@ -3188,6 +3352,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
         tx.try_send(DataEvent::Price(geode_core::pricing::PriceOutcome {
@@ -3248,6 +3413,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            underlyings: Default::default(),
         };
 
         cx.update(|cx| attach(&bridge, window, cx));
@@ -3374,6 +3540,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
 
@@ -3439,6 +3606,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
 
@@ -3504,6 +3672,7 @@ role = "key"
             )),
             pricer: test_pricer(&handle),
             pricer_key: None,
+            underlyings: Default::default(),
             handle,
             factory,
             events: rx,
@@ -3574,6 +3743,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            underlyings: Default::default(),
         };
 
         cx.update(|cx| attach(&bridge, window, cx));
@@ -3650,6 +3820,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
 
@@ -3733,6 +3904,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
@@ -3804,6 +3976,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
@@ -3866,6 +4039,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
 
@@ -3966,6 +4140,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
 
@@ -4033,6 +4208,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
 
@@ -4183,6 +4359,7 @@ role = "key"
             )],
             local_datasets: Default::default(),
             pricer_key: None,
+            underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
 
@@ -4655,6 +4832,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
 

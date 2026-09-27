@@ -424,6 +424,12 @@ parser. Zero, invalid strings, and non-string values warn at
 open pricer tile without a restart; a sheet's own `:refresh` still overrides
 it.
 
+`underlyings` lists the underlyings the pricer's entry bar suggests, in the
+order it offers them: an array of strings, upper-cased, with repeats
+dropped. A non-array value or a non-string element warns at
+`app.pricing.underlyings` and is skipped. A reload applies it to open tiles
+without a restart. Without it the bar says no underlyings are configured.
+
 `pricer_views` holds the pricer's named column views. The builtin layer
 carries the two bundled views; like other named objects, a desk or user entry
 replaces a whole view. A reload reaches open pricer tiles, and a tile whose

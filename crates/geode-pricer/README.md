@@ -38,7 +38,7 @@ The tile:
 | `header` | The prepared header row and footer. |
 | `popup` | The typeahead and the `.` action menu. |
 | `session` | The tile's session record. |
-| `content` | The factory, keymap fragment, actions, and settings. |
+| `content` | The factory, keymap fragment, actions, settings, and the read-only `UnderlyingSource` seam. |
 | `tile` | `PricerTile`: modes, verbs, repricing, write-behind, load. |
 
 The application uses `DuckSheetStore`: sheets are `pricer_sheets` documents in

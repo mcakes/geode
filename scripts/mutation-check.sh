@@ -22270,6 +22270,22 @@ run_mutation "launch: a shared factory stops forwarding accepts" \
   '        &[]' \
   geode-app the_production_roster_opens_market_data_on_an_underlying
 
+# A reload must reach the underlying list, or a desk edit to it waits for
+# a restart.
+run_mutation "pricer app: a reload leaves the underlying list stale" \
+  crates/geode-app/src/bridge.rs \
+  '                underlyings.set(&names);' \
+  '' \
+  geode-app a_config_reload_hands_the_pricer_factory_its_underlyings
+
+# The revision moves only on a real change; a bump on every set makes
+# every tile re-rank on every unrelated reload.
+run_mutation "pricer underlyings: an unchanged set bumps the revision" \
+  crates/geode-pricer/src/content.rs \
+  '        if *self.list.borrow().as_ref() == next[..] {' \
+  '        if false {' \
+  geode-pricer an_underlying_list_normalises_and_bumps_only_on_change
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
