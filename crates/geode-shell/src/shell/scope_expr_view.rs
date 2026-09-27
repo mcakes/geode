@@ -27,11 +27,11 @@
 //! typed text (suggestions off, staged chips kept); on an empty field it
 //! refuses at once and opens no entry. Enter refuses an invalid, reserved
 //! or taken name, an empty text, one Enter itself would refuse, or a
-//! missing user config directory, each inline with the entry still open; otherwise it writes
-//! `[name] expression = "<text>"` to the user layer of `expressions.toml`,
-//! refreshes the frame's definitions from the pending config (so the name
-//! resolves before the write lands), empties the field and stages the
-//! name. Escape puts the text back. In Term mode `mod+s` only says where
+//! missing user config directory, each inline with the entry still open;
+//! otherwise it writes `[name] expression = "<text>"` to the user layer of
+//! `expressions.toml`, refreshes the frame's definitions from the pending
+//! config (so the name resolves before the write lands), empties the field
+//! and stages the name. Escape puts the text back. In Term mode `mod+s` only says where
 //! saving lives.
 //!
 //! Every commit goes through `Frame`'s undoable `set_scope` path. A parse
