@@ -302,20 +302,25 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 - The live step (`Editor::Text::bulk`, opened only on a steppable column with
   a selection live) applies each press through `apply_batch` without
   recording it: all or nothing, a refusal from any cell refusing the press.
+  A line's stepped cells compose into one `SetInstrument` and one
+  `SetShift` per press (`cell::edit_on` over the press's working copy):
+  both rewrite the whole record, so edits built per column from the sheet
+  would have a later column put back an earlier one's step.
   The press's inverse joins the bulk before the rebuild, so a rebuild that
   drops the editor records it. `enter` untouched records the steps as one
   entry (none when they net to zero, nothing written when none was taken);
   every other close (`close_editor`) rolls them back only while they are the
   sheet's last change — `edit_seq`, bumped by every `after_edit`, unchanged
   and every stepped line's qty, instrument and shift as the last step left
-  them — and otherwise records them. `flush_save` (close, quit) rolls back a
-  stepped bulk and closes its editor before the final save; an unstepped one
-  stays with its open editor. A sheet replace drops the bulk unrecorded
-  (`forget_steps`).
+  them — and otherwise records them. `flush_save` (close, quit) settles a
+  stepped bulk by the same rule (`take_back_steps`: rolled back while it is
+  the last change, else recorded and saved) and closes its editor before the
+  final save; an unstepped one stays with its open editor. A sheet replace
+  drops the bulk unrecorded (`forget_steps`).
 - Pointer selection goes through the same `start_selection`/`clear_selection`
   doors as the keys (`PricerTile::pointer`, fed `CellPointer` by the
   delegate on mouse-down). The delegate's `drag_origin` is set only by a
-  press a cell, the tree cell or the gutter caught and cleared by any
+  press that a cell, the tree cell or the gutter caught, and cleared by any
   release, so a button held from elsewhere never drags a selection. A press
   in the open editor's own cell, or on a chevron, sets `inner_press` so the
   row's bubbling handler does not report it; the editor's press reports
@@ -337,6 +342,6 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   width also overrides a view width changed later, until `:autosize reset`.
 - Grid selections are one contiguous row range or rectangle. There is no
   paste of a yanked TSV block (`p` puts only rows a `V` yank remembered), a
-  count is ignored by `shift+j`/`shift+k`, `g p` and `g u` while selecting,
+  count is ignored by `d`, `shift+j`/`shift+k`, `g p` and `g u` while selecting,
   a typed value under `v` fills one column, and a list-form package's qty
   cannot be bulk-set or stepped (its skip reads only `refused`).

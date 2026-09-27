@@ -123,13 +123,15 @@ a selection is live; the palette still reaches their actions.
 The line pricer reports `normal`, `visual`, `menu`, or `insert` the same way:
 an open entry bar, cell editor (the date field included) or `:rm` question is
 `insert` over a live selection, so the editor's `enter`, `escape` and arrows
-keep their insert-mode meaning (over a selection the arrows step it; see
-[features](features.md#selection-2)). Its `pricer && mode == visual` block repeats the
+keep their insert-mode meaning. Over a selection the arrows step every
+selected cell only while the editor sits on an untouched qty, strike,
+barrier or shift cell; otherwise they nudge the editor's text or the date
+field's segment (see [features](features.md#selection-2)). Its `pricer && mode == visual` block repeats the
 normal motions and binds `y` (`pricer::yank`), `d` (`pricer::delete`),
 `shift+j`/`shift+k`, `g p`, `g u`, `i` and `enter` (`pricer::edit`), `v`, `V`
 and `escape` as the selection's verbs. Normal-mode keys it does not list —
-`p`, `shift+p`, `u`, `ctrl+r`, `o`, `n`, `space`, the `z` folds, `g m` and `.`
-— are unbound while a selection is live; the palette still reaches them.
+the doubled `y y`, `y c` and `d d`, `p`, `shift+p`, `u`, `ctrl+r`, `o`, `n`,
+`shift+n`, `space`, the `z` folds, `g m` and `.` — are unbound while a selection is live; the palette still reaches them.
 
 A flag matches when any stack frame carries it. A comparison uses the innermost
 frame defining its key. Both `==` and `!=` are false when the key is absent;

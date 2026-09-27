@@ -816,7 +816,7 @@ Normal-mode keys:
 | `d d` | Delete the row (a package with its legs) |
 | `u` / `ctrl+r` | Undo / redo; 100 entries, strictly last-in first-out. A step that brings rows back puts the cursor on the first of them, and a package that was open comes back open |
 | `y y` / `y c` | Copy the row's shorthand (and remember it for `p`) / the column's cells |
-| `p` / `shift+p` | Put the remembered row below / above; a package always lands at a root boundary |
+| `p` / `shift+p` | Put the remembered rows below / above as one undo entry, the cursor on the first landed row; when any of them is a package the whole run lands at a root boundary |
 | `shift+j` / `shift+k` | Move the row within its parent |
 | `g p` / `g u` | Group the cursor row and the next `count − 1` roots into a custom package / ungroup |
 | `g m` | Open a panel on the cursor row's underlying |
@@ -999,15 +999,17 @@ the cursor keeps its border over it. A row selection also tints the tree
 column as each row's handle.
 
 **Verbs.** In visual mode the verbs are single keys; the doubled normal-mode
-forms are not bound there, nor are `p`, `shift+p`, `u`, `ctrl+r`, `o`, the
-folds and `.` (the palette still reaches them). A verb that refuses keeps the
+forms (`y y`, `y c`, `d d`) are not bound there, nor are `p`, `shift+p`,
+`u`, `ctrl+r`, `o`, `n`, `shift+n`, `space`, the `z` folds, `g m` and `.`
+(the palette still reaches them). A verb that refuses keeps the
 selection and says why in the footer; a success notice goes to the header.
 
 - `y` ends the selection. Under `V` it copies the shorthand of the top-most
   selected rows (a package, not also its selected legs, since the package's
   shorthand already carries them), one per line, and remembers their rows, so
-  a following `p` or `shift+p` puts them all back at once — a package always
-  at a root boundary. Under `v` it copies the block as TSV under its column
+  a following `p` or `shift+p` puts them all back at once, as one undo entry
+  with the cursor on the first landed row. When any of them is a package,
+  the whole run lands at a root boundary, since packages cannot nest. Under `v` it copies the block as TSV under its column
   labels and leaves the remembered row as it was: a block is not rows.
 - `d` under `V` deletes the top-most selected rows as one undo entry,
   remembers them for `p`, ends the selection, and notices `deleted N rows`. A
@@ -1030,7 +1032,8 @@ selection and says why in the footer; a success notice goes to the header.
   rows — use V`): a block's cells are not a set of rows, and acting on its
   rows would edit rows never picked as rows.
 
-A count is ignored while a selection is live: the selection names the rows.
+A count on `d`, `shift+j`/`shift+k`, `g p` or `g u` is ignored while a selection is
+live: the selection names the rows. Motions still take a count.
 Every row verb refuses while the sheet is loading.
 
 **Edits act on lines.** `i`, `enter` or a double-click opens the editor on the
@@ -1079,8 +1082,10 @@ to zero), the press writes nothing and the footer says why.
   replaying their inverses would undo the other write. A click elsewhere, a
   verb, the menu, `:` and `/` cancel the same way. The rollback re-arms the
   save, replacing any save taken mid-step.
-- Closing the tile or quitting mid-step rolls the steps back first and closes
-  the editor, so the final save never stores steps that were not kept.
+- Closing the tile or quitting mid-step takes the steps back by `escape`'s
+  rule before the final save and closes the editor, so the save never stores
+  steps that were not kept. When the steps are no longer the sheet's last
+  change they are recorded as one undo entry instead, and saved with it.
 - Typing makes the edit absolute: on `enter` the steps come out, by
   `escape`'s rule, and the typed value replaces them as one entry. From then
   on the arrows nudge the editor's text alone.
@@ -1119,7 +1124,7 @@ leaves the selection live, the keyboard back with the tile.
 
 Limitations: a selection is one contiguous row range or rectangle; `p` puts
 only rows a `V` yank remembered, so a copied TSV block cannot be pasted; a
-count is ignored on `shift+j`/`shift+k`, `g p` and `g u` while selecting; a
+count is ignored on `d`, `shift+j`/`shift+k`, `g p` and `g u` while selecting; a
 package quantity in list form cannot be bulk-set or stepped, and its skip
 reads only `refused`; a typed value under `v` fills one column, not the
 block.
