@@ -213,8 +213,30 @@ fn y_over_rows_copies_a_header_and_every_painted_column_then_ends_the_selection(
     let text = clipboard(&mut vcx).expect("copied");
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(lines.len(), 3, "a header and two rows");
-    assert!(lines[1].ends_with("4500.00\t0.1800\t-1.0000\t0.1000\t0.2000\t0.3000"));
-    assert!(lines[2].ends_with("4510.00\t0.1900\t-1.1000\t0.4000\t0.5000\t0.6000"));
+    let (axis, columns, labels) = h.tile.read_with(&vcx, |t, _| {
+        let m = t.model();
+        (
+            t.spec.rows.column,
+            m.columns.join("\t"),
+            [m.rows[0].label.to_string(), m.rows[1].label.to_string()],
+        )
+    });
+    assert_eq!(columns.split('\t').count(), 6, "every painted column");
+    assert_eq!(lines[0], format!("{axis}\t{columns}"));
+    assert_eq!(
+        lines[1],
+        format!(
+            "{}\t4500.00\t0.1800\t-1.0000\t0.1000\t0.2000\t0.3000",
+            labels[0]
+        )
+    );
+    assert_eq!(
+        lines[2],
+        format!(
+            "{}\t4510.00\t0.1900\t-1.1000\t0.4000\t0.5000\t0.6000",
+            labels[1]
+        )
+    );
     assert_eq!(h.mode(&vcx), "normal", "y consumes the selection");
 }
 
@@ -279,4 +301,63 @@ fn d_over_a_block_refuses_and_names_v(cx: &mut gpui::TestAppContext) {
             .any(|t| t == "d deletes rows — use V")
     );
     assert_eq!(h.mode(&vcx), "visual", "a refusal keeps the selection");
+}
+
+/// Closing a provisional row-label editor drops its row and shifts every
+/// later index, so a bulk delete reads its labels through a range
+/// resolved after the drop. Here the provisional row sits above the
+/// anchor: the pre-drop range `0..2` would read the anchor AND the row
+/// below it.
+#[gpui::test]
+fn d_over_rows_after_closing_a_label_editor_deletes_only_the_selected_row(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "insert_above", None);
+    assert!(h.tile.read_with(&vcx, |t, _| t.label_editor_open()));
+    assert_eq!(
+        resolved(&h, &vcx).map(|s| s.1),
+        Some(0..2),
+        "provisional + anchor"
+    );
+    h.dispatch(&mut vcx, "delete_row", None);
+    let states = h.tile.read_with(&vcx, |t, _| {
+        t.model()
+            .rows
+            .iter()
+            .map(|r| (r.label.to_string(), r.state))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        states,
+        vec![
+            (TERMS[0].to_string(), RowState::Deleted),
+            (TERMS[1].to_string(), RowState::Document),
+        ]
+    );
+}
+
+/// A selection anchored on a provisional row loses its anchor when the
+/// delete closes that row's label editor. The verb refuses with the
+/// lost-anchor notice rather than claiming the rows were already deleted,
+/// and deletes nothing.
+#[gpui::test]
+fn d_over_rows_anchored_on_a_dropped_provisional_row_refuses_with_the_lost_anchor(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    h.dispatch(&mut vcx, "insert_below", None);
+    assert!(h.tile.read_with(&vcx, |t, _| t.label_editor_open()));
+    h.dispatch(&mut vcx, "visual_rows", None);
+    assert_eq!(resolved(&h, &vcx).map(|s| s.1), Some(1..2));
+    h.dispatch(&mut vcx, "delete_row", None);
+    assert_eq!(
+        notice_of(&h, &vcx).as_deref(),
+        Some("selection cleared: anchor row no longer shown")
+    );
+    assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
+    assert_eq!(resolved(&h, &vcx), None);
 }

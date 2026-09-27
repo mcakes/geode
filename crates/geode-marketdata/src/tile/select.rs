@@ -171,6 +171,18 @@ impl MarketDataTile {
             return Err("d deletes rows — use V".to_string());
         }
         let (_, base) = self.row_verb_target(window, cx)?;
+        // `row_verb_target` may have closed a provisional row-label editor,
+        // dropping that row and shifting every later index; labels must
+        // be read through a range resolved against the model as it is
+        // now, or they name the wrong rows. If the anchor went with the
+        // dropped row the selection is gone: refuse with the notice that
+        // says so, not with "already deleted" over an empty label list.
+        if self.refresh_selection() || self.resolved.is_none() {
+            return Err(self
+                .notice
+                .as_ref()
+                .map_or_else(|| "selection cleared".to_string(), |n| n.to_string()));
+        }
         let labels: Vec<String> = self
             .resolved
             .as_ref()
