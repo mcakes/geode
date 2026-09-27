@@ -199,7 +199,7 @@ const WIDTH: f32 = 480.0;
 
 /// Open the picker (`frame::pick` with `column: None`, `frame::
 /// pick_<column>` or a chip body click with `column: Some(..)`). A no-op
-/// if a modal is already open, mirroring every other `open` here.
+/// when this kind is already open (see `dialog::can_open`).
 /// `column` names an unrecognised column (stale palette state from before
 /// a reload dropped it, say) falls back to the `Columns` stage rather than
 /// opening on a column that no longer exists.
@@ -209,7 +209,7 @@ pub fn open(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    if view.modal.is_some() {
+    if !dialog::can_open(view, dialog::DialogKind::Picker) {
         return;
     }
     let stage = match column {
@@ -236,6 +236,7 @@ pub fn open(
         view,
         window,
         cx,
+        dialog::DialogKind::Picker,
         "Pick",
         move |shell, window, cx| build(shell, &entity, window, cx),
         Some(Rc::new(handle_key)),
