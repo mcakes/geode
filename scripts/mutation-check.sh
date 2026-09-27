@@ -21753,6 +21753,14 @@ run_mutation "named expr: and_then skips a duplicate inner name" \
   geode-core \
   and_then_keeps_outer_names_first_without_duplicates
 
+# A scope carrying names is refused, never compiled without them.
+run_mutation "named expr: the compiler refuses unresolved names" \
+  crates/geode-data/src/query/scope_sql.rs \
+  '    if !scope.named.is_empty() {' \
+  '    if false {' \
+  geode-data \
+  a_scope_with_unresolved_names_is_refused
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
