@@ -157,16 +157,24 @@ mod tests {
 
     #[test]
     fn the_user_layer_replaces_a_desk_object_whole() {
-        let (n, _) = NamedExpressions::from_doc(
-            &doc(&[
-                (
-                    "[liq]\nexpression = \"npv > 0\"\n[keep]\nexpression = \"npv < 0\"\n",
-                    Layer::Desk,
-                ),
-                ("[liq]\nexpression = \"npv > 5\"\n", Layer::User),
-            ]),
-            &ExprVocab::default(),
+        // The desk's `liq` carries a second key the user's override omits.
+        // `NamedExpr` only ever reads `expression`, so proving replacement
+        // (rather than a leaf-only merge that would leave `note` behind)
+        // needs the merged table itself, not just the two entries' text.
+        let merged = doc(&[
+            (
+                "[liq]\nexpression = \"npv > 0\"\nnote = \"legacy\"\n[keep]\nexpression = \"npv < 0\"\n",
+                Layer::Desk,
+            ),
+            ("[liq]\nexpression = \"npv > 5\"\n", Layer::User),
+        ]);
+        let liq = merged.value.get("liq").and_then(|v| v.as_table()).unwrap();
+        assert!(
+            !liq.contains_key("note"),
+            "atomic merge should drop the desk-only key"
         );
+
+        let (n, _) = NamedExpressions::from_doc(&merged, &ExprVocab::default());
         assert_eq!(n.get("liq").unwrap().text(), "npv > 5");
         assert_eq!(n.get("keep").unwrap().text(), "npv < 0");
     }
