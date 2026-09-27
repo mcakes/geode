@@ -432,8 +432,14 @@ impl ViewSpec {
         for j in &self.joins {
             let Some(joined) = schema.dataset(&j.dataset) else {
                 // No second diagnostic about the same line: the keys of a
-                // dataset that does not exist cannot be judged.
-                diags.push(bad(format!("join names unknown dataset '{}'", j.dataset)));
+                // dataset that does not exist cannot be judged. Optional like
+                // every other join failure — a views document shared across
+                // desks may name a reference dataset only some of them load,
+                // and the compiler drops such a join rather than erroring.
+                diags.push(report(
+                    j.required,
+                    format!("join names unknown dataset '{}'", j.dataset),
+                ));
                 continue;
             };
             // The compiler joins at the first grain of the joined dataset
@@ -1581,6 +1587,39 @@ kind = "dimension"
             errors[0].message.contains("strike") && errors[0].message.contains("instrument_ref"),
             "the diagnostic must name the key and the dataset: {}",
             errors[0].message
+        );
+    }
+
+    /// A views document shared across desks may name a reference dataset only
+    /// some of them load. Declaring the join optional drops it, as it does for
+    /// every other join failure, and the compiler drops it too.
+    #[test]
+    fn an_optional_join_naming_an_unknown_dataset_is_dropped_not_refused() {
+        let text = r#"
+[v]
+dataset = "risk_snapshot"
+grouping = ["book"]
+
+[[v.joins]]
+dataset = "no_such_dataset"
+on = ["book"]
+required = false
+
+[[v.columns]]
+name = "book"
+kind = "dimension"
+"#;
+        let (views, _) = ViewSpec::from_doc(&doc(text));
+        let diags = views[0].validate(&schema(), &dimensions(""));
+        assert!(
+            !diags.iter().any(|d| d.severity == Severity::Error),
+            "an optional join must not refuse the view: {diags:?}"
+        );
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert!(
+            diags[0].message.contains("no_such_dataset") && diags[0].message.contains("dropped"),
+            "the diagnostic must name the dataset and say it was dropped: {}",
+            diags[0].message
         );
     }
 

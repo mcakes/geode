@@ -694,10 +694,15 @@ pub(crate) fn compile_view_with_cache(
     let mut stalest_input = vec![view.dataset.clone()];
     for (i, join) in view.joins.iter().enumerate() {
         let Some(joined_ds) = schema.dataset(&join.dataset) else {
-            // Validation refuses this view before any query reaches here, so
-            // arriving with an unknown join dataset means the caller skipped
-            // the gate. Dropping the join silently is what made the joined
-            // columns paint blank forever.
+            // A required join naming a dataset that does not exist refuses the
+            // view at load, so arriving here with one means the caller skipped
+            // the gate. An optional join is dropped here because its author
+            // asked for exactly that, and validation warned that it was
+            // dropped; dropping a required one silently is what made the
+            // joined columns paint blank forever.
+            if !join.required {
+                continue;
+            }
             return Err(compile_error(
                 view,
                 format!("join names unknown dataset '{}'", join.dataset),
@@ -715,10 +720,15 @@ pub(crate) fn compile_view_with_cache(
             .into_iter()
             .find(|g| carries_all(joined_ds, *g, &join.on, dims))
         else {
-            // Validation refuses a join whose key no grain of the joined
-            // dataset carries, so arriving here means the caller skipped the
-            // gate. Dropping the join silently is what made the joined
-            // columns paint blank forever.
+            // A required join whose key no grain of the joined dataset carries
+            // refuses the view at load, so arriving here with one means the
+            // caller skipped the gate. An optional join is dropped here because
+            // its author asked for exactly that, and validation warned that it
+            // was dropped; dropping a required one silently is what made the
+            // joined columns paint blank forever.
+            if !join.required {
+                continue;
+            }
             return Err(compile_error(
                 view,
                 format!(
@@ -1187,6 +1197,79 @@ kind = "dimension"
             message.contains("[\"underlying_ref\"]") && message.contains("instrument_ref"),
             "the error must name the keys no grain carries and the dataset it \
              tried to join: {message}"
+        );
+    }
+
+    /// The author's opt-out, honoured at the compiler. `required = false` asks
+    /// for the join to be dropped, not for the view to stop answering: erroring
+    /// here would leave the view open at load and dead at every query, which is
+    /// worse than the blank column this strictness removed.
+    #[test]
+    fn an_optional_join_naming_an_unknown_dataset_is_dropped_and_the_view_serves() {
+        let (_d, store) = fixture();
+        let schema = joined_schema();
+
+        let mut optional = joined_view();
+        optional.joins[0].dataset = "no_such_dataset".to_string();
+        optional.joins[0].required = false;
+
+        let q = compile_view(
+            store.writer(),
+            &optional,
+            &schema,
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap_or_else(|e| panic!("an optional join must be dropped, not refused: {e}"));
+
+        let rows = run(&store, &q, &["instrument_ref", "delta01", "strike"]);
+        assert!(
+            rows.iter().any(|r| r[1] == "Some(30.0)"),
+            "the view must still answer with its own measures: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|r| r[2] == "?"),
+            "a dropped join supplies nothing, so its column is absent: {rows:?}"
+        );
+    }
+
+    /// The same opt-out at the other arm: the joined dataset exists and its key
+    /// is on the spine, but no grain of it is keyed by that column.
+    #[test]
+    fn an_optional_join_no_grain_can_serve_is_dropped_and_the_view_serves() {
+        let (_d, store) = fixture();
+        let schema = joined_schema();
+        store
+            .apply_schema(schema.dataset("instrument_ref").unwrap())
+            .unwrap();
+
+        let mut optional = joined_view();
+        optional.grouping = vec!["underlying_ref".to_string()];
+        optional.joins[0].on = vec!["underlying_ref".to_string()];
+        optional.joins[0].required = false;
+
+        let q = compile_view(
+            store.writer(),
+            &optional,
+            &schema,
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap_or_else(|e| panic!("an optional join must be dropped, not refused: {e}"));
+
+        let rows = run(&store, &q, &["underlying_ref", "delta01", "strike"]);
+        assert!(
+            rows.iter()
+                .any(|r| r[0] == "Some(\"SPX\")" && r[1] == "Some(10.0)"),
+            "the view must still answer with its own measures: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|r| r[2] == "?"),
+            "a dropped join supplies nothing, so its column is absent: {rows:?}"
         );
     }
 
