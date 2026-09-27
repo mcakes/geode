@@ -1864,8 +1864,8 @@ run_mutation "handle: a refused request is counted" \
 
 run_mutation "handle: a compile failure is delivered as the key's outcome" \
   crates/geode-data/src/handle.rs \
-  '                if let Err(e) = service.query(&params) {' \
-  '                if let Err(e) = service.query(&params) && false {' \
+  '            if let Err(e) = service.query(&params) {' \
+  '            if let Err(e) = service.query(&params) && false {' \
   geode-data \
   the_real_service_answers_through_the_sink_and_reports_open_failures
 
@@ -22847,6 +22847,152 @@ run_mutation "egress: an encoding panic is contained" \
     })) {' \
   '    let bytes = match Ok::<_, Box<dyn std::any::Any + Send>>(job.kind.write(&job.rows)) {' \
   geode-data an_encoding_panic_answers_the_upload_and_keeps_the_worker
+
+# A panicking arm must not end the loop: every later submission would be
+# admitted and never served.
+run_mutation "serve: a panicking arm ends the loop" \
+  crates/geode-data/src/handle.rs \
+  '        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            geode_core::panic::contained(|| {
+                probe(ServePoint::Arm(&req));
+                dispatch(&service, &sink, req);
+            })
+        }));' \
+  '        probe(ServePoint::Arm(&req));
+        dispatch(&service, &sink, req);
+        let outcome: std::thread::Result<()> = Ok(());' \
+  geode-data a_panicking_query_is_answered_on_its_key_and_the_loop_serves_on
+
+# Each answer below turned into a discarded tuple swallows its arm: the tile
+# that asked waits forever on a request the loop already dropped.
+run_mutation "serve: a panicking query is swallowed" \
+  crates/geode-data/src/handle.rs \
+  '                let _ = sink(DataEvent::Query(QueryOutcome {
+                    key,' \
+  '                let _ = (sink, DataEvent::Query(QueryOutcome {
+                    key,' \
+  geode-data a_panicking_query_is_answered_on_its_key_and_the_loop_serves_on
+
+run_mutation "serve: a panicking document request is answered as another kind" \
+  crates/geode-data/src/handle.rs \
+  '            Request::Document(p) => (
+                "document",
+                PanicAnswer::Query {
+                    key: p.key,
+                    tag: p.tag,
+                    submitted: p.submitted,
+                },
+            ),' \
+  '            Request::Document(_) => ("document", PanicAnswer::Unanswered),' \
+  geode-data a_panicking_document_request_is_answered_on_its_key
+
+run_mutation "serve: a panicking distinct request is swallowed" \
+  crates/geode-data/src/handle.rs \
+  '                let _ = sink(DataEvent::Distinct(DistinctOutcome {
+                    key,' \
+  '                let _ = (sink, DataEvent::Distinct(DistinctOutcome {
+                    key,' \
+  geode-data a_panicking_distinct_request_is_answered_on_its_key_and_column
+
+run_mutation "serve: a panicking series request is swallowed" \
+  crates/geode-data/src/handle.rs \
+  '                let _ = sink(DataEvent::Series(SeriesOutcome {
+                    key,' \
+  '                let _ = (sink, DataEvent::Series(SeriesOutcome {
+                    key,' \
+  geode-data a_panicking_series_request_is_answered_on_its_key
+
+run_mutation "serve: a panicking catalog request is swallowed" \
+  crates/geode-data/src/handle.rs \
+  '                let _ = sink(DataEvent::Catalog(CatalogOutcome {' \
+  '                let _ = (sink, DataEvent::Catalog(CatalogOutcome {' \
+  geode-data a_panicking_catalog_request_is_answered_on_its_key
+
+run_mutation "serve: a panicking price request is swallowed" \
+  crates/geode-data/src/handle.rs \
+  '                let _ = sink(DataEvent::Price(PriceOutcome {' \
+  '                let _ = (sink, DataEvent::Price(PriceOutcome {' \
+  geode-data a_panicking_price_request_answers_every_line
+
+run_mutation "serve: a panicking upload is swallowed" \
+  crates/geode-data/src/handle.rs \
+  '                let _ = sink(DataEvent::Upload(UploadOutcome {' \
+  '                let _ = (sink, DataEvent::Upload(UploadOutcome {' \
+  geode-data a_panicking_upload_is_answered_on_its_key_and_target
+
+run_mutation "serve: a panicking publish leaves its writer waiting" \
+  crates/geode-data/src/handle.rs \
+  '                let _ = sink(DataEvent::LocalPublishFailed {' \
+  '                let _ = (sink, DataEvent::LocalPublishFailed {' \
+  geode-data a_panicking_publish_is_a_diagnostic_and_its_writers_failure
+
+run_mutation "serve: a panicking forget leaves its asker waiting" \
+  crates/geode-data/src/handle.rs \
+  '                let _ = sink(DataEvent::ForgetFailed {' \
+  '                let _ = (sink, DataEvent::ForgetFailed {' \
+  geode-data a_panicking_forget_is_a_diagnostic_and_its_askers_failure
+
+run_mutation "serve: a panic with no answer path is silent" \
+  crates/geode-data/src/handle.rs \
+  '                let _ = sink(DataEvent::Diagnostics(vec![error_diagnostic(reason)]));' \
+  '                let _ = (sink, reason);' \
+  geode-data a_panicking_identities_request_is_one_error_diagnostic
+
+run_mutation "serve: a panicking view replacement ends the loop" \
+  crates/geode-data/src/handle.rs \
+  '            let replaced = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                geode_core::panic::contained(|| {
+                    probe(ServePoint::Views);
+                    service.replace_views(views, dimensions)
+                })
+            }));' \
+  '            probe(ServePoint::Views);
+            let replaced: std::thread::Result<Vec<Diagnostic>> =
+                Ok(service.replace_views(views, dimensions));' \
+  geode-data a_panicking_view_replacement_keeps_the_previous_views_and_serves_on
+
+# Unset, a dying loop admits submissions to a queue nothing will read for as
+# long as it takes to join its slowest worker.
+run_mutation "serve: a dying loop still admits submissions" \
+  crates/geode-data/src/handle.rs \
+  '            self.0.store(true, Ordering::Release);' \
+  '            let _ = &self.0;' \
+  geode-data a_submission_while_the_dying_loop_joins_its_workers_is_refused_stopped
+
+run_mutation "serve: a clean quit is declared stopped" \
+  crates/geode-data/src/handle.rs \
+  '        if std::thread::panicking() {' \
+  '        if true {' \
+  geode-data a_clean_shutdown_declares_nothing
+
+run_mutation "serve: a panicking fetch leaves the pair unfailed" \
+  crates/geode-data/src/handle.rs \
+  '            PanicAnswer::Fetch { source, identity } => {
+                service.fail_fetch(&source, &identity, reason)
+            }' \
+  '            PanicAnswer::Fetch { .. } => {}' \
+  geode-data a_fetch_over_an_out_of_range_timestamp_fails_the_pair_and_the_loop_serves_on
+
+# A fresh tracker still emits the pair's Failed, but the source's own lanes
+# never learn it: another pair's recovery then reports the source clean.
+run_mutation "service: a failed fetch skips the load lane" \
+  crates/geode-data/src/service.rs \
+  '        self.health.report_load_and_emit(
+            source,
+            &pair,' \
+  '        let _ = &self.health;
+        HealthTracker::default().report_load_and_emit(
+            source,
+            &pair,' \
+  geode-data a_fetch_the_loop_could_not_run_keeps_its_source_failed_past_another_pairs_recovery
+
+# The service must hand its own sink to each supervised worker as the stop
+# sink; the pricing worker is the one a delivery panic can reach from here.
+run_mutation "service: the pricing worker's stop sink is unwatched" \
+  crates/geode-data/src/service.rs \
+  '        let pricing = PricingWorker::spawn(config.pricer.clone(), price_sink, Arc::clone(&sink));' \
+  '        let pricing = PricingWorker::spawn(config.pricer.clone(), price_sink, crate::supervise::unwatched());' \
+  geode-data a_supervised_worker_death_reaches_the_services_own_sink
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
