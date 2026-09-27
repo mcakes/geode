@@ -19,8 +19,7 @@ const MIN_WIDTH: f32 = 240.0;
 /// The leading tick slot on a `View` row: the same width ticked or not,
 /// so the view names share one leading edge.
 const TICK_SLOT: f32 = 14.0;
-/// How far a popup keeps from the window's edge when it is snapped back
-/// on screen (the market-data popups' margin).
+/// Minimum distance from the window edge when a popup is snapped on screen, in pixels.
 const SNAP_MARGIN: f32 = 8.0;
 
 pub(crate) fn popover_surface(cx: &App) -> Div {

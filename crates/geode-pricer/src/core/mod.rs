@@ -1,7 +1,6 @@
-//! The sheet's pure core (line-pricer spec §6): the row model, the one
-//! edit door with its inverses, the shorthand grammar both ways, the
-//! package templates, the column vocabulary, the views doc and the
-//! storage row shape. No gpui type appears here.
+//! The sheet's pure model: row identity and structure, edits and inverses, shorthand
+//! parsing and rendering, package templates, column formatting, views, and document
+//! conversion. This module has no GPUI types or I/O.
 
 pub mod cell;
 pub mod clip;

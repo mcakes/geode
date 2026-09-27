@@ -76,9 +76,9 @@ the measurement log for fixture and hardware details.
 | Market-data pivot build | 20 × 30 CVI grid | 285 µs |
 | Market-data flat build | 10,000 × five values | 8.18 ms |
 | Market-data cell patch | 10,000 × five values | 116 ns |
-| Line-pricer sheet shift + undo | 1,000 rows | 1.52 ms |
-| Line-pricer single cell edit + undo | 1,000 rows | 6.66 µs |
-| Line-pricer grid build | 1,000 rows, every package open | 1.85 ms |
+| Line-pricer sheet shift + undo | 1,000 entries / 1,200 sheet rows | 1.52 ms |
+| Line-pricer single cell edit + undo | 1,000 entries / 1,200 sheet rows | 6.66 µs |
+| Line-pricer grid build | 1,000 entries / 1,200 sheet rows, every package open | 1.85 ms |
 | Scope expression suggestion refresh | 20,000 cached values, ranked and capped at 50 | 6.82 ms |
 
 The flat 10,000-row market-data build sits at the UI budget boundary. Ordinary

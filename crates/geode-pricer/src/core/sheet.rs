@@ -1,15 +1,10 @@
-//! The sheet (line-pricer spec §6.1): struct of arrays in sheet order, a
-//! package's legs contiguous after it, depth 0 or 1. There is no separate
-//! index to keep in step: `children` is a scan of the following rows'
-//! `parent`, and `parent` itself is rebuilt by one walk after every
-//! structural edit.
+//! The sheet stores parallel arrays in display order, with each package's legs
+//! contiguous after it at depth one. `children` scans the following rows' parents;
+//! structural edits rebuild parent indices in one pass.
 //!
-//! Mutation goes through [`Sheet::apply`] (`edit.rs`). The other `pub`
-//! mutators change no row's identity or request: [`Sheet::deliver`] and
-//! [`Sheet::deliver_all`] (a result landing, one or a batch),
-//! [`Sheet::mark_all_stale`] (a tick, a load, `:price`; never called by
-//! `apply`) and [`Sheet::fold_packages`] (a recompute, which `apply` runs
-//! after every edit).
+//! Row edits go through [`Sheet::apply`]. Result delivery, repricing ticks, and package
+//! folding update pricing state without changing row identity or requests. Sheet name,
+//! view, and refresh policy are independent metadata.
 
 use crate::core::shorthand::{render_line, render_package};
 use crate::core::template::Template;
@@ -18,8 +13,8 @@ use geode_core::pricing::{Instrument, MarketOverrides, PriceRequest, PriceResult
 use std::ops::Range;
 use std::time::Duration;
 
-/// Per-sheet, monotonic, never reused (spec §6.1). `u64` so it is the
-/// `id` a `PriceLine` carries and the `line` axis a document stores.
+/// Per-sheet identity, allocated monotonically and never reused for a new row. Pricing
+/// requests carry the `u64` value; document storage encodes it on an `i64` line axis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LineId(pub u64);
 
@@ -29,12 +24,12 @@ pub enum RowKind {
     Package {
         template: Template,
     },
-    /// Reserved for slice 2's per-underlying children (spec ruling 5).
-    /// Nothing in slice 1 constructs it; `from_rows` refuses it.
+    /// Reserved row kind. Normal edits do not construct it, and document loading
+    /// refuses it.
     Underlying,
 }
 
-/// A line's own shifts; `None` inherits the sheet's (spec ruling 8).
+/// A line's own shifts; `None` inherits the sheet's.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct OwnShifts {
     pub spot_pct: Option<f64>,
@@ -48,8 +43,9 @@ pub enum LineState {
     Failed(String),
 }
 
-/// The sheet's periodic reprice (spec §9.4): the app default, off, or its
-/// own interval. Three states, because storage keeps three (§7.2).
+/// Periodic repricing policy: inherit the application interval, disable it, or use a
+/// sheet-specific interval. Storage preserves the distinction between inherited and
+/// explicit settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refresh {
     Default,
@@ -76,10 +72,9 @@ pub enum RowSpec {
     },
 }
 
-/// One row in transit: what `Remove` records and `Restore` reinstates,
-/// ids and results included, so undo of a removal re-requests nothing
-/// (spec §6.2). Exists only inside an [`crate::core::edit::Undo`]; the
-/// sheet never stores one.
+/// A row record for removal/restore and document loading, including identity and
+/// pricing state. Undo can restore a removed row's result without repricing. The live
+/// sheet stores each field in a parallel array.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RowRecord {
     pub id: LineId,
@@ -95,7 +90,7 @@ pub struct RowRecord {
     pub priced_at: Option<DateTime<Utc>>,
 }
 
-/// Where an insert lands (planning decision 2).
+/// Where an insert lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Place {
     /// A flat index that is a root boundary: `0`, `len()`, or the first
@@ -113,11 +108,11 @@ pub enum Delivered {
     UnknownLine,
     NotALine,
     /// An edit landed during the round trip; the answer is for an older
-    /// request (spec §9.2). Dropped.
+    /// request. Dropped.
     OldRevision {
         current: u64,
     },
-    /// A bug (spec §10.1): dropped and, by the tile, logged.
+    /// A bug: dropped and, by the tile, logged.
     FutureRevision {
         current: u64,
     },
@@ -127,14 +122,13 @@ pub enum Delivered {
 pub struct Sheet {
     pub name: String,
     pub view: String,
-    /// Read through [`Sheet::sheet_shift`]; written only by
-    /// `Edit::SetSheetShift`, because it feeds every inheriting line's
-    /// `request()` and a direct write would leave them all unstaled.
+    /// Sheet-wide shifts, initialized by document loading. Live changes use
+    /// `Edit::SetSheetShift` so inheriting lines receive new revisions when their
+    /// effective requests change.
     pub(crate) sheet_shift: OwnShifts,
-    /// Sheet-wide, by underlying: spot levels now (spec ruling 1). Read
-    /// through [`Sheet::overrides`]; written only by
-    /// `Edit::SetSpotOverride`, for the same reason (§9.3 stales the
-    /// underlying's lines explicitly).
+    /// Absolute spot overrides keyed by underlying. Document loading initializes them;
+    /// live changes use `Edit::SetSpotOverride` to stale affected lines even though
+    /// overrides travel separately from each line's request.
     pub(crate) overrides: MarketOverrides,
     pub refresh: Refresh,
     // per row, in sheet order
@@ -266,7 +260,7 @@ impl Sheet {
         (0..self.len()).filter(|r| self.parent[*r].is_none())
     }
 
-    /// `own.or(sheet)` per field, `0.0` when both are `None` (spec §6.1).
+    /// `own.or(sheet)` per field, `0.0` when both are `None`.
     pub fn effective_shifts(&self, row: usize) -> Shifts {
         let own = self.shift[row];
         Shifts {
@@ -275,7 +269,7 @@ impl Sheet {
         }
     }
 
-    /// The one place a line's request is assembled (spec §6.1). `None`
+    /// The one place a line's request is assembled. `None`
     /// on a package.
     pub fn request(&self, row: usize) -> Option<PriceRequest> {
         self.instrument[row]
@@ -306,11 +300,10 @@ impl Sheet {
         }
     }
 
-    /// A result landing (spec §9.2): installed only for a line that
-    /// exists at exactly the answered revision. A failure installs
-    /// `Failed` and keeps the last good result (the row paints `—`
-    /// either way). Folds packages — the single-result form; a whole
-    /// batch goes through [`Sheet::deliver_all`], which folds once.
+    /// Install a result only when its line exists at the answered revision, then fold
+    /// packages. A failure sets `Failed`, retains the previous result, and records the
+    /// attempt time; result cells display a dash while failed. Use
+    /// [`Sheet::deliver_all`] for a batch so packages fold once.
     pub fn deliver(
         &mut self,
         id: LineId,
@@ -323,11 +316,9 @@ impl Sheet {
         delivered
     }
 
-    /// The batch door Part 3's `Delivery::Price` arm uses: every result
-    /// installed, then ONE `fold_packages` at the end (spec §9.2 folds
-    /// once after the loop over a batch's results — folding per landing
-    /// is quadratic in the sheet's length). Answers one [`Delivered`]
-    /// per result, in the order given. `deliver` is the single-line form.
+    /// Install a pricing batch and fold packages once after all answers. Return one
+    /// [`Delivered`] outcome per answer, in input order. Folding after each answer
+    /// would repeatedly scan the sheet.
     pub fn deliver_all(
         &mut self,
         results: impl IntoIterator<Item = (LineId, u64, Result<PriceResult, String>)>,
@@ -341,11 +332,10 @@ impl Sheet {
         out
     }
 
-    /// Every line `Stale` at its current revision, then one fold (spec
-    /// §9.4's tick, §8.6's `:price`). The third state-only mutator beside
-    /// `deliver`/`deliver_all`: a tick is not an edit, so no revision
-    /// moves — a result already in flight at the current revision must
-    /// still install when it lands.
+    /// Mark every line stale at its current revision and fold packages. Refresh ticks
+    /// and `:price` do not edit requests, so a result already in flight at the current
+    /// revision remains eligible to install. Failed lines become eligible for retry
+    /// too.
     pub fn mark_all_stale(&mut self) {
         for row in 0..self.len() {
             if self.is_line(row) {
@@ -356,7 +346,7 @@ impl Sheet {
     }
 
     /// One result into its row; everything `deliver` does except the
-    /// fold, so a batch can fold once (spec §9.2).
+    /// fold, so a batch can fold once.
     fn install(
         &mut self,
         id: LineId,
@@ -388,19 +378,18 @@ impl Sheet {
         Delivered::Installed
     }
 
-    /// Every package's painted numbers are `Σ qty_leg × value_leg` over
-    /// its legs, its state `Failed` (naming the first failed leg) if any
-    /// leg is, else `Stale` if any leg is, else `Fresh`; its result is
-    /// `Some` only when every leg has one and none has failed; its
-    /// `priced_at` the oldest leg's (spec §6.4, planning decision 9).
-    /// Aggregation, not arithmetic (PHILOSOPHY §1).
+    /// Fold package results as `Σ qty_leg × value_leg`. Failure takes precedence over
+    /// staleness and names the first failed leg; otherwise any stale leg makes the
+    /// package stale. A result exists only for a nonempty package whose legs all have
+    /// results and none has failed. `priced_at` is the oldest present leg timestamp,
+    /// including failed attempts.
     pub fn fold_packages(&mut self) {
         for p in 0..self.len() {
             if !self.is_package(p) {
                 continue;
             }
             let legs = self.children(p);
-            // An empty package has no sum (planning decision 8).
+            // An empty package has no sum.
             let mut complete = !legs.is_empty();
             let mut sum = PriceResult {
                 price: 0.0,
@@ -460,7 +449,7 @@ impl Sheet {
         }
     }
 
-    /// The row in the grammar (spec §6.3): a line; a package in template
+    /// The row in the grammar: a line; a package in template
     /// form while its legs match the table, else its legs one per line;
     /// an empty package as nothing.
     pub fn shorthand(&self, row: usize) -> String {
@@ -486,7 +475,7 @@ impl Sheet {
 
     // ---- the structural primitives `edit.rs` builds on (pub(crate)) ----
 
-    /// The next fresh id; never reused (spec §6.1).
+    /// The next fresh id; never reused.
     pub(crate) fn fresh_id(&mut self) -> LineId {
         let id = LineId(self.next_id);
         self.next_id += 1;
@@ -515,13 +504,9 @@ impl Sheet {
         self.next_id = self.next_id.max(rec.id.0 + 1);
     }
 
-    /// Remove one row at flat `at`. Answers nothing: `parent` stores flat
-    /// indices, so once one row in a range is gone every later index in
-    /// that range shifts and a record taken here-after would misread its
-    /// parent (this is exactly the bug `remove` avoids by calling
-    /// `record(at)` for the WHOLE range first). A caller that needs the
-    /// removed row's record takes it via `record(at)` before calling
-    /// this, never after.
+    /// Remove one row at flat `at`. Callers needing undo records must capture the
+    /// entire removal range first: stored parent indices shift as rows are removed, so
+    /// a record captured partway through removal could name the wrong parent.
     pub(crate) fn take_out(&mut self, at: usize) {
         self.ids.remove(at);
         self.kind.remove(at);
@@ -543,7 +528,7 @@ impl Sheet {
         for i in 0..self.len() {
             if self.is_package(i) {
                 package = Some(i as u32);
-                // A package is always a root in slice 1.
+                // Packages are always roots; only lines can be legs.
                 self.parent[i] = None;
             } else if self.parent[i].is_some() {
                 self.parent[i] = package;
@@ -766,7 +751,7 @@ pub(crate) mod tests {
             .unwrap_err(),
             EditError::NoSuchRow(4)
         );
-        // A package spec at a leg place is refused (depth is at most two).
+        // A package at a leg place is refused: packages cannot nest.
         assert_eq!(
             s.apply(Edit::Insert {
                 place: Place::Leg { package: 0, leg: 0 },
@@ -855,7 +840,7 @@ pub(crate) mod tests {
             }
             other => panic!("{other:?}"),
         }
-        // A leg alone: the package stays, possibly empty (planning decision 8).
+        // A leg alone: the package stays, possibly empty.
         push(&mut s, vec![callspread(1)]);
         s.apply(Edit::Remove { at: 3 }).unwrap();
         assert_eq!(s.children(2), 3..4);
@@ -1000,7 +985,7 @@ pub(crate) mod tests {
             Some(at(0)),
             "a package is as old as its oldest leg"
         );
-        // Failed wins over Stale (planning decision 9) and names the leg.
+        // Failed wins over Stale and names the leg.
         s.deliver(long, 1, Err("refused by the mock".into()), at(2));
         match s.state(0) {
             LineState::Failed(m) => {
@@ -1093,10 +1078,9 @@ pub(crate) mod tests {
         assert_eq!(s.shorthand(3), "", "an empty package renders nothing");
     }
 
-    /// The refresh tick and `:price` (spec §9.4, §8.6; Part 3 planning
-    /// decision 3): every LINE goes `Stale` — a failed one too, since a
-    /// refusal may be transient — at its CURRENT revision, so a result
-    /// already in flight still installs; packages fold to `Stale`.
+    /// Refresh ticks and `:price` mark every line stale, including failed lines that
+    /// may succeed on retry. Revisions remain unchanged so in-flight answers can
+    /// install; package state follows its legs.
     #[test]
     fn mark_all_stale_stales_every_line_and_bumps_no_revision() {
         let mut s = Sheet::new("t");

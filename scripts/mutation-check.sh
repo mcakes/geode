@@ -19520,18 +19520,18 @@ run_mutation "pricer tile: a sheet edit lands on the fallback while loading" \
 
 run_mutation "pricer tile: a load keeps undo recorded against the fallback" \
   crates/geode-pricer/src/tile.rs \
-  '                    // over it. Nothing to undo into is the safe state.
+  '                    // them could overwrite loaded values, so discard their history.
                     self.undo.clear();' \
-  '                    // over it. Nothing to undo into is the safe state.' \
+  '                    // them could overwrite loaded values, so discard their history.' \
   geode-pricer shift_spot_group_ungroup_refuse_while_loading_and_loaded_clears_any_undo
 
 run_mutation "pricer tile: put onto a collapsed package's leg slot hides the line" \
   crates/geode-pricer/src/tile.rs \
-  '        // to wherever it was (review finding).
+  '        // cursor reconciliation can select it.
         if let Place::Leg { package, .. } = place {
             self.expansion.set(self.sheet.id(package), true);
         }' \
-  '        // to wherever it was (review finding).
+  '        // cursor reconciliation can select it.
         let _ = &place;' \
   geode-pricer put_below_onto_a_collapsed_packages_leg_slot_opens_it
 

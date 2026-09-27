@@ -1,9 +1,9 @@
-//! TableDelegate over a prepared Rc<GridModel> installed by the tile. Cursor, loading
+//! Table delegate over a prepared `Rc<GridModel>` installed by the tile. Cursor, loading
 //! state, and cell editor are read-only mirrors of tile state. Column zero
 //! is a pinned tree column with indentation, a fixed chevron slot, and a
 //! package's template tag; the cell cursor does not enter it.
 //!
-//! Package backgrounds belong to render_tr. The table replaces row
+//! Package backgrounds belong to `render_tr`. The table replaces row
 //! backgrounds for hover and selection; per-cell fills would obscure those states.
 
 use crate::grid::{GridModel, GridRowKind};
@@ -60,9 +60,8 @@ pub(crate) fn number_rows(
 /// the cursor row (relative mode only), and the mode.
 type NumbersStamp = (usize, Option<usize>, LineNumbers);
 
-/// A chevron click, re-implemented from the blotter (spec §8.2: "the
-/// blotter's idiom re-implemented, nothing lifted"); the tile toggles
-/// the package at this grid row.
+/// Requests a package expansion toggle at a grid row. Emitted by the table after
+/// selecting the clicked row; the tile owns the expansion state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChevronClicked(pub usize);
 
@@ -446,11 +445,10 @@ impl TableDelegate for SheetDelegate {
 }
 
 impl SheetDelegate {
-    /// One prepared cell. Nothing is formatted or allocated here beyond
-    /// the `debug_selector` closure (dropped unevaluated outside tests):
-    /// the text is a `SharedString` refcount out of the model, the colours
-    /// `Copy` reads of the `Paints` memo, which the tile re-derives on a
-    /// theme change rather than per cell.
+    /// Build a cell's elements from prepared text and colours. Cell values are
+    /// `SharedString` clones; palette values are copied from the tile's theme cache.
+    /// Chevron pointer colours have their own input-keyed cache. An editing cell
+    /// builds its field and optional typeahead from the tile's prepared editor state.
     fn render_cell(
         &mut self,
         row_ix: usize,
@@ -536,11 +534,9 @@ impl SheetDelegate {
         let el = base
             .when(right, |el| el.justify_end())
             .when(at_cursor, |el| el.border_1().border_color(active_border));
-        // The open editor paints its field in place of the text (a
-        // refcount clone at most). The typeahead hangs under THIS cell: a
-        // zero-size absolute child at the cell's bottom-left is the anchor
-        // `render_choice`'s `TopLeft` positions against (the market-data
-        // delegate's arrangement).
+        // The editor replaces this cell's text. Its typeahead anchors its top-left
+        // corner to a zero-size absolute child at the cell's bottom-left, so the
+        // popup follows the edited cell when the table scrolls.
         let editing = self
             .editor
             .as_ref()

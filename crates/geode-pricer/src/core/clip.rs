@@ -1,7 +1,6 @@
-//! Yank and put (line-pricer spec §8.5's `y y`, `d d`, `p`/`shift+p`): a
-//! row as the `RowSpec` it would be typed as — so a put takes fresh ids
-//! and re-requests, never a copy of results — and where a put lands
-//! (planning decision 12).
+//! Yank and put copy row definitions as [`RowSpec`]. Putting a copy allocates fresh IDs
+//! and requests new prices; it never copies results. Package placement respects root
+//! boundaries, while a copied line may become a leg.
 
 use crate::core::entry::place_for;
 use crate::core::sheet::{LineSpec, Place, RowKind, RowSpec, Sheet};
@@ -30,7 +29,7 @@ pub fn spec_of(sheet: &Sheet, row: usize) -> RowSpec {
 }
 
 /// Where a put lands. A package always goes to a root boundary — before
-/// or after the cursor's whole root block — since depth is at most two;
+/// or after the cursor's whole root block — since packages cannot nest;
 /// a line follows `o`'s rule.
 pub fn put_place(sheet: &Sheet, row: Option<usize>, below: bool, spec: &RowSpec) -> Place {
     match (spec, row) {

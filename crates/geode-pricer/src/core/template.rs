@@ -1,15 +1,13 @@
-//! The seven package templates (line-pricer spec §6.3): a template is a
-//! TABLE — for each leg, its weight, which strike and expiry index it
-//! takes and its option kind. The parser expands a template over the
-//! typed strikes and expiries; the renderer recognises legs that still
-//! match a table and prints the template form back.
+//! Seven package templates define each leg's weight, strike and expiry index, and
+//! option kind. The parser expands these tables over typed values; shorthand rendering
+//! uses the named template only while its legs still match that table.
 
 use geode_core::pricing::OptionKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Template {
-    /// A `Group` over a run of roots, or a package whose legs no longer
-    /// match any table.
+    /// A package without a fixed leg template, created by grouping root lines.
+    /// Its shorthand is rendered as individual legs.
     Custom,
     CS,
     PS,
@@ -85,7 +83,7 @@ impl Template {
         }
     }
 
-    /// The lower-case spelling `pricer_sheets.template` stores (spec §7.2).
+    /// The lower-case spelling `pricer_sheets.template` stores.
     pub fn storage_name(self) -> &'static str {
         match self {
             Template::Custom => "custom",

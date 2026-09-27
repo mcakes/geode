@@ -1,10 +1,8 @@
-//! The sheet core's costs at spec §8.2's shape — a sheet of 1,000 lines —
-//! against §7's 8 ms pure-UI budget. `parse` is per line typed; `apply`
-//! and undo is per keystroke; `to_rows`/`from_rows` is per autosave and
-//! per restore; `grid_build_1000` is the prepared `GridModel` rebuild —
-//! the per-keystroke cost the table pays on every edit, delivery and
-//! expansion change. Medians go to docs/perf.md under "Line pricer core"
-//! (`grid_build_1000`: "Line pricer tile").
+//! Parsing, edits and undo, result installation, storage conversion, and grid
+//! preparation for 1,000 shorthand entries. Every tenth entry is a two-leg
+//! package, so the sheet contains 1,200 rows. These benchmarks measure local
+//! model work, excluding pricing execution, database I/O, and painting.
+//! Budgets and reference measurements are in `docs/current/performance.md`.
 
 use chrono::Utc;
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
@@ -17,9 +15,8 @@ use geode_pricer::core::{
 use geode_pricer::grid::GridModel;
 use std::hint::black_box;
 
-/// `n` distinct vanilla lines: alternating buy/sell, calls/puts, strikes
-/// stepping through 400 levels — enough variety that no two requests are
-/// equal, and every tenth line a callspread so packages are folded too.
+/// `n` shorthand entries with varied quantity, option kind, and strike.
+/// Every tenth entry is a callspread, exercising package folding as well.
 fn texts(n: usize) -> Vec<String> {
     (0..n)
         .map(|i| {
@@ -68,9 +65,8 @@ fn bench(c: &mut Criterion) {
         })
     });
 
-    // The sheet-wide shift toggles between set and cleared on alternate
-    // iterations, so every iteration is one apply that re-requests every
-    // inheriting line plus the undo that re-requests them again.
+    // Each iteration sets the sheet shift and undoes it. Both operations
+    // revise inheriting lines and mark them stale without submitting requests.
     let mut s = sheet(1_000);
     g.bench_function("apply_undo_sheet_shift_1000", |b| {
         b.iter(|| {
@@ -141,10 +137,9 @@ fn bench(c: &mut Criterion) {
         })
     });
 
-    // Spec §8.2 / §12: the grid model is rebuilt on every edit, delivery
-    // and expansion change, so a whole build at 1,000 lines — every
-    // package open, every line answered — is the per-keystroke cost the
-    // 8 ms budget constrains.
+    // A full grid rebuild with every package open and every line answered.
+    // The tile performs this preparation after edits, deliveries, and
+    // expansion changes.
     let mut s = sheet(1_000);
     let answers: Vec<(LineId, u64, Result<PriceResult, String>)> = (0..s.len())
         .filter(|r| s.is_line(*r))

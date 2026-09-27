@@ -56,13 +56,15 @@ a tile through (`PricerTile::sheet`, `PricerTile::is_loading`). `geode-app`'s
 dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 `--workspace` builds on one feature set.
 
-## Rules this crate pins
+## Invariants
 
 - Every edit passes through `Sheet::apply`, which returns the undo operation.
   New tile edits use `PricerTile::apply_edit`/`apply_edits`; undo and redo
   apply through the LIFO history. Loading replaces the sheet. Deliveries,
   stale marking, and sheet metadata updates have separate paths.
 - Package rows derive from their legs; they are not independent instruments.
+  Their pricing timestamp is the oldest present leg-attempt timestamp,
+  including failed attempts.
 - Shorthand rendering uses a template only while the legs still match it; the
   grid keeps it as the row's find key and paints only a package's template
   token.
@@ -107,8 +109,8 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   tile owns its focus handle (what `holds_focus` and the shell's insert
   predicate read) and routes keys through `datefield::route` in
   `date_field_key` before they bubble to the shell. The painter and key
-  routing are a local copy of market-data's grid pattern (a module may not
-  depend on a sibling). A tenor seeds from the app clock's today, never
+  routing use the shared widget without depending on sibling feature modules.
+  A tenor seeds from the app clock's today, never
   `chrono::Local`. The tenor note is kept on the editor and restored after
   any key or refusal until the field commits or cancels.
 - `cell::commit` and `cell::commit_date` answer `Ok(None)` when the parsed

@@ -557,7 +557,8 @@ Lines and packages are rows of one table; a package row sums its legs and opens 
 (`space`/`z a`, `z o`, `z c`, `z shift+r`, `z shift+m`, or its chevron). A
 package created in the session opens so its legs show; a restored tile opens
 the packages its session record names. Package rows are read-only in every
-column.
+column. Their pricing timestamp is the oldest present leg-attempt timestamp,
+including failed attempts; it does not establish that every leg priced successfully.
 
 Normal-mode keys:
 
@@ -659,7 +660,8 @@ tile holds:
   another tile is refused
   (`sheet 'x' is open in another tile`). The tile's own name does nothing,
   unless its load failed (`did not load`): then `:e` of it asks again,
-  which is the way to retry a refused or failed load in place.
+  which is the way to retry a refused or failed load in place. Retrying
+  discards edits made in the unsaved fallback sheet.
 - `:new` does the same into the next free `untitled-N`, empty, with no load.
 - `:name <sheet>` is refused if the name is open, is a known document, or has
   a save still queued (`sheet 'x' already exists`), and while the sheet is
@@ -765,8 +767,9 @@ failed. A save the store accepts is only queued; its outcome arrives later by
 sheet name. A refused save (`the store refused it`) or a failed one (the
 writer's reason) paints a notice in the header's own save slot, separate from
 pricing notices: a refused pricing request cannot overwrite it, a later
-successful request cannot clear it, and `escape` does not clear it. Only a
-confirmed save does. Outcomes carry no link to the save that produced them;
+successful request cannot clear it, and `escape` does not clear it. A
+confirmed save clears its failure notice unless a newer submission refusal
+still needs attention. Outcomes carry no link to the save that produced them;
 every one is delivered, in the writer's order, so the last to arrive is the
 latest queued save's. The next change and the close both retry. A close with
 a save queued but unconfirmed writes nothing extra: the write is already

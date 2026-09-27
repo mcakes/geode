@@ -1,14 +1,12 @@
 //! Sheet loading and whole-document saves shared by pricer tiles.
 //!
-//! `load` answers at once when it can, `Pending` when the answer is on its
-//! way, and `Refused` when the request was never submitted.
-//! [`DuckSheetStore`] answers `Pending` and the rows arrive through the
-//! tile's `Delivery::Query` arm into `loaded`. `save` is one whole-sheet
-//! publish and `forget` deletes the whole document, live and archived
-//! (`:rm`, or `:name` retiring the old name); both only queue the write
-//! (`false` is a refusal the tile shows and retries), and the confirmed
-//! outcome reaches the tile separately, by sheet name. A zero-row sheet is
-//! never saved (`to_rows` answers `None`).
+//! Loads return rows or absence immediately, `Pending` for an admitted
+//! asynchronous request, or `Refused` when no request was submitted.
+//! [`DuckSheetStore`] delivers admitted loads through the tile's
+//! `Delivery::Query` route. Its saves publish whole documents; removals delete
+//! both live and archived generations. Write methods report queue admission,
+//! with completion delivered separately by sheet name. The tile decides how
+//! to report or retry failures and skips empty sheets during conversion.
 //!
 //! [`DuckSheetStore`] is the store the app wires. [`MemorySheetStore`] is
 //! the tests' fake: a sheet in it lives for the process, not across a
@@ -44,15 +42,17 @@ pub trait SheetStore {
     /// against the caller's latest request. `key`/`tag` are
     /// unused by a store that answers at once.
     fn load(&self, name: &str, key: QueryKey, tag: u64) -> Loaded;
-    /// Publish the whole sheet. `false`: refused, nothing written.
+    /// Submit the whole sheet. `false` means refusal; `true` means admission,
+    /// with completion reported separately for asynchronous stores.
     fn save(&self, name: &str, rows: DocumentRows) -> bool;
-    /// Delete the document's whole history. `false`: refused, nothing
-    /// changed.
+    /// Submit deletion of the document's whole history. The return value
+    /// reports admission, not asynchronous completion.
     fn forget(&self, name: &str) -> bool;
     /// Every name this store currently knows, for the `:e`/`:name`/`:rm`
     /// commands. Order is not significant to callers.
     fn names(&self) -> Vec<String>;
-    /// Whether a document exists under `name` (the `untitled-N` rule).
+    /// Whether this store knows `name`. A cache-backed implementation can
+    /// return false for a document absent from its latest catalog.
     fn contains(&self, name: &str) -> bool;
     /// A save of `name` is CONFIRMED (the data tier's local-publish
     /// outcome, never `save` answering `true`): a store keeping a cache of
@@ -123,7 +123,7 @@ impl MemorySheetStore {
         self.pending.set(pending);
     }
 
-    /// Every later `load` answers `Refused` (a closed request channel).
+    /// While enabled, every load returns `Refused` without looking up rows.
     pub fn set_load_refused(&self, refused: bool) {
         self.load_refused.set(refused);
     }
