@@ -13084,8 +13084,8 @@ run_mutation "mdedit: the editor gives up focus before it is dropped" \
         {
             window.blur(cx);
         }
-        let Some(Editing {' \
-  '        let Some(Editing {' \
+        let Some(editing) = self.editor.take() else {' \
+  '        let Some(editing) = self.editor.take() else {' \
   geode-marketdata \
   the_editor_gives_up_focus_before_it_is_dropped
 
@@ -13093,20 +13093,18 @@ run_mutation "mdedit: the editor gives up focus before it is dropped" \
 # panel stays in insert mode with the value already written: every
 # keystroke after that is text going into an input nobody meant to be
 # open, and `mode == insert` is exactly what tells the shell to stop
-# matching. Anchored on the `&base,\n);` two lines above (Task 5 gave the
-# attribute arm its own identical-looking `close_editor` +
-# `notice = None` pair, so the bare two lines alone are ambiguous —
-# the closing `}` pair is the row-state match that `commit_cell_value`
-# alone has since Task 7; `commit_attr_edit`'s pair follows a
-# `set_attr` call, not a match).
+# matching. The attribute arm has its own identical-looking
+# `close_editor` + `notice = None` pair, so the bare two lines are
+# ambiguous; the anchor starts at the line before the pair in
+# `commit_cell_value`, which takes a selection editor's live steps out so
+# the close keeps the written value (`commit_attr_edit`'s pair follows a
+# `set_attr` call).
 run_mutation "mdedit: a committed edit closes the editor" \
   crates/geode-marketdata/src/tile.rs \
-  '            }
-        }
+  '        drop(self.editor.as_mut().and_then(|e| e.bulk.take()));
         self.close_editor(window, cx);
         self.notice = None;' \
-  '            }
-        }
+  '        drop(self.editor.as_mut().and_then(|e| e.bulk.take()));
         self.notice = None;' \
   geode-marketdata \
   key_context_reports_insert_while_the_editor_exists
@@ -13187,8 +13185,11 @@ run_mutation "mdbulk: a choice pick over a selection goes to every member" \
   geode-marketdata \
   a_choice_pick_over_a_selection_writes_the_option_to_every_choice_cell
 
-# Nothing accepting is a refusal with the editor open. Mutated to fall
-# through, the editor closes on "set 0 cells" and the typed text is lost.
+# Nothing accepting is a refusal judged before any write, with the editor
+# open and the draft untouched. Mutated to fall through, the later `n == 0`
+# refusal still keeps the editor, but the typed text has already replaced
+# the live steps: the block jumps back to its pre-`i` values under an
+# editor that says nothing was set.
 run_mutation "mdbulk: nothing accepting keeps the editor open" \
   crates/geode-marketdata/src/tile/select.rs \
   '        if writes.is_empty() {
@@ -13196,7 +13197,7 @@ run_mutation "mdbulk: nothing accepting keeps the editor open" \
   '        if false {
             self.notice = Some(' \
   geode-marketdata \
-  a_block_commit_nothing_accepts_is_refused_with_the_editor_open
+  a_nothing_accepts_commit_after_steps_keeps_the_steps_and_the_editor
 
 # A cell that refuses the value is counted by reason. Mutated so a refusal
 # is dropped silently, the notice claims a clean write over a block that
@@ -13209,6 +13210,150 @@ run_mutation "mdbulk: a refusing member is counted" \
                 Err(_) => {}' \
   geode-marketdata \
   a_flat_block_commit_skips_cells_that_refuse_and_counts_them
+
+# A block covers columns only partly, so `d` there refuses rather than
+# deleting every row it touches. Mutated so the guard fires on `Rows`
+# instead, `d` over a block deletes whole rows the trader never selected.
+run_mutation "mdsel: d over a block refuses" \
+  crates/geode-marketdata/src/tile/select.rs \
+  '            .is_some_and(|r| r.kind == SelectKind::Block)' \
+  '            .is_some_and(|r| r.kind == SelectKind::Rows)' \
+  geode-marketdata \
+  d_over_a_block_refuses_and_names_v
+
+# `y` over a selection leads with a header line so the pasted grid lines
+# up with its column names. Mutated away, the first row reads as the
+# header wherever it is pasted.
+run_mutation "mdsel: y over a selection copies a header line first" \
+  crates/geode-marketdata/src/tile/select.rs \
+  '        out.push(header.join("\t"));' \
+  '        let _ = header;' \
+  geode-marketdata \
+  y_over_a_block_copies_its_columns_header_and_cells_only
+
+# The anchor row is found by its label in the current model, so a
+# redelivery or an inserted row keeps the selection on the same term, and
+# a term no longer painted clears it with a notice. Mutated to a fixed
+# index, a vanished anchor silently re-anchors on row 0 — a plausible
+# selection over the wrong rows.
+run_mutation "mdsel: the anchor row is found by its label" \
+  crates/geode-marketdata/src/tile/select.rs \
+  '                |label| self.model.rows.iter().position(|r| &r.label == label),' \
+  '                |_| Some(0),' \
+  geode-marketdata \
+  an_anchor_row_that_disappears_clears_the_selection_with_a_notice
+
+# A `Rows` selection skips each term's forward/atm/skew, `:bump row`'s
+# rule. Mutated to include them, a rows bump moves the slice values too.
+run_mutation "mdsel: a rows selection skips the slice values" \
+  crates/geode-marketdata/src/tile/select.rs \
+  '            SelectKind::Rows => self.model.slice_columns,' \
+  '            SelectKind::Rows => 0,' \
+  geode-marketdata \
+  a_rows_selection_bump_skips_the_slice_values
+
+# While a selection is live, motions clamp at the grid's edges and never
+# enter the header strip, which is never a member. Mutated to the normal
+# step, `k` at row 0 walks into the strip and the selection is gone.
+run_mutation "mdsel: motions clamp while selecting" \
+  crates/geode-marketdata/src/tile.rs \
+  '                    cursor::step_clamped(self.cursor, motion, grid)' \
+  '                    cursor::step(self.cursor, &mut self.last_grid_col, motion, grid)' \
+  geode-marketdata \
+  v_starts_a_block_and_motions_extend_it_clamped
+
+# A key switch ends the selection: the next underlying's terms can carry
+# the same labels, and a selection must never carry over to another
+# document. Mutated away, the emptied model reads as a lost anchor and the
+# header claims the anchor row vanished.
+run_mutation "mdsel: a key switch clears the selection" \
+  crates/geode-marketdata/src/tile.rs \
+  '        self.clear_selection();
+        // A question about the outgoing document must not stand over the' \
+  '        // A question about the outgoing document must not stand over the' \
+  geode-marketdata \
+  a_key_switch_clears_the_selection
+
+# `escape` on a stepped selection editor restores the draft as `i` found
+# it. Mutated away, the cancel keeps every step.
+run_mutation "mdstep: escape restores the draft as it was before i" \
+  crates/geode-marketdata/src/tile/select.rs \
+  '        self.draft.restore_from(bulk.before);' \
+  '        let _ = bulk.before;' \
+  geode-marketdata \
+  escape_after_steps_restores_the_draft_as_it_was_before_i
+
+# The restore happens only while the steps are the draft's last change.
+# Mutated to skip the identity check, an `escape` after a palette revert
+# brings the reverted edits back.
+run_mutation "mdstep: a restore needs the steps to be the last draft change" \
+  crates/geode-marketdata/src/tile/select.rs \
+  '        if !bulk.stepped || !self.draft.same_work_as(&bulk.after) {' \
+  '        if !bulk.stepped {' \
+  geode-marketdata \
+  escape_after_a_revert_mid_step_leaves_the_draft_reverted
+
+# Only a number cursor cell opens a stepping editor; a text or date cursor
+# cell commits absolutely. Mutated so any text-editor cell carries a
+# `bulk`, an untouched `enter` on a text cell reads as "keep the steps"
+# and writes nothing.
+run_mutation "mdstep: only a number cursor cell steps live" \
+  crates/geode-marketdata/src/tile.rs \
+  '            && matches!(
+                target,
+                EditTarget::Cell { cell: (_, col), .. }
+                    if matches!(self.model.kind_of(col), Some(CellKind::Number(_)))
+            ))' \
+  '            && matches!(target, EditTarget::Cell { .. }))' \
+  geode-marketdata \
+  an_untouched_commit_on_a_text_cell_writes_the_seed_to_every_accepting_cell
+
+# A single-cell commit takes the live steps out before the close, so the
+# close never restores the pre-`i` draft over the written value. Mutated
+# away, a typed value equal to the stepped one leaves the draft as the
+# steps made it, the identity check passes, and the close undoes it all.
+run_mutation "mdstep: a typed single-cell commit keeps its value" \
+  crates/geode-marketdata/src/tile.rs \
+  '        drop(self.editor.as_mut().and_then(|e| e.bulk.take()));
+        self.close_editor(window, cx);' \
+  '        self.close_editor(window, cx);' \
+  geode-marketdata \
+  a_typed_commit_equal_to_the_stepped_value_keeps_every_step
+
+# A press inside the open editor's cell is the editor's (caret, text
+# selection, a date separator). The delegate reports no press for it, and
+# the tile ignores the table's `SelectCell` on that cell; either guard
+# mutated away, the click cancels the edit.
+run_mutation "mdmouse: a press in the editor's cell reports nothing" \
+  crates/geode-marketdata/src/delegate.rs \
+  '                if holds_editor
+                    && d.editor' \
+  '                if false
+                    && d.editor' \
+  geode-marketdata \
+  a_click_inside_the_open_editor_keeps_it_open
+
+run_mutation "mdmouse: SelectCell on the editor's cell leaves it open" \
+  crates/geode-marketdata/src/tile.rs \
+  '                    if this.editor_cell() == Some((*row, col)) {
+                        return;
+                    }' \
+  '                    if false {
+                        return;
+                    }' \
+  geode-marketdata \
+  a_click_inside_the_open_editor_keeps_it_open
+
+# The same press guard covers a typed axis's provisional row-label editor
+# (`col` is `None` there), which a cancel would drop together with its
+# row. Mutated to hold for value cells only, a click inside the label
+# field closes it and the new row is gone.
+run_mutation "mdmouse: a press in a row-label editor reports nothing" \
+  crates/geode-marketdata/src/delegate.rs \
+  '                        .is_some_and(|ed| ed.row == row_ix && ed.col == col)' \
+  '                        .is_some_and(|ed| ed.row == row_ix && ed.col == col && col.is_some())' \
+  geode-marketdata \
+  a_click_inside_a_row_label_editor_keeps_it_open
 
 # The grid can move under an open editor: a delivery lands while a trader
 # is typing and a shorter generation clamps the cursor, so the cell the
@@ -13820,11 +13965,28 @@ run_mutation "mdtable: a click while editing cancels the editor" \
 # The first build bound `0` here while citing the blotter's `^`/`$`
 # ruling, so `$` reached the last column and `^` did nothing. Mutated back
 # to `0`, every other key on the fragment still resolves — only a press of
-# `^` against the built keymap sees it.
+# `^` against the built keymap sees it. The visual-mode block repeats the
+# motions, so the anchor runs from the normal block's context line.
 run_mutation "mdkeys: ^ is the panel's first-column key, matching the blotter" \
   crates/geode-marketdata/src/content.rs \
-  '"^" = "marketdata::first_col"' \
-  '"0" = "marketdata::first_col"' \
+  'context = "marketdata && mode == normal"
+[bindings.keys]
+"j" = "marketdata::down"
+"k" = "marketdata::up"
+"h" = "marketdata::left"
+"l" = "marketdata::right"
+"g g" = "marketdata::top"
+"shift+g" = "marketdata::bottom"
+"^" = "marketdata::first_col"' \
+  'context = "marketdata && mode == normal"
+[bindings.keys]
+"j" = "marketdata::down"
+"k" = "marketdata::up"
+"h" = "marketdata::left"
+"l" = "marketdata::right"
+"g g" = "marketdata::top"
+"shift+g" = "marketdata::bottom"
+"0" = "marketdata::first_col"' \
   geode-marketdata \
   caret_and_dollar_resolve_to_the_column_extremes
 
@@ -14332,6 +14494,7 @@ run_mutation "mdattr: the strip clears the table selection" \
   '            Cursor::Attr(_) => self.table.update(cx, |t, cx| {
                 let d = t.delegate_mut();
                 d.cursor = None;
+                d.selected = None;
                 d.editor = editor;
                 d.choice = choice;
                 t.clear_selection(cx);
@@ -14339,6 +14502,7 @@ run_mutation "mdattr: the strip clears the table selection" \
   '            Cursor::Attr(_) => self.table.update(cx, |t, cx| {
                 let d = t.delegate_mut();
                 d.cursor = None;
+                d.selected = None;
                 d.editor = editor;
                 d.choice = choice;
             }),' \
@@ -14539,13 +14703,14 @@ run_mutation "mdpicker: a re-sorted catalog keeps the highlighted KEY, not its o
 # now sits ahead of the park (per-underlying drafts) rather than of the
 # key assignment; the comment line is what makes the anchor unique.
 # Re-anchored 2026-09-24: the upload confirm's disarm now follows the close.
+# Re-anchored 2026-09-27: the selection clear now follows the close.
 run_mutation "mdattr: a key change cancels an open editor" \
   crates/geode-marketdata/src/tile.rs \
   '        if self.editor.is_some() {
             self.close_editor(window, cx);
         }
-        // A question about the outgoing document must not stand over the' \
-  '        // A question about the outgoing document must not stand over the' \
+        // The next underlying'"'"'s rows can carry the same labels; a' \
+  '        // The next underlying'"'"'s rows can carry the same labels; a' \
   geode-marketdata a_key_change_cancels_an_open_editor
 
 # B4: the attribute value's click was the one mouse door that left a
@@ -14557,8 +14722,8 @@ run_mutation "mdattr: an attribute click cancels an open editor" \
   '        if self.editor.is_some() {
             self.close_editor(window, cx);
         }
-        self.cursor = Cursor::Attr(i.min(attrs - 1));' \
-  '        self.cursor = Cursor::Attr(i.min(attrs - 1));' \
+        // The strip is never a selection member: leaving the grid ends the' \
+  '        // The strip is never a selection member: leaving the grid ends the' \
   geode-marketdata an_attribute_click_cancels_the_editor_then_moves
 
 # B3: `is_stale` is clock-injected and, until the final review, no test

@@ -31,6 +31,17 @@ fn v_starts_a_block_and_motions_extend_it_clamped(cx: &mut gpui::TestAppContext)
         h.tile.read_with(&vcx, |t, _| t.cursor()),
         Cursor::Cell { row: 0, col: 4 }
     );
+    // A single `k` at row 0 is where normal mode enters the strip, and a
+    // single `j` at the last row is where it wraps; both clamp here.
+    h.dispatch(&mut vcx, "up", None);
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.cursor()),
+        Cursor::Cell { row: 0, col: 4 }
+    );
+    assert_eq!(resolved(&h, &vcx), Some((SelectKind::Block, 0..1, 3..5)));
+    h.dispatch(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "down", None);
+    assert_eq!(resolved(&h, &vcx), Some((SelectKind::Block, 0..2, 3..5)));
 }
 
 /// The other key switches kind keeping the anchor; the same key again
@@ -689,6 +700,27 @@ fn a_block_commit_nothing_accepts_is_refused_with_the_editor_open(cx: &mut gpui:
         "{:?}",
         h.header_texts(&vcx)
     );
+}
+
+/// A refused commit leaves the draft as it was, live steps included: the
+/// editor stays open over the stepped block, and a later `escape` is what
+/// takes the steps back.
+#[gpui::test]
+fn a_nothing_accepts_commit_after_steps_keeps_the_steps_and_the_editor(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    select_two_nodes_by_two_terms(&h, &mut vcx);
+    h.dispatch(&mut vcx, "edit", None);
+    h.dispatch(&mut vcx, "insert_up", None);
+    h.set_editor(&mut vcx, "abc");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.mode(&vcx), "insert");
+    assert_eq!(h.editor_value(&vcx).as_deref(), Some("abc"));
+    assert_eq!(h.row_texts(&vcx, 1)[3..], ["0.4001", "0.5001", "0.6000"]);
+    h.dispatch(&mut vcx, "cancel", None);
+    assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
 }
 
 /// A choice picked from the popup lands in every selected choice cell;
@@ -1500,6 +1532,42 @@ fn a_click_inside_a_date_cells_field_keeps_it_open(cx: &mut gpui::TestAppContext
     click_at(&mut vcx, separator, 1);
     assert_eq!(h.mode(&vcx), "insert", "a separator click keeps the field");
     assert!(h.tile.read_with(&vcx, |t, _| t.date_field().is_some()));
+}
+
+/// A typed axis's `o` opens a provisional row-label editor in the label
+/// column. A click inside it, on the field's centre or on the gap past
+/// its last segment, is the editor's: it stays open and the provisional
+/// row is not dropped (closing would drop it, since it has no cells yet).
+#[gpui::test]
+fn a_click_inside_a_row_label_editor_keeps_it_open(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    h.dispatch(&mut vcx, "insert_below", None);
+    assert!(h.tile.read_with(&vcx, |t, _| t.label_editor_open()));
+    let rows = h.tile.read_with(&vcx, |t, _| t.model().rows.len());
+    assert_eq!(rows, 3, "two terms and the provisional row");
+    let editor = format!("marketdata-editor-1-{LABEL_COL}");
+    let at = centre_of(&mut vcx, &editor);
+    click_at(&mut vcx, at, 1);
+    draw(&mut vcx);
+    assert!(
+        h.tile.read_with(&vcx, |t, _| t.label_editor_open()),
+        "a click inside the label editor keeps it"
+    );
+    assert_eq!(h.mode(&vcx), "insert");
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.model().rows.len()),
+        rows,
+        "the provisional row is still there"
+    );
+    let bounds = vcx
+        .debug_bounds(Box::leak(editor.into_boxed_str()))
+        .expect("still painted");
+    let edge = gpui::point(bounds.right() - gpui::px(2.), bounds.center().y);
+    click_at(&mut vcx, edge, 1);
+    draw(&mut vcx);
+    assert!(h.tile.read_with(&vcx, |t, _| t.label_editor_open()));
+    assert_eq!(h.tile.read_with(&vcx, |t, _| t.model().rows.len()), rows);
 }
 
 /// With the selection cleared mid-step the commit is single-cell; its
