@@ -766,6 +766,23 @@ grain = "instrument"
     }
 
     #[test]
+    fn distinct_refuses_a_scope_with_unresolved_names() {
+        let f = two_dataset_fixture();
+        let params = DistinctParams {
+            scope: Scope {
+                named: vec!["liq".into()],
+                ..Scope::default()
+            },
+            ..base_params()
+        };
+        let e = compile_distinct(f.conn(), &f.schema, &f.dims, &params).unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "scope: scope carries unresolved named expressions"
+        );
+    }
+
+    #[test]
     fn distinct_under_as_of_reads_the_archive_era() {
         let f = two_dataset_fixture_with_history(); // two generations, currency changed between them
         let params = DistinctParams {

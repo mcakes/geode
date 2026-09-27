@@ -48,6 +48,10 @@ pub enum StoreError {
     /// own for the same reason `Document` is: there is no statement to
     /// report.
     Series(String),
+    /// A scope was refused before it reached SQL at all — a variant of its
+    /// own for the same reason `Document` and `Series` are: there is no
+    /// statement to report.
+    Scope(String),
 }
 
 impl std::fmt::Display for StoreError {
@@ -64,6 +68,7 @@ impl std::fmt::Display for StoreError {
             }
             StoreError::Document(reason) => write!(f, "document: {reason}"),
             StoreError::Series(reason) => write!(f, "series: {reason}"),
+            StoreError::Scope(reason) => write!(f, "scope: {reason}"),
         }
     }
 }
