@@ -55,10 +55,16 @@ Each is written to the code; evidence in brackets.
 13. **Pricer store trait.** `SheetStore::save`/`forget` return `Result<(), Refusal>` and `Loaded::Refused` carries the `Refusal`, so the pricer tile can word and gate by kind [pricer store.rs:28-49].
 14. **Status placement.** "Lead the left side" is read literally: the stopped segment is the first left child, before the count prefix.
 
-## Open questions
+## Owner rulings (Matthew, 2026-09-27) — these override the task text below
 
-- Should the status summary count data *warnings* (for the stale-check warning, deviation 9), or is the diagnostics-tile entry enough? The plan implements §5 literally (warning, tile only).
-- Accept `cancel -> bool` (deviation 7)?
+- **The stale-check report is an Error `Diagnostic`, not a Warning.** A catalog row the lookup cannot read is corruption even though the load proceeds (fail-open stays). As an Error it reaches the status bar's existing `data N errors` segment. Wherever Task 5 and Task 8 say "warning" for the stale check, read "error":
+  - the diagnostic's `severity: Severity::Error`;
+  - its test is named `a_failed_stale_check_is_an_error_diagnostic_through_the_service` and finds `Severity::Error`;
+  - its mutation entry's replacement turns `Error` into `Warning`, so the named test fails;
+  - the data-path doc says "error diagnostic naming the file; it counts in `data N errors`".
+
+  Deviation 9 is resolved by this. The summary still counts only errors.
+- **`cancel` keeps `-> bool`** (deviation 7 accepted).
 
 ---
 
