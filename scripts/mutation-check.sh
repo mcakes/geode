@@ -23982,10 +23982,21 @@ run_mutation "pin: a switch re-seeds the flip baseline" \
 # the new lane's own.
 run_mutation "pin: a switch rebinds the scope field" \
   crates/geode-shell/src/shell/pin.rs \
-  '        self.rebind_scope_field(window, cx);
+  '            self.rebind_scope_field(window, cx);
+        }
         cx.notify();' \
-  '        cx.notify();' \
+  '        }
+        cx.notify();' \
   geode-shell escape_after_a_switch_restores_the_new_lanes_text
+
+# Between two unpinned workspaces the field edits the shared lane before and
+# after the switch; ending and reopening its session there splits the edit
+# and moves Escape's base to the mid-edit text.
+run_mutation "pin: a switch between shared workspaces keeps the session" \
+  crates/geode-shell/src/shell/pin.rs \
+  '            f.is_pinned(prev) || f.is_pinned(active)' \
+  '            true' \
+  geode-shell a_switch_between_unpinned_workspaces_keeps_the_field_session
 
 # A shared session left open across a pin keeps its pushed base: edits that
 # returned to the base leave a no-op undo entry in the shared lane.

@@ -121,13 +121,21 @@ fn switching_workspace_reseeds_the_barrier_without_opening_one(cx: &mut gpui::Te
     });
     dispatch_and_draw(&shell, &mut vcx, "workspace::switch_1");
     vcx.run_until_parked();
-    assert!(
-        !frame.read_with(&vcx, |f, _| f.barrier_open()),
-        "a switch shows another lane; it is not a frame change to flip"
-    );
     assert_eq!(
         shell.read_with(&vcx, |s, _| s.last_flip_versions),
         frame.read_with(&vcx, |f, _| f.view(ws(1)).versions()),
+    );
+    // The switch itself notifies nothing; a later non-flip notification is
+    // what compares against the baseline. Unseeded, it would read workspace
+    // 2's numbers against workspace 1's lane and open a barrier.
+    frame.update(&mut vcx, |f, cx| {
+        f.note_config_reloaded();
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    assert!(
+        !frame.read_with(&vcx, |f, _| f.barrier_open()),
+        "a switch shows another lane; it is not a frame change to flip"
     );
 }
 
@@ -277,8 +285,54 @@ fn a_lane_changed_while_hidden_promotes_without_waiting(cx: &mut gpui::TestAppCo
         "no barrier for a lane nobody can see"
     );
     dispatch_and_draw(&shell, &mut vcx, "workspace::switch_2");
+    // A non-flip notification after the switch compares the shown lane
+    // against the baseline the switch re-seeded.
+    frame.update(&mut vcx, |f, cx| {
+        f.note_config_reloaded();
+        cx.notify();
+    });
+    vcx.run_until_parked();
     assert!(
         !frame.read_with(&vcx, |f, _| f.barrier_open()),
         "showing it opens none either; its tiles requery and promote directly"
+    );
+}
+
+/// Between two unpinned workspaces the field edits the shared lane
+/// throughout, so a switch from inside the field leaves its session whole:
+/// Escape restores the pre-focus text and leaves no undo entry behind.
+#[gpui::test]
+fn a_switch_between_unpinned_workspaces_keeps_the_field_session(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx, _shell, frame) = open_pinnable(cx);
+    vcx.update(|window, _| window.activate_window());
+    let _ = window;
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("alt-/");
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    vcx.simulate_input("ab");
+    vcx.simulate_keystrokes("alt-3"); // switch from inside the field
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    vcx.simulate_input("c");
+    assert_eq!(
+        frame
+            .read_with(&vcx, |f, _| f.shared().scope().text.clone())
+            .as_deref(),
+        Some("abc"),
+        "the field kept focus and kept editing the shared lane"
+    );
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.shared().scope().text.clone()),
+        None,
+        "escape must restore the pre-focus text"
+    );
+    assert!(
+        !frame.update(&mut vcx, |f, _| f.shared_mut().undo_scope()),
+        "the whole session left no undo entry"
     );
 }

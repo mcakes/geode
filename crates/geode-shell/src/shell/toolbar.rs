@@ -85,7 +85,7 @@ const PINNED_TITLES: [&str; 9] = [
     "Frame pinned to workspace 8",
     "Frame pinned to workspace 9",
 ];
-const PIN_HINT: &str = "scope, grouping, and as-of changes here stay here";
+const PIN_HINT: &str = "pinning keeps scope, grouping, and as-of changes in this workspace";
 const PINNED_HINT: &str =
     "scope, grouping, and as-of changes stay here · click to rejoin the shared frame";
 
@@ -594,8 +594,8 @@ pub fn toolbar(
     };
     // Pinned paints as a selected, hazard-free state (the Neutral chip);
     // unpinned is a bare verb like `+` and save.
-    let pinned_paint = chip::chip_paint(theme, chip::Tone::Neutral);
     let (pin_fg, pin_bg, pin_states) = if pin.pinned {
+        let pinned_paint = chip::chip_paint(theme, chip::Tone::Neutral);
         (
             pinned_paint.text,
             pinned_paint.fill,

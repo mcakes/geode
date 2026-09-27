@@ -10,9 +10,11 @@ use crate::tiling::WorkspaceIx;
 
 impl ShellView {
     /// Pin the active workspace to a lane of its own, or return it to the
-    /// shared frame. The open text session ends on the lane it started in
-    /// first, so an unpin cannot carry a pinned session's base into the
-    /// shared lane's history.
+    /// shared frame. On a pin the field's open session is the shared lane's:
+    /// left open, it would keep its pushed base (a no-op undo entry when the
+    /// edits returned to it) and keep coalescing later shared edits, so it
+    /// ends before the field moves to the new lane. On an unpin the pinned
+    /// lane, session included, is dropped anyway.
     pub(super) fn toggle_workspace_pin(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let ws = self.active_ix();
         self.frame.update(cx, |f, cx| {
@@ -28,16 +30,26 @@ impl ShellView {
 
     /// The active workspace changed from `prev`. Showing another lane is not
     /// a frame change: re-seed the flip baseline instead of opening a barrier.
+    /// Between two unpinned workspaces the field still edits the shared
+    /// lane, so its session is left whole: ending it would split one edit
+    /// into two undo entries and lose the pre-focus text Escape restores.
     pub(super) fn on_workspace_switched(
         &mut self,
         prev: WorkspaceIx,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.frame
-            .update(cx, |f, _| f.view_mut(prev).end_scope_session());
+        let active = self.active_ix();
+        let lane_changed = {
+            let f = self.frame.read(cx);
+            f.is_pinned(prev) || f.is_pinned(active)
+        };
         self.last_flip_versions = self.active_frame().read(cx).versions();
-        self.rebind_scope_field(window, cx);
+        if lane_changed {
+            self.frame
+                .update(cx, |f, _| f.view_mut(prev).end_scope_session());
+            self.rebind_scope_field(window, cx);
+        }
         cx.notify();
     }
 
