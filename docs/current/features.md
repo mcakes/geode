@@ -51,7 +51,8 @@ has a value. Sorting on it puts values first, then `mixed`, then blanks, in both
 directions; `y` yanks `mixed` as the word; the selection footer never totals a
 dimension column. See [ungrouped dimension
 columns](data-path.md#ungrouped-dimension-columns). A numeric dimension such as
-`strike` sorts as text.
+`strike` sorts by number and paints its exact value, never rounded by the text
+format.
 
 `g m` opens a panel on the cursor row's `underlying_ref` (the column name is
 fixed); a row above that level, a grouping without it, or a NULL value opens

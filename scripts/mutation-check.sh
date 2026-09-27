@@ -968,10 +968,35 @@ run_mutation "unanimity: a mixed cell paints the marker, not blank" \
 
 run_mutation "unanimity: a mixed cell sorts ahead of the blanks" \
   crates/geode-blotter/src/core/flatten.rs \
-  '            TextKey::Mixed => 1,' \
   '            TextKey::Mixed => 2,' \
+  '            TextKey::Mixed => 3,' \
   geode-blotter \
   a_mixed_dimension_sorts_after_values_and_before_blanks_both_ways
+
+# As text "100" sorts before "95". A numeric dimension must reach the blotter
+# as a number and be compared as one.
+run_mutation "unanimity: a numeric dimension keeps its type in the result" \
+  crates/geode-data/src/query/compile.rs \
+  '        unanimity_selects.push(format!("{alias}.\"{name}\" as \"{name}\""));' \
+  '        unanimity_selects.push(format!("{alias}.\"{name}\"::varchar as \"{name}\""));' \
+  geode-data \
+  the_mixed_flag_reaches_the_snapshot_beside_a_null_value
+
+run_mutation "unanimity: a numeric dimension sorts by number" \
+  crates/geode-blotter/src/core/flatten.rs \
+  '                (TextKey::Number(x), TextKey::Number(y)) => x.total_cmp(&y),' \
+  '                (TextKey::Number(x), TextKey::Number(y)) => x.to_string().cmp(&y.to_string()),' \
+  geode-blotter \
+  a_numeric_dimension_sorts_by_number_with_mixed_and_blanks_last
+
+# The text format's precision is 0: through it 4250.5 paints as a strike of
+# 4251 that does not exist.
+run_mutation "unanimity: a numeric dimension paints its exact value" \
+  crates/geode-blotter/src/core/cache.rs \
+  '        Some(v) => Some(v.to_string()),' \
+  '        Some(v) => Some(format!("{v:.0}")),' \
+  geode-blotter \
+  a_mixed_dimension_cell_paints_the_marker_and_a_blank_one_paints_nothing
 
 run_mutation "unanimity: a mixed cell yanks the marker, not blank" \
   crates/geode-blotter/src/core/yank.rs \

@@ -116,7 +116,7 @@ pub fn cell(snapshot: &Snapshot, plan: &ColumnPlan, row: usize, col: usize) -> O
                     mixed: true,
                 });
             }
-            let text = snapshot.display_at(idx, row)?;
+            let text = dimension_text(snapshot, idx, row)?;
             Some(CachedCell {
                 text: text.into(),
                 sign: None,
@@ -124,6 +124,18 @@ pub fn cell(snapshot: &Snapshot, plan: &ColumnPlan, row: usize, col: usize) -> O
                 mixed: false,
             })
         }
+    }
+}
+
+/// A dimension cell's text. A numeric dimension (an ungrouped `strike`
+/// arrives as a number) prints its shortest exact form — `4250`, `4250.5` —
+/// rather than going through the text format, whose precision of 0 would
+/// round `4250.5` to a strike that does not exist. NaN is blank.
+pub fn dimension_text(snapshot: &Snapshot, idx: usize, row: usize) -> Option<String> {
+    match snapshot.f64_at(idx, row) {
+        Some(v) if v.is_nan() => None,
+        Some(v) => Some(v.to_string()),
+        None => snapshot.display_at(idx, row),
     }
 }
 
@@ -268,7 +280,7 @@ mod tests {
                         mixed_flag: Some(3),
                         ..meta("strike")
                     },
-                    TestColumn::Str(vec![None, Some("100.0"), None, None]),
+                    TestColumn::F64(vec![None, Some(4250.5), None, None]),
                 ),
                 (
                     meta("strike#mixed"),
@@ -297,7 +309,7 @@ mod tests {
             "tree and strike; the flag is not shown"
         );
         let value = cell(&snap, &plan, 1, 1).unwrap();
-        assert_eq!((&*value.text, value.mixed), ("100.0", false));
+        assert_eq!((&*value.text, value.mixed), ("4250.5", false));
         let mixed = cell(&snap, &plan, 2, 1).unwrap();
         assert_eq!((&*mixed.text, mixed.mixed), (MIXED, true));
         assert_eq!(cell(&snap, &plan, 3, 1), None, "blank is not mixed");
