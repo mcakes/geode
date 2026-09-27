@@ -21761,6 +21761,30 @@ run_mutation "named expr: the compiler refuses unresolved names" \
   geode-data \
   a_scope_with_unresolved_names_is_refused
 
+# The blotter shows an unresolved name as its error and submits nothing.
+run_mutation "named expr: the blotter submits an unresolved scope" \
+  crates/geode-blotter/src/tile.rs \
+  '                frame.effective_scope(&self.tile_scope)' \
+  '                Ok(frame.scope().and_then(&self.tile_scope))' \
+  geode-blotter \
+  an_unresolved_named_expression_errors_without_querying_and_a_definition_requeries
+
+# An expressions reload rebuilds the frame's named expressions.
+run_mutation "named expr: reload ignores an expressions change" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                changed(EXPRESSIONS_DOC) || changed("datasets") || changed("dimensions");' \
+  '                false || changed("datasets") || changed("dimensions");' \
+  geode-shell \
+  an_expressions_reload_redefines_the_frames_named_expressions
+
+# The picker never requests values under an unresolved scope.
+run_mutation "named expr: the picker requests an unresolved scope" \
+  crates/geode-shell/src/shell/picker.rs \
+  '    let minus_own = match minus_own.resolve(view.frame.read(cx).named_expressions()) {' \
+  '    let minus_own = match Ok::<_, String>(minus_own) {' \
+  geode-shell \
+  the_picker_shows_an_unresolved_named_expression_instead_of_requesting
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
