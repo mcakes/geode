@@ -79,6 +79,7 @@ the measurement log for fixture and hardware details.
 | Line-pricer sheet shift + undo | 1,000 rows | 1.52 ms |
 | Line-pricer single cell edit + undo | 1,000 rows | 6.66 µs |
 | Line-pricer grid build | 1,000 rows, every package open | 1.85 ms |
+| Line-pricer grid build, package cells aggregated | 1,000 rows, every package open, each package row's `/`-joined leg values | 1.42 ms |
 | Scope expression suggestion refresh | 20,000 cached values, ranked and capped at 50 | 6.82 ms |
 
 The flat 10,000-row market-data build sits at the UI budget boundary. Ordinary
