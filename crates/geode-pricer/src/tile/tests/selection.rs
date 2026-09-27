@@ -259,3 +259,56 @@ fn row_verbs_in_a_block_refuse_and_name_v(cx: &mut gpui::TestAppContext) {
     }
     assert_eq!(h.tree(&vcx).len(), 3);
 }
+
+#[gpui::test]
+fn a_put_of_a_line_and_a_package_from_an_open_leg_lands_at_a_root_boundary(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "down", None); // the line and the CS package
+    h.dispatch(&mut vcx, "yank", None);
+    h.dispatch(&mut vcx, "expand", None); // open the CS package
+    h.dispatch(&mut vcx, "down", None); // its first leg
+    assert!(
+        h.tile.read_with(&vcx, |t, _| t
+            .cursor_sheet_row()
+            .is_some_and(|r| t.sheet.parent(r).is_some())),
+        "the cursor sits on a leg"
+    );
+    h.dispatch(&mut vcx, "put_below", None);
+    assert_eq!(h.footer(&vcx), None, "no refusal");
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.sheet.roots().count()),
+        5,
+        "both rows landed as roots"
+    );
+    h.dispatch(&mut vcx, "undo", None);
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.sheet.roots().count()),
+        3,
+        "one undo takes both back"
+    );
+}
+
+#[gpui::test]
+fn a_leg_selected_without_its_package_is_deleted_as_a_leg(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    h.dispatch(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "expand", None); // open the CS package
+    h.dispatch(&mut vcx, "down", None); // its first leg
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "delete", None);
+    let legs = |h: &Harness, vcx: &VisualTestContext| {
+        h.tile.read_with(vcx, |t, _| {
+            let p = (0..t.sheet.len())
+                .find(|&r| t.sheet.is_package(r))
+                .expect("the package stays");
+            t.sheet.children(p).len()
+        })
+    };
+    assert_eq!(legs(&h, &vcx), 1, "the package keeps its other leg");
+    assert_eq!(h.tile.read_with(&vcx, |t, _| t.sheet.roots().count()), 3);
+    h.dispatch(&mut vcx, "undo", None);
+    assert_eq!(legs(&h, &vcx), 2, "one undo restores the leg");
+}
