@@ -114,3 +114,45 @@ fn a_new_sheet_clears_the_selection(cx: &mut gpui::TestAppContext) {
     h.command(&mut vcx, "new").unwrap();
     assert_eq!(resolved(&h, &vcx), None);
 }
+
+#[gpui::test]
+fn the_totals_follow_a_delivery_not_only_a_cursor_move(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    let price = |h: &Harness, vcx: &VisualTestContext| {
+        h.tile.read_with(vcx, |t, _| {
+            t.totals
+                .iter()
+                .find(|c| c.label.as_ref() == "price")
+                .map(|c| c.text.to_string())
+        })
+    };
+    assert_eq!(price(&h, &vcx).as_deref(), Some("—"), "nothing priced yet");
+    answer_all(&h, &mut vcx, 1.0);
+    let total = price(&h, &vcx).expect("a price total");
+    assert!(
+        total.parse::<f64>().is_ok(),
+        "the delivery re-totals the live selection, got {total:?}"
+    );
+}
+
+#[gpui::test]
+fn a_footer_refusal_takes_the_footer_from_the_selection_strip(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.draw(&mut vcx);
+    assert!(vcx.debug_bounds("aggregate-extent").is_some());
+    h.dispatch(&mut vcx, "put_below", None); // nothing yanked: refused
+    h.draw(&mut vcx);
+    assert_eq!(
+        h.mode(&mut vcx),
+        "visual",
+        "the refusal keeps the selection"
+    );
+    assert_eq!(h.footer(&vcx).as_deref(), Some("nothing to put"));
+    assert!(
+        vcx.debug_bounds("aggregate-extent").is_none(),
+        "the refusal yields no room to the strip"
+    );
+    assert!(vcx.debug_bounds("pricer-footer").is_some());
+}
