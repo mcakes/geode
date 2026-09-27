@@ -10,14 +10,17 @@
 # every selected anchor for exactly one match, reports ANCHOR or AMBIG, and
 # exits nonzero for either finding or an empty selection. Run the unfiltered
 # anchor check before merging and after editing an anchored source block.
-# Nonempty test filters are checked against test-attributed function names under
+# Test filters are checked against test-attributed function names under
 # the selected package's src directory. FILTER means no match; FILTERx means
 # several matches without an exact function name and is also an error. FILTER?
 # means an exact name plus other substring matches and is a warning. This is a
 # source scan, not Cargo test discovery: it does not evaluate cfg attributes,
 # expand macros, or distinguish identical function names in different modules.
-# DUP and SHADOW report shared or overlapping anchors as warnings. They do not
-# by themselves establish that the mutations test the same behavior.
+# REDUNDANT (an entry repeating another's anchor, replacement and filter),
+# NOFILTER (an empty test filter) and NOOP (a replacement equal to its anchor)
+# are errors. ALSO is information: a second test detecting the same mutation.
+# A shared anchor with a different replacement, or an anchor nested in a
+# longer one, is a different mutation and is not reported.
 #
 # --changed defaults to main. It selects files changed versus REF, changed in
 # the working tree, or untracked. The set is captured before mutation so the
@@ -14817,19 +14820,39 @@ run_mutation "ingest: a failed load still ends the strip" \
   geode-data \
   a_failed_load_still_ends_the_strip
 
-# Final whole-branch review, finding 1 (2026-09-19): a file re-queued
-# after it already loaded must not even announce `Started` — one with
-# nothing to end it would stick the status bar's strip forever.
+# A file re-queued after it already loaded must not even announce
+# `Started`: one with nothing to end it would stick the status bar's strip
+# forever. The mutation keeps the skip and moves the announcement above it.
 run_mutation "ingest: a stale skip does not start the strip" \
   crates/geode-data/src/ingest/runner.rs \
   '        if stale {
             clear_in_flight(&queue);
             continue;
+        }
+
+        // Announce Started only after the stale check, so every announcement has a
+        // terminal operation outcome.
+        if !sink(IngestEvent::Started {
+            source: item.source.clone(),
+            path: item.candidate.csv_path.to_string_lossy().into_owned(),
+            queued,
+        }) {
+            log_refused_event(&refusal_logged, "a load-started announcement");
         }' \
-  '        if false {
+  '        if !sink(IngestEvent::Started {
+            source: item.source.clone(),
+            path: item.candidate.csv_path.to_string_lossy().into_owned(),
+            queued,
+        }) {
+            log_refused_event(&refusal_logged, "a load-started announcement");
+        }
+        if stale {
             clear_in_flight(&queue);
             continue;
-        }' \
+        }
+
+        // Announce Started only after the stale check, so every announcement has a
+        // terminal operation outcome.' \
   geode-data \
   a_queued_item_whose_file_was_loaded_meanwhile_is_skipped_at_pop_time
 
@@ -21876,8 +21899,8 @@ run_mutation "launch: a panel with a key is prompted anyway" \
   '        if self.popup.is_none() {' \
   geode-marketdata a_launched_panel_on_an_underlying_opens_no_picker
 
-# The two entries below share an anchor (`--anchors-only` reports DUP as a
-# non-failing warning): they mutate different behaviours of the same line.
+# The two entries below share an anchor on purpose: their replacements
+# mutate different behaviours of the same line.
 run_mutation "launch: blotter reads a subtotal as its first child's underlying" \
   crates/geode-blotter/src/core/launch.rs \
   '    path.get(level)?.clone()' \

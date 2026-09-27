@@ -519,8 +519,13 @@ to the report time if adding the interval overflows.
   measurement log.
 - Ordinary tests verify outcomes. Targeted mutations in
   [`mutation-check.sh`](../../scripts/mutation-check.sh) check whether tests
-  can detect particular wrong-data behaviors; `--anchors-only` validates
-  their source anchors without running Cargo.
+  can detect particular wrong-data behaviors. `--anchors-only` validates the
+  table without running Cargo or editing source: it rejects a stale or
+  ambiguous anchor, a filter matching no test or several without an exact
+  name, an entry with no filter, a replacement equal to its anchor, and a
+  mutation repeated under the same test. The checker,
+  [`mutation_anchors.py`](../../scripts/mutation_anchors.py), has its own
+  unittest suite in `scripts/test_mutation_anchors.py`.
 
 The code linked above is the implementation authority. If this guide and the
 code disagree, correct the guide and assess whether the behavior is an

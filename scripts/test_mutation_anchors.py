@@ -43,7 +43,7 @@ class Check(unittest.TestCase):
     def test_a_clean_entry_passes(self):
         lines, code = self.run_check({LIB: SRC}, [entry()])
         self.assertEqual(code, 0)
-        self.assertIn("checked 1 anchors: 0 stale, 0 ambiguous, 0 bad filters", lines)
+        self.assertIn("checked 1 anchors: 0 stale, 0 ambiguous, 0 bad filters, 0 bad entries", lines)
 
     def test_an_empty_selection_fails(self):
         lines, code = self.run_check({LIB: SRC}, [])
@@ -98,6 +98,60 @@ class Check(unittest.TestCase):
     def test_reads_non_ascii_source(self):
         src = SRC.replace("fn f()", "// chevron ▸ and em dash —\nfn f()")
         lines, code = self.run_check({LIB: src}, [entry()])
+        self.assertEqual(code, 0, lines)
+
+    def test_a_repeated_mutation_under_the_same_test_is_redundant(self):
+        lines, code = self.run_check({LIB: SRC}, [entry(name="a"), entry(name="b")])
+        self.assertEqual(code, 1)
+        self.assertIn("REDUNDANT b  <-- repeats a: same anchor, replacement and test", lines)
+
+    def test_a_repeated_mutation_under_another_test_is_information(self):
+        lines, code = self.run_check({LIB: SRC}, [entry(name="a"), entry(name="b", filt="t_two")])
+        self.assertEqual(code, 0, lines)
+        self.assertIn("ALSO      b  <-- same mutation as a, detected by 't_two'", lines)
+
+    def test_different_mutations_of_one_anchor_are_silent(self):
+        lines, code = self.run_check(
+            {LIB: SRC}, [entry(name="a"), entry(name="b", replacement="let x = 3;")]
+        )
+        self.assertEqual(code, 0)
+        self.assertFalse([l for l in lines if l.startswith(("DUP", "ALSO", "REDUNDANT"))], lines)
+
+    def test_a_nested_anchor_is_silent(self):
+        lines, code = self.run_check(
+            {LIB: SRC},
+            [entry(name="a"), entry(name="b", anchor="x = 1", replacement="x = 4")],
+        )
+        self.assertEqual(code, 0)
+        self.assertFalse([l for l in lines if l.startswith("SHADOW")], lines)
+
+    def test_an_entry_without_a_filter_fails(self):
+        lines, code = self.run_check({LIB: SRC}, [entry(filt="")])
+        self.assertEqual(code, 1)
+        self.assertIn("NOFILTER  e  <-- names no detecting test", lines)
+
+    def test_a_replacement_equal_to_its_anchor_fails(self):
+        lines, code = self.run_check({LIB: SRC}, [entry(replacement="let x = 1;")])
+        self.assertEqual(code, 1)
+        self.assertIn("NOOP      e  <-- replacement equals the anchor; nothing is mutated", lines)
+
+    def test_the_summary_counts_bad_entries(self):
+        lines, _ = self.run_check({LIB: SRC}, [entry(name="a"), entry(name="b"), entry(name="c", filt="")])
+        self.assertIn("checked 3 anchors: 0 stale, 0 ambiguous, 0 bad filters, 2 bad entries", lines)
+
+    def test_an_anchored_file_that_is_not_utf8_is_stale(self):
+        tmp, root = tree({LIB: SRC})
+        self.addCleanup(tmp.cleanup)
+        (root / "crates/p/src/bad.rs").write_bytes(b"\xff\xfe fn f() {}")
+        lines, code = ma.check([entry(file="crates/p/src/bad.rs")], root)
+        self.assertEqual(code, 1)
+        self.assertIn("ANCHOR    e  <-- could not read crates/p/src/bad.rs as UTF-8", lines)
+
+    def test_a_scanned_file_that_is_not_utf8_is_skipped(self):
+        tmp, root = tree({LIB: SRC})
+        self.addCleanup(tmp.cleanup)
+        (root / "crates/p/src/bad.rs").write_bytes(b"\xff\xfe fn f() {}")
+        lines, code = ma.check([entry()], root)
         self.assertEqual(code, 0, lines)
 
 

@@ -2,12 +2,14 @@
 
 Reads the NUL-separated six-field records the zsh script collects (name,
 file, anchor, replacement, package, filter) and checks every anchor for
-exactly one match in its file and every nonempty test filter against the
+exactly one match in its file and every test filter against the
 test-attributed function names under the package's src directory. It runs no
 Cargo command and edits no file.
 
-Missing or ambiguous anchors, invalid filters, and an empty selection fail;
-loose filters and shared or overlapping anchors are warnings.
+Missing or ambiguous anchors, invalid filters, an entry with no filter, a
+replacement equal to its anchor, a mutation repeated under the same test, and
+an empty selection fail. Loose filters and a mutation repeated under another
+test are information.
 """
 
 import collections
@@ -45,7 +47,9 @@ def test_fns(root, pkg):
     for path in sorted((root / "crates" / pkg / "src").rglob("*.rs")):
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
-        except OSError:
+        except (OSError, UnicodeDecodeError):
+            # A file that cannot be read declares no test a filter could
+            # name; skipping it can only fail a filter, never pass one.
             continue
         saw_test_attr = False
         for line in lines:
@@ -71,7 +75,7 @@ def check(entries, root):
     out = []
     fn_cache = {}
     texts = {}
-    stale = ambiguous = bad_filters = loose = 0
+    stale = ambiguous = bad_filters = bad_entries = loose = 0
     for e in entries:
         name, file, anchor, pkg, filt = e.name, e.file, e.anchor, e.pkg, e.filter
         if file not in texts:
@@ -79,10 +83,18 @@ def check(entries, root):
                 texts[file] = (root / file).read_text(encoding="utf-8")
             except OSError:
                 texts[file] = None
+            except UnicodeDecodeError:
+                texts[file] = False
         text = texts[file]
         if text is None:
             stale += 1
             out.append(f"ANCHOR    {name}  <-- file missing: {file}")
+            continue
+        if text is False:
+            # An undecodable file cannot be searched, so the anchor cannot be
+            # shown to exist; reading it as absent keeps the gate failing.
+            stale += 1
+            out.append(f"ANCHOR    {name}  <-- could not read {file} as UTF-8")
             continue
         hits = text.count(anchor)
         if hits == 0:
@@ -91,7 +103,16 @@ def check(entries, root):
         elif hits > 1:
             ambiguous += 1
             out.append(f"AMBIG x{hits}  {name}  <-- anchor matches {hits} times; only the first is mutated")
+        if anchor == e.replacement:
+            # The harness would run the tests on unchanged source and report
+            # the survivor as a missed mutation of code it never touched.
+            bad_entries += 1
+            out.append(f"NOOP      {name}  <-- replacement equals the anchor; nothing is mutated")
         if not filt:
+            # Without a filter the whole package runs, so "caught" names no
+            # test and cannot show which contract the entry guards.
+            bad_entries += 1
+            out.append(f"NOFILTER  {name}  <-- names no detecting test")
             continue
         if pkg not in fn_cache:
             fn_cache[pkg] = test_fns(root, pkg)
@@ -110,48 +131,44 @@ def check(entries, root):
             loose += 1
             out.append(f"FILTER? {len(matched)}  {name}  <-- '{filt}' also matches {len(matched) - 1} sibling test(s)")
 
-    # Shared source anchors may carry different replacements. Report the overlap
-    # for review without treating it as proof that the mutations are redundant.
-    by_anchor = collections.defaultdict(list)
+    # An anchor nested in a longer one occurs once (AMBIG guarantees it), so it
+    # mutates a sub-span of the same site; and different replacements of one
+    # anchor are different mutations of one line. Neither can make a verdict
+    # lie, so neither is reported. What can is the same mutation twice: under
+    # the same test it only repeats a verdict (REDUNDANT, an error); under
+    # another test it is a second detector of one mutation (ALSO, information).
+    groups = collections.defaultdict(list)
     for e in entries:
-        by_anchor[(e.file, e.anchor)].append(e.name)
-    dup_groups = {k: v for k, v in by_anchor.items() if len(v) > 1}
-    dup_entries = sum(len(v) for v in dup_groups.values())
-    for (file, _anchor), names in sorted(dup_groups.items()):
-        for shadowed_name in names[1:]:
-            out.append(f"DUP       {shadowed_name}  <-- shares (file, anchor) with {names[0]}")
+        if e.filter:
+            groups[(e.file, e.anchor, e.replacement)].append(e)
+    also = 0
+    for group in groups.values():
+        first_by_filter = {}
+        for e in group:
+            if e.filter in first_by_filter:
+                bad_entries += 1
+                out.append(
+                    f"REDUNDANT {e.name}  <-- repeats {first_by_filter[e.filter].name}: "
+                    "same anchor, replacement and test"
+                )
+                continue
+            if first_by_filter:
+                also += 1
+                out.append(f"ALSO      {e.name}  <-- same mutation as {group[0].name}, detected by '{e.filter}'")
+            first_by_filter[e.filter] = e
 
-    # An anchor that occurs once but sits inside a longer anchor another entry
-    # uses. AMBIG counts occurrences of one anchor and cannot see this.
-    anchors_by_file = collections.defaultdict(set)
-    for e in entries:
-        anchors_by_file[e.file].add(e.anchor)
-    shadowed_anchors = sorted(
-        (file, anchor)
-        for file, anchors in anchors_by_file.items()
-        for anchor in anchors
-        if any(other != anchor and anchor in other for other in anchors)
+    out.append(
+        f"checked {len(entries)} anchors: {stale} stale, {ambiguous} ambiguous, "
+        f"{bad_filters} bad filters, {bad_entries} bad entries"
     )
-    example_of = {}
-    for e in entries:
-        example_of.setdefault((e.file, e.anchor), e.name)
-    for file, anchor in shadowed_anchors:
-        out.append(f"SHADOW    {example_of[(file, anchor)]}  <-- anchor is a substring of a longer anchor in {file}")
-
-    out.append(f"checked {len(entries)} anchors: {stale} stale, {ambiguous} ambiguous, {bad_filters} bad filters")
     warnings = []
     if loose:
         warnings.append(f"{loose} loose filters")
-    if dup_entries:
-        warnings.append(f"{dup_entries} duplicate anchors in {len(dup_groups)} groups")
-    if shadowed_anchors:
-        warnings.append(f"{len(shadowed_anchors)} shadowed anchors")
+    if also:
+        warnings.append(f"{also} same-mutation entries")
     if warnings:
         out.append(f"  {', '.join(warnings)}")
-        out.append("  (warnings; see the anchor-uniqueness follow-up)")
-    # Shared and overlapping anchors are advisory; only stale/ambiguous locations
-    # and invalid test filters fail this check.
-    return out, (1 if stale or ambiguous or bad_filters else 0)
+    return out, (1 if stale or ambiguous or bad_filters or bad_entries else 0)
 
 
 def main(argv):
