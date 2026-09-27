@@ -18,7 +18,7 @@ Dependencies point toward smaller and more stable crates:
             |       /         |              |
             └──► geode-shell ◄┘              |
                      |                       |
-               shared widgets                |
+               geode-widgets                 |
                      |                       |
                      └─────► geode-core ◄────┘
 

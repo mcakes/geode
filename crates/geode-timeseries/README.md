@@ -62,8 +62,9 @@ cargo bench -p geode-timeseries
   to the nearest action. Key hints are action identities resolved against the
   live keymap at those moments and again when the keymap is republished, so
   an open menu follows a reload; an action bound nowhere shows an empty lane.
-  Theme or named-color changes can trigger a chrome rebuild during render. A frequency the point cap refuses is disabled and
-  carries the model's refusal; range presets are validated when chosen.
+  Theme or named-color changes can trigger a chrome rebuild during render.
+  A frequency the point cap refuses is disabled and carries the model's
+  refusal; range presets are validated when chosen.
 - Menu picks and empty-state buttons dispatch registered actions, or write a
   range or frequency through the model's own setters. Other pointer controls
   share model operations and change processing with keyboard commands.
@@ -103,8 +104,8 @@ cargo bench -p geode-timeseries
 
 `r` (or the range trigger) opens the range menu: the seven presets written out
 with their short labels as text, then `Custom dates…` with its live chord
-(`c` as shipped) painted as a key. `f` (or the frequency trigger) opens the frequency menu; a frequency the
-point cap refuses over the range as resolved under the frame's as-of is a
+(`c` as shipped) painted as a key. `f` (or the frequency trigger) opens the
+frequency menu; a frequency the point cap refuses over the range as resolved under the frame's as-of is a
 disabled row reading `over cap`, and choosing it gives the full refusal as the
 notice. Both tick the value in force and open with the highlight on it. There
 is no frequency step key.

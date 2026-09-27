@@ -53,10 +53,14 @@ has none of them.
   to the nearest action.
 - A confirm holds the keyboard: bare `y` confirms; any other key, chords
   included, cancels and is consumed; a pointer press on the tile or focus
-  leaving also cancels. A change that moves what the question is about (a
-  delivery that moves the market-data document, a pricer `:` command)
-  withdraws it silently. Each answer blurs the prompt before it drops, and
-  the shell's focus restoration path returns the keyboard to the tile.
+  leaving also cancels. A change that moves what the question is about
+  withdraws it unanswered: neither the confirm nor the cancel action runs,
+  and the prompt's blur is not heard as an `n`. Market-data withdraws on a
+  delivery that moves the painted document and says so in its notice
+  (`upload cancelled: a new document arrived`); the pricer withdraws on a `:`
+  command with no notice of its own. Each answer blurs the prompt before it
+  drops, and the shell's focus restoration path returns the keyboard to the
+  tile.
 - A notice is a status (muted), warning or danger line in the theme's text
   tones; which of a tile's notices shows is the tile's own precedence.
 

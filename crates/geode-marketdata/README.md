@@ -146,8 +146,9 @@ is live. An open editor or popup outranks the selection: a selection editor
 is `insert`. Editors, underlying and choice inputs, and upload confirmation
 use insert mode. Insert bindings leave shell chords available; confirmation consumes
 every key, including chords, while armed; a pointer press on the tile or focus
-leaving cancels it, and a delivery that moves the painted document withdraws
-it silently. The upload confirm is `geode_tile::confirm`'s; after an answer
+leaving cancels it. A delivery that moves the painted document or the draft
+withdraws it unanswered (neither submit nor cancel runs) and says so in the
+notice, `upload cancelled: a new document arrived`. The upload confirm is `geode_tile::confirm`'s; after an answer
 the shell's focus restoration path returns the keyboard to the tile.
 
 Action-menu stepping, hover, picking and painting are `geode_tile::menu`'s:
