@@ -729,8 +729,36 @@ fn mod_s_saves_the_text_as_a_named_expression_and_stages_it(cx: &mut gpui::TestA
     );
     assert_eq!(field(&shell, &vcx), "", "the name entry starts empty");
     vcx.simulate_input("liq2");
+    // The write promotes on a timer the test executor runs while parking,
+    // which rebuilds the definitions anyway; the frame must already know
+    // the name at the notify that stages it, before any timer runs.
+    let known_when_staged = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    vcx.update(|_, cx| {
+        let seen = known_when_staged.clone();
+        let frame = shell.read(cx).frame().clone();
+        cx.observe(&shell, move |shell, cx| {
+            let staged = shell
+                .read(cx)
+                .scope_expr_dialog
+                .as_ref()
+                .is_some_and(|d| d.staged.iter().any(|s| s == "liq2"));
+            if staged {
+                let known = matches!(
+                    frame.read(cx).named_expressions().get("liq2"),
+                    Some(geode_core::named::NamedExpr::Valid { .. })
+                );
+                seen.borrow_mut().push(known);
+            }
+        })
+        .detach();
+    });
     vcx.simulate_keystrokes("enter");
     vcx.run_until_parked();
+    assert_eq!(
+        known_when_staged.borrow().first(),
+        Some(&true),
+        "the frame resolves the name the moment it is staged"
+    );
     assert_eq!(expr_error(&shell, &vcx), None);
     assert!(vcx.debug_bounds("dialog-name-row").is_none());
     assert_eq!(field(&shell, &vcx), "", "the field is cleared");
