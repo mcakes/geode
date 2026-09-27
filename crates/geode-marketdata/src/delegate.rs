@@ -13,6 +13,7 @@ use crate::core::{MatrixModel, PanelSpec};
 use crate::header;
 use crate::popup::{ChoicePaint, render_choice};
 use crate::tile::{DateFieldPaint, FlooredTones, MarketDataTile};
+use geode_core::grid::selection::{Resolved, SelectKind};
 use geode_shell::fonts;
 use geode_shell::linenumbers::{GUTTER_GAP_PX, LineNumbers, gutter_number, gutter_px};
 use gpui::prelude::*;
@@ -96,6 +97,9 @@ pub struct MatrixDelegate {
     /// paints no cursor cell here at all (`MarketDataTile::sync_cursor`
     /// clears the table's own selection for that case).
     pub(crate) cursor: Option<(usize, usize)>,
+    /// The tile's resolved selection, mirrored by `sync_cursor`;
+    /// `render_cell` only looks it up.
+    pub(crate) selected: Option<Resolved>,
     /// The open cell editor, mirrored from the tile: the cell it was
     /// opened on (again in model coordinates) and what to paint there.
     /// Painted IN that cell, which is what makes it typeable at all
@@ -146,6 +150,7 @@ impl MatrixDelegate {
             row_axis: SharedString::from(spec.rows.column),
             label_column: spec.rows.shown(),
             cursor: Some((0, 0)),
+            selected: None,
             editor: None,
             choice: None,
             tile,
@@ -407,6 +412,13 @@ impl TableDelegate for MatrixDelegate {
     }
 }
 
+/// The selection tint: an absolute overlay painted as a cell's first
+/// child, so it sits under the text and never replaces an edited or sent
+/// cell's own fill, and the cursor's border still paints over it.
+fn selection_tint(theme: &Theme) -> Div {
+    div().absolute().inset_0().bg(theme.selection.opacity(0.35))
+}
+
 impl MatrixDelegate {
     /// Paint a prepared cell or its active editor. Normal cell text is cloned
     /// from SharedString; date and choice editors share prepared paint. Debug
@@ -442,6 +454,12 @@ impl MatrixDelegate {
                 .cloned()
                 .and_then(|e| self.render_editor(&e, TextAlign::Left, theme));
             let CellPaint { fill, text, strike } = cell_paint(theme, sent, false, state);
+            // A `Rows` selection tints its labels too; a `Block` never
+            // includes the label column.
+            let in_selection = self
+                .selected
+                .as_ref()
+                .is_some_and(|r| r.kind == SelectKind::Rows && r.contains_row(row_ix));
             let el = div()
                 .size_full()
                 .flex()
@@ -453,7 +471,9 @@ impl MatrixDelegate {
                 .whitespace_nowrap()
                 .overflow_hidden()
                 .text_ellipsis()
-                .debug_selector(|| format!("marketdata-cell-{row_ix}-{col_ix}"));
+                .debug_selector(|| format!("marketdata-cell-{row_ix}-{col_ix}"))
+                .relative()
+                .when(in_selection, |el| el.child(selection_tint(theme)));
             return match editor {
                 Some(editor) => el.child(
                     div()
@@ -465,6 +485,10 @@ impl MatrixDelegate {
             };
         };
         let at_cursor = self.cursor == Some((row_ix, model_col));
+        let in_selection = self
+            .selected
+            .as_ref()
+            .is_some_and(|r| r.contains(row_ix, model_col));
         let row = self.model.rows.get(row_ix);
         let state = row.map_or(RowState::Document, |r| r.state);
         let cell = row.and_then(|r| r.cells.get(model_col));
@@ -498,7 +522,9 @@ impl MatrixDelegate {
         el = el
             .when_some(fill, |el, fill| el.bg(fill))
             .text_color(text)
-            .when(strike, |el| el.line_through());
+            .when(strike, |el| el.line_through())
+            .relative()
+            .when(in_selection, |el| el.child(selection_tint(theme)));
         // The editor is cloned out (three refcounts at most) because
         // `render_editor` needs `&mut self` for the tones refresh while
         // `editor_at` borrows `self.editor`; the cell's own text is what

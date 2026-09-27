@@ -37,6 +37,7 @@ use crate::popup::{
 };
 use geode_core::colour::{Rgb, contrast_ratio, readable_on};
 use geode_core::document::{DocumentRows, Value, split_key};
+use geode_core::grid::selection::{Resolved, SelectKind, Selection};
 use geode_core::query::{DocumentParams, QueryKey, QueryOutcome};
 use geode_core::schema::ColumnType;
 use geode_core::snapshot::Snapshot;
@@ -47,6 +48,7 @@ use geode_shell::frame::{Frame, FrameVersions, PublicationWatch};
 use geode_shell::keymap::KeyContext;
 use geode_shell::linenumbers::{LineNumbers, UiSettings};
 use geode_shell::module::{FindEvent, StackHandle, UploadDelivery};
+use geode_shell::shell::aggregates;
 use geode_shell::shell::colours::{to_hsla, to_rgb};
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
@@ -59,17 +61,23 @@ use gpui::{
 };
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::table::{DataTable, TableEvent, TableState};
-use gpui_component::{ActiveTheme as _, Sizable as _, Size, Theme, v_flex};
+use gpui_component::{ActiveTheme as _, Sizable as _, Size, Theme, h_flex, v_flex};
 use std::cell::Cell as StdCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+mod select;
+
 /// How many rows `ctrl+d`/`ctrl+u` step — `vimnav`'s own ±5, the same
 /// fixed offset every list in this codebase uses, multiplied by the count
 /// prefix rather than being viewport-relative.
 const HALF_PAGE: isize = 5;
+
+/// The selection footer's height in design px — the blotter's, pricer's
+/// and timeseries' footer value, so every grid's strip reads alike.
+const FOOTER_HEIGHT: f32 = 20.0;
 
 /// How many rows `ctrl+f`/`ctrl+b`/`pagedown`/`pageup` step — `vimnav`'s
 /// own ±10, the blotter's `page_down_full`.
@@ -484,6 +492,18 @@ pub struct MarketDataTile {
     /// owns the cursor across motions (`j` reads it back to return to the
     /// same column; `0` before the strip has ever been entered).
     last_grid_col: usize,
+    /// A live `V`/`v` selection, anchored by row label and column label so
+    /// it survives a redelivery, an inserted row or a rebase. `None` in
+    /// the ordinary cursor-only state.
+    selection: Option<Selection<SharedString, SharedString>>,
+    /// `selection` re-resolved against the current model and cursor by
+    /// `refresh_selection` — what the delegate's tint and every
+    /// selection-wide verb read, so painting never resolves anything.
+    resolved: Option<Resolved>,
+    /// The footer's `"{rows} rows × {cols} cols"` readout while a
+    /// selection is live; `None` otherwise. Prepared with `resolved` so
+    /// render formats nothing.
+    selection_extent: Option<SharedString>,
     /// The body: gpui-component's table over [`MatrixDelegate`]. Never
     /// focused (see `geode_marketdata::init`, which binds its context's
     /// keys to `NoAction` for the one frame a click gives it gpui focus).
@@ -789,6 +809,9 @@ impl MarketDataTile {
             policy,
             cursor: Cursor::Cell { row: 0, col: 0 },
             last_grid_col: 0,
+            selection: None,
+            resolved: None,
+            selection_extent: None,
             table,
             editor: None,
             find: None,
@@ -851,10 +874,22 @@ impl MarketDataTile {
             "insert"
         } else if matches!(self.popup, Some(Popup::Menu(_))) {
             "menu"
+        } else if self.selection.is_some() {
+            "visual"
         } else {
             "normal"
         };
-        KeyContext::new("marketdata").pair("mode", mode).counts()
+        let mut ctx = KeyContext::new("marketdata").pair("mode", mode);
+        if let Some(s) = &self.selection {
+            ctx = ctx.pair(
+                "select",
+                match s.kind {
+                    SelectKind::Rows => "rows",
+                    SelectKind::Block => "block",
+                },
+            );
+        }
+        ctx.counts()
     }
 
     /// Whether this tile's editor, picker, choice field, or upload confirmation
@@ -1838,17 +1873,27 @@ impl MarketDataTile {
         });
     }
 
-    /// Mirror cursor, editor, and choice state into the delegate and table.
-    /// Translate model columns through the optional row-label offset. Set the
-    /// column before the row so the table finishes in row-selection mode while
-    /// keeping the cell in view. An attribute cursor clears grid selection.
-    fn sync_cursor(&self, cx: &mut Context<Self>) {
+    /// Mirror cursor, selection, editor, and choice state into the delegate
+    /// and table. Translate model columns through the optional row-label
+    /// offset. Set the column before the row so the table finishes in
+    /// row-selection mode while keeping the cell in view. An attribute cursor
+    /// clears grid selection.
+    ///
+    /// Re-resolves the grid selection first, so every cursor or model change
+    /// hands the delegate a current `Resolved`; a lost anchor re-prepares the
+    /// header for its notice here, since not every caller rebuilds chrome.
+    fn sync_cursor(&mut self, cx: &mut Context<Self>) {
+        if self.refresh_selection() {
+            self.rebuild_chrome();
+        }
         let editor = self.delegate_editor();
         let choice = self.delegate_choice();
+        let selected = self.resolved.clone();
         match self.cursor {
             Cursor::Cell { row, col } => self.table.update(cx, |t, cx| {
                 let d = t.delegate_mut();
                 d.cursor = Some((row, col));
+                d.selected = selected;
                 d.editor = editor;
                 d.choice = choice;
                 let table_col = d.table_col(col);
@@ -1859,6 +1904,7 @@ impl MarketDataTile {
             Cursor::Attr(_) => self.table.update(cx, |t, cx| {
                 let d = t.delegate_mut();
                 d.cursor = None;
+                d.selected = None;
                 d.editor = editor;
                 d.choice = choice;
                 t.clear_selection(cx);
@@ -2105,7 +2151,13 @@ impl MarketDataTile {
                 };
                 let was_attr = matches!(self.cursor, Cursor::Attr(_));
                 let grid = self.grid();
-                self.cursor = cursor::step(self.cursor, &mut self.last_grid_col, motion, grid);
+                // A live selection's motions clamp at the grid's edges and
+                // never enter the strip, which is never a member.
+                self.cursor = if self.selection.is_some() {
+                    cursor::step_clamped(self.cursor, motion, grid)
+                } else {
+                    cursor::step(self.cursor, &mut self.last_grid_col, motion, grid)
+                };
                 was_attr != matches!(self.cursor, Cursor::Attr(_))
             }
             "yank" | "yank_row" | "yank_col" => {
@@ -2168,11 +2220,29 @@ impl MarketDataTile {
                 self.repeat_find(dir, count);
                 false
             }
+            "visual_rows" | "visual_block" => {
+                let kind = if verb == "visual_rows" {
+                    SelectKind::Rows
+                } else {
+                    SelectKind::Block
+                };
+                // `true`: a refusal in the strip leaves a notice.
+                self.start_selection(kind);
+                true
+            }
             "escape" => {
-                self.find = None;
-                // Only when there WAS one: `escape` on a clean header
-                // changes nothing the chips show.
-                self.notice.take().is_some()
+                if self.selection.is_some() {
+                    // The first escape ends only the selection; find and
+                    // the notice wait for the next one. The tail's
+                    // `sync_cursor` hands the delegate the cleared tint.
+                    self.clear_selection();
+                    false
+                } else {
+                    self.find = None;
+                    // Only when there WAS one: `escape` on a clean header
+                    // changes nothing the chips show.
+                    self.notice.take().is_some()
+                }
             }
             "menu" => {
                 self.toggle_menu(window, cx);
@@ -4015,6 +4085,9 @@ impl MarketDataTile {
         if self.editor.is_some() {
             self.close_editor(window, cx);
         }
+        // The next underlying's rows can carry the same labels; a
+        // selection must never carry over to another document.
+        self.clear_selection();
         // A question about the outgoing document must not stand over the
         // incoming one.
         let _ = self.disarm_upload(window, cx);
@@ -4583,6 +4656,22 @@ impl gpui::Render for MarketDataTile {
             })
             .child(header)
             .child(body)
+            // The extent readout, only while a selection is live — the
+            // strip's own `aggregate-extent` element, with no totals: a
+            // vol or forward ladder does not add up.
+            .when_some(self.selection_extent.as_ref(), |el, extent| {
+                el.child(
+                    h_flex()
+                        .w_full()
+                        .h(scale::design(FOOTER_HEIGHT))
+                        .items_center()
+                        .px_2()
+                        .text_xs()
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .child(aggregates::strip(Some(extent), &[], &[], theme)),
+                )
+            })
     }
 }
 
@@ -14162,4 +14251,6 @@ edits = [["2026-11-20", "-1", 9.5]]
             );
         }
     }
+
+    mod selection;
 }
