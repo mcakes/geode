@@ -453,6 +453,225 @@ impl ModuleRoster {
     }
 }
 
+/// The content contract for a page: a surface that replaces the workspace
+/// (toolbar, tile surface, command line) while open. Pages own their own
+/// inputs, have no `:` line, and receive no deliveries; they persist through
+/// `[pages.<kind>]` rather than the layout tree.
+pub trait PageContent {
+    /// Pushed innermost on the key context stack while the page is open.
+    /// Carries `mode = insert` while one of the page's inputs is focused.
+    fn key_context(&self, cx: &App) -> KeyContext;
+    /// An action the shell did not recognise. `true` if handled. For
+    /// `page::close`, `true` means the page consumed the close (it had
+    /// something of its own to dismiss) and the shell must not close it.
+    fn dispatch(
+        &self,
+        action: &ActionId,
+        count: Option<u32>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> bool;
+    /// Opening announces `true`; closing `false`. A fresh occupant assumes it
+    /// is hidden until the first call.
+    fn set_visible(&self, visible: bool, cx: &mut App);
+    /// The handle the shell focuses on open; the page view tracks it.
+    fn focus_handle(&self, cx: &App) -> gpui::FocusHandle;
+    /// `true` while one of the page's own text inputs owns keyboard focus,
+    /// the same contract as [`TileContent::holds_focus`]: the shell then
+    /// routes bare keys to the input and only chords to the keymap.
+    fn holds_focus(&self, window: &Window, cx: &App) -> bool;
+    fn title(&self, cx: &App) -> SharedString;
+    /// Opaque state for `[pages.<kind>]` in the session file.
+    fn serialize(&self, cx: &App) -> toml::Table;
+}
+
+pub struct PageOccupant {
+    pub kind: &'static str,
+    pub view: AnyView,
+    pub content: Box<dyn PageContent>,
+}
+
+/// Dispatches a registered shell action on the page's behalf. The shell
+/// builds it from its own weak entity; a page never holds `ShellView`.
+pub type ShellActions = Rc<dyn Fn(&ActionId, &mut Window, &mut App)>;
+
+pub trait PageFactory {
+    fn kind(&self) -> &'static str;
+    /// Sidebar tooltip and palette row text, e.g. "Diagnostics".
+    fn title(&self) -> &'static str;
+    /// Sidebar glyph. Catalog icons outside gpui-component's default set
+    /// must be listed in the app's `ExtraIcons`.
+    fn icon(&self) -> gpui_kit_assets::IconName;
+    /// Runs once, before the keymap builds.
+    fn register_actions(&self, registry: &mut ActionRegistry);
+    /// The contexts this page's [`PageContent::key_context`] can name. The
+    /// fragment checker requires each default binding's predicate to begin
+    /// with one of these.
+    fn contexts(&self) -> Vec<&'static str> {
+        vec![self.kind()]
+    }
+    /// Default bindings as keymap TOML containing only `[[bindings]]` tables.
+    fn default_keymap(&self) -> Option<&'static str> {
+        None
+    }
+    /// A context-free default binding for `page::toggle_<kind>`, such as
+    /// `"mod+d"`. The roster emits it as a shell-generated doc; a module
+    /// fragment cannot carry a context-free binding.
+    fn toggle_binding(&self) -> Option<&'static str> {
+        None
+    }
+    /// Build the page, optionally restoring its `[pages.<kind>]` state. The
+    /// occupant must assume it is hidden until [`PageContent::set_visible`].
+    fn create(
+        &self,
+        restored: Option<&toml::Table>,
+        frame: Entity<Frame>,
+        diagnostics: Entity<Diagnostics>,
+        actions: ShellActions,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> PageOccupant;
+}
+
+/// Every trait method is forwarded, defaulted ones included, for the same
+/// reason the `ModuleFactory` forwarder does: a forwarder inheriting a
+/// default answers for itself, not the factory it wraps.
+impl<F: PageFactory + ?Sized> PageFactory for Rc<F> {
+    fn kind(&self) -> &'static str {
+        (**self).kind()
+    }
+    fn title(&self) -> &'static str {
+        (**self).title()
+    }
+    fn icon(&self) -> gpui_kit_assets::IconName {
+        (**self).icon()
+    }
+    fn register_actions(&self, registry: &mut ActionRegistry) {
+        (**self).register_actions(registry)
+    }
+    fn contexts(&self) -> Vec<&'static str> {
+        (**self).contexts()
+    }
+    fn default_keymap(&self) -> Option<&'static str> {
+        (**self).default_keymap()
+    }
+    fn toggle_binding(&self) -> Option<&'static str> {
+        (**self).toggle_binding()
+    }
+    fn create(
+        &self,
+        restored: Option<&toml::Table>,
+        frame: Entity<Frame>,
+        diagnostics: Entity<Diagnostics>,
+        actions: ShellActions,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> PageOccupant {
+        (**self).create(restored, frame, diagnostics, actions, window, cx)
+    }
+}
+
+/// What the sidebar needs to paint one page button.
+#[derive(Debug, Clone, Copy)]
+pub struct PageEntry {
+    pub kind: &'static str,
+    pub title: &'static str,
+    pub icon: gpui_kit_assets::IconName,
+    /// `page::toggle_<kind>`, the action the button dispatches.
+    pub toggle_action: &'static str,
+}
+
+/// A registered page factory with its toggle action id, leaked once at
+/// [`PageRoster::add`] so [`PageRoster::entries`] never allocates: the
+/// sidebar paints from it on every render.
+struct RegisteredPage {
+    factory: Box<dyn PageFactory>,
+    toggle_action: &'static str,
+}
+
+/// The app's registered page factories, in sidebar order.
+#[derive(Default)]
+pub struct PageRoster {
+    pages: Vec<RegisteredPage>,
+}
+
+impl PageRoster {
+    pub fn new() -> PageRoster {
+        PageRoster::default()
+    }
+
+    pub fn add(&mut self, factory: Box<dyn PageFactory>) {
+        let toggle_action: &'static str =
+            Box::leak(format!("page::toggle_{}", factory.kind()).into_boxed_str());
+        self.pages.push(RegisteredPage {
+            factory,
+            toggle_action,
+        });
+    }
+
+    pub fn factory(&self, kind: &str) -> Option<&dyn PageFactory> {
+        self.pages
+            .iter()
+            .find(|p| p.factory.kind() == kind)
+            .map(|p| p.factory.as_ref())
+    }
+
+    pub fn kinds(&self) -> Vec<&'static str> {
+        self.pages.iter().map(|p| p.factory.kind()).collect()
+    }
+
+    pub fn entries(&self) -> impl Iterator<Item = PageEntry> + '_ {
+        self.pages.iter().map(|p| PageEntry {
+            kind: p.factory.kind(),
+            title: p.factory.title(),
+            icon: p.factory.icon(),
+            toggle_action: p.toggle_action,
+        })
+    }
+
+    pub fn register_actions(&self, registry: &mut ActionRegistry) {
+        for p in &self.pages {
+            p.factory.register_actions(registry);
+        }
+    }
+
+    /// Each factory's default keymap checked against its own contexts (the
+    /// pairing happens here, as in `ModuleRoster::keymap_fragments`), plus
+    /// one shell-generated, unchecked doc per `toggle_binding` named
+    /// `<page:kind>` — the shell wrote it, so the module checker's context
+    /// rule does not apply.
+    pub fn keymap_fragments(&self) -> (Vec<LayerDoc>, Vec<Diagnostic>) {
+        let mut docs = Vec::new();
+        let mut diags = Vec::new();
+        for p in &self.pages {
+            let factory = &p.factory;
+            if let Some(text) = factory.default_keymap() {
+                match fragments::fragment_doc(factory.kind(), text) {
+                    Ok(doc) => {
+                        let (doc, d) = fragments::check_fragment(doc, &factory.contexts());
+                        docs.push(doc);
+                        diags.extend(d);
+                    }
+                    Err(d) => diags.push(d),
+                }
+            }
+            if let Some(key) = factory.toggle_binding() {
+                // `{key:?}` prints the key double-quoted and escaped, which
+                // is a valid TOML key.
+                let text = format!(
+                    "[[bindings]]\n[bindings.keys]\n{key:?} = {:?}\n",
+                    p.toggle_action
+                );
+                match fragments::fragment_doc(&format!("page:{}", factory.kind()), &text) {
+                    Ok(doc) => docs.push(doc),
+                    Err(d) => diags.push(d),
+                }
+            }
+        }
+        (docs, diags)
+    }
+}
+
 /// The occupant of a tile nothing else claims: an unknown session kind,
 /// or a pending request for a kind with no factory. Paints a hint naming
 /// the palette; never a blank, never a panic.
@@ -1009,6 +1228,178 @@ pub mod recording {
             }
         }
     }
+
+    /// What a recording page saw, in order.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum PageRecorded {
+        Created,
+        Visible(bool),
+        Action(String),
+    }
+
+    struct RecordingPageView {
+        focus_handle: FocusHandle,
+        kind: &'static str,
+        input: Entity<InputState>,
+    }
+
+    impl Render for RecordingPageView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let kind = self.kind;
+            div()
+                .size_full()
+                .track_focus(&self.focus_handle)
+                .debug_selector(move || format!("page-{kind}"))
+                .child(Input::new(&self.input))
+        }
+    }
+
+    struct RecordingPageContent {
+        view: Entity<RecordingPageView>,
+        log: Rc<RefCell<Vec<PageRecorded>>>,
+        consume_close: Rc<Cell<bool>>,
+    }
+
+    impl PageContent for RecordingPageContent {
+        fn key_context(&self, cx: &App) -> KeyContext {
+            let kind = self.view.read(cx).kind;
+            KeyContext::new(kind)
+        }
+        fn dispatch(
+            &self,
+            action: &ActionId,
+            _count: Option<u32>,
+            _window: &mut Window,
+            _cx: &mut App,
+        ) -> bool {
+            self.log
+                .borrow_mut()
+                .push(PageRecorded::Action(action.0.clone()));
+            action.0 == "page::close" && self.consume_close.replace(false)
+        }
+        fn set_visible(&self, visible: bool, _cx: &mut App) {
+            self.log.borrow_mut().push(PageRecorded::Visible(visible));
+        }
+        fn focus_handle(&self, cx: &App) -> FocusHandle {
+            self.view.read(cx).focus_handle.clone()
+        }
+        fn holds_focus(&self, window: &Window, cx: &App) -> bool {
+            self.view
+                .read(cx)
+                .input
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+        }
+        fn title(&self, cx: &App) -> SharedString {
+            SharedString::from(self.view.read(cx).kind)
+        }
+        fn serialize(&self, _cx: &App) -> toml::Table {
+            let mut t = toml::Table::new();
+            t.insert("recorded".into(), toml::Value::Boolean(true));
+            t
+        }
+    }
+
+    /// A page factory for shell tests: records lifecycle and actions, paints
+    /// one real `Input` so `holds_focus` can be exercised, and can be told to
+    /// consume the next `page::close` (standing in for a page with a
+    /// dismissable surface of its own).
+    pub struct RecordingPageFactory {
+        kind: &'static str,
+        title: &'static str,
+        log: Rc<RefCell<Vec<PageRecorded>>>,
+        consume_close: Rc<Cell<bool>>,
+        toggle_binding: Option<&'static str>,
+        created_input: Rc<RefCell<Option<Entity<InputState>>>>,
+    }
+
+    impl RecordingPageFactory {
+        pub fn new(kind: &'static str) -> RecordingPageFactory {
+            RecordingPageFactory {
+                kind,
+                title: Box::leak(crate::defaults::capitalize(kind).into_boxed_str()),
+                log: Rc::new(RefCell::new(Vec::new())),
+                consume_close: Rc::new(Cell::new(false)),
+                toggle_binding: Some("mod+d"),
+                created_input: Rc::new(RefCell::new(None)),
+            }
+        }
+        pub fn without_toggle_binding(mut self) -> Self {
+            self.toggle_binding = None;
+            self
+        }
+        pub fn log(&self) -> Rc<RefCell<Vec<PageRecorded>>> {
+            self.log.clone()
+        }
+        pub fn consume_next_close(&self) -> Rc<Cell<bool>> {
+            self.consume_close.clone()
+        }
+        /// The input the created page paints, once created.
+        pub fn input(&self) -> Rc<RefCell<Option<Entity<InputState>>>> {
+            self.created_input.clone()
+        }
+    }
+
+    impl PageFactory for RecordingPageFactory {
+        fn kind(&self) -> &'static str {
+            self.kind
+        }
+        fn title(&self) -> &'static str {
+            self.title
+        }
+        fn icon(&self) -> gpui_kit_assets::IconName {
+            gpui_kit_assets::IconName::Activity
+        }
+        fn register_actions(&self, registry: &mut ActionRegistry) {
+            let _ = registry.register(crate::actions::ActionDef {
+                id: ActionId(format!("{}::noop", self.kind)),
+                title: "Recording page no-op".to_string(),
+                category: "Test".to_string(),
+            });
+        }
+        fn default_keymap(&self) -> Option<&'static str> {
+            // Leaked once per factory: the fragment text must be 'static.
+            Some(Box::leak(
+                format!(
+                    "[[bindings]]\ncontext = {:?}\n[bindings.keys]\n\"n\" = \"{}::noop\"\n",
+                    self.kind, self.kind
+                )
+                .into_boxed_str(),
+            ))
+        }
+        fn toggle_binding(&self) -> Option<&'static str> {
+            self.toggle_binding
+        }
+        fn create(
+            &self,
+            _restored: Option<&toml::Table>,
+            _frame: Entity<Frame>,
+            _diagnostics: Entity<Diagnostics>,
+            _actions: ShellActions,
+            window: &mut Window,
+            cx: &mut App,
+        ) -> PageOccupant {
+            self.log.borrow_mut().push(PageRecorded::Created);
+            let kind = self.kind;
+            let input = cx.new(|cx| InputState::new(window, cx));
+            *self.created_input.borrow_mut() = Some(input.clone());
+            let view = cx.new(|cx| RecordingPageView {
+                focus_handle: cx.focus_handle(),
+                kind,
+                input,
+            });
+            PageOccupant {
+                kind,
+                view: view.clone().into(),
+                content: Box::new(RecordingPageContent {
+                    view,
+                    log: self.log.clone(),
+                    consume_close: self.consume_close.clone(),
+                }),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1127,5 +1518,36 @@ mod tests {
             vec!["placeholder"]
         );
         assert_eq!(placeholder::PlaceholderFactory.default_keymap(), None);
+    }
+
+    #[test]
+    fn page_roster_emits_checked_fragments_and_an_unchecked_toggle_doc() {
+        let mut roster = PageRoster::new();
+        roster.add(Box::new(recording::RecordingPageFactory::new(
+            "diagnostics",
+        )));
+        assert_eq!(roster.kinds(), vec!["diagnostics"]);
+        let entries: Vec<_> = roster
+            .entries()
+            .map(|e| (e.kind, e.title, e.toggle_action))
+            .collect();
+        assert_eq!(
+            entries,
+            vec![("diagnostics", "Diagnostics", "page::toggle_diagnostics")]
+        );
+        let (docs, diags) = roster.keymap_fragments();
+        assert!(diags.is_empty(), "{diags:?}");
+        // One doc from `default_keymap` (checked against `contexts`) and one
+        // generated from `toggle_binding` (context-free, unchecked).
+        assert_eq!(docs.len(), 2);
+        let toggle = docs
+            .iter()
+            .find(|d| d.file.to_string_lossy().contains("page:diagnostics"))
+            .expect("the toggle doc is named after the page");
+        let text = toml::to_string(&toggle.table).unwrap();
+        assert!(
+            text.contains("\"mod+d\" = \"page::toggle_diagnostics\""),
+            "{text}"
+        );
     }
 }

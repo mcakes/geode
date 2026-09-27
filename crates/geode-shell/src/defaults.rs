@@ -101,6 +101,11 @@ context = "tile"
 ":" = "tile::command_line"
 "/" = "tile::find"
 
+[[bindings]]
+context = "page"
+[bindings.keys]
+"escape" = "page::close"
+
 "#;
 
 fn action(reg: &mut ActionRegistry, id: &str, title: &str, category: &str) {
@@ -169,6 +174,9 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         "Workspace",
     );
     action(reg, "workspace::close_tile", "Close tile", "Workspace");
+    // A page replaces the workspace while open; `escape` in context `page`
+    // closes it unless the page consumes the close itself.
+    action(reg, "page::close", "Close page", "Workspace");
     // Dock toggles retain hidden occupants. Move sends the focused tile to a
     // dock, or back to the tree when that dock is already focused.
     action(reg, "dock::toggle_left", "Toggle left dock", "Dock");
@@ -461,6 +469,19 @@ pub fn register_add_actions(reg: &mut ActionRegistry, kinds: &[&str]) {
             &format!("tile::add_{kind}_stacked"),
             &format!("{title}: Stack"),
             "Tiles",
+        );
+    }
+}
+
+/// Register one toggle per page kind, mirroring `register_add_actions`:
+/// `page::toggle_<kind>` titled "<Title>: Open page" in category `<Title>`.
+pub fn register_page_actions(reg: &mut ActionRegistry, pages: &[(&str, &str)]) {
+    for (kind, title) in pages {
+        action(
+            reg,
+            &format!("page::toggle_{kind}"),
+            &format!("{title}: Open page"),
+            title,
         );
     }
 }
@@ -780,6 +801,18 @@ mod tests {
         let mut empty = ActionRegistry::default();
         register_add_actions(&mut empty, &[]);
         assert_eq!(empty.iter().count(), 0);
+    }
+
+    #[test]
+    fn page_actions_register_one_toggle_per_kind() {
+        let mut reg = ActionRegistry::default();
+        register_page_actions(&mut reg, &[("diagnostics", "Diagnostics")]);
+        let def = reg
+            .get(&ActionId("page::toggle_diagnostics".into()))
+            .expect("registered");
+        assert_eq!(def.title, "Diagnostics: Open page");
+        assert_eq!(def.category, "Diagnostics");
+        assert_eq!(reg.iter().count(), 1);
     }
 
     #[test]
