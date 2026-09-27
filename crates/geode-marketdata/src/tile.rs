@@ -725,6 +725,13 @@ impl MarketDataTile {
         cx.subscribe_in(&table, window, |this, _, event: &TableEvent, window, cx| {
             match event {
                 TableEvent::SelectCell(row, col) => {
+                    let col = this.table.read(cx).delegate().model_col(*col);
+                    // A click inside the open editor's own cell is the
+                    // editor's (caret, text selection, a date separator):
+                    // never a cancel, and the cursor is already there.
+                    if this.editor_cell() == Some((*row, col)) {
+                        return;
+                    }
                     // Cancel and blur an open editor before moving the cursor. Clicking
                     // another cell does not commit partially typed text.
                     if this.editor.is_some() {
@@ -734,10 +741,11 @@ impl MarketDataTile {
                         // thread.
                         this.changed(cx);
                     }
-                    let col = this.table.read(cx).delegate().model_col(*col);
                     this.cursor_to(*row, col, cx)
                 }
                 TableEvent::DoubleClickedCell(row, col) => {
+                    // A double-click inside the open editor reopens
+                    // nothing: `begin_edit` refuses while one is open.
                     if let Some(col) = this.table.read(cx).delegate().model_col(*col) {
                         this.cursor_to(*row, Some(col), cx);
                         this.begin_edit(window, cx);
@@ -1955,14 +1963,7 @@ impl MarketDataTile {
     /// paints itself (`render`), and `None` with nothing open.
     fn delegate_editor(&self) -> Option<DelegateEditor> {
         let e = self.editor.as_ref()?;
-        // A row-label editor sits in the row-label column (`col: None`),
-        // which `render_td`'s label arm paints through the same
-        // `render_editor` a cell's uses.
-        let (row, col) = match &e.target {
-            EditTarget::Cell { cell, .. } => (cell.0, Some(cell.1)),
-            EditTarget::RowLabel { row, .. } => (*row, None),
-            EditTarget::Attr { .. } => return None,
-        };
+        let (row, col) = self.editor_cell()?;
         let paint = match &e.state {
             EditorState::Text(state) => DelegateEditorPaint::Text(state.clone()),
             EditorState::Date { paint, focus, .. } => DelegateEditorPaint::Date {
@@ -1971,6 +1972,19 @@ impl MarketDataTile {
             },
         };
         Some(DelegateEditor { row, col, paint })
+    }
+
+    /// The grid cell the open editor is painted in, as `(model row, model
+    /// column)`. A row-label editor sits in the row-label column (`col:
+    /// None`), which `render_td`'s label arm paints through the same
+    /// `render_editor` a cell's uses. `None` for an attribute editor (the
+    /// header paints it) and with nothing open.
+    fn editor_cell(&self) -> Option<(usize, Option<usize>)> {
+        match &self.editor.as_ref()?.target {
+            EditTarget::Cell { cell, .. } => Some((cell.0, Some(cell.1))),
+            EditTarget::RowLabel { row, .. } => Some((*row, None)),
+            EditTarget::Attr { .. } => None,
+        }
     }
 
     /// Prepared choice popup and its cell anchor, mirrored into the delegate by Rc.
@@ -2049,6 +2063,15 @@ impl MarketDataTile {
     /// a cancel (`close_editor`'s rule), and a drag never gets the
     /// `SelectCell` that would otherwise close it.
     fn pointer(&mut self, event: CellPointer, window: &mut Window, cx: &mut Context<Self>) {
+        // What the header shows (mode, notice, footer extent) can only
+        // move with one of these; a plain press that changes none of them
+        // (the cursor cell, nothing selected) skips the rebuild.
+        let before = (
+            self.selection.is_some(),
+            self.cursor,
+            self.editor.is_some(),
+            self.notice.clone(),
+        );
         let kind_for = |label: bool| {
             if label {
                 SelectKind::Rows
@@ -2098,8 +2121,15 @@ impl MarketDataTile {
         }
         // Ends in `sync_cursor`, which re-resolves the selection.
         self.cursor_to(row, col, cx);
-        // The header's mode and footer extent follow the selection.
-        self.changed(cx);
+        let after = (
+            self.selection.is_some(),
+            self.cursor,
+            self.editor.is_some(),
+            self.notice.clone(),
+        );
+        if after != before {
+            self.changed(cx);
+        }
     }
 
     /// Select an attribute without opening it. Cancel an existing editor first,

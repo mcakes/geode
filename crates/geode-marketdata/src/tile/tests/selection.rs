@@ -1411,3 +1411,136 @@ fn on_a_hidden_label_panel_the_gutter_selects_rows(cx: &mut gpui::TestAppContext
         Some((SelectKind::Block, 0..2, 0..1))
     );
 }
+
+// A press inside the cell holding the open editor is the editor's own.
+
+/// Caret placement: the click neither cancels the edit nor writes the
+/// draft, and typing still reaches the field.
+#[gpui::test]
+fn a_click_inside_the_open_editor_keeps_it_open(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    h.dispatch(&mut vcx, "right", Some(4)); // (0, 4): 0.2000
+    h.dispatch(&mut vcx, "edit", None);
+    draw(&mut vcx);
+    let at = centre_of(&mut vcx, "marketdata-editor-0-5");
+    click_at(&mut vcx, at, 1);
+    draw(&mut vcx);
+    assert_eq!(h.mode(&vcx), "insert", "the click did not cancel the edit");
+    assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
+    type_keys(&mut vcx, "9");
+    let text = h.editor_value(&vcx).expect("still open");
+    assert!(
+        text.contains('9') && text.len() == "0.2000".len() + 1,
+        "{text}"
+    );
+}
+
+/// A double-click inside the open editor (a word selection there) does
+/// not reopen it: the typed text is not reseeded away.
+#[gpui::test]
+fn a_double_click_inside_the_open_editor_keeps_the_typed_text(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    h.dispatch(&mut vcx, "right", Some(4));
+    h.dispatch(&mut vcx, "edit", None);
+    h.set_editor(&mut vcx, "0.75");
+    draw(&mut vcx);
+    let at = centre_of(&mut vcx, "marketdata-editor-0-5");
+    click_at(&mut vcx, at, 1);
+    click_at(&mut vcx, at, 2);
+    assert_eq!(h.mode(&vcx), "insert");
+    assert_eq!(h.editor_value(&vcx).as_deref(), Some("0.75"));
+}
+
+/// The bulk editor: a click inside it is not a cancel, so the live steps
+/// are not undone and the selection stays.
+#[gpui::test]
+fn a_click_inside_the_stepped_bulk_editor_keeps_the_steps(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    select_two_nodes_by_two_terms(&h, &mut vcx);
+    h.dispatch(&mut vcx, "edit", None);
+    h.dispatch(&mut vcx, "insert_up", None);
+    draw(&mut vcx);
+    let at = centre_of(&mut vcx, "marketdata-editor-1-5");
+    click_at(&mut vcx, at, 1);
+    draw(&mut vcx);
+    assert_eq!(h.mode(&vcx), "insert");
+    assert!(resolved(&h, &vcx).is_some(), "the selection stays");
+    assert_eq!(h.row_texts(&vcx, 0)[3..], ["0.1001", "0.2001", "0.3000"]);
+    assert_eq!(h.row_texts(&vcx, 1)[3..], ["0.4001", "0.5001", "0.6000"]);
+}
+
+/// A date cell's field: a segment click and a click on a separator
+/// between segments both leave the field open.
+#[gpui::test]
+fn a_click_inside_a_date_cells_field_keeps_it_open(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_flat(cx);
+    h.with_flat_document(&mut vcx);
+    h.dispatch(&mut vcx, "edit", None); // ex date, a date cell
+    assert!(h.tile.read_with(&vcx, |t, _| t.date_field().is_some()));
+    let year = centre_of(&mut vcx, &format!("marketdata-date-seg-{TILE}-0"));
+    click_at(&mut vcx, year, 1);
+    assert_eq!(h.mode(&vcx), "insert", "a segment click keeps the field");
+    assert_eq!(
+        h.tile
+            .read_with(&vcx, |t, _| t.date_field().map(|f| f.segment())),
+        Some(Segment::Year)
+    );
+    draw(&mut vcx);
+    let seg = vcx
+        .debug_bounds(Box::leak(
+            format!("marketdata-date-seg-{TILE}-0").into_boxed_str(),
+        ))
+        .expect("painted");
+    // Just past the year: the `-` separator, which has no listener of
+    // its own.
+    let separator = gpui::point(seg.right() + gpui::px(2.), seg.center().y);
+    click_at(&mut vcx, separator, 1);
+    assert_eq!(h.mode(&vcx), "insert", "a separator click keeps the field");
+    assert!(h.tile.read_with(&vcx, |t, _| t.date_field().is_some()));
+}
+
+/// With the selection cleared mid-step the commit is single-cell; its
+/// parse refusal keeps the editor open, and the `escape` after it is a
+/// cancel that undoes the steps.
+#[gpui::test]
+fn escape_after_a_refused_single_cell_commit_mid_step_undoes_the_steps(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    select_two_nodes_by_two_terms(&h, &mut vcx);
+    h.dispatch(&mut vcx, "edit", None);
+    h.dispatch(&mut vcx, "insert_up", None);
+    h.dispatch(&mut vcx, "visual_block", None); // clears
+    h.set_editor(&mut vcx, "abc");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.mode(&vcx), "insert", "the refusal keeps the editor");
+    assert_eq!(h.row_texts(&vcx, 1)[3..], ["0.4001", "0.5001", "0.6000"]);
+    h.dispatch(&mut vcx, "cancel", None);
+    assert!(h.editor_value(&vcx).is_none());
+    assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
+    assert_eq!(h.row_texts(&vcx, 1)[3..], ["0.4000", "0.5000", "0.6000"]);
+    assert_eq!(h.row_texts(&vcx, 0)[3..], ["0.1000", "0.2000", "0.3000"]);
+}
+
+/// A double-click with a selection live: the first press clears it, so
+/// the editor that opens is a single-cell one and a commit writes only
+/// its cell.
+#[gpui::test]
+fn a_double_click_with_a_selection_opens_a_single_cell_editor(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    select_two_nodes_by_two_terms(&h, &mut vcx);
+    let at = centre_of(&mut vcx, "marketdata-cell-1-5");
+    click_at(&mut vcx, at, 1);
+    click_at(&mut vcx, at, 2);
+    assert_eq!(h.mode(&vcx), "insert");
+    assert_eq!(resolved(&h, &vcx), None, "no selection is left");
+    h.set_editor(&mut vcx, "0.25");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.row_texts(&vcx, 1)[3..], ["0.4000", "0.2500", "0.6000"]);
+    assert_eq!(h.row_texts(&vcx, 0)[3..], ["0.1000", "0.2000", "0.3000"]);
+}
