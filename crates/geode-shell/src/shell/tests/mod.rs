@@ -259,11 +259,20 @@ pub(super) fn services_with_page(page: RecordingPageFactory) -> ShellServices {
     )
 }
 
-/// `services` plus one registered page, its actions and fragments folded
+/// `services` plus one registered page; see [`with_pages`].
+pub(super) fn with_page(services: ShellServices, page: RecordingPageFactory) -> ShellServices {
+    with_pages(services, vec![page])
+}
+
+/// `services` plus the registered pages, their actions and fragments folded
 /// into the registry and keymap in `main.rs`'s order: page toggle actions
 /// after the module roster's own, page fragments after the module
-/// fragments.
-pub(super) fn with_page(mut services: ShellServices, page: RecordingPageFactory) -> ShellServices {
+/// fragments. At most one page may ship a toggle binding, since every
+/// recorder defaults to `mod+d`; build the others `without_toggle_binding`.
+pub(super) fn with_pages(
+    mut services: ShellServices,
+    page_factories: Vec<RecordingPageFactory>,
+) -> ShellServices {
     use crate::module::PageFactory as _;
     let mut registry = ActionRegistry::default();
     register_builtin_actions(&mut registry);
@@ -277,9 +286,15 @@ pub(super) fn with_page(mut services: ShellServices, page: RecordingPageFactory)
     );
     crate::defaults::register_add_actions(&mut registry, &services.roster.kinds());
     services.roster.register_actions(&mut registry);
-    crate::defaults::register_page_actions(&mut registry, &[(page.kind(), page.title())]);
+    let entries: Vec<(&'static str, &'static str)> = page_factories
+        .iter()
+        .map(|p| (p.kind(), p.title()))
+        .collect();
+    crate::defaults::register_page_actions(&mut registry, &entries);
     let mut pages = crate::module::PageRoster::new();
-    pages.add(Box::new(page));
+    for page in page_factories {
+        pages.add(Box::new(page));
+    }
     pages.register_actions(&mut registry);
     let (mut fragments, mut diags) = services.roster.keymap_fragments();
     let (page_fragments, page_diags) = pages.keymap_fragments();

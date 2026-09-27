@@ -48,6 +48,13 @@ impl ShellView {
             && page.occupant.kind != kind
         {
             // One page at a time: a different kind replaces the retained one.
+            // Its last state goes back to the restored map, so the next flush
+            // still writes `[pages.<old kind>]` and a later reopen restores
+            // it; dropping the page alone would lose it from the file.
+            self.services.restored_pages.insert(
+                page.occupant.kind.to_string(),
+                page.occupant.content.serialize(cx),
+            );
             page.occupant.content.set_visible(false, cx);
             self.page = None;
         }

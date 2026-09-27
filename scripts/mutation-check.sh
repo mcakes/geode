@@ -3117,6 +3117,15 @@ run_mutation "session: a state-only change alone still flushes" \
   geode-shell \
   a_module_state_change_alone_flushes_once_with_the_new_state
 
+# A page's state moves without any shell action (no layout flag), so the
+# snapshot comparison is the only thing that gets it to disk.
+run_mutation "session: a page-state-only change alone still flushes" \
+  crates/geode-shell/src/shell/session_io.rs \
+  '            && pages == self.last_pages_written' \
+  '            && true' \
+  geode-shell \
+  a_page_state_change_alone_flushes_once_and_is_quiet_afterwards
+
 # ---- command line (Phase 3 §3.4)
 
 run_mutation "commandline: an ambiguous word is refused, never guessed" \

@@ -1258,6 +1258,7 @@ pub mod recording {
         view: Entity<RecordingPageView>,
         log: Rc<RefCell<Vec<PageRecorded>>>,
         consume_close: Rc<Cell<bool>>,
+        serialized: Rc<RefCell<toml::Table>>,
     }
 
     impl PageContent for RecordingPageContent {
@@ -1295,16 +1296,15 @@ pub mod recording {
             SharedString::from(self.view.read(cx).kind)
         }
         fn serialize(&self, _cx: &App) -> toml::Table {
-            let mut t = toml::Table::new();
-            t.insert("recorded".into(), toml::Value::Boolean(true));
-            t
+            self.serialized.borrow().clone()
         }
     }
 
     /// A page factory for shell tests: records lifecycle and actions, paints
-    /// one real `Input` so `holds_focus` can be exercised, and can be told to
+    /// one real `Input` so `holds_focus` can be exercised, can be told to
     /// consume the next `page::close` (standing in for a page with a
-    /// dismissable surface of its own).
+    /// dismissable surface of its own), serializes a table the test can
+    /// change, and records the table `create` was handed.
     pub struct RecordingPageFactory {
         kind: &'static str,
         title: &'static str,
@@ -1312,10 +1312,14 @@ pub mod recording {
         consume_close: Rc<Cell<bool>>,
         toggle_binding: Option<&'static str>,
         created_input: Rc<RefCell<Option<Entity<InputState>>>>,
+        serialized: Rc<RefCell<toml::Table>>,
+        restored: Rc<RefCell<Option<toml::Table>>>,
     }
 
     impl RecordingPageFactory {
         pub fn new(kind: &'static str) -> RecordingPageFactory {
+            let mut serialized = toml::Table::new();
+            serialized.insert("recorded".into(), toml::Value::Boolean(true));
             RecordingPageFactory {
                 kind,
                 title: Box::leak(crate::defaults::capitalize(kind).into_boxed_str()),
@@ -1323,7 +1327,19 @@ pub mod recording {
                 consume_close: Rc::new(Cell::new(false)),
                 toggle_binding: Some("mod+d"),
                 created_input: Rc::new(RefCell::new(None)),
+                serialized: Rc::new(RefCell::new(serialized)),
+                restored: Rc::new(RefCell::new(None)),
             }
+        }
+        /// The table the created page's `serialize` returns; starts as
+        /// `recorded = true`. A test changes it to stand in for a page
+        /// whose state moved without any shell action.
+        pub fn serialized(&self) -> Rc<RefCell<toml::Table>> {
+            self.serialized.clone()
+        }
+        /// The `restored` table `create` received, once created.
+        pub fn restored(&self) -> Rc<RefCell<Option<toml::Table>>> {
+            self.restored.clone()
         }
         pub fn without_toggle_binding(mut self) -> Self {
             self.toggle_binding = None;
@@ -1373,7 +1389,7 @@ pub mod recording {
         }
         fn create(
             &self,
-            _restored: Option<&toml::Table>,
+            restored: Option<&toml::Table>,
             _frame: Entity<Frame>,
             _diagnostics: Entity<Diagnostics>,
             _actions: ShellActions,
@@ -1381,6 +1397,7 @@ pub mod recording {
             cx: &mut App,
         ) -> PageOccupant {
             self.log.borrow_mut().push(PageRecorded::Created);
+            *self.restored.borrow_mut() = restored.cloned();
             let kind = self.kind;
             let input = cx.new(|cx| InputState::new(window, cx));
             *self.created_input.borrow_mut() = Some(input.clone());
@@ -1396,6 +1413,7 @@ pub mod recording {
                     view,
                     log: self.log.clone(),
                     consume_close: self.consume_close.clone(),
+                    serialized: self.serialized.clone(),
                 }),
             }
         }

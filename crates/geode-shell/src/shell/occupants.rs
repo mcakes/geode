@@ -45,8 +45,9 @@ impl ShellView {
         tiles
     }
 
-    /// Every created page's state (open or not), plus restored tables no
-    /// page has consumed, so an unknown kind survives a save.
+    /// The retained page's state (open or not), plus every table still in
+    /// `restored_pages`: kinds never opened, unknown kinds, and the last
+    /// state of a page another kind replaced. All of them survive a save.
     pub(super) fn current_pages(&self, cx: &App) -> session::PageRecords {
         let mut pages: session::PageRecords = self.services.restored_pages.clone();
         if let Some(page) = &self.page {
