@@ -1,4 +1,4 @@
-//! The x axis (spec §8.2): `Session` maps bucket INDEX to x so a span
+//! The x axis: `Session` maps bucket index to x so a span
 //! with no bucket has no width; `Continuous` maps wall-clock micros.
 //! Bucket `i` occupies `[i, i+1)` (session) or `[b_i, b_i + step)`
 //! (continuous); its centre is where the point paints.
@@ -13,7 +13,7 @@ pub enum TimeScale<'a> {
     Continuous { buckets: &'a [i64], step_us: i64 },
 }
 
-/// The nearest bucket to a cursor (spec §8.1).
+/// Locate the visible bucket centre nearest the cursor.
 pub struct Crosshair;
 
 impl<'a> TimeScale<'a> {
@@ -111,7 +111,7 @@ impl Crosshair {
     }
 }
 
-/// A tick unit (spec §8.2), finest first.
+/// Calendar tick units ordered from finest to coarsest.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Unit {
     Minute,
@@ -229,11 +229,9 @@ fn at(us: i64, offset: FixedOffset) -> DateTime<FixedOffset> {
 /// Ticks for the view into `out` (cleared first); the unit chosen, or
 /// `None` when nothing is visible.
 ///
-/// The chooser builds one candidate `Vec` per unit, so a call allocates
-/// up to five short-lived vectors. That is deliberate: ticks are
-/// recomputed on a chrome-key miss — a view, size, offset or bucket
-/// change — never per frame, so the clarity is worth more here than the
-/// churn; the per-frame paths stay allocation-free.
+/// The chooser builds up to five candidate vectors and formats the chosen
+/// labels. The chart element caches this result until the model, view,
+/// bounds or rem changes, keeping candidate generation out of warm paints.
 pub fn ticks(
     scale: &TimeScale,
     view: View,

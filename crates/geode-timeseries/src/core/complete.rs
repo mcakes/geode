@@ -2,7 +2,7 @@
 //! is in, which loaded names rank against it, and what Tab, Shift+Tab, a
 //! click and Enter write. Pure; the tile owns the input and the focus.
 //!
-//! An expression may reference only a LOADED source series, so the
+//! An expression may reference only a loaded source series, so the
 //! candidates are [`crate::core::Model::series_names`], ranked with the
 //! `:` line's matcher. Word boundaries come from the expression
 //! tokenizer's own character classes, so the completer never offers to
@@ -119,8 +119,8 @@ impl Write {
 }
 
 /// Whether `range` can be sliced out of `line`: in bounds, ordered, and on
-/// character boundaries at both ends. A range cached against other text
-/// fails this rather than panicking the listener that applies it.
+/// character boundaries at both ends. This prevents stale ranges from
+/// panicking a listener; it does not verify that the text is unchanged.
 fn fits(line: &str, range: &Range<usize>) -> bool {
     range.start <= range.end
         && range.end <= line.len()
@@ -152,7 +152,8 @@ impl Completion {
         self.written.is_none() || self.caret != Some(caret)
     }
 
-    /// No series is loaded, so nothing can be referenced at all.
+    /// No unambiguous source names were supplied. This can also happen when
+    /// loaded source pairs are duplicated and cannot be named uniquely.
     pub fn nothing_loaded(&self) -> bool {
         self.names.is_empty()
     }

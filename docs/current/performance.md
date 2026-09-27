@@ -91,13 +91,16 @@ changes still rebuild.
   `render_td`.
 - A market-data delivery or structural edit builds a `MatrixModel`; an
   ordinary cell commit patches it.
-- `ChartKey` contains everything timeseries chart preparation reads. Cursor,
-  fetch-state, and visibility changes do not copy the value vectors.
+- `ChartKey` contains everything timeseries chart preparation reads. Cursor
+  movement and fetch-state changes reuse value vectors. Per-slot visibility
+  changes rebuild the model; theme and named-color changes can trigger that
+  rebuild during render.
 - Chart data paths and chrome are cached. A view move invalidates geometry but
   does not rebuild the module's data model.
-- Chart decimation reuses buffers. GPUI path submission still clones the
-  decimated path, and component axis painters allocate small tick vectors.
-- Density bars are uncached but capped at 2,000 quads per frame.
+- Chart decimation reuses buffers and retains up to two extrema per finite
+  run in each pixel column. Gaps can increase output beyond two points per
+  column. Warm paints still allocate for path submission, labels, and tooltips.
+- Density bars are uncached but capped at 2,000 quads per chart paint.
 - A pricer grid model is rebuilt on edit, delivery, expansion, view, clock or
   entry change, never in render; paints are a per-theme memo.
 - Config dialogs derive rows at each render, key-handling, and click-resolution

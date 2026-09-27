@@ -1,5 +1,7 @@
-//! Window-free geometry (spec §8.1). Everything is `Copy` or borrows;
-//! nothing allocates except into a caller-owned buffer.
+//! Window-free chart geometry, time labels, decimation and palette values.
+//!
+//! Geometry operates over slices and values. Decimation reuses a caller-owned
+//! buffer; time ticks allocate candidate vectors and formatted labels.
 
 pub mod axis;
 pub mod decimate;
@@ -15,7 +17,7 @@ pub mod view;
 /// duplicated because this crate must not depend on the shell.
 pub const DESIGN_REM: f32 = 12.0;
 
-/// Spec §8 constants, in design pixels at [`DESIGN_REM`].
+/// Density-strip width in design pixels at [`DESIGN_REM`].
 pub const DENSITY_STRIP: f32 = 80.0;
 pub const TICK_GAP: f32 = 64.0;
 pub const DASH: f32 = 4.0;
@@ -28,18 +30,13 @@ pub const X_AXIS_HEIGHT: f32 = 18.0;
 /// Minimum vertical distance between two y ticks.
 pub const Y_TICK_GAP: f32 = 40.0;
 
-/// Most density bars one FRAME paints, across both panes and every
-/// visible slot.
+/// Maximum density bars painted by one chart in one paint call, shared
+/// across both panes and all visible slots.
 ///
-/// A bar is one `paint_quad` with no cache behind it. Measurement found
-/// per-cell painting blows up past about 5,000 quads:
-/// 10,000 cost 42 ms, six times a 60 Hz frame. Nothing in the model
-/// bounds the product: `geode_core::series::MAX_BINS` is 200 and a tile
-/// may hold many slots, so nine slots with density on would be ~1,800
-/// quads and a dozen more would cross the cliff. The element counts the
-/// bars it paints and stops at this bound, per pane in slot order, so
-/// the render thread's density cost has a ceiling whatever a module
-/// asks for.
+/// Bars use uncached `paint_quad` calls, so their cost grows with the product
+/// of slots and bins. The painter stops at this limit, visiting the upper
+/// pane before the lower pane and slots in model order within each pane.
+/// Density-strip backgrounds are outside this count.
 pub const MAX_DENSITY_QUADS: usize = 2_000;
 
 /// A design length resolved for the window's rem.
@@ -80,7 +77,7 @@ impl Point {
     pub const fn new(x: f32, y: f32) -> Self {
         Self { x, y }
     }
-    /// A polyline break: the decimator emits one where a `NaN` value
+    /// A polyline break: the decimator emits one where a non-finite value
     /// ends a segment; the path builder starts a new subpath after it.
     pub const BREAK: Point = Point {
         x: f32::NAN,

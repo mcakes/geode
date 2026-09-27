@@ -815,11 +815,9 @@ impl TimeseriesTile {
         self.toggle_menu_kind(MenuKind::Actions, window, cx);
     }
 
-    /// Close menu `kind` if it is up, otherwise close whatever is (a
-    /// field blurred first, through the one closer) and open it. The
-    /// rows are built HERE, once per open — the model, the default
-    /// source, the live chords and the frequency rows' cap refusals are
-    /// read then, never in `render`.
+    /// Toggle menu `kind`, closing a different popup through the focus-aware
+    /// closer first. Opening prepares rows from the model, default source, live
+    /// chords, and point-cap refusals; later chrome and frame changes refresh them.
     pub(super) fn toggle_menu_kind(
         &mut self,
         kind: MenuKind,
@@ -1034,9 +1032,9 @@ impl TimeseriesTile {
         self.open_menu(MenuKind::Actions, cx);
     }
 
-    /// A click on a chip's swatch: the slot becomes the cursor and its
-    /// visibility flips — `v`'s own path, so the fetch-on-show and the
-    /// density budget rules ride along.
+    /// Select the clicked slot and toggle its visibility through the same model
+    /// operation as `v`, including density-budget enforcement. Retained points
+    /// remain available while a series is hidden.
     pub(crate) fn swatch_clicked(&mut self, index: usize, cx: &mut Context<Self>) {
         let moved = self.model.set_cursor(index);
         let flipped = self.model.toggle_visible();

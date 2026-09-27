@@ -21,7 +21,7 @@ Every module follows these interaction rules:
 
 - `:` changes only the focused tile; global changes use actions and palette
   flows.
-- `/` searches within the tile.
+- `/` routes find input to the tile when it supports local search.
 - Pointer commands have keyboard equivalents.
 - Insert-mode inputs own focus only while editing and blur before they close.
 - Stack state is visible through the shared marker in the module header.
@@ -305,8 +305,10 @@ name's first character is in that name, and a caret in a number offers
 nothing. Loaded names that name exactly one series are ranked against
 it with the `:` line's matcher; an empty name (an empty field, or after an
 operator, a parenthesis or a space) offers every one. The list hangs under the
-field over the chart, showing at most eight rows that scroll with the lit row;
-with nothing loaded it says so and names `a`. Tab writes the lit name over the
+field over the chart, showing at most eight rows that scroll with the lit row.
+When no unambiguous source names are available, it shows the add-series hint;
+this also happens when duplicate loaded pairs leave no usable name.
+Tab writes the lit name over the
 name at the caret and repeated Tab cycles the same list; Shift+Tab cycles
 back, and a first Shift+Tab writes the last. The lit row is the name last
 written. A row click writes that name the same way and leaves the keyboard in
@@ -318,8 +320,8 @@ field's undo history. A caret moved without typing, including after a Tab,
 re-ranks on the next Tab, not before; the list itself shows the ranking from
 the last edit. A change of the desk's default source relabels an open list.
 
-A tile's session table is written with `version = 2`. A table without it
-may name series in expression text by slot handle (`s3`), and restore
+A tile's session table is written with `version = 2`. A table with a missing
+version or one below 2 may name series in expression text by slot handle (`s3`), and restore
 rewrites each handle: a source slot's handle becomes its full
 `identity@source`, never the bare identity, so a later change of the default
 source cannot retarget it; another expression's handle becomes that
@@ -336,7 +338,9 @@ Expression slots may narrow results to buckets shared by their operands.
 Delivery tags reject superseded queries. Results requested under a pending
 frame flip are staged until promotion is allowed. This coordinates ready
 results, but the barrier timeout can release them while lagging tiles still
-show older data.
+show older data. The tile follows frame as-of changes and ignores grouping
+and scope. Returning a hidden tile to visibility refetches its source pairs.
+The tile's `/` handler does not implement local find.
 
 The series list, add picker, expression editor, custom dates editor, the three
 menus (action list, range, frequency), and color picker share one `Popup`

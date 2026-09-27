@@ -1,20 +1,13 @@
-//! A window over a generated three-slot model:
+//! A standalone window over a generated three-slot model:
 //! `cargo run -p geode-chart --example chart`.
 //!
-//! Exists because the implementation sandbox cannot paint a window: this
-//! is what the display check runs, and it is kept for the next one. Two
-//! panes (`s3` on the lower left), density on, three percentiles per
-//! slot, a NaN gap every 97 buckets and a session axis whose 2,000
-//! one-minute buckets span five 400-bar days. Keys: `h`/`l` pan,
-//! `=`/`+` zoom in, `-` zoom out, `0` reset — the module's own keys are
-//! Part 4's; these are the example's, bound on the demo view itself.
+//! The display fixture has two panes (`s3` on the lower left), density bars,
+//! three percentiles per slot and a NaN gap every 97 buckets. Its session
+//! axis spans five 400-bar days. Example keys: `h`/`l` pan, `=`/`+` zoom in,
+//! `-` zoom out and `0` reset; these are handled by the demo view.
 //!
-//! **The percentiles and the density bins below are computed HERE, by
-//! plain sorting, and that arithmetic lives in this example binary —
-//! never in `src/`.** `geode-chart` is a lens (PHILOSOPHY §1): in the
-//! app both numbers arrive already computed, from the series query's
-//! `SeriesOutcome`, and the crate only turns a number into a coordinate.
-//! A demo has no data tier to ask, so it does the sorting itself.
+//! This binary computes fixture percentiles and bins by sorting generated
+//! values. Production callers supply those statistics in the chart model.
 
 use std::sync::Arc;
 
@@ -69,9 +62,8 @@ fn model(cx: &App) -> Arc<ChartModel> {
 
     let slot = |number: u8, axis: Axis, seed: u64, base: f64| -> ChartSlot {
         let values = walk(seed, base);
-        // Everything from here to the struct literal is the EXAMPLE's
-        // own arithmetic (see the module doc): the data tier's job in
-        // the app, done by sorting because a demo has no data tier.
+        // Prepare statistics for the fixture. Production models receive
+        // these values from the data tier.
         let mut sorted: Vec<f64> = values.iter().copied().filter(|v| v.is_finite()).collect();
         sorted.sort_by(f64::total_cmp);
         // Nearest-rank percentiles over the sorted finite values.
@@ -172,8 +164,6 @@ fn main() {
             let model = model(cx);
             let demo = cx.new(|cx| {
                 let focus = cx.focus_handle();
-                // `FocusHandle::focus` takes the app too at the pinned
-                // gpui-pre rev (`window.rs`); `Context` derefs to `App`.
                 focus.focus(window, cx);
                 Demo {
                     view: View::full(model.full()),

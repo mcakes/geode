@@ -1,12 +1,10 @@
-//! The immutable input a tile builds once per delivery (spec §8.3).
+//! Prepared chart data and presentation shared with the painting element.
 //!
-//! A `ChartModel` is a plain value: the display buckets, one `ChartSlot`
-//! per series slot with its values already aligned to them, and the
-//! per-slot statistics the data tier computed (percentiles, density
-//! bins). Nothing here computes a number — PHILOSOPHY §1: the chart is a
-//! lens, so the element only ever turns a number into a coordinate.
-//! `version` is bumped by whoever builds the model, and is the first
-//! component of every path-cache key the element forms.
+//! A [`ChartModel`] contains display buckets, aligned values for each
+//! [`ChartSlot`], and statistics supplied by the caller. The chart derives
+//! coordinates and scales; it does not calculate percentiles or density bins.
+//! Callers must change `version` whenever model contents change so cached
+//! scales, labels and paths cannot survive a change to their inputs.
 
 use std::sync::Arc;
 

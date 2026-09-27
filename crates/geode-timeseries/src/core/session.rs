@@ -4,8 +4,8 @@
 //! malformed input where possible and reports discarded data through notices
 //! the tile shows once.
 //!
-//! A table without `version = 2` may name slots by handle (`s3`) in
-//! expression text. Restoring it rewrites each handle to a name: a
+//! A table with a missing version or `version < 2` may name slots by handle
+//! (`s3`) in expression text. Restoring it rewrites each handle to a name: a
 //! source slot's full `identity@source` (never the default-aware label,
 //! which a later default change would retarget), or an expression
 //! slot's own text in parentheses, recursively. A text with no handle
@@ -26,8 +26,8 @@ use super::range::Range;
 use super::resolve::{name_for, resolve};
 use super::rgb::Rgb8;
 
-/// The table format: 2 names series in expression text; absent (1)
-/// names them by slot handle.
+/// Session format written by this crate. Versions below 2, including an
+/// absent version, permit slot handles in expression text.
 const VERSION: i64 = 2;
 
 /// The longest text a handle rewrite may build. Inlining expressions
@@ -261,9 +261,8 @@ pub fn from_table(
         m.set_next_number(p.number);
         let added = match rewritten {
             Ok((text, expr)) => m.add_expr(&text, expr).map(|_| ()),
-            // A legacy text that cannot be rewritten keeps its slot,
-            // failed; a current text that does not resolve is dropped,
-            // as it always was.
+            // Keep failed handle rewrites for a later restore or edit.
+            // Unresolvable name-based expressions are dropped with a notice.
             Err(why) if p.legacy => m.add_legacy_expr(p.text, why).map(|_| ()),
             Err(why) => {
                 notices.push(why);
@@ -323,8 +322,7 @@ fn row_name(r: &Table) -> String {
     }
 }
 
-/// A handle as the old grammar read one: `s` then digits that fit a
-/// `u8`, with no `@source`.
+/// A legacy slot handle: `s` then digits that fit a `u8`, with no `@source`.
 fn legacy_handle(r: &expr::RefName) -> Option<u8> {
     if r.source.is_some() {
         return None;
@@ -400,8 +398,8 @@ fn rewrite_handles(
 }
 
 fn apply_look(m: &mut Model, number: u8, r: &Table) {
-    // `colour` is the key's spelling before the rename; the next save
-    // rewrites it as `color`.
+    // Accept the compatibility key `colour` only when `color` is absent.
+    // Serialization always writes `color`.
     match r.get("color").or_else(|| r.get("colour")) {
         Some(Value::Integer(i))
             if (0..geode_chart::core::palette::Palette::LEN as i64).contains(i) =>
@@ -533,8 +531,8 @@ mod tests {
         );
     }
 
-    /// A session saved before the key was renamed still says `colour`: it is
-    /// read, `color` wins beside it, and the next save writes `color` only.
+    /// The compatibility key `colour` is accepted, `color` takes precedence,
+    /// and serialization writes `color` only.
     #[test]
     fn the_old_colour_key_is_read_and_rewritten_as_color() {
         let text = r##"

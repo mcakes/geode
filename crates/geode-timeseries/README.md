@@ -29,12 +29,12 @@ cargo test -p geode-timeseries
 cargo bench -p geode-timeseries
 ```
 
-## Rules this crate pins
+## Invariants
 
-- `Changed` decides which work a mutation causes; do not replace it with a
-  blanket query and rebuild.
-- Fetch every slot still in `Fetching`; one completed pair may unblock several
-  tiles.
+- `Changed` identifies which mutations require fetching, querying, chart
+  preparation, chrome refresh, or session persistence.
+- Fetch requests cover waiting source/identity pairs, deduplicated within the
+  tile. One completion may unblock several slots or tiles.
 - `Ok(0)` fetch completion still triggers a query because coverage is known.
 - `ChartKey` contains everything chart preparation reads and excludes cursor
   movement.
@@ -57,10 +57,10 @@ cargo bench -p geode-timeseries
   Numbering continues past every number a legacy text names, so the retry
   never resolves a handle to a newer series. Completion leaves out a label
   that names more than one series.
-- A menu's rows are built when it opens, on a chrome rebuild, and on a frame
-  change while it is up, never in `render`; a frequency the point cap refuses
-  is a disabled row whose reason is the model's own refusal, so a pickable row
-  never fails.
+- Menu rows are prepared on open, on chrome rebuilds, and on frame changes
+  while the menu is up. Theme or named-color changes can trigger a chrome
+  rebuild during render. A frequency the point cap refuses is disabled and
+  carries the model's refusal; range presets are validated when chosen.
 - Menu picks and empty-state buttons dispatch registered actions, or write a
   range or frequency through the model's own setters. Other pointer controls
   share model operations and change processing with keyboard commands.
@@ -74,7 +74,7 @@ cargo bench -p geode-timeseries
 - A pointer gesture ends at the same tail as its key: pan and zoom at
   `view_moved`, a split at `apply_changed`.
 - The color picker writes to the slot number it was opened for, never to the
-  cursor, through `Model::set_colour` and `apply_changed`, the same path as
+  cursor, through `Model::set_color` and `apply_changed`, the same path as
   `:color`. The target and featured colors it writes against (`PickContext`)
   outlive the popup, because the hex field's `enter` closes the popover
   before its commit arrives.

@@ -1,7 +1,7 @@
-//! What one delivery costs the UI thread in `geode-timeseries`: building
-//! the `ChartModel` from a `SeriesResult` at the series query's point cap
-//! — 500,000 buckets, four slots (`chart::build` clones every value
-//! vector once; the element then owns the model by `Arc`).
+//! Chart-model preparation at the series query's 500,000-point cap with four
+//! slots. Measures `chart::build`, including cloned bucket and value vectors,
+//! labels, percentiles, and bins. Query execution, delivery handling, and chart
+//! rendering are outside this benchmark.
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use geode_core::series::{SeriesResult, SlotProvenance, SlotResult};

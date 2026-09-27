@@ -1,16 +1,16 @@
 //! The shell-hosted timeseries entity: slot model, requests, prepared header,
 //! chart input, and one tile-owned popup.
 //!
-//! Model changes carry [`Changed`](crate::core::Changed) flags into
-//! [`TimeseriesTile::apply_changed`], which schedules fetches and queries and
-//! refreshes prepared content. View movement uses [`TimeseriesTile::view_moved`]
+//! Model changes carry [`Changed`] flags into
+//! `TimeseriesTile::apply_changed`, which schedules fetches and queries and
+//! refreshes prepared content. View movement uses `TimeseriesTile::view_moved`
 //! to retain the chart's cached paths; only visible-window statistics need a
 //! new query. Refusals become notices or inline popup errors.
 //!
-//! [`data`] owns fetch tracking, tagged series delivery, and flip-barrier
+//! `data` owns fetch tracking, tagged series delivery, and flip-barrier
 //! staging. Only the frame's as-of counter invalidates an established series
 //! request; flip releases staged results without triggering a query.
-//! [`popups`] owns opening, input, commit, and dismissal for local editors.
+//! `popups` owns opening, input, commit, and dismissal for local editors.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -152,10 +152,9 @@ pub struct TimeseriesTile {
     header: HeaderModel,
     title: SharedString,
     stack: Option<StackHandle>,
-    /// One local popup: series list, add picker, expression editor, custom
-    /// dates editor, or a menu. List and menu rows are prepared with chrome;
-    /// date segments are prepared by field transitions rather than formatted
-    /// during render.
+    /// One local popup: series list, add picker, expression editor, custom dates
+    /// editor, menu, or color picker. List and menu rows are prepared with chrome;
+    /// date segments are prepared by field transitions rather than during render.
     popup: Option<Popup>,
     footer: Vec<header::FooterHint>,
     /// The chart surface's last painted bounds (`tile::pointer`).
@@ -296,10 +295,8 @@ impl TimeseriesTile {
         })
         .detach();
 
-        // One derivation feeds both the chips' swatches and the chart
-        // model's line colors — they are the same five colors, and
-        // building the wheel twice is the thing `rebuild_chrome` exists
-        // to avoid.
+        // Share theme-derived palette and named-color inputs between chip
+        // swatches and chart lines so their colors agree without duplicate setup.
         let colors_ptr = Arc::as_ptr(&colors.borrow()) as usize;
         let color_of = color_fn(Arc::clone(&colors.borrow()), cx.theme());
         let header = HeaderModel::prepare(&model, settings.default_source.as_deref(), &color_of);

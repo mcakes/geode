@@ -1,4 +1,4 @@
-//! Where a slot paints (ruling 12): four y axes over two panes.
+//! Four y-axis assignments across an upper and an optional lower pane.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum Axis {
@@ -43,7 +43,7 @@ impl Axis {
             Axis::Right | Axis::BottomRight => Side::Right,
         }
     }
-    /// `left → right → bottomleft → bottomright → left` (the `y` key).
+    /// Cycle `left → right → bottomleft → bottomright → left`.
     pub fn next(self) -> Axis {
         let i = Axis::ALL.iter().position(|a| *a == self).unwrap();
         Axis::ALL[(i + 1) % 4]
@@ -60,7 +60,7 @@ impl Axis {
             Axis::BottomRight => "bottomright",
         }
     }
-    /// The chip letter(s) (spec §9.3).
+    /// Compact axis label: `L`, `R`, `BL` or `BR`.
     pub fn letter(self) -> &'static str {
         match self {
             Axis::Left => "L",

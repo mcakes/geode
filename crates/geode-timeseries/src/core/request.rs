@@ -1,4 +1,6 @@
-//! From the model to a `SeriesParams` (spec §6.1, §9.10).
+//! Build series requests from the tile model and frame as-of. The query range
+//! covers the configured dates; the visible window bounds statistics. Failed
+//! legacy expressions are excluded because they have no resolved operands.
 
 use chrono::{DateTime, TimeZone, Utc};
 use geode_chart::AxisMode;
@@ -7,12 +9,10 @@ use geode_core::series::{SeriesParams, SeriesSpec};
 
 use super::model::Model;
 
-/// The visible span (ruling 10: stats are over the VISIBLE window).
-/// `None` when there are no buckets yet — this function cannot know the
-/// range to fall back to, so `params` is the one that does. Under
-/// `Session` the view is an index window; the span runs from the first
-/// visible bucket to the last visible bucket plus one frequency step
-/// (half-open). Under `Continuous` the view IS micros.
+/// Convert the visible view to a half-open UTC span for statistics. Session
+/// mode maps bucket indices to timestamps, ending one frequency step after
+/// the last visible bucket. Continuous mode stores microseconds directly.
+/// With no buckets, return `None`; [`params`] falls back to the query range.
 pub fn window(model: &Model, buckets: &[i64]) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
     if buckets.is_empty() {
         return None;
@@ -34,6 +34,9 @@ pub fn window(model: &Model, buckets: &[i64]) -> Option<(DateTime<Utc>, DateTime
     })
 }
 
+/// Build a request when the model has a dataset and at least one slot.
+/// Carry all nonlegacy slots, including hidden slots and expression operands.
+/// Clamp the statistics window to the query range, allowing an empty window.
 pub fn params(
     model: &Model,
     key: QueryKey,

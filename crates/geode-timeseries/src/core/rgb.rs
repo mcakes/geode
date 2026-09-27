@@ -14,9 +14,9 @@ use super::model::Color;
 pub struct Rgb8(pub [u8; 3]);
 
 impl Rgb8 {
-    /// `#rrggbb`, six hex digits in either case, and nothing else: the
-    /// short and alpha forms the picker's own field accepts are refused,
-    /// because a series is always opaque and one spelling is one colour.
+    /// Parse `#rrggbb` with exactly six hex digits in either case. Commands
+    /// and sessions use this opaque RGB form; the picker's short and alpha
+    /// forms must be converted to RGB bytes before they can be stored.
     pub fn parse_hex(text: &str) -> Option<Rgb8> {
         let digits = text.strip_prefix('#')?;
         if digits.len() != 6 || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
