@@ -3106,6 +3106,17 @@ impl PricerTile {
         self.cursor.line.and_then(|id| self.model.grid_row_of(id))
     }
 
+    /// The launch context at the cursor: the cursor row's sole underlying.
+    pub(crate) fn launch_context(&self) -> geode_core::launch::LaunchContext {
+        geode_core::launch::LaunchContext {
+            underlying: self
+                .cursor_row()
+                .and_then(|g| self.model.rows.get(g))
+                .and_then(|r| r.row)
+                .and_then(|row| self.sheet.sole_underlying(row)),
+        }
+    }
+
     /// Point the cursor at grid row `row` (clamped to a cursor row).
     pub(crate) fn set_cursor_row(&mut self, row: usize) {
         let rows: Vec<usize> = self.cursor_rows().collect();
@@ -3804,6 +3815,25 @@ pub(crate) mod tests {
         assert_eq!(r.sheet.as_deref(), Some("book"));
         assert_eq!(r.view.as_deref(), Some("barrier"));
         assert_eq!(r.cursor, Some(crate::core::LineId(2)));
+    }
+
+    /// The cursor line's underlying is the tile's launch context; an empty
+    /// sheet has none.
+    #[gpui::test]
+    fn the_launch_context_is_the_cursor_lines_underlying(cx: &mut gpui::TestAppContext) {
+        let (store, mut record) = seeded(&["SPX Z26 5000 C", "NDX Z26 20000 C"]);
+        record.insert("cursor".into(), toml::Value::Integer(2));
+        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        h.visible(&mut vcx, true);
+        let ctx = vcx.update(|_, cx| h.content.launch_context(cx));
+        assert_eq!(ctx.underlying.as_deref(), Some("NDX"));
+    }
+
+    #[gpui::test]
+    fn an_empty_sheet_has_no_launch_context(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        let empty = vcx.update(|_, cx| h.content.launch_context(cx));
+        assert!(empty.is_empty());
     }
 
     #[gpui::test]

@@ -205,6 +205,26 @@ impl Sheet {
         self.instrument[row].as_ref()
     }
 
+    /// The one underlying `row` is on: its own instrument's for a line or a
+    /// leg, the legs' shared one for a package. `None` for a package across
+    /// several underlyings (or none), or a row with no instrument; a launch
+    /// context names one underlying or nothing.
+    pub fn sole_underlying(&self, row: usize) -> Option<String> {
+        if !self.is_package(row) {
+            return self.instrument(row).map(|i| i.underlying().to_string());
+        }
+        let mut found: Option<&str> = None;
+        for leg in self.children(row) {
+            let u = self.instrument(leg)?.underlying();
+            match found {
+                None => found = Some(u),
+                Some(f) if f == u => {}
+                Some(_) => return None,
+            }
+        }
+        found.map(str::to_string)
+    }
+
     pub fn qty(&self, row: usize) -> i64 {
         self.qty[row]
     }
@@ -682,6 +702,51 @@ pub(crate) mod tests {
                 rows,
             })
             .unwrap();
+    }
+
+    fn ndx(strike: f64, kind: OptionKind) -> Instrument {
+        let Instrument::Vanilla(mut v) = spx(strike, kind) else {
+            unreachable!()
+        };
+        v.underlying = "NDX".into();
+        Instrument::Vanilla(v)
+    }
+
+    #[test]
+    fn a_line_and_a_leg_name_their_own_underlying() {
+        let mut s = Sheet::new("t");
+        push(
+            &mut s,
+            vec![line(spx(5000.0, OptionKind::Call), 1), callspread(-5)],
+        );
+        assert_eq!(s.sole_underlying(0), Some("SPX".into()), "a line");
+        let leg = s.children(1).start;
+        assert_eq!(s.sole_underlying(leg), Some("SPX".into()), "a leg");
+        assert_eq!(
+            s.sole_underlying(1),
+            Some("SPX".into()),
+            "a package on one underlying"
+        );
+    }
+
+    #[test]
+    fn a_package_across_two_underlyings_names_none() {
+        let mut s = Sheet::new("t");
+        push(
+            &mut s,
+            vec![
+                line(spx(1.0, OptionKind::Call), 1),
+                line(ndx(2.0, OptionKind::Call), 1),
+            ],
+        );
+        s.apply(Edit::Group {
+            first: 0,
+            count: 2,
+            template: Template::Custom,
+            id: None,
+        })
+        .unwrap();
+        assert_eq!(s.sole_underlying(0), None);
     }
 
     #[test]

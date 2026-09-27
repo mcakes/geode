@@ -14,7 +14,7 @@ The pure core (`core`, no element, entity, window, or data service):
 
 | Module | Holds |
 |---|---|
-| `sheet` | Struct-of-arrays rows, packages, inherited shifts, and stable line IDs. |
+| `sheet` | Struct-of-arrays rows, packages, inherited shifts, stable line IDs, and `sole_underlying` (a row's own underlying, or a package's when its legs share one). |
 | `edit` | The one mutation door and undo records. |
 | `undo` | The tile's bounded, strictly last-in first-out undo/redo stack. |
 | `shorthand`, `template` | Parsing and rendering custom lines and package templates. |

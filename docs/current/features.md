@@ -486,7 +486,11 @@ Normal-mode keys:
 | `p` / `shift+p` | Put the remembered row below / above; a package always lands at a root boundary |
 | `shift+j` / `shift+k` | Move the row within its parent |
 | `g p` / `g u` | Group the cursor row and the next `count − 1` roots into a custom package / ungroup |
+| `g m` | Open a panel on the cursor row's underlying |
 | `.` | Open the action menu |
+
+`g m` opens a panel on the cursor row's underlying: a line's or leg's own, a
+package's when its legs share one; otherwise the plain tile picker.
 
 The action menu offers repricing, grouping, ungrouping, undo, redo, deletion,
 and view selection. Key hints show default bindings and do not reflect

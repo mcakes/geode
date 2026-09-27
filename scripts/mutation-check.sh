@@ -21449,6 +21449,12 @@ run_mutation "launch: blotter turns a NULL underlying into text" \
   '    Some(path.get(level)?.clone().unwrap_or_else(|| "NULL".into()))' \
   geode-blotter a_null_underlying_is_empty_not_a_made_up_key
 
+run_mutation "launch: a mixed package names its first leg's underlying" \
+  crates/geode-pricer/src/core/sheet.rs \
+  '                Some(_) => return None,' \
+  '                Some(_) => {}' \
+  geode-pricer a_package_across_two_underlyings_names_none
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
