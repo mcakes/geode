@@ -177,10 +177,7 @@ pub(crate) fn rail(
             .child(s.title())
             .child(badge.text_xs())
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                let _ = weak.update(cx, |p, cx| {
-                    p.set_section(s, cx);
-                    p.sync_filter_input(window, cx);
-                });
+                let _ = weak.update(cx, |p, cx| p.set_section(s, window, cx));
             });
         listrow::paint_row(row, paint, s == section)
     });

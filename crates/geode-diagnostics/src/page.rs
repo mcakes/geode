@@ -67,9 +67,6 @@ pub struct DiagnosticsPage {
     /// Filter text per section; the one input shows the selected section's.
     filters: [String; 5],
     filter_input: Entity<InputState>,
-    /// Set by a windowless section change: the input still shows the old
-    /// section's text until `sync_filter_input` runs with a window.
-    filter_input_stale: bool,
     table: Entity<TableState<SectionDelegate>>,
     prepared: Rc<PreparedTable>,
     /// The rem the delegate's column widths were prepared at; `refresh`
@@ -181,14 +178,17 @@ impl DiagnosticsPage {
 
         cx.observe(&diagnostics, |this, diagnostics, cx| {
             let now = diagnostics.read(cx).versions();
+            let has_new = this.log.has_new();
             let relevant = if this.section == Section::Log {
-                this.log.has_new() || now.log_levels != this.last_diag_versions.log_levels
+                has_new || now.log_levels != this.last_diag_versions.log_levels
             } else {
                 diag_version_for(this.section, now)
                     != diag_version_for(this.section, this.last_diag_versions)
             };
-            // Badges read every counter: refresh them on any counter change.
-            let any = now != this.last_diag_versions;
+            // Badges read every counter and the tail's error count: refresh
+            // them on any counter change or new record, whatever section
+            // is selected.
+            let any = has_new || now != this.last_diag_versions;
             this.last_diag_versions = now;
             if relevant {
                 this.rebuild(cx);
@@ -244,7 +244,6 @@ impl DiagnosticsPage {
             cursors: [0; 5],
             filters: Default::default(),
             filter_input,
-            filter_input_stale: false,
             table,
             prepared: Rc::new(PreparedTable::empty()),
             last_rem: scale::DESIGN_REM,
@@ -380,6 +379,11 @@ impl DiagnosticsPage {
     }
 
     fn refresh_badges(&mut self, cx: &mut Context<Self>) {
+        // The Log badge counts the whole tail, so the tail is drained here
+        // for every section, not only when the Log table rebuilds. A second
+        // drain after the Log rebuild's own returns false and changes
+        // nothing; the loss gap is still measured at the last drain.
+        self.log.drain();
         let clock = Self::clock(cx);
         let d = self.diagnostics.read(cx);
         let log_errors = self
@@ -398,32 +402,25 @@ impl DiagnosticsPage {
         cx.notify();
     }
 
-    pub fn set_section(&mut self, section: Section, cx: &mut Context<Self>) {
+    /// Select a section: rebuild it and show its filter text in the one
+    /// input. The input's `set_value` needs the window, so every caller
+    /// brings one; nothing syncs the input from render.
+    pub fn set_section(&mut self, section: Section, window: &mut Window, cx: &mut Context<Self>) {
         if self.section == section {
             return;
         }
         self.section = section;
         self.title = title_for(section);
-        // The input needs a `Window` to take the new section's text; the
-        // next caller with one (`dispatch`, a rail click, render) syncs it.
-        self.filter_input_stale = true;
-        self.rebuild(cx);
-        self.sync_ages_timer(cx);
-    }
-
-    /// Show the selected section's filter text in the one input. Setting
-    /// the value emits no `Change`, so the section is not rebuilt again.
-    pub(crate) fn sync_filter_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.filter_input_stale {
-            return;
-        }
-        self.filter_input_stale = false;
-        let text = self.filters[self.section as usize].clone();
+        // Setting the value emits no `Change`, so the section is not
+        // rebuilt a second time.
+        let text = self.filters[section as usize].clone();
         self.filter_input.update(cx, |input, cx| {
             if input.value().as_ref() != text {
                 input.set_value(text, window, cx);
             }
         });
+        self.rebuild(cx);
+        self.sync_ages_timer(cx);
     }
 
     fn set_cursor(&mut self, ix: usize, cx: &mut Context<Self>) {
@@ -532,17 +529,14 @@ impl DiagnosticsPage {
             "page_up" => self.move_cursor(-5 * n, cx),
             "page_down_full" => self.move_cursor(10 * n, cx),
             "page_up_full" => self.move_cursor(-10 * n, cx),
-            "next_section" => {
-                self.set_section(self.section.next(), cx);
-                self.sync_filter_input(window, cx);
-            }
-            "prev_section" => {
-                self.set_section(self.section.prev(), cx);
-                self.sync_filter_input(window, cx);
-            }
+            "next_section" => self.set_section(self.section.next(), window, cx),
+            "prev_section" => self.set_section(self.section.prev(), window, cx),
             "expand" => self.toggle_expansion_at_cursor(Some(true), cx),
             "collapse" => self.toggle_expansion_at_cursor(Some(false), cx),
             "activate" => self.toggle_expansion_at_cursor(None, cx),
+            // Perf paints no input: focusing its handle would leave a focused
+            // handle with no element. The action is consumed and does nothing.
+            "filter" if self.section == Section::Perf => {}
             "filter" => self.filter_input.update(cx, |i, cx| i.focus(window, cx)),
             "blur" => self.focus_handle.focus(window, cx),
             _ => return false,
@@ -744,9 +738,6 @@ impl gpui::Render for DiagnosticsPage {
                 t.refresh(cx);
             });
         }
-        // A windowless section change left the input on the old text.
-        self.sync_filter_input(window, cx);
-
         let weak = cx.weak_entity();
         let header = crate::page_chrome::header(&self.header_chips, self.actions.clone(), cx);
         let rail = crate::page_chrome::rail(
@@ -949,14 +940,40 @@ mod tests {
         assert_eq!(h.page.read_with(&vcx, |p, _| p.rebuild_count), before + 1);
     }
 
+    /// The Log rail badge counts errors in the tail whatever section is
+    /// selected: the tail must be drained for the badge, not only for the
+    /// Log table.
+    #[gpui::test]
+    fn the_log_rail_badge_counts_errors_while_another_section_is_selected(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        assert_eq!(h.page.read_with(&vcx, |p, _| p.section()), Section::Sources);
+        h.ring.push(geode_core::log::Record {
+            at: SystemTime::now(),
+            level: geode_core::log::Level::ERROR,
+            target: "geode::shell",
+            message: "boom".into(),
+            seq: 0,
+        });
+        h.diagnostics.update(&mut vcx, |_, cx| cx.notify());
+        vcx.run_until_parked();
+        assert_eq!(
+            h.page
+                .read_with(&vcx, |p, _| p.rail_texts[Section::Log as usize].clone())
+                .as_ref(),
+            "err 1"
+        );
+    }
+
     #[gpui::test]
     fn the_open_config_directory_button_goes_through_the_shell_actions_handle(
         cx: &mut gpui::TestAppContext,
     ) {
         let (h, mut vcx) = open(cx);
-        h.page
-            .update(&mut vcx, |p, cx| p.set_section(Section::Config, cx));
         vcx.update(|window, cx| {
+            h.page
+                .update(cx, |p, cx| p.set_section(Section::Config, window, cx));
             let _ = window.draw(cx);
         });
         let b = vcx
