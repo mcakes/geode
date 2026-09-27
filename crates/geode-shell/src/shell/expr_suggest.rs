@@ -19,36 +19,47 @@ use crate::keymap::Keystroke;
 use crate::listfilter;
 use crate::vimnav::NavCommand;
 
+use super::dialog::DialogKind;
 use super::{EXPR_KEY, ShellEvent, ShellView, chip, scale, scope_expr_view};
 
-/// The open expression field's completion, whichever surface holds it.
+/// The live dialog's expression completion. The `dialog_input` observer calls
+/// `refresh` on every notify, so a covered dialog's completion must not be
+/// returned here, or another dialog's text would recompute it.
 pub(crate) fn completion_mut(view: &mut ShellView) -> Option<&mut ExprCompletion> {
-    if let Some(state) = view.scope_expr_dialog.as_mut() {
-        return Some(&mut state.completion);
+    match view.top_kind()? {
+        DialogKind::ScopeExpr => view.scope_expr_dialog.as_mut().map(|s| &mut s.completion),
+        DialogKind::Object => {
+            let state = view.object_dialog.as_mut()?;
+            if !super::objectdialog::expression_entry_open(state) {
+                return None;
+            }
+            Some(state.expr.get_or_insert_with(ExprCompletion::default))
+        }
+        _ => None,
     }
-    let state = view.object_dialog.as_mut()?;
-    if !super::objectdialog::expression_entry_open(state) {
-        return None;
-    }
-    Some(state.expr.get_or_insert_with(ExprCompletion::default))
 }
 
 /// The scope the finished expression will be ANDed with, which is what
 /// the values request is narrowed by.
 fn values_scope(view: &ShellView, cx: &App) -> Option<Scope> {
     let current = view.frame.read(cx).scope();
-    if let Some(state) = view.scope_expr_dialog.as_ref() {
-        return Some(scope_expr_view::request_scope(&state.mode, current));
+    match view.top_kind() {
+        Some(DialogKind::ScopeExpr) => {
+            let state = view.scope_expr_dialog.as_ref()?;
+            Some(scope_expr_view::request_scope(&state.mode, current))
+        }
+        Some(DialogKind::Object) => {
+            let state = view.object_dialog.as_ref()?;
+            if !super::objectdialog::expression_entry_open(state) {
+                return None;
+            }
+            let draft = state.draft.as_ref()?;
+            let pending = super::objectdialog::apply::config_with_pending(view);
+            let config = pending.as_ref().unwrap_or(&view.services.config);
+            Some(super::objectdialog::scopes::expression_scope(draft, config))
+        }
+        _ => None,
     }
-    if let Some(state) = view.object_dialog.as_ref()
-        && super::objectdialog::expression_entry_open(state)
-        && let Some(draft) = state.draft.as_ref()
-    {
-        let pending = super::objectdialog::apply::config_with_pending(view);
-        let config = pending.as_ref().unwrap_or(&view.services.config);
-        return Some(super::objectdialog::scopes::expression_scope(draft, config));
-    }
-    None
 }
 
 /// Re-read the field's text and caret. Runs from the input observer, on
@@ -97,14 +108,26 @@ fn request_values(view: &mut ShellView, column: String, cx: &mut Context<ShellVi
     }));
 }
 
-/// An `EXPR_KEY` reply. It is dropped when no expression field is open
-/// or the tag is not the column's latest.
+/// An `EXPR_KEY` reply. A covered dialog's field still owns its outstanding
+/// request, so the reply is offered to each live completion; the tag decides
+/// which one asked. Dropped when none matches.
 pub(crate) fn deliver(view: &mut ShellView, outcome: DistinctOutcome, cx: &mut Context<ShellView>) {
     let vocab = view.expr_vocab.clone();
-    let Some(c) = completion_mut(view) else {
-        return;
-    };
-    if c.deliver(&outcome.column, outcome.tag, outcome.values, &vocab) {
+    let mut landed = false;
+    if let Some(state) = view.scope_expr_dialog.as_mut() {
+        landed =
+            state
+                .completion
+                .deliver(&outcome.column, outcome.tag, outcome.values.clone(), &vocab);
+    }
+    if !landed
+        && let Some(state) = view.object_dialog.as_mut()
+        && super::objectdialog::expression_entry_open(state)
+        && let Some(c) = state.expr.as_mut()
+    {
+        landed = c.deliver(&outcome.column, outcome.tag, outcome.values, &vocab);
+    }
+    if landed {
         cx.notify();
     }
 }

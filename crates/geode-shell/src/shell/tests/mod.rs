@@ -573,6 +573,7 @@ mod asof;
 mod chrome_and_dialogs;
 mod commandline;
 mod diagnostics;
+mod dialog_stack;
 mod dock;
 mod drag;
 mod flip;
