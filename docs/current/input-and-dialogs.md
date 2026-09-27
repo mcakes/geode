@@ -62,6 +62,21 @@ still lower in the stack. The backdrop occludes what it covers, so a click
 outside the panel only closes the dialog; it never also reaches a scope-bar
 chip or tile beneath.
 
+Object dialogs are the exception to one-per-kind: they stack per domain.
+Over a Views dialog, Colors, Scopes, or any other domain pushes, so a trader
+editing a column can open Colors from the palette, add the color the column
+needs, and Escape back. The covered dialog's whole state and scroll offset are
+parked in its own stack entry (`ShellModal::parked_object`) and restored when
+the cover pops: the same stage, row, open field, and caret. The same domain
+never nests, because two drafts of one file would race each other's writes:
+requesting it from the top does nothing, and from lower in the stack posts
+"views is already open underneath" (the notice names the domain). A covered
+object dialog still receives its values replies and reload refreshes, and its
+column `color` choices follow named colors created above it, with the current
+selection kept by name and the draft left clean. A failed configuration write
+rebuilds only the drafts that contributed edits to the failed batch; a covered
+dialog with nothing in it keeps its unsaved draft.
+
 Revealing the covered entry restores the shared input's text and caret to
 what they were when it was covered, and gives back its focus: mode dialogs
 (Settings, Keybindings, the Object dialog, As-of) resolve focus from their own
@@ -79,10 +94,11 @@ themselves because they do not pass through the keyboard handler's tail.
 Writing an input value does not emit `InputEvent::Change`; model mutations
 cannot depend on such an event to keep text synchronized.
 
-Known limitation: the stack holds one instance per `DialogKind`, so a second
-request for a live kind cannot open beside the first even from a different
-call site. The three `choicedialog` pickers (grouping, tile kind, log level)
-share one kind and so count as one instance for this purpose.
+Known limitation: apart from object dialogs, the stack holds one instance per
+`DialogKind`, so a second request for a live kind cannot open beside the first
+even from a different call site. The three `choicedialog` pickers (grouping,
+tile kind, log level) share one kind and one state field, so none of them can
+open while another is anywhere in the stack.
 
 A multi-screen dialog registers its back step with `dialog::set_back`: a
 predicate over its current state and the transition Escape's final back step
