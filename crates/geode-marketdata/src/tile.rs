@@ -3495,7 +3495,10 @@ impl MarketDataTile {
         cx.notify();
     }
 
-    /// The pick itself: close the popup FIRST (blur, then drop — its
+    /// The pick itself. Under a live selection the option goes to
+    /// [`Self::commit_bulk`], which writes it to every accepting member
+    /// and closes the popup itself, or leaves it open when nothing
+    /// accepts. Otherwise close the popup FIRST (blur, then drop — its
     /// field is done being useful the moment an option is chosen, as
     /// `picker_pick` closes before `set_key`), then write through
     /// [`Self::commit_cell_value`], the one door every cell value lands

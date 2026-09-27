@@ -14,6 +14,9 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Skip {
     Deleted,
+    /// An inserted row the model still paints but the draft no longer
+    /// holds, so the write had nowhere to land.
+    Moved,
     Empty,
     NotNumeric,
     WrongType,
@@ -25,6 +28,7 @@ impl Skip {
     fn phrase(self) -> &'static str {
         match self {
             Skip::Deleted => "deleted",
+            Skip::Moved => "moved",
             Skip::Empty => "empty",
             Skip::NotNumeric => "not numeric",
             Skip::WrongType => "wrong type",
@@ -195,6 +199,18 @@ mod tests {
         assert_eq!(
             step_notice(2, -1, &s),
             "stepped 2 cells -1, skipped 3 (2 deleted, 1 wrong type)"
+        );
+    }
+
+    #[test]
+    fn a_cell_the_draft_no_longer_holds_is_named_moved_after_deleted() {
+        let mut s = Skips::default();
+        s.add(Skip::Empty);
+        s.add(Skip::Moved);
+        s.add(Skip::Deleted);
+        assert_eq!(
+            set_notice(1, &s),
+            "set 1 cell, skipped 3 (1 deleted, 1 moved, 1 empty)"
         );
     }
 }

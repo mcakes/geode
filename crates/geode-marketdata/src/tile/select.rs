@@ -331,11 +331,35 @@ impl MarketDataTile {
                 return true;
             }
         };
+        let nothing_accepts = |skips: &Skips| {
+            format!(
+                "no selected cell accepts '{}'{}",
+                text.trim(),
+                skips.describe()
+            )
+        };
         let mut skips = Skips::default();
         let mut writes = Vec::new();
         for (row, col) in self.selection_cells() {
             if self.model.rows[row].state == RowState::Deleted {
                 skips.add(Skip::Deleted);
+                continue;
+            }
+            // An inserted row's cell lands by label in the draft's own row
+            // edit (`set_row_cell`). One the model paints but the draft no
+            // longer holds would take no write; judging it here, before
+            // anything is written, keeps the count honest and lets a
+            // selection of nothing else refuse with the draft untouched.
+            // Every draft change rebuilds the model, so no production
+            // route is known to reach this; it guards the notice against
+            // claiming cells the trader will not find edited.
+            if self.model.rows[row].state == RowState::Inserted
+                && !matches!(
+                    self.draft.row_state(self.model.rows[row].label.as_ref()),
+                    Some(RowEdit::Inserted { .. })
+                )
+            {
+                skips.add(Skip::Moved);
                 continue;
             }
             let Some(kind) = self.model.kind_of(col) else {
@@ -348,14 +372,7 @@ impl MarketDataTile {
             }
         }
         if writes.is_empty() {
-            self.notice = Some(
-                format!(
-                    "no selected cell accepts '{}'{}",
-                    text.trim(),
-                    skips.describe()
-                )
-                .into(),
-            );
+            self.notice = Some(nothing_accepts(&skips).into());
             return true;
         }
         // Labels and `cell_ref`s are read from the model as it stands; it
@@ -383,11 +400,18 @@ impl MarketDataTile {
                 // Filtered above; never written.
                 RowState::Deleted => false,
             };
-            // A notice counting a write the draft did not take would
-            // claim cells the trader will not find edited.
+            // Judged above, so a refused write here is a broken
+            // invariant; it is still counted as skipped rather than
+            // claimed as set.
             if written {
                 n += 1;
+            } else {
+                skips.add(Skip::Moved);
             }
+        }
+        if n == 0 {
+            self.notice = Some(nothing_accepts(&skips).into());
+            return true;
         }
         self.close_editor(window, cx);
         self.close_popup_with_window(window, cx);

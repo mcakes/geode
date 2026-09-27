@@ -682,6 +682,12 @@ fn a_block_commit_nothing_accepts_is_refused_with_the_editor_open(cx: &mut gpui:
     h.dispatch(&mut vcx, "commit", None);
     assert_eq!(h.mode(&vcx), "insert");
     assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
+    assert!(
+        h.header_texts(&vcx)
+            .contains(&"no selected cell accepts 'abc', skipped 1 (1 wrong type)".to_string()),
+        "{:?}",
+        h.header_texts(&vcx)
+    );
 }
 
 /// A choice picked from the popup lands in every selected choice cell;
@@ -710,6 +716,7 @@ fn a_choice_pick_over_a_selection_writes_the_option_to_every_choice_cell(
             .contains(&"set 2 cells, skipped 4 (4 wrong type)".to_string())
     );
     assert!(!h.tile.read_with(&vcx, |t, _| t.choice_popup_open()));
+    assert_eq!(h.mode(&vcx), "visual", "a pick keeps the selection");
 }
 
 /// The date field's value commits to every selected date cell.
@@ -725,4 +732,5 @@ fn a_date_commit_over_a_selection_writes_every_date_cell(cx: &mut gpui::TestAppC
     h.dispatch(&mut vcx, "commit", None);
     assert_eq!(h.col_texts(&vcx, 0), vec!["2027-03-02", "2027-03-02"]);
     assert!(h.header_texts(&vcx).contains(&"set 2 cells".to_string()));
+    assert_eq!(h.mode(&vcx), "visual", "a date commit keeps the selection");
 }
