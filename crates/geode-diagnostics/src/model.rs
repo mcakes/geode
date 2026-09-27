@@ -47,6 +47,32 @@ fn health_title(health: &Health) -> &'static str {
     }
 }
 
+/// Severity by variant only. `Health`'s derived `Ord` also compares reason
+/// text, so `max()` over it would call the lexically largest reason the
+/// worst and `==` would split two `Failed` sources into two counts; the
+/// status summary counts by label, and the page must agree with it.
+fn health_rank(health: &Health) -> u8 {
+    match health {
+        Health::Ok => 0,
+        Health::Pending => 1,
+        Health::PendingTooLong => 2,
+        Health::Degraded { .. } => 3,
+        Health::Failed { .. } => 4,
+    }
+}
+
+/// The worst reported health by variant. Among equals the first by source
+/// name wins, so the returned reason is deterministic.
+fn worst_health(d: &Diagnostics) -> Option<&Health> {
+    d.sources
+        .values()
+        .filter_map(|s| s.health.as_ref())
+        .fold(None, |worst: Option<&Health>, h| match worst {
+            Some(w) if health_rank(w) >= health_rank(h) => Some(w),
+            _ => Some(h),
+        })
+}
+
 /// Format `HH:MM:SS` using the supplied display clock, shared with the
 /// frame's time readouts. The page supplies the configured `AppClock`.
 fn local_hms(t: SystemTime, clock: Clock) -> String {
@@ -83,9 +109,9 @@ pub struct SourceRow {
     pub history: Vec<(String, Health)>,
 }
 
-/// Worst health first, then name; unreported sources last by name. The same
-/// order the tile used. `Health::Ord` orders by severity ascending, so
-/// reported health is reversed.
+/// Worst health first by variant rank, then name; unreported sources last
+/// by name. Not `Health`'s derived `Ord`: that falls through to reason text
+/// before the name, so two failed sources would order by their reasons.
 ///
 /// A source the ingest runner is loading but nothing has described or
 /// reported yet still gets a row: the load is the first thing known about
@@ -97,7 +123,8 @@ pub fn source_rows(d: &Diagnostics, clock: Clock) -> Vec<SourceRow> {
         .filter(|(_, s)| s.health.is_some())
         .map(|(name, s)| (name.as_str(), s))
         .collect();
-    reported.sort_by(|a, b| b.1.health.cmp(&a.1.health).then_with(|| a.0.cmp(b.0)));
+    let rank = |s: &SourceState| s.health.as_ref().map(health_rank).unwrap_or(0);
+    reported.sort_by(|a, b| rank(b.1).cmp(&rank(a.1)).then_with(|| a.0.cmp(b.0)));
     let mut unreported: Vec<(&str, &SourceState)> = d
         .sources
         .iter()
@@ -621,7 +648,7 @@ pub struct Badges {
 }
 
 pub fn badges(d: &Diagnostics, log_errors: usize) -> Badges {
-    let worst = d.sources.values().filter_map(|s| s.health.clone()).max();
+    let worst = worst_health(d).cloned();
     let current = current_diagnostics(d);
     let errors = current
         .iter()
@@ -649,13 +676,13 @@ pub fn badges(d: &Diagnostics, log_errors: usize) -> Badges {
 pub fn header_chips(d: &Diagnostics, clock: Clock) -> Vec<(String, Tone)> {
     let plural = |n: usize| if n == 1 { "" } else { "s" };
     let mut out = Vec::new();
-    if let Some(worst) = d.sources.values().filter_map(|s| s.health.clone()).max() {
+    if let Some(worst) = worst_health(d) {
         let n = d
             .sources
             .values()
-            .filter(|s| s.health.as_ref() == Some(&worst))
+            .filter(|s| s.health.as_ref().map(Health::label) == Some(worst.label()))
             .count();
-        out.push((format!("{n} {}", worst.label()), health_tone(Some(&worst))));
+        out.push((format!("{n} {}", worst.label()), health_tone(Some(worst))));
     }
     let errors = d
         .config
@@ -714,13 +741,27 @@ pub(crate) mod tests {
             t,
         );
         d.note_polled("zz_unreported", 0, t, t + Duration::from_secs(60));
+        // Same variant, reasons in the opposite order to the names: the
+        // derived `Ord` would put `c_degraded` ("zzz") before `a_degraded`.
+        d.note_health(
+            "c_degraded",
+            Health::Degraded {
+                reason: "zzz".into(),
+            },
+            String::new(),
+            t,
+        );
         let rows = source_rows(&d, clock());
         let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
-        assert_eq!(names, vec!["a_degraded", "b_ok", "zz_unreported"]);
+        assert_eq!(
+            names,
+            vec!["a_degraded", "c_degraded", "b_ok", "zz_unreported"],
+            "rank then name, never reason text"
+        );
         assert_eq!(rows[0].health, "Degraded — stale");
         assert_eq!(rows[0].tone, Tone::Warn);
-        assert_eq!(rows[2].health, "no report yet");
-        assert_eq!(rows[2].ready, "0", "polled: ready shown");
+        assert_eq!(rows[3].health, "no report yet");
+        assert_eq!(rows[3].ready, "0", "polled: ready shown");
         assert_eq!(rows[0].ready, "", "never polled: blank");
     }
 
@@ -889,6 +930,48 @@ pub(crate) mod tests {
             chips.last().unwrap(),
             &("catalog pending".to_string(), Tone::Muted)
         );
+    }
+
+    /// `Health`'s derived `Eq`/`Ord` include the reason, so a full-value
+    /// compare reads two failed sources as "1 failed" and picks the worst by
+    /// reason text; the status summary counts by label and must agree.
+    #[test]
+    fn the_health_chip_counts_by_label_not_by_reason() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        let t = SystemTime::now();
+        d.note_health(
+            "a",
+            Health::Failed {
+                reason: "zzz".into(),
+            },
+            String::new(),
+            t,
+        );
+        d.note_health(
+            "b",
+            Health::Failed {
+                reason: "aaa".into(),
+            },
+            String::new(),
+            t,
+        );
+        d.note_health(
+            "c",
+            Health::Degraded {
+                reason: "~~~ sorts above Failed's reasons".into(),
+            },
+            String::new(),
+            t,
+        );
+        let chips = header_chips(&d, clock());
+        assert_eq!(chips[0], ("2 failed".to_string(), Tone::Error));
+        let b = badges(&d, 0);
+        assert!(
+            matches!(b.sources.0, Some(Health::Failed { .. })),
+            "worst by variant, not by reason text: {:?}",
+            b.sources
+        );
+        assert_eq!(d.summary().as_ref(), "sources 1 degraded · 2 failed");
     }
 
     #[test]
