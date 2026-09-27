@@ -671,10 +671,9 @@ fn a_click_on_a_dialog_row_under_the_palette_does_not_open_it(cx: &mut gpui::Tes
     );
 }
 
-/// Reverses the earlier "known limitation": `tile::command_line`, `tile::find`,
-/// and `stack::pick`, run from the palette over a dialog, used to open real
-/// transient chrome behind the stack that the user could not see or usefully
-/// reach. Each must now refuse with a notice and leave the stack untouched.
+/// Palette requests for tile command lines, find prompts, and stack lists
+/// refuse with a notice while a dialog is open. The modal keeps its state
+/// and no hidden tile control acquires an unusable keyboard route.
 #[gpui::test]
 fn palette_transient_chrome_is_refused_over_a_dialog(cx: &mut gpui::TestAppContext) {
     let (mut vcx, shell, _log, _left, _right, _top) = super::stacks::stacked_shell(cx);
@@ -725,12 +724,9 @@ fn palette_transient_chrome_is_refused_over_a_dialog(cx: &mut gpui::TestAppConte
     }
 }
 
-/// Regression guard for a reviewed finding that turned out not to reproduce:
-/// `dispatch_palette_item`'s `is_toggle` guard already skips dispatch for the
-/// palette's own "Toggle command palette" row, so picking it over a dialog
-/// just closes the palette — it does not re-dispatch `palette::toggle` and
-/// reopen it, so `commit_selected`'s post-dispatch `refocus_top` has nothing
-/// to steal focus from.
+/// Choosing the palette's own toggle row closes it and restores the covered
+/// dialog's input. The `is_toggle` guard suppresses a second toggle dispatch
+/// that would reopen the palette.
 #[gpui::test]
 fn picking_the_toggle_row_over_a_dialog_does_not_reopen_the_palette(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = dialog_test_shell(cx, "config::views");
@@ -794,11 +790,9 @@ fn config_with_a_second_dataset_column() -> Config {
     })
 }
 
-/// A hot reload that adds a dataset column must refresh a COVERED
-/// `ScopeExpr` dialog's suggestions too, not only the top dialog's:
-/// `hot_reload`'s `pickable_changed` branch used to rebuild only
-/// `top_kind()`'s completion, so a covered expression field kept its stale
-/// "unknown column" warning until its own next keystroke.
+/// Hot reload refreshes covered expression fields as well as the top dialog.
+/// A newly defined column must clear its unknown-column warning before the
+/// covered dialog is revealed or receives another keystroke.
 #[gpui::test]
 fn a_reload_refreshes_a_covered_expression_dialogs_suggestions(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = dialog_test_shell_with(
@@ -854,5 +848,54 @@ fn a_reload_refreshes_a_covered_expression_dialogs_suggestions(cx: &mut gpui::Te
             .is_none()),
         "the covered dialog's suggestions must refresh from the reload, \
          not only from its own next keystroke"
+    );
+}
+
+/// gpui fires `on_mouse_down` for every hovered hitbox, so a backdrop without
+/// `occlude()` lets a click outside the panel reach the scope-bar chip beneath it:
+/// the dialog pops AND the chip's `×` drops its dimension. The click must only
+/// close the dialog.
+#[gpui::test]
+fn a_backdrop_click_over_a_scope_chip_closes_the_dialog_and_leaves_the_chip(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    frame.update(&mut vcx, |f, cx| {
+        let mut s = f.scope().clone();
+        s.dimensions.push(geode_core::scope::DimensionSelection {
+            column: "book".into(),
+            values: vec!["BK001".into()],
+        });
+        f.set_scope(s);
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    dispatch_action(&shell, "settings::open", &mut vcx);
+    draw(&mut vcx);
+    assert_eq!(kinds(&shell, &mut vcx), vec![DialogKind::Settings]);
+    let close = vcx
+        .debug_bounds("scope-chip-close-book")
+        .expect("chip painted under the backdrop");
+    let panel = vcx
+        .debug_bounds("shell-modal-panel")
+        .expect("panel painted");
+    assert!(
+        !panel.contains(&close.center()),
+        "the chip must sit outside the panel for this click to land on the backdrop"
+    );
+
+    vcx.simulate_click(close.center(), gpui::Modifiers::default());
+    draw(&mut vcx);
+
+    assert!(
+        kinds(&shell, &mut vcx).is_empty(),
+        "the backdrop click closes the dialog"
+    );
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.scope().dimensions.len()),
+        1,
+        "the click must not also reach the chip's × beneath the backdrop"
     );
 }

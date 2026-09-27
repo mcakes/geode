@@ -129,6 +129,39 @@ fn typed_keys_reach_a_tiles_focused_input_in_insert_mode(cx: &mut gpui::TestAppC
     );
 }
 
+/// A tile leaving the screen takes the keyboard back only from a tile that
+/// left, never from one still painted: pulling a neighbour into a tile that
+/// is typing hides the neighbour, and the typing tile keeps its input.
+#[gpui::test]
+fn a_pull_from_insert_mode_leaves_the_typing_tile_its_input(cx: &mut gpui::TestAppContext) {
+    let (services, _log, input) = services_with_an_insert_recorder(REC_INSERT_FRAGMENT);
+    let (window, mut vcx) = open_shell(cx, services);
+    vcx.simulate_keystrokes("ctrl-v");
+    let (shell, shell_focus) = enter_insert_mode(&window, &mut vcx);
+
+    vcx.simulate_keystrokes("alt-shift-h");
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s
+            .services
+            .workspaces
+            .active()
+            .tree()
+            .visible_tiles()
+            .len()),
+        1,
+        "fixture check: the left tile was pulled in"
+    );
+    assert!(
+        !vcx.update(|window, _cx| shell_focus.is_focused(window)),
+        "the shell root must not have taken the keyboard from a painted tile"
+    );
+    vcx.simulate_input("ab");
+    assert_eq!(rec_input_value(&input, &vcx).as_deref(), Some("ab"));
+}
+
 /// Chords still resolve against the live context stack while a tile input is focused:
 /// `ctrl+k` opens the palette as a single-keystroke binding.
 #[gpui::test]

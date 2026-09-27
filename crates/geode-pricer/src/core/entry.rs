@@ -1,7 +1,6 @@
-//! The entry bar's pure half (line-pricer spec §8.4, entry-bar spec §4):
-//! where `o` (always below) and `p`/`shift+p` land, where the next line
-//! lands after a successful `enter`, the bar's target label, and the
-//! `up`/`down` history.
+//! Pure entry-bar placement, target labels, and history. `o` inserts below the cursor,
+//! successful entry advances the insertion place, and history is derived from the
+//! sheet's root rows.
 
 use crate::core::sheet::{Place, RowKind, RowSpec, Sheet};
 
@@ -43,9 +42,9 @@ fn span(spec: &RowSpec) -> usize {
 }
 
 /// The place after `inserted` landed at `place`, so a book of lines
-/// is typed without another `o` (spec §8.4). [`landing_place`] never hands
-/// a package a leg place; `apply` would refuse that pair, so it answers
-/// `place` unchanged.
+/// is typed without another `o`. Callers first resolve the insertion through
+/// [`landing_place`], which lifts a package out of a leg place. An unresolved
+/// package/leg pair leaves `place` unchanged because `apply` would refuse it.
 pub fn next_place(place: Place, inserted: &RowSpec) -> Place {
     match (place, inserted) {
         (Place::Root { at }, spec) => Place::Root {
@@ -86,9 +85,8 @@ fn describe(sheet: &Sheet, row: usize) -> String {
     }
 }
 
-/// Where the entry bar's `enter` lands, as its muted label (entry-bar
-/// spec §4.2). Computed from the place alone, so the label and the insert
-/// can never disagree.
+/// Describe the entry bar's pending insertion place for its muted target label.
+/// A typed package may land outside that place's parent via [`landing_place`].
 pub fn target_label(sheet: &Sheet, place: Place) -> String {
     match place {
         // The bar always passes `below = true`, so `Root { at: 0 }`
@@ -107,10 +105,9 @@ pub fn target_label(sheet: &Sheet, place: Place) -> String {
     }
 }
 
-/// The entry field's history (spec §8.4: "the sheet's own lines, most
-/// recent first"): every ROOT row's shorthand, newest id first, a repeat
-/// kept only at its newest. A custom package spells on several lines and
-/// cannot be one entry, so it is left out.
+/// History contains each root row's shorthand, newest ID first, with duplicates kept
+/// only at their newest occurrence. Empty and multiline forms are omitted because they
+/// cannot fill one entry line.
 pub fn history(sheet: &Sheet) -> Vec<String> {
     let mut roots: Vec<usize> = sheet.roots().collect();
     roots.sort_by_key(|r| std::cmp::Reverse(sheet.id(*r)));

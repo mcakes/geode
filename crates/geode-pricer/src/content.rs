@@ -1,8 +1,7 @@
-//! What the shell hosts (line-pricer spec §8.1): the [`TileContent`]
-//! wrapper over a [`PricerTile`], and the factory that builds them. The
-//! factory carries the data handle, the loaded views, the template
-//! tables, the pricing settings, the sheet store and the set of sheet
-//! names open across its tiles (spec §7.4) — the shell sees none of them.
+//! Shell integration through a [`TileContent`] wrapper and [`PricerFactory`].
+//! The factory shares views, template tables, pricing settings, storage, and sheet-name
+//! reservations across tiles. It routes save outcomes and configuration
+//! reloads to live tiles and flushes pending edits when the app quits.
 
 use crate::core::storage::PRICER_SHEETS_DATASET;
 use crate::core::template::TemplateSet;
@@ -27,8 +26,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Every action this module registers, with its palette title — one list
-/// that [`DEFAULT_KEYMAP`] binds and `register_actions` registers.
+/// Registered actions and their palette titles. [`DEFAULT_KEYMAP`] binds
+/// the keyboard subset; commands and menus also expose actions.
 pub const ACTIONS: &[(&str, &str)] = &[
     ("pricer::down", "Cursor down"),
     ("pricer::up", "Cursor up"),
@@ -89,13 +88,13 @@ pub(crate) fn action_title(id: &'static str) -> &'static str {
 /// Registered but deliberately unbound: `:price` and the menu reach it.
 pub const NO_DEFAULT_KEY: &[&str] = &["pricer::price"];
 
-/// The module's keymap fragment (spec §8.4–§8.5). Every predicate is a
+/// The module's keymap fragment. Every predicate is a
 /// plain conjunction whose first identifier is `pricer`. Both text fields
 /// (the entry field and the cell editor) report `mode == insert` — the one
 /// word the shell's insert-focus predicate reads — and share one block;
 /// the tile routes `commit`/`cancel`/`insert_*` by which field is open. No
 /// chord is bound there, so `ctrl+k` keeps opening the palette from inside
-/// a field. `y` alone is NOT bound (planning decision 16): an
+/// a field. `y` alone is unbound: an
 /// exact match dispatches at once, so it would make `y y` and `y c`
 /// unreachable. `g` alone is not bound for the same reason (`g g`, `g p`,
 /// `g u`, `g m`).
@@ -171,10 +170,8 @@ context = "pricer && mode == menu"
 "." = "pricer::menu_close"
 "#;
 
-/// The app-level settings every tile reads (spec §5.5, §8.3, §9.4):
-/// the pricer's name for the header and whether this binary has it, the
-/// `[pricing] refresh` default (`None` = off), and the shell's
-/// `stale_after`.
+/// Shared pricing settings: the running adapter's name and availability,
+/// default refresh interval (`None` disables it), and freshness threshold.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PricerSettings {
     pub pricer: String,
@@ -194,9 +191,9 @@ impl Default for PricerSettings {
     }
 }
 
-/// Where the entry bar's underlying suggestions come from. The app backs
-/// it with `[pricing] underlyings` today and with the active watchlist
-/// later; the pricer reads it, never writes it.
+/// Read-only source of underlying suggestions for the entry bar. The app supplies
+/// an [`UnderlyingList`] populated from `[pricing] underlyings`; tiles cache its
+/// values until the provider revision changes.
 pub trait UnderlyingSource {
     /// In the provider's own order.
     fn underlyings(&self, cx: &App) -> Rc<[SharedString]>;
@@ -250,12 +247,12 @@ pub(crate) struct Shared {
     pub(crate) templates: RefCell<Arc<TemplateSet>>,
     pub(crate) settings: RefCell<PricerSettings>,
     pub(crate) store: Rc<dyn SheetStore>,
-    /// Sheet names open in some tile (spec §7.4): `untitled-N` skips them,
-    /// and `:e`/`:name`/`:rm` refuse them, so two writers never race.
+    /// Names held by this factory's tiles. Allocation and sheet commands
+    /// check this set to prevent two tiles from writing the same sheet.
     pub(crate) open: RefCell<BTreeSet<String>>,
-    /// Names with a save queued and not yet answered. The document will
-    /// exist, but the store does not know it until the save is confirmed
-    /// — so `untitled-N` and `:name` treat these as taken (a closed
+    /// Names with a save queued and not yet answered. A write may fail, so
+    /// the store adds a new name only after confirmation.
+    /// `untitled-N` and `:name` treat these as taken (a closed
     /// tile's queued save must not have its name handed to a new sheet,
     /// whose first save would land on top of it), and a load of one
     /// waits for the answer (reads and saves run on different lanes, so
@@ -280,7 +277,7 @@ pub(crate) struct Shared {
     /// `:name` and `:rm` refuse them, so no tile opens a sheet the forget
     /// would then delete under it.
     pub(crate) retiring: RefCell<BTreeSet<String>>,
-    /// So a reload reaches every open tile (planning decision 20).
+    /// Weak tile references for reload, save-outcome routing, and quit flushing.
     pub(crate) tiles: RefCell<Vec<WeakEntity<PricerTile>>>,
     /// The entry bar's underlying suggestions; an empty list until the
     /// app hands one over (`PricerFactory::with_underlyings`).
@@ -351,7 +348,17 @@ impl TileContent for PricerContent {
     }
 
     fn serialize(&self, cx: &App) -> toml::Table {
-        self.tile.read(cx).serialize()
+        self.tile.read(cx).serialize(cx)
+    }
+    /// The same route as `:autosize [reset]`.
+    fn autosize_columns(
+        &self,
+        reset: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<(), &'static str> {
+        self.tile
+            .update(cx, |t, cx| t.autosize_columns(reset, window, cx))
     }
 
     fn holds_focus(&self, window: &Window, cx: &App) -> bool {
@@ -364,8 +371,8 @@ impl TileContent for PricerContent {
 }
 
 impl Shared {
-    /// Whether a document under `name` exists or is about to: known to
-    /// the store, or with a save queued and unconfirmed.
+    /// Whether a name is reserved by a known document, a pending save, or
+    /// retirement. Open-tile ownership is checked separately through `open`.
     pub(crate) fn taken(&self, name: &str) -> bool {
         self.store.contains(name)
             || self.save_pending(name)
@@ -408,8 +415,8 @@ impl Shared {
         }
     }
 
-    /// The known sheet names, sorted — the `:e`/`:rm` vocabulary. A
-    /// queued save's name is included: its document is on its way.
+    /// Sorted command vocabulary: known and pending-save names, excluding
+    /// names reserved for retirement.
     pub(crate) fn sheet_names(&self) -> Vec<String> {
         let mut names: BTreeSet<String> = self.store.names().into_iter().collect();
         names.extend(self.pending_saves.borrow().keys().cloned());
@@ -534,11 +541,9 @@ impl PricerFactory {
             .detach();
     }
 
-    /// A reload (planning decision 20): the new views, template tables and
-    /// live pricing settings, then every open tile adopts the tables,
-    /// re-resolves its view and restarts its timer. The pricer's name and
-    /// presence are the running data engine's and change only with a
-    /// restart (`[pricing] adapter`).
+    /// Replace views, template tables, and live pricing settings. Every open tile
+    /// adopts the tables, re-resolves its view, and restarts its timer. Adapter name
+    /// and availability describe the running data engine and change only on restart.
     pub fn reload(
         &self,
         views: Views,
@@ -611,10 +616,9 @@ impl PricerFactory {
             .collect()
     }
 
-    /// Save every open tile's unsaved sheet now (`PricerTile::flush_save`).
-    /// The app calls this at quit, before it stops the data service, so the
-    /// saves are queued ahead of the shutdown, which runs queued local
-    /// writes before it stops.
+    /// Attempt to queue unsaved sheets from every live tile. The app calls
+    /// this before stopping the data service, whose writer drains admitted
+    /// local writes. Admission failures remain visible in each tile's save state.
     pub fn flush_all(&self, cx: &mut App) {
         for tile in self.live_tiles() {
             tile.update(cx, |t, cx| {

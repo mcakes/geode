@@ -14,7 +14,7 @@ use gpui_component::{Theme, h_flex, v_flex};
 use geode_core::query::{DistinctOutcome, DistinctParams};
 use geode_core::scope::Scope;
 
-use crate::exprcomplete::{ExprCompletion, MAX_ROWS, Refresh};
+use crate::exprcomplete::{Accept, ExprCompletion, MAX_ROWS, Refresh, RowKind};
 use crate::keymap::Keystroke;
 use crate::listfilter;
 use crate::vimnav::NavCommand;
@@ -27,7 +27,15 @@ use super::{EXPR_KEY, ShellEvent, ShellView, chip, scale, scope_expr_view};
 /// returned here, or another dialog's text would recompute it.
 pub(crate) fn completion_mut(view: &mut ShellView) -> Option<&mut ExprCompletion> {
     match view.top_kind()? {
-        DialogKind::ScopeExpr => view.scope_expr_dialog.as_mut().map(|s| &mut s.completion),
+        DialogKind::ScopeExpr => {
+            let state = view.scope_expr_dialog.as_mut()?;
+            // The name entry shares the field; suggesting columns for a name
+            // would offer to write an expression into it.
+            if state.naming.is_some() {
+                return None;
+            }
+            Some(&mut state.completion)
+        }
         DialogKind::Object => {
             let state = view.object_dialog.as_mut()?;
             if !super::objectdialog::expression_entry_open(state) {
@@ -46,7 +54,11 @@ fn values_scope(view: &ShellView, cx: &App) -> Option<Scope> {
         Some(DialogKind::ScopeExpr) => {
             let current = view.frame.read(cx).scope();
             let state = view.scope_expr_dialog.as_ref()?;
-            Some(scope_expr_view::request_scope(&state.mode, current))
+            Some(scope_expr_view::request_scope(
+                &state.mode,
+                current,
+                &state.staged,
+            ))
         }
         Some(DialogKind::Object) => {
             let state = view
@@ -70,9 +82,9 @@ fn values_scope(view: &ShellView, cx: &App) -> Option<Scope> {
     }
 }
 
-/// Re-read the field's text and caret. Runs from the input observer, on
-/// open, after an accept and before a claimed key. It never runs in
-/// render.
+/// Re-read the field's text and caret from input notifications, on open,
+/// after accepting a row, and before Tab inserts one. Unchanged text and
+/// caret skip rebuilding the suggestions. This does not run during render.
 pub(crate) fn refresh(view: &mut ShellView, cx: &mut Context<ShellView>) {
     // The observer fires for every dialog sharing the input (and every
     // cursor blink); with no expression field open, copy nothing.
@@ -94,6 +106,20 @@ pub(crate) fn refresh(view: &mut ShellView, cx: &mut Context<ShellView>) {
     }
     view.expr_scroll.scroll_to_item(0);
     cx.notify();
+}
+
+/// The top dialog was just revealed. Every expression field shares one pool
+/// key, so a covering dialog's field may have replaced this field's request,
+/// which then never replies; kept `Loading`, the field would say "loading
+/// values…" and `refresh` would never ask again. Values the covering dialog's
+/// actions narrowed differently go too. Drop them all and re-read the field.
+pub(crate) fn revealed(view: &mut ShellView, cx: &mut Context<ShellView>) {
+    let vocab = view.expr_vocab.clone();
+    let Some(c) = completion_mut(view) else {
+        return;
+    };
+    c.forget_values(&vocab);
+    refresh(view, cx);
 }
 
 fn request_values(view: &mut ShellView, column: String, cx: &mut Context<ShellView>) {
@@ -191,16 +217,23 @@ pub(crate) fn handle_key(
     true
 }
 
-/// Write ranked row `i` over its token, keep the keyboard in the field,
-/// and re-read the new position.
+/// Accept ranked row `i`: write it over its token (a named row erases
+/// the token and stages its name), keep the keyboard in the field, and
+/// re-read the new position.
 pub(crate) fn accept(
     view: &mut ShellView,
     i: usize,
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    let Some(write) = completion_mut(view).and_then(|c| c.accept(i)) else {
+    let Some(accepted) = completion_mut(view).and_then(|c| c.accept(i)) else {
         return;
+    };
+    // The erase goes through the same range replace as an insert, so cmd+z
+    // brings the typed prefix back.
+    let (write, staged) = match accepted {
+        Accept::Write(write) => (write, None),
+        Accept::Stage { name, erase } => (erase, Some(name)),
     };
     view.dialog_input.update(cx, |s, cx| {
         s.set_selected_range(write.range.clone(), cx);
@@ -223,38 +256,53 @@ pub(crate) fn accept(
         draft.set_query(text);
         super::dialog::sync_dialog_text(view, window, cx);
     }
+    if let Some(name) = staged {
+        stage_named(view, &name, cx);
+    }
     refresh(view, cx);
 }
 
-/// A pointer accept: write the ranked row labelled `label` as the list
-/// stands at the press. The row is found by label, not by its painted
-/// position, so a list rebuilt between paint and press never accepts a
-/// different row; a label no longer listed does nothing.
-pub(crate) fn accept_label(
+/// Add `name` to the open frame expression dialog's staged names, so
+/// Enter applies it beside the parsed text, and stop offering it. Only
+/// that dialog offers named rows.
+fn stage_named(view: &mut ShellView, name: &str, cx: &mut Context<ShellView>) {
+    scope_expr_view::stage(view, name, cx);
+}
+
+/// A pointer accept: accept the ranked row of this kind labelled `label`
+/// as the list stands at the press. The row is found by kind and label,
+/// not by its painted position, so a list rebuilt between paint and press
+/// never accepts a different row, and a named expression sharing a
+/// column's name never accepts the column; a row no longer listed does
+/// nothing.
+pub(crate) fn accept_row(
     view: &mut ShellView,
+    named: bool,
     label: &str,
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    let Some(i) = completion_mut(view).and_then(|c| c.rows().iter().position(|r| r.label == label))
-    else {
+    let Some(i) = completion_mut(view).and_then(|c| c.position(named, label)) else {
         return;
     };
     accept(view, i, window, cx);
 }
 
-/// Row height at the design rem; the viewport shows at most this many rows.
+/// Row height in design units, scaled with the window rem size.
 const ROW_HEIGHT: f32 = 26.0;
+/// Maximum rows visible before the suggestion list scrolls.
 const VISIBLE_ROWS: usize = 8;
 
 /// The hint line, the ranked rows (or "no matches") and the warning line.
 /// Selectors: `scope-expr-hint`, `scope-expr-row-{label}`,
-/// `scope-expr-no-matches` and `scope-expr-warning`.
+/// `scope-expr-named-row-{name}`, `scope-expr-no-matches` and
+/// `scope-expr-warning`. `on_click` gets whether the row is named and its
+/// label.
 pub(crate) fn render(
     c: &ExprCompletion,
     scroll: &ScrollHandle,
     theme: &Theme,
-    on_click: impl Fn(&str, &mut Window, &mut App) + Clone + 'static,
+    on_click: impl Fn(bool, &str, &mut Window, &mut App) + Clone + 'static,
 ) -> AnyElement {
     let paint = super::listrow::row_paint(theme);
     let mut column = v_flex().gap_1().w_full().child(
@@ -273,7 +321,22 @@ pub(crate) fn render(
             .overflow_y_scroll()
             .track_scroll(scroll);
         for (position, row) in c.rows().iter().enumerate().take(MAX_ROWS) {
-            let selector = format!("scope-expr-row-{}", row.label);
+            // A named row has its own selector: a name equal to a column's
+            // would otherwise share the column row's id.
+            let (named, broken) = match row.kind {
+                RowKind::Insert => (false, false),
+                RowKind::Named { broken } => (true, broken),
+            };
+            let selector = if named {
+                format!("scope-expr-named-row-{}", row.label)
+            } else {
+                format!("scope-expr-row-{}", row.label)
+            };
+            let detail_color = if broken {
+                chip::chip_paint(theme, chip::Tone::DangerText).text
+            } else {
+                theme.muted_foreground
+            };
             let on_click = on_click.clone();
             let label = row.label.clone();
             let element = h_flex()
@@ -286,18 +349,29 @@ pub(crate) fn render(
                 .justify_between()
                 .rounded(theme.radius)
                 .debug_selector(move || selector.clone())
-                .child(div().font_family(crate::fonts::MONO).text_sm().child(
-                    super::keybindings_view::highlighted_text(
-                        &row.label,
-                        &row.indices,
-                        paint.accent,
-                    ),
-                ))
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .font_family(crate::fonts::MONO)
+                        .text_sm()
+                        .when(named, |label| {
+                            label.child(
+                                div()
+                                    .text_color(theme.muted_foreground)
+                                    .child(SharedString::new_static("≡")),
+                            )
+                        })
+                        .child(super::keybindings_view::highlighted_text(
+                            &row.label,
+                            &row.indices,
+                            paint.accent,
+                        )),
+                )
                 .child(
                     div()
                         .font_family(crate::fonts::MONO)
                         .text_xs()
-                        .text_color(theme.muted_foreground)
+                        .text_color(detail_color)
                         .child(SharedString::from(row.detail.clone())),
                 )
                 .on_mouse_down(MouseButton::Left, move |event, window, cx| {
@@ -306,7 +380,7 @@ pub(crate) fn render(
                     if event.click_count > 1 {
                         return;
                     }
-                    on_click(&label, window, cx);
+                    on_click(named, &label, window, cx);
                 });
             rows = rows.child(super::listrow::paint_row(
                 element,

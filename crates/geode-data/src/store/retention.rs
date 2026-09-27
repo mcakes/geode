@@ -14,9 +14,9 @@ use geode_core::schema::DatasetSpec;
 
 #[derive(Debug, Clone, Default)]
 pub struct RetentionPolicy {
-    /// Keep this many generations per partition.
+    /// Keep this many archived generations per partition, excluding live.
     pub keep_generations: Option<usize>,
-    /// Keep generations whose source time is within this window.
+    /// Keep archived generations whose source time is within this window.
     pub keep_age: Option<Duration>,
 }
 
@@ -216,9 +216,7 @@ mod tests {
     use geode_core::config::{LayerDoc, merge_docs};
     use geode_core::schema::{Grain, SchemaSpec};
 
-    /// `risk_snapshot`'s pairs for the grains a test means to sweep. These
-    /// tests name grains because the eviction they check is a measure
-    /// dataset's; `sweep` itself no longer knows what a grain is.
+    /// `risk_snapshot` table pairs for the measure grains a test sweeps.
     fn pairs(grains: &[Grain]) -> Vec<TablePair> {
         grains
             .iter()
@@ -423,12 +421,9 @@ grain = "position"
 
     #[test]
     fn the_oldest_remaining_bound_spans_every_grain_swept() {
-        // `oldest_remaining` answers "how far back can time travel go",
-        // and it folds across grains. Every other test here sweeps a
-        // single grain, where folding a lone value with `min` and with
-        // `max` are the same thing — so the fold itself was never
-        // exercised, and reporting the *newest* grain's oldest row would
-        // have understated the history actually held.
+        // `oldest_remaining` is the minimum source time across the swept archive
+        // tables. Different per-grain minima distinguish this fold from a maximum;
+        // it does not promise complete history for every partition.
         let (_d, store) = fixture();
         store
             .writer()
@@ -754,10 +749,8 @@ grain = "position"
 
     #[test]
     fn a_sweep_that_reconciles_nothing_still_leaves_the_summary_matching() {
-        // An empty policy evicts no rows, so reconciliation should find
-        // every summarised generation still present -- a regression check
-        // that the reconciliation added alongside eviction does not
-        // itself drop rows it should not.
+        // An empty policy evicts no rows. Reconciliation must preserve every
+        // summary entry whose generation remains in a live or archive table.
         let (_d, store) = fixture();
         fill(&store, 5);
         let tables = POSITION_TABLES.map(String::from);

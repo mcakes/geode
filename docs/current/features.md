@@ -21,28 +21,94 @@ Every module follows these interaction rules:
 
 - `:` changes only the focused tile; global changes use actions and palette
   flows.
-- `/` searches within the tile.
+- `/` routes find input to the tile when it supports local search.
 - Pointer commands have keyboard equivalents.
 - Insert-mode inputs own focus only while editing and blur before they close.
 - Stack state is visible through the shared marker in the module header.
 - Delivery matches are exhaustive so a new outcome cannot be ignored silently.
 
+### Autosized columns
+
+The blotter, market-data, and pricer tiles fit their columns to their content
+on `:autosize` or the palette's "Autosize columns" (`tile::autosize_columns`,
+the focused tile only); `:autosize reset` returns to the configured or
+default widths. Each tile runs one method for both doors.
+
+- **Measure.** `geode_shell::colfit` counts the characters of the header and
+  each cell and multiplies by JetBrains Mono's advance (0.6 em) at `text_sm`
+  (0.875 rem). It adds the `XSmall` table cell's padding, read from
+  gpui-component, and the 2 px cursor border. The rem is the window's when the
+  command runs. Modules add their own cell chrome: the blotter's `px_1` and
+  sort icon, and the tree columns' indent and chevron slot. Widths are clamped
+  to 2.5–40 rem: at least about three characters, and never so wide that one
+  long cell pushes the other columns off-screen. The fit runs once on the UI
+  thread and never in render.
+- **What is measured.** Market data measures every row of its prepared
+  model. The pricer measures every visible grid row, so the legs of a
+  collapsed package are not measured. The blotter measures only the header
+  and the rows in its format cache, which holds the window the table last
+  asked to see. Formatting a whole snapshot would break the UI budget, so a
+  wider value in a row that was never on screen does not widen its column.
+- **Nothing to fit.** When there are no rows to measure, `:autosize` refuses
+  with "nothing loaded to fit" and keeps the widths it already has. This
+  covers a blotter with no snapshot or an empty result, a panel with no
+  document or no rows, and a sheet that is still loading or empty. The
+  palette action shows the same refusal as a notice. `:autosize reset` always
+  runs.
+- **Storage.** The delegate holds fitted widths in pixels, keyed by a stable
+  column key: the blotter's column name (empty for the tree column), the
+  market-data column label (`__row_axis` for row labels), or the pricer's
+  vocabulary name (`__tree` for the tree). `column()` prefers a fitted width
+  to the default, so every refresh keeps it. A key the current model lacks is
+  ignored, and a new column gets its default width. The widths persist in the
+  session record's `column_widths` table. A missing or malformed table
+  restores as no fitted widths. A restored width is clamped to 25–560 px,
+  the range a fit can produce at any font scale (2.5 rem at the 10 px rem to
+  40 rem at the 14 px rem).
+- **Blotter specifics.** Switching the blotter's view clears its fitted widths.
+  A restored record whose view no longer exists opens the fallback view
+  without them. A grouping change drops the tree column's fitted width,
+  because its labels and depths belong to the grouping, and keeps the other
+  columns' widths.
+- **Fitted beats configured.** A fitted width overrides the configured one,
+  including a `presentation.width` or pricer view width changed later, until
+  `:autosize reset` or a refit.
+- **Limits.** Widths are pixels because `TableDelegate::column` has no window
+  from which to rescale rem. After a font-size change, fitted widths behave
+  like configured ones: run `:autosize` again. The blotter's header is painted
+  in the UI font but measured with the mono advance, which usually
+  overestimates it slightly. Market data and the pricer keep
+  `col_resizable(false)`. A blotter column dragged wider still returns to its
+  fitted or configured width on the next refresh.
+
 ## Blotter
 
 `geode-blotter` renders any configured view as a collapsible hierarchy. The
-data service returns every grouping depth in one `Snapshot`; the pure blotter
-core resolves columns, builds visible rows, retains expansion by path, formats
+data service returns grouped rows and attribution metadata in a `Snapshot`;
+the pure blotter core resolves columns, builds visible rows, retains expansion by path, formats
 the visible window, and handles cursor, find, and yank behavior.
 
 Attribution metadata decides whether a measure is meaningful at each depth. A
 non-attributable cell is shown as NULL rather than a plausible but incorrect
-sum. Pinned grouping, unscoped mode, local as-of, filtering, and named colors
-are tile state and survive through the module's session record.
+sum. The selected view, pinned grouping, unscoped mode, local as-of, and
+filtering survive through the module's session record. Named colors come from
+shared configuration; cursor, selection, expansion, and sort state are not
+persisted by the tile.
 
 The `DataTable` delegate paints a prepared row model. Rendering does not
-recompile columns or format the whole dataset. Publication watches are scoped
-to the datasets the view reads, and global frame changes are staged through
-the flip barrier.
+recompile columns or format the whole dataset. Each delivered snapshot builds
+a candidate column plan so presentation changes are recognized even when the
+column names and indices are unchanged. The format cache holds the visible
+window; named colors reuse resolved base and sign variants until their
+definitions or theme inputs change.
+
+Publication watches are scoped to the datasets the view reads. Global frame
+changes use the flip barrier: promotion requires the staged snapshot's followed
+counters to match, including watched data and configuration. Local pins exempt
+the corresponding frame changes; tile-local requeries clear any staged result.
+Restored filters are parsed for syntax, with malformed expressions dropped and
+logged. Interactive `:filter` commands also validate column names against the
+current schema and derived dimensions.
 
 An ungrouped dimension column (a `dimension` column the grouping does not
 contain, such as `strike` beside a position tree) shows its value where every
@@ -51,7 +117,8 @@ has a value. Sorting on it puts values first, then `mixed`, then blanks, in both
 directions; `y` yanks `mixed` as the word; the selection footer never totals a
 dimension column. See [ungrouped dimension
 columns](data-path.md#ungrouped-dimension-columns). A numeric dimension such as
-`strike` sorts as text.
+`strike` sorts by number and paints its exact value, never rounded by the text
+format.
 
 `g m` opens a panel on the cursor row's `underlying_ref` (the column name is
 fixed); a row above that level, a grouping without it, or a NULL value opens
@@ -69,8 +136,9 @@ anchor would silently invert the selection. `y` yanks the selection as TSV: a
 row selection copies every column with its header row, and a cell block
 copies only its own columns, still with their header.
 
-The anchor is a tree path plus a column name, not a display index, so a
-re-sort, a column move, or a live redelivery keeps the same data selected.
+The anchor is a tree path plus a column name. Sorting, column moves, and
+live redelivery preserve that identity and recompute the range to the current
+cursor in display order; the intermediate rows or columns can change.
 The anchor is the end the selection started from, which may be the range's
 last row. If the anchor's row is no longer shown — collapsed, filtered out,
 narrowed away — the selection clears and the tile reports "selection cleared:
@@ -87,17 +155,17 @@ bearish for a `sign` column, the sign variant of a sign-tinted named color), in
 the grid's monospace face. The footer shows the total only — no count, mean,
 or extremes. The total is computed over the selection's top-most rows only: a
 group row already carries its children's total, so counting a child as well
-would double it. A column carrying a `DeterminedNonAdditive` value anywhere in
-the selection shows a muted `—†` instead of a total — an explicit refusal
-rather than a plausible but wrong one — and a column with no values in the
-selection shows `—`.
+would double it. NULL and NaN values do not contribute. A contributing
+`DeterminedNonAdditive` value produces a muted `—†`; a summable column with
+no contributing values shows `—`.
 
 Whether a column adds up at all is a separate fact, decided by the query
 compiler and carried on the snapshot's column metadata (`ColumnMeta::summable`):
 only a plain measure whose schema aggregate is `sum` is summable. A `min`,
 `max`, or `any` measure, a derived expression (a ratio of sums is not a sum),
 a joined column, and anything unmarked are not. Such a column shows a muted
-`—‡`, and the footer adds "‡ this column does not add up". Attribution alone
+`—‡`, and the footer adds "‡ this column does not add up". This refusal takes
+precedence over `†`. Attribution alone
 cannot decide this: a `max` measure's values belong to their rows, yet the
 total of two maxima is meaningless.
 
@@ -109,7 +177,7 @@ continuously, and whether it selects rows or a block is decided by where the
 press that started it landed — the gutter starts rows, a cell starts a
 block — so a drag that did not begin with a press on a cell or the gutter
 selects nothing. The first `escape` clears the selection alone; a second
-escape falls through to clearing narrowing or find, as it always did.
+escape follows the tile's normal narrowing and find-clearing behavior.
 
 Limitations: a selection is always one contiguous row range or rectangle —
 there is no multi-range selection — and there is no paste; `y` is yank-only.
@@ -126,10 +194,15 @@ registers the concrete CVI and dividend kinds.
 delivery or structural edit. Ordinary cell commits patch it when possible;
 editing a Sent draft rebuilds to clear sent styling throughout the grid.
 
-Edits live in a `Draft` over a base identified by the document's source time
-**and the store generation the read named**. The default Hold policy retains
-the base snapshot when available after a document with a different generation
-arrives. `:auto` selects how later deliveries resolve such a transition:
+Edits live in a `Draft` whose `DocumentBase` contains source time and an
+optional store generation. Different source times indicate different data;
+equal times also differ when both generations are known and unequal. If
+either generation is unknown, comparison falls back to source time and
+cannot detect a same-time republish. When a document exists at the selected
+as-of, production queries report its generation for live and historical reads.
+
+The default Hold policy retains the base snapshot when available after a
+differing delivery. `:auto` selects how unsent edits handle the transition:
 
 | Policy | Effect on unsent edits |
 |---|---|
@@ -146,22 +219,26 @@ incoming document has no rows. Sent drafts follow the separate echo rules
 below. A snapshot that cannot build a valid grid leaves the last usable model
 and draft unchanged and reports the error.
 
-A base is a generation, not an instant. A historical delivery puts the draft
-Behind, and so does a corrected republish at the same source time: the
-generation differs even when the time does not. Such a delivery always produces
-a notice naming the republish, because the `update HH:MM` badge and the
-source-time chip both carry the base's own time and would otherwise report
-nothing new — held, the notice offers `:rebase` and `:revert`; automatically
-rebased, it says the edits were moved, since nothing is left pending. A
-disclosure the policy already made, of replaced or dropped work, outranks it.
-Returning to the base generation, or a redelivery of the same one, is not a
-republish and says nothing. A document read names its generation under both
-live and historical as-of, so an open draft normally has one; where nothing
-named it — a session file written before the generation was saved — the
-comparison falls back to source time alone, which cannot see a republish.
+An older historical generation can put a draft Behind just as a newer live
+generation can. Returning to the base restores Editing. A same-time republish
+that changes the draft's state produces a notice because its timestamp alone
+cannot show the change: Hold offers `:rebase` and `:revert`; automatic rebase
+reports that the edits moved. Replacement and dropped-edit notices take
+precedence. Redelivery of the same generation and returning to the base do
+not produce a republish notice.
 
-The module supports numeric, date, text, and closed-choice
-cells, row insertion/deletion, and kind-specific actions. See the
+Base-snapshot retention and same-day group-guard capture require exact
+equality of the source-time/generation pair. They do not use the weaker
+unknown-generation fallback: a snapshot with a known generation cannot be
+assumed to be a saved base whose generation is unknown.
+
+The module supports numeric, date, text, and closed-choice cells, row
+insertion/deletion, and kind-specific actions. Integer cells parse directly
+to `i64` and retain that type through drafts and upload assembly, preserving
+values above 2^53. Bumps on integer cells use checked integer addition and
+refuse fractional deltas or integer overflow; all candidate results are
+validated before any edit is written. Bump deltas themselves are parsed as
+`f64`, so their precision is limited by that representation. See the
 [crate guide](../../crates/geode-marketdata/README.md) for grid, popup, and
 command-parser contracts.
 
@@ -175,7 +252,9 @@ gutter while cursor borders, draft fills, and deletion marks stay on the data
 cell. Numbering includes inserted and deleted rows in painted order. Relative
 mode uses absolute numbers while the cursor is in the header attribute strip.
 Numeric and date editors retain the displayed value's alignment and text origin
-inside the cell.
+inside the cell. Opening a header attribute editor preserves the value box's
+top and height. Date fields retain its width; text fields may grow. The
+attribute strip supplies the frame, so neither editor adds input chrome.
 
 Dividend row labels use the ex date and a same-date ordinal (`<date>#n`).
 Rebase drops cell edits and deletions in a same-date group whose row count
@@ -186,9 +265,12 @@ within an unchanged-size group remains undetectable and can move an edit to
 the wrong dividend.
 
 Session drafts store cell edits with row and column labels, allowing restore
-to resolve them against a delivered grid. Attribute serialization has a type
-ambiguity: a text attribute that looks like an ISO date restores as a Date.
-The saved draft therefore does not preserve every attribute value's type.
+to resolve them against a delivered grid. `base` stores source time and
+`base_generation` stores the generation when known. Parked drafts use the
+same encoding, preserving identity across underlying switches. A missing
+`base_generation` restores as unknown and uses the source-time comparison
+fallback. Attribute serialization has a separate type ambiguity: a text
+attribute that looks like an ISO date restores as a Date.
 
 ### Uploads
 
@@ -220,13 +302,13 @@ notice naming it and leaves the visible draft alone. Session restoration also
 restores nonempty drafts as Editing; upload status and echo tracking are not
 saved.
 
-A Sent draft compares the next delivered generation against the submitted
-document once that generation differs from the base — a different source time,
-or the same time at a different store generation. Comparison ignores row order
-and minted row labels, compares attributes, and allows one ULP for
-floating-point values.
-Matching contents clear the draft and show `sent HH:MM, confirmed HH:MM` until
-the next edit. This is a content match, without an upstream correlation id.
+A Sent draft checks a delivery against the submitted document once its base
+differs by the source-time/generation rule above. Reusing a cached differing
+echo requires exact pair equality, including whether the generation is
+known. Content comparison ignores row order and minted row labels, compares
+attributes, and allows one ULP for floating-point values. Matching contents
+clear the draft and show `sent HH:MM, confirmed HH:MM` until the next edit.
+This is a content match, without an upstream correlation id.
 
 Different contents retain the draft over its base and show `echo differs
 (N rows)`; an attribute mismatch counts as one additional row. An uncomparable
@@ -295,8 +377,10 @@ name's first character is in that name, and a caret in a number offers
 nothing. Loaded names that name exactly one series are ranked against
 it with the `:` line's matcher; an empty name (an empty field, or after an
 operator, a parenthesis or a space) offers every one. The list hangs under the
-field over the chart, showing at most eight rows that scroll with the lit row;
-with nothing loaded it says so and names `a`. Tab writes the lit name over the
+field over the chart, showing at most eight rows that scroll with the lit row.
+When no unambiguous source names are available, it shows the add-series hint;
+this also happens when duplicate loaded pairs leave no usable name.
+Tab writes the lit name over the
 name at the caret and repeated Tab cycles the same list; Shift+Tab cycles
 back, and a first Shift+Tab writes the last. The lit row is the name last
 written. A row click writes that name the same way and leaves the keyboard in
@@ -308,8 +392,8 @@ field's undo history. A caret moved without typing, including after a Tab,
 re-ranks on the next Tab, not before; the list itself shows the ranking from
 the last edit. A change of the desk's default source relabels an open list.
 
-A tile's session table is written with `version = 2`. A table without it
-may name series in expression text by slot handle (`s3`), and restore
+A tile's session table is written with `version = 2`. A table with a missing
+version or one below 2 may name series in expression text by slot handle (`s3`), and restore
 rewrites each handle: a source slot's handle becomes its full
 `identity@source`, never the bare identity, so a later change of the default
 source cannot retarget it; another expression's handle becomes that
@@ -326,7 +410,9 @@ Expression slots may narrow results to buckets shared by their operands.
 Delivery tags reject superseded queries. Results requested under a pending
 frame flip are staged until promotion is allowed. This coordinates ready
 results, but the barrier timeout can release them while lagging tiles still
-show older data.
+show older data. The tile follows frame as-of changes and ignores grouping
+and scope. Returning a hidden tile to visibility refetches its source pairs.
+The tile's `/` handler does not implement local find.
 
 The series list, add picker, expression editor, custom dates editor, the three
 menus (action list, range, frequency), and color picker share one `Popup`
@@ -433,7 +519,12 @@ not. See the [measurement log](../perf.md) for conditions and timings.
 `geode-widgets` contains the shared segmented `DateTimeField`. Its pure state
 and key routing are separate from a painter that receives presentation values,
 allowing the market-data panel, pricer expiry editor, timeseries date editor,
-and as-of dialog to share behavior without depending on each other.
+and as-of dialog to share behavior without depending on each other. Hosts own
+commit, cancellation, focus, and timezone conversion. A valid stored date can
+still have incomplete pending digits: hosts call `complete_pending` before
+committing and report its segment error. Segment display text is allocated by
+`segments()` and cached by the host for painting. See the
+[widget integration contract](../../crates/geode-widgets/README.md#host-integration).
 
 ## Diagnostics
 
@@ -554,8 +645,29 @@ absolutely when there is no cursor row.
 Lines and packages are rows of one table; a package row sums its legs and opens and closes like a tree node
 (`space`/`z a`, `z o`, `z c`, `z shift+r`, `z shift+m`, or its chevron). A
 package created in the session opens so its legs show; a restored tile opens
-the packages its session record names. Package rows are read-only in every
-column.
+the packages its session record names. A package row's text columns show
+its legs' distinct values in leg order joined with `/` (a call spread reads
+`SPX`, `Z26`, `7400/7800`, `C`); barrier columns read only its barrier legs.
+Shift columns group legs by the shift as the cell spells it, show a leg with
+no shift as `—` beside set ones (`+2.0/—`), and paint muted only when every
+leg inherits the sheet's. Its
+qty is the package quantity while the legs fit the template, otherwise the
+list of distinct leg quantities. These cells edit (`i`, `enter`,
+double-click open a plain text editor, even for expiry and type): one
+value goes to every leg; a `/` list with one part per shown value replaces
+each where it appears (`7500/7900` moves a spread's two strikes; a fly's
+body moves once); a package quantity rescales every leg by its weight. A
+list with the wrong part count is refused naming the count and the cell
+(`2 values: 7400/7800`) and the editor stays open. Every part is checked
+first, and the whole edit is one undo step and one reprice. The editor
+groups a cell as the view paints it, so a precision override counts the
+same parts on screen, in the editor and in a refusal. If a template reload
+under an open package editor changes the text the cell would open on (the
+legs now fit the template, or no longer do), `enter` refuses with the
+editor's `the cell moved` message rather than read the typed quantity
+another way. Result columns stay read-only.
+A package row's pricing timestamp is the oldest present leg-attempt timestamp,
+including failed attempts; it does not establish that every leg priced successfully.
 
 The shorthand's package types come from the `pricer_templates` configuration
 document: the seven built-ins (`CS`, `PS`, `STRD`, `STRG`, `RR`, `FLY`,
@@ -678,7 +790,8 @@ tile holds:
   another tile is refused
   (`sheet 'x' is open in another tile`). The tile's own name does nothing,
   unless its load failed (`did not load`): then `:e` of it asks again,
-  which is the way to retry a refused or failed load in place.
+  which is the way to retry a refused or failed load in place. Retrying
+  discards edits made in the unsaved fallback sheet.
 - `:new` does the same into the next free `untitled-N`, empty, with no load.
 - `:name <sheet>` is refused if the name is open, is a known document, or has
   a save still queued (`sheet 'x' already exists`), and while the sheet is
@@ -795,9 +908,10 @@ failed. A save the store accepts is only queued; its outcome arrives later by
 sheet name. A refused save (`sheet not saved: the data service is busy; the
 next edit retries`) or a failed one (`sheet not saved: <the writer's reason>;
 the next edit retries`) paints a notice in the header's own save slot,
-separate from pricing notices: a refused pricing request cannot overwrite it, a later
-successful request cannot clear it, and `escape` does not clear it. Only a
-confirmed save does. Outcomes carry no link to the save that produced them;
+separate from pricing notices: a refused pricing request cannot overwrite it,
+a later successful request cannot clear it, and `escape` does not clear it. A
+confirmed save clears its failure notice unless a newer submission refusal
+still needs attention. Outcomes carry no link to the save that produced them;
 every one is delivered, in the writer's order, so the last to arrive is the
 latest queued save's. The next change and the close both retry. A close with
 a save queued but unconfirmed writes nothing extra: the write is already
@@ -867,10 +981,18 @@ delivery; it does not call a pricing implementation directly.
 ## Demo and application composition
 
 `geode-demo-data` generates deterministic risk batches and market-data
-documents. `geode-app --demo` writes them under a seed-specific temporary
-directory and uses the same ingestion, adapter, parsing, query, and delivery
-paths as configured sources. Demo adapters provide subscribed documents and
-fetchable series without pretending to be production vendor integrations.
+documents. `geode-app --demo` writes risk files under a seed-specific temporary
+directory and streams serialized documents through its in-process adapter.
+Both use the same ingestion, parsing, query, and delivery paths as configured
+sources. Demo configuration remains below desk and user overrides. Cached
+sources and database contents are reused, so schema or generator changes may
+require clearing the demo directory; see the [application README](../../crates/geode-app/README.md).
+
+Demo series provide deterministic minute bars in fixed weekday sessions from
+14:30 to 21:00 UTC, without holiday or daylight-saving rules. One source
+advertises identities and another requires manual entry. Document production
+and ingestion are asynchronous; starting the app does not guarantee data is
+ready for the first frame.
 
 `geode-app` is the composition root. It loads configuration, initializes GPUI
 and logging, builds registries, creates the data service and bridge, registers

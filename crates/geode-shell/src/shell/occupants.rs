@@ -359,10 +359,18 @@ impl ShellView {
         // This runs during the render that removes the tile; deferring through
         // `pending_focus_restore` would leave a frame with invalid focus.
         // Shell inputs retain their caret. Any new shell focusable surface must
-        // be included in `holds_shell_focus`.
+        // be included in `holds_shell_focus`. A tile still on screen that owns
+        // the focus keeps it too: a pull hides a neighbour while the focused
+        // tile may be typing, and taking its input would strand the open
+        // editor. Focus no painted tile claims is still taken back.
         if any_tile_left_the_screen
             && let Some(focused) = window.focused(cx)
             && !self.holds_shell_focus(&focused, cx)
+            && !active.iter().any(|id| {
+                self.occupants
+                    .get(id)
+                    .is_some_and(|o| o.content.holds_focus(window, cx))
+            })
         {
             self.focus_handle.focus(window, cx);
         }

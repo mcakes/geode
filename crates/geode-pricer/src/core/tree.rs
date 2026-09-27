@@ -1,6 +1,5 @@
-//! Which package rows are open (line-pricer spec §8.2, §8.5's tree keys)
-//! and the flat rows that are therefore visible. Keyed by `LineId`, so
-//! an edit that moves rows never opens or closes the wrong package.
+//! Package expansion and visible row order. Expansion is keyed by [`LineId`], so moving
+//! rows never changes which package is open.
 
 use crate::core::sheet::{LineId, Sheet};
 use std::collections::BTreeSet;

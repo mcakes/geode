@@ -1,5 +1,5 @@
-//! One or two panes with their axis rects, a density strip and one
-//! shared x axis (spec §8.1, ruling 12).
+//! One or two panes with aligned plot columns, optional density strips
+//! and one shared x axis beneath the lowest pane.
 
 use super::{AXIS_WIDTH, DENSITY_STRIP, PANE_GAP, Rect, X_AXIS_HEIGHT, design_px};
 

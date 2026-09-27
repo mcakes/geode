@@ -1,7 +1,7 @@
-//! Yank as TSV (Phase 3 spec §6.4): a header line of labels, then one
-//! line per selected visible row — tree text indented two spaces per
-//! depth, numbers raw and unscaled, blanks for NULL, and the `mixed`
-//! marker for an ungrouped dimension whose rows disagree.
+//! TSV export of selected visible rows and columns, with a header of display
+//! labels. Tree text is indented two spaces per depth; numeric values are
+//! unscaled. Mixed dimensions export the `mixed` marker; other NULL cells are
+//! blank. Fields are joined without escaping embedded tabs or newlines.
 
 use crate::core::cache::MIXED;
 use crate::core::plan::{ColumnKind, ColumnPlan};
@@ -50,7 +50,9 @@ pub fn tsv(
                 // blank it would claim the rows under it have no value.
                 ColumnKind::Dimension => match column.index {
                     Some(i) if snapshot.is_mixed_at(i, row) => MIXED.to_string(),
-                    Some(i) => snapshot.display_at(i, row).unwrap_or_default(),
+                    Some(i) => {
+                        crate::core::cache::dimension_text(snapshot, i, row).unwrap_or_default()
+                    }
                     None => String::new(),
                 },
             };
@@ -152,7 +154,7 @@ mod tests {
                         mixed_flag: Some(3),
                         ..meta("strike")
                     },
-                    TestColumn::Str(vec![None, Some("100.0"), None, None]),
+                    TestColumn::F64(vec![None, Some(4250.5), None, None]),
                 ),
                 (
                     meta("strike#mixed"),
@@ -168,12 +170,11 @@ mod tests {
         (snap, plan)
     }
 
-    /// A mixed cell yanks its marker; a blank one yanks nothing, as a NULL
-    /// always has.
+    /// A mixed cell exports its marker; a blank cell exports an empty field.
     #[test]
     fn a_mixed_dimension_yanks_its_marker_and_a_blank_one_yanks_nothing() {
         let (snap, plan) = unanimity_fixture();
         let out = tsv(&snap, &plan, &[1, 2, 3], 0..3, 1..2);
-        assert_eq!(out, "strike\n100.0\nmixed\n\n");
+        assert_eq!(out, "strike\n4250.5\nmixed\n\n");
     }
 }

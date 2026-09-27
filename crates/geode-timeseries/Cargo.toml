@@ -7,15 +7,9 @@ publish.workspace = true
 [lib]
 bench = false
 
-# `geode-core` for the series vocabulary (`Frequency`, `SeriesParams`,
-# the expression AST), `geode-shell` for the module-hosting contract
-# (`TileContent`, `Frame`, `Diagnostics`, `ChoiceList`, the chip/control
-# doors) and the `SeriesSettings` global, `geode-widgets` for the
-# segmented date field, `geode-chart` for the model and the element,
-# `geode-data` for `DataHandle` alone — the one door a module asks for
-# data through (never `geode-blotter`, never `geode-diagnostics`),
-# `chrono` for range resolution and the local offset, `toml` for the
-# session round trip.
+# Shared series vocabulary lives in geode-core; geode-shell supplies hosting
+# and settings. Widgets provide date inputs, geode-chart owns chart painting,
+# and DataHandle is the module's interface to geode-data.
 [dependencies]
 geode-core.workspace = true
 geode-shell.workspace = true

@@ -37,24 +37,27 @@ pub struct ColumnMeta {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Freshness {
     pub dataset: String,
-    /// RFC 3339, or `None` when the dataset has never loaded.
+    /// Selected source time in RFC 3339, or `None` when no matching source
+    /// time is known. Live views report dataset-wide freshness; historical
+    /// views report the oldest selected source time per dataset. Documents
+    /// report the source time of their own partition.
     pub as_of: Option<String>,
-    /// The store generation this answer was read from, or `None` when no
-    /// single generation names the read: a dataset that has never loaded, or
-    /// a historical view read, whose era resolves one generation *per
-    /// partition* and so has no scalar identity.
+    /// Publication identity for a document, or the dataset's newest live
+    /// generation for a live view. The live-view value is a dataset-wide
+    /// change marker; its partitions can contain different generations.
+    /// Historical views report `None`, as do reads with no matching generation.
     ///
-    /// Source time is not an identity on its own — a corrected republish
-    /// keeps its source time and takes a new generation ID — so a reader
-    /// deciding whether the data under it moved must compare this too.
-    /// `None` is not evidence that it did not; it means unknown.
+    /// A corrected republish can keep its source time while taking a new
+    /// generation ID. Compare known generation IDs as well as source times
+    /// when checking for changes. `None` means unknown, not unchanged.
     pub generation: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct Provenance {
     pub datasets: Vec<Freshness>,
-    /// Set when the result came from the archive rather than live.
+    /// Requested historical instant in RFC 3339, or `None` for a live read.
+    /// Historical reads can select rows from either live or archive storage.
     pub as_of_request: Option<String>,
 }
 
@@ -770,10 +773,9 @@ impl Snapshot {
     /// freshness and draft-base comparisons; the ordinary builder supplies empty
     /// provenance.
     ///
-    /// A `None` generation says the read did not learn one, never that the data
-    /// is unchanged. A fixture omitting what a real read would have named
-    /// therefore exercises the source-time fallback, not the path it was
-    /// written for.
+    /// Supply a generation ID to exercise identity comparisons. `None`
+    /// exercises the document panel's source-time fallback, which cannot
+    /// distinguish corrected republishes at the same source time.
     pub fn for_tests_with_provenance(
         columns: Vec<(ColumnMeta, TestColumn)>,
         grouping_len: usize,
@@ -1337,8 +1339,8 @@ mod tests {
 
     /// A mixed flag must name a boolean companion column: pointing it at a
     /// value column would read that column's truthiness as "the rows
-    /// disagree". A NULL flag — a spine row the column's grain has no rows
-    /// under — is not mixed.
+    /// disagree". A NULL flag is treated as false; the query compiler
+    /// coalesces unmatched flags to false before snapshot construction.
     #[test]
     fn a_mixed_flag_must_name_a_boolean_companion_and_a_null_flag_is_not_mixed() {
         let mut wrong = meta();

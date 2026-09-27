@@ -124,8 +124,11 @@ listings, the stale check, the local sweep, discovery, result delivery —
 reports its panics as diagnostics or health. A thread that unwinds past every
 boundary is declared as `DataEvent::ThreadStopped`, shown in the status bar
 until restart, and never restarted. Containment does not interrupt blocked
-calls. The application panic hook logs contained panics; uncontained panics,
-including a supervised thread's death, also produce a crash report. See
+calls. The application panic hook logs panics marked by those containment
+boundaries without writing a report. Other panics, including a supervised
+thread's death, trigger a best-effort report under the user config directory
+before the previous hook runs. An absent marker does not establish whether
+the process will exit; another caller may catch the unwind. See
 [containment and liveness](data-path.md#containment-and-liveness).
 
 Health and freshness describe what the system knows rather than concealing

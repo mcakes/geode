@@ -86,29 +86,27 @@ typed values. Series datasets describe identities and time/value columns.
 Views refer to those declarations and may narrow presentation without changing
 the underlying dataset.
 
-A view column carries a `kind` — `measure`, `dimension`, or `derived` — and the
-key **defaults to `measure`**. A view join and a view column also take
-`required`, a boolean defaulting to true; a non-bool value is ignored, as it is
-for a sort key's `descending` and for the schema's own `required`. Together those
-two defaults are the upgrade consequence of view validation becoming a gate: a
-column written as just a name is a measure, so if the primary dataset declares no
-measure of that name, the view is refused when queried instead of opening with
-that column blank. Writing `kind = "dimension"` where that was meant, or
-`required = false` to accept the column being dropped, is the fix, and the
-diagnostic names the view and the column. A `dimension` column the grouping does
-not contain and no join supplies is shown by the unanimity rule — its value where
-every row beneath a tree row agrees, `mixed` where they disagree, blank where none
-has a value — when a declared grain of the primary dataset carries it alongside
-the whole grouping; otherwise it is refused with "is declared a dimension, but it
-is not in the grouping, no join carries it, and no declared grain of dataset …
-carries it alongside the grouping …". See [ungrouped dimension
-columns](data-path.md#ungrouped-dimension-columns). `required` has no effect on a
-`derived` column: nothing validates a derived expression at load — its SQL is
-the compiler's business — so there is no failure for the flag to downgrade. The same applies to a join whose keys
-no grain of the joined dataset carries, or which keys on a column the grouping
-does not include. See [queries and time
-travel](data-path.md#queries-and-time-travel) for what a refusal looks like at
-query time.
+A view column's `kind` is `measure` (the default), `dimension`, or `derived`.
+A join or column also accepts a boolean `required`, defaulting to true;
+non-boolean values leave the default in force. Required declarations that fail
+validation refuse the view when queried, with a diagnostic naming the view and
+column or join.
+
+Use `kind = "dimension"` for a dimension instead of relying on the measure
+default. `required = false` permits dropping an unusable join, a column whose
+measure role does not match, or a dimension column unreachable under the
+grouping. It does not suppress every validation error: unknown columns and
+invalid derived-dimension sources still refuse the view. Derived SQL is
+checked during compilation and is unaffected by this flag. See
+[view validation](typed-documents.md#views-and-presentation) and
+[query refusals](data-path.md#queries-and-time-travel) for the boundaries.
+
+An ungrouped `dimension` column can still be displayed when a declared grain
+of the primary dataset carries it alongside the whole grouping. Each tree row
+shows its value when all contributing rows agree, `mixed` when they disagree,
+and blank when all values are NULL. If no grouping, join, or carrying grain
+can supply it, a required column refuses the view. See
+[ungrouped dimension columns](data-path.md#ungrouped-dimension-columns).
 
 ## Validation boundaries
 
@@ -432,13 +430,15 @@ open pricer tile without a restart; a sheet's own `:refresh` still overrides
 it.
 
 `underlyings` lists the underlyings the pricer's entry bar suggests, in the
-order it offers them: an array of strings, upper-cased, with blank entries
-and repeats dropped. A non-string element warns at
+order it offers them: an array of strings, trimmed and upper-cased, with
+blank entries dropped and duplicates keeping their first position. A non-string element warns at
 `app.pricing.underlyings` and is skipped. A value that is not an array warns
 and is ignored: on a reload the bar keeps the list it had. A reload applies a
 valid list to open tiles without a restart. An edit to `underlyings` alone
 still runs the pricer's full reload, which restarts every open tile's refresh
-timer. Without it the bar says no underlyings are configured.
+timer. An absent `underlyings` clears the list, including on reload; a
+non-array value at startup leaves it empty. With an empty list the bar says
+no underlyings are configured.
 
 `pricer_views` holds the pricer's named column views. The builtin layer
 carries the two bundled views; like other named objects, a desk or user entry

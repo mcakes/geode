@@ -424,22 +424,16 @@ corrected serves again without a restart. A refused view stays registered and
 its siblings still serve; one unhonourable view does not take the desk down or
 disappear from the dialogs that would fix it.
 
-The refusal replaced two worse outcomes. Previously the query compiled
-regardless: a column the view could not supply came back **absent** from the row,
-which paints blank in the blotter — indistinguishable from a genuine NULL, and
-with no diagnostic anywhere a trader would be looking. And a column declared a
-measure that was really a grain-bearing attribute reached a `Sum` default and was
-totalled: because an attribute repeats across every row of its grain, that total
-was plausible and wrong, which is worse than blank because the desk would have
-acted on it. The aggregate now comes from the column's own declared role, so
-there is no default left to fall into. The error names the view and the reason,
-which is the whole remedy.
+A refused view reports an error instead of returning an absent column that
+would look like a genuine NULL. Measure aggregation follows the schema's
+explicit role; a grain-bearing attribute cannot fall through to a default sum
+and produce a misleading total.
 
-A join or a column may declare `required = false`. Its failure is then a warning
-saying the declaration was dropped because it is optional, and the view still
-opens; only an **error** refuses. A join keyed outside the grouping that supplies
-no column of the view warns whichever way `required` is set: nothing is denied,
-the join is simply never performed.
+`required = false` downgrades unusable joins, measure-role mismatches, and
+unreachable dimension columns to warnings, allowing those declarations to be
+dropped. Unknown columns and invalid derived-dimension sources remain errors.
+A join keyed outside the grouping that supplies no selected column only warns,
+regardless of `required`, because no selected value depends on it.
 
 The same checks run against a **per-query grouping override**, which validates a
 copy of the view with the override's grouping in place. Regrouping away from a
@@ -448,61 +442,12 @@ dimension (below): it is shown by the unanimity rule when a grain carries it
 alongside the new grouping, and otherwise the query is refused rather than
 painting the column blank for as long as the override lasts. The remedy is in
 the message: group by the column again, or declare it `required = false`.
+An override cannot rescue a view already refused during load validation.
 
-### Ungrouped dimension columns
-
-A view may show a `dimension` column it does not group by — `strike` or
-`expiry` beside an `lhu → underlying_ref → position_ref` tree. When the column
-is declared with the dimension role in the primary (measure-family) dataset, is
-not a derived dimension, and no join supplies it, the compiler computes it by
-the **unanimity rule**, at every depth including the grand total:
-
-- the value, when every stored row under the tree row has that one non-NULL
-  value;
-- **mixed**, when they disagree — including a NULL beside a value, since
-  showing the value would claim it for rows that have none;
-- blank (NULL), when no row under it has a value.
-
-It is never `any_value`: a position holds several instruments with their own
-strikes, and an arbitrary leg's strike is a plausible wrong value.
-
-The column is read from one table: the coarsest declared grain of the dataset
-that carries it and every column of the view's grouping (`unanimity_grain` in
-`geode-core`'s `view` module). The whole grouping, not a query's bounded prefix,
-so one grain serves every depth and a view that validates compiles at every
-`max_depth`. Per column the aggregate is `case when count(c) = count(*) and
-min(c) = max(c) then min(c) end` plus a flag `count(c) > 0 and (count(c) <
-count(*) or min(c) <> max(c))`, over the same grouping sets and level marker as
-a measure aggregate at that grain, joined to the spine the same way, with the
-grain's scope predicate and era. When a measure aggregate already reads that
-grain the two aggregates ride its scan; otherwise one `dim_<table>` CTE per grain
-holds them. That CTE is joined to the spine but never feeds it, so adding a
-display column never adds or removes tree rows, and a view declaring no
-ungrouped dimension compiles to the statement it always did.
-
-The result carries the value cast to text, as a grouping column is, and a
-boolean companion column named `<column>#mixed` (false where the grain has no
-rows under the spine row). `ColumnMeta::mixed_flag` links the value to its
-companion by index and `Snapshot::from_batches` refuses a flag that is not a
-boolean column of the batch; `Snapshot::is_mixed_at` reads it. The column is not
-summable and is `Additive` at every depth, because the rule is already exact,
-and takes the chosen grain's scope semantics. A consumer reading the snapshot
-without the flag sees NULL, not a value.
-
-Known limitations: the unanimity is over the chosen grain table's rows, so an
-instrument with no row in that table (a cash instrument absent from the
-underlying table when the grouping forces the underlying grain) does not take
-part; choosing the coarsest carrying grain minimises this. A numeric column
-arrives as text, like a numeric grouping column, so it sorts as text. A derived
-column over the dimension sees only the value column, so where the input is
-mixed the derived cell is blank, not marked.
-
-The compiler no longer absorbs the same defects itself. A join naming an unknown
-dataset, or keyed on columns no grain of the joined dataset carries, is a
-compile error naming the dataset; validation refuses both earlier, so reaching
-them means a caller skipped the gate. A measure's aggregate comes from its
-declared role with no fallback, so a column that is not a measure cannot reach
-one.
+The compiler also checks joins against available datasets and grains. An
+unusable required join produces an error naming the dataset; an optional join
+is omitted. These checks protect callers that bypass service-level validation.
+Derived SQL remains subject to compilation errors.
 
 The read pool coalesces by the **caller's key**, usually a tile, rather than
 by view name. Two tiles showing one view therefore do not supersede each
@@ -543,10 +488,58 @@ Attribution says whether a value belongs to its row; it does not say whether
 a column adds up. The compiler records that separately as
 `ColumnMeta::summable`, true only for a plain measure whose schema aggregate
 is `sum`. Min, max, and any measures, derived expressions, joined columns,
-and grouping columns are not summable, and anything that builds a snapshot
-without the compiler defaults to not summable. A consumer that totals a
-selection (the blotter footer) must gate on it, because a total of maxima or
-of ratios is a plausible wrong number.
+and grouping columns are not summable. Document-query and catalog snapshot
+builders mark their columns false; custom builders must supply the flag
+explicitly. Selection totals require this flag and additive contributing
+values. Attribution alone cannot justify a total of maxima or ratios.
+
+### Ungrouped dimension columns
+
+A view may show a `dimension` column it does not group by — `strike` or
+`expiry` beside an `lhu → underlying_ref → position_ref` tree. When the column
+is declared with the dimension role in the primary (measure-family) dataset, is
+not a derived dimension, and no join supplies it, the compiler computes it by
+the **unanimity rule**, at every depth including the grand total:
+
+- the value, when every stored row under the tree row has that one non-NULL
+  value;
+- **mixed**, when they disagree — including a NULL beside a value, since
+  showing the value would claim it for rows that have none;
+- blank (NULL), when no row under it has a value.
+
+Unanimity prevents an arbitrary leg's strike from appearing as the strike
+for a position containing several instruments.
+
+The column is read from one table: the coarsest declared grain of the dataset
+that carries it and every column of the view's grouping (`unanimity_grain` in
+`geode-core`'s `view` module). The whole grouping, not a query's bounded prefix,
+so one grain serves every depth and a view that validates compiles at every
+`max_depth`. Per column the aggregate is `case when count(c) = count(*) and
+min(c) = max(c) then min(c) end` plus a flag `count(c) > 0 and (count(c) <
+count(*) or min(c) <> max(c))`, over the same grouping sets and level marker as
+a measure aggregate at that grain, joined to the spine the same way, with the
+grain's scope predicate and era. When a measure aggregate already reads that
+grain the two aggregates ride its scan; otherwise one `dim_<table>` CTE per grain
+holds them. That CTE is joined to the spine but never feeds it, so adding a
+display column never adds or removes tree rows. Views without ungrouped
+dimension columns do not add this aggregation.
+
+The result carries the value in the column's own type, so a numeric dimension
+sorts as a number and paints its shortest exact form (`4250`, `4250.5`), and a
+boolean companion column named `<column>#mixed` (false where the grain has no
+rows under the spine row). `ColumnMeta::mixed_flag` links the value to its
+companion by index and `Snapshot::from_batches` refuses a flag that is not a
+boolean column of the batch; `Snapshot::is_mixed_at` reads it. The column is not
+summable and is `Additive` at every depth, because the rule is already exact,
+and takes the chosen grain's scope semantics. A consumer reading the snapshot
+without the flag sees NULL, not a value.
+
+Known limitations: the unanimity is over the chosen grain table's rows, so an
+instrument with no row in that table (a cash instrument absent from the
+underlying table when the grouping forces the underlying grain) does not take
+part; choosing the coarsest carrying grain minimises this. A derived
+column over the dimension sees only the value column, so where the input is
+mixed the derived cell is blank, not marked.
 
 ## Retention and maintenance
 
@@ -614,16 +607,26 @@ contributing file, and a view with multiple inputs is as fresh as its stalest
 input. That avoids labeling a partial or joined answer with the newest
 contributor's timestamp.
 
-Provenance also reports the generation each dataset was read from. A live read
-names the newest live generation of the partition asked about (a document read)
-or of the whole dataset (a view read); a historical document read names the
-generation its as-of pinned. A historical view read reports no generation,
-because its era resolves one generation per partition and no single ID names
-that answer. An absent generation means unknown — a dataset that has never
-loaded, or a read that cannot name one — never unchanged: a reader deciding
-whether the data under it moved then falls back to source time, and must treat
-that as the weaker test it is, because a corrected republish keeps its source
-time and differs only by generation.
+Provenance reports source time and generation separately. Corrected republishes
+can share a source time while taking different generation IDs. Planning,
+provenance lookup, and row execution share one reader transaction, so these
+values describe the same database snapshot.
+
+| Read | Generation reported |
+|---|---|
+| Live document | Newest live-published generation of the requested key's partition. |
+| Historical document | Generation selected for that key at the requested instant. |
+| Live view | Greatest live-published generation ID across each input dataset, regardless of query scope. |
+| Historical view | `None`; each partition resolves independently. |
+
+A live view's dataset-wide value is a publication change marker; it does not
+name every partition's generation. Archive-only arrivals do not advance live
+markers. Document reads report no generation when none matches, including a
+historical request before the document's first retained generation.
+
+An absent generation means unknown, not unchanged. The document panel compares
+known generation IDs as well as source times. Its source-time fallback cannot
+distinguish corrected republishes at the same source time.
 
 Health is keyed by **source**. Discovery and load outcomes occupy separate
 lanes because a clean, content-blind poll cannot prove that the last publish

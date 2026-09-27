@@ -1,4 +1,6 @@
-//! The scope bar's menu for adding dimension and expression filters.
+//! The scope bar's menu for adding dimension and expression filters. The
+//! expression dialog offers named expressions beside typed ones, so they
+//! have no row of their own.
 //!
 //! The `+` control opens the menu below its glyph. Rows show live bindings
 //! through [`kbd::menu_binding`]. `j`/`k`/`up`/`down` move the selection;

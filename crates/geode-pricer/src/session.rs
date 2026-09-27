@@ -1,11 +1,12 @@
-//! The tile's session record (line-pricer spec §7.4): `{ sheet, view,
-//! refresh, cursor, expanded }`. The sheet's rows are the store's; this
-//! names which sheet the tile shows and how it was looking at it. Read
-//! leniently — a key of the wrong type is ignored, never a refusal — so
-//! a hand-edited `session.toml` still opens the tile.
+//! Tile session state: sheet name, view, refresh setting, cursor line ID,
+//! expanded package IDs, and `:autosize` column widths. Sheet contents are
+//! stored separately. Reading ignores wrong-typed fields, invalid refresh
+//! values, and negative IDs; valid members of a mixed expansion list are
+//! retained.
 
 use crate::core::sheet::{LineId, Refresh};
 use crate::core::storage::{encode_refresh, parse_refresh};
+use geode_shell::colfit::{FittedWidths, SESSION_KEY, widths_from_record, widths_to_toml};
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Record {
@@ -14,6 +15,8 @@ pub struct Record {
     pub refresh: Option<Refresh>,
     pub cursor: Option<LineId>,
     pub expanded: Vec<LineId>,
+    /// `:autosize`'s fitted widths by column name (`geode_shell::colfit`).
+    pub widths: FittedWidths,
 }
 
 fn id(v: &toml::Value) -> Option<LineId> {
@@ -37,6 +40,7 @@ impl Record {
                 .and_then(|v| v.as_array())
                 .map(|a| a.iter().filter_map(id).collect())
                 .unwrap_or_default(),
+            widths: widths_from_record(Some(t)),
         }
     }
 
@@ -65,6 +69,9 @@ impl Record {
                 ),
             );
         }
+        if let Some(w) = widths_to_toml(&self.widths) {
+            t.insert(SESSION_KEY.into(), w);
+        }
         t
     }
 }
@@ -82,6 +89,9 @@ mod tests {
             refresh: Some(Refresh::Every(Duration::from_secs(10))),
             cursor: Some(LineId(7)),
             expanded: vec![LineId(2), LineId(9)],
+            widths: [("strike".to_string(), 92.0), ("__tree".to_string(), 64.0)]
+                .into_iter()
+                .collect(),
         };
         assert_eq!(Record::from_table(&r.to_table()), r);
         assert_eq!(

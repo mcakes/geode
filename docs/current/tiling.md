@@ -53,6 +53,26 @@ focused dock does nothing; removing its last tile hides it.
 | Edge drop | Insert beside the target's slot, within or across regions |
 | Centre drop | Insert after the target in its stack; a plain target becomes a stack |
 | Dock-background drop | Insert into that dock; dropping into the source dock does nothing |
+| Pull (`mod+shift+h/j/k/l`) | Move the visible neighbor in that direction into the focused tile's slot; a plain tile becomes a stack |
+| Split a stack (`mod+s`) | The focused member's stack becomes a split in its own slot |
+
+Pull names a tile on screen rather than a node in the tree, so its result
+never depends on how the layout was nested. The neighbor is the nearest
+visible tile that way within the focused region, chosen by the same geometry
+as directional focus; a stacked neighbor
+gives up only its visible member. Focus stays on the focused tile, which stays
+active. Stack order follows the screen: a tile pulled from the left or above
+goes first and one from the right or below goes last, so repeated pulls sweep
+a row or column in reading order from either end. With no neighbor that way —
+an edge, a lone tile, or a fullscreen tile, which has no visible neighbor — it
+refuses with a notice.
+
+Splitting a stack keeps member order, gives equal ratios, and takes its
+orientation from the configured add direction resolved against the stack's
+slot, as `stack::unstack` does. The stack's previous split ratios and nesting
+are not remembered, so pulling tiles in and splitting them out again yields an
+equal flat split. It clears fullscreen, and a plain tile refuses with a
+notice.
 
 Matching-orientation insertion adds a sibling and equalizes sibling ratios.
 Otherwise it wraps the anchor slot in a half-and-half split. A member used

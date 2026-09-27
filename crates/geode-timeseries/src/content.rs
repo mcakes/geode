@@ -1,7 +1,6 @@
-//! What the shell hosts (Phase 3 spec §3.1, §3.2; timeseries spec
-//! §9.1): the [`TileContent`] wrapper over a [`TimeseriesTile`] entity,
-//! and the factory that builds them. The factory carries the data handle
-//! (§2.1) and the `colours` doc; the shell never sees either.
+//! Shell integration through a [`TileContent`] wrapper and [`TimeseriesFactory`].
+//! The app supplies the factory's data handle and shared named colors; the
+//! shell creates and hosts tiles through the module contract.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -22,9 +21,8 @@ use gpui::{App, Entity, SharedString, Window};
 
 use crate::tile::TimeseriesTile;
 
-/// Every action this module registers, with its palette title. One list
-/// that [`DEFAULT_KEYMAP`] binds and `register_actions` registers, so the
-/// two cannot drift.
+/// Registered actions and their palette titles. [`DEFAULT_KEYMAP`] binds
+/// the keyboard subset; menus and the palette also expose actions.
 pub const ACTIONS: &[(&str, &str)] = &[
     ("timeseries::add", "Add a series…"),
     ("timeseries::expr", "Compose an expression…"),
@@ -75,12 +73,10 @@ pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
     ("timeseries::pick_colour", "timeseries::pick_color"),
 ];
 
-/// The module's keymap fragment. Every predicate is a plain conjunction
-/// whose first identifier is `timeseries`, this factory's only context —
-/// `keymap::fragments::check_fragment` refuses anything else, and a
-/// fragment can therefore never shadow a shell binding. A bare `g` or
-/// `0` here shadows nothing outside the tile: the shell's own `g g` is a
-/// `workspace` binding the tile context sits above.
+/// Bindings scoped to the factory's `timeseries` context. Fragment validation
+/// requires each predicate to be a conjunction beginning with that context.
+/// Within the tile, these bindings take precedence over workspace bindings;
+/// outside it, the fragment does not participate in key resolution.
 pub const DEFAULT_KEYMAP: &str = r#"
 [[bindings]]
 context = "timeseries && mode == normal"
@@ -167,9 +163,7 @@ impl TileContent for TimeseriesContent {
         self.tile.read(cx).key_context()
     }
 
-    /// `window` is forwarded rather than dropped: the popup verbs
-    /// create a field, focus it and blur it, none of which is
-    /// reachable from `&mut App` alone.
+    /// Forward the window so popup actions can create, focus, and blur inputs.
     fn dispatch(
         &self,
         action: &ActionId,
@@ -181,10 +175,7 @@ impl TileContent for TimeseriesContent {
             .update(cx, |t, cx| t.dispatch(action, count, window, cx))
     }
 
-    /// `window` is unused here — no `:` verb this tile has touches a
-    /// popup — and stays only because [`TileContent::command`] is
-    /// spelled that way for every module; `TimeseriesTile::command`
-    /// discards it with a `let _`.
+    /// Forward tile-local commands through the module's command handler.
     fn command(&self, line: &str, window: &mut Window, cx: &mut App) -> Result<(), String> {
         self.tile.update(cx, |t, cx| t.command(line, window, cx))
     }
@@ -237,15 +228,12 @@ impl TileContent for TimeseriesContent {
     }
 }
 
-/// Builds this module's tiles. One factory for the crate: unlike the
-/// market-data panel there is no per-document-kind spec, so kind and
-/// context are the same word and `contexts()` takes the trait default.
+/// Creates timeseries tiles sharing the data handle and named colors.
+/// The factory uses the default module context, matching its `timeseries` kind.
 pub struct TimeseriesFactory {
     data: DataHandle,
-    /// `colours.toml`'s definitions, shared with every tile this factory
-    /// has built exactly as `BlotterFactory`'s are, so a config reload
-    /// reaches them all without recreating any. An `Arc` inside the cell
-    /// so a tile clones a pointer rather than the map.
+    /// Definitions shared with existing and future tiles. Replacing the
+    /// inner `Arc` invalidates each tile's chart cache through `ChartKey`.
     colours: Rc<RefCell<Arc<NamedColours>>>,
 }
 
@@ -257,9 +245,8 @@ impl TimeseriesFactory {
         }
     }
 
-    /// A reloaded `colours` doc: every open tile resolves its named
-    /// colors from the new set on its next chrome rebuild. A fresh
-    /// `Arc` every time, like the blotter's.
+    /// Replace shared named colors. The fresh `Arc` changes the chart cache
+    /// key so the next chart preparation resolves colors from this set.
     pub fn set_colours(&self, colours: NamedColours) {
         *self.colours.borrow_mut() = Arc::new(colours);
     }
@@ -321,9 +308,8 @@ mod tests {
     use super::*;
     use geode_core::config::{Layer, LayerDoc, Severity};
 
-    /// A user keymap written before the rename names `timeseries::colour`:
-    /// through this factory's real registration it still binds, to the
-    /// current id, with a warning naming both.
+    /// Compatibility color-action names resolve to their current IDs through
+    /// factory registration, with a warning for each alias.
     #[test]
     fn a_user_binding_naming_an_old_color_action_binds_the_new_id() {
         let (data, _rx) = DataHandle::for_tests();

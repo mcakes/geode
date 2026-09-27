@@ -1659,6 +1659,27 @@ render), so this is added to the keystroke's own edit cost — the worst
 case, a sheet-wide `:shift` (1.52 ms above) plus the rebuild, stays
 under 3.5 ms. Paints are a per-theme memo and are not in this figure; a
 theme switch re-derives the memo and rebuilds nothing.
+
+### Package row cells aggregated (2026-09-27)
+
+`cargo bench -p geode-pricer --bench core -- grid_build_1000`, the same
+fixture as above, after package rows began painting their legs' distinct
+values joined with `/` (every text column, the package quantity or leg
+list, and shift groups by spelled text) instead of blank text cells. Apple
+M5 Pro, rustc 1.96.0, bench profile, 100 samples. **The machine was loaded**
+(load average 20–25 from concurrent builds in other checkouts). The first
+run, taken while this checkout's own bench build was still finishing, read
+1.78 ms (interval 1.65–1.94 ms, 13 outliers); the rerun below is the value
+of record.
+
+| Benchmark | What it is | Result |
+|---|---|---|
+| `grid_build_1000` | one whole `GridModel::build`, 100 two-leg package rows aggregated | 1.42 ms (1.4213 ms; interval 1.4047–1.4404 ms, 6 outliers) |
+
+Aggregation does not show above the earlier 1.85 ms reading; the two runs
+differ by machine load more than by the change. Well inside the 8 ms
+budget.
+
 ## Timeseries chart (spec §8, Part 3)
 
 What one **cache miss** costs the render thread in `geode-chart`: the
@@ -1935,6 +1956,6 @@ the pairs as a same-run ratio, not as reference values.
 
 The depth-2 shapes the blotter opens with stay under the 50 ms requery
 budget with both columns even under this load. The added cost is the two
-`min`/`max`/`count` pairs per underlying row and two more text plus two
-boolean columns across the Arrow boundary. An unloaded re-measure is still
+`min`/`max`/`count` pairs per underlying row and one numeric, one text, and
+two boolean columns across the Arrow boundary. An unloaded re-measure is still
 owed before these become reference values.

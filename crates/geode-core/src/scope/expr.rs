@@ -31,10 +31,11 @@ impl CompareOp {
     }
 }
 
-/// The refusal for `op` (its grammar text) on derived dimension `column`,
-/// or `None` when the operator is allowed. Derived dimensions are mapped
-/// labels, so only `=`, `!=` and `in` mean anything on them. Both
-/// `Scope::validate` and the expression dialogs' live check use this.
+/// The refusal for a comparison operator's grammar text on a derived
+/// dimension, or `None` for `=`, `!=`, or `<>`. Derived dimensions map
+/// labels to members, so ordering and pattern comparisons are unsupported.
+/// `in` is handled separately by the grammar. Scope validation and live
+/// expression checks share this rule.
 pub fn derived_op_error(column: &str, op: &str) -> Option<String> {
     (!matches!(op, "=" | "!=" | "<>")).then(|| {
         format!(

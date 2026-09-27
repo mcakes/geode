@@ -661,9 +661,8 @@ impl HealthTracker {
 /// Validate every view once, returning the diagnostics to publish and the
 /// refusals to enforce.
 ///
-/// One function because `open` and a reload must never disagree about which
-/// views are honourable: a view refused at open and served after a reload would
-/// be a blotter that works until the next config write.
+/// Opening and reloading use the same validation rules, so a configuration's
+/// acceptance does not depend on when it was loaded.
 fn validate_views(
     views: &[ViewSpec],
     schema: &SchemaSpec,
@@ -702,11 +701,9 @@ pub struct DataService {
     /// returned so `open` keeps its signature and a caller that does not
     /// surface diagnostics still gets a working service.
     diagnostics: Vec<Diagnostic>,
-    /// Views whose configuration cannot be honoured, by name, each with the
-    /// first error explaining why. A query for one is refused instead of
-    /// compiled: the compiler would return the columns it cannot supply as
-    /// absent, and an absent column paints blank with nothing on screen to say
-    /// why.
+    /// Views that failed validation, keyed by name with their first error.
+    /// Refusing them before compilation keeps configuration failures visible
+    /// even when no diagnostics panel is open.
     refused_views: std::collections::BTreeMap<String, String>,
     /// One worker per upload target. They only answer the sink, so they
     /// stop first and depend on nothing below.
@@ -3869,10 +3866,8 @@ mod tests {
         );
         let ndx_generation = ndx.provenance().datasets[0].generation;
 
-        // NDX.Z was published before the third publish (SPX.Z's second), so
-        // a dataset-wide maximum would answer with SPX.Z's newest generation
-        // for NDX.Z too. The fixture's single document could not catch that:
-        // this pair is what tells the two apart.
+        // NDX.Z predates SPX.Z's second publish. A dataset-wide maximum
+        // would incorrectly report SPX.Z's generation for both documents.
         assert!(spx_generation.is_some() && ndx_generation.is_some());
         assert_ne!(spx_generation, ndx_generation);
         assert!(
@@ -4011,9 +4006,8 @@ mod tests {
 
     #[test]
     fn a_view_with_an_error_diagnostic_is_refused_by_name_not_compiled() {
-        // A diagnostic nobody has a panel open for is not a remedy. Before the
-        // refusal, this query compiled: `nosuchcolumn` came back absent, and an
-        // absent column paints blank with nothing on screen to say why.
+        // Invalid views must produce a query refusal naming the problem,
+        // even when the caller does not inspect configuration diagnostics.
         let (db, _src, _svc, _rx) = service();
         let ds = crate::ingest::load::tests_support::fixture().3;
         let mut schema = SchemaSpec::default();

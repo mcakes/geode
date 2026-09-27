@@ -1,15 +1,13 @@
 # geode-data
 
-`DataService`, the only door to data in Geode. It discovers sources,
-ingests them into one persistent DuckDB database, keeps freshness and
-health, and answers queries as immutable columnar `Snapshot`s over a
-channel. No other crate opens a file or a socket; modules hold a
-`DataHandle` and ask.
+`DataService` owns data-source ingestion, persistent DuckDB storage, and
+query execution. Modules submit requests through `DataHandle`; results,
+publication events, and health updates return through an event sink. Source
+transports and database connections stay outside the UI modules.
 
-This crate depends on `geode-core` alone. It never depends on the shell,
-on a module or on a parser crate: document kinds arrive as
-`geode_core::document::DocumentKind` trait objects that `geode-app`
-registers at startup.
+Its only production workspace dependency is `geode-core`. The app supplies
+concrete document parsers, adapters, and pricers through shared traits, keeping
+the data crate independent of the shell and feature modules.
 
 Current behavior and rationale:
 [`docs/current/data-path.md`](../../docs/current/data-path.md).
@@ -71,7 +69,8 @@ for capacity, coalescing, and worker shutdown behavior.
 | `adapter` | Subscription, upload, and fetch capabilities; a registry, bounded message sink, and topic matching. Includes the in-process `ChannelAdapter`; the app can register additional implementations such as its demo series adapter. |
 | `ingest` | The discovery scheduler, the cold-start priority ladder, the per-file load pipeline, the grain split and conflict detector, the ingest runner (one thread, one writer connection, three queues), the subscribed-source receiver, the `Coalescer`, and the fetch worker. |
 | `store` | The DuckDB store: DDL generated from the schema, the per-file publish transaction and backfill guard, document publish, the series family's bitemporal append (`append_series`, the one door series rows enter by), retention, and the freshness catalog in source time. |
-| `query` | The query path: scope to bound SQL, the grain-aware view compiler, the read pool (latest-wins per key, stale results dropped), as-of routing against the archive, the picker's distinct values, the document request, the catalog request. A scope still carrying a named-expression reference (`Scope.named` nonempty) is refused with `StoreError::Scope` rather than compiled — resolving a name is the shell's job, before a query ever reaches here. |
+| `query` | Scope lowering, grain-aware view compilation, distinct values, document and series queries, catalog reads, and the read pool. View/document planning, provenance, and execution share a worker transaction; superseded results are dropped. |
+| `pricing` | App-supplied pricer registry and a separate bounded worker queue. Queued batches coalesce by key; cancellation stops a running batch at the next line boundary. |
 | `documents` | The `DocumentKind` registry the app fills. |
 | `egress` | Startup target resolution and per-target workers that encode and send, with eight waiting jobs. Refusals answer from the service thread; encoding and transport results, including contained panics, answer from the worker as keyed/tagged upload outcomes. |
 | `health` | Re-export of `geode_core::health::Health`. |
@@ -86,9 +85,9 @@ for capacity, coalescing, and worker shutdown behavior.
 
 ```sh
 cargo test -p geode-data
-cargo bench -p geode-data      # ingest, query, publish_document, append_series
-zsh scripts/mutation-check.sh  # run after touching the compiler, scope lowering,
-                               # as-of routing, publish, retention or discovery
+cargo bench -p geode-data      # ingestion, document/series writes, view/series queries
+zsh scripts/mutation-check.sh --anchors-only
+zsh scripts/mutation-check.sh --changed  # mutations for changed source files
 ```
 
 The requery budget and current reference measurements are in
@@ -102,6 +101,9 @@ often tripped:
 
 - `SUM` never double-counts: measures are split by grain at ingest and
   aggregated at their own grain by the compiler.
+- View column metadata marks only plain `sum` measures as summable.
+  Selection summaries also check per-cell attribution: a value belonging to
+  a row does not imply that its column can be totalled across rows.
 - A view that `ViewSpec::validate` reports an error for is refused by name, not
   compiled: `query` answers with that view's first error message. The check sits
   after the unknown-view lookup and before the grouping override, so an unknown
@@ -110,18 +112,21 @@ often tripped:
   set rather than merging into it, so a view corrected in the configuration serves
   again without a restart. A refused view stays registered so the dialogs can fix
   it.
-- The view compiler errors rather than dropping a join it cannot honour: an
-  unknown join dataset, or keys no grain of the joined dataset carries. The one
-  remaining `continue` in that loop is a depth fact, not a configuration error —
-  a join runs only at depths whose spine materializes its keys, and at a coarser
-  depth the joined columns are left out of the statement entirely while the
-  grouping key itself is NULL from a separate path. A measure's aggregate comes
-  from its declared role with no fallback, so a non-measure column cannot reach
-  one.
-- An ungrouped dimension column is computed by the unanimity rule (value, mixed,
-  or blank; never `any_value`) from the grain `ViewSpec::ungrouped_dimensions`
-  names, joined like a measure aggregate but never feeding the spine. A view
-  declaring none compiles to its old statement byte for byte, pinned by
+- The view compiler errors for a required join with an unknown dataset or
+  keys no grain carries, and skips such optional joins. A join runs only when
+  the query's materialized grouping contains all its keys; at coarser depths
+  its selected attributes are absent and deeper grouping keys are NULL.
+  Measures use the aggregate from their declared role, with no fallback for
+  columns of another role.
+- Scope lowering and distinct queries refuse unresolved named-expression
+  references with `StoreError::Scope`. The shell resolves names before
+  submission so a missing definition cannot silently widen a query.
+- Ungrouped primary dimensions use a unanimity aggregate: the common value
+  when all contributing rows agree, `mixed` when they disagree (including a
+  value alongside NULL), and blank when all values are NULL or no rows match.
+  The aggregate reads the coarsest declared grain carrying the column and
+  the whole grouping. It joins the tree spine without changing tree rows.
+  Views without these dimensions retain the SQL shape checked by
   `testdata/demo_tree_view.sql`.
 - Health is keyed by source, never by dataset; deciding and emitting a
   transition are one step under the lock.
@@ -136,18 +141,16 @@ often tripped:
 - Generation summaries cover all live/archive pairs, including NULL-book
   partitions. As-of selection and retention break source-time ties by the
   greatest generation ID so corrected republishes win consistently.
-- Provenance names the generation a read actually used, because source time
-  alone cannot see a corrected republish. The catalog answers the live cases:
-  `live_generation` for one partition's newest and `dataset_generation` for a
-  whole dataset's, the maximum where `dataset_as_of` takes the minimum, since
-  this field reports whether the data changed rather than how stale it is. A
-  historical document read reports the `gen_id` it pinned and a historical view
-  read reports none, its era having resolved one generation per partition.
-  `latest_gen_id` stays an internal sequence helper: `ensure_tables` reads it
-  once to start the generation ID sequence above recorded history, and nothing
-  else calls it. A load allocates from that sequence through `reserve_gen_id`
-  and `record` stores the ID it was given. `latest_gen_id` aggregates the whole
-  catalog, so it names no partition and is not a freshness answer.
+- Document provenance reports the selected partition's generation ID, for
+  live and historical reads. This distinguishes corrected republishes that
+  share a source time. Live views report `dataset_generation`, the maximum
+  live-published ID across the dataset; their freshness time instead reports
+  the stalest input. Historical views have no scalar generation identity.
+  `None` means unknown, not unchanged. See
+  [freshness and provenance](../../docs/current/data-path.md#freshness-health-and-delivery).
+- `reserve_gen_id` allocates publication IDs from the store sequence, and
+  `record` stores the supplied ID. `latest_gen_id` reads the catalog-wide
+  maximum for sequence initialization; it is not a read's freshness marker.
 - Live/archive retention has a transactional storage API but no production
   scheduler for measure or feed-published document datasets. Local datasets
   are swept on the writer after a local publish takes its document past

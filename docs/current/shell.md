@@ -48,7 +48,11 @@ A stack occupies one layout slot and keeps two or more leaf tiles alive. Only
 its active member is visible. Focusing a member activates it, so structural
 focus cannot point at a hidden member. The shell sends each occupant a
 `StackHandle`; modules paint its marker through the shared builder and use it
-to open the shell-owned member list.
+to open the shell-owned member list. `stack::pull_*` moves the visible
+neighbor into the focused tile's slot and `stack::split` turns a stack back
+into tiles. The shell dispatches both rather than the pure workspace router:
+the split's orientation needs the slot's geometry, and a refused pull leaves a
+notice.
 
 A fullscreen tile paints with the same chrome as a workspace's only tile,
 so the status bar marks it instead. The bar's right region is its
@@ -127,7 +131,10 @@ that occupant intentionally holds an insert-mode input.
 
 An occupant that closes a focused input must blur it before dropping its
 handle. Switching workspaces also restores focus immediately when the old
-occupant remains alive but is no longer mounted. Without these steps GPUI can
+occupant remains alive but is no longer mounted. Likewise, the render that
+takes a tile off screen returns focus to the shell root unless a shell input
+or a still-painted occupant (through `holds_focus`) owns it, so a pull into a
+tile that is typing leaves its editor focused. Without these steps GPUI can
 retain or fall back from a handle that no longer receives the shell's key
 listeners, leaving subsequent chords ineffective.
 
@@ -250,18 +257,25 @@ A named chip's tooltip is the expression text. A name the frame's
 `≡ name · missing` or `≡ name · invalid`, whose tooltip is the reason
 `Scope::resolve` gives; every tile that scope reaches refuses to query until
 the name is defined again or removed. The `×` inside a named chip removes that
-name (`Frame::drop_named`, undoable through `set_scope`). Named chips are
-keyed by name, so their element ids survive a neighbour's removal. The chip
-body has no click and no hover fill yet; the Expressions dialog is the
-keyboard route to the definitions. Known limitation: no key removes one name
-from the frame scope. The keyboard reaches that only through
-`frame::scope_clear` (the whole scope), `frame::scope_undo`, or loading a
-saved scope. A scope whose only content is a name is not empty: the chips
-row and the save glyph paint for it.
+name (`Frame::drop_named`, undoable through `set_scope`) and does nothing
+else. Named chips are keyed by name, so their element ids survive a
+neighbour's removal. The chip body has the chips' hover and pressed fills,
+and a click on it opens the Expressions dialog on that name
+(`objectdialog::render::open_object`): a defined name opens in its edit
+stage, an invalid one included, since editing it is how it gets fixed; a
+missing name opens the Browse list with the notice `'<name>' is not
+defined`. The keyboard route to one name's removal is the scope expression
+dialog: `frame::scope_expression` opens it in Whole mode with the frame's
+names staged as chips, backspace at the field's start removes the last one,
+and Enter applies the rest (see
+[input and dialogs](input-and-dialogs.md#frame-expression)). A scope whose
+only content is a name is not empty: the chips row and the save glyph paint
+for it.
 
 The `+` verb opens the "Add a filter" menu under itself: "Dimension…"
-dispatches `frame::pick`, "Expression…" dispatches `frame::add_expression`,
-and each row shows its action's live binding, if any. The `+` holds its
+dispatches `frame::pick`, "Expression…" dispatches `frame::add_expression` (whose dialog offers the
+named expressions beside typed text), and each row shows its action's live
+binding, if any. The `+` holds its
 pressed fill while the menu is open. The menu is shell-owned transient state
 (`shell/addfilter.rs`), not gpui-component's `PopupMenu`, because its rows
 dispatch the shell's string actions and label them from the shell keymap.

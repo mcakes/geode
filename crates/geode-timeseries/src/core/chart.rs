@@ -1,7 +1,9 @@
-//! `SeriesResult` + `Model` → `ChartModel` (spec §8.3, §8.5). Built once
-//! per delivery or chrome change, never in `render`. Every field the
-//! chart's cache keys do NOT carry (`axis_mode`, `step_us`) rides on
-//! `version`, which the tile bumps on every rebuild.
+//! Prepare a chart model from query results and slot presentation settings.
+//! The tile rebuilds it when chart inputs change, including theme or named-color
+//! changes detected during render. Its version
+//! invalidates chart caches for inputs absent from their keys, including axis
+//! mode and frequency step. Missing result slots get one NaN per bucket;
+//! results for removed slots are ignored.
 
 use geode_chart::{ChartModel, ChartSlot};
 use geode_core::series::SeriesResult;

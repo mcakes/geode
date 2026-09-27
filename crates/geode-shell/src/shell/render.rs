@@ -915,8 +915,21 @@ impl Render for ShellView {
                 });
             });
         };
-        // A named-expression chip's `×` drops that name alone, an undoable
-        // edit like the other chips' `×`. Its body has no click yet.
+        // A named-expression chip's body opens the Expressions dialog on
+        // that name; its `×` drops that name alone, an undoable edit like
+        // the other chips' `×`.
+        let named_open_entity = cx.entity();
+        let on_named_open = move |name: &str, window: &mut Window, cx: &mut App| {
+            named_open_entity.update(cx, |view, cx| {
+                objectdialog::render::open_object(
+                    view,
+                    objectdialog::Domain::Expressions,
+                    name,
+                    window,
+                    cx,
+                );
+            });
+        };
         let named_close_entity = cx.entity();
         let on_named_close = move |name: &str, _window: &mut Window, cx: &mut App| {
             named_close_entity.update(cx, |view, cx| {
@@ -948,6 +961,7 @@ impl Render for ShellView {
             on_as_of,
             on_term_open,
             on_term_close,
+            on_named_open,
             on_named_close,
             cx,
         );

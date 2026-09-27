@@ -1,15 +1,18 @@
-//! The pricing worker (line-pricer spec §5.3): one thread, its own
-//! queue, separate from the DuckDB query pool.
+//! One pricing thread with its own queue, independent of the DuckDB read pool.
 //!
-//! Rules, each pinned by a test below:
-//! * latest wins per key — a queued batch for a key is replaced by a
-//!   newer one in place; a batch arriving while its key is running queues
-//!   behind it;
-//! * cancel by key drops the queued batch and stops a running one at the
-//!   next line boundary, delivering the lines already priced;
-//! * every `price` call runs under `catch_unwind` + `panic::contained`,
-//!   so a panic is one line's error and the worker keeps going;
-//! * no pricer configured answers every line with the configured name.
+//! At most [`PRICE_BOUND`] distinct keys can wait. A newer queued batch replaces
+//! that key's pending batch in place. Submitting while the same key runs queues
+//! another batch; it does not cancel the running one.
+//!
+//! Cancellation removes queued work and stops a running batch at the next line
+//! boundary, returning any lines already processed. Overrides are set once per
+//! batch; failure makes each processed line an error. Individual pricing panics
+//! become line errors and leave the worker available. An unavailable pricer
+//! returns the configured missing-pricer reason for each processed line.
+//!
+//! A refused sink delivery logs once and does not stop the worker. Shutdown
+//! cancels running work at a line boundary and drops queued work; it joins the
+//! thread, so a blocked pricer can delay shutdown.
 
 use super::PricerConfig;
 use geode_core::pricing::{PriceOutcome, PriceParams};
@@ -141,9 +144,8 @@ fn run(queue: Arc<(Mutex<Queue>, Condvar)>, config: PricerConfig, sink: PriceSin
         let started = std::time::Instant::now();
         let mut results = Vec::with_capacity(params.lines.len());
         let mut failures = 0usize;
-        // Spec §5.3 "Overrides once per batch": a refusal or a panic here
-        // fails the whole batch — a line priced against the wrong data
-        // source is worse than no price.
+        // Apply overrides once per batch. If refused or panicking, price no lines
+        // against the wrong inputs; report the failure for each processed line.
         let overrides_failed: Option<String> = match &config.pricer {
             None => None,
             Some(pricer) => {

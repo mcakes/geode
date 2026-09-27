@@ -122,13 +122,9 @@ fn double_clicking_a_placeholder_opens_the_picker_and_a_pick_fills_it(
         dialog_filter_is_focused(&shell, &mut cx),
         "the field keeps focus through the rest of the double-click"
     );
-    // The door's early return must skip the click-to-focus tail entirely,
-    // not just leave focus looking right: falling through still calls
-    // `focus_main_tile`, which marks the session dirty even though the
-    // tile was already focused. A dialog-aware `pending_focus_restore`
-    // (see `dialog::refocus_top`) now re-focuses this same field either
-    // way, so the focus assertion above no longer catches a skipped
-    // early return on its own — this does.
+    // Opening the picker must skip tile-focus mutation. Focus restoration
+    // can hide an accidental call to `focus_main_tile`, but its session-dirty
+    // side effect remains observable even when the tile was already focused.
     assert!(
         !shell.read_with(&cx, |s, _| s.session_dirty),
         "opening the picker is not a workspace-mutating dispatch"

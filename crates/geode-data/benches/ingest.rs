@@ -1,8 +1,6 @@
-//! Ingest benchmarks (spec §9.3). Establishes the cold-start and
-//! throughput baselines, and answers the parse-parallelism question spec
-//! §5.6 declines to assume.
-//!
-//! Uses the generated source directory, never checked-in fixtures (§7.4).
+//! Cold-start ingestion, reopening, per-file load, and CSV staging benchmarks.
+//! Source directories are generated outside the timed work. Staging cases
+//! compare sequential and multi-connection parsing across file sizes.
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use geode_core::config::{LayerDoc, merge_docs};
@@ -243,9 +241,8 @@ fn bench_cold_start(c: &mut Criterion) {
 }
 
 fn bench_warm_start(c: &mut Criterion) {
-    // Reopening a populated database must be milliseconds: live tables are
-    // queryable the moment it opens, which is what keeps the <1s startup
-    // budget reachable without reading a CSV (spec §5.4, §7.1).
+    // Measure opening an existing store with queryable live tables,
+    // without parsing CSV data again.
     let ds = schema();
     let (src, _emitted) = source_dir(100_000);
     let db_dir = tempfile::tempdir().unwrap();
@@ -315,16 +312,10 @@ fn bench_single_file_load(c: &mut Criterion) {
     group.finish();
 }
 
-/// Spec §5.6's open question: does staging on separate connections beat
-/// staging sequentially through the writer?
-///
-/// **File size is the variable that decides it**, so this measures both
-/// regimes. DuckDB's CSV reader is itself multi-threaded, so it should
-/// saturate the cores on a large file on its own and inter-file
-/// parallelism should stop paying; on small files it cannot, and spreading
-/// files across connections should win. The desk's real files run to
-/// hundreds of thousands of rows, so the large case is the one that
-/// governs — the small case is here to show where the crossover is.
+/// Compare sequential staging with four concurrent connections for two
+/// file-size regimes. DuckDB also parallelizes individual CSV reads, so
+/// inter-file concurrency can affect small and large files differently.
+/// This measures staging only, not concurrent publication.
 fn bench_parse_parallelism(c: &mut Criterion) {
     let ds = schema();
     let mut group = c.benchmark_group("ingest_parallelism");

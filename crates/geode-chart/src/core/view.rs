@@ -1,4 +1,4 @@
-//! The visible window along x (spec §8.1): an index window under
+//! The visible window along x: an index window under
 //! `Session` (bucket `i` occupies `[i, i+1)`), a micros window under
 //! `Continuous`. Unit-agnostic: every method takes the loaded `full`
 //! range in the same units and clamps to it.

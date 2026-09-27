@@ -12,7 +12,7 @@ use gpui_component::WindowExt as _;
 use crate::actions::ActionId;
 use crate::commandline::Prompt;
 use crate::keymap::{Binding, KeyContext, MatchResult, UNBOUND_ACTION};
-use crate::tiling::{Orientation, apply_workspace_action};
+use crate::tiling::{Direction, Orientation, apply_workspace_action};
 use crate::vimfind;
 use crate::{fontsize, theme};
 use geode_core::query::AsOf;
@@ -27,6 +27,21 @@ use super::{
 
 /// The notice produced when a stack verb targets a tile outside a stack.
 pub(super) const NOT_IN_A_STACK: &str = "not in a stack";
+
+/// The notice produced when a `stack::pull_*` finds no visible tile beside
+/// focus in its direction.
+pub(super) const NO_TILE_THAT_WAY: &str = "no tile that way";
+
+/// The direction a `stack::pull_*` action names, or `None` for any other id.
+fn pull_direction(id: &str) -> Option<Direction> {
+    match id {
+        "stack::pull_left" => Some(Direction::Left),
+        "stack::pull_down" => Some(Direction::Down),
+        "stack::pull_up" => Some(Direction::Up),
+        "stack::pull_right" => Some(Direction::Right),
+        _ => None,
+    }
+}
 
 /// The notice produced when a palette action tries to open transient chrome
 /// (the command line, find, or the stack list) while a dialog is open.
@@ -113,14 +128,9 @@ impl ShellView {
         self.stack_list = None;
         self.add_filter_menu = None;
 
-        // The palette reaches every action, including these three, even while a
-        // dialog is open (ruling 5). Each would open real transient chrome behind
-        // the stack that the user cannot see and, being blocked from the keyboard
-        // by the modal branch, can barely reach: an unfocusable command line that
-        // cancels itself on the next render, a find prompt with the same fate, or
-        // a stack list that only becomes usable once the stack closes. Refuse
-        // instead of running them behind the stack, unlike an ordinary palette
-        // action (see `commit_selected`), which is allowed to run there.
+        // The palette reaches every action while a dialog is open. Refuse
+        // transient tile controls here: the modal would hide them and block
+        // their keyboard route. Other palette actions may run behind the stack.
         if self.modal_open()
             && matches!(
                 action.0.as_str(),
@@ -140,6 +150,38 @@ impl ShellView {
                 self.note_keyboard_focus_move(window, cx);
             } else {
                 self.notice = Some(NOT_IN_A_STACK);
+            }
+            return;
+        }
+        if action.0 == "stack::split" {
+            // The split is shaped like `stack::unstack`'s: the configured add
+            // direction resolved against the focused slot.
+            let rect = self
+                .services
+                .workspaces
+                .active()
+                .focused_tile_rect(super::render::content_area(window));
+            let orientation = self.add_direction.resolve(None, rect);
+            if self
+                .services
+                .workspaces
+                .active_mut()
+                .split_stack(orientation)
+            {
+                self.session_dirty = true;
+                self.note_keyboard_focus_move(window, cx);
+            } else {
+                self.notice = Some(NOT_IN_A_STACK);
+            }
+            return;
+        }
+        if let Some(dir) = pull_direction(&action.0) {
+            // Focus stays on its tile; the pulled one is hidden, and the
+            // occupant sync delivers both tiles' new stack positions.
+            if self.services.workspaces.active_mut().pull(dir) {
+                self.session_dirty = true;
+            } else {
+                self.notice = Some(NO_TILE_THAT_WAY);
             }
             return;
         }
@@ -366,6 +408,23 @@ impl ShellView {
                     choicedialog::open_tile_kinds_with(self, kinds, context, window, cx);
                 }
             }
+        } else if action.0 == "tile::autosize_columns" {
+            // The focused tile's occupant fits its own table; any other
+            // tile is untouched. A refusal (no tile, no table) is a notice.
+            let result = match self
+                .services
+                .workspaces
+                .active()
+                .focused_tile()
+                .and_then(|t| self.occupants.get(&t))
+            {
+                Some(o) => o.content.autosize_columns(false, window, cx),
+                None => Err(crate::colfit::NO_TABLE),
+            };
+            if let Err(refusal) = result {
+                self.notice = Some(refusal);
+            }
+            cx.notify();
         } else if action.0 == "log::level" {
             // Open the target-then-level picker for application logging.
             choicedialog::open_log_level(self, window, cx);

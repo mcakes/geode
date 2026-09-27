@@ -2,12 +2,16 @@
 //! controller in `shell::expr_suggest` feeds it the field's text and
 //! caret and paints what it holds.
 //!
-//! `refresh` re-reads the caret position (`geode_core::scope::complete::
-//! context_at`), then rebuilds the rows, hint and warning. Rows are ranked
-//! with the shared fuzzy matcher and capped at [`MAX_ROWS`]. Categorical
-//! values come from an async distinct query: `refresh` asks for a column
-//! once (`Refresh::Request`), and `deliver` accepts only the latest tag
-//! for that column, so a reply from a superseded request is never shown.
+//! [`ExprCompletion::refresh`] derives context from the text and caret through
+//! [`context_at`], then rebuilds rows, hints and warnings when either changes.
+//! Rows use the shared fuzzy matcher and are capped at [`MAX_ROWS`]. Categorical
+//! values come from asynchronous distinct queries and remain cached per column
+//! for this completion state. Only a reply matching the column's current
+//! loading tag is accepted. Superseded loading entries are discarded so returning
+//! to their columns can request values again; ready and failed entries remain
+//! until invalidated. A narrowing-scope change clears all values. Frame Whole/Add
+//! dialogs can also offer named expressions: accepting one stages its name and
+//! erases the typed prefix without inserting a column reference.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -17,7 +21,7 @@ use geode_core::scope::complete::{Context, ExprVocab, Position, ValueKind, check
 use crate::listfilter;
 use crate::vimnav::{self, NavCommand};
 
-/// At most this many ranked rows are kept. The hint still names the total.
+/// Maximum ranked rows retained. Categorical-value hints report the full cached count.
 pub const MAX_ROWS: usize = 50;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -31,12 +35,45 @@ pub enum Values {
 pub struct Row {
     /// What the row shows and what ranking matches against.
     pub label: String,
-    /// What accepting the row writes over the token.
+    /// Replacement text for an insert row; named rows use [`Accept::Stage`].
     pub insert: String,
-    /// Right-aligned detail: a role and type, a count, or what an operator does.
+    /// Right-aligned detail: role/type, count, operator meaning, or a named
+    /// expression's preview or validation error.
     pub detail: String,
     /// Matched char offsets within `label`.
     pub indices: Vec<usize>,
+    pub kind: RowKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowKind {
+    /// Accepting writes `insert` over the token.
+    Insert,
+    /// A named expression: accepting stages the name beside the text and
+    /// erases the typed token. `broken` is a missing or invalid definition.
+    Named { broken: bool },
+}
+
+/// A named expression the field may stage. The surface decides which
+/// names to offer (already staged ones are left out by the caller).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedOffer {
+    pub name: String,
+    /// The definition's text, or why it is broken.
+    pub preview: String,
+    pub broken: bool,
+}
+
+/// What accepting a row does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Accept {
+    Write(Write),
+    /// Stage `name` and apply `erase` (the token's range, empty text) so
+    /// the typed prefix does not stay behind as text.
+    Stage {
+        name: String,
+        erase: Write,
+    },
 }
 
 /// One accepted row: `text` over the byte `range` of the line it was
@@ -73,6 +110,8 @@ pub struct ExprCompletion {
     hint: String,
     warning: Option<String>,
     values: HashMap<String, Values>,
+    /// Empty unless a surface opts in; no other surface sees named rows.
+    named: Vec<NamedOffer>,
 }
 
 fn quote(value: &str) -> String {
@@ -132,12 +171,10 @@ impl ExprCompletion {
         }
     }
 
-    /// Every column's values are requested under one pool key, and the
-    /// pool keeps only the newest request per key: a replaced pending
-    /// request or an interrupted running one never replies. So at most one
-    /// request is outstanding; any other column still `Loading` is
-    /// forgotten here, or it would say "loading values…" forever and
-    /// `refresh` would never ask again. Ready and Failed entries stay.
+    /// Track the latest request and discard other columns' loading entries.
+    /// All columns share one pool key, so superseded work may never reply.
+    /// Keeping its loading entry would prevent a later visit from requesting
+    /// values again. Ready and failed entries remain cached.
     pub fn mark_loading(&mut self, column: &str, tag: u64, vocab: &ExprVocab) {
         self.values
             .retain(|c, v| c == column || !matches!(v, Values::Loading { .. }));
@@ -165,6 +202,19 @@ impl ExprCompletion {
         true
     }
 
+    /// Drop every column's values, in flight or not, because the scope
+    /// they were narrowed by has changed; kept, they would suggest values
+    /// the new scope excludes, miss ones it admits, or keep an error that
+    /// no longer holds. A reply still on its way no longer matches a
+    /// `Loading` tag, so `deliver` drops it. The last text is forgotten
+    /// too, so the next `refresh` at the same caret asks again rather
+    /// than answering `Unchanged`.
+    pub fn forget_values(&mut self, vocab: &ExprVocab) {
+        self.values.clear();
+        self.rebuild(vocab);
+        self.last = None;
+    }
+
     /// Rebuild the context, rows, hint and warning from the last text and
     /// caret. The highlight is kept, clamped to the new rows.
     pub fn rebuild(&mut self, vocab: &ExprVocab) {
@@ -172,7 +222,14 @@ impl ExprCompletion {
             return;
         };
         let context = context_at(&text, caret);
-        let candidates = self.candidates(&context, vocab);
+        // A name stands for a whole term, so it fits only where a term
+        // starts; offered after a column it would stage mid-comparison.
+        let mut candidates = if matches!(context.position, Position::Column) {
+            self.named_rows()
+        } else {
+            Vec::new()
+        };
+        candidates.extend(self.candidates(&context, vocab));
         let texts: Vec<String> = candidates.iter().map(|r| r.label.clone()).collect();
         self.candidates = candidates.len();
         self.rows = listfilter::rank(&texts, &context.typed)
@@ -192,12 +249,35 @@ impl ExprCompletion {
         self.context = Some(context);
     }
 
+    /// Replace the named offers and rebuild. An empty list (the default)
+    /// means no named rows.
+    pub fn set_named_offers(&mut self, offers: Vec<NamedOffer>, vocab: &ExprVocab) {
+        self.named = offers;
+        self.rebuild(vocab);
+    }
+
+    fn named_rows(&self) -> Vec<Row> {
+        self.named
+            .iter()
+            .map(|offer| Row {
+                label: offer.name.clone(),
+                insert: String::new(),
+                detail: crate::scopebar::elide(&offer.preview),
+                indices: Vec::new(),
+                kind: RowKind::Named {
+                    broken: offer.broken,
+                },
+            })
+            .collect()
+    }
+
     fn candidates(&self, context: &Context, vocab: &ExprVocab) -> Vec<Row> {
         let row = |label: &str, insert: String, detail: &str| Row {
             label: label.to_string(),
             insert,
             detail: detail.to_string(),
             indices: Vec::new(),
+            kind: RowKind::Insert,
         };
         match &context.position {
             Position::Column => {
@@ -302,9 +382,9 @@ impl ExprCompletion {
             vimnav::apply(self.highlighted, self.rows.len(), NavCommand::Move(delta));
     }
 
-    /// The write for ranked row `i`, or `None` when there is no such row
-    /// or the cached range no longer fits the last text.
-    pub fn accept(&self, i: usize) -> Option<Write> {
+    /// What accepting ranked row `i` does, or `None` when there is no such
+    /// row or the cached range no longer fits the last text.
+    pub fn accept(&self, i: usize) -> Option<Accept> {
         let row = self.rows.get(i)?;
         let range = self.context.as_ref()?.token.clone();
         let (text, _) = self.last.as_ref()?;
@@ -312,10 +392,29 @@ impl ExprCompletion {
             && range.end <= text.len()
             && text.is_char_boundary(range.start)
             && text.is_char_boundary(range.end);
-        fits.then(|| Write {
-            range,
-            text: row.insert.clone(),
+        fits.then(|| match row.kind {
+            RowKind::Insert => Accept::Write(Write {
+                range,
+                text: row.insert.clone(),
+            }),
+            // A named row never writes its name as text: the text layer
+            // would then hold a column reference that does not exist.
+            RowKind::Named { .. } => Accept::Stage {
+                name: row.label.clone(),
+                erase: Write {
+                    range,
+                    text: String::new(),
+                },
+            },
         })
+    }
+
+    /// The ranked row of this kind and label. A named expression may share
+    /// a column's name, so the label alone can pick the wrong row.
+    pub fn position(&self, named: bool, label: &str) -> Option<usize> {
+        self.rows
+            .iter()
+            .position(|r| matches!(r.kind, RowKind::Named { .. }) == named && r.label == label)
     }
 
     pub fn rows(&self) -> &[Row] {
@@ -361,6 +460,13 @@ mod tests {
 
     fn labels(c: &ExprCompletion) -> Vec<&str> {
         c.rows().iter().map(|r| r.label.as_str()).collect()
+    }
+
+    fn written(c: &ExprCompletion, i: usize) -> Write {
+        match c.accept(i) {
+            Some(Accept::Write(w)) => w,
+            other => panic!("expected a write, got {other:?}"),
+        }
     }
 
     #[test]
@@ -457,6 +563,31 @@ mod tests {
     }
 
     #[test]
+    fn forgotten_values_are_asked_again_and_a_late_reply_is_dropped() {
+        let v = vocab();
+        let mut c = ExprCompletion::default();
+        c.refresh("book = ", 7, &v);
+        c.mark_loading("book", 1, &v);
+        assert!(c.deliver("book", 1, Ok(vec![("A".into(), 1)]), &v));
+        c.refresh("book = '", 8, &v);
+        c.mark_loading("book", 2, &v);
+        c.forget_values(&v);
+        assert_eq!(c.hint(), "value for book · loading values…");
+        assert_eq!(
+            c.refresh("book = '", 8, &v),
+            Refresh::Request("book".into()),
+            "the same text and caret ask again"
+        );
+        c.mark_loading("book", 3, &v);
+        assert!(
+            !c.deliver("book", 2, Ok(vec![("OLD".into(), 1)]), &v),
+            "a reply to the forgotten request is dropped"
+        );
+        assert!(c.deliver("book", 3, Ok(vec![("NEW".into(), 1)]), &v));
+        assert_eq!(labels(&c), ["'NEW'"]);
+    }
+
+    #[test]
     fn a_failed_request_says_why() {
         let v = vocab();
         let mut c = ExprCompletion::default();
@@ -482,14 +613,11 @@ mod tests {
         let v = vocab();
         let mut c = ExprCompletion::default();
         c.refresh("bo", 2, &v);
-        let w = c.accept(0).unwrap();
+        let w = written(&c, 0);
         assert_eq!(w.apply("bo"), ("book ".to_string(), 5));
         c.refresh("book i", 6, &v);
         assert_eq!(labels(&c)[0], "in");
-        assert_eq!(
-            c.accept(0).unwrap().apply("book i"),
-            ("book in (".to_string(), 9)
-        );
+        assert_eq!(written(&c, 0).apply("book i"), ("book in (".to_string(), 9));
     }
 
     #[test]
@@ -500,7 +628,7 @@ mod tests {
         c.mark_loading("book", 1, &v);
         c.deliver("book", 1, Ok(vec![("O'Neil".into(), 3)]), &v);
         assert_eq!(
-            c.accept(0).unwrap().apply("book = 'O"),
+            written(&c, 0).apply("book = 'O"),
             ("book = 'O''Neil'".to_string(), 16)
         );
     }
@@ -513,7 +641,7 @@ mod tests {
         c.refresh(text, text.len(), &v);
         c.mark_loading("book", 1, &v);
         c.deliver("book", 1, Ok(vec![("Zürich".into(), 1)]), &v);
-        assert_eq!(c.accept(0).unwrap().apply(text).0, "book = 'Zürich'");
+        assert_eq!(written(&c, 0).apply(text).0, "book = 'Zürich'");
     }
 
     #[test]
@@ -566,5 +694,116 @@ mod tests {
         c.deliver("book", 1, Ok(many), &v);
         assert_eq!(c.rows().len(), MAX_ROWS);
         assert_eq!(c.hint(), "value for book · 500 values");
+    }
+
+    fn offers() -> Vec<NamedOffer> {
+        vec![
+            NamedOffer {
+                name: "liq".into(),
+                preview: "npv > 1000000 and book in ('EMEA RATES', 'EMEA CREDIT')".into(),
+                broken: false,
+            },
+            NamedOffer {
+                name: "gone".into(),
+                preview: "not defined".into(),
+                broken: true,
+            },
+        ]
+    }
+
+    #[test]
+    fn named_offers_lead_the_column_position_with_their_previews() {
+        let v = vocab();
+        let mut c = ExprCompletion::default();
+        c.set_named_offers(offers(), &v);
+        c.refresh("", 0, &v);
+        assert_eq!(
+            labels(&c),
+            ["liq", "gone", "book", "npv", "live", "not", "("]
+        );
+        assert_eq!(c.rows()[0].kind, RowKind::Named { broken: false });
+        assert_eq!(c.rows()[1].kind, RowKind::Named { broken: true });
+        assert_eq!(c.rows()[2].kind, RowKind::Insert);
+        assert_eq!(
+            c.rows()[0].detail,
+            "npv > 1000000 and book in ('EMEA RATES',…",
+            "the preview elides to 40 characters plus an ellipsis"
+        );
+        assert_eq!(c.rows()[1].detail, "not defined");
+        c.refresh("li", 2, &v);
+        assert_eq!(labels(&c)[0], "liq", "ranked by name");
+    }
+
+    #[test]
+    fn named_offers_never_appear_past_the_column_position() {
+        let v = vocab();
+        let mut c = ExprCompletion::default();
+        c.set_named_offers(offers(), &v);
+        let named = |c: &ExprCompletion| {
+            c.rows()
+                .iter()
+                .any(|r| matches!(r.kind, RowKind::Named { .. }))
+        };
+        c.refresh("npv ", 4, &v);
+        assert!(!named(&c), "operator position");
+        c.refresh("live = ", 7, &v);
+        assert!(!named(&c), "value position");
+        c.refresh("npv > 1 ", 8, &v);
+        assert!(!named(&c), "connective position");
+        c.refresh("npv > 1 and ", 12, &v);
+        assert!(
+            named(&c),
+            "a column position after a connective offers them again"
+        );
+    }
+
+    #[test]
+    fn without_offers_the_rows_are_unchanged() {
+        let v = vocab();
+        let mut c = ExprCompletion::default();
+        c.set_named_offers(Vec::new(), &v);
+        c.refresh("", 0, &v);
+        assert_eq!(labels(&c), ["book", "npv", "live", "not", "("]);
+        assert!(c.rows().iter().all(|r| r.kind == RowKind::Insert));
+    }
+
+    #[test]
+    fn accepting_a_named_row_stages_it_and_erases_the_token() {
+        let v = vocab();
+        let mut c = ExprCompletion::default();
+        c.set_named_offers(offers(), &v);
+        c.refresh("li", 2, &v);
+        match c.accept(0) {
+            Some(Accept::Stage { name, erase }) => {
+                assert_eq!(name, "liq");
+                assert_eq!(erase.apply("li"), (String::new(), 0));
+            }
+            other => panic!("expected a stage, got {other:?}"),
+        }
+        c.refresh("bo", 2, &v);
+        assert!(
+            matches!(c.accept(0), Some(Accept::Write(w)) if w.text == "book "),
+            "a column still writes"
+        );
+    }
+
+    #[test]
+    fn a_named_offer_sharing_a_column_name_is_found_by_its_kind() {
+        let v = vocab();
+        let mut c = ExprCompletion::default();
+        c.set_named_offers(
+            vec![NamedOffer {
+                name: "book".into(),
+                preview: "book = 'A'".into(),
+                broken: false,
+            }],
+            &v,
+        );
+        c.refresh("book", 4, &v);
+        let named = c.position(true, "book").unwrap();
+        let column = c.position(false, "book").unwrap();
+        assert_ne!(named, column);
+        assert!(matches!(c.accept(named), Some(Accept::Stage { name, .. }) if name == "book"));
+        assert!(matches!(c.accept(column), Some(Accept::Write(w)) if w.text == "book "));
     }
 }

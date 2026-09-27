@@ -44,7 +44,7 @@ const FILTER_WIDTH: f32 = 200.0;
 /// The square a chip's `×` and each bare verb glyph occupy, in design
 /// pixels — a hit target inside a 20 px chip, and the same box for the
 /// `+`/save glyphs so the verbs sit on the chips' centre line.
-const GLYPH_BOX: f32 = 14.0;
+pub(super) const GLYPH_BOX: f32 = 14.0;
 
 /// The inset hairline between two segments, in design pixels: shorter
 /// than the row so it reads as a segment boundary inside the bar, not a
@@ -146,8 +146,8 @@ fn divider(selector: &'static str, colour: Hsla) -> impl IntoElement {
 /// `add_menu` is the add-a-filter menu's painted panel while it is open
 /// ([`super::addfilter::render`]); the `+` hangs it under itself and holds
 /// its pressed fill for as long as it is there. `on_term_open` and
-/// `on_term_close` take the expression term's index; `on_named_close`
-/// takes the named expression's name.
+/// `on_term_close` take the expression term's index; `on_named_open` and
+/// `on_named_close` take the named expression's name.
 #[allow(clippy::too_many_arguments)]
 pub fn toolbar(
     filter_input: &Entity<InputState>,
@@ -162,6 +162,7 @@ pub fn toolbar(
     on_as_of: impl Fn(&mut Window, &mut App) + Clone + 'static,
     on_term_open: impl Fn(usize, &mut Window, &mut App) + Clone + 'static,
     on_term_close: impl Fn(usize, &mut Window, &mut App) + Clone + 'static,
+    on_named_open: impl Fn(&str, &mut Window, &mut App) + Clone + 'static,
     on_named_close: impl Fn(&str, &mut Window, &mut App) + Clone + 'static,
     cx: &App,
 ) -> impl IntoElement {
@@ -268,23 +269,26 @@ pub fn toolbar(
     for named in &model.named {
         has_chips = true;
         // One chip per named expression, after the dimension chips and
-        // before the expression terms. The body carries no listener and no
-        // hover fill: a hover fill promises a click, and the body's click
-        // (open the Expressions dialog) is not wired yet. The `×` drops
-        // the name and occludes the body's hitbox, as a dimension chip's
-        // does. Ids derive from the name, so a chip keeps its pointer
-        // state when a neighbour is removed.
+        // before the expression terms. The body opens the Expressions
+        // dialog on the name; the `×` drops the name and occludes the
+        // body's hitbox, as a dimension chip's does, so a click on it
+        // cannot also open the dialog. Ids derive from the name, so a chip
+        // keeps its pointer state when a neighbour is removed.
         //
         // A broken chip's label carries its own selector, chosen in the same
         // branch as the danger paint, so a window test that finds the
         // selector has found the danger tone.
-        let (fg, bg, close_states, broken_marker) = if named.broken {
+        // The body and its `×` share one pairing measured against the
+        // chip's own fill, the muted chips' rule.
+        let (fg, bg, states, broken_marker) = if named.broken {
             let marker = named.name.clone();
             (broken.text, broken_fill, broken_states, Some(marker))
         } else {
             (chip_fg, chip_bg, chip_states, None)
         };
+        let on_open = on_named_open.clone();
         let on_close = on_named_close.clone();
+        let open_name = named.name.clone();
         let name = named.name.clone();
         let body_selector = named.selector.clone();
         let named_close_selector = named.close_selector.clone();
@@ -307,8 +311,12 @@ pub fn toolbar(
                 named.tip_selector.clone(),
                 named.full.clone(),
                 None,
-                None,
+                Some(SharedString::new_static("click: edit this expression")),
             ))
+            .pointer_states(states)
+            .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                on_open(&open_name, window, cx)
+            })
             .child(
                 div()
                     .id(ElementId::Name(named.close_selector.clone()))
@@ -321,7 +329,7 @@ pub fn toolbar(
                     .child(Icon::new(IconName::Close).small())
                     .debug_selector(move || named_close_selector.to_string())
                     .occlude()
-                    .pointer_states(close_states)
+                    .pointer_states(states)
                     .tooltip(tips::tip_with(
                         named.close_tip_selector.clone(),
                         named.close_title.clone(),

@@ -58,7 +58,9 @@ lower in the stack does nothing either, and posts "… is already open
 underneath" instead of pushing a duplicate or overwriting that entry's state.
 Closing — Enter commit, Escape, the close button, or a backdrop click — pops
 exactly one level and clears only the popped kind's own state, never a kind
-still lower in the stack.
+still lower in the stack. The backdrop occludes what it covers, so a click
+outside the panel only closes the dialog; it never also reaches a scope-bar
+chip or tile beneath.
 
 Revealing the covered entry restores the shared input's text and caret to
 what they were when it was covered, and gives back its focus: mode dialogs
@@ -255,6 +257,22 @@ module owns how those events affect its selection and search state. Opening
 the palette remains available through its effective toggle binding and uses
 the command line's cancellation path.
 
+### Autosize columns
+
+Two doors reach one route. `:autosize` in a blotter, market-data, or pricer
+tile fits every column of that tile's table to its content, and
+`:autosize reset` drops the fitted widths and returns to the configured or
+default ones; both are in each module's completions. The palette's
+"Autosize columns" (`tile::autosize_columns`, category Tile, unbound by
+default) calls `TileContent::autosize_columns` on the focused tile's
+occupant alone, which in the three table modules is the same method the
+command runs. The trait default refuses with "this tile has no table", and
+the shell paints a refusal, or the same text when no tile is focused, as a
+status notice that clears on the next dispatch. A table tile with no rows to
+measure refuses a fit with "nothing loaded to fit" and keeps its widths.
+`:autosize reset` never refuses. Measurement and storage are
+described in [features](features.md#autosized-columns).
+
 ## Scope text and stack selection
 
 The toolbar scope field edits `Frame::scope().text` live. Focus captures the
@@ -355,29 +373,83 @@ Enter; they do not use Normal/Filter mode's keep-query Enter.
 ## Frame expression
 
 [`shell/scope_expr_view.rs`](../../crates/geode-shell/src/shell/scope_expr_view.rs)
-edits the frame's expression in one of three modes, chosen by the door that
+edits the frame's expression and the frame's named-expression references
+(Whole and Add through staged names, Term by naming the term), in one of three modes chosen by the door that
 opens it. Bare Enter trims and parses the draft in every mode.
 
-| Mode | Opened by | Seed | Enter | Empty Enter |
+| Mode | Opened by | Seed | Enter | Empty Enter, nothing staged |
 |---|---|---|---|---|
-| Scope expression (whole) | `frame::scope_expression` | The whole expression | Replaces the expression | Clears it |
+| Scope expression (whole) | `frame::scope_expression` | The whole expression; the frame's names staged | Sets the names to the staged list and replaces the expression | Clears the expression and the names |
 | Edit scope term | A click on a toolbar term chip | That top-level `and` term | Replaces that term; the other terms keep their order | Removes that term |
-| Add scope expression | `frame::add_expression`, the `+` menu's "Expression…" row | Empty | Joins it to the current expression with `and`, or sets it when there is none | Closes without a change |
+| Add scope expression | `frame::add_expression` (the `+` menu's "Expression…" row) | Empty, nothing staged | Appends the staged names the frame lacks and joins the text to the current expression with `and`, or sets it when there is none | Closes without a change |
+
+Whole and Add stage named expressions beside the text. Each staged name
+paints as a `≡ name` chip above the field, in staged order, with a `×` that
+unstages it; a name the frame cannot resolve (missing or invalid) takes the
+danger tone, as its scope-bar chip does. Backspace with the caret at the
+field's start and no selection removes the last staged chip; anywhere else
+backspace edits the text. A name is staged by accepting its suggestion row
+(see [Suggestions](#suggestions)). Enter applies the staged names and the
+text in one `set_scope`, so one undo takes back both. An empty field with
+names staged applies the names alone: Whole sets them and clears the
+expression, Add appends them. Term mode stages nothing.
 
 The term and add modes show a muted note under the field saying what the
-commit touches. A successful commit changes only the expression in the frame
-scope, through undoable `set_scope`, then closes. Parse errors remain inline
+commit touches. A successful commit changes only the expression and, in
+Whole and Add, the named references in the frame scope, through undoable
+`set_scope`, then closes. Parse errors remain inline
 in every mode and typing clears the error. The term dialog remembers the term
 it was seeded with; if the scope changed while it was open so that its index
 no longer holds that term (gone, or a different term in its place), an edit
 or an empty (removing) commit refuses inline rather than touch whichever term
-now has that index. Escape applies nothing.
+now has that index. Escape discards the scope draft; definitions already
+saved with `mod+s` remain.
 `frame::clear_expression` drops the whole expression layer without a dialog;
-with no expression it does nothing. Neither new action has a default chord.
+with no expression it does nothing. `frame::add_expression` is bound to
+`mod+x` by default, as `frame::pick` is to `mod+p`; neither
+`frame::scope_expression` nor `frame::clear_expression` has a default chord.
+All three are in the palette. Named expressions have no entry of their own: the Add
+dialog offers them beside typed text, and any expression is named at
+creation or later with `mod+s`.
+
+In every mode, `mod+s` (the configured `mod` key, Alt by default, with
+`s`; the footer's chip shows the user's own alias) saves the typed text as a
+named expression. On an empty or whitespace-only field it refuses at once
+with `nothing to save — the expression is empty` and opens nothing.
+Otherwise the field becomes a name entry labelled `Save this expression as a
+named expression · name`, with the suggestion list off and the staged chips
+kept. Escape leaves the entry and puts the text back. Enter checks the name
+first, then the text, and refuses inline with the entry still open for:
+
+- a malformed name (`name: <reason>`, from `check_object_name`);
+- a reserved name (`'<name>' is reserved`);
+- a name the Expressions domain already holds (`'<name>' already exists`);
+- text that the dialog's own Enter would refuse (a syntax or schema error);
+- no writable user config directory (`no writable user config directory —
+  nothing was changed`).
+
+A save writes `[name] expression = "<text>"` to the user layer of
+`expressions.toml` through the object dialog's write path, rebuilds the
+frame's named expressions from the pending configuration at once (so the new
+name resolves before the write reaches disk), empties the field, and stages
+the name. In Whole and Add nothing reaches the frame scope until Enter;
+Escape cancels that draft without removing the saved definition.
+
+In Term mode the save names the term (the entry reads `Name this term ·
+name`, the footer chip `name this term`): Enter on a name writes the field's
+text (edits included) as above, then replaces the term with the name in one
+`set_scope` (the term leaves the expression and the name joins the frame's
+named list) and closes the dialog. One undo puts the plain term back; the
+definition stays. The term is checked before anything is written, so a term
+that changed underneath refuses with the term dialog's usual message and
+writes nothing. A write that fails later rolls the configuration back but not
+the swap: the tile then refuses to query with a missing-name error rather
+than drop the filter, and one undo restores the term, as with a staged name
+in Add.
 
 The toolbar's `+` opens a two-row menu, "Dimension…" (`frame::pick`) and
-"Expression…" (`frame::add_expression`), each row showing its action's live
-binding through `kbd::menu_binding`. It owns the keyboard while open: `j`/`k`
+"Expression…" (`frame::add_expression`), each row showing its action's live binding
+through `kbd::menu_binding`. It owns the keyboard while open: `j`/`k`
 or the arrows move with wrap, Enter commits the highlighted row, Escape
 closes, and other bare keys are consumed. A chord passes to the matcher, and
 any dispatch closes the menu. A row click commits; a press of any button
@@ -397,33 +469,48 @@ pure state in
 [`exprcomplete.rs`](../../crates/geode-shell/src/exprcomplete.rs)) shows what
 fits at the caret, reading the partial text through
 [`geode_core::scope::complete`](../../crates/geode-core/src/scope/complete.rs).
-It updates on every keystroke and every caret move, not only on a full parse.
+It refreshes when text or caret changes without requiring a full parse. Rows
+are ranked against the token prefix and capped at 50. The vocabulary combines
+columns across datasets, then derived dimensions; the first declaration of a
+name determines its role and type.
 
 The rows depend on the caret's position in the grammar:
 
 | Caret is after | Rows offered |
 |---|---|
-| Nothing, `(`, `and`, `or`, `not` | Every column, then `not` and `(` |
+| Nothing, `(`, `and`, `or`, `not` | In the frame dialog's Whole and Add modes, the unstaged named expressions; then every column, then `not` and `(` |
 | A column | The operators valid for that column's type |
 | An operator, or inside an open `in (` list | Values for that column, when there are any to list |
 | A complete term | `and`, `or`, plus `)` when a paren is open (or `,` / `)` inside an `in` list) |
 
 Right after typing `in` and before its `(`, the only row offered is `(` itself.
 
+Named rows appear only at that column position, only in the frame dialog's
+Whole and Add modes: never in Term mode, never in the name entry, and never
+in the Scopes or Expressions object dialogs' `expression` field. They rank
+with the other rows by their name. A row paints as `≡ name` under its own
+selector (`scope-expr-named-row-{name}`), so a name equal to a column's name
+is a separate row. Its detail is an elided preview of the definition's text;
+a definition that is invalid shows its reason instead, in danger text.
+Accepting a named row (tab or a click) erases the typed token, through the
+same range replace as an insertion so cmd+z restores the text, and stages the
+name as a chip above the field instead of writing it. A staged name is not
+offered again until it is unstaged. Add mode also leaves out the names the
+frame already has, since Enter would add nothing for them. A configuration
+reload re-offers the current definitions under an open dialog.
+
 Operators are filtered by the column's type: text offers `= != in like`;
 number, date, and timestamp offer `= != < <= > >= in`; bool offers `= !=`;
 a derived dimension offers `= != in`. `<>` still parses but is never offered;
 it is a synonym for `!=`.
 
-A value list is offered only for a categorical text column (a dimension's
-dictionary): a distinct query returns its values with row counts, requested
-once per column per dialog opening — the cache resets each time the field
-opens, and a failed request is not retried again within that opening. Every
-column is requested under one query-pool key, and the pool keeps only the
-newest request per key, so at most one request is outstanding: asking for a
-second column forgets a first that has not answered, and returning to it
-asks again rather than showing `loading values…` for good. The
-hint reads `loading values…` while the request is in flight and `values
+Categorical text values come from a distinct query with row counts. Ready
+results and failures are cached per column until the field closes; a failure
+is not retried within that opening. All requests use one query-pool key, so
+requesting another column supersedes an unanswered request and removes its
+loading entry. Returning to that column requests it again. A dialog pushed
+over an expression field can supersede its request under the same key.
+Revealing the field clears cached values and requests them again. The hint reads `loading values…` while the request is in flight and `values
 unavailable: <reason>` if it fails. A derived dimension lists its configured
 labels with no query, and a bool column lists `true`/`false`. Every other
 kind — non-categorical text such as a key, and number, date, or timestamp
@@ -434,9 +521,14 @@ make the typed prefix an unsound filter):
 
 | Mode | Values narrowed by |
 |---|---|
-| Whole | The frame's dimension selections, text filter and as-of. Its own expression is excluded, since the dialog replaces it. |
-| Add | The frame's full current scope, including its expression. |
+| Whole | The frame's dimension selections, text filter and as-of, with the staged names in place of the frame's. Its own expression is excluded, since the dialog replaces it. |
+| Add | The frame's full current scope, including its expression, plus the staged names. |
 | Term | The frame's scope with the edited term removed. |
+
+Staging or unstaging a name, saving one with `mod+s`, or a reload that
+changes the definitions changes that scope, so the frame dialog drops every
+cached column and asks again for the one under the caret; a reply to a
+request made before the change is dropped.
 
 A reply whose tag is not that column's latest is dropped, so a superseded
 request never overwrites a newer one.
@@ -446,9 +538,9 @@ the new position; shift+tab moves the highlight back one row; the arrows and
 ctrl+p/ctrl+n move it by exactly one (page keys and ctrl+u/d/b/f stay the
 field's own caret keys). A row click inserts without moving focus out of the
 field. The click names its row by label, found in the list as it stands at
-the press, so a list rebuilt since paint never inserts a different row; the
-second press of a double-click is ignored, so it inserts once. Enter never inserts a suggestion; as the mode table above says, it
-always applies the whole draft. Every insertion is a range replace on the
+the press; if its label is absent, nothing is inserted. The second press of
+a double-click is ignored. Enter applies the draft according to the mode
+table above; it does not insert a suggestion. Every insertion is a range replace on the
 field's own text, so cmd+z undoes it like any other edit.
 
 A warning line under the rows names the first schema problem in the text — an
@@ -459,10 +551,13 @@ Syntax errors stay silent while typing; they surface only on Enter.
 
 Enter refuses a syntax error or a schema error (the same check the warning
 line uses) with its message, and the text stays in the field. With no schema
-loaded (an empty vocabulary), the schema check does nothing and Enter
-accepts the text.
+loaded (an empty vocabulary), Enter still parses syntax but skips schema
+checks.
 
-Known limitations: the grammar has no date literal, so a malformed date is
-only caught at query time; values are not narrowed by the text already typed;
-ordering on a text column is not checked; and the blotter's own `:filter`
-command-line completion is unchanged by any of this.
+Validation checks names against the combined vocabulary rather than an
+individual tile's dataset. It checks forbidden derived-dimension operators,
+but does not enforce every type-specific operator restriction shown in the
+suggestions. Dates are quoted strings, so malformed dates can still fail at
+query time. Typed prefixes rank value suggestions without narrowing the
+underlying distinct request. The blotter's `:filter` command uses its separate
+command-line completion.

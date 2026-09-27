@@ -41,8 +41,8 @@ type ModalBuilder = Rc<dyn Fn(&ShellView, &mut Window, &mut App) -> AnyElement>;
 
 /// A modal's optional handler for normalized shell keystrokes. Runs before the shell's
 /// Escape-close fallback; `true` consumes the key, including Escape. `false` permits
-/// the modal fallback and text-input handling, but never resumes shell chord matching
-/// while the modal is open.
+/// the modal fallback and text-input handling. Declined chords may open another
+/// dialog or the palette; other shell actions remain blocked on this key route.
 ///
 /// The caller already holds `&mut ShellView`. Use that borrow: synchronously updating
 /// its entity here would be reentrant access.
@@ -484,6 +484,7 @@ pub(crate) fn refocus_top(view: &mut ShellView, window: &mut Window, cx: &mut Co
             i.set_value(saved.text, window, cx);
             i.set_selected_range(saved.cursor..saved.cursor, cx);
         });
+        super::expr_suggest::revealed(view, cx);
     }
     match kind {
         DialogKind::Picker | DialogKind::Choice | DialogKind::ScopeExpr => {
@@ -911,6 +912,10 @@ pub(crate) fn render_modal(
         .pt(px(viewport_height * MODAL_TOP_RATIO))
         .bg(overlay)
         .debug_selector(|| "shell-modal-backdrop".to_string())
+        // gpui fires `on_mouse_down` for every hovered hitbox, not only the
+        // topmost; without `occlude()` a click outside the panel pops the dialog
+        // and also reaches the chrome beneath (a scope chip's `×`, a tile press).
+        .occlude()
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|view, _event, window, cx| {

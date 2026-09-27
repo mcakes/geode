@@ -38,7 +38,8 @@ In Normal mode, Escape clears a remaining query, then returns to the parent
 stage, then closes. The title row's Back button, painted in every stage but
 Browse, returns to the parent stage in one click: it first cancels an open
 value field, reverts filtering, and clears the query, and it does nothing
-while a confirmation is pending. Open value fields and Naming handle their keys separately:
+while a confirmation is pending. Open value fields and Naming handle their
+keys separately:
 Enter applies or chooses a field value, or validates and creates a name;
 Escape cancels that entry. They do not use the filter snapshot even though
 they focus the same input. Cancelling typed text or reverting a filter does
@@ -203,6 +204,18 @@ and the object is written to the user layer only on the first Enter that
 parses and is not empty. Escape before that Enter writes nothing. A copy
 starts from its source's text as usual, since it is never empty.
 
+The frame's scope expression dialog is a second way to create a named
+expression: `mod+s` in any of its modes names the typed text, applying
+the same name checks as creation here (malformed, reserved, or already held)
+and the dialog's own Enter checks on the text, and writes
+`[name] expression = "<text>"` to the user layer of `expressions.toml`
+through this dialog's write path. In the term editor the name then
+replaces the term (see
+[input and dialogs](input-and-dialogs.md#frame-expression)). The
+Expressions dialog is also where a scope-bar named chip's click lands: a
+defined name opens in its edit stage, and a missing one opens Browse with
+`'<name>' is not defined`.
+
 Delete removes a user-defined object. Revert requires an inherited object to
 restore and removes the user's definition and associated view presentation
 where present. A presentation-only view override can therefore be reverted
@@ -269,20 +282,22 @@ written afterward — and the query reports it once the scope is used.
 
 ## Scope expression field
 
-The Scopes domain's `expression` field carries the same suggestion list as
-the frame's expression dialogs — see [input-and-dialogs.md's Frame
-expression](input-and-dialogs.md#frame-expression) for the rows, operators,
-value rules, and keys, all of which apply here while the field is open. It
-narrows its values request by the edited scope's own dimension selections
-and text filter, with no expression (the field is replacing it), and the
-frame's as-of.
+The Scopes domain's `expression` field shares suggestion rows, operators,
+value rules, and insertion keys with the [frame expression editor](input-and-dialogs.md#frame-expression).
+Its distinct-values request uses the draft's dimension selections and text
+filter with the frame's as-of. The expression being replaced is removed before
+parsing that scope, so an unreadable saved expression does not discard the
+remaining narrowing.
 
-Enter commits the field, as any other text field does, and refuses an
-unknown column or a bad operator on a derived dimension with an `expression:`
-notice, keeping the field open; escape reverts the field's text instead of
-committing it. Both keep the object dialog's own text-entry contract; only
-tab, the arrows, and ctrl+p/ctrl+n additionally serve the suggestion list
-while this field is open.
+The Scopes and Expressions object fields exclude named-expression suggestions.
+Scopes select those references through their separate Named expressions field.
+
+Enter validates and commits the field. Syntax errors, unknown columns, and
+forbidden operators on derived dimensions produce an `expression:` notice
+and keep the field open. Escape cancels the field edit. Tab inserts a suggestion;
+Shift+Tab, Up/Down, and Ctrl+P/Ctrl+N move the suggestion highlight. Insertion
+uses the input's undoable range replacement and then updates the draft, so
+text synchronization preserves the inserted value.
 
 The Expressions domain's own `expression` field — the one field a named
 expression has — carries the same suggestion list and the same Enter/Escape
