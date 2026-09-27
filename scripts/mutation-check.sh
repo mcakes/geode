@@ -13157,6 +13157,59 @@ run_mutation "mdbump: an explicit axis bypasses the selection" \
   geode-marketdata \
   bump_with_no_axis_moves_every_selected_number_and_keeps_the_selection
 
+# With a selection live, a typed value commits to every accepting member.
+# Mutated away, `enter` writes only the cursor cell while the selection
+# stays painted, so the trader believes the block was set.
+run_mutation "mdbulk: a text commit over a selection goes to every member" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.selection.is_some() {
+            return self.commit_bulk(text, window, cx);' \
+  '        if false {
+            return self.commit_bulk(text, window, cx);' \
+  geode-marketdata \
+  i_over_a_block_writes_one_value_to_every_accepting_cell
+
+run_mutation "mdbulk: a date commit over a selection goes to every member" \
+  crates/geode-marketdata/src/tile.rs \
+  '                if self.selection.is_some() {
+                    let text = field.date().format("%Y-%m-%d").to_string();' \
+  '                if false {
+                    let text = field.date().format("%Y-%m-%d").to_string();' \
+  geode-marketdata \
+  a_date_commit_over_a_selection_writes_every_date_cell
+
+run_mutation "mdbulk: a choice pick over a selection goes to every member" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.selection.is_some() {
+            return self.commit_bulk(&option, window, cx);' \
+  '        if false {
+            return self.commit_bulk(&option, window, cx);' \
+  geode-marketdata \
+  a_choice_pick_over_a_selection_writes_the_option_to_every_choice_cell
+
+# Nothing accepting is a refusal with the editor open. Mutated to fall
+# through, the editor closes on "set 0 cells" and the typed text is lost.
+run_mutation "mdbulk: nothing accepting keeps the editor open" \
+  crates/geode-marketdata/src/tile/select.rs \
+  '        if writes.is_empty() {
+            self.notice = Some(' \
+  '        if false {
+            self.notice = Some(' \
+  geode-marketdata \
+  a_block_commit_nothing_accepts_is_refused_with_the_editor_open
+
+# A cell that refuses the value is counted by reason. Mutated so a refusal
+# is dropped silently, the notice claims a clean write over a block that
+# was only partly set.
+run_mutation "mdbulk: a refusing member is counted" \
+  crates/geode-marketdata/src/tile/select.rs \
+  '                Ok(value) => writes.push(((row, col), value)),
+                Err(skip) => skips.add(skip),' \
+  '                Ok(value) => writes.push(((row, col), value)),
+                Err(_) => {}' \
+  geode-marketdata \
+  a_flat_block_commit_skips_cells_that_refuse_and_counts_them
+
 # The grid can move under an open editor: a delivery lands while a trader
 # is typing and a shorter generation clamps the cursor, so the cell the
 # editor was opened on may now carry another term's labels. Mutated away,

@@ -308,6 +308,94 @@ impl MarketDataTile {
         Ok(())
     }
 
+    /// `enter` on a typed value with a selection live: write it to every
+    /// selected cell whose kind accepts it, skipping and counting the
+    /// rest. Every member is judged before any write, so when nothing
+    /// accepts the commit is refused with the editor open and the draft
+    /// untouched. Keeps the selection (a repeatable edit). Answers
+    /// whether the header needs re-preparing.
+    pub(super) fn commit_bulk(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if let Some(refusal) = self.held_refusal() {
+            self.notice = Some(refusal.into());
+            return true;
+        }
+        let base = match self.edit_base() {
+            Ok(base) => base,
+            Err(e) => {
+                self.notice = Some(e.into());
+                return true;
+            }
+        };
+        let mut skips = Skips::default();
+        let mut writes = Vec::new();
+        for (row, col) in self.selection_cells() {
+            if self.model.rows[row].state == RowState::Deleted {
+                skips.add(Skip::Deleted);
+                continue;
+            }
+            let Some(kind) = self.model.kind_of(col) else {
+                continue;
+            };
+            let ty = declared_type(self.spec, &self.model, col);
+            match bulk::accept(kind, ty, self.column_required(col), text) {
+                Ok(value) => writes.push(((row, col), value)),
+                Err(skip) => skips.add(skip),
+            }
+        }
+        if writes.is_empty() {
+            self.notice = Some(
+                format!(
+                    "no selected cell accepts '{}'{}",
+                    text.trim(),
+                    skips.describe()
+                )
+                .into(),
+            );
+            return true;
+        }
+        // Labels and `cell_ref`s are read from the model as it stands; it
+        // is rebuilt only after every write, so no write shifts another's
+        // target.
+        let mut n = 0;
+        for ((row, col), value) in writes {
+            let labels = self.model.label_of((row, col));
+            let m = &self.model.rows[row];
+            let written = match m.state {
+                RowState::Inserted => {
+                    self.draft
+                        .set_row_cell(labels.0.as_ref(), labels.1.as_ref(), value)
+                }
+                RowState::Document => {
+                    let cell_ref = m.cells[col].cell_ref;
+                    self.draft.set(
+                        cell_ref,
+                        (labels.0.to_string(), labels.1.to_string()),
+                        value,
+                        &base,
+                    );
+                    true
+                }
+                // Filtered above; never written.
+                RowState::Deleted => false,
+            };
+            // A notice counting a write the draft did not take would
+            // claim cells the trader will not find edited.
+            if written {
+                n += 1;
+            }
+        }
+        self.close_editor(window, cx);
+        self.close_popup_with_window(window, cx);
+        self.rebuild_model(cx);
+        self.notice = Some(bulk::set_notice(n, &skips).into());
+        true
+    }
+
     /// The live selection as last resolved — the test reader for what
     /// the delegate was handed.
     #[cfg(test)]

@@ -2650,6 +2650,10 @@ impl MarketDataTile {
                     return true;
                 }
                 *paint = DateFieldPaint::of(field, self.id.0);
+                if self.selection.is_some() {
+                    let text = field.date().format("%Y-%m-%d").to_string();
+                    return self.commit_bulk(&text, window, cx);
+                }
                 let value = Value::Date(field.date());
                 self.commit_cell_value(cell, labels, value, window, cx)
             }
@@ -2818,6 +2822,9 @@ impl MarketDataTile {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.selection.is_some() {
+            return self.commit_bulk(text, window, cx);
+        }
         let value = match self.model.kind_of(cell.1) {
             Some(CellKind::Number(_)) => {
                 // `declared_type` answers `Some` for every `Number` column
@@ -3498,6 +3505,9 @@ impl MarketDataTile {
             return false;
         };
         let (cell, labels) = c.target();
+        if self.selection.is_some() {
+            return self.commit_bulk(&option, window, cx);
+        }
         self.close_popup_with_window(window, cx);
         self.commit_cell_value(cell, labels, Value::Utf8(option), window, cx)
     }

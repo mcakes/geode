@@ -618,3 +618,111 @@ fn a_selection_bump_with_no_numbers_refuses(cx: &mut gpui::TestAppContext) {
     );
     assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().len()), before);
 }
+
+/// `i` then `enter` over a block writes the one typed value to every
+/// member, keeps the selection, and one revert takes all of it back.
+#[gpui::test]
+fn i_over_a_block_writes_one_value_to_every_accepting_cell(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    h.dispatch(&mut vcx, "right", Some(SLICE as u32));
+    h.dispatch(&mut vcx, "visual_block", None);
+    h.dispatch(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "right", None);
+    h.dispatch(&mut vcx, "edit", None);
+    assert_eq!(h.mode(&vcx), "insert");
+    h.set_editor(&mut vcx, "0.25");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.row_texts(&vcx, 0)[3..], ["0.2500", "0.2500", "0.3000"]);
+    assert_eq!(h.row_texts(&vcx, 1)[3..], ["0.2500", "0.2500", "0.6000"]);
+    assert!(h.header_texts(&vcx).iter().any(|t| t == "set 4 cells"));
+    assert_eq!(h.mode(&vcx), "visual", "a block commit keeps the selection");
+    h.command(&mut vcx, "revert").unwrap();
+    assert!(
+        h.tile.read_with(&vcx, |t, _| t.draft().is_empty()),
+        "one revert restores all of it"
+    );
+}
+
+/// Over a flat row selection a number lands only in the number column;
+/// the date and choice cells refuse it and are counted by reason.
+#[gpui::test]
+fn a_flat_block_commit_skips_cells_that_refuse_and_counts_them(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_flat(cx);
+    h.with_flat_document(&mut vcx);
+    h.dispatch(&mut vcx, "right", None); // amount
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "edit", None);
+    h.set_editor(&mut vcx, "2");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(
+        h.row_texts(&vcx, 0),
+        vec!["2026-12-18", "2.0000", "declared"]
+    );
+    assert_eq!(
+        h.row_texts(&vcx, 1),
+        vec!["2027-03-19", "2.0000", "estimated"]
+    );
+    assert!(
+        h.header_texts(&vcx)
+            .contains(&"set 2 cells, skipped 4 (2 wrong type, 2 not an option)".to_string())
+    );
+}
+
+/// When no member accepts the typed value, nothing is written and the
+/// editor stays open with the text for the trader to fix.
+#[gpui::test]
+fn a_block_commit_nothing_accepts_is_refused_with_the_editor_open(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    h.dispatch(&mut vcx, "visual_block", None);
+    h.dispatch(&mut vcx, "edit", None);
+    h.set_editor(&mut vcx, "abc");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.mode(&vcx), "insert");
+    assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
+}
+
+/// A choice picked from the popup lands in every selected choice cell;
+/// the number and date cells refuse the option's text.
+#[gpui::test]
+fn a_choice_pick_over_a_selection_writes_the_option_to_every_choice_cell(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open_flat(cx);
+    h.with_flat_document(&mut vcx);
+    h.dispatch(&mut vcx, "right", Some(2)); // status
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "edit", None);
+    assert!(h.tile.read_with(&vcx, |t, _| t.choice_popup_open()));
+    h.set_choice_text(&mut vcx, "paid");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.col_texts(&vcx, 2), vec!["paid", "paid"]);
+    assert_eq!(
+        h.col_texts(&vcx, 1),
+        vec!["1.2500", "0.5000"],
+        "amount refused 'paid'"
+    );
+    assert!(
+        h.header_texts(&vcx)
+            .contains(&"set 2 cells, skipped 4 (4 wrong type)".to_string())
+    );
+    assert!(!h.tile.read_with(&vcx, |t, _| t.choice_popup_open()));
+}
+
+/// The date field's value commits to every selected date cell.
+#[gpui::test]
+fn a_date_commit_over_a_selection_writes_every_date_cell(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_flat(cx);
+    h.with_flat_document(&mut vcx);
+    h.dispatch(&mut vcx, "visual_block", None); // ex column
+    h.dispatch(&mut vcx, "down", None); // cursor on D2's 2027-03-19
+    h.dispatch(&mut vcx, "edit", None);
+    draw(&mut vcx);
+    type_keys(&mut vcx, "2"); // the day segment: 2027-03-02
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.col_texts(&vcx, 0), vec!["2027-03-02", "2027-03-02"]);
+    assert!(h.header_texts(&vcx).contains(&"set 2 cells".to_string()));
+}
