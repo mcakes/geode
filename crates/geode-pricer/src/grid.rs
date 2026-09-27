@@ -254,9 +254,12 @@ mod tests {
             .position(|c| c.def.name == "strike")
             .unwrap();
         assert_eq!(
-            m.rows[1].cells[strike].state,
-            CellState::Blank,
-            "a package has no strike"
+            (
+                m.rows[1].cells[strike].text.as_ref(),
+                m.rows[1].cells[strike].state
+            ),
+            ("4800/5200", CellState::Own),
+            "a package shows its legs' strikes"
         );
         assert!(
             m.columns[price].right && !m.columns[1].right,

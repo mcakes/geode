@@ -20,6 +20,7 @@ The pure core (`core`, no element, entity, window, or data service):
 | `shorthand` | Parsing and rendering lines and packages against a `TemplateSet`. |
 | `template` | Template names, the `pricer_templates` reader and `TemplateSet`. |
 | `columns`, `views` | Column vocabulary, prepared column plans, and cell text. |
+| `package` | A package row's aggregated cells: its legs' distinct values in leg order joined with `/`, and the package quantity while the legs fit its template. |
 | `cell` | Cell commit validation, the typeahead vocabularies, the expiry date commit, and nudging. |
 | `entry` | Where `o` lands, the entry bar's label, and the entry history. |
 | `complete` | Entry-bar completion: the slot at the caret, suggestions, hint, and the Tab cycle. |
@@ -71,6 +72,13 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   apply through the LIFO history. Loading replaces the sheet. Deliveries,
   stale marking, and sheet metadata updates have separate paths.
 - Package rows derive from their legs; they are not independent instruments.
+- A package row's qty and eight text columns aggregate its legs: the
+  distinct values, compared as values, in leg order joined with `/` and
+  spelled as a line's cell spells them. Barrier columns read only barrier
+  legs; shifts group by the effective value and paint inherited only when
+  every leg inherits. Qty is the package quantity (first leg qty over the
+  template's first weight) while the legs fit the template, else the list
+  of distinct leg quantities.
 - Shorthand rendering uses a template only while the legs still match its
   current table (an overflowing quantity never matches); otherwise it prints
   the legs one per line. The grid keeps

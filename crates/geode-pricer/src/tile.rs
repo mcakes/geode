@@ -4448,8 +4448,8 @@ pub(crate) mod tests {
         let clip = vcx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
         assert_eq!(
             clip.as_deref(),
-            Some("5000\n\n4000"),
-            "the package's strike is blank"
+            Some("5000\n4800/5200\n4000"),
+            "the package's strike lists its legs'"
         );
     }
 

@@ -23111,6 +23111,55 @@ run_mutation "pricer entry bar: a history step leaves the list stale" \
   '' \
   geode-pricer up_walks_history_with_the_list_open_and_the_list_follows
 
+# A package's cells aggregate its legs; without the route they paint blank.
+run_mutation "pricer package: text cells paint blank" \
+  crates/geode-pricer/src/core/columns.rs \
+  '    if sheet.is_package(row) && crate::core::package::aggregates(def.kind) {' \
+  '    if false && crate::core::package::aggregates(def.kind) {' \
+  geode-pricer a_call_spread_shows_one_underlying_one_expiry_and_both_strikes
+
+# Repeated values collapse: a fly's body is one strike, not two.
+run_mutation "pricer package: repeats are not collapsed" \
+  crates/geode-pricer/src/core/package.rs \
+  '        match keys.iter().position(|k| *k == v) {' \
+  '        match None::<usize> {' \
+  geode-pricer distinct_values_keep_leg_order_and_collapse_repeats
+
+# Barrier columns read only barrier legs: a vanilla leg must not add a part.
+run_mutation "pricer package: a vanilla leg counts in a barrier column" \
+  crates/geode-pricer/src/core/package.rs \
+  '            Instrument::Vanilla(_) => None,' \
+  '            Instrument::Vanilla(v) => Some((l, &*Box::leak(Box::new(geode_core::pricing::Barrier { vanilla: v.clone(), level: 0.0, barrier: geode_core::pricing::BarrierKind::DownIn })))),' \
+  geode-pricer barrier_columns_read_only_barrier_legs
+
+# The package quantity shows only while the legs fit the template.
+run_mutation "pricer package: qty ignores whether the legs fit" \
+  crates/geode-pricer/src/core/package.rs \
+  '    render_package(def, &legs)?;' \
+  '' \
+  geode-pricer qty_falls_back_to_the_leg_list_when_the_legs_do_not_fit
+
+# A shift paints muted only when every leg inherits.
+run_mutation "pricer package: a shift reads inherited while a leg sets its own" \
+  crates/geode-pricer/src/core/package.rs \
+  '        Some(pick) if sheet.children(row).all(|l| pick(sheet.shift(l)).is_none()) => {' \
+  '        Some(_) => {' \
+  geode-pricer shifts_group_by_effective_value_and_mute_when_all_inherit
+
+# Shifts group by the effective value: an own 2 and an inherited 2 are one.
+run_mutation "pricer package: shifts group by the own value" \
+  crates/geode-pricer/src/core/package.rs \
+  '                    .map(|l| (l, pick(sheet.shift(l)).or(sheet_value))),' \
+  '                    .map(|l| (l, pick(sheet.shift(l)))),' \
+  geode-pricer shifts_group_by_effective_value_and_mute_when_all_inherit
+
+# A shift group opens for editing on the plain number, not the signed cell.
+run_mutation "pricer package: a shift group edits as its display" \
+  crates/geode-pricer/src/core/package.rs \
+  '                    Some(v) => (signed(*v, format), plain(*v)),' \
+  '                    Some(v) => (signed(*v, format), signed(*v, format)),' \
+  geode-pricer a_group_opens_for_editing_in_the_line_editors_spelling
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
