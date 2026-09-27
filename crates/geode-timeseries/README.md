@@ -12,13 +12,13 @@ Current behavior and rationale:
 
 | Module | Holds |
 |---|---|
-| `core` | Pure model, range, source resolution, request building, chart-model preparation, session conversion, the three menus' rows (action list, range, frequency), the expression field's series-name completion (`core::complete`), and the absolute `#rrggbb` color with the picker's pick mapping (`core::rgb`). |
+| `core` | Pure model, range, source resolution, request building, chart-model preparation, session conversion, the three menus' rows (action list, range, frequency) as `geode_tile::menu` rows over `Pick`, the expression field's series-name completion (`core::complete`), and the absolute `#rrggbb` color with the picker's pick mapping (`core::rgb`). |
 | `commands` | The tile-local `:` vocabulary. |
 | `tile` | The retained entity, frame observation, verbs, `:` dispatch, focus, and chart cache key. |
 | `tile::data` | Fetch submission, series queries, delivery filtering, and flip-barrier staging and promotion. |
 | `tile::popups` | Opening, input routing, commits, cancellation, focus, and pointer controls for six transient surfaces, including the reusable component color picker, the menus, and the range and frequency trigger doors. |
 | `tile::pointer` | Chart wheel, drag-pan, and split-drag gestures using chart hit testing. |
-| `popup` | State and rendering for the series list, add picker, custom dates editor, the menus (one painter for the action list, range menu and frequency menu), and the expression field's completion list, plus expression-editor state. Series, picker and completion rows share a row shell; menu rows, date fields, and the inline expression editor have separate renderers. The component renders its own color picker. |
+| `popup` | State and rendering for the series list, add picker, custom dates editor and the expression field's completion list, plus expression-editor state; rows share `geode_tile::popover::row_shell`; the menus are `geode_tile::menu`'s. Date fields and the inline expression editor have their own renderers; the component renders its own color picker. The notice line paints through `geode_tile::notice`. |
 | `header` | Prepared chips, the range and frequency triggers (each hangs its own popup and shows an open state while it is up), the action-menu button, inline expression field, color-picker trigger, and empty state. |
 | `content` | `TileContent` wrapper, factory, actions, and keymap fragment. |
 
@@ -58,7 +58,9 @@ cargo bench -p geode-timeseries
   never resolves a handle to a newer series. Completion leaves out a label
   that names more than one series.
 - Menu rows are prepared on open, on chrome rebuilds, and on frame changes
-  while the menu is up. Theme or named-color changes can trigger a chrome
+  while the menu is up; a rebuild keeps the highlight on its row, or snaps it
+  to the nearest action. Key hints are action identities resolved against the
+  live keymap at those moments and again when the keymap is republished. Theme or named-color changes can trigger a chrome
   rebuild during render. A frequency the point cap refuses is disabled and
   carries the model's refusal; range presets are validated when chosen.
 - Menu picks and empty-state buttons dispatch registered actions, or write a
@@ -99,7 +101,7 @@ cargo bench -p geode-timeseries
 ## Range and frequency menus
 
 `r` (or the range trigger) opens the range menu: the seven presets written out
-with their short labels as text, then `Custom dates…` with `c` painted as a
+with their short labels as text, then `Custom dates…` with its live chord (`c` as shipped) painted as a
 key. `f` (or the frequency trigger) opens the frequency menu; a frequency the
 point cap refuses over the range as resolved under the frame's as-of is a
 disabled row reading `over cap`, and choosing it gives the full refusal as the

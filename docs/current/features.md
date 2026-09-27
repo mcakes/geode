@@ -463,7 +463,7 @@ Runtime responsibilities are split by module:
 | [`tile::data`](../../crates/geode-timeseries/src/tile/data.rs) | Fetch and query submission, delivery freshness, last-good results, and flip-barrier staging and promotion |
 | [`tile::pointer`](../../crates/geode-timeseries/src/tile/pointer.rs) | Chart hit testing, wheel navigation, pan and split drags |
 | [`tile::popups`](../../crates/geode-timeseries/src/tile/popups.rs) | Popup transitions, keyboard handling, commits, cancellation, and focus |
-| [`popup`](../../crates/geode-timeseries/src/popup.rs) | Popup state types and rendering, including shared list-row layout and hit testing |
+| [`popup`](../../crates/geode-timeseries/src/popup.rs) | Popup state types and rendering over `geode-tile`'s row shell, anchoring, menus and notice |
 
 Settings and tiles obtain configured fetch sources from the shell-published
 `SeriesSettings` global. A configured source is not proof that its adapter
@@ -557,8 +557,9 @@ It offers popup openers, actions for the selected slot, `Frequency…`, toggles,
 and view reset. Keyboard stepping skips disabled rows, separators, and
 headings. Pointer selection can rest on a disabled row, which has no highlight
 fill; choosing it shows its reason and leaves the menu open. Enabled actions
-close the menu before dispatch. Key hints refresh when the menu opens or its
-chrome rebuilds, so an open menu can retain old hints after a keymap reload.
+close the menu before dispatch. Key hints are the live keymap's and are
+re-resolved when the menu opens, when its chrome rebuilds and when the keymap
+is reloaded.
 
 The header shows the range and the frequency as two triggers, `1y ▾` and
 `1d ▾`; an absolute range shows its dates, `2025-09-26 – 2026-09-26 ▾`. Each

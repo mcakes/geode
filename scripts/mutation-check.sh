@@ -19417,24 +19417,24 @@ run_mutation "timeseries: an expression parse error keeps the field open" \
 # starts on it; an absolute range ticks `Custom dates…` instead.
 run_mutation "timeseries range menu: the preset in force is ticked" \
   crates/geode-timeseries/src/core/menu.rs \
-  '            checked: Some(*current == Range::Relative(p)),' \
-  '            checked: Some(false),' \
+  '                    .checked(*current == Range::Relative(p)),' \
+  '                    .checked(false),' \
   geode-timeseries \
   the_range_menu_writes_the_presets_out_ticks_the_current_and_ends_on_custom
 
 run_mutation "timeseries range menu: an absolute range ticks custom dates" \
   crates/geode-timeseries/src/core/menu.rs \
-  '        checked: Some(matches!(current, Range::Absolute { .. })),' \
-  '        checked: Some(false),' \
+  '            .checked(matches!(current, Range::Absolute { .. })),' \
+  '            .checked(false),' \
   geode-timeseries \
   an_absolute_range_ticks_custom_dates_and_starts_there
 
 run_mutation "timeseries menus: the highlight starts on the value in force" \
   crates/geode-timeseries/src/core/menu.rs \
-  '                    checked: Some(true),
-                    pick: Pick::Range(_) | Pick::CustomRange | Pick::Frequency(_),' \
-  '                    checked: Some(false),
-                    pick: Pick::Range(_) | Pick::CustomRange | Pick::Frequency(_),' \
+  '                a.tick() == Some(true)
+                    && a.is_enabled()' \
+  '                a.tick() == Some(false)
+                    && a.is_enabled()' \
   geode-timeseries \
   the_range_menu_writes_the_presets_out_ticks_the_current_and_ends_on_custom
 
@@ -19522,7 +19522,7 @@ run_mutation "timeseries dates editor: the insert layer's cancel returns to the 
 
 run_mutation "timeseries dates editor: escape lands the highlight on custom dates" \
   crates/geode-timeseries/src/tile/popups.rs \
-  '            m.highlighted = custom;' \
+  '            m.menu.highlight(custom);' \
   '            let _ = custom;' \
   geode-timeseries \
   escape_in_the_editor_returns_to_the_range_menu_and_escape_again_closes
@@ -21072,17 +21072,17 @@ run_mutation "timeseries mouse: an empty tile disables the slot rows" \
 
 # Stepping never lands on a separator or a section heading.
 run_mutation "timeseries mouse: menu stepping skips non-rows" \
-  crates/geode-timeseries/src/core/menu.rs \
-  '            (at + 1..rows.len()).find(|&i| lands(&rows[i]))' \
+  crates/geode-tile/src/menu/mod.rs \
+  '            (at + 1..rows.len()).find(|&i| rows[i].lands())' \
   '            (at + 1..rows.len()).next()' \
   geode-timeseries stepping_skips_separators_and_sections_and_clamps
 
 # Nor on a disabled row (user report 2026-09-25): mutated, `j` from
 # `Range…` on an empty tile lands on the greyed `Hide`.
 run_mutation "timeseries menu: stepping skips disabled rows" \
-  crates/geode-timeseries/src/core/menu.rs \
-  '            (at + 1..rows.len()).find(|&i| lands(&rows[i]))' \
-  '            (at + 1..rows.len()).find(|&i| matches!(rows[i], MenuRow::Action { .. }))' \
+  crates/geode-tile/src/menu/mod.rs \
+  '            (at + 1..rows.len()).find(|&i| rows[i].lands())' \
+  '            (at + 1..rows.len()).find(|&i| rows[i].is_action())' \
   geode-timeseries stepping_skips_disabled_rows
 
 # The ⋯ button toggles in the CAPTURE phase, ahead of the open menu's
@@ -21163,16 +21163,16 @@ run_mutation "timeseries frequency menu: an as-of change refreshes the cap reaso
 # a frequency's short label) as text: a label routed to the key lane would
 # paint as nothing, or as a key it is not.
 run_mutation "timeseries menus: a short label is text, not a key" \
-  crates/geode-timeseries/src/core/menu.rs \
-  '                (Ok(()), Some(label)) => Trailing::Text(label.clone()),' \
-  '                (Ok(()), Some(_)) => Trailing::Keys(hint),' \
+  crates/geode-tile/src/menu/mod.rs \
+  '        Hint::Label(text) => Lane::Text(text.clone()),' \
+  '        Hint::Label(_) => Lane::Empty,' \
   geode-timeseries the_range_menu_writes_the_presets_out_ticks_the_current_and_ends_on_custom
 
 # A capped row's trailing column is short; the full refusal is the notice.
 run_mutation "timeseries frequency menu: a capped row shows a short reason" \
   crates/geode-timeseries/src/core/menu.rs \
-  '            short_reason: Some(SharedString::new_static(OVER_CAP)),' \
-  '            short_reason: None,' \
+  '                .short_reason(OVER_CAP)' \
+  '' \
   geode-timeseries the_frequency_menu_ticks_the_current_and_disables_what_the_cap_refuses
 
 # The range trigger paints its open state while the dates editor, not
@@ -21236,8 +21236,8 @@ run_mutation "timeseries triggers: the range trigger opens the range menu" \
 # carrying the model's own reason (pure rows, and the tile's question).
 run_mutation "timeseries frequency menu: a capped row is disabled" \
   crates/geode-timeseries/src/core/menu.rs \
-  '            enabled: refusal(f).map_err(SharedString::from),' \
-  '            enabled: Ok(()),' \
+  '                .enabled(refusal(f).map_err(SharedString::from))' \
+  '                .enabled(Ok(()))' \
   geode-timeseries the_frequency_menu_ticks_the_current_and_disables_what_the_cap_refuses
 
 run_mutation "timeseries frequency menu: the tile asks the cap per row" \
@@ -21261,12 +21261,25 @@ run_mutation "timeseries frequency menu: a pick writes that frequency" \
 # A disabled row's pick is the notice and nothing else: mutated, the
 # action list's greyed `Remove` closes the menu and dispatches.
 run_mutation "timeseries menus: a disabled row explains and stays" \
-  crates/geode-timeseries/src/tile/popups.rs \
-  '            self.notice = Some(reason.clone());
-            cx.notify();
-            return;' \
-  '            let _ = reason;' \
+  crates/geode-tile/src/menu/mod.rs \
+  '            Err(reason) => Err(reason.clone()),' \
+  '            Err(_) => Ok(action.pick.clone()),' \
   geode-timeseries the_actions_button_toggles_the_menu_and_a_row_click_dispatches_or_explains
+
+# The tile's own half of that rule: the refused pick's reason becomes the
+# notice. Mutated, the greyed `Remove` keeps the menu up but says nothing.
+run_mutation "timeseries menus: a disabled row's reason is the notice" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '                self.notice = Some(reason);' \
+  '                let _ = reason;' \
+  geode-timeseries the_actions_button_toggles_the_menu_and_a_row_click_dispatches_or_explains
+
+# An open menu's hints follow a keymap reload.
+run_mutation "timeseries menus: a keymap reload leaves the open menu's hints" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '                m.menu.rehint(&geode_tile::menu::live_bindings(cx));' \
+  '                let _ = &m.menu;' \
+  geode-timeseries an_open_menu_follows_a_keymap_reload
 
 # The action list's `Frequency…` row opens the frequency menu.
 run_mutation "timeseries action list: Frequency opens the frequency menu" \
