@@ -1,14 +1,14 @@
 //! Uploads to egress targets. The service thread resolves the target, the
-//! address and the document kind, writes the document to bytes, and hands
-//! them to that target's worker thread, so a slow transport never blocks the
-//! request loop. One worker per target runs its uploads one at a time, in
+//! address and the document kind, and hands the rows to that target's worker,
+//! so neither a slow encoder nor a slow transport blocks the request loop. One
+//! worker per target encodes and sends its uploads one at a time, in
 //! submission order, behind a queue of [`EGRESS_QUEUE_BOUND`] waiting jobs.
 //!
-//! A serviced upload normally emits one `DataEvent::Upload`. Validation,
-//! serialization, and queue refusals answer on the service thread; transport
-//! results answer from the worker. Transport panics become errors naming the
-//! target, and the worker continues with queued jobs. Serialization has no panic
-//! boundary, neither call has a timeout, and the event sink can refuse an outcome.
+//! A serviced upload normally emits one `DataEvent::Upload`. Validation and
+//! queue refusals answer on the service thread; encoding and transport results
+//! answer from the worker. An encoding or transport panic becomes an error
+//! naming the target and the step, and the worker continues with queued jobs.
+//! Neither call has a timeout, and the event sink can refuse an outcome.
 //! There is no automatic retry.
 //!
 //! Shutdown drops the job senders and joins the workers. A worker finishes
@@ -19,12 +19,12 @@ use crate::adapter::{AdapterRegistry, Egress};
 use crate::documents::DocumentRegistry;
 use crate::service::{DataEvent, EventSink};
 use geode_core::config::{Diagnostic, Severity};
-use geode_core::document::DocumentRows;
+use geode_core::document::{DocumentKind, DocumentRows};
 use geode_core::egress_config::EgressSpec;
 use geode_core::query::QueryKey;
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 /// Uploads waiting behind the one in flight, per target. Past this the
@@ -83,14 +83,17 @@ pub fn resolve(
     (kept, diags)
 }
 
-/// A written upload waiting for its target's worker.
+/// An accepted upload waiting for its target's worker, which encodes it and
+/// sends it. The rows travel, not bytes: the encoder is foreign code and runs
+/// inside the worker's boundary.
 struct Job {
     key: QueryKey,
     tag: u64,
     document: String,
     document_key: String,
     address: String,
-    bytes: Vec<u8>,
+    rows: DocumentRows,
+    kind: Arc<dyn DocumentKind>,
 }
 
 struct Target {
@@ -139,18 +142,7 @@ fn answer(
 
 fn work(name: String, mut egress: Box<dyn Egress>, jobs: Receiver<Job>, sink: EventSink) {
     while let Ok(job) = jobs.recv() {
-        // Convert transport panics into this upload's error and keep servicing the
-        // queue. Mark the catch boundary so the app logs a contained panic without
-        // creating a crash report.
-        let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            geode_core::panic::contained(|| egress.upload(&job.address, job.bytes))
-        })) {
-            Ok(outcome) => outcome.map_err(|e| format!("egress '{name}': {e}")),
-            Err(payload) => Err(format!(
-                "egress '{name}': transport panicked: {}",
-                crate::ingest::runner::panic_payload_message(&*payload)
-            )),
-        };
+        let result = run_job(&name, egress.as_mut(), &job);
         answer(
             &sink,
             &name,
@@ -160,6 +152,34 @@ fn work(name: String, mut egress: Box<dyn Egress>, jobs: Receiver<Job>, sink: Ev
             job.tag,
             result,
         );
+    }
+}
+
+/// Encode and send one job. Both steps are foreign code (the document kind,
+/// then the transport), so each runs inside its own marked boundary: a panic
+/// in either fails this upload alone, named by step, and the worker goes on
+/// to the next job. The caller answers exactly once with the result.
+fn run_job(name: &str, egress: &mut dyn Egress, job: &Job) -> Result<(), String> {
+    let bytes = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        geode_core::panic::contained(|| job.kind.write(&job.rows))
+    })) {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(e)) => return Err(format!("egress '{name}': {e}")),
+        Err(payload) => {
+            return Err(format!(
+                "egress '{name}': encoding panicked: {}",
+                crate::ingest::runner::panic_payload_message(&*payload)
+            ));
+        }
+    };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        geode_core::panic::contained(|| egress.upload(&job.address, bytes))
+    })) {
+        Ok(outcome) => outcome.map_err(|e| format!("egress '{name}': {e}")),
+        Err(payload) => Err(format!(
+            "egress '{name}': transport panicked: {}",
+            crate::ingest::runner::panic_payload_message(&*payload)
+        )),
     }
 }
 
@@ -211,10 +231,10 @@ impl EgressWorkers {
         EgressWorkers { targets, sink }
     }
 
-    /// Resolve, serialize, and queue an upload. Validation and queue refusals
-    /// offer an error outcome on the service thread. The worker offers the
-    /// transport result if it completes; panic and blocked-call limits are
-    /// described in the module documentation.
+    /// Resolve and queue an upload. Validation and queue refusals offer an
+    /// error outcome on the service thread. The worker encodes and sends it and
+    /// offers the result; panic and blocked-call limits are described in the
+    /// module documentation.
     pub(crate) fn upload(&self, p: UploadParams, documents: &DocumentRegistry) {
         let document_key = p.rows.key.join("/");
         let refuse = |message: String| {
@@ -237,10 +257,6 @@ impl EgressWorkers {
         let Some(kind) = documents.get(&p.document) else {
             return refuse(format!("no document kind {}", p.document));
         };
-        let bytes = match kind.write(&p.rows) {
-            Ok(bytes) => bytes,
-            Err(e) => return refuse(e.to_string()),
-        };
         let guard = target.tx.lock().unwrap_or_else(|e| e.into_inner());
         let Some(tx) = guard.as_ref() else {
             drop(guard);
@@ -257,7 +273,8 @@ impl EgressWorkers {
             document: p.document.clone(),
             document_key: document_key.clone(),
             address,
-            bytes,
+            rows: p.rows,
+            kind,
         };
         let refused = match tx.try_send(job) {
             Ok(()) => None,
@@ -300,16 +317,16 @@ mod tests {
     use super::*;
     use crate::adapter::channel::ChannelAdapter;
     use crate::adapter::{Adapter, AdapterError, MESSAGE_BOUND, MessageSink, Subscription};
-    use geode_core::document::{DocumentKind, ParseError, ParsedDocument, WriteError};
+    use geode_core::document::{ParseError, ParsedDocument, WriteError};
     use geode_core::schema::ColumnType;
-    use std::sync::Arc;
     use std::sync::mpsc::{Receiver, channel};
     use std::time::Duration;
 
     const TARGET: &str = "sophis";
     const DIVIDEND: &str = "dividend_schedule";
 
-    /// Writes the rows' key as its bytes; a key of `BAD` is a write error.
+    /// Writes the rows' key as its bytes; a key of `BAD` is a write error and
+    /// a key of `PANIC` panics.
     struct KeyKind;
 
     impl DocumentKind for KeyKind {
@@ -325,6 +342,9 @@ mod tests {
             })
         }
         fn write(&self, rows: &DocumentRows) -> Result<Vec<u8>, WriteError> {
+            if rows.key == ["PANIC"] {
+                panic!("{WRITE_PANIC}");
+            }
             if rows.key == ["BAD"] {
                 return Err(WriteError {
                     message: "dividend 3 has no pay date".into(),
@@ -643,6 +663,9 @@ mod tests {
     /// the assertion and the panic that produced it cannot drift apart.
     const UPLOAD_PANIC: &str = "the transport fell over";
 
+    /// The message `KeyKind::write` panics with for a `PANIC` key.
+    const WRITE_PANIC: &str = "the encoder fell over";
+
     /// Panic for the configured number of calls, then succeed. The fixture
     /// exercises both the error outcome and continued use of the same worker.
     struct PanickingEgress {
@@ -694,6 +717,51 @@ mod tests {
             Ok(()),
             "the worker survived, so the next upload succeeds"
         );
+        assert_silent(&rx);
+    }
+
+    /// Encoding is foreign code on the worker now: its panic fails this
+    /// upload alone, answered once, and the upload queued behind it still
+    /// runs and answers.
+    #[test]
+    fn an_encoding_panic_answers_the_upload_and_keeps_the_worker() {
+        let (entered_tx, entered) = sync_channel(64);
+        let (release, release_rx) = sync_channel(64);
+        let mut adapters = AdapterRegistry::default();
+        adapters.register(Arc::new(TakeOnceAdapter {
+            name: "gate",
+            egress: Mutex::new(Some(Box::new(GateEgress {
+                entered: entered_tx,
+                release: release_rx,
+            }))),
+        }));
+        let (sink, rx) = event_sink();
+        let workers = EgressWorkers::spawn(
+            &[spec("gate", &[(DIVIDEND, "gate/{key}")])],
+            &adapters,
+            sink,
+        );
+        let release = release;
+        let documents = documents();
+
+        workers.upload(params(1, TARGET, DIVIDEND, "PANIC"), &documents);
+        workers.upload(params(2, TARGET, DIVIDEND, "K1"), &documents);
+        let first = next_upload(&rx);
+        assert_eq!(first.tag, 1);
+        let message = first.result.expect_err("an encoding panic is an error");
+        assert!(
+            message.contains("encoding panicked") && message.contains(WRITE_PANIC),
+            "{message}"
+        );
+        assert!(message.contains(&format!("egress '{TARGET}'")), "{message}");
+        assert_eq!(
+            entered.recv_timeout(Duration::from_secs(5)).unwrap(),
+            "gate/K1",
+            "the queued upload behind it still reaches the transport"
+        );
+        release.send(()).unwrap();
+        let second = next_upload(&rx);
+        assert_eq!((second.tag, second.result), (2, Ok(())));
         assert_silent(&rx);
     }
 
