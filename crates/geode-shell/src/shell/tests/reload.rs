@@ -1089,6 +1089,44 @@ fn a_reloaded_groupings_doc_replaces_the_slots_and_a_sources_change_asks_for_a_r
     );
 }
 
+/// An `expressions` reload redefines the frame's named expressions: adding
+/// an entry defines it, and editing its text replaces it.
+#[gpui::test]
+fn an_expressions_reload_redefines_the_frames_named_expressions(cx: &mut gpui::TestAppContext) {
+    let (services, _log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    let config = |expressions: &str| {
+        Config::load(&ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+                LayerDoc::builtin("expressions", expressions).unwrap(),
+            ],
+            ..ConfigSources::default()
+        })
+    };
+    let liq_text = |cx: &mut gpui::VisualTestContext| {
+        shell.read_with(cx, |s, cx| {
+            s.frame
+                .read(cx)
+                .named_expressions()
+                .get("liq")
+                .map(|e| e.text().to_string())
+        })
+    };
+    assert_eq!(liq_text(&mut cx), None);
+
+    shell.update(&mut cx, |s, cx| {
+        s.apply_reload(config("[liq]\nexpression = \"npv > 0\"\n"), cx)
+    });
+    assert_eq!(liq_text(&mut cx).as_deref(), Some("npv > 0"));
+
+    shell.update(&mut cx, |s, cx| {
+        s.apply_reload(config("[liq]\nexpression = \"npv > 5\"\n"), cx)
+    });
+    assert_eq!(liq_text(&mut cx).as_deref(), Some("npv > 5"));
+}
+
 /// Compare reloads against the sources baseline used to start the data service.
 /// Returning to that baseline clears restart-required status, even after intervening
 /// reloads.

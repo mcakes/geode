@@ -14,6 +14,7 @@ use crate::perf::RequeryStats;
 use crate::scopebar::{self, ScopeBarModel};
 use geode_core::config::Layer;
 use geode_core::groupings::GroupingSlots;
+use geode_core::named::NamedExpressions;
 use geode_core::query::{AsOf, QueryKey};
 use geode_core::scope::{Expr, Scope};
 use geode_core::scopes::SavedScopes;
@@ -156,6 +157,9 @@ pub struct Frame {
     recent_publishes: VecDeque<Publish>,
     publication_watches: HashMap<String, DatasetWatches>,
     saved_scopes: SavedScopes,
+    /// Named scope expressions from `expressions.toml`, which the scope and
+    /// saved scopes reference by name; `effective_scope` folds them in.
+    named: NamedExpressions,
     /// Latest saved scope awaiting persistence to user `scopes.toml`.
     /// A later save replaces this pending value until the observer drains it.
     pending_scope_persist: Option<(String, Scope)>,
@@ -187,6 +191,7 @@ impl Frame {
             recent_publishes: VecDeque::new(),
             publication_watches: HashMap::new(),
             saved_scopes: saved,
+            named: NamedExpressions::default(),
             pending_scope_persist: None,
             versions: FrameVersions::default(),
             requery: RequeryStats::new(),
@@ -317,6 +322,18 @@ impl Frame {
         let before = s.dimensions.len();
         s.dimensions.retain(|d| d.column != column);
         if s.dimensions.len() == before {
+            return false;
+        }
+        self.set_scope(s)
+    }
+
+    /// Remove named expression `name` from the scope through the undoable
+    /// `set_scope` path. Return false when the scope does not name it.
+    pub fn drop_named(&mut self, name: &str) -> bool {
+        let mut s = self.scope.clone();
+        let before = s.named.len();
+        s.named.retain(|n| n != name);
+        if s.named.len() == before {
             return false;
         }
         self.set_scope(s)
@@ -594,6 +611,22 @@ impl Frame {
         true
     }
 
+    pub fn named_expressions(&self) -> &NamedExpressions {
+        &self.named
+    }
+
+    /// Replace the named expressions after reload. A change bumps config so a
+    /// tile whose scope references a redefined name requeries, even though
+    /// the active scope itself is unchanged.
+    pub fn replace_named_expressions(&mut self, named: NamedExpressions) -> bool {
+        if self.named == named {
+            return false;
+        }
+        self.named = named;
+        self.versions.config += 1;
+        true
+    }
+
     /// Save the current scope in memory, replace the pending scope write, and
     /// bump saved_scopes. Validate the object name and reject reserved action
     /// names to prevent collisions when registering `scope::<name>` actions.
@@ -640,9 +673,12 @@ impl Frame {
         self.versions.config += 1;
     }
 
-    /// Compose the frame scope with the tile layer through `Scope::and_then`.
-    pub fn effective_scope(&self, tile: &Scope) -> Scope {
-        self.scope.and_then(tile)
+    /// Compose the frame scope with the tile layer through `Scope::and_then`,
+    /// then fold in every named expression it references. A missing or
+    /// invalid name is an error the caller shows instead of querying:
+    /// skipping it would widen the scope and produce plausible wrong totals.
+    pub fn effective_scope(&self, tile: &Scope) -> Result<Scope, String> {
+        self.scope.and_then(tile).resolve(&self.named)
     }
 
     /// Return cached scope-bar labels for versions excluding flip, the configured
@@ -885,10 +921,13 @@ mod tests {
             text: Some("spx".into()),
             ..Scope::default()
         };
-        let eff = f.effective_scope(&tile);
+        let eff = f.effective_scope(&tile).unwrap();
         assert_eq!(eff.dimensions, book_scope("BK000").dimensions);
         assert_eq!(eff.text.as_deref(), Some("spx"));
-        assert_eq!(f.effective_scope(&Scope::default()), book_scope("BK000"));
+        assert_eq!(
+            f.effective_scope(&Scope::default()),
+            Ok(book_scope("BK000"))
+        );
     }
 
     #[test]
@@ -1491,5 +1530,55 @@ mod tests {
         assert_eq!(f.publication_watches["cvi"].documents.len(), 1);
         f.note_published(publish("cvi", "SPX"));
         assert_eq!(f.versions_for([&spx_twin]).data, f.versions().data);
+    }
+
+    fn named(text: &str) -> geode_core::named::NamedExpressions {
+        use geode_core::config::{LayerDoc, merge_docs};
+        let doc = LayerDoc::builtin(geode_core::config::EXPRESSIONS_DOC, text).unwrap();
+        let merged = merge_docs(geode_core::config::EXPRESSIONS_DOC, &[doc]);
+        let (n, diags) = geode_core::named::NamedExpressions::from_doc(
+            &merged,
+            &geode_core::scope::complete::ExprVocab::default(),
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        n
+    }
+
+    #[test]
+    fn effective_scope_resolves_named_expressions_and_refuses_a_missing_one() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let mut scope = book_scope("BK000");
+        scope.named = vec!["gone".into()];
+        f.set_scope(scope);
+        assert_eq!(
+            f.effective_scope(&Scope::default()),
+            Err("named expression 'gone' is missing".to_string())
+        );
+
+        assert!(f.replace_named_expressions(named("[gone]\nexpression = \"npv > 0\"\n")));
+        let resolved = f.effective_scope(&Scope::default()).unwrap();
+        assert!(resolved.named.is_empty(), "{resolved:?}");
+        assert_eq!(
+            resolved.expression.map(|e| e.to_string()).as_deref(),
+            Some("npv > 0")
+        );
+        assert_eq!(resolved.dimensions, book_scope("BK000").dimensions);
+    }
+
+    #[test]
+    fn replace_named_expressions_bumps_config_exactly_when_content_changes() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let v0 = f.versions();
+        let liq = named("[liq]\nexpression = \"npv > 0\"\n");
+        assert!(f.replace_named_expressions(liq.clone()));
+        let v1 = f.versions();
+        assert_eq!(v1.config, v0.config + 1);
+        assert_eq!(f.named_expressions(), &liq);
+
+        assert!(!f.replace_named_expressions(liq), "same content");
+        assert_eq!(f.versions(), v1);
+
+        assert!(f.replace_named_expressions(named("[liq]\nexpression = \"npv > 5\"\n")));
+        assert_eq!(f.versions().config, v1.config + 1);
     }
 }

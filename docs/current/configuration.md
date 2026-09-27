@@ -22,8 +22,8 @@ are part of several document contracts.
 
 Top-level entries in `views`, `view_presentation`, `dataset_presentation`,
 `layouts`, `groupings`, `scopes`, `datasets`, `sources`, `egress`, `dimensions`,
-`colors`, `pricer_views`, `pricer_templates`, and `overrides` replace whole
-named objects.
+`colors`, `expressions`, `pricer_views`, `pricer_templates`, and `overrides`
+replace whole named objects.
 Overriding one source therefore requires its complete configuration, including
 required fields; omitted fields do not inherit from the lower-layer source.
 
@@ -66,6 +66,7 @@ The main configuration documents have distinct owners:
 | `dimensions.toml` | Derived dimensions used for grouping and scope |
 | `groupings.toml` | The nine shared grouping slots |
 | `scopes.toml` | Named scopes |
+| `expressions.toml` | Named scope expressions, referenced by name from a saved scope or the frame |
 | `colors.toml` | Named semantic data colors |
 | `dataset_presentation.toml` | Desk-level column presentation between schema and view overrides |
 | `view_presentation.toml` | Per-view column order, visibility, widths, and formatting overrides |
@@ -133,6 +134,19 @@ and [configuration-dialogs.md's Scope expression field](configuration-dialogs.md
 Source adapter names, document kinds, module keymap fragments, and pricer
 names depend on what the assembled application has registered, so `geode-app`
 performs those cross-crate checks at startup and reload.
+
+`expressions.toml` holds named scope expressions: an expression text saved
+under a name so a saved scope or the frame can refer to it instead of copying
+it (`geode_core::named::NamedExpressions`). Each entry is parsed at load time.
+One that fails to parse is kept as `Invalid`, carrying its text and parse
+reason, rather than dropped, so a reference to it can report "invalid" rather
+than "missing" — a deleted name and a broken definition must not look alike.
+An expression that parses but names a column the current schema lacks stays
+`Valid` and only warns; the column error surfaces the same way any scope
+expression's does, at query time. A scope's own list of names is read and
+persisted without validating them against this document at all: resolution,
+not the reader, is what a missing or invalid name fails against (see
+[the shared frame](shell.md#the-shared-frame)).
 
 Schema changes do not migrate an existing DuckDB database. `apply_schema`
 creates missing tables and columns needed by its own metadata, while payload
@@ -332,6 +346,7 @@ Accepted candidates update runtime state according to their inputs:
 | Effective `app.theme` | Apply the theme when changed; unrelated edits preserve the current theme |
 | `groupings`, `datasets`, or `dimensions` | Rebuild shared grouping slots |
 | `scopes`, `datasets`, or `dimensions` | Rebuild saved scopes |
+| `expressions`, `datasets`, or `dimensions` | Rebuild named expressions; a changed or redefined entry bumps the frame's config version so a tile whose scope references it requeries |
 | `datasets` or `dimensions` | Rebuild dimension-picker columns |
 | Views, either presentation document, dimensions, or colors | Emit `ConfigReloaded` for the app bridge |
 | Sources, datasets, egress, or `app.pricing.adapter` differing from startup | Mark restart required; return to the startup inputs to clear it |

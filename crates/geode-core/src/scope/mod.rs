@@ -36,6 +36,10 @@ pub struct Scope {
     /// constraint", so an emptied selection cannot carry the difference
     /// between "everything" and "nothing" (see [`Scope::and_then`]).
     pub impossible: bool,
+    /// Named expressions this scope refers to, by name, ANDed with its other
+    /// parts. Resolved by [`Scope::resolve`] before any query. The data
+    /// compiler refuses a scope that still carries names.
+    pub named: Vec<String>,
 }
 
 impl Scope {
@@ -46,6 +50,7 @@ impl Scope {
             && self.dimensions.iter().all(|d| d.values.is_empty())
             && self.text.is_none()
             && self.expression.is_none()
+            && self.named.is_empty()
     }
 
     /// Compose scope layers. Selections on the same dimension intersect;
@@ -102,7 +107,45 @@ impl Scope {
                 (None, b) => b.clone(),
             },
             impossible,
+            named: self
+                .named
+                .iter()
+                .chain(inner.named.iter().filter(|n| !self.named.contains(n)))
+                .cloned()
+                .collect(),
         }
+    }
+
+    /// This scope with every named expression folded into `expression`:
+    /// the names in list order, ANDed together, then ANDed with the existing
+    /// expression; `named` comes back empty. The first missing or invalid
+    /// name is an error, never skipped. Skipping it would widen the scope
+    /// and produce plausible wrong totals.
+    pub fn resolve(&self, named: &crate::named::NamedExpressions) -> Result<Scope, String> {
+        if self.named.is_empty() {
+            return Ok(self.clone());
+        }
+        let mut folded: Option<Expr> = None;
+        for name in &self.named {
+            let expr = match named.get(name) {
+                None => return Err(format!("named expression '{name}' is missing")),
+                Some(crate::named::NamedExpr::Invalid { reason, .. }) => {
+                    return Err(format!("named expression '{name}' is invalid: {reason}"));
+                }
+                Some(crate::named::NamedExpr::Valid { expr, .. }) => expr.clone(),
+            };
+            folded = Some(match folded {
+                None => expr,
+                Some(acc) => Expr::And(Box::new(acc), Box::new(expr)),
+            });
+        }
+        let mut out = self.clone();
+        out.named.clear();
+        out.expression = match (folded, self.expression.clone()) {
+            (Some(n), Some(e)) => Some(Expr::And(Box::new(n), Box::new(e))),
+            (n, e) => n.or(e),
+        };
+        Ok(out)
     }
 
     /// Column references from selections and expressions, with duplicates
@@ -492,6 +535,7 @@ grain = "underlying"
             expression: Some(parse_expr("lhu = 'L0'").unwrap()),
             text: None,
             impossible: false,
+            named: Vec::new(),
         };
         let mut cols = s.columns();
         cols.sort_unstable();
@@ -523,6 +567,7 @@ grain = "underlying"
             text: Some("SPX".into()),
             expression: Some(parse_expr("delta01 > 100").unwrap()),
             impossible: false,
+            named: Vec::new(),
         };
         assert!(
             s.validate(&dataset(), &DerivedDimensions::default())
@@ -580,6 +625,7 @@ grain = "underlying"
             text: Some("spx".into()),
             expression: None,
             impossible: false,
+            named: Vec::new(),
         };
         let (kept, dropped) = scope.applicable_to(&ds, &DerivedDimensions::default());
         assert_eq!(dropped, vec!["book".to_string(), "lhu".to_string()]);
@@ -603,5 +649,88 @@ grain = "underlying"
         let (kept, dropped) = scope.applicable_to(&ds, &dims);
         assert!(dropped.is_empty());
         assert_eq!(kept.dimensions.len(), 1);
+    }
+
+    fn named_fixture() -> crate::named::NamedExpressions {
+        use crate::config::{LayerDoc, merge_docs};
+        let d = LayerDoc::builtin(
+            "expressions",
+            "[a]\nexpression = \"x = 1\"\n[b]\nexpression = \"y = 2\"\n[bad]\nexpression = \"z >\"\n",
+        )
+        .unwrap();
+        crate::named::NamedExpressions::from_doc(
+            &merge_docs("expressions", &[d]),
+            &crate::scope::complete::ExprVocab::default(),
+        )
+        .0
+    }
+
+    #[test]
+    fn resolve_ands_names_in_order_then_the_expression_and_clears_the_list() {
+        let s = Scope {
+            named: vec!["a".into(), "b".into()],
+            expression: Some(parse_expr("w = 3").unwrap()),
+            ..Scope::default()
+        };
+        let r = s.resolve(&named_fixture()).unwrap();
+        assert!(r.named.is_empty());
+        assert_eq!(
+            r.expression.unwrap().to_string(),
+            "((x = 1) and (y = 2)) and (w = 3)"
+        );
+    }
+
+    #[test]
+    fn resolve_without_names_is_identity() {
+        let s = Scope {
+            expression: Some(parse_expr("w = 3").unwrap()),
+            ..Scope::default()
+        };
+        assert_eq!(s.resolve(&named_fixture()).unwrap(), s);
+    }
+
+    #[test]
+    fn resolve_names_the_first_bad_reference() {
+        let missing = Scope {
+            named: vec!["a".into(), "gone".into()],
+            ..Scope::default()
+        };
+        assert_eq!(
+            missing.resolve(&named_fixture()),
+            Err("named expression 'gone' is missing".to_string())
+        );
+        let invalid = Scope {
+            named: vec!["bad".into()],
+            ..Scope::default()
+        };
+        let e = invalid.resolve(&named_fixture()).unwrap_err();
+        assert!(
+            e.starts_with("named expression 'bad' is invalid: expected a value"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn and_then_keeps_outer_names_first_without_duplicates() {
+        let outer = Scope {
+            named: vec!["a".into(), "b".into()],
+            ..Scope::default()
+        };
+        let inner = Scope {
+            named: vec!["b".into(), "c".into()],
+            ..Scope::default()
+        };
+        assert_eq!(outer.and_then(&inner).named, ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn a_scope_with_only_names_is_not_empty() {
+        assert!(
+            !Scope {
+                named: vec!["a".into()],
+                ..Scope::default()
+            }
+            .is_empty()
+        );
     }
 }

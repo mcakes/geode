@@ -13,7 +13,7 @@ use crate::keymap::build_keymap;
 use crate::keymap::fragments;
 use crate::reload;
 use crate::vimfind::FindStyle;
-use geode_core::config::{Config, Diagnostic, Severity};
+use geode_core::config::{Config, Diagnostic, EXPRESSIONS_DOC, Severity};
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::groupings::GroupingSlots;
 use geode_core::log::LogLevels;
@@ -88,6 +88,22 @@ pub fn rebuild_saved_scopes(
         }
     }
     saved
+}
+
+/// Read named scope expressions, checking each against the vocabulary the
+/// current datasets and dimensions define, and log the entry diagnostics.
+/// An invalid entry is kept so a reference to it reports "invalid" rather
+/// than "missing". Shared by startup and reload.
+pub fn rebuild_named_expressions(config: &Config) -> geode_core::named::NamedExpressions {
+    let vocab = super::expr_vocab(config);
+    let (named, diags) = config
+        .doc(EXPRESSIONS_DOC)
+        .map(|d| geode_core::named::NamedExpressions::from_doc(d, &vocab))
+        .unwrap_or_default();
+    for d in &diags {
+        tracing::warn!(target: "geode::config", "{d}");
+    }
+    named
 }
 
 impl ShellView {
@@ -175,6 +191,9 @@ impl ShellView {
             let groupings_changed =
                 changed("groupings") || changed("datasets") || changed("dimensions");
             let scopes_changed = changed("scopes") || changed("datasets") || changed("dimensions");
+            // Entry warnings name columns, so a schema change re-reads the entries.
+            let named_changed =
+                changed(EXPRESSIONS_DOC) || changed("datasets") || changed("dimensions");
             // Presentation, dimensions, and named colors all affect the views or
             // factory settings refreshed by the app's `ConfigReloaded` handler.
             let views_changed = changed("views")
@@ -304,6 +323,14 @@ impl ShellView {
                 let saved = rebuild_saved_scopes(&self.services.config, true);
                 self.frame.update(cx, |f, cx| {
                     if f.replace_saved_scopes(saved) {
+                        cx.notify();
+                    }
+                });
+            }
+            if named_changed {
+                let named = rebuild_named_expressions(&self.services.config);
+                self.frame.update(cx, |f, cx| {
+                    if f.replace_named_expressions(named) {
                         cx.notify();
                     }
                 });

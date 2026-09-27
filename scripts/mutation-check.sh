@@ -3511,8 +3511,8 @@ run_mutation "blotter: :filter narrows only this tile" \
 
 run_mutation "blotter: an unscoped tile keeps its own filter" \
   crates/geode-blotter/src/tile.rs \
-  '                self.tile_scope.clone()' \
-  '                Scope::default()' \
+  '                Ok(self.tile_scope.clone())' \
+  '                Ok(Scope::default())' \
   geode-blotter an_unscoped_tile_still_applies_its_own_filter
 
 run_mutation "blotter: filter validates against the dataset" \
@@ -7551,6 +7551,7 @@ run_mutation "objectdialog: an emptied Doc object removes the user's key instead
 run_mutation "objectdialog: unticking a Doc list's last entry is allowed again" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
   '                if included
+                    && !may_empty
                     && dest == Destination::Doc
                     && self.values.is_none()
                     && items.iter().filter(|i| i.included).count() == 1
@@ -8382,8 +8383,8 @@ run_mutation "scope-save: the save chip's savable gate" \
 # both in the palette and in `input.rs`'s `scope::<name>` dispatch arm.
 run_mutation "scope-save: save_current is a reserved scope name" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '            Domain::Scopes => &geode_core::scopes::RESERVED_NAMES,' \
-  '            Domain::Scopes => &[],' \
+  '            Domain::Scopes | Domain::Expressions => &geode_core::scopes::RESERVED_NAMES,' \
+  '            Domain::Scopes | Domain::Expressions => &[],' \
   geode-shell \
   scope_save_current_refuses_its_own_name_as_reserved
 
@@ -8993,14 +8994,26 @@ run_mutation "groupings: an unchanged chain is applied anyway" \
 # Re-anchored (30fcede gave this arm `.min_h_6()` — item 2 of the final
 # review's re-review — so the bare-`div()` text the old anchor matched
 # no longer exists). The three match arms together are still the
-# unique text: `confirm_row(confirm, &draft.name, entity, cx)` and
+# unique text: the edit stage's `confirm_row(` call on `&draft.name` and
 # `action_bar(shell, entity)` each occur nowhere else in this file.
 run_mutation "objectdialog: the action bar stays up under the chain field" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '        (true, _) => div().min_h_6().into_any_element(),
-        (false, Some(confirm)) => confirm_row(confirm, &draft.name, entity, cx),
+        (false, Some(confirm)) => confirm_row(
+            confirm,
+            &draft.name,
+            state.confirm_detail.as_deref(),
+            entity,
+            cx,
+        ),
         (false, None) => action_bar(shell, entity),' \
-  '        (_, Some(confirm)) => confirm_row(confirm, &draft.name, entity, cx),
+  '        (_, Some(confirm)) => confirm_row(
+            confirm,
+            &draft.name,
+            state.confirm_detail.as_deref(),
+            entity,
+            cx,
+        ),
         (_, None) => action_bar(shell, entity),' \
   geode-shell \
   i_opens_the_chain_field_tab_completes_and_enter_writes_the_chain
@@ -9137,7 +9150,7 @@ run_mutation "objectdialog: a tick click toggles through space's path" \
 # `Draft::toggle_selected`, which adds an empty selection instead.
 run_mutation "objectdialog: a tick on an available Scopes row opens its values" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    if !in_values_stage(shell) && is_scopes(shell) {' \
+  '    if !in_values_stage(shell) && is_scopes(shell) && !on_scopes_named_row(shell) {' \
   '    if false {' \
   geode-shell clicking_an_available_dimensions_tick_opens_its_values_stage
 
@@ -22004,6 +22017,161 @@ run_mutation "modal back: a click is ignored while a confirm is pending" \
   '        if self.confirm.is_some() || !self.has_previous_stage() {' \
   '        if !self.has_previous_stage() {' \
   geode-shell the_back_button_is_ignored_while_a_confirm_is_pending
+
+# ---- Named scope expressions.
+# The expressions document replaces whole objects by name across layers.
+run_mutation "named expr: the user layer replaces an object whole" \
+  crates/geode-core/src/config/merge.rs \
+  '        | "expressions" => Some(1),' \
+  '        | "expressions_off" => Some(1),' \
+  geode-core \
+  the_user_layer_replaces_a_desk_object_whole
+
+# A missing name must fail resolution; skipping it would widen the scope.
+run_mutation "named expr: a missing name fails resolution" \
+  crates/geode-core/src/scope/mod.rs \
+  "                None => return Err(format!(\"named expression '{name}' is missing\"))," \
+  "                None => continue," \
+  geode-core \
+  resolve_names_the_first_bad_reference
+
+# Composition never repeats an outer name.
+run_mutation "named expr: and_then skips a duplicate inner name" \
+  crates/geode-core/src/scope/mod.rs \
+  '.filter(|n| !self.named.contains(n))' \
+  '.filter(|_n| true)' \
+  geode-core \
+  and_then_keeps_outer_names_first_without_duplicates
+
+# A scope carrying names is refused, never compiled without them.
+run_mutation "named expr: the compiler refuses unresolved names" \
+  crates/geode-data/src/query/scope_sql.rs \
+  '    if !scope.named.is_empty() {' \
+  '    if false {' \
+  geode-data \
+  a_scope_with_unresolved_names_is_refused
+
+# The blotter shows an unresolved name as its error and submits nothing.
+run_mutation "named expr: the blotter submits an unresolved scope" \
+  crates/geode-blotter/src/tile.rs \
+  '                frame.effective_scope(&self.tile_scope)' \
+  '                Ok(frame.scope().and_then(&self.tile_scope))' \
+  geode-blotter \
+  an_unresolved_named_expression_errors_without_querying_and_a_definition_requeries
+
+# An expressions reload rebuilds the frame's named expressions.
+run_mutation "named expr: reload ignores an expressions change" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                changed(EXPRESSIONS_DOC) || changed("datasets") || changed("dimensions");' \
+  '                false || changed("datasets") || changed("dimensions");' \
+  geode-shell \
+  an_expressions_reload_redefines_the_frames_named_expressions
+
+# The picker never requests values under an unresolved scope.
+run_mutation "named expr: the picker requests an unresolved scope" \
+  crates/geode-shell/src/shell/picker.rs \
+  '    let minus_own = match minus_own.resolve(view.frame.read(cx).named_expressions()) {' \
+  '    let minus_own = match Ok::<_, String>(minus_own) {' \
+  geode-shell \
+  the_picker_shows_an_unresolved_named_expression_instead_of_requesting
+
+# The Scopes fold writes only ticked named expressions.
+run_mutation "named expr: the scopes fold writes unticked names" \
+  crates/geode-shell/src/shell/objectdialog/scopes.rs \
+  '                        .filter(|i| i.included)' \
+  '                        .filter(|_| true)' \
+  geode-shell \
+  unticking_every_named_expression_drops_the_key
+
+# A scope's named-expression list may be emptied by unticking.
+run_mutation "named expr: the last named untick is refused" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '                let may_empty = self.fields[field].key == "named";' \
+  '                let may_empty = false;' \
+  geode-shell \
+  unticking_every_named_expression_drops_the_key
+
+# Space on a named expression ticks it rather than opening Values.
+run_mutation "named expr: space on a named row takes the dimensions door" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '            ) => draft.fields.get(field).is_some_and(|f| f.key == "named"),' \
+  '            ) => false,' \
+  geode-shell \
+  space_on_a_named_expression_never_opens_values
+
+# Deleting a named expression names the saved scopes that tick it.
+run_mutation "named expr: the delete question's used-by scan finds no scope" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                        .is_some_and(|names| names.iter().any(|n| n.as_str() == Some(name)))' \
+  '                        .is_some_and(|_| false)' \
+  geode-shell \
+  deleting_a_named_expression_names_its_users
+
+# `c` on a named expression seeds the copy's field from the copied table.
+run_mutation "named expr: a copy's field is built empty" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            Domain::Expressions => expressions::fields_from_table(Some(table)),' \
+  '            Domain::Expressions => expressions::fields_from_table(None),' \
+  geode-shell \
+  c_copies_a_named_expression_with_its_text
+
+# Naming a fresh expression opens its field instead of creating an invalid one.
+run_mutation "named expr: naming a fresh expression creates it at once" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    let opens_expression = domain == Domain::Expressions && seed == NameSeed::Empty;' \
+  '    let opens_expression = false;' \
+  geode-shell \
+  a_new_named_expression_is_written_to_the_user_file
+
+# The Expressions dialog's expression field turns suggestions on.
+run_mutation "named expr: the expressions field has no suggestions" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '    matches!(state.domain, Domain::Scopes | Domain::Expressions)' \
+  '    state.domain == Domain::Scopes' \
+  geode-shell \
+  the_expressions_field_suggests_columns
+
+# The scope bar shows every name on the frame's scope, or it narrows
+# totals with nothing on screen saying so.
+run_mutation "named expr: the scope bar omits named chips" \
+  crates/geode-shell/src/scopebar.rs \
+  '        .map(|name| named_chip(name, frame.named_expressions()))' \
+  '        .filter(|_| false).map(|name| named_chip(name, frame.named_expressions()))' \
+  geode-shell \
+  a_loaded_scope_paints_a_chip_for_its_named_expression
+
+# A named chip's × removes that name through set_scope.
+run_mutation "named expr: a named chip's x removes nothing" \
+  crates/geode-shell/src/shell/render.rs \
+  '                    if f.drop_named(name) {' \
+  '                    if false && f.drop_named(name) {' \
+  geode-shell \
+  a_named_chips_close_glyph_drops_the_name_undoably
+
+# A missing name paints the danger chip.
+run_mutation "named expr: a missing name paints the plain chip" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '        let (fg, bg, close_states, broken_marker) = if named.broken {' \
+  '        let (fg, bg, close_states, broken_marker) = if false && named.broken {' \
+  geode-shell \
+  a_missing_name_paints_the_broken_chip
+
+# The document distinct arm compiles its scope by its own route, so the
+# names are refused before any arm.
+run_mutation "named expr: document distinct drops unresolved names" \
+  crates/geode-data/src/query/distinct.rs \
+  '    if !params.scope.named.is_empty() {' \
+  '    if false {' \
+  geode-data \
+  distinct_over_a_document_only_dimension_refuses_unresolved_names
+
+# A Scopes item's missing/invalid named note is danger text.
+run_mutation "named expr: a missing named note is muted" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                        && matches!(entry.note.as_deref(), Some("missing" | "invalid"));' \
+  '                        && matches!(entry.note.as_deref(), Some("never"));' \
+  geode-shell \
+  a_missing_named_expressions_note_paints_in_danger_text
 
 run_mutation "launch: a restored tile is launched" \
   crates/geode-shell/src/shell/occupants.rs \

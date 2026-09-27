@@ -15,6 +15,7 @@ pub mod groupings;
 pub mod health;
 pub mod launch;
 pub mod log;
+pub mod named;
 pub mod nudge;
 pub mod panic;
 pub mod pricing;
