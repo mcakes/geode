@@ -18188,10 +18188,10 @@ run_mutation "pricer sheets: a failed save after :name forgets the old document"
 
 run_mutation "pricer sheets: :name renames a sheet whose load failed" \
   crates/geode-pricer/src/tile.rs \
-  '        if self.save_blocked {
-            // The sheet shown is the fallback' \
-  '        if false {
-            // The sheet shown is the fallback' \
+  '        } else if self.save_blocked {
+            Some(RenameBlock::NotLoaded)' \
+  '        } else if false {
+            Some(RenameBlock::NotLoaded)' \
   geode-pricer colon_name_refuses_a_sheet_that_did_not_load
 
 run_mutation "pricer sheets: :name takes a known name" \
@@ -18248,8 +18248,10 @@ run_mutation "pricer rm: y forgets nothing" \
 
 run_mutation "pricer rm: the confirm is not insert mode" \
   crates/geode-pricer/src/tile.rs \
-  '        if self.confirm.is_some() || self.entry.is_some() || self.editor.is_some() {' \
-  '        if self.entry.is_some() || self.editor.is_some() {' \
+  '        if self.confirm.is_some()
+            || self.entry.is_some()' \
+  '        if false
+            || self.entry.is_some()' \
   geode-pricer colon_rm_asks_and_y_forgets
 
 run_mutation "pricer rm: focus leaving leaves the question standing" \
@@ -18307,10 +18309,10 @@ run_mutation "pricer retiring: :e opens a sheet being removed" \
 
 run_mutation "pricer retiring: :name takes a name being removed" \
   crates/geode-pricer/src/tile.rs \
-  '            return Err("the last rename is not saved yet".into());
+  '            return Err(why);
         }
         self.shared.refuse_retiring(&name)?;' \
-  '            return Err("the last rename is not saved yet".into());
+  '            return Err(why);
         }' \
   geode-pricer a_retiring_name_is_reserved_until_its_forget_is_answered
 
@@ -20959,8 +20961,8 @@ run_mutation "objectdialog: a click lands on a row the keyboard cannot reach" \
 # the tile, 2026-09-24).
 run_mutation "pricer tile: the entry field is not insert mode" \
   crates/geode-pricer/src/tile.rs \
-  '        if self.confirm.is_some() || self.entry.is_some() || self.editor.is_some() {' \
-  '        if self.confirm.is_some() || self.editor.is_some() {' \
+  '            || self.entry.is_some()' \
+  '            || false' \
   geode-app \
   typing_into_the_pricer_entry_field_fires_no_shell_binding
 
@@ -21808,9 +21810,9 @@ run_mutation "pricer rm: a sheet open in another tile arms the confirm" \
 # Every key under the armed confirm is the confirm's alone.
 run_mutation "pricer rm: a key under the confirm reaches the tile too" \
   crates/geode-pricer/src/header.rs \
-  '                        if tile.update(cx, |t, cx| t.confirm_key(event, window, cx)) {
-                            cx.stop_propagation();' \
-  '                        if tile.update(cx, |t, cx| t.confirm_key(event, window, cx)) {' \
+  '                                if tile.update(cx, |t, cx| t.confirm_key(event, window, cx)) {
+                                    cx.stop_propagation();' \
+  '                                if tile.update(cx, |t, cx| t.confirm_key(event, window, cx)) {' \
   geode-app a_key_answering_the_rm_confirm_reaches_nothing_else
 
 # The table's own escape would clear its selection and stop the key before
@@ -21828,11 +21830,15 @@ run_mutation "pricer init: DataTable keeps its own escape" \
 # field instead of completing.
 run_mutation "pricer init: the entry bar does not reclaim tab" \
   crates/geode-pricer/src/lib.rs \
-  '        ["tab", "shift-tab"]
-            .map(|key| gpui::KeyBinding::new(key, gpui::NoAction, Some(header::ENTRY_CONTEXT))),' \
-  '        ["f24"]
-            .map(|key| gpui::KeyBinding::new(key, gpui::NoAction, Some(header::ENTRY_CONTEXT))),' \
+  '    for context in [header::ENTRY_CONTEXT, popup::SHEET_PICKER_CONTEXT] {' \
+  '    for context in [popup::SHEET_PICKER_CONTEXT] {' \
   geode-pricer tab_writes_the_lit_underlying_and_cycles
+
+run_mutation "pricer init: the sheet picker does not reclaim tab" \
+  crates/geode-pricer/src/lib.rs \
+  '    for context in [header::ENTRY_CONTEXT, popup::SHEET_PICKER_CONTEXT] {' \
+  '    for context in [header::ENTRY_CONTEXT] {' \
+  geode-pricer the_picker_steps_completes_commits_and_escape_closes
 
 # An empty hint must keep its row, or the table jumps as the caret enters
 # the last slot.
@@ -22238,8 +22244,8 @@ run_mutation "pricer date field: escape leaves the tenor" \
 # shell's bindings.
 run_mutation "pricer date field: insert mode while it is open" \
   crates/geode-pricer/src/tile.rs \
-  '        if self.confirm.is_some() || self.entry.is_some() || self.editor.is_some() {' \
-  '        if self.confirm.is_some() || self.entry.is_some() || self.editor.as_ref().is_some_and(|e| e.input().is_some()) {' \
+  '            || self.editor.is_some()' \
+  '            || self.editor.as_ref().is_some_and(|e| e.input().is_some())' \
   geode-app typing_into_the_pricer_date_field_fires_no_shell_binding
 
 # The date field's own focus handle counts as the tile holding focus
@@ -24212,6 +24218,149 @@ run_mutation "autosize: the trait default accepts a fit" \
   '        Err(crate::colfit::NO_TABLE)' \
   '        Ok(())' \
   geode-shell autosize_on_a_tile_without_a_table_shows_the_refusal
+
+# ---- Pricer sheets by pointer (2026-09-27) ----
+
+# The sheet picker's filter and the rename field put the tile in
+# `mode == insert`, and their focus counts as the tile holding focus: the
+# shell's two insert conditions. Mutated, a capital typed into either runs
+# a shell binding (shift+d duplicates the tile).
+run_mutation "pricer sheets: the picker is not insert mode" \
+  crates/geode-pricer/src/tile.rs \
+  '            || self.sheet_picker.is_some()' \
+  '            || false' \
+  geode-app typing_into_the_pricer_sheet_picker_and_rename_field_fires_no_shell_binding
+
+run_mutation "pricer sheets: the rename field is not insert mode" \
+  crates/geode-pricer/src/tile.rs \
+  '            || self.rename_field.is_some()' \
+  '            || false' \
+  geode-app typing_into_the_pricer_sheet_picker_and_rename_field_fires_no_shell_binding
+
+run_mutation "pricer sheets: a sheet field's focus is not the tile's" \
+  crates/geode-pricer/src/tile.rs \
+  '            .any(|i| i.read(cx).focus_handle(cx).is_focused(window));' \
+  '            .any(|_| false);' \
+  geode-app typing_into_the_pricer_sheet_picker_and_rename_field_fires_no_shell_binding
+
+# A press on the name must keep a focus-tracking ancestor from taking the
+# keyboard from the field it just focused (mouse-opened fields were deaf).
+run_mutation "pricer sheets: the name press lets an ancestor take focus" \
+  crates/geode-pricer/src/tile.rs \
+  '        window.prevent_default();' \
+  '        let _ = &window;' \
+  geode-app typing_into_the_pricer_sheet_picker_and_rename_field_fires_no_shell_binding
+
+# A double-click renames only when both its presses reached the name.
+run_mutation "pricer sheets: a double-click renames whatever its first press hit" \
+  crates/geode-pricer/src/tile.rs \
+  '        let verb = if click_count >= 2 && follows_name {' \
+  '        let verb = if click_count >= 2 {' \
+  geode-pricer a_double_click_whose_first_press_missed_the_name_opens_the_picker
+
+run_mutation "pricer sheets: no press is remembered as the name's" \
+  crates/geode-pricer/src/tile.rs \
+  '        self.last_press_on_name = std::mem::take(&mut self.press_on_name);' \
+  '        self.last_press_on_name = false;' \
+  geode-pricer a_double_click_on_the_sheet_name_renames_in_place
+
+# A click on the name with the picker open closes it; mutated, it reopens.
+run_mutation "pricer sheets: the name click does not toggle the picker" \
+  crates/geode-pricer/src/tile.rs \
+  '        } else if self.sheet_picker.is_some() {' \
+  '        } else if false {' \
+  geode-pricer the_sheet_name_toggles_the_picker_and_a_press_elsewhere_closes_it
+
+# A pick takes `:e`'s route, refusals included.
+run_mutation "pricer sheets: an open pick skips :e's refusals" \
+  crates/geode-pricer/src/tile.rs \
+  '            PickerPurpose::Open => self.edit_sheet(name, cx),' \
+  '            PickerPurpose::Open => self.switch_sheet(name, true, cx),' \
+  geode-pricer picking_a_sheet_open_elsewhere_refuses_like_colon_e
+
+run_mutation "pricer sheets: a remove pick opens the sheet" \
+  crates/geode-pricer/src/tile.rs \
+  '            PickerPurpose::Remove => self.arm_remove(name, window, cx),' \
+  '            PickerPurpose::Remove => self.edit_sheet(name, cx),' \
+  geode-pricer the_remove_picker_arms_colon_rms_confirm
+
+run_mutation "pricer sheets: tab does not complete the picker" \
+  crates/geode-pricer/src/tile.rs \
+  '        if p.list.complete() {' \
+  '        if false {' \
+  geode-pricer the_picker_steps_completes_commits_and_escape_closes
+
+run_mutation "pricer sheets: up and down do not step the picker" \
+  crates/geode-pricer/src/tile.rs \
+  '                    p.list.nav(NavCommand::Move(steps));' \
+  '                    let _ = steps;' \
+  geode-pricer the_picker_steps_completes_commits_and_escape_closes
+
+# The picker opens on the current sheet, so an `enter` straight away keeps it.
+run_mutation "pricer sheets: the picker opens on the first name" \
+  crates/geode-pricer/src/popup.rs \
+  '        list.place(current.as_deref());' \
+  '        let _ = current;' \
+  geode-pricer the_sheet_actions_dispatch_from_the_palette_and_close_other_fields
+
+run_mutation "pricer sheets: the current sheet is marked open elsewhere" \
+  crates/geode-pricer/src/popup.rs \
+  '            open_elsewhere: n != current && open.contains(n),' \
+  '            open_elsewhere: open.contains(n),' \
+  geode-pricer sheet_rows_list_known_and_held_names_once_sorted_with_their_marks
+
+# The rename field takes `:name`'s route and keeps itself open on a refusal.
+run_mutation "pricer sheets: the rename field skips :name's refusals" \
+  crates/geode-pricer/src/tile.rs \
+  '            Ok(Command::Name(name)) => self.rename(name, cx),' \
+  '            Ok(Command::Name(name)) => {
+                self.sheet.name = name;
+                Ok(())
+            }' \
+  geode-pricer a_refused_rename_keeps_the_field_and_escape_or_a_press_outside_cancels
+
+run_mutation "pricer sheets: a refused rename closes the field" \
+  crates/geode-pricer/src/tile.rs \
+  '            Ok(()) => self.close_rename_field(window, cx),' \
+  '            Ok(()) | Err(_) if true => self.close_rename_field(window, cx),' \
+  geode-pricer a_refused_rename_keeps_the_field_and_escape_or_a_press_outside_cancels
+
+run_mutation "pricer sheets: the menu's rename row is never greyed" \
+  crates/geode-pricer/src/tile.rs \
+  '                self.rename_block().map_or(Ok(()), |b| Err(b.reason())),' \
+  '                Ok(()),' \
+  geode-pricer a_blocked_rename_says_why_and_greys_its_menu_row
+
+run_mutation "pricer sheets: Remove sheet opens the open picker" \
+  crates/geode-pricer/src/tile.rs \
+  '            "remove_sheet" => self.open_sheet_picker(PickerPurpose::Remove, window, cx),' \
+  '            "remove_sheet" => self.open_sheet_picker(PickerPurpose::Open, window, cx),' \
+  geode-pricer the_menus_sheet_rows_open_rename_create_and_remove
+
+# The prompt's buttons: Yes is `y`, No any other key, and a press on
+# either does not cancel the question before the click lands.
+run_mutation "pricer sheets: the Yes button cancels" \
+  crates/geode-pricer/src/tile.rs \
+  '        if yes {' \
+  '        if !yes {' \
+  geode-pricer the_prompts_yes_button_removes_and_no_cancels
+
+run_mutation "pricer sheets: any press on the tile cancels the prompt first" \
+  crates/geode-pricer/src/tile.rs \
+  '            .capture_any_mouse_down(move |_, _, cx| {
+                press_tile.update(cx, |t, _| t.note_press());' \
+  '            .capture_any_mouse_down(move |_, window, cx| {
+                press_tile.update(cx, |t, cx| {
+                    t.note_press();
+                    t.cancel_remove_on_pointer(window, cx)
+                });' \
+  geode-pricer the_prompts_yes_button_removes_and_no_cancels
+
+run_mutation "pricer sheets: a press off the buttons leaves the prompt standing" \
+  crates/geode-pricer/src/header.rs \
+  '                                    tile.update(cx, |t, cx| t.cancel_remove_on_pointer(window, cx))' \
+  '                                    let _ = (&tile, window, cx);' \
+  geode-pricer focus_leaving_or_a_pointer_press_cancels_the_rm_confirm
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

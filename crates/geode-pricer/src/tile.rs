@@ -10199,6 +10199,12 @@ pub(crate) mod tests {
         h.dispatch(&mut vcx, "new_sheet", None);
         assert_eq!(h.title(&mut vcx), "Pricer · untitled-1");
         assert!(h.entry_text(&vcx).is_none());
+        h.dispatch(&mut vcx, "open_sheet", None);
+        assert_eq!(
+            picker_rows(&h, &vcx),
+            Some(vec![" book".to_string(), ">✓ untitled-1".to_string()]),
+            "the picker opens on the current sheet, wherever it sorts"
+        );
     }
 
     /// `:` and `/` go straight to the tile, past `dispatch`: they close
