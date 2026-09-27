@@ -7165,8 +7165,11 @@ pub(crate) mod tests {
         let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
         h.visible(&mut vcx, true);
         assert_eq!(
-            h.save_notice(&vcx),
-            Some(blocked_notice("book", &load_refused(Refusal::Stopped)).to_string())
+            h.save_notice(&vcx).as_deref(),
+            Some(
+                "sheet 'book' did not load (the store refused the load: the data service \
+                 has stopped); edits are not saved"
+            )
         );
     }
 
@@ -7744,8 +7747,11 @@ pub(crate) mod tests {
         let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
         h.visible(&mut vcx, true);
         assert_eq!(
-            h.save_notice(&vcx),
-            Some(blocked_notice("book", &load_refused(Refusal::Busy)).to_string())
+            h.save_notice(&vcx).as_deref(),
+            Some(
+                "sheet 'book' did not load (the store refused the load: the data service \
+                 is busy); edits are not saved"
+            )
         );
         assert_ne!(
             h.notice(&vcx).as_deref(),
