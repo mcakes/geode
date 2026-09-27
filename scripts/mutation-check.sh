@@ -21810,6 +21810,30 @@ run_mutation "named expr: space on a named row takes the dimensions door" \
   geode-shell \
   space_on_a_named_expression_never_opens_values
 
+# Deleting a named expression names the saved scopes that tick it.
+run_mutation "named expr: the delete question's used-by scan finds no scope" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                        .is_some_and(|names| names.iter().any(|n| n.as_str() == Some(name)))' \
+  '                        .is_some_and(|_| false)' \
+  geode-shell \
+  deleting_a_named_expression_names_its_users
+
+# `c` on a named expression seeds the copy's field from the copied table.
+run_mutation "named expr: a copy's field is built empty" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            Domain::Expressions => expressions::fields_from_table(Some(table)),' \
+  '            Domain::Expressions => expressions::fields_from_table(None),' \
+  geode-shell \
+  c_copies_a_named_expression_with_its_text
+
+# The Expressions dialog's expression field turns suggestions on.
+run_mutation "named expr: the expressions field has no suggestions" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '    matches!(state.domain, Domain::Scopes | Domain::Expressions)' \
+  '    state.domain == Domain::Scopes' \
+  geode-shell \
+  the_expressions_field_suggests_columns
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

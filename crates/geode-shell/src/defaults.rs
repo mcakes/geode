@@ -225,6 +225,13 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     action(reg, "config::colors", "Edit colors…", "Configuration");
     reg.register_rename("config::colours", "config::colors")
         .expect("a retired id is never a registered one");
+    // Edit named scope expressions, which saved scopes and the frame tick.
+    action(
+        reg,
+        "config::expressions",
+        "Edit expressions…",
+        "Configuration",
+    );
     // Open the user configuration directory in the OS file manager for edits
     // outside the dialogs. The title omits an ellipsis because this opens a folder.
     action(

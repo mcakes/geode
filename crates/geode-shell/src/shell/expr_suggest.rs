@@ -40,6 +40,14 @@ fn values_scope(view: &ShellView, cx: &App) -> Option<Scope> {
     if let Some(state) = view.scope_expr_dialog.as_ref() {
         return Some(scope_expr_view::request_scope(&state.mode, current));
     }
+    // A named expression has no enclosing scope: it is ANDed into whichever
+    // scope ticks it, so its values are the whole dataset's.
+    if let Some(state) = view.object_dialog.as_ref()
+        && super::objectdialog::expression_entry_open(state)
+        && state.domain == super::objectdialog::Domain::Expressions
+    {
+        return Some(Scope::default());
+    }
     if let Some(state) = view.object_dialog.as_ref()
         && super::objectdialog::expression_entry_open(state)
         && let Some(draft) = state.draft.as_ref()

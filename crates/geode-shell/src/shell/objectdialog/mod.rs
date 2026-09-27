@@ -14,6 +14,7 @@
 pub mod apply;
 mod colours;
 mod dataset_columns;
+mod expressions;
 mod groupings;
 pub mod render;
 mod schema;
@@ -56,6 +57,9 @@ pub enum Domain {
     /// The shared color vocabulary a column's `colour` field and a chart series can
     /// name — one object per named color, a hue (with its tone) or a theme token.
     Colors,
+    /// Named scope expressions: an expression text saved under a name that saved
+    /// scopes and the frame tick instead of copying it.
+    Expressions,
 }
 
 /// The current stage. Nested stages give Escape a previous stage to return to; mutable
@@ -162,6 +166,7 @@ impl Domain {
             Domain::Schema => schema::DOC,
             Domain::Sources => sources::DOC,
             Domain::Colors => colours::DOC,
+            Domain::Expressions => expressions::DOC,
         }
     }
 
@@ -174,6 +179,7 @@ impl Domain {
             Domain::Schema => "Schema",
             Domain::Sources => "Sources",
             Domain::Colors => "Colors",
+            Domain::Expressions => "Expressions",
         }
     }
 
@@ -188,6 +194,7 @@ impl Domain {
             Domain::Schema => "datasets",
             Domain::Sources => "sources",
             Domain::Colors => "colors",
+            Domain::Expressions => "expressions",
         }
     }
 
@@ -202,6 +209,7 @@ impl Domain {
             Domain::Schema => schema::summary,
             Domain::Sources => sources::summary,
             Domain::Colors => colours::summary,
+            Domain::Expressions => expressions::summary,
         }
     }
 
@@ -216,7 +224,8 @@ impl Domain {
             | Domain::Scopes
             | Domain::Schema
             | Domain::Sources
-            | Domain::Colors => None,
+            | Domain::Colors
+            | Domain::Expressions => None,
         }
     }
 
@@ -226,9 +235,12 @@ impl Domain {
     pub(super) fn roster(self) -> Option<&'static [&'static str]> {
         match self {
             Domain::Groupings => Some(&["1", "2", "3", "4", "5", "6", "7", "8", "9"]),
-            Domain::Views | Domain::Scopes | Domain::Schema | Domain::Sources | Domain::Colors => {
-                None
-            }
+            Domain::Views
+            | Domain::Scopes
+            | Domain::Schema
+            | Domain::Sources
+            | Domain::Colors
+            | Domain::Expressions => None,
         }
     }
 
@@ -239,10 +251,10 @@ impl Domain {
         !matches!(self, Domain::Schema) || matches!(stage, Stage::Column { .. })
     }
 
-    /// May `c` copy an object under a new name? Scopes alone for now; the mechanism is
-    /// generic.
+    /// May `c` copy an object under a new name? Scopes and named expressions; the
+    /// mechanism is generic.
     pub fn duplicable(self) -> bool {
-        self == Domain::Scopes
+        matches!(self, Domain::Scopes | Domain::Expressions)
     }
 
     /// The text painted before an object's name, if this domain groups its objects.
@@ -257,7 +269,8 @@ impl Domain {
             | Domain::Groupings
             | Domain::Scopes
             | Domain::Schema
-            | Domain::Colors => None,
+            | Domain::Colors
+            | Domain::Expressions => None,
         }
     }
 
@@ -277,12 +290,13 @@ impl Domain {
 
     /// Names reserved by syntax outside the domain's own document. Colors excludes
     /// `none` and `sign`, which already mean built-in formatting choices. Scopes
-    /// excludes the `save_current` action name to avoid ambiguous palette dispatch.
-    /// Other domains have no additional reserved names.
+    /// excludes the `save_current` action name to avoid ambiguous palette dispatch;
+    /// named expressions follow the saved-scope rules. Other domains have no
+    /// additional reserved names.
     pub fn reserved_names(self) -> &'static [&'static str] {
         match self {
             Domain::Colors => &geode_core::colour::RESERVED_NAMES,
-            Domain::Scopes => &geode_core::scopes::RESERVED_NAMES,
+            Domain::Scopes | Domain::Expressions => &geode_core::scopes::RESERVED_NAMES,
             Domain::Views | Domain::Groupings | Domain::Schema | Domain::Sources => &[],
         }
     }
@@ -663,6 +677,10 @@ impl Destination {
             // no presentation overlay for a shared color).
             (Destination::Presentation, Domain::Colors) => {
                 unreachable!("Colors has no Presentation-destined fields")
+            }
+            // A named expression's one field is `Destination::Doc`.
+            (Destination::Presentation, Domain::Expressions) => {
+                unreachable!("Expressions has no Presentation-destined fields")
             }
             (Destination::DatasetPresentation, Domain::Schema) => {
                 geode_core::view::DATASET_PRESENTATION_DOC
@@ -2623,6 +2641,7 @@ impl Domain {
             Domain::Groupings => groupings::help(key),
             Domain::Scopes => scopes::help(key),
             Domain::Colors => colours::help(key),
+            Domain::Expressions => expressions::help(key),
             Domain::Schema => schema::help(key),
         }
     }
@@ -2638,6 +2657,7 @@ impl Domain {
                 false
             }
             Domain::Scopes => matches!(key, "text" | "expression"),
+            Domain::Expressions => key == "expression",
             Domain::Views | Domain::Schema => views::text_editable(key),
             Domain::Sources => sources::text_editable(key),
         }
@@ -2655,7 +2675,8 @@ impl Domain {
                 let _ = key;
                 Ok(text.trim().to_string())
             }
-            Domain::Scopes => scopes::parse_text(key, text),
+            // One grammar for an expression wherever it is typed.
+            Domain::Scopes | Domain::Expressions => scopes::parse_text(key, text),
             // Schema joins Views for the reason `text_editable` gives:
             // the two column stages are the same seven rows, so `width`
             // must have the same grammar through either door.
@@ -2678,6 +2699,7 @@ impl Domain {
             Domain::Schema => schema::fields(config, object),
             Domain::Sources => sources::fields(config, object),
             Domain::Colors => colours::fields(config, object),
+            Domain::Expressions => expressions::fields(config, object),
         }
     }
 
@@ -2690,6 +2712,7 @@ impl Domain {
     pub fn fields_from_source(self, config: &Config, table: &toml::Table) -> Vec<Field> {
         match self {
             Domain::Scopes => scopes::fields_from_table(config, Some(table)),
+            Domain::Expressions => expressions::fields_from_table(Some(table)),
             Domain::Views
             | Domain::Groupings
             | Domain::Schema
@@ -2763,6 +2786,7 @@ impl Domain {
             Domain::Schema => schema::to_table(draft, dest),
             Domain::Sources => sources::to_table(draft, dest),
             Domain::Colors => colours::to_table(draft, dest),
+            Domain::Expressions => expressions::to_table(draft, dest),
         }
     }
 
@@ -2776,6 +2800,7 @@ impl Domain {
             Domain::Schema => schema::validate(draft, config),
             Domain::Sources => sources::validate(draft, config),
             Domain::Colors => colours::validate(draft, config),
+            Domain::Expressions => expressions::validate(draft, config),
         }
     }
 }
@@ -2943,6 +2968,10 @@ pub struct ObjectDialogState {
     /// if the target still resolves to this name, since a reload can re-rank the browse
     /// list under an index cursor.
     pub confirm_target: Option<String>,
+    /// A sentence painted after [`Self::confirm`]'s question: who else uses the
+    /// object (a named expression's saved scopes and the frame). Written beside the
+    /// question and cleared with it by [`Self::disarm`].
+    pub confirm_detail: Option<String>,
     /// Source dataset captured from the selected browse row when naming starts. Clear
     /// it when naming ends; it seeds the new source's dataset choice.
     pub naming_dataset: Option<String>,
@@ -2960,10 +2989,11 @@ pub struct ObjectDialogState {
     pub expr: Option<crate::exprcomplete::ExprCompletion>,
 }
 
-/// Whether the Scopes dialog's `expression` field is the open text entry,
-/// which is the condition for its suggestions to be shown and to claim keys.
+/// Whether an `expression` field — a saved scope's or a named expression's —
+/// is the open text entry, which is the condition for its suggestions to be
+/// shown and to claim keys.
 pub(crate) fn expression_entry_open(state: &ObjectDialogState) -> bool {
-    state.domain == Domain::Scopes
+    matches!(state.domain, Domain::Scopes | Domain::Expressions)
         && state.draft.as_ref().is_some_and(|d| {
             matches!(d.text_entry, Some(TextEntry { row: EditRow::Field(i), .. })
                 if d.fields.get(i).is_some_and(|f| f.key == "expression"))
@@ -2986,6 +3016,7 @@ impl ObjectDialogState {
             draft: None,
             confirm: None,
             confirm_target: None,
+            confirm_detail: None,
             naming_dataset: None,
             naming_seed: NameSeed::Empty,
             values_tag: 0,
@@ -2998,6 +3029,7 @@ impl ObjectDialogState {
     pub fn disarm(&mut self) {
         self.confirm = None;
         self.confirm_target = None;
+        self.confirm_detail = None;
     }
 
     /// Pure stage entry, called through `render::enter_edit_stage` so scroll reset,

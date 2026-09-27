@@ -358,7 +358,7 @@ fn handle_browse_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<She
                 if !state.domain.writable(&state.stage) {
                     set_notice(shell, READ_ONLY_NOTICE.to_string());
                 } else if verb == 'd' {
-                    arm_delete(shell);
+                    arm_delete(shell, cx);
                 } else {
                     arm_revert(shell);
                 }
@@ -1466,7 +1466,7 @@ fn handle_edit_key_inner(
                 None => set_notice(shell, "that is as far as this row goes".to_string()),
             }
         }
-        NormalCommand::Verb('d') => arm_delete(shell),
+        NormalCommand::Verb('d') => arm_delete(shell, cx),
         NormalCommand::Verb('r') => arm_revert(shell),
         NormalCommand::Verb('o') => overwrite_scope(shell, cx),
         // `x` removes a member into its catalogue. Route its own refusal directly to
@@ -1846,10 +1846,11 @@ fn handle_text_key(
                 let domain = domain.expect("a draft implies an open dialog");
                 draft.apply_text_entry(&|key, text| {
                     let text = domain.parse_text(key, text)?;
-                    // A Scopes expression naming a column the schema lacks
-                    // parses, but its reader would drop the scope with a
-                    // warning later; refuse it here, with the field open.
-                    if domain == Domain::Scopes
+                    // An expression naming a column the schema lacks parses,
+                    // but a scope's reader would drop the scope with a warning
+                    // later, and a named one would fail every scope ticking it;
+                    // refuse it here, with the field open.
+                    if matches!(domain, Domain::Scopes | Domain::Expressions)
                         && key == "expression"
                         && let Some(w) = geode_core::scope::complete::check(&text, &vocab, None)
                             .into_iter()
@@ -2194,6 +2195,7 @@ fn arm_confirm(shell: &mut ShellView, confirm: Confirm) {
     if let Some(state) = shell.object_dialog.as_mut() {
         state.confirm = Some(confirm);
         state.confirm_target = target;
+        state.confirm_detail = None;
     }
 }
 
@@ -2501,7 +2503,7 @@ fn removal_edits(
 /// Arm deletion only for a user-defined object. Inherited objects cannot be deleted by
 /// a user-layer write. A presentation-only override instead points to revert; an
 /// unconfigured grouping slot reports that it is empty.
-fn arm_delete(shell: &mut ShellView) {
+fn arm_delete(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     // Object deletion is unavailable inside column and Values projections. Apply the
     // guard here so pointer and keyboard actions enforce the same rule.
     if in_column_stage(shell) {
@@ -2517,6 +2519,12 @@ fn arm_delete(shell: &mut ShellView) {
     match target_row(shell) {
         Some(row) if row.layer == Some(Layer::User) => {
             arm_confirm(shell, Confirm::Delete);
+            let detail = in_domain(shell, Domain::Expressions)
+                .then(|| named_expression_users(shell, &row.name, cx))
+                .flatten();
+            if let Some(state) = shell.object_dialog.as_mut() {
+                state.confirm_detail = detail;
+            }
         }
         // The remedy names the stage: from the list there is nothing to
         // tick, the slot has to be opened first.
@@ -2545,6 +2553,49 @@ fn arm_delete(shell: &mut ShellView) {
         }
         None => set_notice(shell, no_target_notice(shell)),
     }
+}
+
+/// Is the open dialog browsing `domain`?
+fn in_domain(shell: &ShellView, domain: Domain) -> bool {
+    shell
+        .object_dialog
+        .as_ref()
+        .is_some_and(|state| state.domain == domain)
+}
+
+/// Who ticks the named expression `name`, as the sentence the delete question
+/// carries: saved scopes in name order, then the frame. `None` when nothing
+/// does. Scopes are read off the raw pending-aware doc, not the reader, so a
+/// scope the reader drops for some other fault still counts as a user.
+/// Deleting never edits these users; the sentence is what says so.
+fn named_expression_users(shell: &ShellView, name: &str, cx: &App) -> Option<String> {
+    let pending = apply::config_with_pending(shell);
+    let config = pending.as_ref().unwrap_or(&shell.services.config);
+    let mut users: Vec<String> = config
+        .doc(scopes::DOC)
+        .map(|doc| {
+            doc.value
+                .iter()
+                .filter(|(_, scope)| {
+                    scope
+                        .get("named")
+                        .and_then(|v| v.as_array())
+                        .is_some_and(|names| names.iter().any(|n| n.as_str() == Some(name)))
+                })
+                .map(|(scope, _)| scope.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    users.sort();
+    if shell.frame.read(cx).scope().named.iter().any(|n| n == name) {
+        users.push("the current scope".to_string());
+    }
+    let list = match users.as_slice() {
+        [] => return None,
+        [one] => one.clone(),
+        [init @ .., last] => format!("{} and {last}", init.join(", ")),
+    };
+    Some(format!("Used by {list}."))
 }
 
 /// Arm reversion when a user definition or presentation overlays an inherited object.
@@ -3172,7 +3223,7 @@ fn build(
         // read here that derives nothing per frame.
         Some(confirm) => {
             let name = state.confirm_target.clone().unwrap_or_default();
-            confirm_row(confirm, &name, entity, cx)
+            confirm_row(confirm, &name, state.confirm_detail.as_deref(), entity, cx)
         }
         None => browse_action_bar(state, &rows, &visible, entity),
     };
@@ -3223,7 +3274,13 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         // has no height of its own, so opening a field (`i`) would shift the footer up
         // by a button's height and `escape` would shift it back.
         (true, _) => div().min_h_6().into_any_element(),
-        (false, Some(confirm)) => confirm_row(confirm, &draft.name, entity, cx),
+        (false, Some(confirm)) => confirm_row(
+            confirm,
+            &draft.name,
+            state.confirm_detail.as_deref(),
+            entity,
+            cx,
+        ),
         (false, None) => action_bar(shell, entity),
     };
     let theme = cx.theme();
@@ -4190,12 +4247,13 @@ fn section_header_text(domain: Domain, key: &str, own: bool) -> (&'static str, &
         ),
         (Domain::Scopes, true) => ("DIMENSIONS — `enter` opens values · `x` drops", "members"),
         (Domain::Scopes, false) => ("AVAILABLE — `enter` picks values", "available"),
-        // None of Schema, Sources or Colors has an `OrderedList` field
-        // at all (`schema.rs`'s, `sources.rs`'s and `colours.rs`'s own
-        // module docs — every field on any of the three is a plain
-        // scalar), so this arm is unreachable for all three; kept only
-        // to stay exhaustive as domains are added.
-        (Domain::Schema | Domain::Sources | Domain::Colors, _) => ("", "members"),
+        // None of Schema, Sources, Colors or Expressions has an
+        // `OrderedList` field at all (each adapter's own module doc —
+        // every field is a plain scalar), so this arm is unreachable for
+        // all four; kept only to stay exhaustive as domains are added.
+        (Domain::Schema | Domain::Sources | Domain::Colors | Domain::Expressions, _) => {
+            ("", "members")
+        }
     }
 }
 
@@ -4426,6 +4484,7 @@ fn browse_action_bar(
 fn confirm_row(
     confirm: Confirm,
     name: &str,
+    detail: Option<&str>,
     entity: &Entity<ShellView>,
     cx: &mut App,
 ) -> AnyElement {
@@ -4439,13 +4498,22 @@ fn confirm_row(
     let on_no: dialog::ConfirmHandler =
         Rc::new(|shell, _window, cx| answer_confirm(shell, false, cx));
     let selector = format!("objectdialog-confirm-prompt-{name}");
+    // The detail joins the question's own text so it paints in the prompt's place and
+    // colour; the empty marker lets a test see that it was painted.
+    let prompt = match detail {
+        Some(detail) => format!("{} {detail}", confirm.prompt(name)),
+        None => confirm.prompt(name),
+    };
     div()
         // Names the object the prompt is about, so a test can tell which
         // one the row was painted for — `dialog::confirm_row`'s own
         // selectors are per surface, not per object.
         .debug_selector(move || selector.clone())
+        .when(detail.is_some(), |el| {
+            el.child(div().debug_selector(|| "objectdialog-confirm-detail".to_string()))
+        })
         .child(dialog::confirm_row(
-            confirm.prompt(name),
+            prompt,
             yes_label,
             "objectdialog",
             entity,
@@ -4540,7 +4608,7 @@ fn press_verb(shell: &mut ShellView, key: &str, window: &mut Window, cx: &mut Co
         return;
     }
     match key {
-        "d" => arm_delete(shell),
+        "d" => arm_delete(shell, cx),
         "r" => arm_revert(shell),
         "i" => open_field(shell),
         "o" => overwrite_scope(shell, cx),
