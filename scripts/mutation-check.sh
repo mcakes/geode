@@ -23977,14 +23977,15 @@ run_mutation "pin: a switch re-seeds the flip baseline" \
   '        {}' \
   geode-shell switching_workspace_reseeds_the_barrier_without_opening_one
 
-# Without the rebind, the focused field keeps the old lane's text and the
-# next session opens on it, so typing lands stale text in the new lane.
+# Without the rebind, a field focused across the switch keeps the old
+# lane's entry text as its Escape base, so Escape writes that text over
+# the new lane's own.
 run_mutation "pin: a switch rebinds the scope field" \
   crates/geode-shell/src/shell/pin.rs \
   '        self.rebind_scope_field(window, cx);
         cx.notify();' \
   '        cx.notify();' \
-  geode-shell typing_across_a_workspace_switch_lands_in_each_lane
+  geode-shell escape_after_a_switch_restores_the_new_lanes_text
 
 # A shared session left open across a pin keeps its pushed base: edits that
 # returned to the base leave a no-op undo entry in the shared lane.

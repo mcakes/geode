@@ -166,6 +166,45 @@ fn typing_across_a_workspace_switch_lands_in_each_lane(cx: &mut gpui::TestAppCon
     );
 }
 
+/// A switch from inside the field rebinds its session to the new lane, so
+/// Escape restores the new lane's own text rather than writing the old
+/// lane's entry text over it.
+#[gpui::test]
+fn escape_after_a_switch_restores_the_new_lanes_text(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx, shell, frame) = open_pinnable(cx);
+    vcx.update(|window, _| window.activate_window());
+    let _ = window;
+    dispatch_and_draw(&shell, &mut vcx, "workspace::switch_2");
+    dispatch_and_draw(&shell, &mut vcx, "frame::pin_workspace");
+    frame.update(&mut vcx, |f, cx| {
+        f.shared_mut().set_text(Some("one".into()));
+        cx.notify();
+    });
+    vcx.simulate_keystrokes("alt-/");
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    vcx.simulate_input("sp");
+    vcx.simulate_keystrokes("alt-1"); // switch from inside the field
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    let (two, one) = frame.read_with(&vcx, |f, _| {
+        (
+            f.view(ws(2)).scope().text.clone(),
+            f.view(ws(1)).scope().text.clone(),
+        )
+    });
+    assert_eq!(two.as_deref(), Some("sp"), "the old lane keeps its typing");
+    assert_eq!(
+        one.as_deref(),
+        Some("one"),
+        "Escape restores the new lane's text, not the old lane's entry text"
+    );
+}
+
 #[gpui::test]
 fn unpinning_mid_session_leaves_the_shared_history_clean(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx, shell, frame) = open_pinnable(cx);
