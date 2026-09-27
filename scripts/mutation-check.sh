@@ -21778,6 +21778,12 @@ run_mutation "launch: a mixed package names its first leg's underlying" \
   '                Some(_) => {}' \
   geode-pricer a_package_across_two_underlyings_names_none
 
+run_mutation "launch: a shared factory stops forwarding accepts" \
+  crates/geode-shell/src/module.rs \
+  '        (**self).accepts()' \
+  '        &[]' \
+  geode-app the_production_roster_opens_market_data_on_an_underlying
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

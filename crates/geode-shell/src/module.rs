@@ -327,6 +327,46 @@ pub trait ModuleFactory {
     ) -> TileOccupant;
 }
 
+/// A shared factory registers as itself. The app keeps an `Rc` of each
+/// factory for its reload handlers and hands the roster a clone.
+///
+/// Every trait method is forwarded, defaulted ones included. A forwarder
+/// that inherits a default answers for itself instead of the factory it
+/// wraps: a missing `contexts` drops the module's whole keymap, and a
+/// missing `accepts` leaves `tile::open_with` with no kind to offer. Add
+/// every new `ModuleFactory` method here too.
+impl<F: ModuleFactory + ?Sized> ModuleFactory for Rc<F> {
+    fn kind(&self) -> &'static str {
+        (**self).kind()
+    }
+    fn register_actions(&self, registry: &mut ActionRegistry) {
+        (**self).register_actions(registry)
+    }
+    fn contexts(&self) -> Vec<&'static str> {
+        (**self).contexts()
+    }
+    fn default_keymap(&self) -> Option<&'static str> {
+        (**self).default_keymap()
+    }
+    fn accepts(&self) -> &'static [ContextField] {
+        (**self).accepts()
+    }
+    fn launch_state(&self, ctx: &LaunchContext) -> Option<toml::Table> {
+        (**self).launch_state(ctx)
+    }
+    fn create(
+        &self,
+        tile: TileId,
+        restored: Option<&toml::Table>,
+        frame: Entity<Frame>,
+        diagnostics: Entity<Diagnostics>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> TileOccupant {
+        (**self).create(tile, restored, frame, diagnostics, window, cx)
+    }
+}
+
 /// The app's registered module factories. Adding a tile requires an
 /// explicit kind. If no factory claims that kind, the shell paints a
 /// [`placeholder`] with a recovery hint instead of selecting another module.
