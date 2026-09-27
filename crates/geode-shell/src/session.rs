@@ -457,8 +457,10 @@ pub fn from_toml(table: &toml::Table) -> Result<Restored, Vec<String>> {
                             match value.get("frame") {
                                 None => {}
                                 Some(toml::Value::Table(t)) => {
+                                    let record = FrameRecord::from_toml(t, &mut warnings);
+                                    // `None` is unreachable: `parse_workspace` bounds `ix` to 1..=9.
                                     if let Some(w) = WorkspaceIx::new(ix) {
-                                        pinned.insert(w, FrameRecord::from_toml(t, &mut warnings));
+                                        pinned.insert(w, record);
                                     }
                                 }
                                 Some(_) => warnings.push(format!(

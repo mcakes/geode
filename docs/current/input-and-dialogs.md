@@ -79,6 +79,14 @@ themselves because they do not pass through the keyboard handler's tail.
 Writing an input value does not emit `InputEvent::Change`; model mutations
 cannot depend on such an event to keep text synchronized.
 
+Each entry records the workspace active when it was pushed
+(`ShellModal::workspace`). Frame dialogs — the dimension picker, as-of,
+grouping, the frame expression dialog, and the Scopes dialog's frame
+actions — read and commit the lane of the workspace recorded on the stack's
+base entry, through `ShellView::target_frame`, so a dialog opened in a pinned
+workspace changes only that workspace's lane (see
+[workspace lanes](shell.md#workspace-lanes)).
+
 Known limitation: the stack holds one instance per `DialogKind`, so a second
 request for a live kind cannot open beside the first even from a different
 call site. The three `choicedialog` pickers (grouping, tile kind, log level)

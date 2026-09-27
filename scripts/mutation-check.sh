@@ -24024,7 +24024,7 @@ run_mutation "session: a pinned lane is written under its workspace" \
 
 run_mutation "session: a workspace frame table restores pinned" \
   crates/geode-shell/src/session.rs \
-  'pinned.insert(w, FrameRecord::from_toml(t, &mut warnings));' \
+  'pinned.insert(w, record);' \
   '{}' \
   geode-shell a_pinned_lane_round_trips_under_its_workspace
 
@@ -24041,6 +24041,16 @@ run_mutation "shell: a restored pinned lane has no undo back to empty" \
   '                lane.clear_history();' \
   '' \
   geode-shell a_restored_pinned_workspace_is_pinned_with_its_record
+
+# A pin restored onto a workspace the layout lacks would never be written back.
+run_mutation "shell: a restored pin without its workspace is skipped" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                    ws.get()
+                );
+                continue;' \
+  '                    ws.get()
+                );' \
+  geode-shell a_restored_pin_without_its_workspace_is_skipped
 
 # Both session writes carry the pinned lanes; dropping them from either loses
 # the pin at the next restart.

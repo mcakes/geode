@@ -1183,6 +1183,17 @@ impl ShellView {
         // runs before the flip seed below so a restored lane never reads as
         // "just changed".
         for (ws, record) in services.restored_pinned.clone() {
+            // A pin on a workspace the layout lacks would be written by no
+            // save and silently lost; both come from one session read, so
+            // this only guards a hand-assembled `ShellServices`.
+            if !services.workspaces.spaces().any(|(ix, _)| ix == ws.get()) {
+                tracing::warn!(
+                    target: "geode::session",
+                    "pinned frame for workspace {} has no workspace; ignored",
+                    ws.get()
+                );
+                continue;
+            }
             frame.update(cx, |f, _| {
                 f.pin(ws);
                 let mut lane = f.view_mut(ws);

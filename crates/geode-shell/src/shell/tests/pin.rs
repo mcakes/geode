@@ -387,6 +387,27 @@ fn a_restored_pinned_workspace_is_pinned_with_its_record(cx: &mut gpui::TestAppC
     );
 }
 
+/// A restored pin for a workspace the layout does not hold is skipped: no
+/// save would write it, so pinning it would lose the lane silently.
+#[gpui::test]
+fn a_restored_pin_without_its_workspace_is_skipped(cx: &mut gpui::TestAppContext) {
+    let mut services = test_services();
+    assert!(
+        !services.workspaces.spaces().any(|(ix, _)| ix == 7),
+        "fixture must not hold workspace 7"
+    );
+    let record = crate::session::FrameRecord {
+        scope: geode_core::scope::Scope::default(),
+        active_slot: None,
+        as_of: geode_core::query::AsOf::Live,
+    };
+    services.restored_pinned.insert(ws(7), record);
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    assert!(!frame.read_with(&vcx, |f, _| f.is_pinned(ws(7))));
+}
+
 /// Pinning, a pinned lane's edits, and unpinning each reach the next session
 /// snapshot: the periodic write and the quit save both carry
 /// `workspaces.N.frame` while pinned, and an unpin drops it so the workspace

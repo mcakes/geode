@@ -21,8 +21,8 @@ or perform blocking work.
 State with a narrower owner stays outside `ShellView`:
 
 - `Workspaces` and the tiling tree own layout and structural focus.
-- `Frame` owns the scope, grouping, as-of value, recent publications, and
-  version counters observed by tiles.
+- `Frame` owns the scope, grouping, as-of value (shared, or per pinned
+  workspace), recent publications, and version counters observed by tiles.
 - Each module entity owns its cursor, subscriptions, draft, and prepared
   presentation.
 - GPUI component state, such as `InputState` and `TableState`, owns reusable
@@ -182,6 +182,61 @@ active grouping, as-of value, recent publications, saved scopes, named
 expressions, and version counters. Every mutation bumps only the counters
 affected by that change, so a tile can cheaply ignore dimensions it does not
 follow.
+
+### Workspace lanes
+
+The selection lives in a lane: scope with its undo/redo stacks and open text
+session, the active grouping slot, and as-of with its one remembered previous
+value. The frame holds one shared lane and one lane per pinned workspace. An
+unpinned workspace reads and writes the shared lane; a pinned one reads and
+writes only its own. Definitions stay shared across lanes — grouping slot
+contents, saved scopes, named expressions — as do recent publications and the
+data and config versions.
+
+Every lane draws its scope, grouping, and as-of generations from one
+frame-wide counter, so a generation number names exactly one value in any
+lane. A tile compares numbers, not content; with per-lane counters a tile
+whose workspace changed lanes could see an equal number over different
+content and skip a requery it needed. Pinning copies the shared lane's values
+and generations into the new lane with empty history — equal content under
+equal numbers, so nothing requeries. Unpinning discards the lane, its history
+included, without a confirm; nothing is promoted to the shared lane, and the
+workspace reads the shared lane again. A grouping reload (`replace_slots`)
+bumps grouping in every lane, hidden pinned ones included, and clears an
+active slot that no longer exists in each lane separately; saving a slot
+(`save_slot`) bumps grouping only in the lanes where that slot is active.
+
+Tiles receive a `FrameRef` bound to their workspace (see
+[architecture](architecture.md)), so a pin or unpin changes the lane a tile
+reads without it re-subscribing. Any lane's change notifies every observer;
+each tile's version compare filters out the lanes it does not read.
+
+Only the active workspace's lane opens a flip barrier: its visible tiles are
+the ones a barrier coordinates, so the shell compares and opens against the
+active lane. A workspace switch is not a frame change: it re-seeds the flip
+baseline from the new active lane instead of opening a barrier. When the
+switch leaves or enters a pinned workspace, the old lane's text session ends
+and the scope field re-reads the new lane; a focused field keeps focus and
+opens a fresh session there, so Escape restores the new lane's text. A switch
+between two unpinned workspaces leaves the field's session whole, because
+ending it would split one edit into two undo entries. Pinning and unpinning
+rebind the field the same way.
+
+The toolbar's first readout control is a pin glyph, before the as-of chip:
+a bare, muted verb while the active workspace is unpinned, a neutral chip
+while it is pinned. Its tooltip is "Pin the frame to workspace N" or "Frame
+pinned to workspace N". A click toggles the pin, as does the palette action
+`frame::pin_workspace` ("Toggle the frame pin for this workspace", category
+Frame), which has no default binding. The pin covers scope, grouping, and
+as-of together; there is no per-part pin.
+
+Shell surfaces resolve their lane through `ShellView::target_frame`: the
+workspace recorded on the base entry of the modal stack when a dialog is
+open, else the active workspace. A dialog therefore reads and commits the
+lane it was opened from. The flip barrier and the toolbar's scope text field
+use the active workspace's lane directly. The session's `[frame]` record is
+written from and restored into the shared lane explicitly, whatever is
+active.
 
 A scope (`geode_core::scope::Scope`) has four parts: dimension selections, a
 list of named-expression references (`named`), a text filter, and an
@@ -415,6 +470,7 @@ The writer emits `config_version = 1` and these records:
 | `workspaces.N.docks.<side>` | Left, right, or bottom dock tree, focused tile, visibility, and size |
 | `workspaces.N.tiles.<id>` | Module name and its opaque state table |
 | `frame` | Dimension selections, named-expression references, text/expression scope, grouping slot, and as-of |
+| `workspaces.N.frame` | Pinned lane for workspace N (same fields as `frame`); present iff workspace N is pinned |
 | `palette.usage` | Per-row usage count and last-used timestamp |
 
 Trees use recursive `leaf`, `split`, and `stack` nodes. Splits store orientation,
@@ -449,6 +505,7 @@ a later save replaces it with the current state.
 | Main fullscreen combined with dock focus | Clear fullscreen and keep dock focus, with a warning |
 | Malformed or locally dangling tile record | Warn and drop the record |
 | Invalid optional frame or palette data | Retain usable fields/entries and warn for the errors their readers report |
+| `workspaces.N.frame` is not a table | Warn; the workspace restores unpinned |
 
 Frame restoration parses scope expressions but does not validate columns
 against the current schema. Invalid slots, expression syntax, date strings,
@@ -460,6 +517,11 @@ kept without checking they are defined; a missing or invalid one becomes the
 frame's resolution error on the next query rather than failing restoration.
 The shell applies scope, slot, and as-of, then clears scope history. Undo/redo
 history and recent publishes start fresh; saved scopes come from config.
+A `workspaces.N.frame` table is read by the same reader, so a partial record
+keeps its usable fields. Each restored pinned lane is pinned, filled, and has
+its history cleared like the shared one, before the flip baseline is seeded,
+so a restored lane never reads as just changed. A pinned record whose
+workspace the restored layout lacks is skipped with a warning.
 
 The shell creates occupants from restored records through the module roster.
 Only the factory matching a record's module name receives its state. An
@@ -473,7 +535,7 @@ so ordinary additions do not reuse them.
 Workspace actions mark layout state dirty and return without session file I/O.
 The shared reload watcher checks for a session snapshot on its 500 ms tick,
 before any configuration-scan early return. It also compares serialized module
-state, frame versions, and palette usage versions, so those changes can trigger
+state, the frame's generation counter, and palette usage versions, so those changes can trigger
 a save independently of layout dirt. This is periodic coalescing, not a timer
 reset after each action; other work adds to the interval.
 
