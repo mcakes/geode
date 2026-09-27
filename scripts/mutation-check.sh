@@ -779,11 +779,11 @@ run_mutation "views: a join keyed outside the grouping is refused" \
 # repeats across every row of its grain — so the total on screen looks like a
 # number and is not one. `kind` defaults to "measure", so this is the mistake
 # the shorthand form makes.
-# A dimension reaches the row only by being grouped or by coming off a join;
-# the spine selects nothing else. Mutated so the grouping test never holds, a
-# dimension column the view declares but nothing supplies goes unreported, and
-# the blotter paints that column empty on every row forever with no diagnostic
-# anywhere the trader would look.
+# A dimension reaches the row only by being grouped, by coming off a join, or
+# by the unanimity rule from a grain carrying it alongside the grouping.
+# Mutated so the check never holds, a dimension column the view declares but
+# nothing supplies goes unreported, and the blotter paints that column empty on
+# every row forever with no diagnostic anywhere the trader would look.
 run_mutation "views: a dimension column must be reachable" \
   crates/geode-core/src/view.rs \
   '                    if let ViewColumn::Dimension { required, .. } = other
@@ -792,6 +792,111 @@ run_mutation "views: a dimension column must be reachable" \
                         && false' \
   geode-core \
   a_dimension_column_neither_grouped_nor_joined_refuses_the_view
+
+# Validation must accept an ungrouped dimension a grain can supply, or a view
+# the Views dialog offers (every dimension-role column) refuses on save.
+run_mutation "unanimity: validate accepts a carried ungrouped dimension" \
+  crates/geode-core/src/view.rs \
+  '                            .any(|u| u.name == name && u.grain.is_some())' \
+  '                            .any(|_u| false)' \
+  geode-core \
+  an_ungrouped_dimension_a_grain_carries_alongside_the_grouping_is_accepted
+
+# The grain must carry the column itself. Without that check a position-only
+# dataset validates a strike column and the compiler reads a table that does
+# not store it — a binder error at query time instead of a named refusal.
+run_mutation "unanimity: validate refuses an ungrouped dimension no grain carries" \
+  crates/geode-core/src/view.rs \
+  '        let carries_column = ds.carries(*g, column);' \
+  '        let carries_column = true;' \
+  geode-core \
+  an_ungrouped_dimension_no_grain_carries_refuses_the_view
+
+# Judged against every grouping column: a grain that does not carry one of them
+# cannot join its aggregate to the spine at that level.
+run_mutation "unanimity: the grain carries the whole grouping" \
+  crates/geode-core/src/view.rs \
+  '        let carries_grouping = grouping.iter().all(|c| ds.carries(*g, dims.base_column(c)));' \
+  '        let carries_grouping = grouping.iter().all(|_c| true);' \
+  geode-core \
+  the_unanimity_grain_is_the_coarsest_carrying_the_column_and_the_whole_grouping
+
+# The rule itself: a value only where every row agrees. `any_value` paints an
+# arbitrary instrument's strike on a position that holds several — a plausible
+# wrong value, worse than the explicit marker.
+run_mutation "unanimity: disagreeing rows are mixed, never any_value" \
+  crates/geode-data/src/query/compile.rs \
+  '        format!("case when count({c}) = count(*) and min({c}) = max({c}) then min({c}) end as {c}"),' \
+  '        format!("any_value({c}) as {c}"),' \
+  geode-data \
+  an_ungrouped_dimension_shows_a_value_only_where_every_row_under_it_agrees
+
+# A NULL beside a value is mixed. Without the count comparison it paints blank
+# (the value is withheld and the flag not set), claiming no row has a value.
+run_mutation "unanimity: a NULL beside a value is mixed" \
+  crates/geode-data/src/query/compile.rs \
+  '(count({c}) < count(*) or min({c}) <> max({c}))' \
+  '(min({c}) <> max({c}))' \
+  geode-data \
+  a_null_beside_a_value_is_mixed_and_no_value_at_all_is_blank
+
+# Every row NULL is blank, not mixed: there is nothing to disagree about.
+run_mutation "unanimity: no value at all is blank, not mixed" \
+  crates/geode-data/src/query/compile.rs \
+  '"(count({c}) > 0 and (count({c})' \
+  '"((count({c})' \
+  geode-data \
+  a_null_beside_a_value_is_mixed_and_no_value_at_all_is_blank
+
+# The backstop for a caller that skipped validation: a required column no grain
+# can supply is an error, not a column silently absent from the row.
+run_mutation "unanimity: the compiler refuses a required uncarried dimension" \
+  crates/geode-data/src/query/compile.rs \
+  '            None if u.required => {' \
+  '            None if false => {' \
+  geode-data \
+  an_unreachable_ungrouped_dimension_is_dropped_if_optional_and_an_error_if_required
+
+# The aggregates ride an existing measure scan of their grain rather than a
+# second scan of the same table.
+run_mutation "unanimity: folded into the measure aggregate at its grain" \
+  crates/geode-data/src/query/compile.rs \
+  '        if !folded.is_empty() {' \
+  '        if false {' \
+  geode-data \
+  an_ungrouped_dimension_neither_changes_the_rows_nor_scans_twice
+
+# A flag index that is not a boolean companion would read an arbitrary column's
+# truthiness as "the rows disagree".
+run_mutation "unanimity: a mixed flag must be a boolean column" \
+  crates/geode-core/src/snapshot.rs \
+  '                    b.column(flag).data_type() == &arrow::datatypes::DataType::Boolean' \
+  '                    true' \
+  geode-core \
+  a_mixed_flag_must_name_a_boolean_companion_and_a_null_flag_is_not_mixed
+
+# Mixed is NULL in the data. Read the value first and it paints blank — the one
+# thing it must not look like.
+run_mutation "unanimity: a mixed cell paints the marker, not blank" \
+  crates/geode-blotter/src/core/cache.rs \
+  '            if snapshot.is_mixed_at(idx, row) {' \
+  '            if false {' \
+  geode-blotter \
+  a_mixed_dimension_cell_paints_the_marker_and_a_blank_one_paints_nothing
+
+run_mutation "unanimity: a mixed cell sorts ahead of the blanks" \
+  crates/geode-blotter/src/core/flatten.rs \
+  '            TextKey::Mixed => 1,' \
+  '            TextKey::Mixed => 2,' \
+  geode-blotter \
+  a_mixed_dimension_sorts_after_values_and_before_blanks_both_ways
+
+run_mutation "unanimity: a mixed cell yanks the marker, not blank" \
+  crates/geode-blotter/src/core/yank.rs \
+  '                    Some(i) if snapshot.is_mixed_at(i, row) => MIXED.to_string(),' \
+  '                    Some(i) if false => MIXED.to_string(),' \
+  geode-blotter \
+  a_mixed_dimension_yanks_its_marker_and_a_blank_one_yanks_nothing
 
 run_mutation "views: a measure column must really be a measure" \
   crates/geode-core/src/view.rs \
@@ -1215,8 +1320,8 @@ run_mutation "scope: conjuncts routed separately" \
 
 run_mutation "spine: assembled from every aggregate, not the finest" \
   crates/geode-data/src/query/compile.rs \
-  '.filter(|d| own_present[*d] == *d).collect();' \
-  '.filter(|d| own_present[*d] == *d && own.len() == depth).collect();' \
+  '.filter(|d| shape.own_present[*d] == *d)' \
+  '.filter(|d| shape.own_present[*d] == *d && shape.own.len() == depth)' \
   geode-data \
   a_cash_only_position_has_a_row_at_the_lhu_level
 
