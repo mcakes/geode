@@ -21728,6 +21728,15 @@ run_mutation "modal back: a click is ignored while a confirm is pending" \
   '        if !self.has_previous_stage() {' \
   geode-shell the_back_button_is_ignored_while_a_confirm_is_pending
 
+# ---- Named scope expressions.
+# The expressions document replaces whole objects by name across layers.
+run_mutation "named expr: the user layer replaces an object whole" \
+  crates/geode-core/src/config/merge.rs \
+  '        | "expressions" => Some(1),' \
+  '        | "expressions_off" => Some(1),' \
+  geode-core \
+  the_user_layer_replaces_a_desk_object_whole
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

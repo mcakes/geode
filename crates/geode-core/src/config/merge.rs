@@ -25,7 +25,8 @@ fn atomic_depth(doc_name: &str) -> Option<u32> {
         | "datasets"
         | "sources"
         | "egress"
-        | "dimensions" => Some(1),
+        | "dimensions"
+        | "expressions" => Some(1),
         // One complete definition per color name.
         "colors" => Some(1),
         // One complete definition per pricer view name.
