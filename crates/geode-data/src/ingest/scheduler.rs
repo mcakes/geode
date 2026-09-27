@@ -205,13 +205,21 @@ fn run(
                 },
                 detail: format!("discovery failed: {e}"),
             })),
-            Err(_) => Refused::health(!sink(SchedulerEvent::Health {
-                source: spec.name.clone(),
-                worst: Health::Failed {
-                    reason: "discovery panicked".into(),
-                },
-                detail: "discovery panicked".into(),
-            })),
+            // The payload rides the reason: "discovery panicked" alone
+            // names no defect a desk could report.
+            Err(payload) => {
+                let reason = format!(
+                    "discovery panicked: {}",
+                    crate::ingest::runner::panic_payload_message(payload.as_ref())
+                );
+                Refused::health(!sink(SchedulerEvent::Health {
+                    source: spec.name.clone(),
+                    worst: Health::Failed {
+                        reason: reason.clone(),
+                    },
+                    detail: reason,
+                }))
+            }
         };
         if let Some(what) = refused.what() {
             log_refused_discovery(&refusal_logged, what, &spec.name);
@@ -337,6 +345,55 @@ mod tests {
     fn events_sink() -> (SchedulerSink, Receiver<SchedulerEvent>) {
         let (tx, rx) = channel();
         (Arc::new(move |e| tx.send(e).is_ok()), rx)
+    }
+
+    #[test]
+    fn a_panicking_discovery_poll_names_its_payload() {
+        let (_db, dir, ingest, _ingest_rx, conn, spec, _ds) =
+            harness(Duration::from_millis(50), Duration::from_secs(3600));
+        let csv = dir.path().join("risk_2026-08-24_BK0.csv");
+        std::fs::write(&csv, "Book\nBK0\n").unwrap();
+        std::fs::write(
+            dir.path().join("risk_2026-08-24_BK0.csv.done"),
+            r#"{"as_of":"2026-08-24T07:00:00Z","columns":["Book"],"books":["BK0"]}"#,
+        )
+        .unwrap();
+        // A NULL mtime makes the catalog lookup's row read panic.
+        conn.execute_batch(&format!(
+            "insert into file_generations
+                 (file_id, dataset, batch, path, size, mtime, source_time,
+                  gen_id, loaded_at, row_count, health, health_reason, archived_only)
+             values
+                 (-1, 'risk_snapshot', 'BK0', '{}', 1, NULL,
+                  '2026-08-24T07:00:00Z'::timestamptz, -1, now(), 1, 'ok', NULL, false);",
+            csv.display()
+        ))
+        .unwrap();
+        let (sink, sched_rx) = events_sink();
+        let sched = Scheduler::spawn(
+            vec![spec],
+            conn,
+            ingest,
+            sink,
+            crate::supervise::unwatched(),
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let reason = loop {
+            assert!(std::time::Instant::now() < deadline, "no failed health");
+            if let Ok(SchedulerEvent::Health {
+                worst: Health::Failed { reason },
+                ..
+            }) = sched_rx.recv_timeout(Duration::from_secs(1))
+            {
+                break reason;
+            }
+        };
+        assert!(
+            reason.starts_with("discovery panicked: ")
+                && reason.len() > "discovery panicked: ".len(),
+            "the payload rides the health reason: {reason}"
+        );
+        sched.shutdown();
     }
 
     /// Refuse the first matching event and count it. Tests wait for the refusal

@@ -227,6 +227,116 @@ fn view_snapshot(payload: Payload) -> Result<geode_core::snapshot::Snapshot, Str
     }
 }
 
+/// The event a pool result becomes. A payload of the wrong kind, or a
+/// distinct snapshot missing its `value`/`n` columns, is that key's error,
+/// never a panic: this runs on a query worker.
+fn result_event(r: QueryResult, health_tracker: &HealthTracker) -> DataEvent {
+    match r.kind {
+        RequestKind::Query => DataEvent::Query(QueryOutcome {
+            key: r.key,
+            tag: r.tag,
+            snapshot: r.payload.and_then(view_snapshot).map(Arc::new),
+            submitted: r.submitted,
+        }),
+        RequestKind::Distinct { column } => DataEvent::Distinct(DistinctOutcome {
+            key: r.key,
+            tag: r.tag,
+            column,
+            values: r.payload.and_then(view_snapshot).and_then(|s| {
+                let (Some(v), Some(n)) = (s.column_index("value"), s.column_index("n")) else {
+                    return Err(
+                        "internal: a distinct answer without its value and n columns".to_string(),
+                    );
+                };
+                Ok((0..s.rows())
+                    .filter_map(|row| {
+                        Some((s.text_at(v, row)?.to_string(), s.i64_at(n, row)? as u64))
+                    })
+                    .collect())
+            }),
+        }),
+        // Match health to source slots by slot number. Expression slots leave gaps,
+        // so positional zipping would attach health to the wrong result.
+        RequestKind::Series { pairs } => {
+            let result = match r.payload {
+                Ok(Payload::Series(mut res)) => {
+                    for (slot, source, identity) in &pairs {
+                        let key = format!("{identity}@{source}");
+                        if let Some(s) = res.slots.iter_mut().find(|s| s.slot == *slot) {
+                            s.provenance.health = health_tracker.load_lane(source, &key);
+                        }
+                    }
+                    Ok(res)
+                }
+                // Report a mismatched worker payload as an error rather than panicking.
+                Ok(Payload::Snapshot(_)) => {
+                    Err("internal: a series request answered with a snapshot".to_string())
+                }
+                Err(e) => Err(e),
+            };
+            DataEvent::Series(SeriesOutcome {
+                key: r.key,
+                tag: r.tag,
+                submitted: r.submitted,
+                result,
+            })
+        }
+    }
+}
+
+/// Build `r`'s event inside a panic boundary. The pool worker sends what
+/// this returns outside its own boundary, so a panic here would end the
+/// worker; instead the key is answered with an error of its own kind.
+fn contained_result_event(
+    r: QueryResult,
+    build: impl FnOnce(QueryResult) -> DataEvent,
+) -> DataEvent {
+    let (key, tag, submitted, kind) = (r.key, r.tag, r.submitted, r.kind.clone());
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        geode_core::panic::contained(|| build(r))
+    })) {
+        Ok(event) => event,
+        Err(payload) => {
+            let reason = format!(
+                "result delivery panicked: {}",
+                crate::ingest::runner::panic_payload_message(payload.as_ref())
+            );
+            match kind {
+                RequestKind::Query => DataEvent::Query(QueryOutcome {
+                    key,
+                    tag,
+                    snapshot: Err(reason),
+                    submitted,
+                }),
+                RequestKind::Distinct { column } => DataEvent::Distinct(DistinctOutcome {
+                    key,
+                    tag,
+                    column,
+                    values: Err(reason),
+                }),
+                RequestKind::Series { .. } => DataEvent::Series(SeriesOutcome {
+                    key,
+                    tag,
+                    submitted,
+                    result: Err(reason),
+                }),
+            }
+        }
+    }
+}
+
+/// A fetch source's identity listing panicked. Nobody asked for it, so the
+/// only door is an error diagnostic naming the source and the payload.
+fn identity_listing_panicked(source: &str, payload: &str) -> DataEvent {
+    DataEvent::Diagnostics(vec![Diagnostic {
+        severity: Severity::Error,
+        layer: None,
+        file: None,
+        message: format!("identity listing for {source} panicked: {payload}"),
+        path: None,
+    }])
+}
+
 /// Convert a poll result to its diagnostic event. A user-configured interval
 /// can overflow SystemTime; fall back to `at` rather than panic. `next` is
 /// an estimate, not a scheduling deadline.
@@ -722,57 +832,14 @@ impl DataService {
 
         let result_sink: ResultSink = {
             let sink = Arc::clone(&sink);
-            // The tracker rides into the sink so a series result can
-            // carry each pair's load-lane word
-            // without a second trip through the service thread.
+            // The tracker rides into the sink so a series result can carry
+            // each pair's load-lane word without a second trip through the
+            // service thread.
             let health_tracker = Arc::clone(&health_tracker);
-            Arc::new(move |r: QueryResult| match r.kind {
-                RequestKind::Query => sink(DataEvent::Query(QueryOutcome {
-                    key: r.key,
-                    tag: r.tag,
-                    snapshot: r.payload.and_then(view_snapshot).map(Arc::new),
-                    submitted: r.submitted,
-                })),
-                RequestKind::Distinct { column } => sink(DataEvent::Distinct(DistinctOutcome {
-                    key: r.key,
-                    tag: r.tag,
-                    column,
-                    values: r.payload.and_then(view_snapshot).map(|s| {
-                        let v = s.column_index("value").expect("distinct selects value");
-                        let n = s.column_index("n").expect("distinct selects n");
-                        (0..s.rows())
-                            .filter_map(|row| {
-                                Some((s.text_at(v, row)?.to_string(), s.i64_at(n, row)? as u64))
-                            })
-                            .collect()
-                    }),
-                })),
-                // Match health to source slots by slot number. Expression slots leave gaps,
-                // so positional zipping would attach health to the wrong result.
-                RequestKind::Series { pairs } => {
-                    let result = match r.payload {
-                        Ok(Payload::Series(mut res)) => {
-                            for (slot, source, identity) in &pairs {
-                                let key = format!("{identity}@{source}");
-                                if let Some(s) = res.slots.iter_mut().find(|s| s.slot == *slot) {
-                                    s.provenance.health = health_tracker.load_lane(source, &key);
-                                }
-                            }
-                            Ok(res)
-                        }
-                        // Report a mismatched worker payload as an error rather than panicking.
-                        Ok(Payload::Snapshot(_)) => {
-                            Err("internal: a series request answered with a snapshot".to_string())
-                        }
-                        Err(e) => Err(e),
-                    };
-                    sink(DataEvent::Series(SeriesOutcome {
-                        key: r.key,
-                        tag: r.tag,
-                        submitted: r.submitted,
-                        result,
-                    }))
-                }
+            Arc::new(move |r: QueryResult| {
+                sink(contained_result_event(r, |r| {
+                    result_event(r, &health_tracker)
+                }))
             })
         };
         let pool = QueryPool::spawn_with_sink(
@@ -1020,6 +1087,10 @@ impl DataService {
                         reason,
                     }) && delivered
                 }
+                // A condition the runner reports without failing a job: a
+                // stale check that could not read the catalog, a local sweep
+                // that panicked.
+                IngestEvent::Diagnostic(d) => sink(DataEvent::Diagnostics(vec![d])),
                 // A drained runner also ends progress. The runner does not retry refused
                 // events; the app mailbox coalesces progress state.
                 IngestEvent::PlanComplete => sink(DataEvent::LoadEnded),
@@ -1154,6 +1225,9 @@ impl DataService {
                             // failure (`Fetch::catalogue`'s own doc): the
                             // picker simply has no typeahead for it.
                             FetchOutcome::Identities(None) => {}
+                            FetchOutcome::IdentitiesPanicked(payload) => {
+                                let _ = sink(identity_listing_panicked(&source, &payload));
+                            }
                         })
                     };
                     match FetchWorker::spawn(&spec.name, fetch, outcome_sink, Arc::clone(&sink)) {
@@ -2688,6 +2762,206 @@ mod tests {
         })
         .unwrap();
         (dir, calls, service, rx)
+    }
+
+    struct PanickingCatalogueAdapter;
+    impl crate::adapter::Adapter for PanickingCatalogueAdapter {
+        fn name(&self) -> &'static str {
+            "fake_kdb"
+        }
+        fn subscription(&self) -> Option<Box<dyn crate::adapter::Subscription>> {
+            None
+        }
+        fn egress(&self) -> Option<Box<dyn crate::adapter::Egress>> {
+            None
+        }
+        fn fetch(&self) -> Option<Box<dyn crate::adapter::Fetch>> {
+            struct Listing;
+            impl crate::adapter::Fetch for Listing {
+                fn fetch(
+                    &mut self,
+                    _: &crate::adapter::FetchRequest,
+                ) -> Result<crate::adapter::SeriesRows, crate::adapter::AdapterError>
+                {
+                    unreachable!("only the catalogue is asked")
+                }
+                fn catalogue(&mut self) -> Option<Vec<String>> {
+                    panic!("the listing fell over")
+                }
+            }
+            Some(Box::new(Listing))
+        }
+    }
+
+    /// Nobody asked for the listing (open asks), so the only door is an
+    /// error diagnostic naming the source and the payload.
+    #[test]
+    fn a_panicking_identity_listing_is_an_error_diagnostic_naming_the_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapters = AdapterRegistry::default();
+        adapters.register(Arc::new(PanickingCatalogueAdapter));
+        let mut schema = SchemaSpec::default();
+        schema
+            .datasets
+            .push(crate::store::ddl::tests_support::series_dataset());
+        let (_service, rx) = DataService::open_channel(DataServiceConfig {
+            db_path: dir.path().join("geode.duckdb"),
+            schema,
+            views: Vec::new(),
+            dimensions: DerivedDimensions::default(),
+            query_workers: 1,
+            sources: vec![crate::source::SourceSpec {
+                adapter: "fake_kdb".to_string(),
+                ..crate::source::SourceSpec::directory("kdb_hist", "series", Vec::new())
+            }],
+            adapters,
+            documents: Default::default(),
+            egress: Vec::new(),
+            pricer: PricerConfig::default(),
+        })
+        .unwrap();
+        let message = until(&rx, |e| match e {
+            DataEvent::Diagnostics(d) => d
+                .into_iter()
+                .find(|d| d.severity == Severity::Error && d.message.contains("identity listing")),
+            _ => None,
+        });
+        assert!(
+            message
+                .message
+                .contains("identity listing for kdb_hist panicked: the listing fell over"),
+            "{message:?}"
+        );
+    }
+
+    /// The stale check fails open (a failed lookup must not discard the
+    /// load) and is reported: an error naming the file reaches the sink,
+    /// since a catalog row the lookup cannot read is corruption.
+    #[test]
+    fn a_failed_stale_check_is_an_error_diagnostic_through_the_service() {
+        let (db, src, store, ds, _emitted) = crate::ingest::load::tests_support::fixture();
+        let spec = crate::source::SourceSpec {
+            pending_timeout: Duration::from_secs(3600),
+            batch_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<batch>.+)$".into()),
+            ..crate::source::SourceSpec::directory(
+                "risk",
+                "risk_snapshot",
+                vec![format!("{}/*.csv", src.path().display())],
+            )
+        };
+        let found =
+            crate::source::discover(&spec, &Catalog::new(store.writer()), SystemTime::now())
+                .unwrap();
+        let plan = crate::ingest::build_plan(&[(spec, found)]);
+        let poisoned = plan.items[0].clone();
+        // A NULL mtime makes the catalog lookup's row read panic.
+        store
+            .writer()
+            .execute_batch(&format!(
+                "insert into file_generations
+                     (file_id, dataset, batch, path, size, mtime, source_time,
+                      gen_id, loaded_at, row_count, health, health_reason,
+                      archived_only)
+                 values
+                     (-1, '{}', '{}', '{}', {}, NULL, '{}'::timestamptz, -1,
+                      now(), 1, 'ok', NULL, false);",
+                poisoned.dataset,
+                poisoned.batch,
+                poisoned.candidate.csv_path.display(),
+                poisoned.candidate.size,
+                poisoned.source_time.to_rfc3339(),
+            ))
+            .unwrap();
+        drop(store);
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(ds);
+        let (service, rx) = DataService::open_channel(DataServiceConfig {
+            db_path: db.path().join("geode.duckdb"),
+            schema,
+            views: Vec::new(),
+            dimensions: DerivedDimensions::default(),
+            query_workers: 1,
+            sources: Vec::new(),
+            adapters: Default::default(),
+            documents: Default::default(),
+            egress: Vec::new(),
+            pricer: PricerConfig::default(),
+        })
+        .unwrap();
+        service.ingest.submit(crate::ingest::WorkPlan {
+            items: vec![poisoned.clone()],
+        });
+        let error = until(&rx, |e| match e {
+            DataEvent::Diagnostics(d) => d.into_iter().find(|d| d.severity == Severity::Error),
+            _ => None,
+        });
+        assert!(
+            error
+                .message
+                .contains(&poisoned.candidate.csv_path.display().to_string())
+                && error.message.contains("panicked"),
+            "{error:?}"
+        );
+        service.shutdown();
+    }
+
+    #[test]
+    fn a_distinct_answer_without_its_columns_is_an_err_for_its_key() {
+        let empty = geode_core::snapshot::Snapshot::from_batches(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            geode_core::snapshot::Provenance::default(),
+        )
+        .unwrap();
+        let event = result_event(
+            crate::query::pool::QueryResult {
+                id: 1,
+                key: QueryKey(3),
+                tag: 2,
+                submitted: Instant::now(),
+                view: crate::query::pool::ViewId("distinct".into()),
+                payload: Ok(Payload::Snapshot(empty)),
+                kind: RequestKind::Distinct {
+                    column: "book".into(),
+                },
+            },
+            &HealthTracker::default(),
+        );
+        match event {
+            DataEvent::Distinct(o) => {
+                assert_eq!((o.key, o.tag, o.column.as_str()), (QueryKey(3), 2, "book"));
+                assert!(
+                    o.values.is_err_and(|e| e.contains("value")),
+                    "an Err for the key, not a panic"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_panic_building_a_result_event_answers_its_key_with_an_error() {
+        let event = contained_result_event(
+            crate::query::pool::QueryResult {
+                id: 1,
+                key: QueryKey(4),
+                tag: 7,
+                submitted: Instant::now(),
+                view: crate::query::pool::ViewId("v".into()),
+                payload: Err("unused".into()),
+                kind: RequestKind::Query,
+            },
+            |_| panic!("the event builder fell over"),
+        );
+        match event {
+            DataEvent::Query(o) => {
+                assert_eq!((o.key, o.tag), (QueryKey(4), 7));
+                let reason = o.snapshot.expect_err("a panicking build is an error");
+                assert!(reason.contains("the event builder fell over"), "{reason}");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     fn next_series_fetched(

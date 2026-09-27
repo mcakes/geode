@@ -31,9 +31,10 @@ use crate::store::retention::{RetentionPolicy, sweep};
 use crate::store::series::{SeriesAppendRequest, SeriesAppended, Span, append_series};
 use crate::store::{Catalog, Store, StoreError};
 use chrono::{DateTime, Utc};
+use geode_core::config::{Diagnostic, Severity};
 use geode_core::document::{DocumentRows, join_key};
 use geode_core::pricing::LOCAL_SOURCE;
-use geode_core::schema::SchemaSpec;
+use geode_core::schema::{DatasetSpec, SchemaSpec};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -102,6 +103,10 @@ pub enum IngestEvent {
         batch: String,
         reason: String,
     },
+    /// A condition to report that fails no job: a pop-time stale check that
+    /// could not read the catalog (the load proceeds), a local sweep that
+    /// panicked (the save stands).
+    Diagnostic(geode_core::config::Diagnostic),
     /// The queue drained. Not a terminal state — more work may be submitted.
     PlanComplete,
 }
@@ -518,7 +523,7 @@ fn publish_one_document(
         );
     }
     if published && dataset.local {
-        sweep_local(store, dataset, &batch);
+        sweep_local(store, dataset, &batch, sink, refusal_logged);
     }
 }
 
@@ -569,27 +574,67 @@ fn local_needs_sweep(
 /// and its outcome was sent, so a failure never turns a stored save into a
 /// failed one: it is logged, and that document's next save retries (it is
 /// still past the bound). Returns whether a sweep ran and succeeded.
-fn sweep_local(store: &Store, dataset: &geode_core::schema::DatasetSpec, batch: &str) -> bool {
+fn sweep_local(
+    store: &Store,
+    dataset: &DatasetSpec,
+    batch: &str,
+    sink: &IngestSink,
+    refusal_logged: &AtomicBool,
+) -> bool {
+    sweep_local_with(store, dataset, batch, sink, refusal_logged, sweep_body)
+}
+
+/// The sweep work behind [`sweep_local`], injectable so a test can panic it:
+/// no stored state makes the real sweep panic.
+type SweepFn = fn(&Store, &DatasetSpec, &str) -> Result<bool, String>;
+
+fn sweep_body(store: &Store, dataset: &DatasetSpec, batch: &str) -> Result<bool, String> {
     let policy = RetentionPolicy {
         keep_generations: Some(LOCAL_KEEP_GENERATIONS),
         keep_age: None,
     };
     let pairs = crate::store::ddl::table_pairs(dataset);
+    if !local_needs_sweep(store, dataset, batch).map_err(|e| e.to_string())? {
+        return Ok(false);
+    }
+    sweep(store.writer(), dataset, &pairs, &policy, Utc::now()).map_err(|e| e.to_string())?;
+    prune_orphan_provenance(store, dataset).map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+/// [`sweep_local`] over an injected body, inside a panic boundary. A failure
+/// is logged; a panic is also an error diagnostic, since it is a defect in the
+/// sweep rather than a full disk.
+fn sweep_local_with(
+    store: &Store,
+    dataset: &DatasetSpec,
+    batch: &str,
+    sink: &IngestSink,
+    refusal_logged: &AtomicBool,
+    body: SweepFn,
+) -> bool {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        geode_core::panic::contained(|| {
-            if !local_needs_sweep(store, dataset, batch).map_err(|e| e.to_string())? {
-                return Ok(false);
-            }
-            sweep(store.writer(), dataset, &pairs, &policy, Utc::now())
-                .map_err(|e| e.to_string())?;
-            prune_orphan_provenance(store, dataset).map_err(|e| e.to_string())?;
-            Ok(true)
-        })
+        geode_core::panic::contained(|| body(store, dataset, batch))
     }));
     let reason = match outcome {
         Ok(Ok(swept)) => return swept,
         Ok(Err(reason)) => reason,
-        Err(payload) => format!("panicked: {}", panic_payload_message(payload.as_ref())),
+        Err(payload) => {
+            let payload = panic_payload_message(payload.as_ref());
+            // A panic here is a defect in the sweep, not a full disk: say so
+            // where a trader looks, not only in the log.
+            let delivered = sink(IngestEvent::Diagnostic(Diagnostic {
+                severity: Severity::Error,
+                layer: None,
+                file: None,
+                message: format!("local sweep panicked: {payload}"),
+                path: None,
+            }));
+            if !delivered {
+                log_refused_event(refusal_logged, "a local-sweep panic");
+            }
+            format!("panicked: {payload}")
+        }
     };
     tracing::warn!(
         target: "geode::ingest",
@@ -597,6 +642,31 @@ fn sweep_local(store: &Store, dataset: &geode_core::schema::DatasetSpec, batch: 
         dataset.name,
     );
     false
+}
+
+/// Report a pop-time stale check that could not decide. The load proceeds
+/// (fail open), so the rows are not lost; but a catalog row the lookup cannot
+/// read is corruption, so this is an error, and the only trace that the load
+/// went unchecked.
+fn report_stale_check(
+    sink: &IngestSink,
+    refusal_logged: &AtomicBool,
+    path: &std::path::Path,
+    what: &str,
+) {
+    let delivered = sink(IngestEvent::Diagnostic(Diagnostic {
+        severity: Severity::Error,
+        layer: None,
+        file: None,
+        message: format!(
+            "the stale check for {} could not read the catalog ({what}); loading it anyway",
+            path.display()
+        ),
+        path: None,
+    }));
+    if !delivered {
+        log_refused_event(refusal_logged, "a stale-check error");
+    }
 }
 
 /// Forget one local document under panic containment and report the outcome.
@@ -831,18 +901,33 @@ fn run(
 
         // Recheck the catalog before loading: work may have become redundant while
         // queued. A stale skip emits no event. Lookup errors and contained panics
-        // fail open so the load is attempted rather than silently discarded.
-        let stale = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // fail open, deliberately: a failed lookup must not discard the load, and
+        // the cost is a redundant reload of the same rows as a new generation,
+        // never a wrong total. Each is reported, so an unreadable catalog is not
+        // silent.
+        let lookup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             geode_core::panic::contained(|| {
                 Catalog::new(store.writer()).lookup_by_path(&item.candidate.csv_path)
             })
-        }))
-        .map(|result| match result {
-            Ok(Some(prev)) => is_unchanged(&prev, item.candidate.size, item.source_time),
-            Ok(None) => false,
-            Err(_store_error) => false,
-        })
-        .unwrap_or(false);
+        }));
+        let stale = match lookup {
+            Ok(Ok(Some(prev))) => is_unchanged(&prev, item.candidate.size, item.source_time),
+            Ok(Ok(None)) => false,
+            Ok(Err(e)) => {
+                report_stale_check(
+                    &sink,
+                    &refusal_logged,
+                    &item.candidate.csv_path,
+                    &e.to_string(),
+                );
+                false
+            }
+            Err(payload) => {
+                let what = format!("panicked: {}", panic_payload_message(payload.as_ref()));
+                report_stale_check(&sink, &refusal_logged, &item.candidate.csv_path, &what);
+                false
+            }
+        };
         if stale {
             clear_in_flight(&queue);
             continue;
@@ -1078,6 +1163,7 @@ mod tests {
                 IngestEvent::SeriesFailed { .. } => "series_failed",
                 IngestEvent::Forgotten { .. } => "forgotten",
                 IngestEvent::ForgetFailed { .. } => "forget_failed",
+                IngestEvent::Diagnostic(_) => "diagnostic",
                 IngestEvent::PlanComplete => "drained",
             })
             .filter(|k| *k != "drained")
@@ -1873,6 +1959,14 @@ mod tests {
             "fail-open means \"not stale\": the poisoned item's own load \
              still proceeds rather than being silently skipped: {events:?}"
         );
+        let path = poisoned.candidate.csv_path.display().to_string();
+        assert!(
+            events.iter().any(|e| matches!(e, IngestEvent::Diagnostic(d)
+                if d.severity == geode_core::config::Severity::Error
+                    && d.message.contains(&path)
+                    && d.message.contains("panicked"))),
+            "the fail-open is reported, naming the file and the payload: {events:?}"
+        );
     }
 
     // Document publication.
@@ -2512,6 +2606,37 @@ mod tests {
         assert_eq!(live, future + chrono::Duration::microseconds(1));
     }
 
+    /// A panicking sweep is a defect, not a full disk: it reaches the sink
+    /// as an error naming the payload, and the save it followed stands.
+    #[test]
+    fn a_panicking_local_sweep_is_an_error_diagnostic() {
+        use crate::store::ddl::tests_support::local_dataset;
+        let (_dir, _path, store, _schema) = local_store();
+        let ds = local_dataset();
+        let (tx, rx) = channel();
+        let sink: IngestSink = Arc::new(move |e| tx.send(e).is_ok());
+        let latch = AtomicBool::new(false);
+        assert!(!sweep_local_with(
+            &store,
+            &ds,
+            "s",
+            &sink,
+            &latch,
+            |_, _, _| { panic!("the sweep fell over") }
+        ));
+        match rx.try_recv().expect("the panic is reported") {
+            IngestEvent::Diagnostic(d) => {
+                assert_eq!(d.severity, geode_core::config::Severity::Error);
+                assert!(
+                    d.message
+                        .contains("local sweep panicked: the sweep fell over"),
+                    "{d:?}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
     /// The sweep is gated on the saved document crossing the bound, so a
     /// save under it costs one small count, not a sweep of every sheet; the
     /// sweep that does run also prunes the evicted generations' provenance.
@@ -2520,6 +2645,8 @@ mod tests {
         use crate::store::ddl::tests_support::local_dataset;
         let (_dir, path, store, _schema) = local_store();
         let ds = local_dataset();
+        let quiet: IngestSink = Arc::new(|_| true);
+        let latch = AtomicBool::new(false);
         let start = ts("2026-09-12T14:00:00Z");
         let save = |i: usize| {
             let at = start + chrono::Duration::seconds(i as i64);
@@ -2543,13 +2670,16 @@ mod tests {
             !local_needs_sweep(&store, &ds, "s").unwrap(),
             "at the bound"
         );
-        assert!(!sweep_local(&store, &ds, "s"), "no sweep under the bound");
+        assert!(
+            !sweep_local(&store, &ds, "s", &quiet, &latch),
+            "no sweep under the bound"
+        );
         save(LOCAL_KEEP_GENERATIONS + 1);
         assert!(
             local_needs_sweep(&store, &ds, "s").unwrap(),
             "past the bound"
         );
-        assert!(sweep_local(&store, &ds, "s"));
+        assert!(sweep_local(&store, &ds, "s", &quiet, &latch));
         drop(store);
         let bound = LOCAL_KEEP_GENERATIONS as i64 + 1;
         for sql in [
