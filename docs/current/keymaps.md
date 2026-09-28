@@ -135,8 +135,8 @@ repeats the normal motions and binds `y` (`pricer::yank`), `d`
 (`pricer::delete`), `shift+j`/`shift+k`, `g p`, `g u`, `i` and `enter`
 (`pricer::edit`), `v`, `V` and `escape` as the selection's verbs.
 Normal-mode keys it does not list — the doubled `y y`, `y c` and `d d`, `p`,
-`shift+p`, `u`, `ctrl+r`, `o`, `n`, `shift+n`, `space`, the `z` folds, `g m`
-and `.` — are unbound while a selection is live; the palette still reaches
+`shift+p`, `u`, `ctrl+r`, `o`, `shift+o`, `n`, `shift+n`, `space`, the `z`
+folds, `g m` and `.` — are unbound while a selection is live; the palette still reaches
 them. A palette verb closes an open editor first, as a cancel, so the
 palette's `undo` mid-step takes the steps back and then undoes the entry
 before them.

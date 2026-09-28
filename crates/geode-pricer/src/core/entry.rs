@@ -89,9 +89,10 @@ fn describe(sheet: &Sheet, row: usize) -> String {
 /// A typed package may land outside that place's parent via [`landing_place`].
 pub fn target_label(sheet: &Sheet, place: Place) -> String {
     match place {
-        // The bar always passes `below = true`, so `Root { at: 0 }`
-        // reaches here only on an empty sheet, where "at end" is true.
-        Place::Root { at } if at == 0 || at >= sheet.len() => "at end".to_string(),
+        // An empty sheet has only an end; `shift+o` on the first row is
+        // `Root { at: 0 }` over rows, which lands before all of them.
+        Place::Root { at } if at >= sheet.len() => "at end".to_string(),
+        Place::Root { at: 0 } => "at top".to_string(),
         Place::Root { at } => {
             let before = at - 1;
             let root = sheet.parent(before).unwrap_or(before);

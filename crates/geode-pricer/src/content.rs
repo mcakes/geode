@@ -49,7 +49,8 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("pricer::find_next", "Find next"),
     ("pricer::find_prev", "Find previous"),
     ("pricer::escape", "Clear selection, else find and notice"),
-    ("pricer::add_below", "Add lines…"),
+    ("pricer::add_below", "Add lines below…"),
+    ("pricer::add_above", "Add lines above…"),
     ("pricer::edit", "Edit cell…"),
     ("pricer::delete", "Delete row"),
     ("pricer::undo", "Undo"),
@@ -178,6 +179,7 @@ context = "pricer && mode == normal"
 "shift+n" = "pricer::find_prev"
 "escape" = "pricer::escape"
 "o" = "pricer::add_below"
+"shift+o" = "pricer::add_above"
 "i" = "pricer::edit"
 "enter" = "pricer::edit"
 "d d" = "pricer::delete"
@@ -951,9 +953,13 @@ mod tests {
     }
 
     #[test]
-    fn shift_o_is_unbound_and_add_above_is_gone() {
-        assert!(!DEFAULT_KEYMAP.contains("shift+o"));
-        assert!(!ACTIONS.iter().any(|(id, _)| *id == "pricer::add_above"));
+    fn o_adds_below_and_shift_o_adds_above() {
+        assert_eq!(resolve("o", "normal").as_deref(), Some("pricer::add_below"));
+        assert_eq!(
+            resolve("shift+o", "normal").as_deref(),
+            Some("pricer::add_above")
+        );
+        assert!(ACTIONS.iter().any(|(id, _)| *id == "pricer::add_above"));
     }
 
     #[test]

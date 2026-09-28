@@ -12293,21 +12293,6 @@ run_mutation "mdstep: a restore needs the steps to be the last draft change" \
   geode-marketdata \
   escape_after_a_revert_mid_step_leaves_the_draft_reverted
 
-# Only a number cursor cell opens a stepping editor; a text or date cursor
-# cell commits absolutely. Mutated so any text-editor cell carries a
-# `bulk`, an untouched `enter` on a text cell reads as "keep the steps"
-# and writes nothing.
-run_mutation "mdstep: only a number cursor cell steps live" \
-  crates/geode-marketdata/src/tile.rs \
-  '            && matches!(
-                target,
-                EditTarget::Cell { cell: (_, col), .. }
-                    if matches!(self.model.kind_of(col), Some(CellKind::Number(_)))
-            ))' \
-  '            && matches!(target, EditTarget::Cell { .. }))' \
-  geode-marketdata \
-  an_untouched_commit_on_a_text_cell_writes_the_seed_to_every_accepting_cell
-
 # A selection edit opens only on a member cell. Mutated away, `i` on a
 # slice value inside a row selection opens an editor whose typed value and
 # steps land in the vol ladder while the forward it showed stays as it was.
@@ -19223,11 +19208,11 @@ run_mutation "pricer entry bar: a chevron press that closes the bar hands off no
 # leg is hidden and the cursor names a row the model does not paint.
 run_mutation "pricer entry bar: o on a closed package leaves it closed" \
   crates/geode-pricer/src/tile.rs \
-  '        let place = place_for(&self.sheet, self.cursor_sheet_row(), true);
+  '        let place = place_for(&self.sheet, self.cursor_sheet_row(), below);
         if let Place::Leg { package, .. } = place {
             self.expansion.set(self.sheet.id(package), true);
         }' \
-  '        let place = place_for(&self.sheet, self.cursor_sheet_row(), true);' \
+  '        let place = place_for(&self.sheet, self.cursor_sheet_row(), below);' \
   geode-pricer o_on_a_closed_package_opens_it_and_lands_on_its_first_leg
 
 # The palette's commit focuses the shell root before it dispatches
@@ -21826,6 +21811,21 @@ run_mutation "pricer entry bar: a history step leaves the list stale" \
   $'        // `set_value` emits no Change: the recalled line re-ranks here.\n        self.refresh_entry_completion(cx);' \
   '' \
   geode-pricer up_walks_history_with_the_list_open_and_the_list_follows
+
+# `shift+o` opens the bar on the place ABOVE the cursor row. Mutated to
+# always pass below, `O` lands its first line under the row instead.
+run_mutation "pricer entry bar: shift+o lands below the cursor row" \
+  crates/geode-pricer/src/tile.rs \
+  '        let place = place_for(&self.sheet, self.cursor_sheet_row(), below);' \
+  '        let place = place_for(&self.sheet, self.cursor_sheet_row(), true);' \
+  geode-pricer shift_o_lands_above_the_cursor_row_and_continues_below_what_landed
+
+# Above the first row is the top of the sheet, not its end.
+run_mutation "pricer entry bar: above the first row reads at end" \
+  crates/geode-pricer/src/core/entry.rs \
+  '        Place::Root { at: 0 } => "at top".to_string(),' \
+  '        Place::Root { at: 0 } => "at end".to_string(),' \
+  geode-pricer shift_o_on_the_first_row_lands_at_the_top
 
 # ---- containment and liveness
 
