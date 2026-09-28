@@ -25506,6 +25506,42 @@ run_mutation "pricer grid: a partial package's key reads every leg" \
   "    if !text.is_empty() && !text.contains('\\n') {" \
   geode-pricer a_partly_hidden_packages_find_key_reads_only_its_shown_legs
 
+# Structural verbs on a partly hidden package act on its hidden legs too:
+# the one door refuses them all.
+run_mutation "pricer scope: structural verbs ignore a partly hidden package" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'            .any(|r| self.partly_hidden(r))\n            .then_some(PARTLY_HIDDEN)' \
+  $'            .any(|_| false)\n            .then_some(PARTLY_HIDDEN)' \
+  geode-pricer row_verbs_on_a_partly_hidden_package_are_refused
+
+# A selection refuses whole when any of its rows is a partly hidden package.
+run_mutation "pricer scope: a selection's structural target is the cursor row" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'        let targets: Vec<usize> = if selected {\n            self.selected_sheet_rows()' \
+  $'        let targets: Vec<usize> = if false {\n            self.selected_sheet_rows()' \
+  geode-pricer selection_verbs_over_a_partly_hidden_package_refuse_whole
+
+# `g u` on a shown leg dissolves its package: the target is the parent.
+run_mutation "pricer scope: g u on a leg targets the leg" \
+  crates/geode-pricer/src/tile/select.rs \
+  '                "ungroup" => vec![self.sheet.parent(row).unwrap_or(row)],' \
+  '                "ungroup" => vec![row],' \
+  geode-pricer a_shown_leg_ungroups_nothing_but_deletes_itself
+
+# A counted `g p` reaches every root it would take as a member.
+run_mutation "pricer scope: a counted g p checks the cursor row alone" \
+  crates/geode-pricer/src/tile/select.rs \
+  '                    .take(count.max(1))' \
+  '                    .take(1)' \
+  geode-pricer a_counted_group_reaching_a_partly_hidden_package_is_refused
+
+# The command door asks the same question as the keys.
+run_mutation "pricer scope: :ungroup skips the door" \
+  crates/geode-pricer/src/tile.rs \
+  $'                if let Some(why) = self.partly_hidden_refusal("ungroup", 1, false) {\n                    return Err(why.into());\n                }' \
+  $'                if let Some(_why) = None::<&str> {\n                    return Err(_why.into());\n                }' \
+  geode-pricer row_verbs_on_a_partly_hidden_package_are_refused
+
 # A `dimensions` edit alone reloads the pricer, and the reload hands the
 # factory the new dimensions.
 run_mutation "pricer key: dimensions left out" \

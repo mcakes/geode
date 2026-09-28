@@ -2821,7 +2821,10 @@ impl PricerTile {
             | "group" | "ungroup" => {
                 if self.loading {
                     self.footer = Some("the sheet is still loading".into());
-                } else if let Some(why) = self.row_verb_refusal(verb) {
+                } else if let Some(why) = self
+                    .row_verb_refusal(verb)
+                    .or_else(|| self.partly_hidden_refusal(verb, n, self.selection.is_some()))
+                {
                     self.footer = Some(why.into());
                 } else {
                     // A live selection names the rows itself, so a count
@@ -3334,10 +3337,17 @@ impl PricerTile {
             }
             Command::Group(count) => {
                 self.refuse_while_loading()?;
-                self.group(count.unwrap_or(1), cx)
+                let count = count.unwrap_or(1);
+                if let Some(why) = self.partly_hidden_refusal("group", count, false) {
+                    return Err(why.into());
+                }
+                self.group(count, cx)
             }
             Command::Ungroup => {
                 self.refuse_while_loading()?;
+                if let Some(why) = self.partly_hidden_refusal("ungroup", 1, false) {
+                    return Err(why.into());
+                }
                 self.ungroup(cx)
             }
             Command::Edit(name) => self.edit_sheet(name, cx),

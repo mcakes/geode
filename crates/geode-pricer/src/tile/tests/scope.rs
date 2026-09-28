@@ -263,3 +263,100 @@ fn a_selection_total_over_a_partly_hidden_package_counts_its_shown_legs(
     });
     assert_eq!(total.as_deref(), Some("-5.00"));
 }
+
+// ---- structural verbs on a partly hidden package ----
+
+/// The sheet's rows as shorthand, to prove a refused verb changed nothing.
+fn rows(h: &Harness, vcx: &VisualTestContext) -> Vec<String> {
+    h.tile.read_with(vcx, |t, _| {
+        (0..t.sheet.len()).map(|r| t.sheet.shorthand(r)).collect()
+    })
+}
+
+/// BOOK under `strike != 5200` with the cursor on P, partly hidden.
+fn on_partial_package(cx: &mut gpui::TestAppContext) -> (Harness, VisualTestContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    set_expr(&h, &mut vcx, "strike != 5200");
+    h.motion(&mut vcx, "down", None);
+    assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(1), "fixture: on P");
+    (h, vcx)
+}
+
+/// `d d`, `shift+j`/`shift+k` and `g u` on the partly hidden package row
+/// refuse with the footer and change nothing: each would act on the
+/// hidden leg too.
+#[gpui::test]
+fn row_verbs_on_a_partly_hidden_package_are_refused(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = on_partial_package(cx);
+    let before = rows(&h, &vcx);
+    for verb in ["delete", "move_down", "move_up", "ungroup"] {
+        h.dispatch(&mut vcx, verb, None);
+        footer_is_partly_hidden(&h, &vcx);
+        assert_eq!(rows(&h, &vcx), before, "`{verb}` changed nothing");
+    }
+    // The command door refuses the same way.
+    for line in ["ungroup", "group 2"] {
+        assert_eq!(
+            h.command(&mut vcx, line),
+            Err("package partly hidden by the scope: edit its legs".to_string()),
+            ":{line}"
+        );
+    }
+    assert_eq!(rows(&h, &vcx), before);
+    assert!(!h.tile.read_with(&vcx, |t, _| t.undo.can_undo()));
+}
+
+/// `g u` from the package's shown leg names the package too: refused.
+/// The leg itself stays deletable.
+#[gpui::test]
+fn a_shown_leg_ungroups_nothing_but_deletes_itself(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = on_partial_package(cx);
+    h.dispatch(&mut vcx, "expand", None);
+    h.motion(&mut vcx, "down", None);
+    assert_eq!(
+        h.cursor(&vcx).map(|c| c.0),
+        Some(2),
+        "fixture: the 4800 leg"
+    );
+    let before = rows(&h, &vcx);
+    h.dispatch(&mut vcx, "ungroup", None);
+    footer_is_partly_hidden(&h, &vcx);
+    assert_eq!(rows(&h, &vcx), before);
+    h.dispatch(&mut vcx, "delete", None);
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.sheet.children(1).len()),
+        1,
+        "the shown leg deletes alone"
+    );
+}
+
+/// `g p` with a count reaching the partly hidden package as a member.
+#[gpui::test]
+fn a_counted_group_reaching_a_partly_hidden_package_is_refused(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    set_expr(&h, &mut vcx, "strike != 5200");
+    let before = rows(&h, &vcx);
+    h.dispatch(&mut vcx, "group", Some(2));
+    footer_is_partly_hidden(&h, &vcx);
+    assert_eq!(rows(&h, &vcx), before);
+}
+
+/// A `V` selection holding the partly hidden package refuses delete and
+/// move as a whole: no part of the selection is acted on.
+#[gpui::test]
+fn selection_verbs_over_a_partly_hidden_package_refuse_whole(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    set_expr(&h, &mut vcx, "strike != 5200");
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.motion(&mut vcx, "bottom", None); // A, P, B
+    let before = rows(&h, &vcx);
+    for verb in ["delete", "move_up", "ungroup", "group"] {
+        h.dispatch(&mut vcx, verb, None);
+        footer_is_partly_hidden(&h, &vcx);
+        assert_eq!(rows(&h, &vcx), before, "`{verb}` changed nothing");
+    }
+    assert!(!h.tile.read_with(&vcx, |t, _| t.undo.can_undo()));
+    // Non-mutating verbs stay: a yank over the same selection works.
+    h.dispatch(&mut vcx, "yank", None);
+    assert!(h.tile.read_with(&vcx, |t, _| t.register.is_some()));
+}

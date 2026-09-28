@@ -336,6 +336,49 @@ impl PricerTile {
         }
     }
 
+    /// The one door every structural verb passes before it mutates: `d`,
+    /// `shift+j`/`shift+k`, `g p` and `g u` (keys, the `.` menu, and
+    /// `:group`/`:ungroup`) refuse with [`PARTLY_HIDDEN`] when their target
+    /// includes a package the scope partly hides, since each would act on
+    /// its hidden legs too. `selected`: the verb acts on the live
+    /// selection, which then refuses as a whole — no part of it is acted
+    /// on. Otherwise the target is the cursor row; for `g u` its package
+    /// (a leg's parent), for `g p` the `count` roots from the cursor. A
+    /// shown leg on its own is not a package and stays editable. Verbs that
+    /// mutate nothing (yank, fold, find, motions) never ask.
+    pub(crate) fn partly_hidden_refusal(
+        &self,
+        verb: &str,
+        count: usize,
+        selected: bool,
+    ) -> Option<&'static str> {
+        if !matches!(
+            verb,
+            "delete" | "move_down" | "move_up" | "group" | "ungroup"
+        ) {
+            return None;
+        }
+        let targets: Vec<usize> = if selected {
+            self.selected_sheet_rows()
+        } else {
+            let row = self.cursor_sheet_row()?;
+            match verb {
+                "ungroup" => vec![self.sheet.parent(row).unwrap_or(row)],
+                "group" => self
+                    .sheet
+                    .roots()
+                    .filter(|&r| r >= row)
+                    .take(count.max(1))
+                    .collect(),
+                _ => vec![row],
+            }
+        };
+        targets
+            .into_iter()
+            .any(|r| self.partly_hidden(r))
+            .then_some(PARTLY_HIDDEN)
+    }
+
     /// `y` over a selection, which it ends. Under `V` the clipboard gets
     /// the top-most rows' shorthand, one per line, and the register their
     /// specs — a package's legs are already in its own spec, so copying
@@ -388,7 +431,10 @@ impl PricerTile {
     /// any remove, since each remove shifts the indices after it; the
     /// removes run bottom-up so the earlier indices stay valid.
     pub(crate) fn delete_selection(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
-        if let Some(why) = self.row_verb_refusal("delete") {
+        if let Some(why) = self
+            .row_verb_refusal("delete")
+            .or_else(|| self.partly_hidden_refusal("delete", 1, true))
+        {
             return Err(why.into());
         }
         let top = top_most(&self.sheet, &self.selected_sheet_rows());
