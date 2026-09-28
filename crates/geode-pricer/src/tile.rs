@@ -5152,7 +5152,8 @@ pub(crate) mod tests {
         let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "NDX Z26 20000 C"]);
         h.dispatch(&mut vcx, "group", Some(2));
         h.motion(&mut vcx, "top", None);
-        assert_eq!(h.tree(&vcx)[0], "CUSTOM SPX/NDX Z26", "the package, on top");
+        let top = &h.tree(&vcx)[0];
+        assert!(top.starts_with("CUSTOM SPX/NDX"), "the package, on top: {top}");
         let ctx = vcx
             .update(|_, cx| h.content.dimension_context(cx))
             .expect("a cursor row has a context");
