@@ -7052,10 +7052,12 @@ run_mutation "diagnostics data: an ingest-only source gets no row" \
   geode-diagnostics \
   a_loading_row_shows_for_an_unreported_source_too
 
+# `spec.shape` stays read, so a `-D warnings` test profile cannot turn this
+# into a BUILD verdict.
 run_mutation "diagnostics data: a subscribed source is described as a directory one" \
   crates/geode-diagnostics/src/model.rs \
   '        Some(spec) => match spec.shape {' \
-  '        Some(spec) => match SourceShape::Directory {' \
+  '        Some(spec) => match if spec.shape == SourceShape::Fetch { SourceShape::Fetch } else { SourceShape::Directory } {' \
   geode-diagnostics \
   a_source_row_describes_its_shape_from_the_summary
 
@@ -7106,6 +7108,22 @@ run_mutation "diagnostics data: the health chip counts by full value, not by lab
   '            .filter(|s| s.health.as_ref() == Some(worst))' \
   geode-diagnostics \
   the_health_chip_counts_by_label_not_by_reason
+
+run_mutation "diagnostics perf: the catalog tiles read the block count as bytes" \
+  crates/geode-diagnostics/src/model.rs \
+  '            format_bytes(c.used_blocks.saturating_mul(c.block_size)),' \
+  '            format_bytes(c.used_blocks),' \
+  geode-diagnostics \
+  perf_model_carries_buckets_overflow_and_the_overlay_mirror
+
+run_mutation "diagnostics perf: the catalog tiles stay empty after a catalog arrives" \
+  crates/geode-diagnostics/src/model.rs \
+  '        Some(c) => (
+            format_bytes(c.database_bytes),' \
+  '        Some(c) if false => (
+            format_bytes(c.database_bytes),' \
+  geode-diagnostics \
+  perf_model_carries_buckets_overflow_and_the_overlay_mirror
 
 run_mutation "diagnostics perf: the overflow bucket is dropped" \
   crates/geode-diagnostics/src/model.rs \

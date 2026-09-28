@@ -677,7 +677,7 @@ grow, and the strip shows the cursor row's detail lines instead.
 | Sources | Source, Health (title-case label with the reason), Since (clock time and age), Shape, Last poll, Next poll, Ready, Loading. Worst reported health first by variant then name; unreported sources last, and a source known only from an ingest load gets a "no report yet" row with its loading text. Toolbar: a filter over name and health. Detail: the spec lines by shape and the health history. |
 | Data | One expandable row per dataset with Partitions, Latest gen, Published, Rows, Resolved, Live, and Loaded; a dataset expands to its generations, the one resolved under a historical frame as-of marked. Toolbar: filter, a chip reading `catalog as-of = frame` or `catalog pending`, Refresh catalog, Expand all, Collapse all. |
 | Config | Two panels. Left: the current diagnostics batch (config and data lanes) or, behind the History button, the prior batches newest first with their batch time; a click there moves only that panel's detail strip. Right, the cursor table: one expandable row per document and one row per leaf with Key, Value, and the Layer from `Config::explain`; a filter over `document.key` and value; an Open config directory button. |
-| Log | Time with milliseconds, Level, Target, and Message over the retained tail. Toolbar: level toggles, a target select over the targets seen in the tail plus `all`, a text filter over message and target, Follow, Clear, and Levels. Detail: the full record with a Copy button that puts it on the clipboard. |
+| Log | Time with milliseconds, Lvl, Target, and Message over the retained tail. Toolbar: level toggles, a target select over the targets seen in the tail plus `all`, a text filter over message and target, Follow, Clear, and Levels. Detail: the full record with a Copy button that puts it on the clipboard. |
 | Perf | No table. Stat tiles for frame p50 · p95 · max with the sample count and the 8 ms budget, requery submit→snapshot with the 50 ms budget, requery snapshot→paint, and dropped events; a frame-interval histogram whose bars past the budget take the warning tone; database and DuckDB memory tiles from the catalog; and the Performance overlay switch. |
 
 Keys in the page's own context: `j`/`k` move the cursor, `g g`/`G` jump,
@@ -698,8 +698,9 @@ shell-actions handle, never a direct call. A Levels pick queues
 drains, applies, persists, and mirrors them, so the switch shows the shell's
 value. Refresh catalog queues an explicit catalog request the bridge serves;
 Open config directory dispatches `config::open_directory`. The Levels
-popover lists the default level, read-only, and the known targets with five
-level buttons each. It offers no way to add a target: `[log]` keeps only the
+popover lists the default level, read-only, then the known targets, then
+any target a hand-edited `[log]` names outside that list, each with five
+level buttons. It offers no way to add a target: `[log]` keeps only the
 known targets across a reload, so an added one could not persist. A section
 change blurs a focused filter and closes the popover first, because the next
 section may paint neither.

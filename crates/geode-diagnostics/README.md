@@ -20,10 +20,10 @@ The seam it sits on: [pages](../../docs/current/shell.md#pages).
 | [`prepared`](src/prepared.rs) | `PreparedTable`: the column specs and rows a section paints, with expansion and filtering applied; `cell_at` places a notice row's one cell in the widest column. Pure; `Rc`-shared with the delegate. |
 | [`table`](src/table.rs) | `SectionDelegate`, the one `TableDelegate` for every table section: paints a shared prepared table, scales column widths with the window rem, and formats nothing per paint but a parent row's expander. |
 | [`page`](src/page.rs) | `DiagnosticsPage`: the observers, the selected section, per-section cursors and filters, the expansion sets, the log tail and its filter, the target select, the Levels state, the cached badge and header strings, the ages timer, key dispatch, visibility, serialization, and the frame layout. |
-| [`page_chrome`](src/page_chrome.rs) | The header with its chips and back control, the rail with its badges, and the detail strip with the Copy button. Pointer routes only; every action has a keyboard route in `page`. |
+| [`page_chrome`](src/page_chrome.rs) | The header with its chips and back control, the rail with its badges, and the detail strip with the Copy button. Pointer routes; the back control and the rail rows have keyboard routes in `page` (Escape, `[`/`]`), and Copy does not (see Limits). |
 | [`config_view`](src/config_view.rs) | The Config body: the diagnostics panel (Current or History) beside the effective-values table, each with its own toolbar row and detail strip. |
 | [`log_view`](src/log_view.rs) | The Log toolbar: level toggles, the target select, the text filter, Follow, Clear, and the Levels popover. |
-| [`levels`](src/levels.rs) | The Levels popover's pure rows: the read-only default, then the known targets, each with the effective level resolved by the longest configured prefix, spelled as `LogLevels` stores them. |
+| [`levels`](src/levels.rs) | The Levels popover's pure rows: the read-only default, then the known targets, then any configured target outside that list (a hand-edited `[log]` key, shown but not offered for adding), each with the effective level resolved by the longest configured prefix, spelled as `LogLevels` stores them. |
 | [`perf_view`](src/perf_view.rs) | The Perf body: stat tiles, the histogram bars (`bar_heights` is pure), the database tiles, and the overlay switch. |
 | [`log`](src/log.rs) | `LogTail`, a bounded copy of the ring from the sequence at creation (4,096 records, the loss gap measured per drain), and `LogFilter` over level, target, and text. Pure. |
 
@@ -93,8 +93,8 @@ cargo test -p geode-diagnostics --release -- --ignored log_rebuild_timing --noca
   names the gap measured at the last drain, not a lifetime total.
 - A notice row paints its single cell in the table's widest column and
   nothing elsewhere; the table clips every cell to its column.
-- `TableState::column()` is read only on `refresh`: every new prepared
-  table is followed by one, and render refreshes both tables when the
+- `TableState::column()` is read only on `refresh`: every rebuilt table
+  is followed by one, and render refreshes both tables when the
   window's rem moves off the one the widths were prepared at. The ages
   tick replaces the table without a refresh, because columns do not change.
 - The ages timer exists only while the page is visible and Sources is

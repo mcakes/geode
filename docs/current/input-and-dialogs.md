@@ -43,9 +43,9 @@ unhandled action ids are offered to the open page, else the focused
 occupant. Counts reach stack cycling and module dispatch; the general
 workspace router ignores them.
 
-With a [page](shell.md#pages) open, Escape is taken in this order: a drag
-in flight is cancelled; an open modal closes and the page stays; the
-palette closes and focus returns to the page; a focused page input takes it
+With a [page](shell.md#pages) open, Escape is taken in this order: an open
+modal closes and the page stays; the palette closes and focus returns to
+the page; a focused page input takes it
 through the page's own `mode == insert` binding, which blurs the input back
 to normal mode; then the `page` context's `escape` resolves to
 `page::close`, which the page sees first and may consume when it has

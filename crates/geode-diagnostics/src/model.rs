@@ -1024,5 +1024,36 @@ pub(crate) mod tests {
         assert_eq!(m.buckets.iter().map(|(_, n)| *n as u64).sum::<u64>(), 2);
         assert_eq!(m.buckets.last(), Some(&(u64::MAX, 1)));
         assert!(m.overlay);
+        // The database tiles are empty until a catalog arrives, then read
+        // its resource figures: used space is blocks times block size.
+        assert_eq!(
+            (&m.database, &m.used, &m.block_size, &m.memory, &m.threads),
+            (
+                &String::new(),
+                &String::new(),
+                &String::new(),
+                &String::new(),
+                &String::new()
+            )
+        );
+        d.set_catalog(
+            CatalogSnapshot {
+                as_of: AsOf::Live,
+                datasets: Vec::new(),
+                database_bytes: 3 * 1024 * 1024 * 1024,
+                used_blocks: 4,
+                block_size: 256 * 1024,
+                memory_bytes: 512,
+                threads: 8,
+                identities: Vec::new(),
+            },
+            SystemTime::now(),
+        );
+        let m = perf_model(&d, &RequeryStats::new());
+        assert_eq!(m.database, "3.0GB");
+        assert_eq!(m.used, "1.0MB");
+        assert_eq!(m.block_size, "256.0KB");
+        assert_eq!(m.memory, "512B");
+        assert_eq!(m.threads, "8");
     }
 }

@@ -943,7 +943,7 @@ fn two_open_module_calls_for_the_same_kind_before_any_render_add_only_once(
     assert_eq!(
         tiles.len(),
         1,
-        "two open_module('diagnostics') calls with no render between them \
+        "two open_module('probe') calls with no render between them \
          must add only once: {tiles:?}"
     );
     assert_eq!(
@@ -988,7 +988,7 @@ fn open_module_with_no_matching_factory_paints_a_placeholder_and_warns(
     assert_eq!(
         shell.read_with(&cx, |s, _| s.occupant_kind(tile)),
         Some(crate::module::placeholder::PLACEHOLDER_KIND),
-        "no 'diagnostics' factory is registered, so the tile is a placeholder"
+        "no 'nonesuch' factory is registered, so the tile is a placeholder"
     );
 
     let mut records = Vec::new();
