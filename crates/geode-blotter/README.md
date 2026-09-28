@@ -33,7 +33,10 @@ cargo bench -p geode-blotter   # the pure core
   or no cached rows, a fit refuses with "nothing loaded to fit" and keeps
   its widths.
 - A view switch clears the fitted widths, and a restored record whose view
-  is gone starts without them. `apply_snapshot` drops only the tree column's
+  is gone starts without them. A view over a computed dataset is never the
+  blotter's: `:view` neither completes nor opens it, and a record naming one
+  opens the fallback view with the refusal as its notice, held through the
+  fallback's first snapshot. `apply_snapshot` drops only the tree column's
   width (key `""`) when the grouping differs from the plan's. That method is
   the one place every grouping change reaches the delegate. The session
   record keeps the widths under `column_widths`.

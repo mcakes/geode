@@ -178,6 +178,12 @@ pub struct BlotterTile {
     /// Header notice. Dropped sorts and selections are warnings; query and
     /// configuration failures are danger.
     pub error: Option<Notice>,
+    /// The refusal a restored view over a computed dataset opened with,
+    /// pending the first delivery. That delivery is the fallback view's
+    /// own snapshot, landing before the trader could read the header, so
+    /// `apply` raises the notice again instead of letting it clear; the
+    /// next delivery follows something the trader did and clears it.
+    restored_view_refusal: Option<String>,
     find: Option<FindState>,
     /// This tile's view query under the flip barrier (see
     /// `geode_tile::following`), with the grouping each result was asked
@@ -224,9 +230,26 @@ impl BlotterTile {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let view_name = restored
-            .and_then(|t| t.get("view").and_then(|v| v.as_str()).map(str::to_string))
-            .filter(|n| views.borrow().iter().any(|v| &v.name == n))
+        let restored_name = restored.and_then(|t| t.get("view").and_then(|v| v.as_str()));
+        // A restored view over a computed dataset exists but is a module's
+        // to show: the fallback below applies as for a missing view, and
+        // the tile opens with the refusal as its notice so the trader
+        // learns why the record's view did not come back.
+        let restored_view_computed = restored_name.and_then(|n| {
+            let views = views.borrow();
+            views
+                .iter()
+                .find(|v| v.name == n && !showable_in(&schema.borrow(), v))
+                .map(computed_view_refusal)
+        });
+        let view_name = restored_name
+            .map(str::to_string)
+            .filter(|n| {
+                views
+                    .borrow()
+                    .iter()
+                    .any(|v| &v.name == n && showable_in(&schema.borrow(), v))
+            })
             .or_else(|| {
                 // Without a valid restored view, use the explicit default, then the
                 // first configured view. `ViewSpec::from_doc` orders that fallback
@@ -239,10 +262,7 @@ impl BlotterTile {
                     .map(|v| v.name.clone())
             })
             .unwrap_or_default();
-        let restored_view_kept = restored
-            .and_then(|t| t.get("view"))
-            .and_then(|v| v.as_str())
-            == Some(view_name.as_str());
+        let restored_view_kept = restored_name == Some(view_name.as_str());
         let pin = match restored {
             Some(t) if t.get("pinned_slot").and_then(|v| v.as_integer()).is_some() => {
                 Pin::Slot(t["pinned_slot"].as_integer().unwrap() as u8)
@@ -431,7 +451,8 @@ impl BlotterTile {
             stack: None,
             delivered_at: None,
             visible: false,
-            error: None,
+            error: restored_view_computed.clone().map(Notice::danger),
+            restored_view_refusal: restored_view_computed,
             find: None,
             following: FollowingQuery::new(),
         }
@@ -631,6 +652,11 @@ impl BlotterTile {
     /// columns and selected row, and delivery time starts the paint timer.
     /// The immutable snapshot is shared directly with the delegate.
     fn apply(&mut self, snapshot: Arc<Snapshot>, grouping: Vec<String>, cx: &mut Context<Self>) {
+        // Raised before the notices below so a fresher one about this very
+        // snapshot (a dropped sort or selection) still wins the one slot.
+        if let Some(refusal) = self.restored_view_refusal.take() {
+            self.error = Some(Notice::danger(refusal));
+        }
         if let Some(view) = self.view() {
             // The plan is (re)built from `view` here, so the definitions
             // its `Colour::Named` columns resolve against are refreshed
@@ -861,6 +887,11 @@ impl BlotterTile {
 
     fn compute_title(view_name: &str, grouping: &[String]) -> SharedString {
         format!("{} · {}", view_name, GroupingSlots::label_of(grouping)).into()
+    }
+
+    /// A view the blotter can query: not over a computed dataset.
+    fn showable(&self, view: &ViewSpec) -> bool {
+        showable_in(&self.schema.borrow(), view)
     }
 
     pub fn key_context(&self, cx: &App) -> KeyContext {
@@ -1271,8 +1302,14 @@ impl BlotterTile {
                 }
             }
             Command::View(name) => {
-                if !self.views.borrow().iter().any(|v| v.name == name) {
-                    return Err(format!("no view named '{name}'"));
+                {
+                    let views = self.views.borrow();
+                    let Some(view) = views.iter().find(|v| v.name == name) else {
+                        return Err(format!("no view named '{name}'"));
+                    };
+                    if !self.showable(view) {
+                        return Err(computed_view_refusal(view));
+                    }
                 }
                 self.view_name = name;
                 // Another view is another column set: its fitted widths
@@ -1397,7 +1434,13 @@ impl BlotterTile {
                 dimensions.push(d.name.clone());
             }
         }
-        let views = self.views.borrow().iter().map(|v| v.name.clone()).collect();
+        let views = self
+            .views
+            .borrow()
+            .iter()
+            .filter(|v| self.showable(v))
+            .map(|v| v.name.clone())
+            .collect();
         completions(
             line,
             cursor,
@@ -1551,6 +1594,26 @@ impl BlotterTile {
             })
             .collect()
     }
+}
+
+/// A view the blotter can query: not over a computed dataset. Such a
+/// dataset has no tables and a module answers for its views, so the
+/// blotter refuses them itself rather than showing the trader a query
+/// refusal for a view that was never its to show. A view over a dataset
+/// the schema does not name is left to the query path's own diagnostic.
+fn showable_in(schema: &SchemaSpec, view: &ViewSpec) -> bool {
+    !schema
+        .dataset(&view.dataset)
+        .is_some_and(|d| d.is_computed())
+}
+
+/// The refusal for a view over a computed dataset — one text for the
+/// `:view` command and the restore-fallback notice.
+fn computed_view_refusal(view: &ViewSpec) -> String {
+    format!(
+        "view '{}' is over computed dataset '{}', which a module answers for; the blotter cannot show it",
+        view.name, view.dataset
+    )
 }
 
 /// Format an RFC 3339 freshness timestamp as `HH:MM` on the trader's clock.
@@ -1906,7 +1969,10 @@ mod tests {
                      [d.columns.underlying_ref]\ntype = \"utf8\"\nrole = \"dimension\"\ntextual = true\n\
                      [d.columns.model_code]\ntype = \"utf8\"\nrole = \"dimension\"\ngrain = \"instrument\"\n\
                      [d.columns.delta01]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"underlying\"\n\
-                     [d.columns.daily_trading_pnl]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"underlying\"\n";
+                     [d.columns.daily_trading_pnl]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"underlying\"\n\
+                     [pricer]\ncomputed = true\n\
+                     [pricer.columns.instrument_ref]\ntype = \"utf8\"\nrole = \"key\"\n\
+                     [pricer.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"underlying\"\n";
         let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
         let (schema, diags) = SchemaSpec::from_doc(&doc);
         assert!(diags.is_empty(), "{diags:?}");
@@ -2267,6 +2333,96 @@ mod tests {
         let (h, vcx) = open_with_views(cx, None, views_with_explicit_default("wide"));
         let state = h.tile.read_with(&vcx, |t, cx| t.serialize(cx));
         assert_eq!(state["view"].as_str(), Some("wide"));
+    }
+
+    /// One blotter view over `d` beside one over the computed `pricer`
+    /// dataset, as `views.toml` holds them side by side in the real app.
+    fn tree_and_vanilla() -> Vec<ViewSpec> {
+        let text = "[tree]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n[[tree.columns]]\nname = \"delta01\"\n\
+                    [vanilla]\ndataset = \"pricer\"\n[[vanilla.columns]]\nname = \"npv\"\n";
+        ViewSpec::from_doc(&merge_docs(
+            "views",
+            &[LayerDoc::builtin("views", text).unwrap()],
+        ))
+        .0
+    }
+
+    /// A view over a computed dataset is a module's to answer: the blotter
+    /// neither offers it in `:view` completion nor opens it by command.
+    #[gpui::test]
+    fn view_completion_and_command_exclude_views_over_a_computed_dataset(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_with_views(cx, None, tree_and_vanilla());
+        let words = h
+            .tile
+            .read_with(&vcx, |t, cx| t.completions("view ", 5, cx));
+        assert_eq!(
+            words,
+            vec!["tree"],
+            "a computed dataset's view is not offered"
+        );
+        let err = h
+            .tile
+            .update_in(&mut vcx, |t, window, cx| {
+                t.command("view vanilla", window, cx)
+            })
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "view 'vanilla' is over computed dataset 'pricer', which a module answers for; the blotter cannot show it"
+        );
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.view_name.clone()),
+            "tree",
+            "the current view is kept"
+        );
+    }
+
+    /// A session record naming a view over a computed dataset restores
+    /// the default view instead, and says why in the tile's notice.
+    #[gpui::test]
+    fn restoring_a_view_over_a_computed_dataset_falls_back_to_the_default(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let restored: toml::Table = "view = \"vanilla\"".parse().unwrap();
+        let (h, vcx) = open_with_views(cx, Some(&restored), tree_and_vanilla());
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.view_name.clone()), "tree");
+        let notice = h
+            .tile
+            .read_with(&vcx, |t, _| t.error_text())
+            .expect("the fallback carries a notice");
+        assert!(notice.contains("computed dataset 'pricer'"), "{notice}");
+    }
+
+    /// The fallback view's own first snapshot lands within milliseconds of
+    /// opening; a notice it cleared would never be read. It outlives that
+    /// delivery and clears on the next, which follows something the
+    /// trader did.
+    #[gpui::test]
+    fn the_restore_fallback_notice_outlives_the_fallback_views_first_delivery(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let restored: toml::Table = "view = \"vanilla\"".parse().unwrap();
+        let (h, mut vcx) = open_with_views(cx, Some(&restored), tree_and_vanilla());
+        h.tile.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut vcx, p.tag, Ok(snapshot()));
+        let notice = h
+            .tile
+            .read_with(&vcx, |t, _| t.error_text())
+            .expect("the notice survives the fallback view's first snapshot");
+        assert!(notice.contains("computed dataset 'pricer'"), "{notice}");
+        h.tile.update_in(&mut vcx, |t, window, cx| {
+            t.command("group lhu", window, cx).unwrap()
+        });
+        let p = next_query(&h.requests);
+        deliver(&h, &mut vcx, p.tag, Ok(snapshot()));
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.error_text()),
+            None,
+            "a delivery after the trader acted clears it"
+        );
     }
 
     /// Two tiles sharing one frame, one `DataHandle`/`Receiver<Request>`

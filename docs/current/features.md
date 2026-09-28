@@ -112,9 +112,14 @@ default widths. Each tile runs one method for both doors.
   40 rem at the 14 px rem).
 - **Blotter specifics.** Switching the blotter's view clears its fitted widths.
   A restored record whose view no longer exists opens the fallback view
-  without them. A grouping change drops the tree column's fitted width,
-  because its labels and depths belong to the grouping, and keeps the other
-  columns' widths.
+  without them. A view over a computed dataset, such as the pricer's, is
+  neither offered by `:view` completion nor opened by `:view`, which refuses
+  with `view '<name>' is over computed dataset '<dataset>', which a module
+  answers for; the blotter cannot show it`; a record naming one opens the
+  fallback view with that refusal as its notice, which outlives the fallback
+  view's first snapshot. A grouping change drops the tree column's fitted
+  width, because its labels and depths belong to the grouping, and keeps the
+  other columns' widths.
 - **Fitted beats configured.** A fitted width overrides the configured one,
   including a `presentation.width` or pricer view width changed later, until
   `:autosize reset` or a refit.
