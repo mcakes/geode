@@ -5155,14 +5155,15 @@ run_mutation "publication routing: a document query must really arrive" \
   '        if !barrier.wants(key, now) {' \
   geode-marketdata unrelated_documents_cannot_release_a_barrier_or_discard_a_valid_stage
 
-# The rule now lives in `geode_tile::following`; this module's route stays
-# the named test.
+# Promotion runs in `geode_tile::following`; the versions it compares are
+# still this panel's own (`versions_for` its publication watch). Only the
+# promotion's input is mutated: mutating the shared `now` is caught first by
+# the requery an unrelated publish would then cause, which leaves the
+# promotion assertion unproven.
 run_mutation "publication routing: panel promotion uses its own dependencies" \
   crates/geode-marketdata/src/tile.rs \
-  '            let now = this.versions(cx);
-            let promoted = this.following.on_flip(now, Self::differs_on_followed);' \
-  '            let now = this.frame.read(cx).versions();
-            let promoted = this.following.on_flip(now, Self::differs_on_followed);' \
+  '            let promoted = this.following.on_flip(now, Self::differs_on_followed);' \
+  '            let promoted = this.following.on_flip(this.frame.read(cx).versions(), Self::differs_on_followed);' \
   geode-marketdata unrelated_documents_cannot_release_a_barrier_or_discard_a_valid_stage
 
 run_mutation "publication routing: a series query must really arrive" \
