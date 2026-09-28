@@ -1353,6 +1353,21 @@ mod tests {
         })
     }
 
+    /// A computed dataset is vocabulary a module answers for; a view over
+    /// it is exactly what the pricer reads, so the choice offers it.
+    #[test]
+    fn the_dataset_choice_offers_a_computed_dataset() {
+        let datasets = "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n[pricer]\ncomputed = true\n[pricer.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\n";
+        let config = config_from(&[(Layer::Builtin, "datasets", datasets)]);
+        let fields = fields(&config, None);
+        let dataset = fields.iter().find(|f| f.key == "dataset").unwrap();
+        assert!(
+            matches!(&dataset.kind, FieldKind::Choice { options, .. } if options == &["pricer", "risk"]),
+            "{:?}",
+            dataset.kind
+        );
+    }
+
     /// A local dataset (the app's own documents, such as pricer sheets) is
     /// not something a view reads, so the dataset choice does not offer it.
     #[test]

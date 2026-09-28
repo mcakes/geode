@@ -256,7 +256,9 @@ pub fn pickable_columns(config: &Config) -> Vec<Pickable> {
         .unwrap_or_default();
 
     let mut out: Vec<Pickable> = Vec::new();
-    for dataset in &schema.datasets {
+    // A computed dataset's values cannot be listed (no relation); its
+    // columns that another dataset shares are picked through that dataset.
+    for dataset in schema.datasets.iter().filter(|d| !d.computed) {
         for column in dataset.categorical_columns() {
             if let Some(p) = out.iter_mut().find(|p| p.column == column) {
                 p.datasets.push(dataset.name.clone());

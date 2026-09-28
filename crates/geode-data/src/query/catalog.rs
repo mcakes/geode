@@ -32,7 +32,8 @@ fn build_catalog_with(
     let conn = &tx;
     let sizes = table_sizes(conn)?;
     let mut datasets = Vec::with_capacity(schema.datasets.len());
-    for ds in &schema.datasets {
+    // A computed dataset has no tables, so it has no history to report.
+    for ds in schema.datasets.iter().filter(|d| !d.computed) {
         datasets.push(dataset_catalog(conn, ds, as_of, &sizes)?);
         after_dataset();
     }

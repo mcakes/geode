@@ -398,7 +398,9 @@ A view query compiles scope predicates and grouping into one statement for
 all tree depths. Each measure is aggregated at its own grain, then joined at
 the grouping cardinality. The result is an immutable columnar `Snapshot`:
 expanding a tree node works on the prepared result rather than issuing another
-database query. User supplied scope values are bound as parameters.
+database query. User supplied scope values are bound as parameters. A computed
+dataset has no relation: the compiler refuses a view or join over it, and
+distinct-value requests skip it.
 
 A scope reaching compilation still carrying a named-expression reference
 (`Scope.named` nonempty) is refused outright, with `StoreError::Scope("scope

@@ -1178,6 +1178,52 @@ grain = "underlying"
         assert_eq!(g[2].datasets, vec!["risk_snapshot"]);
     }
 
+    /// A computed measures dataset a module answers for in process.
+    const COMPUTED_PRICER: &str = r#"
+[pricer]
+computed = true
+[pricer.columns.instrument_ref]
+type = "utf8"
+role = "key"
+[pricer.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+[pricer.columns.option_type]
+type = "utf8"
+role = "dimension"
+grain = "instrument"
+[pricer.columns.npv]
+type = "f64"
+role = "measure"
+grain = "underlying"
+"#;
+
+    /// A computed dataset has no relation, so its values cannot be listed;
+    /// a column another dataset shares is picked through that dataset.
+    #[test]
+    fn pickables_skip_a_computed_dataset() {
+        let config = config_from(&[("datasets", COMPUTED_PRICER)]);
+        let p = super::super::pickable_columns(&config);
+        assert!(
+            !p.iter().any(|c| c.column == "option_type"),
+            "a computed dataset's categorical column is not pickable: {p:?}"
+        );
+    }
+
+    /// The grouping vocabulary is what the compiler accepts in a slot, and
+    /// a computed dataset's columns are exactly the vocabulary it exists to
+    /// declare, so they are groupable.
+    #[test]
+    fn groupable_columns_include_a_computed_dataset() {
+        let config = config_from(&[("datasets", COMPUTED_PRICER)]);
+        let g = super::super::groupable_columns(&config);
+        let underlying = g
+            .iter()
+            .find(|c| c.column == "underlying_ref")
+            .unwrap_or_else(|| panic!("underlying_ref from the computed dataset: {g:?}"));
+        assert_eq!(underlying.datasets, vec!["pricer"]);
+    }
+
     /// A dataset with no declared grain (no measure or attribute) has no
     /// table the compiler could scan, so it contributes nothing — the same
     /// `finest_carrying` rule that would refuse the query.

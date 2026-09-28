@@ -116,7 +116,7 @@ groups changed fields and renders whole named objects for those destinations.
 
 | Domain or edit | Destination and behavior |
 |---|---|
-| Views: dataset or column membership | `views.toml`; replaces the named definition |
+| Views: dataset or column membership | `views.toml`; replaces the named definition. The dataset choice offers every stored and computed dataset; Sources offers stored ones only. |
 | Views: order, hidden state, label, width, format | `view_presentation.toml`; overlays the definition |
 | Schema: declared-column presentation | `dataset_presentation.toml`; applies to columns owned by that dataset |
 | Groupings | `groupings.toml`; numbered slot containing an array of dimensions |

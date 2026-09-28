@@ -59,7 +59,7 @@ The main configuration documents have distinct owners:
 | Document | Defines |
 |---|---|
 | `app.toml` | Theme, primary modifier, UI settings, logging, time zone, pricing and timeseries settings |
-| `datasets.toml` | Dataset families, columns, roles, types, grains, retention, and local publication |
+| `datasets.toml` | Dataset families, columns, roles, types, grains, retention, local publication, and `computed` |
 | `views.toml` | Queryable views, joins, columns, expressions, grouping, and sorting |
 | `sources.toml` | File, subscription, and fetch sources with readiness and adapter settings |
 | `egress.toml` | Upload targets: adapter and a per-document address template |
@@ -173,6 +173,16 @@ edit saved there is such a redeclaration. Local datasets are not offered as
 the dataset choice in the Views and Sources dialogs: no view reads the app's
 own documents, and the source reader refuses a local dataset. A value that
 already names one is kept, as any current value is.
+
+A measures-family dataset may set `computed = true`: a module answers for it
+in process. No source may feed it (the source reader refuses one), no table is
+created, and any query naming it is refused with `dataset '<name>' is computed
+by a module and has no tables`. Its value is vocabulary: its columns take part
+in scope completion, groupings and the Views dialog's dataset choice exactly as
+a stored dataset's do, while the Sources dialog and the frame's value pickers
+leave it out. `computed` on a document or series dataset is an error and is
+cleared. The line pricer's `pricer` dataset is the one computed dataset every
+build declares.
 
 ## Source configuration
 

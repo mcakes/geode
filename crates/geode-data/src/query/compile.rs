@@ -492,6 +492,15 @@ pub(crate) fn compile_view_with_cache(
     let ds = schema
         .dataset(&view.dataset)
         .ok_or_else(|| compile_error(view, format!("unknown dataset '{}'", view.dataset)))?;
+    if ds.computed {
+        return Err(compile_error(
+            view,
+            format!(
+                "dataset '{}' is computed by a module and has no tables",
+                ds.name
+            ),
+        ));
+    }
 
     let n = view.grouping.len();
     let depth = max_depth.min(n);
@@ -902,6 +911,14 @@ pub(crate) fn compile_view_with_cache(
                 format!("join names unknown dataset '{}'", join.dataset),
             ));
         };
+        // A computed dataset has no relation to join against, so the join
+        // can never be honoured, required or not.
+        if joined_ds.is_computed() {
+            return Err(compile_error(
+                view,
+                format!("join names computed dataset '{}'", join.dataset),
+            ));
+        }
 
         // The key must be on the spine *as materialized*. Testing the
         // whole grouping would reference a column the bounded spine does
@@ -1439,6 +1456,37 @@ sql = "delta01 / nullif(peak, 0)"
             rows[0][1], "None",
             "a key below max_depth is NULL, not an error: {rows:?}"
         );
+    }
+
+    #[test]
+    fn a_view_over_a_computed_dataset_is_refused_before_any_table_is_touched() {
+        let (_d, store) = fixture();
+        let doc = merge_docs(
+            "datasets",
+            &[LayerDoc::builtin(
+                "datasets",
+                "[pricer]\ncomputed = true\n[pricer.columns.instrument_ref]\ntype = \"utf8\"\nrole = \"key\"\n[pricer.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"underlying\"\n",
+            )
+            .unwrap()],
+        );
+        let schema = SchemaSpec::from_doc(&doc).0;
+        let view = ViewSpec {
+            name: "vanilla".into(),
+            dataset: "pricer".into(),
+            columns: vec![geode_core::view::ViewColumn::measure("npv")],
+            ..ViewSpec::default()
+        };
+        let err = compile_view(
+            store.writer(),
+            &view,
+            &schema,
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("computed by a module"), "{err}");
     }
 
     /// The other half of the same refusal, and the arm the unknown-dataset case
