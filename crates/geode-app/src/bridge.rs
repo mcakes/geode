@@ -5782,11 +5782,13 @@ role = "key"
                     cx,
                     kind,
                     Some(&text),
-                    &["n", "j", "down"],
+                    &["n", "n", "j", "down"],
                     &["motion::down"]
                 ),
-                vec![2],
-                "{kind}: n and down move, j is silenced\n{text}"
+                // Two presses of n, so a tile where n is dead but j lives
+                // cannot score the same total.
+                vec![3],
+                "{kind}: n twice and down move, j is silenced\n{text}"
             );
         }
     }
