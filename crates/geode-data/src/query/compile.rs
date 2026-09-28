@@ -570,6 +570,13 @@ pub(crate) fn compile_view_with_cache(
             None => {}
         }
     }
+    // Context columns the host asked for (ViewSpec::context): optional, so
+    // one no grain can supply is dropped, never an error.
+    for u in view.context_dimensions(schema, dims) {
+        if let Some(grain) = u.grain {
+            unanimous.push((u.name.to_string(), grain));
+        }
+    }
     // The companion flag is a result column of its own; a view column that
     // already bears its name would make the snapshot's by-name lookups
     // ambiguous.
@@ -4399,6 +4406,86 @@ grain = "underlying"
         let found: Vec<_> = rows.iter().filter(|r| r.0 == path).collect();
         assert_eq!(found.len(), 1, "one row at '{path}': {rows:?}");
         (found[0].1.clone(), found[0].2.clone())
+    }
+
+    /// `(tree path, value, mixed)` for `column` on every row.
+    fn context_rows(
+        store: &crate::store::Store,
+        q: &CompiledQuery,
+        column: &str,
+    ) -> Vec<(String, Option<String>, bool)> {
+        let conn = store.writer();
+        let mut stmt = conn
+            .prepare(&q.sql)
+            .unwrap_or_else(|e| panic!("prepare failed: {e}\n{}", q.sql));
+        let grouping = q.grouping.clone();
+        let rows = stmt
+            .query_map(duckdb::params_from_iter(q.params.iter()), |r| {
+                let depth: i64 = r.get("row_depth")?;
+                let path: Vec<String> = grouping
+                    .iter()
+                    .take(depth as usize)
+                    .map(|g| {
+                        r.get::<_, Option<String>>(g.as_str())
+                            .map(|v| v.unwrap_or_default())
+                    })
+                    .collect::<Result<_, _>>()?;
+                let value: Option<String> = r.get(column)?;
+                let flag: bool = r.get(mixed_flag_name(column).as_str())?;
+                Ok((path.join("/"), value, flag))
+            })
+            .unwrap_or_else(|e| panic!("execute failed: {e}\n{}", q.sql));
+        rows.map(|r| r.unwrap()).collect()
+    }
+
+    fn with_context(mut view: ViewSpec, columns: &[&str]) -> ViewSpec {
+        view.context = columns.iter().map(|c| c.to_string()).collect();
+        view
+    }
+
+    #[test]
+    fn a_context_key_is_unanimous_where_one_position_sits_under_the_row() {
+        let (_dir, store) = unanimity_fixture();
+        let view = with_context(unanimity_view("[\"lhu\"]", &["npv"]), &["position_ref"]);
+        let q = compile_unanimity(&store, &view, 1);
+        let rows = context_rows(&store, &q, "position_ref");
+        let at = |p: &str| rows.iter().find(|r| r.0 == p).cloned().unwrap();
+        assert_eq!(
+            at("L2"),
+            ("L2".into(), Some("P5".into()), false),
+            "one position"
+        );
+        assert_eq!(at("L0"), ("L0".into(), None, true), "P1 and P2: mixed");
+        assert_eq!(
+            at(""),
+            ("".into(), None, true),
+            "the grand total holds five"
+        );
+    }
+
+    #[test]
+    fn a_context_column_the_dataset_lacks_is_skipped() {
+        let (_dir, store) = unanimity_fixture();
+        let view = with_context(unanimity_view("[\"lhu\"]", &["npv"]), &["nemo_id"]);
+        let q = compile_unanimity(&store, &view, 1);
+        assert!(!q.sql.contains("nemo_id"), "{}", q.sql);
+    }
+
+    #[test]
+    fn a_shown_context_column_is_not_emitted_twice() {
+        let (_dir, store) = unanimity_fixture();
+        // `strike` is already an ungrouped dimension column of this view.
+        let view = with_context(unanimity_view("[\"lhu\"]", &["npv"]), &["strike"]);
+        let q = compile_unanimity(&store, &view, 1);
+        assert_eq!(q.columns.iter().filter(|c| c.name == "strike").count(), 1);
+    }
+
+    #[test]
+    fn a_grouped_context_column_is_not_emitted() {
+        let (_dir, store) = unanimity_fixture();
+        let view = with_context(unanimity_view("[\"lhu\"]", &["npv"]), &["lhu"]);
+        let q = compile_unanimity(&store, &view, 1);
+        assert!(!q.columns.iter().any(|c| c.name == mixed_flag_name("lhu")));
     }
 
     fn value(v: &str) -> Shown {

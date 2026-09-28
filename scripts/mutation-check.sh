@@ -22678,6 +22678,25 @@ run_mutation "launch: a shared factory stops forwarding accepts" \
   '        &[]' \
   geode-app the_production_roster_opens_market_data_on_an_underlying
 
+# A context column the view shows must not be emitted a second time.
+run_mutation "context: a shown context column is emitted twice" \
+  crates/geode-core/src/view.rs \
+  '                && !self.columns.iter().any(|c| c.name() == name)' \
+  '                && true' \
+  geode-data a_shown_context_column_is_not_emitted_twice
+
+run_mutation "context: a grouped context column is emitted" \
+  crates/geode-core/src/view.rs \
+  '            let wanted = !self.grouping.contains(name)' \
+  '            let wanted = true' \
+  geode-data a_grouped_context_column_is_not_emitted
+
+run_mutation "context: the compiler drops context columns" \
+  crates/geode-data/src/query/compile.rs \
+  '    for u in view.context_dimensions(schema, dims) {' \
+  '    for u in view.context_dimensions(schema, dims).into_iter().take(0) {' \
+  geode-data a_context_key_is_unanimous_where_one_position_sits_under_the_row
+
 # A reload must reach the underlying list, or a desk edit to it waits for
 # a restart.
 run_mutation "pricer app: a reload leaves the underlying list stale" \

@@ -354,6 +354,11 @@ pub struct ViewSpec {
     /// exists. At most one parsed view is marked. Without a string default,
     /// `from_doc` sorts views by name for deterministic fallback selection.
     pub is_default: bool,
+    /// Runtime only, never read from config: the columns the host wants
+    /// each row's single value of, beyond what the view shows (the shell's
+    /// dimension-action registry). The data service fills it per query;
+    /// validation ignores it. See [`ViewSpec::context_dimensions`].
+    pub context: Vec<String>,
 }
 
 /// The declared grain of `ds` an ungrouped dimension column is computed
@@ -441,6 +446,44 @@ impl ViewSpec {
                 grain: unanimity_grain(ds, &self.grouping, name, dims),
             })
             .collect()
+    }
+
+    /// The context columns ([`ViewSpec::context`]) the compiler supplies
+    /// by the unanimity rule, as optional ungrouped dimensions: those the
+    /// primary dataset declares as a key or a dimension, which the view
+    /// neither groups by, nor names as a column, nor takes off a join, and
+    /// which are not derived. A column the dataset lacks is skipped
+    /// silently — the host's list spans datasets. Each appears once.
+    pub fn context_dimensions<'a>(
+        &'a self,
+        schema: &SchemaSpec,
+        dims: &DerivedDimensions,
+    ) -> Vec<UngroupedDimension<'a>> {
+        let Some(ds) = schema.dataset(&self.dataset) else {
+            return Vec::new();
+        };
+        if ds.is_document() || ds.is_series() {
+            return Vec::new();
+        }
+        let mut out: Vec<UngroupedDimension<'a>> = Vec::new();
+        for name in &self.context {
+            let wanted = !self.grouping.contains(name)
+                && !self.columns.iter().any(|c| c.name() == name)
+                && dims.get(name).is_none()
+                && !self.joined_column(schema, name)
+                && ds.column(name).is_some_and(|c| {
+                    matches!(c.role, ColumnRole::Key | ColumnRole::Dimension { .. })
+                })
+                && !out.iter().any(|u| u.name == name);
+            if wanted {
+                out.push(UngroupedDimension {
+                    name,
+                    required: false,
+                    grain: unanimity_grain(ds, &self.grouping, name, dims),
+                });
+            }
+        }
+        out
     }
 
     /// Distinct grains of the measures this view selects, coarse first.
@@ -1874,6 +1917,25 @@ grain = "position"
              [[v.columns]]\nname = \"strike\"\nkind = \"dimension\"\nrequired = {required}\n"
         );
         ViewSpec::from_doc(&doc(&text)).0.remove(0)
+    }
+
+    /// The context list keeps only a declared key or dimension the view
+    /// neither shows nor groups by, once each; a name the dataset lacks is
+    /// skipped. Every entry is optional.
+    #[test]
+    fn context_dimensions_keep_only_unshown_ungrouped_declared_columns_once() {
+        let schema = carried_schema(true);
+        let mut view = strike_view(r#"["lhu"]"#, true);
+        view.context = ["position_ref", "strike", "lhu", "position_ref", "nonesuch"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let got = view.context_dimensions(&schema, &dimensions(""));
+        let names: Vec<&str> = got.iter().map(|u| u.name).collect();
+        assert_eq!(names, vec!["position_ref"]);
+        assert!(got.iter().all(|u| !u.required));
+        // Validation ignores the runtime list.
+        assert!(view.validate(&schema, &dimensions("")).is_empty());
     }
 
     /// The unanimity rule supplies an ungrouped dimension from a grain that

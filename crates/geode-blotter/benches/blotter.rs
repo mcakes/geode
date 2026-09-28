@@ -87,6 +87,7 @@ fn shape(l1: usize, l2: usize, l3: usize, measures: usize) -> (Snapshot, ViewSpe
         sort: Vec::new(),
         presentation: BTreeMap::new(),
         is_default: false,
+        context: Vec::new(),
     };
     (snapshot, view)
 }
