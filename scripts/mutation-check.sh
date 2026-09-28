@@ -2795,6 +2795,56 @@ run_mutation "edit column: the blotter reports the tree column as active" \
   geode-blotter \
   the_tree_column_is_no_active_column
 
+run_mutation "column inherit: the overlay's keys are not read as set" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '            keys.set(key, sets(p, key));' \
+  '            keys.set(key, false);' \
+  geode-shell \
+  presentation_keys_read_presence_not_value
+
+run_mutation "column inherit: the writer writes an inherited key" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '    if set.has("scale")' \
+  '    if true' \
+  geode-shell \
+  an_inherited_field_equal_or_not_writes_nothing
+
+run_mutation "column inherit: choosing the inherited option does not pin" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        set.set(&key, true);' \
+  '        set.set(&key, was);' \
+  geode-shell \
+  choosing_the_inherited_option_pins_it
+
+run_mutation "column inherit: r does not unset the key" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        set.set(key, false);
+        Ok(Fold { key, to })' \
+  '        Ok(Fold { key, to })' \
+  geode-shell \
+  r_inherits_a_set_view_color_and_the_key_leaves_the_overlay
+
+run_mutation "column inherit: a set-only change is not a write" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            || self.presentation_set != self.baseline_presentation_set' \
+  '            || false' \
+  geode-shell \
+  r_on_a_pinned_equal_value_removes_the_key
+
+run_mutation "column inherit: the ↺ click reaches nothing" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                                                on_inherit_clicked(shell, position, window, cx);' \
+  '                                                let _ = (shell, position, window);' \
+  geode-shell \
+  the_inherit_control_does_what_r_does
+
+run_mutation "column inherit: shift+r is not routed in the column stage" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  "        NormalCommand::Verb('R') if in_column_stage(shell) => inherit_all_rows(shell, cx)," \
+  "" \
+  geode-shell \
+  shift_r_inherits_every_field
+
 run_mutation "dialog stack: every chord reaches through a dialog" \
   crates/geode-shell/src/shell/input.rs \
   '                        && dialog::opens_dialog(&action)' \
