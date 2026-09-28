@@ -5,7 +5,6 @@
 //! `DataTable`; [`tile`] owns requests and frame synchronization;
 //! [`content`] exposes the tile and its factory to the shell.
 
-pub mod colour_cache;
 pub mod content;
 pub mod core;
 pub mod delegate;

@@ -1,4 +1,4 @@
-//! Cached named colours for the theme's resolved inputs.
+//! Cached named colours for the theme's resolved inputs, shared by every tile that paints a named colour.
 //!
 //! Each defined name resolves its base and sign variants once per cache fill.
 //! Hue definitions require interpolation and gamut clipping; cell painting

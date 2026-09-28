@@ -11156,11 +11156,11 @@ run_mutation "blotter: a tile hands the delegate its colours" \
   a_delivered_snapshot_hands_the_delegate_the_tiles_colours
 
 # The cache empties when an anchor changes.
-run_mutation "blotter: the colour cache invalidates on a changed anchor" \
-  crates/geode-blotter/src/colour_cache.rs \
+run_mutation "tile: the colour cache invalidates on a changed anchor" \
+  crates/geode-tile/src/colour.rs \
   '        if self.key.as_ref() != Some(&key) {' \
   '        if self.key.is_none() {' \
-  geode-blotter \
+  geode-tile \
   a_steady_theme_costs_no_recompute_and_a_changed_anchor_empties_the_cache
 
 # An unknown name paints in foreground, never a stale colour.
@@ -11287,15 +11287,15 @@ run_mutation "colours: the swatch triad follows tint_sign" \
   geode-shell \
   ticking_tint_by_sign_paints_the_two_variant_swatches
 
-# The blotter cache resolves each tint variant under its own sign. Returning
-# the base for the positive variant removes its tint. These tests inspect
-# the cached colours; rendered text colour is not observable in
+# The tile kit's colour cache resolves each tint variant under its own sign.
+# Returning the base for the positive variant removes its tint. These tests
+# inspect the cached colours; rendered text colour is not observable in
 # TestAppContext.
-run_mutation "blotter: the colour cache resolves the sign variants" \
-  crates/geode-blotter/src/colour_cache.rs \
+run_mutation "tile: the colour cache resolves the sign variants" \
+  crates/geode-tile/src/colour.rs \
   '            positive: to_hsla(resolve_signed(def, Sign::Positive, anchors, tokens)),' \
   '            positive: to_hsla(resolve_signed(def, Sign::Zero, anchors, tokens)),' \
-  geode-blotter \
+  geode-tile \
   a_tinted_definition_resolves_three_variants_and_an_untinted_one_three_of_the_base
 
 run_mutation "objectdialog: r inherits in the column stage" \

@@ -5867,7 +5867,7 @@ mod tests {
         });
         assert_eq!(
             resolved,
-            Some(crate::colour_cache::Resolved::plain(
+            Some(geode_tile::colour::Resolved::plain(
                 geode_shell::shell::colours::to_hsla(danger)
             )),
             "the tile's own colours must reach the delegate with the plan"
