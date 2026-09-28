@@ -155,15 +155,23 @@ fn join_parts(parts: &[String]) -> String {
 /// the table (the grammar round-trips it), else its template token with
 /// its legs' distinct underlyings, then the painted summary (expiries,
 /// then strikes), so a custom package's painted text is findable.
-fn package_search(sheet: &Sheet, row: usize) -> String {
+///
+/// `shown`: a partly hidden package's shown legs. Its key is then always
+/// the token-and-parts form over those legs alone, as its painted summary
+/// is: the template form reads every leg, so `/` would find the row by a
+/// hidden leg column 0 does not paint.
+fn package_search(sheet: &Sheet, row: usize, shown: Option<&[usize]>) -> String {
     let text = sheet.shorthand(row);
-    if !text.is_empty() && !text.contains('\n') {
+    if shown.is_none() && !text.is_empty() && !text.contains('\n') {
         return text;
     }
     let RowKind::Package { template } = sheet.kind(row) else {
         return text;
     };
-    let p = leg_parts(sheet, sheet.children(row));
+    let p = match shown {
+        Some(legs) => leg_parts(sheet, legs.iter().copied()),
+        None => leg_parts(sheet, sheet.children(row)),
+    };
     join_parts(&[
         template.token().to_string(),
         p.unds.join("/"),
@@ -257,7 +265,11 @@ impl GridModel {
                         SharedString::new_static(template.token()),
                         SharedString::from(summary),
                         SharedString::from(leg_note(shown, total)),
-                        SharedString::from(package_search(sheet, r)),
+                        SharedString::from(package_search(
+                            sheet,
+                            r,
+                            subset.as_ref().map(|(legs, _)| legs.as_slice()),
+                        )),
                     )
                 }
                 _ => {
@@ -633,6 +645,35 @@ mod tests {
         let all = build(&s, &e);
         assert_eq!(all.rows[1].cells[col("npv")].text.as_ref(), "1.00");
         assert_eq!(all.rows[1].note.as_ref(), "· 2 legs");
+    }
+
+    /// A partly hidden package's find key reads its shown legs, as its
+    /// summary does: `/` must never find a row by a hidden leg's strike
+    /// that column 0 does not paint.
+    #[test]
+    fn a_partly_hidden_packages_find_key_reads_only_its_shown_legs() {
+        let s = sheet();
+        let v = scoped(&s);
+        let m = GridModel::build(&s, &Expansion::default(), &v, &plan(), Clock::utc());
+        let p = &m.rows[1];
+        assert_eq!(p.row, Some(1));
+        assert!(
+            !p.search.contains("4800"),
+            "the hidden leg's strike is not findable: {}",
+            p.search
+        );
+        assert!(
+            p.search.contains("5200"),
+            "the shown leg's is: {}",
+            p.search
+        );
+        assert!(
+            p.search.contains(p.text.as_ref()),
+            "the painted summary is findable"
+        );
+        // Unscoped, the key is the template form again, over every leg.
+        let all = build(&s, &Expansion::default());
+        assert!(all.rows[1].search.contains("4800"));
     }
 
     #[test]

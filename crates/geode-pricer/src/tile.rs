@@ -21,6 +21,7 @@ use crate::core::template::Template;
 use crate::core::tree::Expansion;
 use crate::core::undo::UndoStack;
 use crate::core::views::ColumnPlan;
+use crate::core::visibility::{Visibility, apply_scope};
 use crate::core::{Place, RowSpec};
 use crate::delegate::{
     CellPointer, ChevronClicked, ColumnMoved, DateFieldPaint, EditorField, EditorPaint,
@@ -39,6 +40,7 @@ use geode_core::document::DocumentRows;
 use geode_core::grid::selection::{Resolved, SelectKind, Selection};
 use geode_core::pricing::{PriceLine, PriceOutcome, PriceParams};
 use geode_core::query::{QueryKey, QueryOutcome};
+use geode_core::scope::Scope;
 use geode_data::{DataHandle, Refusal};
 use geode_shell::actions::ActionId;
 use geode_shell::choice::{ChoiceList, DEFAULT_CAP};
@@ -55,6 +57,7 @@ use geode_shell::vimnav::NavCommand;
 use geode_tile::confirm::{self, Confirm, ConfirmHost};
 use geode_tile::following::{self, FrameDoor};
 use geode_tile::menu::{self, ActionRow, Hint, Menu, MenuHost, MenuIds, Row};
+use geode_tile::notice::Notice;
 use geode_widgets::datefield::{DateTimeField, FieldKey, Precision, Segment, route};
 use gpui::prelude::*;
 use gpui::{
@@ -202,6 +205,12 @@ const ENTRY_HINT: &str = "-5 SPX DEC26 95%/105% CS";
 /// one it opened on (a view switch), or whose package cell would now open
 /// on other text (a template reload), refuses with this.
 pub(crate) const MOVED: &str = "the cell moved; edit refused";
+
+/// A package row whose legs the frame's scope partly hides paints only
+/// its shown legs, so an edit through it would write legs the trader
+/// cannot see: every cell edit onto it (the editor, a selection's commit
+/// or live step) refuses with this.
+pub(crate) const PARTLY_HIDDEN: &str = "package partly hidden by the scope: edit its legs";
 
 /// Cell editor attached to a line identity and column kind. Rebuilds follow the
 /// target across movement and close the editor if it disappears; commit checks
@@ -368,6 +377,23 @@ pub struct PricerTile {
     pub(crate) shared: Rc<Shared>,
     pub(crate) sheet: Sheet,
     pub(crate) expansion: Expansion,
+    /// `:unscoped`: this tile ignores the frame's scope. Session key
+    /// `unscoped`, as the blotter's.
+    unscoped: bool,
+    /// The scope this tile follows, as last read from the frame
+    /// (`effective_scope`; empty while `unscoped`); `Err` when a named
+    /// expression did not resolve. The frame observer re-reads it on every
+    /// notify and rebuilds only when it changed; every rebuild re-applies
+    /// it, so a scope over a measure or `status` follows repricing.
+    applied_scope: Result<Scope, String>,
+    /// `applied_scope`'s verdict over the sheet as last built.
+    pub(crate) visibility: Visibility,
+    /// Why `applied_scope` hides nothing although it is not empty: a
+    /// column `pricer` lacks, an evaluator error, or an unresolved name.
+    /// A standing header notice while it lasts.
+    scope_refusal: Option<SharedString>,
+    /// The `unscoped` chip's tooltip selector, built once from the tile id.
+    unscoped_tip: SharedString,
     pub(crate) plan: ColumnPlan,
     pub(crate) model: Rc<GridModel>,
     pub(crate) table: Entity<TableState<SheetDelegate>>,
@@ -529,6 +555,16 @@ pub struct PricerTile {
     /// Counts recorded sheet changes, so an open step editor can tell
     /// whether its steps are still the sheet's last change.
     pub(crate) edit_seq: u64,
+}
+
+/// The scope a tile follows: the frame's effective scope for its lane
+/// (the pricer has no tile layer), or none while `unscoped`. `Err` is an
+/// unresolved named expression, which the tile refuses as a whole.
+fn read_scope(frame: &FrameRef, unscoped: bool, cx: &App) -> Result<Scope, String> {
+    if unscoped {
+        return Ok(Scope::default());
+    }
+    frame.read(cx).effective_scope(&Scope::default())
 }
 
 fn app_clock(cx: &App) -> Clock {
@@ -696,8 +732,12 @@ impl PricerTile {
         )
         .detach();
         // Pricing does not follow frame queries, so there is no result to wait for.
-        // Arrive immediately to avoid holding other tiles behind the flip barrier.
+        // The frame's scope applies here, synchronously (a bounded pass over
+        // the sheet and one model build), and the tile then arrives at once
+        // — on every path, a refused or unchanged scope included — so it
+        // never holds other tiles behind the flip barrier.
         cx.observe(frame.entity(), |this, _, cx| {
+            this.follow_scope(cx);
             // Arrive through the tile's own handle: the observed entity alone
             // would answer for the shared lane, not this workspace's.
             let frame = this.frame.clone();
@@ -759,13 +799,20 @@ impl PricerTile {
             col: 0,
             last_row: 0,
         };
+        let unscoped = record.unscoped;
+        let applied_scope = read_scope(&frame, unscoped, cx);
         let mut this = PricerTile {
             id,
             frame,
             data,
             shared,
+            visibility: Visibility::all(&sheet),
             sheet,
             expansion,
+            unscoped,
+            applied_scope,
+            scope_refusal: None,
+            unscoped_tip: format!("tip-pricer-unscoped-{}", id.0).into(),
             plan: ColumnPlan::default(),
             model: Rc::new(GridModel::default()),
             table,
@@ -974,6 +1021,7 @@ impl PricerTile {
                 Some(held) => held.clone(),
                 None => self.expansion.live_ids(&self.sheet).collect(),
             },
+            unscoped: self.unscoped,
         }
         .to_table()
     }
@@ -1424,6 +1472,10 @@ impl PricerTile {
         ) else {
             return;
         };
+        if self.partly_hidden(row) {
+            self.footer = Some(PARTLY_HIDDEN.into());
+            return;
+        }
         let (line, col, kind) = (self.sheet.id(row), self.cursor.col, planned.def.kind);
         let editor = match cell::editor_for(&self.sheet, row, kind, &planned.format) {
             Err(why) => {
@@ -1677,6 +1729,11 @@ impl PricerTile {
         let Some(row) = self.editor_row(line, col, kind, window, cx) else {
             return;
         };
+        // The scope may have changed under an open editor.
+        if self.partly_hidden(row) {
+            self.finish_commit(Err(PARTLY_HIDDEN.into()), window, cx);
+            return;
+        }
         // `editor_row` confirmed the planned column at `col`.
         let format = &self.plan.columns[col].format;
         // A package cell that would open on other text now (a template
@@ -1826,6 +1883,10 @@ impl PricerTile {
         let Some(row) = self.editor_row(line, col, kind, window, cx) else {
             return;
         };
+        if self.partly_hidden(row) {
+            self.finish_commit(Err(PARTLY_HIDDEN.into()), window, cx);
+            return;
+        }
         let answer = cell::commit_date(&self.sheet, row, date);
         self.finish_commit(answer.map(|e| e.into_iter().collect()), window, cx);
     }
@@ -3296,6 +3357,15 @@ impl PricerTile {
             Command::Autosize { reset } => self
                 .autosize_columns(reset, window, cx)
                 .map_err(str::to_string),
+            Command::Unscoped => {
+                self.unscoped = !self.unscoped;
+                self.follow_scope(cx);
+                // The chip follows the toggle even when the scope read is
+                // unchanged (an empty frame scope rebuilds nothing).
+                self.rebuild_chrome();
+                cx.notify();
+                Ok(())
+            }
         }
     }
 
@@ -3883,17 +3953,98 @@ impl PricerTile {
 
     /// Model, table, chrome, notify — after every change that moves what
     /// the grid shows.
+    ///
+    /// Every rebuild re-applies the scope in force: an edit, a delivery or
+    /// a load changes what a scope over a measure or `status` matches.
     pub(crate) fn rebuild(&mut self, cx: &mut Context<Self>) {
-        self.model = Rc::new(GridModel::build(
+        self.apply_visibility();
+        let model = Rc::new(GridModel::build(
             &self.sheet,
             &self.expansion,
-            &crate::core::Visibility::all(&self.sheet),
+            &self.visibility,
             &self.plan,
             self.clock,
         ));
+        self.recover_hidden_cursor(&model);
+        self.model = model;
         self.install_model(cx);
         self.rebuild_chrome();
         cx.notify();
+    }
+
+    /// Re-read the frame's effective scope (empty while `unscoped`) and
+    /// rebuild when it differs from the one applied — an unrelated frame
+    /// notify (a grouping, an as-of, a barrier) rebuilds nothing. The frame
+    /// observer's arrival follows on every path.
+    pub(crate) fn follow_scope(&mut self, cx: &mut Context<Self>) {
+        let scope = read_scope(&self.frame, self.unscoped, cx);
+        if scope != self.applied_scope {
+            self.applied_scope = scope;
+            self.rebuild(cx);
+        }
+    }
+
+    /// `applied_scope` over the sheet as it is now. A refusal hides
+    /// nothing and stands as a header notice until a scope the pricer can
+    /// honour replaces it.
+    fn apply_visibility(&mut self) {
+        let verdict = match &self.applied_scope {
+            Ok(scope) => apply_scope(&self.sheet, scope, &self.shared.dims.borrow(), self.clock),
+            Err(message) => Err(message.clone()),
+        };
+        match verdict {
+            Ok(v) => {
+                self.visibility = v;
+                self.scope_refusal = None;
+            }
+            Err(message) => {
+                self.visibility = Visibility::all(&self.sheet);
+                if self.scope_refusal.as_deref() != Some(message.as_str()) {
+                    self.scope_refusal = Some(message.into());
+                }
+            }
+        }
+    }
+
+    /// A cursor whose line the scope now hides goes to the nearest row
+    /// above it that `model` still shows, else the nearest below — not to
+    /// whatever row slid into its old index (`reconcile_cursor`'s fallback
+    /// for a deleted line). Read against the model being replaced, so no
+    /// index into it outlives this call.
+    fn recover_hidden_cursor(&mut self, model: &GridModel) {
+        if self.loading {
+            return;
+        }
+        let Some(id) = self.cursor.line else {
+            return;
+        };
+        let hidden = self
+            .sheet
+            .index_of(id)
+            .is_some_and(|r| !self.visibility.is_shown(r));
+        if !hidden || model.grid_row_of(id).is_some() {
+            return;
+        }
+        let Some(at) = self.model.grid_row_of(id) else {
+            return;
+        };
+        let shown: std::collections::HashSet<LineId> =
+            model.rows.iter().filter_map(|r| r.id).collect();
+        let old = &self.model.rows;
+        if let Some(to) = old[..at]
+            .iter()
+            .rev()
+            .chain(old[at + 1..].iter())
+            .find_map(|r| r.id.filter(|i| shown.contains(i)))
+        {
+            self.cursor.line = Some(to);
+        }
+    }
+
+    /// Whether sheet row `row` is a package the scope partly hides: its
+    /// row is read-only (`PARTLY_HIDDEN`).
+    pub(crate) fn partly_hidden(&self, row: usize) -> bool {
+        self.sheet.is_package(row) && self.visibility.is_partial(&self.sheet, row)
     }
 
     /// Install the prepared model, refresh table layout, and reconcile editor and cursor.
@@ -3982,11 +4133,19 @@ impl PricerTile {
         } else if self.refusals > 0 {
             Some(REFUSED.into())
         } else {
-            self.notice.clone().or_else(|| self.view_notice.clone())
+            self.notice.clone()
         };
+        let standing = self
+            .scope_refusal
+            .clone()
+            .map(Notice::danger)
+            .or_else(|| self.view_notice.clone().map(Notice::warning));
         self.header = header::prepare(HeaderInputs {
             sheet: &self.sheet,
             notice,
+            standing,
+            hidden: self.visibility.hidden,
+            unscoped: self.unscoped,
             prompt: self.confirm.as_ref().map(|c| c.prompt_text().clone()),
             save: self.save_notice.clone(),
             settings: &settings,
@@ -4412,6 +4571,7 @@ impl gpui::Render for PricerTile {
                 name_tip: self.name_tip.clone(),
                 rename: self.rename_field.as_ref(),
                 picker,
+                unscoped_tip: self.unscoped_tip.clone(),
             },
             theme,
         );
@@ -8410,6 +8570,8 @@ pub(crate) mod tests {
             "e book",
             "autosize",
             "autosize reset",
+            // Detaching reads the frame; it never writes it.
+            "unscoped",
         ];
         for word in crate::core::commands::VERBS {
             assert!(
@@ -11747,5 +11909,6 @@ pub(crate) mod tests {
         assert_eq!(h.mode(&mut vcx), "normal");
     }
 
+    mod scope;
     mod selection;
 }

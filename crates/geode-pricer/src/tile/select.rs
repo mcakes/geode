@@ -8,7 +8,8 @@ use super::*;
 use crate::core::cell::READ_ONLY;
 use crate::core::package::{self, package_qty};
 use crate::core::select::{
-    Skip, Skips, group_plan, lines_of, move_plan, risk_totals, set_notice, step_notice, top_most,
+    Skip, Skips, group_plan, lines_of, move_plan, risk_totals_visible, set_notice, step_notice,
+    top_most,
 };
 use crate::core::sheet::OwnShifts;
 use geode_core::grid::selection::Lost;
@@ -129,7 +130,7 @@ impl PricerTile {
             })
             .collect();
         let measures: Vec<(Measure, bool)> = planned.iter().map(|(m, _)| *m).collect();
-        let sums = risk_totals(&self.sheet, &top, &measures);
+        let sums = risk_totals_visible(&self.sheet, &top, &measures, &self.visibility);
         self.totals.clear();
         for ((_, planned), sum) in planned.into_iter().zip(sums) {
             let cell = match sum {
@@ -169,6 +170,16 @@ impl PricerTile {
     /// under `V`, whose columns span every column including read-only
     /// ones, and the block's under `v`. A typed commit writes the
     /// cursor's column alone under both; see [`Self::commit_selection`].
+    /// Whether the selection holds a package row the scope partly hides.
+    /// A selected package stands for every leg (`lines_of`), hidden ones
+    /// too, so a bulk write through it would reach legs no row paints:
+    /// the whole write refuses with [`PARTLY_HIDDEN`].
+    pub(crate) fn selection_partly_hidden(&self) -> bool {
+        self.selected_sheet_rows()
+            .into_iter()
+            .any(|r| self.partly_hidden(r))
+    }
+
     pub(crate) fn selection_targets(&self) -> (Vec<usize>, Vec<usize>) {
         let Some(r) = &self.resolved else {
             return (Vec::new(), Vec::new());
@@ -205,6 +216,13 @@ impl PricerTile {
     ) -> bool {
         if self.loading {
             self.footer = Some("the sheet is still loading".into());
+            self.rebuild_chrome();
+            cx.notify();
+            return false;
+        }
+        if self.selection_partly_hidden() {
+            self.footer = Some(PARTLY_HIDDEN.into());
+            self.sync_editor(cx);
             self.rebuild_chrome();
             cx.notify();
             return false;
@@ -536,6 +554,15 @@ impl PricerTile {
         // sign of it in the field.
         if !self.cursor_on_editor(line, kind) {
             return None;
+        }
+        // Refused here rather than answered `None`: the single-field
+        // nudge would then step the editor's text, which the commit would
+        // refuse anyway.
+        if self.selection_partly_hidden() {
+            self.footer = Some(PARTLY_HIDDEN.into());
+            self.rebuild_chrome();
+            cx.notify();
+            return Some(());
         }
         let (lines, cols) = self.selection_targets();
         let top = top_most(&self.sheet, &self.selected_sheet_rows());

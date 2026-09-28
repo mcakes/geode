@@ -297,7 +297,7 @@ fn assert_parity(cases: &[(&str, Scope)], ds: &DatasetSpec) {
         let sql = sql_ids(&conn, scope, ds, &dims);
         let eval = eval_ids(&rows, scope, ds, &dims);
         if trace {
-            eprintln!("{name:<40} sql={sql:?}");
+            println!("{name:<40} sql={sql:?}");
         }
         let agree = match (&sql, &eval) {
             (Ok(a), Ok(b)) => a == b,
