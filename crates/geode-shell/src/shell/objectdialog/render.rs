@@ -40,8 +40,8 @@ use super::sources;
 use super::views;
 use super::{
     ColumnContext, ColumnDoor, ColumnLayers, Completions, Confirm, Destination, Domain, Draft,
-    EditRow, FellTo, FieldKind, Fold, NameSeed, ObjectDialogState, ObjectRow, READ_ONLY_NOTICE,
-    RowDrag, RowVocabulary, Stage, Step,
+    EditRow, FieldKind, Fold, NameSeed, ObjectDialogState, ObjectRow, READ_ONLY_NOTICE, RowDrag,
+    RowVocabulary, Stage, Step,
 };
 use crate::dialogmode::{self, DialogMode, EscapeStep, NormalCommand};
 use crate::footer::{Hint, HintRow};
@@ -1021,6 +1021,18 @@ fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<Shel
             let Some(item) = dataset_columns::item_for(dataset, column, &overlay_object) else {
                 return false;
             };
+            // The keys the dataset overlay sets for this column — `item_for` parsed the
+            // overlay alone, so its presentation is exactly that. A column entered
+            // before in this draft keeps the state it was left in.
+            let keys = views::PresentationKeys::of(&item.presentation);
+            draft
+                .presentation_set
+                .entry(column.to_string())
+                .or_insert(keys);
+            draft
+                .baseline_presentation_set
+                .entry(column.to_string())
+                .or_insert(keys);
             (
                 views::column_fields(&item, &colours, Destination::DatasetPresentation),
                 ColumnContext {
@@ -2434,13 +2446,8 @@ fn revalidate(shell: &mut ShellView) {
     // Explain a cleared key's inherited value after reseeding its field. Name the
     // actual fallback layer: dataset presentation takes precedence over the view
     // definition. No lower layer means the field uses its default without a notice.
-    if let Some(Fold { key, to: Some(to) }) = fold {
-        let layer = match to {
-            FellTo::Desk => "the desk",
-            FellTo::Dataset => "the dataset",
-            FellTo::EachView => "each view",
-        };
-        set_notice(shell, format!("{key} follows {layer} again"));
+    if let Some(Fold { key, to }) = fold {
+        set_notice(shell, format!("{key} follows {} again", to.phrase()));
     }
 }
 

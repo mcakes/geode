@@ -1122,21 +1122,34 @@ impl Step {
     }
 }
 
-/// What a cleared column-stage key fell to: the desk view's own key, the dataset level,
-/// or — from the Schema door — whatever each view says. `None` means nothing below sets
-/// the key, so there is nothing to tell the trader.
+/// What an inherited column-stage key follows: the desk view's own key, the dataset
+/// level, the kind default when neither sets it, or — from the Schema door — whatever
+/// each view says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FellTo {
     Desk,
     Dataset,
+    Default,
     EachView,
 }
 
-/// One fold's outcome: the key the trader cleared, and what it fell to.
+impl FellTo {
+    /// How a notice names it: "color follows {phrase} again".
+    pub const fn phrase(self) -> &'static str {
+        match self {
+            FellTo::Desk => "the desk",
+            FellTo::Dataset => "the dataset",
+            FellTo::Default => "the default",
+            FellTo::EachView => "each view",
+        }
+    }
+}
+
+/// A key the trader released, and what it now follows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Fold {
     pub key: &'static str,
-    pub to: Option<FellTo>,
+    pub to: FellTo,
 }
 
 impl Draft {
@@ -1543,12 +1556,13 @@ impl Draft {
     }
 
     /// Fold installed column fields before validation or rendering a write. Views
-    /// updates the parent list item against definition plus dataset values; Schema
-    /// updates its scratch item against kind defaults. No context means no fold.
+    /// updates the parent list item, Schema its scratch item, through the column's set:
+    /// set keys take their field's value, inherited keys the layer below (Views: the
+    /// definition with the dataset level over it; Schema: the kind default). Inherited
+    /// fields are then reseeded, so the screen shows the value that will read back.
     ///
-    /// Cleared label and width fields inherit the baseline. Reseed them immediately so
-    /// the draft shows the value that persistence will read back. Return the cleared
-    /// key and its inherited layer for the caller's notice.
+    /// Returns the key an empty Label or `auto` Width just released, and what it now
+    /// follows, for the caller's notice.
     pub fn fold_column(&mut self) -> Option<Fold> {
         let name = self.column.clone()?;
         // Both doors install one; a stage without it folds nothing, which
@@ -1559,19 +1573,20 @@ impl Draft {
             self.column_ctx.is_some(),
             "a column stage always carries its door's context"
         );
-        // The `door` is `Copy` and the `layers` are what the baseline and
-        // the fell-to decision below read — cloning the whole context
-        // would clone the overlay table and the scratch item on every
-        // keystroke, for two fields neither arm touches.
-        let (door, layers) = {
+        let (door, baseline) = {
             let ctx = self.column_ctx.as_ref()?;
-            (ctx.door, ctx.layers.clone())
+            let baseline = match ctx.door {
+                ColumnDoor::View => ctx.layers.below_view(),
+                ColumnDoor::Dataset => ColumnPresentation::default(),
+            };
+            (ctx.door, baseline)
         };
-        let baseline = match door {
-            ColumnDoor::View => layers.below_view(),
-            ColumnDoor::Dataset => ColumnPresentation::default(),
-        };
-        let cleared = match door {
+        let mut set = self
+            .presentation_set
+            .get(&name)
+            .copied()
+            .unwrap_or_default();
+        let (released, folded) = match door {
             ColumnDoor::View => {
                 let parent = self.parent_fields.as_mut()?;
                 let field = parent.iter_mut().find(|f| f.key == "columns")?;
@@ -1579,60 +1594,37 @@ impl Draft {
                     return None;
                 };
                 let item = items.iter_mut().find(|i| i.name == name)?;
-                let cleared = views::fold_into(item, &self.fields, &baseline);
-                // Copied out so the parent's borrow ends before the
-                // installed fields are written.
-                let (label, width) = (item.presentation.label.clone(), item.presentation.width);
-                self.reseed_cleared_texts(label, width);
-                cleared
+                let released = views::fold_into(item, &self.fields, &baseline, &mut set);
+                (released, item.clone())
             }
             ColumnDoor::Dataset => {
-                let ctx_mut = self.column_ctx.as_mut()?;
-                let item = ctx_mut.item.as_mut()?;
-                let cleared = views::fold_into(item, &self.fields, &baseline);
-                let (label, width) = (item.presentation.label.clone(), item.presentation.width);
-                self.reseed_cleared_texts(label, width);
-                cleared
+                let item = self.column_ctx.as_mut()?.item.as_mut()?;
+                let released = views::fold_into(item, &self.fields, &baseline, &mut set);
+                (released, item.clone())
             }
         };
-        let key = cleared?;
-        let to = match door {
-            // below the dataset level is the desk view's own key, which varies per view
-            // — so the honest answer is "each view", not one layer's name.
-            ColumnDoor::Dataset => Some(FellTo::EachView),
-            ColumnDoor::View => {
-                let set = |p: &ColumnPresentation| match key {
-                    "label" => p.label.is_some(),
-                    "width" => p.width.is_some(),
-                    _ => false,
-                };
-                // the dataset level sits ABOVE the desk view, so a cleared view key
-                // meets it first.
-                if set(&layers.dataset) {
-                    Some(FellTo::Dataset)
-                } else if set(&layers.desk) {
-                    Some(FellTo::Desk)
-                } else {
-                    None
-                }
+        for field in &mut self.fields {
+            if !set.has(&field.key) {
+                views::reseed_field(field, &folded);
             }
-        };
-        Some(Fold { key, to })
+        }
+        self.presentation_set.insert(name, set);
+        released.map(|key| Fold {
+            key,
+            to: self.fell_to(key),
+        })
     }
 
-    /// After a fold, the label and width `Text` fields show what the
-    /// column now has (the baseline's value once cleared), so the desk's
-    /// or dataset's value reappears on the keystroke that cleared it.
-    fn reseed_cleared_texts(&mut self, label: Option<String>, width: Option<f32>) {
-        for field in &mut self.fields {
-            let FieldKind::Text(text) = &mut field.kind else {
-                continue;
-            };
-            match field.key.as_str() {
-                "label" => *text = label.clone().unwrap_or_default(),
-                "width" => *text = views::width_text(width),
-                _ => {}
-            }
+    /// What `key` inherits from in the open column stage.
+    pub fn fell_to(&self, key: &str) -> FellTo {
+        let Some(ctx) = self.column_ctx.as_ref() else {
+            return FellTo::Default;
+        };
+        match ctx.door {
+            ColumnDoor::Dataset => FellTo::EachView,
+            ColumnDoor::View if views::sets(&ctx.layers.dataset, key) => FellTo::Dataset,
+            ColumnDoor::View if views::sets(&ctx.layers.desk, key) => FellTo::Desk,
+            ColumnDoor::View => FellTo::Default,
         }
     }
 
@@ -3536,6 +3528,12 @@ mod tests {
                 "npv",
                 views::column_fields(&item, &[], Destination::Presentation)
             ));
+            // The label is set at the view level, so emptying it releases it.
+            draft
+                .presentation_set
+                .entry("npv".into())
+                .or_default()
+                .set("label", true);
             for field in &mut draft.fields {
                 if field.key == "label" {
                     field.kind = FieldKind::Text(String::new());
@@ -3556,7 +3554,7 @@ mod tests {
             both.fold_column(),
             Some(Fold {
                 key: "label",
-                to: Some(FellTo::Dataset)
+                to: FellTo::Dataset
             }),
             "the dataset level sits above the desk view, so it is what \
              the cleared key lands on first"
@@ -3570,7 +3568,7 @@ mod tests {
             desk_only.fold_column(),
             Some(Fold {
                 key: "label",
-                to: Some(FellTo::Desk)
+                to: FellTo::Desk
             })
         );
 
@@ -3579,10 +3577,10 @@ mod tests {
             neither.fold_column(),
             Some(Fold {
                 key: "label",
-                to: None
+                to: FellTo::Default
             }),
-            "the key really was cleared, but nothing below sets it — so \
-             the caller has no layer to name and says nothing"
+            "nothing below sets the key: it falls to the kind default, and the \
+             notice says so"
         );
     }
 
@@ -4670,6 +4668,12 @@ mod tests {
         {
             items[1].presentation.width = Some(120.0);
         }
+        // A width the view overlay sets: the writer writes set keys only.
+        draft
+            .presentation_set
+            .entry("npv".into())
+            .or_default()
+            .set("width", true);
         draft.toggle_selected(); // hide `book`
         draft.move_item(1); // and move it below `npv`
         let text = object_text(

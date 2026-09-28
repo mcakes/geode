@@ -7011,9 +7011,10 @@ fn the_column_stage_writes_a_differing_key_to_the_overlay(cx: &mut gpui::TestApp
         "the desk's view is untouched"
     );
 
-    // Clearing Label removes the override, reveals the inherited desk label, and
-    // explains why. The overlay cannot delete a key supplied by the view definition,
-    // and no empty label reaches the file.
+    // A typed label sets it at the view level; clearing it again releases the
+    // override, reveals the inherited desk label, and explains why. The overlay
+    // cannot delete a key supplied by the view definition, and no empty label
+    // reaches the file.
     cx.simulate_keystrokes("k k"); // scale → width → label
     cx.simulate_keystrokes("i");
     cx.run_until_parked();
@@ -7022,7 +7023,16 @@ fn the_column_stage_writes_a_differing_key_to_the_overlay(cx: &mut gpui::TestApp
         "NPV",
         "seeded with the label in force — the desk's"
     );
-    cx.simulate_keystrokes("backspace backspace backspace enter");
+    cx.simulate_keystrokes("backspace backspace backspace");
+    cx.simulate_input("Mine");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+    let written = std::fs::read_to_string(dir.path().join("view_presentation.toml")).unwrap();
+    assert!(written.contains("label = \"Mine\""), "{written}");
+    cx.simulate_keystrokes("i");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("backspace backspace backspace backspace enter");
     cx.run_until_parked();
     assert!(edit_draft(&shell, &cx, |d| matches!(
         &d.fields[0].kind,

@@ -195,7 +195,7 @@ fn kind_for_type(ty: ColumnType) -> Option<&'static str> {
 }
 
 /// Render the dataset's whole presentation object, preserving other columns verbatim
-/// and replacing the open column with its nondefault fields. Drop that column when no
+/// and replacing the open column with the keys it sets at the dataset level. Drop that column when no
 /// keys remain; an empty dataset object becomes an overlay removal.
 ///
 /// Only `columns` is retained at the dataset-object level. Unknown sibling keys are not
@@ -224,54 +224,18 @@ pub fn table(draft: &Draft) -> toml_edit::Table {
     }
     if let Some(item) = ctx.item.as_ref() {
         let mut folded = item.clone();
-        views::fold_into(&mut folded, &draft.fields, &ColumnPresentation::default());
-        let kind = views::kind_default(&folded);
-        let effective = kind.clone().with(&folded.presentation);
-        let p = &folded.presentation;
-        let mut t = toml_edit::Table::new();
-        // The five format keys compare RESOLVED against the kind default,
-        // for `views::presentation_table`'s own reason: the fold writes a
-        // `Some` for every one of them (each field was seeded with the
-        // value in force), so a raw-`Option` comparison would copy the
-        // whole kind default into the trader's file on the first
-        // keystroke.
-        if effective.precision != kind.precision
-            && let Some(v) = p.precision
-        {
-            t["precision"] = toml_edit::value(i64::from(v));
-        }
-        if effective.thousands != kind.thousands
-            && let Some(v) = p.thousands
-        {
-            t["thousands"] = toml_edit::value(v);
-        }
-        if effective.negative != kind.negative
-            && let Some(v) = p.negative
-        {
-            t["negative"] = toml_edit::value(views::negative_key(v));
-        }
-        if effective.colour != kind.colour
-            && let Some(v) = &p.colour
-        {
-            t["color"] = toml_edit::value(views::color_key(v));
-        }
-        if effective.scale != kind.scale
-            && let Some(v) = p.scale
-        {
-            t["scale"] = toml_edit::value(views::scale_key(v));
-        }
-        // `label` and `width` have no kind default to resolve against —
-        // a column either has one or it does not — so both compare as
-        // bare `Option`s, and a cleared one (`fold_into` wrote the
-        // baseline's `None` back) simply is not written.
-        if let Some(v) = &p.label
-            && !v.is_empty()
-        {
-            t["label"] = toml_edit::value(v.as_str());
-        }
-        if let Some(v) = p.width {
-            t["width"] = views::width_value(v);
-        }
+        let mut set = draft
+            .presentation_set
+            .get(open)
+            .copied()
+            .unwrap_or_default();
+        views::fold_into(
+            &mut folded,
+            &draft.fields,
+            &ColumnPresentation::default(),
+            &mut set,
+        );
+        let t = views::set_keys_table(&folded.presentation, set);
         if !t.is_empty() {
             columns[open] = toml_edit::Item::Table(t);
         }
@@ -543,7 +507,7 @@ mod writer_tests {
     }
 
     #[test]
-    fn the_writer_keeps_other_columns_verbatim_and_emits_only_keys_off_the_kind_default() {
+    fn schema_writer_keeps_other_columns_and_writes_only_set_keys() {
         let schema = risk_schema();
         let risk = schema.dataset("risk").unwrap();
         let overlay_object =
@@ -557,13 +521,18 @@ mod writer_tests {
             overlay_object,
             item: Some(item),
         });
-        // Precision left at the kind default (2): not written. Width kept.
-        // Thousands stepped: written.
+        // Width set on disk: kept. Thousands stepped: written. Precision pinned at
+        // the kind default (2): written. Scale inherited: not written.
         for f in &mut draft.fields {
             if f.key == "thousands" {
                 f.kind = FieldKind::Bool(false);
             }
         }
+        let mut set = views::PresentationKeys::default();
+        for key in ["width", "thousands", "precision"] {
+            set.set(key, true);
+        }
+        draft.presentation_set.insert("npv".into(), set);
         draft.column = Some("npv".into());
         let text = written(table(&draft));
         assert!(
@@ -573,7 +542,8 @@ mod writer_tests {
         assert!(text.contains("[risk.columns.npv]"), "{text}");
         assert!(text.contains("width = 90"), "{text}");
         assert!(text.contains("thousands = false"), "{text}");
-        assert!(!text.contains("precision"), "{text}");
+        assert!(text.contains("precision = 2"), "a pinned default: {text}");
+        assert!(!text.contains("scale"), "{text}");
     }
 
     #[test]
@@ -591,6 +561,9 @@ mod writer_tests {
             item: Some(item),
         });
         draft.column = Some("npv".into());
+        let mut set = views::PresentationKeys::default();
+        set.set("width", true);
+        draft.presentation_set.insert("npv".into(), set);
         for f in &mut draft.fields {
             if f.key == "width" {
                 f.kind = FieldKind::Text("auto".into());
