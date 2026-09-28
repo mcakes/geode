@@ -14108,10 +14108,10 @@ run_mutation "pricer motion: a selection clamps a bare step" \
 # like every verb that is not the bar's own.
 run_mutation "pricer motion: a motion closes an open field first" \
   crates/geode-pricer/src/tile.rs \
-  '            if verb != "add_below" {
+  '            if !matches!(verb, "add_below" | "add_above") {
                 self.close_entry(window, cx);
             }' \
-  '            if verb != "add_below" && verb != "motion" {
+  '            if !matches!(verb, "add_below" | "add_above" | "motion") {
                 self.close_entry(window, cx);
             }' \
   geode-pricer a_motion_closes_an_open_entry_bar_then_moves

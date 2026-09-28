@@ -6051,7 +6051,7 @@ pub(crate) mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
-        h.dispatch(&mut vcx, "bottom", None); // the 4000 P root
+        h.motion(&mut vcx, "bottom", None); // the 4000 P root
         h.dispatch(&mut vcx, "add_above", None);
         assert_eq!(
             h.entry_label(&vcx).as_deref(),
@@ -6096,9 +6096,9 @@ pub(crate) mod tests {
     #[gpui::test]
     fn shift_o_on_a_leg_lands_inside_its_package_before_that_leg(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
-        h.dispatch(&mut vcx, "down", None);
+        h.motion(&mut vcx, "down", None);
         h.dispatch(&mut vcx, "expand", None);
-        h.dispatch(&mut vcx, "down", Some(2)); // the package's second leg
+        h.motion(&mut vcx, "down", Some(2)); // the package's second leg
         let (package, legs_before) = h.tile.read_with(&vcx, |t, _| {
             let p = (0..t.sheet.len()).find(|&r| t.sheet.is_package(r)).unwrap();
             (p, t.sheet.children(p).len())
@@ -8955,7 +8955,7 @@ pub(crate) mod tests {
             .tile
             .read_with(&vcx, |t, _| t.menu.as_ref().and_then(|m| m.highlighted()));
         assert_eq!(at, Some(11), "over the Sheet section header onto Open");
-        h.dispatch(&mut vcx, "menu_down", Some(4));
+        h.motion(&mut vcx, "menu_down", Some(4));
         let at = h
             .tile
             .read_with(&vcx, |t, _| t.menu.as_ref().and_then(|m| m.highlighted()));

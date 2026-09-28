@@ -1274,9 +1274,9 @@ fn an_untouched_commit_on_a_text_cell_writes_nothing(cx: &mut gpui::TestAppConte
 fn an_untouched_choice_commit_over_a_selection_writes_nothing(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_flat(cx);
     h.with_flat_document(&mut vcx);
-    h.dispatch(&mut vcx, "right", Some(2)); // status: declared / estimated
+    h.motion(&mut vcx, "right", Some(2)); // status: declared / estimated
     h.dispatch(&mut vcx, "visual_rows", None);
-    h.dispatch(&mut vcx, "down", None);
+    h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "edit", None);
     assert!(h.tile.read_with(&vcx, |t, _| t.choice_popup_open()));
     h.dispatch(&mut vcx, "commit", None);
@@ -1301,7 +1301,7 @@ fn an_untouched_date_commit_over_a_selection_writes_nothing(cx: &mut gpui::TestA
     let (h, mut vcx) = open_flat(cx);
     h.with_flat_document(&mut vcx);
     h.dispatch(&mut vcx, "visual_block", None); // ex column
-    h.dispatch(&mut vcx, "down", None);
+    h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "edit", None);
     h.dispatch(&mut vcx, "commit", None);
     assert_eq!(h.col_texts(&vcx, 0), vec!["2026-12-18", "2027-03-19"]);
