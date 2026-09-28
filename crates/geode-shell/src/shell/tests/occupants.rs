@@ -1189,7 +1189,7 @@ fn shift_d_duplicates_the_focused_tile_with_its_state_and_ctrl_shift_d_stacks_it
     });
     // Give the recorder some state through its own `:` command.
     cx.simulate_keystrokes(":");
-    cx.simulate_input("sort delta01"); // an exact completion word runs as typed (commandline.rs §3.4)
+    cx.simulate_input("sort delta01"); // an exact completion word runs as typed
     cx.simulate_keystrokes("enter");
 
     cx.simulate_keystrokes("shift-d");
@@ -1330,7 +1330,7 @@ fn a_pending_request_lands_on_exactly_the_tile_that_asked(cx: &mut gpui::TestApp
         shell.read_with(&cx, |s, _| s.occupant_kind(other)),
         Some(crate::module::placeholder::PLACEHOLDER_KIND),
         "the plain split asked for nothing, and there is no default kind \
-         to guess with (§7.1) — it gets a placeholder"
+         to guess with — it gets a placeholder"
     );
 }
 

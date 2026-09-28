@@ -180,7 +180,7 @@ mod tests {
             .writer()
             .query_row("select x from probe", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(x, 7, "data must survive reopen (spec §2.1)");
+        assert_eq!(x, 7, "data must survive reopen");
     }
 
     #[test]

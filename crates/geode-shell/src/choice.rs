@@ -295,7 +295,7 @@ mod tests {
     fn nav_wraps_a_bare_step_and_nav_clamped_does_not() {
         let mut list = ChoiceList::new(opts(&["a", "b", "c"]), 12);
         list.nav(NavCommand::Move(-1));
-        assert_eq!(list.highlighted(), 2, "a bare -1 wraps (§20.5)");
+        assert_eq!(list.highlighted(), 2, "a bare -1 wraps");
         list.nav_clamped(NavCommand::Move(5));
         assert_eq!(list.highlighted(), 2, "clamped at the last painted row");
         list.nav_clamped(NavCommand::Move(-5));

@@ -874,7 +874,7 @@ mod tests {
         assert_eq!(n, 1);
         assert!(
             ch.fetch() && ch.chrome() && ch.session() && !ch.query(),
-            "a fetch, not yet a query (§9.10)"
+            "a fetch, not yet a query"
         );
         assert_eq!(m.cursor(), Some(0));
         assert!(matches!(m.slots()[0].state, SlotState::Fetching));
@@ -1028,13 +1028,13 @@ mod tests {
             .unwrap();
         assert!(
             ch.fetch() && ch.query() && ch.session() && ch.chrome(),
-            "a range change fetches AND queries (§9.10)"
+            "a range change fetches AND queries"
         );
         assert!(
             m.slots()
                 .iter()
                 .all(|s| matches!(s.state, SlotState::Fetching)),
-            "a range change refetches every source slot (ruling 4)"
+            "a range change refetches every source slot"
         );
         m.set_frequency(Frequency::M1, now(), &AsOf::Live).unwrap();
         assert!(
@@ -1109,7 +1109,7 @@ mod tests {
         let ch = m.pan(1);
         assert!(
             ch.chrome() && ch.query(),
-            "percentiles/density are over the visible window (ruling 10)"
+            "percentiles/density are over the visible window"
         );
         assert_eq!(
             (m.view().lo, m.view().hi),

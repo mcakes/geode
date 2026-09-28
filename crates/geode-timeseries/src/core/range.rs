@@ -208,7 +208,7 @@ mod tests {
         assert_eq!(from, t("2025-09-19T15:00:00Z"));
         let at = t("2026-03-01T12:00:00Z");
         let (from, to) = r.resolve(now, &AsOf::At(at));
-        assert_eq!(to, at, "the frame's as-of clips the visible end (ruling 4)");
+        assert_eq!(to, at, "the frame's as-of clips the visible end");
         assert_eq!(
             from,
             t("2025-03-01T12:00:00Z"),

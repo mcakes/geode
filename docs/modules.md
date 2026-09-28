@@ -1,3 +1,10 @@
+# Historical feature ideas
+
+This undated planning inventory mixes implemented features with proposals.
+It is retained as a record of ideas, not as a description of current behavior
+or a committed roadmap. See [current features](current/features.md) and
+[architecture](current/architecture.md) for supported capabilities and ownership.
+
 ## Blotter
 - Input: 
     * risk_snapshot, trade_blotter, daily_pnl Datasets

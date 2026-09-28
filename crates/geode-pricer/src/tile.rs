@@ -22,7 +22,9 @@ use crate::core::tree::Expansion;
 use crate::core::undo::UndoStack;
 use crate::core::views::ColumnPlan;
 use crate::core::{Place, RowSpec};
-use crate::delegate::{ChevronClicked, DateFieldPaint, EditorField, EditorPaint, SheetDelegate};
+use crate::delegate::{
+    CellPointer, ChevronClicked, DateFieldPaint, EditorField, EditorPaint, SheetDelegate,
+};
 use crate::grid::GridModel;
 use crate::header::{self, HeaderInputs, HeaderModel};
 use crate::popup::{PricerPick, choice_paint};
@@ -31,6 +33,7 @@ use crate::store::Loaded;
 use chrono::Utc;
 use geode_core::clock::Clock;
 use geode_core::document::DocumentRows;
+use geode_core::grid::selection::{Resolved, SelectKind, Selection};
 use geode_core::pricing::{PriceLine, PriceOutcome, PriceParams};
 use geode_core::query::{QueryKey, QueryOutcome};
 use geode_data::{DataHandle, Refusal};
@@ -41,6 +44,7 @@ use geode_shell::frame::Frame;
 use geode_shell::keymap::{Binding, KeyContext};
 use geode_shell::linenumbers::{LineNumbers, UiSettings};
 use geode_shell::module::{FindEvent, StackHandle};
+use geode_shell::shell::aggregates::AggregateCell;
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::vimfind::{FindDirection, find_match};
@@ -60,6 +64,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+mod select;
 
 pub(crate) const LOADING: &str = "loading…";
 
@@ -182,6 +188,14 @@ pub(crate) enum Editor {
         /// template weight only while the legs fit), so a commit whose
         /// cell would now open on other text refuses with `MOVED`.
         opened: Option<String>,
+        /// The live step's state, while a selection is live and the cell
+        /// steps; `None` otherwise.
+        bulk: Option<Bulk>,
+        /// The text the field opened on. Over a selection with no live
+        /// step, `enter` on this text unchanged writes nothing: the cursor
+        /// cell's own value filled across every target would be a wrong
+        /// block from a no-op gesture.
+        initial: String,
     },
     Choice {
         line: LineId,
@@ -197,6 +211,11 @@ pub(crate) enum Editor {
         /// option (case-insensitively): ranking is a subsequence match, so
         /// an untouched highlight is a guess — `HSI` would commit `HSCEI`.
         moved: bool,
+        /// The option the list opened on. Over a selection, `enter` with
+        /// the highlight never moved and the query empty or this option
+        /// writes nothing: the cursor cell's own option filled across the
+        /// targets would turn a put into a call from a no-op gesture.
+        initial: String,
     },
     /// An expiry's segmented date field (every expiry, a tenor included):
     /// a pure field the tile routes keys into (`date_field_key`), its own
@@ -215,8 +234,50 @@ pub(crate) enum Editor {
         /// and dropped only when the field commits or cancels, so the
         /// trader still sees that `enter` replaces the tenor.
         note: Option<SharedString>,
+        /// The date the field opened on (a tenor's is today) and whether
+        /// a digit was typed since. Over a selection, `enter` on that date
+        /// with nothing typed writes nothing: the opening date filled
+        /// across the targets would replace their expiries, a tenor's with
+        /// today, from a no-op gesture.
+        initial: chrono::NaiveDate,
+        typed: bool,
     },
 }
+
+/// A text editor opened on a steppable cursor cell over a live selection.
+/// While its text is untouched, arrows step every target cell in the
+/// sheet at once, each press repricing; `enter` keeps the steps as one
+/// undo entry and any other close takes them back — but only while they
+/// are still the sheet's last change, so a rollback never undoes another
+/// writer's edit.
+pub(crate) struct Bulk {
+    /// The text the tile last put in the editor. Any other value means
+    /// the trader typed, which turns the edit absolute.
+    pub(crate) seeded: String,
+    /// Signed steps since `i`, for the notice.
+    pub(crate) steps: i64,
+    /// The inverses of every step since `i`, the last step's first.
+    pub(crate) undo: Undo,
+    /// `edit_seq` right after the last step landed.
+    pub(crate) seq: u64,
+    /// Each stepped line's values right after the last step. A write that
+    /// bypassed the counter still shows here, and rolling back over it
+    /// would put the steps' inverses on cells something else wrote.
+    pub(crate) after: HashMap<LineId, StepMark>,
+    /// Each stepped line's values before its first step, so a keep of
+    /// steps that net to nothing records no entry.
+    pub(crate) before: HashMap<LineId, StepMark>,
+    /// The step notice last shown, withdrawn by a rollback: the count
+    /// would describe steps that are no longer in the sheet.
+    pub(crate) notice: Option<SharedString>,
+}
+
+/// What a step may change on a line: its quantity, instrument and shifts.
+pub(crate) type StepMark = (
+    i64,
+    Option<geode_core::pricing::Instrument>,
+    crate::core::sheet::OwnShifts,
+);
 
 /// What an `enter` in the cell editor means before the cell parses it.
 enum Choice {
@@ -360,8 +421,9 @@ pub struct PricerTile {
     menu_tip: SharedString,
     stack: Option<StackHandle>,
     pub(crate) clock: Clock,
-    /// What `p`/`shift+p` put: the last `y y` or `d d`.
-    pub(crate) register: Option<crate::core::RowSpec>,
+    /// What `p`/`shift+p` put: the last `y y`, `d d`, or `y`/`d` over a
+    /// `V` selection, in sheet order.
+    pub(crate) register: Option<Vec<crate::core::RowSpec>>,
     find: Option<FindState>,
     /// Latest pricing submission tag. An outcome with any other tag is dropped whole.
     pub(crate) tag: u64,
@@ -409,6 +471,19 @@ pub struct PricerTile {
     /// read). Re-read only when the revision moves.
     underlyings: Rc<[SharedString]>,
     underlyings_rev: Option<u64>,
+    /// The live `V`/`v` selection, anchored by line and plan column name
+    /// so a rebuild re-finds the same cells. `None` outside visual mode.
+    pub(crate) selection: Option<Selection<LineId, &'static str>>,
+    /// `selection` resolved against the model and cursor at the last
+    /// change point; render and the delegate only read it.
+    pub(crate) resolved: Option<Resolved>,
+    /// The footer's `R rows × C cols`, prepared with `resolved`.
+    pub(crate) selection_extent: Option<SharedString>,
+    /// The footer's position totals, prepared with `resolved`.
+    pub(crate) totals: Vec<AggregateCell>,
+    /// Counts recorded sheet changes, so an open step editor can tell
+    /// whether its steps are still the sheet's last change.
+    pub(crate) edit_seq: u64,
 }
 
 fn app_clock(cx: &App) -> Clock {
@@ -562,6 +637,15 @@ impl PricerTile {
             |this, _, event: &ChevronClicked, window, cx| this.chevron_clicked(event.0, window, cx),
         )
         .detach();
+        // Shift+click and drag: the delegate's own pointer events, which
+        // reach `pointer` on mouse-down, ahead of the table's `SelectCell`
+        // (emitted on the release). Window access for the editor's blur.
+        cx.subscribe_in(
+            &table,
+            window,
+            |this, _, event: &CellPointer, window, cx| this.pointer(*event, window, cx),
+        )
+        .detach();
         // Pricing does not follow frame queries, so there is no result to wait for.
         // Arrive immediately to avoid holding other tiles behind the flip barrier.
         cx.observe(&frame, |this, frame, cx| {
@@ -606,11 +690,11 @@ impl PricerTile {
         .detach();
         // Release flushes a dirty sheet once, cancels pricing, and releases its name
         // for another tile to open.
-        cx.on_release(|this: &mut PricerTile, _cx| {
+        cx.on_release(|this: &mut PricerTile, cx| {
             // Flush edits still waiting on the timer and retry failed or refused
             // saves. Queued, unanswered saves already belong to the writer.
             // `save_now` leaves a blocked fallback unpublished.
-            this.flush_save();
+            this.flush_save(cx);
             this.data.cancel(QueryKey(this.id.0));
             this.shared.open.borrow_mut().remove(&this.sheet.name);
             // A rename not yet confirmed keeps its old document.
@@ -685,6 +769,11 @@ impl PricerTile {
             pressed: None,
             underlyings: Rc::from([]),
             underlyings_rev: None,
+            selection: None,
+            resolved: None,
+            selection_extent: None,
+            totals: Vec::new(),
+            edit_seq: 0,
         };
         this.adopt_templates();
         this.resolve_plan();
@@ -703,9 +792,15 @@ impl PricerTile {
 
     // ---- what the shell reads ----------------------------------------
 
-    /// `normal`, `insert` or `menu`.
+    /// `normal`, `insert`, `menu` or `visual`, with `select = rows|block`
+    /// while a selection is live.
     pub fn key_context(&self) -> KeyContext {
-        KeyContext::new("pricer").pair("mode", self.mode()).counts()
+        let cx = KeyContext::new("pricer").pair("mode", self.mode()).counts();
+        match self.selection.as_ref().map(|s| s.kind) {
+            Some(SelectKind::Rows) => cx.pair("select", "rows"),
+            Some(SelectKind::Block) => cx.pair("select", "block"),
+            None => cx,
+        }
     }
 
     /// `insert` while EITHER field is open — the entry field or the cell
@@ -718,11 +813,16 @@ impl PricerTile {
     ///
     /// An armed `:rm` confirm is `insert` too: its prompt holds the
     /// keyboard exactly as a field does.
+    ///
+    /// `visual` while a selection is live and neither a field nor the
+    /// menu holds the keys: the selection's own single-key verbs apply.
     pub(crate) fn mode(&self) -> &'static str {
         if self.confirm.is_some() || self.entry.is_some() || self.editor.is_some() {
             "insert"
         } else if self.menu.is_some() {
             "menu"
+        } else if self.selection.is_some() {
+            "visual"
         } else {
             "normal"
         }
@@ -892,14 +992,38 @@ impl PricerTile {
         Ok(())
     }
 
-    /// Apply several edits as one undo entry. On refusal, replay prior inverses in
-    /// reverse order without recording the batch. A refused rollback clears history and
-    /// leaves the partially rolled-back sheet for after_edit to rebuild.
+    /// Apply several edits as one undo entry through [`Self::apply_batch`];
+    /// a refused batch records nothing but still rebuilds, since a refused
+    /// rollback leaves a partly rolled-back sheet.
     pub(crate) fn apply_edits(
         &mut self,
         edits: Vec<Edit>,
         cx: &mut Context<Self>,
     ) -> Result<(), EditError> {
+        match self.apply_batch(edits) {
+            Err(e) => {
+                self.after_edit(cx);
+                Err(e)
+            }
+            Ok(undo) => {
+                if let Some(undo) = undo {
+                    self.undo.record(undo);
+                    self.after_edit(cx);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Apply several edits all or nothing, answering their combined
+    /// inverse (the last edit's first), or `None` for no edits. Records
+    /// nothing and rebuilds nothing: the caller decides whether the batch
+    /// is an undo entry of its own (a live step's is not until `enter`).
+    /// A refusal replays the landed inverses in reverse; a refused
+    /// replay clears history, since its remaining inverses address the
+    /// previous row layout, and leaves the partly rolled-back sheet for
+    /// the caller's rebuild.
+    pub(crate) fn apply_batch(&mut self, edits: Vec<Edit>) -> Result<Option<Undo>, EditError> {
         let mut undos: Vec<Undo> = Vec::new();
         for e in edits {
             match self.sheet.apply(e) {
@@ -922,20 +1046,17 @@ impl PricerTile {
                             break;
                         }
                     }
-                    self.after_edit(cx);
                     return Err(err);
                 }
             }
         }
         if undos.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         // Take back the LAST edit first.
-        self.undo.record(Undo {
+        Ok(Some(Undo {
             inverse: undos.into_iter().rev().flat_map(|u| u.inverse).collect(),
-        });
-        self.after_edit(cx);
-        Ok(())
+        }))
     }
 
     /// `o` opens the entry bar under the header and focuses its input.
@@ -1198,6 +1319,11 @@ impl PricerTile {
     /// `i`/`enter`/double-click: a text field on the cell's grammar
     /// spelling, or a typeahead over its vocabulary; a cell that does not
     /// edit says why in the footer.
+    ///
+    /// Under a live selection the editor opens on the cursor cell exactly
+    /// as without one, and that cell must itself be editable: a read-only
+    /// cursor cell refuses with its own reason, rather than opening a
+    /// field whose grammar belongs to some other selected cell.
     fn begin_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.loading {
             self.footer = Some("the sheet is still loading".into());
@@ -1245,18 +1371,31 @@ impl PricerTile {
                     focus: cx.focus_handle(),
                     paint,
                     note,
+                    initial: date,
+                    typed: false,
                 }
             }
             Ok(CellEditor::Text(text)) => {
                 let opened = self.sheet.is_package(row).then(|| text.clone());
+                let bulk = (self.selection.is_some() && select::steppable(kind)).then(|| Bulk {
+                    seeded: text.clone(),
+                    steps: 0,
+                    undo: Undo { inverse: vec![] },
+                    seq: self.edit_seq,
+                    after: HashMap::new(),
+                    before: HashMap::new(),
+                    notice: None,
+                });
                 let input = cx.new(|cx| InputState::new(window, cx));
-                input.update(cx, |s, cx| s.set_value(text, window, cx));
+                input.update(cx, |s, cx| s.set_value(text.clone(), window, cx));
                 Editor::Text {
                     line,
                     col,
                     kind,
                     input,
                     opened,
+                    bulk,
+                    initial: text,
                 }
             }
             Ok(CellEditor::Choice {
@@ -1306,6 +1445,7 @@ impl PricerTile {
                     list,
                     free,
                     moved: false,
+                    initial: current,
                 }
             }
         };
@@ -1327,8 +1467,37 @@ impl PricerTile {
             self.commit_date(window, cx);
             return;
         }
+        // A live step's editor. Untouched text keeps the steps as one undo
+        // entry and writes nothing more — with no step taken, nothing at
+        // all: the shown value written to every target would be a
+        // plausible wrong block from a no-op gesture. Typed text is
+        // absolute, so any steps come out first and the typed value
+        // replaces them rather than landing on top.
+        let untouched = match &self.editor {
+            Some(Editor::Text {
+                input,
+                bulk: Some(b),
+                ..
+            }) => Some(input.read(cx).value().as_ref() == b.seeded),
+            _ => None,
+        };
+        if let Some(untouched) = untouched {
+            if untouched {
+                if let Some(bulk) = self.take_bulk() {
+                    self.settle_bulk(bulk, true, cx);
+                }
+                self.close_editor(window, cx);
+                self.rebuild_chrome();
+                cx.notify();
+                return;
+            }
+            if let Some(bulk) = self.take_bulk() {
+                self.settle_bulk(bulk, false, cx);
+            }
+        }
         // The editor's borrow ends inside this block, before any `self` call.
-        let (value, (line, col, kind), opened) = {
+        let stepped = untouched.is_some();
+        let (value, (line, col, kind), opened, unchanged) = {
             let Some(editor) = self.editor.as_mut() else {
                 return;
             };
@@ -1340,6 +1509,17 @@ impl PricerTile {
             let opened = match editor {
                 Editor::Text { opened, .. } => opened.clone(),
                 _ => None,
+            };
+            // Whether `enter` leaves the cell as it opened. A live step's
+            // editor answered that above: its typed text is absolute even
+            // when it spells the opening value, since the steps came out.
+            let unchanged = match editor {
+                Editor::Text { initial, .. } => !stepped && text == *initial,
+                Editor::Choice { moved, initial, .. } => {
+                    let typed = text.trim();
+                    !*moved && (typed.is_empty() || typed.eq_ignore_ascii_case(initial))
+                }
+                Editor::Date { .. } => false,
             };
             let value = if let Editor::Choice {
                 list, free, moved, ..
@@ -1366,8 +1546,17 @@ impl PricerTile {
             } else {
                 Choice::Value(text)
             };
-            (value, target, opened)
+            (value, target, opened, unchanged)
         };
+        // Over a selection an unchanged cell writes nothing: its own value
+        // filled across every target would be a plausible wrong block
+        // from a no-op gesture. No edit, no notice, no undo entry.
+        if unchanged && self.selection.is_some() {
+            self.close_editor(window, cx);
+            self.rebuild_chrome();
+            cx.notify();
+            return;
+        }
         let value = match value {
             Choice::Value(v) => Some(v),
             // An untouched free list with nothing typed: the cell keeps
@@ -1387,6 +1576,16 @@ impl PricerTile {
             cx.notify();
             return;
         };
+        // A live selection takes the value to every target line, each
+        // judged on its own; the cursor cell is only where it was typed.
+        if self.selection.is_some() {
+            if !self.cursor_on_editor(line, kind) {
+                self.refuse_moved(window, cx);
+            } else if self.commit_selection(&value, None, cx) {
+                self.close_editor(window, cx);
+            }
+            return;
+        }
         let Some(row) = self.editor_row(line, col, kind, window, cx) else {
             return;
         };
@@ -1466,6 +1665,16 @@ impl PricerTile {
         row
     }
 
+    /// Whether the cursor still sits on the cell the editor opened on. A
+    /// `V` selection writes the cursor's column, so a commit after the
+    /// cursor left the editor's column would write the typed text into
+    /// a column it was never typed for.
+    fn cursor_on_editor(&self, line: LineId, kind: ColumnKind) -> bool {
+        let row_line = self.cursor_sheet_row().map(|r| self.sheet.id(r));
+        let col_kind = self.plan.columns.get(self.cursor.col).map(|c| c.def.kind);
+        row_line == Some(line) && col_kind == Some(kind)
+    }
+
     /// Close the editor with `MOVED`: its commit no longer means what the
     /// trader saw when it opened.
     fn refuse_moved(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1488,12 +1697,15 @@ impl PricerTile {
             kind,
             field,
             paint,
+            initial,
+            typed,
             ..
         }) = self.editor.as_mut()
         else {
             return;
         };
         let (line, col, kind) = (*line, *col, *kind);
+        let (initial, typed) = (*initial, *typed);
         let finished = field.complete_pending();
         *paint = DateFieldPaint::of(field, id);
         let date = field.date();
@@ -1502,6 +1714,25 @@ impl PricerTile {
             self.sync_editor(cx);
             self.rebuild_chrome();
             cx.notify();
+            return;
+        }
+        // A live selection takes a changed or typed date to every target
+        // line. The opening date untyped writes nothing: filled across the
+        // targets it would replace their expiries (a tenor's with today)
+        // from a no-op gesture.
+        if self.selection.is_some() {
+            if date == initial && !typed {
+                self.close_editor(window, cx);
+                self.rebuild_chrome();
+                cx.notify();
+                return;
+            }
+            let text = date.format("%Y-%m-%d").to_string();
+            if !self.cursor_on_editor(line, kind) {
+                self.refuse_moved(window, cx);
+            } else if self.commit_selection(&text, Some(date), cx) {
+                self.close_editor(window, cx);
+            }
             return;
         }
         let Some(row) = self.editor_row(line, col, kind, window, cx) else {
@@ -1530,7 +1761,11 @@ impl PricerTile {
         };
         let id = self.id.0;
         let Some(Editor::Date {
-            field, paint, note, ..
+            field,
+            paint,
+            note,
+            typed,
+            ..
         }) = self.editor.as_mut()
         else {
             return false;
@@ -1547,6 +1782,10 @@ impl PricerTile {
                 cx.notify();
             }
             other => {
+                // A typed digit is a deliberate date, even the opening one.
+                if matches!(other, FieldKey::Digit(_)) {
+                    *typed = true;
+                }
                 if field.apply(other) {
                     *paint = DateFieldPaint::of(field, id);
                 }
@@ -1630,7 +1869,14 @@ impl PricerTile {
 
     /// Blur an editor that owns window focus before releasing its focus handle.
     /// Otherwise the shell cannot restore focus after the editor disappears.
+    ///
+    /// A live step's editor closed any way but a commit takes its steps
+    /// back (`settle_bulk`), after the field is gone so the rebuild never
+    /// paints a dead one. Every cancel comes here: `cancel`, a click
+    /// elsewhere, any verb (`dispatch` closes the editor first), the
+    /// menu, `:` and `/`.
     pub(crate) fn close_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let bulk = self.take_bulk();
         let Some(editor) = self.editor.take() else {
             return;
         };
@@ -1638,6 +1884,9 @@ impl PricerTile {
             window.blur(cx);
         }
         self.sync_editor(cx);
+        if let Some(bulk) = bulk {
+            self.settle_bulk(bulk, false, cx);
+        }
         cx.notify();
     }
 
@@ -1645,6 +1894,11 @@ impl PricerTile {
     /// precision; in a typeahead they move the
     /// highlight.
     fn nudge(&mut self, steps: i64, window: &mut Window, cx: &mut Context<Self>) {
+        // Over a live selection with the text untouched, the step goes to
+        // every target cell instead of the text alone.
+        if self.bulk_step(steps, window, cx).is_some() {
+            return;
+        }
         let id = self.id.0;
         let refused = match &mut self.editor {
             // The date field steps its active segment — the same step its
@@ -1659,7 +1913,9 @@ impl PricerTile {
                 None
             }
             Some(Editor::Text { kind, input, .. }) => {
-                let text = input.read(cx).value().to_string();
+                // An empty shift field inherits: it steps from the value
+                // its cell paints, as the live step does.
+                let text = cell::step_from(&self.sheet, *kind, &input.read(cx).value());
                 match cell::nudge(*kind, &text, steps) {
                     Ok(next) => {
                         input.update(cx, |s, cx| s.set_value(next, window, cx));
@@ -1720,6 +1976,7 @@ impl PricerTile {
     /// write-behind saving. Keep expansion IDs so undo can restore an open package.
     /// Periodic refresh keeps its own timer and skips empty sheets.
     pub(crate) fn after_edit(&mut self, cx: &mut Context<Self>) {
+        self.edit_seq += 1;
         self.rebuild(cx);
         self.submit(cx);
         self.arm_save(cx);
@@ -1748,11 +2005,34 @@ impl PricerTile {
     /// save left unsaved, and drop the timer. A close and the app's quit
     /// both come here: neither may leave edits behind a timer that will
     /// never fire.
-    pub(crate) fn flush_save(&mut self) {
+    ///
+    /// An open live step is abandoned first, as `escape` would: a close
+    /// or quit has no `escape` after it, and saving then would persist
+    /// steps the trader never kept. Its editor closes with it: the field
+    /// still shows stepped text, and a later `enter` would commit that
+    /// text absolutely. Answers whether it closed an editor, so a caller
+    /// holding a `Context` rebuilds the grid off the rolled-back sheet.
+    pub(crate) fn flush_save(&mut self, cx: &mut App) -> bool {
+        let mut closed = false;
+        // Tested before it is taken: an unstepped bulk stays with its
+        // open editor. Dropping it would leave the editor open without
+        // one, and a later untouched `enter` would write the cursor's
+        // value across the whole selection.
+        let stepped = matches!(
+            &self.editor,
+            Some(Editor::Text { bulk: Some(b), .. }) if !b.undo.inverse.is_empty()
+        );
+        if stepped && let Some(bulk) = self.take_bulk() {
+            if self.take_back_steps(bulk) {
+                self.dirty = true;
+            }
+            closed = self.release_editor(cx);
+        }
         self.save_task = None;
         if self.dirty || self.save_failed {
             let _ = self.save_now();
         }
+        closed
     }
 
     /// The whole sheet, once. An empty sheet publishes nothing (the last
@@ -2155,6 +2435,9 @@ impl PricerTile {
             Ok(Some(rows)) => match from_rows(&name, &rows) {
                 Ok(mut s) => {
                     s.mark_all_stale();
+                    // The anchor's line id names a line of the old sheet.
+                    self.clear_selection();
+                    self.forget_steps();
                     self.sheet = s;
                     self.adopt_templates();
                     // Fallback edits have inverses against different rows. Replaying
@@ -2288,7 +2571,7 @@ impl PricerTile {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(
                         self.sheet.shorthand(row),
                     ));
-                    self.register = Some(crate::core::clip::spec_of(&self.sheet, row));
+                    self.register = Some(vec![spec_of(&self.sheet, row)]);
                 }
             }
             "yank_col" => {
@@ -2309,12 +2592,22 @@ impl PricerTile {
             }
             "find_next" => self.repeat_find(FindDirection::Forward, n),
             "find_prev" => self.repeat_find(FindDirection::Backward, n),
+            // A live selection takes the first `escape` alone, so leaving
+            // visual mode never also drops the find or a notice.
+            "escape" if self.selection.is_some() => self.clear_selection(),
             "escape" => {
                 self.find = None;
                 // "loading…" is the only sign a load is pending; `loaded`
                 // clears it when the rows (or the refusal) arrive.
                 if !self.loading {
                     self.notice = None;
+                }
+            }
+            "visual_rows" => self.start_selection(SelectKind::Rows),
+            "visual_block" => self.start_selection(SelectKind::Block),
+            "yank" => {
+                if let Err(why) = self.yank_selection(cx) {
+                    self.footer = Some(why.into());
                 }
             }
             "price" => {
@@ -2362,8 +2655,18 @@ impl PricerTile {
             | "group" | "ungroup" => {
                 if self.loading {
                     self.footer = Some("the sheet is still loading".into());
+                } else if let Some(why) = self.row_verb_refusal(verb) {
+                    self.footer = Some(why.into());
                 } else {
+                    // A live selection names the rows itself, so a count
+                    // is ignored rather than stretching past what was picked.
+                    let selected = self.selection.is_some();
                     let result = match verb {
+                        "delete" if selected => self.delete_selection(cx),
+                        "move_down" if selected => self.move_selection(true, cx),
+                        "move_up" if selected => self.move_selection(false, cx),
+                        "group" if selected => self.group_selection(cx),
+                        "ungroup" if selected => self.ungroup_selection(cx),
                         "delete" => self.delete_row(cx),
                         "undo" => self.history_step(false, cx),
                         "redo" => self.history_step(true, cx),
@@ -2424,7 +2727,7 @@ impl PricerTile {
         let spec = spec_of(&self.sheet, row);
         self.apply_edit(Edit::Remove { at: row }, cx)
             .map_err(|e| e.to_string())?;
-        self.register = Some(spec);
+        self.register = Some(vec![spec]);
         Ok(())
     }
 
@@ -2473,11 +2776,22 @@ impl PricerTile {
         }
     }
 
-    /// `p` / `shift+p` insert register contents with fresh IDs and requests at
-    /// `put_place`'s position, then select the first inserted row.
+    /// `p` / `shift+p` insert every register row together, with fresh IDs
+    /// and requests, as one edit (one undo entry), then select the first
+    /// landed row. Any package among them takes the place: packages cannot
+    /// nest, so the whole run lands at a root boundary rather than being
+    /// refused at a leg place.
     fn put(&mut self, below: bool, cx: &mut Context<Self>) -> Result<(), String> {
-        let spec = self.register.clone().ok_or("nothing to put")?;
-        let place = put_place(&self.sheet, self.cursor_sheet_row(), below, &spec);
+        let specs = self
+            .register
+            .clone()
+            .filter(|v| !v.is_empty())
+            .ok_or("nothing to put")?;
+        let lead = specs
+            .iter()
+            .find(|s| matches!(s, RowSpec::Package { .. }))
+            .unwrap_or(&specs[0]);
+        let place = put_place(&self.sheet, self.cursor_sheet_row(), below, lead);
         // Open the parent before inserting a leg so the new row is visible and
         // cursor reconciliation can select it.
         if let Place::Leg { package, .. } = place {
@@ -2486,16 +2800,22 @@ impl PricerTile {
         self.apply_edit(
             Edit::Insert {
                 place,
-                rows: vec![spec.clone()],
+                rows: specs.clone(),
             },
             cx,
         )
         .map_err(|e| e.to_string())?;
-        let id = self.sheet.id(landed_row(place));
-        if matches!(spec, RowSpec::Package { .. }) {
-            self.expansion.set(id, true);
+        // Landed rows are contiguous: a package occupies itself and its legs.
+        let first = landed_row(place);
+        let mut at = first;
+        for spec in &specs {
+            if let RowSpec::Package { legs, .. } = spec {
+                self.expansion.set(self.sheet.id(at), true);
+                at += legs.len();
+            }
+            at += 1;
         }
-        self.cursor.line = Some(id);
+        self.cursor.line = Some(self.sheet.id(first));
         self.rebuild(cx);
         Ok(())
     }
@@ -2933,6 +3253,9 @@ impl PricerTile {
         self.data.cancel(QueryKey(self.id.0));
         self.tag += 1;
         self.in_flight.clear();
+        // Line ids restart per sheet: the anchor would name a new line.
+        self.clear_selection();
+        self.forget_steps();
         self.sheet = Sheet::new(&name);
         self.adopt_templates();
         self.undo.clear();
@@ -3205,10 +3528,26 @@ impl PricerTile {
     /// Retain its focus handle until deferred access to the opening window can blur it.
     /// Check that it still owns focus so a newer field is not blurred.
     fn drop_orphaned_editor(&mut self, cx: &mut Context<Self>) {
+        // Mid-rebuild a rollback would rebuild inside the rebuild: steps
+        // still in the sheet are recorded instead, so they stay undoable
+        // rather than landing with no history.
+        if let Some(bulk) = self.take_bulk()
+            && !bulk.undo.inverse.is_empty()
+        {
+            self.undo.record(bulk.undo);
+        }
+        if self.release_editor(cx) {
+            self.footer = Some(MOVED.into());
+        }
+    }
+
+    /// Drop the editor where no `Window` is at hand, blurring it later
+    /// through the window it opened in if it still owns focus (a newer
+    /// field is never blurred). Answers whether there was one.
+    fn release_editor(&mut self, cx: &mut App) -> bool {
         let Some(editor) = self.editor.take() else {
-            return;
+            return false;
         };
-        self.footer = Some(MOVED.into());
         let focus = editor.focus_handle(cx);
         drop(editor);
         if let Some(handle) = self.editor_window {
@@ -3220,6 +3559,7 @@ impl PricerTile {
                 });
             });
         }
+        true
     }
 
     pub(crate) fn rebuild_chrome(&mut self) {
@@ -3306,12 +3646,20 @@ impl PricerTile {
 
     /// Mirror the cursor into the table: column before row, so the component ends
     /// in row mode. The delegate paints the cell cursor separately.
+    ///
+    /// The selection re-resolves here first: the cursor is its moving
+    /// corner, so every cursor change is a selection change point.
     pub(crate) fn sync_cursor(&mut self, cx: &mut Context<Self>) {
         self.reconcile_cursor();
+        if self.refresh_selection() {
+            self.rebuild_chrome();
+        }
         let row = self.cursor_row();
         let col = self.cursor.col;
+        let selected = self.resolved.clone();
         self.table.update(cx, |t, cx| {
             t.delegate_mut().cursor = row.map(|r| (r, col));
+            t.delegate_mut().selected = selected;
             t.delegate_mut().refresh_numbers();
             match row {
                 Some(r) => {
@@ -3364,6 +3712,103 @@ impl PricerTile {
         }
     }
 
+    /// The `(grid row, plan column)` the open editor sits on.
+    fn editor_cell(&self) -> Option<(usize, usize)> {
+        let (line, col, _) = self.editor.as_ref()?.target();
+        Some((self.model.grid_row_of(line)?, col))
+    }
+
+    /// Every mouse selection gesture lands here and goes through the same
+    /// `start_selection`/`clear_selection` doors the keys use, so the mouse
+    /// never reaches a selection the keys could not. A plain press clears
+    /// and moves the cursor (the table's `SelectCell` on the release moves
+    /// it again, to the same cell); a shift press or a drag starts a
+    /// selection only when none is live — `Rows` from the tree cell or the
+    /// gutter, `Block` from a value cell — then moves the cursor, which
+    /// extends it. The tree cell keeps the cursor's column: the cursor
+    /// never enters the tree column.
+    ///
+    /// Ordering: the delegate emits the press on mouse-down and the table
+    /// emits `SelectCell` only on the click (the release), so a shift
+    /// press starts the selection at the PRE-press cursor with no capture
+    /// of it needed. A drag anchors at its press cell because the plain
+    /// press already moved the cursor there.
+    ///
+    /// Any gesture that gets here closes an open editor first: a click is
+    /// a cancel (`close_editor`'s rule, which takes live steps back), and
+    /// a drag never gets the `SelectCell` that would otherwise close it.
+    /// A press inside the editor's own cell never gets here. A press
+    /// leaves the entry bar to `SelectCell`, whose click hand-off needs
+    /// the table where the press found it; a drag has no such click, so
+    /// it closes the bar itself.
+    fn pointer(&mut self, event: CellPointer, window: &mut Window, cx: &mut Context<Self>) {
+        // What the chrome shows (mode, footer extent, notice) moves only
+        // with one of these; a plain press that changes none of them (the
+        // cursor cell, nothing selected) skips the rebuild.
+        let snapshot = |t: &Self| {
+            (
+                t.selection.is_some(),
+                t.cursor_row(),
+                t.cursor.col,
+                t.editor.is_some(),
+                t.entry.is_some(),
+                t.footer.clone(),
+            )
+        };
+        let before = snapshot(self);
+        let kind_for = |tree: bool| {
+            if tree {
+                SelectKind::Rows
+            } else {
+                SelectKind::Block
+            }
+        };
+        let (row, col, start) = match event {
+            CellPointer::Press {
+                row,
+                col,
+                shift: false,
+            } => {
+                self.clear_selection();
+                (row, col, None)
+            }
+            CellPointer::Press {
+                row,
+                col,
+                shift: true,
+            } => (row, col, Some(kind_for(col.is_none()))),
+            CellPointer::Drag { row, col, tree } => {
+                // Still inside the cell the cursor is on (the tree cell or
+                // the gutter keeps the column): nothing to start or extend.
+                if self.cursor_row() == Some(row) && col.is_none_or(|c| c == self.cursor.col) {
+                    return;
+                }
+                self.close_entry(window, cx);
+                (row, col, Some(kind_for(tree)))
+            }
+        };
+        if self.editor.is_some() {
+            self.close_editor(window, cx);
+        }
+        if let Some(kind) = start
+            && self.selection.is_none()
+        {
+            self.start_selection(kind);
+        }
+        if let Some(id) = self.line_at(row) {
+            self.cursor.line = Some(id);
+            if let Some(c) = col {
+                self.cursor.col = c;
+            }
+        }
+        // Re-resolves the selection against the moved cursor.
+        self.sync_cursor(cx);
+        if snapshot(self) != before {
+            self.rebuild_chrome();
+            cx.notify();
+        }
+    }
+
     fn on_table_event(&mut self, event: &TableEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             TableEvent::SelectCell(row, col) => {
@@ -3380,6 +3825,16 @@ impl PricerTile {
                 self.pressed = self.click_anchor.take();
                 if self.entry.is_some() {
                     self.click_anchor = Some(line);
+                }
+                // A click inside the open editor's own cell is the
+                // editor's (caret, text selection): never a cancel, which
+                // would also take a live step's steps back, and the cursor
+                // is already there. After the hand-off, which every press
+                // takes part in.
+                if SheetDelegate::plan_col(*col)
+                    .is_some_and(|c| self.editor_cell() == Some((*row, c)))
+                {
+                    return;
                 }
                 self.close_entry(window, cx);
                 self.close_editor(window, cx);
@@ -3402,6 +3857,14 @@ impl PricerTile {
                     Some(line) => line,
                     None => self.line_at(*row),
                 };
+                // A double-click inside the open editor (a word selection
+                // there) reopens nothing: reopening would reseed the typed
+                // text and take a live step's steps back.
+                if SheetDelegate::plan_col(*col)
+                    .is_some_and(|c| self.editor_cell() == Some((*row, c)))
+                {
+                    return;
+                }
                 self.close_entry(window, cx);
                 let Some(id) = line else {
                     return;
@@ -3494,7 +3957,14 @@ impl gpui::Render for PricerTile {
                 cx,
             )
         });
-        let footer = header::render_footer(self.footer_text.as_ref(), theme);
+        // A refusal or a line failure takes the footer while it stands.
+        let strip = self.footer_text.is_none();
+        let footer = header::render_footer(
+            self.footer_text.as_ref(),
+            self.selection_extent.as_ref().filter(|_| strip),
+            &self.totals,
+            theme,
+        );
         // A pointer press anywhere on the tile cancels an armed `:rm`
         // confirm (the confirm door's capture-phase press).
         confirm::cancel_on_press(
@@ -3599,6 +4069,27 @@ pub(crate) mod tests {
         diagnostics: Entity<Diagnostics>,
     }
 
+    /// The window's view between `Root` and the tile. Its bubble-phase
+    /// press counter stands in for the shell's tile-level press, which
+    /// puts the keyboard back on the tile: a tile listener that stopped
+    /// a press's propagation would leave the shell deaf to it.
+    struct Host {
+        tile: Entity<PricerTile>,
+        presses: Rc<std::cell::Cell<u32>>,
+    }
+
+    impl gpui::Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            let presses = self.presses.clone();
+            div()
+                .size_full()
+                .on_mouse_down(gpui::MouseButton::Left, move |_, _, _| {
+                    presses.set(presses.get() + 1);
+                })
+                .child(self.tile.clone())
+        }
+    }
+
     // Not every field and method has a reader in every build.
     #[allow(dead_code)]
     pub(crate) struct Harness {
@@ -3610,6 +4101,8 @@ pub(crate) mod tests {
         pub store: MemorySheetStore,
         pub data: DataHandle,
         rx: RefCell<Option<Receiver<Request>>>,
+        /// Left presses that bubbled out of the tile to the host.
+        pub host_presses: Rc<std::cell::Cell<u32>>,
     }
 
     /// A sheet named `book` in a fresh store, built from shorthand lines,
@@ -3711,9 +4204,11 @@ pub(crate) mod tests {
         }
         let factory = Rc::new(factory);
         let slot: Rc<RefCell<Option<Built>>> = Rc::new(RefCell::new(None));
+        let host_presses = Rc::new(std::cell::Cell::new(0));
         let window = cx
             .update(|cx| {
                 let slot = slot.clone();
+                let presses = host_presses.clone();
                 let factory = factory.clone();
                 cx.open_window(gpui::WindowOptions::default(), |window, cx| {
                     let frame =
@@ -3734,9 +4229,10 @@ pub(crate) mod tests {
                         frame,
                         diagnostics,
                     });
+                    let host = cx.new(|_| Host { tile, presses });
                     // `Root` is load-bearing: gpui-component registers the
                     // focused `InputState` on it (the entry field and editor).
-                    cx.new(|cx| gpui_component::Root::new(tile, window, cx))
+                    cx.new(|cx| gpui_component::Root::new(host, window, cx))
                 })
             })
             .unwrap();
@@ -3755,6 +4251,7 @@ pub(crate) mod tests {
                 store,
                 data,
                 rx: RefCell::new(Some(rx)),
+                host_presses,
             },
             vcx,
         )
@@ -4611,7 +5108,7 @@ pub(crate) mod tests {
         let b = h.prices().remove(0);
         h.answer(&mut vcx, &b, 12.5);
         edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 7 });
-        assert!(h.prices().is_empty(), "qty changes no request (spec §9.3)");
+        assert!(h.prices().is_empty(), "qty changes no request");
         let e = new_strike(&h, &vcx, 0, 5100.0);
         edit(&h, &mut vcx, e);
         let again = h.prices();
@@ -5618,7 +6115,7 @@ pub(crate) mod tests {
         typed(h, vcx, text);
     }
 
-    /// Spec §3–§5: a package strike's `/` list moves each leg's strike,
+    /// A package strike's `/` list moves each leg's strike,
     /// and the whole commit is one reprice and one undo step.
     #[gpui::test]
     fn editing_a_package_strike_moves_both_legs_in_one_undo_step(cx: &mut gpui::TestAppContext) {
@@ -5697,7 +6194,7 @@ pub(crate) mod tests {
         assert_eq!(legs(&h, &vcx), [-5, 5], "no leg moved");
     }
 
-    /// Spec §3, §6: a package expiry opens a plain text editor, not the
+    /// A package expiry opens a plain text editor, not the
     /// date field; a list with the wrong part count keeps the editor open
     /// and names the count and the current cell.
     #[gpui::test]
@@ -5738,6 +6235,23 @@ pub(crate) mod tests {
             Some("4994"),
             "a count multiplies"
         );
+    }
+
+    /// An inherited shift paints the sheet's value; the empty field it
+    /// opens on means "inherit", not zero. A step starting from zero
+    /// would move a painted +2.0 down to +1.0 on `up`.
+    #[gpui::test]
+    fn a_nudge_on_an_inherited_shift_steps_from_the_painted_value(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.command(&mut vcx, "shift spot 2").unwrap();
+        goto_column(&h, &mut vcx, "spot_shift");
+        assert_eq!(h.cell(&vcx, 0, "spot_shift"), "+2.0", "fixture: inherited");
+        h.dispatch(&mut vcx, "edit", None);
+        assert_eq!(editor_text(&h, &vcx).as_deref(), Some(""), "opens empty");
+        h.dispatch(&mut vcx, "insert_up", None);
+        assert_eq!(editor_text(&h, &vcx).as_deref(), Some("3"));
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.cell(&vcx, 0, "spot_shift"), "+3.0");
     }
 
     #[gpui::test]
@@ -6383,7 +6897,7 @@ pub(crate) mod tests {
         assert_eq!(
             h.prices().len(),
             1,
-            "an instrument change is a request change (spec §9.3)"
+            "an instrument change is a request change"
         );
     }
 
@@ -6504,7 +7018,7 @@ pub(crate) mod tests {
         h.command(&mut vcx, "spot spx 5100").unwrap();
         let b = h.prices().remove(0);
         assert_eq!(b.overrides.spot.get("SPX"), Some(&5100.0));
-        assert_eq!(b.lines.len(), 4, "every SPX line is restaled (spec §9.3)");
+        assert_eq!(b.lines.len(), 4, "every SPX line is restaled");
         h.command(&mut vcx, "spot ndx 18000").unwrap();
         answer_all(&h, &mut vcx, 12.5);
         h.command(&mut vcx, "spot clear").unwrap();
@@ -6961,7 +7475,7 @@ pub(crate) mod tests {
         assert_eq!(
             h.store.save_count(),
             base,
-            "a zero-row document is never published (spec §7.2)"
+            "a zero-row document is never published"
         );
         assert_eq!(stored(&h).len(), 1);
     }
@@ -9111,7 +9625,7 @@ pub(crate) mod tests {
         assert_eq!(priced, None, "the old batch's answer is not this sheet's");
     }
 
-    // ---- fix round 1: retiring names, deferred loads, save origins ----
+    // ---- retiring names, deferred loads, save origins ----
 
     /// A tile restoring `sheet` in a window of its own, from the harness's
     /// factory — the production route a session restore takes.
@@ -9420,4 +9934,6 @@ pub(crate) mod tests {
         save_answered(&h, &mut vcx, "other", Ok(()));
         assert!(h.notice(&vcx).is_none());
     }
+
+    mod selection;
 }

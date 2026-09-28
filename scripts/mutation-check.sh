@@ -16562,11 +16562,9 @@ run_mutation "pricer sheets: a switch keeps the old sheet's pricing tag" \
   crates/geode-pricer/src/tile.rs \
   '        self.data.cancel(QueryKey(self.id.0));
         self.tag += 1;
-        self.in_flight.clear();
-        self.sheet = Sheet::new(&name);' \
+        self.in_flight.clear();' \
   '        self.data.cancel(QueryKey(self.id.0));
-        self.in_flight.clear();
-        self.sheet = Sheet::new(&name);' \
+        self.in_flight.clear();' \
   geode-pricer an_old_sheets_pricing_answer_never_lands_on_the_new_one
 
 run_mutation "pricer load: a load starting leaves a refusal streak standing" \
@@ -18864,7 +18862,7 @@ run_mutation "pricer tile: a refused save is silent" \
 
 run_mutation "pricer tile: a close drops a pending save" \
   crates/geode-pricer/src/tile.rs \
-  '            this.flush_save();' \
+  '            this.flush_save(cx);' \
   '' \
   geode-pricer closing_flushes_a_pending_save_and_the_next_tile_reopens_it
 
@@ -19270,8 +19268,10 @@ run_mutation "pricer tile: a refusal destroys the standing notice" \
 run_mutation "pricer tile: an edit prunes the open set" \
   crates/geode-pricer/src/tile.rs \
   '    pub(crate) fn after_edit(&mut self, cx: &mut Context<Self>) {
+        self.edit_seq += 1;
         self.rebuild(cx);' \
   '    pub(crate) fn after_edit(&mut self, cx: &mut Context<Self>) {
+        self.edit_seq += 1;
         self.expansion.retain_packages(&self.sheet);
         self.rebuild(cx);' \
   geode-pricer dd_then_u_on_an_open_package_restores_it_open_under_the_cursor
@@ -20010,7 +20010,7 @@ run_mutation "quit: the data hook stops the service without flushing sheets" \
 
 run_mutation "pricer: flush_all flushes no tile" \
   crates/geode-pricer/src/content.rs \
-  '                t.flush_save();' \
+  $'                if t.flush_save(cx) {\n                    t.rebuild(cx);\n                }' \
   '' \
   geode-pricer flush_all_saves_every_unsaved_sheet_now
 
@@ -22350,6 +22350,322 @@ run_mutation "pricer tile: a package commit ignores a changed opening text" \
   '            && cell::editor_for(&self.sheet, row, kind, format) != Ok(CellEditor::Text(opened))' \
   '            && opened.is_empty()' \
   geode-pricer a_template_reload_under_an_open_package_qty_editor_refuses_the_commit
+
+# A package selected with its own leg stands for its legs once: an edit
+# must never write a leg twice.
+run_mutation "pricer select: lines_of keeps a leg twice" \
+  crates/geode-pricer/src/core/select.rs \
+  '    out.dedup();' \
+  '    // no dedup' \
+  geode-pricer lines_of_dedupes_a_package_and_its_legs
+
+# The footer totals top-most rows: an open package's folded sum already
+# carries its legs, so totalling both would double them.
+run_mutation "pricer select: totals count a selected package's legs again" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'        let top = top_most(&self.sheet, &self.selected_sheet_rows());\n        let sums = risk_totals' \
+  $'        let top = self.selected_sheet_rows();\n        let sums = risk_totals' \
+  geode-pricer the_footer_totals_count_an_open_packages_legs_once
+
+# A line's total is a position total: its qty times the unit value.
+run_mutation "pricer select: totals drop the qty weighting" \
+  crates/geode-pricer/src/core/select.rs \
+  '            sheet.qty(r) as f64' \
+  '            1.0' \
+  geode-pricer risk_totals_are_position_totals_and_refuse_an_incomplete_column
+
+# An unpriced or failed row makes its column incomplete, never a partial sum.
+run_mutation "pricer select: an unpriced row counts as zero in the totals" \
+  crates/geode-pricer/src/core/select.rs \
+  '            (LineState::Failed(_), _) | (_, None) => None,' \
+  '            (LineState::Failed(_), _) | (_, None) => Some([0.0; 6]),' \
+  geode-pricer risk_totals_are_position_totals_and_refuse_an_incomplete_column
+
+# An incomplete total paints as a refused dash, not a number.
+run_mutation "pricer select: an incomplete total paints as zero" \
+  crates/geode-pricer/src/tile/select.rs \
+  '                    text: "—".into(),' \
+  '                    text: "0.00".into(),' \
+  geode-pricer an_unpriced_row_turns_its_total_into_a_dash
+
+# `d` under a `v` block refuses: a block's cells are not a set of rows.
+run_mutation "pricer select: d deletes a block's rows" \
+  crates/geode-pricer/src/tile/select.rs \
+  '            "delete" => Some("d deletes rows — use V"),' \
+  '            "delete" => None,' \
+  geode-pricer row_verbs_in_a_block_refuse_and_name_v
+
+# `d` over rows is ONE undo entry.
+run_mutation "pricer select: d removes each row as its own undo entry" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'        if let Err(e) = self.apply_edits(edits, cx) {\n            // A refused batch leaves the sheet as it was, so the selection' \
+  $'        if let Err(e) = Vec::<Edit>::into_iter(edits).try_for_each(|e| self.apply_edit(e, cx)) {\n            // A refused batch leaves the sheet as it was, so the selection' \
+  geode-pricer d_over_rows_deletes_them_in_one_undo_entry
+
+# `d` removes bottom-up: each remove shifts the indices after it.
+run_mutation "pricer select: d removes top-down" \
+  crates/geode-pricer/src/tile/select.rs \
+  '        at.sort_unstable_by(|a, b| b.cmp(a));' \
+  '        at.sort_unstable();' \
+  geode-pricer d_over_rows_deletes_them_in_one_undo_entry
+
+# shift+j/k slide the block as a unit: the neighbour hops the block's length.
+run_mutation "pricer select: a block move hops the neighbour one row" \
+  crates/geode-pricer/src/core/select.rs \
+  '    let len = (hi - lo + 1) as isize;' \
+  '    let len = 1isize;' \
+  geode-pricer move_plan_moves_the_neighbouring_sibling_across_the_block
+
+# `g p` over a selection including a package refuses and says why.
+run_mutation "pricer select: g p groups a package into a package" \
+  crates/geode-pricer/src/core/select.rs \
+  '    if top.iter().any(|&r| sheet.is_package(r)) {' \
+  '    if false {' \
+  geode-pricer group_plan_needs_contiguous_root_lines_and_names_why
+
+# A live selection routes the row verbs to its own rows, not the cursor's.
+run_mutation "pricer select: shift+j over a selection moves only the cursor row" \
+  crates/geode-pricer/src/tile.rs \
+  '                        "move_down" if selected => self.move_selection(true, cx),' \
+  '                        "move_down" if false => self.move_selection(true, cx),' \
+  geode-pricer shift_j_moves_the_selected_block_as_a_unit_and_keeps_the_selection
+
+# `g p` opens the new package with the cursor on it.
+run_mutation "pricer select: g p leaves the new package closed" \
+  crates/geode-pricer/src/tile/select.rs \
+  '        self.expansion.set(id, true);' \
+  '        let _ = id;' \
+  geode-pricer g_p_over_root_lines_groups_them_and_u_restores
+
+# A typed absolute value writes the cursor's column only, under `v` too:
+# one text parsed into several column grammars is a plausible wrong value.
+run_mutation "pricer select: a typed commit under v writes the block's first column" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'        let Some(planned) = self.plan.columns.get(self.cursor.col) else {\n            return false;' \
+  $'        let Some(planned) = self.plan.columns.get(self.resolved.as_ref().map_or(self.cursor.col, |r| r.cols.start)) else {\n            return false;' \
+  geode-pricer a_typed_commit_in_a_block_leaves_its_other_columns_untouched
+
+# ... and under `V`, whose columns span the whole row.
+run_mutation "pricer select: a typed commit under V writes the row's last column" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'        let Some(planned) = self.plan.columns.get(self.cursor.col) else {\n            return false;' \
+  $'        let Some(planned) = self.plan.columns.get(self.resolved.as_ref().map_or(self.cursor.col, |r| r.cols.end - 1)) else {\n            return false;' \
+  geode-pricer i_over_rows_writes_the_cursor_column_on_every_target_line_in_one_undo
+
+# A selected package's typed qty goes through the template weights: the
+# per-leg path writes the bare number to every leg (-5/+5 → -5/-5).
+run_mutation "pricer select: a typed package qty writes every leg unweighted" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'        if kind == ColumnKind::Qty && editable {\n            let packages' \
+  $'        if false {\n            let packages' \
+  geode-pricer a_typed_package_qty_over_a_selection_scales_its_legs_by_the_weights
+
+# The live step on a package qty steps the PACKAGE qty through the weights.
+run_mutation "pricer select: a package qty step steps each leg by one" \
+  crates/geode-pricer/src/tile/select.rs \
+  '            if ckind == ColumnKind::Qty && editable {' \
+  '            if false {' \
+  geode-pricer a_package_qty_step_moves_its_legs_by_the_template_weights
+
+# Every cancel of a live step's editor takes the steps back.
+run_mutation "pricer select: escape keeps the live steps" \
+  crates/geode-pricer/src/tile.rs \
+  $'        if let Some(bulk) = bulk {\n            self.settle_bulk(bulk, false, cx);\n        }\n        cx.notify();' \
+  $'        if let Some(bulk) = bulk {\n            self.settle_bulk(bulk, true, cx);\n        }\n        cx.notify();' \
+  geode-pricer escape_rolls_every_step_back
+
+# A rollback runs only while the steps are the sheet's last change: a
+# recorded edit since (the counter) keeps them as one undo entry.
+run_mutation "pricer select: escape rolls back over a later recorded edit" \
+  crates/geode-pricer/src/tile/select.rs \
+  '        let unchanged = bulk.seq == self.edit_seq' \
+  '        let unchanged = true' \
+  geode-pricer escape_after_another_recorded_edit_keeps_the_steps_undoable
+
+# ... and a stepped cell changed underneath (the marks) keeps them too.
+run_mutation "pricer select: escape rolls back over a changed stepped cell" \
+  crates/geode-pricer/src/tile/select.rs \
+  '            && bulk.after.iter().all(|(id, mark)| {' \
+  '            && true || bulk.after.iter().all(|(id, mark)| {' \
+  geode-pricer escape_after_a_stepped_cell_changed_underneath_keeps_the_steps
+
+# A step press is all or nothing: one refused cell refuses the press.
+run_mutation "pricer select: a refused line step lets the rest land" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'                    Err(why) => return self.refuse_step(why, cx),\n                }\n            }\n        }\n        // One whole-record edit per line and record' \
+  $'                    Err(_) => skips.add(Skip::Refused),\n                }\n            }\n        }\n        // One whole-record edit per line and record' \
+  geode-pricer a_step_that_zeroes_a_qty_writes_nothing
+
+run_mutation "pricer select: a refused package qty step lets the rest land" \
+  crates/geode-pricer/src/tile/select.rs \
+  '                        Err(why) => return self.refuse_step(why, cx),' \
+  '                        Err(_) => skips.add(Skip::Refused),' \
+  geode-pricer a_package_qty_stepping_to_zero_refuses_the_whole_press
+
+# A press inside the open editor's cell (a date separator: no segment
+# catches it) is the editor's, never a cancel.
+run_mutation "pricer select: a press inside the editor's cell cancels it" \
+  crates/geode-pricer/src/delegate.rs \
+  $'                if col.is_some()\n                    && d.editor' \
+  $'                if false\n                    && d.editor' \
+  geode-pricer a_press_on_the_date_fields_separator_keeps_the_editor_open
+
+# A sheet replace clears the selection deliberately: line ids restart per
+# sheet, and a lost-anchor footer would misreport it.
+run_mutation "pricer select: a new sheet keeps the old selection" \
+  crates/geode-pricer/src/tile.rs \
+  $'        // Line ids restart per sheet: the anchor would name a new line.\n        self.clear_selection();' \
+  '        // Line ids restart per sheet: the anchor would name a new line.' \
+  geode-pricer a_new_sheet_clears_the_selection
+
+# An untouched enter over a selection writes nothing: the shown value
+# filled across every target would be a wrong block from a no-op gesture.
+run_mutation "pricer select: an untouched enter fills the selection" \
+  crates/geode-pricer/src/tile.rs \
+  '            if untouched {' \
+  '            if false {' \
+  geode-pricer an_untouched_enter_over_a_selection_writes_nothing
+
+# A close or quit mid-step rolls the steps back before the final save.
+run_mutation "pricer select: a flush saves the live steps" \
+  crates/geode-pricer/src/tile.rs \
+  '        if stepped && let Some(bulk) = self.take_bulk() {' \
+  '        if false && stepped && let Some(bulk) = self.take_bulk() {' \
+  geode-pricer a_flush_mid_step_saves_the_sheet_without_the_steps
+
+# A drag extends only from a press a cell caught, never from a button
+# held down elsewhere and passing over the cells.
+run_mutation "pricer select: a drag from off the cells selects" \
+  crates/geode-pricer/src/delegate.rs \
+  $'            let Some(started_on_tree) = d.drag_origin else {\n                return;\n            };' \
+  '            let started_on_tree = d.drag_origin.unwrap_or(false);' \
+  geode-pricer a_drag_that_started_off_the_cells_selects_nothing
+
+# A step builds each line's whole-record edit on the press's earlier
+# cells of that line: from the sheet per column, the vol step's `SetShift`
+# would put the spot step back.
+run_mutation "pricer select: a block step builds each column on the sheet (shifts)" \
+  crates/geode-pricer/src/tile/select.rs \
+  '                let Some((inst, own)) = line_work.get(&l).cloned().or_else(|| {' \
+  '                let Some((inst, own)) = None::<(Instrument, OwnShifts)>.or_else(|| {' \
+  geode-pricer a_block_step_over_both_shifts_moves_both
+
+# ... and the barrier step's `SetInstrument` would put the strike step back.
+run_mutation "pricer select: a block step builds each column on the sheet (instrument)" \
+  crates/geode-pricer/src/tile/select.rs \
+  '                let Some((inst, own)) = line_work.get(&l).cloned().or_else(|| {' \
+  '                let Some((inst, own)) = line_work.get(&usize::MAX).cloned().or_else(|| {' \
+  geode-pricer a_block_step_over_strike_and_barrier_moves_both
+
+# Under `V` the live step moves the cursor's column only: a row selection's
+# columns span every column.
+run_mutation "pricer select: a V step moves every column of the rows" \
+  crates/geode-pricer/src/tile/select.rs \
+  '            SelectKind::Rows => vec![self.cursor.col],' \
+  '            SelectKind::Rows => r.cols.clone().collect(),' \
+  geode-pricer a_rows_step_moves_only_the_cursor_column
+
+# The table's click inside the open editor's cell is the editor's.
+run_mutation "pricer select: a table click inside the editor cancels it" \
+  crates/geode-pricer/src/tile.rs \
+  $'                    .is_some_and(|c| self.editor_cell() == Some((*row, c)))\n                {\n                    return;\n                }\n                self.close_entry(window, cx);\n                self.close_editor(window, cx);' \
+  $'                    .is_some_and(|_| false)\n                {\n                    return;\n                }\n                self.close_entry(window, cx);\n                self.close_editor(window, cx);' \
+  geode-pricer a_click_inside_the_open_editor_keeps_it_open
+
+# A double-click inside the open editor reopens nothing (it would take a
+# live step's steps back).
+run_mutation "pricer select: a double-click inside the editor reopens it" \
+  crates/geode-pricer/src/tile.rs \
+  $'                    .is_some_and(|c| self.editor_cell() == Some((*row, c)))\n                {\n                    return;\n                }\n                self.close_entry(window, cx);\n                let Some(id) = line else {' \
+  $'                    .is_some_and(|_| false)\n                {\n                    return;\n                }\n                self.close_entry(window, cx);\n                let Some(id) = line else {' \
+  geode-pricer a_click_or_double_click_inside_the_stepped_editor_keeps_the_steps
+
+# The first `escape` with a selection live clears the selection alone.
+run_mutation "pricer select: escape leaves the selection live" \
+  crates/geode-pricer/src/tile.rs \
+  '            "escape" if self.selection.is_some() => self.clear_selection(),' \
+  '            "escape" if false => self.clear_selection(),' \
+  geode-pricer escape_clears_only_the_selection_first
+
+# `g u` dissolves bottom-up so each earlier package's index stays valid.
+run_mutation "pricer select: g u dissolves top-down" \
+  crates/geode-pricer/src/tile/select.rs \
+  '        packages.sort_unstable_by(|a, b| b.cmp(a));' \
+  '        packages.sort_unstable();' \
+  geode-pricer g_u_ungroups_every_selected_package_in_one_undo_entry
+
+# An inheriting shift opens empty; the live step moves it from the value
+# it paints. Stepped from zero, a painted +2.0 went to +1.0 on `up`.
+run_mutation "pricer select: a step moves an inherited shift from zero" \
+  crates/geode-pricer/src/tile/select.rs \
+  '                    Ok(CellEditor::Text(t)) => cell::step_from(&self.sheet, ckind, &t),' \
+  '                    Ok(CellEditor::Text(t)) => t,' \
+  geode-pricer a_shift_step_moves_inherited_and_own_cells_up_from_what_they_paint
+
+# The single-cell nudge agrees with the live step on an inherited shift.
+run_mutation "pricer select: a single-cell nudge moves an inherited shift from zero" \
+  crates/geode-pricer/src/tile.rs \
+  '                let text = cell::step_from(&self.sheet, *kind, &input.read(cx).value());' \
+  '                let text = input.read(cx).value().to_string();' \
+  geode-pricer a_nudge_on_an_inherited_shift_steps_from_the_painted_value
+
+# An unchanged choice or text cell over a selection writes nothing: its
+# own value filled across the targets turned the 4000 P into a call.
+run_mutation "pricer select: an untouched choice or text enter fills the selection" \
+  crates/geode-pricer/src/tile.rs \
+  '        if unchanged && self.selection.is_some() {' \
+  '        if false && self.selection.is_some() {' \
+  geode-pricer an_untouched_choice_enter_over_a_selection_writes_nothing
+
+run_mutation "pricer select: an untouched choice reads as changed" \
+  crates/geode-pricer/src/tile.rs \
+  $'                    !*moved && (typed.is_empty() || typed.eq_ignore_ascii_case(initial))' \
+  '                    false' \
+  geode-pricer an_untouched_choice_enter_over_a_selection_writes_nothing
+
+# A moved highlight is a pick, even onto an empty query.
+run_mutation "pricer select: a moved choice reads as untouched" \
+  crates/geode-pricer/src/tile.rs \
+  $'                    !*moved && (typed.is_empty() || typed.eq_ignore_ascii_case(initial))' \
+  $'                    (typed.is_empty() || typed.eq_ignore_ascii_case(initial))' \
+  geode-pricer a_moved_choice_over_a_selection_writes_every_line_in_one_undo
+
+# A text cell with no live step (a package's type) is unchanged on its
+# opening text.
+run_mutation "pricer select: an untouched package text cell reads as changed" \
+  crates/geode-pricer/src/tile.rs \
+  '                Editor::Text { initial, .. } => !stepped && text == *initial,' \
+  '                Editor::Text { .. } => false,' \
+  geode-pricer an_untouched_package_text_cell_over_a_selection_writes_nothing
+
+# The opening date untyped writes nothing over a selection; it replaced a
+# tenor with today's date.
+run_mutation "pricer select: an untouched date fills the selection" \
+  crates/geode-pricer/src/tile.rs \
+  '            if date == initial && !typed {' \
+  '            if false {' \
+  geode-pricer an_unchanged_untyped_date_over_a_selection_writes_nothing
+
+# A typed day is a deliberate date, even the opening one.
+run_mutation "pricer select: a typed opening date writes nothing" \
+  crates/geode-pricer/src/tile.rs \
+  '            if date == initial && !typed {' \
+  '            if date == initial {' \
+  geode-pricer an_unchanged_untyped_date_over_a_selection_writes_nothing
+
+run_mutation "pricer select: a typed digit is not recorded" \
+  crates/geode-pricer/src/tile.rs \
+  $'                if matches!(other, FieldKey::Digit(_)) {\n                    *typed = true;' \
+  $'                if matches!(other, FieldKey::Digit(_)) {\n                    *typed = false;' \
+  geode-pricer an_unchanged_untyped_date_over_a_selection_writes_nothing
+
+# A failed line keeps its old result: the totals check the state, or the
+# retained value would read as a complete total.
+run_mutation "pricer select: a failed line's retained result counts in the totals" \
+  crates/geode-pricer/src/core/select.rs \
+  '            (LineState::Failed(_), _) | (_, None) => None,' \
+  '            (_, None) => None,' \
+  geode-pricer risk_totals_refuse_a_failed_line_even_with_a_retained_result
 
 # The fit is the widest content, not whichever cell comes first.
 run_mutation "autosize: the fit measures the first text, not the widest" \

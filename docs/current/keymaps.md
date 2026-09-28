@@ -99,14 +99,14 @@ blotter && mode == normal
 mode != insert
 ```
 
-A module can push more than one key onto its own frame. The blotter's and the
-market-data panel's `key_context` push `mode == visual` while a grid selection
-is live (the same flag `mode == normal` above tests for its absence) and, only
-then, a second `select == rows` or `select == block` pair naming the
-selection's kind — `blotter && select == rows` reaches only while a `V` row
-selection is live, never a `v` block one. The market-data panel pushes its
-`select` pair whenever a selection is live, including while an editor or the
-action menu is open over it.
+A module can push more than one key onto its own frame. The blotter's, the
+market-data panel's and the line pricer's `key_context` push `mode == visual`
+while a grid selection is live (the same flag `mode == normal` above tests for
+its absence) and, only then, a second `select == rows` or `select == block`
+pair naming the selection's kind — `blotter && select == rows` reaches only
+while a `V` row selection is live, never a `v` block one. The market-data
+panel and the pricer push their `select` pair whenever a selection is live,
+including while an editor or the action menu is open over it.
 
 The market-data panel reports one of `normal`, `visual`, `menu`, or `insert`.
 An open editor, picker, choice field, or upload confirmation is `insert` even
@@ -119,6 +119,27 @@ and `escape` — because a doubled normal-mode form (`y y`, `y c`, `d d`) would
 leave the first press waiting for a second. Normal-mode keys the block does
 not list, such as `space`, `o`, `u`, `n`, and `.`, have no panel binding while
 a selection is live; the palette still reaches their actions.
+
+The line pricer reports `normal`, `visual`, `menu`, or `insert` the same way:
+an open entry bar, cell editor (the date field included) or `:rm` question is
+`insert` over a live selection, so the editor's `enter`, `escape` and arrows
+keep their insert-mode meaning. Over a selection the arrows step every
+selected cell only while the editor sits on an untouched qty, strike,
+barrier or shift cell; otherwise they nudge the editor's text or the date
+field's segment (see [features](features.md#selection-2)). An inherited shift
+steps from the value it paints, in the live step and the single-cell nudge
+alike. Over a selection, an `enter` that leaves the cursor cell as it opened
+(an unmoved choice, an untyped date on its opening day, unedited text) writes
+nothing and closes the editor. The pricer's `pricer && mode == visual` block
+repeats the normal motions and binds `y` (`pricer::yank`), `d`
+(`pricer::delete`), `shift+j`/`shift+k`, `g p`, `g u`, `i` and `enter`
+(`pricer::edit`), `v`, `V` and `escape` as the selection's verbs.
+Normal-mode keys it does not list — the doubled `y y`, `y c` and `d d`, `p`,
+`shift+p`, `u`, `ctrl+r`, `o`, `n`, `shift+n`, `space`, the `z` folds, `g m`
+and `.` — are unbound while a selection is live; the palette still reaches
+them. A palette verb closes an open editor first, as a cancel, so the
+palette's `undo` mid-step takes the steps back and then undoes the entry
+before them.
 
 A flag matches when any stack frame carries it. A comparison uses the innermost
 frame defining its key. Both `==` and `!=` are false when the key is absent;
