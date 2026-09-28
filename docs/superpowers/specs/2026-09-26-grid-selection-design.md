@@ -248,6 +248,17 @@ rather than leg by leg, which would flatten a spread into same-signed legs;
 its legs are left out of the per-line targets, and a package in list form
 is refused. This amends "Columns" and "Typed value" above.
 
+**Untouched commits and inherited shifts** (ruling 2026-09-27, final
+review).
+- **Untouched commit.** An untouched `enter` over a selection writes
+  nothing, in every editor: a stepping editor, a choice whose highlight
+  never moved, a date whose segments were never typed, or text equal to
+  what the editor opened on. Only a real change commits.
+- **Inherited shifts.** A shift cell that inherits the sheet's shift
+  steps from the value it paints, so an inherited `+2.0` steps to the
+  line's own `+3.0`. This holds for the live step and the single-cell
+  nudge alike.
+
 **Footer** (ruling 2026-09-27). While a selection is live the footer shows
 the extent. Beside it are totals of `price`, `delta`, `gamma`, `vega`,
 `theta` and `rho` over the **top-most** selected rows (§1 ruling 2). A
