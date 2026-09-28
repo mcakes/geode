@@ -163,6 +163,15 @@ impl Surface {
                 k_max: ks[ks.len() - 1],
             });
         }
+        // Distinct dates can floor to the same year fraction (a term on
+        // the anchor and the day after); interpolating between them would
+        // divide by zero, so refuse the document up front.
+        if let Some(pair) = out.windows(2).find(|w| w[1].t <= w[0].t) {
+            return Err(VolError(format!(
+                "{KIND} document terms {} and {} are not distinct in time",
+                pair[0].date, pair[1].date
+            )));
+        }
         Ok(Surface { terms: out })
     }
 
@@ -642,5 +651,92 @@ pub(crate) mod tests {
             "{}",
             r.points[0].vol
         );
+    }
+
+    /// Total-variance interpolation of two flat terms `(days_a, vol_a)`
+    /// and `(days_b, vol_b)` at `days`, the arithmetic the model states.
+    fn variance_interp(days_a: f64, vol_a: f64, days_b: f64, vol_b: f64, days: f64) -> f64 {
+        let (ta, tb, t) = (days_a / 365.0, days_b / 365.0, days / 365.0);
+        let (wa, wb) = (vol_a * vol_a * ta, vol_b * vol_b * tb);
+        ((wa + (wb - wa) * (t - ta) / (tb - ta)) / t).sqrt()
+    }
+
+    #[test]
+    fn between_three_terms_the_bracketing_pair_is_chosen_by_date() {
+        // Flat 0.2 / 0.4 / 0.2 at 30, 61 and 91 days. Each gap is sliced
+        // at its midpoint: the first gap catches a bracket that skips the
+        // middle term (its two ends agree at 0.2, so a wrong pair paints
+        // exactly 0.2), the second catches a bracket pinned to the first
+        // two terms (which would extrapolate past 0.4).
+        let doc = cvi_doc(
+            "2026-09-01",
+            &[
+                ("2026-10-01", 100.0, 0.2, 0.0),
+                ("2026-11-01", 100.0, 0.4, 0.0),
+                ("2026-12-01", 100.0, 0.2, 0.0),
+            ],
+            |_, _| 0.0,
+        );
+        let r = DemoVolModel
+            .slice(&doc, &at("2026-10-16", &[100.0]))
+            .unwrap();
+        let expected = variance_interp(30.0, 0.2, 61.0, 0.4, 45.0);
+        let skipped_middle = variance_interp(30.0, 0.2, 91.0, 0.2, 45.0);
+        assert!(
+            (r.points[0].vol - expected).abs() < 1e-9,
+            "{} vs {expected}",
+            r.points[0].vol
+        );
+        assert!((r.points[0].vol - skipped_middle).abs() > 1e-6);
+        let r = DemoVolModel
+            .slice(&doc, &at("2026-11-16", &[100.0]))
+            .unwrap();
+        let expected = variance_interp(61.0, 0.4, 91.0, 0.2, 76.0);
+        let first_pair = variance_interp(30.0, 0.2, 61.0, 0.4, 76.0);
+        assert!(
+            r.points[0].vol > 0.2 && r.points[0].vol < 0.4,
+            "{}",
+            r.points[0].vol
+        );
+        assert!(
+            (r.points[0].vol - expected).abs() < 1e-9,
+            "{} vs {expected}",
+            r.points[0].vol
+        );
+        assert!((r.points[0].vol - first_pair).abs() > 1e-6);
+    }
+
+    #[test]
+    fn terms_that_share_a_year_fraction_are_refused() {
+        // Both terms floor to one day, so interpolating between them would
+        // divide by zero; the document is refused naming the pair.
+        let doc = cvi_doc(
+            "2026-09-01",
+            &[
+                ("2026-09-01", 100.0, 0.2, 0.0),
+                ("2026-09-02", 100.0, 0.2, 0.0),
+            ],
+            |_, _| 0.0,
+        );
+        let err = DemoVolModel
+            .slice(&doc, &at("2026-09-01", &[100.0]))
+            .unwrap_err();
+        assert_eq!(
+            err.0,
+            "cvi_params document terms 2026-09-01 and 2026-09-02 are not distinct in time"
+        );
+    }
+
+    #[test]
+    fn a_non_positive_or_nan_at_strike_is_refused() {
+        let doc = flat(0.2);
+        let err = DemoVolModel
+            .slice(&doc, &at("2026-10-16", &[100.0, -5.0]))
+            .unwrap_err();
+        assert_eq!(err.0, "strike -5 is not positive");
+        let err = DemoVolModel
+            .slice(&doc, &at("2026-10-16", &[f64::NAN]))
+            .unwrap_err();
+        assert!(err.0.starts_with("strike NaN is not positive"), "{}", err.0);
     }
 }
