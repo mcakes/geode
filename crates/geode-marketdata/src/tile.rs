@@ -1044,7 +1044,11 @@ impl MarketDataTile {
             // `apply` clears notices only when it paints the delivery, before
             // it writes any new restore, policy or validation notice.
             Delivered::Apply(snapshot) => self.apply(snapshot, cx),
-            Delivered::Held => {}
+            // Superseded: asked under an as-of or document generation this
+            // panel has since moved past (it was hidden across the change).
+            // Applying would run the draft policy against a document nobody
+            // is looking at; the reshow asks again.
+            Delivered::Held | Delivered::Superseded => {}
             // Last good stays on screen: a failed select says nothing about
             // the document already painted.
             Delivered::Failed(e) => self.notice = Some(e.into()),
@@ -6335,12 +6339,83 @@ mod tests {
             "a hidden panel asks nothing"
         );
         h.deliver(&mut vcx, first.tag, Arc::new(cvi(BASE)));
+        assert_eq!(
+            h.rows(&vcx),
+            0,
+            "the answer to the as-of it left behind is not applied"
+        );
         h.visible(&mut vcx, true);
         let second = h
             .document_request()
             .expect("the as-of moved while hidden: reshow asks again");
         assert!(second.tag > first.tag);
         assert_eq!(second.as_of, geode_core::query::AsOf::At(at));
+    }
+
+    /// A reply asked under an as-of the panel moved past while hidden is
+    /// dropped, not applied: applying it would run the draft policy (here
+    /// `:auto replace`, which throws the edits away) against a document
+    /// nobody asked for any more. The reshow asks under the new as-of.
+    #[gpui::test]
+    fn a_reply_to_an_as_of_left_behind_while_hidden_runs_no_draft_policy(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "auto replace").unwrap();
+        h.with_document_tagged(&mut vcx);
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "0.5");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().len()), 1);
+
+        // An as-of change while shown: the panel asks again at once.
+        let first_at = chrono::Utc::now() - chrono::Duration::days(1);
+        h.frame.update(&mut vcx, |f, cx| {
+            f.set_as_of(geode_core::query::AsOf::At(first_at));
+            cx.notify();
+        });
+        let asked = h.document_request().expect("an as-of change requeries");
+        // Hidden with that question out, then the as-of moves again.
+        h.visible(&mut vcx, false);
+        let second_at = chrono::Utc::now() - chrono::Duration::days(2);
+        h.frame.update(&mut vcx, |f, cx| {
+            f.set_as_of(geode_core::query::AsOf::At(second_at));
+            cx.notify();
+        });
+        h.deliver(
+            &mut vcx,
+            asked.tag,
+            Arc::new(document_of(&["2026-11-20"], &NODES, NEWER)),
+        );
+
+        let (edits, state, source, rows, notice) = h.tile.read_with(&vcx, |t, _| {
+            (
+                t.draft().len(),
+                t.draft().state.clone(),
+                t.model().base.as_ref().map(|b| b.as_of.clone()),
+                t.model().rows.len(),
+                t.notice().map(str::to_string),
+            )
+        });
+        assert_eq!(
+            source.as_deref(),
+            Some(BASE),
+            "the old reply is not painted"
+        );
+        assert_eq!(rows, 2);
+        assert_eq!(edits, 1, "and the replace policy never ran");
+        assert_eq!(state, DraftState::Editing);
+        assert!(
+            !notice.as_deref().is_some_and(|n| n.contains("replaced")),
+            "nothing was replaced: {notice:?}"
+        );
+
+        h.visible(&mut vcx, true);
+        let again = h
+            .document_request()
+            .expect("the as-of moved while hidden: reshow asks again");
+        assert!(again.tag > asked.tag);
+        assert_eq!(again.as_of, geode_core::query::AsOf::At(second_at));
     }
 
     /// A panel hidden while enrolled in an open barrier still answers it with

@@ -238,8 +238,9 @@ result cannot satisfy the new version tuple.
 
 Only visible occupants are barrier participants. Hiding a following tile (a
 stack, dock or workspace switch) cancels nothing: its in-flight query
-finishes, the reply applies when it lands and still answers any barrier the
-tile was enrolled in, and on return the tile requeries only if a counter it
+finishes, the reply applies when it lands (unless a counter the tile follows
+moved since it asked, in which case it is dropped, as a superseded stage is)
+and still answers any barrier the tile was enrolled in, and on return the tile requeries only if a counter it
 follows moved while it was hidden. Closing is different: removal calls
 `TileContent::closed`, and a following tile cancels its query by key and
 answers any open barrier still waiting on it, so closing a tile during a

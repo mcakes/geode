@@ -275,8 +275,10 @@ The document request follows the frame's as-of and publications of the
 panel's own document, through the flip barrier. Hiding a panel keeps its
 request in flight: the reply applies while hidden, answers any barrier the
 panel was enrolled in, and showing it again asks only if the as-of or the
-document moved meanwhile. Closing the panel cancels the request and answers
-any open barrier still waiting on it.
+document moved meanwhile. A reply asked under an as-of or document the panel
+has since moved past is dropped rather than applied, so no update policy runs
+against it. Closing the panel cancels the request and answers any open
+barrier still waiting on it.
 
 Base-snapshot retention and same-day group-guard capture require exact
 equality of the source-time/generation pair. They do not use the weaker
@@ -595,7 +597,10 @@ while hidden. Returning a hidden tile to visibility refetches its source pairs
 (hidden tiles hear no fetch completions), and the refetch's completion
 requeries; the show itself queries only if the as-of moved while hidden.
 Closing the tile cancels its series query and answers any open flip barrier;
-fetches run on.
+fetches run on. A zoom or pan queued behind an in-flight query is dropped if
+the tile is hidden before that query lands; the reshow's refetch completion
+requeries the current view, and if that fetch fails nothing asks again until
+the next change.
 The tile's `/` handler does not implement local find.
 
 The series list, add picker, expression editor, custom dates editor, the three

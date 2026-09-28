@@ -23,7 +23,9 @@ impl TimeseriesTile {
             // An old tag cannot answer the newer request or its barrier arrival.
             Delivered::Stale => return,
             Delivered::Apply(result) => self.apply_result(result, cx),
-            Delivered::Held => {}
+            // Superseded: asked under an as-of the tile moved past while
+            // hidden; the reshow asks again.
+            Delivered::Held | Delivered::Superseded => {}
             // Last good stays on screen: a failed query says nothing about
             // the points already painted.
             Delivered::Failed(e) => self.notice = Some(e.into()),

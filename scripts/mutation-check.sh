@@ -24767,9 +24767,13 @@ run_mutation "blotter: an unconfigured view answers the barrier" \
                 true,' \
   geode-blotter a_view_removed_under_an_open_barrier_answers_it
 
-# The same path supersedes the question still out for the old view (and
-# drops any stage) through `begin`. Mutated away, that query's late outcome
-# is current, applies and clears the "not configured" error.
+# The same path asks a new question through `begin`: it supersedes the
+# query still out for the old view, drops any stage, and records the
+# reload's versions as what it answered (`KeepActed`). Mutated away, the
+# tile keeps the pre-reload versions, so every later frame notification,
+# the barrier release's own included, re-runs the failing requery. (A late
+# outcome for the old view is dropped either way: `deliver` supersedes an
+# answer asked before a followed counter moved.)
 run_mutation "blotter: an unconfigured view supersedes the old view's query" \
   crates/geode-blotter/src/tile.rs \
   '            let versions = self.versions(cx);
@@ -24777,6 +24781,16 @@ run_mutation "blotter: an unconfigured view supersedes the old view's query" \
   '            let versions = self.versions(cx);
             let _ = versions;' \
   geode-blotter a_view_removed_under_an_open_barrier_answers_it
+
+# A direct delivery (no barrier wants it) makes the same followed-counter
+# check promotion makes. Mutated away, a market-data panel hidden across an
+# as-of change applies the old as-of's document when its reply lands, and
+# runs the draft policy (`:auto replace` drops the edits) on it.
+run_mutation "mdtile: a reply to an as-of left behind while hidden is dropped" \
+  crates/geode-tile/src/following.rs \
+  '                    if asked.is_some_and(|under| differs(under, now)) {' \
+  '                    if false {' \
+  geode-marketdata a_reply_to_an_as_of_left_behind_while_hidden_runs_no_draft_policy
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

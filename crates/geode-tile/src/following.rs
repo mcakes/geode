@@ -103,6 +103,11 @@ pub enum Delivered<T, E> {
     Apply(T),
     /// Held behind the barrier; nothing to paint yet.
     Held,
+    /// The current request's answer, but a counter the tile follows moved
+    /// since it asked: dropped, like a superseded stage. The query is
+    /// answered; `acted` still names the old versions, so the next show or
+    /// frame change asks again.
+    Superseded,
     /// The query failed, and has already arrived. The tile keeps its last
     /// good result and shows this error.
     Failed(E),
@@ -307,6 +312,16 @@ impl<T> FollowingQuery<T> {
                 // versions, so this result and every other tile's promote
                 // together.
                 let Some(held_under) = asked.filter(|&under| barrier.wants(key, under)) else {
+                    // The same check promotion makes: a counter the tile
+                    // follows moved since it asked (in practice only while
+                    // hidden: a visible tile requeries on the change, and
+                    // the old tag goes stale), so the answer is to a question nobody is
+                    // asking. Applying it would paint, and run any side
+                    // effect of applying, under the old versions. Not wanted
+                    // by the barrier, so not an arrival either.
+                    if asked.is_some_and(|under| differs(under, now)) {
+                        return Delivered::Superseded;
+                    }
                     return Delivered::Apply(value);
                 };
                 self.staged = Some((value, held_under));
@@ -532,6 +547,34 @@ mod tests {
         assert_eq!(
             q.deliver::<&str>(tag, Ok(2), v, follows_config, &mut f, K),
             Delivered::Apply(2)
+        );
+    }
+
+    /// The direct path agrees with promotion: an answer asked under
+    /// versions a followed counter has since left is dropped, not applied,
+    /// and is no arrival; a change the tile does not follow applies.
+    #[test]
+    fn a_delivery_asked_before_a_followed_change_is_superseded() {
+        let mut f = fresh_frame();
+        let asked = f.versions();
+        let mut q = FollowingQuery::<u32>::new();
+        let tag = q.begin(asked, Instant::now());
+        assert!(f.set_text(Some("a".into())), "a change it does not follow");
+        assert_eq!(
+            q.deliver::<&str>(tag, Ok(1), f.versions(), follows_config, &mut f, K),
+            Delivered::Apply(1)
+        );
+        let tag = q.begin(f.versions(), Instant::now());
+        f.note_config_reloaded();
+        assert_eq!(
+            q.deliver::<&str>(tag, Ok(2), f.versions(), follows_config, &mut f, K),
+            Delivered::Superseded
+        );
+        assert!(!q.in_flight(), "answered");
+        assert!(!q.is_staged(), "and nothing held");
+        assert!(
+            q.follows_changed(f.versions(), follows_config),
+            "so the next show asks again"
         );
     }
 

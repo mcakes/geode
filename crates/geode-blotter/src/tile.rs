@@ -806,6 +806,11 @@ impl BlotterTile {
                 self.apply(snapshot, grouping, cx);
             }
             Delivered::Held => self.error = None,
+            // Asked under a scope, grouping, as-of, watched publication or
+            // configuration this tile has since moved past while hidden:
+            // neither painted nor a verdict on the current question, so the
+            // header keeps what it says. The reshow asks again.
+            Delivered::Superseded => {}
             // The last good snapshot stays; the failure has already arrived.
             Delivered::Failed(e) => self.error = Some(Notice::danger(e)),
         }
@@ -5633,6 +5638,13 @@ mod tests {
             frame.read_with(&vcx, |f, _| f.barrier_open()),
             "B answered; A's question is still out"
         );
+        frame.update(&mut vcx, |f, _| {
+            assert!(
+                !f.sweep(opened + FLIP_DEADLINE / 2),
+                "halfway to the deadline, time alone releases nothing"
+            );
+        });
+        assert!(frame.read_with(&vcx, |f, _| f.barrier_open()));
 
         // The reload, as the app makes it: the factory's shared views are
         // replaced (`BlotterFactory::set_views`), then the config counter
@@ -5652,22 +5664,27 @@ mod tests {
             error(&vcx).as_deref(),
             Some("view 'wide' is not configured")
         );
-        frame.update(&mut vcx, |f, _| {
-            assert!(
-                !f.sweep(opened + FLIP_DEADLINE / 2),
-                "time has not released it"
-            );
-        });
         assert!(
             !frame.read_with(&vcx, |f, _| f.barrier_open()),
             "the unconfigured view answered the barrier before its deadline"
+        );
+        let answered_current = h.a.read_with(&vcx, |t, cx| {
+            let now = t.versions(cx);
+            t.following
+                .acted()
+                .is_some_and(|acted| !t.differs_on_followed(acted, now))
+        });
+        assert!(
+            answered_current,
+            "it answered as a new question under the reload's versions, so \
+             an unrelated notification (the release's own) is not a retry"
         );
 
         deliver_to(&h.a, QueryKey(7), &mut vcx, pa1.tag, Ok(snapshot2()));
         assert_eq!(
             error(&vcx).as_deref(),
             Some("view 'wide' is not configured"),
-            "a late outcome for the removed view is stale"
+            "a late outcome for the removed view paints nothing and clears nothing"
         );
     }
 
