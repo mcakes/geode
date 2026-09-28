@@ -57,7 +57,8 @@ impl Coordinate {
 
 /// Where a slice is evaluated. `Dense(n)` is `n` strikes spanning the
 /// document's own strike range for that expiry; `At` is absolute strikes,
-/// in any order, echoed back in the same order.
+/// in any order, echoed back in the same order. Density over an `At`
+/// grid is meaningful only for ascending strikes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Grid {
     Dense(usize),

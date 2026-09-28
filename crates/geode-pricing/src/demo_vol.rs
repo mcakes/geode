@@ -295,14 +295,53 @@ impl VolModel for DemoVolModel {
         })
     }
 
-    fn coordinates(&self, _req: &MapRequest) -> Result<Vec<f64>, VolError> {
-        Err(VolError("not yet".into()))
+    fn coordinates(&self, req: &MapRequest) -> Result<Vec<f64>, VolError> {
+        if req.strikes.len() != req.vols.len() {
+            return Err(VolError(format!(
+                "map has {} strikes and {} vols",
+                req.strikes.len(),
+                req.vols.len()
+            )));
+        }
+        if !positive(req.forward) {
+            return Err(VolError(format!("forward {} is not positive", req.forward)));
+        }
+        if let Some(bad) = req.strikes.iter().find(|k| !positive(**k)) {
+            return Err(VolError(format!("strike {bad} is not positive")));
+        }
+        let t = year_fraction(req.as_of, req.expiry);
+        Ok(req
+            .strikes
+            .iter()
+            .zip(&req.vols)
+            .map(|(&strike, &vol)| {
+                coordinate_of(req.coordinate, req.forward, strike, vol.max(VOL_FLOOR), t)
+            })
+            .collect())
     }
 }
 
-/// Filled in by the density task.
-fn density(_points: &[SlicePoint], _forward: f64, _t: f64) -> Vec<(f64, f64)> {
-    Vec::new()
+/// Breeden–Litzenberger on the slice's own points: the second
+/// difference of the undiscounted call price in strike, at each interior
+/// point, on a grid that need not be uniform. Nothing is clamped: a
+/// negative lobe is a butterfly violation the trader wants to see.
+fn density(points: &[SlicePoint], forward: f64, t: f64) -> Vec<(f64, f64)> {
+    if points.len() < 3 {
+        return Vec::new();
+    }
+    let prices: Vec<f64> = points
+        .iter()
+        .map(|p| crate::black::call_price(forward, p.strike, p.vol, t))
+        .collect();
+    (1..points.len() - 1)
+        .map(|i| {
+            let h0 = points[i].strike - points[i - 1].strike;
+            let h1 = points[i + 1].strike - points[i].strike;
+            let pdf = 2.0 * ((prices[i + 1] - prices[i]) / h1 - (prices[i] - prices[i - 1]) / h0)
+                / (h0 + h1);
+            (points[i].x, pdf)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -738,5 +777,195 @@ pub(crate) mod tests {
             .slice(&doc, &at("2026-10-16", &[f64::NAN]))
             .unwrap_err();
         assert!(err.0.starts_with("strike NaN is not positive"), "{}", err.0);
+    }
+
+    #[test]
+    fn moneyness_and_log_moneyness_are_strike_over_forward() {
+        let doc = flat(0.2);
+        for (coord, f) in [
+            (
+                Coordinate::Moneyness,
+                (|k: f64| k / 100.0) as fn(f64) -> f64,
+            ),
+            (Coordinate::LogMoneyness, |k: f64| (k / 100.0).ln()),
+        ] {
+            let r = DemoVolModel
+                .slice(
+                    &doc,
+                    &SliceRequest {
+                        expiry: date("2026-10-16"),
+                        coordinate: coord,
+                        grid: Grid::At(vec![80.0, 100.0, 125.0]),
+                        density: false,
+                    },
+                )
+                .unwrap();
+            for p in &r.points {
+                assert!((p.x - f(p.strike)).abs() < 1e-12, "{coord:?} {p:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn delta_is_in_the_unit_interval_and_decreases_with_strike() {
+        let doc = cvi_doc(
+            "2026-09-01",
+            &[
+                ("2026-10-16", 100.0, 0.2, -0.8),
+                ("2027-01-15", 100.0, 0.2, -0.8),
+            ],
+            |_, _| 0.0,
+        );
+        let r = DemoVolModel
+            .slice(
+                &doc,
+                &SliceRequest {
+                    expiry: date("2026-11-20"),
+                    coordinate: Coordinate::Delta,
+                    grid: Grid::Dense(40),
+                    density: false,
+                },
+            )
+            .unwrap();
+        let xs: Vec<f64> = r.points.iter().map(|p| p.x).collect();
+        assert!(xs.iter().all(|x| *x > 0.0 && *x < 1.0), "{xs:?}");
+        assert!(xs.windows(2).all(|w| w[1] < w[0]), "{xs:?}");
+    }
+
+    #[test]
+    fn a_map_places_chain_points_by_their_own_vols() {
+        let req = MapRequest {
+            expiry: date("2026-12-18"),
+            as_of: date("2026-09-18"),
+            forward: 100.0,
+            coordinate: Coordinate::Delta,
+            strikes: vec![90.0, 100.0, 110.0],
+            vols: vec![0.30, 0.20, 0.15],
+        };
+        let xs = DemoVolModel.coordinates(&req).unwrap();
+        let t = 91.0 / 365.0;
+        for (i, (k, v)) in req.strikes.iter().zip(&req.vols).enumerate() {
+            let expected = crate::black::call_delta(100.0, *k, *v, t);
+            assert!((xs[i] - expected).abs() < 1e-12);
+        }
+        let money = DemoVolModel
+            .coordinates(&MapRequest {
+                coordinate: Coordinate::Moneyness,
+                ..req.clone()
+            })
+            .unwrap();
+        assert_eq!(money, vec![0.9, 1.0, 1.1]);
+        let strike = DemoVolModel
+            .coordinates(&MapRequest {
+                coordinate: Coordinate::Strike,
+                ..req.clone()
+            })
+            .unwrap();
+        assert_eq!(strike, req.strikes);
+    }
+
+    #[test]
+    fn a_map_with_mismatched_lengths_or_a_bad_forward_is_an_error() {
+        let base = MapRequest {
+            expiry: date("2026-12-18"),
+            as_of: date("2026-09-18"),
+            forward: 100.0,
+            coordinate: Coordinate::Moneyness,
+            strikes: vec![90.0, 100.0],
+            vols: vec![0.3],
+        };
+        assert_eq!(
+            DemoVolModel.coordinates(&base).unwrap_err().0,
+            "map has 2 strikes and 1 vols"
+        );
+        let bad_forward = MapRequest {
+            forward: 0.0,
+            vols: vec![0.3, 0.2],
+            ..base.clone()
+        };
+        assert_eq!(
+            DemoVolModel.coordinates(&bad_forward).unwrap_err().0,
+            "forward 0 is not positive"
+        );
+    }
+
+    #[test]
+    fn a_non_positive_strike_fails_the_job_naming_it() {
+        let doc = flat(0.2);
+        let err = DemoVolModel
+            .slice(&doc, &at("2026-10-16", &[100.0, 0.0]))
+            .unwrap_err();
+        assert_eq!(err.0, "strike 0 is not positive");
+        let req = MapRequest {
+            expiry: date("2026-12-18"),
+            as_of: date("2026-09-18"),
+            forward: 100.0,
+            coordinate: Coordinate::LogMoneyness,
+            strikes: vec![100.0, -5.0],
+            vols: vec![0.2, 0.2],
+        };
+        assert_eq!(
+            DemoVolModel.coordinates(&req).unwrap_err().0,
+            "strike -5 is not positive"
+        );
+    }
+
+    #[test]
+    fn a_flat_smiles_density_integrates_to_about_one_over_a_wide_grid() {
+        let doc = flat(0.2);
+        let strikes: Vec<f64> = (1..=3000).map(|i| i as f64 * 0.1).collect(); // 0.1 .. 300
+        let r = DemoVolModel
+            .slice(
+                &doc,
+                &SliceRequest {
+                    expiry: date("2027-04-16"),
+                    coordinate: Coordinate::Strike,
+                    grid: Grid::At(strikes.clone()),
+                    density: true,
+                },
+            )
+            .unwrap();
+        let d = r.density.unwrap();
+        assert_eq!(d.len(), strikes.len() - 2, "interior points only");
+        // Trapezoid over the interior points, x is the strike here.
+        let mass: f64 = d
+            .windows(2)
+            .map(|w| 0.5 * (w[0].1 + w[1].1) * (w[1].0 - w[0].0))
+            .sum();
+        assert!((mass - 1.0).abs() < 0.02, "{mass}");
+        assert!(
+            d.iter().all(|(_, p)| *p >= -1e-9),
+            "a flat smile has no negative lobe"
+        );
+        // The density sits at the interior points' x values.
+        assert!((d[0].0 - r.points[1].x).abs() < 1e-12);
+    }
+
+    #[test]
+    fn density_is_reported_in_the_requested_coordinate_and_is_unclamped() {
+        // A wildly non-convex smile produces a negative lobe; it is returned as is.
+        let doc = cvi_doc(
+            "2026-09-01",
+            &[
+                ("2026-10-16", 100.0, 0.2, 0.0),
+                ("2027-01-15", 100.0, 0.2, 0.0),
+            ],
+            |n, _| if n == 0.0 { -15.0 } else { 0.0 },
+        );
+        let r = DemoVolModel
+            .slice(
+                &doc,
+                &SliceRequest {
+                    expiry: date("2026-10-16"),
+                    coordinate: Coordinate::Moneyness,
+                    grid: Grid::Dense(200),
+                    density: true,
+                },
+            )
+            .unwrap();
+        let d = r.density.unwrap();
+        assert_eq!(d.len(), 198);
+        assert!(d.iter().all(|(x, _)| *x > 0.7 && *x < 1.1), "moneyness x");
+        assert!(d.iter().any(|(_, p)| *p < 0.0), "the negative lobe is kept");
     }
 }
