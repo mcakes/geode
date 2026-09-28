@@ -8,6 +8,7 @@
 use geode_core::document::{DocumentKind, DocumentRows};
 use geode_data::adapter::ChannelFeed;
 use geode_demo_data::documents::chain::ChainGenerator;
+use geode_demo_data::documents::cvi::CviGenerator;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
@@ -75,9 +76,9 @@ impl Drop for DemoBus {
 /// Spawns the `geode-demo-bus` thread over `producers`.
 ///
 /// Startup attempts `startup_repeats` publishes per key, in producer order
-/// then key order, without waiting for a cadence. Ingestion and delivery remain asynchronous.
-/// Subsequent publishes follow [`round_robin_schedule`], with one wait per
-/// publish across all producers. Jitter is seeded and capped at `cadence`,
+/// then key order, without waiting for a cadence. Ingestion and delivery
+/// remain asynchronous. Subsequent publishes follow [`round_robin_schedule`],
+/// with one wait per publish across all producers. Jitter is seeded and capped at `cadence`,
 /// giving nonnegative waits from `cadence - jitter` through `cadence + jitter`
 /// at millisecond jitter resolution. Adding producers lengthens the schedule
 /// without multiplying its steady-state publication rate.
@@ -125,10 +126,9 @@ fn sleep_checking_stop(duration: Duration, stop: &AtomicBool) -> bool {
 /// Generates and serializes one document, then publishes it to the topic
 /// formed by concatenating the prefix and key. A generator that returns
 /// `None` (its input is not ready yet) skips this publish silently.
-/// Serialization errors log a
-/// warning and skip this publish. A full or disconnected inbound queue drops
-/// the message; the feed counts refusals and the bus warns only on the first.
-/// There is no immediate retry. Generator and serializer panics are not caught.
+/// Serialization errors log a warning and skip this publish. A full or
+/// disconnected inbound queue drops the message; the feed counts refusals
+/// and the bus warns only on the first. There is no immediate retry. Generator and serializer panics are not caught.
 fn publish_one(
     feed: &ChannelFeed,
     kind: &Arc<dyn DocumentKind>,
@@ -159,6 +159,22 @@ fn publish_one(
             "demo bus: the inbound queue is full; at least one publish was dropped"
         );
     }
+}
+
+/// The CVI producer's body: generate the underlying's next CVI document and
+/// store a clone under `key` for [`chain_next`] to price off, surviving a
+/// poisoned lock. Always publishes.
+pub fn cvi_next(
+    cvi: &mut CviGenerator,
+    latest_cvi: &Mutex<HashMap<String, DocumentRows>>,
+    key: &str,
+) -> Option<DocumentRows> {
+    let doc = cvi.next_document(key);
+    latest_cvi
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(key.to_string(), doc.clone());
+    Some(doc)
 }
 
 /// The chain producer's body: price the underlying's next expiry off the
@@ -278,7 +294,6 @@ mod tests {
     use super::*;
     use chrono::NaiveDate;
     use geode_data::adapter::{Adapter, ChannelAdapter, MessageSink};
-    use geode_demo_data::documents::cvi::CviGenerator;
     use geode_demo_data::documents::dividend::DividendGenerator;
     use geode_documents::{CviKind, DividendKind};
     use std::collections::HashSet;
@@ -313,17 +328,15 @@ mod tests {
         let latest: Arc<Mutex<HashMap<String, DocumentRows>>> = Arc::default();
         let mut cvi = CviGenerator::new(42, underlyings.clone(), anchor);
         let mut chain = ChainGenerator::new(42, underlyings.clone(), anchor);
-        let store = Arc::clone(&latest);
         vec![
             Producer {
                 kind: Arc::new(CviKind),
                 topic_prefix: "marketdata/cvi/",
                 keys: underlyings.clone(),
                 startup_repeats: 1,
-                next: Box::new(move |key| {
-                    let doc = cvi.next_document(key);
-                    store.lock().unwrap().insert(key.to_string(), doc.clone());
-                    Some(doc)
+                next: Box::new({
+                    let latest = Arc::clone(&latest);
+                    move |key| cvi_next(&mut cvi, &latest, key)
                 }),
             },
             Producer {
@@ -367,6 +380,24 @@ mod tests {
             keys.len(),
             2 * EXPIRIES,
             "every (underlying, expiry) at startup"
+        );
+    }
+
+    #[test]
+    fn the_cvi_producer_stores_what_it_publishes() {
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+        let anchor = NaiveDate::from_ymd_opt(2026, 9, 12).unwrap();
+        let latest: Mutex<HashMap<String, DocumentRows>> = Mutex::default();
+        let mut cvi = CviGenerator::new(42, vec!["SPX".to_string()], anchor);
+        let published =
+            cvi_next(&mut cvi, &latest, "SPX").expect("the CVI producer always publishes");
+        let store = latest.lock().unwrap();
+        assert_eq!(store.len(), 1, "only the published key is stored");
+        assert_eq!(
+            store.get("SPX"),
+            Some(&published),
+            "the store holds exactly what was published"
         );
     }
 
