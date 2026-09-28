@@ -3,6 +3,7 @@
 //! Registered by the app as a `PageFactory`; reached from the sidebar, the
 //! palette, the status-bar summary, and `mod+d`.
 
+mod config_view;
 pub mod log;
 pub mod model;
 mod page;

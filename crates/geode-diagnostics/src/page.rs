@@ -26,8 +26,9 @@ use gpui::{
 use gpui_component::button::Button;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::table::{DataTable, TableEvent, TableState};
-use gpui_component::{ActiveTheme as _, Selectable as _, Sizable as _, Size, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, Sizable as _, Size, h_flex, v_flex};
 
+use crate::config_view::{self, ConfigView};
 use crate::log::{LogFilter, LogTail};
 use crate::model::{self, Badges, Tone};
 use crate::prepared::{self, PreparedTable};
@@ -69,11 +70,18 @@ pub struct DiagnosticsPage {
     filter_input: Entity<InputState>,
     table: Entity<TableState<SectionDelegate>>,
     prepared: Rc<PreparedTable>,
-    /// The rem the delegate's column widths were prepared at; `refresh`
+    /// The Config section's left panel: the current or historical
+    /// diagnostics. Pointer-driven; the keys stay with `table`.
+    diag_table: Entity<TableState<SectionDelegate>>,
+    diag_prepared: Rc<PreparedTable>,
+    /// The left panel's selected row, feeding its own detail strip.
+    diag_cursor: usize,
+    /// The rem the delegates' column widths were prepared at; `refresh`
     /// runs only when the window's rem moves off it.
     last_rem: f32,
     collapsed_datasets: BTreeSet<String>,
     collapsed_docs: BTreeSet<String>,
+    /// The left panel shows prior batches instead of the current one.
     config_history: bool,
     /// Whether the catalog was taken under the frame's as-of; the Data
     /// toolbar chip. Cached at rebuild: both inputs rebuild the section.
@@ -150,16 +158,7 @@ impl DiagnosticsPage {
         )
         .detach();
 
-        let table = cx.new(|cx| {
-            TableState::new(SectionDelegate::new(), window, cx)
-                .row_selectable(true)
-                .col_selectable(false)
-                .cell_selectable(false)
-                .col_resizable(true)
-                .col_movable(false)
-                .sortable(false)
-                .loop_selection(false)
-        });
+        let table = Self::new_table(SectionDelegate::new(), window, cx);
         // `set_selected_row` echoes `SelectRow`; `set_cursor` returns early
         // when the row is already the cursor, so the echo is inert. A
         // single click only selects, so a click never surprises with a
@@ -174,6 +173,26 @@ impl DiagnosticsPage {
                     this.toggle_expansion_at_cursor(None, cx);
                 }
                 _ => {}
+            },
+        )
+        .detach();
+        // The left panel's rows expand nothing: a selection only moves its
+        // detail strip, and the keyboard cursor stays on the right table.
+        let diag_table = Self::new_table(
+            SectionDelegate::with_row_selector("diagnostics-diag-row"),
+            window,
+            cx,
+        );
+        cx.subscribe_in(
+            &diag_table,
+            window,
+            |this, _table, event: &TableEvent, _window, cx| {
+                if let TableEvent::SelectRow(ix) = event
+                    && this.diag_cursor != *ix
+                {
+                    this.diag_cursor = *ix;
+                    cx.notify();
+                }
             },
         )
         .detach();
@@ -251,6 +270,9 @@ impl DiagnosticsPage {
             filter_input,
             table,
             prepared: Rc::new(PreparedTable::empty()),
+            diag_table,
+            diag_prepared: Rc::new(PreparedTable::empty()),
+            diag_cursor: 0,
             last_rem: scale::DESIGN_REM,
             collapsed_datasets: BTreeSet::new(),
             collapsed_docs: BTreeSet::new(),
@@ -283,6 +305,25 @@ impl DiagnosticsPage {
         };
         this.rebuild(cx);
         this
+    }
+
+    /// Both tables share one shape: row selection only, resizable fixed
+    /// columns, no sorting.
+    fn new_table(
+        delegate: SectionDelegate,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<TableState<SectionDelegate>> {
+        cx.new(|cx| {
+            TableState::new(delegate, window, cx)
+                .row_selectable(true)
+                .col_selectable(false)
+                .cell_selectable(false)
+                .col_resizable(true)
+                .col_movable(false)
+                .sortable(false)
+                .loop_selection(false)
+        })
     }
 
     pub fn section(&self) -> Section {
@@ -318,6 +359,9 @@ impl DiagnosticsPage {
             self.log.drain();
         }
         let filter = self.filters[self.section as usize].clone();
+        // The Config section's left panel is built alongside its cursor
+        // table: both read inputs the config version covers.
+        let mut diag_prepared = None;
         let prepared = {
             let d = self.diagnostics.read(cx);
             let frame = self.frame.read(cx);
@@ -333,10 +377,18 @@ impl DiagnosticsPage {
                         &filter,
                     )
                 }
-                Section::Config => prepared::config_table(
-                    &model::config_docs(&self.config.borrow(), &filter),
-                    &self.collapsed_docs,
-                ),
+                Section::Config => {
+                    let diags = if self.config_history {
+                        model::history_diagnostics(d, clock)
+                    } else {
+                        model::current_diagnostics(d)
+                    };
+                    diag_prepared = Some(prepared::diagnostics_table(&diags, self.config_history));
+                    prepared::config_table(
+                        &model::config_docs(&self.config.borrow(), &filter),
+                        &self.collapsed_docs,
+                    )
+                }
                 Section::Log => {
                     // The one input is the log's message filter.
                     self.log_filter.text = filter;
@@ -370,6 +422,19 @@ impl DiagnosticsPage {
                 t.set_selected_row(cursor, cx);
             }
         });
+        if let Some(diag) = diag_prepared {
+            self.diag_prepared = Rc::new(diag);
+            let len = self.diag_prepared.rows.len();
+            self.diag_cursor = self.diag_cursor.min(len.saturating_sub(1));
+            let (shared, cursor) = (self.diag_prepared.clone(), self.diag_cursor);
+            self.diag_table.update(cx, |t, cx| {
+                t.delegate_mut().set(shared);
+                t.refresh(cx);
+                if len > 0 {
+                    t.set_selected_row(cursor, cx);
+                }
+            });
+        }
         self.refresh_copy_text();
         self.refresh_badges(cx);
         cx.notify();
@@ -402,9 +467,24 @@ impl DiagnosticsPage {
             .map(|(s, t)| (SharedString::from(s), t))
             .collect();
         self.rail_texts = crate::page_chrome::rail_texts(&self.badges);
-        self.history_label =
-            SharedString::from(format!("History ({} batches)", d.config_history.len()));
+        // The front batch is the current one; history is the rest.
+        self.history_label = SharedString::from(format!(
+            "History ({} batches)",
+            d.config_history.len().saturating_sub(1)
+        ));
         cx.notify();
+    }
+
+    /// Switch the Config section's left panel between the current batch
+    /// and the prior ones. The lists are unrelated, so the panel's
+    /// selection restarts at the top.
+    pub(crate) fn set_config_history(&mut self, history: bool, cx: &mut Context<Self>) {
+        if self.config_history == history {
+            return;
+        }
+        self.config_history = history;
+        self.diag_cursor = 0;
+        self.rebuild(cx);
     }
 
     /// Select a section: rebuild it and show its filter text in the one
@@ -680,69 +760,8 @@ impl DiagnosticsPage {
                     )
                     .into_any_element()
             }
-            Section::Config => {
-                let actions = self.actions.clone();
-                let (current, history) = (weak.clone(), weak);
-                h_flex()
-                    .gap_2()
-                    .p_2()
-                    .items_center()
-                    .child(
-                        div()
-                            .id("diagnostics-diag-current")
-                            .debug_selector(|| "diagnostics-diag-current".to_string())
-                            .child(
-                                Button::new("diagnostics-diag-current")
-                                    .xsmall()
-                                    .selected(!self.config_history)
-                                    .label("Current")
-                                    .on_click(move |_, _window, cx| {
-                                        let _ = current.update(cx, |p, cx| {
-                                            p.config_history = false;
-                                            cx.notify();
-                                        });
-                                    }),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("diagnostics-diag-history")
-                            .debug_selector(|| "diagnostics-diag-history".to_string())
-                            .child(
-                                Button::new("diagnostics-diag-history")
-                                    .xsmall()
-                                    .selected(self.config_history)
-                                    .label(self.history_label.clone())
-                                    .on_click(move |_, _window, cx| {
-                                        let _ = history.update(cx, |p, cx| {
-                                            p.config_history = true;
-                                            cx.notify();
-                                        });
-                                    }),
-                            ),
-                    )
-                    .child(self.filter_input_el())
-                    .child(
-                        div()
-                            .id("diagnostics-open-config-dir")
-                            .debug_selector(|| "diagnostics-open-config-dir".to_string())
-                            .child(
-                                Button::new("diagnostics-open-config-dir")
-                                    .outline()
-                                    .xsmall()
-                                    .label("Open config directory")
-                                    .on_click(move |_, window, cx| {
-                                        actions(
-                                            &ActionId("config::open_directory".into()),
-                                            window,
-                                            cx,
-                                        );
-                                    }),
-                            ),
-                    )
-                    .into_any_element()
-            }
-            Section::Perf => div().into_any_element(),
+            // Config's toolbars belong to its two panels (`config_view`).
+            Section::Config | Section::Perf => div().into_any_element(),
         }
     }
 }
@@ -755,10 +774,12 @@ impl gpui::Render for DiagnosticsPage {
         let rem = f32::from(window.rem_size());
         if rem != self.last_rem {
             self.last_rem = rem;
-            self.table.update(cx, |t, cx| {
-                t.delegate_mut().set_rem(rem);
-                t.refresh(cx);
-            });
+            for table in [&self.table, &self.diag_table] {
+                table.update(cx, |t, cx| {
+                    t.delegate_mut().set_rem(rem);
+                    t.refresh(cx);
+                });
+            }
         }
         let weak = cx.weak_entity();
         let header = crate::page_chrome::header(&self.header_chips, self.actions.clone(), cx);
@@ -774,7 +795,21 @@ impl gpui::Render for DiagnosticsPage {
             Section::Perf => {
                 crate::perf_view::render(self.perf.as_ref(), weak, cx).into_any_element()
             }
-            _ => {
+            Section::Config => config_view::render(
+                ConfigView {
+                    diag_table: &self.diag_table,
+                    diag_row: self.diag_prepared.rows.get(self.diag_cursor),
+                    history: self.config_history,
+                    history_label: self.history_label.clone(),
+                    table: &self.table,
+                    row: self.prepared.rows.get(self.cursor()),
+                    filter: self.filter_input_el(),
+                    actions: self.actions.clone(),
+                },
+                weak,
+                cx,
+            ),
+            Section::Sources | Section::Data | Section::Log => {
                 let row = self.prepared.rows.get(self.cursor());
                 let copy = self.copy_text.clone();
                 v_flex()
@@ -787,7 +822,12 @@ impl gpui::Render for DiagnosticsPage {
                                 .stripe(false),
                         ),
                     )
-                    .child(crate::page_chrome::detail_strip(row, copy, cx))
+                    .child(crate::page_chrome::detail_strip(
+                        "diagnostics-detail",
+                        row,
+                        copy,
+                        cx,
+                    ))
                     .into_any_element()
             }
         };
@@ -1213,6 +1253,166 @@ mod tests {
         double_click(&mut vcx, at);
         vcx.run_until_parked();
         assert_eq!(rows(&vcx), 1, "and the next collapses");
+    }
+
+    fn open_config_section(h: &Harness, vcx: &mut gpui::VisualTestContext) {
+        vcx.update(|window, cx| {
+            h.page
+                .update(cx, |p, cx| p.set_section(Section::Config, window, cx));
+            let _ = window.draw(cx);
+        });
+    }
+
+    /// Two config batches five seconds apart: the second is current, the
+    /// first is history.
+    fn note_two_config_batches(h: &Harness, vcx: &mut gpui::VisualTestContext) {
+        use geode_core::config::{Diagnostic, Severity};
+        let t0 = SystemTime::now();
+        h.diagnostics.update(vcx, |d, cx| {
+            d.note_config(
+                vec![Diagnostic {
+                    severity: Severity::Error,
+                    layer: None,
+                    file: Some("views.toml".into()),
+                    message: "first".into(),
+                    path: Some("blotter.columns.4".into()),
+                }],
+                t0,
+            );
+            d.note_config(
+                vec![Diagnostic {
+                    severity: Severity::Warning,
+                    layer: None,
+                    file: None,
+                    message: "second".into(),
+                    path: None,
+                }],
+                t0 + std::time::Duration::from_secs(5),
+            );
+            cx.notify();
+        });
+    }
+
+    /// The Config section's left panel lists the current batch; the
+    /// History button switches it to the prior batches, batch column
+    /// first, through the pointer route.
+    #[gpui::test]
+    fn the_config_section_paints_current_diagnostics_and_switches_to_history(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        note_two_config_batches(&h, &mut vcx);
+        open_config_section(&h, &mut vcx);
+        let current = h.page.read_with(&vcx, |p, cx| {
+            p.diag_table.read(cx).delegate().table().clone()
+        });
+        assert_eq!(current.rows.len(), 1);
+        assert_eq!(current.rows[0].cells[3].text.as_ref(), "second");
+        assert_eq!(
+            h.page
+                .read_with(&vcx, |p, _| p.history_label.clone())
+                .as_ref(),
+            "History (1 batches)",
+            "the current batch is not history"
+        );
+        let b = vcx.debug_bounds("diagnostics-diag-history").unwrap();
+        vcx.simulate_click(b.center(), gpui::Modifiers::default());
+        let history = h.page.read_with(&vcx, |p, cx| {
+            p.diag_table.read(cx).delegate().table().clone()
+        });
+        assert_eq!(history.columns.len(), 5, "batch column first");
+        assert_eq!(history.rows[0].cells[4].text.as_ref(), "first");
+        assert_eq!(
+            history.rows[0].cells[3].text.as_ref(),
+            "views.toml › blotter.columns.4"
+        );
+        // Current again through its own button.
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let b = vcx.debug_bounds("diagnostics-diag-current").unwrap();
+        vcx.simulate_click(b.center(), gpui::Modifiers::default());
+        let current = h.page.read_with(&vcx, |p, cx| {
+            p.diag_table.read(cx).delegate().table().clone()
+        });
+        assert_eq!(current.columns.len(), 4);
+        assert_eq!(current.rows[0].cells[3].text.as_ref(), "second");
+    }
+
+    /// A click on a left-panel row drives that panel's detail strip and
+    /// leaves the keyboard cursor, which belongs to the right table, alone.
+    #[gpui::test]
+    fn clicking_a_diagnostics_panel_row_moves_only_its_own_detail(cx: &mut gpui::TestAppContext) {
+        use geode_core::config::{Diagnostic, Severity};
+        let (h, mut vcx) = open(cx);
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            let diag = |m: &str| Diagnostic {
+                severity: Severity::Warning,
+                layer: None,
+                file: None,
+                message: m.into(),
+                path: None,
+            };
+            d.note_config(vec![diag("one"), diag("two")], SystemTime::now());
+            cx.notify();
+        });
+        open_config_section(&h, &mut vcx);
+        vcx.update(|window, cx| {
+            h.page.update(cx, |p, cx| {
+                let _ = p.dispatch(&ActionId("diagnostics::down".into()), None, window, cx);
+            });
+        });
+        let before = h.page.read_with(&vcx, |p, _| p.cursor());
+        assert_eq!(h.page.read_with(&vcx, |p, _| p.diag_cursor), 0);
+        let row = vcx
+            .debug_bounds("diagnostics-diag-row-1")
+            .expect("the second diagnostic row is painted in the left panel");
+        let at = gpui::point(row.origin.x + gpui::px(4.0), row.center().y);
+        vcx.simulate_click(at, gpui::Modifiers::default());
+        vcx.run_until_parked();
+        assert_eq!(h.page.read_with(&vcx, |p, _| p.diag_cursor), 1);
+        assert_eq!(
+            h.page.read_with(&vcx, |p, _| p.cursor()),
+            before,
+            "the right table's cursor is untouched"
+        );
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            vcx.debug_bounds("diagnostics-diag-detail").is_some(),
+            "the left panel paints its own detail strip"
+        );
+    }
+
+    /// Only the Config section reads the loaded config, so only it
+    /// rebuilds on a config version bump.
+    #[gpui::test]
+    fn a_config_version_change_rebuilds_only_the_config_section(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        open_config_section(&h, &mut vcx);
+        let before = h.page.read_with(&vcx, |p, _| p.rebuild_count);
+        h.frame.update(&mut vcx, |f, cx| {
+            f.note_config_reloaded();
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        assert_eq!(h.page.read_with(&vcx, |p, _| p.rebuild_count), before + 1);
+        vcx.update(|window, cx| {
+            h.page
+                .update(cx, |p, cx| p.set_section(Section::Sources, window, cx));
+        });
+        let before = h.page.read_with(&vcx, |p, _| p.rebuild_count);
+        h.frame.update(&mut vcx, |f, cx| {
+            f.note_config_reloaded();
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            h.page.read_with(&vcx, |p, _| p.rebuild_count),
+            before,
+            "sources ignore a config bump"
+        );
     }
 
     #[gpui::test]

@@ -21,13 +21,22 @@ const INDENT_STEP: f32 = 12.0;
 pub struct SectionDelegate {
     table: Rc<PreparedTable>,
     rem_px: f32,
+    /// Prefix of the per-row debug selector. The Config section paints two
+    /// tables at once; distinct prefixes keep their rows addressable.
+    row_selector: &'static str,
 }
 
 impl SectionDelegate {
+    /// The cursor table's delegate; its rows are `diagnostics-row-{ix}`.
     pub fn new() -> SectionDelegate {
+        Self::with_row_selector("diagnostics-row")
+    }
+
+    pub fn with_row_selector(row_selector: &'static str) -> SectionDelegate {
         SectionDelegate {
             table: Rc::new(PreparedTable::empty()),
             rem_px: scale::DESIGN_REM,
+            row_selector,
         }
     }
 
@@ -120,9 +129,10 @@ impl TableDelegate for SectionDelegate {
         };
         // The first cell names its row for pointer tests; a no-op outside
         // test builds.
+        let row_selector = self.row_selector;
         div()
             .when(col_ix == 0, |el| {
-                el.debug_selector(|| format!("diagnostics-row-{row_ix}"))
+                el.debug_selector(move || format!("{row_selector}-{row_ix}"))
             })
             .w_full()
             .pl(scale::design(f32::from(cell.indent) * INDENT_STEP))

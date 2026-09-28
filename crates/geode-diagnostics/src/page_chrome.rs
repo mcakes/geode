@@ -191,9 +191,11 @@ pub(crate) fn rail(
         .into_any_element()
 }
 
-/// The cursor row's detail lines; `copy` adds a button that puts that
-/// text on the clipboard (the log's full record).
+/// A selected row's detail lines; `copy` adds a button that puts that
+/// text on the clipboard (the log's full record). `selector` names the
+/// strip for tests: the Config section paints one per table.
 pub(crate) fn detail_strip(
+    selector: &'static str,
     row: Option<&PreparedRow>,
     copy: Option<SharedString>,
     cx: &mut Context<DiagnosticsPage>,
@@ -227,7 +229,7 @@ pub(crate) fn detail_strip(
         .py_1()
         .font_family(fonts::MONO)
         .text_xs()
-        .debug_selector(|| "diagnostics-detail".to_string())
+        .debug_selector(move || selector.to_string())
         .child(lines)
         .when_some(copy, |el, text| {
             el.child(
