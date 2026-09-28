@@ -394,6 +394,8 @@ impl TileContent for PricerContent {
     fn deliver(&self, delivery: Delivery, _window: &mut Window, cx: &mut App) {
         match delivery {
             Delivery::Price(outcome) => self.tile.update(cx, |t, cx| t.deliver(outcome, cx)),
+            // This tile asks no vol slices; an outcome addressed here is a routing bug.
+            Delivery::VolSlices(_) => {}
             // A sheet load's answer; the tile drops any but its latest.
             Delivery::Query(outcome) => self.tile.update(cx, |t, cx| t.query_answered(outcome, cx)),
             // The tile fetches no series, so either is a routing bug.

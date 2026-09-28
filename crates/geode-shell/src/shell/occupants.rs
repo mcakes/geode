@@ -91,6 +91,7 @@ impl ShellView {
             keyed @ (Delivery::Query(_)
             | Delivery::Series(_)
             | Delivery::Price(_)
+            | Delivery::VolSlices(_)
             | Delivery::Upload(_)) => {
                 if let Some(key) = keyed.key()
                     && let Some(o) = self.occupants.get(&TileId(key.0))

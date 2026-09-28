@@ -103,6 +103,8 @@ impl TileContent for DiagnosticsContent {
             Delivery::Query(_) => {}
             // This tile never prices; an outcome addressed here is a routing bug.
             Delivery::Price(_) => {}
+            // This tile asks no vol slices; an outcome addressed here is a routing bug.
+            Delivery::VolSlices(_) => {}
             // This tile asks no series query and holds no
             // `(identity, source)` pair — and a key-less
             // `SeriesFetched` DOES reach it, since it is broadcast to

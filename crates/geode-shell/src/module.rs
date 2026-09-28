@@ -21,6 +21,7 @@ use geode_core::pricing::PriceOutcome;
 use geode_core::query::{QueryKey, QueryOutcome};
 use geode_core::series::SeriesOutcome;
 use geode_core::tile_columns::TileColumns;
+use geode_core::vol::VolSliceOutcome;
 use gpui::{AnyView, App, Entity, SharedString, Window};
 use std::rc::Rc;
 
@@ -40,6 +41,8 @@ pub enum FindEvent {
 pub enum Delivery {
     Query(QueryOutcome),
     Price(PriceOutcome),
+    /// A vol slice batch's answer, routed by tile key like a `Price`.
+    VolSlices(VolSliceOutcome),
     /// A series query's answer, routed by tile key like a `Query`.
     Series(SeriesOutcome),
     /// A fetch finished. Keyed by the
@@ -82,6 +85,7 @@ impl Delivery {
         match self {
             Delivery::Query(outcome) => Some(outcome.key),
             Delivery::Price(outcome) => Some(outcome.key),
+            Delivery::VolSlices(outcome) => Some(outcome.key),
             Delivery::Series(outcome) => Some(outcome.key),
             Delivery::SeriesFetched { .. } => None,
             Delivery::Upload(u) => Some(u.key),
@@ -538,6 +542,8 @@ pub mod placeholder {
                 Delivery::Query(_) => {}
                 // This tile has no module; nothing is ever addressed here.
                 Delivery::Price(_) => {}
+                // This tile has no module; nothing is ever addressed here.
+                Delivery::VolSlices(_) => {}
                 // This tile asks no series query and holds no
                 // `(identity, source)` pair.
                 Delivery::Series(_) | Delivery::SeriesFetched { .. } => {}
@@ -608,6 +614,7 @@ pub mod recording {
         Closed(TileId),
         Delivered(TileId, u64),
         Priced(TileId, u64),
+        VolSliced(TileId, u64),
         /// A key-less [`Delivery::SeriesFetched`] this tile was handed,
         /// as `"{identity}@{source}"` — the pair spelled the way a
         /// timeseries slot names it, so a broadcast test can assert on
@@ -862,6 +869,11 @@ pub mod recording {
                     self.log
                         .borrow_mut()
                         .push(Recorded::Priced(self.tile, outcome.tag));
+                }
+                Delivery::VolSlices(outcome) => {
+                    self.log
+                        .borrow_mut()
+                        .push(Recorded::VolSliced(self.tile, outcome.tag));
                 }
                 // A series outcome is routed by key exactly as a query's
                 // is, so it is recorded the same way — the tag is what

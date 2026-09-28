@@ -68,6 +68,7 @@ pub fn thread_label(thread: &str) -> String {
         "geode-ingest" => "ingest",
         "geode-discovery" => "discovery",
         "geode-pricing" => "pricing",
+        "geode-vol" => "vol model",
         other => other,
     }
     .to_string()
@@ -1495,6 +1496,7 @@ mod tests {
             ("geode-ingest", "ingest"),
             ("geode-discovery", "discovery"),
             ("geode-pricing", "pricing"),
+            ("geode-vol", "vol model"),
             ("geode-query-0", "query worker 0"),
             ("geode-fetch-kdb", "fetch kdb"),
             ("geode-subscribe-cvi", "subscription cvi"),
