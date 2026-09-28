@@ -202,17 +202,16 @@ fn check_pivot<'a>(spec: &PanelSpec, ds: &'a DatasetSpec, axis: &str) -> Result<
     }
     let axis_ty = column(ds, axis, "columns.axis")?.ty;
     for (i, s) in spec.slice_values.iter().enumerate() {
-        if axis_is_text(axis_ty) {
-            return Err((
-                format!("slice.{i}.label"),
-                format!(
-                    "slices are refused over the {} axis '{axis}': its column labels come from the data, so slice label '{}' could collide with one",
-                    spelled(axis_ty),
-                    s.label
-                ),
-            ));
-        }
-        if axis_label_could_be(axis_ty, &s.label) {
+        // Numbers paint through their plain spelling and dates as ISO text,
+        // so a label that parses as one could also be an axis label. Any
+        // other axis paints labels straight from the data: no label can be
+        // proven distinct at load.
+        let collides = match axis_ty {
+            ColumnType::F64 | ColumnType::I64 => s.label.trim().parse::<f64>().is_ok(),
+            ColumnType::Date => chrono::NaiveDate::parse_from_str(&s.label, "%Y-%m-%d").is_ok(),
+            _ => return Err(data_labelled_axis(i, axis, axis_ty, &s.label)),
+        };
+        if collides {
             return Err((
                 format!("slice.{i}.label"),
                 format!(
@@ -225,20 +224,17 @@ fn check_pivot<'a>(spec: &PanelSpec, ds: &'a DatasetSpec, axis: &str) -> Result<
     Ok(value.name.as_str())
 }
 
-/// An axis whose labels are free text: any slice label could be one of them,
-/// so no load-time check can rule a collision out.
-fn axis_is_text(axis: ColumnType) -> bool {
-    !matches!(axis, ColumnType::F64 | ColumnType::I64 | ColumnType::Date)
-}
-
-/// Whether the numeric or date pivot axis could produce `label` as a column
-/// label. Numbers paint through their plain spelling and dates as ISO text.
-fn axis_label_could_be(axis: ColumnType, label: &str) -> bool {
-    match axis {
-        ColumnType::F64 | ColumnType::I64 => label.trim().parse::<f64>().is_ok(),
-        ColumnType::Date => chrono::NaiveDate::parse_from_str(label, "%Y-%m-%d").is_ok(),
-        _ => true,
-    }
+/// Slice `i` over an axis whose column labels come from the data: a draft
+/// resolves an edit by column label, so a collision would misdirect edits,
+/// and none can be ruled out before the data arrives.
+fn data_labelled_axis(i: usize, axis: &str, ty: ColumnType, label: &str) -> Refusal {
+    (
+        format!("slice.{i}.label"),
+        format!(
+            "slices are refused over the {} axis '{axis}': its column labels come from the data, so slice label '{label}' could collide with one",
+            spelled(ty)
+        ),
+    )
 }
 
 /// Every column the document kind writes, less the document key the tile
