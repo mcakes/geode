@@ -92,7 +92,8 @@ filter gate, before any toolchain step.
 - A tile mechanism two modules would otherwise each write lives in
   `geode-tile` — interaction behavior (keys, focus, open and close,
   precedence) as well as paint: popups (`popover`), `.` action menus
-  (`menu`), the in-tile y/n confirm (`confirm`) and notices (`notice`).
+  (`menu`), the in-tile y/n confirm (`confirm`), notices (`notice`) and the
+  flip-barrier state machine (`following`).
 - In object, settings, and keybinding dialog filters, Escape restores the entry
   query and bare Enter keeps the typed query; neither opens a row or commits.
   Use `dialogmode::{filter_exit, enter_filter, exit_filter}` for keyboard and

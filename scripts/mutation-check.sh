@@ -24549,6 +24549,42 @@ run_mutation "mdmenu: a rebind does not reach the menu" \
   '            let _ = geode_tile::menu::live_bindings(cx);' \
   geode-marketdata an_open_menu_follows_a_keymap_reload
 
+# geode_tile::following carries the barrier rules for every following tile.
+# These entries name its own pure tests; each module's re-aimed entries name
+# the module route.
+run_mutation "following: KeepActed remembers what a local refusal answered" \
+  crates/geode-tile/src/following.rs \
+  '        if unanswered == Unanswered::Retry {' \
+  '        if true {' \
+  geode-tile keep_acted_arrives_and_remembers_what_it_answered
+
+run_mutation "following: a closing tile answers the barrier" \
+  crates/geode-tile/src/following.rs \
+  '        barrier.arrive(key, closing_under)' \
+  '        false' \
+  geode-tile close_releases_a_barrier_it_was_the_last_wait_of
+
+run_mutation "following: a closing tile supersedes its tag" \
+  crates/geode-tile/src/following.rs \
+  '    pub fn close(&mut self, barrier: &mut impl Barrier, key: QueryKey) -> bool {
+        self.tag += 1;' \
+  '    pub fn close(&mut self, barrier: &mut impl Barrier, key: QueryKey) -> bool {' \
+  geode-tile close_supersedes_the_question_and_answers_the_barrier
+
+run_mutation "following: arrive_immediately answers" \
+  crates/geode-tile/src/following.rs \
+  '    barrier.wants(key, now) && barrier.arrive(key, now)' \
+  '    barrier.wants(key, now) && false' \
+  geode-tile arrive_immediately_answers_only_a_barrier_that_wants_the_key
+
+run_mutation "following: a releasing arrival notifies the frame" \
+  crates/geode-tile/src/following.rs \
+  '            if released {
+                cx.notify();
+            }' \
+  '            let _ = &cx;' \
+  geode-tile a_releasing_arrival_through_the_door_notifies_the_frame
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

@@ -46,7 +46,8 @@ background data work. It does not depend on the shell or feature modules.
 
 `geode-tile` is the kit tiles are built from: the popover, the `.` action
 menu, the in-tile y/n confirm and the notice line, as models with one
-painter each. It depends on `geode-shell` for its paint doors and the live
+painter each, and the `following` flip-barrier state machine every following
+tile runs for its own query. It depends on `geode-shell` for its paint doors and the live
 keymap, never on `geode-data` or a feature module, and the shell never
 depends on it. A tile mechanism two modules would otherwise each write lives
 there.

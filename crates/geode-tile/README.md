@@ -14,6 +14,7 @@ Current architecture:
 | Module | Holds |
 |---|---|
 | `confirm` | The in-tile y/n confirm over a `ConfirmHost` (one `Option<Confirm<P>>` slot, `confirmed`, `cancelled`): `arm`, `key` (bare `y` confirms; every other key cancels and is consumed), `cancel` (pointer, blur, a verb from elsewhere), `withdraw` (no `Window`: drops the blur answer at once, defers the blur, answers nothing), `prompt` (the focused question in the foreground color; a press on it takes no focus), `cancel_on_press` (capture-phase press on the tile root). Every answer blurs the prompt before its handle drops; the shell's restoration path, not the door, returns the keyboard to the tile. |
+| `following` | The flip-barrier state machine a following tile runs for its own query: `FollowingQuery<T>` (the versions last asked under, the in-flight instant, the result held for the barrier, the last flip seen, the tag) with `on_flip`/`promote` (followed counters decide, not flip identity; promotion runs before the tile's visibility check), `follows_changed`, `self_arrive` (never for a same-identity query still out), `begin` (drops the stage), `submitted` (`Unanswered::Retry` arrives then forgets; `KeepActed` arrives and remembers), `deliver` (a stale tag is not an arrival; a failure arrives; a releasing arrival promotes at once), `reset`, `close` (supersede, then answer any barrier still waiting); `arrive_immediately` for tiles that submit no frame query; the `Barrier` trait over `Frame` and `FrameDoor` (the entity, notifying on release). Methods return decisions; the tile applies results and formats notices. |
 | `menu` | The `.` action menu: `Row` (`Action`/`Separator`/`Section`), `ActionRow` (pick, title, `Hint` resolved to a `Lane` through the live keymap, `enabled` with its reason, optional short reason, `checked` tick slot read back as `tick()`), `Menu` (highlight, `step`, `highlight`, `pick`, `replace_rows`, `rehint`), and `render_menu` over a `MenuHost`. Stepping lands only on enabled actions, and from a non-action row on the first enabled one; an all-disabled menu has no cursor; a rebuild snaps the highlight to the nearest action. Which keys step and pick stays the module's. |
 | `notice` | `Notice` (prepared text and a `Tone`: `Status`, `Warning`, `Danger`) and its one paint in theme tokens. Precedence between a tile's notice slots stays the tile's. |
 | `popover` | Popup geometry (`ROW_HEIGHT`, `ROW_INSET`, `MIN_WIDTH`, `SNAP_MARGIN`), the popover `surface`, `anchor_popup` (deferred, anchored, snapped, priority 1), and the `row_shell`/`empty_row` row frames. |
@@ -21,6 +22,10 @@ Current architecture:
 Used by the pricer (all four doors), market-data (all four), timeseries
 (popover, menu, notice) and the blotter (notice). Diagnostics has no popover,
 menu, confirm or notice line and does not depend on this crate.
+
+The crate takes a submission's outcome as `submitted: bool` rather than
+depending on `geode-data`: every refusal path uses the data service's
+`Refusal` only to word a notice, which the tile writes itself.
 
 ## Menu hints
 
