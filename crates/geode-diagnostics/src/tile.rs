@@ -13,7 +13,7 @@ use geode_core::log::{Record, Ring};
 use geode_core::query::QueryKey;
 use geode_shell::actions::ActionId;
 use geode_shell::fonts;
-use geode_shell::frame::{Frame, FrameVersions};
+use geode_shell::frame::{FrameRef, FrameVersions};
 use geode_shell::keymap::KeyContext;
 use geode_shell::module::{FindEvent, StackHandle};
 use geode_shell::shell::chip;
@@ -65,7 +65,7 @@ fn title_text_for(section: Section) -> SharedString {
 
 pub struct DiagnosticsTile {
     tile: TileId,
-    frame: Entity<Frame>,
+    frame: FrameRef,
     diagnostics: Entity<geode_shell::diagnostics::Diagnostics>,
     ring: Arc<Ring>,
     config: Rc<RefCell<Config>>,
@@ -113,7 +113,7 @@ impl DiagnosticsTile {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         tile: TileId,
-        frame: Entity<Frame>,
+        frame: FrameRef,
         diagnostics: Entity<geode_shell::diagnostics::Diagnostics>,
         ring: Arc<Ring>,
         config: Rc<RefCell<Config>>,
@@ -162,7 +162,10 @@ impl DiagnosticsTile {
         // The app registers its config-refresh frame observer before tiles
         // are created. That observer must update the shared `Config` before
         // this observer rebuilds config rows on the same version change.
-        cx.observe(&frame, |this, frame, cx| {
+        cx.observe(frame.entity(), |this, _, cx| {
+            // Read through the tile's own handle: the observed entity alone
+            // would answer for the shared lane, not this workspace's.
+            let frame = this.frame.clone();
             let now = frame.read(cx).versions();
             let as_of_changed = now.as_of != this.last_frame_versions.as_of;
             let config_changed = now.config != this.last_frame_versions.config;
@@ -651,6 +654,7 @@ mod tests {
     use geode_core::scopes::SavedScopes;
     use geode_shell::diagnostics::{Diagnostics, Health};
     use geode_shell::frame::Frame;
+    use geode_shell::tiling::WorkspaceIx;
     use gpui::{Entity, Window};
 
     struct Host {
@@ -686,6 +690,10 @@ mod tests {
         let window = cx
             .update(|cx| {
                 cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    // The tile sits in unpinned workspace 1, so the shared lane
+                    // is its lane and tests address it as `f.shared()` /
+                    // `f.shared_mut()`. A test that pins must reach the tile's
+                    // lane through its `FrameRef` instead.
                     let frame =
                         cx.new(|_| Frame::new(GroupingSlots::default(), SavedScopes::new(), None));
                     let diagnostics = cx.new(|_| Diagnostics::new(LogLevels::default()));
@@ -695,7 +703,7 @@ mod tests {
                         let tile = cx.new(|cx| {
                             DiagnosticsTile::new(
                                 TileId(9),
-                                frame.clone(),
+                                FrameRef::new(frame.clone(), WorkspaceIx::FIRST),
                                 diagnostics.clone(),
                                 ring2.clone(),
                                 config2.clone(),
@@ -771,7 +779,7 @@ mod tests {
                         let tile = cx.new(|cx| {
                             DiagnosticsTile::new(
                                 TileId(9),
-                                frame.clone(),
+                                FrameRef::new(frame.clone(), WorkspaceIx::FIRST),
                                 diagnostics.clone(),
                                 ring2.clone(),
                                 config2.clone(),
@@ -822,11 +830,12 @@ mod tests {
     fn the_tile_answers_a_flip_barrier_it_has_nothing_coming_for(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         h.frame.update(&mut vcx, |f, cx| {
-            f.set_scope(Scope {
+            f.shared_mut().set_scope(Scope {
                 text: Some("spx".into()),
                 ..Default::default()
             });
-            f.open_flip([QueryKey(9)], std::time::Instant::now());
+            f.shared_mut()
+                .open_flip([QueryKey(9)], std::time::Instant::now());
             cx.notify();
         });
         assert!(
@@ -901,7 +910,7 @@ mod tests {
                 "no sweep line for `:{word}`"
             );
         }
-        let before = h.frame.read_with(&vcx, |f, _| f.versions());
+        let before = h.frame.read_with(&vcx, |f, _| f.shared().versions());
         for line in lines {
             let result = h.tile.update(&mut vcx, |t, cx| t.command(line, cx));
             if line.starts_with("level") {
@@ -916,7 +925,7 @@ mod tests {
             });
             assert!(level.is_none(), "`:{line}` queued a log-level change");
             assert!(!overlay, "`:{line}` queued an overlay toggle");
-            let after = h.frame.read_with(&vcx, |f, _| f.versions());
+            let after = h.frame.read_with(&vcx, |f, _| f.shared().versions());
             assert_eq!(
                 (after.scope, after.grouping, after.as_of),
                 (before.scope, before.grouping, before.as_of),
@@ -1522,7 +1531,7 @@ mod tests {
         let before = h.tile.read_with(&vcx, |t, _| t.rebuild_count());
 
         h.frame.update(&mut vcx, |f, cx| {
-            f.set_scope(Scope {
+            f.shared_mut().set_scope(Scope {
                 text: Some("x".into()),
                 ..Scope::default()
             });
@@ -1588,7 +1597,7 @@ mod tests {
             .update(&mut vcx, |d, _| d.take_pending_catalog_request());
 
         h.frame.update(&mut vcx, |f, cx| {
-            f.set_as_of(AsOf::At(chrono::Utc::now()));
+            f.shared_mut().set_as_of(AsOf::At(chrono::Utc::now()));
             cx.notify();
         });
         vcx.update(|window, cx| {
@@ -1608,7 +1617,7 @@ mod tests {
     fn an_as_of_change_while_invisible_does_not_request_a_catalog(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         h.frame.update(&mut vcx, |f, cx| {
-            f.set_as_of(AsOf::At(chrono::Utc::now()));
+            f.shared_mut().set_as_of(AsOf::At(chrono::Utc::now()));
             cx.notify();
         });
         vcx.update(|window, cx| {

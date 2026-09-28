@@ -18,7 +18,7 @@ mod paint;
 mod render;
 
 pub use paint::{MenuPaint, RowPaint, row_paint};
-pub use render::{MenuHost, MenuIds, render_menu};
+pub use render::{MenuHost, MenuIds, TICK_SLOT, render_menu};
 
 use std::sync::Arc;
 

@@ -27,7 +27,7 @@ use geode_core::series::{Frequency, SeriesOutcome, SeriesResult, SlotKind};
 use geode_data::{DataHandle, FetchParams};
 use geode_shell::actions::ActionId;
 use geode_shell::diagnostics::Diagnostics;
-use geode_shell::frame::{Frame, FrameVersions};
+use geode_shell::frame::{FrameRef, FrameVersions};
 use geode_shell::keymap::KeyContext;
 use geode_shell::module::{FindEvent, StackHandle};
 use geode_shell::series::SeriesSettings;
@@ -105,7 +105,7 @@ struct ChartKey {
 
 pub struct TimeseriesTile {
     id: TileId,
-    frame: Entity<Frame>,
+    frame: FrameRef,
     /// Catalogue used by the add picker. The observer updates an open identity
     /// list when its options change; series-row provenance comes from results.
     diagnostics: Entity<Diagnostics>,
@@ -172,7 +172,7 @@ impl TimeseriesTile {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: TileId,
-        frame: Entity<Frame>,
+        frame: FrameRef,
         diagnostics: Entity<Diagnostics>,
         data: DataHandle,
         colors: Rc<RefCell<Arc<NamedColours>>>,
@@ -222,10 +222,12 @@ impl TimeseriesTile {
             cx.notify();
         })
         .detach();
-        cx.observe(&frame, |this, frame, cx| {
+        cx.observe(frame.entity(), |this, _, cx| {
             // Process flip releases before the visibility guard so hidden tiles can
             // promote staged data. Promotion still checks the followed as-of version.
-            let now = frame.read(cx).versions();
+            // Read through the tile's own handle: the observed entity alone
+            // would answer for the shared lane, not this workspace's.
+            let now = this.frame.read(cx).versions();
             // The post-step: every promotion that took something releases a
             // view move waiting behind it.
             match this.following.on_flip(now, Self::differs_on_followed) {

@@ -3,7 +3,9 @@
 //! Warning and danger chips use translucent semantic fills with `foreground`
 //! text. The corresponding `warning_foreground` and `danger_foreground`
 //! tokens are intended for solid fills and can become unreadable over tints.
-//! Neutral chips use the theme's secondary fill and text pair.
+//! Neutral chips use the theme's secondary fill and text pair. Active chips
+//! use a solid `primary`, floored against the title bar so the on state
+//! stands out, with `primary_foreground` floored against that fill.
 //!
 //! Text-only tones use `warning` or `danger`, adjusted toward `foreground`
 //! when needed to meet the readability floor against the background.
@@ -46,6 +48,14 @@ pub enum Tone {
     /// warning colour for states that need attention. The fill can be faint
     /// on some themes; text readability is checked by the theme sweep.
     Neutral,
+    /// An on state the trader switched on that changes what the screen
+    /// shows, such as a workspace's pinned frame: a solid `primary` whose
+    /// lightness is moved toward `foreground` until it clears the readability
+    /// floor against the title bar, carrying `primary_foreground` floored
+    /// against that fill. Solid rather than tinted because it must read as on
+    /// at a glance; `Neutral` is too faint for that on many themes, and several
+    /// themes ship a `primary` too close to their title bar to use unadjusted.
+    Active,
 }
 
 /// A chip's colours, resolved: `fill` is `None` for a text-only tone.
@@ -82,6 +92,26 @@ pub fn chip_paint(theme: &Theme, tone: Tone) -> ChipPaint {
             fill: Some(theme.secondary),
             text: theme.secondary_foreground,
         },
+        Tone::Active => {
+            let background = to_rgb(theme.background);
+            let bar = over(theme.title_bar, background);
+            let fill = readable_on(
+                over(theme.primary, background),
+                bar,
+                to_rgb(theme.foreground),
+            );
+            // The text pole is whichever end of the theme contrasts more
+            // with the fill, so a light fill takes dark text and vice versa.
+            let pole = [theme.foreground, theme.background]
+                .map(to_rgb)
+                .into_iter()
+                .max_by(|a, b| contrast_ratio(*a, fill).total_cmp(&contrast_ratio(*b, fill)))
+                .unwrap_or(background);
+            ChipPaint {
+                fill: Some(to_hsla(fill)),
+                text: to_hsla(readable_on(to_rgb(theme.primary_foreground), fill, pole)),
+            }
+        }
     }
 }
 
@@ -119,12 +149,13 @@ mod tests {
     use super::*;
     use gpui_component::ActiveTheme as _;
 
-    const TONES: [Tone; 5] = [
+    const TONES: [Tone; 6] = [
         Tone::Warning,
         Tone::Danger,
         Tone::WarningText,
         Tone::DangerText,
         Tone::Neutral,
+        Tone::Active,
     ];
 
     /// Every tone's text must meet the readability floor against its
@@ -157,6 +188,36 @@ mod tests {
         assert!(
             failures.is_empty(),
             "unreadable chips:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    /// An `Active` chip marks an on state that must read at a glance, so its
+    /// solid fill must stand apart from the title bar it sits on by the
+    /// non-text contrast floor (3:1) on every bundled theme.
+    #[gpui::test]
+    fn an_active_chip_stands_out_from_the_title_bar_on_every_bundled_theme(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+        let (service, _) = crate::theme::load_bundled();
+        let mut failures = Vec::new();
+        for name in service.names() {
+            let entry = service.resolve(&name).unwrap().clone();
+            cx.update(|cx| {
+                Theme::global_mut(cx).apply_config(&entry);
+                let theme = cx.theme();
+                let paint = chip_paint(theme, Tone::Active);
+                let fill = over(paint.fill.unwrap(), to_rgb(theme.background));
+                let ratio = contrast_ratio(fill, over(theme.title_bar, to_rgb(theme.background)));
+                if ratio < READABLE_RATIO {
+                    failures.push(format!("{name}: {ratio:.2}:1"));
+                }
+            });
+        }
+        assert!(
+            failures.is_empty(),
+            "faint active chips:\n{}",
             failures.join("\n")
         );
     }

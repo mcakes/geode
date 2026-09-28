@@ -234,6 +234,7 @@ pub(super) fn services_with_recorders(
         roster,
         restored_tiles: crate::session::TileRecords::new(),
         restored_frame: None,
+        restored_pinned: Default::default(),
         restored_palette_usage: crate::palette_usage::PaletteUsage::new(),
         log: None,
         action_tail: std::sync::Arc::new(std::sync::Mutex::new(
@@ -606,9 +607,11 @@ mod occupants;
 mod palette;
 mod perf;
 mod picker;
+mod pin;
 mod reload;
 mod scope_expr;
 mod scopebar;
+mod scopepicker;
 mod session;
 mod stacks;
 mod tilepicker;

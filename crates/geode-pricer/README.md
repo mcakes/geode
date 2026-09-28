@@ -22,7 +22,7 @@ The pure core (`core`, no element, entity, window, or data service):
 | `columns`, `views` | Column vocabulary, prepared column plans, and cell text. |
 | `package` | A package row's aggregated cells: its legs' distinct values in leg order joined with `/`, and the package quantity while the legs fit its template; how an edit to one of those cells maps onto its legs. |
 | `cell` | Cell commit validation, the typeahead vocabularies, the expiry date commit, and nudging. |
-| `entry` | Where `o` lands, lifting a typed package out of a leg position, the entry bar's label, and entry history. |
+| `entry` | Where `o` and `shift+o` land, lifting a typed package out of a leg position, the entry bar's label, and entry history. |
 | `complete` | Entry-bar completion: the slot at the caret, suggestions, hint, and the Tab cycle. |
 | `clip` | The yank register and where `p`/`shift+p` land. |
 | `tree` | Package expansion and the visible-row walk. |
@@ -38,8 +38,8 @@ The tile:
 | `grid` | The prepared `GridModel`, rebuilt on change. |
 | `paint` | The per-theme paint memo, floored to a readable ratio. |
 | `delegate` | The table delegate: cells, the tree column (indent, chevron, template tag), editor, expiry date field. |
-| `header` | The prepared header row (notices as `geode_tile::notice::Notice`) and footer. |
-| `popup` | The typeahead, the entry bar's completion list, and `PricerPick` (what a menu row does). The menu, popup geometry, the `:rm` confirm and the header notices paint through `geode-tile`. |
+| `header` | The prepared header row (notices as `geode_tile::notice::Notice`), the sheet name control and rename field, and the footer. |
+| `popup` | The typeahead, the entry bar's completion list, the sheet picker (`sheet_rows`, `SheetPicker`), and `PricerPick` (what a menu row does). The menu, popup geometry, the `:rm` confirm and the header notices paint through `geode-tile`. |
 | `session` | The tile's session record, including `:autosize`'s fitted widths (`column_widths`, read leniently). |
 | `content` | The factory, keymap fragment (verbs, field keys and the menu's pick and close keys; the grid motions and the menu steps are the shell's shared `motion::*` bindings), actions, the retired motion ids' renames (`RENAMED_ACTIONS`), settings, and the read-only `UnderlyingSource` seam. |
 | `tile` | `PricerTile`: modes (a key context that publishes `grid`, and `tilelist` while the action menu is open so the shared menu steps reach it), verbs, repricing, write-behind, load. Every `motion::*` id runs as one verb through `geode_tile::motion`, so it closes an open field or menu first like any other verb. |
@@ -57,7 +57,8 @@ cargo bench -p geode-pricer
 ```
 
 The `test-support` feature exposes read-only accessors a host's tests observe
-a tile through (`PricerTile::sheet`, `PricerTile::is_loading`). `geode-app`'s
+a tile through (`PricerTile::sheet`, `PricerTile::is_loading`,
+`PricerTile::sheet_field_text`). `geode-app`'s
 dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 `--workspace` builds on one feature set.
 
@@ -67,7 +68,8 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   history step, commit and reload, and a Tab at a moved caret re-ranks first.
   A completion write is one range replace (one undo step) whose own `Change`
   is skipped as its echo, so the Tab cycle survives it. `lib::init` reclaims
-  `tab`/`shift-tab` in the bar's `PricerEntry` context from gpui-component's
+  `tab`/`shift-tab` in the bar's `PricerEntry` context (and the sheet
+  picker's `PricerSheetPicker`, where `tab` completes) from gpui-component's
   focus cycling.
 - Entry completion suggests configured underlyings, upcoming monthly expiries,
   tenors, option types, templates, and barrier kinds. It replaces the token at
@@ -227,11 +229,29 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   the new one is confirmed, and is refused on a sheet whose load failed (its
   fallback would replace the real document). `:rm` refuses every open name.
 - The `:rm` confirmation is `geode_tile::confirm`'s: a focused prompt in
-  the header that consumes every key (bare `y` confirms), the tile in
-  `insert` mode while armed, cancelled by focus leaving or a pointer press,
-  blurred before it drops. A `:` command arriving under it withdraws it
-  unanswered. After an answer the shell's focus restoration path returns the
-  keyboard to the tile.
+  the header that consumes every key (bare `y` confirms), with the door's
+  Yes/No buttons (`y` and "any other key"), the tile in `insert` mode while
+  armed, cancelled by focus leaving or a pointer press anywhere but the two
+  buttons, blurred before it drops. A `:` command arriving under it
+  withdraws it unanswered. After an answer the shell's focus restoration
+  path returns the keyboard to the tile.
+- The sheet picker and the rename field are pointer forms of `:e`/`:rm` and
+  `:name`: a pick goes through `edit_sheet`/`arm_remove`, and the field's
+  text through `commands::parse` and `rename`, so no refusal is restated.
+  The picker paints through `geode_tile::popover` (surface, `row_shell`,
+  `empty_row`, `anchor_popup`). Both report `mode == insert` and count in
+  `holds_focus`, blur before they drop, and close on any other verb, `:`
+  and `/`. `RenameBlock` is the rename refusal known before a name is typed
+  (the menu greys the row with its reason). The name's press listener runs
+  in the capture phase (a second click toggles the picker closed before its
+  outside-press closer runs) and prevents default so no focus-tracking
+  ancestor takes the new field's focus. The name's outside-press listener
+  (not hover-gated, so it hears presses on surfaces painted over the tile)
+  clears `last_press_on_name`, so a double-click renames only when both
+  presses hit the name. A press with any modifier opens nothing and leaves
+  default alone: mod+drag and mod+double-click fullscreen stay the shell's.
+  `lib::init` reclaims `tab` in the rename field's `PricerRename` context,
+  and the field consumes it, so the keyboard never leaves the open field.
 - Known names are the store's (`set_known` from the diagnostics catalog,
   which only adds and never re-adds a name confirmed forgotten until a
   save of it is confirmed; confirmed saves; less confirmed forgets) plus

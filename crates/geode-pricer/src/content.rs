@@ -12,7 +12,7 @@ use geode_core::document::split_key;
 use geode_data::DataHandle;
 use geode_shell::actions::{ActionDef, ActionId, ActionRegistry};
 use geode_shell::diagnostics::Diagnostics;
-use geode_shell::frame::Frame;
+use geode_shell::frame::FrameRef;
 use geode_shell::keymap::KeyContext;
 use geode_shell::module::{
     Delivery, FindEvent, ModuleFactory, StackHandle, TileContent, TileOccupant,
@@ -37,7 +37,8 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("pricer::find_next", "Find next"),
     ("pricer::find_prev", "Find previous"),
     ("pricer::escape", "Clear selection, else find and notice"),
-    ("pricer::add_below", "Add lines…"),
+    ("pricer::add_below", "Add lines below…"),
+    ("pricer::add_above", "Add lines above…"),
     ("pricer::edit", "Edit cell…"),
     ("pricer::delete", "Delete row"),
     ("pricer::undo", "Undo"),
@@ -55,6 +56,10 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("pricer::expand_all", "Expand all packages"),
     ("pricer::collapse_all", "Collapse all packages"),
     ("pricer::price", "Reprice all lines"),
+    ("pricer::open_sheet", "Open sheet…"),
+    ("pricer::rename_sheet", "Rename sheet…"),
+    ("pricer::new_sheet", "New sheet"),
+    ("pricer::remove_sheet", "Remove sheet…"),
     ("pricer::commit", "Commit edit"),
     ("pricer::cancel", "Cancel edit"),
     ("pricer::insert_up", "Insert: up"),
@@ -93,14 +98,24 @@ pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
     ("pricer::menu_up", "motion::menu_up"),
 ];
 
-/// Registered but deliberately unbound: `:price` and the menu reach it.
-pub const NO_DEFAULT_KEY: &[&str] = &["pricer::price"];
+/// Registered but deliberately unbound: `:price` and the menu reach
+/// repricing; the sheet verbs are the `:e`/`:name`/`:new`/`:rm` commands'
+/// pointer and palette forms (the header's sheet name, the menu).
+pub const NO_DEFAULT_KEY: &[&str] = &[
+    "pricer::price",
+    "pricer::open_sheet",
+    "pricer::rename_sheet",
+    "pricer::new_sheet",
+    "pricer::remove_sheet",
+];
 
 /// The module's keymap fragment. Every predicate is a
-/// plain conjunction whose first identifier is `pricer`. Both text fields
-/// (the entry field and the cell editor) report `mode == insert` — the one
-/// word the shell's insert-focus predicate reads — and share one block;
-/// the tile routes `commit`/`cancel`/`insert_*` by which field is open. No
+/// plain conjunction whose first identifier is `pricer`. Every field (the
+/// entry field, the cell editor, the sheet picker's filter and the rename
+/// field) and the armed `:rm` prompt report `mode == insert` — the one word
+/// the shell's insert-focus predicate reads — and share one block; the tile
+/// routes `commit`/`cancel`/`insert_*` by which field is open (the prompt
+/// consumes its keys before they reach the block). No
 /// chord is bound there, so `ctrl+k` keeps opening the palette from inside
 /// a field. `y` alone is unbound: an
 /// exact match dispatches at once, so it would make `y y` and `y c`
@@ -149,6 +164,7 @@ context = "pricer && mode == normal"
 "shift+n" = "pricer::find_prev"
 "escape" = "pricer::escape"
 "o" = "pricer::add_below"
+"shift+o" = "pricer::add_above"
 "i" = "pricer::edit"
 "enter" = "pricer::edit"
 "d d" = "pricer::delete"
@@ -745,7 +761,7 @@ impl ModuleFactory for PricerFactory {
         &self,
         tile: TileId,
         restored: Option<&toml::Table>,
-        frame: Entity<Frame>,
+        frame: FrameRef,
         diagnostics: Entity<Diagnostics>,
         window: &mut Window,
         cx: &mut App,
@@ -1045,9 +1061,13 @@ mod tests {
     }
 
     #[test]
-    fn shift_o_is_unbound_and_add_above_is_gone() {
-        assert!(!DEFAULT_KEYMAP.contains("shift+o"));
-        assert!(!ACTIONS.iter().any(|(id, _)| *id == "pricer::add_above"));
+    fn o_adds_below_and_shift_o_adds_above() {
+        assert_eq!(resolve("o", "normal").as_deref(), Some("pricer::add_below"));
+        assert_eq!(
+            resolve("shift+o", "normal").as_deref(),
+            Some("pricer::add_above")
+        );
+        assert!(ACTIONS.iter().any(|(id, _)| *id == "pricer::add_above"));
     }
 
     #[test]

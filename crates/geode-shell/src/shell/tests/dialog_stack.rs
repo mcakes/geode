@@ -869,12 +869,12 @@ fn a_backdrop_click_over_a_scope_chip_closes_the_dialog_and_leaves_the_chip(
     let shell = shell_of(&window, &mut vcx);
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
     frame.update(&mut vcx, |f, cx| {
-        let mut s = f.scope().clone();
+        let mut s = f.shared().scope().clone();
         s.dimensions.push(geode_core::scope::DimensionSelection {
             column: "book".into(),
             values: vec!["BK001".into()],
         });
-        f.set_scope(s);
+        f.shared_mut().set_scope(s);
         cx.notify();
     });
     vcx.run_until_parked();
@@ -900,7 +900,7 @@ fn a_backdrop_click_over_a_scope_chip_closes_the_dialog_and_leaves_the_chip(
         "the backdrop click closes the dialog"
     );
     assert_eq!(
-        frame.read_with(&vcx, |f, _| f.scope().dimensions.len()),
+        frame.read_with(&vcx, |f, _| f.shared().scope().dimensions.len()),
         1,
         "the click must not also reach the chip's × beneath the backdrop"
     );

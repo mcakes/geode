@@ -1,5 +1,5 @@
 //! Scope-expression integration: opening from the palette, committing through
-//! `Frame::set_scope` for undo support, parse errors, empty-expression clearing, chip
+//! `FrameViewMut::set_scope` for undo support, parse errors, empty-expression clearing, chip
 //! clicks, and restoring focus to the text field.
 
 use super::*;
@@ -14,7 +14,7 @@ fn expr_scope(text: &str) -> Scope {
     }
 }
 
-/// `enter` on a typed expression commits it through `Frame::set_scope`,
+/// `enter` on a typed expression commits it through `FrameViewMut::set_scope`,
 /// closes the dialog, and — since it went through `set_scope` rather
 /// than bypassing undo — `frame::scope_undo` restores the prior scope.
 #[gpui::test]
@@ -27,6 +27,7 @@ fn typing_an_expression_and_enter_sets_it_through_set_scope(cx: &mut gpui::TestA
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
     assert_eq!(
         frame.read_with(&vcx, |f, _| f
+            .shared()
             .scope()
             .expression
             .as_ref()
@@ -36,7 +37,7 @@ fn typing_an_expression_and_enter_sets_it_through_set_scope(cx: &mut gpui::TestA
     assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
     dispatch_action(&shell, "frame::scope_undo", &mut vcx);
     assert!(
-        frame.read_with(&vcx, |f, _| f.scope().expression.is_none()),
+        frame.read_with(&vcx, |f, _| f.shared().scope().expression.is_none()),
         "the commit went through set_scope, so undo restores"
     );
 }
@@ -53,7 +54,7 @@ fn a_parse_error_paints_inline_and_leaves_the_frame_alone(cx: &mut gpui::TestApp
     assert!(shell.read_with(&vcx, |s, _| s.modal_open()), "stays open");
     assert!(vcx.debug_bounds("scope-expr-error").is_some());
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
-    assert!(frame.read_with(&vcx, |f, _| f.scope().expression.is_none()));
+    assert!(frame.read_with(&vcx, |f, _| f.shared().scope().expression.is_none()));
     // Typing again clears the error.
     vcx.simulate_input(" 'x'");
     vcx.run_until_parked();
@@ -69,7 +70,7 @@ fn the_field_opens_seeded_and_an_empty_commit_clears(cx: &mut gpui::TestAppConte
     let shell = shell_of(&window, &mut vcx);
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
     frame.update(&mut vcx, |f, cx| {
-        f.set_scope(expr_scope("book = 'BK000'"));
+        f.shared_mut().set_scope(expr_scope("book = 'BK000'"));
         cx.notify();
     });
     dispatch_action(&shell, "frame::scope_expression", &mut vcx);
@@ -83,7 +84,7 @@ fn the_field_opens_seeded_and_an_empty_commit_clears(cx: &mut gpui::TestAppConte
         input.update(cx, |i, cx| i.set_value("", window, cx));
     });
     vcx.simulate_keystrokes("enter");
-    assert!(frame.read_with(&vcx, |f, _| f.scope().expression.is_none()));
+    assert!(frame.read_with(&vcx, |f, _| f.shared().scope().expression.is_none()));
     assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
 }
 
@@ -97,7 +98,7 @@ fn clicking_the_expression_chip_opens_the_dialog_and_typing_lands(cx: &mut gpui:
     let shell = shell_of(&window, &mut vcx);
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
     frame.update(&mut vcx, |f, cx| {
-        f.set_scope(expr_scope("book = 'BK000'"));
+        f.shared_mut().set_scope(expr_scope("book = 'BK000'"));
         cx.notify();
     });
     vcx.run_until_parked();
@@ -324,7 +325,7 @@ fn add_mode_requests_values_under_the_current_expression(cx: &mut gpui::TestAppC
     let shell = shell_of(&window, &mut vcx);
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
     frame.update(&mut vcx, |f, cx| {
-        f.set_scope(expr_scope("live = true"));
+        f.shared_mut().set_scope(expr_scope("live = true"));
         cx.notify();
     });
     let seen = requests(&shell, &mut vcx);
@@ -473,7 +474,7 @@ fn a_reload_rebuilds_the_vocab_under_an_open_dialog(cx: &mut gpui::TestAppContex
 
 fn named_of(shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext) -> Vec<String> {
     let frame = shell.read_with(vcx, |s, _| s.frame().clone());
-    frame.read_with(vcx, |f, _| f.scope().named.clone())
+    frame.read_with(vcx, |f, _| f.shared().scope().named.clone())
 }
 
 /// A shell over [`services_with_named`] whose frame scope names `named`
@@ -487,7 +488,7 @@ fn named_shell(
     let shell = shell_of(&window, &mut vcx);
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
     frame.update(&mut vcx, |f, cx| {
-        f.set_scope(Scope {
+        f.shared_mut().set_scope(Scope {
             named: named.iter().map(ToString::to_string).collect(),
             expression: expression.map(|t| parse_expr(t).unwrap()),
             ..Scope::default()
@@ -539,6 +540,7 @@ fn backspace_at_the_start_unstages_the_last_name_and_undo_restores(cx: &mut gpui
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
     assert_eq!(
         frame.read_with(&vcx, |f, _| f
+            .shared()
             .scope()
             .expression
             .as_ref()
@@ -851,7 +853,7 @@ fn mod_s_saves_the_text_as_a_named_expression_and_stages_it(cx: &mut gpui::TestA
     assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
     assert_eq!(named_of(&shell, &vcx), vec!["liq2".to_string()]);
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
-    let resolved = frame.read_with(&vcx, |f, _| f.effective_scope(&Scope::default()));
+    let resolved = frame.read_with(&vcx, |f, _| f.shared().effective_scope(&Scope::default()));
     assert!(
         resolved.is_ok(),
         "the new name resolves before the write flushes: {resolved:?}"
@@ -980,7 +982,8 @@ fn the_save_chip_paints_only_where_saving_works(cx: &mut gpui::TestAppContext) {
     vcx.run_until_parked();
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
     frame.update(&mut vcx, |f, cx| {
-        f.set_scope(expr_scope("npv > 5 and live = true"));
+        f.shared_mut()
+            .set_scope(expr_scope("npv > 5 and live = true"));
         cx.notify();
     });
     vcx.run_until_parked();
@@ -1072,7 +1075,7 @@ fn term_saving_shell(
     vcx.run_until_parked();
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
     frame.update(&mut vcx, |f, cx| {
-        f.set_scope(expr_scope(text));
+        f.shared_mut().set_scope(expr_scope(text));
         cx.notify();
     });
     vcx.run_until_parked();
@@ -1093,6 +1096,7 @@ fn term_texts(shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext) -> Vec<S
     shell.read_with(vcx, |s, cx| {
         s.frame()
             .read(cx)
+            .shared()
             .scope()
             .expression
             .as_ref()
@@ -1141,7 +1145,10 @@ fn mod_s_in_term_mode_names_the_term(cx: &mut gpui::TestAppContext) {
         written.contains("[big]\nexpression = \"npv > 5\""),
         "{written}"
     );
-    assert!(frame.update(&mut vcx, |f, _| f.undo_scope()), "one step");
+    assert!(
+        frame.update(&mut vcx, |f, _| f.shared_mut().undo_scope()),
+        "one step"
+    );
     assert_eq!(
         term_texts(&shell, &vcx),
         vec!["npv > 5".to_string(), "live = true".to_string()]
@@ -1182,7 +1189,8 @@ fn naming_a_changed_term_refuses_and_writes_nothing(cx: &mut gpui::TestAppContex
     vcx.simulate_input("big");
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
     frame.update(&mut vcx, |f, cx| {
-        f.set_scope(expr_scope("npv > 7 and live = true"));
+        f.shared_mut()
+            .set_scope(expr_scope("npv > 7 and live = true"));
         cx.notify();
     });
     vcx.run_until_parked();

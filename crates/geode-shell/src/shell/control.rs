@@ -212,6 +212,7 @@ mod tests {
     /// it here.
     fn shipped(theme: &Theme) -> Vec<(ControlInputs, &'static str)> {
         let muted = Rest::Filled(theme.muted);
+        let active = crate::shell::chip::chip_paint(theme, crate::shell::chip::Tone::Active);
         vec![
             (
                 ControlInputs::new(theme, muted, theme.title_bar, theme.muted_foreground),
@@ -289,6 +290,16 @@ mod tests {
                     theme.foreground,
                 ),
                 "as-of chip (Tone::Warning on the title bar)",
+            ),
+            (
+                // The pinned workspace glyph uses `Tone::Active` on the title bar.
+                ControlInputs::new(
+                    theme,
+                    Rest::Filled(active.fill.unwrap_or(theme.primary)),
+                    theme.title_bar,
+                    active.text,
+                ),
+                "pinned glyph (Tone::Active on the title bar)",
             ),
             (
                 // Timeseries slot chips sit on the tile background and move the

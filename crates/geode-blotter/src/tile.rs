@@ -25,7 +25,7 @@ use geode_shell::colfit::{
     FitMetrics, FittedWidths, NOTHING_TO_FIT, SESSION_KEY, widths_from_record, widths_to_toml,
 };
 use geode_shell::fonts;
-use geode_shell::frame::{Frame, FrameVersions, PublicationWatch};
+use geode_shell::frame::{FrameRef, FrameVersions, FrameView, PublicationWatch};
 use geode_shell::keymap::KeyContext;
 use geode_shell::linenumbers::{LineNumbers, UiSettings};
 use geode_shell::module::{FindEvent, StackHandle};
@@ -99,7 +99,7 @@ pub enum TileAsOf {
 
 pub struct BlotterTile {
     tile: TileId,
-    frame: Entity<Frame>,
+    frame: FrameRef,
     data: DataHandle,
     views: Rc<RefCell<Vec<ViewSpec>>>,
     /// Named colour definitions shared through the factory and refreshed on
@@ -199,7 +199,7 @@ impl BlotterTile {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         tile: TileId,
-        frame: Entity<Frame>,
+        frame: FrameRef,
         data: DataHandle,
         views: Rc<RefCell<Vec<ViewSpec>>>,
         colours: Rc<RefCell<Arc<NamedColours>>>,
@@ -377,7 +377,7 @@ impl BlotterTile {
             this.pointer(*event, cx)
         })
         .detach();
-        cx.observe(&frame, |this, _, cx| this.on_frame_changed(cx))
+        cx.observe(frame.entity(), |this, _, cx| this.on_frame_changed(cx))
             .detach();
         cx.observe_global::<UiSettings>(|this, cx| this.on_ui_settings(cx))
             .detach();
@@ -532,7 +532,7 @@ impl BlotterTile {
         true
     }
 
-    fn grouping(&self, frame: &Frame, view: &ViewSpec) -> Vec<String> {
+    fn grouping(&self, frame: &FrameView<'_>, view: &ViewSpec) -> Vec<String> {
         match &self.pin {
             Pin::Grouping(g) => g.clone(),
             Pin::Slot(n) => frame
@@ -682,7 +682,7 @@ impl BlotterTile {
         self.watch_view(&view, cx);
         let (grouping, scope, as_of, versions) = {
             let frame = self.frame.read(cx);
-            let grouping = self.grouping(frame, &view);
+            let grouping = self.grouping(&frame, &view);
             // A tile scope comes from `:filter` and never names an
             // expression, so the unscoped branch needs no resolution; the
             // compiler refuses one that somehow does.
@@ -1827,9 +1827,10 @@ mod tests {
     use geode_core::snapshot::{ColumnMeta, Freshness, Provenance, Snapshot, TestColumn};
     use geode_data::{DataHandle, Request};
     use geode_shell::actions::ActionId;
-    use geode_shell::frame::{FLIP_DEADLINE, Frame, Publish};
+    use geode_shell::frame::{FLIP_DEADLINE, Frame, FrameRef, Publish};
     use geode_shell::module::{FindEvent, TileContent};
     use geode_shell::tiling::TileId;
+    use geode_shell::tiling::WorkspaceIx;
     use geode_shell::vimfind::FindStyle;
     use geode_tile::notice::Notice;
     use gpui::px;
@@ -2109,12 +2110,16 @@ mod tests {
         let window = cx
             .update(|cx| {
                 cx.open_window(options, |window, cx| {
+                    // The tile sits in unpinned workspace 1, so the shared lane
+                    // is its lane and tests address it as `f.shared()` /
+                    // `f.shared_mut()`. A test that pins must reach the tile's
+                    // lane through its `FrameRef` instead.
                     let frame = cx.new(|_| Frame::new(slots(), SavedScopes::new(), None));
                     cx.new(|cx| {
                         let tile = cx.new(|cx| {
                             BlotterTile::new(
                                 TileId(7),
-                                frame.clone(),
+                                FrameRef::new(frame.clone(), WorkspaceIx::FIRST),
                                 data.clone(),
                                 Rc::new(RefCell::new(views())),
                                 Rc::new(RefCell::new(Arc::new(NamedColours::default()))),
@@ -2179,7 +2184,7 @@ mod tests {
                         let tile = cx.new(|cx| {
                             BlotterTile::new(
                                 TileId(7),
-                                frame.clone(),
+                                FrameRef::new(frame.clone(), WorkspaceIx::FIRST),
                                 data.clone(),
                                 Rc::new(RefCell::new(views)),
                                 Rc::new(RefCell::new(Arc::new(colours))),
@@ -2266,7 +2271,7 @@ mod tests {
                         let a = cx.new(|cx| {
                             BlotterTile::new(
                                 TileId(7),
-                                frame.clone(),
+                                FrameRef::new(frame.clone(), WorkspaceIx::FIRST),
                                 data.clone(),
                                 views.clone(),
                                 colours.clone(),
@@ -2282,7 +2287,7 @@ mod tests {
                         let b = cx.new(|cx| {
                             BlotterTile::new(
                                 TileId(8),
-                                frame.clone(),
+                                FrameRef::new(frame.clone(), WorkspaceIx::FIRST),
                                 data.clone(),
                                 views.clone(),
                                 colours.clone(),
@@ -2495,7 +2500,7 @@ mod tests {
         h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
         let _ = next_query(&h.requests);
         h.frame.update(&mut cx, |f, cx| {
-            f.set_active_slot(Some(2));
+            f.shared_mut().set_active_slot(Some(2));
             cx.notify();
         });
         let p = next_query(&h.requests);
@@ -2515,7 +2520,7 @@ mod tests {
             "pinned"
         );
         h.frame.update(&mut cx, |f, cx| {
-            f.set_active_slot(Some(1));
+            f.shared_mut().set_active_slot(Some(1));
             cx.notify();
         });
         assert!(
@@ -2549,8 +2554,9 @@ mod tests {
         // dropped, so the next submit is refused.
         h.data.shutdown();
         h.frame.update(&mut vcx, |f, cx| {
-            f.set_as_of(AsOf::At(chrono::Utc::now()));
-            f.open_flip([QueryKey(7)], std::time::Instant::now());
+            f.shared_mut().set_as_of(AsOf::At(chrono::Utc::now()));
+            f.shared_mut()
+                .open_flip([QueryKey(7)], std::time::Instant::now());
             cx.notify();
         });
         assert!(
@@ -2577,7 +2583,7 @@ mod tests {
         deliver(&h, &mut vcx, first.tag, Ok(snapshot()));
         let change = |vcx: &mut gpui::VisualTestContext| {
             h.frame.update(vcx, |f, cx| {
-                f.set_as_of(AsOf::At(chrono::Utc::now()));
+                f.shared_mut().set_as_of(AsOf::At(chrono::Utc::now()));
                 cx.notify();
             });
         };
@@ -2623,17 +2629,18 @@ mod tests {
         deliver(&h, &mut vcx, first.tag, Ok(snapshot()));
 
         h.frame.update(&mut vcx, |f, cx| {
-            f.set_text(Some("A".into()));
+            f.shared_mut().set_text(Some("A".into()));
             cx.notify();
         });
         let in_flight = next_query(&h.requests);
 
         h.frame.update(&mut vcx, |f, cx| {
-            f.set_scope(Scope {
+            f.shared_mut().set_scope(Scope {
                 named: vec!["gone".into()],
                 ..Scope::default()
             });
-            f.open_flip([QueryKey(7)], std::time::Instant::now());
+            f.shared_mut()
+                .open_flip([QueryKey(7)], std::time::Instant::now());
             cx.notify();
         });
         assert!(
@@ -3999,9 +4006,9 @@ mod tests {
         // unscoped: an unscoped tile doesn't follow the frame's scope
         // version, so this alone triggers no requery.
         h.frame.update(&mut cx, |f, cx| {
-            let mut scope = f.scope().clone();
+            let mut scope = f.shared().scope().clone();
             scope.text = Some("ignored".into());
-            if f.set_scope(scope) {
+            if f.shared_mut().set_scope(scope) {
                 cx.notify();
             }
         });
@@ -4043,7 +4050,7 @@ mod tests {
         // The frame moves on to a new (historical) instant; a tile
         // pinned to the frame's own former value does not track it.
         h.frame.update(&mut cx, |f, cx| {
-            f.set_as_of(AsOf::At(chrono::Utc::now()));
+            f.shared_mut().set_as_of(AsOf::At(chrono::Utc::now()));
             cx.notify();
         });
         assert!(
@@ -4055,7 +4062,7 @@ mod tests {
         });
         let _ = next_query(&h.requests);
 
-        let frame_as_of_version = h.frame.read_with(&cx, |f, _| f.versions().as_of);
+        let frame_as_of_version = h.frame.read_with(&cx, |f, _| f.shared().versions().as_of);
 
         h.tile.update_in(&mut cx, |t, window, cx| {
             t.command("asof 14:05", window, cx).unwrap()
@@ -4066,11 +4073,11 @@ mod tests {
             "the request carries the pin"
         );
         assert!(
-            !h.frame.read_with(&cx, |f, _| f.as_of().is_live()),
+            !h.frame.read_with(&cx, |f, _| f.shared().as_of().is_live()),
             "the frame stayed at the historical instant the prelude moved it to"
         );
         assert_eq!(
-            h.frame.read_with(&cx, |f, _| f.versions().as_of),
+            h.frame.read_with(&cx, |f, _| f.shared().versions().as_of),
             frame_as_of_version,
             "the frame's as-of counter did not move"
         );
@@ -4099,7 +4106,7 @@ mod tests {
 
         // Live under a historical frame.
         h.frame.update(&mut cx, |f, cx| {
-            f.set_as_of(AsOf::At(chrono::Utc::now()));
+            f.shared_mut().set_as_of(AsOf::At(chrono::Utc::now()));
             cx.notify();
         });
         let p = next_query(&h.requests);
@@ -4111,7 +4118,7 @@ mod tests {
         assert!(p.as_of.is_live(), "pinned to live under a historical frame");
         assert!(
             matches!(
-                h.frame.read_with(&cx, |f, _| f.as_of().clone()),
+                h.frame.read_with(&cx, |f, _| f.shared().as_of().clone()),
                 AsOf::At(_)
             ),
             "the frame stayed historical"
@@ -4134,8 +4141,9 @@ mod tests {
         deliver(&h, &mut cx, p.tag, Ok(snapshot()));
 
         h.frame.update(&mut cx, |f, cx| {
-            f.set_as_of(AsOf::At(chrono::Utc::now()));
-            f.open_flip([QueryKey(7)], std::time::Instant::now());
+            f.shared_mut().set_as_of(AsOf::At(chrono::Utc::now()));
+            f.shared_mut()
+                .open_flip([QueryKey(7)], std::time::Instant::now());
             cx.notify();
         });
         assert!(
@@ -5089,7 +5097,7 @@ mod tests {
         assert_eq!(shown_texts(&h.a, &vcx), old_texts);
         assert_eq!(shown_texts(&h.b, &vcx), old_texts);
 
-        let frame = h.a.read_with(&vcx, |t, _| t.frame.clone());
+        let frame = h.a.read_with(&vcx, |t, _| t.frame.entity().clone());
 
         // A scope change: this test drives the two steps directly, in
         // whichever order reaches "both queries in flight, no barrier
@@ -5103,13 +5111,14 @@ mod tests {
         // `a_pinned_tile_arrives_from_on_frame_changed_without_
         // requerying` below, which drives that real order.
         frame.update(&mut vcx, |f, cx| {
-            f.set_text(Some("A".into()));
+            f.shared_mut().set_text(Some("A".into()));
             cx.notify();
         });
         let pa1 = next_query(&h.requests);
         let pb1 = next_query(&h.requests);
         frame.update(&mut vcx, |f, _| {
-            f.open_flip([QueryKey(7), QueryKey(8)], Instant::now())
+            f.shared_mut()
+                .open_flip([QueryKey(7), QueryKey(8)], Instant::now())
         });
 
         // A's outcome arrives first: staged, not painted — the barrier
@@ -5134,13 +5143,14 @@ mod tests {
 
         // Repeat, with B failing this time.
         frame.update(&mut vcx, |f, cx| {
-            f.set_text(Some("B".into()));
+            f.shared_mut().set_text(Some("B".into()));
             cx.notify();
         });
         let pa2 = next_query(&h.requests);
         let pb2 = next_query(&h.requests);
         frame.update(&mut vcx, |f, _| {
-            f.open_flip([QueryKey(7), QueryKey(8)], Instant::now())
+            f.shared_mut()
+                .open_flip([QueryKey(7), QueryKey(8)], Instant::now())
         });
         deliver_to(&h.a, QueryKey(7), &mut vcx, pa2.tag, Ok(snapshot()));
         assert_eq!(shown_texts(&h.a, &vcx), new_texts, "still staged");
@@ -5191,10 +5201,11 @@ mod tests {
         let pa_pin = next_query(&h.requests);
         deliver_to(&h.a, QueryKey(7), &mut vcx, pa_pin.tag, Ok(snapshot()));
 
-        let frame = h.a.read_with(&vcx, |t, _| t.frame.clone());
+        let frame = h.a.read_with(&vcx, |t, _| t.frame.entity().clone());
         frame.update(&mut vcx, |f, cx| {
-            f.set_active_slot(Some(1));
-            f.open_flip([QueryKey(7), QueryKey(8)], Instant::now());
+            f.shared_mut().set_active_slot(Some(1));
+            f.shared_mut()
+                .open_flip([QueryKey(7), QueryKey(8)], Instant::now());
             cx.notify();
         });
 
@@ -5205,7 +5216,7 @@ mod tests {
             "A is pinned — it never requeries"
         );
 
-        let v = frame.read_with(&vcx, |f, _| f.versions());
+        let v = frame.read_with(&vcx, |f, _| f.shared().versions());
         assert!(
             frame.read_with(&vcx, |f, _| f.barrier_open()),
             "still waiting on B"
@@ -5244,18 +5255,19 @@ mod tests {
         deliver_to(&h.b, QueryKey(8), &mut vcx, pb0.tag, Ok(snapshot()));
         let baseline = shown_texts(&h.b, &vcx);
 
-        let frame = h.a.read_with(&vcx, |t, _| t.frame.clone());
+        let frame = h.a.read_with(&vcx, |t, _| t.frame.entity().clone());
 
         // V1: a scope change opens a barrier over both keys.
         frame.update(&mut vcx, |f, cx| {
-            f.set_text(Some("V1".into()));
+            f.shared_mut().set_text(Some("V1".into()));
             cx.notify();
         });
         let pa1 = next_query(&h.requests);
         let pb1 = next_query(&h.requests);
         let _ = pa1; // A's V1 query is left outstanding — never delivered.
         frame.update(&mut vcx, |f, _| {
-            f.open_flip([QueryKey(7), QueryKey(8)], Instant::now())
+            f.shared_mut()
+                .open_flip([QueryKey(7), QueryKey(8)], Instant::now())
         });
 
         // B's V1 outcome arrives first and stages — the barrier still
@@ -5274,14 +5286,15 @@ mod tests {
         // repeated scope edit supersedes an in-flight one — that part
         // isn't new here); `open_flip` replaces the barrier.
         frame.update(&mut vcx, |f, cx| {
-            f.set_text(Some("V2".into()));
+            f.shared_mut().set_text(Some("V2".into()));
             cx.notify();
         });
         let pa2 = next_query(&h.requests);
         let pb2 = next_query(&h.requests);
         let _ = pa2;
         frame.update(&mut vcx, |f, _| {
-            f.open_flip([QueryKey(7), QueryKey(8)], Instant::now())
+            f.shared_mut()
+                .open_flip([QueryKey(7), QueryKey(8)], Instant::now())
         });
 
         // Nothing else ever arrives for the V2 barrier — the deadline
@@ -5329,19 +5342,20 @@ mod tests {
         let qb_pin = next_query(&h2.requests);
         deliver_to(&h2.b, QueryKey(8), &mut vcx2, qb_pin.tag, Ok(snapshot()));
 
-        let frame2 = h2.a.read_with(&vcx2, |t, _| t.frame.clone());
+        let frame2 = h2.a.read_with(&vcx2, |t, _| t.frame.entity().clone());
 
         // V1: a scope change — pinned-to-grouping B still follows scope,
         // so it requeries and, once the barrier opens over it, stages.
         frame2.update(&mut vcx2, |f, cx| {
-            f.set_text(Some("V1".into()));
+            f.shared_mut().set_text(Some("V1".into()));
             cx.notify();
         });
         let qa1 = next_query(&h2.requests);
         let qb1 = next_query(&h2.requests);
         let _ = qa1; // A's V1 query is left outstanding — never delivered.
         frame2.update(&mut vcx2, |f, _| {
-            f.open_flip([QueryKey(7), QueryKey(8)], Instant::now())
+            f.shared_mut()
+                .open_flip([QueryKey(7), QueryKey(8)], Instant::now())
         });
         deliver_to(&h2.b, QueryKey(8), &mut vcx2, qb1.tag, Ok(snapshot2()));
         assert_eq!(
@@ -5360,8 +5374,8 @@ mod tests {
         // since it is the barrier's only key, releases it and bumps
         // `flip` on the very next notify pass.
         frame2.update(&mut vcx2, |f, cx| {
-            f.set_active_slot(Some(1));
-            f.open_flip([QueryKey(8)], Instant::now());
+            f.shared_mut().set_active_slot(Some(1));
+            f.shared_mut().open_flip([QueryKey(8)], Instant::now());
             cx.notify();
         });
         vcx2.run_until_parked();
@@ -5396,11 +5410,11 @@ mod tests {
         deliver_to(&h3.b, QueryKey(8), &mut vcx3, rb0.tag, Ok(snapshot()));
         let baseline3 = shown_texts(&h3.b, &vcx3);
 
-        let frame3 = h3.a.read_with(&vcx3, |t, _| t.frame.clone());
+        let frame3 = h3.a.read_with(&vcx3, |t, _| t.frame.entity().clone());
 
         // V1: a scope change opens a barrier over both keys.
         frame3.update(&mut vcx3, |f, cx| {
-            f.set_text(Some("V1".into()));
+            f.shared_mut().set_text(Some("V1".into()));
             cx.notify();
         });
         let ra1 = next_query(&h3.requests);
@@ -5408,7 +5422,8 @@ mod tests {
         let _ = ra1; // A's V1 query is left outstanding — the barrier
         // never releases on its own arrival in this scenario.
         frame3.update(&mut vcx3, |f, _| {
-            f.open_flip([QueryKey(7), QueryKey(8)], Instant::now())
+            f.shared_mut()
+                .open_flip([QueryKey(7), QueryKey(8)], Instant::now())
         });
         deliver_to(&h3.b, QueryKey(8), &mut vcx3, rb1.tag, Ok(snapshot2()));
         assert_eq!(
@@ -5468,17 +5483,18 @@ mod tests {
         deliver_to(&h.a, QueryKey(7), &mut vcx, pa0.tag, Ok(snapshot()));
         deliver_to(&h.b, QueryKey(8), &mut vcx, pb0.tag, Ok(snapshot()));
         let baseline = shown_texts(&h.b, &vcx);
-        let frame = h.a.read_with(&vcx, |t, _| t.frame.clone());
+        let frame = h.a.read_with(&vcx, |t, _| t.frame.entity().clone());
 
         // V1: a scope change over both keys; B stages, A never answers.
         frame.update(&mut vcx, |f, cx| {
-            f.set_text(Some("V1".into()));
+            f.shared_mut().set_text(Some("V1".into()));
             cx.notify();
         });
         let _pa1 = next_query(&h.requests);
         let pb1 = next_query(&h.requests);
         frame.update(&mut vcx, |f, _| {
-            f.open_flip([QueryKey(7), QueryKey(8)], Instant::now())
+            f.shared_mut()
+                .open_flip([QueryKey(7), QueryKey(8)], Instant::now())
         });
         deliver_to(&h.b, QueryKey(8), &mut vcx, pb1.tag, Ok(snapshot2()));
         assert_eq!(shown_texts(&h.b, &vcx), baseline, "V1 is staged");
@@ -5487,7 +5503,7 @@ mod tests {
         // hidden tile does not requery, so nothing clears the stage.
         h.b.update(&mut vcx, |t, cx| t.set_visible(false, cx));
         frame.update(&mut vcx, |f, cx| {
-            f.set_text(Some("V2".into()));
+            f.shared_mut().set_text(Some("V2".into()));
             cx.notify();
         });
         let _pa2 = next_query(&h.requests);
@@ -5540,7 +5556,7 @@ mod tests {
         deliver(&h, &mut vcx, p0.tag, Ok(snapshot()));
         h.tile.update(&mut vcx, |t, cx| t.set_visible(false, cx));
         h.frame.update(&mut vcx, |f, cx| {
-            f.set_text(Some("A".into()));
+            f.shared_mut().set_text(Some("A".into()));
             cx.notify();
         });
         assert!(h.requests.try_recv().is_err(), "a hidden tile asks nothing");
@@ -5602,7 +5618,7 @@ mod tests {
         );
         vcx.run_until_parked();
         assert!(
-            !frame.read_with(&vcx, |f, _| f.barrier_open()),
+            !frame.entity().read_with(&vcx, |f, _| f.barrier_open()),
             "and answers the barrier before its deadline"
         );
         let new_texts = vec!["".to_string(), "M1".into(), "M2".into()];
@@ -5639,7 +5655,7 @@ mod tests {
         let pb1 = next_query(&h.requests);
         deliver_to(&h.b, QueryKey(8), &mut vcx, pb1.tag, Ok(snapshot2()));
         assert!(
-            frame.read_with(&vcx, |f, _| f.barrier_open()),
+            frame.entity().read_with(&vcx, |f, _| f.barrier_open()),
             "B answered; A's question is still out"
         );
         frame.update(&mut vcx, |f, _| {
@@ -5648,7 +5664,7 @@ mod tests {
                 "halfway to the deadline, time alone releases nothing"
             );
         });
-        assert!(frame.read_with(&vcx, |f, _| f.barrier_open()));
+        assert!(frame.entity().read_with(&vcx, |f, _| f.barrier_open()));
 
         // The reload, as the app makes it: the factory's shared views are
         // replaced (`BlotterFactory::set_views`), then the config counter
@@ -5669,7 +5685,7 @@ mod tests {
             Some("view 'wide' is not configured")
         );
         assert!(
-            !frame.read_with(&vcx, |f, _| f.barrier_open()),
+            !frame.entity().read_with(&vcx, |f, _| f.barrier_open()),
             "the unconfigured view answered the barrier before its deadline"
         );
         let answered_current = h.a.read_with(&vcx, |t, cx| {
@@ -5706,18 +5722,19 @@ mod tests {
         deliver_to(&h.a, QueryKey(7), &mut vcx, pa0.tag, Ok(snapshot()));
         deliver_to(&h.b, QueryKey(8), &mut vcx, pb0.tag, Ok(snapshot()));
         let baseline = shown_texts(&h.b, &vcx);
-        let frame = h.a.read_with(&vcx, |t, _| t.frame.clone());
+        let frame = h.a.read_with(&vcx, |t, _| t.frame.entity().clone());
 
         // V1: a scope change opens a barrier over both keys; A's query is
         // left outstanding, so only the deadline will release it.
         frame.update(&mut vcx, |f, cx| {
-            f.set_text(Some("V1".into()));
+            f.shared_mut().set_text(Some("V1".into()));
             cx.notify();
         });
         let _pa1 = next_query(&h.requests);
         let pb1 = next_query(&h.requests);
         frame.update(&mut vcx, |f, _| {
-            f.open_flip([QueryKey(7), QueryKey(8)], Instant::now())
+            f.shared_mut()
+                .open_flip([QueryKey(7), QueryKey(8)], Instant::now())
         });
         deliver_to(&h.b, QueryKey(8), &mut vcx, pb1.tag, Ok(snapshot2()));
         assert_eq!(
@@ -5899,12 +5916,12 @@ mod tests {
         let read = |cx: &gpui::VisualTestContext| {
             h.frame.read_with(cx, |f, _| {
                 (
-                    f.versions().scope,
-                    f.versions().grouping,
-                    f.versions().as_of,
+                    f.shared().versions().scope,
+                    f.shared().versions().grouping,
+                    f.shared().versions().as_of,
                     f.slots().clone(),
-                    f.scope().clone(),
-                    f.as_of().clone(),
+                    f.shared().scope().clone(),
+                    f.shared().as_of().clone(),
                 )
             })
         };
@@ -6139,7 +6156,7 @@ mod tests {
     #[gpui::test]
     fn publication_bursts_query_only_base_and_join_consumers(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_two(cx);
-        let frame = h.a.read_with(&vcx, |t, _| t.frame.clone());
+        let frame = h.a.read_with(&vcx, |t, _| t.frame.entity().clone());
         h.a.update(&mut vcx, |t, _| {
             let mut views = t.views.borrow_mut();
             views
@@ -6237,10 +6254,11 @@ mod tests {
         let b = next_query(&h.requests);
         deliver_to(&h.a, QueryKey(7), &mut vcx, a.tag, Ok(snapshot()));
         deliver_to(&h.b, QueryKey(8), &mut vcx, b.tag, Ok(snapshot()));
-        let frame = h.a.read_with(&vcx, |t, _| t.frame.clone());
+        let frame = h.a.read_with(&vcx, |t, _| t.frame.entity().clone());
         frame.update(&mut vcx, |f, cx| {
-            f.set_text(Some("new scope".into()));
-            f.open_flip([QueryKey(7), QueryKey(8)], Instant::now());
+            f.shared_mut().set_text(Some("new scope".into()));
+            f.shared_mut()
+                .open_flip([QueryKey(7), QueryKey(8)], Instant::now());
             cx.notify();
         });
         let _a = next_query(&h.requests);
@@ -6248,7 +6266,8 @@ mod tests {
         publish_for(&frame, &mut vcx, "unrelated");
         assert!(h.requests.try_recv().is_err());
         assert!(
-            frame.read_with(&vcx, |f, _| f.barrier_wants(QueryKey(8), f.versions())),
+            frame.read_with(&vcx, |f, _| f
+                .barrier_wants(QueryKey(8), f.shared().versions())),
             "query still outstanding"
         );
         deliver_to(&h.b, QueryKey(8), &mut vcx, b.tag, Ok(snapshot2()));
@@ -6260,7 +6279,7 @@ mod tests {
             "A is still outstanding"
         );
         frame.update(&mut vcx, |f, cx| {
-            f.arrived(QueryKey(7), f.versions());
+            f.arrived(QueryKey(7), f.shared().versions());
             cx.notify();
         });
         assert_eq!(

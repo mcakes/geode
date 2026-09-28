@@ -58,6 +58,7 @@ pub(super) fn services_with_pickable() -> ShellServices {
         roster: crate::module::ModuleRoster::default(),
         restored_tiles: crate::session::TileRecords::new(),
         restored_frame: None,
+        restored_pinned: Default::default(),
         restored_palette_usage: crate::palette_usage::PaletteUsage::new(),
         log: None,
         action_tail: std::sync::Arc::new(std::sync::Mutex::new(
@@ -89,7 +90,7 @@ fn the_picker_requests_values_minus_its_own_selection_and_applies_ticks_as_one_s
     });
 
     frame.update(&mut vcx, |f, cx| {
-        f.set_scope(Scope {
+        f.shared_mut().set_scope(Scope {
             dimensions: vec![
                 DimensionSelection {
                     column: "book".into(),
@@ -160,15 +161,16 @@ fn the_picker_requests_values_minus_its_own_selection_and_applies_ticks_as_one_s
     // ticked.
     vcx.simulate_keystrokes("tab");
 
-    let v0 = frame.read_with(&vcx, |f, _| f.versions().scope);
+    let v0 = frame.read_with(&vcx, |f, _| f.shared().versions().scope);
     vcx.simulate_keystrokes("down tab enter"); // tick BK001 (BK000 re-ticked above), apply
     assert_eq!(
-        frame.read_with(&vcx, |f, _| f.versions().scope),
+        frame.read_with(&vcx, |f, _| f.shared().versions().scope),
         v0 + 1,
         "one scope change"
     );
     let books = frame.read_with(&vcx, |f, _| {
-        f.scope()
+        f.shared()
+            .scope()
             .dimensions
             .iter()
             .find(|d| d.column == "book")
@@ -203,7 +205,7 @@ fn the_picker_shows_an_unresolved_named_expression_instead_of_requesting(
     });
 
     frame.update(&mut vcx, |f, cx| {
-        f.set_scope(Scope {
+        f.shared_mut().set_scope(Scope {
             named: vec!["gone".into()],
             ..Scope::default()
         });
@@ -249,7 +251,7 @@ fn clicking_a_scope_chips_body_opens_the_picker_on_that_column(cx: &mut gpui::Te
     });
 
     frame.update(&mut vcx, |f, cx| {
-        f.set_scope(Scope {
+        f.shared_mut().set_scope(Scope {
             dimensions: vec![DimensionSelection {
                 column: "book".into(),
                 values: vec!["BK000".into()],
@@ -306,7 +308,7 @@ fn hovering_a_scope_chip_shows_the_full_selection_and_the_picker_chord(
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
 
     frame.update(&mut vcx, |f, cx| {
-        f.set_scope(Scope {
+        f.shared_mut().set_scope(Scope {
             dimensions: vec![DimensionSelection {
                 column: "book".into(),
                 values: vec!["A".into(), "B".into(), "C".into()],
@@ -420,7 +422,7 @@ fn escape_cancels_without_touching_the_scope(cx: &mut gpui::TestAppContext) {
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
 
     frame.update(&mut vcx, |f, cx| {
-        f.set_scope(Scope {
+        f.shared_mut().set_scope(Scope {
             dimensions: vec![DimensionSelection {
                 column: "book".into(),
                 values: vec!["BK000".into()],
@@ -429,7 +431,7 @@ fn escape_cancels_without_touching_the_scope(cx: &mut gpui::TestAppContext) {
         });
         cx.notify();
     });
-    let v0 = frame.read_with(&vcx, |f, _| f.versions().scope);
+    let v0 = frame.read_with(&vcx, |f, _| f.shared().versions().scope);
 
     dispatch_action(&shell, "frame::pick_book", &mut vcx);
     shell.update(&mut vcx, |s, cx| {
@@ -482,12 +484,13 @@ fn escape_cancels_without_touching_the_scope(cx: &mut gpui::TestAppContext) {
         "and a second escape closes, clearing the picker like every other dialog"
     );
     assert_eq!(
-        frame.read_with(&vcx, |f, _| f.versions().scope),
+        frame.read_with(&vcx, |f, _| f.shared().versions().scope),
         v0,
         "escape must not touch the scope"
     );
     let books = frame.read_with(&vcx, |f, _| {
-        f.scope()
+        f.shared()
+            .scope()
             .dimensions
             .iter()
             .find(|d| d.column == "book")
@@ -600,7 +603,13 @@ fn a_values_row_double_click_toggles_its_tick(cx: &mut gpui::TestAppContext) {
     vcx.simulate_keystrokes("enter");
     vcx.run_until_parked();
     assert!(
-        shell.read_with(&vcx, |s, cx| s.frame.read(cx).scope().dimensions.is_empty()),
+        shell.read_with(&vcx, |s, cx| s
+            .frame
+            .read(cx)
+            .shared()
+            .scope()
+            .dimensions
+            .is_empty()),
         "enter applied the touched, empty tick set"
     );
 }
@@ -697,7 +706,7 @@ fn arrowing_to_a_value_and_pressing_enter_commits_it_without_tab(cx: &mut gpui::
     let (window, mut vcx) = open_shell(cx, services_with_pickable());
     let shell = shell_of(&window, &mut vcx);
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
-    let v0 = frame.read_with(&vcx, |f, _| f.versions().scope);
+    let v0 = frame.read_with(&vcx, |f, _| f.shared().versions().scope);
 
     dispatch_action(&shell, "frame::pick", &mut vcx);
     vcx.run_until_parked();
@@ -748,12 +757,13 @@ fn arrowing_to_a_value_and_pressing_enter_commits_it_without_tab(cx: &mut gpui::
 
     assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
     assert_eq!(
-        frame.read_with(&vcx, |f, _| f.versions().scope),
+        frame.read_with(&vcx, |f, _| f.shared().versions().scope),
         v0 + 1,
         "the highlighted value must land as one real scope change"
     );
     let books = frame.read_with(&vcx, |f, _| {
-        f.scope()
+        f.shared()
+            .scope()
             .dimensions
             .iter()
             .find(|d| d.column == "book")
@@ -775,7 +785,7 @@ fn ctrl_x_then_enter_clears_the_columns_selection(cx: &mut gpui::TestAppContext)
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
 
     frame.update(&mut vcx, |f, cx| {
-        f.set_scope(Scope {
+        f.shared_mut().set_scope(Scope {
             dimensions: vec![DimensionSelection {
                 column: "book".into(),
                 values: vec!["BK000".into()],
@@ -804,6 +814,7 @@ fn ctrl_x_then_enter_clears_the_columns_selection(cx: &mut gpui::TestAppContext)
 
     assert!(
         frame.read_with(&vcx, |f, _| f
+            .shared()
             .scope()
             .dimensions
             .iter()

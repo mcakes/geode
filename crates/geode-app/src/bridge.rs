@@ -695,7 +695,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
             };
             let tag = refresh.tag.get() + 1;
             refresh.tag.set(tag);
-            let as_of = shell.read(cx).frame().read(cx).as_of().clone();
+            let as_of = shell.read(cx).active_frame().read(cx).as_of().clone();
             match handle.catalog(CatalogParams {
                 key: DIAGNOSTICS_KEY,
                 tag,
@@ -845,12 +845,12 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
         let diagnostics = diagnostics.clone();
         let shell = shell.clone();
         let frame = shell.read(cx).frame().clone();
-        let last = Rc::new(Cell::new(frame.read(cx).versions().config));
+        let last = Rc::new(Cell::new(frame.read(cx).config_version()));
         // Seeded with the key the factory was built from; `None` (a factory
         // built from an unknown config) lets the first reload through.
         let last_key = Rc::new(std::cell::RefCell::new(bridge.pricer_key.clone()));
         cx.observe(&frame, move |frame, cx| {
-            let now = frame.read(cx).versions().config;
+            let now = frame.read(cx).config_version();
             if now == last.get() {
                 return;
             }
@@ -1049,7 +1049,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                         catalog_refresh.in_flight.set(None);
                         match outcome.snapshot {
                             Ok(snapshot) => {
-                                let current_as_of = shell.read(cx).frame().read(cx).as_of().clone();
+                                let current_as_of = shell.read(cx).active_frame().read(cx).as_of().clone();
                                 diagnostics.update(cx, |d, cx| {
                                     let before = d.version();
                                     // A publication while reading schedules another read, but
@@ -1422,6 +1422,7 @@ role = "key"
             roster: ModuleRoster::default(),
             restored_tiles: TileRecords::new(),
             restored_frame: None,
+            restored_pinned: Default::default(),
             restored_palette_usage: geode_shell::palette_usage::PaletteUsage::new(),
             log: None,
             action_tail: std::sync::Arc::new(std::sync::Mutex::new(
@@ -1462,6 +1463,7 @@ role = "key"
             roster,
             restored_tiles: TileRecords::new(),
             restored_frame: None,
+            restored_pinned: Default::default(),
             restored_palette_usage: geode_shell::palette_usage::PaletteUsage::new(),
             log: None,
             action_tail: std::sync::Arc::new(std::sync::Mutex::new(
@@ -2137,6 +2139,7 @@ role = "key"
             &Workspaces::new(),
             &TileRecords::new(),
             None,
+            &geode_shell::session::PinnedRecords::new(),
             &geode_shell::palette_usage::PaletteUsage::new(),
         );
         let ws1: toml::Table = r#"
@@ -2192,7 +2195,170 @@ role = "key"
         );
     }
 
-    /// "Add lines…" committed from the shell palette while the bar is open
+    /// The sheet picker's filter and the rename field, both opened by the
+    /// pointer on the header's sheet name, are insert focus for the shell
+    /// too: a shifted letter typed after the click is text, never a shell
+    /// binding (`shift+d` is `workspace::duplicate_horizontal`). The keys
+    /// are typed AFTER the click, the way a mouse-opened field is used.
+    #[gpui::test]
+    fn typing_into_the_pricer_sheet_picker_and_rename_field_fires_no_shell_binding(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use geode_shell::diagnostics::fnv1a;
+        let (handle, _rx) = DataHandle::for_tests();
+        let services = test_shell_services();
+        let tail = services.action_tail.clone();
+        let (services, tiles) = with_a_pricer_tile_on(services, test_pricer(&handle), "a");
+        let window = open_pricer_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        let draw = |vcx: &mut gpui::VisualTestContext| {
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            })
+        };
+        draw(&mut vcx);
+        let tile = tiles.borrow()[0].clone();
+        let dispatched = |id: &str| {
+            let h = fnv1a(id);
+            tail.lock().unwrap().recent().any(|x| x == h)
+        };
+        let field =
+            |vcx: &mut gpui::VisualTestContext| tile.read_with(vcx, |t, cx| t.sheet_field_text(cx));
+        let name = vcx
+            .debug_bounds("pricer-sheet-name")
+            .expect("the sheet name is painted")
+            .center();
+        let press = |vcx: &mut gpui::VisualTestContext, click_count: usize| {
+            vcx.simulate_event(gpui::MouseDownEvent {
+                position: name,
+                modifiers: gpui::Modifiers::default(),
+                button: gpui::MouseButton::Left,
+                click_count,
+                first_mouse: false,
+            });
+            vcx.simulate_event(gpui::MouseUpEvent {
+                position: name,
+                modifiers: gpui::Modifiers::default(),
+                button: gpui::MouseButton::Left,
+                click_count,
+            });
+            vcx.run_until_parked();
+            draw(vcx);
+        };
+
+        press(&mut vcx, 1);
+        assert_eq!(
+            field(&mut vcx).as_deref(),
+            Some(""),
+            "fixture: the picker opened"
+        );
+        vcx.simulate_keystrokes("shift-d");
+        vcx.simulate_input("ec");
+        vcx.run_until_parked();
+        assert!(
+            !dispatched("workspace::duplicate_horizontal"),
+            "a capital typed into the sheet picker ran a shell binding"
+        );
+        assert_eq!(
+            field(&mut vcx).as_deref(),
+            Some("Dec"),
+            "the picker took the text"
+        );
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+        draw(&mut vcx);
+        assert!(dispatched("pricer::cancel"), "escape reached the pricer");
+        assert_eq!(field(&mut vcx), None, "fixture: escape closed the picker");
+
+        press(&mut vcx, 1);
+        press(&mut vcx, 2);
+        assert_eq!(
+            field(&mut vcx).as_deref(),
+            Some("a"),
+            "fixture: the rename field opened"
+        );
+        vcx.simulate_keystrokes("shift-d");
+        vcx.simulate_input("ay");
+        vcx.run_until_parked();
+        assert!(
+            !dispatched("workspace::duplicate_horizontal"),
+            "a capital typed into the rename field ran a shell binding"
+        );
+        assert_eq!(
+            field(&mut vcx).as_deref(),
+            Some("Day"),
+            "the rename field took the text over its selected name"
+        );
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        assert!(dispatched("pricer::commit"), "enter reached the pricer");
+        assert_eq!(field(&mut vcx), None, "enter renamed and closed the field");
+        assert_eq!(
+            tile.read_with(&vcx, |t, _| t.title().to_string()),
+            "Pricer · Day"
+        );
+    }
+
+    /// A mod+double-click on the pricer's sheet name is the shell's
+    /// fullscreen gesture and nothing else: no picker, no rename field.
+    #[gpui::test]
+    fn a_mod_double_click_on_the_pricer_sheet_name_fullscreens_and_opens_no_field(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use geode_shell::diagnostics::fnv1a;
+        let (handle, _rx) = DataHandle::for_tests();
+        let services = test_shell_services();
+        let tail = services.action_tail.clone();
+        let alias = services.mod_alias;
+        let modifiers = gpui::Modifiers {
+            control: alias.ctrl,
+            alt: alias.alt,
+            platform: alias.cmd,
+            ..Default::default()
+        };
+        let (services, tiles) = with_a_pricer_tile_on(services, test_pricer(&handle), "a");
+        let window = open_pricer_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let tile = tiles.borrow()[0].clone();
+        let name = vcx
+            .debug_bounds("pricer-sheet-name")
+            .expect("the sheet name is painted")
+            .center();
+        for click_count in [1, 2] {
+            vcx.simulate_event(gpui::MouseDownEvent {
+                position: name,
+                modifiers,
+                button: gpui::MouseButton::Left,
+                click_count,
+                first_mouse: false,
+            });
+            vcx.simulate_event(gpui::MouseUpEvent {
+                position: name,
+                modifiers,
+                button: gpui::MouseButton::Left,
+                click_count,
+            });
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+        let h = fnv1a("workspace::fullscreen_tile");
+        assert!(
+            tail.lock().unwrap().recent().any(|x| x == h),
+            "the shell's mod+double-click fullscreened the tile"
+        );
+        assert_eq!(
+            tile.read_with(&vcx, |t, cx| t.sheet_field_text(cx)),
+            None,
+            "the pricer opened no picker or rename field"
+        );
+    }
+
+    /// "Add lines below…" committed from the shell palette while the bar is open
     /// leaves the bar, its text, and focus in its field. The palette's
     /// commit returns focus to the shell root before it dispatches, so an
     /// open bar that kept only its text would read `mode == insert`
@@ -2224,7 +2390,7 @@ role = "key"
             let _ = window.draw(cx);
         });
         assert_eq!(count("palette::toggle"), 1, "fixture: the palette opened");
-        vcx.simulate_input("Add lines");
+        vcx.simulate_input("Add lines below");
         vcx.simulate_keystrokes("enter");
         vcx.run_until_parked();
         vcx.update(|window, cx| {
@@ -2545,7 +2711,7 @@ role = "key"
             &self,
             tile: TileId,
             restored: Option<&toml::Table>,
-            frame: Entity<geode_shell::frame::Frame>,
+            frame: geode_shell::frame::FrameRef,
             diagnostics: Entity<Diagnostics>,
             window: &mut gpui::Window,
             cx: &mut App,
@@ -2588,6 +2754,7 @@ role = "key"
             &Workspaces::new(),
             &TileRecords::new(),
             None,
+            &geode_shell::session::PinnedRecords::new(),
             &geode_shell::palette_usage::PaletteUsage::new(),
         );
         let ws1: toml::Table = format!(
@@ -2641,7 +2808,7 @@ role = "key"
             &self,
             tile: TileId,
             restored: Option<&toml::Table>,
-            frame: Entity<geode_shell::frame::Frame>,
+            frame: geode_shell::frame::FrameRef,
             diagnostics: Entity<Diagnostics>,
             window: &mut gpui::Window,
             cx: &mut App,
@@ -2706,6 +2873,7 @@ role = "key"
             &Workspaces::new(),
             &TileRecords::new(),
             None,
+            &geode_shell::session::PinnedRecords::new(),
             &geode_shell::palette_usage::PaletteUsage::new(),
         );
         let ws1: toml::Table = r#"
@@ -3435,7 +3603,7 @@ role = "key"
         });
         let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
         let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
-        let before = frame.read_with(&vcx, |f, _| f.versions().data);
+        let before = frame.read_with(&vcx, |f, _| f.data_version());
 
         tx.try_send(DataEvent::Published {
             dataset: "pricer_sheets".into(),
@@ -3446,7 +3614,7 @@ role = "key"
         .unwrap();
         vcx.run_until_parked();
         assert_eq!(
-            frame.read_with(&vcx, |f, _| f.versions().data),
+            frame.read_with(&vcx, |f, _| f.data_version()),
             before,
             "a local publish is not a data change"
         );
@@ -3464,7 +3632,7 @@ role = "key"
         })
         .unwrap();
         vcx.run_until_parked();
-        assert_eq!(frame.read_with(&vcx, |f, _| f.versions().data), before + 1);
+        assert_eq!(frame.read_with(&vcx, |f, _| f.data_version()), before + 1);
     }
 
     /// A pricing outcome must reach the recording occupant, not merely survive
@@ -3646,6 +3814,7 @@ role = "key"
             &Workspaces::new(),
             &TileRecords::new(),
             None,
+            &geode_shell::session::PinnedRecords::new(),
             &geode_shell::palette_usage::PaletteUsage::new(),
         );
         let ws1: toml::Table = r#"
@@ -4412,7 +4581,10 @@ role = "key"
             diagnostics_factory.create(
                 TileId(999),
                 None,
-                frame.clone(),
+                geode_shell::frame::FrameRef::new(
+                    frame.clone(),
+                    geode_shell::tiling::WorkspaceIx::FIRST,
+                ),
                 diagnostics.clone(),
                 window,
                 cx,
@@ -4432,7 +4604,8 @@ role = "key"
         let at = chrono::Utc::now();
         for offset in (0..8).rev() {
             frame.update(&mut vcx, |f, cx| {
-                f.set_as_of(AsOf::At(at - chrono::Duration::days(offset)));
+                f.shared_mut()
+                    .set_as_of(AsOf::At(at - chrono::Duration::days(offset)));
                 cx.notify();
             });
             vcx.run_until_parked();
@@ -4484,7 +4657,7 @@ role = "key"
         // Recovery from a stale in-flight result must not mask that contract.
         let later = at + chrono::Duration::days(1);
         frame.update(&mut vcx, |f, cx| {
-            f.set_as_of(AsOf::At(later));
+            f.shared_mut().set_as_of(AsOf::At(later));
             cx.notify();
         });
         vcx.run_until_parked();
@@ -5443,7 +5616,7 @@ role = "key"
         let first = next_catalog(&f);
         let at = chrono::Utc::now();
         frame.update(&mut vcx, |frame, cx| {
-            frame.set_as_of(AsOf::At(at));
+            frame.shared_mut().set_as_of(AsOf::At(at));
             cx.notify();
         });
         vcx.run_until_parked();
@@ -5567,6 +5740,7 @@ role = "key"
             &Workspaces::new(),
             &TileRecords::new(),
             None,
+            &geode_shell::session::PinnedRecords::new(),
             &geode_shell::palette_usage::PaletteUsage::new(),
         );
         let ws1: toml::Table = format!(

@@ -35,6 +35,7 @@ use super::scale;
 use crate::dialogmode::{self, DialogMode, FocusTarget};
 use crate::footer::{self, Hint};
 use crate::keymap::{Keystroke, Modifiers};
+use crate::tiling::WorkspaceIx;
 
 /// Content builder called from [`ShellView::render`] with its existing shell borrow.
 /// See [`ShellModal::build`] for the entity-access constraint.
@@ -227,6 +228,7 @@ pub(crate) fn opens_dialog(action: &crate::actions::ActionId) -> bool {
             | "frame::scope_expression"
             | "frame::add_expression"
             | "frame::grouping"
+            | "frame::scope"
             | "tile::add"
             | "tile::open_with"
             | "log::level"
@@ -269,6 +271,9 @@ pub struct ShellModal {
     pub back: Option<ModalBack>,
     /// Set while another entry covers this one; restored by [`refocus_top`].
     pub saved_input: Option<SavedInput>,
+    /// The workspace active when this entry was pushed. The stack's base
+    /// entry decides which lane every frame dialog reads and commits to.
+    pub workspace: WorkspaceIx,
     /// Set while an object dialog of another domain covers this `Object` entry;
     /// restored by [`unpark_object_dialog`].
     pub parked_object: Option<ParkedObject>,
@@ -474,6 +479,7 @@ pub fn open_shell_dialog_with_key<F>(
         on_key,
         back: None,
         saved_input: None,
+        workspace: view.services.workspaces.active_ix(),
         parked_object: None,
     });
 

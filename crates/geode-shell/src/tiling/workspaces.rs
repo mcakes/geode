@@ -754,6 +754,24 @@ impl Workspace {
     }
 }
 
+/// A workspace's index, 1–9. Frame lanes and tile frame handles key on it;
+/// the tiling layer keeps its own `u8` internally and hands this out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct WorkspaceIx(u8);
+
+impl WorkspaceIx {
+    pub const FIRST: WorkspaceIx = WorkspaceIx(1);
+
+    /// `None` outside 1–9.
+    pub fn new(n: u8) -> Option<WorkspaceIx> {
+        (1..=9).contains(&n).then_some(WorkspaceIx(n))
+    }
+
+    pub fn get(self) -> u8 {
+        self.0
+    }
+}
+
 /// Workspace collection with indices 1–9 and a shared tile-ID allocator.
 /// Switching materializes an absent workspace; empty workspaces remain stored.
 /// Each shell owns its collection through `ShellServices`.
@@ -789,6 +807,18 @@ impl Workspaces {
 
     pub fn active_index(&self) -> u8 {
         self.active
+    }
+
+    pub fn active_ix(&self) -> WorkspaceIx {
+        WorkspaceIx(self.active)
+    }
+
+    /// The workspace whose main or dock trees hold `id`. A tile never
+    /// moves between workspaces, so the answer is fixed for its life.
+    pub fn workspace_of(&self, id: TileId) -> Option<WorkspaceIx> {
+        self.spaces()
+            .find(|(_, w)| w.region_of(id).is_some())
+            .map(|(ix, _)| WorkspaceIx(ix))
     }
 
     /// See the field doc: the ABA-proof "which workspace era is this"
@@ -1118,6 +1148,18 @@ mod tests {
             "away-and-back is two bumps — the ABA the epoch exists to expose"
         );
         assert_eq!(ws.active_index(), 1);
+    }
+
+    #[test]
+    fn workspace_of_names_the_workspace_holding_the_tile() {
+        let mut ws = Workspaces::new();
+        let a = ws.split_active(Orientation::Horizontal);
+        ws.switch(2);
+        let b = ws.split_active(Orientation::Horizontal);
+        assert_eq!(ws.workspace_of(a), WorkspaceIx::new(1));
+        assert_eq!(ws.workspace_of(b), WorkspaceIx::new(2));
+        assert_eq!(ws.workspace_of(TileId(999)), None);
+        assert_eq!(ws.active_ix(), WorkspaceIx::new(2).unwrap());
     }
 
     #[test]

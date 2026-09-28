@@ -94,6 +94,7 @@ context = "workspace"
 "mod+x" = "frame::add_expression"
 "mod+t" = "frame::as_of"
 "mod+g" = "frame::grouping"
+"mod+o" = "frame::scope"
 "mod+n" = "tile::add"
 
 [[bindings]]
@@ -422,6 +423,15 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     action(reg, "frame::scope_undo", "Undo scope change", "Frame");
     action(reg, "frame::scope_redo", "Redo scope change", "Frame");
     action(reg, "frame::scope_clear", "Clear scope", "Frame");
+    // Give the active workspace its own scope, grouping, and as-of, or
+    // return it to the shared frame (discarding its own). Toolbar glyph
+    // and palette; no default chord.
+    action(
+        reg,
+        "frame::pin_workspace",
+        "Toggle the frame pin for this workspace",
+        "Frame",
+    );
     // Save the current frame scope through the Scopes dialog naming prompt.
     // Dispatch this id before matching the generic `scope::` prefix; otherwise
     // `save_current` would be interpreted as a scope name. That name is reserved
@@ -437,6 +447,9 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     action(reg, "frame::pick", "Pick a dimension…", "Frame");
     // The grouping picker lists filled slots and the view default with typeahead.
     action(reg, "frame::grouping", "Pick a grouping…", "Frame");
+    // The scope picker lists the frame's live saved scopes with typeahead;
+    // a pick loads one undoably, like the `scope::<name>` actions.
+    action(reg, "frame::scope", "Pick a scope…", "Frame");
     // Focus the scope text field; its Input handles typing once focused.
     action(
         reg,

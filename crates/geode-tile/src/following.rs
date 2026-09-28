@@ -17,12 +17,14 @@
 use std::time::Instant;
 
 use geode_core::query::QueryKey;
-use geode_shell::frame::{Frame, FrameVersions};
-use gpui::{App, Entity};
+use geode_shell::frame::{FrameRef, FrameVersions, FrameViewMut};
+use gpui::App;
 
-/// The flip barrier as a following query sees it. [`Frame`] implements it
-/// directly, for pure tests; [`FrameDoor`] implements it over the shared
-/// frame entity.
+/// The flip barrier as a following query sees it. [`FrameViewMut`]
+/// implements it directly, for pure tests; [`FrameDoor`] implements it over
+/// the frame entity through a tile's [`FrameRef`]. Both read the versions of
+/// one workspace's lane, so a tile in a pinned workspace answers with its own
+/// lane's counters, never the shared lane's.
 pub trait Barrier {
     /// The frame's counters now. An open barrier always carries the current
     /// flip identity (`Frame::open_flip` captures it and a later change
@@ -35,7 +37,7 @@ pub trait Barrier {
     fn arrive(&mut self, key: QueryKey, versions: FrameVersions) -> bool;
 }
 
-impl Barrier for Frame {
+impl Barrier for FrameViewMut<'_> {
     fn current(&self) -> FrameVersions {
         self.versions()
     }
@@ -47,18 +49,19 @@ impl Barrier for Frame {
     }
 }
 
-/// The shared frame entity as a [`Barrier`]. An arrival that releases the
+/// A tile's frame handle as a [`Barrier`]: versions are read from the
+/// tile's own lane through [`FrameRef::read`]. An arrival that releases the
 /// barrier notifies the frame, so every other tile's observer sees the
 /// `flip` bump and promotes what it staged in the same pass; without the
 /// notification they would sit on their stages until an unrelated frame
 /// change.
 pub struct FrameDoor<'a> {
-    frame: &'a Entity<Frame>,
+    frame: &'a FrameRef,
     cx: &'a mut App,
 }
 
 impl<'a> FrameDoor<'a> {
-    pub fn new(frame: &'a Entity<Frame>, cx: &'a mut App) -> FrameDoor<'a> {
+    pub fn new(frame: &'a FrameRef, cx: &'a mut App) -> FrameDoor<'a> {
         FrameDoor { frame, cx }
     }
 }
@@ -72,6 +75,7 @@ impl Barrier for FrameDoor<'_> {
     }
     fn arrive(&mut self, key: QueryKey, versions: FrameVersions) -> bool {
         self.frame.update(self.cx, |frame, cx| {
+            // The barrier is frame-wide; only the versions are per lane.
             let released = frame.arrived(key, versions);
             if released {
                 cx.notify();
@@ -394,7 +398,8 @@ mod tests {
     use super::*;
     use geode_core::groupings::GroupingSlots;
     use geode_core::scopes::SavedScopes;
-    use geode_shell::frame::FLIP_DEADLINE;
+    use geode_shell::frame::{FLIP_DEADLINE, Frame};
+    use geode_shell::tiling::WorkspaceIx;
     use gpui::AppContext as _;
     use std::cell::Cell;
     use std::rc::Rc;
@@ -408,7 +413,12 @@ mod tests {
 
     /// A scope change and the barrier the shell opens for it over `keys`,
     /// opened at `at`; the versions it carries.
-    fn flip_scope(f: &mut Frame, text: &str, keys: &[QueryKey], at: Instant) -> FrameVersions {
+    fn flip_scope(
+        f: &mut FrameViewMut<'_>,
+        text: &str,
+        keys: &[QueryKey],
+        at: Instant,
+    ) -> FrameVersions {
         assert!(f.set_text(Some(text.into())), "a real scope change");
         f.open_flip(keys.iter().copied(), at);
         f.versions()
@@ -421,7 +431,9 @@ mod tests {
 
     #[test]
     fn a_stale_tag_is_not_an_arrival() {
-        let mut f = fresh_frame();
+        let mut frame = fresh_frame();
+        // Pure tests run in the shared lane: an unpinned workspace's.
+        let mut f = frame.shared_mut();
         let t0 = Instant::now();
         let v = flip_scope(&mut f, "a", &[K, OTHER], t0);
         let mut q = FollowingQuery::<u32>::new();
@@ -440,7 +452,9 @@ mod tests {
 
     #[test]
     fn a_failed_outcome_still_arrives() {
-        let mut f = fresh_frame();
+        let mut frame = fresh_frame();
+        // Pure tests run in the shared lane: an unpinned workspace's.
+        let mut f = frame.shared_mut();
         let t0 = Instant::now();
         let v = flip_scope(&mut f, "a", &[K], t0);
         let mut q = FollowingQuery::<u32>::new();
@@ -458,7 +472,9 @@ mod tests {
 
     #[test]
     fn a_refusal_arrives_under_what_it_asked_then_forgets_it() {
-        let mut f = fresh_frame();
+        let mut frame = fresh_frame();
+        // Pure tests run in the shared lane: an unpinned workspace's.
+        let mut f = frame.shared_mut();
         let t0 = Instant::now();
         let v = flip_scope(&mut f, "a", &[K, OTHER], t0);
         let mut q = FollowingQuery::<u32>::new();
@@ -475,7 +491,9 @@ mod tests {
 
     #[test]
     fn keep_acted_arrives_and_remembers_what_it_answered() {
-        let mut f = fresh_frame();
+        let mut frame = fresh_frame();
+        // Pure tests run in the shared lane: an unpinned workspace's.
+        let mut f = frame.shared_mut();
         let t0 = Instant::now();
         let v = flip_scope(&mut f, "a", &[K, OTHER], t0);
         let mut q = FollowingQuery::<u32>::new();
@@ -492,7 +510,9 @@ mod tests {
 
     #[test]
     fn a_submission_that_went_out_changes_nothing() {
-        let mut f = fresh_frame();
+        let mut frame = fresh_frame();
+        // Pure tests run in the shared lane: an unpinned workspace's.
+        let mut f = frame.shared_mut();
         let t0 = Instant::now();
         let v = flip_scope(&mut f, "a", &[K], t0);
         let mut q = FollowingQuery::<u32>::new();
@@ -507,7 +527,9 @@ mod tests {
     /// reads as staged, the query as answered, until the promotion.
     #[test]
     fn a_held_result_promotes_on_the_flip_and_only_once() {
-        let mut f = fresh_frame();
+        let mut frame = fresh_frame();
+        // Pure tests run in the shared lane: an unpinned workspace's.
+        let mut f = frame.shared_mut();
         let t0 = Instant::now();
         let v = flip_scope(&mut f, "a", &[K, OTHER], t0);
         let mut q = FollowingQuery::<u32>::new();
@@ -531,7 +553,9 @@ mod tests {
 
     #[test]
     fn a_delivery_that_releases_the_barrier_promotes_at_once() {
-        let mut f = fresh_frame();
+        let mut frame = fresh_frame();
+        // Pure tests run in the shared lane: an unpinned workspace's.
+        let mut f = frame.shared_mut();
         let t0 = Instant::now();
         let v = flip_scope(&mut f, "a", &[K], t0);
         let mut q = FollowingQuery::<u32>::new();
@@ -546,7 +570,9 @@ mod tests {
 
     #[test]
     fn a_delivery_with_no_barrier_applies() {
-        let mut f = fresh_frame();
+        let mut frame = fresh_frame();
+        // Pure tests run in the shared lane: an unpinned workspace's.
+        let mut f = frame.shared_mut();
         let v = f.versions();
         let mut q = FollowingQuery::<u32>::new();
         let tag = q.begin(v, Instant::now());
@@ -561,7 +587,9 @@ mod tests {
     /// and is no arrival; a change the tile does not follow applies.
     #[test]
     fn a_delivery_asked_before_a_followed_change_is_superseded() {
-        let mut f = fresh_frame();
+        let mut frame = fresh_frame();
+        // Pure tests run in the shared lane: an unpinned workspace's.
+        let mut f = frame.shared_mut();
         let asked = f.versions();
         let mut q = FollowingQuery::<u32>::new();
         let tag = q.begin(asked, Instant::now());
@@ -589,7 +617,9 @@ mod tests {
     /// is dropped: it answers the barrier but applies nothing.
     #[test]
     fn a_releasing_delivery_asked_before_a_followed_change_is_superseded() {
-        let mut f = fresh_frame();
+        let mut frame = fresh_frame();
+        // Pure tests run in the shared lane: an unpinned workspace's.
+        let mut f = frame.shared_mut();
         let t0 = Instant::now();
         let v = flip_scope(&mut f, "a", &[K], t0);
         let mut q = FollowingQuery::<u32>::new();
@@ -610,7 +640,9 @@ mod tests {
 
     #[test]
     fn a_stage_survives_a_barrier_replaced_by_a_change_it_does_not_follow() {
-        let mut f = fresh_frame();
+        let mut frame = fresh_frame();
+        // Pure tests run in the shared lane: an unpinned workspace's.
+        let mut f = frame.shared_mut();
         let t0 = Instant::now();
         let v1 = flip_scope(&mut f, "a", &[K, OTHER], t0);
         let mut q = FollowingQuery::<u32>::new();
@@ -631,7 +663,9 @@ mod tests {
 
     #[test]
     fn a_stage_is_dropped_once_a_counter_it_follows_moved() {
-        let mut f = fresh_frame();
+        let mut frame = fresh_frame();
+        // Pure tests run in the shared lane: an unpinned workspace's.
+        let mut f = frame.shared_mut();
         let t0 = Instant::now();
         let v = flip_scope(&mut f, "a", &[K, OTHER], t0);
         let mut q = FollowingQuery::<u32>::new();
@@ -650,7 +684,9 @@ mod tests {
 
     #[test]
     fn self_arrive_waits_for_a_same_identity_query_in_flight() {
-        let mut f = fresh_frame();
+        let mut frame = fresh_frame();
+        // Pure tests run in the shared lane: an unpinned workspace's.
+        let mut f = frame.shared_mut();
         let t0 = Instant::now();
         let mut older = FollowingQuery::<u32>::new();
         older.begin(f.versions(), t0);
@@ -677,7 +713,9 @@ mod tests {
 
     #[test]
     fn follows_changed_is_true_before_the_first_question() {
-        let mut f = fresh_frame();
+        let mut frame = fresh_frame();
+        // Pure tests run in the shared lane: an unpinned workspace's.
+        let mut f = frame.shared_mut();
         let mut q = FollowingQuery::<u32>::new();
         assert!(q.follows_changed(f.versions(), follows_config));
         q.begin(f.versions(), Instant::now());
@@ -688,7 +726,9 @@ mod tests {
 
     #[test]
     fn reset_forgets_the_question_and_its_stage() {
-        let mut f = fresh_frame();
+        let mut frame = fresh_frame();
+        // Pure tests run in the shared lane: an unpinned workspace's.
+        let mut f = frame.shared_mut();
         let t0 = Instant::now();
         let v = flip_scope(&mut f, "a", &[K, OTHER], t0);
         let mut q = FollowingQuery::<u32>::new();
@@ -708,7 +748,9 @@ mod tests {
 
     #[test]
     fn close_supersedes_the_question_and_answers_the_barrier() {
-        let mut f = fresh_frame();
+        let mut frame = fresh_frame();
+        // Pure tests run in the shared lane: an unpinned workspace's.
+        let mut f = frame.shared_mut();
         let t0 = Instant::now();
         let v = flip_scope(&mut f, "a", &[K, OTHER], t0);
         let mut q = FollowingQuery::<u32>::new();
@@ -732,7 +774,9 @@ mod tests {
 
     #[test]
     fn close_releases_a_barrier_it_was_the_last_wait_of() {
-        let mut f = fresh_frame();
+        let mut frame = fresh_frame();
+        // Pure tests run in the shared lane: an unpinned workspace's.
+        let mut f = frame.shared_mut();
         let t0 = Instant::now();
         let v = flip_scope(&mut f, "a", &[K], t0);
         let mut q = FollowingQuery::<u32>::new();
@@ -743,7 +787,9 @@ mod tests {
 
     #[test]
     fn close_with_nothing_open_changes_nothing() {
-        let mut f = fresh_frame();
+        let mut frame = fresh_frame();
+        // Pure tests run in the shared lane: an unpinned workspace's.
+        let mut f = frame.shared_mut();
         let before = f.versions();
         let mut q = FollowingQuery::<u32>::new();
         assert!(!q.close(&mut f, K));
@@ -752,7 +798,9 @@ mod tests {
 
     #[test]
     fn arrive_immediately_answers_only_a_barrier_that_wants_the_key() {
-        let mut f = fresh_frame();
+        let mut frame = fresh_frame();
+        // Pure tests run in the shared lane: an unpinned workspace's.
+        let mut f = frame.shared_mut();
         assert!(!arrive_immediately(&mut f, K), "nothing open");
         let v = flip_scope(&mut f, "a", &[K, OTHER], Instant::now());
         assert!(!arrive_immediately(&mut f, K));
@@ -768,9 +816,12 @@ mod tests {
         let seen = heard.clone();
         let _watch = cx.update(|cx| cx.observe(&frame, move |_, _| seen.set(seen.get() + 1)));
         let t0 = Instant::now();
-        let v = frame.update(cx, |f, _| flip_scope(f, "a", &[K, OTHER], t0));
+        let v = frame.update(cx, |f, _| {
+            flip_scope(&mut f.shared_mut(), "a", &[K, OTHER], t0)
+        });
+        let tile = FrameRef::new(frame.clone(), WorkspaceIx::FIRST);
         cx.update(|cx| {
-            let mut door = FrameDoor::new(&frame, cx);
+            let mut door = FrameDoor::new(&tile, cx);
             assert!(!door.arrive(K, v), "the other tile still holds it");
         });
         cx.run_until_parked();
@@ -780,7 +831,7 @@ mod tests {
             "an arrival that releases nothing is not news"
         );
         cx.update(|cx| {
-            let mut door = FrameDoor::new(&frame, cx);
+            let mut door = FrameDoor::new(&tile, cx);
             assert!(door.wants(OTHER, v));
             assert!(door.arrive(OTHER, v));
         });
@@ -790,5 +841,29 @@ mod tests {
             1,
             "a release notifies, so every staged tile promotes in the same pass"
         );
+    }
+
+    /// A tile in a pinned workspace answers the barrier with its own lane's
+    /// counters: reading the shared lane would hand a pinned tile versions
+    /// it never followed, and it would stage or promote against the wrong
+    /// scope.
+    #[gpui::test]
+    fn the_door_reads_the_tiles_own_lane(cx: &mut gpui::TestAppContext) {
+        let frame = cx.update(|cx| cx.new(|_| fresh_frame()));
+        let ws = WorkspaceIx::new(2).unwrap();
+        let (pinned, shared) = frame.update(cx, |f, _| {
+            assert!(f.pin(ws));
+            assert!(
+                f.view_mut(ws).set_text(Some("a".into())),
+                "a pinned-lane edit"
+            );
+            (f.view(ws).versions(), f.shared().versions())
+        });
+        assert_ne!(pinned, shared, "the edit moved only the pinned lane");
+        let tile = FrameRef::new(frame.clone(), ws);
+        cx.update(|cx| {
+            let door = FrameDoor::new(&tile, cx);
+            assert_eq!(door.current(), pinned);
+        });
     }
 }

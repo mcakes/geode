@@ -10,7 +10,7 @@
 
 use crate::actions::{ActionId, ActionRegistry};
 use crate::diagnostics::Diagnostics;
-use crate::frame::Frame;
+use crate::frame::FrameRef;
 use crate::keymap::KeyContext;
 use crate::keymap::fragments;
 use crate::shell::control::{self, PointerStates as _};
@@ -356,7 +356,7 @@ pub trait ModuleFactory {
         &self,
         tile: TileId,
         restored: Option<&toml::Table>,
-        frame: Entity<Frame>,
+        frame: FrameRef,
         diagnostics: Entity<Diagnostics>,
         window: &mut Window,
         cx: &mut App,
@@ -394,7 +394,7 @@ impl<F: ModuleFactory + ?Sized> ModuleFactory for Rc<F> {
         &self,
         tile: TileId,
         restored: Option<&toml::Table>,
-        frame: Entity<Frame>,
+        frame: FrameRef,
         diagnostics: Entity<Diagnostics>,
         window: &mut Window,
         cx: &mut App,
@@ -569,7 +569,7 @@ pub mod placeholder {
             &self,
             tile: TileId,
             _: Option<&toml::Table>,
-            _: Entity<Frame>,
+            _: FrameRef,
             _: Entity<Diagnostics>,
             _: &mut Window,
             cx: &mut App,
@@ -598,6 +598,8 @@ pub mod recording {
     #[derive(Debug, Clone, PartialEq)]
     pub enum Recorded {
         Created(TileId, Option<toml::Table>),
+        /// The workspace of the frame handle `create` received.
+        Framed(TileId, crate::tiling::WorkspaceIx),
         Dispatch(TileId, ActionId, Option<u32>),
         Command(TileId, String),
         Find(TileId, FindEvent),
@@ -1012,7 +1014,7 @@ pub mod recording {
             &self,
             tile: TileId,
             restored: Option<&toml::Table>,
-            _: Entity<Frame>,
+            frame: FrameRef,
             _: Entity<Diagnostics>,
             _: &mut Window,
             cx: &mut App,
@@ -1020,6 +1022,9 @@ pub mod recording {
             self.log
                 .borrow_mut()
                 .push(Recorded::Created(tile, restored.cloned()));
+            self.log
+                .borrow_mut()
+                .push(Recorded::Framed(tile, frame.workspace()));
             let focus = cx.focus_handle();
             *self.last_focus.borrow_mut() = Some(focus.clone());
             let view = cx.new(|_| RecordingView {

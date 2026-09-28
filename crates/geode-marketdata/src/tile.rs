@@ -47,7 +47,7 @@ use geode_shell::colfit::{
     FitMetrics, FittedWidths, NOTHING_TO_FIT, SESSION_KEY, widths_from_record, widths_to_toml,
 };
 use geode_shell::diagnostics::Diagnostics;
-use geode_shell::frame::{Frame, FrameVersions, PublicationWatch};
+use geode_shell::frame::{FrameRef, FrameVersions, PublicationWatch};
 use geode_shell::keymap::{Binding, KeyContext};
 use geode_shell::linenumbers::{LineNumbers, UiSettings};
 use geode_shell::module::{FindEvent, StackHandle, UploadDelivery};
@@ -271,6 +271,14 @@ struct Editing {
     /// Set only on a text editor opened on a number cursor cell over a
     /// live selection.
     bulk: Option<Bulk>,
+    /// The text the editor opened on: its seed, or a date field's painted
+    /// date. Over a selection, a commit that still holds it (and a date
+    /// field no digit was typed into) writes nothing — a no-op `enter`
+    /// must never copy one cell's value across the selection.
+    opened: String,
+    /// A digit or backspace reached the date field since it opened, so a
+    /// retyped same date is a deliberate write, not a no-op.
+    typed: bool,
 }
 
 /// A text editor opened on a number cursor cell over a live selection
@@ -454,7 +462,7 @@ enum Yank {
 pub struct MarketDataTile {
     id: TileId,
     spec: &'static PanelSpec,
-    frame: Entity<Frame>,
+    frame: FrameRef,
     diagnostics: Entity<Diagnostics>,
     data: DataHandle,
     /// The document key, in the dataset's declared `key` order. The
@@ -607,7 +615,7 @@ impl MarketDataTile {
     pub fn new(
         id: TileId,
         spec: &'static PanelSpec,
-        frame: Entity<Frame>,
+        frame: FrameRef,
         diagnostics: Entity<Diagnostics>,
         data: DataHandle,
         stale_after: Rc<StdCell<Duration>>,
@@ -758,7 +766,7 @@ impl MarketDataTile {
             |this, _, event: &CellPointer, window, cx| this.pointer(*event, window, cx),
         )
         .detach();
-        cx.observe(&frame, |this, _frame, cx| {
+        cx.observe(frame.entity(), |this, _frame, cx| {
             // Promote before the visibility check, so a panel hidden after
             // staging still lands its answer. A flip releases prepared
             // results; it never triggers a document query.
@@ -2496,7 +2504,7 @@ impl MarketDataTile {
                 )
             }
         };
-        let state = if wants_date {
+        let (state, opened) = if wants_date {
             // Seed a date field from painted text, falling back to today's date on the
             // configured clock when the text is empty or invalid.
             let date = chrono::NaiveDate::parse_from_str(text.as_ref(), "%Y-%m-%d")
@@ -2509,20 +2517,23 @@ impl MarketDataTile {
             let focus = cx.focus_handle();
             focus.focus(window, cx);
             let paint = DateFieldPaint::of(&field, self.id.0);
-            EditorState::Date {
-                field,
-                focus,
-                paint,
-            }
+            (
+                EditorState::Date {
+                    field,
+                    focus,
+                    paint,
+                },
+                date.format("%Y-%m-%d").to_string(),
+            )
         } else {
             let state = cx.new(|cx| InputState::new(window, cx));
             state.update(cx, |s, cx| s.set_value(text.clone(), window, cx));
             state.read(cx).focus_handle(cx).focus(window, cx);
-            EditorState::Text(state)
+            (EditorState::Text(state), text.to_string())
         };
         // Only a number cursor cell steps the selection live. A text or
-        // date cursor cell commits absolutely: its untouched `enter` writes
-        // the seeded value to every accepting member.
+        // date cursor cell commits absolutely once it has changed; an
+        // untouched `enter` writes nothing (`Editing::opened`).
         let bulk = (self.selection.is_some()
             && matches!(state, EditorState::Text(_))
             && matches!(
@@ -2547,6 +2558,8 @@ impl MarketDataTile {
             state,
             target,
             bulk,
+            opened,
+            typed: false,
         });
         self.notice = None;
     }
@@ -2569,11 +2582,15 @@ impl MarketDataTile {
         };
         let Some(Editing {
             state: EditorState::Date { field, paint, .. },
+            typed,
             ..
         }) = self.editor.as_mut()
         else {
             return false;
         };
+        if matches!(key, FieldKey::Digit(_) | FieldKey::Backspace) {
+            *typed = true;
+        }
         match key {
             FieldKey::Commit => {
                 self.commit_edit(window, cx);
@@ -2650,6 +2667,11 @@ impl MarketDataTile {
                     self.close_editor(window, cx);
                     return true;
                 }
+                if self.selection.is_some() && text == editing.opened {
+                    // Untouched over a selection: nothing to write.
+                    self.close_editor(window, cx);
+                    return true;
+                }
                 self.commit_cell_edit(cell, labels, &text, window, cx)
             }
             (EditorState::Text(state), EditTarget::Attr { index, column }) => {
@@ -2682,6 +2704,11 @@ impl MarketDataTile {
                 *paint = DateFieldPaint::of(field, self.id.0);
                 if self.selection.is_some() {
                     let text = field.date().format("%Y-%m-%d").to_string();
+                    if !editing.typed && text == editing.opened {
+                        // Untouched over a selection: nothing to write.
+                        self.close_editor(window, cx);
+                        return true;
+                    }
                     return self.commit_bulk(&text, window, cx);
                 }
                 let value = Value::Date(field.date());
@@ -3241,6 +3268,8 @@ impl MarketDataTile {
             state,
             target: EditTarget::RowLabel { row, label },
             bulk: None,
+            opened: String::new(),
+            typed: false,
         });
     }
 
@@ -3482,6 +3511,12 @@ impl MarketDataTile {
             return true;
         };
         let option = c.list.options()[i].clone();
+        if self.selection.is_some() && option == c.opened {
+            // `enter` on the value the cell already holds, over a
+            // selection: nothing to write. A row click stays a pick.
+            self.close_popup_with_window(window, cx);
+            return true;
+        }
         self.pick_option(option, window, cx)
     }
 
@@ -4798,9 +4833,10 @@ mod tests {
     use geode_data::{DataHandle, Request};
     use geode_shell::actions::ActionId;
     use geode_shell::diagnostics::Diagnostics;
-    use geode_shell::frame::{FLIP_DEADLINE, Frame, Publish};
+    use geode_shell::frame::{FLIP_DEADLINE, Frame, FrameRef, Publish};
     use geode_shell::module::{Delivery, FindEvent, ModuleFactory, TileContent};
     use geode_shell::tiling::TileId;
+    use geode_shell::tiling::WorkspaceIx;
     use gpui::{Entity, Window};
 
     /// Header tones derived by this tile must meet 3:1 contrast on every bundled
@@ -5126,13 +5162,17 @@ mod tests {
             .update(|cx| {
                 let slot = slot.clone();
                 cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    // The tile sits in unpinned workspace 1, so the shared lane
+                    // is its lane and tests address it as `f.shared()` /
+                    // `f.shared_mut()`. A test that pins must reach the tile's
+                    // lane through its `FrameRef` instead.
                     let frame =
                         cx.new(|_| Frame::new(GroupingSlots::default(), SavedScopes::new(), None));
                     let diagnostics = cx.new(|_| Diagnostics::new(LogLevels::default()));
                     let occupant = factory.create(
                         TileId(TILE),
                         restored.as_ref(),
-                        frame.clone(),
+                        FrameRef::new(frame.clone(), WorkspaceIx::FIRST),
                         diagnostics.clone(),
                         window,
                         cx,
@@ -5218,7 +5258,14 @@ mod tests {
                 let frame =
                     cx.new(|_| Frame::new(GroupingSlots::default(), SavedScopes::new(), None));
                 let diagnostics = cx.new(|_| Diagnostics::new(LogLevels::default()));
-                let occupant = factory.create(TileId(TILE), None, frame, diagnostics, window, cx);
+                let occupant = factory.create(
+                    TileId(TILE),
+                    None,
+                    FrameRef::new(frame, WorkspaceIx::FIRST),
+                    diagnostics,
+                    window,
+                    cx,
+                );
                 let tile = occupant.view.clone().downcast::<MarketDataTile>().unwrap();
                 *out.borrow_mut() = Some(tile.clone());
                 let host = cx.new(|_| Host {
@@ -5300,7 +5347,7 @@ mod tests {
             self.rx.try_iter().collect()
         }
         fn versions(&self, vcx: &gpui::VisualTestContext) -> geode_shell::frame::FrameVersions {
-            self.frame.read_with(vcx, |f, _| f.versions())
+            self.frame.read_with(vcx, |f, _| f.shared().versions())
         }
         fn barrier_open(&self, vcx: &gpui::VisualTestContext) -> bool {
             self.frame.read_with(vcx, |f, _| f.barrier_open())
@@ -5896,10 +5943,10 @@ mod tests {
     ) {
         let keys = keys.to_vec();
         h.frame.update(vcx, |f, cx| {
-            f.set_as_of(geode_core::query::AsOf::At(
+            f.shared_mut().set_as_of(geode_core::query::AsOf::At(
                 chrono::Utc::now() - chrono::Duration::seconds(secs as i64),
             ));
-            f.open_flip(keys, Instant::now());
+            f.shared_mut().open_flip(keys, Instant::now());
             cx.notify();
         });
     }
@@ -6338,7 +6385,7 @@ mod tests {
             .unwrap()
             .with_timezone(&chrono::Utc);
         h.frame.update(&mut vcx, |f, cx| {
-            f.set_as_of(geode_core::query::AsOf::At(at));
+            f.shared_mut().set_as_of(geode_core::query::AsOf::At(at));
             cx.notify();
         });
         assert!(
@@ -6378,7 +6425,8 @@ mod tests {
         // An as-of change while shown: the panel asks again at once.
         let first_at = chrono::Utc::now() - chrono::Duration::days(1);
         h.frame.update(&mut vcx, |f, cx| {
-            f.set_as_of(geode_core::query::AsOf::At(first_at));
+            f.shared_mut()
+                .set_as_of(geode_core::query::AsOf::At(first_at));
             cx.notify();
         });
         let asked = h.document_request().expect("an as-of change requeries");
@@ -6386,7 +6434,8 @@ mod tests {
         h.visible(&mut vcx, false);
         let second_at = chrono::Utc::now() - chrono::Duration::days(2);
         h.frame.update(&mut vcx, |f, cx| {
-            f.set_as_of(geode_core::query::AsOf::At(second_at));
+            f.shared_mut()
+                .set_as_of(geode_core::query::AsOf::At(second_at));
             cx.notify();
         });
         h.deliver(
@@ -6475,8 +6524,9 @@ mod tests {
         let opened = Instant::now();
         let at = chrono::Utc::now() - chrono::Duration::seconds(60);
         h.frame.update(&mut vcx, |f, cx| {
-            f.set_as_of(geode_core::query::AsOf::At(at));
-            f.open_flip([QueryKey(TILE)], opened);
+            let mut lane = f.shared_mut();
+            lane.set_as_of(geode_core::query::AsOf::At(at));
+            lane.open_flip([QueryKey(TILE)], opened);
             cx.notify();
         });
         let second = h.document_request().expect("an as-of change requeries").tag;
@@ -6576,11 +6626,11 @@ mod tests {
         h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
 
         h.frame.update(&mut vcx, |f, cx| {
-            f.set_scope(geode_core::scope::Scope {
+            f.shared_mut().set_scope(geode_core::scope::Scope {
                 text: Some("spx".into()),
                 ..Default::default()
             });
-            f.open_flip([QueryKey(TILE)], Instant::now());
+            f.shared_mut().open_flip([QueryKey(TILE)], Instant::now());
             cx.notify();
         });
         assert!(
@@ -6610,8 +6660,8 @@ mod tests {
             .unwrap()
             .with_timezone(&chrono::Utc);
         h.frame.update(&mut vcx, |f, cx| {
-            f.set_as_of(geode_core::query::AsOf::At(at));
-            f.open_flip([QueryKey(TILE)], Instant::now());
+            f.shared_mut().set_as_of(geode_core::query::AsOf::At(at));
+            f.shared_mut().open_flip([QueryKey(TILE)], Instant::now());
             cx.notify();
         });
         let second = h
@@ -6641,8 +6691,8 @@ mod tests {
             .unwrap()
             .with_timezone(&chrono::Utc);
         h.frame.update(&mut vcx, |f, cx| {
-            f.set_as_of(geode_core::query::AsOf::At(at));
-            f.open_flip([QueryKey(TILE)], Instant::now());
+            f.shared_mut().set_as_of(geode_core::query::AsOf::At(at));
+            f.shared_mut().open_flip([QueryKey(TILE)], Instant::now());
             cx.notify();
         });
         let second = h.document_request().unwrap().tag;
@@ -9924,8 +9974,9 @@ edits = [["2026-09-18#2", "amount", 9.0]]
         // the NEW scope. The panel follows neither `scope` nor
         // `grouping`, so it never requeries — it self-arrives on B2.
         h.frame.update(&mut vcx, |f, cx| {
-            f.set_text(Some("SPX".into()));
-            f.open_flip([QueryKey(TILE), other], Instant::now());
+            f.shared_mut().set_text(Some("SPX".into()));
+            f.shared_mut()
+                .open_flip([QueryKey(TILE), other], Instant::now());
             cx.notify();
         });
         assert!(
@@ -12605,14 +12656,14 @@ edits = [["2026-11-20", "-1", 9.5]]
                 "no sweep line for `:{word}`"
             );
         }
-        let before = h.frame.read_with(&vcx, |f, _| f.versions());
+        let before = h.frame.read_with(&vcx, |f, _| f.shared().versions());
         for line in lines {
             assert!(
                 crate::commands::parse(line).is_ok(),
                 "`{line}` no longer parses"
             );
             let _ = vcx.update(|window, cx| h.content.command(line, window, cx));
-            let after = h.frame.read_with(&vcx, |f, _| f.versions());
+            let after = h.frame.read_with(&vcx, |f, _| f.shared().versions());
             assert_eq!(
                 (after.scope, after.grouping, after.as_of),
                 (before.scope, before.grouping, before.as_of),
@@ -13335,8 +13386,8 @@ edits = [["2026-11-20", "-1", 9.5]]
         publish_document_for(&h, &mut vcx, "cvi_params", "NDX.Z");
         assert!(h.document_request().is_none());
         assert!(
-            h.frame
-                .read_with(&vcx, |f, _| f.barrier_wants(QueryKey(TILE), f.versions())),
+            h.frame.read_with(&vcx, |f, _| f
+                .barrier_wants(QueryKey(TILE), f.shared().versions())),
             "the real query is still in flight"
         );
         h.deliver(
@@ -13613,6 +13664,41 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         assert!(h.upload_request().is_none());
     }
 
+    /// The upload confirm's No button is any other key and its Yes button
+    /// is `y`: the confirm door paints both, and a press on either does not
+    /// cancel the question before its click lands.
+    #[gpui::test]
+    fn the_upload_confirms_yes_and_no_buttons_answer_it(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        let click = |vcx: &mut gpui::VisualTestContext, selector: &str| {
+            let at = centre_of(vcx, selector);
+            vcx.simulate_click(at, gpui::Modifiers::default());
+            vcx.run_until_parked();
+            draw(vcx);
+        };
+
+        assert_eq!(h.command(&mut vcx, "upload"), Ok(()));
+        draw(&mut vcx);
+        click(&mut vcx, &format!("marketdata-upload-confirm-{TILE}-no"));
+        assert_eq!(h.upload_prompt(&vcx), None);
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some(UPLOAD_CANCELLED.into())
+        );
+        assert!(h.upload_request().is_none(), "No sends nothing");
+
+        assert_eq!(h.command(&mut vcx, "upload"), Ok(()));
+        draw(&mut vcx);
+        click(&mut vcx, &format!("marketdata-upload-confirm-{TILE}-yes"));
+        let sent = h.upload_request().expect("Yes submits, as y does");
+        assert_eq!(sent.target, "sophis");
+        assert_eq!(h.upload_prompt(&vcx), None, "disarmed");
+        assert_eq!(h.mode(&vcx), "normal");
+    }
+
     #[gpui::test]
     fn focus_leaving_the_tile_cancels_the_confirm(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_upload(cx);
@@ -13749,7 +13835,7 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
             now - chrono::Duration::days(3),
         ] {
             h.frame.update(&mut vcx, |f, cx| {
-                f.set_as_of(geode_core::query::AsOf::At(at));
+                f.shared_mut().set_as_of(geode_core::query::AsOf::At(at));
                 cx.notify();
             });
             vcx.run_until_parked();
@@ -13767,7 +13853,7 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         assert_eq!(older.len(), "YYYY-MM-DD HH:MM".len(), "{older}");
 
         h.frame.update(&mut vcx, |f, cx| {
-            f.set_as_of(geode_core::query::AsOf::Live);
+            f.shared_mut().set_as_of(geode_core::query::AsOf::Live);
             cx.notify();
         });
         vcx.run_until_parked();
@@ -13792,14 +13878,14 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         let clock = h.tile.read_with(&vcx, |t, _| t.clock);
         let at = chrono::Utc::now() - chrono::Duration::seconds(60);
         h.frame.update(&mut vcx, |f, cx| {
-            f.set_as_of(geode_core::query::AsOf::At(at));
+            f.shared_mut().set_as_of(geode_core::query::AsOf::At(at));
             cx.notify();
         });
         vcx.run_until_parked();
         let tag = h.document_request().expect("the historical request").tag;
         h.deliver(&mut vcx, tag, Arc::new(cvi_requested_at(BASE, at)));
         h.frame.update(&mut vcx, |f, cx| {
-            f.set_as_of(geode_core::query::AsOf::Live);
+            f.shared_mut().set_as_of(geode_core::query::AsOf::Live);
             cx.notify();
         });
         vcx.run_until_parked();
@@ -13845,7 +13931,7 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         let clock = h.tile.read_with(&vcx, |t, _| t.clock);
         let at = chrono::Utc::now() - chrono::Duration::seconds(60);
         h.frame.update(&mut vcx, |f, cx| {
-            f.set_as_of(geode_core::query::AsOf::At(at));
+            f.shared_mut().set_as_of(geode_core::query::AsOf::At(at));
             cx.notify();
         });
         vcx.run_until_parked();
@@ -14704,7 +14790,7 @@ cells = {{ ex = {{ type = "date", value = "2027-06-18" }}, amount = 0.75, status
             &self,
             tile: TileId,
             restored: Option<&toml::Table>,
-            frame: Entity<Frame>,
+            frame: FrameRef,
             diagnostics: Entity<Diagnostics>,
             window: &mut Window,
             cx: &mut gpui::App,
@@ -14770,6 +14856,7 @@ cells = {{ ex = {{ type = "date", value = "2027-06-18" }}, amount = 0.75, status
             &geode_shell::tiling::Workspaces::new(),
             &geode_shell::session::TileRecords::new(),
             None,
+            &geode_shell::session::PinnedRecords::new(),
             &geode_shell::palette_usage::PaletteUsage::new(),
         );
         let ws1: toml::Table = format!(
@@ -14808,6 +14895,7 @@ edits = [["2026-11-20", "-1", 9.5]]
             roster,
             restored_tiles: restored.tiles,
             restored_frame: None,
+            restored_pinned: Default::default(),
             restored_palette_usage: geode_shell::palette_usage::PaletteUsage::new(),
             log: None,
             action_tail: Arc::new(std::sync::Mutex::new(

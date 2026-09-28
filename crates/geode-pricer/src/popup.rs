@@ -1,16 +1,18 @@
-//! Cell choice typeahead, the entry bar's completion list, and the pick type
-//! behind the tile's action menu. Popup geometry and layering, and the menu
+//! Cell choice typeahead, the entry bar's completion list, the sheet
+//! picker, and the pick type behind the tile's action menu. Popup geometry and layering, and the menu
 //! itself, are `geode_tile`'s; what these lists hold is the pricer's.
 
 use crate::core::complete::Completion;
 use crate::tile::PricerTile;
 use geode_shell::choice::ChoiceList;
 use geode_shell::shell::scale;
-use geode_tile::menu::MenuPick;
+use geode_tile::menu::{MenuPaint, MenuPick};
 use geode_tile::popover::{self, ROW_HEIGHT, ROW_INSET};
 use gpui::prelude::*;
-use gpui::{Anchor, App, Entity, MouseButton, SharedString, div};
+use gpui::{Anchor, App, ElementId, Entity, MouseButton, SharedString, div};
+use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme as _, h_flex};
+use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ChoicePaint {
@@ -159,5 +161,225 @@ impl MenuPick for PricerPick {
             PricerPick::Action(id) => SharedString::new_static(id),
             PricerPick::View(name) => format!("view:{name}").into(),
         }
+    }
+}
+
+/// The sheet picker's key context: `lib::init` reclaims `tab`/`shift-tab`
+/// in it from gpui-component's focus cycling, so `tab` completes.
+pub const SHEET_PICKER_CONTEXT: &str = "PricerSheetPicker";
+
+/// What a sheet picker's pick does: open the sheet (`:e`'s route) or arm
+/// its removal (`:rm`'s route).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PickerPurpose {
+    Open,
+    Remove,
+}
+
+impl PickerPurpose {
+    /// The filter field's placeholder: what a pick will do.
+    pub(crate) fn placeholder(self) -> &'static str {
+        match self {
+            PickerPurpose::Open => "open sheet",
+            PickerPurpose::Remove => "remove sheet",
+        }
+    }
+}
+
+/// One sheet picker row: a name and its marks, prepared when the picker
+/// opens. The marks describe; they refuse nothing. A pick goes through
+/// the command's own route, which decides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SheetRow {
+    pub name: SharedString,
+    /// The sheet this tile shows: the leading tick.
+    pub current: bool,
+    /// Held by another tile: [`OPEN_ELSEWHERE`] in the trailing lane.
+    pub open_elsewhere: bool,
+}
+
+/// The trailing-lane mark of a sheet another tile holds.
+pub(crate) const OPEN_ELSEWHERE: &str = "open";
+
+/// The picker's rows, sorted by name: every known or pending-save name
+/// (`known`, retiring names already left out), every name a tile holds,
+/// and this tile's own. An unsaved sheet is listed while a tile holds
+/// it, so the trader sees why its name is taken.
+pub(crate) fn sheet_rows(
+    known: &[String],
+    open: &BTreeSet<String>,
+    current: &str,
+) -> Vec<SheetRow> {
+    let mut names: BTreeSet<&str> = known.iter().map(String::as_str).collect();
+    names.extend(open.iter().map(String::as_str));
+    names.insert(current);
+    names
+        .into_iter()
+        .map(|n| SheetRow {
+            name: SharedString::from(n.to_string()),
+            current: n == current,
+            open_elsewhere: n != current && open.contains(n),
+        })
+        .collect()
+}
+
+/// The open sheet picker: its filter field, which holds the keyboard
+/// (the tile reads `mode == insert` while it is open), the ranked names,
+/// and the rows' marks, parallel to the list's options.
+pub(crate) struct SheetPicker {
+    pub purpose: PickerPurpose,
+    pub input: Entity<InputState>,
+    pub list: ChoiceList,
+    pub rows: Vec<SheetRow>,
+}
+
+impl SheetPicker {
+    /// Highlight the current sheet, so an `enter` straight away keeps it
+    /// rather than switching to whichever name sorts first.
+    pub(crate) fn new(
+        purpose: PickerPurpose,
+        input: Entity<InputState>,
+        rows: Vec<SheetRow>,
+    ) -> Self {
+        let mut list = ChoiceList::new(
+            rows.iter().map(|r| r.name.to_string()).collect(),
+            geode_shell::choice::DEFAULT_CAP,
+        );
+        let current = rows.iter().find(|r| r.current).map(|r| r.name.to_string());
+        list.place(current.as_deref());
+        Self {
+            purpose,
+            input,
+            list,
+            rows,
+        }
+    }
+
+    /// The highlighted row's name; `None` with nothing matching.
+    pub(crate) fn picked(&self) -> Option<String> {
+        self.list.highlighted_text().map(str::to_string)
+    }
+}
+
+/// Paint the sheet picker hung from the header's sheet name: its filter
+/// field over a window of ranked names, in the shared popover surface and
+/// row frame. The current sheet carries the tick; one another tile holds
+/// says [`OPEN_ELSEWHERE`]. A row press picks it (the row frame consumes
+/// the press, and `occlude` keeps what is beneath from hearing it), hover
+/// moves the highlight, and a press anywhere else closes the picker.
+pub(crate) fn render_sheet_picker(
+    p: &SheetPicker,
+    tile: &Entity<PricerTile>,
+    cx: &App,
+) -> impl IntoElement + use<> {
+    let theme = cx.theme();
+    let paint = MenuPaint::derive(theme);
+    let mut list = popover::surface(cx)
+        .debug_selector(|| "pricer-sheet-picker".into())
+        .key_context(SHEET_PICKER_CONTEXT)
+        .occlude()
+        .on_key_down({
+            let tile = tile.clone();
+            move |event: &gpui::KeyDownEvent, window, cx| {
+                if tile.update(cx, |t, cx| t.sheet_picker_key(event, window, cx)) {
+                    cx.stop_propagation();
+                }
+            }
+        })
+        .on_mouse_down_out({
+            let tile = tile.clone();
+            move |_, window, cx| tile.update(cx, |t, cx| t.close_sheet_picker(window, cx))
+        })
+        .child(
+            div()
+                .w_full()
+                .pb_1()
+                .mb_1()
+                .border_b_1()
+                .border_color(theme.border)
+                .debug_selector(|| "pricer-sheet-picker-field".into())
+                .child(Input::new(&p.input).appearance(false).w_full()),
+        );
+    if p.list.painted_len() == 0 {
+        list = list.child(popover::empty_row(theme, crate::tile::NO_SHEET_MATCHES));
+    }
+    let lit = p.list.highlighted();
+    for (i, ranked) in p.list.painted().iter().enumerate() {
+        let row = &p.rows[ranked.row];
+        let highlighted = i == lit;
+        let lane = if highlighted {
+            paint.active_text
+        } else {
+            paint.muted
+        };
+        list = list.child(
+            popover::row_shell(
+                theme,
+                paint.rest_pointer.hover,
+                ElementId::NamedInteger(SharedString::new_static("pricer-sheet-row"), i as u64),
+                highlighted,
+                move || format!("pricer-sheet-row-{i}"),
+                {
+                    let tile = tile.clone();
+                    move |window, cx| tile.update(cx, |t, cx| t.sheet_picker_pick(i, window, cx))
+                },
+            )
+            .justify_between()
+            .on_mouse_move({
+                let tile = tile.clone();
+                move |_, _, cx| tile.update(cx, |t, cx| t.sheet_picker_hover(i, cx))
+            })
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .w(scale::design(geode_tile::menu::TICK_SLOT))
+                            .flex_shrink_0()
+                            .child(if row.current { "\u{2713}" } else { "" }),
+                    )
+                    .child(row.name.clone()),
+            )
+            .child(
+                div()
+                    .text_color(lane)
+                    .debug_selector(move || format!("pricer-sheet-lane-{i}"))
+                    .child(if row.open_elsewhere {
+                        OPEN_ELSEWHERE
+                    } else {
+                        ""
+                    }),
+            ),
+        );
+    }
+    popover::anchor_popup(list, Anchor::TopLeft)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sheet_rows_list_known_and_held_names_once_sorted_with_their_marks() {
+        let known = vec!["zeta".to_string(), "alpha".to_string(), "book".to_string()];
+        let open: BTreeSet<String> = ["book", "held", "zeta"].map(String::from).into();
+        let rows = sheet_rows(&known, &open, "book");
+        let spelled: Vec<(String, bool, bool)> = rows
+            .iter()
+            .map(|r| (r.name.to_string(), r.current, r.open_elsewhere))
+            .collect();
+        assert_eq!(
+            spelled,
+            vec![
+                ("alpha".into(), false, false),
+                ("book".into(), true, false),
+                ("held".into(), false, true),
+                ("zeta".into(), false, true),
+            ],
+            "the current sheet is ticked, not marked open; an unsaved held name is listed"
+        );
+        let unsaved = sheet_rows(&[], &BTreeSet::new(), "untitled-1");
+        assert_eq!(unsaved.len(), 1, "the current sheet is listed unsaved");
+        assert!(unsaved[0].current);
     }
 }

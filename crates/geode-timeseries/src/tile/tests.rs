@@ -14,11 +14,11 @@ use geode_core::series::{BucketRule, Frequency, SlotKind, SlotProvenance, SlotRe
 use geode_data::{DataHandle, Request};
 use geode_shell::actions::{ActionId, ActionRegistry};
 use geode_shell::diagnostics::Diagnostics;
-use geode_shell::frame::Frame;
+use geode_shell::frame::{Frame, FrameRef};
 use geode_shell::keymap::{KeyContext, Keymap, MatchResult, Matcher, build_keymap};
 use geode_shell::module::{Delivery, ModuleFactory, ModuleRoster, TileContent, TileOccupant};
 use geode_shell::series::{FetchSource, SeriesSettings};
-use geode_shell::tiling::TileId;
+use geode_shell::tiling::{TileId, WorkspaceIx};
 use geode_widgets::datefield::Segment;
 use gpui::{Entity, SharedString, Window};
 use gpui_component::color_picker::ColorPickerState;
@@ -169,7 +169,7 @@ impl ModuleFactory for Handle {
         &self,
         tile: TileId,
         restored: Option<&toml::Table>,
-        frame: Entity<Frame>,
+        frame: FrameRef,
         diagnostics: Entity<Diagnostics>,
         window: &mut Window,
         cx: &mut gpui::App,
@@ -231,8 +231,8 @@ fn open_barrier_on_as_of(
 ) {
     let keys = keys.to_vec();
     h.frame.update(vcx, |f, cx| {
-        f.set_as_of(AsOf::At(at));
-        f.open_flip(keys, std::time::Instant::now());
+        f.shared_mut().set_as_of(AsOf::At(at));
+        f.shared_mut().open_flip(keys, std::time::Instant::now());
         cx.notify();
     });
 }
@@ -333,13 +333,17 @@ fn open_full(
             let factory = factory.clone();
             let keymap = keymap.clone();
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                // The tile sits in unpinned workspace 1, so the shared lane is
+                // its lane and tests address it as `f.shared()` /
+                // `f.shared_mut()`. A test that pins must reach the tile's lane
+                // through its `FrameRef` instead.
                 let frame =
                     cx.new(|_| Frame::new(GroupingSlots::default(), SavedScopes::new(), None));
                 let diagnostics = cx.new(|_| Diagnostics::new(LogLevels::default()));
                 let occupant = factory.create(
                     TileId(TILE),
                     restored.as_ref(),
-                    frame.clone(),
+                    FrameRef::new(frame.clone(), WorkspaceIx::FIRST),
                     diagnostics.clone(),
                     window,
                     cx,
@@ -1079,11 +1083,11 @@ fn every_colon_command_leaves_the_frame_alone(cx: &mut gpui::TestAppContext) {
             "no sweep line for `:{word}`"
         );
     }
-    let before = h.frame.read_with(&vcx, |f, _| f.versions());
+    let before = h.frame.read_with(&vcx, |f, _| f.shared().versions());
     for line in lines {
         assert!(commands::parse(line).is_ok(), "`{line}` no longer parses");
         let _ = vcx.update(|window, cx| h.content.command(line, window, cx));
-        let after = h.frame.read_with(&vcx, |f, _| f.versions());
+        let after = h.frame.read_with(&vcx, |f, _| f.shared().versions());
         assert_eq!(
             (after.scope, after.grouping, after.as_of),
             (before.scope, before.grouping, before.as_of),
@@ -1304,7 +1308,7 @@ fn a_range_change_refetches_a_pair_whose_fetch_has_not_answered(cx: &mut gpui::T
     // An unrelated frame notification before the first fetch returns must not
     // resubmit that span. With no acted query yet, requery can still be needed.
     h.frame.update(&mut vcx, |f, cx| {
-        f.set_scope(geode_core::scope::Scope {
+        f.shared_mut().set_scope(geode_core::scope::Scope {
             text: Some("spx".into()),
             ..Default::default()
         });
@@ -1556,11 +1560,12 @@ fn the_tile_follows_as_of_only_and_stages_under_an_open_barrier(cx: &mut gpui::T
     h.deliver_series(&mut vcx, tag, result_with(&[1], 5));
     // A scope bump: nothing, and it must not hold the barrier either.
     h.frame.update(&mut vcx, |f, cx| {
-        f.set_scope(geode_core::scope::Scope {
+        f.shared_mut().set_scope(geode_core::scope::Scope {
             text: Some("spx".into()),
             ..Default::default()
         });
-        f.open_flip([QueryKey(TILE)], std::time::Instant::now());
+        f.shared_mut()
+            .open_flip([QueryKey(TILE)], std::time::Instant::now());
         cx.notify();
     });
     assert!(h.series_request().is_none(), "scope is not followed");
@@ -1680,7 +1685,7 @@ fn an_as_of_change_while_hidden_requeries_on_reshow(cx: &mut gpui::TestAppContex
     h.requests();
     let at = chrono::Utc::now() - chrono::Duration::days(30);
     h.frame.update(&mut vcx, |f, cx| {
-        f.set_as_of(AsOf::At(at));
+        f.shared_mut().set_as_of(AsOf::At(at));
         cx.notify();
     });
     assert!(h.requests().is_empty(), "a hidden tile asks nothing");
@@ -1703,8 +1708,9 @@ fn closing_the_tile_mid_flip_cancels_its_query_and_releases_the_barrier(
     let at = chrono::Utc::now() - chrono::Duration::days(30);
     let opened = std::time::Instant::now();
     h.frame.update(&mut vcx, |f, cx| {
-        f.set_as_of(AsOf::At(at));
-        f.open_flip([QueryKey(TILE)], opened);
+        let mut lane = f.shared_mut();
+        lane.set_as_of(AsOf::At(at));
+        lane.open_flip([QueryKey(TILE)], opened);
         cx.notify();
     });
     let q = h.series_request().expect("an as-of change queries");
@@ -2682,7 +2688,7 @@ fn an_absolute_range_reopens_on_the_dates_it_stores(cx: &mut gpui::TestAppContex
     // An as-of inside the stored span clips queries, but must not rewrite the
     // To date merely because the editor opens and commits.
     h.frame.update(&mut vcx, |f, cx| {
-        f.set_as_of(AsOf::At(
+        f.shared_mut().set_as_of(AsOf::At(
             "2026-01-20T00:00:00Z".parse::<DateTime<Utc>>().unwrap(),
         ));
         cx.notify();
@@ -3778,7 +3784,7 @@ fn an_as_of_change_refreshes_an_open_frequency_menus_cap_reasons(cx: &mut gpui::
         "six years of 5m is over the cap"
     );
     h.frame.update(&mut vcx, |f, cx| {
-        f.set_as_of(AsOf::At(
+        f.shared_mut().set_as_of(AsOf::At(
             "2020-06-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap(),
         ));
         cx.notify();

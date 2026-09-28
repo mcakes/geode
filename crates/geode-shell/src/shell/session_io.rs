@@ -10,14 +10,36 @@ use crate::session::{self, FrameRecord};
 use super::ShellView;
 
 impl ShellView {
-    /// Capture the frame fields shared by periodic and shutdown saves.
+    /// Capture the shared lane's `[frame]` record for periodic and shutdown
+    /// saves. Pinned lanes are workspace-owned and written by `pinned_records`.
     fn frame_record(&self, cx: &App) -> FrameRecord {
-        let frame = self.frame.read(cx);
+        let frame = self.frame.read(cx).shared();
         FrameRecord {
             scope: frame.scope().clone(),
             active_slot: frame.active_slot(),
             as_of: frame.as_of().clone(),
         }
+    }
+
+    /// Capture each pinned workspace's own lane for `workspaces.N.frame`.
+    /// Pin, unpin, and lane edits advance the frame generation, so the
+    /// periodic dirty check already covers changes here.
+    fn pinned_records(&self, cx: &App) -> session::PinnedRecords {
+        let frame = self.frame.read(cx);
+        frame
+            .pinned_workspaces()
+            .map(|ws| {
+                let lane = frame.view(ws);
+                (
+                    ws,
+                    FrameRecord {
+                        scope: lane.scope().clone(),
+                        active_slot: lane.active_slot(),
+                        as_of: lane.as_of().clone(),
+                    },
+                )
+            })
+            .collect()
     }
 
     /// Extract a snapshot when layout dirt, serialized tile state, frame
@@ -32,9 +54,8 @@ impl ShellView {
     /// No configured path or no detected change returns `None` silently.
     pub(super) fn take_dirty_session_write(&mut self, cx: &App) -> Option<(PathBuf, String)> {
         let tiles = self.current_tiles(cx);
-        let versions = self.frame.read(cx).versions();
-        let frame_versions = (versions.scope, versions.grouping, versions.as_of);
-        let frame_dirty = frame_versions != self.last_frame_versions_written;
+        let frame_generation = self.frame.read(cx).generation();
+        let frame_dirty = frame_generation != self.last_frame_generation_written;
         let usage_dirty = self.palette_usage_version != self.last_palette_usage_written;
         // Module state changes do not set the layout flag. Compare serialized
         // records and frame/usage versions to catch independent changes.
@@ -48,11 +69,12 @@ impl ShellView {
             &self.services.workspaces,
             &tiles,
             Some(&record),
+            &self.pinned_records(cx),
             &self.palette_usage,
         ) {
             Ok(text) => {
                 self.last_tiles_written = tiles;
-                self.last_frame_versions_written = frame_versions;
+                self.last_frame_generation_written = frame_generation;
                 self.last_palette_usage_written = self.palette_usage_version;
                 Some((path, text))
             }
@@ -77,6 +99,7 @@ impl ShellView {
             &self.services.workspaces,
             &self.current_tiles(cx),
             Some(&record),
+            &self.pinned_records(cx),
             &self.palette_usage,
         ) {
             tracing::warn!(target: "geode::session", "failed to save session: {e}");

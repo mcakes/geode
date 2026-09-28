@@ -58,9 +58,12 @@ has none of them.
   keeps the menu open; an enabled pick closes the menu before it dispatches.
   Rows rebuilt under an open menu keep the highlight on its row, or snap it
   to the nearest action.
-- A confirm holds the keyboard: bare `y` confirms; any other key, chords
-  included, cancels and is consumed; a pointer press on the tile or focus
-  leaving also cancels. A change that moves what the question is about
+- A confirm holds the keyboard: bare `y` or the prompt's Yes button
+  confirms; any other key, chords included, cancels and is consumed, as does
+  its No button; a pointer press anywhere else on the tile (the gap between
+  the buttons included) or focus leaving also cancels. A press on a button
+  moves no focus and does not cancel first, so the question stands until the
+  click lands. A change that moves what the question is about
   withdraws it unanswered: neither the confirm nor the cancel action runs,
   and the prompt's blur is not heard as an `n`. Market-data withdraws on a
   delivery that moves the painted document or the draft and says so in its
@@ -469,8 +472,12 @@ option exactly: a bulk write has no popup to rank a near miss. Deleted rows
 and cells that refuse are skipped and counted, `set 5 cells, skipped 3 (2
 deleted, 1 wrong type)`. Every member is judged before any write, so when
 nothing accepts, the commit is refused with the editor still open and the
-draft untouched. On a text or date cursor cell an untouched `enter` writes
-the seeded value across the selection. The selection stays after a
+draft untouched. An untouched `enter` writes nothing and closes the editor,
+so a no-op gesture never copies one cell's value across the selection:
+text still equal to what the editor opened on, a date field no digit was
+typed into whose date is unchanged, or `enter` on the option the cell
+already holds. Stepping a date or moving the choice highlight is a change;
+a click on a choice row is always a pick. The selection stays after a
 commit.
 
 **Live steps.** On a number cursor cell with its text untouched, the editor's
@@ -529,10 +536,11 @@ that document would overwrite untouched rows with old values.
 
 Arming confirmation assembles the rows and snapshots the draft. The header
 shows the target and counts of changed cells, attributes, added rows, and
-removed rows. Bare unmodified `y` submits that snapshot after rechecking the
-live frame, live painted generation, and full draft equality. Every other key
-cancels and is consumed, including chords. A pointer press on the tile or loss
-of focus also cancels. A delivery that changes the draft or painted generation,
+removed rows. Bare unmodified `y`, or the prompt's Yes button, submits that
+snapshot after rechecking the live frame, live painted generation, and full
+draft equality. Every other key cancels and is consumed, including chords; so
+does No. A pointer press anywhere else on the tile or loss of focus also
+cancels. A delivery that changes the draft or painted generation,
 or a switch of underlying, withdraws the prompt unanswered. The prompt is the
 shared `geode_tile::confirm` door.
 
@@ -851,7 +859,7 @@ the application roster.
 ### The tile
 
 The tile (titled `Pricer · <sheet>`) shows one named sheet under a single
-dense header: the sheet name with `view <name>`, any sheet-wide shift chips
+dense header: the sheet name (a control: see [sheets by pointer](#sheets-by-pointer)) with `view <name>`, any sheet-wide shift chips
 (`spot +2.0%`, `vol -1.0`, spelled as the shift cells spell them), `N pricing…`
 while lines are stale, `N failed` in danger text while any line's last answer
 was a failure, `pricer <name>`, the last priced time, which reads `stale` once
@@ -883,10 +891,11 @@ floored to the readable ratio on the row's own ground and on the table's
 hover and selected-row grounds.
 
 The entry bar sits between the header and the column headers. A muted label
-names where `enter` lands (`after <row>`, `into <TEMPLATE>`, `at end`). A
-parse error or a refused insert keeps the text and shows the reason under
-the field in danger text; any edit clears it. "Add lines…" from the palette
-while the bar is open keeps its text and place and focuses its field again.
+names where `enter` lands (`after <row>`, `into <TEMPLATE>`, `at top`,
+`at end`). A parse error or a refused insert keeps the text and shows the
+reason under the field in danger text; any edit clears it. "Add lines
+below…" or "Add lines above…" from the palette while the bar is open keeps
+its text and place and focuses its field again.
 
 As you type, the bar suggests the part of the line under the caret and a
 hint line names what goes there: underlyings from `[pricing] underlyings`,
@@ -961,6 +970,7 @@ Normal-mode keys:
 | Keys | Effect |
 |---|---|
 | `o` | Open the entry bar under the header; `enter` adds the line below the cursor row (on a leg, the next leg; on a package, its first leg; with no cursor row, at the end; a package typed inside a package lands just after that package) and keeps the bar open for the next; `up`/`down` walk the sheet's own lines as history; `tab`/`shift+tab` complete the token at the caret; `escape` closes it |
+| `shift+o` | The same bar, but the first line lands above the cursor row (on a leg, before that leg in its package; on a package or a top-level line, before it; on the first row, `at top`); each further line lands after the one just added, so a typed run reads top to bottom |
 | `i`, `enter`, double-click | Edit the cell in place; `up`/`down` (`shift`: ten) step a number by the precision its text carries, or the expiry date field's active segment |
 | `d d` | Delete the row (a package with its legs) |
 | `u` / `ctrl+r` | Undo / redo; 100 entries, strictly last-in first-out. A step that brings rows back puts the cursor on the first of them, and a package that was open comes back open |
@@ -976,13 +986,15 @@ Normal-mode keys:
 package's when its legs share one; otherwise the plain tile picker.
 
 The action menu offers repricing, grouping, ungrouping, undo, redo, deletion,
-and view selection. Key hints are the actions' live chords (`:price` when the
-keymap binds none; an empty lane for the other actions) and follow a keymap
-reload while the menu is open. The menu opens on its first enabled action,
-and keyboard stepping skips disabled rows, separators, and headings. A
-pointer, or rows rebuilt under the highlight, can still leave a disabled row
-selected. It has no highlight fill; choosing it shows its reason in the
-footer and leaves the menu open. The shared rules are in
+the sheet verbs (Open sheet…, Rename sheet…, New sheet, Remove sheet…; see
+[sheets by pointer](#sheets-by-pointer)), and view selection. Key hints are
+the actions' live chords (`:price` and the sheet rows' `:e`, `:name`, `:new`,
+`:rm` when the keymap binds none; an empty lane for the other actions) and
+follow a keymap reload while the menu is open. The menu opens on its first
+enabled action, and keyboard stepping skips disabled rows, separators, and
+headings. A pointer, or rows rebuilt under the highlight, can still leave a
+disabled row selected. It has no highlight fill; choosing it shows its reason
+in the footer and leaves the menu open. The shared rules are in
 [Shared tile interaction](#shared-tile-interaction).
 
 `y` alone is unbound: the key matcher dispatches an exact match at once, so a
@@ -1088,10 +1100,11 @@ tile holds:
   documents remain.
 - `:rm <sheet>` is refused for any open sheet (this tile's own: close it or
   `:e` another sheet first) and for a name that is not a document. Otherwise
-  the header asks `remove sheet 'x' and all its history? (y/n)` and holds the
-  keyboard (the tile is in insert mode). Bare `y` removes the document and its
-  whole history; any other key, a pointer press on the tile, or focus leaving
-  it answers no (`sheet not removed` in the footer). `y` checks the name
+  the header asks `remove sheet 'x' and all its history? (y/n)` beside Yes
+  and No buttons and holds the keyboard (the tile is in insert mode). Bare `y`
+  or Yes removes the document and its whole history; any other key, No, a
+  pointer press anywhere but the two buttons, or focus leaving it answers no
+  (`sheet not removed` in the footer). `y` checks the name
   again: if a tile opened it, or a `:name` began retiring it, while the
   question stood, nothing is removed (`sheet 'x' not removed: it is open in
   another tile` / `…: it is being removed`). A removal the data service
@@ -1104,6 +1117,41 @@ tile holds:
 
 A sheet name may not hold a control character: the store joins document key
 parts with `U+001F`.
+
+#### Sheets by pointer
+
+Each sheet verb has a pointer and palette form that takes the command's own
+route, so every refusal above applies unchanged. The palette actions
+(`Open sheet…`, `Rename sheet…`, `New sheet`, `Remove sheet…`) have no
+default key.
+
+- A click on the header's sheet name (tooltip `Sheets`) opens the sheet
+  picker under it: a filter field over every known sheet, every sheet a tile
+  holds, and this tile's own, opened on the current sheet (ticked). A sheet
+  another tile holds says `open`. Typing filters (the shared fuzzy match),
+  `up`/`down` step, `tab` completes the field to the highlighted name, a
+  hover moves the highlight, and `enter` or a row click picks through `:e`.
+  A refusal shows in the footer and keeps the picker open; `enter` with
+  nothing matching says `no sheet matches`. `escape`, a second click on the
+  name, or a press outside closes it. The rows are prepared when the picker
+  opens and do not follow later catalog changes; the pick itself decides.
+- A double-click on the name replaces it with a rename field holding the
+  name, all selected. `enter` renames through `:name`'s parse and route; a
+  refusal shows in the footer and keeps the field; `escape` or a press
+  outside cancels without renaming; `tab` keeps the keyboard in the field.
+  A double-click renames only when both presses reached the name: one whose
+  first press landed anywhere else (the open picker, another surface painted
+  over the tile) is a single click. A press on the name with a modifier held
+  is the shell's (a tile drag, a fullscreen double-click) and opens nothing.
+  A rename refused whatever the
+  name (loading, a failed load, an unconfirmed rename) never opens the
+  field; the footer says why, and the menu's row is greyed with the reason.
+- The menu's `Remove sheet…` opens the same picker to remove: a pick arms
+  `:rm`'s confirm, and the current sheet is refused with `:rm`'s words.
+  `New sheet` is `:new` without a name.
+- The picker's filter and the rename field put the tile in insert mode, so
+  letters typed into them never reach shell bindings. A command, a search,
+  or any other verb closes them, as it closes the other fields.
 
 A save's outcome goes to the tile that queued it, not to whichever tile holds
 the name now. A tile that has moved on (`:e`, `:new`) and hears its old
@@ -1152,8 +1200,8 @@ column as each row's handle.
 
 **Verbs.** In visual mode the verbs are single keys; the doubled normal-mode
 forms (`y y`, `y c`, `d d`) are not bound there, nor are `p`, `shift+p`,
-`u`, `ctrl+r`, `o`, `n`, `shift+n`, `space`, the `z` folds, `g m` and `.`
-(the palette still reaches them). A verb that refuses keeps the
+`u`, `ctrl+r`, `o`, `shift+o`, `n`, `shift+n`, `space`, the `z` folds, `g m`
+and `.` (the palette still reaches them). A verb that refuses keeps the
 selection and says why in the footer; a success notice goes to the header.
 
 - `y` ends the selection. Under `V` it copies the shorthand of the top-most

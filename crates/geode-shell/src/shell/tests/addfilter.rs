@@ -18,7 +18,8 @@ fn expr_scope(text: &str) -> Scope {
 
 fn terms(frame: &Entity<crate::frame::Frame>, vcx: &gpui::VisualTestContext) -> Vec<String> {
     frame.read_with(vcx, |f, _| {
-        f.scope()
+        f.shared()
+            .scope()
             .expression
             .as_ref()
             .map(|e| e.conjuncts().iter().map(|t| t.to_string()).collect())
@@ -47,7 +48,7 @@ fn shell_with_expr(
     let shell = shell_of(&window, &mut vcx);
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
     frame.update(&mut vcx, |f, cx| {
-        f.set_scope(expr_scope(expr));
+        f.shared_mut().set_scope(expr_scope(expr));
         cx.notify();
     });
     vcx.run_until_parked();
@@ -250,7 +251,7 @@ fn a_term_gone_at_commit_refuses_inline(cx: &mut gpui::TestAppContext) {
     let (shell, frame, mut vcx) = shell_with_expr(cx, "a = 1 and b = 2");
     click(&mut vcx, "scope-expr-chip-1");
     frame.update(&mut vcx, |f, cx| {
-        f.set_scope(expr_scope("a = 1"));
+        f.shared_mut().set_scope(expr_scope("a = 1"));
         cx.notify();
     });
     vcx.simulate_keystrokes("enter");
@@ -268,7 +269,7 @@ fn a_term_replaced_underneath_refuses_edit_and_removal(cx: &mut gpui::TestAppCon
     let (shell, frame, mut vcx) = shell_with_expr(cx, "a = 1 and b = 2");
     click(&mut vcx, "scope-expr-chip-1");
     frame.update(&mut vcx, |f, cx| {
-        f.set_scope(expr_scope("x = 1 and y = 2"));
+        f.shared_mut().set_scope(expr_scope("x = 1 and y = 2"));
         cx.notify();
     });
     vcx.simulate_input(" or z = 3");
@@ -403,7 +404,7 @@ fn closing_the_menu_cancels_a_pending_sequence(cx: &mut gpui::TestAppContext) {
     let shell = shell_of(&window, &mut vcx);
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
     frame.update(&mut vcx, |f, cx| {
-        f.set_scope(expr_scope("a = 1"));
+        f.shared_mut().set_scope(expr_scope("a = 1"));
         cx.notify();
     });
     vcx.run_until_parked();
@@ -481,7 +482,7 @@ fn the_add_and_clear_expression_actions(cx: &mut gpui::TestAppContext) {
 
     dispatch_action(&shell, "frame::clear_expression", &mut vcx);
     assert_eq!(
-        frame.read_with(&vcx, |f, _| f.scope().expression.clone()),
+        frame.read_with(&vcx, |f, _| f.shared().scope().expression.clone()),
         None
     );
     dispatch_action(&shell, "frame::scope_undo", &mut vcx);

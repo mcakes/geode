@@ -1,4 +1,5 @@
-//! A filter-only choice modal for grouping slots, tile kinds, and log levels.
+//! A filter-only choice modal for grouping slots, saved scopes, tile kinds,
+//! columns, and log levels.
 //! [`ChoiceList`] owns ranking, highlight, Tab completion, and navigation.
 //! Enter or a row click commits the selected option.
 //!
@@ -6,6 +7,13 @@
 //! an empty query, digits activate a configured slot and 0 restores the view
 //! default. Tile choices follow roster order and omit the placeholder; a
 //! commit fills the focused placeholder or splits the focused real tile.
+//!
+//! Scope (`frame::scope`) lists the target frame's saved scopes as they
+//! are at open — not the startup action registry — by name, opening on
+//! the one equal to the current scope. A pick loads through
+//! `ShellView::load_saved_scope`, the `scope::<name>` actions' own
+//! undoable path; a name removed under the open picker posts a notice.
+//! With no saved scope the list is replaced by a how-to-save hint.
 //!
 //! Log level uses two steps in the same modal: select a target, then a level.
 //! Escape or the title row's Back button returns from the level step to targets.
@@ -29,6 +37,8 @@ use gpui_component::{ActiveTheme as _, v_flex};
 use geode_core::groupings::GroupingSlots;
 use geode_core::launch::LaunchContext;
 use geode_core::log::{Level, LogLevels, TARGETS};
+use geode_core::scope::Scope;
+use geode_core::scopes::SavedScopes;
 use geode_core::tile_columns::{TileColumn, TileColumns};
 
 use crate::choice::{self, ChoiceKey, ChoiceList};
@@ -74,6 +84,10 @@ pub enum Target {
         view: String,
         names: Vec<String>,
     },
+    /// `frame::scope`: the saved scope names, read from the target frame's
+    /// live saved scopes at open. `names[i]` is the scope declared option
+    /// `i` loads (the row text is the name itself).
+    Scope { names: Vec<String> },
     /// Log-level stage: `None` shows targets; `Some(target)` shows levels.
     LogLevel {
         targets: Vec<String>,
@@ -201,6 +215,26 @@ impl ChoiceDialogState {
         })
     }
 
+    /// One row per saved scope, spelled as its name, in the saved set's
+    /// order (`SavedScopes` is a name-ordered map). The highlight opens on
+    /// the first saved scope EQUAL to `current` (the frame's scope), so
+    /// `enter` on an untouched picker changes nothing; else on the first
+    /// row. An empty set is an empty list: nothing is lit and `enter`
+    /// picks nothing.
+    pub fn scopes(saved: &SavedScopes, current: &Scope) -> Self {
+        let names: Vec<String> = saved.keys().cloned().collect();
+        let active = saved
+            .iter()
+            .find(|(_, scope)| *scope == current)
+            .map(|(name, _)| name.as_str());
+        let mut list = ChoiceList::new(names.clone(), choice::DEFAULT_CAP);
+        list.place(active);
+        Self {
+            list,
+            target: Target::Scope { names },
+        }
+    }
+
     /// The modal's title: the chrome's fixed words, or `Open {underlying}…`
     /// for a context launch.
     pub fn title(&self) -> SharedString {
@@ -213,9 +247,10 @@ impl ChoiceDialogState {
                 Domain::Schema => format!("Edit column in schema \u{b7} {view}").into(),
                 _ => format!("Edit column in view \u{b7} {view}").into(),
             },
-            Target::Grouping { .. } | Target::TileKind { .. } | Target::LogLevel { .. } => {
-                chrome(&self.target).0.into()
-            }
+            Target::Grouping { .. }
+            | Target::TileKind { .. }
+            | Target::Scope { .. }
+            | Target::LogLevel { .. } => chrome(&self.target).0.into(),
         }
     }
 
@@ -281,6 +316,7 @@ impl ChoiceDialogState {
                 view: view.clone(),
                 column: names[declared].clone(),
             },
+            Target::Scope { names } => Pick::Scope(names[declared].clone()),
             Target::LogLevel { targets, chosen } => match chosen {
                 None => Pick::LogTarget(targets[declared].clone()),
                 Some(target) => Pick::LogLevel(target.clone(), LEVEL_WORDS[declared].1),
@@ -309,6 +345,7 @@ impl ChoiceDialogState {
             Pick::Kind(_)
             | Pick::KindWith(..)
             | Pick::Column { .. }
+            | Pick::Scope(_)
             | Pick::LogTarget(_)
             | Pick::LogLevel(..) => None,
         }
@@ -319,7 +356,7 @@ impl ChoiceDialogState {
 /// dialog state: a pick is a one-off event whose commit drops that state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pick {
-    /// `Frame::set_active_slot`; `None` is the view default.
+    /// `FrameViewMut::set_active_slot`; `None` is the view default.
     Slot(Option<u8>),
     /// `ShellView::add_tile` of this kind.
     Kind(String),
@@ -332,6 +369,8 @@ pub enum Pick {
         view: String,
         column: String,
     },
+    /// `ShellView::load_saved_scope` of this name.
+    Scope(String),
     /// Step 1 of `Set log level…`: replace the rows with the levels.
     LogTarget(String),
     /// Step 2: `Diagnostics::request_level`.
@@ -408,6 +447,21 @@ const COLUMN_HINTS: &[Hint] = &[
     Hint::Text("close"),
 ];
 
+const SCOPE_HINTS: &[Hint] = &[
+    Hint::Text("type to filter ·"),
+    Hint::Key("up"),
+    Hint::Key("down"),
+    Hint::Text("move ·"),
+    Hint::Key("enter"),
+    Hint::Text("load ·"),
+    Hint::Key("escape"),
+    Hint::Text("close"),
+];
+
+/// The scope picker's footer with no saved scope: no row to move over and
+/// nothing for Enter to load, so only the way out is offered.
+const SCOPE_EMPTY_HINTS: &[Hint] = &[Hint::Key("escape"), Hint::Text("close")];
+
 const LOG_HINTS: &[Hint] = &[
     Hint::Text("type to filter ·"),
     Hint::Key("up"),
@@ -432,6 +486,7 @@ fn chrome(target: &Target) -> (&'static str, &'static str, &'static str, &'stati
         Target::TileKindWith { .. } => ("Open in\u{2026}", "tile", "tile-hints", TILE_HINTS),
         // Fallback only: `title()` names the view and the dialog.
         Target::Column { .. } => ("Edit column", "column", "column-hints", COLUMN_HINTS),
+        Target::Scope { .. } => ("Scope", "scope", "scope-hints", SCOPE_HINTS),
         Target::LogLevel { .. } => ("Log level", "loglevel", "loglevel-hints", LOG_HINTS),
     }
 }
@@ -440,8 +495,20 @@ fn chrome(target: &Target) -> (&'static str, &'static str, &'static str, &'stati
 /// toolbar readout's click.
 pub fn open_grouping(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
     let state = {
-        let frame = view.frame.read(cx);
+        let frame = view.target_frame().read(cx);
         ChoiceDialogState::grouping(frame.slots(), frame.active_slot())
+    };
+    open(view, state, window, cx);
+}
+
+/// Open on the target frame's saved scopes — `frame::scope` and the
+/// toolbar's load glyph. The rows are the frame's LIVE saved scopes, read
+/// now, so a scope saved or reloaded since startup is listed (the
+/// palette's `scope::<name>` rows are fixed at startup).
+pub fn open_scopes(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
+    let state = {
+        let frame = view.target_frame().read(cx);
+        ChoiceDialogState::scopes(frame.saved_scopes(), frame.scope())
     };
     open(view, state, window, cx);
 }
@@ -595,14 +662,19 @@ fn back_to_targets(
 /// Notice for a slot removed after the dialog captured its rows.
 pub(super) const SLOT_GONE: &str = "that grouping slot is no longer configured";
 
+/// Notice for a saved scope removed after the dialog captured its rows.
+pub(super) const SCOPE_GONE: &str = "that saved scope no longer exists";
+
 /// Commit through the target's operation. Grouping revalidates the slot
-/// against the frame. Tile kind closes the modal before calling `add_tile`,
+/// against the frame; a scope loads through `load_saved_scope`, the
+/// `scope::<name>` actions' own path, and a name gone since the open
+/// posts [`SCOPE_GONE`]. Tile kind closes the modal before calling `add_tile`,
 /// so modal focus return precedes occupant creation. A log target replaces
 /// the rows without closing; a log level requests the change and closes.
 fn commit(shell: &mut ShellView, pick: Pick, window: &mut Window, cx: &mut Context<ShellView>) {
     match pick {
         Pick::Slot(slot) => {
-            let (changed, still_there) = shell.frame.update(cx, |f, cx| {
+            let (changed, still_there) = shell.target_frame().update(cx, |f, cx| {
                 let changed = f.set_active_slot(slot);
                 if changed {
                     cx.notify();
@@ -611,6 +683,12 @@ fn commit(shell: &mut ShellView, pick: Pick, window: &mut Window, cx: &mut Conte
             });
             if !changed && !still_there {
                 shell.notice = Some(SLOT_GONE);
+            }
+            shell.close_modal(window, cx);
+        }
+        Pick::Scope(name) => {
+            if shell.load_saved_scope(&name, cx).is_err() {
+                shell.notice = Some(SCOPE_GONE);
             }
             shell.close_modal(window, cx);
         }
@@ -766,6 +844,12 @@ fn build(
         return div().into_any_element();
     };
     let (_, prefix, hints_selector, hints) = chrome(&state.target);
+    let no_scopes = matches!(state.target, Target::Scope { .. }) && state.list.options().is_empty();
+    let (hints_selector, hints) = if no_scopes {
+        ("scope-empty-hints", SCOPE_EMPTY_HINTS)
+    } else {
+        (hints_selector, hints)
+    };
     let theme = cx.theme();
     let muted = theme.muted_foreground;
     let click_entity = entity.clone();
@@ -786,12 +870,45 @@ fn build(
             });
         },
     );
+    // No saved scope at all: in place of an empty list, say how to make one.
+    let body = if no_scopes {
+        no_scopes_hint(muted, cx)
+    } else {
+        rows
+    };
     v_flex()
         .gap_2()
         .w(scale::design(WIDTH))
         .child(dialog::filter_row(&shell.dialog_input, None, cx))
-        .child(rows)
+        .child(body)
         .child(hint_row(hints, hints_selector, WIDTH, muted, theme.border))
+        .into_any_element()
+}
+
+/// The scope picker's empty state: how to save the first scope. Names the
+/// `scope::save_current` chord from the live keymap when one is bound
+/// (none is by default), else the palette row's title. Painted only while
+/// the picker is open on an empty set, so the one lookup is not per-frame
+/// work on any other surface.
+fn no_scopes_hint(muted: gpui::Hsla, cx: &App) -> AnyElement {
+    let chord = cx
+        .try_global::<crate::tips::Chords>()
+        .and_then(|chords| crate::tips::chord_for(&chords.0, "scope::save_current"));
+    let lead = "No saved scopes \u{2014} narrow the scope, then save it with the save glyph or";
+    gpui_component::h_flex()
+        .id("scope-empty-hint")
+        .gap_1()
+        .items_center()
+        .flex_wrap()
+        .px_3()
+        .text_sm()
+        .text_color(muted)
+        .debug_selector(|| "scope-empty-hint".to_string())
+        .child(lead)
+        .map(|el| match chord {
+            Some(keys) => el.child(super::kbd::binding(&keys)),
+            None => el.child("Scope: Save current as\u{2026}"),
+        })
         .into_any_element()
 }
 
@@ -1032,5 +1149,84 @@ mod tests {
                 geode_core::log::Level::TRACE
             ))
         );
+    }
+
+    fn text_scope(text: &str) -> geode_core::scope::Scope {
+        geode_core::scope::Scope {
+            text: Some(text.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn saved(names: &[(&str, &str)]) -> geode_core::scopes::SavedScopes {
+        names
+            .iter()
+            .map(|(name, text)| ((*name).to_string(), text_scope(text)))
+            .collect()
+    }
+
+    /// One row per saved scope, spelled as its name, in the saved set's
+    /// own (name) order; with no scope equal to the frame's the first row
+    /// is lit.
+    #[test]
+    fn scope_rows_are_the_saved_names_in_order_the_first_lit() {
+        let state = ChoiceDialogState::scopes(
+            &saved(&[("us", "us"), ("eu", "eu"), ("asia", "asia")]),
+            &geode_core::scope::Scope::default(),
+        );
+        assert_eq!(state.list.options(), ["asia", "eu", "us"]);
+        assert_eq!(state.highlighted_pick(), Some(Pick::Scope("asia".into())));
+        assert_eq!(state.title().as_ref(), "Scope");
+        assert_eq!(state.jump("1"), None, "digits type on this target");
+    }
+
+    /// The row whose saved scope equals the frame's current scope is lit,
+    /// so `enter` on an untouched picker reloads what is already there.
+    #[test]
+    fn the_scope_equal_to_the_current_one_is_lit() {
+        let state = ChoiceDialogState::scopes(
+            &saved(&[("asia", "asia"), ("eu", "eu"), ("us", "us")]),
+            &text_scope("eu"),
+        );
+        assert_eq!(state.highlighted_pick(), Some(Pick::Scope("eu".into())));
+    }
+
+    /// Two saved scopes equal to the current one: the first in row order.
+    #[test]
+    fn of_two_equal_saved_scopes_the_first_is_lit() {
+        let state = ChoiceDialogState::scopes(
+            &saved(&[("asia", "asia"), ("eu", "same"), ("us", "same")]),
+            &text_scope("same"),
+        );
+        assert_eq!(state.highlighted_pick(), Some(Pick::Scope("eu".into())));
+    }
+
+    /// No saved scopes: an empty list, nothing to pick, no panic.
+    #[test]
+    fn no_saved_scopes_is_an_empty_list_with_nothing_to_pick() {
+        let state = ChoiceDialogState::scopes(
+            &geode_core::scopes::SavedScopes::new(),
+            &geode_core::scope::Scope::default(),
+        );
+        assert!(state.list.options().is_empty());
+        assert_eq!(state.highlighted_pick(), None);
+        assert_eq!(state.pick_at_ranked(0), None);
+    }
+
+    /// A filtered row resolves to its own name through the ranked order:
+    /// the target's names index the DECLARED options.
+    #[test]
+    fn a_filtered_scope_row_names_its_own_scope() {
+        let mut state = ChoiceDialogState::scopes(
+            &saved(&[("asia", "asia"), ("eu", "eu"), ("us", "us")]),
+            &geode_core::scope::Scope::default(),
+        );
+        state.list.set_query("us");
+        assert_eq!(state.pick_at_ranked(0), Some(Pick::Scope("us".into())));
+        assert_eq!(state.highlighted_pick(), Some(Pick::Scope("us".into())));
+        let Target::Scope { names } = &state.target else {
+            panic!("a scope target")
+        };
+        assert_eq!(names.as_slice(), state.list.options());
     }
 }

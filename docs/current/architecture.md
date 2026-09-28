@@ -104,6 +104,10 @@ Shared global frame state contains scope, grouping, and as-of. Each tile may
 follow or override parts of that state. Version counters let a module decide
 which changes require a query or rebuild without comparing whole documents.
 
+A module receives the frame as a `FrameRef`, not the bare frame entity. A
+tile's `FrameRef` is bound to its workspace for life; reads resolve to that
+workspace's lane (see [the shared frame](shell.md#the-shared-frame)).
+
 Financial calculation is outside the application layer. An in-process
 calculation crate remains behind the same request/outcome seam that an external
 service could implement. The app may shape results through grouping,

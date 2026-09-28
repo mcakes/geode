@@ -44,6 +44,9 @@ pub(crate) struct ChoicePopup {
     /// [`Self::prepare`] indexes by `Ranked::row`.
     option_labels: Vec<SharedString>,
     paint: Rc<ChoicePaint>,
+    /// The cell's value when the popup opened. Over a selection, `enter`
+    /// on this same option is a no-op, never a fill of the selection.
+    pub opened: String,
 }
 
 /// The rows [`render_choice`] paints — the painted WINDOW of the ranked
@@ -84,6 +87,7 @@ impl ChoicePopup {
             cell,
             labels,
             option_labels,
+            opened: current.to_string(),
         };
         popup.prepare();
         popup

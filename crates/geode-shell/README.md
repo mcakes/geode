@@ -6,9 +6,11 @@ as-of), theming, the modal dialogs, and the contract a module implements
 to live in a tile. Built on gpui and gpui-component.
 
 This crate never depends on `geode-data` or on any module crate. A module
-gets shell-side handles only (a `TileId`, the frame entity, the action
+gets shell-side handles only (a `TileId`, a `FrameRef`, the action
 registry); anything it needs from data it asks `geode-data` for itself,
-and the two meet only in `geode-app`.
+and the two meet only in `geode-app`. A tile's `FrameRef` is bound to its
+workspace for life; reads resolve to that workspace's lane (see
+[the shared frame](../../docs/current/shell.md#the-shared-frame)).
 
 Current behavior and rationale: [`docs/current/shell.md`](../../docs/current/shell.md).
 Keyboard ownership, palette, completion, choices, and frame-picker contracts:
@@ -27,7 +29,8 @@ GPUI globals or provide rendering helpers.
 | `tiling` | Split/leaf/stack trees, workspaces, docks, divider and drop-zone geometry. Rendering and navigation share tree geometry; see [tiling contracts](../../docs/current/tiling.md) for focus, transfer, resize, and restoration rules. |
 | `keymap` | Keystrokes, predicates, layered binding resolution, sequences, counts, and module fragments. `GRID`/`TILELIST` are the flags a tile publishes for the shared motions. See [keymaps and actions](../../docs/current/keymaps.md) for matching, filtering, and editor limitations. |
 | `actions` | The shared action registry; the keymap maps keys to action ids and the palette lists them. |
-| `frame` | The shared frame: scope with undo/redo, the active grouping slot, as-of, recent publishes, saved scopes, named expressions (`expressions.toml`, rebuilt on reload), and the data and config generations, as one value every tile observes. `effective_scope` composes the frame and tile scope layers and resolves named references, returning the first missing or invalid one as an error instead of a scope. |
+| `frame` | The shared frame: scope with undo/redo, the active grouping slot, as-of, recent publishes, saved scopes, named expressions (`expressions.toml`, rebuilt on reload), and the data and config generations, as one value every tile observes. The selection lives in lanes — one shared, one per pinned workspace (`pin`, `unpin`) — read through `FrameView` and written through `FrameViewMut`; every lane's generations come from one counter, so a number names one value in any lane. See [workspace lanes](../../docs/current/shell.md#workspace-lanes). `effective_scope` composes the frame and tile scope layers and resolves named references, returning the first missing or invalid one as an error instead of a scope. |
+| `frame_ref` | `FrameRef`, the workspace-bound frame handle a module receives: `read`/`update` resolve to that workspace's lane. |
 | `scopebar`, `commandline`, `palette_usage`, `listfilter`, `choice`, `vimnav`, `vimfind`, `footer` | The models behind the scope bar, the per-tile `:` line, palette ranking (frecency), filtered lists, choice-with-typeahead, vim-style list motion and `/` find, and dialog footer hints. |
 | `exprcomplete` | Pure scope-expression completion: derives context from text and caret, retains up to 50 ranked rows, and caches categorical values per column. Loading tags reject stale replies; superseded loading entries are discarded so revisiting a column can request again. Scope changes clear the cache. Whole/Add frame dialogs also offer named expressions, whose acceptance stages a name and erases the typed prefix. |
 | `dialogmode` | Shared Normal/Filter transitions. Keyboard and frozen-row clicks snapshot the query; Escape restores it and bare Enter keeps it, with neither exit acting on a row. See [dialog filtering](../../docs/current/shell.md#dialog-filtering) for focus and stage-specific exceptions. |
@@ -44,7 +47,9 @@ GPUI globals or provide rendering helpers.
 | Module | Holds |
 |---|---|
 | `shell` | `ShellView`, the window owner: tile occupants and focus, input dispatch, rendering, drag and drop, chrome (the status bar's first left segment is the stopped data-thread segment), dialogs and palette, hot reload, and session I/O. `aggregates` renders selection extents and totals prepared by grid tiles. Shared color helpers and `kbd` keep chrome presentation consistent. Tests live in `shell/tests/`. |
+| `shell/pin` | The workspace pin toggle (`frame::pin_workspace` and the toolbar glyph), the workspace-switch hook that re-seeds the flip baseline, and the scope field's rebinding to the active lane. |
 | `shell/dialog` | Modal stack ownership, opening, shared-input synchronization, and focus restoration. Only the top dialog renders and receives keys. A kind cannot open twice; pop restores the covered dialog's text and caret. See [modal lifetime](../../docs/current/input-and-dialogs.md#modal-lifetime-and-focus). |
+| `shell/choicedialog` | The filter-only choice modal behind the grouping picker, the scope picker (`frame::scope`: the frame's live saved scopes, loaded through `ShellView::load_saved_scope`), the tile-kind and `tile::open_with` pickers, the column lists, and `Set log level…`. One `Target` per use decides rows, title, footer and commit. See [choices](../../docs/current/input-and-dialogs.md#grouping-scope-tile-log-and-column-choices). |
 | `shell/scope_expr_view` | Frame expression editing in Whole, Term, and Add modes. Whole/Add stage named-expression chips; `mod+s` saves typed text as a named definition. Term mode can replace one guarded term with a named reference. |
 | `shell/expr_suggest` | Shared expression-completion controller and renderer for frame, Scopes, and Expressions fields. Observes text and caret changes, requests values under reserved `EXPR_KEY`, and accepts rows through undoable range replacement. Tab accepts; Shift-Tab, Up/Down, and Ctrl-P/Ctrl-N move the highlight. Named rows stage references only in frame Whole/Add mode. Named-definition fields request unscoped values; unresolved scope references report an error before requesting. |
 | `module` | The module-hosting contract: `TileContent` (including `closed`, called once on removal after `set_visible(false)`, `launch_context`, `tile_columns`, `launched`, and `autosize_columns`, whose default refuses with `colfit::NO_TABLE`; `tile::autosize_columns` calls it on the focused occupant only and shows a refusal as a notice), `ModuleFactory` (including `accepts` and `launch_state`), `ModuleRoster`, `Delivery`, `StackHandle`. `module::recording` is the test double a downstream crate hosts a neighbour with. |
