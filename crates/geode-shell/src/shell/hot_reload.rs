@@ -282,20 +282,29 @@ impl ShellView {
                 // at once, not at its next keystroke — including one covered
                 // by another dialog. `expr_suggest::completion_mut` reaches
                 // only `top_kind()`'s field, so a covered `ScopeExpr` dialog
-                // or a covered `Object` dialog's open expression field is
-                // rebuilt directly here instead, and shows fresh suggestions
-                // the moment it is revealed rather than at its own next edit.
+                // or a covered `Object` dialog's open expression field (live
+                // or parked under another domain's dialog) is rebuilt directly
+                // here instead, and shows fresh suggestions the moment it is
+                // revealed rather than at its own next edit.
                 self.expr_vocab = std::rc::Rc::new(super::expr_vocab(&self.services.config));
                 let vocab = self.expr_vocab.clone();
                 if let Some(state) = self.scope_expr_dialog.as_mut() {
                     state.completion.rebuild(&vocab);
                 }
-                if let Some(state) = self.object_dialog.as_mut()
-                    && let Some(expr) = state.expr.as_mut()
+                for state in self
+                    .object_dialog
+                    .iter_mut()
+                    .chain(super::dialog::parked_objects_mut(&mut self.modals))
                 {
-                    expr.rebuild(&vocab);
+                    if let Some(expr) = state.expr.as_mut() {
+                        expr.rebuild(&vocab);
+                    }
                 }
             }
+
+            // Named colors may have changed; open column stages, covered or not,
+            // offer the new set.
+            super::objectdialog::render::refresh_color_choices(self);
 
             if theme_changed {
                 self.services

@@ -54,18 +54,6 @@ pub fn menu_binding(keystrokes: &[Keystroke], colour: Hsla) -> Div {
         }))
 }
 
-/// [`spec`] for a menu's trailing lane: keys through [`menu_binding`],
-/// anything else as text in the lane's `colour`.
-pub fn menu_spec(spec: &str, colour: Hsla) -> AnyElement {
-    match spec_keys(spec) {
-        Some(keys) => menu_binding(&keys, colour).into_any_element(),
-        None => gpui::div()
-            .text_color(colour)
-            .child(SharedString::from(spec.to_string()))
-            .into_any_element(),
-    }
-}
-
 /// A hint verb beside its binding: the chips, then the word.
 pub fn hint(keystrokes: &[Keystroke], word: impl Into<SharedString>) -> Div {
     h_flex()

@@ -809,31 +809,39 @@ pub(super) const AUTO: &str = "auto";
 const MIN_WIDTH: i64 = 20;
 const MAX_WIDTH: i64 = 2000;
 
-/// Build the same seven presentation fields for Views and Schema, with every field
-/// carrying the supplied overlay destination. Seed effective values using kind defaults
-/// rather than unset placeholders. The writer later omits values equal to its inherited
-/// baseline.
-///
-/// Named colors follow the built-in choices. Preserve an unknown configured color as
-/// an extra option so the current value remains visible and repairable.
-pub fn column_fields(item: &ListItem, colors: &[String], dest: Destination) -> Vec<Field> {
-    let p = &item.presentation;
-    let effective = kind_default(item).with(p);
-
-    let mut color_options: Vec<String> = geode_core::colour::RESERVED_NAMES
+/// The options a column's `color` choice offers: the reserved names, then the named
+/// colors, then `current` if neither lists it, so an unknown or removed color stays
+/// visible and repairable. The one builder of this list, shared by [`column_fields`]
+/// and [`super::Draft::refresh_color_options`] so the two cannot drift.
+pub fn color_options(colors: &[String], current: &str) -> Vec<String> {
+    let mut options: Vec<String> = geode_core::colour::RESERVED_NAMES
         .iter()
         .map(|name| (*name).to_string())
         .collect();
-    color_options.extend(
+    options.extend(
         colors
             .iter()
             .filter(|name| !geode_core::colour::RESERVED_NAMES.contains(&name.as_str()))
             .cloned(),
     );
-    let current_color = color_key(&effective.colour);
-    if !color_options.contains(&current_color) {
-        color_options.push(current_color.clone());
+    if !options.iter().any(|option| option == current) {
+        options.push(current.to_string());
     }
+    options
+}
+
+/// Build the same seven presentation fields for Views and Schema, with every field
+/// carrying the supplied overlay destination. Seed effective values using kind defaults
+/// rather than unset placeholders. The writer later omits values equal to its inherited
+/// baseline.
+///
+/// Named colors follow the built-in choices (see [`color_options`]).
+pub fn column_fields(item: &ListItem, colors: &[String], dest: Destination) -> Vec<Field> {
+    let p = &item.presentation;
+    let effective = kind_default(item).with(p);
+
+    let current_color = color_key(&effective.colour);
+    let color_options = color_options(colors, &current_color);
 
     let fields = vec![
         text_row("label", "Label", p.label.clone().unwrap_or_default(), dest),

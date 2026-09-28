@@ -197,11 +197,51 @@ itself; its hidden children are not visited.
   `can't group: lines are inside a package`.
 - `g u` (`Rows`) ungroups every selected package; lines in the selection are
   ignored; no package selected refuses.
-- `i` in a `Block` behaves as §4.4 (one value to every accepting cell).
+- `y` (`Block`) copies the block as TSV (§4.2) and leaves the register alone.
 - Every bulk operation is one undo step: its edits apply as a batch whose
   inverses concatenate into a single undo entry. One `u` restores all of it,
   one `ctrl+r` redoes all of it.
 - A count on `g p` keeps its meaning only with no selection.
+
+**Cell edits over a selection** (ruling 2026-09-27):
+
+- **Edits act on lines.** A selected package row stands for all of its legs,
+  whether it is open or not. The edited set is the deduplicated set of lines.
+  A line is itself; a package is its legs. A package and its own selected
+  legs therefore never edit a leg twice. A call spread's strikes step or
+  take a typed value leg by leg. The package's own `/`-list cell would
+  refuse to nudge.
+- **Columns.** Under `V`, `i` and the step act on the cursor's column only,
+  down the selected rows. Otherwise one typed value would land in qty,
+  strike, barrier and both shifts at once. Under `v` they act on the
+  block's columns.
+- **Typed value.** `i` / `enter` opens the editor on the cursor cell.
+  - On commit, the text goes through each target line's own commit rule
+    (`cell::commit`, or the expiry date commit).
+  - A read-only column, a barrier on a vanilla line, or a value the
+    column's rule refuses is skipped and counted in the notice
+    (`set 6 cells, skipped 2 (read-only)`).
+  - If nothing accepts, the commit refuses and the editor stays open.
+- **Live step.** This is the same rule as §4.4. While the editor text is
+  untouched, each `up`/`down` (`shift` ×10) steps every target cell.
+  - Each cell steps from its own current text by that column's own nudge
+    rule (`cell::nudge`), and the grid repaints. Cells that cannot step are
+    skipped and counted.
+  - A press is all-or-nothing, and a refused press writes nothing.
+  - `enter` keeps every step as **one** undo entry. `escape` rolls back
+    every step since `i`, but only while the steps are still the sheet's
+    last change.
+  - Typing turns the edit absolute.
+  - Every step reprices the lines it touched through the tile's ordinary
+    repricing path.
+- A date or choice cursor cell keeps its own editor behaviour, and its
+  commit is absolute.
+
+**Footer** (ruling 2026-09-27). While a selection is live the footer shows
+the extent. Beside it are totals of `price`, `delta`, `gamma`, `vega`,
+`theta` and `rho` over the **top-most** selected rows (§1 ruling 2). A
+package already sums its legs, so a package and its own legs never both
+count. A refusal notice takes the footer while it stands.
 
 ### 4.6 Kind mismatch
 

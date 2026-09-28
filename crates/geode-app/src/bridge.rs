@@ -2614,6 +2614,73 @@ role = "key"
         );
     }
 
+    /// A press on the `:rm` prompt itself answers "no" and takes no focus
+    /// (the prompt's own press-to-focus would hand the keyboard back to a
+    /// question that is gone). The keyboard returns to the tile through the
+    /// shell's restoration path: the very next `j` moves the cursor.
+    #[gpui::test]
+    fn the_tile_answers_keys_after_a_press_on_the_rm_prompt(cx: &mut gpui::TestAppContext) {
+        use geode_pricer::store::SheetStore as _;
+        let (handle, _rx) = DataHandle::for_tests();
+        let store = MemorySheetStore::default();
+        store.set_known(vec!["x".into()]);
+        let pricer = Rc::new(PricerFactory::new(
+            handle,
+            Rc::new(store.clone()),
+            Views::builtin(),
+            TemplateSet::builtin(),
+            PricerSettings::default(),
+        ));
+        let (services, tiles) = with_a_pricer_tile_on(test_shell_services(), pricer, "a");
+        let window = open_pricer_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let tile = tiles.borrow()[0].clone();
+        type_a_line(&mut vcx, "-5 SPX Z26 5000 C");
+        vcx.simulate_input("-3 SPX Z26 5100 C");
+        vcx.simulate_keystrokes("enter");
+        vcx.simulate_keystrokes("escape");
+        vcx.simulate_keystrokes("k");
+        vcx.run_until_parked();
+        let cursor = |vcx: &gpui::VisualTestContext| {
+            tile.read_with(vcx, |t, cx| t.serialize(cx).get("cursor").cloned())
+        };
+        let mode = |vcx: &gpui::VisualTestContext| {
+            tile.read_with(vcx, |t, _| {
+                t.key_context().get("mode").unwrap_or("").to_string()
+            })
+        };
+
+        type_command(&mut vcx, "rm x");
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(mode(&vcx), "insert", "fixture: `:rm x` armed the confirm");
+        let at = vcx
+            .debug_bounds("pricer-remove-confirm-1")
+            .expect("the prompt is painted")
+            .center();
+        vcx.simulate_click(at, gpui::Modifiers::default());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(mode(&vcx), "normal", "the press cancelled the confirm");
+        assert!(store.forgets().is_empty(), "a press is not `y`");
+
+        let before = cursor(&vcx);
+        vcx.simulate_keystrokes("j");
+        vcx.run_until_parked();
+        assert_ne!(
+            cursor(&vcx),
+            before,
+            "`j` reached the tile with no other click after the prompt press"
+        );
+    }
+
     type PricerTiles = Rc<RefCell<Vec<Entity<geode_pricer::tile::PricerTile>>>>;
 
     /// Forwards to the pricer factory exactly as `main`'s handle does and

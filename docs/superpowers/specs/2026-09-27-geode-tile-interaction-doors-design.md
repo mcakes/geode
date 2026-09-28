@@ -107,10 +107,12 @@ One model and one renderer for `.` action menus.
 
 The in-tile y/n prompt.
 
-- **While armed:** the confirm holds focus and paints its prompt through `notice`.
+- **While armed:** the confirm holds focus and paints its prompt in `notice`'s one-line shape, in the foreground color
+  (ruled 2026-09-27: no visible change).
   A bare `y` confirms and runs the module's action. Any other key, a pointer press
-  anywhere in the tile, or a blur cancels it. Focus returns to where it was when
-  the confirm was armed. Blur-then-drop is observed: the prompt's focus handle is
+  anywhere in the tile, or a blur cancels it. Focus returns to the tile through the shell's existing restoration path (the
+  confirm blurs; ruled 2026-09-27 — the handle focused at arm time is a closing
+  input and refocusing it would strand the keyboard). Blur-then-drop is observed: the prompt's focus handle is
   released before the state drops.
 - **Module supplies:** the question text and the confirm action.
 - **Door owns:** arm, disarm, cancel-on-key, cancel-on-pointer, cancel-on-blur and

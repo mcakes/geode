@@ -35,7 +35,7 @@ impl TimeseriesTile {
                     -(n as isize)
                 };
                 if let Some(Popup::Menu(m)) = &mut self.popup {
-                    m.highlighted = menu::step(&m.rows, m.highlighted, delta);
+                    m.menu.step(delta);
                 }
                 cx.notify();
                 true
@@ -48,7 +48,10 @@ impl TimeseriesTile {
                 let Some(Popup::Menu(m)) = &self.popup else {
                     return false;
                 };
-                let index = m.highlighted;
+                // An all-disabled menu has no highlight: `enter` does nothing.
+                let Some(index) = m.menu.highlighted() else {
+                    return true;
+                };
                 self.menu_pick(index, window, cx);
                 true
             }
@@ -651,9 +654,9 @@ impl TimeseriesTile {
         self.close_popup_with_window(window, cx);
         self.open_menu(MenuKind::Range, cx);
         if let Some(Popup::Menu(m)) = &mut self.popup
-            && let Some(custom) = menu::custom_row(&m.rows)
+            && let Some(custom) = menu::custom_row(m.menu.rows())
         {
-            m.highlighted = custom;
+            m.menu.highlight(custom);
         }
     }
 
@@ -838,11 +841,15 @@ impl TimeseriesTile {
     /// highlight on the value in force (`menu::start`).
     pub(super) fn open_menu(&mut self, kind: MenuKind, cx: &mut Context<Self>) {
         let rows = self.menu_rows(kind, cx);
-        let highlighted = menu::start(&rows);
+        let start = menu::start(&rows);
+        let tile_id = self.id.0;
         self.popup = Some(Popup::Menu(MenuState {
             kind,
-            rows,
-            highlighted,
+            ids: MenuIds::new(
+                format!("ts-menu-{}-{tile_id}", kind.word()),
+                format!("ts-menu-row-{tile_id}"),
+            ),
+            menu: Menu::new(rows, &geode_tile::menu::live_bindings(cx)).open_at(start),
         }));
         self.notice = None;
         cx.notify();
@@ -853,11 +860,10 @@ impl TimeseriesTile {
     /// delivery can move what a row promises under an open menu (the
     /// cursor slot, the range, the frequency, the cap).
     ///
-    /// Every action row's `hint` is its action's live chord (the
-    /// footer's own rule), and so is `Custom dates…`'s when the keymap
-    /// binds one; a preset's and a frequency's is its short label.
-    pub(super) fn menu_rows(&self, kind: MenuKind, cx: &App) -> Vec<menu::MenuRow> {
-        let mut rows = match kind {
+    /// Hints are action identities the door resolves against the live
+    /// keymap; a preset's and a frequency's is its short label.
+    pub(super) fn menu_rows(&self, kind: MenuKind, cx: &App) -> Vec<Row<menu::Pick>> {
+        match kind {
             MenuKind::Actions => {
                 let default_source = cx
                     .try_global::<SeriesSettings>()
@@ -874,33 +880,7 @@ impl TimeseriesTile {
                     self.model.frequency_refusal(f, now, &as_of)
                 })
             }
-        };
-        let empty = Vec::new();
-        let bindings = cx
-            .try_global::<geode_shell::tips::Chords>()
-            .map(|c| c.0.as_slice())
-            .unwrap_or(&empty);
-        let chord = |action: &str| geode_shell::tips::chord_for(bindings, action);
-        for row in &mut rows {
-            match row {
-                menu::MenuRow::Action {
-                    pick: menu::Pick::Action(id),
-                    hint,
-                    ..
-                } => *hint = chord(&id.0).unwrap_or_default(),
-                menu::MenuRow::Action {
-                    pick: menu::Pick::CustomRange,
-                    hint,
-                    ..
-                } => {
-                    if let Some(live) = chord(menu::CUSTOM_RANGE_ACTION) {
-                        *hint = live;
-                    }
-                }
-                _ => {}
-            }
         }
-        rows
     }
 
     /// A click on the range trigger: opens the range menu through `r`'s
@@ -942,57 +922,6 @@ impl TimeseriesTile {
     /// A click on the frequency trigger: `f`'s own path, which toggles.
     pub(crate) fn freq_trigger_clicked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.dispatch(&ActionId("timeseries::freq".into()), None, window, cx);
-    }
-
-    /// A pointer resting on menu row `index`: the mouse form of `j`/`k`.
-    /// Change-only, because gpui fires this on every pointer move over
-    /// the row.
-    pub(crate) fn menu_hover(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(Popup::Menu(m)) = &mut self.popup else {
-            return;
-        };
-        if m.highlighted == index || index >= m.rows.len() {
-            return;
-        }
-        m.highlighted = index;
-        cx.notify();
-    }
-
-    /// `enter` on the highlighted row, or a click on any row: a disabled
-    /// row's reason becomes the notice and the menu stays. An enabled
-    /// action row closes the menu and re-enters [`Self::dispatch`] on
-    /// its own action id, so a row, a key and the palette take one path;
-    /// a preset or a frequency is written through the model's own setter
-    /// (`:range`'s and `:freq`'s), and `Custom dates…` opens the editor.
-    pub(crate) fn menu_pick(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(Popup::Menu(m)) = &self.popup else {
-            return;
-        };
-        let Some(menu::MenuRow::Action { pick, enabled, .. }) = m.rows.get(index) else {
-            return;
-        };
-        if let Err(reason) = enabled {
-            self.notice = Some(reason.clone());
-            cx.notify();
-            return;
-        }
-        match pick.clone() {
-            menu::Pick::Action(id) => {
-                self.close_popup_with_window(window, cx);
-                self.dispatch(&id, None, window, cx);
-            }
-            menu::Pick::CustomRange => self.open_range_editor(window, cx),
-            menu::Pick::Range(preset) => {
-                let (now, as_of) = self.now_and_as_of(cx);
-                let written = self.model.set_range(Range::Relative(preset), now, &as_of);
-                self.menu_written(written, window, cx);
-            }
-            menu::Pick::Frequency(f) => {
-                let (now, as_of) = self.now_and_as_of(cx);
-                let written = self.model.set_frequency(f, now, &as_of);
-                self.menu_written(written, window, cx);
-            }
-        }
     }
 
     /// A value row's write: on success the menu closes and the change
@@ -1213,5 +1142,56 @@ impl TimeseriesTile {
     pub(crate) fn chip_clicked(&mut self, index: usize, cx: &mut Context<Self>) {
         let changed = self.model.set_cursor(index);
         self.apply_changed(changed, cx);
+    }
+}
+
+impl MenuHost for TimeseriesTile {
+    /// A pointer resting on menu row `index`: the mouse form of `j`/`k`.
+    /// Change-only, because gpui fires this on every pointer move over
+    /// the row.
+    fn menu_hover(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(Popup::Menu(m)) = &mut self.popup
+            && m.menu.highlight(index)
+        {
+            cx.notify();
+        }
+    }
+
+    /// `enter` on the highlighted row, or a click on any row: a disabled
+    /// row's reason becomes the notice and the menu stays. An enabled
+    /// action row closes the menu and re-enters [`TimeseriesTile::dispatch`]
+    /// on its own action id, so a row, a key and the palette take one path;
+    /// a preset or a frequency is written through the model's own setter
+    /// (`:range`'s and `:freq`'s), and `Custom dates…` opens the editor.
+    fn menu_pick(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Popup::Menu(m)) = &self.popup else {
+            return;
+        };
+        let pick = match m.menu.pick(index) {
+            Some(Ok(pick)) => pick,
+            Some(Err(reason)) => {
+                self.notice = Some(reason);
+                cx.notify();
+                return;
+            }
+            None => return,
+        };
+        match pick {
+            menu::Pick::Action(id) => {
+                self.close_popup_with_window(window, cx);
+                self.dispatch(&id, None, window, cx);
+            }
+            menu::Pick::CustomRange => self.open_range_editor(window, cx),
+            menu::Pick::Range(preset) => {
+                let (now, as_of) = self.now_and_as_of(cx);
+                let written = self.model.set_range(Range::Relative(preset), now, &as_of);
+                self.menu_written(written, window, cx);
+            }
+            menu::Pick::Frequency(f) => {
+                let (now, as_of) = self.now_and_as_of(cx);
+                let written = self.model.set_frequency(f, now, &as_of);
+                self.menu_written(written, window, cx);
+            }
+        }
     }
 }

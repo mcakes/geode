@@ -27,6 +27,46 @@ Every module follows these interaction rules:
 - Stack state is visible through the shared marker in the module header.
 - Delivery matches are exhaustive so a new outcome cannot be ignored silently.
 
+## Shared tile interaction
+
+Modules build their popups, `.` action menus, in-tile y/n confirms and
+notice lines from `geode-tile`, so each rule below holds in every tile that
+has the surface. The pricer and market-data use all four, timeseries the
+popups, menus and notice line, and the blotter the notice line. Diagnostics
+has none of them.
+
+- A popup is deferred above the tile's clip and snaps inside the window with
+  an 8-pixel margin. An action menu occludes what it covers, so its hover and
+  presses do not reach the tile beneath.
+- A menu opens on its first enabled action (timeseries' range and frequency
+  menus on the enabled value in force). Key hints resolve from the live
+  keymap when the menu opens, when its rows rebuild, and when the keymap is
+  republished, so an open menu follows a reload. An action the keymap binds
+  nowhere shows an empty lane, or its `:` verb on a row that has one
+  (`:price`, `:upload`, `:rebase`, `:revert`, `:auto hold`).
+- Keyboard stepping lands only on enabled actions, clamped at either end
+  without wrapping; from a row that is not an action it lands on the first
+  enabled action. A pointer can light a disabled row, which takes no
+  highlight fill. Enter or a click on a disabled row shows its reason and
+  keeps the menu open; an enabled pick closes the menu before it dispatches.
+  Rows rebuilt under an open menu keep the highlight on its row, or snap it
+  to the nearest action.
+- A confirm holds the keyboard: bare `y` or the prompt's Yes button
+  confirms; any other key, chords included, cancels and is consumed, as does
+  its No button; a pointer press anywhere else on the tile (the gap between
+  the buttons included) or focus leaving also cancels. A press on a button
+  moves no focus and does not cancel first, so the question stands until the
+  click lands. A change that moves what the question is about
+  withdraws it unanswered: neither the confirm nor the cancel action runs,
+  and the prompt's blur is not heard as an `n`. Market-data withdraws on a
+  delivery that moves the painted document or the draft and says so in its
+  notice (`upload cancelled: a new document arrived`); the pricer withdraws
+  on a `:` command with no notice of its own. Each answer blurs the prompt before it
+  drops, and the shell's focus restoration path returns the keyboard to the
+  tile.
+- A notice is a status (muted), warning or danger line in the theme's text
+  tones; which of a tile's notices shows is the tile's own precedence.
+
 ### Autosized columns
 
 The blotter, market-data, and pricer tiles fit their columns to their content
@@ -240,7 +280,13 @@ refuse fractional deltas or integer overflow; all candidate results are
 validated before any edit is written. Bump deltas themselves are parsed as
 `f64`, so their precision is limited by that representation. See the
 [crate guide](../../crates/geode-marketdata/README.md) for grid, popup, and
-command-parser contracts.
+command-parser contracts. The `.` action list follows the
+[shared menu rules](#shared-tile-interaction): its key hints are the live
+keymap's and follow a keymap reload while it is open, the update-policy and
+kind-action rows included; `Upload`, `Rebase`, `Revert edits` and the three
+policy rows (`:auto hold`, `:auto rebase`, `:auto replace`) fall back to their
+`:` verbs when unbound, and the other rows to an empty lane. A disabled row's
+reason becomes the notice.
 
 A panel opened through an add (palette, tile picker, `open_with`, duplicate)
 with no underlying opens the underlying picker at once; a restored panel does
@@ -404,11 +450,13 @@ that document would overwrite untouched rows with old values.
 
 Arming confirmation assembles the rows and snapshots the draft. The header
 shows the target and counts of changed cells, attributes, added rows, and
-removed rows. Bare unmodified `y` submits that snapshot after rechecking the
-live frame, live painted generation, and full draft equality. Every other key
-cancels and is consumed, including chords. A pointer press on the tile or loss
-of focus also cancels. A delivery that changes the draft or painted generation
-withdraws the prompt.
+removed rows. Bare unmodified `y`, or the prompt's Yes button, submits that
+snapshot after rechecking the live frame, live painted generation, and full
+draft equality. Every other key cancels and is consumed, including chords; so
+does No. A pointer press anywhere else on the tile or loss of focus also
+cancels. A delivery that changes the draft or painted generation,
+or a switch of underlying, withdraws the prompt unanswered. The prompt is the
+shared `geode_tile::confirm` door.
 
 Transport success marks the draft `sent HH:MM` only if the current draft is
 still Editing and equals the submitted draft, including its base. Failure
@@ -461,7 +509,7 @@ Runtime responsibilities are split by module:
 | [`tile::data`](../../crates/geode-timeseries/src/tile/data.rs) | Fetch and query submission, delivery freshness, last-good results, and flip-barrier staging and promotion |
 | [`tile::pointer`](../../crates/geode-timeseries/src/tile/pointer.rs) | Chart hit testing, wheel navigation, pan and split drags |
 | [`tile::popups`](../../crates/geode-timeseries/src/tile/popups.rs) | Popup transitions, keyboard handling, commits, cancellation, and focus |
-| [`popup`](../../crates/geode-timeseries/src/popup.rs) | Popup state types and rendering, including shared list-row layout and hit testing |
+| [`popup`](../../crates/geode-timeseries/src/popup.rs) | Popup state types and rendering over `geode-tile`'s row shell, anchoring, menus and notice |
 
 Settings and tiles obtain configured fetch sources from the shell-published
 `SeriesSettings` global. A configured source is not proof that its adapter
@@ -552,11 +600,13 @@ affect them; cursor movement does not rebuild the data model.
 
 The header's `⋯` button, a chip's right-click, and `.` open the action menu.
 It offers popup openers, actions for the selected slot, `Frequency…`, toggles,
-and view reset. Keyboard stepping skips disabled rows, separators, and
-headings. Pointer selection can rest on a disabled row, which has no highlight
-fill; choosing it shows its reason and leaves the menu open. Enabled actions
-close the menu before dispatch. Key hints refresh when the menu opens or its
-chrome rebuilds, so an open menu can retain old hints after a keymap reload.
+and view reset. It opens on its first enabled action, and keyboard stepping
+skips disabled rows, separators, and headings. A pointer can rest on a
+disabled row, which has no highlight fill; choosing it shows its reason and
+leaves the menu open. Enabled actions close the menu before dispatch. Key
+hints are the live keymap's and are re-resolved when the menu opens, when its
+chrome rebuilds, and when the keymap is republished; an action the keymap
+binds nowhere shows an empty lane.
 
 The header shows the range and the frequency as two triggers, `1y ▾` and
 `1d ▾`; an absolute range shows its dates, `2025-09-26 – 2026-09-26 ▾`. Each
@@ -827,12 +877,15 @@ package's when its legs share one; otherwise the plain tile picker.
 
 The action menu offers repricing, grouping, ungrouping, undo, redo, deletion,
 the sheet verbs (Open sheet…, Rename sheet…, New sheet, Remove sheet…; see
-[sheets by pointer](#sheets-by-pointer)), and view selection. Key hints show
-default bindings (for the sheet rows, their `:` verbs) and do not reflect
-rebindings. Keyboard stepping skips disabled rows, separators, and headings.
-Pointer selection, the initial highlight, or a rebuilt menu can still leave a
+[sheets by pointer](#sheets-by-pointer)), and view selection. Key hints are
+the actions' live chords (`:price` and the sheet rows' `:e`, `:name`, `:new`,
+`:rm` when the keymap binds none; an empty lane for the other actions) and
+follow a keymap reload while the menu is open. The menu opens on its first
+enabled action, and keyboard stepping skips disabled rows, separators, and
+headings. A pointer, or rows rebuilt under the highlight, can still leave a
 disabled row selected. It has no highlight fill; choosing it shows its reason
-and leaves the menu open.
+in the footer and leaves the menu open. The shared rules are in
+[Shared tile interaction](#shared-tile-interaction).
 
 `y` alone is unbound: the key matcher dispatches an exact match at once, so a
 binding on `y` would make `y y` and `y c` unreachable. `g` alone is unbound for

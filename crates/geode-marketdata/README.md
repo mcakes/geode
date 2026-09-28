@@ -27,14 +27,14 @@ Current behavior and rationale:
 | `core::spec`, `core::matrix` | Panel vocabulary and prepared grids built from a snapshot plus draft. |
 | `core::draft` | Typed edits, label-based rebase, same-date group guards, and `DocumentBase` identity (source time plus optional store generation). |
 | `core::upload` | Typed whole-document assembly and row-order-independent echo comparison; minted labels are ignored and floats allow one ULP. |
-| `core::cursor`, `core::menu` | Grid navigation (wrapping, and `step_clamped` for a live selection) and available actions. Numeric nudging and date fields are re-exported from `geode-core` and `geode-widgets`. |
+| `core::cursor`, `core::menu` | Grid navigation (wrapping, and `step_clamped` for a live selection) and the action list's rows (`geode_tile::menu` rows over action ids, hints as live chords). Numeric nudging and date fields are re-exported from `geode-core` and `geode-widgets`. |
 | `core::bulk` | Selection-wide edit rules: whether a typed value lands in a cell of each kind, one arrow step's delta per column, and the `set`/`stepped` notices that count skips by reason. |
 | `commands` | The `:` line: `:rebase`, `:revert`, `:auto`, `:bump`, `:upload`, `:autosize [reset]` and the rest, parsed to data. |
-| `header` | Prepared identity, attributes, draft/upload feedback, source time, shared date-field rendering, and the menu control. |
+| `header` | Prepared identity, attributes, draft/upload feedback (notices through `geode_tile::notice`), source time, shared date-field rendering, and the menu control. |
 | `tile` | `MarketDataTile`: requests one document by key through `DataHandle`, stages under the barrier, owns the cursor, the editor, the draft and the parked drafts per underlying. |
 | `tile::select` | The `V`/`v` grid selection: its state doors, label-anchored resolution, and every verb that takes it as operand (`y`, `d`, `:bump`, the bulk commit, the live step and its undo). |
 | `delegate` | `MatrixDelegate`, the `TableDelegate` over gpui-component's table. Holds `:autosize`'s fitted widths by column label (`__row_axis` for the row labels), which `column()` prefers over the fixed defaults. |
-| `popup` | Action menu, underlying picker, and cell-choice state and rendering. Menu/picker anchor at the header; choices anchor beneath their target cell. |
+| `popup` | Underlying picker and cell-choice state and rendering over `geode_tile::popover`; the action menu is `geode_tile::menu`'s. Menu/picker anchor at the header; choices anchor beneath their target cell. |
 | `content` | The `TileContent` wrapper and `MarketDataFactory`, one per `PanelSpec`, plus the module's `ACTIONS` and `DEFAULT_KEYMAP` fragment. |
 
 ## Commands
@@ -141,15 +141,27 @@ cargo bench -p geode-marketdata    # matrix model and draft
 ## Input and popup contracts
 
 The panel reports `normal`, `visual`, `menu`, or `insert` in the shared
-`marketdata` context, with `select == rows|block` added whenever a selection
-is live. An open editor or popup outranks the selection: a selection editor
-is `insert`. Editors, underlying and choice inputs, and upload confirmation
-use insert mode. Insert bindings leave shell chords available; confirmation consumes
-every key, including chords, while armed.
+`marketdata` context, with `select == rows|block` added whenever a selection is
+live. An open editor or popup outranks the selection: a selection editor is
+`insert`. Editors, underlying and choice inputs, and upload confirmation use
+insert mode. Insert bindings leave shell chords available; confirmation
+consumes every key, including chords, while armed; a pointer press on the tile
+or focus leaving cancels it. A delivery that moves the painted document or the
+draft withdraws it unanswered (neither submit nor cancel runs) and says so in
+the notice, `upload cancelled: a new document arrived`. The upload confirm is
+`geode_tile::confirm`'s; after an answer the shell's focus restoration path
+returns the keyboard to the tile.
 
-Action-menu keyboard motion counts enabled actions and skips disabled rows,
-headings, and separators without wrapping. Pointer hover can highlight a
-refused action so its reason remains accessible.
+Action-menu stepping, hover, picking and painting are `geode_tile::menu`'s:
+the menu opens on its first enabled action; motion counts enabled actions and
+skips disabled rows, headings and separators without wrapping, and from a row
+that is not an action lands on the first enabled one; hover can light a
+refused action, which takes no fill, and Enter or a click on it makes its
+reason the notice and keeps the menu open; key hints are the live keymap's,
+resolved when the menu opens, and follow a reload while the menu is open. A
+key-only row (`Load underlying…`, a kind action) whose action the keymap binds
+nowhere shows an empty lane; `Upload`, `Rebase`, `Revert edits` and the three
+policy rows (`:auto hold|rebase|replace`) fall back to their `:` verbs.
 
 Underlying and choice lists retain every ranked match but paint a moving window
 of at most twelve rows. Hover changes selection, and clicks commit. Underlying

@@ -37,8 +37,8 @@ The tile:
 | `grid` | The prepared `GridModel`, rebuilt on change. |
 | `paint` | The per-theme paint memo, floored to a readable ratio. |
 | `delegate` | The table delegate: cells, the tree column (indent, chevron, template tag), editor, expiry date field. |
-| `header` | The prepared header row and footer. |
-| `popup` | The typeahead, the entry bar's completion list, the `.` action menu, and the sheet picker (`sheet_rows`, `SheetPicker`). |
+| `header` | The prepared header row (notices as `geode_tile::notice::Notice`), the sheet name control and rename field, and the footer. |
+| `popup` | The typeahead, the entry bar's completion list, the sheet picker (`sheet_rows`, `SheetPicker`), and `PricerPick` (what a menu row does). The menu, popup geometry, the `:rm` confirm and the header notices paint through `geode-tile`. |
 | `session` | The tile's session record, including `:autosize`'s fitted widths (`column_widths`, read leniently). |
 | `content` | The factory, keymap fragment, actions, settings, and the read-only `UnderlyingSource` seam. |
 | `tile` | `PricerTile`: modes, verbs, repricing, write-behind, load. |
@@ -225,32 +225,28 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   `save_blocked` sheet, which it reloads. `:name` forgets the old name only after a save under
   the new one is confirmed, and is refused on a sheet whose load failed (its
   fallback would replace the real document). `:rm` refuses every open name.
-- The `:rm` confirmation uses a focused prompt in the
-  header whose `on_key_down` consumes every key (bare `y` confirms), the
-  tile in `insert` mode while armed, cancelled by focus leaving or a pointer
-  press, blurred before it drops. Its Yes/No buttons (`confirm_clicked`) are
-  `y` and "any other key". The pointer cancel is the button group's own
-  listeners: outside-press (capture phase) for presses off the group, and a
-  group mouse-down for presses in the gap between the buttons, which skips a
-  press whose default a `Button` prevented. gpui's `Button` only prevents
-  the focus move on a left press; the press still bubbles to the shell's
-  tile listener, whose focus restore keeps the prompt because the prompt
-  holds focus. So a press on a button reaches its click instead of first
-  cancelling the question.
+- The `:rm` confirmation is `geode_tile::confirm`'s: a focused prompt in
+  the header that consumes every key (bare `y` confirms), with the door's
+  Yes/No buttons (`y` and "any other key"), the tile in `insert` mode while
+  armed, cancelled by focus leaving or a pointer press anywhere but the two
+  buttons, blurred before it drops. A `:` command arriving under it
+  withdraws it unanswered. After an answer the shell's focus restoration
+  path returns the keyboard to the tile.
 - The sheet picker and the rename field are pointer forms of `:e`/`:rm` and
   `:name`: a pick goes through `edit_sheet`/`arm_remove`, and the field's
   text through `commands::parse` and `rename`, so no refusal is restated.
-  Both report `mode == insert` and count in `holds_focus`, blur before they
-  drop, and close on any other verb, `:` and `/`. `RenameBlock` is the
-  rename refusal known before a name is typed (the menu greys the row with
-  its reason). The name's press listener runs in the capture phase (a
-  second click toggles the picker closed before its outside-press closer
-  runs) and prevents default so no focus-tracking ancestor takes the new
-  field's focus. The name's outside-press listener (not hover-gated, so it
-  hears presses on surfaces painted over the tile) clears
-  `last_press_on_name`, so a double-click renames only when both presses
-  hit the name. A press with any modifier opens nothing and leaves default
-  alone: mod+drag and mod+double-click fullscreen stay the shell's.
+  The picker paints through `geode_tile::popover` (surface, `row_shell`,
+  `empty_row`, `anchor_popup`). Both report `mode == insert` and count in
+  `holds_focus`, blur before they drop, and close on any other verb, `:`
+  and `/`. `RenameBlock` is the rename refusal known before a name is typed
+  (the menu greys the row with its reason). The name's press listener runs
+  in the capture phase (a second click toggles the picker closed before its
+  outside-press closer runs) and prevents default so no focus-tracking
+  ancestor takes the new field's focus. The name's outside-press listener
+  (not hover-gated, so it hears presses on surfaces painted over the tile)
+  clears `last_press_on_name`, so a double-click renames only when both
+  presses hit the name. A press with any modifier opens nothing and leaves
+  default alone: mod+drag and mod+double-click fullscreen stay the shell's.
   `lib::init` reclaims `tab` in the rename field's `PricerRename` context,
   and the field consumes it, so the keyboard never leaves the open field.
 - Known names are the store's (`set_known` from the diagnostics catalog,
@@ -289,17 +285,21 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   before every `refresh`, keyed by row count, relative cursor row and
   mode. Gutter text uses the row's floored muted paint (the row's
   own text paint on the cursor row).
-- `paint` prepares grid-row and action-menu text colors and tests their
-  contrast across every bundled theme. Row text is checked against its base,
-  hover, and selection backgrounds; menu text against popover and enabled
-  highlight backgrounds. This sweep does not cover every header or typeahead
+- `paint` prepares grid-row text colors and tests their contrast across
+  every bundled theme. Row text is checked against its base, hover, and
+  selection backgrounds; menu colors are `geode_tile::menu::MenuPaint`'s.
+  This sweep does not cover every header or typeahead
   token, and the bounded adjustment is not a guarantee for arbitrary themes.
 - A disabled action can hold the menu highlight but paints no highlight
   fill. Picking it reports its reason and keeps the menu open.
-- A menu command's title is its palette title (`content::action_title`); the
-  menu's keyboard navigation skips separators, section headers, and disabled
-  rows. Disabled actions can still hold the highlight after a pointer move,
-  opening the menu, or rebuilding its rows.
+- A menu command's title is its palette title (`content::action_title`) and
+  its key hint the action's live chord (`:price` when the keymap binds none,
+  an empty lane for the other actions), resolved when the menu opens or its
+  rows rebuild and again on every keymap publish while it is open. The menu
+  opens on its first enabled action; keyboard navigation skips separators,
+  section headers, and disabled rows, and from a row that is not an action
+  lands on the first enabled one. Disabled actions can still hold the
+  highlight after a pointer move or a rebuild of the rows under it.
 - Default column widths are checked against labels and representative large
   values at the largest font size, including padding and cursor borders.
   These samples are not numeric limits: an overflowing right-aligned value
@@ -307,9 +307,6 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 
 ## Known limitations
 
-- The action menu's key hints are the default bindings, written into the
-  menu; a user rebind is not reflected there. The market-data action list has
-  the same limitation.
 - Column widths are fixed pixels and do not follow font size. The defaults
   fit the tested samples at the largest font step and leave more space at
   smaller steps. `:autosize` (or the palette's "Autosize columns") fits

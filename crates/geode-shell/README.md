@@ -90,7 +90,11 @@ change most often hits:
   `window.open_dialog`. A mouse-opened dialog relies on the
   `prevent_default` inside that door. Openers check `dialog::can_open` before
   installing state: a duplicate kind would overwrite the covered dialog's draft.
-  Unclaimed dialog-opening chords and the palette can open above a dialog;
+  Object dialogs check `dialog::can_open_object` instead: they stack per domain,
+  and `objectdialog::render::open` parks the covered state in its stack entry
+  (`ShellModal::parked_object`) before installing its own. Code that must reach
+  a covered object dialog (deliveries, reload refreshes, write reverts) iterates
+  `object_dialog` plus `dialog::parked_objects_mut`. Unclaimed dialog-opening chords and the palette can open above a dialog;
   tile command lines, find prompts, and stack lists are refused while it is open.
 - The pure state of a dialog is the truth; `dialog::sync_dialog_text`
   reconciles the shared input's text and focus after state transitions.

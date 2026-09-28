@@ -36,6 +36,7 @@ use geode_shell::tiling::TileId;
 use geode_shell::tips;
 use geode_shell::vimfind::{FindDirection, FindStyle};
 use geode_shell::vimnav::NavCommand;
+use geode_tile::notice::{self, Notice};
 use gpui::prelude::*;
 use gpui::{
     App, ClipboardItem, Context, ElementId, Entity, IntoElement, SharedString, Window, div,
@@ -177,9 +178,9 @@ pub struct BlotterTile {
     in_flight: Option<Instant>,
     delivered_at: Option<Instant>,
     visible: bool,
-    /// Header notice with its semantic tone. Dropped sorts and selections use
-    /// `WarningText`; query/configuration failures use `DangerText`.
-    pub error: Option<(String, Tone)>,
+    /// Header notice. Dropped sorts and selections are warnings; query and
+    /// configuration failures are danger.
+    pub error: Option<Notice>,
     find: Option<FindState>,
     /// Successful outcome waiting for the frame's flip barrier, with the
     /// query's grouping and frame versions. `deliver` promotes it if its
@@ -663,10 +664,9 @@ impl BlotterTile {
                 t.delegate_mut().dropped_sort.take()
             });
             if let Some(name) = dropped_sort {
-                self.error = Some((
-                    format!("sort on '{name}' dropped: the column is no longer in this view"),
-                    Tone::WarningText,
-                ));
+                self.error = Some(Notice::warning(format!(
+                    "sort on '{name}' dropped: the column is no longer in this view"
+                )));
             }
             self.take_selection_notice(cx);
         }
@@ -678,10 +678,10 @@ impl BlotterTile {
         // unchanged, as with tile-local filters and grouping overrides.
         self.staged = None;
         let Some(view) = self.view() else {
-            self.error = Some((
-                format!("view '{}' is not configured", self.view_name),
-                Tone::DangerText,
-            ));
+            self.error = Some(Notice::danger(format!(
+                "view '{}' is not configured",
+                self.view_name
+            )));
             cx.notify();
             return;
         };
@@ -718,7 +718,7 @@ impl BlotterTile {
                 // following tile waits out `FLIP_DEADLINE`. `acted` stays
                 // set: redefining the name bumps the config version, which
                 // is the retry.
-                self.error = Some((message, Tone::DangerText));
+                self.error = Some(Notice::danger(message));
                 // Supersede any query still in flight: its outcome is for the
                 // previous scope and must not paint over this error.
                 self.tag += 1;
@@ -758,7 +758,7 @@ impl BlotterTile {
         if let Err(refusal) = queued {
             // A stopped refusal retries on the next frame change too: each
             // attempt costs nothing and re-reports the same kind.
-            self.error = Some((format!("query refused: {refusal}"), Tone::DangerText));
+            self.error = Some(Notice::danger(format!("query refused: {refusal}")));
             self.in_flight = None;
             // A refused submit has no future outcome. Arrive at the barrier so
             // other tiles can proceed, then clear `acted` so the next frame
@@ -824,7 +824,7 @@ impl BlotterTile {
                 }
             }
             Err(e) => {
-                self.error = Some((e, Tone::DangerText));
+                self.error = Some(Notice::danger(e));
                 // A failed outcome still arrives at the barrier, allowing other
                 // tiles to promote while this tile keeps its last good snapshot.
                 self.frame.update(cx, |f, cx| {
@@ -1196,7 +1196,7 @@ impl BlotterTile {
                 Lost::Row => "selection cleared: anchor row no longer shown",
                 Lost::Column => "selection cleared: anchor column no longer shown",
             };
-            self.error = Some((text.into(), Tone::WarningText));
+            self.error = Some(Notice::warning(text));
         }
     }
 
@@ -1523,7 +1523,7 @@ impl BlotterTile {
     /// The tile's current notice or error text, as the header shows it.
     #[cfg(test)]
     pub fn error_text(&self) -> Option<String> {
-        self.error.as_ref().map(|(e, _)| e.clone())
+        self.error.as_ref().map(|e| e.text().to_string())
     }
 
     /// Freshness readouts using render's clock lookup, formatting, and
@@ -1769,12 +1769,8 @@ impl gpui::Render for BlotterTile {
         {
             header = header.child(div().child("…"));
         }
-        if let Some((e, tone)) = &self.error {
-            header = header.child(
-                div()
-                    .text_color(chip::chip_paint(theme, *tone).text)
-                    .child(e.clone()),
-            );
+        if let Some(n) = &self.error {
+            header = header.child(notice::render(n, theme));
         }
 
         // Footer: counts and legends.
@@ -1868,6 +1864,7 @@ mod tests {
     use geode_shell::module::FindEvent;
     use geode_shell::tiling::TileId;
     use geode_shell::vimfind::FindStyle;
+    use geode_tile::notice::Notice;
     use gpui::px;
     use gpui::{Modifiers, MouseButton};
     use std::sync::Arc;
@@ -2619,7 +2616,7 @@ mod tests {
         };
         let error = |vcx: &gpui::VisualTestContext| {
             h.tile
-                .read_with(vcx, |t, _| t.error.as_ref().map(|e| e.0.to_string()))
+                .read_with(vcx, |t, _| t.error.as_ref().map(|e| e.text().to_string()))
         };
         h.data.fill_for_tests();
         change(&mut vcx);
@@ -2678,10 +2675,7 @@ mod tests {
         );
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.error.clone()),
-            Some((
-                "named expression 'gone' is missing".to_string(),
-                Tone::DangerText
-            ))
+            Some(Notice::danger("named expression 'gone' is missing"))
         );
         assert!(
             !h.frame.read_with(&vcx, |f, _| f.barrier_open()),
@@ -2689,7 +2683,9 @@ mod tests {
         );
         deliver(&h, &mut vcx, in_flight.tag, Ok(snapshot2()));
         assert_eq!(
-            h.tile.read_with(&vcx, |t, _| t.error.clone()).map(|e| e.0),
+            h.tile
+                .read_with(&vcx, |t, _| t.error.clone())
+                .map(|e| e.text().to_string()),
             Some("named expression 'gone' is missing".to_string()),
             "the previous scope's outcome is stale"
         );
@@ -2762,7 +2758,7 @@ mod tests {
         assert_eq!(rows, vec![0, 1, 2], "the last good snapshot stays");
         assert_eq!(
             error,
-            Some(("binder error".to_string(), Tone::DangerText)),
+            Some(Notice::danger("binder error")),
             "a delivered error still paints danger"
         );
     }
@@ -3624,17 +3620,18 @@ mod tests {
                 .read_with(&cx, |t, cx| t.table().read(cx).delegate().sort.is_none()),
             "the sorted column is gone, so the sort is gone"
         );
-        let (notice, tone) = h
+        let notice = h
             .tile
             .read_with(&cx, |t, _| t.error.clone())
             .expect("a notice names the dropped sort");
         assert!(
-            notice.contains("delta01"),
-            "the notice names the column whose sort went: {notice}"
+            notice.text().contains("delta01"),
+            "the notice names the column whose sort went: {}",
+            notice.text()
         );
         assert_eq!(
-            tone,
-            Tone::WarningText,
+            notice.tone(),
+            notice::Tone::Warning,
             "a dropped sort is a state change the trader caused, not an error"
         );
     }
@@ -5168,10 +5165,7 @@ mod tests {
             "B keeps its last-good snapshot"
         );
         let b_error = h.b.read_with(&vcx, |t, _| t.error.clone());
-        assert_eq!(
-            b_error,
-            Some(("binder error".to_string(), Tone::DangerText))
-        );
+        assert_eq!(b_error, Some(Notice::danger("binder error")));
     }
 
     /// A grouping-pinned tile ignores grouping-only changes but still belongs
