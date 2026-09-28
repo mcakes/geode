@@ -27,7 +27,9 @@
 //! not convert fails whatever the row too, *unless* a constant from a
 //! derived dimension decides the enclosing `and`/`or` first: DuckDB folds
 //! `false and x` before it converts `x`'s literal. A row value that does not
-//! convert fails that row only.
+//! convert is reported on that row: `matches` reports the error on the row
+//! whose value fails; the SQL fails the whole query, so a caller must refuse
+//! the scope if any row errs.
 
 use super::{CompareOp, Expr, Literal, Scope, derived_op_error};
 use crate::dimensions::{DerivedDimension, DerivedDimensions};
@@ -216,6 +218,12 @@ impl Scope {
     /// selection of a derived value nothing maps to keeps nothing even when
     /// a later part would be refused, because the SQL returns `false`
     /// before compiling that part.
+    ///
+    /// An `Err` on any one row refuses the whole scope. `matches` reports
+    /// the error on the row whose value fails; the SQL fails the whole
+    /// query, so a caller must refuse the scope if any row errs. Dropping
+    /// only the failing row and keeping the rest would narrow the rows in
+    /// a way the SQL never does.
     pub fn matches(
         &self,
         row: &dyn RowValues,
@@ -496,9 +504,9 @@ impl Domain {
         })
     }
 
-    /// Convert a row value. A failure belongs to this row alone: DuckDB
-    /// casts a text column value by value and fails on the first that
-    /// does not convert.
+    /// Convert a row value. The failure is reported on this row, but in
+    /// DuckDB it fails the whole query: the column is cast value by value
+    /// and the first value that does not convert aborts the statement.
     fn row<'a>(self, column: &str, v: &'a Value) -> Result<Scalar<'a>, String> {
         let refuse = |s: &str| {
             format!(
