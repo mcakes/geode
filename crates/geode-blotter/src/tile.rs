@@ -36,6 +36,7 @@ use geode_shell::tiling::TileId;
 use geode_shell::tips;
 use geode_shell::vimfind::{FindDirection, FindStyle};
 use geode_shell::vimnav::NavCommand;
+use geode_tile::following::{Delivered, FollowingQuery, FrameDoor, Promotion, Unanswered};
 use geode_tile::notice::{self, Notice};
 use gpui::prelude::*;
 use gpui::{
@@ -161,10 +162,7 @@ pub struct BlotterTile {
     /// The `filtered` pill's own tooltip selector (`"tip-blotter-
     /// filtered-{id}"`), built once alongside `filter_tip`.
     filter_tip_selector: SharedString,
-    /// The frame versions last acted on; `None` until the first query.
-    acted: Option<FrameVersions>,
     publications: Vec<PublicationWatch>,
-    tag: u64,
     last_grouping: Vec<String>,
     /// [`Self::title`]'s answer, cached so a stack-list row (which reads
     /// it every frame the list is open) never formats a `String`: kept
@@ -175,25 +173,39 @@ pub struct BlotterTile {
     title: SharedString,
     /// This tile's stack membership, shown in the header; `None` outside a stack.
     stack: Option<StackHandle>,
-    in_flight: Option<Instant>,
     delivered_at: Option<Instant>,
     visible: bool,
     /// Header notice. Dropped sorts and selections are warnings; query and
     /// configuration failures are danger.
     pub error: Option<Notice>,
     find: Option<FindState>,
-    /// Successful outcome waiting for the frame's flip barrier, with the
-    /// query's grouping and frame versions. `deliver` promotes it if its
-    /// arrival releases the barrier; otherwise `on_frame_changed` promotes it
-    /// when `flip` advances.
-    ///
-    /// Promotion checks only counters this tile follows, including watched
-    /// data and configuration. `requery` also clears this state because a
-    /// tile-local change can supersede a query without changing any counter.
-    staged: Option<(Arc<Snapshot>, Vec<String>, FrameVersions)>,
-    /// Last observed `versions().flip`. A new value attempts promotion of a
-    /// staged snapshot independently of whether a requery is needed.
-    last_flip: u64,
+    /// This tile's view query under the flip barrier (see
+    /// `geode_tile::following`), with the grouping each result was asked
+    /// under. Promotion compares only counters this tile follows (`Followed`),
+    /// including watched data and configuration; a tile-local requery clears
+    /// the stage because it moves no frame counter.
+    following: FollowingQuery<(Arc<Snapshot>, Vec<String>)>,
+}
+
+/// The frame counters a blotter's answer depends on, copied out of the tile
+/// so the barrier helper can compare versions while the tile's query state
+/// is mutably borrowed. Watched data and configuration are always followed;
+/// scope unless unscoped, grouping unless pinned, as-of unless pinned.
+#[derive(Debug, Clone, Copy)]
+struct Followed {
+    scope: bool,
+    grouping: bool,
+    as_of: bool,
+}
+
+impl Followed {
+    fn differs(self, versions: FrameVersions, now: FrameVersions) -> bool {
+        (self.scope && versions.scope != now.scope)
+            || (self.grouping && versions.grouping != now.grouping)
+            || (self.as_of && versions.as_of != now.as_of)
+            || versions.data != now.data
+            || versions.config != now.config
+    }
 }
 
 impl BlotterTile {
@@ -413,19 +425,15 @@ impl BlotterTile {
             tile_scope,
             filter_tip,
             filter_tip_selector,
-            acted: None,
             publications: Vec::new(),
-            tag: 0,
             last_grouping: Vec::new(),
             title,
             stack: None,
-            in_flight: None,
             delivered_at: None,
             visible: false,
             error: None,
             find: None,
-            staged: None,
-            last_flip: 0,
+            following: FollowingQuery::new(),
         }
     }
 
@@ -442,7 +450,8 @@ impl BlotterTile {
     }
 
     pub fn last_query(&self) -> Option<(u64, Vec<String>)> {
-        (self.tag > 0).then(|| (self.tag, self.last_grouping.clone()))
+        let tag = self.following.tag();
+        (tag > 0).then(|| (tag, self.last_grouping.clone()))
     }
 
     fn view(&self) -> Option<ViewSpec> {
@@ -565,74 +574,44 @@ impl BlotterTile {
         });
     }
 
-    /// Whether a followed frame counter requires a new query. `flip` only
-    /// releases staged display work and is handled by `on_frame_changed`.
-    fn follows_changed(&self, now: FrameVersions) -> bool {
-        let Some(acted) = self.acted else {
-            return true;
-        };
-        self.differs_on_followed(acted, now)
+    fn followed(&self) -> Followed {
+        Followed {
+            scope: !self.unscoped,
+            grouping: self.pin == Pin::None,
+            as_of: matches!(self.tile_as_of, TileAsOf::Follow),
+        }
     }
 
-    /// Compare the counters this tile follows: scope unless unscoped,
-    /// grouping unless pinned, as-of unless pinned, and always watched data
-    /// and configuration. Requery and staged-snapshot promotion share this
-    /// comparison so they agree about which changes invalidate an answer.
+    /// Compare the counters this tile follows. Requery and staged-snapshot
+    /// promotion share this comparison so they agree about which changes
+    /// invalidate an answer.
     fn differs_on_followed(&self, versions: FrameVersions, now: FrameVersions) -> bool {
-        (!self.unscoped && versions.scope != now.scope)
-            || (self.pin == Pin::None && versions.grouping != now.grouping)
-            || (matches!(self.tile_as_of, TileAsOf::Follow) && versions.as_of != now.as_of)
-            || versions.data != now.data
-            || versions.config != now.config
+        self.followed().differs(versions, now)
     }
 
     fn on_frame_changed(&mut self, cx: &mut Context<Self>) {
         // Attempt promotion on every flip, including while hidden, so hiding
         // between staging and release does not leave a valid answer waiting.
-        let flip = self.frame.read(cx).versions().flip;
-        if flip != self.last_flip {
-            self.last_flip = flip;
-            self.promote(cx);
+        // `flip` itself is never a requery input.
+        let now = self.versions(cx);
+        let followed = self.followed();
+        let differs = move |a, b| followed.differs(a, b);
+        let promoted = self.following.on_flip(now, differs);
+        if let Promotion::Apply((snapshot, grouping)) = promoted {
+            self.apply(snapshot, grouping, cx);
         }
         if !self.visible {
             return;
         }
-        let now = self.versions(cx);
-        if self.follows_changed(now) {
+        if self.following.follows_changed(now, differs) {
             self.requery(cx);
         } else {
-            // A tile can belong to the barrier without following its change.
-            // Unless it still awaits a query with that flip identity, mark it
-            // arrived: no new result is needed to release its siblings.
+            // A tile can belong to the barrier without following its change;
+            // unless its own query for this flip identity is still out, it
+            // answers now so its siblings are not held.
             let key = QueryKey(self.tile.0);
-            let awaiting = self.in_flight.is_some()
-                && self
-                    .acted
-                    .is_some_and(|acted| acted.same_flip_identity(now));
-            if !awaiting && self.frame.read(cx).barrier_wants(key, now) {
-                self.frame.update(cx, |f, cx| {
-                    if f.arrived(key, now) {
-                        cx.notify();
-                    }
-                });
-            }
-        }
-    }
-
-    /// Apply a staged snapshot if its followed counters are still current.
-    /// A replaced barrier can release an answer to an outdated query; drop
-    /// that answer while retaining the displayed snapshot.
-    ///
-    /// Unfollowed scope, grouping, or as-of changes do not invalidate a stage.
-    /// Tile-local changes are handled by `requery` clearing `staged`, since
-    /// those changes need not advance any frame counter.
-    fn promote(&mut self, cx: &mut Context<Self>) {
-        let Some((snapshot, grouping, versions)) = self.staged.take() else {
-            return;
-        };
-        let now = self.versions(cx);
-        if !self.differs_on_followed(versions, now) {
-            self.apply(snapshot, grouping, cx);
+            self.following
+                .self_arrive(&mut FrameDoor::new(&self.frame, cx), key, now);
         }
     }
 
@@ -676,7 +655,7 @@ impl BlotterTile {
     fn requery(&mut self, cx: &mut Context<Self>) {
         // A new query supersedes staged work even when frame versions are
         // unchanged, as with tile-local filters and grouping overrides.
-        self.staged = None;
+        self.following.drop_stage();
         let Some(view) = self.view() else {
             self.error = Some(Notice::danger(format!(
                 "view '{}' is not configured",
@@ -720,16 +699,17 @@ impl BlotterTile {
                 // is the retry.
                 self.error = Some(Notice::danger(message));
                 // Supersede any query still in flight: its outcome is for the
-                // previous scope and must not paint over this error.
-                self.tag += 1;
-                self.in_flight = None;
-                self.acted = Some(versions);
+                // previous scope and must not paint over this error. `acted`
+                // stays set: redefining the name bumps the config version,
+                // which is the retry.
+                self.following.begin(versions, Instant::now());
                 let key = QueryKey(self.tile.0);
-                self.frame.update(cx, |f, cx| {
-                    if f.arrived(key, versions) {
-                        cx.notify();
-                    }
-                });
+                self.following.submitted(
+                    false,
+                    Unanswered::KeepActed,
+                    &mut FrameDoor::new(&self.frame, cx),
+                    key,
+                );
                 cx.notify();
                 return;
             }
@@ -739,15 +719,14 @@ impl BlotterTile {
             d.expansion.prune_to(grouping.len());
             d.depth_bound(grouping.len()).max(1)
         });
-        self.tag += 1;
         let submitted = Instant::now();
-        self.in_flight = Some(submitted);
-        self.acted = Some(versions);
+        let tag = self.following.begin(versions, submitted);
         self.last_grouping = grouping.clone();
         self.title = Self::compute_title(&self.view_name, &self.last_grouping);
+        let key = QueryKey(self.tile.0);
         let queued = self.data.query(QueryParams {
-            key: QueryKey(self.tile.0),
-            tag: self.tag,
+            key,
+            tag,
             submitted,
             view: self.view_name.clone(),
             grouping: Some(grouping),
@@ -755,30 +734,25 @@ impl BlotterTile {
             as_of,
             max_depth,
         });
-        if let Err(refusal) = queued {
+        if let Err(refusal) = &queued {
             // A stopped refusal retries on the next frame change too: each
-            // attempt costs nothing and re-reports the same kind.
+            // attempt costs nothing and re-reports the same kind. The last
+            // snapshot stays.
             self.error = Some(Notice::danger(format!("query refused: {refusal}")));
-            self.in_flight = None;
-            // A refused submit has no future outcome. Arrive at the barrier so
-            // other tiles can proceed, then clear `acted` so the next frame
-            // notification or visibility change retries. Keep the last snapshot
-            // and show the refusal.
-            let key = QueryKey(self.tile.0);
-            self.frame.update(cx, |f, cx| {
-                if f.arrived(key, versions) {
-                    cx.notify();
-                }
-            });
-            self.acted = None;
         }
+        self.following.submitted(
+            queued.is_ok(),
+            Unanswered::Retry,
+            &mut FrameDoor::new(&self.frame, cx),
+            key,
+        );
         // Repaint once the in-flight affordance is due, if still waiting.
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(IN_FLIGHT_AFTER + Duration::from_millis(10))
                 .await;
             let _ = this.update(cx, |t, cx| {
-                if t.in_flight.is_some() {
+                if t.following.in_flight() {
                     cx.notify();
                 }
             });
@@ -788,51 +762,35 @@ impl BlotterTile {
     }
 
     pub fn deliver(&mut self, outcome: QueryOutcome, cx: &mut Context<Self>) {
-        if outcome.tag != self.tag {
+        let now = self.versions(cx);
+        let followed = self.followed();
+        let result = outcome
+            .snapshot
+            .map(|snapshot| (snapshot, self.last_grouping.clone()));
+        let key = QueryKey(self.tile.0);
+        let delivered = self.following.deliver(
+            outcome.tag,
+            result,
+            now,
+            move |a, b| followed.differs(a, b),
+            &mut FrameDoor::new(&self.frame, cx),
+            key,
+        );
+        if let Delivered::Stale = delivered {
             return; // stale: a newer request is out
         }
-        self.in_flight = None;
         let micros = outcome.submitted.elapsed().as_micros() as u64;
         self.frame
             .update(cx, |f, _| f.requery.record_submit_to_snapshot(micros));
-        let key = QueryKey(self.tile.0);
-        let acted = self.acted.unwrap_or_default();
-        match outcome.snapshot {
-            Ok(snapshot) => {
+        match delivered {
+            Delivered::Stale => {}
+            Delivered::Apply((snapshot, grouping)) => {
                 self.error = None;
-                // Stage while the matching barrier wants this key. Its release
-                // coordinates display across the participating tiles.
-                let wants = self.frame.read(cx).barrier_wants(key, acted);
-                if wants {
-                    self.staged = Some((snapshot, self.last_grouping.clone(), acted));
-                    // `arrived` may itself empty the barrier right here —
-                    // when it does, promote immediately rather than
-                    // waiting for the `flip` bump to reach this tile's
-                    // own `on_frame_changed` on a later notify pass.
-                    let released = self.frame.update(cx, |f, cx| {
-                        let r = f.arrived(key, acted);
-                        if r {
-                            cx.notify();
-                        }
-                        r
-                    });
-                    if released {
-                        self.promote(cx);
-                    }
-                } else {
-                    self.apply(snapshot, self.last_grouping.clone(), cx);
-                }
+                self.apply(snapshot, grouping, cx);
             }
-            Err(e) => {
-                self.error = Some(Notice::danger(e));
-                // A failed outcome still arrives at the barrier, allowing other
-                // tiles to promote while this tile keeps its last good snapshot.
-                self.frame.update(cx, |f, cx| {
-                    if f.arrived(key, acted) {
-                        cx.notify();
-                    }
-                });
-            }
+            Delivered::Held => self.error = None,
+            // The last good snapshot stays; the failure has already arrived.
+            Delivered::Failed(e) => self.error = Some(Notice::danger(e)),
         }
         cx.notify();
     }
@@ -841,7 +799,10 @@ impl BlotterTile {
         self.visible = visible;
         if visible {
             let now = self.versions(cx);
-            if self.follows_changed(now) {
+            if self
+                .following
+                .follows_changed(now, |a, b| self.differs_on_followed(a, b))
+            {
                 self.requery(cx);
             }
         }
@@ -1764,7 +1725,8 @@ impl gpui::Render for BlotterTile {
             }
         }
         if self
-            .in_flight
+            .following
+            .in_flight_since()
             .is_some_and(|t| t.elapsed() > IN_FLIGHT_AFTER)
         {
             header = header.child(div().child("…"));
@@ -2595,7 +2557,7 @@ mod tests {
             "and it must still say so"
         );
         assert!(
-            h.tile.read_with(&vcx, |t, _| t.acted.is_none()),
+            h.tile.read_with(&vcx, |t, _| t.following.acted().is_none()),
             "`acted` is cleared, so the next frame change is a real retry"
         );
     }
@@ -5558,7 +5520,7 @@ mod tests {
         );
         let versions_agree = h.b.read_with(&vcx, |t, cx| {
             let now = t.frame.read(cx).versions();
-            !t.differs_on_followed(t.acted.unwrap(), now)
+            !t.differs_on_followed(t.following.acted().unwrap(), now)
         });
         assert!(
             versions_agree,
@@ -6069,7 +6031,7 @@ mod tests {
             "query still outstanding"
         );
         deliver_to(&h.b, QueryKey(8), &mut vcx, b.tag, Ok(snapshot2()));
-        assert!(h.b.read_with(&vcx, |t, _| t.staged.is_some()));
+        assert!(h.b.read_with(&vcx, |t, _| t.following.is_staged()));
         publish_for(&frame, &mut vcx, "unrelated");
         assert!(h.requests.try_recv().is_err());
         assert!(

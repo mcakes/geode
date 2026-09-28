@@ -21,8 +21,8 @@ Current architecture:
 
 Used by the pricer (all four doors), market-data (all four, and `following`
 for its document request), timeseries (popover, menu, notice, and `following`
-for its series query) and the blotter
-(notice). Diagnostics has no popover, menu, confirm or notice line and does
+for its series query) and the blotter (notice, and `following` for its view
+query). Diagnostics has no popover, menu, confirm or notice line and does
 not depend on this crate.
 
 The crate takes a submission's outcome as `submitted: bool` rather than

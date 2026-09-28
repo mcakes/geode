@@ -3623,11 +3623,12 @@ run_mutation "asof-pin: the request carries the pin" \
   geode-blotter \
   asof_pins_the_tile_and_leaves_the_frame_alone
 
-# A pinned tile does not follow the frame's as-of counter.
+# A pinned tile does not follow the frame's as-of counter. The policy is
+# the tile's `Followed` value, copied out for `geode_tile::following`.
 run_mutation "asof-pin: a pinned tile does not follow the frame's as-of" \
   crates/geode-blotter/src/tile.rs \
-  '            || (matches!(self.tile_as_of, TileAsOf::Follow) && versions.as_of != now.as_of)' \
-  '            || versions.as_of != now.as_of' \
+  '            as_of: matches!(self.tile_as_of, TileAsOf::Follow),' \
+  '            as_of: true,' \
   geode-blotter \
   a_pinned_tile_ignores_the_frames_as_of_and_answers_the_barrier
 
@@ -3981,9 +3982,11 @@ run_mutation "delegate: any_determined reflects the whole cached window" \
 
 # ---- blotter tile (Phase 3 §6.5, §6.7, §6.8, §3.1, §4.3)
 
+# The rule now lives in `geode_tile::following`; this module's route stays
+# the named test.
 run_mutation "tile: a stale tag is dropped" \
-  crates/geode-blotter/src/tile.rs \
-  '        if outcome.tag != self.tag {' \
+  crates/geode-tile/src/following.rs \
+  '        if tag != self.tag {' \
   '        if false {' \
   geode-blotter \
   a_stale_outcome_is_dropped_an_error_keeps_the_last_snapshot_and_timing_is_recorded
@@ -3992,10 +3995,11 @@ run_mutation "tile: a stale tag is dropped" \
 # moved into `differs_on_followed`, which `promote`'s gate now shares —
 # same site, same meaning, `acted` spelled `versions` because the caller
 # is no longer always `self.acted`.
+# Re-anchored again: the follow policy is now the tile's `Followed` value.
 run_mutation "tile: a pinned tile ignores the slot" \
   crates/geode-blotter/src/tile.rs \
-  '            || (self.pin == Pin::None && versions.grouping != now.grouping)' \
-  '            || versions.grouping != now.grouping' \
+  '            grouping: self.pin == Pin::None,' \
+  '            grouping: true,' \
   geode-blotter \
   a_frame_slot_change_requeries_once_and_a_pinned_tile_ignores_it
 
@@ -4008,10 +4012,12 @@ run_mutation "tile: the depth bound is requested, not everything" \
 
 run_mutation "tile: a query error keeps the last snapshot" \
   crates/geode-blotter/src/tile.rs \
-  '                self.error = Some(Notice::danger(e));' \
-  '                self.error = Some(Notice::danger(e));
+  '            Delivered::Failed(e) => self.error = Some(Notice::danger(e)),' \
+  '            Delivered::Failed(e) => {
+                self.error = Some(Notice::danger(e));
                 self.table
-                    .update(cx, |t, _| *t.delegate_mut() = BlotterDelegate::new());' \
+                    .update(cx, |t, _| *t.delegate_mut() = BlotterDelegate::new());
+            }' \
   geode-blotter \
   a_stale_outcome_is_dropped_an_error_keeps_the_last_snapshot_and_timing_is_recorded
 
@@ -5060,20 +5066,20 @@ run_mutation "as-of: the stripe is painted only when historical" \
 
 # ---- Phase 4a Task 8: the flip barrier (spec §3.10)
 
+# The rule now lives in `geode_tile::following`; this module's route stays
+# the named test.
 run_mutation "flip: failure counts as arrival" \
-  crates/geode-blotter/src/tile.rs \
-  '                self.frame.update(cx, |f, cx| {
-                    if f.arrived(key, acted) {
-                        cx.notify();
-                    }
-                });' \
-  '                let _ = (key, acted);' \
+  crates/geode-tile/src/following.rs \
+  '                if let Some(under) = asked {
+                    barrier.arrive(key, under);
+                }' \
+  '                let _ = (asked, key);' \
   geode-blotter two_tiles_promote_in_the_same_pass_and_a_failure_releases_the_barrier
 
 run_mutation "flip: a staged snapshot waits for the barrier" \
-  crates/geode-blotter/src/tile.rs \
-  '                if wants {' \
-  '                if false {' \
+  crates/geode-tile/src/following.rs \
+  '                let Some(held_under) = asked.filter(|&under| barrier.wants(key, under)) else {' \
+  '                let Some(held_under) = asked.filter(|_| false) else {' \
   geode-blotter two_tiles_promote_in_the_same_pass_and_a_failure_releases_the_barrier
 
 run_mutation "flip: the deadline releases" \
@@ -5127,18 +5133,23 @@ run_mutation "publication routing: joined datasets invalidate the view" \
   '.chain(std::iter::empty())' \
   geode-blotter publication_bursts_query_only_base_and_join_consumers
 
+# The rule now lives in `geode_tile::following`; this module's route stays
+# the named test.
 run_mutation "publication routing: a blotter query must really arrive" \
-  crates/geode-blotter/src/tile.rs \
-  'if !awaiting && self.frame.read(cx).barrier_wants(key, now) {' \
-  'if self.frame.read(cx).barrier_wants(key, now) {' \
+  crates/geode-tile/src/following.rs \
+  '        if answering_now || !barrier.wants(key, now) {' \
+  '        if !barrier.wants(key, now) {' \
   geode-blotter unrelated_publications_neither_answer_a_query_nor_discard_its_stage
 
+# Promotion runs in `geode_tile::following`; the versions it compares are
+# still this tile's own (`versions_for` its publication watches). Only the
+# promotion's input is mutated: mutating the shared `now` would also feed
+# the requery check, where an unrelated publish is caught by the requery it
+# then causes, leaving the promotion assertion unproven.
 run_mutation "publication routing: blotter promotion uses its own dependencies" \
   crates/geode-blotter/src/tile.rs \
-  'let now = self.versions(cx);
-        if !self.differs_on_followed(versions, now) {' \
-  'let now = self.frame.read(cx).versions();
-        if !self.differs_on_followed(versions, now) {' \
+  '        let promoted = self.following.on_flip(now, differs);' \
+  '        let promoted = self.following.on_flip(self.frame.read(cx).versions(), differs);' \
   geode-blotter unrelated_publications_neither_answer_a_query_nor_discard_its_stage
 
 run_mutation "publication routing: panels watch an exact document" \
@@ -5174,8 +5185,9 @@ run_mutation "publication routing: a series query must really arrive" \
 
 run_mutation "flip: a non-following tile still arrives on its own" \
   crates/geode-blotter/src/tile.rs \
-  '            if !awaiting && self.frame.read(cx).barrier_wants(key, now) {' \
-  '            if false {' \
+  '            self.following
+                .self_arrive(&mut FrameDoor::new(&self.frame, cx), key, now);' \
+  '            let _ = (key, now);' \
   geode-blotter a_pinned_tile_arrives_from_on_frame_changed_without_requerying
 
 # ---- Fix round 1, Finding 1: a staged snapshot needs its own version
@@ -5210,17 +5222,22 @@ run_mutation "flip: a non-following tile still arrives on its own" \
 # moved with it, to the one race the narrowed gate still defends (a
 # HIDDEN tile, where no requery supersedes the stage) — a pinned tile
 # under a grouping-only change now promotes, which is the finding.
+# The gate now lives in `geode_tile::following`; this module's route stays
+# the named test.
 run_mutation "flip: promote only applies a staged snapshot that still answers what the tile follows" \
-  crates/geode-blotter/src/tile.rs \
-  '        if !self.differs_on_followed(versions, now) {' \
-  '        if true {' \
+  crates/geode-tile/src/following.rs \
+  '        if differs(staged_under, now) {' \
+  '        if false {' \
   geode-blotter a_stage_is_dropped_when_a_counter_the_tile_follows_has_moved
 
+# The clear moved into `FollowingQuery::begin`, which every submitting
+# path runs; the tile's own `drop_stage` now covers only the unconfigured
+# view, and a mutant of it alone would survive behind `begin`.
 run_mutation "flip: a fresh requery clears whatever was staged before it" \
-  crates/geode-blotter/src/tile.rs \
-  '        self.staged = None;
-' \
-  '' \
+  crates/geode-tile/src/following.rs \
+  '    pub fn begin(&mut self, versions: FrameVersions, submitted: Instant) -> u64 {
+        self.staged = None;' \
+  '    pub fn begin(&mut self, versions: FrameVersions, submitted: Instant) -> u64 {' \
   geode-blotter a_tile_local_requery_clears_the_stage_a_barrier_left_behind
 
 # ---- Final fix wave (whole-branch review, 2026-09-06): F1, F3 ---------
@@ -13697,10 +13714,11 @@ run_mutation "final: a panel stage is dropped once a counter it follows has move
 # must PROMOTE what it staged. Mutated back to the flip identity, the
 # pre-mutation rows stay painted forever (nothing requeries a pinned tile
 # for a grouping change).
+# The gate now lives in `geode_tile::following`.
 run_mutation "final: a pinned blotter promotes the stage a replaced barrier left it" \
-  crates/geode-blotter/src/tile.rs \
-  '        if !self.differs_on_followed(versions, now) {' \
-  '        if versions.same_flip_identity(now) {' \
+  crates/geode-tile/src/following.rs \
+  '        if differs(staged_under, now) {' \
+  '        if !staged_under.same_flip_identity(now) {' \
   geode-blotter a_second_mutation_during_a_barrier_wait_clears_the_stale_staged_snapshot
 
 # I-2: a restored draft is resolved only against the first NON-EMPTY,

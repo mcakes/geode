@@ -47,10 +47,10 @@ background data work. It does not depend on the shell or feature modules.
 `geode-tile` is the kit tiles are built from: the popover, the `.` action
 menu, the in-tile y/n confirm and the notice line, as models with one
 painter each, and the `following` flip-barrier state machine every following
-tile runs for its own query. It depends on `geode-shell` for its paint doors and the live
-keymap, never on `geode-data` or a feature module, and the shell never
-depends on it. A tile mechanism two modules would otherwise each write lives
-there.
+tile runs for its own query. It depends on `geode-shell` for its paint doors
+and the live keymap, never on `geode-data` or a feature module, and the shell
+never depends on it. A tile mechanism two modules would otherwise each write
+lives there.
 
 Feature crates such as `geode-blotter`, `geode-marketdata`,
 `geode-timeseries`, `geode-diagnostics`, and `geode-pricer` implement the
