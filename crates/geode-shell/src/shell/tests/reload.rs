@@ -1326,8 +1326,8 @@ fn a_vol_model_change_requires_a_restart_and_a_revert_clears_it(cx: &mut gpui::T
     assert!(shell.read_with(&cx, |s, _| s.restart_required.is_none()));
 }
 
-/// Only `[pricing] adapter` belongs to the restart baseline. Changes to the live
-/// `refresh` setting must not request restart.
+/// Of `[pricing]`, only `adapter` belongs to the restart baseline (beside
+/// `[vol] model`). Changes to the live `refresh` setting must not request restart.
 #[gpui::test]
 fn a_pricing_refresh_change_needs_no_restart(cx: &mut gpui::TestAppContext) {
     let (services, _log) = services_with_recorder();

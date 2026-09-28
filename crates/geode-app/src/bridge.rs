@@ -3595,11 +3595,10 @@ role = "key"
             .find(|d| d.message.contains("vol model"))
             .unwrap();
         assert_eq!(d.severity, Severity::Warning);
-        assert!(
-            d.message
-                .contains("vol model \"vendor\" ([vol] model) is not built into this binary"),
-            "{}",
-            d.message
+        assert_eq!(
+            d.message,
+            "vol model \"vendor\" ([vol] model) is not built into this binary \
+             (have: ); every vol slice will say so"
         );
         assert_eq!(d.path.as_deref(), Some("app.vol.model"));
 

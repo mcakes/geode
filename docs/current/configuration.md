@@ -429,12 +429,6 @@ parser. Zero, invalid strings, and non-string values warn at
 open pricer tile without a restart; a sheet's own `:refresh` still overrides
 it.
 
-`[vol]` in `app.toml` selects the vol-surface evaluator behind the slice
-viewer. `model` names a model the binary registers; the default and the only
-one in every build is `demo`, a smooth stand-in that is not a financial model.
-A name the binary lacks warns at startup and every vol slice answers with that
-reason. Changing `model` marks restart required, as `[pricing] adapter` does.
-
 `underlyings` lists the underlyings the pricer's entry bar suggests, in the
 order it offers them: an array of strings, trimmed and upper-cased, with
 blank entries dropped and duplicates keeping their first position. A non-string element warns at
@@ -497,6 +491,14 @@ reversal for every sheet. A reload reaches open pricer tiles without a
 restart. Rows already on a sheet keep their legs and prices; see
 [the pricer](features.md) for how a package prints once its template is
 removed or redefined.
+
+## Vol
+
+`[vol]` in `app.toml` selects the vol-surface evaluator behind the slice
+viewer. `model` names a model the binary registers; the default and the only
+one in every build is `demo`, a smooth stand-in that is not a financial model.
+A name the binary lacks warns at startup and every vol slice answers with that
+reason. Changing `model` marks restart required, as `[pricing] adapter` does.
 
 ## Maintaining configuration
 

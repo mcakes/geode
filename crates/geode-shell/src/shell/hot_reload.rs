@@ -214,11 +214,11 @@ impl ShellView {
             .filter(|(name, baseline)| !docs_equal(new_config.layered_docs(name), baseline))
             .map(|(name, _)| name)
             .collect::<Vec<_>>();
-            // Only the pricing adapter requires restart; refresh is a live setting.
+            // The pricing adapter and the vol model are fixed at startup, so each
+            // requires restart when it differs; `refresh` is a live setting.
             if new_config.get("app", "pricing.adapter").cloned() != self.pricing_baseline {
                 restart.push("pricing");
             }
-            // The vol model is fixed at startup the same way.
             if new_config.get("app", "vol.model").cloned() != self.vol_baseline {
                 restart.push("vol");
             }
