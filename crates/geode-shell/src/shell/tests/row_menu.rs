@@ -1,6 +1,7 @@
 //! The shell's row menu: `tile::context_menu` (`g .`) on the focused
 //! tile's cursor row, its keys, its picks, and what closes it.
 
+use super::drag::main_tile_point;
 use super::launch::{draw, focused, underlying_state};
 use super::*;
 use crate::module::recording::{Recorded, RecordingAction, RecordingFactory};
@@ -9,7 +10,7 @@ use std::rc::Rc;
 
 type Log = Rc<std::cell::RefCell<Vec<Recorded>>>;
 
-const ROW_FRAGMENT: &str = "[[bindings]]\ncontext = \"rec\"\n[bindings.keys]\n\"g g\" = \"rec::noop\"\n\"g .\" = \"tile::context_menu\"\n\"g m\" = \"tile::open_with\"\n";
+const ROW_FRAGMENT: &str = "[[bindings]]\ncontext = \"rec\"\n[bindings.keys]\n\"g g\" = \"rec::noop\"\n\"g .\" = \"tile::context_menu\"\n\"g m\" = \"tile::open_with\"\n\"ctrl+alt+x ctrl+alt+y\" = \"rec::noop\"\n";
 
 struct Fixture {
     services: ShellServices,
@@ -206,4 +207,206 @@ fn g_m_on_a_row_with_only_an_action_column_shows_the_notice(cx: &mut gpui::TestA
         shell.read_with(&vcx, |s, _| s.notice),
         Some(crate::shell::input::NO_MODULE_OPENS)
     );
+}
+
+#[gpui::test]
+fn a_left_click_on_a_row_picks_it(cx: &mut gpui::TestAppContext) {
+    let f = fixture(Some(spx_p7()));
+    let (window, mut vcx) = open_shell(cx, f.services);
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("ctrl-v");
+    draw(&mut vcx);
+    vcx.simulate_keystrokes("g .");
+    draw(&mut vcx);
+    // Rows: section, Open Rec, separator, section, Open in Nemo.
+    assert_eq!(
+        row_menu_titles(&shell, &vcx).map(|t| t[4].clone()),
+        Some("Open in Nemo".to_string())
+    );
+    let row = vcx
+        .debug_bounds("row-menu-row-4")
+        .expect("the Nemo row paints");
+    vcx.simulate_click(row.center(), gpui::Modifiers::none());
+    draw(&mut vcx);
+    assert!(row_menu_titles(&shell, &vcx).is_none());
+    assert_eq!(f.runs.borrow().as_slice(), &[spx_p7()]);
+}
+
+/// Opened while the scope bar's text field held focus (the palette opened
+/// from the field, or a user chord bound in the workspace context), the
+/// menu hands focus back to the field when it closes itself.
+#[gpui::test]
+fn escape_returns_focus_to_the_filter_field_it_opened_from(cx: &mut gpui::TestAppContext) {
+    let f = fixture(Some(spx_p7()));
+    let (window, mut vcx) = open_shell(cx, f.services);
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("ctrl-v");
+    draw(&mut vcx);
+    let field = shell.read_with(&vcx, |s, cx| s.filter_input.read(cx).focus_handle(cx));
+    vcx.update(|window, cx| field.focus(window, cx));
+    draw(&mut vcx);
+    assert!(vcx.update(|window, _| field.is_focused(window)));
+    shell.update_in(&mut vcx, |s, window, cx| {
+        s.open_row_menu(spx_p7(), None, window, cx)
+    });
+    draw(&mut vcx);
+    assert!(row_menu_titles(&shell, &vcx).is_some());
+    assert!(
+        !vcx.update(|window, _| field.is_focused(window)),
+        "the menu took the field's keys"
+    );
+    vcx.simulate_keystrokes("escape");
+    draw(&mut vcx);
+    assert!(row_menu_titles(&shell, &vcx).is_none());
+    assert!(vcx.update(|window, _| field.is_focused(window)));
+}
+
+/// A menu with no point to hang from (no recorded point, no focused tile)
+/// would paint nothing yet swallow every key: the frame drops it.
+#[gpui::test]
+fn a_row_menu_with_nowhere_to_hang_is_dropped(cx: &mut gpui::TestAppContext) {
+    let f = fixture(Some(spx_p7()));
+    let (window, mut vcx) = open_shell(cx, f.services);
+    let shell = shell_of(&window, &mut vcx);
+    draw(&mut vcx);
+    assert!(
+        shell.read_with(&vcx, |s, _| s
+            .services
+            .workspaces
+            .active()
+            .focused_tile()
+            .is_none()),
+        "a fresh session has no tile"
+    );
+    shell.update_in(&mut vcx, |s, window, cx| {
+        s.open_row_menu(spx_p7(), None, window, cx)
+    });
+    draw(&mut vcx);
+    assert!(row_menu_titles(&shell, &vcx).is_none());
+    // Keys reach the shell again: `ctrl-v` splits.
+    vcx.simulate_keystrokes("ctrl-v");
+    draw(&mut vcx);
+    assert!(shell.read_with(&vcx, |s, _| {
+        s.services.workspaces.active().focused_tile().is_some()
+    }));
+}
+
+#[gpui::test]
+fn a_right_press_opens_the_row_menu_at_the_pointer(cx: &mut gpui::TestAppContext) {
+    let mut rec = RecordingFactory::new("rec");
+    rec.accepts = &["underlying_ref"];
+    *rec.press_context.borrow_mut() = Some(spx_p7());
+    let services = services_with_recorders(vec![rec]);
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("ctrl-v");
+    draw(&mut vcx);
+    let id = focused(&shell, &vcx);
+    let at = main_tile_point(&mut vcx, &shell, id, 0.5, 0.5);
+    vcx.simulate_mouse_down(at, gpui::MouseButton::Right, gpui::Modifiers::none());
+    draw(&mut vcx);
+    let opened_at = shell.read_with(&vcx, |s, _| s.row_menu.as_ref().and_then(|m| m.at()));
+    assert_eq!(opened_at, Some(at));
+    // A mouse-opened surface must take typed keys (grouping-picker rule).
+    vcx.simulate_keystrokes("enter");
+    draw(&mut vcx);
+    assert!(
+        shell.read_with(&vcx, |s, _| s.row_menu.is_none()),
+        "enter picked Open Rec"
+    );
+}
+
+#[gpui::test]
+fn a_right_press_on_a_tile_without_press_context_opens_nothing(cx: &mut gpui::TestAppContext) {
+    let mut rec = RecordingFactory::new("rec");
+    rec.accepts = &["underlying_ref"];
+    *rec.dimension_context.borrow_mut() = Some(spx_p7()); // g . would work
+    let services = services_with_recorders(vec![rec]);
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("ctrl-v");
+    draw(&mut vcx);
+    let id = focused(&shell, &vcx);
+    let at = main_tile_point(&mut vcx, &shell, id, 0.5, 0.5);
+    vcx.simulate_mouse_down(at, gpui::MouseButton::Right, gpui::Modifiers::none());
+    draw(&mut vcx);
+    assert!(shell.read_with(&vcx, |s, _| s.row_menu.is_none()));
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.notice),
+        None,
+        "no notice on a press either"
+    );
+}
+
+#[gpui::test]
+fn a_press_outside_the_row_menu_closes_it(cx: &mut gpui::TestAppContext) {
+    let f = fixture(Some(spx_p7()));
+    let (window, mut vcx) = open_shell(cx, f.services);
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("ctrl-v");
+    draw(&mut vcx);
+    vcx.simulate_keystrokes("g .");
+    draw(&mut vcx);
+    assert!(row_menu_titles(&shell, &vcx).is_some());
+    let far = gpui::point(gpui::px(5.), gpui::px(5.));
+    vcx.simulate_mouse_down(far, gpui::MouseButton::Left, gpui::Modifiers::none());
+    draw(&mut vcx);
+    assert!(shell.read_with(&vcx, |s, _| s.row_menu.is_none()));
+}
+
+/// The dock's right-press listener opens the menu the same way.
+#[gpui::test]
+fn a_right_press_on_a_docked_tile_opens_the_row_menu_at_the_pointer(
+    cx: &mut gpui::TestAppContext,
+) {
+    let mut rec = RecordingFactory::new("rec");
+    rec.accepts = &["underlying_ref"];
+    *rec.press_context.borrow_mut() = Some(spx_p7());
+    let services = services_with_recorders(vec![rec]);
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("ctrl-v");
+    draw(&mut vcx);
+    let id = focused(&shell, &vcx);
+    vcx.simulate_keystrokes("ctrl-{"); // tile → left dock
+    draw(&mut vcx);
+    let at = super::drag::dock_tile_point(&mut vcx, &shell, DockSide::Left, id, 0.5, 0.5);
+    vcx.simulate_mouse_down(at, gpui::MouseButton::Right, gpui::Modifiers::none());
+    draw(&mut vcx);
+    let opened_at = shell.read_with(&vcx, |s, _| s.row_menu.as_ref().and_then(|m| m.at()));
+    assert_eq!(opened_at, Some(at));
+}
+
+/// A chord prefix typed while the menu is open passes to the matcher; a
+/// pick cancels it, so the sequence cannot complete after the menu.
+#[gpui::test]
+fn a_pick_cancels_a_chord_prefix_typed_while_open(cx: &mut gpui::TestAppContext) {
+    let f = fixture(Some(spx_p7()));
+    let (window, mut vcx) = open_shell(cx, f.services);
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("ctrl-v");
+    draw(&mut vcx);
+    let noops = || {
+        f.log
+            .borrow()
+            .iter()
+            .filter(|r| matches!(r, Recorded::Dispatch(_, a, _) if a.0 == "rec::noop"))
+            .count()
+    };
+    // Sanity: the sequence dispatches on its own.
+    vcx.simulate_keystrokes("ctrl-alt-x ctrl-alt-y");
+    draw(&mut vcx);
+    assert_eq!(noops(), 1);
+    vcx.simulate_keystrokes("g . ctrl-alt-x");
+    draw(&mut vcx);
+    assert!(row_menu_titles(&shell, &vcx).is_some(), "a prefix is no dispatch");
+    let row = vcx
+        .debug_bounds("row-menu-row-4")
+        .expect("the Nemo row paints");
+    vcx.simulate_click(row.center(), gpui::Modifiers::none());
+    draw(&mut vcx);
+    assert_eq!(f.runs.borrow().len(), 1, "the click picked Nemo");
+    vcx.simulate_keystrokes("ctrl-alt-y");
+    draw(&mut vcx);
+    assert_eq!(noops(), 1, "the prefix did not survive the pick");
 }

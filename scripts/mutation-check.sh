@@ -20631,10 +20631,10 @@ run_mutation "timeseries triggers: the editor keeps the range trigger open" \
 # keyboard actions.
 run_mutation "shell: a right press focuses the tile" \
   crates/geode-shell/src/shell/render.rs \
-  '                            cx.listener(move |view, _event: &MouseDownEvent, window, cx| {
+  '                            cx.listener(move |view, event: &MouseDownEvent, window, cx| {
                                 view.leave_command_line(window, cx);
                                 if view.services.workspaces.active_mut().focus_main_tile(id) {' \
-  '                            cx.listener(move |view, _event: &MouseDownEvent, window, cx| {
+  '                            cx.listener(move |view, event: &MouseDownEvent, window, cx| {
                                 view.leave_command_line(window, cx);
                                 if false {' \
   geode-shell a_right_click_focuses_the_tile_and_never_arms_a_drag
@@ -22968,6 +22968,58 @@ run_mutation "row menu: an open pick ignores the launch state" \
   '                    .and_then(|f| f.launch_state(&open.context));' \
   '                    .and_then(|_| None);' \
   geode-shell enter_on_open_splits_a_tile_with_the_launch_state
+
+# A right press answers from press_context, not the cursor row's
+# dimension_context: a tile that opens no menu on a press stays quiet.
+run_mutation "row menu: a right press ignores press_context" \
+  crates/geode-shell/src/shell/row_menu.rs \
+  '            .and_then(|o| o.content.press_context(cx))' \
+  '            .and_then(|o| o.content.dimension_context(cx))' \
+  geode-shell a_right_press_on_a_tile_without_press_context_opens_nothing
+
+# A right press hangs the menu at the pointer, not the tile's corner.
+run_mutation "row menu: a right press hangs the menu at the tile" \
+  crates/geode-shell/src/shell/row_menu.rs \
+  '        self.open_row_menu(context, Some(at), window, cx);' \
+  '        self.open_row_menu(context, None, window, cx);' \
+  geode-shell a_right_press_opens_the_row_menu_at_the_pointer
+
+# Both right-press listeners open the menu: the main tree's and the dock's.
+# Multi-line anchors, since each listener's lines at the shorter indent
+# are substrings of the other's.
+run_mutation "row menu: a main-tree right press opens nothing" \
+  crates/geode-shell/src/shell/render.rs \
+  $'                                let at = event.position;\n                                cx.defer_in(window, move |view, window, cx| {\n                                    view.open_row_menu_from_press(id, at, window, cx);\n                                });' \
+  '                                let _ = event;' \
+  geode-shell a_right_press_opens_the_row_menu_at_the_pointer
+
+run_mutation "row menu: a docked right press opens nothing" \
+  crates/geode-shell/src/shell/render.rs \
+  $'                                    let at = event.position;\n                                    cx.defer_in(window, move |view, window, cx| {\n                                        view.open_row_menu_from_press(id, at, window, cx);\n                                    });' \
+  '                                    let _ = event;' \
+  geode-shell a_right_press_on_a_docked_tile_opens_the_row_menu_at_the_pointer
+
+# Opened while the scope bar's text field held focus, the menu hands
+# focus back there when it closes itself.
+run_mutation "row menu: a dismissal forgets the text field" \
+  crates/geode-shell/src/shell/row_menu.rs \
+  '        self.overlay_return_to_filter = open.return_to_filter;' \
+  '        self.overlay_return_to_filter = false;' \
+  geode-shell escape_returns_focus_to_the_filter_field_it_opened_from
+
+# A pick cancels a chord prefix typed while the menu was open.
+run_mutation "row menu: a prefix survives a pick" \
+  crates/geode-shell/src/shell/row_menu.rs \
+  $'        // after the pick.\n        self.matcher.cancel();' \
+  '        // after the pick.' \
+  geode-shell a_pick_cancels_a_chord_prefix_typed_while_open
+
+# A menu with nowhere to hang paints nothing but would swallow every key.
+run_mutation "row menu: an unpaintable menu stays open" \
+  crates/geode-shell/src/shell/render.rs \
+  '        if focused_rect.is_none() && self.row_menu.as_ref().is_some_and(|m| m.at().is_none()) {' \
+  '        if false {' \
+  geode-shell a_row_menu_with_nowhere_to_hang_is_dropped
 
 # A reload must reach the underlying list, or a desk edit to it waits for
 # a restart.

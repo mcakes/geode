@@ -266,6 +266,14 @@ pub trait TileContent {
     fn dimension_context(&self, _cx: &App) -> Option<DimensionContext> {
         None
     }
+    /// The context of the row a right press just landed on, for the shell's
+    /// row menu, or `None` for a tile that opens no menu on a right press.
+    /// Called once per right press, after the module's own press handling
+    /// has run; a module records the pressed row and column in its own
+    /// press handler and answers from them here.
+    fn press_context(&self, _cx: &mut App) -> Option<DimensionContext> {
+        None
+    }
     /// The view columns this tile presents and the one at its cursor, pulled
     /// by the shell when `config::view_column` / `config::schema_column`
     /// runs, so the module needs no handle into the shell. `None` (the
@@ -939,6 +947,9 @@ pub mod recording {
         /// source's context AFTER `tile::open_with` has opened its dialog,
         /// and so prove the shell captured it at open.
         pub dimension_context: Rc<RefCell<Option<DimensionContext>>>,
+        /// What every occupant this factory creates answers from
+        /// `press_context`; shared and mutable like `dimension_context`.
+        pub press_context: Rc<RefCell<Option<DimensionContext>>>,
         /// What `accepts` answers. Empty by default, so every existing
         /// fixture stays out of `tile::open_with`'s list.
         pub accepts: &'static [&'static str],
@@ -968,6 +979,7 @@ pub mod recording {
                 contexts: &[],
                 input: Rc::new(RefCell::new(None)),
                 dimension_context: Rc::new(RefCell::new(None)),
+                press_context: Rc::new(RefCell::new(None)),
                 accepts: &[],
                 tile_columns: Rc::new(RefCell::new(None)),
                 edit_on_launch: false,
@@ -1031,6 +1043,8 @@ pub mod recording {
         /// Shared with [`RecordingFactory::dimension_context`]; see it for
         /// why it is mutable after creation.
         dimension_context: Rc<RefCell<Option<DimensionContext>>>,
+        /// Shared with [`RecordingFactory::press_context`].
+        press_context: Rc<RefCell<Option<DimensionContext>>>,
         /// Shared with [`RecordingFactory::tile_columns`].
         tile_columns: Rc<RefCell<Option<TileColumns>>>,
         /// Shared with [`RecordingFactory::edit_on_launch`]; see it for what
@@ -1209,6 +1223,9 @@ pub mod recording {
         fn dimension_context(&self, _cx: &App) -> Option<DimensionContext> {
             self.dimension_context.borrow().clone()
         }
+        fn press_context(&self, _cx: &mut App) -> Option<DimensionContext> {
+            self.press_context.borrow().clone()
+        }
         fn tile_columns(&self, _cx: &App) -> Option<TileColumns> {
             self.tile_columns.borrow().clone()
         }
@@ -1324,6 +1341,7 @@ pub mod recording {
                     input: self.input.clone(),
                     stack: RefCell::new(None),
                     dimension_context: self.dimension_context.clone(),
+                    press_context: self.press_context.clone(),
                     tile_columns: self.tile_columns.clone(),
                     edit_on_launch: self.edit_on_launch,
                     grid: self.grid,

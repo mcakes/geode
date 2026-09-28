@@ -1,8 +1,10 @@
 //! The row menu: what a tile row's single-valued columns let the user do
 //! (spec §3), built by [`crate::dimension::menu_rows`]. The shell owns it
 //! so every grid gets the same menu from one `dimension_context`. Opened by
-//! `tile::context_menu` at the cursor row; closed by a pick, `escape`, a
-//! press outside it, a chord's dispatch, a dialog or the palette opening.
+//! `tile::context_menu` at the cursor row, or by a right press on a tile
+//! that answers `press_context`, at the pointer; closed by a pick,
+//! `escape`, a press outside it, a chord's dispatch, a dialog or the
+//! palette opening.
 
 use geode_core::context::DimensionContext;
 use gpui::{Context, Pixels, Point, Window};
@@ -11,6 +13,7 @@ use super::ShellView;
 use crate::defaults::AddPlacement;
 use crate::dimension::{RowPick, menu_rows};
 use crate::menu::{Menu, MenuHost};
+use crate::tiling::TileId;
 
 /// Status notice: the row names no value any kind or action takes.
 pub(crate) const NO_ROW_ACTIONS: &str = "no actions for this row";
@@ -22,6 +25,9 @@ pub struct RowMenu {
     /// Window point the menu hangs from; `None` → the focused tile's
     /// top-left.
     at: Option<Point<Pixels>>,
+    /// The scope bar's text field held focus when the menu opened: a
+    /// dismissal hands it back there.
+    return_to_filter: bool,
 }
 
 impl RowMenu {
@@ -99,10 +105,14 @@ impl ShellView {
         self.close_stack_list(cx);
         self.close_add_filter_menu(cx);
         self.matcher.cancel();
+        // Recorded before the root takes focus, as the add-a-filter menu
+        // records it.
+        let return_to_filter = self.filter_field_focused(window, cx);
         self.row_menu = Some(RowMenu {
             menu: Menu::new(rows, self.services.keymap.bindings()),
             context,
             at,
+            return_to_filter,
         });
         if !window
             .focused(cx)
@@ -122,18 +132,46 @@ impl ShellView {
         }
     }
 
-    /// The menu closes itself (`escape`, a press outside it): cancel any
-    /// chord prefix typed while it was open and give focus back home. The
-    /// menu never opens from the scope bar's text field, so the return
-    /// never goes there.
-    pub(crate) fn dismiss_row_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.row_menu.take().is_none() {
+    /// A right press on tile `id` at `at`: the menu on its pressed row, if
+    /// the occupant opens one (`press_context`); otherwise nothing.
+    pub(crate) fn open_row_menu_from_press(
+        &mut self,
+        id: TileId,
+        at: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(context) = self
+            .occupants
+            .get(&id)
+            .and_then(|o| o.content.press_context(cx))
+        else {
             return;
+        };
+        self.open_row_menu(context, Some(at), window, cx);
+    }
+
+    /// The menu closes itself (`escape`, a press outside it): cancel any
+    /// chord prefix typed while it was open and give focus back: to the
+    /// scope bar's text field if it held focus when the menu opened (the
+    /// palette opened from the field, or a user chord bound in the
+    /// workspace context), home otherwise.
+    pub(crate) fn dismiss_row_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.drop_row_menu(window, cx) {
+            cx.notify();
         }
+    }
+
+    /// [`Self::dismiss_row_menu`] without the notify, for `render`, which
+    /// drops a menu with no point to hang from. False if none was open.
+    pub(super) fn drop_row_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(open) = self.row_menu.take() else {
+            return false;
+        };
         self.matcher.cancel();
-        self.overlay_return_to_filter = false;
+        self.overlay_return_to_filter = open.return_to_filter;
         self.return_focus_from_overlay(window, cx);
-        cx.notify();
+        true
     }
 
     /// The menu's keys while it is open: `j`/`down` and `k`/`up` step,
@@ -179,6 +217,9 @@ impl MenuHost for ShellView {
         let Some(open) = self.row_menu.take() else {
             return;
         };
+        // A chord prefix typed while the menu was open must not complete
+        // after the pick.
+        self.matcher.cancel();
         cx.notify();
         match pick {
             RowPick::Open { kind } => {
