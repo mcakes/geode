@@ -449,6 +449,17 @@ impl BlotterTile {
         }
     }
 
+    /// The presented columns and the cursor's column, for the shell's
+    /// edit-column actions. `None` until a plan exists or when the view is
+    /// no longer configured.
+    pub fn tile_columns(&self, cx: &App) -> Option<geode_core::tile_columns::TileColumns> {
+        let view = self.view()?;
+        let d = self.table.read(cx).delegate();
+        d.plan
+            .as_ref()
+            .map(|plan| plan.tile_columns(&view, d.cursor.col))
+    }
+
     pub fn last_query(&self) -> Option<(u64, Vec<String>)> {
         let tag = self.following.tag();
         (tag > 0).then(|| (tag, self.last_grouping.clone()))
@@ -5372,11 +5383,8 @@ mod tests {
         assert_eq!(
             shown_texts(&h2.b, &vcx2),
             vec!["".to_string(), "M1".into(), "M2".into()],
-            "I-1 (final whole-branch review): B is PINNED, so a \
-             grouping-only mutation is not something it follows — the V1 \
-             payload is still the answer to its latest question, and the \
-             only answer it will ever get for that scope. Dropping it left \
-             the pre-V1 rows painted with `acted` claiming B was current"
+            "B is pinned, so a grouping-only change must retain the V1 payload \
+             answering its latest request"
         );
 
         // A watched data publication requeries B while its earlier answer is

@@ -178,6 +178,9 @@ impl TileContent for BlotterContent {
     fn launch_context(&self, cx: &App) -> geode_core::launch::LaunchContext {
         self.tile.read(cx).launch_context(cx)
     }
+    fn tile_columns(&self, cx: &App) -> Option<geode_core::tile_columns::TileColumns> {
+        self.tile.read(cx).tile_columns(cx)
+    }
 }
 
 pub struct BlotterFactory {

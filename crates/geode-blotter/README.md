@@ -84,6 +84,9 @@ cargo bench -p geode-blotter   # the pure core
 - `g m` opens another module using the cursor row's underlying. The grouping
   must contain `underlying_ref`, and the cursor must be at or below its level
   with a non-NULL value. A visual selection does not change the launch context.
+- `tile_columns` reports the plan's non-tree columns and the cursor's column
+  for the shell's edit-column actions; the tree column is never active, and
+  derived view columns are flagged so Schema can leave them out.
 - Frame scope names resolve against current expression definitions before a
   query is submitted. Missing names show an error, invalidate older pending
   results, and release the tile's flip-barrier wait. Updating definitions

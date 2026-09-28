@@ -914,7 +914,7 @@ fn normal_mode_verbs_drive_the_model_and_bump_the_chart_version(cx: &mut gpui::T
     assert_eq!(h.model(&vcx).slots()[1].axis, Axis::Right);
     assert!(
         h.chart(&vcx).version > v0,
-        "a chrome change rebuilds the chart model (§8.5's version contract)"
+        "a chrome change rebuilds the chart model"
     );
     // Two axis steps from Right pass through BottomLeft to BottomRight.
     h.dispatch(&mut vcx, "axis_next", Some(2));
@@ -1111,10 +1111,7 @@ fn serialize_and_restore_round_trip_the_model(cx: &mut gpui::TestAppContext) {
     h.dispatch(&mut vcx, "zoom_in", None);
     let table = vcx.update(|_, cx| h.content.serialize(cx));
     assert_eq!(table.get("slots").unwrap().as_array().unwrap().len(), 3);
-    assert!(
-        table.get("view").is_none(),
-        "the view is not persisted (§9.11)"
-    );
+    assert!(table.get("view").is_none(), "the view is not persisted");
     let (h2, mut vcx2) = open_with(cx, Some(table.clone()));
     let m = h2.model(&vcx2);
     assert_eq!(m.slots().len(), 3);
@@ -1524,7 +1521,7 @@ fn a_query_change_requeries_and_a_range_change_fetches_and_queries(cx: &mut gpui
     );
     assert!(
         matches!(reqs[1], Request::Series(_)),
-        "…and queries the cached part at once (§9.10)"
+        "…and queries the cached part at once"
     );
     // Stats over the visible window: a pan requeries while
     // percentiles are on.
@@ -1642,7 +1639,7 @@ fn a_hidden_tile_keeps_its_query_and_a_shown_one_refetches_and_a_restored_one_re
     let reqs = h.requests();
     assert!(
         reqs.iter().any(|r| matches!(r, Request::Fetch(_))),
-        "shown: refetch (§9.10)…"
+        "shown: refetch…"
     );
     assert!(
         !reqs.iter().any(|r| matches!(r, Request::Series(_))),

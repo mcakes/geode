@@ -8846,7 +8846,7 @@ deleted = true
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.choice_highlighted()),
             Some("estimated".into()),
-            "a bare step wraps (§20.5)"
+            "a bare step wraps"
         );
         h.dispatch(&mut vcx, "cancel", None);
         assert!(!h.tile.read_with(&vcx, |t, _| t.choice_popup_open()));

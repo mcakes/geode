@@ -594,6 +594,7 @@ mod diagnostics;
 mod dialog_stack;
 mod dock;
 mod drag;
+mod edit_column;
 mod flip;
 mod grouping;
 mod input;

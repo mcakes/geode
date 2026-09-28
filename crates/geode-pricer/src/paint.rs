@@ -246,14 +246,9 @@ mod tests {
         );
     }
 
-    /// Review fix (2026-09-24): floating `own`/`package_own` toward
-    /// `theme.foreground` itself made `readable_on` a no-op whenever the
-    /// colour and its ground already matched (`contrast_ratio` at 1:1,
-    /// nothing for the bisection to move toward). Pin the fix at the
-    /// helper `derive` calls: a colour equal to its own ground must still
-    /// reach `READABLE_RATIO` once floored toward a pole. The light and
-    /// dark grounds pin WHICH pole: from either, only the pole with more
-    /// contrast can reach 3:1 (white on light grey peaks near 1.6:1).
+    /// A color equal to its background must still reach READABLE_RATIO.
+    /// Moving toward the higher-contrast black or white pole supplies a
+    /// distinct endpoint for bisection on both light and dark backgrounds.
     #[test]
     fn the_floor_moves_a_colour_equal_to_its_ground_to_the_readable_ratio() {
         for level in [0.2, 0.5, 0.8] {

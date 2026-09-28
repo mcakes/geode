@@ -13,3 +13,6 @@
 # fails — under the mutation harness that is every mutated run, so the files
 # are noise, not fixtures (2026-09-20, timeseries Part 3).
 proptest-regressions/
+
+# Local documentation plans and design archive.
+/docs/superpowers/

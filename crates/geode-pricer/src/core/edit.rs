@@ -421,7 +421,7 @@ impl Sheet {
     }
 
     /// The siblings of `row`, in order: the roots, or the legs of its package.
-    fn siblings(&self, row: usize) -> Vec<usize> {
+    pub(crate) fn siblings(&self, row: usize) -> Vec<usize> {
         match self.parent(row) {
             None => self.roots().collect(),
             Some(p) => self.children(p).collect(),

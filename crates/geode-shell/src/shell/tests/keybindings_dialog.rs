@@ -948,15 +948,8 @@ fn clearing_the_query_scrolls_back_to_the_top(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// Escape means escape whatever else is held down. Normal mode claims
-/// every key it does not understand, so a `shift+escape` that only the
-/// *bare* guard recognised would be swallowed and do nothing at all —
-/// where before this dialog went modal it fell through to
-/// `handle_key_down`'s close, which never looked at modifiers
-/// (`input.rs`: `event.keystroke.key == "escape"`). A key that visibly
-/// does nothing is the defect class this whole interaction model exists
-/// to remove, so both rungs reachable from here take a modified escape
-/// exactly as they take a bare one.
+/// Normal mode consumes unrecognized keys. Modified Escape follows the
+/// same exit ladder as bare Escape in both normal and filter mode.
 #[gpui::test]
 fn a_modified_escape_walks_the_same_ladder_as_a_bare_one(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
@@ -1206,7 +1199,7 @@ fn r_resets_a_user_override_by_removing_it(cx: &mut gpui::TestAppContext) {
     );
     let notice = shell
         .read_with(&vcx, |s, _| s.keybindings.as_ref().unwrap().notice.clone())
-        .expect("r acknowledges the write it spawned (whole-branch review, Minor 3)");
+        .expect("r acknowledges the write it spawned");
     assert!(
         !notice.contains("no user override"),
         "a reset that had something to reset reports no complaint: {notice}"

@@ -248,6 +248,20 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     action(reg, "config::scopes", "Edit scopes…", "Configuration");
     // Inspect the read-only dataset schema used by configuration choices.
     action(reg, "config::schema", "Edit schema…", "Configuration");
+    // Open Views or Schema on one column of the focused tile's view: a list of
+    // its columns, the cursor's highlighted. Palette-only.
+    action(
+        reg,
+        "config::view_column",
+        "Edit column in view…",
+        "Configuration",
+    );
+    action(
+        reg,
+        "config::schema_column",
+        "Edit column in schema…",
+        "Configuration",
+    );
     // Edit ingest sources, grouped by dataset.
     action(reg, "config::sources", "Edit sources…", "Configuration");
     // Edit named colors shared by column presentation and chart series.

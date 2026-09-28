@@ -1356,8 +1356,7 @@ fn unhiding_the_last_column_removes_the_object_rather_than_writing_an_empty_tabl
     let text = std::fs::read_to_string(dir.path().join("view_presentation.toml")).unwrap();
     assert!(
         !text.contains("[tree]"),
-        "and an absence on disk too — a bare `[tree]` is the artefact this \
-         ruling exists to make unwritable:\n{text}"
+        "an empty presentation must leave no bare `[tree]` table on disk:\n{text}"
     );
 }
 
@@ -1998,10 +1997,8 @@ fn reordering_slot_3_and_pressing_ctrl_3_regroups_off_the_new_order(cx: &mut gpu
     );
 }
 
-/// The confirm-and-fork step above is not incidental: `d`/`r` on a
-/// Groupings slot must not panic looking for a presentation file that
-/// does not exist (`Domain::presentation_doc` is `None` for Groupings) —
-/// this is the regression the removal path's own generalisation guards.
+/// Deleting or reverting a forked Groupings slot must not request a
+/// presentation document: `Domain::presentation_doc` is `None` for Groupings.
 #[gpui::test]
 fn deleting_a_forked_slot_does_not_look_for_a_presentation_doc_that_does_not_exist(
     cx: &mut gpui::TestAppContext,
@@ -3304,7 +3301,7 @@ fn c_refuses_when_the_source_vanished_before_enter(cx: &mut gpui::TestAppContext
     assert!(dialog_state(&shell, &cx, |s| s.draft.is_none()));
 }
 
-/// `c` is Scopes-only for now: elsewhere it is an unbound letter.
+/// `c` is Scopes-only: elsewhere it is an unbound letter.
 #[gpui::test]
 fn c_is_not_a_verb_on_views(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -3563,7 +3560,7 @@ fn deliver_values_routes_by_key_and_drops_stale_outcomes(cx: &mut gpui::TestAppC
     );
     cx.simulate_keystrokes("enter"); // open `mine`
     // The stage opens on book, skipping the inert Dimensions header.
-    cx.simulate_keystrokes("enter"); // Values stage (Task 4's door)
+    cx.simulate_keystrokes("enter"); // Values stage
     cx.run_until_parked();
     let tag = dialog_state(&shell, &cx, |s| s.values_tag);
     let deliver =
@@ -8375,7 +8372,7 @@ fn i_and_n_have_buttons_that_do_what_their_keys_do(cx: &mut gpui::TestAppContext
     cx.run_until_parked();
     assert!(
         cx.debug_bounds("objectdialog-action-i").is_some(),
-        "a multi-option Choice both steps and types now (spec 2026-09-19 §3.2)"
+        "a multi-option Choice supports stepping and typing"
     );
 }
 

@@ -1,5 +1,6 @@
-//! Deterministic synthetic risk data at the desk's real grain. The same seed
-//! and configuration produce identical struct-of-arrays data.
+//! Deterministic risk batches, CSV fixtures, and CVI/dividend documents.
+//! Risk measures repeat at their declared grain. Document generators retain
+//! per-key state and produce repeatable sequences from explicit seeds and dates.
 
 pub mod documents;
 mod emit;
@@ -34,10 +35,8 @@ mod tests {
 
     #[test]
     fn reaches_the_requested_row_count() {
-        // Book and LHU cardinality is fixed, so position count is what must
-        // scale. Before this was enforced the generator capped near 3k rows
-        // per business date and the §7.4 million-row benchmarks would have
-        // silently measured a few thousand.
+        // Fixed book and LHU cardinalities must not cap the position budget
+        // below the requested batch size.
         for target in [1_000usize, 20_000, 250_000] {
             let b = generate(&GeneratorConfig {
                 rows: target,
