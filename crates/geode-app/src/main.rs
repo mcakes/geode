@@ -118,6 +118,7 @@ fn main() {
 
             let (mut services, desk, user, bridge, diagnostics_factory) = build_shell_services(
                 demo_root.as_deref(),
+                config_dirs(),
                 log_ring,
                 log_control,
                 adapters,
@@ -194,20 +195,9 @@ fn main() {
                 tracing::warn!(target: "geode::theme", "{warning}");
             }
 
-            // Load layout, module records, frame state, and palette usage before
-            // constructing the shell. Themes are restored from layered config.
-            // Report session recovery warnings without aborting startup.
-            if let Some(path) = &services.session_path {
-                let restored = session::load(path);
-                for warning in &restored.warnings {
-                    tracing::warn!(target: "geode::session", "{warning}");
-                }
-                services.workspaces = restored.workspaces;
-                services.restored_tiles = restored.tiles;
-                services.restored_frame = restored.frame;
-                services.restored_pinned = restored.pinned;
-                services.restored_palette_usage = restored.palette_usage;
-            }
+            // Themes are restored from layered config; the session supplies
+            // layout, module records, frame state and palette usage.
+            restore_session(&mut services);
 
             // Save current session state synchronously at quit, including changes
             // since the last periodic snapshot. This is best-effort and does not
@@ -434,8 +424,10 @@ fn builtin_layer(demo_root: Option<&Path>) -> Vec<LayerDoc> {
 /// empty; session restoration happens before the shell is constructed. Config
 /// and keymap diagnostics are logged with their declared severity.
 ///
-/// Return the same desk/user directories used for loading so the shell watches
-/// the correct sources. Return the data bridge for attachment after window
+/// `dirs` are the desk and user config directories (`config_dirs()` in
+/// production; temporary directories in tests, which must never read the
+/// real user layer). Return the same directories so the shell watches the
+/// sources it loaded. Return the data bridge for attachment after window
 /// creation; data setup requires datasets and views documents. The builtin
 /// pricer declarations supply these even outside demo mode.
 ///
@@ -445,6 +437,7 @@ fn builtin_layer(demo_root: Option<&Path>) -> Vec<LayerDoc> {
 /// configured levels through its reload control.
 fn build_shell_services(
     demo_root: Option<&Path>,
+    dirs: (Option<PathBuf>, Option<PathBuf>),
     log_ring: Arc<Ring>,
     log_control: Arc<dyn LevelControl>,
     adapters: geode_data::adapter::AdapterRegistry,
@@ -457,7 +450,7 @@ fn build_shell_services(
     Option<bridge::Bridge>,
     Rc<DiagnosticsFactory>,
 ) {
-    let (desk, user) = config_dirs();
+    let (desk, user) = dirs;
     let builtin = builtin_layer(demo_root);
     // Load configuration and retain its builtin documents from one source set.
     // Configuration writes and reloads must keep the same demo and pricer defaults.
@@ -600,6 +593,24 @@ fn build_shell_services(
         composition_diagnostics,
     };
     (services, desk, user, bridge, diagnostics_factory)
+}
+
+/// Load layout, module records, frame state and palette usage from the
+/// session file before the shell is constructed. Recovery warnings are
+/// logged; a missing or unreadable session starts fresh.
+fn restore_session(services: &mut ShellServices) {
+    let Some(path) = &services.session_path else {
+        return;
+    };
+    let restored = session::load(path);
+    for warning in &restored.warnings {
+        tracing::warn!(target: "geode::session", "{warning}");
+    }
+    services.workspaces = restored.workspaces;
+    services.restored_tiles = restored.tiles;
+    services.restored_frame = restored.frame;
+    services.restored_pinned = restored.pinned;
+    services.restored_palette_usage = restored.palette_usage;
 }
 
 /// Log a configuration or keymap diagnostic at `geode::config`, using its
