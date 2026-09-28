@@ -58,6 +58,7 @@ use geode_shell::tiling::TileId;
 use geode_shell::vimfind::{FindDirection, find_match};
 use geode_shell::vimnav::NavCommand;
 use geode_tile::confirm::{self, Confirm, ConfirmHost};
+use geode_tile::following::{Delivered, FollowingQuery, FrameDoor, Promotion, Unanswered};
 use geode_tile::menu::{Menu, MenuHost, MenuIds};
 use gpui::prelude::*;
 use gpui::{
@@ -415,7 +416,7 @@ enum EditTarget {
         /// different term. `commit` compares these against the model's
         /// CURRENT pair for the same cell and refuses when they differ —
         /// one comparison, at the one moment the answer matters, rather
-        /// than a cancel-on-delivery path (which `promote` could not
+        /// than a cancel-on-delivery path (which promotion could not
         /// take: it runs from the frame observer, where there is no
         /// `Window` to blur).
         labels: (SharedString, SharedString),
@@ -472,24 +473,16 @@ pub struct MarketDataTile {
     /// to ask about, and guessing one would paint a document the trader never
     /// asked for.
     key: Option<Vec<String>>,
-    tag: u64,
+    /// This panel's document request under the flip barrier (see
+    /// `geode_tile::following`): the versions it last asked under (whole,
+    /// though only `as_of` and `data` decide a requery; the barrier is keyed
+    /// by flip identity), whether it is out, the answer held for the barrier,
+    /// the last flip seen, and the request tag.
+    following: FollowingQuery<Arc<Snapshot>>,
     /// Resolved upload targets whose documents include this panel's document kind, in
     /// egress.toml order. Captured at construction because egress configuration
     /// requires restart; upload target resolution and completions use this list.
     egress_targets: Vec<SharedString>,
-    /// The frame versions the last request was made under; `None` until
-    /// the first.
-    ///
-    /// The WHOLE `FrameVersions`, even though only two of its counters
-    /// decide a requery (`follows_changed` compares `as_of` and `data`
-    /// and nothing else): the flip barrier is keyed by the flip identity
-    /// — `(scope, grouping, as_of)` — so answering it
-    /// (`Frame::arrived(key, acted)`) needs the versions the request was
-    /// made under, not just the pair this panel follows. One field rather
-    /// than two, because they are one fact: what the frame looked like
-    /// when this panel last asked.
-    acted: Option<FrameVersions>,
-    query_in_flight: bool,
     publication: Option<PublicationWatch>,
     visible: bool,
     /// Newest accepted delivered snapshot, retained for rebase even when a Behind draft
@@ -562,16 +555,6 @@ pub struct MarketDataTile {
     /// header's own time text so the staleness rule is a comparison per
     /// frame rather than an RFC-3339 parse.
     source_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// Snapshot staged while the flip barrier waits for this tile, with the request
-    /// versions it answers. Promote applies it only if followed versions still match.
-    /// Requery clears superseded staging; unrelated scope/grouping barrier changes must
-    /// not discard a valid document answer.
-    staged: Option<(Arc<Snapshot>, FrameVersions)>,
-    /// `versions().flip` as of the last promotion — this panel's own half
-    /// of the bump. Starts at `0` (the blotter's own seed): the first
-    /// observer pass on a frame that has already flipped then calls
-    /// `promote`, which is a no-op with nothing staged.
-    last_flip: u64,
     /// The header's floored tone colours, refreshed at the top of `render`
     /// (see [`FlooredTones`]).
     tones: FlooredTones,
@@ -785,13 +768,14 @@ impl MarketDataTile {
         )
         .detach();
         cx.observe(&frame, |this, _frame, cx| {
-            // Promote staged results on flip even if the tile became hidden after
-            // staging. Flip releases prepared results; it never triggers a document
-            // query.
+            // Promote before the visibility check, so a panel hidden after
+            // staging still lands its answer. A flip releases prepared
+            // results; it never triggers a document query.
             let now = this.versions(cx);
-            if now.flip != this.last_flip {
-                this.last_flip = now.flip;
-                this.promote(cx);
+            let promoted = this.following.on_flip(now, Self::differs_on_followed);
+            if let Promotion::Apply(snapshot) = promoted {
+                this.apply(snapshot, cx);
+                this.changed(cx);
             }
             if !this.visible {
                 return;
@@ -799,12 +783,18 @@ impl MarketDataTile {
             // Only `as_of` and `data` are followed (see the module doc);
             // a scope keystroke bumps `scope` on every character and must
             // not cost this panel a requery.
-            if this.key.is_some() && this.follows_changed(now) {
+            if this.key.is_some()
+                && this
+                    .following
+                    .follows_changed(now, Self::differs_on_followed)
+            {
                 // The barrier is answered on delivery instead, with the
                 // versions this request was made under.
                 this.requery(cx);
             } else {
-                this.self_arrive(now, cx);
+                let key = QueryKey(this.id.0);
+                this.following
+                    .self_arrive(&mut FrameDoor::new(&this.frame, cx), key, now);
             }
         })
         .detach();
@@ -865,10 +855,8 @@ impl MarketDataTile {
             unresolved_restore: !draft.is_empty(),
             parked,
             key,
-            tag: 0,
+            following: FollowingQuery::new(),
             egress_targets,
-            acted: None,
-            query_in_flight: false,
             publication: None,
             visible: false,
             snapshot: None,
@@ -901,8 +889,6 @@ impl MarketDataTile {
                 stale: false,
             },
             source_at: None,
-            staged: None,
-            last_flip: 0,
             tones,
             popup: None,
             menu_tip_selector: format!("tip-marketdata-menu-button-{}", id.0).into(),
@@ -991,70 +977,10 @@ impl MarketDataTile {
         self.frame.read(cx).versions_for(&self.publication)
     }
 
-    /// Whether the frame has moved in a way a document request depends
-    /// on — `as_of` and `data`, never `scope`/`grouping`/`config`/`flip`
-    /// (the module doc says why for each). `None` (nothing asked yet) is
-    /// always a change.
-    fn follows_changed(&self, now: FrameVersions) -> bool {
-        let Some(acted) = self.acted else {
-            return true;
-        };
-        Self::differs_on_followed(acted, now)
-    }
-
     /// Shared followed-version comparison for deciding both requery and staged-result
     /// validity. Only as-of and watched publication data affect this document request.
     fn differs_on_followed(versions: FrameVersions, now: FrameVersions) -> bool {
         versions.as_of != now.as_of || versions.data != now.data
-    }
-
-    /// Acknowledge a barrier change that requires no document query, such as a scope or
-    /// grouping change. The shell includes all visible occupants, so silence would
-    /// delay other tiles until the barrier deadline.
-    fn self_arrive(&mut self, now: FrameVersions, cx: &mut Context<Self>) {
-        // An unrelated notification is not an answer to the query this
-        // barrier is already waiting for.
-        if self.query_in_flight
-            && self
-                .acted
-                .is_some_and(|acted| acted.same_flip_identity(now))
-        {
-            return;
-        }
-        let key = QueryKey(self.id.0);
-        if self.frame.read(cx).barrier_wants(key, now) {
-            self.frame.update(cx, |f, cx| {
-                if f.arrived(key, now) {
-                    cx.notify();
-                }
-            });
-        }
-    }
-
-    /// Tell an open barrier this panel's own outcome has landed, with the
-    /// versions the request was made under — a failed outcome counts too
-    /// (the blotter's rule: one broken tile must never hold every other
-    /// tile open until the deadline).
-    fn arrive(&mut self, cx: &mut Context<Self>) {
-        let _ = self.arrive_and_release(cx);
-    }
-
-    /// [`Self::arrive`], answering whether this arrival is what EMPTIED
-    /// the barrier — the caller uses that to promote its own staged
-    /// snapshot at once rather than waiting for the `flip` bump to reach
-    /// its observer on a later notify pass.
-    fn arrive_and_release(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(acted) = self.acted else {
-            return false;
-        };
-        let key = QueryKey(self.id.0);
-        self.frame.update(cx, |f, cx| {
-            let released = f.arrived(key, acted);
-            if released {
-                cx.notify();
-            }
-            released
-        })
     }
 
     /// Submit this panel's document request, keyed by the tile so two
@@ -1073,83 +999,59 @@ impl MarketDataTile {
                 frame.watch_publications(self.spec.dataset, Some(&batch))
             }));
         }
-        // A fresh question always supersedes whatever was staged for the
-        // old one, whether or not `promote`'s own version check would
-        // have caught it.
-        self.staged = None;
         let (as_of, versions) = {
             let frame = self.frame.read(cx);
             (frame.as_of().clone(), frame.versions_for(&self.publication))
         };
-        self.tag += 1;
-        self.acted = Some(versions);
+        // `begin` also drops whatever was staged for the previous question.
+        let submitted = Instant::now();
+        let tag = self.following.begin(versions, submitted);
+        let key = QueryKey(self.id.0);
         let queued = self.data.document(DocumentParams {
-            key: QueryKey(self.id.0),
-            tag: self.tag,
-            submitted: Instant::now(),
+            key,
+            tag,
+            submitted,
             dataset: self.spec.dataset.to_string(),
             document_key,
             as_of,
         });
-        self.query_in_flight = queued.is_ok();
-        if let Err(refusal) = queued {
+        if let Err(refusal) = &queued {
             self.notice = Some(format!("document request refused: {refusal}").into());
-            // A refused submission has no future delivery. Arrive before clearing
-            // acted, which arrival reads; clearing then permits a later frame change to
-            // retry.
-            self.arrive(cx);
-            self.acted = None;
-            self.query_in_flight = false;
         }
+        self.following.submitted(
+            queued.is_ok(),
+            Unanswered::Retry,
+            &mut FrameDoor::new(&self.frame, cx),
+            key,
+        );
         self.changed(cx);
     }
 
     pub fn deliver(&mut self, outcome: QueryOutcome, cx: &mut Context<Self>) {
-        if outcome.tag != self.tag {
-            // Stale: a newer request is out — and deliberately NOT an
-            // arrival (the blotter drops one the same way). A barrier
-            // waits for the versions this panel last ACTED under, which
-            // is the newer request's; arriving here would answer for a
-            // question that is still in flight, and that newer outcome's
-            // own delivery is what answers it.
-            return;
-        }
-        self.query_in_flight = false;
-        let acted = self.acted;
-        match outcome.snapshot {
-            Ok(snapshot) => {
-                // Stage while the barrier waits for this key so document and other tile
-                // results promote together. Clear notices only when apply paints the
-                // delivery, before it writes any new restore, policy, or validation
-                // notice.
-                let wants = acted.is_some_and(|acted| {
-                    self.frame
-                        .read(cx)
-                        .barrier_wants(QueryKey(self.id.0), acted)
-                });
-                if wants {
-                    let acted = acted.expect("`wants` is false without one");
-                    self.staged = Some((snapshot, acted));
-                    // `arrived` may empty the barrier right here — when it
-                    // does, promote at once rather than waiting for the
-                    // `flip` bump to come back round to this panel's own
-                    // observer on a later notify pass.
-                    if self.arrive_and_release(cx) {
-                        self.promote(cx);
-                    }
-                } else {
-                    self.apply(snapshot, cx);
-                    self.arrive(cx);
-                }
-            }
-            Err(e) => {
-                // Last good stays on screen: a failed select says nothing
-                // about the document already painted. It still counts as
-                // an arrival — one broken tile must never hold every other
-                // tile open until the deadline.
-                self.notice = Some(e.into());
-                self.arrive(cx);
-            }
+        let now = self.versions(cx);
+        let key = QueryKey(self.id.0);
+        let delivered = self.following.deliver(
+            outcome.tag,
+            outcome.snapshot,
+            now,
+            Self::differs_on_followed,
+            &mut FrameDoor::new(&self.frame, cx),
+            key,
+        );
+        match delivered {
+            // A newer request is out; its own outcome answers the barrier.
+            Delivered::Stale => return,
+            // `apply` clears notices only when it paints the delivery, before
+            // it writes any new restore, policy or validation notice.
+            Delivered::Apply(snapshot) => self.apply(snapshot, cx),
+            // Superseded: asked under an as-of or document generation this
+            // panel has since moved past (it was hidden across the change).
+            // Applying would run the draft policy against a document nobody
+            // is looking at; the reshow asks again.
+            Delivered::Held | Delivered::Superseded => {}
+            // Last good stays on screen: a failed select says nothing about
+            // the document already painted.
+            Delivered::Failed(e) => self.notice = Some(e.into()),
         }
         self.changed(cx);
     }
@@ -1397,7 +1299,7 @@ impl MarketDataTile {
 
     /// Put a delivered snapshot on screen: the draft's own view of the
     /// generation, the model, the cursor and the scroll. Called by
-    /// `deliver` for an un-barriered outcome and by [`Self::promote`] for
+    /// `deliver` for an outcome it paints at once and by the frame observer for
     /// a staged one, so the two paths cannot drift.
     fn apply(&mut self, snapshot: Arc<Snapshot>, cx: &mut Context<Self>) {
         let painted = self.painted_snapshot().and_then(|s| base_of(&s));
@@ -1697,21 +1599,14 @@ impl MarketDataTile {
         Ok(held(format!("echo differs ({differing} rows)")))
     }
 
-    /// Promote a staged document when flip releases it or this tile's arrival finishes
-    /// the barrier. Compare followed versions, not the barrier's full identity: scope
-    /// and grouping changes need no new query, so their replacement barrier still uses
-    /// this answer. Discard staging when as-of or watched data changed; requery and key
-    /// changes also clear it.
-    fn promote(&mut self, cx: &mut Context<Self>) {
-        let Some((snapshot, versions)) = self.staged.take() else {
-            return;
-        };
-        if !Self::differs_on_followed(versions, self.versions(cx)) {
-            self.apply(snapshot, cx);
-            self.changed(cx);
-        }
-    }
-
+    /// Hiding cancels nothing and forgets nothing: the outstanding request
+    /// finishes and its reply applies when it lands (it still answers any
+    /// barrier it was enrolled in), unless a counter this panel follows
+    /// moved since it asked: that reply is dropped as `Superseded`, not
+    /// applied, so no draft policy runs against a document nobody asked
+    /// about. Showing again requeries only if a
+    /// counter this panel follows moved since it last asked. Closing is
+    /// `closed`.
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         if self.visible == visible {
             return;
@@ -1722,19 +1617,27 @@ impl MarketDataTile {
             // nothing else asks for one on this panel's behalf.
             self.request_catalog_if_needed(cx);
             let now = self.versions(cx);
-            if self.key.is_some() && self.follows_changed(now) {
+            if self.key.is_some()
+                && self
+                    .following
+                    .follows_changed(now, Self::differs_on_followed)
+            {
                 self.requery(cx);
             }
-        } else {
-            // An in-flight document nothing will paint is a round trip
-            // spent for nothing.
-            self.data.cancel(QueryKey(self.id.0));
-            // Clear acted with the cancelled request so showing the tile cannot treat
-            // an undelivered request as current.
-            self.acted = None;
-            self.query_in_flight = false;
         }
         self.changed(cx);
+    }
+
+    /// The shell is removing this panel: cancel the document request by key
+    /// and answer any barrier still waiting on it, so a flip never waits out
+    /// its deadline for a panel that is gone. Runs inside the shell's
+    /// occupant reconciliation, so it updates only the frame and the data
+    /// handle, never the shell.
+    pub fn closed(&mut self, cx: &mut Context<Self>) {
+        let key = QueryKey(self.id.0);
+        self.data.cancel(key);
+        self.following
+            .close(&mut FrameDoor::new(&self.frame, cx), key);
     }
 
     pub fn set_stack(&mut self, stack: Option<StackHandle>, cx: &mut Context<Self>) {
@@ -4268,20 +4171,13 @@ impl MarketDataTile {
         self.echo = None;
         self.snapshot = None;
         self.base_snapshot = None;
-        // Including anything STAGED for the old key: a key change bumps no
-        // frame version, so `promote`'s own flip-identity check would
-        // happily put the previous document's grid on screen under the new
-        // key's header. (`requery` below clears it too, but only on the
-        // visible path — a hidden panel would otherwise carry it.)
-        self.staged = None;
-        // A different document is a different question: the next
-        // delivery is never the one already asked for.
-        self.acted = None;
-        self.query_in_flight = false;
+        // A different document is a different question: drop what was held
+        // for the old key (a key change bumps no frame counter, so a later
+        // flip would otherwise promote it under the new key's header),
+        // forget what was asked, and advance the tag even while hidden so
+        // the old key's late delivery cannot enter the restored draft.
+        self.following.reset();
         self.publication = None;
-        // Advance the request tag on every switch, including while hidden, so an old
-        // key's late delivery cannot enter the newly restored draft.
-        self.tag += 1;
         self.cursor = Cursor::Cell { row: 0, col: 0 };
         self.last_grid_col = 0;
         self.rebuild_model(cx);
@@ -4447,10 +4343,10 @@ impl MarketDataTile {
 
     /// Whether this panel considers itself to have an outstanding
     /// question — `false` is what makes the next frame change a real
-    /// retry (the refusal and hidden-mid-flight rules).
+    /// retry (the refusal rule).
     #[cfg(test)]
     pub(crate) fn acted_is_none(&self) -> bool {
-        self.acted.is_none()
+        self.following.acted().is_none()
     }
 
     /// The open editor's own entity — a test seeds a value through it,
@@ -4903,7 +4799,7 @@ mod tests {
     use geode_data::{DataHandle, Request};
     use geode_shell::actions::ActionId;
     use geode_shell::diagnostics::Diagnostics;
-    use geode_shell::frame::{Frame, Publish};
+    use geode_shell::frame::{FLIP_DEADLINE, Frame, Publish};
     use geode_shell::module::{Delivery, FindEvent, ModuleFactory, TileContent};
     use geode_shell::tiling::TileId;
     use gpui::{Entity, Window};
@@ -5382,10 +5278,9 @@ mod tests {
             };
             vcx.update(|window, cx| self.content.deliver(Delivery::Query(outcome), window, cx));
         }
-        /// The next DOCUMENT request, skipping the `Cancel` a
-        /// `set_visible(false)` puts on the same channel — no test asserts
-        /// on a cancel, and every one of them would otherwise have to know
-        /// whether the panel had been hidden at some point.
+        /// The next DOCUMENT request, skipping any `Cancel` (a close puts
+        /// one on the same channel); a test that asserts on a cancel reads
+        /// `raw_requests`.
         fn document_request(&self) -> Option<geode_core::query::DocumentParams> {
             loop {
                 match self.rx.try_recv() {
@@ -5395,6 +5290,10 @@ mod tests {
                     Err(_) => return None,
                 }
             }
+        }
+        /// Everything on the channel since the last drain, `Cancel` included.
+        fn raw_requests(&self) -> Vec<Request> {
+            self.rx.try_iter().collect()
         }
         fn versions(&self, vcx: &gpui::VisualTestContext) -> geode_shell::frame::FrameVersions {
             self.frame.read_with(vcx, |f, _| f.versions())
@@ -5824,7 +5723,7 @@ mod tests {
         h.dispatch(&mut vcx, "edit", None);
         h.set_editor(&mut vcx, "9.9");
         h.dispatch(&mut vcx, "commit", None);
-        let tag = h.tile.read_with(&vcx, |t, _| t.tag);
+        let tag = h.tile.read_with(&vcx, |t, _| t.following.tag());
         h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
         assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_behind()));
 
@@ -6330,6 +6229,40 @@ mod tests {
         );
     }
 
+    /// A flip promotes before the visibility check: a panel hidden after it
+    /// staged still lands its answer when the barrier releases, rather than
+    /// holding a stage nobody promotes until it is shown again.
+    #[gpui::test]
+    fn a_stage_held_when_the_panel_hides_promotes_on_the_flip(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let first = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, first, Arc::new(cvi(BASE)));
+
+        let other = QueryKey(TILE + 1);
+        open_barrier_on_as_of(&h, &mut vcx, &[QueryKey(TILE), other], 60);
+        let second = h.document_request().unwrap().tag;
+        h.deliver(
+            &mut vcx,
+            second,
+            Arc::new(document_of(&["t0", "t1", "t2", "t3", "t4"], &NODES, BASE)),
+        );
+        assert_eq!(h.rows(&vcx), 2, "staged behind the other tile");
+
+        h.visible(&mut vcx, false);
+        let now = h.versions(&vcx);
+        h.frame.update(&mut vcx, |f, cx| {
+            assert!(f.arrived(other, now), "the other tile's answer releases it");
+            cx.notify();
+        });
+        assert_eq!(
+            h.rows(&vcx),
+            5,
+            "a hidden panel still promotes what it staged on the flip"
+        );
+    }
+
     /// The other half: when this panel's own arrival is what empties the
     /// barrier, it promotes on the spot rather than waiting for the `flip`
     /// bump to come back round to its observer on a later notify pass.
@@ -6356,22 +6289,221 @@ mod tests {
         );
     }
 
-    /// Hiding cancels the outstanding request and clears acted. Showing the tile again
-    /// must query rather than treat an undelivered request as current.
+    /// Hiding a panel cancels nothing and forgets nothing: the outstanding
+    /// request finishes, its reply paints while the panel is hidden, and
+    /// showing it again asks nothing because nothing it follows moved.
     #[gpui::test]
-    fn a_tile_hidden_mid_flight_requeries_on_reshow(cx: &mut gpui::TestAppContext) {
+    fn a_panel_hidden_mid_flight_paints_the_reply_and_asks_nothing_on_reshow(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let (h, mut vcx) = open(cx);
         h.command(&mut vcx, "key SPX.Z").unwrap();
         h.visible(&mut vcx, true);
         let first = h.document_request().expect("the first request");
-        // Hidden before the outcome lands, then shown again with nothing
-        // about the frame having changed.
         h.visible(&mut vcx, false);
+        assert!(
+            !h.raw_requests()
+                .iter()
+                .any(|r| matches!(r, Request::Cancel { .. })),
+            "a hide is not a close: nothing is cancelled"
+        );
+        h.deliver(&mut vcx, first.tag, Arc::new(cvi(BASE)));
+        assert_eq!(
+            h.rows(&vcx),
+            2,
+            "the reply applies while the panel is hidden"
+        );
+        h.visible(&mut vcx, true);
+        assert!(
+            h.document_request().is_none(),
+            "nothing it follows moved, so nothing is asked"
+        );
+        assert_eq!(h.rows(&vcx), 2);
+    }
+
+    /// The reply to a question asked before a followed change can land while
+    /// the panel is hidden; reshow must still ask again.
+    #[gpui::test]
+    fn a_followed_change_while_hidden_requeries_on_reshow(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let first = h.document_request().expect("the first request");
+        h.visible(&mut vcx, false);
+        let at = chrono::DateTime::parse_from_rfc3339(BASE)
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        h.frame.update(&mut vcx, |f, cx| {
+            f.set_as_of(geode_core::query::AsOf::At(at));
+            cx.notify();
+        });
+        assert!(
+            h.document_request().is_none(),
+            "a hidden panel asks nothing"
+        );
+        h.deliver(&mut vcx, first.tag, Arc::new(cvi(BASE)));
+        assert_eq!(
+            h.rows(&vcx),
+            0,
+            "the answer to the as-of it left behind is not applied"
+        );
         h.visible(&mut vcx, true);
         let second = h
             .document_request()
-            .expect("a cancelled request must be asked again");
+            .expect("the as-of moved while hidden: reshow asks again");
         assert!(second.tag > first.tag);
+        assert_eq!(second.as_of, geode_core::query::AsOf::At(at));
+    }
+
+    /// A reply asked under an as-of the panel moved past while hidden is
+    /// dropped, not applied: applying it would run the draft policy (here
+    /// `:auto replace`, which throws the edits away) against a document
+    /// nobody asked for any more. The reshow asks under the new as-of.
+    #[gpui::test]
+    fn a_reply_to_an_as_of_left_behind_while_hidden_runs_no_draft_policy(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "auto replace").unwrap();
+        h.with_document_tagged(&mut vcx);
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "0.5");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().len()), 1);
+
+        // An as-of change while shown: the panel asks again at once.
+        let first_at = chrono::Utc::now() - chrono::Duration::days(1);
+        h.frame.update(&mut vcx, |f, cx| {
+            f.set_as_of(geode_core::query::AsOf::At(first_at));
+            cx.notify();
+        });
+        let asked = h.document_request().expect("an as-of change requeries");
+        // Hidden with that question out, then the as-of moves again.
+        h.visible(&mut vcx, false);
+        let second_at = chrono::Utc::now() - chrono::Duration::days(2);
+        h.frame.update(&mut vcx, |f, cx| {
+            f.set_as_of(geode_core::query::AsOf::At(second_at));
+            cx.notify();
+        });
+        h.deliver(
+            &mut vcx,
+            asked.tag,
+            Arc::new(document_of(&["2026-11-20"], &NODES, NEWER)),
+        );
+
+        let (edits, state, source, rows, notice) = h.tile.read_with(&vcx, |t, _| {
+            (
+                t.draft().len(),
+                t.draft().state.clone(),
+                t.model().base.as_ref().map(|b| b.as_of.clone()),
+                t.model().rows.len(),
+                t.notice().map(str::to_string),
+            )
+        });
+        assert_eq!(
+            source.as_deref(),
+            Some(BASE),
+            "the old reply is not painted"
+        );
+        assert_eq!(rows, 2);
+        assert_eq!(edits, 1, "and the replace policy never ran");
+        assert_eq!(state, DraftState::Editing);
+        assert!(
+            !notice.as_deref().is_some_and(|n| n.contains("replaced")),
+            "nothing was replaced: {notice:?}"
+        );
+
+        h.visible(&mut vcx, true);
+        let again = h
+            .document_request()
+            .expect("the as-of moved while hidden: reshow asks again");
+        assert!(again.tag > asked.tag);
+        assert_eq!(again.as_of, geode_core::query::AsOf::At(second_at));
+    }
+
+    /// A panel hidden while enrolled in an open barrier still answers it with
+    /// its reply, and promotes on the flip while hidden, so a tab switch in
+    /// the middle of a flip never holds the other tiles to the deadline.
+    #[gpui::test]
+    fn a_panel_hidden_mid_flip_still_answers_the_barrier(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let first = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, first, Arc::new(cvi(BASE)));
+        let other = QueryKey(TILE + 1);
+        open_barrier_on_as_of(&h, &mut vcx, &[QueryKey(TILE), other], 60);
+        let second = h.document_request().unwrap().tag;
+        h.visible(&mut vcx, false);
+        h.deliver(
+            &mut vcx,
+            second,
+            Arc::new(document_of(&["t0", "t1", "t2", "t3", "t4"], &NODES, BASE)),
+        );
+        let now = h.versions(&vcx);
+        assert!(
+            !h.frame
+                .read_with(&vcx, |f, _| f.barrier_wants(QueryKey(TILE), now)),
+            "the reply answered the barrier it was enrolled in, hidden or not"
+        );
+        assert_eq!(h.rows(&vcx), 2, "held behind the other tile");
+        h.frame.update(&mut vcx, |f, cx| {
+            assert!(f.arrived(other, now));
+            cx.notify();
+        });
+        assert_eq!(h.rows(&vcx), 5, "and promoted on the flip while hidden");
+    }
+
+    /// Closing a panel cancels its request by key and answers the barrier
+    /// before its deadline, so the other tiles do not wait it out; a late
+    /// reply paints nothing.
+    #[gpui::test]
+    fn closing_a_panel_mid_flip_cancels_its_request_and_releases_the_barrier(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // The shell's recorder test pins that removal reaches `closed`;
+        // this test pins what `closed` does.
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let first = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, first, Arc::new(cvi(BASE)));
+        let opened = Instant::now();
+        let at = chrono::Utc::now() - chrono::Duration::seconds(60);
+        h.frame.update(&mut vcx, |f, cx| {
+            f.set_as_of(geode_core::query::AsOf::At(at));
+            f.open_flip([QueryKey(TILE)], opened);
+            cx.notify();
+        });
+        let second = h.document_request().expect("an as-of change requeries").tag;
+        h.frame.update(&mut vcx, |f, _| {
+            assert!(
+                !f.sweep(opened + FLIP_DEADLINE / 2),
+                "halfway to the deadline, time alone releases nothing"
+            );
+        });
+        assert!(h.barrier_open(&vcx), "waiting on this panel's reply");
+        vcx.update(|_, cx| h.content.closed(cx));
+        assert!(
+            h.raw_requests()
+                .iter()
+                .any(|r| matches!(r, Request::Cancel { key } if *key == QueryKey(TILE))),
+            "a close cancels the request by key"
+        );
+        assert!(
+            !h.barrier_open(&vcx),
+            "the close answered the barrier before its deadline"
+        );
+        h.deliver(
+            &mut vcx,
+            second,
+            Arc::new(document_of(&["t0", "t1", "t2", "t3", "t4"], &NODES, BASE)),
+        );
+        assert_eq!(
+            h.rows(&vcx),
+            2,
+            "a late reply to a closed panel paints nothing"
+        );
     }
 
     #[gpui::test]
@@ -8714,7 +8846,7 @@ deleted = true
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.choice_highlighted()),
             Some("estimated".into()),
-            "a bare step wraps (§20.5)"
+            "a bare step wraps"
         );
         h.dispatch(&mut vcx, "cancel", None);
         assert!(!h.tile.read_with(&vcx, |t, _| t.choice_popup_open()));
@@ -9789,9 +9921,9 @@ edits = [["2026-09-18#2", "amount", 9.0]]
 
     /// The other side of the same gate, and why it is still load-bearing:
     /// a stage whose own `as_of` no longer matches the frame's must NOT
-    /// promote. Reachable while HIDDEN — `set_visible(false)` cancels the
-    /// request but a stage already taken stays, and a hidden panel does
-    /// not requery for the as-of change that follows.
+    /// promote. Reachable while HIDDEN — a hidden panel keeps a stage
+    /// already taken, and does not requery for the as-of change that
+    /// follows.
     #[gpui::test]
     fn a_stage_is_dropped_when_a_counter_the_panel_follows_has_moved(
         cx: &mut gpui::TestAppContext,
@@ -9991,7 +10123,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         h.set_editor(&mut vcx, "0.5");
         h.dispatch(&mut vcx, "commit", None);
 
-        let tag = h.tile.read_with(&vcx, |t, _| t.tag);
+        let tag = h.tile.read_with(&vcx, |t, _| t.following.tag());
         h.deliver(
             &mut vcx,
             tag,
@@ -10028,7 +10160,7 @@ edits = [["2026-11-20", "-1", 9.5]]
     fn a_painting_delivery_clears_the_previous_deliverys_notice(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         h.with_document(&mut vcx);
-        let tag = h.tile.read_with(&vcx, |t, _| t.tag);
+        let tag = h.tile.read_with(&vcx, |t, _| t.following.tag());
         h.deliver_err(&mut vcx, tag, "the document select failed");
         assert!(h.tile.read_with(&vcx, |t, _| t.notice().is_some()));
 
@@ -10358,7 +10490,7 @@ edits = [["2099-01-01", "-1", 1.0]]
         let (h, mut vcx) = open(cx);
         h.with_document(&mut vcx);
         h.command(&mut vcx, "set spot_ref 4520").unwrap();
-        let tag = h.tile.read_with(&vcx, |t, _| t.tag);
+        let tag = h.tile.read_with(&vcx, |t, _| t.following.tag());
         h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
         assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_behind()));
         assert!(
@@ -13230,7 +13362,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         let (h, mut vcx) = open_upload(cx);
         h.with_document(&mut vcx);
         h.edit_one_cell(&mut vcx);
-        let tag = h.tile.read_with(&vcx, |t, _| t.tag);
+        let tag = h.tile.read_with(&vcx, |t, _| t.following.tag());
         h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
         assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_behind()));
         assert_eq!(
@@ -13606,7 +13738,7 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
             cx.notify();
         });
         vcx.run_until_parked();
-        let tag = h.tile.read_with(&vcx, |t, _| t.tag);
+        let tag = h.tile.read_with(&vcx, |t, _| t.following.tag());
         h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
         assert_eq!(h.command(&mut vcx, "upload"), Ok(()), "live again: armed");
     }
@@ -13881,7 +14013,7 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         h.edit_one_cell(&mut vcx);
         h.command(&mut vcx, "upload").unwrap();
         draw(&mut vcx);
-        let tag = h.tile.read_with(&vcx, |t, _| t.tag);
+        let tag = h.tile.read_with(&vcx, |t, _| t.following.tag());
         h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
         assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_behind()));
         assert_eq!(h.upload_prompt(&vcx), None, "withdrawn on the delivery");
@@ -13920,7 +14052,7 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         });
         assert!(vcx.update(|window, _| prompt_focus.is_focused(window)));
         let before = h.tile.read_with(&vcx, |t, _| t.draft().clone());
-        let tag = h.tile.read_with(&vcx, |t, _| t.tag);
+        let tag = h.tile.read_with(&vcx, |t, _| t.following.tag());
         h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
         let after = h.tile.read_with(&vcx, |t, _| t.draft().clone());
         assert_eq!(
@@ -13985,7 +14117,7 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         draw(&mut vcx);
         type_keys(&mut vcx, "y");
         let upload_tag = h.upload_request().expect("submitted").tag;
-        let tag = h.tile.read_with(&vcx, |t, _| t.tag);
+        let tag = h.tile.read_with(&vcx, |t, _| t.following.tag());
         h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
         assert_eq!(
             h.tile
@@ -14040,7 +14172,7 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         /// A further generation answering the panel's own latest request —
         /// what the upstream's publish of the sent document arrives as.
         fn echo(&self, vcx: &mut gpui::VisualTestContext, snapshot: Snapshot) {
-            let tag = self.tile.read_with(vcx, |t, _| t.tag);
+            let tag = self.tile.read_with(vcx, |t, _| t.following.tag());
             self.deliver(vcx, tag, Arc::new(snapshot));
         }
         fn sent_at(&self, vcx: &gpui::VisualTestContext) -> String {
@@ -14693,7 +14825,11 @@ edits = [["2026-11-20", "-1", 9.5]]
                 }
             }
             let tag = asked.expect("the visible panel asked for its document");
-            assert_eq!(tag, tile.read_with(&vcx, |t, _| t.tag), "{answer}");
+            assert_eq!(
+                tag,
+                tile.read_with(&vcx, |t, _| t.following.tag()),
+                "{answer}"
+            );
             let outcome = QueryOutcome {
                 // The session's own tile id, not the harness's `TILE`.
                 key: QueryKey(1),

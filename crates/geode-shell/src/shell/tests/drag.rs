@@ -754,19 +754,12 @@ fn switching_workspaces_mid_tile_drag_cancels_with_nothing_applied(cx: &mut gpui
         "a workspace switch mid-drag cancels the tile drag"
     );
 
-    // The grab focused the tile's own occupant (the fixture's recorder
-    // tracks its focus handle, as `DataTable` does), and switching to
-    // the empty workspace 2 unmounted it — the orphaned-`FocusId` state
-    // `pending_focus_restore` exists for, in which `handle_key_down`
-    // stops firing until something claims focus again — except it is not
-    // orphaned here at all: occupants are retained for tiles in every
-    // workspace, so the view (and the handle it holds) is alive and
-    // merely unmounted, and gpui falls back to `root_node_id` dispatch,
-    // which reaches none of the shell's key listeners. What saves the
-    // `alt-1` below is `ensure_occupants`'s departed-tile backstop,
-    // firing in the draw above (the grab's own re-arm is real, and has
-    // `a_grab_leaves_the_shell_focused_on_the_next_frame` to itself —
-    // this path no longer depends on it).
+    // Switching to empty workspace 2 unmounts the focused occupant but
+    // retains its view and focus handle. GPUI's fallback dispatch cannot
+    // reach the shell's key listeners while that unmounted handle owns
+    // focus. `ensure_occupants` restores shell focus in the draw above,
+    // so `alt-1` reaches the shell. The grab's own focus restoration is
+    // isolated in `a_grab_leaves_the_shell_focused_on_the_next_frame`.
     cx.simulate_keystrokes("alt-1");
     assert_eq!(
         shell.read_with(&cx, |shell, _| shell.services.workspaces.active_index()),
@@ -889,19 +882,11 @@ fn a_plain_click_still_focuses_and_never_arms_a_drag(cx: &mut gpui::TestAppConte
     );
 }
 
-/// The grab's own focus restore, isolated from the backstop that also
-/// covers it (round-1 harness finding: with `ensure_occupants`'s
-/// departed-tile backstop in place, deleting this re-arm no longer
-/// failed the workspace-switch test — the backstop caught it instead,
-/// leaving the re-arm's own behaviour untested).
-///
-/// Nothing leaves the visible set here, so the backstop cannot fire and
-/// this is the re-arm alone. The invariant it upholds is the one
-/// `a_click_on_a_tile_leaves_the_shell_focused_on_the_next_frame`
-/// states for a plain click: after ANY tile mouse-down, the shell root
-/// holds keyboard focus again on the next frame. A grab is a tile
-/// mouse-down, and the fixture's recorder takes focus on it exactly as
-/// `DataTable` would.
+/// A tile grab restores shell focus on the next frame, just as a plain
+/// tile mouse-down does. The fixture's recorder takes focus on the press
+/// as `DataTable` does. No tile leaves the visible set, so
+/// `ensure_occupants`'s departed-tile backstop cannot mask a missing
+/// restore from the grab itself.
 #[gpui::test]
 fn a_grab_leaves_the_shell_focused_on_the_next_frame(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell, _left, right) = two_tile_drag_shell(cx);

@@ -11,6 +11,7 @@ pub mod complete;
 pub mod edit;
 pub mod entry;
 pub mod package;
+pub mod select;
 pub mod sheet;
 pub mod shorthand;
 pub mod storage;

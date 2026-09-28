@@ -10,6 +10,7 @@ use crate::grid::{GridModel, GridRowKind};
 use crate::paint::Paints;
 use crate::popup::{ChoicePaint, render_choice};
 use crate::tile::PricerTile;
+use geode_core::grid::selection::{Resolved, SelectKind};
 use geode_shell::colfit::{FitMetrics, FittedWidths};
 use geode_shell::fonts;
 use geode_shell::linenumbers::{GUTTER_GAP_PX, LineNumbers, gutter_number, gutter_px};
@@ -18,8 +19,9 @@ use geode_shell::shell::scale;
 use geode_widgets::datefield::{self, DateTimeField, SegmentPaint, SegmentText};
 use gpui::prelude::*;
 use gpui::{
-    App, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, SharedString, Stateful,
-    TextAlign, WeakEntity, Window, div, px, relative,
+    App, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, SharedString, Stateful, TextAlign, WeakEntity, Window, div, px,
+    relative,
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::table::{Column, ColumnFixed, TableDelegate, TableState};
@@ -69,6 +71,41 @@ type NumbersStamp = (usize, Option<usize>, LineNumbers);
 pub struct ChevronClicked(pub usize);
 
 impl EventEmitter<ChevronClicked> for TableState<SheetDelegate> {}
+
+/// Every mouse selection gesture a cell, the tree cell or the line-number
+/// gutter recognises, carried to the tile's `pointer`: the one door a
+/// shift+click and a drag go through to `start_selection` and
+/// `clear_selection`, so the mouse never reaches a selection state the
+/// keys could not. `col` is a PLAN column; `None` is the tree cell (or
+/// its gutter), the row's handle, which is never a selection member. A
+/// `Drag`'s `tree` is where its press landed, not where the pointer is
+/// now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CellPointer {
+    Press {
+        row: usize,
+        col: Option<usize>,
+        shift: bool,
+    },
+    Drag {
+        row: usize,
+        col: Option<usize>,
+        tree: bool,
+    },
+}
+
+impl EventEmitter<CellPointer> for TableState<SheetDelegate> {}
+
+/// A press an element inside a cell owns, recorded on the way up so the
+/// cell and the row it bubbles through next do not report it as their
+/// own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InnerPress {
+    /// The open editor's own cell: caret placement, a text selection.
+    Editor,
+    /// A package chevron: a toggle, never a selection gesture.
+    Chevron,
+}
 
 /// A paint-time copy of the tile's open editor (`PricerTile::sync_editor`):
 /// the grid cell it sits on, its field, and the typeahead's prepared rows.
@@ -175,6 +212,10 @@ pub struct SheetDelegate {
     pub(crate) model: Rc<GridModel>,
     /// `(grid row, plan column)`; `None` with no cursor row.
     pub(crate) cursor: Option<(usize, usize)>,
+    /// The tile's resolved selection, mirrored by `sync_cursor`: grid
+    /// rows × plan columns. The tree column is never a member; it tints
+    /// only as a whole selected row's handle.
+    pub(crate) selected: Option<Resolved>,
     pub(crate) paints: Paints,
     /// The tile's `loading`, mirrored by `install_model`: the empty table
     /// says `Loading sheet…` rather than inviting an `o` the tile would
@@ -202,6 +243,25 @@ pub struct SheetDelegate {
     /// `install_model` refresh keeps it; a name the current view lacks is
     /// ignored and a column with no entry keeps the view's width.
     pub(crate) fitted: FittedWidths,
+    /// The `(row, col)` a mouse move last emitted a `CellPointer::Drag`
+    /// for. gpui fires a move per pixel, not per cell; without this a held
+    /// drag would re-run the tile's `pointer` on every frame. Stale after
+    /// a drag no cell saw released, which costs one extra emission at most.
+    drag_last: Option<(usize, Option<usize>)>,
+    /// `Some` while the primary button is down because of a press a cell,
+    /// the tree cell or the gutter of this table caught — `true` when it
+    /// was the tree cell or the gutter. `None` while another element owns
+    /// the drag (a scrollbar, the header, a tile divider, a chevron), so a
+    /// button held over the cells from elsewhere never starts or extends
+    /// a selection. Cleared by any release: each cell's `on_mouse_up` /
+    /// `on_mouse_up_out` pair sees every release wherever it lands.
+    drag_origin: Option<bool>,
+    /// Set by a press the open editor's cell or a chevron owns, and taken
+    /// by the row's press handler, which bubbles after the cell's: without
+    /// it the row would report the press at the cursor column — for the
+    /// editor, its own cell — and so cancel the edit the press was aimed
+    /// into.
+    inner_press: Option<InnerPress>,
 }
 
 impl SheetDelegate {
@@ -209,6 +269,7 @@ impl SheetDelegate {
         SheetDelegate {
             model: Rc::new(GridModel::default()),
             cursor: None,
+            selected: None,
             paints: Paints::derive(theme),
             loading: false,
             chevron: None,
@@ -219,6 +280,9 @@ impl SheetDelegate {
             gutter: 0.0,
             numbers_stamp: None,
             fitted: FittedWidths::new(),
+            drag_last: None,
+            drag_origin: None,
+            inner_press: None,
         }
     }
 
@@ -406,20 +470,49 @@ impl TableDelegate for SheetDelegate {
     }
 
     /// A package row's ground, on the row (see the module doc). A filler
-    /// row past the model paints nothing.
+    /// row past the model paints nothing and reports nothing.
+    ///
+    /// A press on the row outside every cell (the table's trailing filler)
+    /// is still a click on that row: it reports a press at the cursor's
+    /// column so the tile's one pointer door clears or extends exactly as
+    /// a cell press would. The row bubbles after its cells, so a press a
+    /// cell already caught has set `drag_origin` (or `inner_press`) and is
+    /// not reported twice; this press arms no drag.
     fn render_tr(
         &mut self,
         row_ix: usize,
         _window: &mut Window,
-        _cx: &mut Context<TableState<Self>>,
+        cx: &mut Context<TableState<Self>>,
     ) -> Stateful<Div> {
         let ground = match self.model.rows.get(row_ix).map(|r| r.kind) {
             Some(GridRowKind::Package { .. }) => Some(self.paints.package_ground),
             _ => None,
         };
-        div()
+        let row = div()
             .id(("row", row_ix))
-            .when_some(ground, |el, g| el.bg(g))
+            .when_some(ground, |el, g| el.bg(g));
+        if row_ix >= self.model.rows.len() {
+            return row;
+        }
+        row.on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                let d = this.delegate_mut();
+                // Taken on every row press, so it never outlives the
+                // press that set it.
+                if d.inner_press.take().is_some() || d.drag_origin.is_some() {
+                    return;
+                }
+                let Some((_, col)) = d.cursor else {
+                    return;
+                };
+                cx.emit(CellPointer::Press {
+                    row: row_ix,
+                    col: Some(col),
+                    shift: e.modifiers.shift,
+                });
+            }),
+        )
     }
 
     /// Paint loading or entry guidance in full-opacity muted text contrast-adjusted
@@ -470,7 +563,8 @@ impl TableDelegate for SheetDelegate {
             .size_full()
             .flex()
             .child(
-                div()
+                // The gutter is the row's handle, as the tree cell is.
+                Self::wire_pointer(div(), cx, row_ix, None)
                     .flex()
                     .flex_shrink_0()
                     .h_full()
@@ -486,6 +580,13 @@ impl TableDelegate for SheetDelegate {
             .child(div().flex_1().min_w_0().h_full().child(cell))
             .into_any_element()
     }
+}
+
+/// The selection tint: an absolute overlay painted as a cell's first
+/// child, so it sits under the text, a package row's ground (painted on
+/// the row) still shows through, and the cursor's border paints over it.
+fn selection_tint(theme: &Theme) -> Div {
+    div().absolute().inset_0().bg(theme.selection.opacity(0.35))
 }
 
 impl SheetDelegate {
@@ -520,6 +621,14 @@ impl SheetDelegate {
             .whitespace_nowrap()
             .overflow_hidden()
             .debug_selector(|| format!("pricer-cell-{row_ix}-{col_ix}"));
+        let tinted = self
+            .selected
+            .as_ref()
+            .is_some_and(|s| match Self::plan_col(col_ix) {
+                Some(c) => s.contains(row_ix, c),
+                None => s.kind == SelectKind::Rows && s.contains_row(row_ix),
+            });
+        let base = base.when(tinted, |el| el.relative().child(selection_tint(cx.theme())));
         let Some(plan_col) = Self::plan_col(col_ix) else {
             // The tree column: indent by depth, then the fixed chevron
             // slot (a chevron on a package, empty otherwise), then the
@@ -546,6 +655,16 @@ impl SheetDelegate {
                             .text_color(paints.package_muted)
                             .pointer_states(states)
                             .debug_selector(|| format!("pricer-chevron-{row_ix}"))
+                            // Recorded, not stopped: the tree cell reports
+                            // it as a plain press (it clears a selection
+                            // and never starts one) and the shell's
+                            // tile-level press still arrives.
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _: &MouseDownEvent, _, _| {
+                                    this.delegate_mut().inner_press = Some(InnerPress::Chevron);
+                                }),
+                            )
                             .on_click(cx.listener(move |this, e: &ClickEvent, _window, cx| {
                                 cx.stop_propagation();
                                 // Toggle only on the first press of a double-click.
@@ -560,7 +679,7 @@ impl SheetDelegate {
                 }
                 _ => slot,
             };
-            return el
+            return Self::wire_pointer(el, cx, row_ix, None)
                 .text_color(paints.text(crate::core::CellState::Own, package))
                 .child(slot)
                 .child(
@@ -575,7 +694,7 @@ impl SheetDelegate {
         };
         let at_cursor = self.cursor == Some((row_ix, plan_col));
         let right = model.columns.get(plan_col).is_some_and(|c| c.right);
-        let el = base
+        let el = Self::wire_pointer(base, cx, row_ix, Some(plan_col))
             .when(right, |el| el.justify_end())
             .when(at_cursor, |el| el.border_1().border_color(active_border));
         // The editor replaces this cell's text. Its typeahead anchors its top-left
@@ -645,6 +764,103 @@ impl SheetDelegate {
                 })
                 .into_any_element(),
         }
+    }
+}
+
+impl SheetDelegate {
+    /// Wire a cell's, the tree cell's or the gutter's selection gestures
+    /// onto `el`: a press (plain or shift) and, only while the button has
+    /// stayed down since a press this table caught, a drag. `col` is the
+    /// plan column (`None` for the tree cell or the gutter); a drag
+    /// carries the `tree` flag of the element its PRESS landed on, so the
+    /// selection's kind is decided by where it started, not by what is
+    /// under the pointer now.
+    ///
+    /// A press in the cell holding the open editor belongs to the editor
+    /// (caret placement, text selection), so it reports nothing and arms
+    /// no drag: it must never cancel the edit or start a selection. A
+    /// chevron's press is reported as a plain press whatever its
+    /// modifiers, and arms no drag: the chevron toggles its package and
+    /// never starts a selection.
+    ///
+    /// None of the listeners stops propagation: the table's own
+    /// `SelectCell` click and the shell's tile-focus press must still
+    /// arrive, and a fast double-click still reaches gpui's click-count
+    /// tracking and so `DoubleClickedCell`.
+    fn wire_pointer(
+        el: Div,
+        cx: &Context<TableState<Self>>,
+        row_ix: usize,
+        col: Option<usize>,
+    ) -> Div {
+        let tree = col.is_none();
+        el.on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                let d = this.delegate_mut();
+                if d.inner_press == Some(InnerPress::Chevron) {
+                    cx.emit(CellPointer::Press {
+                        row: row_ix,
+                        col,
+                        shift: false,
+                    });
+                    return;
+                }
+                if col.is_some()
+                    && d.editor
+                        .as_ref()
+                        .is_some_and(|ed| ed.row == row_ix && Some(ed.col) == col)
+                {
+                    d.inner_press = Some(InnerPress::Editor);
+                    return;
+                }
+                d.drag_last = Some((row_ix, col));
+                d.drag_origin = Some(tree);
+                cx.emit(CellPointer::Press {
+                    row: row_ix,
+                    col,
+                    shift: e.modifiers.shift,
+                });
+            }),
+        )
+        .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, _, cx| {
+            if e.pressed_button != Some(MouseButton::Left) {
+                return;
+            }
+            let d = this.delegate_mut();
+            // No press recorded: the button came down on something else
+            // and is only passing over this cell.
+            let Some(started_on_tree) = d.drag_origin else {
+                return;
+            };
+            if d.drag_last == Some((row_ix, col)) {
+                return;
+            }
+            d.drag_last = Some((row_ix, col));
+            cx.emit(CellPointer::Drag {
+                row: row_ix,
+                col,
+                tree: started_on_tree,
+            });
+        }))
+        // A release anywhere ends the drag: `on_mouse_up` when it lands
+        // here, `on_mouse_up_out` everywhere else.
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseUpEvent, _, _| {
+                let d = this.delegate_mut();
+                d.drag_origin = None;
+                d.inner_press = None;
+            }),
+        )
+        .on_mouse_up_out(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseUpEvent, _, _| {
+                let d = this.delegate_mut();
+                d.drag_origin = None;
+                d.inner_press = None;
+            }),
+        )
     }
 }
 

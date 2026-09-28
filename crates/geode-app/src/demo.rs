@@ -355,7 +355,7 @@ mod demo_config_integration {
         let names: Vec<&str> = setup.views.iter().map(|v| v.name.as_str()).collect();
         assert_eq!(names, vec!["tree", "wide"]);
         let wide = setup.views.iter().find(|v| v.name == "wide").unwrap();
-        assert_eq!(wide.columns.len(), 100, "spec §6.6's 100-column view");
+        assert_eq!(wide.columns.len(), 100, "the wide view has 100 columns");
         // All five source definitions survive setup: risk CSVs, CVI and
         // dividend subscriptions, and the two timeseries fetch adapters.
         assert_eq!(setup.config.sources.len(), 5);

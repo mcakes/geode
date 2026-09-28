@@ -1120,11 +1120,9 @@ fn user_layer_rebinding_ctrl_k_prevents_palette_open_and_dispatches_rebound_acti
     );
 }
 
-/// Regression for `dispatch_palette_item`: selecting the
-/// `palette::toggle` row from inside the palette itself is a true
-/// toggle — the palette closes (Enter already did that) and must stay
-/// closed, not reopen. Filters straight down to that one row via its
-/// exact title so the test doesn't depend on where it ranks unfiltered.
+/// Selecting `palette::toggle` from the palette closes it and keeps it
+/// closed after dispatch. Filtering by the exact title isolates the row
+/// without depending on its unfiltered rank.
 #[gpui::test]
 fn enter_on_the_palette_toggle_row_closes_the_palette_without_reopening(
     cx: &mut gpui::TestAppContext,

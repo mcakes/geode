@@ -427,7 +427,7 @@ impl Harness {
         }
     }
     /// Everything submitted since the last drain except a `Cancel` —
-    /// what a test asserting on ORDER reads, since a hide's cancel is
+    /// what a test asserting on ORDER reads, since a close's cancel is
     /// housekeeping rather than a question.
     fn requests(&self) -> Vec<Request> {
         self.raw_requests()
@@ -914,7 +914,7 @@ fn normal_mode_verbs_drive_the_model_and_bump_the_chart_version(cx: &mut gpui::T
     assert_eq!(h.model(&vcx).slots()[1].axis, Axis::Right);
     assert!(
         h.chart(&vcx).version > v0,
-        "a chrome change rebuilds the chart model (§8.5's version contract)"
+        "a chrome change rebuilds the chart model"
     );
     // Two axis steps from Right pass through BottomLeft to BottomRight.
     h.dispatch(&mut vcx, "axis_next", Some(2));
@@ -1111,10 +1111,7 @@ fn serialize_and_restore_round_trip_the_model(cx: &mut gpui::TestAppContext) {
     h.dispatch(&mut vcx, "zoom_in", None);
     let table = vcx.update(|_, cx| h.content.serialize(cx));
     assert_eq!(table.get("slots").unwrap().as_array().unwrap().len(), 3);
-    assert!(
-        table.get("view").is_none(),
-        "the view is not persisted (§9.11)"
-    );
+    assert!(table.get("view").is_none(), "the view is not persisted");
     let (h2, mut vcx2) = open_with(cx, Some(table.clone()));
     let m = h2.model(&vcx2);
     assert_eq!(m.slots().len(), 3);
@@ -1524,7 +1521,7 @@ fn a_query_change_requeries_and_a_range_change_fetches_and_queries(cx: &mut gpui
     );
     assert!(
         matches!(reqs[1], Request::Series(_)),
-        "…and queries the cached part at once (§9.10)"
+        "…and queries the cached part at once"
     );
     // Stats over the visible window: a pan requeries while
     // percentiles are on.
@@ -1615,7 +1612,7 @@ fn the_tile_follows_as_of_only_and_stages_under_an_open_barrier(cx: &mut gpui::T
 }
 
 #[gpui::test]
-fn a_hidden_tile_cancels_and_a_shown_one_requeries_and_a_restored_one_refetches_once(
+fn a_hidden_tile_keeps_its_query_and_a_shown_one_refetches_and_a_restored_one_refetches_once(
     cx: &mut gpui::TestAppContext,
 ) {
     let (h, mut vcx) = open(cx);
@@ -1624,24 +1621,30 @@ fn a_hidden_tile_cancels_and_a_shown_one_requeries_and_a_restored_one_refetches_
     h.requests();
     h.deliver_fetched(&mut vcx, "demo_kdb", "SPX.close", Ok(1));
     let tag = h.series_request().unwrap().tag;
-    // A tile with a result on screen is what a hide/show round trip
-    // is about; a tile that has never been answered comes back
-    // through its fetch, which the restore half below pins.
-    h.deliver_series(&mut vcx, tag, result_with(&[1], 5));
-    h.requests();
+    // Hidden with the query still out: a hide is not a close.
     h.visible(&mut vcx, false);
     assert!(
-        matches!(h.raw_requests().last(), Some(Request::Cancel { key }) if *key == QueryKey(TILE))
+        !h.raw_requests()
+            .iter()
+            .any(|r| matches!(r, Request::Cancel { .. })),
+        "a hide is not a close: the query is kept"
+    );
+    h.deliver_series(&mut vcx, tag, result_with(&[1], 5));
+    assert_eq!(
+        h.chart(&vcx).buckets.len(),
+        5,
+        "its answer applies while hidden"
     );
     h.visible(&mut vcx, true);
     let reqs = h.requests();
     assert!(
         reqs.iter().any(|r| matches!(r, Request::Fetch(_))),
-        "shown: refetch (§9.10)…"
+        "shown: refetch…"
     );
     assert!(
-        reqs.iter().any(|r| matches!(r, Request::Series(_))),
-        "…and requery"
+        !reqs.iter().any(|r| matches!(r, Request::Series(_))),
+        "…but no query from the show itself: nothing it follows moved, and \
+         the refetch's completion is what asks again"
     );
     let table = vcx.update(|_, cx| h.content.serialize(cx));
     let (h2, mut vcx2) = open_with(cx, Some(table));
@@ -1662,6 +1665,67 @@ fn a_hidden_tile_cancels_and_a_shown_one_requeries_and_a_restored_one_refetches_
     assert!(
         h2.fetch_request().is_some(),
         "every show refetches (coverage subtraction makes it cheap)"
+    );
+}
+
+#[gpui::test]
+fn an_as_of_change_while_hidden_requeries_on_reshow(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_loaded(cx, 5);
+    h.visible(&mut vcx, false);
+    h.requests();
+    let at = chrono::Utc::now() - chrono::Duration::days(30);
+    h.frame.update(&mut vcx, |f, cx| {
+        f.set_as_of(AsOf::At(at));
+        cx.notify();
+    });
+    assert!(h.requests().is_empty(), "a hidden tile asks nothing");
+    h.visible(&mut vcx, true);
+    let reqs = h.requests();
+    let Some(Request::Series(q)) = reqs.iter().find(|r| matches!(r, Request::Series(_))) else {
+        panic!("the as-of moved while hidden: reshow asks again: {reqs:?}");
+    };
+    assert_eq!(q.as_of, AsOf::At(at));
+}
+
+#[gpui::test]
+fn closing_the_tile_mid_flip_cancels_its_query_and_releases_the_barrier(
+    cx: &mut gpui::TestAppContext,
+) {
+    // The shell's recorder test pins that removal reaches `closed`;
+    // this test pins what `closed` does.
+    let (h, mut vcx) = open_loaded(cx, 5);
+    h.requests();
+    let at = chrono::Utc::now() - chrono::Duration::days(30);
+    let opened = std::time::Instant::now();
+    h.frame.update(&mut vcx, |f, cx| {
+        f.set_as_of(AsOf::At(at));
+        f.open_flip([QueryKey(TILE)], opened);
+        cx.notify();
+    });
+    let q = h.series_request().expect("an as-of change queries");
+    h.frame.update(&mut vcx, |f, _| {
+        assert!(
+            !f.sweep(opened + geode_shell::frame::FLIP_DEADLINE / 2),
+            "halfway to the deadline, time alone releases nothing"
+        );
+    });
+    assert!(h.frame.read_with(&vcx, |f, _| f.barrier_open()));
+    vcx.update(|_, cx| h.content.closed(cx));
+    assert!(
+        h.raw_requests()
+            .iter()
+            .any(|r| matches!(r, Request::Cancel { key } if *key == QueryKey(TILE))),
+        "a close cancels the query by key"
+    );
+    assert!(
+        !h.frame.read_with(&vcx, |f, _| f.barrier_open()),
+        "and answers the barrier before its deadline"
+    );
+    h.deliver_series(&mut vcx, q.tag, result_with(&[1], 9));
+    assert_eq!(
+        h.chart(&vcx).buckets.len(),
+        5,
+        "a late answer to a closed tile paints nothing"
     );
 }
 

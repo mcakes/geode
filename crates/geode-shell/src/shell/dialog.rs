@@ -219,6 +219,8 @@ pub(crate) fn opens_dialog(action: &crate::actions::ActionId) -> bool {
             | "config::sources"
             | "config::colors"
             | "config::expressions"
+            | "config::view_column"
+            | "config::schema_column"
             | "frame::pick"
             | "scope::save_current"
             | "frame::as_of"

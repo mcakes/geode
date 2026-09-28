@@ -460,7 +460,7 @@ fn escape_cancels_without_touching_the_scope(cx: &mut gpui::TestAppContext) {
             s.picker.as_ref().map(|p| &p.stage),
             Some(picker::Stage::Columns)
         )),
-        "spec §20.2: escape from Values steps back to Columns first"
+        "escape from Values steps back to Columns first"
     );
     assert_eq!(
         shell.read_with(&vcx, |s, _| s.picker.as_ref().unwrap().ticked.len()),

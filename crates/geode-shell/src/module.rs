@@ -20,6 +20,7 @@ use geode_core::launch::{ContextField, LaunchContext};
 use geode_core::pricing::PriceOutcome;
 use geode_core::query::{QueryKey, QueryOutcome};
 use geode_core::series::SeriesOutcome;
+use geode_core::tile_columns::TileColumns;
 use gpui::{AnyView, App, Entity, SharedString, Window};
 use std::rc::Rc;
 
@@ -224,6 +225,13 @@ pub trait TileContent {
     /// Subscribing before that announcement would retain resources for tiles
     /// that may never appear on screen.
     fn set_visible(&self, visible: bool, cx: &mut App);
+    /// The shell removed this occupant for good (its tile closed, or a
+    /// placeholder was filled in place) and drops it right after, following
+    /// `set_visible(false)`. Hiding never calls this. A following tile
+    /// cancels its in-flight query here and answers any open flip barrier
+    /// still waiting on it, so a closed tile never holds the others to the
+    /// deadline. The default does nothing.
+    fn closed(&self, _cx: &mut App) {}
     /// Set this tile's stack position, or `None` outside a stack.
     /// `ShellView::ensure_occupants` calls this after creation and whenever
     /// `(index, len)` changes. Modules paint the marker first in their header
@@ -251,6 +259,14 @@ pub trait TileContent {
     /// value; the shell then opens the plain tile-kind picker.
     fn launch_context(&self, _cx: &App) -> LaunchContext {
         LaunchContext::default()
+    }
+    /// The view columns this tile presents and the one at its cursor, pulled
+    /// by the shell when `config::view_column` / `config::schema_column`
+    /// runs, so the module needs no handle into the shell. `None` (the
+    /// default) for a tile that shows no configured view; the shell then
+    /// refuses with a status notice.
+    fn tile_columns(&self, _cx: &App) -> Option<TileColumns> {
+        None
     }
     /// Called once, deferred after the first render, for an occupant that
     /// `ShellView::add_tile` created (not a session restore) and that is the
@@ -586,6 +602,8 @@ pub mod recording {
         Command(TileId, String),
         Find(TileId, FindEvent),
         Visible(TileId, bool),
+        /// `closed` reached this tile: its occupant is being removed.
+        Closed(TileId),
         Delivered(TileId, u64),
         Priced(TileId, u64),
         /// A key-less [`Delivery::SeriesFetched`] this tile was handed,
@@ -649,6 +667,9 @@ pub mod recording {
         /// What `accepts` answers. Empty by default, so every existing
         /// fixture stays out of `tile::open_with`'s list.
         pub accepts: &'static [ContextField],
+        /// What every occupant this factory creates answers from
+        /// `tile_columns`; shared and mutable like `launch_context`.
+        pub tile_columns: Rc<RefCell<Option<TileColumns>>>,
         /// When set, `launched` opens the insert-mode input exactly as
         /// `<kind>::edit` does — the stand-in for a panel that opens its own
         /// picker when launched, so a shell test can prove the input still
@@ -670,6 +691,7 @@ pub mod recording {
                 input: Rc::new(RefCell::new(None)),
                 launch_context: Rc::new(RefCell::new(LaunchContext::default())),
                 accepts: &[],
+                tile_columns: Rc::new(RefCell::new(None)),
                 edit_on_launch: false,
             }
         }
@@ -730,6 +752,8 @@ pub mod recording {
         /// Shared with [`RecordingFactory::launch_context`]; see it for why
         /// it is mutable after creation.
         launch_context: Rc<RefCell<LaunchContext>>,
+        /// Shared with [`RecordingFactory::tile_columns`].
+        tile_columns: Rc<RefCell<Option<TileColumns>>>,
         /// Shared with [`RecordingFactory::edit_on_launch`]; see it for what
         /// `launched` does with it.
         edit_on_launch: bool,
@@ -867,6 +891,9 @@ pub mod recording {
                 .borrow_mut()
                 .push(Recorded::Visible(self.tile, visible));
         }
+        fn closed(&self, _: &mut App) {
+            self.log.borrow_mut().push(Recorded::Closed(self.tile));
+        }
         fn set_stack(&self, stack: Option<StackHandle>, _: &mut App) {
             self.log.borrow_mut().push(Recorded::Stack(
                 self.tile,
@@ -894,6 +921,9 @@ pub mod recording {
         }
         fn launch_context(&self, _cx: &App) -> LaunchContext {
             self.launch_context.borrow().clone()
+        }
+        fn tile_columns(&self, _cx: &App) -> Option<TileColumns> {
+            self.tile_columns.borrow().clone()
         }
         /// Recorded and accepted: the fixture stands in for a table
         /// module. The trait default's refusal is tested on the
@@ -1004,6 +1034,7 @@ pub mod recording {
                     input: self.input.clone(),
                     stack: RefCell::new(None),
                     launch_context: self.launch_context.clone(),
+                    tile_columns: self.tile_columns.clone(),
                     edit_on_launch: self.edit_on_launch,
                 }),
             }

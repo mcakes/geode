@@ -129,10 +129,7 @@ mod tests {
         c.move_rows(10, NavCommand::Move(1), Some(50), true);
         assert_eq!(c.row, 9, "a counted step clamps, no wrap");
         c.move_rows(10, NavCommand::Move(1), None, true);
-        assert_eq!(
-            c.row, 0,
-            "a bare j at the bottom wraps to the top (spec §20.5)"
-        );
+        assert_eq!(c.row, 0, "a bare j at the bottom wraps to the top");
         c.move_rows(10, NavCommand::Move(-1), None, true);
         assert_eq!(c.row, 9, "and a bare k at the top wraps to the bottom");
         c.move_rows(10, NavCommand::Move(1), Some(1), true);

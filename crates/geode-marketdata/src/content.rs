@@ -93,7 +93,39 @@ pub const ACTIONS: &[(&str, &str)] = &[
 ///
 /// Column extremes accept Home/End and the bare ^/$ key spellings. The latter
 /// bindings match the event spelling supplied by the shell's key conversion.
+///
+/// The visual block comes first so the normal block is the later one: a
+/// palette, menu or tooltip hint names an action's LAST live binding
+/// (`effective_binding`), and delete is `d d` in normal mode. With visual
+/// last, the hint would name its bare `d`.
 pub const DEFAULT_KEYMAP: &str = r#"
+[[bindings]]
+context = "marketdata && mode == visual"
+[bindings.keys]
+"j" = "marketdata::down"
+"k" = "marketdata::up"
+"h" = "marketdata::left"
+"l" = "marketdata::right"
+"g g" = "marketdata::top"
+"shift+g" = "marketdata::bottom"
+"^" = "marketdata::first_col"
+"$" = "marketdata::last_col"
+"home" = "marketdata::first_col"
+"end" = "marketdata::last_col"
+"ctrl+d" = "marketdata::page_down"
+"ctrl+u" = "marketdata::page_up"
+"ctrl+f" = "marketdata::page_down_full"
+"ctrl+b" = "marketdata::page_up_full"
+"pagedown" = "marketdata::page_down_full"
+"pageup" = "marketdata::page_up_full"
+"y" = "marketdata::yank"
+"d" = "marketdata::delete_row"
+"i" = "marketdata::edit"
+"enter" = "marketdata::edit"
+"v" = "marketdata::visual_block"
+"shift+v" = "marketdata::visual_rows"
+"escape" = "marketdata::escape"
+
 [[bindings]]
 context = "marketdata && mode == normal"
 [bindings.keys]
@@ -130,33 +162,6 @@ context = "marketdata && mode == normal"
 "d d" = "marketdata::delete_row"
 "v" = "marketdata::visual_block"
 "shift+v" = "marketdata::visual_rows"
-
-[[bindings]]
-context = "marketdata && mode == visual"
-[bindings.keys]
-"j" = "marketdata::down"
-"k" = "marketdata::up"
-"h" = "marketdata::left"
-"l" = "marketdata::right"
-"g g" = "marketdata::top"
-"shift+g" = "marketdata::bottom"
-"^" = "marketdata::first_col"
-"$" = "marketdata::last_col"
-"home" = "marketdata::first_col"
-"end" = "marketdata::last_col"
-"ctrl+d" = "marketdata::page_down"
-"ctrl+u" = "marketdata::page_up"
-"ctrl+f" = "marketdata::page_down_full"
-"ctrl+b" = "marketdata::page_up_full"
-"pagedown" = "marketdata::page_down_full"
-"pageup" = "marketdata::page_up_full"
-"y" = "marketdata::yank"
-"d" = "marketdata::delete_row"
-"i" = "marketdata::edit"
-"enter" = "marketdata::edit"
-"v" = "marketdata::visual_block"
-"shift+v" = "marketdata::visual_rows"
-"escape" = "marketdata::escape"
 
 [[bindings]]
 context = "marketdata && mode == insert"
@@ -227,6 +232,9 @@ impl TileContent for MarketDataContent {
     }
     fn set_visible(&self, visible: bool, cx: &mut App) {
         self.tile.update(cx, |t, cx| t.set_visible(visible, cx))
+    }
+    fn closed(&self, cx: &mut App) {
+        self.tile.update(cx, |t, cx| t.closed(cx))
     }
     fn set_stack(&self, stack: Option<StackHandle>, cx: &mut App) {
         self.tile.update(cx, |t, cx| t.set_stack(stack, cx))
@@ -595,6 +603,26 @@ mod tests {
             targets_for(&egress, "nonesuch").is_empty(),
             "a document no target accepts has no eligible target"
         );
+    }
+
+    /// A hint (palette, menu, tooltip) names an action's last live binding,
+    /// so delete must resolve to the normal-mode `d d`, not the visual
+    /// block's bare `d`, which does nothing outside a selection.
+    #[test]
+    fn delete_rows_hint_names_the_normal_mode_chord() {
+        let doc = fragment_doc(CVI.kind, DEFAULT_KEYMAP).unwrap();
+        let (keymap, diags) = build_keymap(&[doc], default_mod(), &registry());
+        assert!(diags.is_empty(), "{diags:?}");
+        let b = geode_shell::keymap::effective_binding(
+            keymap.bindings(),
+            &ActionId("marketdata::delete_row".into()),
+        )
+        .expect("delete_row is bound");
+        let dd: Vec<_> = ["d", "d"]
+            .iter()
+            .map(|k| parse_keystroke(k, default_mod()).unwrap())
+            .collect();
+        assert_eq!(b.keystrokes, dd);
     }
 
     /// Column-extreme punctuation matches as bare characters even when numeric
