@@ -12842,57 +12842,13 @@ run_mutation "mdtable: a click while editing cancels the editor" \
   geode-marketdata \
   a_click_while_editing_cancels_the_editor_then_moves
 
-# ---- First-column navigation ---- The market-data keymap binds caret to
-# the first column. Replacing it with zero leaves other bindings intact; the
-# test resolves caret against the built keymap.
-# The anchor includes the normal-mode context to distinguish the same
-# motions in visual mode.
-run_mutation "mdkeys: ^ is the panel's first-column key, matching the blotter" \
-  crates/geode-marketdata/src/content.rs \
-  'context = "marketdata && mode == normal"
-[bindings.keys]
-"j" = "marketdata::down"
-"k" = "marketdata::up"
-"h" = "marketdata::left"
-"l" = "marketdata::right"
-"g g" = "marketdata::top"
-"shift+g" = "marketdata::bottom"
-"^" = "marketdata::first_col"' \
-  'context = "marketdata && mode == normal"
-[bindings.keys]
-"j" = "marketdata::down"
-"k" = "marketdata::up"
-"h" = "marketdata::left"
-"l" = "marketdata::right"
-"g g" = "marketdata::top"
-"shift+g" = "marketdata::bottom"
-"0" = "marketdata::first_col"' \
-  geode-marketdata \
-  caret_and_dollar_resolve_to_the_column_extremes
-
-# The visual block repeats the motions, `^` included: while a selection is
-# live, `^` extends it to the first column. Mutated back to `0`, `^` in
-# visual mode matches nothing.
-run_mutation "mdkeys: ^ is the first-column key in visual mode too" \
-  crates/geode-marketdata/src/content.rs \
-  'context = "marketdata && mode == visual"
-[bindings.keys]
-"j" = "marketdata::down"
-"k" = "marketdata::up"
-"h" = "marketdata::left"
-"l" = "marketdata::right"
-"g g" = "marketdata::top"
-"shift+g" = "marketdata::bottom"
-"^" = "marketdata::first_col"' \
-  'context = "marketdata && mode == visual"
-[bindings.keys]
-"j" = "marketdata::down"
-"k" = "marketdata::up"
-"h" = "marketdata::left"
-"l" = "marketdata::right"
-"g g" = "marketdata::top"
-"shift+g" = "marketdata::bottom"
-"0" = "marketdata::first_col"' \
+# ---- First-column navigation ---- The panel takes `^` from the shell's
+# shared grid motions (it publishes `grid` in normal and visual modes).
+# Rebound to `0`, `^` on the panel matches nothing in either mode.
+run_mutation "md motion: ^ is the panel's first-column key" \
+  crates/geode-shell/src/defaults.rs \
+  '"^" = "motion::line_start"' \
+  '"0" = "motion::line_start"' \
   geode-marketdata \
   caret_and_dollar_resolve_to_the_column_extremes
 
@@ -13312,23 +13268,23 @@ run_mutation "mdheader: a dirty draft sets the dot flag" \
 # land on. Mutated so the guard can never pass, `k` on row 0 always steps
 # within the grid (clamped in place, since row 0 cannot go higher) and the
 # strip is unreachable by keyboard at all.
-run_mutation "mdcursor: k on the top row enters the strip" \
+run_mutation "md motion: k on the top row enters the strip" \
   crates/geode-marketdata/src/core/cursor.rs \
-  '        (Cursor::Cell { row: 0, col }, Motion::Rows(n)) if n < 0 && grid.attrs > 0 => {' \
-  '        (Cursor::Cell { row: 0, col }, Motion::Rows(n)) if n < 0 && grid.attrs > usize::MAX - 1 => {' \
+  '        (Cursor::Cell { row: 0, col }, Motion::Rows { by, .. }) if by < 0 && grid.attrs > 0 => {' \
+  '        (Cursor::Cell { row: 0, col }, Motion::Rows { by, .. }) if by < 0 && grid.attrs > usize::MAX - 1 => {' \
   geode-marketdata k_on_the_top_row_enters_the_strip_at_the_nearest_attribute
 
 # `j` (or any downward motion) out of the strip returns to the grid column
 # the cursor left FROM, remembered in `last_grid_col`. Mutated to land on
 # column 0 instead, a trader who entered the strip from column 3 lands
 # back on column 0 rather than where they started.
-run_mutation "mdcursor: j from the strip returns to the remembered column" \
+run_mutation "md motion: j from the strip returns to the remembered column" \
   crates/geode-marketdata/src/core/cursor.rs \
-  '        (Cursor::Attr(_), Motion::Rows(n)) if n > 0 => Cursor::Cell {
+  '        (Cursor::Attr(_), Motion::Rows { by, .. }) if by > 0 => Cursor::Cell {
             row: 0,
             col: (*last_grid_col).min(max_col),
         },' \
-  '        (Cursor::Attr(_), Motion::Rows(n)) if n > 0 => Cursor::Cell {
+  '        (Cursor::Attr(_), Motion::Rows { by, .. }) if by > 0 => Cursor::Cell {
             row: 0,
             col: 0,
         },' \
@@ -13904,12 +13860,59 @@ run_mutation "blotter motion: visual mode clamps a bare step" \
   geode-blotter \
   visual_mode_clamps_a_bare_step
 
-run_mutation "marketdata: the row axis wraps a bare step, the column axis never does (spec §20.5)" \
+run_mutation "md motion: the grid wraps a bare step" \
   crates/geode-marketdata/src/core/cursor.rs \
-  '            row: vimnav::apply(row, grid.rows, NavCommand::Move(n as i64)),' \
-  '            row: vimnav::apply_clamped(row, grid.rows, NavCommand::Move(n as i64)),' \
+  '            row: motion::row(row, grid.rows, m, false),' \
+  '            row: motion::row(row, grid.rows, m, true),' \
   geode-marketdata \
   a_bare_row_step_wraps_and_the_full_page_keys_move_ten
+
+# Every shared motion id reaches the panel's one motion arm; a panel that
+# stops recognising them takes no motion key at all.
+run_mutation "md motion: the panel routes the shared motions" \
+  crates/geode-marketdata/src/tile.rs \
+  '        let verb = if shared_motion.is_some() {' \
+  '        let verb = if false {' \
+  geode-marketdata a_bare_row_step_wraps_and_the_full_page_keys_move_ten
+
+# The shell binds the shared motions under `grid`; a panel that stops
+# publishing the flag takes no motion key at all.
+run_mutation "md motion: the key context publishes grid" \
+  crates/geode-marketdata/src/tile.rs \
+  'KeyContext::new("marketdata").grid()' \
+  'KeyContext::new("marketdata")' \
+  geode-marketdata the_panel_publishes_grid_and_a_counted_g_jumps_to_that_row
+
+run_mutation "motion e2e: a shared override reaches the market-data panel" \
+  crates/geode-marketdata/src/tile.rs \
+  'KeyContext::new("marketdata").grid()' \
+  'KeyContext::new("marketdata")' \
+  geode-app a_shared_motion_override_reaches_each_grid_tile
+
+# `g g`/`G` from the strip under a count land on that row, not the end.
+run_mutation "md motion: a counted G from the strip is that row" \
+  crates/geode-marketdata/src/core/cursor.rs \
+  '            row: motion::row(0, grid.rows, m, false),' \
+  '            row: grid.rows - 1,' \
+  geode-marketdata counted_top_and_bottom_from_the_strip_land_on_that_row
+
+# A palette motion under an open selection editor would move the edit's
+# operand; it refuses like `V`/`v`/`escape`.
+run_mutation "md motion: a motion under a selection editor refuses" \
+  crates/geode-marketdata/src/tile/select.rs \
+  '            "motion" | "visual_rows" | "visual_block" | "escape" => true,' \
+  '            "visual_rows" | "visual_block" | "escape" => true,' \
+  geode-marketdata selection_changing_verbs_refuse_while_a_selection_editor_is_open
+
+# An old user binding on a retired id must bind its shared successor, not
+# some other motion.
+run_mutation "md motion: retired ids rename to the shared ones" \
+  crates/geode-marketdata/src/content.rs \
+  'pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
+    ("marketdata::down", "motion::down"),' \
+  'pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
+    ("marketdata::down", "motion::up"),' \
+  geode-marketdata every_retired_motion_id_renames_to_its_shared_id
 
 run_mutation "picker: the values list moves through vimnav::apply, not a private ±1 (spec §20.5)" \
   crates/geode-shell/src/shell/picker.rs \

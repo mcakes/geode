@@ -46,7 +46,8 @@ has none of them.
   move clamps, `1j` included; a counted `g g` or `G` goes to that 1-based
   row; `ctrl+d`/`ctrl+u` move 5 rows and `ctrl+f`/`ctrl+b` (and
   `pagedown`/`pageup`) 10, times the count; columns clamp; a grid with no
-  rows or columns does not move. The blotter moves on them. See [shared
+  rows or columns does not move. The blotter and the market-data panel move
+  on them. See [shared
   motions](keymaps.md#shared-motions).
 - A popup is deferred above the tile's clip and snaps inside the window with
   an 8-pixel margin. An action menu occludes what it covers, so its hover and
@@ -326,6 +327,15 @@ reason becomes the notice.
 A panel opened through an add (palette, tile picker, `open_with`, duplicate)
 with no underlying opens the underlying picker at once; a restored panel does
 not. Every panel kind accepts an underlying launch context.
+
+The panel moves on the [shared grid motions](#shared-tile-interaction), so
+the arrow keys move its cursor, a bare `j` on the last row wraps to row 0,
+`1j` clamps, and `5G`/`5gg` land on row 5. The header attribute strip sits
+outside the wrap cycle: `k` (or `up`) on row 0, bare or counted, enters the
+strip when the kind has attributes; a downward motion from the strip returns
+to row 0 at the column the cursor left from, and `g g`/`G` (counted or not)
+return to that row of the grid at the same column. A live selection's motions
+clamp and never enter the strip.
 
 `[ui] line_numbers` adds a gutter beside the grid's pinned column: the row
 label when shown, otherwise the first value column. The column widens for the

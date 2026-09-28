@@ -27,7 +27,7 @@ Current behavior and rationale:
 | `core::spec`, `core::matrix` | Panel vocabulary and prepared grids built from a snapshot plus draft. |
 | `core::draft` | Typed edits, label-based rebase, same-date group guards, and `DocumentBase` identity (source time plus optional store generation). |
 | `core::upload` | Typed whole-document assembly and row-order-independent echo comparison; minted labels are ignored and floats allow one ULP. |
-| `core::cursor`, `core::menu` | Grid navigation (wrapping, and `step_clamped` for a live selection) and the action list's rows (`geode_tile::menu` rows over action ids, hints as live chords). Numeric nudging and date fields are re-exported from `geode-core` and `geode-widgets`. |
+| `core::cursor`, `core::menu` | Grid navigation over `geode_tile::motion` (the shared rules; `step_clamped` for a live selection), with the attribute strip outside the wrap cycle, and the action list's rows (`geode_tile::menu` rows over action ids, hints as live chords). Numeric nudging and date fields are re-exported from `geode-core` and `geode-widgets`. |
 | `core::bulk` | Selection-wide edit rules: whether a typed value lands in a cell of each kind, one arrow step's delta per column, and the `set`/`stepped` notices that count skips by reason. |
 | `commands` | The `:` line: `:rebase`, `:revert`, `:auto`, `:bump`, `:upload`, `:autosize [reset]` and the rest, parsed to data. |
 | `header` | Prepared identity, attributes, draft/upload feedback (notices through `geode_tile::notice`), source time, shared date-field rendering, and the menu control. |

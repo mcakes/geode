@@ -5501,7 +5501,7 @@ role = "key"
     }
 
     /// The grid tile kinds the shared motion keys must reach.
-    const GRID_KINDS: &[&str] = &["blotter"];
+    const GRID_KINDS: &[&str] = &["blotter", "cvi"];
 
     /// DataTable key suppression for every grid module, once per test app.
     fn init_grid_modules(cx: &mut gpui::TestAppContext) {
@@ -5684,6 +5684,39 @@ role = "key"
             dispatch_counts(cx, "pricer", Some(user), &["q"], &["motion::down"]),
             vec![0],
             "the override stays in the blotter's own context"
+        );
+        assert_eq!(
+            dispatch_counts(cx, "cvi", Some(user), &["q"], &["motion::down"]),
+            vec![0],
+            "nor does it reach the market-data panel"
+        );
+    }
+
+    /// An override written against the retired `marketdata::down` keeps
+    /// working in the market-data panel, only there, and warns naming both.
+    #[gpui::test]
+    fn an_old_marketdata_down_override_still_moves_the_panel_only_and_warns(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_grid_modules(cx);
+        let user = "[[bindings]]\ncontext = \"marketdata && mode == normal\"\n[bindings.keys]\n\"q\" = \"marketdata::down\"\n";
+        let (_, diags) = shell_with_one_grid_tile("cvi", Some(user));
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].severity, Severity::Warning);
+        assert!(
+            diags[0].message.contains("marketdata::down")
+                && diags[0].message.contains("motion::down"),
+            "{}",
+            diags[0].message
+        );
+        assert_eq!(
+            dispatch_counts(cx, "cvi", Some(user), &["q"], &["motion::down"]),
+            vec![1]
+        );
+        assert_eq!(
+            dispatch_counts(cx, "blotter", Some(user), &["q"], &["motion::down"]),
+            vec![0],
+            "the override stays in the panel's own context"
         );
     }
 }

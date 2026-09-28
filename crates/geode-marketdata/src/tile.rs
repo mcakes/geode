@@ -20,7 +20,7 @@
 //! upload echoes refuse further edits until resolved.
 
 use crate::commands::{self, BumpAxis, Command, KEY_DISPLAY_SEPARATOR};
-use crate::core::cursor::{self, Cursor, Grid, Motion};
+use crate::core::cursor::{self, Cursor, Grid};
 use crate::core::draft::{RowDelete, RowEdit, local_hhmm};
 use crate::core::matrix::{RowState, base_of};
 use crate::core::menu::{self, MenuInputs};
@@ -77,18 +77,9 @@ use std::time::{Duration, Instant};
 mod select;
 use select::{FINISH_EDIT_FIRST, StepsUndo};
 
-/// How many rows `ctrl+d`/`ctrl+u` step — `vimnav`'s own ±5, the same
-/// fixed offset every list in this codebase uses, multiplied by the count
-/// prefix rather than being viewport-relative.
-const HALF_PAGE: isize = 5;
-
 /// The selection footer's height in design px — the blotter's, pricer's
 /// and timeseries' footer value, so every grid's strip reads alike.
 const FOOTER_HEIGHT: f32 = 20.0;
-
-/// How many rows `ctrl+f`/`ctrl+b`/`pagedown`/`pageup` step — `vimnav`'s
-/// own ±10, the blotter's `page_down_full`.
-const FULL_PAGE: isize = 10;
 
 /// Find moves through visible row text without filtering the document axis. Row labels
 /// are searched when painted; panels hiding those labels search their painted cells
@@ -938,7 +929,7 @@ impl MarketDataTile {
         } else {
             "normal"
         };
-        let mut ctx = KeyContext::new("marketdata").pair("mode", mode);
+        let mut ctx = KeyContext::new("marketdata").grid().pair("mode", mode);
         if let Some(s) = &self.selection {
             ctx = ctx.pair(
                 "select",
@@ -2081,7 +2072,14 @@ impl MarketDataTile {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(verb) = action.0.strip_prefix("marketdata::") else {
+        let shared_motion = geode_tile::motion::parse(action, count);
+        // A shared motion runs as the one "motion" verb, so the popup,
+        // selection-editor and chrome rules below treat every motion alike.
+        let verb = if shared_motion.is_some() {
+            "motion"
+        } else if let Some(verb) = action.0.strip_prefix("marketdata::") {
+            verb
+        } else {
             return false;
         };
         // An open selection editor's members are its operand. The palette
@@ -2120,22 +2118,9 @@ impl MarketDataTile {
         // Grid-only motion, yank, and repeat-find need notification, while moving into
         // or out of the attribute strip also changes header cursor styling.
         let chrome = match verb {
-            "down" | "up" | "left" | "right" | "page_down" | "page_up" | "page_down_full"
-            | "page_up_full" | "top" | "bottom" | "first_col" | "last_col" => {
-                let motion = match verb {
-                    "down" => Motion::Rows(n),
-                    "up" => Motion::Rows(-n),
-                    "left" => Motion::Cols(-n),
-                    "right" => Motion::Cols(n),
-                    "page_down" => Motion::Rows(HALF_PAGE * n),
-                    "page_up" => Motion::Rows(-HALF_PAGE * n),
-                    // `vimnav`'s ±10, the blotter's `page_down_full`.
-                    "page_down_full" => Motion::Rows(FULL_PAGE * n),
-                    "page_up_full" => Motion::Rows(-FULL_PAGE * n),
-                    "top" => Motion::Top,
-                    "bottom" => Motion::Bottom,
-                    "first_col" => Motion::FirstCol,
-                    _ => Motion::LastCol,
+            "motion" => {
+                let Some(motion) = shared_motion else {
+                    return false;
                 };
                 let was_attr = matches!(self.cursor, Cursor::Attr(_));
                 let grid = self.grid();
@@ -5260,6 +5245,11 @@ mod tests {
             let id = ActionId(format!("marketdata::{verb}"));
             vcx.update(|window, cx| self.content.dispatch(&id, count, window, cx));
         }
+        /// Dispatch a shared `motion::{id}`, the id the shell's keys send.
+        fn motion(&self, vcx: &mut gpui::VisualTestContext, id: &str, count: Option<u32>) {
+            let id = ActionId(format!("motion::{id}"));
+            vcx.update(|window, cx| self.content.dispatch(&id, count, window, cx));
+        }
         fn deliver(&self, vcx: &mut gpui::VisualTestContext, tag: u64, snapshot: Arc<Snapshot>) {
             let outcome = QueryOutcome {
                 key: QueryKey(TILE),
@@ -5615,24 +5605,24 @@ mod tests {
     fn the_cursor_never_enters_the_label_column(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         h.with_document(&mut vcx);
-        h.dispatch(&mut vcx, "right", Some(2));
+        h.motion(&mut vcx, "right", Some(2));
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.cursor()),
             Cursor::Cell { row: 0, col: 2 }
         );
-        h.dispatch(&mut vcx, "first_col", None);
+        h.motion(&mut vcx, "line_start", None);
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.cursor()),
             Cursor::Cell { row: 0, col: 0 }
         );
-        h.dispatch(&mut vcx, "left", None);
+        h.motion(&mut vcx, "left", None);
         assert_eq!(
             h.selection(&vcx),
             (Some(0), Some(1)),
             "`h` at the first value column stays on it — table column 1, never 0"
         );
 
-        h.dispatch(&mut vcx, "right", Some(2));
+        h.motion(&mut vcx, "right", Some(2));
         let at = centre_of(&mut vcx, "marketdata-cell-1-0");
         click_at(&mut vcx, at, 1);
         assert_eq!(
@@ -5700,7 +5690,7 @@ mod tests {
     fn a_double_click_on_a_row_label_opens_nothing(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         h.with_document(&mut vcx);
-        h.dispatch(&mut vcx, "right", Some(2));
+        h.motion(&mut vcx, "right", Some(2));
 
         let at = centre_of(&mut vcx, "marketdata-cell-1-0");
         click_at(&mut vcx, at, 1);
@@ -5789,8 +5779,8 @@ mod tests {
         };
         assert_eq!(mirror(&vcx), (Some((0, 0)), None));
 
-        h.dispatch(&mut vcx, "down", None);
-        h.dispatch(&mut vcx, "right", Some(2));
+        h.motion(&mut vcx, "down", None);
+        h.motion(&mut vcx, "right", Some(2));
         assert_eq!(
             mirror(&vcx),
             (Some((1, 2)), None),
@@ -5817,8 +5807,8 @@ mod tests {
     fn the_editor_is_painted_in_the_cursor_cell(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         h.with_document(&mut vcx);
-        h.dispatch(&mut vcx, "down", None);
-        h.dispatch(&mut vcx, "right", Some(2));
+        h.motion(&mut vcx, "down", None);
+        h.motion(&mut vcx, "right", Some(2));
         draw(&mut vcx);
         assert!(
             vcx.debug_bounds("marketdata-editor-1-3").is_none(),
@@ -5851,8 +5841,8 @@ mod tests {
     fn the_editor_keeps_the_value_right_aligned(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         h.with_document(&mut vcx);
-        h.dispatch(&mut vcx, "down", None);
-        h.dispatch(&mut vcx, "right", Some(2));
+        h.motion(&mut vcx, "down", None);
+        h.motion(&mut vcx, "right", Some(2));
         h.dispatch(&mut vcx, "edit", None);
         draw(&mut vcx);
         let slot = vcx
@@ -6124,7 +6114,7 @@ mod tests {
 
         let chips = |vcx: &gpui::VisualTestContext| h.tile.read_with(vcx, |t, _| t.header_texts());
         let before = chips(&vcx);
-        h.dispatch(&mut vcx, "down", None);
+        h.motion(&mut vcx, "down", None);
         assert_eq!(
             chips(&vcx),
             before,
@@ -6799,7 +6789,7 @@ mod tests {
         h.command(&mut vcx, "underlying NKY.Z").unwrap();
         let tag = h.document_request().unwrap().tag;
         h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
-        h.dispatch(&mut vcx, "right", None);
+        h.motion(&mut vcx, "right", None);
         h.dispatch(&mut vcx, "edit", None);
         h.set_editor(&mut vcx, "7.7");
         h.dispatch(&mut vcx, "commit", None);
@@ -7010,8 +7000,8 @@ mod tests {
             tag,
             Arc::new(document_of(&["t0", "t1", "t2", "t3", "t4"], &NODES, BASE)),
         );
-        h.dispatch(&mut vcx, "bottom", None);
-        h.dispatch(&mut vcx, "last_col", None);
+        h.motion(&mut vcx, "bottom", None);
+        h.motion(&mut vcx, "line_end", None);
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.cursor()),
             Cursor::Cell {
@@ -7051,29 +7041,29 @@ mod tests {
         let terms = ["t0", "t1", "t2", "t3", "t4"];
         h.deliver(&mut vcx, tag, Arc::new(document_of(&terms, &NODES, BASE)));
 
-        h.dispatch(&mut vcx, "down", Some(3));
+        h.motion(&mut vcx, "down", Some(3));
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.cursor()),
             Cursor::Cell { row: 3, col: 0 }
         );
-        h.dispatch(&mut vcx, "right", Some(2));
+        h.motion(&mut vcx, "right", Some(2));
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.cursor()),
             Cursor::Cell { row: 3, col: 2 }
         );
-        h.dispatch(&mut vcx, "down", Some(9));
+        h.motion(&mut vcx, "down", Some(9));
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.cursor()),
             Cursor::Cell { row: 4, col: 2 },
             "a count past the end clamps"
         );
-        h.dispatch(&mut vcx, "top", None);
-        h.dispatch(&mut vcx, "first_col", None);
+        h.motion(&mut vcx, "top", None);
+        h.motion(&mut vcx, "line_start", None);
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.cursor()),
             Cursor::Cell { row: 0, col: 0 }
         );
-        h.dispatch(&mut vcx, "last_col", None);
+        h.motion(&mut vcx, "line_end", None);
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.cursor()),
             Cursor::Cell {
@@ -7087,7 +7077,7 @@ mod tests {
         // row (which scrolls it into view) and the selected column, so the
         // selection is what a test reads — the blotter's own tests read
         // `selected_row` exactly this way.
-        h.dispatch(&mut vcx, "bottom", None);
+        h.motion(&mut vcx, "bottom", None);
         assert_eq!(
             h.selection(&vcx),
             (Some(terms.len() - 1), Some(LABEL_COL + 1 + SLICE + 2)),
@@ -7118,29 +7108,54 @@ mod tests {
             Cursor::Cell { col, .. } => col,
             Cursor::Attr(_) => panic!("expected a grid cursor"),
         };
-        h.dispatch(&mut vcx, "bottom", None);
+        h.motion(&mut vcx, "bottom", None);
         assert_eq!(row(&vcx), 11);
-        h.dispatch(&mut vcx, "down", None);
+        h.motion(&mut vcx, "down", None);
         assert_eq!(row(&vcx), 0, "a bare j at the bottom wraps to row 0");
-        h.dispatch(&mut vcx, "up", None);
+        h.motion(&mut vcx, "up", None);
         assert!(
             matches!(h.tile.read_with(&vcx, |t, _| t.cursor()), Cursor::Attr(0)),
             "a bare k at the top enters the strip, never wraps, while attributes exist"
         );
-        h.dispatch(&mut vcx, "down", None);
+        h.motion(&mut vcx, "down", None);
         assert_eq!(row(&vcx), 0, "and j returns to the top row");
-        h.dispatch(&mut vcx, "down", Some(20));
+        h.motion(&mut vcx, "down", Some(20));
         assert_eq!(row(&vcx), 11, "a counted step clamps");
-        h.dispatch(&mut vcx, "page_up_full", None);
+        h.motion(&mut vcx, "page_up", None);
         assert_eq!(row(&vcx), 1, "ctrl+b moves ten");
-        h.dispatch(&mut vcx, "page_down_full", None);
+        h.motion(&mut vcx, "page_down", None);
         assert_eq!(row(&vcx), 11);
-        h.dispatch(&mut vcx, "page_down_full", None);
+        h.motion(&mut vcx, "page_down", None);
         assert_eq!(row(&vcx), 11, "and clamps at the end");
-        h.dispatch(&mut vcx, "last_col", None);
+        h.motion(&mut vcx, "line_end", None);
         let last = col(&vcx);
-        h.dispatch(&mut vcx, "right", None);
+        h.motion(&mut vcx, "right", None);
         assert_eq!(col(&vcx), last, "columns clamp: l at the last column stays");
+    }
+
+    /// The panel publishes `grid` in normal and visual modes, and 5G jumps
+    /// to row 5 (a count the panel used to ignore).
+    #[gpui::test]
+    fn the_panel_publishes_grid_and_a_counted_g_jumps_to_that_row(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        let terms: Vec<String> = (0..12).map(|i| format!("t{i}")).collect();
+        let terms: Vec<&str> = terms.iter().map(String::as_str).collect();
+        h.deliver(&mut vcx, tag, Arc::new(document_of(&terms, &NODES, BASE)));
+        let ctx = h.tile.read_with(&vcx, |t, _| t.key_context());
+        assert!(ctx.has_flag(geode_shell::keymap::GRID));
+        h.motion(&mut vcx, "bottom", Some(5));
+        assert!(matches!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            Cursor::Cell { row: 4, .. }
+        ));
+        h.motion(&mut vcx, "top", Some(2));
+        assert!(matches!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            Cursor::Cell { row: 1, .. }
+        ));
     }
 
     #[gpui::test]
@@ -7362,7 +7377,7 @@ edits = [["2026-11-20", "-1", 9.5]]
             Some("4500.00\n4510.00"),
             "the column is newline separated"
         );
-        h.dispatch(&mut vcx, "right", Some(SLICE as u32));
+        h.motion(&mut vcx, "right", Some(SLICE as u32));
         h.dispatch(&mut vcx, "yank_col", None);
         assert_eq!(
             clipboard(&mut vcx).as_deref(),
@@ -7589,7 +7604,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().len()), 3);
 
         h.command(&mut vcx, "revert").unwrap();
-        h.dispatch(&mut vcx, "right", Some(SLICE as u32));
+        h.motion(&mut vcx, "right", Some(SLICE as u32));
         h.command(&mut vcx, "bump 1 col").unwrap();
         assert_eq!(
             h.col_texts(&vcx, SLICE),
@@ -7691,7 +7706,7 @@ edits = [["2026-11-20", "-1", 9.5]]
     fn a_flat_panels_column_bump_on_a_non_numeric_column_is_refused(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_flat(cx);
         h.with_flat_document(&mut vcx);
-        h.dispatch(&mut vcx, "right", Some(2));
+        h.motion(&mut vcx, "right", Some(2));
 
         assert_eq!(
             h.command(&mut vcx, "bump 1 col"),
@@ -8325,7 +8340,7 @@ deleted = true
         let before = h
             .tile
             .read_with(&vcx, |t, _| t.model() as *const MatrixModel);
-        h.dispatch(&mut vcx, "right", Some(1));
+        h.motion(&mut vcx, "right", Some(1));
         h.dispatch(&mut vcx, "edit", None);
         h.set_editor(&mut vcx, "2.5");
         h.dispatch(&mut vcx, "commit", None);
@@ -8455,7 +8470,7 @@ deleted = true
             vec!["1", "1"],
             "cursor on row 0: its absolute number, then distances"
         );
-        h.dispatch(&mut vcx, "down", None);
+        h.motion(&mut vcx, "down", None);
         assert_eq!(texts(&mut vcx), vec!["1", "2"], "cursor on row 1");
         h.tile.update(&mut vcx, |t, cx| {
             t.table().update(cx, |t, _| t.delegate_mut().cursor = None)
@@ -8525,7 +8540,7 @@ deleted = true
         use crate::delegate::DelegateEditorPaint;
         let (h, mut vcx) = open_flat(cx);
         h.with_flat_document(&mut vcx);
-        h.dispatch(&mut vcx, "down", None);
+        h.motion(&mut vcx, "down", None);
         h.dispatch(&mut vcx, "edit", None);
         let focus = h.tile.read_with(&vcx, |t, _| t.date_field_focus()).unwrap();
         let mirrored = h.tile.read_with(&vcx, |t, cx| {
@@ -8610,7 +8625,7 @@ deleted = true
     fn a_flat_panels_commit_on_amount_parses_as_f64(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_flat(cx);
         h.with_flat_document(&mut vcx);
-        h.dispatch(&mut vcx, "right", Some(1));
+        h.motion(&mut vcx, "right", Some(1));
 
         h.dispatch(&mut vcx, "edit", None);
         h.set_editor(&mut vcx, "2.5");
@@ -8631,7 +8646,7 @@ deleted = true
     fn a_flat_panels_nudge_on_amount_steps_by_its_precision(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_flat(cx);
         h.with_flat_document(&mut vcx);
-        h.dispatch(&mut vcx, "right", Some(1));
+        h.motion(&mut vcx, "right", Some(1));
 
         h.dispatch(&mut vcx, "edit", None);
         assert_eq!(h.editor_value(&vcx).as_deref(), Some("1.2500"));
@@ -8651,7 +8666,7 @@ deleted = true
     fn space_steps_a_choice_cell_and_refuses_elsewhere(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_flat(cx);
         h.with_flat_document(&mut vcx);
-        h.dispatch(&mut vcx, "right", Some(2)); // status = declared
+        h.motion(&mut vcx, "right", Some(2)); // status = declared
         h.dispatch(&mut vcx, "step", None);
         assert_eq!(h.cell(&vcx, 0, 2), ("paid".to_string(), true));
         assert_eq!(
@@ -8681,7 +8696,7 @@ deleted = true
         );
         assert_eq!(h.mode(&vcx), "normal", "a step opens nothing");
 
-        h.dispatch(&mut vcx, "left", None); // amount
+        h.motion(&mut vcx, "left", None); // amount
         h.dispatch(&mut vcx, "step", None);
         assert_eq!(
             h.tile
@@ -8703,7 +8718,7 @@ deleted = true
             &mut vcx,
             test_fixtures::schedule_snapshot_with_null_status(),
         );
-        h.dispatch(&mut vcx, "right", Some(2));
+        h.motion(&mut vcx, "right", Some(2));
         assert_eq!(h.cell(&vcx, 0, 2), (String::new(), false));
         h.dispatch(&mut vcx, "step_back", None);
         assert_eq!(h.cell(&vcx, 0, 2), ("cancelled".to_string(), true));
@@ -8729,14 +8744,14 @@ deleted = true
         // CVI has a strip; the schedule does not.
         let (h, mut vcx) = open(cx);
         let tag = h.with_document_tagged(&mut vcx);
-        h.dispatch(&mut vcx, "up", None); // Attr(0)
+        h.motion(&mut vcx, "up", None); // Attr(0)
         h.dispatch(&mut vcx, "step", None);
         assert_eq!(
             h.tile
                 .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
             Some("step needs a grid cell — the cursor is in the header".to_string())
         );
-        h.dispatch(&mut vcx, "down", None);
+        h.motion(&mut vcx, "down", None);
         h.dispatch(&mut vcx, "edit", None);
         h.set_editor(&mut vcx, "0.5");
         h.dispatch(&mut vcx, "commit", None);
@@ -8759,7 +8774,7 @@ deleted = true
     fn i_on_a_choice_cell_opens_a_typeahead_and_enter_picks(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_flat(cx);
         h.with_flat_document(&mut vcx);
-        h.dispatch(&mut vcx, "right", Some(2));
+        h.motion(&mut vcx, "right", Some(2));
         h.dispatch(&mut vcx, "edit", None);
         assert!(h.tile.read_with(&vcx, |t, _| t.choice_popup_open()));
         assert!(
@@ -8814,7 +8829,7 @@ deleted = true
     ) {
         let (h, mut vcx) = open_flat(cx);
         h.with_flat_document(&mut vcx);
-        h.dispatch(&mut vcx, "right", Some(2));
+        h.motion(&mut vcx, "right", Some(2));
         h.dispatch(&mut vcx, "edit", None);
         h.set_choice_text(&mut vcx, "zzz");
         h.dispatch(&mut vcx, "commit", None);
@@ -8862,7 +8877,7 @@ deleted = true
     fn the_choice_popup_hangs_under_its_cell_and_a_row_click_picks(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_flat(cx);
         h.with_flat_document(&mut vcx);
-        h.dispatch(&mut vcx, "right", Some(2));
+        h.motion(&mut vcx, "right", Some(2));
         h.dispatch(&mut vcx, "edit", None);
         draw(&mut vcx);
         let cell = vcx
@@ -8954,7 +8969,7 @@ deleted = true
             tag,
             Arc::new(test_fixtures::schedule_snapshot_at(&rows, BASE)),
         );
-        h.dispatch(&mut vcx, "right", Some(2));
+        h.motion(&mut vcx, "right", Some(2));
         h.dispatch(&mut vcx, "step", None);
         h.deliver(
             &mut vcx,
@@ -9190,7 +9205,7 @@ deleted = true
             tag,
             Arc::new(document_of(&["t0", "t1", "t2", "t3", "t4"], &NODES, BASE)),
         );
-        h.dispatch(&mut vcx, "bottom", None);
+        h.motion(&mut vcx, "bottom", None);
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.cursor()),
             Cursor::Cell { row: 4, col: 0 }
@@ -9342,7 +9357,7 @@ deleted = true
 
         // Onto the first NODE column, past the slice values: a cell whose
         // column identity is a ladder position, which is what moves.
-        h.dispatch(&mut vcx, "right", Some(SLICE as u32));
+        h.motion(&mut vcx, "right", Some(SLICE as u32));
         h.dispatch(&mut vcx, "edit", None);
         h.set_editor(&mut vcx, "0.9");
         h.dispatch(&mut vcx, "commit", None);
@@ -9514,12 +9529,12 @@ deleted = true
         h.dispatch(&mut vcx, "edit", None);
         h.set_editor(&mut vcx, "0.5");
         h.dispatch(&mut vcx, "commit", None);
-        h.dispatch(&mut vcx, "right", None);
+        h.motion(&mut vcx, "right", None);
         h.dispatch(&mut vcx, "edit", None);
         h.set_editor(&mut vcx, "0.6");
         h.dispatch(&mut vcx, "commit", None);
-        h.dispatch(&mut vcx, "left", None);
-        h.dispatch(&mut vcx, "down", None);
+        h.motion(&mut vcx, "left", None);
+        h.motion(&mut vcx, "down", None);
         h.dispatch(&mut vcx, "edit", None);
         h.set_editor(&mut vcx, "0.7");
         h.dispatch(&mut vcx, "commit", None);
@@ -9596,8 +9611,8 @@ deleted = true
         );
 
         // Row 1 ("2026-09-18#2"), the "amount" column (index 3).
-        h.dispatch(&mut vcx, "down", None);
-        h.dispatch(&mut vcx, "right", Some(3));
+        h.motion(&mut vcx, "down", None);
+        h.motion(&mut vcx, "right", Some(3));
         h.dispatch(&mut vcx, "edit", None);
         h.set_editor(&mut vcx, "9.0");
         h.dispatch(&mut vcx, "commit", None);
@@ -10213,8 +10228,8 @@ edits = [["2099-01-01", "-1", 1.0]]
     ) {
         let (h, mut vcx) = open(cx);
         h.with_document(&mut vcx);
-        h.dispatch(&mut vcx, "right", None);
-        h.dispatch(&mut vcx, "up", None);
+        h.motion(&mut vcx, "right", None);
+        h.motion(&mut vcx, "up", None);
         assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor()), Cursor::Attr(1));
         assert_eq!(
             h.selection(&vcx),
@@ -10237,7 +10252,7 @@ edits = [["2099-01-01", "-1", 1.0]]
                 .read_with(&vcx, |t, _| t.header_texts())
                 .contains(&"spot 4520".to_string())
         );
-        h.dispatch(&mut vcx, "down", None);
+        h.motion(&mut vcx, "down", None);
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.cursor()),
             Cursor::Cell { row: 0, col: 1 }
@@ -10250,8 +10265,8 @@ edits = [["2099-01-01", "-1", 1.0]]
     fn a_bad_number_stays_in_insert_mode_with_the_notice(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         h.with_document(&mut vcx);
-        h.dispatch(&mut vcx, "right", None);
-        h.dispatch(&mut vcx, "up", None); // Attr(1) = spot_ref
+        h.motion(&mut vcx, "right", None);
+        h.motion(&mut vcx, "up", None); // Attr(1) = spot_ref
         h.dispatch(&mut vcx, "edit", None);
         h.set_editor(&mut vcx, "abc");
         h.dispatch(&mut vcx, "commit", None);
@@ -10275,7 +10290,7 @@ edits = [["2099-01-01", "-1", 1.0]]
     fn up_steps_a_cell_one_unit_of_its_precision_and_shift_ten(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         h.with_document(&mut vcx);
-        h.dispatch(&mut vcx, "right", Some(3)); // the first node: 0.1000
+        h.motion(&mut vcx, "right", Some(3)); // the first node: 0.1000
         h.dispatch(&mut vcx, "edit", None);
         assert_eq!(h.editor_value(&vcx).as_deref(), Some("0.1000"));
 
@@ -10315,7 +10330,7 @@ edits = [["2099-01-01", "-1", 1.0]]
     fn an_attribute_nudges_by_days_or_by_its_painted_places(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         h.with_document(&mut vcx);
-        h.dispatch(&mut vcx, "up", None); // Attr(0) = anchor_date
+        h.motion(&mut vcx, "up", None); // Attr(0) = anchor_date
         h.dispatch(&mut vcx, "edit", None);
         assert_eq!(h.editor_value(&vcx).as_deref(), Some("2026-09-12"));
         h.dispatch(&mut vcx, "insert_down_big", None);
@@ -10324,7 +10339,7 @@ edits = [["2099-01-01", "-1", 1.0]]
         assert_eq!(h.editor_value(&vcx).as_deref(), Some("2026-09-03"));
         h.dispatch(&mut vcx, "cancel", None);
 
-        h.dispatch(&mut vcx, "right", None); // Attr(1) = spot_ref
+        h.motion(&mut vcx, "right", None); // Attr(1) = spot_ref
         h.dispatch(&mut vcx, "edit", None);
         assert_eq!(h.editor_value(&vcx).as_deref(), Some("5000"));
         h.dispatch(&mut vcx, "insert_up", None);
@@ -10338,7 +10353,7 @@ edits = [["2099-01-01", "-1", 1.0]]
     fn a_nudge_refuses_unparseable_text_and_escape_discards_it(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         h.with_document(&mut vcx);
-        h.dispatch(&mut vcx, "right", Some(3));
+        h.motion(&mut vcx, "right", Some(3));
         h.dispatch(&mut vcx, "edit", None);
         h.set_editor(&mut vcx, "abc");
         h.dispatch(&mut vcx, "insert_up", None);
@@ -10552,7 +10567,7 @@ edits = [["2099-01-01", "-1", 1.0]]
     fn yank_in_the_strip_reads_the_attribute_and_yc_is_inert(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         h.with_document(&mut vcx);
-        h.dispatch(&mut vcx, "up", None);
+        h.motion(&mut vcx, "up", None);
         assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor()), Cursor::Attr(0));
         h.dispatch(&mut vcx, "yank", None);
         assert_eq!(clipboard(&mut vcx).as_deref(), Some("2026-09-12"));
@@ -10605,7 +10620,7 @@ edits = [["2099-01-01", "-1", 1.0]]
         let (h, mut vcx) = open(cx);
         h.with_document(&mut vcx);
         h.dispatch(&mut vcx, "menu", None);
-        h.dispatch(&mut vcx, "down", None);
+        h.motion(&mut vcx, "down", None);
         assert_eq!(h.mode(&vcx), "normal");
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.cursor()),
@@ -10985,7 +11000,7 @@ edits = [["2099-01-01", "-1", 1.0]]
     /// field's `on_key_down` is a listener on the painted, focused element,
     /// so every test that types into it draws first.
     fn open_date_field(h: &Harness, vcx: &mut gpui::VisualTestContext) {
-        h.dispatch(vcx, "up", None); // Attr(0) = anchor_date
+        h.motion(vcx, "up", None); // Attr(0) = anchor_date
         h.dispatch(vcx, "edit", None);
         draw(vcx);
     }
@@ -11329,8 +11344,8 @@ edits = [["2099-01-01", "-1", 1.0]]
     fn a_number_attribute_still_opens_the_text_editor(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         h.with_document(&mut vcx);
-        h.dispatch(&mut vcx, "right", None);
-        h.dispatch(&mut vcx, "up", None); // Attr(1) = spot_ref
+        h.motion(&mut vcx, "right", None);
+        h.motion(&mut vcx, "up", None); // Attr(1) = spot_ref
         h.dispatch(&mut vcx, "edit", None);
         assert!(h.tile.read_with(&vcx, |t, _| t.editor_state()).is_some());
         assert!(h.tile.read_with(&vcx, |t, _| t.date_field()).is_none());
@@ -11345,7 +11360,7 @@ edits = [["2099-01-01", "-1", 1.0]]
     fn shift_up_in_the_editor_no_longer_moves_the_tables_selection(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         h.with_document(&mut vcx);
-        h.dispatch(&mut vcx, "down", None);
+        h.motion(&mut vcx, "down", None);
         assert_eq!(h.selection(&vcx), (Some(1), Some(1)));
         h.dispatch(&mut vcx, "edit", None);
         assert_eq!(h.mode(&vcx), "insert");
@@ -11717,7 +11732,7 @@ edits = [["2099-01-01", "-1", 1.0]]
     fn the_menu_row_to_picker_path_leaves_the_pickers_field_focused(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         h.with_document(&mut vcx);
-        h.dispatch(&mut vcx, "up", None);
+        h.motion(&mut vcx, "up", None);
         assert!(matches!(
             h.tile.read_with(&vcx, |t, _| t.cursor()),
             Cursor::Attr(_)
@@ -11809,7 +11824,7 @@ edits = [["2099-01-01", "-1", 1.0]]
     fn a_find_cancelled_from_the_strip_returns_to_the_strip(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         h.with_document(&mut vcx);
-        h.dispatch(&mut vcx, "up", None);
+        h.motion(&mut vcx, "up", None);
         let origin = h.tile.read_with(&vcx, |t, _| t.cursor());
         assert!(matches!(origin, Cursor::Attr(_)), "{origin:?}");
         vcx.update(|window, cx| {
@@ -11968,7 +11983,7 @@ edits = [["2099-01-01", "-1", 1.0]]
         h.dispatch(&mut vcx, "edit", None);
         h.set_editor(&mut vcx, "0.5");
         h.dispatch(&mut vcx, "commit", None);
-        h.dispatch(&mut vcx, "down", None);
+        h.motion(&mut vcx, "down", None);
         h.dispatch(&mut vcx, "edit", None);
         h.set_editor(&mut vcx, "0.7");
         h.dispatch(&mut vcx, "commit", None);
@@ -12016,7 +12031,7 @@ edits = [["2099-01-01", "-1", 1.0]]
         h.dispatch(&mut vcx, "edit", None);
         h.set_editor(&mut vcx, "0.5");
         h.dispatch(&mut vcx, "commit", None);
-        h.dispatch(&mut vcx, "right", None);
+        h.motion(&mut vcx, "right", None);
         h.dispatch(&mut vcx, "edit", None);
         h.set_editor(&mut vcx, "0.6");
         h.dispatch(&mut vcx, "commit", None);
@@ -12270,7 +12285,7 @@ auto = "discard"
         h.dispatch(&mut vcx, "edit", None);
         h.set_editor(&mut vcx, "0.5");
         h.dispatch(&mut vcx, "commit", None);
-        h.dispatch(&mut vcx, "right", None);
+        h.motion(&mut vcx, "right", None);
         h.dispatch(&mut vcx, "edit", None);
         h.set_editor(&mut vcx, "0.6");
         assert_eq!(h.mode(&vcx), "insert");
@@ -12471,7 +12486,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         h.dispatch(&mut vcx, "edit", None);
         h.set_editor(&mut vcx, "0.5");
         h.dispatch(&mut vcx, "commit", None);
-        h.dispatch(&mut vcx, "right", None);
+        h.motion(&mut vcx, "right", None);
         h.dispatch(&mut vcx, "edit", None);
         h.set_editor(&mut vcx, "0.6");
         assert_eq!(h.mode(&vcx), "insert");
@@ -12928,7 +12943,7 @@ edits = [["2026-11-20", "-1", 9.5]]
             ["2026-10-16", "2027-01-15", "2026-11-20"]
         );
         // Back onto 2026-10-16 and insert again below it.
-        h.dispatch(&mut vcx, "up", None);
+        h.motion(&mut vcx, "up", None);
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.cursor()),
             Cursor::Cell { row: 0, col: 0 }
@@ -12962,14 +12977,14 @@ edits = [["2026-11-20", "-1", 9.5]]
     fn row_verbs_are_refused_while_behind_and_in_the_strip(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         let tag = h.with_document_tagged(&mut vcx);
-        h.dispatch(&mut vcx, "up", None); // Attr(0)
+        h.motion(&mut vcx, "up", None); // Attr(0)
         for verb in ["insert_below", "insert_above", "delete_row"] {
             h.dispatch(&mut vcx, verb, None);
             assert_eq!(notice_of(&h, &vcx).as_deref(), Some("not a row"), "{verb}");
             assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
             assert!(h.editor_value(&vcx).is_none());
         }
-        h.dispatch(&mut vcx, "down", None);
+        h.motion(&mut vcx, "down", None);
         h.dispatch(&mut vcx, "edit", None);
         h.set_editor(&mut vcx, "0.5");
         h.dispatch(&mut vcx, "commit", None);
@@ -13008,7 +13023,7 @@ edits = [["2026-11-20", "-1", 9.5]]
     fn o_cancels_an_open_editor_before_inserting(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_flat(cx);
         h.with_flat_document(&mut vcx);
-        h.dispatch(&mut vcx, "right", None); // amount
+        h.motion(&mut vcx, "right", None); // amount
         h.dispatch(&mut vcx, "edit", None);
         h.set_editor(&mut vcx, "9.9");
         h.dispatch(&mut vcx, "insert_below", None);
@@ -13036,7 +13051,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         // fill the amount.
         type_keys(&mut vcx, "enter");
         assert_eq!(h.mode(&vcx), "normal");
-        h.dispatch(&mut vcx, "right", None);
+        h.motion(&mut vcx, "right", None);
         h.dispatch(&mut vcx, "edit", None);
         h.set_editor(&mut vcx, "2.5");
         h.dispatch(&mut vcx, "commit", None);
@@ -13104,7 +13119,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         h.dispatch(&mut vcx, "insert_below", None);
         draw(&mut vcx);
         type_keys(&mut vcx, "escape");
-        h.dispatch(&mut vcx, "up", None); // back on D1
+        h.motion(&mut vcx, "up", None); // back on D1
         h.dispatch(&mut vcx, "insert_below", None);
         assert_eq!(row_labels(&h, &vcx), ["D1", "new-2", "new-1", "D2"]);
         assert_eq!(
@@ -13630,7 +13645,7 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         // Escape clears a notice; the failure stays until the next edit.
         h.dispatch(&mut vcx, "escape", None);
         assert!(h.header_texts(&vcx).contains(&err));
-        h.dispatch(&mut vcx, "down", None);
+        h.motion(&mut vcx, "down", None);
         h.edit_one_cell(&mut vcx);
         assert!(
             !h.header_texts(&vcx).contains(&err),
@@ -13804,7 +13819,7 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         draw(&mut vcx);
         type_keys(&mut vcx, "y");
         let tag = h.upload_request().expect("submitted").tag;
-        h.dispatch(&mut vcx, "down", None);
+        h.motion(&mut vcx, "down", None);
         h.edit_one_cell(&mut vcx);
         assert_eq!(
             h.command(&mut vcx, "upload"),
@@ -14209,7 +14224,7 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         // the frame) does not take the line down; the next edit does.
         h.echo(&mut vcx, test_fixtures::snapshot_of_at(&CVI, &sent, NEWER));
         assert!(has_confirmed(&h, &vcx), "{:?}", h.header_texts(&vcx));
-        h.dispatch(&mut vcx, "down", None);
+        h.motion(&mut vcx, "down", None);
         h.edit_one_cell(&mut vcx);
         assert!(!has_confirmed(&h, &vcx), "{:?}", h.header_texts(&vcx));
     }
@@ -14475,7 +14490,7 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         type_keys(&mut vcx, "y");
         let tag = h.upload_request().unwrap().tag;
         assert!(h.sent_rows(&vcx).is_some(), "kept while in flight");
-        h.dispatch(&mut vcx, "down", None);
+        h.motion(&mut vcx, "down", None);
         h.edit_one_cell(&mut vcx);
         h.deliver_upload(&mut vcx, tag, Ok(()));
         assert_eq!(
@@ -14493,7 +14508,7 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         h.with_document(&mut vcx);
         h.edit_one_cell(&mut vcx);
         h.upload_ok(&mut vcx);
-        h.dispatch(&mut vcx, "down", None);
+        h.motion(&mut vcx, "down", None);
         h.edit_one_cell(&mut vcx);
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.draft().state.clone()),
@@ -14908,6 +14923,54 @@ edits = [["2026-11-20", "-1", 9.5]]
             row(&vcx),
             before + 1,
             "j reached the tile with no other click after the prompt press"
+        );
+    }
+
+    /// The shared motion keys reach the panel through the shell's builtin
+    /// bindings: `down` moves (the fragment never bound the arrows), a
+    /// counted `G` is that row, and `k` on row 0 still enters the strip.
+    #[gpui::test]
+    fn the_shared_motion_keys_move_the_panel_through_the_shell(cx: &mut gpui::TestAppContext) {
+        let (mut vcx, shell, tile, rx) = open_in_shell(cx);
+        let mut asked = None;
+        while let Ok(request) = rx.try_recv() {
+            if let Request::Document(params) = request {
+                asked = Some(params.tag);
+            }
+        }
+        let tag = asked.expect("the visible panel asked for its document");
+        let outcome = QueryOutcome {
+            key: QueryKey(1),
+            tag,
+            snapshot: Ok(Arc::new(cvi(BASE))),
+            submitted: Instant::now(),
+        };
+        vcx.update(|window, cx| {
+            shell.update(cx, |s, cx| s.deliver(Delivery::Query(outcome), window, cx))
+        });
+        draw(&mut vcx);
+        let cursor = |vcx: &gpui::VisualTestContext| tile.read_with(vcx, |t, _| t.cursor());
+        type_keys(&mut vcx, "g g");
+        assert!(matches!(cursor(&vcx), Cursor::Cell { row: 0, .. }));
+        type_keys(&mut vcx, "down");
+        assert!(
+            matches!(cursor(&vcx), Cursor::Cell { row: 1, .. }),
+            "the arrow moves"
+        );
+        type_keys(&mut vcx, "1 shift-g");
+        assert!(
+            matches!(cursor(&vcx), Cursor::Cell { row: 0, .. }),
+            "1G is row 1"
+        );
+        type_keys(&mut vcx, "k");
+        assert!(
+            matches!(cursor(&vcx), Cursor::Attr(_)),
+            "k on row 0 enters the strip"
+        );
+        type_keys(&mut vcx, "shift-g");
+        assert!(
+            matches!(cursor(&vcx), Cursor::Cell { row: 1, .. }),
+            "G leaves the strip"
         );
     }
 

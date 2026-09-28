@@ -69,7 +69,11 @@ The blotter's retired motion ids rename as `blotter::down`/`up`/`left`/
 `blotter::page_down_full`/`page_up_full` → `motion::page_down`/`page_up`, and
 `blotter::first_col`/`last_col` → `motion::line_start`/`line_end`. A user
 binding on one of them keeps its own context (for example
-`blotter && mode == normal`), so it still moves only the blotter.
+`blotter && mode == normal`), so it still moves only the blotter. The
+market-data panel's retired ids rename the same way from the `marketdata::`
+prefix (`marketdata::down` → `motion::down`, `marketdata::page_down_full` →
+`motion::page_down`, `marketdata::first_col` → `motion::line_start`, and so
+on), and a binding on one keeps its `marketdata && …` context.
 
 ## Key spelling and primary modifier
 
@@ -123,7 +127,8 @@ The market-data panel reports one of `normal`, `visual`, `menu`, or `insert`.
 An open editor, picker, choice field, or upload confirmation is `insert` even
 while a selection is live, so the editor's `enter`, `escape`, and arrows keep
 their insert-mode meaning over a selection; the action menu is `menu`. Its
-`marketdata && mode == visual` block repeats the normal motions and binds the
+motions are the shared grid motions (the panel publishes `grid` in normal and
+visual modes); its `marketdata && mode == visual` block binds the
 selection verbs as single keys — `y` (`marketdata::yank`), `d`
 (`marketdata::delete_row`), `i` and `enter` (`marketdata::edit`), `v`, `V`,
 and `escape` — because a doubled normal-mode form (`y y`, `y c`, `d d`) would
@@ -255,6 +260,8 @@ compiler still participate in the reload gate.
 A grid module's fragment binds no motions: they come from the shared
 `motion::*` bindings under `grid`. The blotter's fragment binds only its
 verbs (expansion, selection, yank, find, sort, `g m`, escape).
+The market-data panel's fragment binds its verbs and its `mode == menu`
+keys; `k` on row 0 still enters the attribute strip around the shared result.
 
 A fragment may name any action, not only ones its own module registers, so
 long as its context is the module's own: both the blotter's and the pricer's
