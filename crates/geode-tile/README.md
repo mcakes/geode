@@ -19,9 +19,10 @@ Current architecture:
 | `notice` | `Notice` (prepared text and a `Tone`: `Status`, `Warning`, `Danger`) and its one paint in theme tokens. Precedence between a tile's notice slots stays the tile's. |
 | `popover` | Popup geometry (`ROW_HEIGHT`, `ROW_INSET`, `MIN_WIDTH`, `SNAP_MARGIN`), the popover `surface`, `anchor_popup` (deferred, anchored, snapped, priority 1), and the `row_shell`/`empty_row` row frames. |
 
-Used by the pricer (all four doors), market-data (all four), timeseries
-(popover, menu, notice) and the blotter (notice). Diagnostics has no popover,
-menu, confirm or notice line and does not depend on this crate.
+Used by the pricer (all four doors), market-data (all four, and `following`
+for its document request), timeseries (popover, menu, notice) and the blotter
+(notice). Diagnostics has no popover, menu, confirm or notice line and does
+not depend on this crate.
 
 The crate takes a submission's outcome as `submitted: bool` rather than
 depending on `geode-data`: every refusal path uses the data service's
