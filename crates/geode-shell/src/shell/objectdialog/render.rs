@@ -22,8 +22,10 @@
 
 use std::rc::Rc;
 
-use geode_core::config::{Layer, Severity, check_object_name};
+use geode_core::config::{Layer, Severity, check_object_name, load_views};
 use geode_core::query::{DistinctOutcome, DistinctParams};
+use geode_core::schema::SchemaSpec;
+use geode_core::view::{DatasetPresentationSpec, ViewSpec};
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Div, Entity, MouseButton, Window, div, rems};
 use gpui_component::button::{Button, ButtonVariants as _};
@@ -727,6 +729,74 @@ pub(in crate::shell) fn open_object(
     cx.notify();
 }
 
+/// The object an edit-column route opens for `column` of `view`: the view itself for
+/// Views; for Schema, the first dataset of the view (primary, then joins) that declares
+/// the column — the owner dataset presentation resolves to. `Err` is the footer notice.
+#[allow(dead_code)] // wired by the choice dialog in the next commit
+fn resolve_column_object(
+    domain: Domain,
+    views: &[ViewSpec],
+    schema: &SchemaSpec,
+    view: &str,
+    column: &str,
+) -> Result<String, String> {
+    let Some(spec) = views.iter().find(|v| v.name == view) else {
+        return Err(format!("view '{view}' is not defined"));
+    };
+    match domain {
+        Domain::Schema => DatasetPresentationSpec::owner_of(spec, column, schema)
+            .map(str::to_string)
+            .ok_or_else(|| format!("'{column}' is not declared by any dataset of view '{view}'")),
+        _ => Ok(view.to_string()),
+    }
+}
+
+/// Open `domain`'s dialog straight onto `column`'s Column stage for a tile's `view`
+/// (`config::view_column` / `config::schema_column`). Resolves the object against the
+/// pending-aware config at this moment, not the tile's copy, because a reload or a
+/// queued edit may have changed the view since the tile planned. Each failure lands in
+/// the dialog's footer notice at the stage it reached: an unresolvable object stays in
+/// Browse, a column the object no longer has stops on its Edit stage.
+#[allow(dead_code)] // wired by the choice dialog in the next commit
+pub(in crate::shell) fn open_column(
+    shell: &mut ShellView,
+    domain: Domain,
+    view: &str,
+    column: &str,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    // Same guard as `open_object`: without it the stages below would land on whatever
+    // object dialog is live.
+    if !dialog::can_open_object(shell, domain) {
+        return;
+    }
+    let object = {
+        let folded = apply::config_with_pending(shell);
+        let config = folded.as_ref().unwrap_or(&shell.services.config);
+        let (views, _) = load_views(config);
+        let schema = config
+            .doc("datasets")
+            .map(|doc| SchemaSpec::from_doc(doc).0)
+            .unwrap_or_default();
+        resolve_column_object(domain, &views, &schema, view, column)
+    };
+    open(shell, domain, window, cx);
+    match object {
+        Err(notice) => set_notice(shell, notice),
+        Ok(object) => {
+            enter_edit_stage(shell, &object, None, cx);
+            if !enter_column_stage(shell, column, cx) {
+                set_notice(shell, format!("'{column}' is not a column of '{object}'"));
+            }
+        }
+    }
+    // `open` synchronized the shared input for Browse; the stage now on screen needs
+    // its own pass.
+    dialog::sync_dialog_text(shell, window, cx);
+    cx.notify();
+}
+
 /// the dataset of the browse row under the cursor, for `n` on Sources — `None` on every
 /// other domain, or with no row (an empty list, or a keystroke racing the modal
 /// closing).
@@ -858,20 +928,20 @@ fn enter_edit_stage(
 ///
 /// Read colors and overlay baselines from the pending-aware config. Clear mode, query,
 /// confirmation, and viewport for the new stage. If the column cannot be resolved,
-/// discard the prepared context and leave the current stage intact.
-fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<ShellView>) {
+/// discard the prepared context, leave the current stage intact and return `false`.
+fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<ShellView>) -> bool {
     // Use pending edits for the named-color choices and presentation baselines. A
     // stage opened during debounce must not overwrite a value it cannot yet see.
     let pending = apply::config_with_pending(shell);
     let config = pending.as_ref().unwrap_or(&shell.services.config);
     let colours = colours::names(config);
     let Some(state) = shell.object_dialog.as_ref() else {
-        return;
+        return false;
     };
     let domain = state.domain;
     let object = match &state.stage {
         Stage::Edit { object } | Stage::Column { object, .. } => object.clone(),
-        _ => return,
+        _ => return false,
     };
     // Read the Schema seed from the same pending-aware config before borrowing the
     // draft mutably. Preserve the dataset's other edited columns in its overlay.
@@ -883,10 +953,10 @@ fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<Shel
         (schema, dataset_columns::overlay_object(config, &object))
     });
     let Some(state) = shell.object_dialog.as_mut() else {
-        return;
+        return false;
     };
     let Some(draft) = state.draft.as_mut() else {
-        return;
+        return false;
     };
     let (fields, ctx) = match domain {
         Domain::Views => {
@@ -895,7 +965,7 @@ fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<Shel
                 .and_then(|items| items.iter().find(|i| i.name == column))
                 .cloned()
             else {
-                return;
+                return false;
             };
             // The layer between the desk view and this view's own overlay, refreshed
             // from the PENDING-aware config before the context is built: a
@@ -918,13 +988,13 @@ fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<Shel
         // this one.
         Domain::Schema => {
             let Some((schema, overlay_object)) = schema_seed else {
-                return;
+                return false;
             };
             let Some(dataset) = schema.dataset(&object) else {
-                return;
+                return false;
             };
             let Some(item) = dataset_columns::item_for(dataset, column, &overlay_object) else {
-                return;
+                return false;
             };
             (
                 views::column_fields(&item, &colours, Destination::DatasetPresentation),
@@ -942,12 +1012,12 @@ fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<Shel
         // No other domain has a column stage: Groupings, Scopes, Sources
         // and Colors have no per-column presentation to open, and
         // `column_stage_target` never names a row on one.
-        _ => return,
+        _ => return false,
     };
     draft.column_ctx = Some(ctx);
     if !draft.enter_column(column, fields) {
         draft.column_ctx = None;
-        return;
+        return false;
     }
     // Settle selection at stage entry because pointer activation bypasses the keyboard
     // handler's final settle.
@@ -969,6 +1039,7 @@ fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<Shel
     // the viewport goes with it — `enter_edit_stage`'s own reset.
     shell.object_dialog_scroll.scroll_to_item(0);
     cx.notify();
+    true
 }
 
 /// Fold the column fields and return to the parent object, selecting the column. Schema
@@ -5078,4 +5149,91 @@ pub(in crate::shell) fn deliver_values(
         shell.object_dialog_scroll.scroll_to_item(selected);
     }
     cx.notify();
+}
+
+#[cfg(test)]
+mod column_route_tests {
+    use super::*;
+    use geode_core::config::{LayerDoc, merge_docs};
+    use geode_core::schema::SchemaSpec;
+    use geode_core::view::{JoinSpec, ViewColumn, ViewSpec};
+
+    fn schema() -> SchemaSpec {
+        let text = "[risk_snapshot.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+                    [risk_snapshot.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n\
+                    [instrument_ref.columns.instrument_ref]\ntype = \"utf8\"\nrole = \"key\"\n\
+                    [instrument_ref.columns.spot]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"instrument\"\n";
+        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
+        SchemaSpec::from_doc(&doc).0
+    }
+
+    fn views() -> Vec<ViewSpec> {
+        vec![ViewSpec {
+            name: "tree".into(),
+            dataset: "risk_snapshot".into(),
+            joins: vec![JoinSpec {
+                dataset: "instrument_ref".into(),
+                on: vec!["instrument_ref".into()],
+                required: true,
+            }],
+            columns: vec![
+                ViewColumn::Measure {
+                    name: "npv".into(),
+                    required: true,
+                },
+                ViewColumn::Measure {
+                    name: "spot".into(),
+                    required: true,
+                },
+                ViewColumn::Derived {
+                    name: "npv_x2".into(),
+                    sql: "npv * 2".into(),
+                    required: true,
+                },
+            ],
+            ..ViewSpec::default()
+        }]
+    }
+
+    #[test]
+    fn views_resolves_to_the_view_itself() {
+        assert_eq!(
+            resolve_column_object(Domain::Views, &views(), &schema(), "tree", "npv"),
+            Ok("tree".to_string())
+        );
+    }
+
+    #[test]
+    fn schema_resolves_a_primary_column_to_the_view_dataset() {
+        assert_eq!(
+            resolve_column_object(Domain::Schema, &views(), &schema(), "tree", "npv"),
+            Ok("risk_snapshot".to_string())
+        );
+    }
+
+    #[test]
+    fn schema_resolves_a_joined_column_to_its_owning_dataset() {
+        assert_eq!(
+            resolve_column_object(Domain::Schema, &views(), &schema(), "tree", "spot"),
+            Ok("instrument_ref".to_string())
+        );
+    }
+
+    #[test]
+    fn schema_refuses_a_column_no_dataset_declares() {
+        assert_eq!(
+            resolve_column_object(Domain::Schema, &views(), &schema(), "tree", "npv_x2"),
+            Err("'npv_x2' is not declared by any dataset of view 'tree'".to_string())
+        );
+    }
+
+    #[test]
+    fn an_undefined_view_is_refused_for_both_domains() {
+        for domain in [Domain::Views, Domain::Schema] {
+            assert_eq!(
+                resolve_column_object(domain, &views(), &schema(), "gone", "npv"),
+                Err("view 'gone' is not defined".to_string())
+            );
+        }
+    }
 }
