@@ -13966,6 +13966,14 @@ run_mutation "pricer motion: a bare j wraps outside a selection" \
   '            let selecting = true;' \
   geode-pricer motions_move_the_cursor_and_never_into_the_tree_column
 
+# Under a live selection a bare `j`/`k` at an end clamps; a wrap would carry
+# the moving corner across the anchor.
+run_mutation "pricer motion: a selection clamps a bare step" \
+  crates/geode-pricer/src/tile.rs \
+  '            let selecting = self.selection.is_some();' \
+  '            let selecting = false;' \
+  geode-pricer a_bare_step_at_either_end_clamps_under_a_selection
+
 # A palette motion over an open entry bar closes the bar before moving,
 # like every verb that is not the bar's own.
 run_mutation "pricer motion: a motion closes an open field first" \

@@ -789,7 +789,8 @@ The cursor moves on the [shared grid motions](#shared-tile-interaction) (the
 tile publishes `grid` and `mode == normal`), so the arrow keys move it, a bare
 `j` on the last row wraps to the top, and a counted `g g` or `G` goes to that
 row. Any motion stops following; a bare `G` resumes it, and a counted `G`
-jumps to that row without following.
+jumps to that row without following. On an empty section a motion
+changes nothing, so a following empty log keeps following through `g g`.
 
 Source ages reflect the last row rebuild rather than a ticking timer; the
 absolute timestamp remains visible. Config output is capped at 2,000 leaves

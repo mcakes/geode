@@ -28,6 +28,36 @@ fn v_starts_a_block_and_motions_extend_it(cx: &mut gpui::TestAppContext) {
     );
 }
 
+/// A bare `j`/`k` at the sheet's ends clamps while a selection is live: a
+/// wrap would carry the moving corner across the anchor and invert the
+/// selection. The motions arrive by the id the shell's keys send.
+#[gpui::test]
+fn a_bare_step_at_either_end_clamps_under_a_selection(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    let cols = h.columns(&vcx).len();
+    h.motion(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.motion(&mut vcx, "bottom", None);
+    assert_eq!(h.cursor(&vcx), Some((2, 0)), "fixture: on the last row");
+    assert_eq!(resolved(&h, &vcx), Some((SelectKind::Rows, 1..3, 0..cols)));
+    h.motion(&mut vcx, "down", None);
+    assert_eq!(h.cursor(&vcx), Some((2, 0)), "a bare j at the end stays");
+    assert_eq!(
+        resolved(&h, &vcx),
+        Some((SelectKind::Rows, 1..3, 0..cols)),
+        "and the extent is unchanged"
+    );
+    h.motion(&mut vcx, "top", None);
+    assert_eq!(resolved(&h, &vcx), Some((SelectKind::Rows, 0..2, 0..cols)));
+    h.motion(&mut vcx, "up", None);
+    assert_eq!(h.cursor(&vcx), Some((0, 0)), "a bare k at the top stays");
+    assert_eq!(
+        resolved(&h, &vcx),
+        Some((SelectKind::Rows, 0..2, 0..cols)),
+        "and the extent is unchanged"
+    );
+}
+
 #[gpui::test]
 fn shift_v_switches_kind_keeping_the_anchor_and_the_same_key_clears(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &BOOK);

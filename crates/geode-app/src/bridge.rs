@@ -5680,16 +5680,18 @@ role = "key"
             dispatch_counts(cx, "blotter", Some(user), &["q"], &["motion::down"]),
             vec![1]
         );
-        assert_eq!(
-            dispatch_counts(cx, "pricer", Some(user), &["q"], &["motion::down"]),
-            vec![0],
-            "the override stays in the blotter's own context"
-        );
-        assert_eq!(
-            dispatch_counts(cx, "cvi", Some(user), &["q"], &["motion::down"]),
-            vec![0],
-            "nor does it reach the market-data panel"
-        );
+        assert_reaches_no_other_grid_tile(cx, "blotter", user);
+    }
+
+    /// An old-id override under `own`'s context moves no other grid tile.
+    fn assert_reaches_no_other_grid_tile(cx: &mut gpui::TestAppContext, own: &str, user: &str) {
+        for kind in GRID_KINDS.iter().filter(|k| **k != own) {
+            assert_eq!(
+                dispatch_counts(cx, kind, Some(user), &["q"], &["motion::down"]),
+                vec![0],
+                "{kind}: the {own} override stays in its own context"
+            );
+        }
     }
 
     /// An override written against the retired `marketdata::down` keeps
@@ -5713,11 +5715,7 @@ role = "key"
             dispatch_counts(cx, "cvi", Some(user), &["q"], &["motion::down"]),
             vec![1]
         );
-        assert_eq!(
-            dispatch_counts(cx, "blotter", Some(user), &["q"], &["motion::down"]),
-            vec![0],
-            "the override stays in the panel's own context"
-        );
+        assert_reaches_no_other_grid_tile(cx, "cvi", user);
     }
 
     /// An override written against the retired `pricer::down` keeps working
@@ -5740,13 +5738,7 @@ role = "key"
             dispatch_counts(cx, "pricer", Some(user), &["q"], &["motion::down"]),
             vec![1]
         );
-        for kind in ["blotter", "cvi"] {
-            assert_eq!(
-                dispatch_counts(cx, kind, Some(user), &["q"], &["motion::down"]),
-                vec![0],
-                "{kind}: the override stays in the pricer's own context"
-            );
-        }
+        assert_reaches_no_other_grid_tile(cx, "pricer", user);
     }
 
     /// An override written against the retired `diagnostics::down` keeps
@@ -5770,12 +5762,6 @@ role = "key"
             dispatch_counts(cx, "diagnostics", Some(user), &["q"], &["motion::down"]),
             vec![1]
         );
-        for kind in ["blotter", "cvi", "pricer"] {
-            assert_eq!(
-                dispatch_counts(cx, kind, Some(user), &["q"], &["motion::down"]),
-                vec![0],
-                "{kind}: the override stays in the diagnostics tile's own context"
-            );
-        }
+        assert_reaches_no_other_grid_tile(cx, "diagnostics", user);
     }
 }
