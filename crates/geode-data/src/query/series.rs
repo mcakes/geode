@@ -3,8 +3,9 @@
 //! slot, and a coverage statement per source slot.
 //!
 //! Source points select `arg_max(value, received_at)` per timestamp before
-//! bucketing. Historical reads also require `received_at <= t` and `ts <= t`;
-//! series do not use generation IDs. Source identities and time bounds use
+//! bucketing. Historical reads require `ts <= t` and take the latest version
+//! with `received_at <= t`, falling back to the earliest version when none
+//! was known by then; series do not use generation IDs. Source identities and time bounds use
 //! bound parameters; validated numeric literals and bucket intervals form SQL.
 //!
 //! Statistics repeat the points statement's CTEs and bucketing. All statements
@@ -189,11 +190,18 @@ fn ctes(params: &SeriesParams, order: &[u8]) -> Result<(String, Vec<Value>), Sto
     let interval = params.frequency.interval_sql();
     let mut parts: Vec<String> = Vec::new();
     let mut bound: Vec<Value> = Vec::new();
-    let as_of = match &params.as_of {
-        AsOf::Live => String::new(),
-        AsOf::At(_) => {
-            " and received_at <= make_timestamp(?) and ts <= make_timestamp(?)".to_string()
-        }
+    // Under an as-of, each `ts` takes its latest version known by the
+    // instant, or — when every version arrived later — its FIRST one. A
+    // fetch stamps its rows with the fetch time, so a strict
+    // `received_at <= t` would hide every bar backfilled after `t`; the
+    // fallback keeps corrections honest (one received after `t` still
+    // loses to an original known by then) without blanking history.
+    let (value, as_of) = match &params.as_of {
+        AsOf::Live => ("arg_max(value, received_at)", ""),
+        AsOf::At(_) => (
+            "coalesce(arg_max(value, received_at) filter (where received_at <= make_timestamp(?)), arg_min(value, received_at))",
+            " and ts <= make_timestamp(?)",
+        ),
     };
     for s in &params.series {
         if let SlotKind::Source {
@@ -203,16 +211,20 @@ fn ctes(params: &SeriesParams, order: &[u8]) -> Result<(String, Vec<Value>), Sto
         } = &s.kind
         {
             parts.push(format!(
-                "s{n} as (\n  select time_bucket({interval}, ts) as b, {agg} as v\n  from (\n    select ts, arg_max(value, received_at) as v\n    from {table}\n    where source = ? and series_id = ? and ts >= make_timestamp(?) and ts < make_timestamp(?){as_of}\n    group by ts\n  )\n  group by b\n)",
+                "s{n} as (\n  select time_bucket({interval}, ts) as b, {agg} as v\n  from (\n    select ts, {value} as v\n    from {table}\n    where source = ? and series_id = ? and ts >= make_timestamp(?) and ts < make_timestamp(?){as_of}\n    group by ts\n  )\n  group by b\n)",
                 n = s.slot,
                 agg = aggregate(*rule),
             ));
+            // Placeholders bind in text order: the select list's as-of
+            // instant precedes the `where` clause's.
+            if let AsOf::At(t) = &params.as_of {
+                bound.push(Value::BigInt(micros(*t)));
+            }
             bound.push(Value::Text(source.clone()));
             bound.push(Value::Text(identity.clone()));
             bound.push(Value::BigInt(micros(params.range.0)));
             bound.push(Value::BigInt(micros(params.range.1)));
             if let AsOf::At(t) = &params.as_of {
-                bound.push(Value::BigInt(micros(*t)));
                 bound.push(Value::BigInt(micros(*t)));
             }
         }
@@ -643,13 +655,20 @@ mod tests {
         let plan = compile_series(&schema(), &p).unwrap();
         assert!(
             plan.points.sql.contains(
-                "and ts < make_timestamp(?) and received_at <= make_timestamp(?) and ts <= make_timestamp(?)"
+                "select ts, coalesce(arg_max(value, received_at) filter (where received_at <= make_timestamp(?)), arg_min(value, received_at)) as v"
             ),
             "{}",
             plan.points.sql
         );
+        assert!(
+            plan.points
+                .sql
+                .contains("and ts < make_timestamp(?) and ts <= make_timestamp(?)"),
+            "{}",
+            plan.points.sql
+        );
         assert_eq!(plan.points.params.len(), 6);
-        assert_eq!(plan.points.params[4], micros("2026-01-08T12:00:00Z"));
+        assert_eq!(plan.points.params[0], micros("2026-01-08T12:00:00Z"));
         assert_eq!(plan.points.params[5], micros("2026-01-08T12:00:00Z"));
     }
 
@@ -1084,6 +1103,36 @@ mod tests {
         p.as_of = AsOf::At(ts("2026-01-05T12:00:00Z"));
         let earlier = run(&store, &p);
         assert!(earlier.buckets.is_empty());
+    }
+
+    #[test]
+    fn an_as_of_before_a_bar_was_fetched_still_sees_its_first_version() {
+        // A backfill fetched on Jan 9 stamps every bar received Jan 9; an
+        // as-of of Jan 7 must still paint Jan 5 and 6 (not Jan 8, past
+        // the as-of's own ts bound), each at its FIRST known value.
+        let (_d, store) = store();
+        for (day, v) in [("05", 1.0), ("06", 2.0), ("08", 4.0)] {
+            append(
+                &store,
+                "A",
+                &format!("2026-01-{day}T14:30:00Z"),
+                &[v],
+                "2026-01-09T09:00:00Z",
+            );
+        }
+        append(
+            &store,
+            "A",
+            "2026-01-06T14:30:00Z",
+            &[20.0],
+            "2026-01-10T09:00:00Z",
+        );
+        let mut p = params(vec![source(1, "A", BucketRule::Last)]);
+        p.as_of = AsOf::At(ts("2026-01-07T12:00:00Z"));
+        let then = run(&store, &p);
+        assert_eq!(then.slots[0].values, vec![1.0, 2.0]);
+        let live = run(&store, &params(vec![source(1, "A", BucketRule::Last)]));
+        assert_eq!(live.slots[0].values, vec![1.0, 20.0, 4.0]);
     }
 
     #[test]
