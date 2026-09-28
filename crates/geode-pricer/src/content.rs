@@ -108,7 +108,47 @@ pub const NO_DEFAULT_KEY: &[&str] = &["pricer::price"];
 /// `d`, `shift+j`/`shift+k`, `g p`, `g u`, `i` and `enter` act on the
 /// whole selection, so no doubled `y y` or `d d` has to stay reachable.
 /// `escape` there clears only the selection.
+///
+/// The visual block comes first so the normal block is the later one: a
+/// menu or tooltip hint names an action's LAST live binding
+/// (`effective_binding`), and the menu is opened from normal mode, where
+/// delete is `d d`. With visual last, the hint would name its bare `d`.
 pub const DEFAULT_KEYMAP: &str = r#"
+[[bindings]]
+context = "pricer && mode == visual"
+[bindings.keys]
+"j" = "pricer::down"
+"k" = "pricer::up"
+"h" = "pricer::left"
+"l" = "pricer::right"
+"down" = "pricer::down"
+"up" = "pricer::up"
+"left" = "pricer::left"
+"right" = "pricer::right"
+"g g" = "pricer::top"
+"shift+g" = "pricer::bottom"
+"^" = "pricer::first_col"
+"$" = "pricer::last_col"
+"home" = "pricer::first_col"
+"end" = "pricer::last_col"
+"ctrl+d" = "pricer::page_down"
+"ctrl+u" = "pricer::page_up"
+"ctrl+f" = "pricer::page_down_full"
+"ctrl+b" = "pricer::page_up_full"
+"pagedown" = "pricer::page_down_full"
+"pageup" = "pricer::page_up_full"
+"y" = "pricer::yank"
+"d" = "pricer::delete"
+"shift+j" = "pricer::move_down"
+"shift+k" = "pricer::move_up"
+"g p" = "pricer::group"
+"g u" = "pricer::ungroup"
+"i" = "pricer::edit"
+"enter" = "pricer::edit"
+"v" = "pricer::visual_block"
+"shift+v" = "pricer::visual_rows"
+"escape" = "pricer::escape"
+
 [[bindings]]
 context = "pricer && mode == normal"
 [bindings.keys]
@@ -159,41 +199,6 @@ context = "pricer && mode == normal"
 "z shift+m" = "pricer::collapse_all"
 "v" = "pricer::visual_block"
 "shift+v" = "pricer::visual_rows"
-
-[[bindings]]
-context = "pricer && mode == visual"
-[bindings.keys]
-"j" = "pricer::down"
-"k" = "pricer::up"
-"h" = "pricer::left"
-"l" = "pricer::right"
-"down" = "pricer::down"
-"up" = "pricer::up"
-"left" = "pricer::left"
-"right" = "pricer::right"
-"g g" = "pricer::top"
-"shift+g" = "pricer::bottom"
-"^" = "pricer::first_col"
-"$" = "pricer::last_col"
-"home" = "pricer::first_col"
-"end" = "pricer::last_col"
-"ctrl+d" = "pricer::page_down"
-"ctrl+u" = "pricer::page_up"
-"ctrl+f" = "pricer::page_down_full"
-"ctrl+b" = "pricer::page_up_full"
-"pagedown" = "pricer::page_down_full"
-"pageup" = "pricer::page_up_full"
-"y" = "pricer::yank"
-"d" = "pricer::delete"
-"shift+j" = "pricer::move_down"
-"shift+k" = "pricer::move_up"
-"g p" = "pricer::group"
-"g u" = "pricer::ungroup"
-"i" = "pricer::edit"
-"enter" = "pricer::edit"
-"v" = "pricer::visual_block"
-"shift+v" = "pricer::visual_rows"
-"escape" = "pricer::escape"
 
 [[bindings]]
 context = "pricer && mode == insert"
