@@ -6783,14 +6783,41 @@ run_mutation "shell page: a workspace switch leaves the page open" \
   geode-shell \
   a_workspace_switch_closes_the_page
 
-run_mutation "shell page: tile::add is not refused over a page" \
+run_mutation "shell page: nothing is refused over a page" \
   crates/geode-shell/src/shell/input.rs \
-  '        if self.page_open()
-            && (matches!(' \
-  '        if false
-            && (matches!(' \
+  '        if self.page_open() && refused_over_a_page(&action.0) {' \
+  '        if false {' \
   geode-shell \
-  tile_add_is_refused_while_a_page_is_open
+  layout_edits_are_refused_while_a_page_is_open
+
+# `Close tile` from the palette over a page destroys an unseen tile with no
+# undo; only the switches are exempt.
+run_mutation "shell page: the workspace family reaches the router over a page" \
+  crates/geode-shell/src/shell/input.rs \
+  '        return !id.starts_with("workspace::switch_");' \
+  '        return false;' \
+  geode-shell \
+  layout_edits_are_refused_while_a_page_is_open
+
+# Spelled with an impossible prefix rather than `false` so the mutant
+# compiles without a warning.
+run_mutation "shell page: the dock and stack families reach the router over a page" \
+  crates/geode-shell/src/shell/input.rs \
+  '    id.starts_with("dock::")
+        || id.starts_with("stack::")' \
+  '    id.starts_with("dock::::")
+        || id.starts_with("stack::::")' \
+  geode-shell \
+  layout_edits_are_refused_while_a_page_is_open
+
+# With the filter gone every context resolves bare keys in insert mode, so a
+# page's `mode == normal` binding fires inside its focused input.
+run_mutation "shell page: bare keys in insert mode resolve against every context" \
+  crates/geode-shell/src/shell/input.rs \
+  '                .filter(|c| c.get("mode") == Some("insert"))' \
+  '                .filter(|c| c.get("mode").is_some())' \
+  geode-shell \
+  a_mode_normal_page_binding_types_in_the_input_and_fires_after_blur
 
 run_mutation "shell page: the context stack keeps workspace under a page" \
   crates/geode-shell/src/shell/input.rs \
@@ -7035,6 +7062,60 @@ run_mutation "diagnostics page: the History label never pluralizes" \
   '        self.history_label = SharedString::from(if false {' \
   geode-diagnostics \
   the_config_section_paints_current_diagnostics_and_switches_to_history
+
+# A table on the bare `diagnostics` context passes the fragment check, yet
+# its bare keys fire inside the focused filter: the insert route keeps every
+# context carrying `mode == insert`, which the page's does then.
+run_mutation "diagnostics keymap: the bare keys lose their mode clause" \
+  crates/geode-diagnostics/src/lib.rs \
+  'context = "diagnostics && mode == normal"' \
+  'context = "diagnostics"' \
+  geode-diagnostics \
+  every_default_keymap_table_names_a_mode
+
+# The table's root tracks its own handle: a row click would move focus into
+# it, and its `escape` then clears the selection instead of closing the page.
+run_mutation "diagnostics page: a row click hands focus to the table" \
+  crates/geode-diagnostics/src/table.rs \
+  '        .capture_any_mouse_down(|_event, window, _cx| window.prevent_default())
+' \
+  '' \
+  geode-diagnostics \
+  a_row_click_selects_without_taking_focus_from_the_page
+
+# A closed page is retained for the window: without the guard every poll,
+# publication, and config batch builds a section nobody sees.
+run_mutation "diagnostics page: a hidden page rebuilds on every diagnostics notify" \
+  crates/geode-diagnostics/src/page.rs \
+  '            if !this.visible {
+                this.last_diag_versions = now;
+                return;
+            }
+            let has_new = this.log.has_new();' \
+  '            let has_new = this.visible && this.log.has_new();' \
+  geode-diagnostics \
+  a_hidden_page_neither_rebuilds_nor_refreshes_badges_until_shown
+
+run_mutation "diagnostics page: a hidden page rebuilds on every frame notify" \
+  crates/geode-diagnostics/src/page.rs \
+  '            if !this.visible {
+                this.last_frame_versions = now;
+                return;
+            }
+            let as_of_changed' \
+  '            let as_of_changed' \
+  geode-diagnostics \
+  a_hidden_page_neither_rebuilds_nor_refreshes_badges_until_shown
+
+# A `mod+d` with the popover open must not reopen the page with it armed.
+run_mutation "diagnostics page: hiding leaves the Levels popover open" \
+  crates/geode-diagnostics/src/page.rs \
+  '        if !visible {
+            self.set_levels_open(false, cx);
+        }' \
+  '' \
+  geode-diagnostics \
+  leaving_the_log_section_closes_the_levels_popover
 
 # ---- the diagnostics page: data rows and badges
 

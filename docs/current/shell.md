@@ -331,8 +331,11 @@ the shell does not recognise go to the open page's `dispatch` instead of
 the focused occupant. The palette still reaches every action id over a
 page, so `ShellView::dispatch` refuses with a notice the ones that would
 open chrome or change a layout the trader cannot see: the tile command
-line, find, the stack list, `tile::add` and every per-kind add action,
-`tile::open_with`, `tile::autosize_columns`, and both duplicate actions.
+line, find, `tile::add` and every per-kind add action, `tile::open_with`,
+`tile::autosize_columns`, and every `workspace::`, `dock::`, and `stack::`
+action other than the workspace switches, which close the page first. The
+refusal is one predicate in `input.rs`; `Close tile` over a page would
+otherwise destroy an unseen tile with no undo.
 
 `page::toggle_*` and `page::close` are refused with the close-the-dialog
 notice while a modal is open: the dialog was opened over the page and
@@ -348,7 +351,9 @@ Opening focuses the page's handle; closing returns focus to the shell
 root. A page reports `holds_focus` while one of its inputs owns the
 keyboard, and its context then carries `mode == insert`: the insert route
 consults the open page before any tile, so bare keys type into the input
-and only chords resolve against the stack. Focus restoration after an
+and only chords resolve against the stack. A page's bare-key bindings
+therefore live in a `mode == normal` table
+([keymaps](keymaps.md#context-predicates)). Focus restoration after an
 overlay closes goes to the open page's handle, never the shell root, where
 the page's own bindings are unreachable. A mouse open calls
 `prevent_default` so the press cannot bubble to the shell root and take

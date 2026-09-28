@@ -19,7 +19,7 @@ this order:
 | Shell modal or component dialog | Excludes the ordinary matcher. A shell modal's handler gets first refusal. A chord it declines is dispatched only if it is bound to a dialog-opening action or the palette toggle; every other chord stays inert. Unclaimed Escape closes the top dialog. |
 | Focused per-tile command line | Handles its own keys. The effective palette toggle remains available and cancels the line. |
 | Focused scope text field | Typing bypasses the matcher. Single-key chords resolve against the workspace context only. |
-| Open page or occupant holding focus in insert mode | Single-key chords use the whole context stack; bare keys use only contexts carrying `mode == insert`. The open page's `holds_focus` is consulted before any tile's. |
+| Open page or occupant holding focus in insert mode | Single-key chords use the whole context stack; bare keys use only contexts carrying `mode == insert`. The open page's `holds_focus` is consulted before any tile's. Because the page's own context carries `mode == insert` then, its bare-key bindings must sit in a `mode == normal` table or they fire inside the input; see [keymaps](keymaps.md#context-predicates). |
 | Palette toggle and open palette | The toggle resolves directly against the effective single-key binding; an open palette owns remaining keys. |
 | Stack member list | Consumes non-chord keys. Chords fall through to ordinary matching. |
 | Active tile or divider drag | Escape stops the drag before ordinary matching. |
@@ -195,10 +195,12 @@ stranded.
 
 While a page is open the same three are refused with `close the page first
 (esc)`, and so are `tile::add`, every per-kind add action,
-`tile::open_with`, `tile::autosize_columns`, and both duplicate actions:
-the page covers the tile surface they would open on or change, and a
-layout edited behind a page is a change the trader cannot see. The palette
-reaches every other action over a page.
+`tile::open_with`, `tile::autosize_columns`, and every `workspace::`,
+`dock::`, and `stack::` action except the workspace switches: the page
+covers the tile surface they would open on or change, and a layout edited
+behind a page is a change the trader cannot see (`Close tile` would destroy
+an unseen tile with no undo). A switch closes the page and then switches.
+The palette reaches every other action over a page.
 
 [`palette`](../../crates/geode-shell/src/palette.rs) matches action title and
 category, not action id. Category matches receive half weight, rounded up.

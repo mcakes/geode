@@ -199,6 +199,14 @@ shell-generated document named `page:<kind>` that binds
 because the shell wrote it; it still compiles with the rest and a user
 keymap can rebind or unbind it like any builtin.
 
+A page's bare-key bindings carry `mode == normal`, for the reason a
+module's do. While one of the page's inputs holds focus its context carries
+`mode == insert`, and the insert route resolves bare keys against every
+context carrying that pair, so a table on the bare `diagnostics` context
+would fire `j`, `G`, or `enter` inside the filter instead of typing them.
+The `mode == insert` table holds only the keys the input surrenders
+(`escape`, which blurs it).
+
 See [input and dialogs](input-and-dialogs.md#keyboard-ownership) for surfaces
 that bypass sequences and counts while handling text, and for the limits of
 palette binding badges and which-key hints.

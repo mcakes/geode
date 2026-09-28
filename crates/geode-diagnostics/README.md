@@ -14,7 +14,7 @@ The seam it sits on: [pages](../../docs/current/shell.md#pages).
 
 | Module | Holds |
 |---|---|
-| [`lib`](src/lib.rs) | `DiagnosticsPageFactory`: kind, title, icon, action registration, the default keymap fragment (context `diagnostics`), the `mod+d` toggle binding, and the `PageContent` adapter over the page entity. |
+| [`lib`](src/lib.rs) | `DiagnosticsPageFactory`: kind, title, icon, action registration, the default keymap fragment (`diagnostics && mode == normal` for the bare keys, `diagnostics && mode == insert` for Escape), the `mod+d` toggle binding, and the `PageContent` adapter over the page entity. |
 | [`section`](src/section.rs) | The five sections in rail order: names, titles, and cycling. |
 | [`model`](src/model.rs) | Typed rows per section (`SourceRow`, `DatasetRow`, `DiagnosticRow`, `ConfigDoc`, `LogRow`, `PerfModel`), the badges, and the header chips. Pure: explicit `now` and clock inputs, no GPUI, no I/O. |
 | [`prepared`](src/prepared.rs) | `PreparedTable`: the column specs and rows a section paints, with expansion and filtering applied; `cell_at` places a notice row's one cell in the widest column. Pure; `Rc`-shared with the delegate. |
@@ -77,6 +77,21 @@ cargo test -p geode-diagnostics --release -- --ignored log_rebuild_timing --noca
   filter, or expansion changes also rebuild. A perf tick never walks the
   config documents. Badges and header chips refresh on any counter change
   or new record, whatever section is shown.
+- A hidden page builds nothing: the page is retained for the window's
+  lifetime, so its observers move their version baselines and return while
+  it is closed, and `set_visible(true)` rebuilds once with everything that
+  arrived meanwhile. A clock change waits for the show the same way.
+- Every bare-key table in the fragment carries `mode == normal`. The
+  page's context carries `mode == insert` while the filter holds focus,
+  and the shell's insert route resolves bare keys against every context
+  carrying that pair, so a table on the bare context would fire `j`, `G`,
+  or `enter` inside the filter. Only Escape lives in the insert table.
+- Both `DataTable`s paint inside `table::table_el`, whose capture-phase
+  mouse-down calls `prevent_default`: the table's root tracks its own
+  focus handle, and a row click that moved focus into it would hand the
+  next Escape to the table's `Cancel`, which clears the selection and
+  stops there, so the page would close only on the second press. The row's
+  own click (select, double-click) still fires.
 - Visibility calls `Diagnostics::watch()`/`unwatch()` and notifies in the
   same update; a watch queues the initial catalog. A visible as-of change
   requests a refresh; a hidden page requests one when it is shown again.
@@ -104,6 +119,8 @@ cargo test -p geode-diagnostics --release -- --ignored log_rebuild_timing --noca
   closes the Levels popover before switching, because the next section may
   not paint them. It needs a window to set the input's text; nothing syncs
   the input from render, and setting its value emits no `Change`.
+  `set_visible(false)` closes the popover too, so a closed page cannot
+  reopen with it armed.
 - Health ranks by variant, never by `Health`'s derived `Ord`, which
   compares reason text; the header chip counts sources by label, as the
   status summary does. A source known only from an ingest load still gets a
