@@ -51,7 +51,8 @@ pub(super) const CLOSE_DIALOG_FIRST: &str = "close the dialog first";
 /// duplicate, or resize a tile, while a page covers the tile surface.
 pub(super) const CLOSE_PAGE_FIRST: &str = "close the page first (esc)";
 
-/// The notice when no registered kind accepts the focused tile's context.
+/// The notice when the focused tile's context holds a registered context
+/// column (`ModuleRoster::context_columns`) that no listed kind accepts.
 pub(crate) const NO_MODULE_OPENS: &str = "no module opens on the context at the cursor";
 
 /// The action ids refused with [`CLOSE_PAGE_FIRST`] while a page is open:
@@ -482,6 +483,10 @@ impl ShellView {
             choicedialog::open_tile_kinds(self, window, cx);
         } else if action.0 == "tile::open_with" {
             // Pull the focused tile's context now; the dialog keeps this copy.
+            // A context holding no registered context column (empty, or only
+            // columns such as `lhu` that nothing registers) opens the plain
+            // picker; one holding a registered column that no kind accepts
+            // shows the notice.
             let context = self
                 .services
                 .workspaces
@@ -490,7 +495,9 @@ impl ShellView {
                 .and_then(|t| self.occupants.get(&t))
                 .and_then(|o| o.content.dimension_context(cx))
                 .unwrap_or_default();
-            if context.is_empty() {
+            let registered = self.services.roster.context_columns();
+            let registered: Vec<&str> = registered.iter().map(String::as_str).collect();
+            if !context.offers(&registered) {
                 choicedialog::open_tile_kinds(self, window, cx);
             } else {
                 let kinds: Vec<&'static str> = self

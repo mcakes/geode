@@ -256,7 +256,8 @@ pub trait TileContent {
     /// The context at this tile's cursor row, for `tile::open_with` (and
     /// the row menu, Part 2). Pulled by the shell when the action runs, so
     /// a module needs no handle into the shell. `None` (the default) for a
-    /// tile with no rows; an empty context opens the plain tile picker.
+    /// tile with no cursor row. A context holding no registered context
+    /// column (`ModuleRoster::context_columns`) opens the plain tile picker.
     fn dimension_context(&self, _cx: &App) -> Option<DimensionContext> {
         None
     }

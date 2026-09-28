@@ -22670,6 +22670,12 @@ run_mutation "context: open_with needs every column accepted" \
   '        self.values.iter().all(|(c, _)| accepts.contains(&c.as_str())) && !self.values.is_empty()' \
   geode-shell g_m_offers_a_kind_accepting_one_of_several_columns
 
+run_mutation "context: open_with notices a row with no registered context column" \
+  crates/geode-shell/src/shell/input.rs \
+  '            if !context.offers(&registered) {' \
+  '            if context.is_empty() {' \
+  geode-shell g_m_on_a_row_with_no_context_column_opens_the_plain_picker
+
 # A context column the view shows must not be emitted a second time.
 run_mutation "context: a shown context column is emitted twice" \
   crates/geode-core/src/view.rs \

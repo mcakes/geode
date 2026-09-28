@@ -338,9 +338,37 @@ fn g_m_with_an_empty_context_opens_the_plain_tile_picker(cx: &mut gpui::TestAppC
     );
 }
 
-/// No accepting kind: no dialog, and the notice names why.
+/// A row whose context holds only columns no factory registers (an `lhu`
+/// subtotal) opens the plain tile picker, as an empty context does, even
+/// though a kind accepting another column is on the roster.
 #[gpui::test]
-fn g_m_with_no_accepting_kind_shows_the_notice(cx: &mut gpui::TestAppContext) {
+fn g_m_on_a_row_with_no_context_column_opens_the_plain_picker(cx: &mut gpui::TestAppContext) {
+    let (services, _log, _cell) = launch_services(DimensionContext::of(&[("lhu", "L1")]));
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("ctrl-v");
+    draw(&mut vcx);
+    vcx.simulate_keystrokes("g m");
+    draw(&mut vcx);
+    assert!(
+        matches!(
+            dialog_target(&shell, &vcx),
+            Some(crate::shell::choicedialog::Target::TileKind { .. })
+        ),
+        "{:?}",
+        dialog_target(&shell, &vcx)
+    );
+    assert_eq!(shell.read_with(&vcx, |s, _| s.notice), None);
+}
+
+/// A roster where no kind accepts anything registers no context column, so
+/// even an `underlying_ref` context opens the plain picker, not the notice.
+/// The notice (a registered column no listed kind accepts) is unreachable
+/// in Part 1: every registered column comes from some factory's `accepts`,
+/// and that factory is then listed. Part 2's action columns make it
+/// reachable.
+#[gpui::test]
+fn g_m_with_no_accepting_kind_opens_the_plain_picker(cx: &mut gpui::TestAppContext) {
     let mut rec = RecordingFactory::new("rec");
     rec.fragment = Some(LAUNCH_FRAGMENT);
     *rec.dimension_context.borrow_mut() = Some(spx());
@@ -351,9 +379,13 @@ fn g_m_with_no_accepting_kind_shows_the_notice(cx: &mut gpui::TestAppContext) {
     draw(&mut vcx);
     vcx.simulate_keystrokes("g m");
     draw(&mut vcx);
-    assert!(dialog_target(&shell, &vcx).is_none());
-    assert_eq!(
-        shell.read_with(&vcx, |s, _| s.notice),
-        Some(crate::shell::input::NO_MODULE_OPENS)
+    assert!(
+        matches!(
+            dialog_target(&shell, &vcx),
+            Some(crate::shell::choicedialog::Target::TileKind { .. })
+        ),
+        "{:?}",
+        dialog_target(&shell, &vcx)
     );
+    assert_eq!(shell.read_with(&vcx, |s, _| s.notice), None);
 }

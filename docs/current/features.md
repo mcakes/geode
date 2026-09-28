@@ -231,7 +231,8 @@ format.
 panel kind accepts. The blotter reads it from the grouping path, a shown
 column, or the hidden context column the data service adds; a row above the
 column's grouping level, a mixed value, or a NULL value leaves it absent, and
-a row with no accepted column opens the plain tile picker.
+a row holding no registered context column (an `lhu` subtotal, say) opens the
+plain tile picker.
 
 "Edit column in view…" and "Edit column in schema…" list the blotter's
 planned non-tree columns with the cursor's column highlighted

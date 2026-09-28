@@ -93,9 +93,11 @@ other columns a row carries do not block a kind. The dialog is titled
 order, of a column a listed kind accepts. `ModuleRoster::context_columns` is
 the union of every factory's `accepts`. A pick always splits: the factory's
 `launch_state` translates the context into that kind's own restored-state
-table, so a source and a target agree without depending on each other. An
-empty context falls back to the plain tile picker; no accepting kind
-produces a notice instead of opening anything. The context is captured when
+table, so a source and a target agree without depending on each other. A
+context holding no registered context column (empty, or only columns such as
+`lhu` that no factory accepts) falls back to the plain tile picker; one
+holding a registered column that no listed kind accepts produces a notice
+instead of opening anything. The context is captured when
 the dialog opens, so moving the source tile's cursor afterward does not
 change what a pick creates.
 
