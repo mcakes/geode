@@ -31,6 +31,11 @@ pub enum Command {
         order: SortOrder,
     },
     SortClear,
+    /// `:autosize` fits every column to the header and the loaded rows;
+    /// `:autosize reset` returns to the view's widths.
+    Autosize {
+        reset: bool,
+    },
     /// A command reserved for a frame-wide or configuration action. The tile
     /// shows its message inline, naming the supported route. Refused commands
     /// are excluded from completion candidates.
@@ -40,8 +45,8 @@ pub enum Command {
 /// Top-level command completion vocabulary, excluding refused commands.
 /// The tile's `every_colon_command_leaves_the_frame_alone` test checks each
 /// entry for frame-state isolation.
-pub const COMMANDS: [&str; 7] = [
-    "asof", "filter", "group", "sort", "unpin", "unscoped", "view",
+pub const COMMANDS: [&str; 8] = [
+    "asof", "autosize", "filter", "group", "sort", "unpin", "unscoped", "view",
 ];
 
 /// Refusal messages direct frame-wide and configuration commands to their
@@ -74,6 +79,11 @@ pub fn parse(line: &str) -> Result<Command, String> {
     match head {
         "unpin" => Ok(Command::Unpin),
         "unscoped" => Ok(Command::Unscoped),
+        "autosize" => match rest {
+            "" => Ok(Command::Autosize { reset: false }),
+            "reset" => Ok(Command::Autosize { reset: true }),
+            _ => Err("autosize takes nothing, or `reset`".into()),
+        },
         "live" => Ok(Command::Refused(REFUSED_LIVE)),
         "group" => {
             let mut words = rest.split_whitespace();
@@ -218,6 +228,7 @@ pub fn completions(line: &str, cursor: usize, vocab: &Vocabulary) -> Vec<String>
             v
         }
         ["asof"] => vec!["clear".into(), "live".into()],
+        ["autosize"] => vec!["reset".into()],
         ["view"] => vocab.views.clone(),
         _ => Vec::new(),
     };
@@ -300,6 +311,21 @@ mod tests {
     }
 
     #[test]
+    fn autosize_parses_with_an_optional_reset_and_completes_it() {
+        assert_eq!(
+            parse("autosize").unwrap(),
+            Command::Autosize { reset: false }
+        );
+        assert_eq!(
+            parse("autosize reset").unwrap(),
+            Command::Autosize { reset: true }
+        );
+        assert!(parse("autosize wide").unwrap_err().contains("reset"));
+        assert_eq!(completions("autosize ", 9, &vocab()), vec!["reset"]);
+        assert!(completions("", 0, &vocab()).contains(&"autosize".to_string()));
+    }
+
+    #[test]
     fn errors_name_the_problem() {
         assert!(parse("").unwrap_err().contains("empty"));
         assert!(
@@ -347,13 +373,13 @@ mod tests {
         assert_eq!(
             names(""),
             vec![
-                "asof", "filter", "group", "sort", "unpin", "unscoped", "view"
+                "asof", "autosize", "filter", "group", "sort", "unpin", "unscoped", "view"
             ]
         );
         assert_eq!(
             names("so"),
             vec![
-                "asof", "filter", "group", "sort", "unpin", "unscoped", "view"
+                "asof", "autosize", "filter", "group", "sort", "unpin", "unscoped", "view"
             ],
             "the shell ranks; the vocabulary is whole"
         );
@@ -377,7 +403,7 @@ mod tests {
         assert_eq!(
             completions("sort delta01", 2, &v),
             vec![
-                "asof", "filter", "group", "sort", "unpin", "unscoped", "view"
+                "asof", "autosize", "filter", "group", "sort", "unpin", "unscoped", "view"
             ],
             "the cursor's word, not the last"
         );

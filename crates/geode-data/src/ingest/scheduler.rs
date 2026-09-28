@@ -48,12 +48,14 @@ impl Scheduler {
         conn: duckdb::Connection,
         ingest: Arc<IngestHandle>,
         sink: SchedulerSink,
+        stopped: crate::service::EventSink,
     ) -> Scheduler {
         let stop = Arc::new((Mutex::new(false), Condvar::new()));
         let worker_stop = Arc::clone(&stop);
-        let thread = std::thread::Builder::new()
-            .name("geode-discovery".into())
-            .spawn(move || run(sources, conn, ingest, sink, worker_stop))
+        let thread =
+            crate::supervise::spawn_supervised("geode-discovery".to_string(), stopped, move || {
+                run(sources, conn, ingest, sink, worker_stop)
+            })
             .expect("spawning the discovery thread");
         Scheduler {
             stop,
@@ -203,13 +205,21 @@ fn run(
                 },
                 detail: format!("discovery failed: {e}"),
             })),
-            Err(_) => Refused::health(!sink(SchedulerEvent::Health {
-                source: spec.name.clone(),
-                worst: Health::Failed {
-                    reason: "discovery panicked".into(),
-                },
-                detail: "discovery panicked".into(),
-            })),
+            // The payload rides the reason: "discovery panicked" alone
+            // names no defect a desk could report.
+            Err(payload) => {
+                let reason = format!(
+                    "discovery panicked: {}",
+                    crate::ingest::runner::panic_payload_message(payload.as_ref())
+                );
+                Refused::health(!sink(SchedulerEvent::Health {
+                    source: spec.name.clone(),
+                    worst: Health::Failed {
+                        reason: reason.clone(),
+                    },
+                    detail: reason,
+                }))
+            }
         };
         if let Some(what) = refused.what() {
             log_refused_discovery(&refusal_logged, what, &spec.name);
@@ -337,6 +347,55 @@ mod tests {
         (Arc::new(move |e| tx.send(e).is_ok()), rx)
     }
 
+    #[test]
+    fn a_panicking_discovery_poll_names_its_payload() {
+        let (_db, dir, ingest, _ingest_rx, conn, spec, _ds) =
+            harness(Duration::from_millis(50), Duration::from_secs(3600));
+        let csv = dir.path().join("risk_2026-08-24_BK0.csv");
+        std::fs::write(&csv, "Book\nBK0\n").unwrap();
+        std::fs::write(
+            dir.path().join("risk_2026-08-24_BK0.csv.done"),
+            r#"{"as_of":"2026-08-24T07:00:00Z","columns":["Book"],"books":["BK0"]}"#,
+        )
+        .unwrap();
+        // A NULL mtime makes the catalog lookup's row read panic.
+        conn.execute_batch(&format!(
+            "insert into file_generations
+                 (file_id, dataset, batch, path, size, mtime, source_time,
+                  gen_id, loaded_at, row_count, health, health_reason, archived_only)
+             values
+                 (-1, 'risk_snapshot', 'BK0', '{}', 1, NULL,
+                  '2026-08-24T07:00:00Z'::timestamptz, -1, now(), 1, 'ok', NULL, false);",
+            csv.display()
+        ))
+        .unwrap();
+        let (sink, sched_rx) = events_sink();
+        let sched = Scheduler::spawn(
+            vec![spec],
+            conn,
+            ingest,
+            sink,
+            crate::supervise::unwatched(),
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let reason = loop {
+            assert!(std::time::Instant::now() < deadline, "no failed health");
+            if let Ok(SchedulerEvent::Health {
+                worst: Health::Failed { reason },
+                ..
+            }) = sched_rx.recv_timeout(Duration::from_secs(1))
+            {
+                break reason;
+            }
+        };
+        assert!(
+            reason.starts_with("discovery panicked: ")
+                && reason.len() > "discovery panicked: ".len(),
+            "the payload rides the health reason: {reason}"
+        );
+        sched.shutdown();
+    }
+
     /// Refuse the first matching event and count it. Tests wait for the refusal
     /// before verifying discovery continues.
     fn refusing_events_sink(
@@ -452,7 +511,13 @@ mod tests {
             harness(poll, Duration::from_secs(3600));
         let (sink, sched_rx, refusals) =
             refusing_events_sink(|e| matches!(e, SchedulerEvent::Polled { .. }));
-        let sched = Scheduler::spawn(vec![spec], conn, Arc::clone(&ingest), sink);
+        let sched = Scheduler::spawn(
+            vec![spec],
+            conn,
+            Arc::clone(&ingest),
+            sink,
+            crate::supervise::unwatched(),
+        );
 
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         while std::time::Instant::now() < deadline
@@ -551,7 +616,13 @@ mod tests {
             harness(Duration::from_millis(20), Duration::from_secs(3600));
         let (sink, sched_rx, refusals) =
             refusing_events_sink(|e| matches!(e, SchedulerEvent::Health { .. }));
-        let sched = Scheduler::spawn(vec![spec], conn, Arc::clone(&ingest), sink);
+        let sched = Scheduler::spawn(
+            vec![spec],
+            conn,
+            Arc::clone(&ingest),
+            sink,
+            crate::supervise::unwatched(),
+        );
 
         let first = sched_rx.recv_timeout(Duration::from_secs(30));
         sched.shutdown();
@@ -573,7 +644,13 @@ mod tests {
         let (_db, dir, ingest, ingest_rx, conn, spec, _ds) =
             harness(Duration::from_millis(50), Duration::from_secs(3600));
         let (sink, sched_rx) = events_sink();
-        let sched = Scheduler::spawn(vec![spec], conn, Arc::clone(&ingest), sink);
+        let sched = Scheduler::spawn(
+            vec![spec],
+            conn,
+            Arc::clone(&ingest),
+            sink,
+            crate::supervise::unwatched(),
+        );
 
         // Skip the first clean health report while waiting for poll completion.
         let mut first = sched_rx.recv_timeout(Duration::from_secs(10)).unwrap();
@@ -623,7 +700,13 @@ mod tests {
         let (_db, _dir, ingest, ingest_rx, conn, spec, _ds) =
             harness(poll, Duration::from_secs(3600));
         let (sink, sched_rx) = events_sink();
-        let sched = Scheduler::spawn(vec![spec], conn, Arc::clone(&ingest), sink);
+        let sched = Scheduler::spawn(
+            vec![spec],
+            conn,
+            Arc::clone(&ingest),
+            sink,
+            crate::supervise::unwatched(),
+        );
         let mut polls = 0;
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         while polls < 5 && std::time::Instant::now() < deadline {
@@ -653,7 +736,13 @@ mod tests {
         )
         .unwrap();
         let (sink, sched_rx) = events_sink();
-        let sched = Scheduler::spawn(vec![spec], conn, ingest, sink);
+        let sched = Scheduler::spawn(
+            vec![spec],
+            conn,
+            ingest,
+            sink,
+            crate::supervise::unwatched(),
+        );
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let mut seen = None;
         while std::time::Instant::now() < deadline {
@@ -681,7 +770,13 @@ mod tests {
         )
         .unwrap();
         let (sink, sched_rx) = events_sink();
-        let sched = Scheduler::spawn(vec![spec], conn, ingest, sink);
+        let sched = Scheduler::spawn(
+            vec![spec],
+            conn,
+            ingest,
+            sink,
+            crate::supervise::unwatched(),
+        );
 
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let mut degraded = false;
@@ -728,7 +823,13 @@ mod tests {
         let (_db, _dir, ingest, _ingest_rx, conn, spec, _ds) =
             harness(poll, Duration::from_secs(3600));
         let (sink, sched_rx) = events_sink();
-        let sched = Scheduler::spawn(vec![spec], conn, ingest, sink);
+        let sched = Scheduler::spawn(
+            vec![spec],
+            conn,
+            ingest,
+            sink,
+            crate::supervise::unwatched(),
+        );
         let mut polls = 0;
         let mut ok_count = 0;
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
@@ -755,7 +856,13 @@ mod tests {
         let (_db, _dir, ingest, _rx, conn, _spec, _ds) =
             harness(Duration::from_secs(1), Duration::from_secs(1));
         let (sink, _sched_rx) = events_sink();
-        let sched = Scheduler::spawn(Vec::new(), conn, ingest, sink);
+        let sched = Scheduler::spawn(
+            Vec::new(),
+            conn,
+            ingest,
+            sink,
+            crate::supervise::unwatched(),
+        );
         sched.shutdown();
         sched.shutdown();
     }
@@ -798,7 +905,13 @@ mod tests {
         // into the scheduler, for the honest check below.
         let query_conn = conn.try_clone().unwrap();
         let (sink, _sched_rx) = events_sink();
-        let sched = Scheduler::spawn(vec![spec], conn, Arc::clone(&ingest), sink);
+        let sched = Scheduler::spawn(
+            vec![spec],
+            conn,
+            Arc::clone(&ingest),
+            sink,
+            crate::supervise::unwatched(),
+        );
 
         // Allow time for real CSV loads and publication transactions under parallel
         // test load. Duplicate publication is checked separately before this timeout.
@@ -855,5 +968,18 @@ mod tests {
         for (path, c) in &counts {
             assert_eq!(*c, 1, "{path} has {c} generations, expected exactly one");
         }
+    }
+
+    #[test]
+    fn a_discovery_thread_that_dies_is_declared() {
+        let (_db, _dir, ingest, _ingest_rx, conn, spec, _ds) =
+            harness(Duration::from_millis(50), Duration::ZERO);
+        let (stop, stops) = crate::supervise::tests_support::recording();
+        let sink: SchedulerSink = Arc::new(|_| panic!("the scheduler sink fell over"));
+        let sched = Scheduler::spawn(vec![spec], conn, ingest, sink, stop);
+        let (thread, reason) = crate::supervise::tests_support::next_stop(&stops);
+        assert_eq!(thread, "geode-discovery");
+        assert!(reason.contains("the scheduler sink fell over"), "{reason}");
+        sched.shutdown();
     }
 }

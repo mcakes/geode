@@ -1,12 +1,13 @@
 //! Sheet loading and whole-document saves shared by pricer tiles.
 //!
 //! Loads return rows or absence immediately, `Pending` for an admitted
-//! asynchronous request, or `Refused` when no request was submitted.
-//! [`DuckSheetStore`] delivers admitted loads through the tile's
-//! `Delivery::Query` route. Its saves publish whole documents; removals delete
-//! both live and archived generations. Write methods report queue admission,
-//! with completion delivered separately by sheet name. The tile decides how
-//! to report or retry failures and skips empty sheets during conversion.
+//! asynchronous request, or `Refused` with the refusal kind when no request
+//! was submitted. [`DuckSheetStore`] delivers admitted loads through the
+//! tile's `Delivery::Query` route. Its saves publish whole documents; removals
+//! delete both live and archived generations. Write methods report queue
+//! admission (`Err` carries the refusal, busy or stopped), with completion
+//! delivered separately by sheet name. The tile decides how to report or retry
+//! failures and skips empty sheets during conversion.
 //!
 //! [`DuckSheetStore`] is the store the app wires. [`MemorySheetStore`] is
 //! the tests' fake: a sheet in it lives for the process, not across a
@@ -16,7 +17,7 @@ use crate::core::storage::PRICER_SHEETS_DATASET;
 use geode_core::document::DocumentRows;
 use geode_core::pricing::LocalPublish;
 use geode_core::query::{AsOf, DocumentParams, QueryKey};
-use geode_data::{DataHandle, LocalForget};
+use geode_data::{DataHandle, LocalForget, Refusal};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
@@ -30,10 +31,11 @@ pub enum Loaded {
     Missing,
     /// On its way; the tile paints `loading` until `PricerTile::loaded`.
     Pending,
-    /// The load was never submitted — a closed or full request channel.
-    /// No answer will arrive. The caller must report a failed load and block
-    /// saves so an empty fallback cannot overwrite the stored document.
-    Refused,
+    /// The load was never submitted, and why: `Busy` (a full request
+    /// channel) or `Stopped` (the service is gone). No answer will arrive.
+    /// The caller must report a failed load and block saves so an empty
+    /// fallback cannot overwrite the stored document.
+    Refused(Refusal),
 }
 
 pub trait SheetStore {
@@ -42,12 +44,14 @@ pub trait SheetStore {
     /// against the caller's latest request. `key`/`tag` are
     /// unused by a store that answers at once.
     fn load(&self, name: &str, key: QueryKey, tag: u64) -> Loaded;
-    /// Submit the whole sheet. `false` means refusal; `true` means admission,
-    /// with completion reported separately for asynchronous stores.
-    fn save(&self, name: &str, rows: DocumentRows) -> bool;
-    /// Submit deletion of the document's whole history. The return value
-    /// reports admission, not asynchronous completion.
-    fn forget(&self, name: &str) -> bool;
+    /// Submit the whole sheet. `Err` is a refusal (busy or stopped) and
+    /// nothing was written; `Ok` means admission, with completion reported
+    /// separately for asynchronous stores.
+    fn save(&self, name: &str, rows: DocumentRows) -> Result<(), Refusal>;
+    /// Submit deletion of the document's whole history. `Err` is a refusal
+    /// and nothing changed; `Ok` reports admission, not asynchronous
+    /// completion.
+    fn forget(&self, name: &str) -> Result<(), Refusal>;
     /// Every name this store currently knows, for the `:e`/`:name`/`:rm`
     /// commands. Order is not significant to callers.
     fn names(&self) -> Vec<String>;
@@ -99,9 +103,10 @@ pub struct MemorySheetStore {
     confirming: Rc<Cell<bool>>,
     forgets: Rc<RefCell<Vec<String>>>,
     saves: Rc<Cell<usize>>,
-    refusing: Rc<Cell<bool>>,
+    save_refusal: Rc<Cell<Option<Refusal>>>,
     pending: Rc<Cell<bool>>,
-    load_refused: Rc<Cell<bool>>,
+    load_refusal: Rc<Cell<Option<Refusal>>>,
+    forget_refusal: Rc<Cell<Option<Refusal>>>,
     loads: Rc<RefCell<Vec<(String, QueryKey, u64)>>>,
 }
 
@@ -115,17 +120,36 @@ impl MemorySheetStore {
         self.saves.get()
     }
 
+    /// Every later `save` is refused `Busy` (a full request channel).
     pub fn set_refusing(&self, refusing: bool) {
-        self.refusing.set(refusing);
+        self.save_refusal.set(refusing.then_some(Refusal::Busy));
+    }
+
+    /// Every later `save` is refused with this kind; `None` admits again.
+    pub fn set_save_refusal(&self, refusal: Option<Refusal>) {
+        self.save_refusal.set(refusal);
     }
 
     pub fn set_pending(&self, pending: bool) {
         self.pending.set(pending);
     }
 
-    /// While enabled, every load returns `Refused` without looking up rows.
+    /// While enabled, every load returns `Refused(Busy)` (a full request
+    /// channel) without looking up rows.
     pub fn set_load_refused(&self, refused: bool) {
-        self.load_refused.set(refused);
+        self.load_refusal.set(refused.then_some(Refusal::Busy));
+    }
+
+    /// Every later `load` answers `Refused` with this kind; `None` answers
+    /// normally again.
+    pub fn set_load_refusal(&self, refusal: Option<Refusal>) {
+        self.load_refusal.set(refusal);
+    }
+
+    /// Every later `forget` is refused with this kind before it changes
+    /// anything; `None` admits again.
+    pub fn set_forget_refusal(&self, refusal: Option<Refusal>) {
+        self.forget_refusal.set(refusal);
     }
 
     /// Every `load` asked so far, as `(name, key, tag)`.
@@ -147,8 +171,8 @@ impl MemorySheetStore {
 impl SheetStore for MemorySheetStore {
     fn load(&self, name: &str, key: QueryKey, tag: u64) -> Loaded {
         self.loads.borrow_mut().push((name.to_string(), key, tag));
-        if self.load_refused.get() {
-            return Loaded::Refused;
+        if let Some(refusal) = self.load_refusal.get() {
+            return Loaded::Refused(refusal);
         }
         if self.pending.get() {
             return Loaded::Pending;
@@ -159,22 +183,25 @@ impl SheetStore for MemorySheetStore {
         }
     }
 
-    fn save(&self, name: &str, rows: DocumentRows) -> bool {
-        if self.refusing.get() {
-            return false;
+    fn save(&self, name: &str, rows: DocumentRows) -> Result<(), Refusal> {
+        if let Some(refusal) = self.save_refusal.get() {
+            return Err(refusal);
         }
         self.sheets.borrow_mut().insert(name.to_string(), rows);
         self.saves.set(self.saves.get() + 1);
-        true
+        Ok(())
     }
 
-    fn forget(&self, name: &str) -> bool {
+    fn forget(&self, name: &str) -> Result<(), Refusal> {
+        if let Some(refusal) = self.forget_refusal.get() {
+            return Err(refusal);
+        }
         self.forgets.borrow_mut().push(name.to_string());
         self.sheets.borrow_mut().remove(name);
         if !self.confirming.get() {
             self.known.borrow_mut().remove(name);
         }
-        true
+        Ok(())
     }
 
     fn names(&self) -> Vec<String> {
@@ -256,14 +283,13 @@ impl SheetStore for DuckSheetStore {
             document_key: vec![name.to_string()],
             as_of: AsOf::Live,
         });
-        if queued {
-            Loaded::Pending
-        } else {
-            Loaded::Refused
+        match queued {
+            Ok(()) => Loaded::Pending,
+            Err(refusal) => Loaded::Refused(refusal),
         }
     }
 
-    fn save(&self, name: &str, rows: DocumentRows) -> bool {
+    fn save(&self, name: &str, rows: DocumentRows) -> Result<(), Refusal> {
         // `rows.key` already carries the sheet name (`to_rows` sets it);
         // `name` names the caller's intent for readers of this call site.
         let _ = name;
@@ -273,7 +299,7 @@ impl SheetStore for DuckSheetStore {
         })
     }
 
-    fn forget(&self, name: &str) -> bool {
+    fn forget(&self, name: &str) -> Result<(), Refusal> {
         self.data.forget(LocalForget {
             dataset: PRICER_SHEETS_DATASET.to_string(),
             key: vec![name.to_string()],
@@ -338,7 +364,7 @@ mod tests {
             Loaded::Missing
         ));
         assert!(!store.contains("book"));
-        assert!(store.save("book", rows()));
+        assert!(store.save("book", rows()).is_ok());
         assert!(store.contains("book"));
         assert_eq!(store.names(), vec!["book".to_string()]);
         let Loaded::Rows(back) = store.load("book", QueryKey(1), 0) else {
@@ -352,7 +378,7 @@ mod tests {
     fn a_refusing_store_keeps_nothing_and_a_pending_one_answers_pending() {
         let store = MemorySheetStore::default();
         store.set_refusing(true);
-        assert!(!store.save("book", rows()));
+        assert_eq!(store.save("book", rows()), Err(Refusal::Busy));
         assert!(store.get("book").is_none());
         store.set_pending(true);
         assert!(matches!(
@@ -364,26 +390,26 @@ mod tests {
     #[test]
     fn forget_removes_the_entry_and_drops_it_from_names() {
         let store = MemorySheetStore::default();
-        assert!(store.save("book", rows()));
-        assert!(store.forget("book"));
+        assert!(store.save("book", rows()).is_ok());
+        assert!(store.forget("book").is_ok());
         assert!(!store.contains("book"));
         assert!(store.names().is_empty());
         // Forgetting an absent name is still accepted: nothing to undo.
-        assert!(store.forget("book"));
+        assert!(store.forget("book").is_ok());
     }
 
     #[test]
     fn a_confirming_store_knows_a_name_only_once_confirmed() {
         let store = MemorySheetStore::default();
         store.set_confirming(true);
-        assert!(store.save("book", rows()));
+        assert!(store.save("book", rows()).is_ok());
         assert!(!store.contains("book"), "queued, not confirmed");
         assert!(store.names().is_empty());
         store.note_saved("book");
         assert!(store.contains("book"));
         store.set_known(vec!["alpha".into()]);
         assert_eq!(store.names(), vec!["alpha".to_string(), "book".to_string()]);
-        assert!(store.forget("book"));
+        assert!(store.forget("book").is_ok());
         assert!(store.contains("book"), "a forget is known once confirmed");
         store.note_forgotten("book");
         assert_eq!(store.names(), vec!["alpha".to_string()]);
@@ -394,7 +420,7 @@ mod tests {
     fn clones_share_one_map() {
         let a = MemorySheetStore::default();
         let b = a.clone();
-        a.save("book", rows());
+        a.save("book", rows()).unwrap();
         assert!(
             b.contains("book"),
             "the factory and every tile see one store"
@@ -443,7 +469,7 @@ mod tests {
             let store = DuckSheetStore::new(handle);
             assert!(matches!(
                 store.load("book", QueryKey(1), 0),
-                Loaded::Refused
+                Loaded::Refused(Refusal::Stopped)
             ));
         }
 
@@ -452,7 +478,7 @@ mod tests {
             let (handle, rx) = DataHandle::for_tests();
             let store = DuckSheetStore::new(handle);
             let rows = sheet_rows("book");
-            assert!(store.save("book", rows.clone()));
+            assert!(store.save("book", rows.clone()).is_ok());
             match rx.recv_timeout(Duration::from_secs(1)).unwrap() {
                 Request::Publish(p) => {
                     assert_eq!(p.dataset, PRICER_SHEETS_DATASET);
@@ -466,7 +492,7 @@ mod tests {
         fn forget_submits_a_forget_request_naming_the_dataset_and_key() {
             let (handle, rx) = DataHandle::for_tests();
             let store = DuckSheetStore::new(handle);
-            assert!(store.forget("book"));
+            assert!(store.forget("book").is_ok());
             match rx.recv_timeout(Duration::from_secs(1)).unwrap() {
                 Request::Forget(f) => {
                     assert_eq!(f.dataset, PRICER_SHEETS_DATASET);

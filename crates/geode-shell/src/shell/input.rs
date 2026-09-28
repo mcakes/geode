@@ -408,6 +408,23 @@ impl ShellView {
                     choicedialog::open_tile_kinds_with(self, kinds, context, window, cx);
                 }
             }
+        } else if action.0 == "tile::autosize_columns" {
+            // The focused tile's occupant fits its own table; any other
+            // tile is untouched. A refusal (no tile, no table) is a notice.
+            let result = match self
+                .services
+                .workspaces
+                .active()
+                .focused_tile()
+                .and_then(|t| self.occupants.get(&t))
+            {
+                Some(o) => o.content.autosize_columns(false, window, cx),
+                None => Err(crate::colfit::NO_TABLE),
+            };
+            if let Err(refusal) = result {
+                self.notice = Some(refusal);
+            }
+            cx.notify();
         } else if action.0 == "log::level" {
             // Open the target-then-level picker for application logging.
             choicedialog::open_log_level(self, window, cx);

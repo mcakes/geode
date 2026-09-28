@@ -20,25 +20,26 @@ The pure core (`core`, no element, entity, window, or data service):
 | `shorthand` | Parsing and rendering lines and packages against a `TemplateSet`. |
 | `template` | Template names, the `pricer_templates` reader and `TemplateSet`. |
 | `columns`, `views` | Column vocabulary, prepared column plans, and cell text. |
+| `package` | A package row's aggregated cells: its legs' distinct values in leg order joined with `/`, and the package quantity while the legs fit its template; how an edit to one of those cells maps onto its legs. |
 | `cell` | Cell commit validation, the typeahead vocabularies, the expiry date commit, and nudging. |
 | `entry` | Where `o` lands, lifting a typed package out of a leg position, the entry bar's label, and entry history. |
 | `complete` | Entry-bar completion: the slot at the caret, suggestions, hint, and the Tab cycle. |
 | `clip` | The yank register and where `p`/`shift+p` land. |
 | `tree` | Package expansion and the visible-row walk. |
-| `commands` | The `:` vocabulary: parse and completions. |
+| `commands` | The `:` vocabulary (including `:autosize [reset]`): parse and completions. |
 | `storage` | The frozen `pricer_sheets` declaration; conversion between sheets, document rows, and a document answer. |
 
 The tile:
 
 | Module | Holds |
 |---|---|
-| `store` | The `SheetStore` seam, addressed by key/tag with `Loaded::Refused` for a load that never went out; `MemorySheetStore` (in-memory, the tests' fake) and `DuckSheetStore` (the store `geode-app` wires: `pricer_sheets` document reads/writes over `DataHandle`, with a `known`-names cache fed from the diagnostics catalog and the store's own confirmed writes). |
+| `store` | The `SheetStore` seam, addressed by key/tag with `Loaded::Refused(Refusal)` for a load that never went out and `save`/`forget` returning `Result<(), Refusal>`; `MemorySheetStore` (in-memory, the tests' fake, whose `set_save_refusal`/`set_load_refusal`/`set_forget_refusal` choose the refusal kind and `set_refusing`/`set_load_refused` are `Busy` shorthands) and `DuckSheetStore` (the store `geode-app` wires: `pricer_sheets` document reads/writes over `DataHandle`, with a `known`-names cache fed from the diagnostics catalog and the store's own confirmed writes). |
 | `grid` | The prepared `GridModel`, rebuilt on change. |
 | `paint` | The per-theme paint memo, floored to a readable ratio. |
 | `delegate` | The table delegate: cells, the tree column (indent, chevron, template tag), editor, expiry date field. |
-| `header` | The prepared header row and footer. |
-| `popup` | The typeahead, the entry bar's completion list, and the `.` action menu. |
-| `session` | The tile's session record. |
+| `header` | The prepared header row (notices as `geode_tile::notice::Notice`) and footer. |
+| `popup` | The typeahead, the entry bar's completion list, and `PricerPick` (what a menu row does). The menu, popup geometry, the `:rm` confirm and the header notices paint through `geode-tile`. |
+| `session` | The tile's session record, including `:autosize`'s fitted widths (`column_widths`, read leniently). |
 | `content` | The factory, keymap fragment, actions, settings, and the read-only `UnderlyingSource` seam. |
 | `tile` | `PricerTile`: modes, verbs, repricing, write-behind, load. |
 
@@ -87,6 +88,24 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 - Package rows derive from their legs; they are not independent instruments.
   Their pricing timestamp is the oldest present leg-attempt timestamp,
   including failed attempts.
+- A package row's qty and eight text columns aggregate its legs: the
+  distinct values, compared as values, in leg order joined with `/` and
+  spelled as a line's cell spells them. Barrier columns read only barrier
+  legs. Shifts group by the spelled effective value (an own 2.04 and an
+  inherited 2.0 are one `+2.0`), an unset part among set ones paints `—`,
+  and the cell paints inherited only when every leg inherits. Qty is the
+  package quantity (first leg qty over the template's first weight) while
+  the legs fit the template, else the list of distinct leg quantities.
+- A package cell's edit maps by position onto the distinct values it shows,
+  validates every part through the line cell's `edit_for` before anything
+  applies, and applies as one undo entry (one reprice). A commit that
+  changes no leg is no edit. Package rows open a plain text editor, even
+  for expiry and type. The editor and the commit group by the planned
+  column's format, the one the cell paints with, so a view's precision
+  override counts the same parts in all three. The editor records the text
+  it opened on; a commit whose cell would now open on other text (a
+  template reload moved the legs into or out of the template's form, which
+  changes whether a qty rescales by weight) closes with `MOVED`.
 - Shorthand rendering uses a template only while the legs still match its
   current table (an overflowing quantity never matches); otherwise it prints
   the legs one per line. The grid keeps the shorthand as the row's find key
@@ -120,6 +139,10 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   notice without replacing it, log once per streak, and schedule retries from
   one second up to a thirty-second cap. Admission or a submit with no further
   work needed ends the streak. Only one retry timer is pending at a time.
+  That backoff is for `Refusal::Busy` only. A `Stopped` refusal arms no retry
+  and sets `stopped`: the header shows `STOPPED` over every other notice and
+  `submit` returns at once for the rest of the tile's life, so no refresh
+  tick, edit, or `:price` asks a service that will never come back.
 - Package expansion IDs survive edits because IDs are not reused, allowing
   undo to restore an open package. Loading prunes the set; session output
   includes only packages still present. Restoring a leg selects it and opens
@@ -138,7 +161,8 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 - `add_below` with the bar already open (a palette dispatch) refocuses its
   field: the palette's commit focuses the shell root first, and an open bar
   without focus reads `insert` while shell bindings take shifted letters.
-- The expiry always edits in `geode_widgets::datefield`'s pure field; the
+- A line's expiry edits in `geode_widgets::datefield`'s pure field (a
+  package row's expiry edits as text, above); the
   tile owns its focus handle (what `holds_focus` and the shell's insert
   predicate read) and routes keys through `datefield::route` in
   `date_field_key` before they bubble to the shell. The painter and key
@@ -146,11 +170,12 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   A tenor seeds from the app clock's today, never
   `chrono::Local`. The tenor note is kept on the editor and restored after
   any key or refusal until the field commits or cancels.
-- `cell::commit` and `cell::commit_date` answer `Ok(None)` when the parsed
-  value equals what the line holds (`cell::changed` compares values: qty,
-  own shifts, instrument). The tile's `finish_commit` closes the editor
-  without an edit, so an unchanged commit in any cell records no undo entry,
-  reprices nothing and saves nothing.
+- `cell::commit_edits` answers an empty `Vec` (and `cell::commit_date`
+  `Ok(None)`) when every parsed value equals what the line or leg holds
+  (`cell::changed` compares values: qty, own shifts, instrument). The
+  tile's `finish_commit` closes the editor without an edit, so an unchanged
+  commit in any cell records no undo entry, reprices nothing and saves
+  nothing.
 - In-grid fields (`delegate::cell_input`) are `Input::appearance(false)` with
   no horizontal padding, at the row's height, in the cell's alignment: the
   cell's cursor border is the only frame. `:` and `/` close
@@ -182,11 +207,15 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   refusal streak.
 - `SheetStore::load` is addressed by the caller's `QueryKey`/tag so a
   DuckDB-backed answer can be routed back; a load the store never
-  submitted answers `Loaded::Refused`, which the tile treats as a failed
-  load (`save_blocked`), never as a `Pending` that will silently never
-  resolve. `save`/`forget` only queue a write — `true` means admitted,
-  not written — and the confirmed outcome reaches the tile separately, by
-  sheet name.
+  submitted answers `Loaded::Refused(Refusal)`, which the tile treats as a
+  failed load (`save_blocked`) naming the refusal's kind, never as a
+  `Pending` that will silently never resolve. `save`/`forget` only queue a
+  write — `Ok` means admitted, not written — and the confirmed outcome
+  reaches the tile separately, by sheet name. A `Busy` save refusal paints
+  `NOT_SAVED` and the next edit retries; a `Stopped` one sets `save_stopped`
+  and paints `SAVE_STOPPED`, after which `save_now` never calls the store
+  again (it repaints the notice, so `:name`, which clears the save slot,
+  still shows it).
 - `:e`/`:new` flush the outgoing sheet (a refused flush keeps the tile on
   it), release its name, cancel its pricing and retire its pricing tag (line
   ids restart per sheet), and reset undo, expansion, cursor and every
@@ -194,10 +223,12 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   `save_blocked` sheet, which it reloads. `:name` forgets the old name only after a save under
   the new one is confirmed, and is refused on a sheet whose load failed (its
   fallback would replace the real document). `:rm` refuses every open name.
-- The `:rm` confirmation uses a focused prompt in the
-  header whose `on_key_down` consumes every key (bare `y` confirms), the
-  tile in `insert` mode while armed, cancelled by focus leaving or a pointer
-  press, blurred before it drops.
+- The `:rm` confirmation is `geode_tile::confirm`'s: a focused prompt in
+  the header that consumes every key (bare `y` confirms), the tile in
+  `insert` mode while armed, cancelled by focus leaving or a pointer press,
+  blurred before it drops. A `:` command arriving under it withdraws it
+  unanswered. After an answer the shell's focus restoration path returns the
+  keyboard to the tile.
 - Known names are the store's (`set_known` from the diagnostics catalog,
   which only adds and never re-adds a name confirmed forgotten until a
   save of it is confirmed; confirmed saves; less confirmed forgets) plus
@@ -234,17 +265,21 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   before every `refresh`, keyed by row count, relative cursor row and
   mode. Gutter text uses the row's floored muted paint (the row's
   own text paint on the cursor row).
-- `paint` prepares grid-row and action-menu text colors and tests their
-  contrast across every bundled theme. Row text is checked against its base,
-  hover, and selection backgrounds; menu text against popover and enabled
-  highlight backgrounds. This sweep does not cover every header or typeahead
+- `paint` prepares grid-row text colors and tests their contrast across
+  every bundled theme. Row text is checked against its base, hover, and
+  selection backgrounds; menu colors are `geode_tile::menu::MenuPaint`'s.
+  This sweep does not cover every header or typeahead
   token, and the bounded adjustment is not a guarantee for arbitrary themes.
 - A disabled action can hold the menu highlight but paints no highlight
   fill. Picking it reports its reason and keeps the menu open.
-- A menu command's title is its palette title (`content::action_title`); the
-  menu's keyboard navigation skips separators, section headers, and disabled
-  rows. Disabled actions can still hold the highlight after a pointer move,
-  opening the menu, or rebuilding its rows.
+- A menu command's title is its palette title (`content::action_title`) and
+  its key hint the action's live chord (`:price` when the keymap binds none,
+  an empty lane for the other actions), resolved when the menu opens or its
+  rows rebuild and again on every keymap publish while it is open. The menu
+  opens on its first enabled action; keyboard navigation skips separators,
+  section headers, and disabled rows, and from a row that is not an action
+  lands on the first enabled one. Disabled actions can still hold the
+  highlight after a pointer move or a rebuild of the rows under it.
 - Default column widths are checked against labels and representative large
   values at the largest font size, including padding and cursor borders.
   These samples are not numeric limits: an overflowing right-aligned value
@@ -252,9 +287,12 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 
 ## Known limitations
 
-- The action menu's key hints are the default bindings, written into the
-  menu; a user rebind is not reflected there. The market-data action list has
-  the same limitation.
 - Column widths are fixed pixels and do not follow font size. The defaults
   fit the tested samples at the largest font step and leave more space at
-  smaller steps.
+  smaller steps. `:autosize` (or the palette's "Autosize columns") fits
+  every column to the visible grid rows at the current rem size, so a
+  collapsed package's legs are not measured. It refuses with "nothing loaded
+  to fit" while the sheet loads or has no rows. It stores the widths by
+  vocabulary name (`__tree` for the tree) in the session record. A font
+  change does not rescale fitted widths; run `:autosize` again. A fitted
+  width also overrides a view width changed later, until `:autosize reset`.

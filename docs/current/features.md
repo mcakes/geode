@@ -27,6 +27,97 @@ Every module follows these interaction rules:
 - Stack state is visible through the shared marker in the module header.
 - Delivery matches are exhaustive so a new outcome cannot be ignored silently.
 
+## Shared tile interaction
+
+Modules build their popups, `.` action menus, in-tile y/n confirms and
+notice lines from `geode-tile`, so each rule below holds in every tile that
+has the surface. The pricer and market-data use all four, timeseries the
+popups, menus and notice line, and the blotter the notice line. Diagnostics
+has none of them.
+
+- A popup is deferred above the tile's clip and snaps inside the window with
+  an 8-pixel margin. An action menu occludes what it covers, so its hover and
+  presses do not reach the tile beneath.
+- A menu opens on its first enabled action (timeseries' range and frequency
+  menus on the enabled value in force). Key hints resolve from the live
+  keymap when the menu opens, when its rows rebuild, and when the keymap is
+  republished, so an open menu follows a reload. An action the keymap binds
+  nowhere shows an empty lane, or its `:` verb on a row that has one
+  (`:price`, `:upload`, `:rebase`, `:revert`, `:auto hold`).
+- Keyboard stepping lands only on enabled actions, clamped at either end
+  without wrapping; from a row that is not an action it lands on the first
+  enabled action. A pointer can light a disabled row, which takes no
+  highlight fill. Enter or a click on a disabled row shows its reason and
+  keeps the menu open; an enabled pick closes the menu before it dispatches.
+  Rows rebuilt under an open menu keep the highlight on its row, or snap it
+  to the nearest action.
+- A confirm holds the keyboard: bare `y` confirms; any other key, chords
+  included, cancels and is consumed; a pointer press on the tile or focus
+  leaving also cancels. A change that moves what the question is about
+  withdraws it unanswered: neither the confirm nor the cancel action runs,
+  and the prompt's blur is not heard as an `n`. Market-data withdraws on a
+  delivery that moves the painted document or the draft and says so in its
+  notice (`upload cancelled: a new document arrived`); the pricer withdraws
+  on a `:` command with no notice of its own. Each answer blurs the prompt before it
+  drops, and the shell's focus restoration path returns the keyboard to the
+  tile.
+- A notice is a status (muted), warning or danger line in the theme's text
+  tones; which of a tile's notices shows is the tile's own precedence.
+
+### Autosized columns
+
+The blotter, market-data, and pricer tiles fit their columns to their content
+on `:autosize` or the palette's "Autosize columns" (`tile::autosize_columns`,
+the focused tile only); `:autosize reset` returns to the configured or
+default widths. Each tile runs one method for both doors.
+
+- **Measure.** `geode_shell::colfit` counts the characters of the header and
+  each cell and multiplies by JetBrains Mono's advance (0.6 em) at `text_sm`
+  (0.875 rem). It adds the `XSmall` table cell's padding, read from
+  gpui-component, and the 2 px cursor border. The rem is the window's when the
+  command runs. Modules add their own cell chrome: the blotter's `px_1` and
+  sort icon, and the tree columns' indent and chevron slot. Widths are clamped
+  to 2.5–40 rem: at least about three characters, and never so wide that one
+  long cell pushes the other columns off-screen. The fit runs once on the UI
+  thread and never in render.
+- **What is measured.** Market data measures every row of its prepared
+  model. The pricer measures every visible grid row, so the legs of a
+  collapsed package are not measured. The blotter measures only the header
+  and the rows in its format cache, which holds the window the table last
+  asked to see. Formatting a whole snapshot would break the UI budget, so a
+  wider value in a row that was never on screen does not widen its column.
+- **Nothing to fit.** When there are no rows to measure, `:autosize` refuses
+  with "nothing loaded to fit" and keeps the widths it already has. This
+  covers a blotter with no snapshot or an empty result, a panel with no
+  document or no rows, and a sheet that is still loading or empty. The
+  palette action shows the same refusal as a notice. `:autosize reset` always
+  runs.
+- **Storage.** The delegate holds fitted widths in pixels, keyed by a stable
+  column key: the blotter's column name (empty for the tree column), the
+  market-data column label (`__row_axis` for row labels), or the pricer's
+  vocabulary name (`__tree` for the tree). `column()` prefers a fitted width
+  to the default, so every refresh keeps it. A key the current model lacks is
+  ignored, and a new column gets its default width. The widths persist in the
+  session record's `column_widths` table. A missing or malformed table
+  restores as no fitted widths. A restored width is clamped to 25–560 px,
+  the range a fit can produce at any font scale (2.5 rem at the 10 px rem to
+  40 rem at the 14 px rem).
+- **Blotter specifics.** Switching the blotter's view clears its fitted widths.
+  A restored record whose view no longer exists opens the fallback view
+  without them. A grouping change drops the tree column's fitted width,
+  because its labels and depths belong to the grouping, and keeps the other
+  columns' widths.
+- **Fitted beats configured.** A fitted width overrides the configured one,
+  including a `presentation.width` or pricer view width changed later, until
+  `:autosize reset` or a refit.
+- **Limits.** Widths are pixels because `TableDelegate::column` has no window
+  from which to rescale rem. After a font-size change, fitted widths behave
+  like configured ones: run `:autosize` again. The blotter's header is painted
+  in the UI font but measured with the mono advance, which usually
+  overestimates it slightly. Market data and the pricer keep
+  `col_resizable(false)`. A blotter column dragged wider still returns to its
+  fitted or configured width on the next refresh.
+
 ## Blotter
 
 `geode-blotter` renders any configured view as a collapsible hierarchy. The
@@ -186,7 +277,13 @@ refuse fractional deltas or integer overflow; all candidate results are
 validated before any edit is written. Bump deltas themselves are parsed as
 `f64`, so their precision is limited by that representation. See the
 [crate guide](../../crates/geode-marketdata/README.md) for grid, popup, and
-command-parser contracts.
+command-parser contracts. The `.` action list follows the
+[shared menu rules](#shared-tile-interaction): its key hints are the live
+keymap's and follow a keymap reload while it is open, the update-policy and
+kind-action rows included; `Upload`, `Rebase`, `Revert edits` and the three
+policy rows (`:auto hold`, `:auto rebase`, `:auto replace`) fall back to their
+`:` verbs when unbound, and the other rows to an empty lane. A disabled row's
+reason becomes the notice.
 
 A panel opened through an add (palette, tile picker, `open_with`, duplicate)
 with no underlying opens the underlying picker at once; a restored panel does
@@ -218,6 +315,127 @@ same encoding, preserving identity across underlying switches. A missing
 fallback. Attribute serialization has a separate type ambiguity: a text
 attribute that looks like an ISO date restores as a Date.
 
+### Selection
+
+The panel's grid selection follows the [blotter's](#selection): `V`
+(`marketdata::visual_rows`) selects whole rows and `v`
+(`marketdata::visual_block`) a rectangle of cells; the other key switches
+kind at the same anchor and the same key again clears. While a selection is
+live the tile reports `mode == visual` (see [context
+predicates](keymaps.md#context-predicates)); motions extend it and clamp at the
+grid's edges, never wrapping and never entering the header attribute strip.
+The strip and the row-label column are never members. The first `escape`
+clears the selection alone.
+
+The anchor is the row's label and the column's name, so a redelivery, an
+inserted row, or a rebase keeps the same cells selected. An anchor no longer
+painted clears the selection with "selection cleared: anchor row no longer
+shown" (or "anchor column", for a block); no neighbour is guessed. Switching
+underlying clears the selection, because the next document's terms can carry
+the same labels and a selection must never carry over to another document. A
+click on a header attribute leaves the grid and clears it without a notice.
+
+The selection tint, the theme's selection color, overlays each cell's own
+edited, sent, or deleted fill (it never replaces it) and sits under the text;
+the cursor keeps its border inside the tint. A row selection tints its labels
+and every column. The footer shows the extent alone (`2 rows × 3 cols`), with
+no totals: a vol or forward ladder does not add up.
+
+In visual mode the verbs are single keys; the doubled normal-mode forms
+(`y y`, `y c`, `d d`) are not bound there.
+
+- `y` copies the selection as TSV and ends it. A row selection copies a
+  header line (the row-axis name where labels are shown, then every column)
+  and each row as `y y` would; a block copies its own columns' header and
+  cells, with no label.
+- `d` deletes every row of a row selection and ends the selection. When
+  every selected row is already deleted it refuses and keeps the selection.
+  Over a block it refuses with `d deletes rows — use V` and keeps
+  the selection, rather than deleting whole rows the block only partly covers.
+- `:bump <delta>` with no axis moves every selected number by `delta` and
+  keeps the selection; `:bump <delta> row|col` keeps its cursor-relative
+  meaning and ignores the selection. It notices `bumped N cells`. Like a live
+  step it is all-or-nothing: a fractional delta over a selection that
+  includes an integer column writes nothing.
+- `i` or `enter` opens the editor on the cursor cell, and refuses exactly when
+  that cell refuses (a deleted row, a document with nothing to edit) or is
+  not a member of the selection (below); it does not look for another member.
+
+On a pivot panel, a row selection's edits skip each term's leading slice
+values (forward, atm, skew), which is `:bump row`'s rule: a term's ladder
+moves without its forward. A flat panel has no slice values, and a block is
+exactly its rectangle. The copy and the tint still cover the slice values.
+Because they are not members, `i` on a slice value inside a row selection
+opens no editor and says `slice values are not in a row selection — use v`:
+the typed value or the steps would otherwise land in the ladder while the
+cell the editor showed stayed as it was. A block over the slice columns
+edits them.
+
+While the selection editor is open, its members are the edit's operand. The
+verbs that would move or end the selection under it — a motion, `V`/`v`, the
+`escape` action and `y`, each reachable from the palette in insert mode —
+refuse with `finish the edit first — enter or escape`. A delivery that no
+longer paints the anchor still clears the selection; the editor then acts on
+its own cell, and its arrows nudge the text.
+
+**One typed value.** With a selection live, committing the editor — typed
+text, a date field, or a choice picked from the popup — writes the value to
+every selected cell that accepts it. A number cell parses it by its column's
+declared type, a date cell as a date, a text cell as trimmed text (blank is
+refused where the column is required), and a choice cell only when it names an
+option exactly: a bulk write has no popup to rank a near miss. Deleted rows
+and cells that refuse are skipped and counted, `set 5 cells, skipped 3 (2
+deleted, 1 wrong type)`. Every member is judged before any write, so when
+nothing accepts, the commit is refused with the editor still open and the
+draft untouched. On a text or date cursor cell an untouched `enter` writes
+the seeded value across the selection. The selection stays after a
+commit.
+
+**Live steps.** On a number cursor cell with its text untouched, the editor's
+arrows (`up`/`down`, `shift+` for ten) step every selected number in the
+draft at once, so the grid shows the block as it moves; the header reads
+`stepped N cells +S` with the running total. Each cell moves from its exact
+current value by one unit of its column's displayed places, or by 1 on an
+integer column, and is never rounded to the painted grid: snapping would
+silently rewrite each cell's unpainted decimals. Empty, deleted, and
+non-number cells are skipped and counted. Each press is all-or-nothing: if
+any cell refuses (an overflow), nothing is written. A step refuses while the
+draft is Behind or its upload echo differs, as every edit does.
+
+- `enter` on the untouched text keeps the steps and the selection.
+- `escape` restores the draft exactly as `i` found it, provided the steps are
+  still its last change and the painted document has not moved; a delivery
+  held Behind meanwhile stays reported, and a draft that was Sent comes back
+  Sent with its echo check. A click elsewhere, a row verb, or a
+  switch of underlying closes the editor the same way. If an automatic rebase
+  moved the painted document, the steps are kept and the header says `steps
+  kept: the document moved`, because the pre-edit draft is keyed to a grid
+  no longer shown. If anything else changed the draft meanwhile (a revert, an
+  automatic replace, `:set`), the editor closes silently and leaves the draft
+  as it is.
+- Typing makes the edit absolute. The typed value replaces the steps; a cell
+  that refuses it returns to its pre-`i` value rather than keeping a
+  half-step. The exception is a painted document that moved while the editor
+  was open: then the steps stay, the typed value is written over them, and
+  the notice reads `set N cells; steps kept: the document moved`. From then
+  on the arrows nudge the editor's text alone.
+
+**Mouse.** A shift+click makes a block from the cursor as it was before the
+press to the clicked cell, or a row selection when it lands on a row label
+or the line-number gutter. A drag selects
+continuously from the cell it started on; where the press landed decides the
+kind, and a drag that did not start on a cell, label, or gutter selects
+nothing. With a selection live, shift+click extends it. A plain click anywhere
+on a row, including beside its cells, clears the selection and moves the
+cursor, so a double-click with a selection live opens a single-cell editor. A
+press inside the open editor's own cell belongs to the editor (caret
+placement, text selection, a date segment or separator): it neither cancels
+the edit nor starts a selection; `escape` cancels.
+
+Limitations: a selection is one contiguous row range or rectangle; there is
+no paste; `space` is not bound in visual mode, and the choice step reached
+from the palette acts on the cursor cell alone; the footer shows no totals.
+
 ### Uploads
 
 `:upload [target]` and the action list's `Upload` row send the edited document
@@ -232,8 +450,9 @@ shows the target and counts of changed cells, attributes, added rows, and
 removed rows. Bare unmodified `y` submits that snapshot after rechecking the
 live frame, live painted generation, and full draft equality. Every other key
 cancels and is consumed, including chords. A pointer press on the tile or loss
-of focus also cancels. A delivery that changes the draft or painted generation
-withdraws the prompt.
+of focus also cancels. A delivery that changes the draft or painted generation,
+or a switch of underlying, withdraws the prompt unanswered. The prompt is the
+shared `geode_tile::confirm` door.
 
 Transport success marks the draft `sent HH:MM` only if the current draft is
 still Editing and equals the submitted draft, including its base. Failure
@@ -286,7 +505,7 @@ Runtime responsibilities are split by module:
 | [`tile::data`](../../crates/geode-timeseries/src/tile/data.rs) | Fetch and query submission, delivery freshness, last-good results, and flip-barrier staging and promotion |
 | [`tile::pointer`](../../crates/geode-timeseries/src/tile/pointer.rs) | Chart hit testing, wheel navigation, pan and split drags |
 | [`tile::popups`](../../crates/geode-timeseries/src/tile/popups.rs) | Popup transitions, keyboard handling, commits, cancellation, and focus |
-| [`popup`](../../crates/geode-timeseries/src/popup.rs) | Popup state types and rendering, including shared list-row layout and hit testing |
+| [`popup`](../../crates/geode-timeseries/src/popup.rs) | Popup state types and rendering over `geode-tile`'s row shell, anchoring, menus and notice |
 
 Settings and tiles obtain configured fetch sources from the shell-published
 `SeriesSettings` global. A configured source is not proof that its adapter
@@ -377,11 +596,13 @@ affect them; cursor movement does not rebuild the data model.
 
 The header's `⋯` button, a chip's right-click, and `.` open the action menu.
 It offers popup openers, actions for the selected slot, `Frequency…`, toggles,
-and view reset. Keyboard stepping skips disabled rows, separators, and
-headings. Pointer selection can rest on a disabled row, which has no highlight
-fill; choosing it shows its reason and leaves the menu open. Enabled actions
-close the menu before dispatch. Key hints refresh when the menu opens or its
-chrome rebuilds, so an open menu can retain old hints after a keymap reload.
+and view reset. It opens on its first enabled action, and keyboard stepping
+skips disabled rows, separators, and headings. A pointer can rest on a
+disabled row, which has no highlight fill; choosing it shows its reason and
+leaves the menu open. Enabled actions close the menu before dispatch. Key
+hints are the live keymap's and are re-resolved when the menu opens, when its
+chrome rebuilds, and when the keymap is republished; an action the keymap
+binds nowhere shows an empty lane.
 
 The header shows the range and the frequency as two triggers, `1y ▾` and
 `1d ▾`; an absolute range shows its dates, `2025-09-26 – 2026-09-26 ▾`. Each
@@ -482,7 +703,7 @@ The session saves the section and filter.
 
 | Section | Contents |
 |---|---|
-| Sources | Descriptions, health, loading activity, and poll times; worst reported health first, unreported sources last |
+| Sources | Stopped data threads first (label, reason, and time; they stay until restart), then descriptions, health, loading activity, and poll times; worst reported health first, unreported sources last |
 | Data | Dataset and partition generations, with the resolved generation highlighted for a historical frame as-of |
 | Config | Current config-load diagnostics, data-layer diagnostics, prior load batches, and effective values with layer provenance |
 | Log | A bounded local tail of new records, with substring filtering and cursor following |
@@ -591,8 +812,28 @@ absolutely when there is no cursor row.
 Lines and packages are rows of one table; a package row sums its legs and opens and closes like a tree node
 (`space`/`z a`, `z o`, `z c`, `z shift+r`, `z shift+m`, or its chevron). A
 package created in the session opens so its legs show; a restored tile opens
-the packages its session record names. Package rows are read-only in every
-column. Their pricing timestamp is the oldest present leg-attempt timestamp,
+the packages its session record names. A package row's text columns show
+its legs' distinct values in leg order joined with `/` (a call spread reads
+`SPX`, `Z26`, `7400/7800`, `C`); barrier columns read only its barrier legs.
+Shift columns group legs by the shift as the cell spells it, show a leg with
+no shift as `—` beside set ones (`+2.0/—`), and paint muted only when every
+leg inherits the sheet's. Its
+qty is the package quantity while the legs fit the template, otherwise the
+list of distinct leg quantities. These cells edit (`i`, `enter`,
+double-click open a plain text editor, even for expiry and type): one
+value goes to every leg; a `/` list with one part per shown value replaces
+each where it appears (`7500/7900` moves a spread's two strikes; a fly's
+body moves once); a package quantity rescales every leg by its weight. A
+list with the wrong part count is refused naming the count and the cell
+(`2 values: 7400/7800`) and the editor stays open. Every part is checked
+first, and the whole edit is one undo step and one reprice. The editor
+groups a cell as the view paints it, so a precision override counts the
+same parts on screen, in the editor and in a refusal. If a template reload
+under an open package editor changes the text the cell would open on (the
+legs now fit the template, or no longer do), `enter` refuses with the
+editor's `the cell moved` message rather than read the typed quantity
+another way. Result columns stay read-only.
+A package row's pricing timestamp is the oldest present leg-attempt timestamp,
 including failed attempts; it does not establish that every leg priced successfully.
 
 The shorthand's package types come from the `pricer_templates` configuration
@@ -631,11 +872,14 @@ Normal-mode keys:
 package's when its legs share one; otherwise the plain tile picker.
 
 The action menu offers repricing, grouping, ungrouping, undo, redo, deletion,
-and view selection. Key hints show default bindings and do not reflect
-rebindings. Keyboard stepping skips disabled rows, separators, and headings.
-Pointer selection, the initial highlight, or a rebuilt menu can still leave a
-disabled row selected. It has no highlight fill; choosing it shows its reason
-and leaves the menu open.
+and view selection. Key hints are the actions' live chords (`:price` when the
+keymap binds none; an empty lane for the other actions) and follow a keymap
+reload while the menu is open. The menu opens on its first enabled action,
+and keyboard stepping skips disabled rows, separators, and headings. A
+pointer, or rows rebuilt under the highlight, can still leave a disabled row
+selected. It has no highlight fill; choosing it shows its reason in the
+footer and leaves the menu open. The shared rules are in
+[Shared tile interaction](#shared-tile-interaction).
 
 `y` alone is unbound: the key matcher dispatches an exact match at once, so a
 binding on `y` would make `y y` and `y c` unreachable. `g` alone is unbound for
@@ -718,7 +962,11 @@ tile holds:
   unless its load failed (`did not load`): then `:e` of it asks again,
   which is the way to retry a refused or failed load in place. Retrying
   discards edits made in the unsaved fallback sheet.
-- `:new` does the same into the next free `untitled-N`, empty, with no load.
+- `:new [sheet]` does the same into an empty sheet with no load: under the
+  given name, else the next free `untitled-N`. A name that already exists
+  (open in any tile, this one included, a known document, a queued save, or
+  a sheet being removed) is refused with `sheet 'x' already exists; :e x
+  opens it`, and the tile stays where it is.
 - `:name <sheet>` is refused if the name is open, is a known document, or has
   a save still queued (`sheet 'x' already exists`), and while the sheet is
   loading or after its load failed. Otherwise the tile takes the new name at
@@ -742,8 +990,12 @@ tile holds:
   it answers no (`sheet not removed` in the footer). `y` checks the name
   again: if a tile opened it, or a `:name` began retiring it, while the
   question stood, nothing is removed (`sheet 'x' not removed: it is open in
-  another tile` / `…: it is being removed`). A removal that fails says
-  so in the header. The name is reserved, as for `:name`, until the removal
+  another tile` / `…: it is being removed`). A removal the data service
+  refuses says so in the footer (`sheet 'x' not removed: the data service is
+  busy` / `sheet 'x' not removed: the data service has stopped`); one that fails after admission says so in the
+  header. When `:name` retires the old name and the service refuses that
+  removal, the header reads `old sheet 'x' not removed: …` with the same
+  reason, and the old document stays. The name is reserved, as for `:name`, until the removal
   is answered.
 
 A sheet name may not hold a control character: the store joins document key
@@ -780,14 +1032,21 @@ Hiding a tile requests cancellation by key and defers further pricing until
 shown, keeping its stale marks. Cancellation is best effort and cannot retract
 emitted outcomes; matching deliveries can still apply while hidden.
 
-A refused submission (a full request queue, or a data service that is gone)
-paints `pricing request refused: …; retrying` over the header notice without
-replacing it, and retries: after one second, then doubling per consecutive
-refusal up to thirty seconds. The first refusal of a streak logs a warning on
+A submission refused because the request queue is full paints `pricing
+request refused: the data service is busy; retrying` over the header notice
+without replacing it, and retries: after one second, then doubling per
+consecutive refusal up to thirty seconds. The first refusal of a streak logs a warning on
 `geode::pricing` with the tile id; the rest of the streak logs nothing. The
 streak ends when a submission is admitted or when nothing is left to ask for
 (its lines were answered or deleted); the notice it covered then shows again,
 and the next refusal starts over at one second. `escape` does not clear it.
+
+A submission refused because the data service has stopped arms no retry: the
+service is declared stopped and never restarted, so every retry would repeat
+the refusal. The header shows `pricing request refused: the data service has
+stopped` for the rest of the tile's life, over any other notice, and the tile
+submits nothing further: no refresh tick, edit, or `:price` asks the service
+again. It logs one warning on `geode::pricing`.
 
 The refresh timer marks every line stale and resubmits while the tile is
 visible and the sheet has a line. `[pricing] refresh` sets the default
@@ -820,16 +1079,23 @@ A sheet is saved as a whole document one idle second after its last change.
 Closing the tile saves any change not yet saved, whether it was still waiting
 on the idle timer, was refused by the store, or was queued and then reported
 failed. A save the store accepts is only queued; its outcome arrives later by
-sheet name. A refused save (`the store refused it`) or a failed one (the
-writer's reason) paints a notice in the header's own save slot, separate from
-pricing notices: a refused pricing request cannot overwrite it, a later
-successful request cannot clear it, and `escape` does not clear it. A
+sheet name. A refused save (`sheet not saved: the data service is busy; the
+next edit retries`) or a failed one (`sheet not saved: <the writer's reason>;
+the next edit retries`) paints a notice in the header's own save slot,
+separate from pricing notices: a refused pricing request cannot overwrite it,
+a later successful request cannot clear it, and `escape` does not clear it. A
 confirmed save clears its failure notice unless a newer submission refusal
 still needs attention. Outcomes carry no link to the save that produced them;
 every one is delivered, in the writer's order, so the last to arrive is the
 latest queued save's. The next change and the close both retry. A close with
 a save queued but unconfirmed writes nothing extra: the write is already
 queued. An empty sheet publishes nothing.
+
+A save refused because the data service has stopped reads `sheet not saved:
+the data service has stopped`, and the tile stops asking for the rest of its
+life, across `:e`: later edits, the idle timer, `:name`, and the close do not
+call the store again, and each keeps that notice showing. The stopped save state and the stopped pricing state are
+separate; each is set by its own first `Stopped` refusal.
 
 Quitting the app attempts to queue every unsaved sheet before stopping the data
 service. The writer drains queued local saves and removals, subject to the
@@ -874,7 +1140,9 @@ generations remain available only within the retention limit.
   generation.
 - If the data service fails to open, requests admitted before that never
   answer (for every request kind, not only sheets): a tile shows `loading…`
-  until it switches sheet, and a sheet with a save queued stays taken.
+  until it switches sheet, and a sheet with a save queued stays taken. Later
+  submissions are refused `Stopped`, and the status bar shows `data service
+  stopped — restart Geode`.
 
 Other known gaps: the underlying typeahead does not yet offer catalogue
 underlyings; result cells are not sign-colored; column widths are the

@@ -298,6 +298,9 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     // Pulls the focused tile's launch context and lists the kinds that
     // accept it. Outside the `tile::add_` prefix, like `tile::add`.
     action(reg, "tile::open_with", "Open with context…", "Tiles");
+    // Fits the focused tile's table columns to their content
+    // (`TileContent::autosize_columns`). Palette-only: no default key.
+    action(reg, "tile::autosize_columns", "Autosize columns", "Tile");
     // Control-1 through Control-9 activate grouping slots; empty slots are
     // ignored. Control-0 restores each following tile's view-default grouping.
     for i in 1..=9 {

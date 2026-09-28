@@ -107,6 +107,15 @@ pub struct BlotterContent {
     tile: Entity<BlotterTile>,
 }
 
+impl BlotterContent {
+    /// The content wrapper over an existing tile, so a test drives the
+    /// shell's own door (`TileContent`) rather than the tile's methods.
+    #[cfg(test)]
+    pub(crate) fn for_tile(tile: Entity<BlotterTile>) -> BlotterContent {
+        BlotterContent { tile }
+    }
+}
+
 impl TileContent for BlotterContent {
     fn key_context(&self, cx: &App) -> KeyContext {
         self.tile.read(cx).key_context(cx)
@@ -120,8 +129,18 @@ impl TileContent for BlotterContent {
     ) -> bool {
         self.tile.update(cx, |t, cx| t.dispatch(action, count, cx))
     }
-    fn command(&self, line: &str, _window: &mut Window, cx: &mut App) -> Result<(), String> {
-        self.tile.update(cx, |t, cx| t.command(line, cx))
+    fn command(&self, line: &str, window: &mut Window, cx: &mut App) -> Result<(), String> {
+        self.tile.update(cx, |t, cx| t.command(line, window, cx))
+    }
+    /// The same route as `:autosize [reset]`.
+    fn autosize_columns(
+        &self,
+        reset: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<(), &'static str> {
+        self.tile
+            .update(cx, |t, cx| t.autosize_columns(reset, window, cx))
     }
     fn completions(&self, line: &str, cursor: usize, cx: &App) -> Vec<String> {
         self.tile.read(cx).completions(line, cursor, cx)
@@ -151,7 +170,7 @@ impl TileContent for BlotterContent {
         self.tile.read(cx).title()
     }
     fn serialize(&self, cx: &App) -> toml::Table {
-        self.tile.read(cx).serialize()
+        self.tile.read(cx).serialize(cx)
     }
     fn launch_context(&self, cx: &App) -> geode_core::launch::LaunchContext {
         self.tile.read(cx).launch_context(cx)

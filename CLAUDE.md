@@ -64,6 +64,9 @@ filter gate, before any toolchain step.
   modules.
 - Feature modules do not depend on sibling features. They implement
   `TileContent` and carry their own `DataHandle` when needed.
+- `geode-tile` sits between `geode-shell` and the feature modules. It depends
+  on `geode-shell` and `geode-core`, never on `geode-data` or a feature
+  module; `geode-shell` never depends on it.
 - `geode-app` is the composition root: it registers adapters, document kinds,
   pricers, module factories, and opens the window.
 - Only `geode-data` owns source I/O and DuckDB connections. Only the ingest
@@ -86,6 +89,10 @@ filter gate, before any toolchain step.
   tile; application and frame changes use registered actions.
 - Dialogs open through `shell::dialog::open_shell_dialog`. The pure dialog
   draft is the source of truth; `sync_dialog_text` is the text/focus bridge.
+- A tile mechanism two modules would otherwise each write lives in
+  `geode-tile` — interaction behavior (keys, focus, open and close,
+  precedence) as well as paint: popups (`popover`), `.` action menus
+  (`menu`), the in-tile y/n confirm (`confirm`) and notices (`notice`).
 - In object, settings, and keybinding dialog filters, Escape restores the entry
   query and bare Enter keeps the typed query; neither opens a row or commits.
   Use `dialogmode::{filter_exit, enter_filter, exit_filter}` for keyboard and

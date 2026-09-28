@@ -17,6 +17,7 @@ use geode_data::documents::DocumentRegistry;
 use geode_data::source::SourceSpec;
 use geode_data::{
     DataEvent, DataHandle, DataService, DataServiceConfig, EventSink, PricerConfig, PricerRegistry,
+    Refusal,
 };
 use geode_marketdata::MarketDataFactory;
 use geode_marketdata::core::{CVI, DIVIDEND};
@@ -695,18 +696,22 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
             let tag = refresh.tag.get() + 1;
             refresh.tag.set(tag);
             let as_of = shell.read(cx).frame().read(cx).as_of().clone();
-            if handle.catalog(CatalogParams {
+            match handle.catalog(CatalogParams {
                 key: DIAGNOSTICS_KEY,
                 tag,
                 as_of,
             }) {
-                refresh.in_flight.set(Some((tag, request)));
-            } else {
-                tracing::warn!(
-                    target: "geode::query",
-                    "catalog request refused — the data service is busy or gone"
-                );
-                refresh.retry(&diagnostics, request, window, cx);
+                Ok(()) => refresh.in_flight.set(Some((tag, request))),
+                Err(Refusal::Busy) => {
+                    tracing::warn!(
+                        target: "geode::query",
+                        "catalog request refused: the data service is busy; retrying"
+                    );
+                    refresh.retry(&diagnostics, request, window, cx);
+                }
+                // Nothing will serve a retry, and the stopped segment already
+                // says why: keeping the demand would re-ask on every notify.
+                Err(Refusal::Stopped) => {}
             }
         }
     })
@@ -771,12 +776,29 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     factory.set_schema(schema);
                 }
                 factory.set_dims(dims.clone());
-                handle.replace_views(views, dims);
+                // A refused hand-off leaves the service on the old views while
+                // the factory builds tiles against the new ones: say so.
+                let handoff = match handle.replace_views(views, dims) {
+                    Ok(()) => None,
+                    Err(refusal) => Some(Diagnostic {
+                        severity: match refusal {
+                            Refusal::Busy => Severity::Warning,
+                            Refusal::Stopped => Severity::Error,
+                        },
+                        layer: None,
+                        file: None,
+                        message: format!(
+                            "the reloaded views did not reach the data service: {refusal}"
+                        ),
+                        path: None,
+                    }),
+                };
                 // The config borrow has ended; diagnostics can now be updated through cx.
                 let reload_diags: Vec<Diagnostic> = presentation_diags
                     .into_iter()
                     .chain(colour_diags)
                     .chain(pin_diags)
+                    .chain(handoff)
                     .collect();
                 if !reload_diags.is_empty() {
                     diagnostics.update(cx, |dg, cx| {
@@ -793,12 +815,15 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
             // a synthetic error with the same key/tag/column so the picker stops waiting.
             ShellEvent::DistinctRequested(params) => {
                 let queued = handle.distinct(params.clone());
-                if !queued {
+                if let Err(refusal) = queued {
                     let outcome = DistinctOutcome {
                         key: params.key,
                         tag: params.tag,
                         column: params.column.clone(),
-                        values: Err("the data service is busy or gone — try again".into()),
+                        values: Err(match refusal {
+                            Refusal::Busy => "the data service is busy — try again".into(),
+                            Refusal::Stopped => "the data service has stopped".into(),
+                        }),
                     };
                     shell.update(cx, |s, cx| s.deliver_distinct(outcome, cx));
                 }
@@ -878,6 +903,8 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
     }
 
     let diagnostics_for_drain = diagnostics.clone();
+    // The handle's `Busy` refusal total, read once per drained event.
+    let refused_handle = handle.clone();
     let catalog_refresh_for_drain = catalog_refresh.clone();
     // Retain local dataset names for the drain task after attach's borrow ends.
     let local_datasets = Rc::clone(&bridge.local_datasets);
@@ -888,8 +915,10 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
         let catalog_refresh = catalog_refresh_for_drain;
         let catalog_window = window;
         let mut last_dropped = 0u64;
+        let mut last_refused = 0u64;
         while let Ok(event) = rx.recv().await {
             let now_dropped = dropped.load(Ordering::Relaxed);
+            let now_refused = refused_handle.dropped_requests();
             // Check window liveness for every event variant. Updating a retained shell
             // entity alone would keep succeeding after the window closes and retain this
             // task's captures. With no new event, the task can remain awaiting the mailbox.
@@ -901,6 +930,15 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     diagnostics.update(cx, |d, cx| {
                         let before = d.version();
                         d.note_dropped(now_dropped);
+                        if d.version() != before {
+                            cx.notify();
+                        }
+                    });
+                }
+                if now_refused != last_refused {
+                    diagnostics.update(cx, |d, cx| {
+                        let before = d.version();
+                        d.note_refused(now_refused);
                         if d.version() != before {
                             cx.notify();
                         }
@@ -1143,12 +1181,27 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             s.deliver(Delivery::Price(outcome), window, cx)
                         });
                     }
+                    // A data thread died despite containment, or the request
+                    // loop never opened. Its segment and the diagnostics row
+                    // stay until restart. Logging is not repeated here: the
+                    // supervisor logs a death, and an open failure also
+                    // arrives as an error Diagnostic.
+                    DataEvent::ThreadStopped { thread, reason } => {
+                        diagnostics.update(cx, |d, cx| {
+                            let before = d.version();
+                            d.note_thread_stopped(&thread, reason, SystemTime::now());
+                            if d.version() != before {
+                                cx.notify();
+                            }
+                        });
+                    }
                 }
             });
             if handled.is_err() {
                 return; // the window is gone
             }
             last_dropped = now_dropped;
+            last_refused = now_refused;
         }
     })
     .detach();
@@ -2365,7 +2418,7 @@ role = "key"
         vcx.simulate_keystrokes("k");
         vcx.run_until_parked();
         let cursor = |vcx: &gpui::VisualTestContext| {
-            tile.read_with(vcx, |t, _| t.serialize().get("cursor").cloned())
+            tile.read_with(vcx, |t, cx| t.serialize(cx).get("cursor").cloned())
         };
         let before = cursor(&vcx);
         vcx.simulate_keystrokes("j");
@@ -2395,6 +2448,73 @@ role = "key"
             cursor(&vcx),
             before,
             "the confirm's `j` also moved the cursor"
+        );
+    }
+
+    /// A press on the `:rm` prompt itself answers "no" and takes no focus
+    /// (the prompt's own press-to-focus would hand the keyboard back to a
+    /// question that is gone). The keyboard returns to the tile through the
+    /// shell's restoration path: the very next `j` moves the cursor.
+    #[gpui::test]
+    fn the_tile_answers_keys_after_a_press_on_the_rm_prompt(cx: &mut gpui::TestAppContext) {
+        use geode_pricer::store::SheetStore as _;
+        let (handle, _rx) = DataHandle::for_tests();
+        let store = MemorySheetStore::default();
+        store.set_known(vec!["x".into()]);
+        let pricer = Rc::new(PricerFactory::new(
+            handle,
+            Rc::new(store.clone()),
+            Views::builtin(),
+            TemplateSet::builtin(),
+            PricerSettings::default(),
+        ));
+        let (services, tiles) = with_a_pricer_tile_on(test_shell_services(), pricer, "a");
+        let window = open_pricer_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let tile = tiles.borrow()[0].clone();
+        type_a_line(&mut vcx, "-5 SPX Z26 5000 C");
+        vcx.simulate_input("-3 SPX Z26 5100 C");
+        vcx.simulate_keystrokes("enter");
+        vcx.simulate_keystrokes("escape");
+        vcx.simulate_keystrokes("k");
+        vcx.run_until_parked();
+        let cursor = |vcx: &gpui::VisualTestContext| {
+            tile.read_with(vcx, |t, cx| t.serialize(cx).get("cursor").cloned())
+        };
+        let mode = |vcx: &gpui::VisualTestContext| {
+            tile.read_with(vcx, |t, _| {
+                t.key_context().get("mode").unwrap_or("").to_string()
+            })
+        };
+
+        type_command(&mut vcx, "rm x");
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(mode(&vcx), "insert", "fixture: `:rm x` armed the confirm");
+        let at = vcx
+            .debug_bounds("pricer-remove-confirm-1")
+            .expect("the prompt is painted")
+            .center();
+        vcx.simulate_click(at, gpui::Modifiers::default());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(mode(&vcx), "normal", "the press cancelled the confirm");
+        assert!(store.forgets().is_empty(), "a press is not `y`");
+
+        let before = cursor(&vcx);
+        vcx.simulate_keystrokes("j");
+        vcx.run_until_parked();
+        assert_ne!(
+            cursor(&vcx),
+            before,
+            "`j` reached the tile with no other click after the prompt press"
         );
     }
 
@@ -2998,14 +3118,18 @@ role = "key"
         .unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         let handle = DataService::spawn(setup.config, Arc::new(move |e| tx.send(e).is_ok()));
-        assert!(handle.document(geode_core::query::DocumentParams {
-            key: QueryKey(7),
-            tag: 1,
-            submitted: std::time::Instant::now(),
-            dataset: PRICER_SHEETS_DATASET.into(),
-            document_key: vec!["book".into()],
-            as_of: AsOf::Live,
-        }));
+        assert!(
+            handle
+                .document(geode_core::query::DocumentParams {
+                    key: QueryKey(7),
+                    tag: 1,
+                    submitted: std::time::Instant::now(),
+                    dataset: PRICER_SHEETS_DATASET.into(),
+                    document_key: vec!["book".into()],
+                    as_of: AsOf::Live,
+                })
+                .is_ok()
+        );
         let rows = loop {
             if let DataEvent::Query(o) = rx.recv_timeout(Duration::from_secs(30)).unwrap() {
                 break o.snapshot.unwrap().rows();
@@ -3828,6 +3952,27 @@ role = "key"
     /// Verify the bridge delivers an error so the picker cannot remain loading.
     #[gpui::test]
     fn a_refused_distinct_request_errors_the_picker(cx: &mut gpui::TestAppContext) {
+        assert_eq!(
+            distinct_refused(cx, DataHandle::shutdown),
+            Some(Err("the data service has stopped".to_string())),
+            "a refused request must error the picker, not leave it loading forever"
+        );
+    }
+
+    #[gpui::test]
+    fn a_busy_distinct_request_says_try_again(cx: &mut gpui::TestAppContext) {
+        assert_eq!(
+            distinct_refused(cx, DataHandle::fill_for_tests),
+            Some(Err("the data service is busy — try again".to_string()))
+        );
+    }
+
+    /// The picker's values after a distinct request against a handle that
+    /// `refuse` has made refuse.
+    fn distinct_refused(
+        cx: &mut gpui::TestAppContext,
+        refuse: fn(&DataHandle),
+    ) -> Option<Result<Vec<(String, u64)>, String>> {
         let window = open_test_window(cx, test_shell_services_with_pickable_book());
         let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
         vcx.update(|window, cx| {
@@ -3835,7 +3980,7 @@ role = "key"
         });
 
         let (handle, _rx) = DataHandle::for_tests();
-        handle.shutdown();
+        refuse(&handle);
         let factory = Rc::new(BlotterFactory::new(
             handle.clone(),
             Vec::new(),
@@ -3882,19 +4027,12 @@ role = "key"
         });
         vcx.run_until_parked();
 
-        let values = shell.read_with(&vcx, |s, _| {
+        shell.read_with(&vcx, |s, _| {
             s.picker()
                 .expect("the picker is still open — nothing here closes it")
                 .values
                 .clone()
-        });
-        assert_eq!(
-            values,
-            Some(Err(
-                "the data service is busy or gone — try again".to_string()
-            )),
-            "a refused request must error the picker, not leave it loading forever"
-        );
+        })
     }
 
     /// Reload presentation diagnostics must reach the retained diagnostics model,
@@ -4911,6 +5049,60 @@ role = "key"
     }
 
     #[gpui::test]
+    fn a_thread_stopped_event_reaches_the_status_segment(cx: &mut gpui::TestAppContext) {
+        let f = catalog_fixture(cx);
+        let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let shell = f.window.root(&mut vcx).unwrap().read_with(&vcx, |r, _| {
+            r.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+        f.events
+            .try_send(DataEvent::ThreadStopped {
+                thread: "geode-ingest".into(),
+                reason: "boom".into(),
+            })
+            .unwrap();
+        vcx.run_until_parked();
+        assert_eq!(
+            diagnostics.read_with(&vcx, |d, _| d.stopped_segment().map(|s| s.text.to_string())),
+            Some("ingest stopped".to_string())
+        );
+    }
+
+    #[gpui::test]
+    fn refused_submissions_reach_the_status_summary(cx: &mut gpui::TestAppContext) {
+        let f = catalog_fixture(cx);
+        let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let shell = f.window.root(&mut vcx).unwrap().read_with(&vcx, |r, _| {
+            r.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+        f.bridge.handle.fill_for_tests();
+        assert_eq!(
+            f.bridge.handle.query(geode_data::QueryParams {
+                key: QueryKey(1),
+                tag: 1,
+                submitted: std::time::Instant::now(),
+                view: "tree".into(),
+                grouping: None,
+                scope: Default::default(),
+                as_of: AsOf::Live,
+                max_depth: 1,
+            }),
+            Err(geode_data::Refusal::Busy)
+        );
+        let refused = f.bridge.handle.dropped_requests();
+        assert!(refused > 0);
+        // Any drained event carries the handle's refusal total with it.
+        f.events.try_send(DataEvent::LoadEnded).unwrap();
+        vcx.run_until_parked();
+        assert_eq!(diagnostics.read_with(&vcx, |d, _| d.refused), refused);
+        assert!(diagnostics.read_with(&vcx, |d, _| {
+            d.summary().contains(&format!("{refused} refused"))
+        }));
+    }
+
+    #[gpui::test]
     fn catalog_bursts_keep_one_read_and_one_follow_up(cx: &mut gpui::TestAppContext) {
         let f = catalog_fixture(cx);
         let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
@@ -5077,6 +5269,62 @@ role = "key"
             16
         );
         assert!(f.requests.try_recv().is_err());
+    }
+
+    #[gpui::test]
+    fn a_stopped_service_does_not_retry_the_catalog(cx: &mut gpui::TestAppContext) {
+        let f = catalog_fixture(cx);
+        let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let shell = f.window.root(&mut vcx).unwrap().read_with(&vcx, |r, _| {
+            r.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+        f.bridge.handle.shutdown();
+        diagnostics.update(&mut vcx, |d, cx| {
+            d.watch();
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        vcx.executor().advance_clock(CATALOG_RETRY_DELAY * 3);
+        vcx.run_until_parked();
+        assert!(
+            !diagnostics.read_with(&vcx, |d, _| d.pending_catalog_request()),
+            "a stopped service keeps no retry demand; the stopped segment says why"
+        );
+    }
+
+    #[gpui::test]
+    fn a_reload_into_a_stopped_service_is_an_error_diagnostic(cx: &mut gpui::TestAppContext) {
+        let services = test_shell_services_with_sources(ConfigSources {
+            builtin: vec![LayerDoc::builtin("views", "[tree]\ndataset = \"risk\"\n").unwrap()],
+            desk: None,
+            user: None,
+        });
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let (handle, _rx) = DataHandle::for_tests();
+        handle.shutdown();
+        let bridge = test_bridge(handle);
+        cx.update(|cx| attach(&bridge, window, cx));
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        vcx.update(|_, cx| {
+            shell.update(cx, |_, cx| cx.emit(ShellEvent::ConfigReloaded));
+        });
+        vcx.run_until_parked();
+        let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+        assert!(diagnostics.read_with(&vcx, |d, _| {
+            d.data_diagnostics.iter().any(|(_, d)| {
+                d.severity == Severity::Error
+                    && d.message
+                        == "the reloaded views did not reach the data service: \
+                            the data service has stopped"
+            })
+        }));
     }
 
     #[gpui::test]

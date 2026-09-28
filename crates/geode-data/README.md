@@ -17,8 +17,13 @@ Current behavior and rationale:
 The ingest runner owns the only writer connection. `DataService` runs the
 request loop with its own reader for catalog and coverage lookups; the
 query pool has independent readers. `DataHandle` is the `Clone + Send + Sync`
-door: request submission uses `try_send`, and a request that cannot be queued
-is refused and counted rather than waited on. Results and health come back as
+door: request submission uses `try_send` and returns `Result<(), Refusal>`
+rather than waiting. `Refusal::Busy` (a full queue; a later submission can
+succeed) is counted in `dropped_requests`; `Refusal::Stopped` (the request
+loop panicked, failed to open, or was shut down; no retry can succeed) is
+not. The handle's stopped flag is set on a failed open and as the loop
+unwinds, before it joins its workers, so a submission racing a dying loop is
+refused rather than admitted to a queue nothing will read. Results and health come back as
 `DataEvent`s through an `EventSink`; a sink returning `false` means "not
 delivered" and no producer stops on it.
 
@@ -27,10 +32,25 @@ pressure. Shutdown and final-handle drop join workers and must run off the UI
 thread. Admission, cancellation, and completion have distinct guarantees; see
 [requests and UI delivery](../../docs/current/request-delivery.md).
 
-Read, pricing, ingest, and egress transport paths contain panics at their
-operation boundaries; an ingest load panic reports that operation as `Failed`.
-Service-thread upload serialization has no equivalent boundary. Containment
-does not interrupt blocked adapter or filesystem calls.
+The request loop contains each request's arm and the view-replacement step:
+a panicking request is answered once, with `<kind> request panicked:
+<payload>`, through the route that answers its success, and the loop serves
+on. Read, pricing, ingest, and egress paths contain panics at their operation
+boundaries; an ingest load panic reports that operation as `Failed`, and egress
+contains encoding and transport separately on the target's worker. Identity
+listings, the stale check, the local sweep, discovery, and result-event
+building report their panics as error diagnostics, health, or the key's
+error. Containment does not interrupt blocked adapter or filesystem calls.
+
+Every long-lived thread is spawned through `supervise::spawn_supervised`,
+which declares an unwinding body once as `DataEvent::ThreadStopped { thread,
+reason }` and never restarts it; the crash file is still written. A new
+long-lived thread must use it, or its death is silent. Two threads are
+deliberately outside it: the channel adapter's dispatcher
+(`geode-channel-<name>`) and `geode-app`'s demo bus. They are transport-tier
+threads standing in for a vendor client's own threads, which Geode will not
+own either, and are created without an event sink. See
+[containment and liveness](../../docs/current/data-path.md#containment-and-liveness).
 
 The bounded request and adapter channels do not bound the ingest queues.
 Documents precede series, which precede files, with no preemption of running
@@ -42,8 +62,9 @@ for capacity, coalescing, and worker shutdown behavior.
 
 | Module | Holds |
 |---|---|
+| `supervise` | `spawn_supervised`, the one door for long-lived data threads, and `REQUEST_LOOP` (`geode-data`), the request loop's thread name. |
 | `service` | `DataService`, `DataServiceConfig`, `DataEvent`, and the `HealthTracker` (two lanes per source, `discovery` and `load`; the worse by `severity_rank` wins). |
-| `handle` | `DataHandle` and `Request`: queries, distinct values, the catalog, a document by key, a series fetch, identities, an upload, a local publish, and a local forget. |
+| `handle` | `DataHandle`, `Refusal`, and `Request`: queries, distinct values, the catalog, a document by key, a series fetch, identities, an upload, a local publish, and a local forget. |
 | `source` | Directory discovery, sentinel parsing, and readiness classification. Configuration types are shared with `geode-core`; stable-mtime readiness is accepted by configuration but unsupported at runtime. |
 | `adapter` | Subscription, upload, and fetch capabilities; a registry, bounded message sink, and topic matching. Includes the in-process `ChannelAdapter`; the app can register additional implementations such as its demo series adapter. |
 | `ingest` | The discovery scheduler, the cold-start priority ladder, the per-file load pipeline, the grain split and conflict detector, the ingest runner (one thread, one writer connection, three queues), the subscribed-source receiver, the `Coalescer`, and the fetch worker. |
@@ -51,13 +72,14 @@ for capacity, coalescing, and worker shutdown behavior.
 | `query` | Scope lowering, grain-aware view compilation, distinct values, document and series queries, catalog reads, and the read pool. View/document planning, provenance, and execution share a worker transaction; superseded results are dropped. |
 | `pricing` | App-supplied pricer registry and a separate bounded worker queue. Queued batches coalesce by key; cancellation stops a running batch at the next line boundary. |
 | `documents` | The `DocumentKind` registry the app fills. |
-| `egress` | Startup target resolution, service-thread document serialization, and per-target upload workers with eight waiting jobs. Refusals and completed transport calls emit keyed/tagged upload outcomes. |
+| `egress` | Startup target resolution and per-target workers that encode and send, with eight waiting jobs. Refusals answer from the service thread; encoding and transport results, including contained panics, answer from the worker as keyed/tagged upload outcomes. |
 | `health` | Re-export of `geode_core::health::Health`. |
 
 ## Features
 
-- `test-support` exposes `DataHandle::for_tests()` and the other
-  service-thread-free fixtures the module crates' tests use.
+- `test-support` exposes `DataHandle::for_tests()`,
+  `DataHandle::fill_for_tests()` (the next submission is refused `Busy`), and
+  the other service-thread-free fixtures the module crates' tests use.
 
 ## Commands
 
@@ -158,11 +180,16 @@ often tripped:
   path accessibility. Adapter queue admission likewise does not acknowledge
   storage publication. See [source discovery and adapters](../../docs/current/data-path.md#source-discovery-and-adapters).
 - Upload channel admission, transport success, and a stored echo are separate
-  events. Service-thread validation/serialization precedes each target's bounded
-  FIFO worker queue. Refusals, transport returns, and contained transport panics
-  emit outcomes; a transport panic leaves the worker available for later jobs.
-  Startup failure, blocked calls, serialization panics, and sink refusal can
-  prevent delivery. Uploads have no keyed cancellation or automatic retry.
+  events. Service-thread validation precedes each target's bounded FIFO worker
+  queue; the worker encodes (`kind.write`) and sends. Write errors therefore
+  answer after queue admission: a bad document occupies a queue slot until the
+  worker reaches it, and one sent to a full or unavailable target answers
+  `queue full` or the unavailable reason instead. Refusals, write errors,
+  transport returns, and contained encoding or transport panics emit outcomes;
+  a panic leaves the worker available for later jobs. Startup failure, blocked
+  calls, a worker dying outside its boundaries (queued jobs go unanswered), and
+  sink refusal can prevent delivery. Uploads have no keyed cancellation or
+  automatic retry.
 - Adapter resolution and worker creation request separate egress handles.
   Shutdown closes worker queues and joins after queued jobs run; a stuck
   transport can block shutdown. See

@@ -13,8 +13,8 @@ Current behavior and rationale:
 | Module | Holds |
 |---|---|
 | `core` | Column plans, expansion paths, visible-row traversal, cursor movement, find, selection summaries, cursor-row launch context, TSV export, command parsing, and visible-window formatting without GPUI. |
-| `delegate` | `TableDelegate` adapter with prepared rows and cached cell text. Owns selection and paint caches; reports cell gestures and chevron clicks to the tile. |
-| `tile` | `BlotterTile`, the entity per tile: local query overrides, requests through `DataHandle`, frame observation, snapshot staging and application, header and footer rendering. |
+| `delegate` | `TableDelegate` adapter with prepared rows and cached cell text. Holds `:autosize`'s fitted widths by column name, which `column()` prefers over the plan's; `fit_columns` measures the header and the format cache's window only. Owns selection and paint caches; reports cell gestures and chevron clicks to the tile. |
+| `tile` | `BlotterTile`, the entity per tile: local query overrides, requests through `DataHandle`, frame observation, snapshot staging and application, header and footer rendering. The header notice is a `geode_tile::notice::Notice`: dropped sorts and selections are warnings, query and configuration failures danger. |
 | `content` | The `TileContent` wrapper and `BlotterFactory`, the roster entry the app builds with the data handle. |
 | `colour_cache` | Caches each named color's base and sign variants until theme inputs or definitions change. |
 
@@ -27,6 +27,19 @@ cargo bench -p geode-blotter   # the pure core
 
 ## Invariants
 
+- `:autosize` and the shell's `tile::autosize_columns` run one method,
+  `BlotterTile::autosize_columns`. It measures only rows in the format
+  cache (the window the table last asked for), never the whole snapshot. A
+  wider value outside that window does not widen the column. With no plan
+  or no cached rows, a fit refuses with "nothing loaded to fit" and keeps
+  its widths.
+- A view switch clears the fitted widths, and a restored record whose view
+  is gone starts without them. `apply_snapshot` drops only the tree column's
+  width (key `""`) when the grouping differs from the plan's. That method is
+  the one place every grouping change reaches the delegate. The session
+  record keeps the widths under `column_widths`.
+- A fitted width overrides the view's `presentation.width`, including one
+  changed later, until `:autosize reset` or a refit.
 - `geode_blotter::init` overrides the table's navigation bindings with
   `NoAction` after component initialization. Row clicks can briefly focus
   the table; these overrides keep its component actions inactive while

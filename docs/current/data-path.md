@@ -33,8 +33,10 @@ over fetched series, and both priority over queued files; it finishes a file
 already in flight before taking another job. This puts trader-requested work
 ahead of background discovery without attempting concurrent writes.
 
-Ordinary requests use a bounded channel. `DataHandle` returns `false` when
-submission was refused; callers must handle that rather than wait for a reply.
+Ordinary requests use a bounded channel. `DataHandle` returns `Err(Refusal)`
+when submission was refused — `Busy` for a full queue, `Stopped` once the
+request loop has ended — and callers must handle that rather than wait for a
+reply.
 Acceptance is not completion: startup failure, cancellation, and supersession
 can leave an admitted request without an individual outcome. View replacements
 use a separate latest-value mailbox. The app's event sink must not wait for
@@ -48,7 +50,7 @@ The ingestion boundaries have different capacity and replacement rules:
 
 | Boundary | Accepted work and refusal |
 |---|---|
-| `DataHandle` request channel | Bounded; `try_send` refuses without waiting when full or disconnected. |
+| `DataHandle` request channel | Bounded; `try_send` refuses `Busy` without waiting when full, and `Stopped` when the request loop has ended or admission is closed. |
 | Adapter message sink | Bounded; refused messages are counted and dropped. |
 | Subscription coalescer | One pending document per key; newer documents replace it without moving its release deadline. Already submitted jobs are unaffected. |
 | Fetch worker | Up to 64 waiting requests per source; a refused fetch is reported as an outcome. |
@@ -92,6 +94,113 @@ panic containment does not cancel them. See
 [`runner.rs`](../../crates/geode-data/src/ingest/runner.rs),
 [`subscribe.rs`](../../crates/geode-data/src/ingest/subscribe.rs), and
 [`fetch.rs`](../../crates/geode-data/src/ingest/fetch.rs).
+
+## Containment and liveness
+
+No contained panic in the data layer ends as only a log line: a panicking
+request is answered, a dying thread is declared, and a refused submission says
+whether a retry can succeed.
+
+### Supervised threads
+
+Every long-lived data thread is spawned through
+[`supervise::spawn_supervised`](../../crates/geode-data/src/supervise.rs): the
+request loop (`geode-data`), the ingest writer (`geode-ingest`), discovery
+(`geode-discovery`), each read-pool worker (`geode-query-N`), pricing
+(`geode-pricing`), and one thread per fetch source (`geode-fetch-<source>`),
+subscribed source (`geode-subscribe-<source>`), and egress target
+(`geode-egress-<target>`). A body that unwinds past every containment boundary
+emits one `DataEvent::ThreadStopped { thread, reason }` carrying the panic
+payload, logs an error, and ends. Nothing restarts it, because a panic that
+repeats on every request would otherwise crash-loop. The body runs outside the
+`contained` marker, so the app's panic hook still writes a crash file for it. A
+body that returns — a deliberate shutdown — declares nothing.
+
+A request loop that fails to open emits `ThreadStopped` for `geode-data`
+(reason `data service failed to open: <error>`) beside its error diagnostic,
+although nothing unwound. The app mailbox keys `ThreadStopped` by thread, so
+two threads stopping before one UI drain are both delivered. The status bar
+shows every stopped thread until the app restarts; see
+[stopped threads and refusals](shell.md#stopped-threads-and-refusals).
+
+### The request loop
+
+The loop contains each request's arm, and the view-replacement step, in its
+own boundary. A panicking request is answered exactly once, with the error
+`<kind> request panicked: <payload>`, through the route that answers its
+success, and the loop goes on to the next request:
+
+| Request | Answer to a panic |
+|---|---|
+| Query, document | `Query` error for its key and tag |
+| Distinct values | `Distinct` error for its key, tag, and column |
+| Series | `Series` error for its key and tag |
+| Catalog | `Catalog` error for its key and tag |
+| Pricing | `Price` outcome with the error on every submitted line |
+| Upload | `Upload` error for its key, tag, and target |
+| History fetch | The pair's load lane reports `Failed`, then `SeriesFetched` carries the error |
+| Local publish | Error diagnostic and `LocalPublishFailed` |
+| Local forget | Error diagnostic and `ForgetFailed` |
+| Identity refresh, cancellation | One error diagnostic |
+
+A panicking view replacement is one error diagnostic (`view replacement
+panicked: …; the previous views stay in force`). The service validates new
+views before assigning any of them, so the previous views, dimensions, and
+refusals stay in force together.
+
+The answer is sent after the arm's boundary. An event sink that itself panics
+while delivering that answer unwinds the loop, which is then declared stopped
+like any other thread death.
+
+### Refusals
+
+Submissions return `Result<(), Refusal>`. `Refusal::Busy` (`the data service
+is busy`) means the request queue was full; it is counted in
+`DataHandle::dropped_requests`, and a later submission can succeed.
+`Refusal::Stopped` (`the data service has stopped`) means the request loop has
+ended — it panicked, it failed to open, or it was shut down — and no retry can
+succeed; it is not counted. The handle's stopped flag is set when open fails
+and when the loop starts to unwind, before the dying loop joins its workers.
+That join can take as long as the slowest running job; a submission made in
+that window is refused `Stopped` instead of being admitted to a queue nothing
+will read. A clean shutdown never sets the flag and never emits
+`ThreadStopped`; submissions after it are refused `Stopped` because admission
+is closed.
+
+### Panics with no requester
+
+Five paths run work nobody is waiting on. Each reports its panic where a
+trader can see it:
+
+| Path | Report |
+|---|---|
+| A fetch source's identity listing | Error diagnostic `identity listing for <source> panicked: <payload>` |
+| The pop-time stale check before a file load | Error diagnostic naming the file (`the stale check for <file> could not read the catalog (…); loading it anyway`); counts in the status bar's `data N errors` |
+| The local-dataset sweep after a save | Error diagnostic `local sweep panicked: <payload>`; the save it follows is already stored |
+| Discovery | The source's health goes `Failed` with reason `discovery panicked: <payload>` |
+| Building a read-pool result's event | Built inside its own boundary; a panic answers that key with `result delivery panicked: <payload>` in the result's own kind |
+
+The stale check fails open: a lookup that errors or panics loads the file
+anyway, so no rows are lost and the worst cost is a redundant reload of the
+same rows as a new generation. A catalog row the lookup cannot read is still
+corruption, so the report is an error rather than a warning. A distinct answer missing
+its `value` or `n` column is that key's error rather than a panic.
+
+### Limits
+
+- Nothing restarts a stopped thread. The work it served stays undone until the
+  app restarts, and the status bar says so for that whole time.
+- A request already queued to, or claimed by, a data thread when it dies is
+  never answered. The asking tile's loading or in-flight state (a market-data
+  upload "in flight", for example) stays until restart; the status bar's
+  stopped segment is the signal that it will not resolve.
+- The channel adapter's dispatcher (`geode-channel-<name>`) and the demo bus
+  thread are not supervised. They are transport-tier threads that stand in for
+  a vendor client's own threads, which Geode will not own either, and they are
+  created without an event sink. An unwind there leaves the crash file and the
+  log, not a status segment.
+- Containment does not interrupt a blocked call. A thread stuck in adapter,
+  filesystem, or DuckDB I/O is neither stopped nor declared.
 
 ## Ingestion and publication
 
@@ -221,7 +330,7 @@ callbacks must return promptly without panicking. See
 
 ## Egress and uploads
 
-An upload serializes a whole document and sends it through a configured
+An upload encodes a whole document and sends it through a configured
 adapter. Targets resolve at startup from
 [`egress.toml`](configuration.md#egress-configuration). Each usable target has
 one worker thread and its own `Egress` handle. Adapter resolution probes
@@ -230,25 +339,38 @@ adapters must support repeated capability requests. A worker-start failure
 leaves the target unavailable and later requests receive a named refusal.
 
 There are two admission boundaries. `DataHandle::upload` uses the bounded
-service channel: `false` means nothing was admitted and no outcome is owed.
-Once dispatched, the service validates the target and accepted document name,
-looks up its `DocumentKind`, and calls `write` before submitting bytes to the
-target worker. Serialization runs on the service thread and can delay other
-requests. Transport calls run separately, one at a time in each target's FIFO
-queue, with up to eight waiting jobs behind the running call. A full or stopped
-worker queue is refused without waiting for transport capacity.
+service channel: an `Err(Refusal)` means nothing was admitted and no outcome
+is owed. Once dispatched, the service validates the target and accepted
+document name, looks up its `DocumentKind`, and queues the rows, the kind, and
+the expanded address on the target worker, without encoding them. The worker
+queue holds up to eight waiting jobs behind the running one; a full or stopped
+queue is refused at once. The worker takes one job at a time, in submission
+order, and runs the encoder (`kind.write`) and then the transport, each inside
+its own panic boundary, so neither a slow encoder nor a slow transport holds
+up the request loop.
 
-Ordinary refusal paths and completed transport calls each emit one
-`DataEvent::Upload`, echoing the requester's key, tag, and target. Errors name
-the target, including unknown targets, unsupported documents, missing writers,
-write errors, unavailable workers, queue refusal, and transport errors.
-A transport panic becomes `egress '<target>': transport panicked: …`; the
-worker then continues with the next queued job using the same transport handle.
+Because encoding happens after queue admission, a document that cannot be
+encoded still takes a queue slot until the worker reaches it, and a bad
+document sent to a full or unavailable target answers `queue full` or the
+unavailable reason rather than its write error.
+
+Refusal paths and completed jobs each emit one `DataEvent::Upload`, echoing
+the requester's key, tag, and target. Errors name the target, including
+unknown targets, unsupported documents, missing document kinds, unavailable
+workers, queue refusal, write errors, and transport errors. Validation and queue
+refusals answer from the service thread; write errors, transport results, and
+panics answer from the worker. An encoding panic becomes `egress '<target>':
+encoding panicked: …` and a transport panic `egress '<target>': transport
+panicked: …`; either way the worker continues with the next queued job using
+the same transport handle. A panic in the service's own upload step is
+answered by the request loop (see [the request loop](#the-request-loop)), and
+a worker that dies outside both boundaries is declared stopped
+(`geode-egress-<target>`): jobs still queued behind it are never answered,
+and later uploads to that target answer `egress '<target>': stopped`.
 
 Completion still has limits: service startup can fail after channel admission,
-serialization has no panic boundary, and serializer or transport calls can
-block indefinitely. Event-sink refusal has no retry. Uploads have no timeout,
-automatic retry, or keyed cancellation.
+and encoder or transport calls can block indefinitely. Event-sink refusal has
+no retry. Uploads have no timeout, automatic retry, or keyed cancellation.
 
 A successful outcome means the adapter's `upload` call returned successfully;
 the adapter defines what that acknowledges. It does not establish that a

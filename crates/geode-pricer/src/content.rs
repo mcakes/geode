@@ -348,7 +348,17 @@ impl TileContent for PricerContent {
     }
 
     fn serialize(&self, cx: &App) -> toml::Table {
-        self.tile.read(cx).serialize()
+        self.tile.read(cx).serialize(cx)
+    }
+    /// The same route as `:autosize [reset]`.
+    fn autosize_columns(
+        &self,
+        reset: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<(), &'static str> {
+        self.tile
+            .update(cx, |t, cx| t.autosize_columns(reset, window, cx))
     }
 
     fn holds_focus(&self, window: &Window, cx: &App) -> bool {
@@ -367,6 +377,13 @@ impl Shared {
         self.store.contains(name)
             || self.save_pending(name)
             || self.retiring.borrow().contains(name)
+    }
+
+    /// Whether a new sheet may not take `name`: open in any tile (the
+    /// asking tile's own included) or reserved (`taken`). `:name` and a
+    /// named `:new` refuse such a name.
+    pub(crate) fn exists(&self, name: &str) -> bool {
+        self.open.borrow().contains(name) || self.taken(name)
     }
 
     /// Whether a save of `name` is queued and unanswered.

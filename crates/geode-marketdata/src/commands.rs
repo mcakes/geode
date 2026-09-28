@@ -3,7 +3,7 @@
 //!
 //! Vocabulary: `underlying <value>` (`key` is an unlisted alias), `revert`,
 //! `bump <delta> [row|col]`, `rebase`, `upload [target]`, `set <attr> [value...]`,
-//! `auto [hold|rebase|replace]`, and `menu`. Upload arms confirmation rather than
+//! `auto [hold|rebase|replace]`, `menu`, and `autosize [reset]`. Upload arms confirmation rather than
 //! sending immediately. Completion returns candidates for the shell to rank.
 
 use crate::core::UpdatePolicy;
@@ -18,11 +18,11 @@ use geode_core::document::KEY_SEPARATOR;
 /// `catalog_keys`).
 pub const KEY_DISPLAY_SEPARATOR: char = '/';
 
-/// Which way `:bump` walks from the cursor.
+/// Which way `:bump` walks from the cursor when an axis word is typed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BumpAxis {
-    /// Every cell in the cursor's row — the default, because a term's
-    /// whole node ladder is the shape a trader nudges.
+    /// Every cell in the cursor's row — the default without a selection,
+    /// because a term's whole node ladder is the shape a trader nudges.
     #[default]
     Row,
     Col,
@@ -35,9 +35,12 @@ pub enum Command {
     /// checked by the document-query path rather than this parser.
     Key(Vec<String>),
     Revert,
+    /// Add `delta` to numbers. With no axis: the selection when one is
+    /// live, else the cursor's row. An axis word keeps its own meaning
+    /// even with a selection live.
     Bump {
         delta: f64,
-        axis: BumpAxis,
+        axis: Option<BumpAxis>,
     },
     Rebase,
     /// Optional upload-target name. The tile resolves eligibility and requires
@@ -53,11 +56,16 @@ pub enum Command {
     },
     /// Set the new-document policy, or ask the tile for its current value.
     Auto(Option<UpdatePolicy>),
+    /// Fit every column to its content, or with `reset` return to the
+    /// default widths.
+    Autosize {
+        reset: bool,
+    },
 }
 
 /// Completion verbs in declared order. The parser also accepts `key` as an
 /// alias, but never suggests it. Rebase is offered only when `behind` is true.
-pub(crate) const VERBS: [&str; 8] = [
+pub(crate) const VERBS: [&str; 9] = [
     "underlying",
     "revert",
     "bump",
@@ -66,6 +74,7 @@ pub(crate) const VERBS: [&str; 8] = [
     "set",
     "auto",
     "menu",
+    "autosize",
 ];
 
 /// `auto`'s second word: the three policies, as [`UpdatePolicy::as_str`]
@@ -124,8 +133,9 @@ pub fn parse(line: &str) -> Result<Command, String> {
                 return Err(format!("'{delta}' is not a finite number"));
             }
             let axis = match words.next() {
-                None | Some("row") => BumpAxis::Row,
-                Some("col") => BumpAxis::Col,
+                None => None,
+                Some("row") => Some(BumpAxis::Row),
+                Some("col") => Some(BumpAxis::Col),
                 Some(other) => return Err(format!("unknown axis '{other}' (row, col)")),
             };
             Ok(Command::Bump { delta, axis })
@@ -164,6 +174,17 @@ pub fn parse(line: &str) -> Result<Command, String> {
             Ok(Command::Auto(policy))
         }
         Some("menu") => Ok(Command::Menu),
+        Some("autosize") => {
+            let reset = match words.next() {
+                None => false,
+                Some("reset") => true,
+                Some(_) => return Err("usage: autosize [reset]".to_string()),
+            };
+            if words.next().is_some() {
+                return Err("usage: autosize [reset]".to_string());
+            }
+            Ok(Command::Autosize { reset })
+        }
         Some(other) => Err(format!("unknown command '{other}'")),
         None => Err("empty command".to_string()),
     }
@@ -209,6 +230,7 @@ pub fn completions(
         ["set"] => attrs.to_vec(),
         ["upload"] => targets.to_vec(),
         ["auto"] => policy_words(),
+        ["autosize"] => vec!["reset".to_string()],
         // `bump`'s delta is a number nothing can complete; its axis is a
         // two-word vocabulary.
         ["bump", _] => vec!["row".to_string(), "col".to_string()],
@@ -243,15 +265,29 @@ mod tests {
             parse("bump 0.25"),
             Ok(Command::Bump {
                 delta: 0.25,
-                axis: BumpAxis::Row
+                axis: None
             }),
-            "row is the default"
+            "no word is no axis: the tile decides"
+        );
+        assert_eq!(
+            parse("bump 0.25 row"),
+            Ok(Command::Bump {
+                delta: 0.25,
+                axis: Some(BumpAxis::Row)
+            })
+        );
+        assert_eq!(
+            parse("bump 1 col"),
+            Ok(Command::Bump {
+                delta: 1.0,
+                axis: Some(BumpAxis::Col)
+            })
         );
         assert_eq!(
             parse("bump -1 col"),
             Ok(Command::Bump {
                 delta: -1.0,
-                axis: BumpAxis::Col
+                axis: Some(BumpAxis::Col)
             })
         );
         assert!(parse("bump").is_err());
@@ -269,6 +305,21 @@ mod tests {
     }
 
     #[test]
+    fn autosize_parses_an_optional_reset_and_completes_it() {
+        assert_eq!(parse("autosize"), Ok(Command::Autosize { reset: false }));
+        assert_eq!(
+            parse("autosize reset"),
+            Ok(Command::Autosize { reset: true })
+        );
+        assert!(parse("autosize wide").is_err());
+        assert!(parse("autosize reset now").is_err());
+        assert_eq!(
+            completions("autosize ", 9, &[], false, &[], &[]),
+            vec!["reset".to_string()]
+        );
+    }
+
+    #[test]
     fn completions_offer_the_verbs_then_the_catalog_keys() {
         let keys = vec!["NDX.Z".to_string(), "SPX.Z".to_string()];
         assert_eq!(
@@ -280,7 +331,8 @@ mod tests {
                 "upload",
                 "set",
                 "auto",
-                "menu"
+                "menu",
+                "autosize"
             ],
             "rebase is offered only while behind"
         );
@@ -294,7 +346,8 @@ mod tests {
                 "upload",
                 "set",
                 "auto",
-                "menu"
+                "menu",
+                "autosize"
             ]
         );
         assert_eq!(completions("key ", 4, &keys, false, &[], &[]), keys);

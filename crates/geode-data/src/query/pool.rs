@@ -148,8 +148,9 @@ impl QueryPool {
         store: &Store,
         workers: usize,
         sink: ResultSink,
+        stop: crate::service::EventSink,
     ) -> Result<QueryPool, crate::store::StoreError> {
-        Self::spawn_with_run(store, workers, sink, run_one)
+        Self::spawn_with_run(store, workers, sink, stop, run_one)
     }
 
     /// A pool delivering into a channel, for callers that block on
@@ -160,13 +161,17 @@ impl QueryPool {
     ) -> Result<(QueryPool, Receiver<QueryResult>), crate::store::StoreError> {
         let (tx, rx) = channel();
         let sink: ResultSink = Arc::new(move |r| tx.send(r).is_ok());
-        Ok((Self::spawn_with_sink(store, workers, sink)?, rx))
+        Ok((
+            Self::spawn_with_sink(store, workers, sink, crate::supervise::unwatched())?,
+            rx,
+        ))
     }
 
     fn spawn_with_run(
         store: &Store,
         workers: usize,
         sink: ResultSink,
+        stop: crate::service::EventSink,
         run: RunFn,
     ) -> Result<QueryPool, crate::store::StoreError> {
         let queue = Arc::new((Mutex::new(Queue::default()), Condvar::new()));
@@ -180,10 +185,12 @@ impl QueryPool {
             let spawned = store.reader().and_then(|conn| {
                 let q = Arc::clone(&queue);
                 let sink = Arc::clone(&sink);
-                std::thread::Builder::new()
-                    .name(format!("geode-query-{i}"))
-                    .spawn(move || worker(conn, q, sink, run))
-                    .map_err(|source| crate::store::StoreError::SpawnWorker { source })
+                crate::supervise::spawn_supervised(
+                    format!("geode-query-{i}"),
+                    Arc::clone(&stop),
+                    move || worker(conn, q, sink, run),
+                )
+                .map_err(|source| crate::store::StoreError::SpawnWorker { source })
             });
             match spawned {
                 Ok(t) => threads.push(t),
@@ -539,7 +546,10 @@ mod tests {
     fn channel_pool_with(store: &Store, run: RunFn) -> (QueryPool, Receiver<QueryResult>) {
         let (tx, rx) = channel();
         let sink: ResultSink = Arc::new(move |r| tx.send(r).is_ok());
-        (QueryPool::spawn_with_run(store, 1, sink, run).unwrap(), rx)
+        (
+            QueryPool::spawn_with_run(store, 1, sink, crate::supervise::unwatched(), run).unwrap(),
+            rx,
+        )
     }
 
     #[test]
@@ -598,7 +608,8 @@ mod tests {
             }
             tx.send(r).is_ok()
         });
-        let pool = QueryPool::spawn_with_sink(&store, 1, sink).unwrap();
+        let pool =
+            QueryPool::spawn_with_sink(&store, 1, sink, crate::supervise::unwatched()).unwrap();
 
         pool.submit(request(1, "v1", "select sum(v) as v from t"));
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
@@ -660,7 +671,8 @@ mod tests {
                 true
             })
         };
-        let pool = QueryPool::spawn_with_sink(&store, 1, sink).unwrap();
+        let pool =
+            QueryPool::spawn_with_sink(&store, 1, sink, crate::supervise::unwatched()).unwrap();
         pool.submit(request(9, "v", "select sum(v) as v from t"));
         for _ in 0..3000 {
             if !seen.lock().unwrap().is_empty() {
@@ -1198,6 +1210,19 @@ mod tests {
             }
             Payload::Snapshot(_) => panic!("a series request answered with a snapshot"),
         }
+        pool.shutdown();
+    }
+
+    #[test]
+    fn a_query_worker_that_dies_is_declared_by_its_thread_name() {
+        let (_d, store) = fixture(10);
+        let (stop, stops) = crate::supervise::tests_support::recording();
+        let sink: ResultSink = Arc::new(|_| panic!("the result sink fell over"));
+        let pool = QueryPool::spawn_with_sink(&store, 1, sink, stop).unwrap();
+        pool.submit(request(1, "v1", "select sum(v) as v from t"));
+        let (thread, reason) = crate::supervise::tests_support::next_stop(&stops);
+        assert_eq!(thread, "geode-query-0");
+        assert!(reason.contains("the result sink fell over"), "{reason}");
         pool.shutdown();
     }
 }

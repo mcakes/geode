@@ -337,6 +337,10 @@ pub fn cell_text(
     format: &ColumnFormat,
     clock: geode_core::clock::Clock,
 ) -> CellText {
+    // A package row aggregates its legs' values (package-row spec).
+    if sheet.is_package(row) && crate::core::package::aggregates(def.kind) {
+        return crate::core::package::aggregate(sheet, row, def.kind, format);
+    }
     let instrument: Option<&Instrument> = sheet.instrument(row);
     let applies = match def.applies_to {
         Applies::EveryRow => true,
@@ -491,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn instrument_cells_render_the_grammar_and_a_package_paints_them_blank() {
+    fn instrument_cells_render_the_grammar_and_a_package_aggregates_them() {
         let mut s = Sheet::new("t");
         let barrier =
             crate::core::shorthand::parse_builtin("-3 SPX 20DEC26 5000 P DO 4200").unwrap();
@@ -540,25 +544,31 @@ mod tests {
                 state: CellState::Own
             }
         );
-        // The package row.
-        for name in [
-            "qty",
-            "underlying",
-            "expiry",
-            "strike",
-            "type",
-            "barrier",
-            "barrier_type",
-            "spot_shift",
-            "vol_shift",
+        // The package row aggregates its legs.
+        for (name, text) in [
+            ("qty", "1"),
+            ("underlying", "SPX"),
+            ("expiry", "Z26"),
+            ("strike", "4800/5200"),
+            ("type", "C"),
         ] {
+            assert_eq!(
+                cell(&s, 2, name),
+                CellText {
+                    text: text.into(),
+                    state: CellState::Own
+                },
+                "{name}"
+            );
+        }
+        for name in ["barrier", "barrier_type", "spot_shift", "vol_shift"] {
             assert_eq!(
                 cell(&s, 2, name),
                 CellText {
                     text: String::new(),
                     state: CellState::Blank
                 },
-                "{name}"
+                "{name}: no barrier leg, no shift set"
             );
         }
         // Its legs are lines.

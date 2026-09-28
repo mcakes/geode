@@ -16,6 +16,7 @@ use geode_core::colour::{Anchors, NamedColours, Tokens};
 use geode_core::grid::selection::{Lost, Resolved, SelectKind, Selection, UNSUMMABLE_MARK};
 use geode_core::snapshot::Snapshot;
 use geode_core::view::{Colour, ViewSpec};
+use geode_shell::colfit::{FitMetrics, FittedWidths};
 use geode_shell::fonts;
 use geode_shell::linenumbers::{GUTTER_GAP_PX, LineNumbers, gutter_number};
 use geode_shell::shell::aggregates::{AggregateCell, CellPaint};
@@ -73,6 +74,8 @@ enum ColourKind {
 }
 
 const INDENT: f32 = 14.0;
+/// The tree cell's chevron slot (`render_td`'s `w(px(14.))`).
+const CHEVRON_PX: f32 = 14.0;
 const DETERMINED_MARK: &str = "†";
 
 pub struct BlotterDelegate {
@@ -187,6 +190,12 @@ pub struct BlotterDelegate {
     /// `on_mouse_up`/`on_mouse_up_out` pair sees every release exactly
     /// once regardless of where it lands).
     drag_origin: Option<bool>,
+    /// Widths `:autosize` fitted, keyed by `PlannedColumn::name` (the
+    /// tree column's name is empty), in pixels without the gutter.
+    /// `column()` prefers an entry here over the plan's width, so every
+    /// `TableState::refresh` keeps it; a column with no entry keeps its
+    /// configured width. The tile persists it and clears it on a view switch.
+    pub fitted: FittedWidths,
     /// Chevron pointer states memoized by all inputs read by the contrast
     /// calculation. Reusing the result avoids conversions and contrast
     /// correction for every visible row on every frame.
@@ -254,6 +263,7 @@ impl BlotterDelegate {
             chevron: None,
             drag_last: None,
             drag_origin: None,
+            fitted: FittedWidths::new(),
         }
     }
 
@@ -615,6 +625,17 @@ impl BlotterDelegate {
             .as_ref()
             .and_then(|p| p.columns.get(self.cursor.col))
             .map(|c| c.name.clone());
+        // The tree column's labels and depths are the grouping's: a width
+        // fitted under another grouping measured different text. This is
+        // the one door every grouping change (a pin, a slot, the frame)
+        // reaches the delegate through. The measures' widths stay.
+        if self
+            .plan
+            .as_ref()
+            .is_some_and(|p| p.grouping.as_slice() != grouping)
+        {
+            self.fitted.remove("");
+        }
         let fresh = ColumnPlan::build(view, grouping, &snapshot);
         let rebuild = self.plan.as_ref() != Some(&fresh);
         self.dropped_sort = None;
@@ -1026,6 +1047,58 @@ impl BlotterDelegate {
     }
 }
 
+impl BlotterDelegate {
+    /// Fit every planned column to its header and the rows in the format
+    /// cache's window: the rows the table last asked to see, not the
+    /// whole snapshot. Formatting a million rows on the UI thread would
+    /// break the 8 ms budget, so rows outside the window are not measured.
+    ///
+    /// `m` carries the table's own cell padding; this adds the cell's
+    /// `px_1`, a sortable header's sort icon, and in the tree column each
+    /// row's indent and chevron slot. The gutter is not included:
+    /// `column()` adds it to the tree column's width on its own.
+    ///
+    /// `None` while there is nothing to measure: no plan yet, or no row in
+    /// the cache (an empty result).
+    pub fn fit_columns(&self, m: &FitMetrics, cx: &App) -> Option<FittedWidths> {
+        let plan = self.plan.as_ref()?;
+        if self.cache.window().is_empty() {
+            return None;
+        }
+        let m = m.with_extra_padding(0.5 * m.rem_px);
+        // `Icon::size_3` (0.75rem) inside the sort toggle's `p(px(2.))`.
+        let sort_icon = 0.75 * m.rem_px + 4.0;
+        let window = self.cache.window();
+        plan.columns
+            .iter()
+            .enumerate()
+            .map(|(col, c)| {
+                let tree = c.kind == ColumnKind::Tree;
+                let header = self.column(col, cx).name;
+                let header = m.text_px(&header) + if tree { 0.0 } else { sort_icon };
+                let cells = window.clone().filter_map(|row| {
+                    let cell = self.cache.get(row, col)?;
+                    let mut w = m.text_px(&cell.text);
+                    if cell.attribution == Attribution::DeterminedNonAdditive {
+                        w += m.text_px(DETERMINED_MARK) + 0.25 * m.rem_px;
+                    }
+                    if tree {
+                        let depth = self
+                            .shown
+                            .get(row)
+                            .zip(self.snapshot.as_ref())
+                            .map_or(0, |(&r, s)| s.tree().depth(r as usize));
+                        w += depth as f32 * INDENT + CHEVRON_PX;
+                    }
+                    Some(w)
+                });
+                (c.name.clone(), m.fit(std::iter::once(header).chain(cells)))
+            })
+            .collect::<FittedWidths>()
+            .into()
+    }
+}
+
 impl TableDelegate for BlotterDelegate {
     fn columns_count(&self, _cx: &App) -> usize {
         self.plan.as_ref().map_or(0, |p| p.columns.len())
@@ -1070,10 +1143,13 @@ impl TableDelegate for BlotterDelegate {
             // The tree column carries the line-number gutter (below),
             // so it widens by the gutter's width rather than giving up
             // its own text room to it.
-            width: px(if c.kind == ColumnKind::Tree {
-                c.width + self.gutter_px()
-            } else {
-                c.width
+            width: px({
+                let width = self.fitted.get(&c.name).copied().unwrap_or(c.width);
+                if c.kind == ColumnKind::Tree {
+                    width + self.gutter_px()
+                } else {
+                    width
+                }
             }),
             movable: c.kind != ColumnKind::Tree,
             // The tree column stays visible while measures scroll horizontally.

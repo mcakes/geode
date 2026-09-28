@@ -34,7 +34,8 @@ GPUI globals or provide rendering helpers.
 | `theme`, `fonts`, `fontsize`, `linenumbers`, `tileadd`, `tips` | Settings and their pure resolution rules: the bundled gpui-component themes, the bundled Inter and JetBrains Mono faces, the rem scale knob, `[ui] line_numbers`, the add-tile direction, tooltip text from the live keymap. |
 | `config_write`, `keymap_edit`, `log_persist`, `reload` | Ordered user-layer writes, comment-preserving keyed edits, log-level persistence, and reload detection/rejection. See the [configuration contract](../../docs/current/configuration.md#runtime-edits) for write guarantees and the limits of keep-last-good. |
 | `session` | Session encoding, local recovery, and atomic file replacement. Shell integration owns periodic snapshots and shutdown saves. See [session persistence](../../docs/current/shell.md#session-format) for recovery boundaries, unavailable modules, and write-failure behavior. |
-| `diagnostics` | Source health, generations, independent config/data diagnostics, section versions, cached status summary, and watched/explicit catalog demand. See the [diagnostics contract](../../docs/current/shell.md#diagnostics-state-and-demand). |
+| `diagnostics` | Source health, generations, independent config/data diagnostics, stopped data threads (`StoppedThread`, `thread_label`) and the prepared `StoppedSegment`, the `Busy`-refusal total, section versions, cached status summary, and watched/explicit catalog demand. See the [diagnostics contract](../../docs/current/shell.md#diagnostics-state-and-demand). |
+| `colfit` | The pure column-fit measure behind `:autosize` and `tile::autosize_columns`: `FitMetrics` (mono advance at `text_sm`, the `XSmall` cell padding and cursor border at the window's rem, clamped to 2.5–40 rem), the `FittedWidths` map by stable column key, and its lenient `column_widths` session read/write, which clamps a restored width to 25–560 px. `NO_TABLE` and `NOTHING_TO_FIT` are the two refusals. See [autosized columns](../../docs/current/features.md#autosized-columns). |
 | `perf` | The always-compiled frame-time histogram. |
 | `defaults` | The builtin action set and keymap, the Builtin config layer. |
 
@@ -42,11 +43,11 @@ GPUI globals or provide rendering helpers.
 
 | Module | Holds |
 |---|---|
-| `shell` | `ShellView`, the window owner: tile occupants and focus, input dispatch, rendering, drag and drop, chrome, dialogs and palette, hot reload, and session I/O. `aggregates` renders selection extents and totals prepared by grid tiles. Shared color helpers and `kbd` keep chrome presentation consistent. Tests live in `shell/tests/`. |
+| `shell` | `ShellView`, the window owner: tile occupants and focus, input dispatch, rendering, drag and drop, chrome (the status bar's first left segment is the stopped data-thread segment), dialogs and palette, hot reload, and session I/O. `aggregates` renders selection extents and totals prepared by grid tiles. Shared color helpers and `kbd` keep chrome presentation consistent. Tests live in `shell/tests/`. |
 | `shell/dialog` | Modal stack ownership, opening, shared-input synchronization, and focus restoration. Only the top dialog renders and receives keys. A kind cannot open twice; pop restores the covered dialog's text and caret. See [modal lifetime](../../docs/current/input-and-dialogs.md#modal-lifetime-and-focus). |
 | `shell/scope_expr_view` | Frame expression editing in Whole, Term, and Add modes. Whole/Add stage named-expression chips; `mod+s` saves typed text as a named definition. Term mode can replace one guarded term with a named reference. |
 | `shell/expr_suggest` | Shared expression-completion controller and renderer for frame, Scopes, and Expressions fields. Observes text and caret changes, requests values under reserved `EXPR_KEY`, and accepts rows through undoable range replacement. Tab accepts; Shift-Tab, Up/Down, and Ctrl-P/Ctrl-N move the highlight. Named rows stage references only in frame Whole/Add mode. Named-definition fields request unscoped values; unresolved scope references report an error before requesting. |
-| `module` | The module-hosting contract: `TileContent` (including `launch_context` and `launched`), `ModuleFactory` (including `accepts` and `launch_state`), `ModuleRoster`, `Delivery`, `StackHandle`. `module::recording` is the test double a downstream crate hosts a neighbour with. |
+| `module` | The module-hosting contract: `TileContent` (including `launch_context`, `launched`, and `autosize_columns`, whose default refuses with `colfit::NO_TABLE`; `tile::autosize_columns` calls it on the focused occupant only and shows a refusal as a notice), `ModuleFactory` (including `accepts` and `launch_state`), `ModuleRoster`, `Delivery`, `StackHandle`. `module::recording` is the test double a downstream crate hosts a neighbour with. |
 | `shell/objectdialog` | Domain drafts, staged editing, validation, overrides, and debounced persistence. `render::open_object` opens a named object's edit stage or reports that it is undefined. `apply::queue_object` queues a whole user-layer definition with pending edits. The Expressions adapter validates named definitions and identifies referring scopes before deletion. See [configuration dialogs](../../docs/current/configuration-dialogs.md) for ownership and failure boundaries. |
 
 ## Globals
@@ -89,7 +90,11 @@ change most often hits:
   `window.open_dialog`. A mouse-opened dialog relies on the
   `prevent_default` inside that door. Openers check `dialog::can_open` before
   installing state: a duplicate kind would overwrite the covered dialog's draft.
-  Unclaimed dialog-opening chords and the palette can open above a dialog;
+  Object dialogs check `dialog::can_open_object` instead: they stack per domain,
+  and `objectdialog::render::open` parks the covered state in its stack entry
+  (`ShellModal::parked_object`) before installing its own. Code that must reach
+  a covered object dialog (deliveries, reload refreshes, write reverts) iterates
+  `object_dialog` plus `dialog::parked_objects_mut`. Unclaimed dialog-opening chords and the palette can open above a dialog;
   tile command lines, find prompts, and stack lists are refused while it is open.
 - The pure state of a dialog is the truth; `dialog::sync_dialog_text`
   reconciles the shared input's text and focus after state transitions.
@@ -121,5 +126,9 @@ change most often hits:
   and catalog-demand changes require a caller notification even though they
   leave diagnostic data versions unchanged. Explicit catalog demand survives
   the last diagnostics tile hiding.
+- A stopped data thread is recorded once and never cleared: nothing restarts
+  it, so its status segment stays until Geode restarts. The segment's text and
+  tooltip are built in `note_thread_stopped`, not at paint. See
+  [stopped threads and refusals](../../docs/current/shell.md#stopped-threads-and-refusals).
 - Config-load diagnostics replace a batch; data conditions append separately.
   Keep their lifetimes distinct so a reload cannot hide a data-layer error.

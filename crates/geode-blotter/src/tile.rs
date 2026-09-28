@@ -21,6 +21,9 @@ use geode_core::snapshot::Snapshot;
 use geode_core::view::ViewSpec;
 use geode_data::{DataHandle, QueryParams};
 use geode_shell::actions::ActionId;
+use geode_shell::colfit::{
+    FitMetrics, FittedWidths, NOTHING_TO_FIT, SESSION_KEY, widths_from_record, widths_to_toml,
+};
 use geode_shell::fonts;
 use geode_shell::frame::{Frame, FrameVersions, PublicationWatch};
 use geode_shell::keymap::KeyContext;
@@ -33,6 +36,7 @@ use geode_shell::tiling::TileId;
 use geode_shell::tips;
 use geode_shell::vimfind::{FindDirection, FindStyle};
 use geode_shell::vimnav::NavCommand;
+use geode_tile::notice::{self, Notice};
 use gpui::prelude::*;
 use gpui::{
     App, ClipboardItem, Context, ElementId, Entity, IntoElement, SharedString, Window, div,
@@ -174,9 +178,9 @@ pub struct BlotterTile {
     in_flight: Option<Instant>,
     delivered_at: Option<Instant>,
     visible: bool,
-    /// Header notice with its semantic tone. Dropped sorts and selections use
-    /// `WarningText`; query/configuration failures use `DangerText`.
-    pub error: Option<(String, Tone)>,
+    /// Header notice. Dropped sorts and selections are warnings; query and
+    /// configuration failures are danger.
+    pub error: Option<Notice>,
     find: Option<FindState>,
     /// Successful outcome waiting for the frame's flip barrier, with the
     /// query's grouping and frame versions. `deliver` promotes it if its
@@ -223,6 +227,10 @@ impl BlotterTile {
                     .map(|v| v.name.clone())
             })
             .unwrap_or_default();
+        let restored_view_kept = restored
+            .and_then(|t| t.get("view"))
+            .and_then(|v| v.as_str())
+            == Some(view_name.as_str());
         let pin = match restored {
             Some(t) if t.get("pinned_slot").and_then(|v| v.as_integer()).is_some() => {
                 Pin::Slot(t["pinned_slot"].as_integer().unwrap() as u8)
@@ -313,6 +321,13 @@ impl BlotterTile {
         let table = cx.new(|cx| {
             let mut delegate = BlotterDelegate::new();
             delegate.line_numbers = line_numbers;
+            // A missing or garbled record is an empty map, never a refusal.
+            // Widths fitted for a view the record names but that no longer
+            // exists belong to other columns: the fallback view starts
+            // without them.
+            if restored_view_kept {
+                delegate.fitted = widths_from_record(restored);
+            }
             TableState::new(delegate, window, cx)
                 .row_selectable(true)
                 .col_selectable(false)
@@ -649,10 +664,9 @@ impl BlotterTile {
                 t.delegate_mut().dropped_sort.take()
             });
             if let Some(name) = dropped_sort {
-                self.error = Some((
-                    format!("sort on '{name}' dropped: the column is no longer in this view"),
-                    Tone::WarningText,
-                ));
+                self.error = Some(Notice::warning(format!(
+                    "sort on '{name}' dropped: the column is no longer in this view"
+                )));
             }
             self.take_selection_notice(cx);
         }
@@ -664,10 +678,10 @@ impl BlotterTile {
         // unchanged, as with tile-local filters and grouping overrides.
         self.staged = None;
         let Some(view) = self.view() else {
-            self.error = Some((
-                format!("view '{}' is not configured", self.view_name),
-                Tone::DangerText,
-            ));
+            self.error = Some(Notice::danger(format!(
+                "view '{}' is not configured",
+                self.view_name
+            )));
             cx.notify();
             return;
         };
@@ -704,7 +718,7 @@ impl BlotterTile {
                 // following tile waits out `FLIP_DEADLINE`. `acted` stays
                 // set: redefining the name bumps the config version, which
                 // is the retry.
-                self.error = Some((message, Tone::DangerText));
+                self.error = Some(Notice::danger(message));
                 // Supersede any query still in flight: its outcome is for the
                 // previous scope and must not paint over this error.
                 self.tag += 1;
@@ -741,11 +755,10 @@ impl BlotterTile {
             as_of,
             max_depth,
         });
-        if !queued {
-            self.error = Some((
-                "query refused: the data service is busy or gone".into(),
-                Tone::DangerText,
-            ));
+        if let Err(refusal) = queued {
+            // A stopped refusal retries on the next frame change too: each
+            // attempt costs nothing and re-reports the same kind.
+            self.error = Some(Notice::danger(format!("query refused: {refusal}")));
             self.in_flight = None;
             // A refused submit has no future outcome. Arrive at the barrier so
             // other tiles can proceed, then clear `acted` so the next frame
@@ -811,7 +824,7 @@ impl BlotterTile {
                 }
             }
             Err(e) => {
-                self.error = Some((e, Tone::DangerText));
+                self.error = Some(Notice::danger(e));
                 // A failed outcome still arrives at the barrier, allowing other
                 // tiles to promote while this tile keeps its last good snapshot.
                 self.frame.update(cx, |f, cx| {
@@ -1183,12 +1196,20 @@ impl BlotterTile {
                 Lost::Row => "selection cleared: anchor row no longer shown",
                 Lost::Column => "selection cleared: anchor column no longer shown",
             };
-            self.error = Some((text.into(), Tone::WarningText));
+            self.error = Some(Notice::warning(text));
         }
     }
 
-    pub fn command(&mut self, line: &str, cx: &mut Context<Self>) -> Result<(), String> {
+    pub fn command(
+        &mut self,
+        line: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
         match parse(line)? {
+            Command::Autosize { reset } => self
+                .autosize_columns(reset, window, cx)
+                .map_err(str::to_string)?,
             Command::Group(g) => {
                 self.pin = Pin::Grouping(g);
                 self.requery(cx);
@@ -1251,7 +1272,12 @@ impl BlotterTile {
                     return Err(format!("no view named '{name}'"));
                 }
                 self.view_name = name;
-                self.with_delegate(cx, |d| d.plan = None);
+                // Another view is another column set: its fitted widths
+                // would name columns that may mean something else there.
+                self.with_delegate(cx, |d| {
+                    d.plan = None;
+                    d.fitted.clear();
+                });
                 self.requery(cx);
             }
             Command::Sort { column, order } => {
@@ -1283,6 +1309,40 @@ impl BlotterTile {
                 self.table.update(cx, |t, cx| t.refresh(cx));
             }
         }
+        cx.notify();
+        Ok(())
+    }
+
+    /// Fit every column to its header and the loaded rows (`reset`:
+    /// drop the fitted widths), then refresh so the table re-reads
+    /// `column()`. The one route behind both `:autosize` and the shell's
+    /// `tile::autosize_columns`. Measures on the UI thread at the window's
+    /// current rem, never in render; see `BlotterDelegate::fit_columns`
+    /// for which rows count.
+    ///
+    /// With nothing loaded (no snapshot yet, or no rows) a fit refuses with
+    /// [`NOTHING_TO_FIT`] and the widths already held stay; a reset always
+    /// runs.
+    pub fn autosize_columns(
+        &mut self,
+        reset: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), &'static str> {
+        let fitted = if reset {
+            FittedWidths::new()
+        } else {
+            let metrics = FitMetrics::xsmall_mono(window.rem_size());
+            self.table
+                .read(cx)
+                .delegate()
+                .fit_columns(&metrics, cx)
+                .ok_or(NOTHING_TO_FIT)?
+        };
+        self.table.update(cx, |t, cx| {
+            t.delegate_mut().fitted = fitted;
+            t.refresh(cx);
+        });
         cx.notify();
         Ok(())
     }
@@ -1399,7 +1459,7 @@ impl BlotterTile {
         cx.notify();
     }
 
-    pub fn serialize(&self) -> toml::Table {
+    pub fn serialize(&self, cx: &App) -> toml::Table {
         let mut t = toml::Table::new();
         t.insert("view".into(), toml::Value::String(self.view_name.clone()));
         match &self.pin {
@@ -1427,6 +1487,9 @@ impl BlotterTile {
                 filter.insert("text".into(), toml::Value::String(text.clone()));
             }
             t.insert("filter".into(), toml::Value::Table(filter));
+        }
+        if let Some(w) = widths_to_toml(&self.table.read(cx).delegate().fitted) {
+            t.insert(SESSION_KEY.into(), w);
         }
         t
     }
@@ -1460,7 +1523,7 @@ impl BlotterTile {
     /// The tile's current notice or error text, as the header shows it.
     #[cfg(test)]
     pub fn error_text(&self) -> Option<String> {
-        self.error.as_ref().map(|(e, _)| e.clone())
+        self.error.as_ref().map(|e| e.text().to_string())
     }
 
     /// Freshness readouts using render's clock lookup, formatting, and
@@ -1706,12 +1769,8 @@ impl gpui::Render for BlotterTile {
         {
             header = header.child(div().child("…"));
         }
-        if let Some((e, tone)) = &self.error {
-            header = header.child(
-                div()
-                    .text_color(chip::chip_paint(theme, *tone).text)
-                    .child(e.clone()),
-            );
+        if let Some(n) = &self.error {
+            header = header.child(notice::render(n, theme));
         }
 
         // Footer: counts and legends.
@@ -1805,6 +1864,7 @@ mod tests {
     use geode_shell::module::FindEvent;
     use geode_shell::tiling::TileId;
     use geode_shell::vimfind::FindStyle;
+    use geode_tile::notice::Notice;
     use gpui::px;
     use gpui::{Modifiers, MouseButton};
     use std::sync::Arc;
@@ -2196,7 +2256,7 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let (h, vcx) = open_with_views(cx, None, views_with_explicit_default("wide"));
-        let state = h.tile.read_with(&vcx, |t, _| t.serialize());
+        let state = h.tile.read_with(&vcx, |t, cx| t.serialize(cx));
         assert_eq!(state["view"].as_str(), Some("wide"));
     }
 
@@ -2417,8 +2477,8 @@ mod tests {
             ))
         });
         let (h, mut cx) = open(cx);
-        h.tile.update(&mut cx, |t, cx| {
-            t.command("asof 2030-06-15 13:00", cx).unwrap()
+        h.tile.update_in(&mut cx, |t, window, cx| {
+            t.command("asof 2030-06-15 13:00", window, cx).unwrap()
         });
 
         let before = h.tile.read_with(&cx, |t, _| t.asof_chip.to_string());
@@ -2478,8 +2538,9 @@ mod tests {
         );
         assert!(h.requests.try_recv().is_err());
 
-        h.tile
-            .update(&mut cx, |t, cx| t.command("group lhu", cx).unwrap());
+        h.tile.update_in(&mut cx, |t, window, cx| {
+            t.command("group lhu", window, cx).unwrap()
+        });
         let p = next_query(&h.requests);
         assert_eq!(
             p.grouping.as_deref(),
@@ -2494,8 +2555,9 @@ mod tests {
             h.requests.recv_timeout(Duration::from_millis(200)).is_err(),
             "a pinned tile does not follow the slot"
         );
-        h.tile
-            .update(&mut cx, |t, cx| t.command("unpin", cx).unwrap());
+        h.tile.update_in(&mut cx, |t, window, cx| {
+            t.command("unpin", window, cx).unwrap()
+        });
         let p = next_query(&h.requests);
         assert_eq!(
             p.grouping.as_deref(),
@@ -2535,6 +2597,38 @@ mod tests {
         assert!(
             h.tile.read_with(&vcx, |t, _| t.acted.is_none()),
             "`acted` is cleared, so the next frame change is a real retry"
+        );
+    }
+
+    /// A refusal names its kind: a full queue is busy and a later change
+    /// can land; a stopped service is not coming back.
+    #[gpui::test]
+    fn a_refused_query_says_busy_or_stopped(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.tile.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        let first = next_query(&h.requests);
+        deliver(&h, &mut vcx, first.tag, Ok(snapshot()));
+        let change = |vcx: &mut gpui::VisualTestContext| {
+            h.frame.update(vcx, |f, cx| {
+                f.set_as_of(AsOf::At(chrono::Utc::now()));
+                cx.notify();
+            });
+        };
+        let error = |vcx: &gpui::VisualTestContext| {
+            h.tile
+                .read_with(vcx, |t, _| t.error.as_ref().map(|e| e.text().to_string()))
+        };
+        h.data.fill_for_tests();
+        change(&mut vcx);
+        assert_eq!(
+            error(&vcx).as_deref(),
+            Some("query refused: the data service is busy")
+        );
+        h.data.shutdown();
+        change(&mut vcx);
+        assert_eq!(
+            error(&vcx).as_deref(),
+            Some("query refused: the data service has stopped")
         );
     }
 
@@ -2581,10 +2675,7 @@ mod tests {
         );
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.error.clone()),
-            Some((
-                "named expression 'gone' is missing".to_string(),
-                Tone::DangerText
-            ))
+            Some(Notice::danger("named expression 'gone' is missing"))
         );
         assert!(
             !h.frame.read_with(&vcx, |f, _| f.barrier_open()),
@@ -2592,7 +2683,9 @@ mod tests {
         );
         deliver(&h, &mut vcx, in_flight.tag, Ok(snapshot2()));
         assert_eq!(
-            h.tile.read_with(&vcx, |t, _| t.error.clone()).map(|e| e.0),
+            h.tile
+                .read_with(&vcx, |t, _| t.error.clone())
+                .map(|e| e.text().to_string()),
             Some("named expression 'gone' is missing".to_string()),
             "the previous scope's outcome is stale"
         );
@@ -2654,8 +2747,9 @@ mod tests {
             .read_with(&cx, |t, cx| t.table().read(cx).delegate().shown.clone());
         assert_eq!(rows, vec![0, 1, 2], "a stale tag changed nothing");
 
-        h.tile
-            .update(&mut cx, |t, cx| t.command("view wide", cx).unwrap());
+        h.tile.update_in(&mut cx, |t, window, cx| {
+            t.command("view wide", window, cx).unwrap()
+        });
         let p2 = next_query(&h.requests);
         deliver(&h, &mut cx, p2.tag, Err("binder error".into()));
         let (rows, error) = h.tile.read_with(&cx, |t, cx| {
@@ -2664,7 +2758,7 @@ mod tests {
         assert_eq!(rows, vec![0, 1, 2], "the last good snapshot stays");
         assert_eq!(
             error,
-            Some(("binder error".to_string(), Tone::DangerText)),
+            Some(Notice::danger("binder error")),
             "a delivered error still paints danger"
         );
     }
@@ -3358,25 +3452,29 @@ mod tests {
         let (h, mut cx) = open(cx);
         h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
         let _ = next_query(&h.requests);
-        h.tile
-            .update(&mut cx, |t, cx| t.command("asof 14:05", cx).unwrap());
+        h.tile.update_in(&mut cx, |t, window, cx| {
+            t.command("asof 14:05", window, cx).unwrap()
+        });
         let p = next_query(&h.requests);
         assert!(matches!(p.as_of, geode_core::query::AsOf::At(_)));
-        h.tile
-            .update(&mut cx, |t, cx| t.command("asof clear", cx).unwrap());
+        h.tile.update_in(&mut cx, |t, window, cx| {
+            t.command("asof clear", window, cx).unwrap()
+        });
         let p = next_query(&h.requests);
         assert!(p.as_of.is_live());
 
         let err = h
             .tile
-            .update(&mut cx, |t, cx| t.command("sort nonesuch", cx))
+            .update_in(&mut cx, |t, window, cx| {
+                t.command("sort nonesuch", window, cx)
+            })
             .unwrap_err();
         assert!(err.contains("nonesuch"));
         let words = h.tile.read_with(&cx, |t, cx| t.completions("sort ", 5, cx));
         assert_eq!(words, vec!["clear", "daily_trading_pnl", "delta01"]);
         let words = h.tile.read_with(&cx, |t, cx| t.completions("view ", 5, cx));
         assert_eq!(words, vec!["tree", "wide"]);
-        let state = h.tile.read_with(&cx, |t, _| t.serialize());
+        let state = h.tile.read_with(&cx, |t, cx| t.serialize(cx));
         assert_eq!(state["view"].as_str(), Some("tree"));
         assert_eq!(state["unscoped"].as_bool(), Some(false));
     }
@@ -3455,8 +3553,9 @@ mod tests {
             Some(("delta01".to_string(), SortOrder::AbsDesc))
         );
 
-        h.tile.update(&mut cx, |t, cx| {
-            t.command("sort daily_trading_pnl abs asc", cx).unwrap()
+        h.tile.update_in(&mut cx, |t, window, cx| {
+            t.command("sort daily_trading_pnl abs asc", window, cx)
+                .unwrap()
         });
         assert_eq!(
             sort(&mut cx),
@@ -3467,14 +3566,16 @@ mod tests {
             "delta01",
             "the marker follows the sort column"
         );
-        h.tile
-            .update(&mut cx, |t, cx| t.command("sort delta01 abs", cx).unwrap());
+        h.tile.update_in(&mut cx, |t, window, cx| {
+            t.command("sort delta01 abs", window, cx).unwrap()
+        });
         assert_eq!(
             sort(&mut cx),
             Some(("delta01".to_string(), SortOrder::AbsDesc))
         );
-        h.tile
-            .update(&mut cx, |t, cx| t.command("sort clear", cx).unwrap());
+        h.tile.update_in(&mut cx, |t, window, cx| {
+            t.command("sort clear", window, cx).unwrap()
+        });
         assert_eq!(sort(&mut cx), None);
     }
 
@@ -3488,8 +3589,9 @@ mod tests {
         let p = next_query(&h.requests);
         deliver(&h, &mut cx, p.tag, Ok(snapshot()));
 
-        h.tile
-            .update(&mut cx, |t, cx| t.command("sort delta01", cx).unwrap());
+        h.tile.update_in(&mut cx, |t, window, cx| {
+            t.command("sort delta01", window, cx).unwrap()
+        });
         assert!(
             h.tile
                 .read_with(&cx, |t, cx| t.table().read(cx).delegate().sort.is_some()),
@@ -3518,17 +3620,18 @@ mod tests {
                 .read_with(&cx, |t, cx| t.table().read(cx).delegate().sort.is_none()),
             "the sorted column is gone, so the sort is gone"
         );
-        let (notice, tone) = h
+        let notice = h
             .tile
             .read_with(&cx, |t, _| t.error.clone())
             .expect("a notice names the dropped sort");
         assert!(
-            notice.contains("delta01"),
-            "the notice names the column whose sort went: {notice}"
+            notice.text().contains("delta01"),
+            "the notice names the column whose sort went: {}",
+            notice.text()
         );
         assert_eq!(
-            tone,
-            Tone::WarningText,
+            notice.tone(),
+            notice::Tone::Warning,
             "a dropped sort is a state change the trader caused, not an error"
         );
     }
@@ -3745,8 +3848,8 @@ mod tests {
         let _ = next_query(&h.requests); // A's initial query
         let _ = next_query(&h.requests); // B's initial query
 
-        h.a.update(&mut vcx, |t, cx| {
-            t.command("filter model_code = 'EURP'", cx).unwrap()
+        h.a.update_in(&mut vcx, |t, window, cx| {
+            t.command("filter model_code = 'EURP'", window, cx).unwrap()
         });
         let p = next_query(&h.requests);
         assert_eq!(p.key, QueryKey(7), "only tile A requeried");
@@ -3771,7 +3874,7 @@ mod tests {
             "B carries no such pill"
         );
 
-        let state = h.a.read_with(&vcx, |t, _| t.serialize());
+        let state = h.a.read_with(&vcx, |t, cx| t.serialize(cx));
         assert_eq!(
             state["filter"]["expr"].as_str(),
             Some("model_code = 'EURP'")
@@ -3788,7 +3891,9 @@ mod tests {
         assert_eq!(restored_scope, a_scope, "the round-tripped filter matches");
 
         // `:filter clear` clears and the pill goes.
-        h.a.update(&mut vcx, |t, cx| t.command("filter clear", cx).unwrap());
+        h.a.update_in(&mut vcx, |t, window, cx| {
+            t.command("filter clear", window, cx).unwrap()
+        });
         let p2 = next_query(&h.requests);
         assert_eq!(p2.key, QueryKey(7));
         assert!(p2.scope.expression.is_none());
@@ -3808,8 +3913,8 @@ mod tests {
         let _ = next_query(&h.requests); // A's initial query
         let _ = next_query(&h.requests); // B's initial query
 
-        h.a.update(&mut vcx, |t, cx| {
-            t.command("filter model_code = 'EURP'", cx).unwrap()
+        h.a.update_in(&mut vcx, |t, window, cx| {
+            t.command("filter model_code = 'EURP'", window, cx).unwrap()
         });
         let _ = next_query(&h.requests);
 
@@ -3847,8 +3952,8 @@ mod tests {
         let _ = next_query(&h.requests); // A's initial query
         let _ = next_query(&h.requests); // B's initial query
 
-        h.a.update(&mut vcx, |t, cx| {
-            t.command("filter text underlying", cx).unwrap()
+        h.a.update_in(&mut vcx, |t, window, cx| {
+            t.command("filter text underlying", window, cx).unwrap()
         });
         let _ = next_query(&h.requests);
 
@@ -3885,8 +3990,9 @@ mod tests {
         h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
         let _ = next_query(&h.requests);
 
-        h.tile
-            .update(&mut cx, |t, cx| t.command("unscoped", cx).unwrap());
+        h.tile.update_in(&mut cx, |t, window, cx| {
+            t.command("unscoped", window, cx).unwrap()
+        });
         let _ = next_query(&h.requests);
 
         // Give the frame a scope too, to prove it's excluded once
@@ -3904,8 +4010,9 @@ mod tests {
             "unscoped: the frame's own scope change is not followed"
         );
 
-        h.tile
-            .update(&mut cx, |t, cx| t.command("filter text x", cx).unwrap());
+        h.tile.update_in(&mut cx, |t, window, cx| {
+            t.command("filter text x", window, cx).unwrap()
+        });
         let p = next_query(&h.requests);
         assert_eq!(p.scope.text.as_deref(), Some("x"));
         assert!(
@@ -3925,8 +4032,9 @@ mod tests {
         let _ = next_query(&h.requests);
 
         // Pinning the frame's current value still stops following.
-        h.tile
-            .update(&mut cx, |t, cx| t.command("asof live", cx).unwrap());
+        h.tile.update_in(&mut cx, |t, window, cx| {
+            t.command("asof live", window, cx).unwrap()
+        });
         let p = next_query(&h.requests);
         assert!(
             p.as_of.is_live(),
@@ -3942,14 +4050,16 @@ mod tests {
             h.requests.recv_timeout(Duration::from_millis(200)).is_err(),
             "a tile pinned to the frame's own value still does not follow it"
         );
-        h.tile
-            .update(&mut cx, |t, cx| t.command("asof clear", cx).unwrap());
+        h.tile.update_in(&mut cx, |t, window, cx| {
+            t.command("asof clear", window, cx).unwrap()
+        });
         let _ = next_query(&h.requests);
 
         let frame_as_of_version = h.frame.read_with(&cx, |f, _| f.versions().as_of);
 
-        h.tile
-            .update(&mut cx, |t, cx| t.command("asof 14:05", cx).unwrap());
+        h.tile.update_in(&mut cx, |t, window, cx| {
+            t.command("asof 14:05", window, cx).unwrap()
+        });
         let p = next_query(&h.requests);
         assert!(
             matches!(p.as_of, AsOf::At(_)),
@@ -3969,8 +4079,9 @@ mod tests {
             TileAsOf::Pinned(AsOf::At(_))
         ));
 
-        h.tile
-            .update(&mut cx, |t, cx| t.command("asof clear", cx).unwrap());
+        h.tile.update_in(&mut cx, |t, window, cx| {
+            t.command("asof clear", window, cx).unwrap()
+        });
         let p = next_query(&h.requests);
         assert!(
             matches!(p.as_of, AsOf::At(_)),
@@ -3978,8 +4089,9 @@ mod tests {
         );
 
         // Pinning the same value again is a no-op: no requery.
-        h.tile
-            .update(&mut cx, |t, cx| t.command("asof clear", cx).unwrap());
+        h.tile.update_in(&mut cx, |t, window, cx| {
+            t.command("asof clear", window, cx).unwrap()
+        });
         assert!(
             h.requests.recv_timeout(Duration::from_millis(200)).is_err(),
             "clearing an already-following tile requeries nothing"
@@ -3992,8 +4104,9 @@ mod tests {
         });
         let p = next_query(&h.requests);
         assert!(matches!(p.as_of, AsOf::At(_)), "a following tile follows");
-        h.tile
-            .update(&mut cx, |t, cx| t.command("asof live", cx).unwrap());
+        h.tile.update_in(&mut cx, |t, window, cx| {
+            t.command("asof live", window, cx).unwrap()
+        });
         let p = next_query(&h.requests);
         assert!(p.as_of.is_live(), "pinned to live under a historical frame");
         assert!(
@@ -4014,8 +4127,9 @@ mod tests {
         let (h, mut cx) = open(cx);
         h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
         let _ = next_query(&h.requests);
-        h.tile
-            .update(&mut cx, |t, cx| t.command("asof 14:05", cx).unwrap());
+        h.tile.update_in(&mut cx, |t, window, cx| {
+            t.command("asof 14:05", window, cx).unwrap()
+        });
         let p = next_query(&h.requests);
         deliver(&h, &mut cx, p.tag, Ok(snapshot()));
 
@@ -4067,8 +4181,9 @@ mod tests {
             "following, live: no chip"
         );
 
-        h.tile
-            .update(&mut cx, |t, cx| t.command("asof live", cx).unwrap());
+        h.tile.update_in(&mut cx, |t, window, cx| {
+            t.command("asof live", window, cx).unwrap()
+        });
         let p = next_query(&h.requests);
         // A provenance carrying `as_of_request` — otherwise the frame
         // chip's `&& let Some(req) = &p.as_of_request` is already false
@@ -4092,8 +4207,9 @@ mod tests {
             "the provenance chip is suppressed while pinned"
         );
 
-        h.tile
-            .update(&mut cx, |t, cx| t.command("asof clear", cx).unwrap());
+        h.tile.update_in(&mut cx, |t, window, cx| {
+            t.command("asof clear", window, cx).unwrap()
+        });
         let _ = next_query(&h.requests);
         cx.update(|window, cx| {
             let _ = window.draw(cx);
@@ -4109,18 +4225,19 @@ mod tests {
     #[gpui::test]
     fn as_of_round_trips_through_the_session_record(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
-        let state = h.tile.read_with(&vcx, |t, _| t.serialize());
+        let state = h.tile.read_with(&vcx, |t, cx| t.serialize(cx));
         assert!(state.get("as_of").is_none(), "following writes nothing");
 
-        h.tile
-            .update(&mut vcx, |t, cx| t.command("asof live", cx).unwrap());
-        let state = h.tile.read_with(&vcx, |t, _| t.serialize());
+        h.tile.update_in(&mut vcx, |t, window, cx| {
+            t.command("asof live", window, cx).unwrap()
+        });
+        let state = h.tile.read_with(&vcx, |t, cx| t.serialize(cx));
         assert_eq!(state["as_of"].as_str(), Some("live"));
 
-        h.tile.update(&mut vcx, |t, cx| {
-            t.command("asof 2026-09-20 14:05", cx).unwrap()
+        h.tile.update_in(&mut vcx, |t, window, cx| {
+            t.command("asof 2026-09-20 14:05", window, cx).unwrap()
         });
-        let state = h.tile.read_with(&vcx, |t, _| t.serialize());
+        let state = h.tile.read_with(&vcx, |t, cx| t.serialize(cx));
         let written = state["as_of"].as_str().unwrap().to_string();
         assert!(
             chrono::DateTime::parse_from_rfc3339(&written).is_ok(),
@@ -4169,8 +4286,9 @@ mod tests {
         let p = next_query(&h.requests);
         deliver(&h, &mut cx, p.tag, Ok(snapshot()));
 
-        h.tile
-            .update(&mut cx, |t, cx| t.command("asof 14:05", cx).unwrap());
+        h.tile.update_in(&mut cx, |t, window, cx| {
+            t.command("asof 14:05", window, cx).unwrap()
+        });
         let p = next_query(&h.requests);
         deliver(&h, &mut cx, p.tag, Ok(snapshot()));
         cx.update(|window, cx| {
@@ -4219,7 +4337,7 @@ mod tests {
         ] {
             let err = h
                 .tile
-                .update(&mut cx, |t, cx| t.command(line, cx))
+                .update_in(&mut cx, |t, window, cx| t.command(line, window, cx))
                 .unwrap_err();
             assert_eq!(err, expected, "`:{line}`");
         }
@@ -4239,7 +4357,9 @@ mod tests {
 
         let err = h
             .tile
-            .update(&mut cx, |t, cx| t.command("filter nope = 1", cx))
+            .update_in(&mut cx, |t, window, cx| {
+                t.command("filter nope = 1", window, cx)
+            })
             .unwrap_err();
         assert!(err.contains("nope"), "{err}");
         assert!(
@@ -4886,8 +5006,9 @@ mod tests {
         let (h, mut cx) = open(cx);
         h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
         let _ = next_query(&h.requests); // the initial "tree" view query, unused
-        h.tile
-            .update(&mut cx, |t, cx| t.command("view wide", cx).unwrap());
+        h.tile.update_in(&mut cx, |t, window, cx| {
+            t.command("view wide", window, cx).unwrap()
+        });
         let p = next_query(&h.requests);
         deliver(&h, &mut cx, p.tag, Ok(flat_snapshot(200, 0.0)));
 
@@ -5044,10 +5165,7 @@ mod tests {
             "B keeps its last-good snapshot"
         );
         let b_error = h.b.read_with(&vcx, |t, _| t.error.clone());
-        assert_eq!(
-            b_error,
-            Some(("binder error".to_string(), Tone::DangerText))
-        );
+        assert_eq!(b_error, Some(Notice::danger("binder error")));
     }
 
     /// A grouping-pinned tile ignores grouping-only changes but still belongs
@@ -5067,7 +5185,9 @@ mod tests {
         deliver_to(&h.b, QueryKey(8), &mut vcx, pb0.tag, Ok(snapshot()));
 
         // Pin A to a fixed grouping.
-        h.a.update(&mut vcx, |t, cx| t.command("group lhu", cx).unwrap());
+        h.a.update_in(&mut vcx, |t, window, cx| {
+            t.command("group lhu", window, cx).unwrap()
+        });
         let pa_pin = next_query(&h.requests);
         deliver_to(&h.a, QueryKey(7), &mut vcx, pa_pin.tag, Ok(snapshot()));
 
@@ -5203,7 +5323,9 @@ mod tests {
         deliver_to(&h2.b, QueryKey(8), &mut vcx2, qb0.tag, Ok(snapshot()));
         let baseline2 = shown_texts(&h2.b, &vcx2);
 
-        h2.b.update(&mut vcx2, |t, cx| t.command("group lhu", cx).unwrap());
+        h2.b.update_in(&mut vcx2, |t, window, cx| {
+            t.command("group lhu", window, cx).unwrap()
+        });
         let qb_pin = next_query(&h2.requests);
         deliver_to(&h2.b, QueryKey(8), &mut vcx2, qb_pin.tag, Ok(snapshot()));
 
@@ -5425,8 +5547,8 @@ mod tests {
         // B's own `:filter` — a tile-local question. It requeries, but no
         // frame counter moves, so the staged V1 payload and the frame
         // still agree on every counter B follows.
-        h.b.update(&mut vcx, |t, cx| {
-            t.command("filter text spx", cx).unwrap();
+        h.b.update_in(&mut vcx, |t, window, cx| {
+            t.command("filter text spx", window, cx).unwrap();
         });
         let pb_filter = next_query(&h.requests);
         assert_eq!(pb_filter.key, QueryKey(8));
@@ -5573,6 +5695,8 @@ mod tests {
             "view wide",
             "sort delta01 desc",
             "sort clear",
+            "autosize",
+            "autosize reset",
             // The refusals.
             "scope lhu = 'L1'",
             "scope clear",
@@ -5603,7 +5727,9 @@ mod tests {
         };
         let before = read(&cx);
         for line in lines {
-            let _ = h.tile.update(&mut cx, |t, cx| t.command(line, cx));
+            let _ = h
+                .tile
+                .update_in(&mut cx, |t, window, cx| t.command(line, window, cx));
             while h.requests.try_recv().is_ok() {}
             assert_eq!(read(&cx), before, "`:{line}` reached the frame");
             assert!(
@@ -5620,6 +5746,201 @@ mod tests {
             );
         }
     }
+    /// `snapshot()` with `delta01` carrying numbers far wider than the
+    /// measure's configured width.
+    fn wide_snapshot() -> Arc<Snapshot> {
+        let mut columns = snapshot_columns();
+        for (meta, col) in &mut columns {
+            if meta.name == "delta01" {
+                *col = TestColumn::F64(vec![Some(123_456_789_012_345.0); 4]);
+            }
+        }
+        Arc::new(Snapshot::for_tests(columns, 2))
+    }
+
+    /// The width the delegate hands the table for the named column.
+    fn column_width(h: &Harness, cx: &gpui::VisualTestContext, name: &str) -> f32 {
+        use gpui_component::table::TableDelegate as _;
+        h.tile.read_with(cx, |t, cx| {
+            let d = t.table().read(cx).delegate();
+            let ix = d.plan.as_ref().unwrap().position_of(name).unwrap();
+            f32::from(d.column(ix, cx).width)
+        })
+    }
+
+    /// `:autosize` through the command route widens a column whose cells
+    /// outgrow its configured width; the fit survives the refresh a new
+    /// delivery runs (the delegate prefers the fitted width over the
+    /// plan's); `:autosize reset` returns to the configured width.
+    #[gpui::test]
+    fn autosize_fits_the_loaded_rows_survives_a_redelivery_and_resets(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(wide_snapshot()));
+        let configured = column_width(&h, &cx, "delta01");
+        content_command(&h, &mut cx, "autosize").unwrap();
+        let fitted = column_width(&h, &cx, "delta01");
+        assert!(
+            fitted > configured,
+            "fitted {fitted} should exceed configured {configured}"
+        );
+        let rem = cx.update(|window, _| f32::from(window.rem_size()));
+        let text_px = "123,456,789,012,345.00".chars().count() as f32 * rem * 0.875 * 0.6;
+        assert!(fitted >= text_px, "{fitted} holds {text_px}px of text");
+
+        // A redelivery rebuilds and refreshes: the fit stays.
+        h.tile.update(&mut cx, |t, cx| t.requery(cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(wide_snapshot()));
+        assert_eq!(column_width(&h, &cx, "delta01"), fitted);
+
+        content_command(&h, &mut cx, "autosize reset").unwrap();
+        assert_eq!(column_width(&h, &cx, "delta01"), configured);
+    }
+
+    /// A `:` line through the shell's door, `TileContent::command`.
+    fn content_command(
+        h: &Harness,
+        cx: &mut gpui::VisualTestContext,
+        line: &str,
+    ) -> Result<(), String> {
+        use geode_shell::module::TileContent as _;
+        let content = crate::content::BlotterContent::for_tile(h.tile.clone());
+        cx.update(|window, cx| content.command(line, window, cx))
+    }
+
+    /// A record carrying fitted widths for the `tree` view.
+    fn record_with_widths() -> toml::Table {
+        let mut widths = toml::Table::new();
+        widths.insert("delta01".into(), toml::Value::Float(200.0));
+        widths.insert(String::new(), toml::Value::Float(150.0));
+        let mut record = toml::Table::new();
+        record.insert("view".into(), toml::Value::String("tree".into()));
+        record.insert(
+            geode_shell::colfit::SESSION_KEY.into(),
+            toml::Value::Table(widths),
+        );
+        record
+    }
+
+    fn fitted_of(h: &Harness, cx: &gpui::VisualTestContext) -> geode_shell::colfit::FittedWidths {
+        h.tile
+            .read_with(cx, |t, cx| t.table().read(cx).delegate().fitted.clone())
+    }
+
+    /// With nothing loaded, `:autosize` refuses and leaves the restored
+    /// widths alone; `:autosize reset` still drops them.
+    #[gpui::test]
+    fn autosize_with_nothing_loaded_refuses_and_keeps_the_widths(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open_with(cx, Some(&record_with_widths()));
+        let before = fitted_of(&h, &cx);
+        assert_eq!(before.len(), 2);
+        assert_eq!(
+            content_command(&h, &mut cx, "autosize"),
+            Err(geode_shell::colfit::NOTHING_TO_FIT.to_string())
+        );
+        assert_eq!(fitted_of(&h, &cx), before);
+        content_command(&h, &mut cx, "autosize reset").unwrap();
+        assert!(fitted_of(&h, &cx).is_empty());
+    }
+
+    /// A record whose view no longer exists opens the fallback view without
+    /// the old view's widths.
+    #[gpui::test]
+    fn a_restored_record_for_a_missing_view_drops_its_widths(cx: &mut gpui::TestAppContext) {
+        let mut record = record_with_widths();
+        record.insert("view".into(), toml::Value::String("gone".into()));
+        let (h, cx) = open_with(cx, Some(&record));
+        assert!(fitted_of(&h, &cx).is_empty());
+    }
+
+    /// A regroup reaches the delegate with the next snapshot: the tree
+    /// column's fitted width goes (its labels and depths changed), the
+    /// measures' stay.
+    #[gpui::test]
+    fn a_regroup_drops_only_the_tree_columns_fitted_width(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(wide_snapshot()));
+        content_command(&h, &mut cx, "autosize").unwrap();
+        let fitted = fitted_of(&h, &cx);
+        assert!(fitted.contains_key("") && fitted.contains_key("delta01"));
+
+        content_command(&h, &mut cx, "group lhu").unwrap();
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(wide_snapshot()));
+        let after = fitted_of(&h, &cx);
+        assert!(!after.contains_key(""), "{after:?}");
+        assert_eq!(after.get("delta01"), fitted.get("delta01"));
+    }
+
+    /// A redelivery at the same grouping keeps the tree column's width.
+    #[gpui::test]
+    fn a_redelivery_at_the_same_grouping_keeps_the_tree_width(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(wide_snapshot()));
+        content_command(&h, &mut cx, "autosize").unwrap();
+        let fitted = fitted_of(&h, &cx);
+        h.tile.update(&mut cx, |t, cx| t.requery(cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(wide_snapshot()));
+        assert_eq!(fitted_of(&h, &cx), fitted);
+    }
+
+    /// Fitted widths ride the session record and come back on restore; a
+    /// view switch drops them; a garbled record restores none.
+    #[gpui::test]
+    fn autosize_widths_round_trip_the_session_and_a_view_switch_clears_them(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.tile.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut vcx, p.tag, Ok(wide_snapshot()));
+        h.tile
+            .update_in(&mut vcx, |t, window, cx| t.command("autosize", window, cx))
+            .unwrap();
+        let fitted = column_width(&h, &vcx, "delta01");
+        let state = h.tile.read_with(&vcx, |t, cx| t.serialize(cx));
+        assert!(
+            state.contains_key(geode_shell::colfit::SESSION_KEY),
+            "{state:?}"
+        );
+
+        let (h2, mut vcx2) = open_with(cx, Some(&state));
+        h2.tile.update(&mut vcx2, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h2.requests);
+        deliver(&h2, &mut vcx2, p.tag, Ok(snapshot()));
+        assert_eq!(
+            column_width(&h2, &vcx2, "delta01"),
+            fitted,
+            "restored before any refit, whatever the new rows hold"
+        );
+
+        h2.tile
+            .update_in(&mut vcx2, |t, window, cx| {
+                t.command("view wide", window, cx)
+            })
+            .unwrap();
+        let state = h2.tile.read_with(&vcx2, |t, cx| t.serialize(cx));
+        assert!(!state.contains_key(geode_shell::colfit::SESSION_KEY));
+
+        let mut garbled = toml::Table::new();
+        garbled.insert(
+            geode_shell::colfit::SESSION_KEY.into(),
+            toml::Value::String("wide".into()),
+        );
+        let (h3, vcx3) = open_with(cx, Some(&garbled));
+        let state = h3.tile.read_with(&vcx3, |t, cx| t.serialize(cx));
+        assert!(!state.contains_key(geode_shell::colfit::SESSION_KEY));
+    }
+
     fn publish_for(frame: &Entity<Frame>, vcx: &mut gpui::VisualTestContext, dataset: &str) {
         frame.update(vcx, |f, cx| {
             f.note_published(geode_shell::frame::Publish {

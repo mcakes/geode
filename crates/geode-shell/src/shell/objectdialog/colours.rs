@@ -18,6 +18,21 @@ use super::{Destination, Draft, Field, FieldKind};
 /// The config doc name (file stem), as `Config::layered_docs` keys it.
 pub const DOC: &str = geode_core::config::COLORS_DOC;
 
+/// The configured named colors, in declared order: what a column's `color` choice
+/// offers beside the reserved names.
+pub fn names(config: &Config) -> Vec<String> {
+    config
+        .doc(DOC)
+        .map(|doc| {
+            NamedColours::from_doc(doc)
+                .0
+                .names()
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The browse row's muted second line: `Definition::summary`, read
 /// through the very reader that decides what a color resolves to
 /// (`NamedColours::from_doc`) rather than a bespoke re-parse of the raw

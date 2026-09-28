@@ -8,11 +8,13 @@ publish.workspace = true
 bench = false
 
 # Shared series vocabulary lives in geode-core; geode-shell supplies hosting
-# and settings. Widgets provide date inputs, geode-chart owns chart painting,
-# and DataHandle is the module's interface to geode-data.
+# and settings, geode-tile the menus, popups and the notice line. Widgets
+# provide date inputs, geode-chart owns chart painting, and DataHandle is the
+# module's interface to geode-data.
 [dependencies]
 geode-core.workspace = true
 geode-shell.workspace = true
+geode-tile.workspace = true
 geode-widgets.workspace = true
 geode-chart.workspace = true
 geode-data = { path = "../geode-data" }

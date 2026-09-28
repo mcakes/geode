@@ -94,6 +94,7 @@ impl SubscriptionWorker {
     /// against it on its own thread, and a `DatasetSpec` is cloned once
     /// per source here rather than shared behind a lock that a validate
     /// would then take per message.
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         spec: &SourceSpec,
         dataset: DatasetSpec,
@@ -102,6 +103,7 @@ impl SubscriptionWorker {
         ingest: Arc<IngestHandle>,
         report_load: LoadReportSink,
         on_connection: HealthSink,
+        stopped: crate::service::EventSink,
     ) -> Result<SubscriptionWorker, AdapterError> {
         let (sink, rx) = MessageSink::bounded(MESSAGE_BOUND);
         // The counter first, then the sink MOVED into the adapter: after
@@ -122,9 +124,11 @@ impl SubscriptionWorker {
             failed_topics: HashSet::new(),
         };
         let window = spec.coalesce;
-        let thread = std::thread::Builder::new()
-            .name(format!("geode-subscribe-{}", spec.name))
-            .spawn(move || receiving.run(rx, window));
+        let thread = crate::supervise::spawn_supervised(
+            format!("geode-subscribe-{}", spec.name),
+            stopped,
+            move || receiving.run(rx, window),
+        );
         match thread {
             Ok(thread) => Ok(SubscriptionWorker {
                 subscription,
@@ -659,6 +663,7 @@ mod tests {
             Arc::clone(&ingest),
             report_load,
             on_connection,
+            crate::supervise::unwatched(),
         )
         .expect("the bus is open");
         Harness {
@@ -1104,5 +1109,42 @@ mod tests {
             opened.notify_all();
         }
         h.worker.shutdown();
+    }
+
+    #[test]
+    fn a_receiver_that_dies_is_declared() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
+        let ds = cvi_dataset();
+        store.apply_schema(&ds).unwrap();
+        Catalog::new(store.writer()).ensure_tables().unwrap();
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(ds.clone());
+        let (handle, _events) = IngestRunner::spawn_channel(store, schema);
+        let (bus, feed) = ChannelAdapter::new("test_bus");
+        let spec = SourceSpec {
+            adapter: "test_bus".into(),
+            document: Some("fake_cvi".into()),
+            topics: vec!["cvi/>".into()],
+            coalesce: Duration::ZERO,
+            ..SourceSpec::directory("cvi", "cvi_params", Vec::new())
+        };
+        let (stop, stops) = crate::supervise::tests_support::recording();
+        let mut worker = SubscriptionWorker::spawn(
+            &spec,
+            ds,
+            Arc::new(PanickingKind::new()),
+            bus.subscription().expect("the channel adapter subscribes"),
+            Arc::new(handle),
+            Arc::new(|_: &str, _: Health, _: String| panic!("the load report fell over")),
+            Arc::new(|_: ConnectionState| {}),
+            stop,
+        )
+        .expect("the bus is open");
+        feed.publish("cvi/SPX.Z", b"anything".to_vec());
+        let (thread, reason) = crate::supervise::tests_support::next_stop(&stops);
+        assert_eq!(thread, "geode-subscribe-cvi");
+        assert!(reason.contains("the load report fell over"), "{reason}");
+        worker.shutdown();
     }
 }

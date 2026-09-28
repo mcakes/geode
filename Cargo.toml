@@ -5,6 +5,7 @@ members = [
     "crates/geode-data",
     "crates/geode-shell",
     "crates/geode-widgets",
+    "crates/geode-tile",
     "crates/geode-blotter",
     "crates/geode-marketdata",
     "crates/geode-chart",
@@ -26,6 +27,7 @@ publish = false
 geode-core = { path = "crates/geode-core" }
 geode-shell = { path = "crates/geode-shell" }
 geode-widgets = { path = "crates/geode-widgets" }
+geode-tile = { path = "crates/geode-tile" }
 geode-pricing = { path = "crates/geode-pricing" }
 geode-chart = { path = "crates/geode-chart" }
 geode-timeseries = { path = "crates/geode-timeseries" }

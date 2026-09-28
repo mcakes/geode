@@ -256,6 +256,48 @@ impl Draft {
         }
     }
 
+    /// Put back `before` — the open bulk editor's undo. The edits come back
+    /// but delivery facts reached meanwhile win: a `Behind` this draft
+    /// reached since is kept, because a delivery that landed while the
+    /// editor was open is still news; and an `Editing` reached from a
+    /// `before` that was `Behind` is kept, because the base generation came
+    /// back and restoring the older `Behind` would name a delivery that is
+    /// no longer on offer. Otherwise `before`'s state returns, so a draft
+    /// that was `Sent` is `Sent` again. An empty result is `Clean` with no
+    /// base, since an empty draft is never behind.
+    pub fn restore_from(&mut self, before: Draft) {
+        let before_behind = matches!(before.state, DraftState::Behind { .. });
+        let keep = match &self.state {
+            DraftState::Behind { .. } => true,
+            DraftState::Editing => before_behind,
+            DraftState::Clean | DraftState::Sent { .. } => false,
+        };
+        let current = std::mem::take(&mut self.state);
+        *self = before;
+        if self.is_empty() {
+            self.state = DraftState::Clean;
+            self.base = None;
+        } else if keep {
+            self.state = current;
+        }
+    }
+
+    /// Whether `self` holds the same unsent work as `other`: the same cell,
+    /// attribute and row edits at the same keys. The state, the base and
+    /// the captured group counts are ignored, since a delivery moves those
+    /// without touching the work (a held generation, or an automatic
+    /// rebase that re-placed every edit where it was). An undo that
+    /// snapshots the draft after its own last write uses this to tell
+    /// whether anything else has written since: restoring over a revert,
+    /// a replace or another edit would silently bring back work the
+    /// trader or the policy discarded.
+    pub fn same_work_as(&self, other: &Draft) -> bool {
+        self.edits == other.edits
+            && self.labels == other.labels
+            && self.attrs == other.attrs
+            && self.rows == other.rows
+    }
+
     /// Borrow an existing `F64` or `I64` edit without converting its type.
     /// Other values and absent edits return `None`. Callers prefer this value
     /// over the underlying document so successive bumps compose.
@@ -471,33 +513,6 @@ impl Draft {
         self.base = None;
         self.state = DraftState::Clean;
         n
-    }
-
-    /// Add `delta` to the supplied current values, returning the number of
-    /// writes. Validate all results before changing the draft so a fractional
-    /// bump refused by an integer column cannot leave a partially bumped row.
-    ///
-    /// The caller supplies numeric candidates and their declared types, with
-    /// existing edits already included in each current value. [`bumped`] chooses
-    /// the result's type and refuses fractional deltas for integer columns.
-    pub fn bump(
-        &mut self,
-        cells: impl Iterator<Item = ((usize, usize), (String, String), Value, ColumnType)>,
-        delta: f64,
-        base: &DocumentBase,
-    ) -> Result<usize, String> {
-        // Compute every result before writing any edit: a typing refusal
-        // partway through must leave the whole draft unchanged.
-        let mut writes = Vec::new();
-        for (cell, labels, current, ty) in cells {
-            let value = bumped(&current, delta, ty, &labels.1)?;
-            writes.push((cell, labels, value));
-        }
-        let n = writes.len();
-        for (cell, labels, value) in writes {
-            self.set(cell, labels, value, base);
-        }
-        Ok(n)
     }
 
     /// Process delivery and report whether the draft state changed. Editing
@@ -1569,81 +1584,6 @@ mod tests {
     }
 
     #[test]
-    fn bump_adds_the_delta_to_each_cells_current_value() {
-        let mut draft = Draft::default();
-        let cells = vec![
-            ((0, 0), pair("T1", "-20"), Value::F64(1.0), ColumnType::F64),
-            ((0, 1), pair("T1", "-1"), Value::F64(2.5), ColumnType::F64),
-        ];
-        assert_eq!(draft.bump(cells.into_iter(), 0.5, &at(BASE)), Ok(2));
-        assert_eq!(draft.edits.get(&(0, 0)), Some(&Value::F64(1.5)));
-        assert_eq!(draft.edits.get(&(0, 1)), Some(&Value::F64(3.0)));
-        assert_eq!(draft.state, DraftState::Editing);
-        // Bumping again reads the caller's *current* value, which is the
-        // draft's own by then — the tile passes what the model paints.
-        let again = vec![((0, 0), pair("T1", "-20"), Value::F64(1.5), ColumnType::F64)];
-        assert_eq!(draft.bump(again.into_iter(), 0.5, &at(BASE)), Ok(1));
-        assert_eq!(draft.edits.get(&(0, 0)), Some(&Value::F64(2.0)));
-    }
-
-    #[test]
-    fn bump_lands_the_declared_type() {
-        let mut draft = Draft::default();
-        let n = draft
-            .bump(
-                [
-                    (
-                        (0, 0),
-                        ("a".into(), "x".into()),
-                        Value::F64(1.5),
-                        ColumnType::F64,
-                    ),
-                    (
-                        (0, 1),
-                        ("a".into(), "y".into()),
-                        Value::I64(3),
-                        ColumnType::I64,
-                    ),
-                ]
-                .into_iter(),
-                2.0,
-                &at("t0"),
-            )
-            .unwrap();
-        assert_eq!(n, 2);
-        assert_eq!(draft.edits[&(0, 0)], Value::F64(3.5));
-        assert_eq!(draft.edits[&(0, 1)], Value::I64(5));
-    }
-
-    #[test]
-    fn bump_refuses_a_fractional_delta_on_an_integer_column_before_writing() {
-        let mut draft = Draft::default();
-        let err = draft
-            .bump(
-                [
-                    (
-                        (0, 0),
-                        ("a".into(), "x".into()),
-                        Value::F64(1.5),
-                        ColumnType::F64,
-                    ),
-                    (
-                        (0, 1),
-                        ("a".into(), "y".into()),
-                        Value::I64(3),
-                        ColumnType::I64,
-                    ),
-                ]
-                .into_iter(),
-                0.5,
-                &at("t0"),
-            )
-            .unwrap_err();
-        assert!(err.contains("whole numbers") && err.contains("y"), "{err}");
-        assert!(draft.is_empty(), "no cell written on a refusal");
-    }
-
-    #[test]
     fn set_row_cell_moves_a_sent_draft_back_to_editing() {
         let mut draft = Draft::default();
         draft.insert_row("new-1".into(), None, &at("t0"));
@@ -1655,9 +1595,9 @@ mod tests {
     }
 
     /// `:bump` only ever reaches a `Number` cell — the tile decides that
-    /// through `MatrixModel::kind_of`, before it ever builds the iterator
-    /// `bump` takes — and `numeric_edit` is the door `MarketDataTile::bump`
-    /// reads an existing edit's CURRENT value through: `F64`/`I64` keep
+    /// through `MatrixModel::kind_of` before reading any value — and
+    /// `numeric_edit` is the door `MarketDataTile::current_numeric` reads
+    /// an existing edit's CURRENT value through: `F64`/`I64` keep
     /// their own type, a `Date`/`Utf8` edit (or no edit at all) answers
     /// `None` rather than being coerced.
     #[test]
@@ -2415,5 +2355,82 @@ mod tests {
         let back = Draft::from_toml(&d.to_toml());
         assert_eq!(back.rows, d.rows);
         assert_eq!(back.base, d.base);
+    }
+
+    #[test]
+    fn restore_from_puts_back_the_edits_and_keeps_a_behind_reached_meanwhile() {
+        let base = DocumentBase::default();
+        let mut before = Draft::default();
+        before.set((0, 0), ("a".into(), "x".into()), Value::F64(1.0), &base);
+        let mut now = before.clone();
+        now.set((0, 1), ("a".into(), "y".into()), Value::F64(2.0), &base);
+        let newer = DocumentBase {
+            as_of: "2026-09-27T10:00:00Z".into(),
+            generation: Some(8),
+        };
+        now.on_delivered(&newer);
+        assert!(now.is_behind());
+
+        now.restore_from(before.clone());
+        assert_eq!(now.len(), 1, "the step's edit is gone");
+        assert!(now.is_behind(), "the delivery is still news");
+
+        // Restoring to an empty draft is Clean: an empty draft is never behind.
+        now.restore_from(Draft::default());
+        assert!(now.is_empty() && !now.is_behind());
+    }
+
+    #[test]
+    fn restore_from_does_not_revive_a_behind_the_base_redelivery_ended() {
+        let base = DocumentBase::default();
+        let newer = DocumentBase {
+            as_of: "2026-09-27T10:00:00Z".into(),
+            generation: Some(8),
+        };
+        let mut before = Draft::default();
+        before.set((0, 0), ("a".into(), "x".into()), Value::F64(1.0), &base);
+        before.on_delivered(&newer);
+        assert!(before.is_behind());
+
+        let mut now = before.clone();
+        now.set((0, 1), ("a".into(), "y".into()), Value::F64(2.0), &base);
+        now.on_delivered(&base);
+        assert_eq!(now.state, DraftState::Editing, "the base came back");
+
+        now.restore_from(before.clone());
+        assert_eq!(now.len(), 1, "the step's edit is gone");
+        assert_eq!(now.edits, before.edits, "the earlier edits are back");
+        assert!(!now.is_behind(), "the stale delivery is not revived");
+    }
+
+    #[test]
+    fn same_work_ignores_state_base_and_group_counts_but_not_edits() {
+        let base = DocumentBase::default();
+        let mut after = Draft::default();
+        after.set((0, 0), ("a".into(), "x".into()), Value::F64(1.0), &base);
+        let mut now = after.clone();
+        now.on_delivered(&DocumentBase {
+            as_of: "2026-09-27T10:00:00Z".into(),
+            generation: Some(8),
+        });
+        now.base = Some(DocumentBase {
+            as_of: "2026-09-27T10:00:00Z".into(),
+            generation: Some(8),
+        });
+        now.groups.insert("2026-09-18".into(), 2);
+        assert!(now.same_work_as(&after), "a delivery moved no work");
+
+        let mut edited = after.clone();
+        edited.set((0, 1), ("a".into(), "y".into()), Value::F64(2.0), &base);
+        assert!(!edited.same_work_as(&after));
+        let mut reverted = after.clone();
+        reverted.revert();
+        assert!(!reverted.same_work_as(&after));
+        let mut attr = after.clone();
+        attr.set_attr("spot", Value::F64(1.0), &base);
+        assert!(!attr.same_work_as(&after));
+        let mut row = after.clone();
+        row.insert_row("new-1".into(), None, &base);
+        assert!(!row.same_work_as(&after));
     }
 }

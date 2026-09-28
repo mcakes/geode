@@ -12,7 +12,7 @@ Current behavior and rationale:
 | Module | Holds |
 |---|---|
 | [`lib`](src/lib.rs) | Module factory, action registration, default keymap, and `TileContent` adapter. |
-| [`sections`](src/sections.rs) | Pure row builders for `sources`, `data`, `config`, `log`, and `perf`; time and clock values are explicit inputs. |
+| [`sections`](src/sections.rs) | Pure row builders for `sources` (led by any stopped data threads), `data`, `config`, `log`, and `perf`; time and clock values are explicit inputs. |
 | [`commands`](src/commands.rs) | Parser and word completions for `:section <name>`, plus refusals for application-wide commands. No GPUI or I/O. |
 | [`tile`](src/tile.rs) | Observers, selected section, filter, cursor, log tail, and prepared rows rendered through `uniform_list`. |
 

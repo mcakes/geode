@@ -142,6 +142,9 @@ struct Harness {
     /// which is exactly what [`Harness::close_channel`] does on
     /// purpose, and why this is an `Option`.
     rx: RefCell<Option<Receiver<Request>>>,
+    /// The tile's own handle: `fill_for_tests` on it makes the next
+    /// submission refused `Busy`.
+    data: DataHandle,
 }
 
 /// A `Box<dyn ModuleFactory>` over the harness's own `Rc` — the
@@ -321,7 +324,7 @@ fn open_full(
         })
     });
     let (data, rx) = DataHandle::for_tests();
-    let factory = Rc::new(TimeseriesFactory::new(data, named_colors(0.0)));
+    let factory = Rc::new(TimeseriesFactory::new(data.clone(), named_colors(0.0)));
     let keymap = Rc::new(app_keymap(&factory));
     let slot: Rc<RefCell<Option<Built>>> = Rc::new(RefCell::new(None));
     let window = cx
@@ -382,6 +385,7 @@ fn open_full(
             shell_focus: built.shell_focus,
             factory,
             rx: RefCell::new(Some(rx)),
+            data,
         },
         vcx,
     )
@@ -742,14 +746,13 @@ impl Harness {
     fn menu_ticked(&self, vcx: &gpui::VisualTestContext) -> String {
         self.tile
             .read_with(vcx, |t, _| match t.popup() {
-                Some(Popup::Menu(m)) => m.rows.iter().find_map(|r| match r {
-                    menu::MenuRow::Action {
-                        title,
-                        checked: Some(true),
-                        ..
-                    } => Some(title.to_string()),
-                    _ => None,
-                }),
+                Some(Popup::Menu(m)) => m
+                    .menu
+                    .rows()
+                    .iter()
+                    .filter_map(|r| r.action())
+                    .find(|a| a.tick() == Some(true))
+                    .map(|a| a.title().to_string()),
                 _ => None,
             })
             .expect("a menu row is ticked")
@@ -1447,6 +1450,20 @@ fn a_delivery_becomes_the_chart_model_and_a_stale_tag_is_dropped(cx: &mut gpui::
 }
 
 #[gpui::test]
+fn a_refused_fetch_fails_the_chip_by_kind(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.visible(&mut vcx, true);
+    h.data.fill_for_tests();
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    assert!(matches!(&h.model(&vcx).slots()[0].state,
+        SlotState::Failed(e) if e == "fetch refused: the data service is busy"));
+    h.close_channel();
+    h.command(&mut vcx, "add NDX.close").unwrap();
+    assert!(matches!(&h.model(&vcx).slots()[1].state,
+        SlotState::Failed(e) if e == "fetch refused: the data service has stopped"));
+}
+
+#[gpui::test]
 fn a_refused_submit_notices_and_still_answers_the_barrier(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     h.visible(&mut vcx, true);
@@ -1459,12 +1476,10 @@ fn a_refused_submit_notices_and_still_answers_the_barrier(cx: &mut gpui::TestApp
     h.close_channel();
     let at = chrono::Utc::now() - chrono::Duration::days(30);
     open_barrier_on_as_of(&h, &mut vcx, &[QueryKey(TILE)], at);
-    assert!(
-        h.notice(&vcx)
-            .unwrap()
-            .starts_with("series request refused"),
-        "the refusal is named, not swallowed: {:?}",
-        h.notice(&vcx)
+    assert_eq!(
+        h.notice(&vcx).as_deref(),
+        Some("series request refused: the data service has stopped"),
+        "the refusal is named, not swallowed"
     );
     assert!(
         !h.frame.read_with(&vcx, |f, _| f.barrier_open()),
@@ -2630,8 +2645,8 @@ fn f_opens_the_frequency_menu_and_a_capped_row_is_disabled_with_its_reason(
     assert_eq!(
         h.tile
             .read_with(&vcx, |t, _| match t.popup() {
-                Some(Popup::Menu(m)) => match m.rows[capped].trailing() {
-                    Some(menu::Trailing::Text(text)) => Some(text.to_string()),
+                Some(Popup::Menu(m)) => match m.menu.rows()[capped].action().unwrap().trailing() {
+                    geode_tile::menu::Trailing::Text(text) => Some(text.to_string()),
                     _ => None,
                 },
                 _ => None,
@@ -2817,16 +2832,17 @@ impl Harness {
     fn menu_rows(&self, vcx: &gpui::VisualTestContext) -> Vec<(String, bool)> {
         self.tile.read_with(vcx, |t, _| match t.popup() {
             Some(Popup::Menu(m)) => m
-                .rows
+                .menu
+                .rows()
                 .iter()
                 .enumerate()
                 .map(|(i, r)| {
                     let title = match r {
-                        menu::MenuRow::Action { title, .. } => title.to_string(),
-                        menu::MenuRow::Separator => "---".into(),
-                        menu::MenuRow::Section(s) => format!("[{s}]"),
+                        geode_tile::menu::Row::Action(a) => a.title().to_string(),
+                        geode_tile::menu::Row::Separator => "---".into(),
+                        geode_tile::menu::Row::Section(s) => format!("[{s}]"),
                     };
-                    (title, i == m.highlighted)
+                    (title, Some(i) == m.menu.highlighted())
                 })
                 .collect(),
             _ => Vec::new(),
@@ -3635,12 +3651,12 @@ fn an_as_of_change_refreshes_an_open_frequency_menus_cap_reasons(cx: &mut gpui::
     h.keys(&mut vcx, "f");
     let enabled = |h: &Harness, vcx: &gpui::VisualTestContext, want: &str| {
         h.tile.read_with(vcx, |t, _| match t.popup() {
-            Some(Popup::Menu(m)) => m.rows.iter().any(|r| {
-                matches!(
-                    r,
-                    menu::MenuRow::Action { title, enabled: Ok(()), .. } if title.as_ref() == want
-                )
-            }),
+            Some(Popup::Menu(m)) => m
+                .menu
+                .rows()
+                .iter()
+                .filter_map(|r| r.action())
+                .any(|a| a.is_enabled() && a.title().as_ref() == want),
             _ => false,
         })
     };
@@ -3699,4 +3715,44 @@ fn a_view_move_while_a_query_is_out_waits_for_its_answer(cx: &mut gpui::TestAppC
     h.wheel(&mut vcx, at, -40., 0.);
     h.dispatch(&mut vcx, "rule", None);
     assert!(h.series_request().is_some(), "a query change never waits");
+}
+
+/// Publish the keymap a running app resolves this tile's hints through
+/// (this module's fragment, plus an optional user layer) as `Chords`, the
+/// way the shell does on a keymap reload.
+fn publish_chords(vcx: &mut gpui::VisualTestContext, user: Option<&str>) {
+    let bindings = crate::content::test_bindings(user);
+    vcx.update(|_, cx| cx.set_global(geode_shell::tips::Chords(std::sync::Arc::new(bindings))));
+    vcx.run_until_parked();
+}
+
+#[gpui::test]
+fn an_open_menu_follows_a_keymap_reload(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    publish_chords(&mut vcx, None);
+    h.keys(&mut vcx, "r");
+    let lane = |h: &Harness, vcx: &gpui::VisualTestContext| {
+        h.tile.read_with(vcx, |t, _| match t.popup() {
+            Some(Popup::Menu(m)) => m
+                .menu
+                .rows()
+                .iter()
+                .filter_map(|r| r.action())
+                .find(|a| a.title().as_ref() == "Custom dates…")
+                .map(|a| a.lane().clone()),
+            _ => None,
+        })
+    };
+    let c = geode_shell::keymap::parse_binding("c", geode_shell::keymap::Modifiers::NONE).unwrap();
+    assert_eq!(lane(&h, &vcx), Some(geode_tile::menu::Lane::Keys(c)));
+    publish_chords(
+        &mut vcx,
+        Some(
+            "[[bindings]]\ncontext = \"timeseries && mode == normal && popup == menu && menu == range\"\n[bindings.keys]\n\"c\" = \"none\"\n\"shift+c\" = \"timeseries::range_custom\"\n",
+        ),
+    );
+    let shift_c =
+        geode_shell::keymap::parse_binding("shift+c", geode_shell::keymap::Modifiers::NONE)
+            .unwrap();
+    assert_eq!(lane(&h, &vcx), Some(geode_tile::menu::Lane::Keys(shift_c)));
 }

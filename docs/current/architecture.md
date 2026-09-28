@@ -11,17 +11,27 @@ Dependencies point toward smaller and more stable crates:
 ```text
                          geode-app
                  composition and process setup
-                    /         |          \
-             feature modules  |       geode-data
-               /      \       |           |
-        geode-shell   shared widgets   geode-core
-               \        |                 /
-                └──── geode-core ─────────┘
+                  /           |             \
+          feature modules     |          geode-data
+            |       \         |              |
+            |    geode-tile   |              |
+            |       /         |              |
+            └──► geode-shell ◄┘              |
+                     |                       |
+               geode-widgets                 |
+                     |                       |
+                     └─────► geode-core ◄────┘
 
 calculation leaf: geode-pricing ─────────────────► geode-core
 pure presentation: geode-chart, geode-widgets ───► geode-core
 wire formats: geode-documents ───────────────────► geode-core
 ```
+
+A feature module depends on `geode-shell` directly (the `TileContent`
+contract, key chips, the rem scale) as well as through `geode-tile`, and may
+also name `geode-widgets`, `geode-chart` and `geode-core` directly.
+`geode-diagnostics` has no popover, menu, confirm or notice line and does not
+depend on `geode-tile`.
 
 `geode-core` is shared vocabulary without window, database, or network
 ownership. Typed interpretation and merging are I/O-free; its configuration
@@ -33,6 +43,13 @@ and pricing requests.
 `geode-shell` owns the window and interaction model. It does not depend on the
 data service or on feature modules. `geode-data` owns sources, DuckDB, and
 background data work. It does not depend on the shell or feature modules.
+
+`geode-tile` is the kit tiles are built from: the popover, the `.` action
+menu, the in-tile y/n confirm and the notice line, as models with one
+painter each. It depends on `geode-shell` for its paint doors and the live
+keymap, never on `geode-data` or a feature module, and the shell never
+depends on it. A tile mechanism two modules would otherwise each write lives
+there.
 
 Feature crates such as `geode-blotter`, `geode-marketdata`,
 `geode-timeseries`, `geode-diagnostics`, and `geode-pricer` implement the
@@ -58,10 +75,15 @@ I/O. The main window contains one `ShellView`, wrapped by gpui-component's
 through `DataHandle`. One ingest runner owns the DuckDB writer. A read pool
 owns independent read connections. Source adapters, discovery, subscription,
 fetch, pricing, egress, and logging workers communicate through bounded
-channels or explicit sinks. Egress serializes documents on the service thread
-before handing bytes to a per-target transport worker.
+channels or explicit sinks. Egress hands each document's rows to a
+per-target worker, which encodes and sends them off the service thread. Every
+long-lived data-service thread is supervised: one that dies is declared once
+to the UI and never restarted. Transport threads standing in for a vendor
+client (the channel adapter's dispatcher, the demo bus) are not.
 
-Submission reports admission or refusal without waiting for queue space.
+Submission reports admission or refusal without waiting for queue space; a
+refusal says whether the queue was busy (a retry can succeed) or the service
+has stopped (none can).
 Admission does not guarantee completion: cancellation, supersession, startup
 failure, and worker failure have request-specific effects. Callers handle
 refusal explicitly and check outcome freshness. See
@@ -110,14 +132,21 @@ migrated when a schema document changes.
 ## Failure boundaries
 
 Expected failures become data: diagnostics, health, refused submissions, or
-per-request errors. Read and pricing workers contain panics in their request
-paths. Egress workers contain transport panics and continue serving their
-queues, but service-thread document serialization has no such boundary.
-Containment does not interrupt blocked calls. The application panic hook logs
-panics marked by those containment boundaries without writing a report. Other
-panics trigger a best-effort report under the user config directory before the
-previous hook runs. An absent marker does not establish whether the process
-will exit; another caller may catch the unwind.
+per-request errors. The request loop contains each request, so a panicking
+request is answered once with an error through its own completion route and
+the loop serves on. Read, pricing, ingest, and egress workers contain panics
+in their operation paths; egress contains encoding and transport separately
+and continues serving its queue. Work nobody is waiting on — identity
+listings, the stale check, the local sweep, discovery, result delivery —
+reports its panics as diagnostics or health. A thread that unwinds past every
+boundary is declared as `DataEvent::ThreadStopped`, shown in the status bar
+until restart, and never restarted. Containment does not interrupt blocked
+calls. The application panic hook logs panics marked by those containment
+boundaries without writing a report. Other panics, including a supervised
+thread's death, trigger a best-effort report under the user config directory
+before the previous hook runs. An absent marker does not establish whether
+the process will exit; another caller may catch the unwind. See
+[containment and liveness](data-path.md#containment-and-liveness).
 
 Health and freshness describe what the system knows rather than concealing
 degradation. A source can remain queryable while degraded; the UI must retain

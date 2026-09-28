@@ -65,6 +65,8 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("marketdata::insert_below", "Insert row below"),
     ("marketdata::insert_above", "Insert row above"),
     ("marketdata::delete_row", "Delete row"),
+    ("marketdata::visual_rows", "Select rows"),
+    ("marketdata::visual_block", "Select cells"),
     ("marketdata::upload", "Upload"),
     ("marketdata::revert", "Revert edits"),
     ("marketdata::rebase", "Rebase"),
@@ -76,7 +78,12 @@ pub const ACTIONS: &[(&str, &str)] = &[
 ];
 
 /// Module bindings supplied above shell defaults and below desk/user overrides.
-/// Normal, insert, and menu contexts match MarketDataTile's current input state.
+/// Normal, visual, insert, and menu contexts match MarketDataTile's current input
+/// state.
+///
+/// Visual mode is a live `V`/`v` selection. It keeps the motions, and its
+/// consuming verbs are single keys (`y`, `d`): the doubled normal-mode forms
+/// would leave the first press waiting for a second there.
 ///
 /// Insert bindings handle commit, cancel, and small/large vertical steps. The
 /// tile interprets steps as picker navigation or numeric editing according to the
@@ -121,6 +128,35 @@ context = "marketdata && mode == normal"
 "o" = "marketdata::insert_below"
 "shift+o" = "marketdata::insert_above"
 "d d" = "marketdata::delete_row"
+"v" = "marketdata::visual_block"
+"shift+v" = "marketdata::visual_rows"
+
+[[bindings]]
+context = "marketdata && mode == visual"
+[bindings.keys]
+"j" = "marketdata::down"
+"k" = "marketdata::up"
+"h" = "marketdata::left"
+"l" = "marketdata::right"
+"g g" = "marketdata::top"
+"shift+g" = "marketdata::bottom"
+"^" = "marketdata::first_col"
+"$" = "marketdata::last_col"
+"home" = "marketdata::first_col"
+"end" = "marketdata::last_col"
+"ctrl+d" = "marketdata::page_down"
+"ctrl+u" = "marketdata::page_up"
+"ctrl+f" = "marketdata::page_down_full"
+"ctrl+b" = "marketdata::page_up_full"
+"pagedown" = "marketdata::page_down_full"
+"pageup" = "marketdata::page_up_full"
+"y" = "marketdata::yank"
+"d" = "marketdata::delete_row"
+"i" = "marketdata::edit"
+"enter" = "marketdata::edit"
+"v" = "marketdata::visual_block"
+"shift+v" = "marketdata::visual_rows"
+"escape" = "marketdata::escape"
 
 [[bindings]]
 context = "marketdata && mode == insert"
@@ -199,7 +235,17 @@ impl TileContent for MarketDataContent {
         self.tile.read(cx).title()
     }
     fn serialize(&self, cx: &App) -> toml::Table {
-        self.tile.read(cx).serialize()
+        self.tile.read(cx).serialize(cx)
+    }
+    /// The same route as `:autosize [reset]`.
+    fn autosize_columns(
+        &self,
+        reset: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<(), &'static str> {
+        self.tile
+            .update(cx, |t, cx| t.autosize_columns(reset, window, cx))
     }
     fn holds_focus(&self, window: &Window, cx: &App) -> bool {
         self.tile.read(cx).holds_focus(window, cx)
@@ -552,27 +598,30 @@ mod tests {
     }
 
     /// Column-extreme punctuation matches as bare characters even when numeric
-    /// counts are enabled on the context.
+    /// counts are enabled on the context, in normal mode and while a
+    /// selection is live (the visual block repeats the motions).
     #[test]
     fn caret_and_dollar_resolve_to_the_column_extremes() {
         let doc = fragment_doc(CVI.kind, DEFAULT_KEYMAP).unwrap();
         let (keymap, diags) = build_keymap(&[doc], default_mod(), &registry());
         assert!(diags.is_empty(), "{diags:?}");
-        let stack = [
-            KeyContext::new("workspace"),
-            KeyContext::new("tile"),
-            KeyContext::new("marketdata")
-                .pair("mode", "normal")
-                .counts(),
-        ];
-        for (spec, expected) in [
-            ("^", "marketdata::first_col"),
-            ("$", "marketdata::last_col"),
-        ] {
-            let keystroke = parse_keystroke(spec, default_mod()).unwrap();
-            match Matcher::default().press(&keymap, keystroke, &stack) {
-                MatchResult::Matched { action, .. } => assert_eq!(action.0, expected, "{spec}"),
-                other => panic!("{spec}: expected a match, got {other:?}"),
+        for mode in ["normal", "visual"] {
+            let stack = [
+                KeyContext::new("workspace"),
+                KeyContext::new("tile"),
+                KeyContext::new("marketdata").pair("mode", mode).counts(),
+            ];
+            for (spec, expected) in [
+                ("^", "marketdata::first_col"),
+                ("$", "marketdata::last_col"),
+            ] {
+                let keystroke = parse_keystroke(spec, default_mod()).unwrap();
+                match Matcher::default().press(&keymap, keystroke, &stack) {
+                    MatchResult::Matched { action, .. } => {
+                        assert_eq!(action.0, expected, "{mode}: {spec}")
+                    }
+                    other => panic!("{mode}: {spec}: expected a match, got {other:?}"),
+                }
             }
         }
     }
@@ -667,6 +716,41 @@ mod tests {
             (&menu, "enter", "marketdata::menu_pick"),
             (&menu, "escape", "marketdata::menu_close"),
             (&menu, ".", "marketdata::menu_close"),
+        ] {
+            let keystroke = parse_keystroke(spec, default_mod()).unwrap();
+            match Matcher::default().press(&keymap, keystroke, stack) {
+                MatchResult::Matched { action, .. } => assert_eq!(action.0, expected, "{spec}"),
+                other => panic!("{spec}: expected a match, got {other:?}"),
+            }
+        }
+    }
+
+    /// `v`/`shift+v` start a selection from normal mode and switch or clear
+    /// it from visual mode, where the consuming verbs are single keys (a
+    /// doubled `y y`/`d d` prefix would leave `y` and `d` waiting there).
+    #[test]
+    fn v_and_shift_v_start_the_two_selections_and_visual_binds_single_key_verbs() {
+        let doc = fragment_doc(CVI.kind, DEFAULT_KEYMAP).unwrap();
+        let (keymap, diags) = build_keymap(&[doc], default_mod(), &registry());
+        assert!(diags.is_empty(), "{diags:?}");
+        let stack_for = |mode: &str| {
+            [
+                KeyContext::new("workspace"),
+                KeyContext::new("tile"),
+                KeyContext::new("marketdata").pair("mode", mode).counts(),
+            ]
+        };
+        let (normal, visual) = (stack_for("normal"), stack_for("visual"));
+        for (stack, spec, expected) in [
+            (&normal, "v", "marketdata::visual_block"),
+            (&normal, "shift+v", "marketdata::visual_rows"),
+            (&visual, "v", "marketdata::visual_block"),
+            (&visual, "shift+v", "marketdata::visual_rows"),
+            (&visual, "j", "marketdata::down"),
+            (&visual, "y", "marketdata::yank"),
+            (&visual, "d", "marketdata::delete_row"),
+            (&visual, "i", "marketdata::edit"),
+            (&visual, "escape", "marketdata::escape"),
         ] {
             let keystroke = parse_keystroke(spec, default_mod()).unwrap();
             match Matcher::default().press(&keymap, keystroke, stack) {

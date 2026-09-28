@@ -334,7 +334,7 @@ pub(crate) fn ladder_snapshot(rows: &[(i64, f64)]) -> Snapshot {
 /// A [`crate::core::DIVIDEND`] document: `(dividend_id, ex_date,
 /// announced_date, pay_date, amount, status)` per row — the shipped
 /// panel's own five value columns, for the one production-route test that
-/// must prove `MarketDataTile::bump`'s `ty_of` reads the REAL spec's
+/// must prove `MarketDataTile::bump`'s `column_type` reads the REAL spec's
 /// `Columns::Values` branch correctly, not `SCHEDULE`'s three-column
 /// stand-in.
 pub(crate) fn dividend_snapshot(rows: &[(&str, &str, &str, &str, f64, &str)]) -> Snapshot {

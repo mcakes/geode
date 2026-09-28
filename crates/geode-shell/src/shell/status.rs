@@ -1,5 +1,5 @@
 //! Bottom status bar prepared from arguments and the active theme, with no retained
-//! state or I/O. Count, pending keys, configuration messages, diagnostics, ingestion,
+//! state or I/O. Stopped data threads, count, pending keys, configuration messages, diagnostics, ingestion,
 //! and historical-time indicators occupy the left region. The right region is the
 //! view-state section: the fullscreen indicator, then the active theme name.
 //! Workspace indicators belong to the sidebar. StatusBar supplies
@@ -15,7 +15,7 @@ use gpui_component::{
 use super::chip;
 use super::control::{self, PointerStates as _};
 use super::scale;
-use crate::diagnostics::IngestActivity;
+use crate::diagnostics::{IngestActivity, StoppedSegment};
 use crate::fonts;
 use crate::keymap::Keystroke;
 
@@ -52,14 +52,15 @@ pub fn fullscreen_label(hidden: usize) -> SharedString {
     }
 }
 
-/// Render optional status segments in order: count, nonempty pending keys, reload
-/// failure, write failure, restart requirement, shell notice, diagnostics summary,
-/// ingestion activity, and historical time on the left; fullscreen, then the theme
-/// name, on the right. The fullscreen segment shows while a main-tree tile is
-/// maximised, carrying the number of tiles it hides; clicking it restores the
-/// layout through the supplied callback. Configuration errors use danger, restart
-/// and diagnostics use warning, and ordinary notices are muted. Diagnostics clicks
-/// invoke the supplied callback. The historical badge requires both the shortened and
+/// Render optional status segments in order: stopped data threads, count, nonempty
+/// pending keys, reload failure, write failure, restart requirement, shell notice,
+/// diagnostics summary, ingestion activity, and historical time on the left;
+/// fullscreen, then the theme name, on the right. The fullscreen segment shows while
+/// a main-tree tile is maximised, carrying the number of tiles it hides; clicking it
+/// restores the layout through the supplied callback. Stopped threads and
+/// configuration errors use danger, restart and diagnostics use warning, and ordinary
+/// notices are muted. Clicks on the stopped segment and the diagnostics summary both
+/// invoke the supplied diagnostics callback. The historical badge requires both the shortened and
 /// full timestamps; its tooltip shows the full timestamp. Inputs remain separate
 /// because callers already hold these values independently.
 #[allow(clippy::too_many_arguments)]
@@ -71,8 +72,11 @@ pub fn status_bar(
     restart_message: Option<&str>,
     // Shell action refusal, cleared by the next dispatch.
     notice: Option<&str>,
+    // Stopped data threads, prepared by `Diagnostics::note_thread_stopped`;
+    // None while every data thread lives.
+    stopped: Option<&StoppedSegment>,
     diagnostics_summary: Option<&str>,
-    on_diagnostics_click: impl Fn(&mut Window, &mut App) + 'static,
+    on_diagnostics_click: impl Fn(&mut Window, &mut App) + Clone + 'static,
     // Current ingestion activity, shown as a loading label and a two-pixel strip along
     // the bar's top edge. None hides both.
     ingest: Option<&IngestActivity>,
@@ -94,6 +98,38 @@ pub fn status_bar(
     // owner" — two declarations of one length drift, and a window test
     // measuring the wrapper cannot see the inner one disagree).
     let mut bar = StatusBar::new().flex_none().w_full().h_full();
+    if let Some(segment) = stopped {
+        // First and in danger: a stopped data thread outranks every count
+        // after it, which may describe a service that no longer runs. It
+        // never clears; restarting Geode is the recovery. The click is the
+        // diagnostics summary's own route, onto the tile whose sources
+        // section lists each stopped thread.
+        let stopped_click = on_diagnostics_click.clone();
+        bar = bar.left(
+            div()
+                .id("data-stopped")
+                .px_1()
+                .rounded(theme.radius_tokens().sm)
+                .text_color(theme.danger)
+                .pointer_states(control::paint(
+                    theme,
+                    control::Rest::Bare,
+                    theme.status_bar,
+                    theme.danger,
+                ))
+                .debug_selector(|| "data-stopped".to_string())
+                .child(segment.text.clone())
+                .tooltip(crate::tips::tip_with(
+                    SharedString::new_static("tip-data-stopped"),
+                    segment.detail.clone(),
+                    None,
+                    Some(SharedString::new_static("click to open diagnostics")),
+                ))
+                .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                    stopped_click(window, cx);
+                }),
+        );
+    }
     if let Some(count) = count {
         bar = bar.left(
             div()

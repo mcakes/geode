@@ -587,6 +587,7 @@ pub(super) fn config_with_mod(mod_key: &str) -> Config {
 
 mod addfilter;
 mod asof;
+mod autosize;
 mod chrome_and_dialogs;
 mod commandline;
 mod diagnostics;
@@ -598,6 +599,7 @@ mod grouping;
 mod input;
 mod keybindings_dialog;
 mod launch;
+mod object_stack;
 mod objectdialog;
 mod occupants;
 mod palette;
