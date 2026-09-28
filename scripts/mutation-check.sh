@@ -19223,36 +19223,28 @@ run_mutation "draft: bump refuses a fractional delta on an I64 column" \
 # kind. Marking them optional lets incomplete rows pass local checks and
 # fail during document assembly.
 run_mutation "spec: DIVIDEND requires the announced date" \
-  crates/geode-marketdata/src/core/spec.rs \
-  '                column: "announced_date".into(),
-                label: "announced".into(),
-                ty: ColumnType::Date,
-                format: ColumnFormat::TEXT,
-                choices: None,
-                required: true,' \
-  '                column: "announced_date".into(),
-                label: "announced".into(),
-                ty: ColumnType::Date,
-                format: ColumnFormat::TEXT,
-                choices: None,
-                required: false,' \
+  crates/geode-marketdata/src/core/builtin_panels.toml \
+  'column = "announced_date"
+label = "announced"
+type = "date"
+required = true' \
+  'column = "announced_date"
+label = "announced"
+type = "date"
+required = false' \
   geode-marketdata \
   dividend_dates_are_required
 
 run_mutation "spec: DIVIDEND requires the pay date" \
-  crates/geode-marketdata/src/core/spec.rs \
-  '                column: "pay_date".into(),
-                label: "pay".into(),
-                ty: ColumnType::Date,
-                format: ColumnFormat::TEXT,
-                choices: None,
-                required: true,' \
-  '                column: "pay_date".into(),
-                label: "pay".into(),
-                ty: ColumnType::Date,
-                format: ColumnFormat::TEXT,
-                choices: None,
-                required: false,' \
+  crates/geode-marketdata/src/core/builtin_panels.toml \
+  'column = "pay_date"
+label = "pay"
+type = "date"
+required = true' \
+  'column = "pay_date"
+label = "pay"
+type = "date"
+required = false' \
   geode-marketdata \
   dividend_dates_are_required
 
@@ -24396,6 +24388,24 @@ run_mutation "panels: a panel must name every column its kind writes" \
   '    if missing.is_empty() {' \
   '    if true {' \
   geode-core a_flat_panel_missing_a_value_column_is_refused
+
+# The forward is a price at two places; mutated, the builtin CVI paints it
+# at four and no longer matches the spec it replaced.
+run_mutation "panels: the builtin CVI forward paints at two places" \
+  crates/geode-marketdata/src/core/builtin_panels.toml \
+  'label = "fwd"
+format = { precision = 2 }' \
+  'label = "fwd"
+format = { precision = 4 }' \
+  geode-marketdata the_builtin_cvi_panel_is_the_spec_the_const_described
+
+# The builtin dividend panel's status vocabulary is the document kind's; a
+# dropped status would refuse a document the kind accepts.
+run_mutation "panels: the builtin dividend statuses match the kind" \
+  crates/geode-marketdata/src/core/builtin_panels.toml \
+  'choices = ["estimated", "declared", "paid", "cancelled"]' \
+  'choices = ["estimated", "declared", "paid"]' \
+  geode-app the_dividend_panel_specs_status_vocabulary_matches_the_dividend_kind
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
