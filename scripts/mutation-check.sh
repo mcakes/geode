@@ -15873,6 +15873,88 @@ run_mutation "grouping: a dialog opened from a mouse-down keeps its field's focu
   geode-shell \
   a_terms_body_edits_that_term_alone
 
+# ---- Scope picker: frame::scope, mod-o and the toolbar load glyph ----
+
+# The picker opens on the saved scope EQUAL to the frame's current one, so
+# a bare `enter` changes nothing.
+run_mutation "scope-picker: the highlight opens on the current scope" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '        list.place(active);' \
+  '        list.place(None);' \
+  geode-shell \
+  the_scope_equal_to_the_current_one_is_lit
+
+run_mutation "scope-picker: enter on an untouched picker keeps the current scope" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '        list.place(active);' \
+  '        list.place(None);' \
+  geode-shell \
+  the_picker_opens_on_the_current_scope_and_enter_keeps_it
+
+# A pick loads through `load_saved_scope` (one undoable `set_scope` step);
+# applying the saved scope and dropping the history is not undoable.
+run_mutation "scope-picker: a pick loads through the undoable load_saved_scope" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '            if shell.load_saved_scope(&name, cx).is_err() {' \
+  '            if shell
+                .target_frame()
+                .update(cx, |f, _| {
+                    let s = f.saved_scopes().get(&name).cloned();
+                    s.map(|s| {
+                        f.set_scope(s);
+                        f.clear_history();
+                    })
+                })
+                .is_none()
+            {' \
+  geode-shell \
+  mod_o_then_typing_and_enter_loads_the_scope_undoably
+
+# A name gone since the open loads nothing AND says so.
+run_mutation "scope-picker: a vanished scope is reported on the status bar" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '            if shell.load_saved_scope(&name, cx).is_err() {' \
+  '            if shell.load_saved_scope(&name, cx).is_err() && false {' \
+  geode-shell \
+  picking_a_scope_removed_under_the_picker_says_so
+
+# The rows are the frame's LIVE saved scopes, not the configuration as
+# loaded (which a scope saved or reloaded into the frame since has not
+# reached).
+run_mutation "scope-picker: rows are the frame's live saved scopes" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '        ChoiceDialogState::scopes(frame.saved_scopes(), frame.scope())' \
+  '        ChoiceDialogState::scopes(
+            &super::hot_reload::rebuild_saved_scopes(&view.services.config, false),
+            frame.scope(),
+        )' \
+  geode-shell \
+  a_scope_saved_after_startup_is_listed_and_loads
+
+# `mod+o` reaches the picker through the dispatch arm.
+run_mutation "scope-picker: frame::scope opens the picker" \
+  crates/geode-shell/src/shell/input.rs \
+  '            choicedialog::open_scopes(self, window, cx);' \
+  '            let _ = (window, cx);' \
+  geode-shell \
+  mod_o_then_typing_and_enter_loads_the_scope_undoably
+
+# The toolbar's load glyph goes through the same open door as `mod+o`.
+run_mutation "scope-picker: the load glyph click opens the picker" \
+  crates/geode-shell/src/shell/render.rs \
+  '                choicedialog::open_scopes(view, window, cx);' \
+  '                let _ = (view, window, cx);' \
+  geode-shell \
+  clicking_the_load_glyph_opens_a_typeable_picker
+
+# The load glyph reads pressed while its picker is up.
+run_mutation "scope-picker: the load glyph holds its pressed state while open" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '            scope_open.then_some("scope-load-chip-open"),' \
+  '            None,' \
+  geode-shell \
+  clicking_the_load_glyph_opens_a_typeable_picker
+
 # ---- Tile picker: placeholder double-click, tile::add and mod-n ----
 
 # Only a PLACEHOLDER's double-click is the door — a real tile's may
