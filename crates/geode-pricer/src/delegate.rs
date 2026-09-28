@@ -77,6 +77,18 @@ pub struct ChevronClicked(pub usize);
 
 impl EventEmitter<ChevronClicked> for TableState<SheetDelegate> {}
 
+/// A header drag dropped: the PLAN column at `from` now sits at `to`.
+/// Emitted by the table's `move_column` hook; the tile owns the plan, so
+/// the delegate reorders nothing of its own and the next `install_model`
+/// hands it the permuted model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColumnMoved {
+    pub from: usize,
+    pub to: usize,
+}
+
+impl EventEmitter<ColumnMoved> for TableState<SheetDelegate> {}
+
 /// Every mouse selection gesture a cell, the tree cell or the line-number
 /// gutter recognises, carried to the tile's `pointer`: the one door a
 /// shift+click and a drag go through to `start_selection` and
@@ -558,10 +570,28 @@ impl TableDelegate for SheetDelegate {
             },
             sort: None,
             width: px(self.fitted.get(c.name).copied().unwrap_or(c.width)),
-            movable: false,
-            resizable: false,
+            movable: true,
+            resizable: true,
             ..Column::default()
         }
+    }
+
+    /// A header drag dropped. Both indices are TABLE indices; the tree
+    /// column never moves and nothing moves before it (it is `fixed`, so
+    /// the table refuses those drops itself, and this guard keeps a plan
+    /// index from going negative should that change). The tile owns the
+    /// plan, so the move is reported, not applied here.
+    fn move_column(
+        &mut self,
+        col_ix: usize,
+        to_ix: usize,
+        _window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) {
+        let (Some(from), Some(to)) = (Self::plan_col(col_ix), Self::plan_col(to_ix)) else {
+            return;
+        };
+        cx.emit(ColumnMoved { from, to });
     }
 
     fn render_th(

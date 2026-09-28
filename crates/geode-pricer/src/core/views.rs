@@ -265,6 +265,23 @@ impl ColumnPlan {
                 .collect(),
         }
     }
+
+    /// Move the column at plan index `from` so it sits at `to`, as a
+    /// header drag asks. An index off the plan, or a no-op move, leaves
+    /// the plan as it was: the order is the open tile's alone and never
+    /// reaches the view.
+    pub fn move_column(&mut self, from: usize, to: usize) {
+        if from < self.columns.len() && to < self.columns.len() && from != to {
+            let c = self.columns.remove(from);
+            self.columns.insert(to, c);
+        }
+    }
+
+    /// The plan index of the column named `name`, so a cursor that names
+    /// its column can find it again after a move.
+    pub fn position_of(&self, name: &str) -> Option<usize> {
+        self.columns.iter().position(|c| c.def.name == name)
+    }
 }
 
 #[cfg(test)]
@@ -276,6 +293,29 @@ mod tests {
     fn specs(text: &str) -> Vec<ViewSpec> {
         let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
         ViewSpec::from_doc(&doc).0
+    }
+
+    #[test]
+    fn move_column_reorders_the_plan_and_position_of_finds_by_name() {
+        let (views, _) = Views::from_specs(&specs(BUILTIN_VIEWS));
+        let mut plan = ColumnPlan::build(views.get("vanilla").unwrap());
+        plan.move_column(0, 2); // qty after expiry
+        assert_eq!(
+            plan.columns
+                .iter()
+                .take(3)
+                .map(|c| c.def.name)
+                .collect::<Vec<_>>(),
+            ["underlying_ref", "expiry", "qty"]
+        );
+        assert_eq!(plan.position_of("qty"), Some(2));
+        assert_eq!(plan.position_of("nonesuch"), None);
+        // Out of range or a no-op: the plan is left as it was.
+        let before = plan.clone();
+        plan.move_column(0, 99);
+        plan.move_column(99, 0);
+        plan.move_column(1, 1);
+        assert_eq!(plan, before);
     }
 
     #[test]

@@ -1423,8 +1423,12 @@ generations remain available only within the retention limit.
   stopped — restart Geode`.
 
 Other known gaps: the underlying typeahead does not yet offer catalogue
-underlyings; result cells are not sign-colored; column widths are the
-vocabulary's fixed pixel widths and cannot be resized.
+underlyings; result cells are not sign-colored. Columns can be dragged to
+reorder and resized with the pointer; both act on the open tile only. A view
+change or reload restores the view's order; a dragged width is kept the way
+an `:autosize` fit is (by vocabulary name in the session record, over the
+view's width) until `:autosize reset`. The tree column is pinned and neither
+moves nor resizes. Persistent order and width belong to the Views dialog.
 
 In-process pricing remains an upstream leaf. A feature submits definitions
 through the data-service request path and receives outcomes through shell

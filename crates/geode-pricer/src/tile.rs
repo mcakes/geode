@@ -23,7 +23,8 @@ use crate::core::undo::UndoStack;
 use crate::core::views::ColumnPlan;
 use crate::core::{Place, RowSpec};
 use crate::delegate::{
-    CellPointer, ChevronClicked, DateFieldPaint, EditorField, EditorPaint, SheetDelegate,
+    CellPointer, ChevronClicked, ColumnMoved, DateFieldPaint, EditorField, EditorPaint,
+    SheetDelegate,
 };
 use crate::grid::GridModel;
 use crate::header::{self, HeaderInputs, HeaderModel};
@@ -672,8 +673,8 @@ impl PricerTile {
                 .cell_selectable(true)
                 .row_header(false)
                 .loop_selection(false)
-                .col_resizable(false)
-                .col_movable(false)
+                .col_resizable(true)
+                .col_movable(true)
                 .sortable(false)
         });
         cx.subscribe_in(&table, window, |this, _, event: &TableEvent, window, cx| {
@@ -685,6 +686,10 @@ impl PricerTile {
             window,
             |this, _, event: &ChevronClicked, window, cx| this.chevron_clicked(event.0, window, cx),
         )
+        .detach();
+        cx.subscribe_in(&table, window, |this, _, event: &ColumnMoved, _, cx| {
+            this.column_moved(event.from, event.to, cx)
+        })
         .detach();
         // Shift+click and drag: the delegate's own pointer events, which
         // reach `pointer` on mouse-down, ahead of the table's `SelectCell`
@@ -4133,6 +4138,21 @@ impl PricerTile {
         }
     }
 
+    /// A header drag dropped: reorder the open tile's plan. The cursor
+    /// names its column by vocabulary name across the move so it stays on
+    /// what the trader was looking at rather than whatever slid into its
+    /// slot; the grid model is built from the plan, so the rebuild
+    /// permutes every row's cells. The order never reaches the view: the
+    /// next `resolve_plan` (a view change, a reload) restores the view's.
+    fn column_moved(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        let under_cursor = self.plan.columns.get(self.cursor.col).map(|c| c.def.name);
+        self.plan.move_column(from, to);
+        if let Some(i) = under_cursor.and_then(|name| self.plan.position_of(name)) {
+            self.cursor.col = i;
+        }
+        self.rebuild(cx);
+    }
+
     /// The `(grid row, plan column)` the open editor sits on.
     fn editor_cell(&self) -> Option<(usize, usize)> {
         let (line, col, _) = self.editor.as_ref()?.target();
@@ -4304,6 +4324,40 @@ impl PricerTile {
                 self.footer = None;
                 self.begin_edit(window, cx);
                 self.rebuild_chrome();
+                cx.notify();
+            }
+            // A resize handle released. The table holds the dragged width
+            // in its own column groups only, and every rebuild's `refresh`
+            // rebuilds those from `column()`; recording the width under
+            // the column's vocabulary name, as `:autosize` does, is what
+            // keeps it past the next edit. The table reports every
+            // column, so only a width that differs from what `column()`
+            // gives is recorded: pinning the untouched ones would silently
+            // override a view width changed later. The tree's entry is
+            // stored without the gutter, as `column()` adds it back.
+            TableEvent::ColumnWidthsChanged(widths) => {
+                use gpui_component::table::TableDelegate as _;
+                self.table.update(cx, |t, cx| {
+                    let current: Vec<f32> = (0..widths.len())
+                        .map(|ix| f32::from(t.delegate().column(ix, cx).width))
+                        .collect();
+                    let d = t.delegate_mut();
+                    let gutter = d.gutter_px();
+                    for (ix, width) in widths.iter().enumerate() {
+                        let width = f32::from(*width);
+                        if width == current[ix] {
+                            continue;
+                        }
+                        let (key, stored) = match SheetDelegate::plan_col(ix) {
+                            None => (crate::delegate::TREE_KEY.to_string(), width - gutter),
+                            Some(c) => match d.model.columns.get(c) {
+                                Some(col) => (col.name.to_string(), width),
+                                None => continue,
+                            },
+                        };
+                        d.fitted.insert(key, stored);
+                    }
+                });
                 cx.notify();
             }
             // `SelectRow`/`SelectColumn` are what `sync_cursor` itself
@@ -5159,6 +5213,151 @@ pub(crate) mod tests {
         keys(&h, &mut vcx, "j l l h k");
         assert!(h.columns(&vcx).is_empty());
         assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor.col), 0);
+    }
+
+    // ---- movable and resizable columns ----
+
+    /// The table's header drag lands in the delegate's `move_column` hook
+    /// with TABLE indices (the tree is 0); this is that call.
+    fn move_column(h: &Harness, vcx: &mut VisualTestContext, from: usize, to: usize) {
+        use gpui_component::table::TableDelegate as _;
+        vcx.update(|window, cx| {
+            h.tile.update(cx, |t, cx| {
+                t.table.update(cx, |table, cx| {
+                    table.delegate_mut().move_column(from, to, window, cx);
+                })
+            })
+        });
+        vcx.run_until_parked();
+        h.draw(vcx);
+    }
+
+    /// A header drag reorders the open tile's plan: the grid's cells follow
+    /// the column, the cursor stays on the column it was on, and an edit's
+    /// rebuild keeps the new order.
+    #[gpui::test]
+    fn a_moved_column_survives_an_edit_and_the_cursor_follows_its_column(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 4000 P"]);
+        let _ = h.prices();
+        goto_column(&h, &mut vcx, "qty");
+        assert_eq!(h.cursor(&vcx).map(|c| c.1), Some(0));
+        assert_eq!(h.cell(&vcx, 0, "qty"), "1");
+
+        move_column(&h, &mut vcx, 1, 3);
+        assert_eq!(h.columns(&vcx)[2], "qty");
+        assert_eq!(h.cursor(&vcx).map(|c| c.1), Some(2), "cursor follows qty");
+        assert_eq!(
+            h.cell(&vcx, 0, "qty"),
+            "1",
+            "the cell moved with its column"
+        );
+
+        h.dispatch(&mut vcx, "edit", None);
+        assert_eq!(
+            editor_text(&h, &vcx).as_deref(),
+            Some("1"),
+            "the editor opened on qty"
+        );
+        select_all_and_type(&h, &mut vcx, "7");
+        h.dispatch(&mut vcx, "commit", None);
+        h.draw(&mut vcx);
+        assert_eq!(h.columns(&vcx)[2], "qty");
+        assert_eq!(h.cursor(&vcx).map(|c| c.1), Some(2));
+        assert_eq!(h.cell(&vcx, 0, "qty"), "7");
+    }
+
+    /// The tree column is pinned: a drag naming it, from either end, moves
+    /// nothing.
+    #[gpui::test]
+    fn the_tree_column_neither_moves_nor_is_moved_before(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 4000 P"]);
+        let before = h.columns(&vcx);
+        move_column(&h, &mut vcx, crate::delegate::TREE_COL, 2);
+        assert_eq!(h.columns(&vcx), before);
+        move_column(&h, &mut vcx, 2, crate::delegate::TREE_COL);
+        assert_eq!(h.columns(&vcx), before);
+    }
+
+    /// An editor open during the move follows its column, as it does
+    /// across every rebuild: the text stays and the commit lands on qty,
+    /// not on whatever slid into plan slot 0.
+    #[gpui::test]
+    fn an_open_editor_follows_its_moved_column(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 4000 P"]);
+        let _ = h.prices();
+        goto_column(&h, &mut vcx, "qty");
+        h.dispatch(&mut vcx, "edit", None);
+        select_all_and_type(&h, &mut vcx, "7");
+        move_column(&h, &mut vcx, 1, 3);
+        assert_eq!(h.mode(&mut vcx), "insert", "the editor stays open");
+        assert_eq!(editor_text(&h, &vcx).as_deref(), Some("7"));
+        assert_eq!(h.cursor(&vcx).map(|c| c.1), Some(2));
+        h.dispatch(&mut vcx, "commit", None);
+        h.draw(&mut vcx);
+        assert_eq!(h.cell(&vcx, 0, "qty"), "7");
+        assert_eq!(h.cell(&vcx, 0, "underlying_ref"), "SPX");
+    }
+
+    /// The order is the open tile's alone: switching views rebuilds the
+    /// plan from the view, so coming back to `vanilla` restores its order.
+    #[gpui::test]
+    fn a_view_change_rebuilds_the_order(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 4000 P"]);
+        let vanilla = h.columns(&vcx);
+        move_column(&h, &mut vcx, 1, 3);
+        assert_ne!(h.columns(&vcx), vanilla);
+        h.command(&mut vcx, "view barrier").unwrap();
+        h.command(&mut vcx, "view vanilla").unwrap();
+        assert_eq!(h.columns(&vcx), vanilla);
+    }
+
+    /// A pointer resize's width is kept the way an autosized one is: the
+    /// table reports it on release and the tile records it under the
+    /// column's vocabulary name, so the refresh every rebuild runs re-reads
+    /// it instead of the view's width. `:autosize reset` drops it.
+    #[gpui::test]
+    fn a_pointer_resize_survives_a_rebuild_and_autosize_reset_drops_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui_component::table::TableDelegate as _;
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 4000 P"]);
+        let default = width_of_column(&h, &vcx, "qty");
+        let tree = width_of_column(&h, &vcx, crate::delegate::TREE_KEY);
+        let qty_ix = 1 + h.columns(&vcx).iter().position(|c| c == "qty").unwrap();
+        // What the table emits when the drag handle is released: every
+        // column's width by table index.
+        let mut widths: Vec<gpui::Pixels> = h.tile.read_with(&vcx, |t, cx| {
+            let d = t.table.read(cx).delegate();
+            (0..d.columns_count(cx))
+                .map(|ix| d.column(ix, cx).width)
+                .collect()
+        });
+        widths[qty_ix] = gpui::px(default + 37.0);
+        h.tile.update(&mut vcx, |t, cx| {
+            t.table.update(cx, |_, cx| {
+                cx.emit(gpui_component::table::TableEvent::ColumnWidthsChanged(
+                    widths,
+                ))
+            })
+        });
+        vcx.run_until_parked();
+        assert_eq!(width_of_column(&h, &vcx, "qty"), default + 37.0);
+        assert_eq!(width_of_column(&h, &vcx, crate::delegate::TREE_KEY), tree);
+        // Only the dragged column is recorded: an untouched one would
+        // otherwise override a view width changed later.
+        assert_eq!(
+            fitted_of(&h, &vcx).keys().collect::<Vec<_>>(),
+            vec!["qty"],
+            "only the dragged column is recorded"
+        );
+
+        h.tile.update(&mut vcx, |t, cx| t.rebuild(cx));
+        assert_eq!(width_of_column(&h, &vcx, "qty"), default + 37.0);
+
+        h.command(&mut vcx, "autosize reset").unwrap();
+        assert_eq!(width_of_column(&h, &vcx, "qty"), default);
     }
 
     // ---- column colours ----
