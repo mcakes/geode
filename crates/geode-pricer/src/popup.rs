@@ -334,7 +334,7 @@ pub(crate) fn render_sheet_picker(
                     .gap_1()
                     .child(
                         div()
-                            .w(scale::design(TICK_SLOT))
+                            .w(scale::design(geode_tile::menu::TICK_SLOT))
                             .flex_shrink_0()
                             .child(if row.current { "\u{2713}" } else { "" }),
                     )
@@ -354,10 +354,6 @@ pub(crate) fn render_sheet_picker(
     }
     popover::anchor_popup(list, Anchor::TopLeft)
 }
-
-/// The leading tick slot on a picker row: the same width ticked or not,
-/// so the names share one leading edge (the menu's own tick width).
-const TICK_SLOT: f32 = 14.0;
 
 #[cfg(test)]
 mod tests {

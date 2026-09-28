@@ -16,8 +16,9 @@ use gpui::{
 use gpui_component::{ActiveTheme as _, h_flex};
 
 /// The leading tick slot on a checked row: the same width ticked or not, so
-/// a group's titles share one leading edge.
-const TICK_SLOT: f32 = 14.0;
+/// a group's titles share one leading edge. Pickers that tick their
+/// current row use it too.
+pub const TICK_SLOT: f32 = 14.0;
 
 /// The tile a menu is painted for: where a row press and a row hover go.
 pub trait MenuHost: Sized + 'static {

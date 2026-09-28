@@ -3201,7 +3201,7 @@ impl PricerTile {
         cx.notify();
     }
 
-    // ---- sheets by pointer: the picker, the rename field, Yes/No ------
+    // ---- sheets by pointer: the picker and the rename field ---------
 
     /// `:new` without a name, and "New sheet": the next `untitled-N`,
     /// chosen while this tile still holds its name, so a new sheet never
