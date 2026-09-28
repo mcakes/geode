@@ -7116,12 +7116,10 @@ run_mutation "diagnostics perf: the catalog tiles read the block count as bytes"
   geode-diagnostics \
   perf_model_carries_buckets_overflow_and_the_overlay_mirror
 
-run_mutation "diagnostics perf: the catalog tiles stay empty after a catalog arrives" \
+run_mutation "diagnostics perf: the thread tile stays empty after a catalog arrives" \
   crates/geode-diagnostics/src/model.rs \
-  '        Some(c) => (
-            format_bytes(c.database_bytes),' \
-  '        Some(c) if false => (
-            format_bytes(c.database_bytes),' \
+  '            c.threads.to_string(),' \
+  '            String::new(),' \
   geode-diagnostics \
   perf_model_carries_buckets_overflow_and_the_overlay_mirror
 
