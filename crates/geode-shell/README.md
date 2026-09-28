@@ -47,7 +47,8 @@ GPUI globals or provide rendering helpers.
 | `shell/dialog` | Modal stack ownership, opening, shared-input synchronization, and focus restoration. Only the top dialog renders and receives keys. A kind cannot open twice; pop restores the covered dialog's text and caret. See [modal lifetime](../../docs/current/input-and-dialogs.md#modal-lifetime-and-focus). |
 | `shell/scope_expr_view` | Frame expression editing in Whole, Term, and Add modes. Whole/Add stage named-expression chips; `mod+s` saves typed text as a named definition. Term mode can replace one guarded term with a named reference. |
 | `shell/expr_suggest` | Shared expression-completion controller and renderer for frame, Scopes, and Expressions fields. Observes text and caret changes, requests values under reserved `EXPR_KEY`, and accepts rows through undoable range replacement. Tab accepts; Shift-Tab, Up/Down, and Ctrl-P/Ctrl-N move the highlight. Named rows stage references only in frame Whole/Add mode. Named-definition fields request unscoped values; unresolved scope references report an error before requesting. |
-| `module` | The module-hosting contract: `TileContent` (including `launch_context`, `launched`, and `autosize_columns`, whose default refuses with `colfit::NO_TABLE`; `tile::autosize_columns` calls it on the focused occupant only and shows a refusal as a notice), `ModuleFactory` (including `accepts` and `launch_state`), `ModuleRoster`, `Delivery`, `StackHandle`. `module::recording` is the test double a downstream crate hosts a neighbour with. |
+| `module` | The module-hosting contract: `TileContent` (including `launch_context`, `launched`, and `autosize_columns`, whose default refuses with `colfit::NO_TABLE`; `tile::autosize_columns` calls it on the focused occupant only and shows a refusal as a notice), `ModuleFactory` (including `accepts` and `launch_state`), `ModuleRoster`, `Delivery`, `StackHandle`; and the page seam beside it: `PageContent`, `PageFactory` (with `toggle_binding`), `PageOccupant`, `PageRoster` (whose `keymap_fragments` also emits the shell-generated toggle doc), and the `ShellActions` handle. `module::recording` is the test double a downstream crate hosts a neighbour or a page with. See [pages](../../docs/current/shell.md#pages). |
+| `shell/page` | One page at a time over the workspace: `open_page` (create on first open, then show and focus; a different kind replaces the retained page after stashing its state), `close_page`, `toggle_page`, `focus_home`, and the deferred `shell_actions` handle a page dispatches registered actions through. |
 | `shell/objectdialog` | Domain drafts, staged editing, validation, overrides, and debounced persistence. `render::open_object` opens a named object's edit stage or reports that it is undefined. `apply::queue_object` queues a whole user-layer definition with pending edits. The Expressions adapter validates named definitions and identifies referring scopes before deletion. See [configuration dialogs](../../docs/current/configuration-dialogs.md) for ownership and failure boundaries. |
 
 ## Globals
@@ -110,6 +111,13 @@ change most often hits:
   re-arms `pending_focus_restore`. A module that drops a focused
   `InputState` must `window.blur(cx)` first, or every chord dies for the
   rest of the session.
+- A page hides the tiles beneath it: `fill_active_tiles` yields nothing and
+  `visible_tile_keys` is empty while one is open, so every occupant hears
+  `set_visible(false)` and no flip barrier waits on a tile nobody can see.
+  The context stack is `page` then the page's own context, never
+  `workspace` or `tile`; `page::toggle_*` and `page::close` are refused
+  under a modal; focus returns to the open page's handle, not the shell
+  root, when an overlay closes.
 - Colors go through the doors: `chip_paint` for semantic chips,
   `row_paint` for list rows, `control::paint` for hover and pressed
   states. Each has a sweep over every bundled theme with no exception list.

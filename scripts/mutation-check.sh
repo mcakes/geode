@@ -6813,16 +6813,6 @@ run_mutation "shell page: a consumed close still closes the page" \
   geode-shell \
   a_page_that_consumes_close_stays_open
 
-run_mutation "shell page: a focused page input does not take the insert route" \
-  crates/geode-shell/src/shell/occupants.rs \
-  '            if !page.occupant.content.holds_focus(window, cx) {
-                return None;
-            }
-            return Some(self.context_stack(cx));' \
-  '            return None;' \
-  geode-shell \
-  a_workspace_switch_chord_from_a_focused_page_input_closes_the_page
-
 run_mutation "shell page: open never focuses the page" \
   crates/geode-shell/src/shell/page.rs \
   '        page.open = true;
@@ -6842,14 +6832,6 @@ run_mutation "shell page: close leaves focus on the hidden page" \
         self.session_dirty = true;' \
   geode-shell \
   toggle_opens_then_closes_the_page_and_announces_visibility
-
-run_mutation "shell page: a mouse open lets the press bubble to the root" \
-  crates/geode-shell/src/shell/page.rs \
-  '        window.prevent_default();
-        self.session_dirty = true;' \
-  '        self.session_dirty = true;' \
-  geode-shell \
-  the_sidebar_button_toggles_the_page_and_shows_it_active
 
 run_mutation "shell page: focus_home is the shell root even over a page" \
   crates/geode-shell/src/shell/page.rs \

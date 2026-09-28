@@ -89,8 +89,17 @@ the explicit modifier, such as `mod+shift+p` or `shift+left`.
 
 ## Context predicates
 
-The shell supplies a stack from outermost to innermost context. Predicates
-support flags, comparisons, boolean operators, and parentheses:
+The shell supplies a stack from outermost to innermost context. On the tile
+surface it is `workspace`, then `tile` and the focused occupant's own
+context when one is focused, then `palette` while it is open. While a
+[page](shell.md#pages) replaces the workspace it is `page`, then the page's
+own context, then `palette`; `workspace` and `tile` are absent, so the
+bindings in those tables stay inert until the page closes. The builtin
+keymap binds `escape` to `page::close` in the `page` context and binds the
+workspace switches `mod+1` to `mod+9` context-free, beside the palette
+toggle and the other application-wide chords, because a switch is
+navigation that must reach from a page as well as from the tile surface.
+Predicates support flags, comparisons, boolean operators, and parentheses:
 
 ```text
 workspace
@@ -179,6 +188,16 @@ A fragment may name any action, not only ones its own module registers, so
 long as its context is the module's own: both the blotter's and the pricer's
 default fragments bind `g m` to the shell's `tile::open_with` inside their own
 `mode == normal` context.
+
+A `PageFactory` contributes its `default_keymap` the same way, checked
+against the contexts it declares (its kind by default). Its toggle is
+different: a page's `toggle_binding` (`mod+d` for diagnostics) must be
+context-free to reach from the workspace, and a module fragment cannot carry
+a context-free binding, so the `PageRoster` emits it as a separate
+shell-generated document named `page:<kind>` that binds
+`page::toggle_<kind>`. That document is not put through the fragment filter,
+because the shell wrote it; it still compiles with the rest and a user
+keymap can rebind or unbind it like any builtin.
 
 See [input and dialogs](input-and-dialogs.md#keyboard-ownership) for surfaces
 that bypass sequences and counts while handling text, and for the limits of

@@ -19,11 +19,11 @@ this order:
 | Shell modal or component dialog | Excludes the ordinary matcher. A shell modal's handler gets first refusal. A chord it declines is dispatched only if it is bound to a dialog-opening action or the palette toggle; every other chord stays inert. Unclaimed Escape closes the top dialog. |
 | Focused per-tile command line | Handles its own keys. The effective palette toggle remains available and cancels the line. |
 | Focused scope text field | Typing bypasses the matcher. Single-key chords resolve against the workspace context only. |
-| Occupant holding focus in insert mode | Single-key chords use the whole context stack; bare keys use only contexts carrying `mode == insert`. |
+| Open page or occupant holding focus in insert mode | Single-key chords use the whole context stack; bare keys use only contexts carrying `mode == insert`. The open page's `holds_focus` is consulted before any tile's. |
 | Palette toggle and open palette | The toggle resolves directly against the effective single-key binding; an open palette owns remaining keys. |
 | Stack member list | Consumes non-chord keys. Chords fall through to ordinary matching. |
 | Active tile or divider drag | Escape stops the drag before ordinary matching. |
-| Ordinary keymap | Resolves against workspace, then tile and occupant contexts when present. |
+| Ordinary keymap | Resolves against workspace, then tile and occupant contexts when present. While a page is open the stack is `page`, then the page's own context, then `palette` when open; neither `workspace` nor `tile` is present. |
 
 Here a chord carries Control, Alt, or Command; Shift alone still counts as
 typing. Input components can consume their own editing shortcuts before the
@@ -39,8 +39,22 @@ not claim the key. A closed modal's closer owns focus instead.
 
 Actions from the palette and ordinary matcher share `ShellView::dispatch`.
 Workspace actions mark session state dirty and reconcile structural focus;
-unhandled action ids are offered to the focused occupant. Counts reach stack
-cycling and module dispatch; the general workspace router ignores them.
+unhandled action ids are offered to the open page, else the focused
+occupant. Counts reach stack cycling and module dispatch; the general
+workspace router ignores them.
+
+With a [page](shell.md#pages) open, Escape is taken in this order: a drag
+in flight is cancelled; an open modal closes and the page stays; the
+palette closes and focus returns to the page; a focused page input takes it
+through the page's own `mode == insert` binding, which blurs the input back
+to normal mode; then the `page` context's `escape` resolves to
+`page::close`, which the page sees first and may consume when it has
+something of its own to dismiss, and otherwise the shell closes the page.
+`mod+d` is the diagnostics page's context-free toggle. Under a modal both
+the toggle and `page::close` are refused with the close-the-dialog notice,
+because the dialog was opened over the page. The workspace switches
+`mod+1` to `mod+9` are context-free, so a switch closes the page from
+wherever it is and lands on that workspace's focused tile.
 
 ## Modal lifetime and focus
 
@@ -178,6 +192,13 @@ stack member list that only becomes usable once the stack closes. This
 differs from an ordinary palette action, which is allowed to run behind the
 stack, as described just above: these three are refused instead of left
 stranded.
+
+While a page is open the same three are refused with `close the page first
+(esc)`, and so are `tile::add`, every per-kind add action,
+`tile::open_with`, `tile::autosize_columns`, and both duplicate actions:
+the page covers the tile surface they would open on or change, and a
+layout edited behind a page is a change the trader cannot see. The palette
+reaches every other action over a page.
 
 [`palette`](../../crates/geode-shell/src/palette.rs) matches action title and
 category, not action id. Category matches receive half weight, rounded up.

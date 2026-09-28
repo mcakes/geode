@@ -649,45 +649,98 @@ committing and report its segment error. Segment display text is allocated by
 
 ## Diagnostics
 
-`geode-diagnostics` presents shell-owned operational state: sources, stored
-data, configuration, logs, and performance. The shell's `Diagnostics` entity
-and shared log ring supply the state. `:section <name>` and `[`/`]` select a
-section; log-level and performance-overlay changes use application actions.
-The session saves the section and filter.
+`geode-diagnostics` is the first [page](shell.md#pages): a surface over the
+workspace presenting shell-owned operational state in five sections, with
+sources, stored data, configuration, logs, and performance. The shell's
+`Diagnostics` entity, the shared log ring, the loaded configuration, and the
+frame's requery statistics supply the state. `page::toggle_diagnostics`,
+bound to `mod+d` by default, opens and closes it from the keymap, the
+sidebar button, the palette row "Diagnostics: Open page", or the status
+bar's diagnostics summary; Escape with nothing above the page closes it, as
+does any workspace switch. The page is retained while the window lives, so
+filters, cursors, expansion, and the log tail survive a close and reopen;
+the session saves only the selected section.
 
-| Section | Contents |
+The header carries the title, state chips derived from the same inputs as
+the status summary (worst source health with its count, config errors, data
+errors, and the catalog's arrival time or "catalog pending"), and a back
+control that dispatches `page::close`. A rail on the left lists the
+sections, each with a badge: the worst-health dot and source count, the
+dataset count, config error and warning counts, the error count in the
+retained log tail, and the frame p95. A click or the bracket keys select a
+section. The content pane is the section's toolbar, its table, and a detail
+strip: the table component paints every row at one height, so a row cannot
+grow, and the strip shows the cursor row's detail lines instead.
+
+| Section | Table and toolbar |
 |---|---|
-| Sources | Stopped data threads first (label, reason, and time; they stay until restart), then descriptions, health, loading activity, and poll times; worst reported health first, unreported sources last |
-| Data | Dataset and partition generations, with the resolved generation highlighted for a historical frame as-of |
-| Config | Current config-load diagnostics, data-layer diagnostics, prior load batches, and effective values with layer provenance |
-| Log | A bounded local tail of new records, with substring filtering and cursor following |
-| Perf | Frame and requery timing, dropped-event count, and database resource metrics from the catalog |
+| Sources | Source, Health (title-case label with the reason), Since (clock time and age), Shape, Last poll, Next poll, Ready, Loading. Worst reported health first by variant then name; unreported sources last, and a source known only from an ingest load gets a "no report yet" row with its loading text. Toolbar: a filter over name and health. Detail: the spec lines by shape and the health history. |
+| Data | One expandable row per dataset with Partitions, Latest gen, Published, Rows, Resolved, Live, and Loaded; a dataset expands to its generations, the one resolved under a historical frame as-of marked. Toolbar: filter, a chip reading `catalog as-of = frame` or `catalog pending`, Refresh catalog, Expand all, Collapse all. |
+| Config | Two panels. Left: the current diagnostics batch (config and data lanes) or, behind the History button, the prior batches newest first with their batch time; a click there moves only that panel's detail strip. Right, the cursor table: one expandable row per document and one row per leaf with Key, Value, and the Layer from `Config::explain`; a filter over `document.key` and value; an Open config directory button. |
+| Log | Time with milliseconds, Level, Target, and Message over the retained tail. Toolbar: level toggles, a target select over the targets seen in the tail plus `all`, a text filter over message and target, Follow, Clear, and Levels. Detail: the full record with a Copy button that puts it on the clipboard. |
+| Perf | No table. Stat tiles for frame p50 · p95 · max with the sample count and the 8 ms budget, requery submit→snapshot with the 50 ms budget, requery snapshot→paint, and dropped events; a frame-interval histogram whose bars past the budget take the warning tone; database and DuckDB memory tiles from the catalog; and the Performance overlay switch. |
 
-The tile rebuilds only the selected section. Diagnostics counters, frame
-as-of/config versions, and the log ring sequence gate observer work according
-to the section's inputs. Clock changes and local section, filter, or collapse
-changes also rebuild. Rendering shares prepared rows and cached header text;
-an unrelated performance tick does not walk the config documents.
+Keys in the page's own context: `j`/`k` move the cursor, `g g`/`G` jump,
+`ctrl+d`/`ctrl+u` move half a page and `ctrl+f`/`ctrl+b` a page, all with
+count prefixes; `[`/`]` cycle sections; `z o`/`z c` and Enter expand or
+collapse the cursor row where it expands (Data datasets, Config documents;
+a double-click does the same, a single click only selects); `/` focuses the
+section's filter input, which puts the page in insert mode, and Escape there
+returns to normal mode. On Perf, which paints no input, `/` does nothing.
+Every pointer control has one of these routes or a palette action behind
+it.
 
-The tile does not query ordinary view data, but it still participates in frame
-arrival so a global flip cannot wait on it indefinitely. Catalog requests are
-bounded and coalesced by the app bridge. Hiding the diagnostics surface removes
-watched demand while explicit catalog consumers can keep their own demand.
-An as-of change requests a fresh catalog while the tile is visible. Until the
-catalog's as-of matches the frame, resolved-generation markers are hidden.
+Controls that change application state go through a request channel or the
+shell-actions handle, never a direct call. A Levels pick queues
+`request_level` and the overlay switch `request_overlay_toggle`; the shell
+drains, applies, persists, and mirrors them, so the switch shows the shell's
+value. Refresh catalog queues an explicit catalog request the bridge serves;
+Open config directory dispatches `config::open_directory`. The Levels
+popover lists the default level, read-only, and the known targets with five
+level buttons each. It offers no way to add a target: `[log]` keeps only the
+known targets across a reload, so an added one could not persist. A section
+change blurs a focused filter and closes the popover first, because the next
+section may paint neither.
 
-Each tile retains at most 4,096 log records and reuses its drain buffer. It
-starts at the ring's current sequence when opened. If the ring overwrites
-unread records, the next drain reports that gap; this is not a cumulative
-loss counter. Moving the cursor stops following, and `G` resumes it.
+The page rebuilds only the selected section, and only when that section's
+inputs changed: its `DiagVersions` counter, plus the frame as-of for Data,
+the config version for Config, or new ring records for Log. Clock changes
+and local section, filter, or expansion changes also rebuild. Badges and
+header chips refresh on any counter change or new record whatever section
+is shown, and that refresh is where the log tail is drained, so the Log
+badge counts errors in the whole tail. A hidden page drains nothing: a wrap
+while it is closed is reported by the drain that shows it again.
 
-Source ages reflect the last row rebuild rather than a ticking timer; the
-absolute timestamp remains visible. Config output is capped at 2,000 leaves
-per document with an omitted-count row, although traversal still visits all
-leaves. `/` filters the config and log sections by substring.
+Visibility drives watched demand: opening calls `watch` and closing
+`unwatch`, so a closed page holds no catalog demand while explicit
+consumers keep theirs. An as-of change requests a fresh catalog while the
+page is visible; until the catalog's as-of matches the frame, the resolved
+markers are hidden and the Data chip reads pending. The page submits no
+view query, and no flip barrier waits on it: the tiles beneath are hidden
+while it is open.
 
-See the [crate guide](../../crates/geode-diagnostics/README.md) for the module
-map and observer, notification, and allocation contracts.
+The tail retains at most 4,096 records, starts at the ring's sequence when
+the page is first created, and reuses its drain buffer. If the ring
+overwrites unread records, the next drain leads the table with a loss row
+naming the gap measured at that drain, not a cumulative total; Clear
+forgets the retained records without moving the drain point. Following
+keeps the cursor on the last row; moving the cursor stops it, and `G` or
+the Follow switch resumes it.
+
+Source ages tick once a second while the page is visible and Sources is
+selected, rewriting the Since cells in place without a rebuild; on any
+other section, or a hidden page, the timer is dropped. Every other
+timestamp comes from the last rebuild.
+
+Limits: every table row has one height, so detail lives in the strip; the
+Config left panel is pointer-only, the keys staying with the
+effective-values table; columns resize but do not move or sort, since no
+section defines a sort order yet; the config explainer shows at most 2,000
+leaves per document with an omitted-count row but still traverses every
+leaf; stopped data threads show on the status bar, not in Sources.
+
+See the [crate guide](../../crates/geode-diagnostics/README.md) for the
+module map and the observer, notification, and allocation contracts.
 
 ## Pricing and the line pricer
 
