@@ -12,8 +12,10 @@ use std::sync::Arc;
 #[cfg(test)]
 mod tests;
 
+mod check;
 mod read;
 
+pub use check::load_panels;
 pub use read::read_panels;
 
 /// The layered document panels are read from.
