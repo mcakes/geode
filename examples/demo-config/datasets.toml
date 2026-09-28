@@ -407,6 +407,51 @@ role = "attribute"                # document-level: constant within one document
 [dividend_schedule.columns.schedule_date]
 type = "date"
 role = "attribute"
+
+# ---- Option chains. ----
+# One document per (underlying, expiry): the demo bus publishes one expiry
+# of one underlying per cadence tick through the generated `[opra_sim]`
+# source. Vols arrive computed; nothing averages bid and ask.
+[option_chain]
+family = "document"
+key = ["underlying_ref", "expiry"]   # expiry is text YYYY-MM-DD: document keys are utf8
+axes = ["strike"]
+
+[option_chain.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+textual = true
+[option_chain.columns.expiry]
+type = "utf8"
+role = "dimension"
+[option_chain.columns.strike]
+type = "f64"
+role = "axis"
+[option_chain.columns.bid_vol]
+type = "f64"
+role = "value"
+[option_chain.columns.ask_vol]
+type = "f64"
+role = "value"
+[option_chain.columns.mid_vol]
+type = "f64"
+role = "value"
+[option_chain.columns.bid]
+type = "f64"
+role = "value"
+[option_chain.columns.ask]
+type = "f64"
+role = "value"
+[option_chain.columns.forward]
+type = "f64"
+role = "attribute"
+[option_chain.columns.spot_ref]
+type = "f64"
+role = "attribute"
+[option_chain.columns.quote_time]
+type = "utf8"
+role = "attribute"                # RFC 3339 text: document columns cannot be timestamps
+
 # Series fetch sources share this cache, keyed by identity and source.
 # The series family defines the columns.
 [series]

@@ -42,9 +42,11 @@ pub fn ensure_emitted(dir: &Path, rows: usize) -> std::io::Result<PathBuf> {
 /// source paths rooted at `source_dir`.
 ///
 /// The risk CSV source polls every two seconds using sentinel readiness.
-/// CVI and dividend sources subscribe to `demo_bus`, coalescing updates per
-/// key over 500 ms. `demo_kdb` and `demo_rest` fetch the `series` dataset;
-/// the former offers a catalogue and the latter requires entered identities.
+/// CVI, dividend and option-chain (`opra_sim`) sources subscribe to
+/// `demo_bus`, coalescing updates per key over 500 ms. Chains are never
+/// uploaded, so the egress target names only CVI and dividends. `demo_kdb`
+/// and `demo_rest` fetch the `series` dataset; the former offers a
+/// catalogue and the latter requires entered identities.
 pub fn layer(source_dir: &Path) -> Vec<LayerDoc> {
     let sources = format!(
         "config_version = 1\n[demo]\ndataset = \"risk_snapshot\"\npaths = [{:?}]\n\
@@ -55,6 +57,9 @@ pub fn layer(source_dir: &Path) -> Vec<LayerDoc> {
          priority = \"latest_other\"\n\
          [dividend]\nadapter = \"demo_bus\"\ndataset = \"dividend_schedule\"\n\
          document = \"dividend_schedule\"\ntopics = [\"marketdata/dividend/>\"]\n\
+         coalesce = \"500ms\"\nsource_time = \"receive\"\npriority = \"latest_other\"\n\
+         [opra_sim]\nadapter = \"demo_bus\"\ndataset = \"option_chain\"\n\
+         document = \"option_chain\"\ntopics = [\"marketdata/chain/>\"]\n\
          coalesce = \"500ms\"\nsource_time = \"receive\"\npriority = \"latest_other\"\n\
          [demo_kdb]\nadapter = \"demo_kdb\"\ndataset = \"series\"\n\
          [demo_rest]\nadapter = \"demo_rest\"\ndataset = \"series\"\n",
@@ -203,7 +208,7 @@ mod tests {
             d.is_empty(),
             "SourceSpec::from_doc found diagnostics: {d:?}"
         );
-        assert_eq!(sources.len(), 5);
+        assert_eq!(sources.len(), 6);
     }
 
     /// The dividend source declares its document kind, topic, coalescing,
@@ -232,8 +237,46 @@ mod tests {
         let (sources, d) =
             geode_data::source::SourceSpec::from_doc(config.doc("sources").unwrap(), &schema);
         assert!(d.is_empty(), "{d:?}");
-        assert_eq!(sources.len(), 5, "demo, cvi, dividend, demo_kdb, demo_rest");
+        assert_eq!(
+            sources.len(),
+            6,
+            "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest"
+        );
         assert!(sources.iter().any(|s| s.name == "dividend"));
+    }
+
+    /// The option-chain source declares its document kind, topic,
+    /// coalescing, and priority alongside the other demo sources without
+    /// diagnostics.
+    #[test]
+    fn the_demo_layer_declares_the_option_chain_source() {
+        let docs = layer(std::path::Path::new("/tmp/geode-demo/100-42/src"));
+        let sources = docs.iter().find(|d| d.name == "sources").unwrap();
+        let chain = &sources.table["opra_sim"];
+        assert_eq!(chain["adapter"].as_str(), Some("demo_bus"));
+        assert_eq!(chain["dataset"].as_str(), Some("option_chain"));
+        assert_eq!(chain["document"].as_str(), Some("option_chain"));
+        let topics = chain["topics"].as_array().unwrap();
+        assert_eq!(topics.len(), 1);
+        assert_eq!(topics[0].as_str(), Some("marketdata/chain/>"));
+        assert_eq!(chain["coalesce"].as_str(), Some("500ms"));
+        assert_eq!(chain["priority"].as_str(), Some("latest_other"));
+
+        let config = geode_core::config::Config::load(&geode_core::config::ConfigSources {
+            builtin: layer(std::path::Path::new("/tmp/geode-demo/100-42/src")),
+            ..geode_core::config::ConfigSources::default()
+        });
+        let (schema, d) = geode_core::schema::SchemaSpec::from_doc(config.doc("datasets").unwrap());
+        assert!(d.is_empty(), "{d:?}");
+        let (sources, d) =
+            geode_data::source::SourceSpec::from_doc(config.doc("sources").unwrap(), &schema);
+        assert!(d.is_empty(), "{d:?}");
+        assert_eq!(
+            sources.len(),
+            6,
+            "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest"
+        );
+        assert!(sources.iter().any(|s| s.name == "opra_sim"));
     }
 
     /// Both timeseries sources resolve to the fetch shape over the demo
@@ -272,7 +315,7 @@ mod tests {
             d.is_empty(),
             "SourceSpec::from_doc found diagnostics: {d:?}"
         );
-        assert_eq!(sources.len(), 5);
+        assert_eq!(sources.len(), 6);
         let kdb = sources.iter().find(|s| s.name == "demo_kdb").unwrap();
         let rest = sources.iter().find(|s| s.name == "demo_rest").unwrap();
         assert_eq!(
@@ -365,9 +408,10 @@ mod demo_config_integration {
         assert_eq!(names, vec!["tree", "wide"]);
         let wide = setup.views.iter().find(|v| v.name == "wide").unwrap();
         assert_eq!(wide.columns.len(), 100, "the wide view has 100 columns");
-        // All five source definitions survive setup: risk CSVs, CVI and
-        // dividend subscriptions, and the two timeseries fetch adapters.
-        assert_eq!(setup.config.sources.len(), 5);
+        // All six source definitions survive setup: risk CSVs, the CVI,
+        // dividend and option-chain subscriptions, and the two timeseries
+        // fetch adapters.
+        assert_eq!(setup.config.sources.len(), 6);
         // Setup must carry the resolved egress target into the service config.
         assert_eq!(setup.config.egress.len(), 1);
         assert_eq!(setup.config.egress[0].name, "sophis");
@@ -382,6 +426,11 @@ mod demo_config_integration {
         geode_core::document::check_kind_against(
             &geode_documents::DividendKind,
             setup.config.schema.dataset("dividend_schedule").unwrap(),
+        )
+        .unwrap();
+        geode_core::document::check_kind_against(
+            &geode_documents::OptionChainKind,
+            setup.config.schema.dataset("option_chain").unwrap(),
         )
         .unwrap();
     }
