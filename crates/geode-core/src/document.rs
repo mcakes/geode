@@ -19,6 +19,19 @@ pub fn split_key(batch: &str) -> Vec<String> {
     batch.split(KEY_SEPARATOR).map(str::to_string).collect()
 }
 
+/// Whether the joined key `batch` is `prefix` or lies under it: equal, or
+/// `prefix` followed by [`KEY_SEPARATOR`]. Matching at a part boundary is
+/// the point: `SPX` lies under itself and under `SPX␟2026-10-16`, never
+/// under `SPXW␟…`. The prefix document query, its freshness and the
+/// publication watch all use this one test.
+pub fn is_key_prefix(prefix: &str, batch: &str) -> bool {
+    match batch.strip_prefix(prefix) {
+        Some("") => true,
+        Some(rest) => rest.starts_with(KEY_SEPARATOR),
+        None => false,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Column {
     F64(Vec<f64>),
@@ -380,6 +393,25 @@ mod tests {
     use crate::config::{LayerDoc, merge_docs};
     use crate::schema::SchemaSpec;
     use chrono::NaiveDate;
+
+    #[test]
+    fn a_key_prefix_matches_only_at_a_part_boundary() {
+        let spx = join_key(&["SPX".to_string()]);
+        let spx_oct = join_key(&["SPX".to_string(), "2026-10-16".to_string()]);
+        let spxw_oct = join_key(&["SPXW".to_string(), "2026-10-16".to_string()]);
+        assert!(is_key_prefix(&spx, &spx), "a key is its own prefix");
+        assert!(is_key_prefix(&spx, &spx_oct));
+        assert!(is_key_prefix(&spx_oct, &spx_oct));
+        assert!(
+            !is_key_prefix(&spx, &spxw_oct),
+            "a string prefix is not a key prefix"
+        );
+        assert!(
+            !is_key_prefix(&spx_oct, &spx),
+            "a longer key never prefixes a shorter one"
+        );
+        assert!(!is_key_prefix("SP", &spx));
+    }
 
     const CVI: &str = r#"
 [cvi_params]
