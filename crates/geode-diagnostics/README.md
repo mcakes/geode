@@ -29,9 +29,10 @@ The seam it sits on: [pages](../../docs/current/shell.md#pages).
 
 ## Interaction
 
-`[`/`]` cycle sections, and a rail row's press selects one. `j`/`k`, `g g`,
-`G`, `ctrl+d`/`ctrl+u`, `ctrl+f`/`ctrl+b`, and the page keys move the
-cursor with count prefixes; the detail strip follows it. `z o`/`z c` and
+`[`/`]` cycle sections, and a rail row's press selects one. `j`/`k` move the
+cursor by one, `ctrl+d`/`ctrl+u` by five, `ctrl+f`/`ctrl+b` and the page
+keys by ten, all with count prefixes, and `g g`/`G` jump; the detail strip
+follows the cursor. `z o`/`z c` and
 Enter expand or collapse the cursor row where it expands (Data datasets and
 Config documents); a double-click on a row does the same, and a single click
 only selects. `/` focuses the selected section's filter input, which puts
@@ -124,7 +125,11 @@ cargo test -p geode-diagnostics --release -- --ignored log_rebuild_timing --noca
 
 Every table row has one height, so a row's detail lives in the strip below
 the table. The Config left panel is pointer-only; the keys stay with the
-effective-values table. Columns resize but do not move or sort. The config
+effective-values table. Clear, Copy, Refresh catalog, Expand all, Collapse
+all, the level toggles, and the target select are pointer-only too: they
+have no page binding or palette action yet, unlike the Levels picks, the
+overlay switch, Open config directory, and Follow. Columns resize but do
+not move or sort. The config
 explainer shows at most 2,000 leaves per document with an omitted-count
 row, but still traverses every leaf. Stopped data threads are shown on the
 status bar, not in the Sources section. The Levels popover cannot add a

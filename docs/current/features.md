@@ -681,14 +681,16 @@ grow, and the strip shows the cursor row's detail lines instead.
 | Perf | No table. Stat tiles for frame p50 · p95 · max with the sample count and the 8 ms budget, requery submit→snapshot with the 50 ms budget, requery snapshot→paint, and dropped events; a frame-interval histogram whose bars past the budget take the warning tone; database and DuckDB memory tiles from the catalog; and the Performance overlay switch. |
 
 Keys in the page's own context: `j`/`k` move the cursor, `g g`/`G` jump,
-`ctrl+d`/`ctrl+u` move half a page and `ctrl+f`/`ctrl+b` a page, all with
-count prefixes; `[`/`]` cycle sections; `z o`/`z c` and Enter expand or
-collapse the cursor row where it expands (Data datasets, Config documents;
-a double-click does the same, a single click only selects); `/` focuses the
+`ctrl+d`/`ctrl+u` move five rows and `ctrl+f`/`ctrl+b` ten, all with count
+prefixes; `[`/`]` cycle sections; `z o`/`z c` and Enter expand or collapse
+the cursor row where it expands (Data datasets, Config documents; a
+double-click does the same, a single click only selects); `/` focuses the
 section's filter input, which puts the page in insert mode, and Escape there
 returns to normal mode. On Perf, which paints no input, `/` does nothing.
-Every pointer control has one of these routes or a palette action behind
-it.
+The state-changing controls have keyboard routes through the palette (Set
+log level…, Toggle performance overlay, Open config directory) and Follow
+has `G`; the remaining toolbar controls are pointer-only for now (see the
+limits below).
 
 Controls that change application state go through a request channel or the
 shell-actions handle, never a direct call. A Levels pick queues
@@ -734,7 +736,9 @@ timestamp comes from the last rebuild.
 
 Limits: every table row has one height, so detail lives in the strip; the
 Config left panel is pointer-only, the keys staying with the
-effective-values table; columns resize but do not move or sort, since no
+effective-values table, and so are Clear, Copy, Refresh catalog, Expand all,
+Collapse all, the level toggles, and the target select, which have no
+page binding or palette action yet; columns resize but do not move or sort, since no
 section defines a sort order yet; the config explainer shows at most 2,000
 leaves per document with an omitted-count row but still traverses every
 leaf; stopped data threads show on the status bar, not in Sources.
