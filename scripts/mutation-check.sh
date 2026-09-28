@@ -6847,11 +6847,22 @@ run_mutation "shell: MAJ-2 — ensure_occupants drops a vanished tile's occupant
   '        for (id, o) in self.occupants.iter() {
             if !all.contains(id) {
                 o.content.set_visible(false, cx);
+                o.content.closed(cx);
             }
         }
         self.occupants.retain(|id, _| all.contains(id));' \
   '        self.occupants.retain(|id, _| all.contains(id));' \
   geode-shell closing_a_watching_tile_unwatches_the_diagnostics_entity
+
+# A removed occupant hears `closed` after `set_visible(false)`. Mutated
+# away, a following tile's close never cancels its query or answers the
+# barrier, so closing the tile a flip waits on holds every other tile to
+# `FLIP_DEADLINE`. The test also pins that a workspace switch never closes.
+run_mutation "hosting: a removed occupant is told it closed" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '                o.content.closed(cx);' \
+  '                let _ = &o.content;' \
+  geode-shell closing_a_tile_tells_its_occupant_it_closed_and_a_workspace_switch_does_not
 
 run_mutation "shell: MAJ-3 — note_config_reloaded goes back behind the views_changed gate" \
   crates/geode-shell/src/shell/hot_reload.rs \

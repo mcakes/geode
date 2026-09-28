@@ -68,7 +68,11 @@ fullscreen, so a dock never shows the segment.
 Tile occupants are created through the app-supplied `ModuleRoster`. A new
 occupant begins hidden and receives an explicit visibility value during the
 next reconciliation. Hidden occupants may release live subscriptions and
-must requery when shown if their followed versions changed.
+must requery when shown if their followed versions changed. Removing an
+occupant (closing its tile, or filling a placeholder in place) calls
+`set_visible(false)` and then `closed`, once, before the occupant is dropped.
+Hiding never calls `closed`: a workspace switch, a dock toggle or a stack
+cycle only hides.
 
 ### Launch context
 

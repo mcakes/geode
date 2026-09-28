@@ -112,6 +112,36 @@ fn mod_bracket_cycles_and_the_ring_follows(cx: &mut gpui::TestAppContext) {
     assert_eq!(stack_events(&log, right), vec![None, Some((1, 2))]);
 }
 
+/// Cycling a stack hides the member it leaves but never closes it: a
+/// following member cancels only on `closed`, so a cycle reported as a close
+/// would drop the answer the trader cycles back for.
+#[gpui::test]
+fn cycling_a_stack_hides_members_without_closing_them(cx: &mut gpui::TestAppContext) {
+    let (mut cx, _shell, log, _left, _right, top) = stacked_shell(cx);
+    cx.simulate_keystrokes("alt-]");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.simulate_keystrokes("alt-[");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(
+        log.borrow()
+            .iter()
+            .any(|r| matches!(r, Recorded::Visible(t, false) if *t == top)),
+        "the cycle did hide a member: {:?}",
+        log.borrow()
+    );
+    assert!(
+        !log.borrow()
+            .iter()
+            .any(|r| matches!(r, Recorded::Closed(_))),
+        "a cycle hides; it never closes: {:?}",
+        log.borrow()
+    );
+}
+
 #[gpui::test]
 fn a_count_prefix_steps_n_members(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell, _log, _left, right, top) = stacked_shell(cx);

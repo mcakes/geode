@@ -224,6 +224,13 @@ pub trait TileContent {
     /// Subscribing before that announcement would retain resources for tiles
     /// that may never appear on screen.
     fn set_visible(&self, visible: bool, cx: &mut App);
+    /// The shell removed this occupant for good (its tile closed, or a
+    /// placeholder was filled in place) and drops it right after, following
+    /// `set_visible(false)`. Hiding never calls this. A following tile
+    /// cancels its in-flight query here and answers any open flip barrier
+    /// still waiting on it, so a closed tile never holds the others to the
+    /// deadline. The default does nothing.
+    fn closed(&self, _cx: &mut App) {}
     /// Set this tile's stack position, or `None` outside a stack.
     /// `ShellView::ensure_occupants` calls this after creation and whenever
     /// `(index, len)` changes. Modules paint the marker first in their header
@@ -586,6 +593,8 @@ pub mod recording {
         Command(TileId, String),
         Find(TileId, FindEvent),
         Visible(TileId, bool),
+        /// `closed` reached this tile: its occupant is being removed.
+        Closed(TileId),
         Delivered(TileId, u64),
         Priced(TileId, u64),
         /// A key-less [`Delivery::SeriesFetched`] this tile was handed,
@@ -866,6 +875,9 @@ pub mod recording {
             self.log
                 .borrow_mut()
                 .push(Recorded::Visible(self.tile, visible));
+        }
+        fn closed(&self, _: &mut App) {
+            self.log.borrow_mut().push(Recorded::Closed(self.tile));
         }
         fn set_stack(&self, stack: Option<StackHandle>, _: &mut App) {
             self.log.borrow_mut().push(Recorded::Stack(

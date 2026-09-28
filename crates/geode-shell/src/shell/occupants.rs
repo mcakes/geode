@@ -163,20 +163,23 @@ impl ShellView {
     }
 
     /// Reconcile tile occupants, visibility, and stack positions at render time.
-    /// Create missing occupants, notify removed occupants that they are hidden,
-    /// then drop them. Reusable tile sets retain capacity between frames and
-    /// are temporarily taken out of `self` while factory calls borrow services.
+    /// Create missing occupants, tell removed occupants they are hidden and
+    /// closed, then drop them. Reusable tile sets retain capacity between
+    /// frames and are temporarily taken out of `self` while factory calls
+    /// borrow services.
     /// A fresh `add_tile` occupant that is on screen and focused hears
     /// `TileContent::launched` once, deferred after the render.
     pub(super) fn ensure_occupants(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut all = std::mem::take(&mut self.scratch_all_tiles);
         self.fill_all_tiles(&mut all);
-        // Tell removed occupants they are hidden before dropping them, so they
-        // can release subscriptions with a live GPUI context. The visibility
-        // diff below can only reach occupants still in the map.
+        // Tell removed occupants they are hidden and then closed before
+        // dropping them, so they can release subscriptions and cancel their
+        // queries with a live GPUI context. The visibility diff below can only
+        // reach occupants still in the map.
         for (id, o) in self.occupants.iter() {
             if !all.contains(id) {
                 o.content.set_visible(false, cx);
+                o.content.closed(cx);
             }
         }
         self.occupants.retain(|id, _| all.contains(id));

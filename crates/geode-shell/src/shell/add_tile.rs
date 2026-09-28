@@ -38,6 +38,7 @@ impl ShellView {
         {
             if let Some(o) = self.occupants.remove(&tile) {
                 o.content.set_visible(false, cx);
+                o.content.closed(cx);
             }
             // The new occupant owns this tile ID. Stop preserving any unrestorable
             // session record that previously occupied its placeholder.
