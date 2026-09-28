@@ -825,6 +825,16 @@ pub enum ColumnDoor {
     Dataset,
 }
 
+impl ColumnDoor {
+    /// The overlay this door's fields write.
+    pub fn destination(self) -> Destination {
+        match self {
+            ColumnDoor::View => Destination::Presentation,
+            ColumnDoor::Dataset => Destination::DatasetPresentation,
+        }
+    }
+}
+
 /// Definition and dataset presentation keys kept separately for provenance and clear
 /// notices. View provenance compares current fields with their merged baseline rather
 /// than consulting a possibly stale saved overlay key.
@@ -1067,6 +1077,12 @@ pub struct Draft {
     /// pending-aware config. Other domains leave this map empty; Schema carries its
     /// editable overlay on `ColumnContext`.
     pub dataset_layer: BTreeMap<String, ColumnPresentation>,
+    /// Which column-stage keys each column sets at this draft's presentation layer
+    /// (Views: every column of the view overlay, read at draft build; Schema: each
+    /// column as it is entered). Compared with its baseline, so an inherit that changes
+    /// no displayed value is still a write.
+    pub presentation_set: BTreeMap<String, views::PresentationKeys>,
+    pub baseline_presentation_set: BTreeMap<String, views::PresentationKeys>,
 }
 
 /// Which way `Draft::step_selected` moves the value under the cursor.
@@ -1427,7 +1443,9 @@ impl Draft {
     /// comparison is not enough once a verb (Scopes' `o`) can replace
     /// `source` out from under a painted summary.
     pub fn is_dirty(&self) -> bool {
-        self.fields != self.baseline || self.source != self.baseline_source
+        self.fields != self.baseline
+            || self.source != self.baseline_source
+            || self.presentation_set != self.baseline_presentation_set
     }
 
     /// The column whose presentation is open, if [`Stage::Column`] is. The one question
@@ -2509,6 +2527,13 @@ impl Draft {
         if self.source != self.baseline_source {
             out.entry(Destination::Doc).or_default();
         }
+        // A column-stage inherit or pin may change no field value at all; the set
+        // change alone still has to reach the batch, at the open door's overlay.
+        if self.presentation_set != self.baseline_presentation_set
+            && let Some(ctx) = self.column_ctx.as_ref()
+        {
+            out.entry(ctx.door.destination()).or_default();
+        }
         out
     }
 
@@ -2526,6 +2551,7 @@ impl Draft {
     pub fn mark_saved(&mut self) {
         self.baseline = self.fields.clone();
         self.baseline_source = self.source.clone();
+        self.baseline_presentation_set = self.presentation_set.clone();
     }
 
     /// A draft for an object nothing defines yet. Both baselines are
@@ -2554,6 +2580,8 @@ impl Draft {
             // An object nothing defines yet has no columns for a dataset
             // to speak for; `Domain::draft` is where the layer arrives.
             dataset_layer: BTreeMap::new(),
+            presentation_set: BTreeMap::new(),
+            baseline_presentation_set: BTreeMap::new(),
         }
     }
 
@@ -2787,6 +2815,10 @@ impl Domain {
     /// opens showing whatever is already wrong with it.
     pub fn draft(self, config: &Config, object: &str) -> Draft {
         let fields = self.fields(config, Some(object));
+        let presentation_set = match self {
+            Domain::Views => views::presentation_set_for(config, object),
+            _ => BTreeMap::new(),
+        };
         let source = config
             .doc(self.doc())
             .and_then(|doc| doc.value.get(object))
@@ -2819,6 +2851,8 @@ impl Domain {
                 Domain::Views => views::dataset_layer_for(config, object),
                 _ => BTreeMap::new(),
             },
+            baseline_presentation_set: presentation_set.clone(),
+            presentation_set,
         };
         draft.diagnostics = self.validate(&draft, config);
         draft
@@ -4183,6 +4217,8 @@ mod tests {
             values: None,
             column_ctx: None,
             dataset_layer: BTreeMap::new(),
+            presentation_set: BTreeMap::new(),
+            baseline_presentation_set: BTreeMap::new(),
         }
     }
 

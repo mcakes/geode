@@ -11,7 +11,7 @@ use geode_core::config::{Config, Diagnostic, Layer, LayerDoc, Severity, load_vie
 use geode_core::schema::{ColumnRole, DatasetSpec, SchemaSpec};
 use geode_core::view::{
     Colour, ColumnFormat, ColumnPresentation, DATASET_PRESENTATION_DOC, DatasetPresentationSpec,
-    Negative, Scale, ViewColumn, ViewSpec,
+    Negative, Scale, ViewColumn, ViewPresentationSpec, ViewSpec,
 };
 
 use super::{
@@ -796,6 +796,79 @@ pub const COLUMN_KEYS: [&str; 7] = [
     "negative",
     "color",
 ];
+
+/// Whether `p` holds `key` — one of [`COLUMN_KEYS`] — at all. The layer questions
+/// (which layer sets a key, which keys an overlay sets) are presence questions.
+pub fn sets(p: &ColumnPresentation, key: &str) -> bool {
+    match key {
+        "label" => p.label.is_some(),
+        "width" => p.width.is_some(),
+        "scale" => p.scale.is_some(),
+        "precision" => p.precision.is_some(),
+        "thousands" => p.thousands.is_some(),
+        "negative" => p.negative.is_some(),
+        "color" => p.colour.is_some(),
+        _ => false,
+    }
+}
+
+/// Which of [`COLUMN_KEYS`] a column stage's overlay sets for one column. The writers
+/// write exactly these; every other key inherits from the layers below. Read from
+/// PRESENCE in the parsed overlay, never from values: a key equal to its parent that
+/// is on disk is a pin.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PresentationKeys([bool; 7]);
+
+impl PresentationKeys {
+    fn index(key: &str) -> Option<usize> {
+        COLUMN_KEYS.iter().position(|k| *k == key)
+    }
+
+    pub fn has(&self, key: &str) -> bool {
+        Self::index(key).is_some_and(|i| self.0[i])
+    }
+
+    pub fn set(&mut self, key: &str, on: bool) {
+        if let Some(i) = Self::index(key) {
+            self.0[i] = on;
+        }
+    }
+
+    pub fn any(&self) -> bool {
+        self.0.iter().any(|b| *b)
+    }
+
+    /// The keys a parsed overlay column holds. Parsing first means the legacy
+    /// spellings count and a malformed value, which is not in force, does not.
+    pub fn of(p: &ColumnPresentation) -> PresentationKeys {
+        let mut keys = PresentationKeys::default();
+        for key in COLUMN_KEYS {
+            keys.set(key, sets(p, key));
+        }
+        keys
+    }
+}
+
+/// The set keys of every column of `view`'s presentation overlay, as the merged doc
+/// holds it — the object a user-layer write replaces.
+pub(super) fn presentation_set_for(
+    config: &Config,
+    view: &str,
+) -> BTreeMap<String, PresentationKeys> {
+    let Some(doc) = config.doc(PRESENTATION_DOC) else {
+        return BTreeMap::new();
+    };
+    let (spec, _) = ViewPresentationSpec::from_doc(doc);
+    spec.views
+        .get(view)
+        .map(|v| {
+            v.columns
+                .iter()
+                .map(|(name, p)| (name.clone(), PresentationKeys::of(p)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 /// Display value for a column with no explicit width. `auto` selects the
 /// column kind's default width; it does not request measurement of the
@@ -1998,6 +2071,68 @@ role = "value"
             Some(EditRow::Field(0)),
             "the cursor followed the dataset field through the rebuild"
         );
+    }
+
+    /// A key is set when the overlay holds it, whatever its value; `hidden` is not a
+    /// column-stage key.
+    #[test]
+    fn presentation_keys_read_presence_not_value() {
+        let p = ColumnPresentation {
+            label: Some("Δ".into()),
+            colour: Some(Colour::Named("delta".into())),
+            hidden: Some(true),
+            ..ColumnPresentation::default()
+        };
+        let k = PresentationKeys::of(&p);
+        assert!(k.has("label"));
+        assert!(k.has("color"));
+        assert!(!k.has("width"));
+        assert!(!k.has("hidden"), "hidden is not a column-stage key");
+        assert!(k.any());
+        assert!(!PresentationKeys::default().any());
+    }
+
+    /// A Views draft reads which keys the view overlay sets per column: the legacy
+    /// top-level `width` map counts, a desk definition's label does not.
+    #[test]
+    fn a_views_draft_seeds_its_set_from_the_overlay() {
+        let config = config_from(&[
+            (
+                Layer::Builtin,
+                "datasets",
+                "[risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"instrument\"\n\
+                 [risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n",
+            ),
+            (
+                Layer::Desk,
+                "views",
+                "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\nlabel = \"NPV\"\n\
+                 [[tree.columns]]\nname = \"book\"\nkind = \"dimension\"\n",
+            ),
+            (
+                Layer::User,
+                PRESENTATION_DOC,
+                "[tree]\nwidth = { book = 90 }\n[tree.columns.npv]\ncolor = \"sign\"\n",
+            ),
+        ]);
+        let draft = Domain::Views.draft(&config, "tree");
+        let npv = draft
+            .presentation_set
+            .get("npv")
+            .copied()
+            .unwrap_or_default();
+        assert!(npv.has("color"));
+        assert!(
+            !npv.has("label"),
+            "the desk's label is not set at the view level"
+        );
+        let book = draft
+            .presentation_set
+            .get("book")
+            .copied()
+            .unwrap_or_default();
+        assert!(book.has("width"), "the legacy width map counts as set");
+        assert_eq!(draft.presentation_set, draft.baseline_presentation_set);
     }
 
     /// The overlay writer emits only changed per-column keys under `columns`; it does
