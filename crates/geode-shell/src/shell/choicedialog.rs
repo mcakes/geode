@@ -458,6 +458,10 @@ const SCOPE_HINTS: &[Hint] = &[
     Hint::Text("close"),
 ];
 
+/// The scope picker's footer with no saved scope: no row to move over and
+/// nothing for Enter to load, so only the way out is offered.
+const SCOPE_EMPTY_HINTS: &[Hint] = &[Hint::Key("escape"), Hint::Text("close")];
+
 const LOG_HINTS: &[Hint] = &[
     Hint::Text("type to filter ·"),
     Hint::Key("up"),
@@ -840,6 +844,12 @@ fn build(
         return div().into_any_element();
     };
     let (_, prefix, hints_selector, hints) = chrome(&state.target);
+    let no_scopes = matches!(state.target, Target::Scope { .. }) && state.list.options().is_empty();
+    let (hints_selector, hints) = if no_scopes {
+        ("scope-empty-hints", SCOPE_EMPTY_HINTS)
+    } else {
+        (hints_selector, hints)
+    };
     let theme = cx.theme();
     let muted = theme.muted_foreground;
     let click_entity = entity.clone();
@@ -861,7 +871,7 @@ fn build(
         },
     );
     // No saved scope at all: in place of an empty list, say how to make one.
-    let body = if matches!(state.target, Target::Scope { .. }) && state.list.options().is_empty() {
+    let body = if no_scopes {
         no_scopes_hint(muted, cx)
     } else {
         rows
@@ -884,7 +894,7 @@ fn no_scopes_hint(muted: gpui::Hsla, cx: &App) -> AnyElement {
     let chord = cx
         .try_global::<crate::tips::Chords>()
         .and_then(|chords| crate::tips::chord_for(&chords.0, "scope::save_current"));
-    let lead = "No saved scopes \u{2014} save the current one with the save glyph or";
+    let lead = "No saved scopes \u{2014} narrow the scope, then save it with the save glyph or";
     gpui_component::h_flex()
         .id("scope-empty-hint")
         .gap_1()

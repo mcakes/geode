@@ -215,6 +215,9 @@ fn with_no_saved_scopes_the_picker_says_how_to_save_one(cx: &mut gpui::TestAppCo
     vcx.run_until_parked();
     assert!(shell.read_with(&vcx, |s, _| s.choice_dialog.is_some()));
     assert!(vcx.debug_bounds("scope-empty-hint").is_some());
+    // Enter is inert here, so the footer does not offer it.
+    assert!(vcx.debug_bounds("scope-empty-hints").is_some());
+    assert!(vcx.debug_bounds("scope-hints").is_none());
     vcx.simulate_keystrokes("enter");
     vcx.run_until_parked();
     assert!(shell.read_with(&vcx, |s, _| s.choice_dialog.is_some()));

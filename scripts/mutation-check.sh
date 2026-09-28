@@ -15955,6 +15955,22 @@ run_mutation "scope-picker: the load glyph holds its pressed state while open" \
   geode-shell \
   clicking_the_load_glyph_opens_a_typeable_picker
 
+# With no saved scope the list gives way to the how-to-save hint.
+run_mutation "scope-picker: an empty set paints the save hint" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '    let body = if no_scopes {' \
+  '    let body = if false {' \
+  geode-shell \
+  with_no_saved_scopes_the_picker_says_how_to_save_one
+
+# With no saved scope Enter is inert, so the footer offers only Escape.
+run_mutation "scope-picker: an empty set's footer drops enter" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '        ("scope-empty-hints", SCOPE_EMPTY_HINTS)' \
+  '        (hints_selector, hints)' \
+  geode-shell \
+  with_no_saved_scopes_the_picker_says_how_to_save_one
+
 # ---- Tile picker: placeholder double-click, tile::add and mod-n ----
 
 # Only a PLACEHOLDER's double-click is the door — a real tile's may
