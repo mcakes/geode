@@ -21593,7 +21593,7 @@ run_mutation "timeseries colour picker: removing the target closes the picker" \
 run_mutation "pricer grid: a package's tag is its search text" \
   crates/geode-pricer/src/grid.rs \
   '                    SharedString::new_static(template.token()),' \
-  '                    package_search(sheet, r).into(),' \
+  '                    package_search(sheet, r, None).into(),' \
   geode-pricer rows_follow_the_expansion_and_carry_depth_ids_tags_and_search_keys
 
 # Find reads the unpainted search key, not the painted tag. Anchored on
