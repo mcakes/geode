@@ -1878,7 +1878,7 @@ impl Draft {
     /// inert is the defect class this interaction model exists to
     /// remove.
     pub fn toggle_selected(&mut self) -> Step {
-        self.step_selected(StepDirection::Forward)
+        self.step_pinning(StepDirection::Forward)
     }
 
     /// `shift+space`: change the value under the cursor backward — the
@@ -1887,7 +1887,48 @@ impl Draft {
     /// copies of the same match, which is the failure this codebase keeps
     /// hitting (a fix applied to one copy and not the other).
     pub fn toggle_selected_back(&mut self) -> Step {
-        self.step_selected(StepDirection::Backward)
+        self.step_pinning(StepDirection::Backward)
+    }
+
+    /// A step of the selected row that, in a column stage, also sets its key.
+    fn step_pinning(&mut self, direction: StepDirection) -> Step {
+        let row = self.selected_row();
+        let outcome = self.step_selected(direction);
+        if outcome.changed()
+            && let Some(EditRow::Field(index)) = row
+        {
+            self.pin_field(index);
+        }
+        outcome
+    }
+
+    /// Mark the column-stage field at `index` set at the stage's layer. `true` when it
+    /// was inherited until now. Outside a column stage there is nothing to pin.
+    fn pin_field(&mut self, index: usize) -> bool {
+        let Some(column) = self.column.clone() else {
+            return false;
+        };
+        let Some(key) = self.fields.get(index).map(|f| f.key.clone()) else {
+            return false;
+        };
+        let set = self.presentation_set.entry(column).or_default();
+        let was = set.has(&key);
+        set.set(&key, true);
+        !was
+    }
+
+    /// An applied value in a column stage pins its key, and a value typed or chosen
+    /// equal to the one shown still pins an inherited key: repeating the inherited
+    /// value is how a trader keeps it when the parent changes, so it is a change.
+    fn pin_applied(&mut self, index: usize, outcome: Step) -> Step {
+        match outcome {
+            Step::Changed => {
+                self.pin_field(index);
+                Step::Changed
+            }
+            Step::Inert if self.pin_field(index) => Step::Changed,
+            other => other,
+        }
     }
 
     /// Is the open text field the chain field — the one with a completion
@@ -2045,6 +2086,7 @@ impl Draft {
             }
             _ => Step::Inert,
         };
+        let outcome = self.pin_applied(index, outcome);
         self.text_entry = None;
         self.choice = None;
         self.query.clear();
@@ -2128,6 +2170,16 @@ impl Draft {
                 }
             },
             _ => Step::Inert,
+        };
+        // An empty Label or `auto` Width is the inherit gesture: the fold releases the
+        // key, so it must not be pinned here first.
+        let key = self.fields[index].key.as_str();
+        let inherits =
+            (key == "label" && typed.is_empty()) || (key == "width" && typed == views::AUTO);
+        let outcome = if inherits {
+            outcome
+        } else {
+            self.pin_applied(index, outcome)
         };
         self.text_entry = None;
         self.query.clear();
@@ -6173,6 +6225,92 @@ mod tests {
             empty.selected_vocabulary(Domain::Sources),
             RowVocabulary::Inert
         );
+    }
+
+    /// `tree`'s `npv` column stage, opened the way `render::enter_column_stage`
+    /// opens it (the door's own context builder), cursor on `key`.
+    fn npv_stage_on(key: &str) -> Draft {
+        let config = config_with_view_and_datasets();
+        let mut draft = Domain::Views.draft(&config, "tree");
+        let npv = draft
+            .list_items("columns")
+            .unwrap()
+            .iter()
+            .find(|i| i.name == "npv")
+            .unwrap()
+            .clone();
+        draft.column_ctx = Some(views::column_context(&draft, "npv", npv.clone()));
+        assert!(draft.enter_column(
+            "npv",
+            views::column_fields(&npv, &[], Destination::Presentation)
+        ));
+        draft.selected = draft.fields.iter().position(|f| f.key == key).unwrap();
+        draft
+    }
+
+    fn npv_sets(draft: &Draft, key: &str) -> bool {
+        draft
+            .presentation_set
+            .get("npv")
+            .is_some_and(|set| set.has(key))
+    }
+
+    /// Any edit in a column stage sets its key at the stage's layer.
+    #[test]
+    fn stepping_a_column_field_pins_it() {
+        let mut draft = npv_stage_on("precision");
+        assert!(!npv_sets(&draft, "precision"));
+        assert_eq!(draft.toggle_selected(), Step::Changed);
+        assert!(npv_sets(&draft, "precision"));
+    }
+
+    /// Enter on the option already lit — the inherited value — pins it: that is the
+    /// way to keep a value that happens to equal its parent.
+    #[test]
+    fn choosing_the_inherited_option_pins_it() {
+        let mut draft = npv_stage_on("negative");
+        assert_eq!(draft.begin_choice_entry(), Step::Changed);
+        assert_eq!(draft.apply_choice(), Step::Changed);
+        assert!(npv_sets(&draft, "negative"));
+        // Once set, the same choice again changes nothing.
+        assert_eq!(draft.begin_choice_entry(), Step::Changed);
+        assert_eq!(draft.apply_choice(), Step::Inert);
+    }
+
+    #[test]
+    fn typing_the_same_number_pins_it() {
+        let mut draft = npv_stage_on("precision");
+        let FieldKind::Number { value, .. } = draft.fields[draft.selected].kind else {
+            panic!("precision is a number");
+        };
+        assert_eq!(draft.begin_text_entry(), Step::Changed);
+        draft.set_query(value.to_string());
+        assert_eq!(
+            draft.apply_text_entry(&|_, text| Ok(text.to_string())),
+            Step::Changed
+        );
+        assert!(npv_sets(&draft, "precision"));
+    }
+
+    /// An empty Label is the inherit gesture, never a pin.
+    #[test]
+    fn an_empty_label_commit_does_not_pin() {
+        let mut draft = npv_stage_on("label");
+        assert_eq!(draft.begin_text_entry(), Step::Changed);
+        draft.set_query(String::new());
+        draft.apply_text_entry(&|_, text| Ok(text.to_string()));
+        assert!(!npv_sets(&draft, "label"));
+    }
+
+    /// Outside a column stage there is no column to pin for.
+    #[test]
+    fn outside_a_column_stage_nothing_pins() {
+        let config = config_with_view_and_datasets();
+        let mut draft = Domain::Views.draft(&config, "tree");
+        let before = draft.presentation_set.clone();
+        draft.selected = 0;
+        draft.toggle_selected();
+        assert_eq!(draft.presentation_set, before);
     }
 
     /// the column stage is a PROJECTION over the same draft — the view's fields are
