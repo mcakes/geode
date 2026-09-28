@@ -6242,6 +6242,53 @@ fn open_risk_columns(
     (shell, cx)
 }
 
+/// A Schema column already personalised on disk opens with those keys set: an edit to
+/// another field keeps them in the file (the writer writes set keys only, so an unread
+/// set would delete them) and badges them `dataset`.
+#[gpui::test]
+fn a_schema_column_keeps_its_overlay_keys_through_an_edit(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let overlay = "[risk.columns.book]\nwidth = 90\n";
+    std::fs::write(dir.path().join("dataset_presentation.toml"), overlay).unwrap();
+    let mut services = test_services();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            LayerDoc::builtin(
+                "datasets",
+                "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n",
+            )
+            .unwrap(),
+            LayerDoc {
+                layer: Layer::User,
+                name: "dataset_presentation".to_string(),
+                file: "<test:user>".into(),
+                table: overlay.parse().unwrap(),
+            },
+        ],
+        desk: None,
+        user: None,
+    });
+    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::schema");
+    cx.simulate_keystrokes("enter"); // risk
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter"); // book
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| d.column() == Some("book")));
+    assert!(
+        cx.debug_bounds("objectdialog-field-provenance-width")
+            .is_some()
+    );
+    cx.simulate_keystrokes("j j j j space"); // thousands
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+    let written = std::fs::read_to_string(dir.path().join("dataset_presentation.toml")).unwrap();
+    assert!(
+        written.contains("width = 90") && written.contains("thousands"),
+        "{written}"
+    );
+}
+
 /// Opening a schema column shows its dataset/column breadcrumb. Editing width writes
 /// only the dataset-presentation overlay; Delete and Revert are refused, and returning
 /// to the schema rows retains their read-only behavior.

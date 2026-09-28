@@ -593,10 +593,9 @@ pub(super) fn dataset_layer_for(
         .unwrap_or_default()
 }
 
-/// Definition presentation with dataset presentation applied, by column. Both the fold
-/// and the writer use this baseline so inherited dataset values are not persisted as
-/// new view overrides. The dataset layer is captured on the draft because the writer
-/// receives no Config.
+/// Definition presentation with dataset presentation applied, by column — what an
+/// inherited view key resolves to. Test-only: the stage builds the same merge per
+/// column through `ColumnLayers::below_view`.
 #[cfg(test)]
 pub(super) fn baseline_below(draft: &Draft) -> BTreeMap<String, ColumnPresentation> {
     let mut below = desk_baseline(draft);
@@ -800,13 +799,19 @@ impl PresentationKeys {
     }
 }
 
-/// The set keys of every column of `view`'s presentation overlay, as the merged doc
-/// holds it — the object a user-layer write replaces.
+/// The set keys of each of `view`'s own columns in its presentation overlay, as the
+/// merged doc holds it — the object a user-layer write replaces. An overlay entry for
+/// a column the view does not have is not in force (the overlay's `apply` ignores it)
+/// and seeds nothing, so a column re-added from the catalogue starts inherited.
 pub(super) fn presentation_set_for(
     config: &Config,
     view: &str,
 ) -> BTreeMap<String, PresentationKeys> {
     let Some(doc) = config.doc(PRESENTATION_DOC) else {
+        return BTreeMap::new();
+    };
+    let (views, _) = load_views(config);
+    let Some(members) = views.iter().find(|v| v.name == view).map(|v| &v.columns) else {
         return BTreeMap::new();
     };
     let (spec, _) = ViewPresentationSpec::from_doc(doc);
@@ -815,6 +820,7 @@ pub(super) fn presentation_set_for(
         .map(|v| {
             v.columns
                 .iter()
+                .filter(|(name, _)| members.iter().any(|c| c.name() == name.as_str()))
                 .map(|(name, p)| (name.clone(), PresentationKeys::of(p)))
                 .collect()
         })
@@ -1285,7 +1291,7 @@ pub fn help(key: &str) -> &'static str {
 /// Shared help for the seven presentation fields in either column-stage domain.
 pub fn column_help(key: &str) -> &'static str {
     match key {
-        "label" => "The header text — empty or r inherits the desk or dataset label",
+        "label" => "The header text — empty or r inherits the label below",
         "width" => "Column width in pixels; auto or r inherits",
         "scale" => "Divide values for display: none, k (thousands), M (millions)",
         "precision" => "Decimal places shown, 0 to 12",
@@ -2168,8 +2174,39 @@ role = "value"
         assert_eq!(draft.presentation_set, draft.baseline_presentation_set);
     }
 
-    /// The overlay writer emits only changed per-column keys under `columns`; it does
-    /// not emit legacy top-level hidden or width entries.
+    /// An overlay entry for a column the view no longer has is not in force
+    /// (`ViewPresentationSpec::apply` ignores it), so it seeds nothing: re-adding the
+    /// column from the catalogue must not freeze its dataset values as view pins.
+    #[test]
+    fn an_overlay_entry_for_a_column_the_view_lacks_seeds_nothing() {
+        let config = config_from(&[
+            (
+                Layer::Builtin,
+                "datasets",
+                "[risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"instrument\"\n\
+                 [risk.columns.vega]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"instrument\"\n",
+            ),
+            (
+                Layer::Desk,
+                "views",
+                "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\n",
+            ),
+            (
+                Layer::User,
+                PRESENTATION_DOC,
+                "[tree.columns.vega]\nscale = \"M\"\n",
+            ),
+        ]);
+        let draft = Domain::Views.draft(&config, "tree");
+        assert!(
+            !draft.presentation_set.contains_key("vega"),
+            "{:?}",
+            draft.presentation_set
+        );
+    }
+
+    /// The overlay writer emits exactly the set keys under `columns`, a pin equal to its
+    /// parent included; it does not emit legacy top-level hidden or width entries.
     #[test]
     fn the_writer_emits_exactly_the_set_keys() {
         // desk: npv has scale k, precision 2; the trader sets precision 0 and a color, and hides book.
@@ -2214,8 +2251,8 @@ role = "value"
         );
     }
 
-    /// View overlays compare against definition plus dataset presentation. An edit to
-    /// one field must not copy inherited dataset values into per-view overrides.
+    /// An edit to one field must not copy inherited dataset values into per-view
+    /// overrides: only the set key is written.
     #[test]
     fn an_inherited_field_equal_or_not_writes_nothing() {
         // desk: npv width 50. dataset level: npv width 140, scale k.

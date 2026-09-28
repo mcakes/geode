@@ -2447,9 +2447,9 @@ fn revalidate(shell: &mut ShellView) {
     if let Some(draft) = draft_mut(shell) {
         draft.diagnostics = diagnostics;
     }
-    // Explain a cleared key's inherited value after reseeding its field. Name the
-    // actual fallback layer: dataset presentation takes precedence over the view
-    // definition. No lower layer means the field uses its default without a notice.
+    // Explain a released key's inherited value after reseeding its field. Name the
+    // layer it now follows: dataset presentation takes precedence over the view
+    // definition, and with neither it is the kind default.
     if let Some(Fold { key, to }) = fold {
         set_notice(shell, format!("{key} follows {} again", to.phrase()));
     }

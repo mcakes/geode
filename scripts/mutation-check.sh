@@ -2845,6 +2845,26 @@ run_mutation "column inherit: shift+r is not routed in the column stage" \
   geode-shell \
   shift_r_inherits_every_field
 
+run_mutation "column inherit: a Schema column opens with nothing set" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '            draft
+                .presentation_set
+                .entry(column.to_string())
+                .or_insert(keys);' \
+  '            draft
+                .presentation_set
+                .entry(column.to_string())
+                .or_default();' \
+  geode-shell \
+  a_schema_column_keeps_its_overlay_keys_through_an_edit
+
+run_mutation "column inherit: a stale overlay entry seeds a pin" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '                .filter(|(name, _)| members.iter().any(|c| c.name() == name.as_str()))' \
+  '                .filter(|_| true)' \
+  geode-shell \
+  an_overlay_entry_for_a_column_the_view_lacks_seeds_nothing
+
 run_mutation "dialog stack: every chord reaches through a dialog" \
   crates/geode-shell/src/shell/input.rs \
   '                        && dialog::opens_dialog(&action)' \

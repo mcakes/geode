@@ -835,9 +835,9 @@ impl ColumnDoor {
     }
 }
 
-/// Definition and dataset presentation keys kept separately for provenance and clear
-/// notices. View provenance compares current fields with their merged baseline rather
-/// than consulting a possibly stale saved overlay key.
+/// Definition and dataset presentation keys kept separately: an inherited Views field
+/// resolves from them (dataset over desk), and its badge and release notice name the
+/// layer that sets the key.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ColumnLayers {
     pub desk: ColumnPresentation,
@@ -1071,10 +1071,9 @@ pub struct Draft {
     /// Column-stage destination, baseline layers, and fold target. Views edits its
     /// parent list item; Schema edits a scratch dataset item and overlay object.
     pub column_ctx: Option<ColumnContext>,
-    /// Dataset presentation by column for a Views draft. The writer has no Config
-    /// parameter, so this captured layer is needed to avoid copying inherited dataset
-    /// values into a view overlay as new overrides. Stage entry refreshes it from the
-    /// pending-aware config. Other domains leave this map empty; Schema carries its
+    /// Dataset presentation by column for a Views draft: the layer an inherited view
+    /// key resolves from over the desk definition, captured because the fold has no
+    /// Config. Stage entry refreshes it from the pending-aware config. Other domains leave this map empty; Schema carries its
     /// editable overlay on `ColumnContext`.
     pub dataset_layer: BTreeMap<String, ColumnPresentation>,
     /// Which column-stage keys each column sets at this draft's presentation layer

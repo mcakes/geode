@@ -132,7 +132,8 @@ Presentation-only edits preserve definition inheritance.
 
 Each column-stage field is either set at the stage's layer (the view's
 overlay on Views, the dataset's on Schema) or inherited from the layers
-below. Opening a column reads which keys that overlay holds; changing a
+below. Which keys that overlay holds is read when the view is opened (Views)
+or when the column is (Schema); changing a
 value sets it, even to a value equal to the one it inherits, which pins it.
 `r` makes the selected field inherit again, `shift+r` every field, and a
 set field's ↺ does what `r` does; an empty Label or `auto` Width inherits
