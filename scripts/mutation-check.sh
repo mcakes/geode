@@ -24294,6 +24294,50 @@ run_mutation "panels: a second kind-action registration is refused" \
   '        if false && self.get(action.id).is_some() {' \
   geode-core a_registered_kind_action_is_found_by_id_and_a_second_registration_is_refused
 
+# An unknown key (a misspelt `format`) is refused; mutated to accept any
+# key, the misspelling paints the text default's zero places.
+run_mutation "panels: an unknown key refuses the panel" \
+  crates/geode-core/src/panel/read.rs \
+  '    match t.keys().find(|k| !keys.contains(&k.as_str())) {' \
+  '    match None::<&String> {' \
+  geode-core a_misspelt_format_key_is_refused_not_ignored
+
+# A typed row identity with a hidden label leaves no column to name a new row in.
+run_mutation "panels: a hidden typed row label refuses" \
+  crates/geode-core/src/panel/read.rs \
+  '    if label == RowLabel::Hidden && matches!(identity, RowIdentity::Typed(_)) {' \
+  '    if false {' \
+  geode-core a_hidden_label_on_a_typed_row_identity_is_refused
+
+# An f64 with no precision would paint at the text default's zero places.
+run_mutation "panels: an f64 without a precision refuses" \
+  crates/geode-core/src/panel/read.rs \
+  '    if needs_precision && !f.contains_key("precision") {' \
+  '    if false {' \
+  geode-core an_f64_value_without_a_precision_is_refused
+
+# Two columns one label would send an edit to the wrong column.
+run_mutation "panels: two columns sharing a label refuse" \
+  crates/geode-core/src/panel/read.rs \
+  '        if labels[..i].iter().any(|(_, l)| l == label) {' \
+  '        if false {' \
+  geode-core two_value_columns_sharing_a_label_are_refused
+
+# A column named twice would be edited in two places and uploaded once.
+run_mutation "panels: a column named twice refuses" \
+  crates/geode-core/src/panel/read.rs \
+  '        if named[..i].iter().any(|(_, c)| c == column) {' \
+  '        if false {' \
+  geode-core a_column_named_twice_is_refused
+
+# Mutated to merge per field, a partial user `[cvi]` inherits the builtin's
+# columns instead of being the whole panel.
+run_mutation "panels: a named panel replaces whole across layers" \
+  crates/geode-core/src/config/merge.rs \
+  '        "panels" => Some(1),' \
+  '        "panels" => None,' \
+  geode-core a_user_panel_replaces_the_builtin_one_whole
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
