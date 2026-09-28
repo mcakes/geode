@@ -22743,6 +22743,31 @@ run_mutation "context: a selection counts children of a selected group" \
   '    top_most(&rows, snapshot.rows(), |_| None)' \
   geode-blotter a_selection_lists_its_top_most_rows_only
 
+run_mutation "context: blotter reads an empty grouping label as a value" \
+  crates/geode-blotter/src/core/context.rs \
+  '        if let Some(v) = value.filter(|v| !v.is_empty()) {' \
+  '        if let Some(v) = value {' \
+  geode-blotter an_empty_grouping_label_is_absent
+
+# The selection rides the context only while the cursor is inside it.
+run_mutation "context: the selection rides a cursor outside it" \
+  crates/geode-blotter/src/delegate.rs \
+  '            Some(r) if r.rows.contains(&self.cursor.row) => {' \
+  '            Some(r) if true => {' \
+  geode-blotter the_dimension_context_follows_the_cursor_row_and_selection
+
+run_mutation "context: a repeated context column is emitted twice" \
+  crates/geode-core/src/view.rs \
+  '                && !out.iter().any(|u| u.name == name);' \
+  '                && true;' \
+  geode-core context_dimensions_keep_only_unshown_ungrouped_declared_columns_once
+
+run_mutation "context: a shared factory stops forwarding launch_state" \
+  crates/geode-shell/src/module.rs \
+  '        (**self).launch_state(ctx)' \
+  '        None' \
+  geode-app the_production_roster_opens_market_data_on_an_underlying
+
 # Startup hands the roster's context columns to the data handle, or no
 # query carries them and a blotter row offers only its shown columns.
 run_mutation "context: startup never publishes the context columns" \
