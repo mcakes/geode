@@ -3832,10 +3832,12 @@ impl PricerTile {
 
     /// The sheet's view as a column plan, or the first loaded view with a
     /// standing notice (the sheet keeps its own `view`, so a view that
-    /// comes back on the next reload is used again).
+    /// comes back on the next reload is used again). A view whose every
+    /// column is hidden plans none and says so, since an empty grid with a
+    /// silent header reads as a broken tile.
     pub(crate) fn resolve_plan(&mut self) {
         let views = self.shared.views.borrow();
-        let (plan, notice) = match views.get(&self.sheet.view) {
+        let (plan, mut notice) = match views.get(&self.sheet.view) {
             Some(v) => (ColumnPlan::build(v), None),
             None => match views.names().next().and_then(|n| views.get(n)) {
                 Some(v) => (
@@ -3855,6 +3857,9 @@ impl PricerTile {
             },
         };
         drop(views);
+        if plan.columns.is_empty() && notice.is_none() {
+            notice = Some(format!("view '{}' has no visible column", self.sheet.view).into());
+        }
         self.plan = plan;
         self.view_notice = notice;
         self.cursor.col = self
@@ -5043,25 +5048,25 @@ pub(crate) mod tests {
         assert!(h.columns(&vcx).contains(&"barrier".to_string()));
         assert_eq!(
             h.command(&mut vcx, "view nope"),
-            Err("no view 'nope' (have: vanilla, barrier)".into())
+            Err("no view 'nope' (have: barrier, vanilla)".into())
         );
         let words = h.tile.read_with(&vcx, |t, _| t.completions("view ", 5));
-        assert_eq!(words, vec!["vanilla", "barrier"]);
+        assert_eq!(words, vec!["barrier", "vanilla"]);
     }
 
     #[gpui::test]
     fn a_reloaded_views_doc_reaches_an_open_tile(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C"]);
         let doc = geode_core::config::merge_docs(
-            "pricer_views",
+            "views",
             &[geode_core::config::LayerDoc::builtin(
-                "pricer_views",
-                "[slim]\ncolumns = [\"qty\", \"npv\"]\n",
+                "views",
+                "[slim]\ndataset = \"pricer\"\n[[slim.columns]]\nname = \"qty\"\nkind = \"dimension\"\n[[slim.columns]]\nname = \"npv\"\n",
             )
             .unwrap()],
         );
-        let (views, diags) = Views::from_doc(&doc);
-        assert!(diags.is_empty());
+        let (views, diags) = Views::from_specs(&geode_core::view::ViewSpec::from_doc(&doc).0);
+        assert!(diags.is_empty(), "{diags:?}");
         vcx.update(|_, cx| {
             h.factory.reload(
                 views,
@@ -5081,6 +5086,49 @@ pub(crate) mod tests {
             Some("view 'vanilla' is not defined; showing 'slim'")
         );
         assert_eq!(h.factory.settings().refresh, None);
+    }
+
+    /// A view whose every column the merged presentation hides plans no
+    /// column: the header says so, and the cursor keys have nothing to
+    /// step onto but do not panic.
+    #[gpui::test]
+    fn a_view_with_every_column_hidden_shows_a_header_notice(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C"]);
+        let doc = geode_core::config::merge_docs(
+            "views",
+            &[geode_core::config::LayerDoc::builtin(
+                "views",
+                "[vanilla]\ndataset = \"pricer\"\n[[vanilla.columns]]\nname = \"npv\"\n",
+            )
+            .unwrap()],
+        );
+        let mut specs = geode_core::view::ViewSpec::from_doc(&doc).0;
+        specs[0]
+            .presentation
+            .entry("npv".into())
+            .or_default()
+            .hidden = Some(true);
+        let (views, diags) = Views::from_specs(&specs);
+        assert!(diags.is_empty(), "{diags:?}");
+        vcx.update(|_, cx| {
+            h.factory.reload(
+                views,
+                TemplateSet::builtin(),
+                None,
+                std::time::Duration::from_secs(60),
+                cx,
+            )
+        });
+        vcx.run_until_parked();
+        h.draw(&mut vcx);
+        assert!(h.columns(&vcx).is_empty(), "{:?}", h.columns(&vcx));
+        assert_eq!(
+            h.notice(&vcx).as_deref(),
+            Some("view 'vanilla' has no visible column")
+        );
+        keys(&h, &mut vcx, "j l l h k");
+        assert!(h.columns(&vcx).is_empty());
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor.col), 0);
     }
 
     /// A pricer has no frame query result to await. It acknowledges the flip barrier
@@ -6852,16 +6900,22 @@ pub(crate) mod tests {
         assert!(!focused(&mut vcx), "blurred, then dropped");
     }
 
-    fn slim_views(columns: &str) -> Views {
+    /// One `slim` view over the pricer dataset naming `columns`, written
+    /// as a `views` doc (a non-measure carries `kind = "dimension"`).
+    fn slim_views(columns: &[&str]) -> Views {
+        let mut text = String::from("[slim]\ndataset = \"pricer\"\n");
+        for name in columns {
+            text.push_str(&format!("[[slim.columns]]\nname = \"{name}\"\n"));
+            let def = crate::core::column(name).expect("a vocabulary column");
+            if !matches!(def.kind, crate::core::ColumnKind::Measure { .. }) {
+                text.push_str("kind = \"dimension\"\n");
+            }
+        }
         let doc = geode_core::config::merge_docs(
-            "pricer_views",
-            &[geode_core::config::LayerDoc::builtin(
-                "pricer_views",
-                &format!("[slim]\ncolumns = [{columns}]\n"),
-            )
-            .unwrap()],
+            "views",
+            &[geode_core::config::LayerDoc::builtin("views", &text).unwrap()],
         );
-        let (views, diags) = Views::from_doc(&doc);
+        let (views, diags) = Views::from_specs(&geode_core::view::ViewSpec::from_doc(&doc).0);
         assert!(diags.is_empty(), "{diags:?}");
         views
     }
@@ -6881,7 +6935,7 @@ pub(crate) mod tests {
         h.dispatch(&mut vcx, "edit", None);
         assert_eq!(editor_paint_col(&h, &vcx), Some(3), "fixture");
         set_editor(&h, &mut vcx, "5100");
-        let views = slim_views("\"qty\", \"strike\", \"underlying_ref\"");
+        let views = slim_views(&["qty", "strike", "underlying_ref"]);
         vcx.update(|_, cx| {
             h.factory.reload(
                 views,
@@ -6914,7 +6968,7 @@ pub(crate) mod tests {
         h.dispatch(&mut vcx, "right", Some(3)); // strike
         h.dispatch(&mut vcx, "edit", None);
         assert!(focused(&mut vcx), "fixture: the field owns focus");
-        let views = slim_views("\"qty\", \"npv\"");
+        let views = slim_views(&["qty", "npv"]);
         vcx.update(|_, cx| {
             h.factory.reload(
                 views,
@@ -7277,7 +7331,7 @@ pub(crate) mod tests {
         let (h, mut vcx) = open_seeded(cx, &DATED);
         open_expiry(&h, &mut vcx, 0);
         assert_eq!(editor_paint_col(&h, &vcx), Some(2), "fixture");
-        let views = slim_views("\"expiry\", \"qty\"");
+        let views = slim_views(&["expiry", "qty"]);
         vcx.update(|_, cx| {
             h.factory.reload(
                 views,
@@ -7308,7 +7362,7 @@ pub(crate) mod tests {
         let (h, mut vcx) = open_seeded(cx, &DATED);
         open_expiry(&h, &mut vcx, 0);
         assert!(focused(&mut vcx), "fixture: the field owns focus");
-        let views = slim_views("\"qty\", \"npv\"");
+        let views = slim_views(&["qty", "npv"]);
         vcx.update(|_, cx| {
             h.factory.reload(
                 views,
@@ -7531,7 +7585,7 @@ pub(crate) mod tests {
         assert_eq!(h.mode(&mut vcx), "normal");
         assert_eq!(h.prices()[0].lines.len(), 4);
         h.dispatch(&mut vcx, "menu", None);
-        h.dispatch(&mut vcx, "menu_down", Some(8)); // past the sheet rows to the second view: barrier
+        h.dispatch(&mut vcx, "menu_down", Some(7)); // past the sheet rows to the first view: barrier
         h.dispatch(&mut vcx, "menu_pick", None);
         assert!(h.columns(&vcx).contains(&"barrier".to_string()));
     }
@@ -7578,7 +7632,7 @@ pub(crate) mod tests {
         h.dispatch(&mut vcx, "menu_down", Some(20)); // view: barrier, the last row
         vcx.update(|_, cx| {
             h.factory.reload(
-                slim_views("\"qty\", \"npv\""),
+                slim_views(&["qty", "npv"]),
                 TemplateSet::builtin(),
                 None,
                 std::time::Duration::from_secs(60),
@@ -8808,8 +8862,8 @@ pub(crate) mod tests {
                 "Remove sheet… | :rm",
                 "—",
                 "[View]",
-                "✓ vanilla",
                 "  barrier",
+                "✓ vanilla",
             ]
         );
         for (id, title) in crate::content::ACTIONS {
@@ -8861,12 +8915,12 @@ pub(crate) mod tests {
     fn a_pointer_move_over_a_menu_row_moves_the_highlight(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
         h.dispatch(&mut vcx, "menu", None);
-        let at = centre_of(&mut vcx, "pricer-menu-row-18"); // barrier
+        let at = centre_of(&mut vcx, "pricer-menu-row-17"); // barrier
         vcx.simulate_mouse_move(at, None, gpui::Modifiers::default());
         let highlighted = h
             .tile
             .read_with(&vcx, |t, _| t.menu.as_ref().and_then(|m| m.highlighted()));
-        assert_eq!(highlighted, Some(18));
+        assert_eq!(highlighted, Some(17));
         h.dispatch(&mut vcx, "menu_pick", None);
         assert!(h.columns(&vcx).contains(&"barrier".to_string()));
     }

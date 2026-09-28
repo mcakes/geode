@@ -1,26 +1,119 @@
-//! Named column sets over the fixed pricer vocabulary. Shared `ColumnPresentation` and
-//! `ColumnFormat` types resolve presentation options. [`BUILTIN_VIEWS`] supplies
-//! defaults; configuration layers replace views by name.
+//! Named column sets over the pricer vocabulary, read from ordinary `views.toml`
+//! views whose `dataset` is `pricer`. `geode_core::config::load_views` has
+//! already merged the view definition, `dataset_presentation` and
+//! `view_presentation` (order permuted, `hidden` set) into each `ViewSpec`;
+//! this module keeps the pricer's views, refuses what it cannot evaluate
+//! (joins, derived SQL) and resolves each column against the vocabulary.
 
 use crate::core::columns::{ColumnDef, column};
-use geode_core::config::{Diagnostic, MergedDoc, Severity};
-use geode_core::view::{ColumnFormat, ColumnPresentation};
-use std::cell::RefCell;
+use crate::core::dataset::PRICER_DATASET;
+use geode_core::config::{Diagnostic, LayerDoc, Severity, merge_docs};
+use geode_core::view::ViewColumn as SpecColumn;
+use geode_core::view::{ColumnFormat, ColumnPresentation, ViewSpec};
 
+/// Retired document name. Nothing reads it; the app reports a document by
+/// this name so a desk or user layer still carrying one learns where its
+/// views now live.
 pub const PRICER_VIEWS_DOC: &str = "pricer_views";
 
-/// Bundled column sets installed through the factory's builtin documents. Both include
-/// status so pending pricing and failures are visible in text as well as through cell
-/// colours.
+/// The two bundled views, a `views` doc over the computed `pricer` dataset
+/// that the application installs in its builtin layer. Both end in `status`
+/// so pending pricing and failures are visible in text as well as through
+/// cell colors. A non-measure column carries `kind = "dimension"` so the
+/// view validates against the dataset declaration at load.
 pub const BUILTIN_VIEWS: &str = r#"[vanilla]
-columns = ["qty", "underlying_ref", "expiry", "strike", "option_type", "currency", "spot_shift", "vol_shift",
-           "npv", "delta01", "gamma01", "vega01", "clean_theta_business_day", "rho010", "status"]
+dataset = "pricer"
+[[vanilla.columns]]
+name = "qty"
+kind = "dimension"
+[[vanilla.columns]]
+name = "underlying_ref"
+kind = "dimension"
+[[vanilla.columns]]
+name = "expiry"
+kind = "dimension"
+[[vanilla.columns]]
+name = "strike"
+kind = "dimension"
+[[vanilla.columns]]
+name = "option_type"
+kind = "dimension"
+[[vanilla.columns]]
+name = "currency"
+kind = "dimension"
+[[vanilla.columns]]
+name = "spot_shift"
+kind = "dimension"
+[[vanilla.columns]]
+name = "vol_shift"
+kind = "dimension"
+[[vanilla.columns]]
+name = "npv"
+[[vanilla.columns]]
+name = "delta01"
+[[vanilla.columns]]
+name = "gamma01"
+[[vanilla.columns]]
+name = "vega01"
+[[vanilla.columns]]
+name = "clean_theta_business_day"
+[[vanilla.columns]]
+name = "rho010"
+[[vanilla.columns]]
+name = "status"
+kind = "dimension"
 
 [barrier]
-columns = ["qty", "underlying_ref", "expiry", "strike", "option_type", "currency", "barrier", "barrier_type", "spot_shift", "vol_shift",
-           "npv", "delta01", "gamma01", "vega01", "clean_theta_business_day", "rho010", "status"]
+dataset = "pricer"
+[[barrier.columns]]
+name = "qty"
+kind = "dimension"
+[[barrier.columns]]
+name = "underlying_ref"
+kind = "dimension"
+[[barrier.columns]]
+name = "expiry"
+kind = "dimension"
+[[barrier.columns]]
+name = "strike"
+kind = "dimension"
+[[barrier.columns]]
+name = "option_type"
+kind = "dimension"
+[[barrier.columns]]
+name = "barrier"
+kind = "dimension"
+[[barrier.columns]]
+name = "barrier_type"
+kind = "dimension"
+[[barrier.columns]]
+name = "currency"
+kind = "dimension"
+[[barrier.columns]]
+name = "spot_shift"
+kind = "dimension"
+[[barrier.columns]]
+name = "vol_shift"
+kind = "dimension"
+[[barrier.columns]]
+name = "npv"
+[[barrier.columns]]
+name = "delta01"
+[[barrier.columns]]
+name = "gamma01"
+[[barrier.columns]]
+name = "vega01"
+[[barrier.columns]]
+name = "clean_theta_business_day"
+[[barrier.columns]]
+name = "rho010"
+[[barrier.columns]]
+name = "status"
+kind = "dimension"
 "#;
 
+/// A vocabulary column with the presentation `load_views` merged for it
+/// (the view's own keys under the two overlays).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ViewColumn {
     pub def: &'static ColumnDef,
@@ -33,121 +126,71 @@ pub struct PricerView {
     pub columns: Vec<ViewColumn>,
 }
 
-/// The loaded views, in doc order.
+/// The loaded pricer views, in `views` doc order.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Views {
     views: Vec<PricerView>,
 }
 
 impl Views {
-    /// Parse views with diagnostic paths rooted at `pricer_views.<view>`. This reader
-    /// leaves layer and file attribution unset; configuration diagnostics can resolve
-    /// them from the merged document.
-    pub fn from_doc(doc: &MergedDoc) -> (Views, Vec<Diagnostic>) {
+    /// Keep the specs whose `dataset` is the pricer's and resolve their
+    /// columns against the vocabulary. A view with a join or a derived
+    /// column is refused whole: the pricer evaluates nothing, so painting
+    /// the columns it could resolve would show a view that is not the one
+    /// declared. An unknown column is dropped from the view with an error;
+    /// a view left with no column is dropped. Diagnostics are rooted at
+    /// `views.<view>`, the path the Views dialog and the diagnostics tile
+    /// already know.
+    pub fn from_specs(specs: &[ViewSpec]) -> (Views, Vec<Diagnostic>) {
         let mut out = Views::default();
         let mut diags = Vec::new();
-        for (name, value) in &doc.value {
-            if name == "config_version" {
-                continue;
-            }
-            let at = |suffix: &str| {
-                if suffix.is_empty() {
-                    format!("{PRICER_VIEWS_DOC}.{name}")
-                } else {
-                    format!("{PRICER_VIEWS_DOC}.{name}.{suffix}")
-                }
-            };
-            let report = |severity: Severity, suffix: &str, m: String| Diagnostic {
-                severity,
+        for spec in specs.iter().filter(|s| s.dataset == PRICER_DATASET) {
+            let name = &spec.name;
+            let bad = |m: String| Diagnostic {
+                severity: Severity::Error,
                 layer: None,
                 file: None,
-                message: format!("pricer view '{name}': {m}"),
-                path: Some(at(suffix)),
+                message: format!("view '{name}': {m}"),
+                path: Some(format!("views.{name}")),
             };
-            let Some(table) = value.as_table() else {
-                diags.push(report(Severity::Error, "", "not a table; dropped".into()));
+            let mut refused = false;
+            if !spec.joins.is_empty() {
+                diags.push(bad(format!(
+                    "joins are not supported on computed dataset '{PRICER_DATASET}'"
+                )));
+                refused = true;
+            }
+            if spec
+                .columns
+                .iter()
+                .any(|c| matches!(c, SpecColumn::Derived { .. }))
+            {
+                diags.push(bad(format!(
+                    "derived columns are not supported on computed dataset '{PRICER_DATASET}'"
+                )));
+                refused = true;
+            }
+            if refused {
+                // Unhonourable: refuse rather than paint a partial view.
                 continue;
-            };
-            let Some(cols) = table.get("columns").and_then(|v| v.as_array()) else {
-                diags.push(report(
-                    Severity::Error,
-                    "",
-                    "missing 'columns' array; view dropped".into(),
-                ));
-                continue;
-            };
-            let mut columns: Vec<ViewColumn> = Vec::with_capacity(cols.len());
-            // `enumerate()` before any filtering, so an index in a path is
-            // the element's real position in the file.
-            for (i, c) in cols.iter().enumerate() {
-                let (col_name, table) = match (c.as_str(), c.as_table()) {
-                    (Some(s), _) => (s, None),
-                    (None, Some(t)) => match t.get("name").and_then(|v| v.as_str()) {
-                        Some(s) => (s, Some(t)),
-                        None => {
-                            diags.push(report(
-                                Severity::Error,
-                                &format!("columns.{i}.name"),
-                                "column table has no 'name'; dropped".into(),
-                            ));
-                            continue;
-                        }
-                    },
-                    (None, None) => {
-                        diags.push(report(
-                            Severity::Error,
-                            &format!("columns.{i}"),
-                            format!("column must be a name or a table (got {c}); dropped"),
-                        ));
-                        continue;
-                    }
-                };
-                let Some(def) = column(col_name) else {
-                    diags.push(report(
-                        Severity::Error,
-                        &format!("columns.{i}"),
-                        format!("unknown column '{col_name}'; dropped"),
-                    ));
+            }
+            let mut columns: Vec<ViewColumn> = Vec::with_capacity(spec.columns.len());
+            for c in &spec.columns {
+                let Some(def) = column(c.name()) else {
+                    diags.push(bad(format!("unknown column '{}'; dropped", c.name())));
                     continue;
                 };
-                if columns.iter().any(|existing| existing.def.name == def.name) {
-                    diags.push(report(
-                        Severity::Warning,
-                        &format!("columns.{i}"),
-                        format!("column '{col_name}' repeated; the repeat is dropped"),
-                    ));
+                if columns.iter().any(|v| v.def.name == def.name) {
+                    // `ViewSpec::from_doc` already warns on a repeat.
                     continue;
                 }
-                let mut presentation = ColumnPresentation::default();
-                if let Some(t) = table {
-                    // A `RefCell` so `warn` stays a `Fn` for the two
-                    // `&dyn Fn` readers, the way `ViewSpec::from_doc` does it.
-                    let col_diags = RefCell::new(Vec::new());
-                    let warn = |key: &str, m: String| {
-                        col_diags.borrow_mut().push(report(
-                            Severity::Warning,
-                            &format!("columns.{i}.{key}"),
-                            format!("column '{col_name}': {m}"),
-                        ));
-                    };
-                    presentation.parse_column_keys(t, false, &warn);
-                    if let Some(f) = t.get("format") {
-                        match f.as_table() {
-                            None => warn("format", "'format' is not a table".into()),
-                            Some(f) => presentation
-                                .parse_format_keys(f, &|key, m| warn(&format!("format.{key}"), m)),
-                        }
-                    }
-                    diags.extend(col_diags.into_inner());
-                }
-                columns.push(ViewColumn { def, presentation });
+                columns.push(ViewColumn {
+                    def,
+                    presentation: spec.presentation_of(c.name()),
+                });
             }
             if columns.is_empty() {
-                diags.push(report(
-                    Severity::Error,
-                    "",
-                    "no valid column; view dropped".into(),
-                ));
+                diags.push(bad("no valid column; view dropped".into()));
                 continue;
             }
             out.views.push(PricerView {
@@ -158,13 +201,16 @@ impl Views {
         (out, diags)
     }
 
-    /// Parse the bundled views. Invalid TOML is a programmer error; tests require these
-    /// definitions to produce no diagnostics.
+    /// The bundled views read as the application reads them. Invalid TOML
+    /// is a programmer error; tests require these definitions to produce
+    /// no diagnostics.
     pub fn builtin() -> Views {
-        let doc = geode_core::config::LayerDoc::builtin(PRICER_VIEWS_DOC, BUILTIN_VIEWS)
-            .expect("BUILTIN_VIEWS is well-formed TOML");
-        let merged = geode_core::config::merge_docs(PRICER_VIEWS_DOC, &[doc]);
-        Views::from_doc(&merged).0
+        let doc = merge_docs(
+            "views",
+            &[LayerDoc::builtin("views", BUILTIN_VIEWS)
+                .expect("BUILTIN_VIEWS is well-formed TOML")],
+        );
+        Views::from_specs(&ViewSpec::from_doc(&doc).0).0
     }
 
     pub fn get(&self, name: &str) -> Option<&PricerView> {
@@ -190,8 +236,10 @@ pub struct PlannedColumn {
     pub format: ColumnFormat,
 }
 
-/// Columns in view order, excluding the delegate's tree column. The plan depends on the
-/// view alone, so an empty sheet retains the same columns.
+/// Columns in view order, excluding the delegate's tree column and any
+/// column the merged presentation hides. The plan depends on the view
+/// alone, so an empty sheet retains the same columns; a view whose every
+/// column is hidden plans none, which the tile reports in its header.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ColumnPlan {
     pub columns: Vec<PlannedColumn>,
@@ -203,6 +251,7 @@ impl ColumnPlan {
             columns: view
                 .columns
                 .iter()
+                .filter(|c| !c.presentation.hidden.unwrap_or(false))
                 .map(|c| PlannedColumn {
                     def: c.def,
                     label: c
@@ -222,30 +271,35 @@ impl ColumnPlan {
 mod tests {
     use super::*;
     use geode_core::config::{LayerDoc, Severity, merge_docs};
+    use geode_core::view::ViewSpec;
 
-    fn doc(text: &str) -> MergedDoc {
-        merge_docs(
-            PRICER_VIEWS_DOC,
-            &[LayerDoc::builtin(PRICER_VIEWS_DOC, text).expect("well-formed test TOML")],
-        )
-    }
-
-    fn names(v: &PricerView) -> Vec<&str> {
-        v.columns.iter().map(|c| c.def.name).collect()
+    fn specs(text: &str) -> Vec<ViewSpec> {
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
+        ViewSpec::from_doc(&doc).0
     }
 
     #[test]
     fn the_two_bundled_views_load_clean() {
-        let (views, diags) = Views::from_doc(&doc(BUILTIN_VIEWS));
+        let (views, diags) = Views::from_specs(&specs(BUILTIN_VIEWS));
         assert!(diags.is_empty(), "{diags:?}");
+        // `ViewSpec::from_doc` orders views by name when the doc names no
+        // `default`; the pricer keeps that order.
         assert_eq!(
             views.names().collect::<Vec<_>>(),
-            vec!["vanilla", "barrier"]
+            vec!["barrier", "vanilla"]
         );
-        let vanilla = views.get("vanilla").unwrap();
+        let names = |v: &str| {
+            views
+                .get(v)
+                .unwrap()
+                .columns
+                .iter()
+                .map(|c| c.def.name)
+                .collect::<Vec<_>>()
+        };
         assert_eq!(
-            names(vanilla),
-            vec![
+            names("vanilla"),
+            [
                 "qty",
                 "underlying_ref",
                 "expiry",
@@ -263,18 +317,17 @@ mod tests {
                 "status"
             ]
         );
-        let barrier = views.get("barrier").unwrap();
         assert_eq!(
-            names(barrier),
-            vec![
+            names("barrier"),
+            [
                 "qty",
                 "underlying_ref",
                 "expiry",
                 "strike",
                 "option_type",
-                "currency",
                 "barrier",
                 "barrier_type",
+                "currency",
                 "spot_shift",
                 "vol_shift",
                 "npv",
@@ -286,140 +339,137 @@ mod tests {
                 "status"
             ]
         );
-        assert_eq!(Views::builtin(), views);
-        assert!(views.get("price").is_none());
     }
 
     #[test]
-    fn an_unknown_column_is_an_error_and_dropped() {
-        let (views, diags) =
-            Views::from_doc(&doc("[v]\ncolumns = [\"qty\", \"nonesuch\", \"npv\"]\n"));
-        assert_eq!(names(views.get("v").unwrap()), vec!["qty", "npv"]);
-        assert_eq!(diags.len(), 1, "{diags:?}");
-        assert_eq!(diags[0].severity, Severity::Error);
-        assert_eq!(diags[0].path.as_deref(), Some("pricer_views.v.columns.1"));
-        assert!(
-            diags[0].message.contains("nonesuch"),
-            "{}",
-            diags[0].message
-        );
-        assert!(diags[0].message.contains("dropped"), "{}", diags[0].message);
+    fn builtin_is_the_bundled_doc_read_through_from_specs() {
+        assert_eq!(Views::builtin(), Views::from_specs(&specs(BUILTIN_VIEWS)).0);
+        assert!(!Views::builtin().is_empty());
     }
 
     #[test]
-    fn a_view_with_no_valid_column_is_dropped_with_an_error() {
-        let (views, diags) = Views::from_doc(&doc(
-            "config_version = 1\n[empty]\ncolumns = []\n[bad]\ncolumns = [\"nonesuch\"]\n[ok]\ncolumns = [\"npv\"]\n[notatable]\n",
+    fn a_view_over_another_dataset_is_not_a_pricer_view() {
+        let (views, diags) = Views::from_specs(&specs(
+            "[tree]\ndataset = \"risk_snapshot\"\n[[tree.columns]]\nname = \"npv\"\n",
         ));
-        assert_eq!(views.names().collect::<Vec<_>>(), vec!["ok"]);
-        let paths: Vec<&str> = diags.iter().filter_map(|d| d.path.as_deref()).collect();
-        assert!(paths.contains(&"pricer_views.empty"), "{diags:?}");
-        assert!(paths.contains(&"pricer_views.bad"), "{diags:?}");
-        assert!(paths.contains(&"pricer_views.bad.columns.0"), "{diags:?}");
-        assert!(paths.contains(&"pricer_views.notatable"), "{diags:?}");
+        assert!(views.is_empty() && diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn a_pricer_view_with_a_derived_column_or_join_is_refused() {
+        let text = "[x]\ndataset = \"pricer\"\njoins = [{ dataset = \"ref\", on = [\"underlying_ref\"] }]\n[[x.columns]]\nname = \"npv\"\n[[x.columns]]\nname = \"twice\"\nkind = \"derived\"\nsql = \"npv * 2\"\n";
+        let (views, diags) = Views::from_specs(&specs(text));
+        assert!(
+            views.get("x").is_none(),
+            "the view is dropped, not painted partially"
+        );
+        let messages: Vec<&str> = diags.iter().map(|d| d.message.as_str()).collect();
+        assert!(
+            messages
+                .iter()
+                .any(|m| m
+                    .contains("derived columns are not supported on computed dataset 'pricer'")),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("joins are not supported on computed dataset 'pricer'")),
+            "{messages:?}"
+        );
         assert!(
             diags
                 .iter()
-                .filter(|d| d.path.as_deref() == Some("pricer_views.empty"))
-                .all(|d| d.severity == Severity::Error)
+                .all(|d| d.severity == Severity::Error && d.path.as_deref() == Some("views.x")),
+            "{diags:?}"
         );
-        // A view whose `columns` is missing or not an array.
-        let (views, diags) = Views::from_doc(&doc("[v]\nname = \"x\"\n[w]\ncolumns = \"npv\"\n"));
+    }
+
+    #[test]
+    fn an_unknown_measure_is_dropped_from_the_pricer_view_not_the_view() {
+        let (views, diags) = Views::from_specs(&specs(
+            "[x]\ndataset = \"pricer\"\n[[x.columns]]\nname = \"npv\"\n[[x.columns]]\nname = \"daily_pnl\"\n",
+        ));
+        assert_eq!(views.get("x").unwrap().columns.len(), 1);
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.message.contains("unknown column 'daily_pnl'")
+                    && d.severity == Severity::Error),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn a_view_with_no_valid_column_is_dropped_and_a_repeat_is_kept_once() {
+        let (views, diags) = Views::from_specs(&specs(
+            "[x]\ndataset = \"pricer\"\n[[x.columns]]\nname = \"nonesuch\"\n",
+        ));
         assert!(views.is_empty());
-        assert_eq!(
+        assert!(
             diags
                 .iter()
-                .filter(|d| d.severity == Severity::Error)
-                .count(),
-            2,
+                .any(|d| d.message.contains("no valid column; view dropped")
+                    && d.path.as_deref() == Some("views.x")),
             "{diags:?}"
+        );
+        let (views, _) = Views::from_specs(&specs(
+            "[x]\ndataset = \"pricer\"\n[[x.columns]]\nname = \"npv\"\n[[x.columns]]\nname = \"npv\"\n",
+        ));
+        assert_eq!(views.get("x").unwrap().columns.len(), 1);
+    }
+
+    #[test]
+    fn a_hidden_column_is_left_out_of_the_plan() {
+        let mut s = specs(
+            "[x]\ndataset = \"pricer\"\n[[x.columns]]\nname = \"qty\"\nkind = \"dimension\"\n[[x.columns]]\nname = \"npv\"\n",
+        );
+        s[0].presentation.entry("qty".into()).or_default().hidden = Some(true);
+        let (views, _) = Views::from_specs(&s);
+        let plan = ColumnPlan::build(views.get("x").unwrap());
+        assert_eq!(
+            plan.columns.iter().map(|c| c.def.name).collect::<Vec<_>>(),
+            ["npv"]
         );
     }
 
     #[test]
-    fn the_table_form_carries_label_width_and_format() {
-        let (views, diags) = Views::from_doc(&doc(
-            "[v]\ncolumns = [\n  \"qty\",\n  { name = \"npv\", label = \"PX\", width = 120, format = { precision = 4, thousands = false } },\n  { name = \"delta01\", format = { precision = 99 } },\n  { label = \"no name\" },\n  { name = \"qty\" },\n  { name = \"vega01\", width = -1 },\n]\n",
-        ));
-        let v = views.get("v").unwrap();
+    fn a_plan_resolves_label_width_and_format_from_the_merged_presentation() {
+        let text = "[x]\ndataset = \"pricer\"\n[[x.columns]]\nname = \"npv\"\nlabel = \"PX\"\nwidth = 120\nformat = { precision = 4, thousands = false }\n";
+        let (views, _) = Views::from_specs(&specs(text));
+        let c = &ColumnPlan::build(views.get("x").unwrap()).columns[0];
         assert_eq!(
-            names(v),
-            vec!["qty", "npv", "delta01", "vega01"],
-            "the nameless and the repeat are dropped"
+            (
+                c.label.as_str(),
+                c.width,
+                c.format.precision,
+                c.format.thousands
+            ),
+            ("PX", 120.0, 4, false)
         );
-        let price = &v.columns[1];
-        assert_eq!(price.presentation.label.as_deref(), Some("PX"));
-        assert_eq!(price.presentation.width, Some(120.0));
-        assert_eq!(price.presentation.precision, Some(4));
-        assert_eq!(price.presentation.thousands, Some(false));
-        assert_eq!(
-            v.columns[2].presentation.precision, None,
-            "99 is out of range and warned"
-        );
-        let paths: Vec<&str> = diags.iter().filter_map(|d| d.path.as_deref()).collect();
-        assert!(
-            paths.contains(&"pricer_views.v.columns.2.format.precision"),
-            "{diags:?}"
-        );
-        assert!(
-            paths.contains(&"pricer_views.v.columns.3.name"),
-            "{diags:?}"
-        );
-        assert!(
-            paths.contains(&"pricer_views.v.columns.4"),
-            "the repeat: {diags:?}"
-        );
-        assert!(
-            paths.contains(&"pricer_views.v.columns.5.width"),
-            "{diags:?}"
-        );
-        assert!(
-            diags
-                .iter()
-                .filter(|d| d.path.as_deref() == Some("pricer_views.v.columns.4"))
-                .all(|d| d.severity == Severity::Warning)
-        );
-        // A non-string, non-table element.
-        let (views, diags) = Views::from_doc(&doc("[v]\ncolumns = [\"qty\", 3]\n"));
-        assert_eq!(names(views.get("v").unwrap()), vec!["qty"]);
-        assert_eq!(diags[0].path.as_deref(), Some("pricer_views.v.columns.1"));
     }
 
     #[test]
-    fn a_plan_resolves_label_width_and_format_from_the_defaults_under_the_presentation() {
-        let (views, _) = Views::from_doc(&doc(
-            "[v]\ncolumns = [\"qty\", { name = \"npv\", label = \"PX\", width = 120, format = { precision = 4 } }, \"barrier\"]\n",
+    fn a_plan_falls_back_to_the_vocabulary_defaults() {
+        let (views, _) = Views::from_specs(&specs(
+            "[x]\ndataset = \"pricer\"\n[[x.columns]]\nname = \"qty\"\nkind = \"dimension\"\n[[x.columns]]\nname = \"spot_shift\"\nkind = \"dimension\"\n[[x.columns]]\nname = \"barrier_type\"\nkind = \"dimension\"\n[[x.columns]]\nname = \"npv\"\nformat = { precision = 4 }\n",
         ));
-        let plan = ColumnPlan::build(views.get("v").unwrap());
-        assert_eq!(plan.columns.len(), 3);
+        let plan = ColumnPlan::build(views.get("x").unwrap());
         let qty = &plan.columns[0];
-        assert_eq!(qty.def.name, "qty");
         assert_eq!(qty.label, "qty", "the default label when none is set");
         assert_eq!(qty.width, column("qty").unwrap().default_width);
         assert_eq!(qty.format, column("qty").unwrap().default_format);
-        let price = &plan.columns[1];
-        assert_eq!(price.label, "PX");
-        assert_eq!(price.width, 120.0);
+        let labels: Vec<&str> = plan.columns.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            ["qty", "spot %", "barrier type", "npv"],
+            "readable words, never the snake_case name"
+        );
+        let price = &plan.columns[3];
         assert_eq!(price.format.precision, 4);
         assert!(
             price.format.thousands,
             "the default fills what the presentation left"
-        );
-        let (views, _) =
-            Views::from_doc(&doc("[v]\ncolumns = [\"spot_shift\", \"barrier_type\"]\n"));
-        let labels: Vec<String> = ColumnPlan::build(views.get("v").unwrap())
-            .columns
-            .into_iter()
-            .map(|c| c.label)
-            .collect();
-        assert_eq!(
-            labels,
-            vec!["spot %", "barrier type"],
-            "readable words, never the snake_case name"
-        );
-        assert_eq!(
-            plan.columns[2].def.name, "barrier",
-            "a column is planned whether or not any row is a barrier"
         );
         // Both bundled views plan every column they name.
         for name in ["vanilla", "barrier"] {
@@ -431,5 +481,18 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn a_view_with_every_column_hidden_paints_no_column_and_says_so() {
+        // ColumnPlan side: an empty plan is legal.
+        let mut s = specs("[x]\ndataset = \"pricer\"\n[[x.columns]]\nname = \"npv\"\n");
+        s[0].presentation.entry("npv".into()).or_default().hidden = Some(true);
+        let (views, _) = Views::from_specs(&s);
+        assert!(
+            ColumnPlan::build(views.get("x").unwrap())
+                .columns
+                .is_empty()
+        );
     }
 }

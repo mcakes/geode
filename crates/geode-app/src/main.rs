@@ -399,11 +399,11 @@ fn add_bridge_modules(roster: &mut ModuleRoster, bridge: &bridge::Bridge) {
 fn builtin_layer(demo_root: Option<&Path>) -> Vec<LayerDoc> {
     let mut builtin = vec![
         LayerDoc::builtin("keymap", BUILTIN_KEYMAP).expect("builtin keymap TOML is well-formed"),
-        LayerDoc::builtin(
-            geode_pricer::core::PRICER_VIEWS_DOC,
-            geode_pricer::core::BUILTIN_VIEWS,
-        )
-        .expect("BUILTIN_VIEWS is well-formed TOML"),
+        // The pricer's two bundled views, over its computed `pricer` dataset.
+        // `views` merges per view name: a demo, desk or user views doc adds
+        // its own views beside these and overrides one by name.
+        LayerDoc::builtin("views", geode_pricer::core::BUILTIN_VIEWS)
+            .expect("BUILTIN_VIEWS is well-formed TOML"),
         LayerDoc::builtin(
             geode_pricer::core::PRICER_TEMPLATES_DOC,
             geode_pricer::core::BUILTIN_TEMPLATES,
@@ -676,6 +676,8 @@ mod tests {
         assert!(parse_args(&["--nonesuch".to_string()]).is_err());
     }
 
+    /// The two bundled views are `views` doc entries over the `pricer`
+    /// dataset the same layer declares, so they validate clean at load.
     #[test]
     fn the_builtin_layer_carries_the_two_pricer_views() {
         let builtin = builtin_layer(None);
@@ -684,12 +686,14 @@ mod tests {
             desk: None,
             user: None,
         });
-        let (views, diags) =
-            geode_pricer::core::Views::from_doc(config.doc("pricer_views").expect("the doc"));
+        assert!(config.doc("pricer_views").is_none(), "retired");
+        let (specs, diags) = geode_core::config::load_views(&config);
+        assert!(diags.is_empty(), "{diags:?}");
+        let (views, diags) = geode_pricer::core::Views::from_specs(&specs);
         assert!(diags.is_empty(), "{diags:?}");
         assert_eq!(
             views.names().collect::<Vec<_>>(),
-            vec!["vanilla", "barrier"]
+            vec!["barrier", "vanilla"]
         );
     }
 

@@ -811,7 +811,11 @@ Column headers are words carrying their unit (`spot %`, `vol pt`, `barrier
 type`, `priced at`), and default widths are checked against labels and representative large
 values (`-1,234,567.8900` for a greek, `-1,234,567.89` for a price) at the
 largest supported font size. These examples do not bound every possible
-value. A view's `label` and `width` override the defaults. Result columns
+value. A view's `label` and `width` override the defaults. Columns are
+managed as any view's: the Views dialog's column stage (order, hidden, label,
+width, format, color) applies to a pricer view, and `hidden` columns leave
+the plan. `Edit column in view…` does not yet read a pricer tile's columns.
+Result columns
 carry risk_snapshot's names — `npv`, `delta01`, `gamma01`, `vega01`,
 `rho010`, `clean_theta_business_day` and the rest — each with a `_usd` twin
 the pricer converts itself; a column means the same thing in a blotter and a

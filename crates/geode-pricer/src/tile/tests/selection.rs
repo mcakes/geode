@@ -1228,7 +1228,7 @@ fn a_block_step_over_strike_and_barrier_moves_both(cx: &mut gpui::TestAppContext
     h.command(&mut vcx, "view barrier").unwrap();
     goto_column(&h, &mut vcx, "strike");
     h.dispatch(&mut vcx, "visual_block", None);
-    h.dispatch(&mut vcx, "right", Some(3)); // strike, type, currency, barrier
+    h.dispatch(&mut vcx, "right", Some(2)); // strike, type, barrier
     h.dispatch(&mut vcx, "edit", None);
     assert_eq!(editor_text(&h, &vcx).as_deref(), Some("4000"));
     h.dispatch(&mut vcx, "insert_up", None);
@@ -1236,7 +1236,7 @@ fn a_block_step_over_strike_and_barrier_moves_both(cx: &mut gpui::TestAppContext
     assert_eq!(h.cell(&vcx, 0, "barrier"), "4001");
     assert_eq!(
         notice(&h, &vcx).as_deref(),
-        Some("stepped 2 cells +1, skipped 2 (1 read-only, 1 not numeric)")
+        Some("stepped 2 cells +1, skipped 1 (1 not numeric)")
     );
     h.dispatch(&mut vcx, "commit", None);
     h.dispatch(&mut vcx, "escape", None);
@@ -1682,7 +1682,7 @@ fn a_drag_that_started_off_the_cells_selects_nothing(cx: &mut gpui::TestAppConte
 #[gpui::test]
 fn a_plain_press_beside_the_cells_clears_the_selection(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &BOOK);
-    let views = slim_views("\"qty\", \"strike\"");
+    let views = slim_views(&["qty", "strike"]);
     vcx.update(|_, cx| {
         h.factory.reload(
             views,

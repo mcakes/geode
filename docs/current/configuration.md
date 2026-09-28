@@ -22,7 +22,7 @@ are part of several document contracts.
 
 Top-level entries in `views`, `view_presentation`, `dataset_presentation`,
 `layouts`, `groupings`, `scopes`, `datasets`, `sources`, `egress`, `dimensions`,
-`colors`, `expressions`, `pricer_views`, `pricer_templates`, and `overrides`
+`colors`, `expressions`, `pricer_templates`, and `overrides`
 replace whole named objects.
 Overriding one source therefore requires its complete configuration, including
 required fields; omitted fields do not inherit from the lower-layer source.
@@ -453,10 +453,17 @@ timer. An absent `underlyings` clears the list, including on reload; a
 non-array value at startup leaves it empty. With an empty list the bar says
 no underlyings are configured.
 
-`pricer_views` holds the pricer's named column views. The builtin layer
-carries the two bundled views; like other named objects, a desk or user entry
-replaces a whole view. A reload reaches open pricer tiles, and a tile whose
-view disappeared shows the first defined view with a header notice.
+The pricer's views are ordinary `views.toml` views whose `dataset` is
+`pricer`. The builtin layer carries `vanilla` and `barrier`; a desk or user
+entry replaces a whole view by name, and `view_presentation.toml` and
+`dataset_presentation.toml` apply as they do to any view. A pricer view may
+not declare `joins` or a `derived` column: either is an error diagnostic on
+the view, and the pricer drops that view rather than paint part of it. A
+`pricer_views` document is no longer read; its presence is an error naming
+`views.toml`. A reload that changes a view, either overlay or the colors
+reaches open pricer tiles; a tile whose view disappeared shows the first
+`pricer` view with a header notice, and a view whose every column is hidden
+says so in the header.
 
 `pricer_templates` holds the package templates the pricer's shorthand
 accepts. The builtin layer carries seven: `CS`, `PS`, `STRD`, `STRG`, `RR`,

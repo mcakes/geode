@@ -136,7 +136,7 @@ pub fn data_setup(
             PricerConfig::missing(&pricer_name)
         }
     };
-    let (pricer_views, view_diags) = pricer_views_from_config(config);
+    let (pricer_views, view_diags) = pricer_views_from_specs(config, &views);
     diagnostics.extend(view_diags);
     let (pricer_templates, template_diags) =
         pricer_templates_from_config(config, &TemplateSet::builtin(), "built-in");
@@ -380,13 +380,24 @@ pub fn pricing_underlyings_from_config(config: &Config) -> (Option<Vec<String>>,
     (Some(names), diags)
 }
 
-/// The `pricer_views` doc, or the bundled two when no layer has one (the
-/// builtin layer always does in the app; a test config may not).
-pub fn pricer_views_from_config(config: &Config) -> (Views, Vec<Diagnostic>) {
-    match config.doc(PRICER_VIEWS_DOC) {
-        Some(doc) => Views::from_doc(doc),
-        None => (Views::builtin(), Vec::new()),
+/// The pricer's views out of `specs`, the `load_views` result for `config`
+/// (the caller has already collected `load_views`'s own diagnostics, so
+/// only the pricer's are returned here). A `pricer_views` document is no
+/// longer read: its presence is an error naming where the views now live,
+/// so a desk or user layer still carrying one is told rather than silently
+/// ignored.
+pub fn pricer_views_from_specs(config: &Config, specs: &[ViewSpec]) -> (Views, Vec<Diagnostic>) {
+    let (views, mut diags) = Views::from_specs(specs);
+    if config.doc(PRICER_VIEWS_DOC).is_some() {
+        diags.push(Diagnostic {
+            severity: Severity::Error,
+            layer: None,
+            file: None,
+            message: "pricer_views is no longer read; declare views over dataset \"pricer\" in views.toml".into(),
+            path: Some(PRICER_VIEWS_DOC.into()),
+        });
     }
+    (views, diags)
 }
 
 /// The `pricer_templates` doc, or the built-in set when no layer has one
@@ -405,14 +416,19 @@ pub fn pricer_templates_from_config(
     }
 }
 
-/// Inputs to the pricer's live reload: merged `pricer_views` and
-/// `pricer_templates`, raw `app.pricing.refresh` and `app.pricing.underlyings`,
-/// and the resolved stale threshold. Equal keys leave factory views, templates,
-/// suggestions, and timers alone and avoid repeating invalid-value warnings.
-/// The selected pricing adapter is fixed at service startup and excluded here.
+/// Inputs to the pricer's live reload: the merged `views` doc with both
+/// presentation overlays and the colors they may name (the pricer's column
+/// plan is built from all four), merged `pricer_templates`, raw
+/// `app.pricing.refresh` and `app.pricing.underlyings`, and the resolved
+/// stale threshold. Equal keys leave factory views, templates, suggestions,
+/// and timers alone and avoid repeating invalid-value warnings. The selected
+/// pricing adapter is fixed at service startup and excluded here.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PricerConfigKey {
     views: Option<toml::Table>,
+    view_presentation: Option<toml::Table>,
+    dataset_presentation: Option<toml::Table>,
+    colors: Option<toml::Table>,
     templates: Option<toml::Table>,
     refresh: Option<toml::Value>,
     underlyings: Option<toml::Value>,
@@ -421,7 +437,12 @@ pub struct PricerConfigKey {
 
 pub fn pricer_config_key(config: &Config) -> PricerConfigKey {
     PricerConfigKey {
-        views: config.doc(PRICER_VIEWS_DOC).map(|d| d.value.clone()),
+        views: config.doc("views").map(|d| d.value.clone()),
+        view_presentation: config.doc("view_presentation").map(|d| d.value.clone()),
+        dataset_presentation: config.doc("dataset_presentation").map(|d| d.value.clone()),
+        colors: config
+            .doc(geode_core::config::COLORS_DOC)
+            .map(|d| d.value.clone()),
         templates: config.doc(PRICER_TEMPLATES_DOC).map(|d| d.value.clone()),
         refresh: config.get("app", "pricing.refresh").cloned(),
         underlyings: config.get("app", "pricing.underlyings").cloned(),
@@ -895,7 +916,10 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     return;
                 }
                 *last_key.borrow_mut() = Some(key);
-                let (views, diags) = pricer_views_from_config(config);
+                // `load_views`'s own diagnostics are the ConfigReloaded
+                // observer's to report; only the pricer's are collected here.
+                let (specs, _) = load_views(config);
+                let (views, diags) = pricer_views_from_specs(config, &specs);
                 let (refresh, refresh_diag) = pricing_refresh_from_config(config);
                 // A bad entry keeps the running definition of its name.
                 let (templates, template_diags) =
@@ -1674,7 +1698,7 @@ role = "key"
             Config::load(&ConfigSources {
                 builtin: vec![
                     LayerDoc::builtin("app", app).unwrap(),
-                    LayerDoc::builtin("pricer_views", views).unwrap(),
+                    LayerDoc::builtin("views", views).unwrap(),
                     LayerDoc::builtin(PRICER_TEMPLATES_DOC, templates).unwrap(),
                 ],
                 desk: None,
@@ -1683,7 +1707,7 @@ role = "key"
         };
         let app = "[theme]\nname = \"a\"\n[log]\nlevel = \"info\"\n\
                    [pricing]\nrefresh = \"10s\"\n[blotter]\nstale_after = \"5m\"\n";
-        let views = "[slim]\ncolumns = [\"qty\", \"price\"]\n";
+        let views = SLIM_VIEW;
         let templates = "[RR]\nlegs = [ { weight = -1, strike = 1, kind = \"P\" }, \
                          { weight = 1, strike = 2, kind = \"C\" } ]\n";
         let base = pricer_config_key(&config(app, views, templates));
@@ -1702,9 +1726,13 @@ role = "key"
             "a [log] edit"
         );
         assert_ne!(
-            pricer_config_key(&config(app, &views.replace("\"qty\", ", ""), templates)),
+            pricer_config_key(&config(
+                app,
+                &views.replace("name = \"qty\"\nkind = \"dimension\"\n", ""),
+                templates
+            )),
             base,
-            "a pricer_views edit"
+            "a views edit"
         );
         assert_ne!(
             pricer_config_key(&config(app, views, &templates.replace("-1", "-2"))),
@@ -1774,31 +1802,131 @@ role = "key"
         assert!(!diags.is_empty(), "the bad entry is reported");
     }
 
+    /// A `views` doc with a blotter view and one pricer view (`slim`, over
+    /// the computed `pricer` dataset).
+    const SLIM_VIEW: &str = "[tree]\ndataset = \"risk\"\n[slim]\ndataset = \"pricer\"\n\
+                             [[slim.columns]]\nname = \"qty\"\nkind = \"dimension\"\n\
+                             [[slim.columns]]\nname = \"npv\"\n";
+
+    /// The pricer's views are the `views` doc's entries over `pricer`: the
+    /// app's builtin layer carries the bundled two, and a view over another
+    /// dataset beside them is not the pricer's.
     #[test]
-    fn pricer_views_fall_back_to_the_bundled_two_with_no_doc() {
+    fn pricer_views_come_from_the_views_doc_over_the_pricer_dataset() {
         let config = Config::load(&ConfigSources {
-            builtin: vec![],
+            builtin: crate::builtin_layer(None),
             desk: None,
             user: None,
         });
-        let (views, diags) = pricer_views_from_config(&config);
-        assert!(diags.is_empty());
+        let (specs, _) = load_views(&config);
+        let (views, diags) = pricer_views_from_specs(&config, &specs);
+        assert!(diags.is_empty(), "{diags:?}");
         assert_eq!(
             views.names().collect::<Vec<_>>(),
-            vec!["vanilla", "barrier"]
+            vec!["barrier", "vanilla"]
+        );
+
+        let mut builtin = crate::builtin_layer(None);
+        builtin.push(
+            LayerDoc::builtin(
+                "views",
+                "[tree]\ndataset = \"risk_snapshot\"\n[[tree.columns]]\nname = \"npv\"\n",
+            )
+            .unwrap(),
+        );
+        let config = Config::load(&ConfigSources {
+            builtin,
+            desk: None,
+            user: None,
+        });
+        let (specs, _) = load_views(&config);
+        assert!(specs.iter().any(|s| s.name == "tree"), "fixture: merged in");
+        let (views, diags) = pricer_views_from_specs(&config, &specs);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(
+            views.names().collect::<Vec<_>>(),
+            vec!["barrier", "vanilla"],
+            "a view over another dataset is not a pricer view"
         );
     }
 
-    /// Pricer view reloads follow the frame's config revision. An edit confined
-    /// to `pricer_views` does not emit `ShellEvent::ConfigReloaded`.
+    /// A layer still carrying the retired document is told where the
+    /// views now live, once, as an error on that document.
+    #[test]
+    fn a_pricer_views_doc_is_an_error_naming_views_toml() {
+        let mut builtin = crate::builtin_layer(None);
+        builtin.push(
+            LayerDoc::builtin(PRICER_VIEWS_DOC, "[slim]\ncolumns = [\"qty\", \"npv\"]\n").unwrap(),
+        );
+        let config = Config::load(&ConfigSources {
+            builtin,
+            desk: None,
+            user: None,
+        });
+        let (specs, _) = load_views(&config);
+        let (views, diags) = pricer_views_from_specs(&config, &specs);
+        assert_eq!(
+            views.names().collect::<Vec<_>>(),
+            vec!["barrier", "vanilla"],
+            "the retired doc adds no view"
+        );
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].severity, Severity::Error);
+        assert!(
+            diags[0].message.contains("views.toml"),
+            "{}",
+            diags[0].message
+        );
+        assert_eq!(diags[0].path.as_deref(), Some(PRICER_VIEWS_DOC));
+    }
+
+    /// The pricer's column plan is built from the merged presentation, so
+    /// an edit to either overlay alone must reach open pricer tiles.
+    #[test]
+    fn a_presentation_only_edit_changes_the_pricer_key() {
+        let config = |extra: Option<LayerDoc>| {
+            let mut builtin = vec![LayerDoc::builtin("views", SLIM_VIEW).unwrap()];
+            builtin.extend(extra);
+            Config::load(&ConfigSources {
+                builtin,
+                desk: None,
+                user: None,
+            })
+        };
+        let base = pricer_config_key(&config(None));
+        assert_ne!(
+            pricer_config_key(&config(Some(
+                LayerDoc::builtin("view_presentation", "[slim]\nhidden = [\"npv\"]\n").unwrap()
+            ))),
+            base,
+            "a view_presentation edit"
+        );
+        assert_ne!(
+            pricer_config_key(&config(Some(
+                LayerDoc::builtin(
+                    "dataset_presentation",
+                    "[pricer.columns.npv]\nlabel = \"PX\"\n"
+                )
+                .unwrap()
+            ))),
+            base,
+            "a dataset_presentation edit"
+        );
+        assert_ne!(
+            pricer_config_key(&config(Some(
+                LayerDoc::builtin(geode_core::config::COLORS_DOC, "[warm]\nhue = 30\n").unwrap()
+            ))),
+            base,
+            "a colors edit"
+        );
+    }
+
+    /// Pricer view reloads follow the frame's config revision: the observer
+    /// re-reads the `views` doc and hands the factory its `pricer` views.
     #[gpui::test]
     fn a_config_reload_hands_the_pricer_factory_its_views(cx: &mut gpui::TestAppContext) {
         let services = test_shell_services_with_sources(ConfigSources {
-            builtin: vec![
-                LayerDoc::builtin("views", "[tree]\ndataset = \"risk\"\n").unwrap(),
-                LayerDoc::builtin("pricer_views", "[slim]\ncolumns = [\"qty\", \"price\"]\n")
-                    .unwrap(),
-            ],
+            builtin: vec![LayerDoc::builtin("views", SLIM_VIEW).unwrap()],
             desk: None,
             user: None,
         });
@@ -1811,7 +1939,7 @@ role = "key"
         let bridge = test_bridge(handle);
         assert_eq!(
             bridge.pricer.view_names(),
-            vec!["vanilla", "barrier"],
+            vec!["barrier", "vanilla"],
             "fixture: built with the bundled views"
         );
         cx.update(|cx| attach(&bridge, window, cx));
@@ -2043,11 +2171,7 @@ role = "key"
         cx: &mut gpui::TestAppContext,
     ) {
         let services = test_shell_services_with_sources(ConfigSources {
-            builtin: vec![
-                LayerDoc::builtin("views", "[tree]\ndataset = \"risk\"\n").unwrap(),
-                LayerDoc::builtin("pricer_views", "[slim]\ncolumns = [\"qty\", \"price\"]\n")
-                    .unwrap(),
-            ],
+            builtin: vec![LayerDoc::builtin("views", SLIM_VIEW).unwrap()],
             desk: None,
             user: None,
         });
@@ -2090,7 +2214,7 @@ role = "key"
         bump(&mut vcx);
         assert_eq!(
             bridge.pricer.view_names(),
-            vec!["vanilla", "barrier"],
+            vec!["barrier", "vanilla"],
             "an unchanged pricer config reloads nothing"
         );
         assert_eq!(bridge.pricer.settings().refresh, None);
@@ -2106,11 +2230,7 @@ role = "key"
         cx: &mut gpui::TestAppContext,
     ) {
         let services = test_shell_services_with_sources(ConfigSources {
-            builtin: vec![
-                LayerDoc::builtin("views", "[tree]\ndataset = \"risk\"\n").unwrap(),
-                LayerDoc::builtin("pricer_views", "[slim]\ncolumns = [\"qty\", \"price\"]\n")
-                    .unwrap(),
-            ],
+            builtin: vec![LayerDoc::builtin("views", SLIM_VIEW).unwrap()],
             desk: None,
             user: None,
         });
@@ -2136,7 +2256,7 @@ role = "key"
         vcx.run_until_parked();
         assert_eq!(
             bridge.pricer.view_names(),
-            vec!["vanilla", "barrier"],
+            vec!["barrier", "vanilla"],
             "the first unchanged reload reached nothing"
         );
     }
