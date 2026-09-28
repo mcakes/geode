@@ -25411,6 +25411,128 @@ run_mutation "scope eval: Kleene or is UNKNOWN when neither side is TRUE" \
         _ => Some(false),' \
   geode-core and_and_or_follow_kleene_logic
 
+# ---- Pricer scope: evaluator operators, visibility, refusal ----
+# `=` holds only on equal values.
+run_mutation "scope eval: = holds on unequal values" \
+  crates/geode-core/src/scope/eval.rs \
+  '        CompareOp::Eq => ord == Ordering::Equal,' \
+  '        CompareOp::Eq => ord != Ordering::Less,' \
+  geode-data evaluate_agrees_with_scope_sql_on_every_operator
+
+# Text compares by bytes, as DuckDB's binary collation: case matters.
+run_mutation "scope eval: text compares case-insensitively" \
+  crates/geode-core/src/scope/eval.rs \
+  '            (Scalar::Text(a), Scalar::Text(b)) => a.as_bytes().cmp(b.as_bytes()),' \
+  '            (Scalar::Text(a), Scalar::Text(b)) => a.to_lowercase().cmp(&b.to_lowercase()),' \
+  geode-data evaluate_agrees_with_scope_sql_on_every_operator
+
+# `<` is strict.
+run_mutation "scope eval: < keeps the equal value" \
+  crates/geode-core/src/scope/eval.rs \
+  '        CompareOp::Lt => ord == Ordering::Less,' \
+  '        CompareOp::Lt => ord != Ordering::Greater,' \
+  geode-data evaluate_agrees_with_scope_sql_on_every_operator
+
+# like's % matches any run, the empty run at the end included.
+run_mutation "scope eval: like's trailing % needs a character" \
+  crates/geode-core/src/scope/eval.rs \
+  '    p[j..].iter().all(|c| *c == '\''%'\'')' \
+  '    p[j..].is_empty()' \
+  geode-core like_matches_wildcards_case_insensitively_with_no_escape
+
+# like is ilike: case-insensitive.
+run_mutation "scope eval: like is case-sensitive" \
+  crates/geode-core/src/scope/eval.rs \
+  '    let v: Vec<char> = value.to_lowercase().chars().collect();' \
+  '    let v: Vec<char> = value.chars().collect();' \
+  geode-core like_matches_wildcards_case_insensitively_with_no_escape
+
+# `in` is any-equal.
+run_mutation "scope eval: in needs every value equal" \
+  crates/geode-core/src/scope/eval.rs \
+  '                            Some(lits.iter().any(|l| v.cmp_sql(l) == Ordering::Equal))' \
+  '                            Some(lits.iter().all(|l| v.cmp_sql(l) == Ordering::Equal))' \
+  geode-data evaluate_agrees_with_scope_sql_on_every_operator
+
+# not over UNKNOWN is UNKNOWN: a NULL never matches under not.
+run_mutation "scope eval: not over a NULL is TRUE" \
+  crates/geode-core/src/scope/eval.rs \
+  '            Expr::Not(e) => e.eval(row, ds, dims)?.map(|v| !v),' \
+  '            Expr::Not(e) => Some(e.eval(row, ds, dims)?.map(|v| !v).unwrap_or(true)),' \
+  geode-core not_over_a_null_comparison_is_unknown_and_drops_the_row
+
+# The text filter searches only textual columns (a needle found only in a
+# number or a non-textual code matches nothing).
+run_mutation "scope eval: the text filter searches every column" \
+  crates/geode-core/src/scope/eval.rs \
+  '        let textual: Vec<&str> = ds.textual_columns().map(|c| c.name.as_str()).collect();' \
+  '        let textual: Vec<&str> = ds.columns.iter().map(|c| c.name.as_str()).collect();' \
+  geode-data evaluate_agrees_with_scope_sql_on_every_operator
+
+# A derived comparison is membership of the source value's mapping.
+run_mutation "scope eval: any mapped source is a derived member" \
+  crates/geode-core/src/scope/eval.rs \
+  '                .is_some_and(|derived| wanted_by(wanted, derived)),' \
+  '                .is_some(),' \
+  geode-data evaluate_agrees_with_scope_sql_on_every_operator
+
+# `impossible` keeps nothing, before anything else is looked at.
+run_mutation "scope eval: impossible keeps rows" \
+  crates/geode-core/src/scope/eval.rs \
+  '        if self.impossible {' \
+  '        if false {' \
+  geode-core an_impossible_scope_keeps_nothing
+
+# A WHERE clause keeps only TRUE: UNKNOWN drops the row.
+run_mutation "scope eval: UNKNOWN keeps the row" \
+  crates/geode-core/src/scope/eval.rs \
+  '        Ok(kept == Some(true))' \
+  '        Ok(kept != Some(false))' \
+  geode-core not_over_a_null_comparison_is_unknown_and_drops_the_row
+
+# A package shows when ANY of its legs matches.
+run_mutation "pricer visibility: a package needs every leg to show" \
+  crates/geode-pricer/src/core/visibility.rs \
+  '            shown[p] = legs.is_empty() || legs.clone().any(|l| shown[l]);' \
+  '            shown[p] = legs.is_empty() || legs.clone().all(|l| shown[l]);' \
+  geode-pricer an_expression_hides_non_matching_lines_and_keeps_a_package_with_any_match
+
+# A desk-wide selection on a column the pricer lacks (book) is dropped,
+# not refused: it must not blank the pricer.
+run_mutation "pricer visibility: a selection on a missing column is kept" \
+  crates/geode-pricer/src/core/visibility.rs \
+  '    let (scope, _dropped) = scope.applicable_to(ds, dims);' \
+  '    let (scope, _dropped) = (scope.clone(), Vec::<String>::new());' \
+  geode-pricer a_selection_on_a_column_pricer_lacks_is_dropped_not_refused
+
+# A refused scope hides nothing, even after a scope that hid lines.
+run_mutation "pricer scope: a refusal keeps the last narrowing" \
+  crates/geode-pricer/src/tile.rs \
+  '                self.visibility = Visibility::all(&self.sheet);' \
+  '                let _ = Visibility::all(&self.sheet);' \
+  geode-pricer a_refused_scope_notices_and_hides_nothing
+
+# A partly hidden package aggregates its shown legs only: the full fold
+# under a row whose legs are partly hidden is a plausible wrong total.
+run_mutation "pricer grid: a partial package aggregates every leg" \
+  crates/geode-pricer/src/grid.rs \
+  '                let legs = visibility.shown_legs(sheet, r);' \
+  '                let legs: Vec<usize> = sheet.children(r).collect();' \
+  geode-pricer a_partly_hidden_package_paints_its_shown_legs_aggregate_and_note
+
+# A typed usize::MAX count refuses instead of overflowing.
+run_mutation "pricer edit: group's end overflows" \
+  crates/geode-pricer/src/core/edit.rs \
+  '        let end = first.saturating_add(count);' \
+  '        let end = first + count;' \
+  geode-pricer a_huge_counted_group_refuses_without_overflowing
+
+run_mutation "pricer scope: the group door's range overflows" \
+  crates/geode-pricer/src/tile/select.rs \
+  '                    let taken = row..row.saturating_add(count.max(1)).min(self.sheet.len());' \
+  '                    let taken = row..(row + count.max(1)).min(self.sheet.len());' \
+  geode-pricer a_huge_counted_group_refuses_without_overflowing
+
 # The pricer's frame observer applies the scope before it arrives at the
 # flip barrier; without it a frame scope never reaches the pricer.
 run_mutation "pricer scope: the observer applies the frame's scope" \
@@ -25531,8 +25653,8 @@ run_mutation "pricer scope: g u on a leg targets the leg" \
 # A counted `g p` reaches every root it would take as a member.
 run_mutation "pricer scope: a counted g p checks the cursor row alone" \
   crates/geode-pricer/src/tile/select.rs \
-  '                    let taken = row..(row + count.max(1)).min(self.sheet.len());' \
-  '                    let taken = row..(row + 1).min(self.sheet.len());' \
+  '                    let taken = row..row.saturating_add(count.max(1)).min(self.sheet.len());' \
+  '                    let taken = row..row.saturating_add(1).min(self.sheet.len());' \
   geode-pricer a_counted_group_reaching_a_partly_hidden_package_is_refused
 
 # The command door asks the same question as the keys.

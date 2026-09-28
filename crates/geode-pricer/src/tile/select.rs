@@ -369,7 +369,7 @@ impl PricerTile {
             match verb {
                 "ungroup" => vec![self.sheet.parent(row).unwrap_or(row)],
                 "group" => {
-                    let taken = row..(row + count.max(1)).min(self.sheet.len());
+                    let taken = row..row.saturating_add(count.max(1)).min(self.sheet.len());
                     if taken.clone().any(|r| !self.visibility.is_shown(r)) {
                         return Some(HIDDEN_IN_RANGE);
                     }

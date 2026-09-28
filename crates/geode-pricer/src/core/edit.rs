@@ -488,7 +488,9 @@ impl Sheet {
         // `first` and the next `count − 1` rows must each be a root line:
         // a root line has no legs, so consecutive root lines are
         // consecutive rows.
-        let end = first + count;
+        // A typed count can be any usize; saturating keeps an absurd one a
+        // refusal rather than an overflow.
+        let end = first.saturating_add(count);
         if end > self.len() {
             return Err(EditError::NotContiguousRoots);
         }

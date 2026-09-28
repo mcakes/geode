@@ -168,6 +168,11 @@ fn a_refused_scope_notices_and_hides_nothing(cx: &mut gpui::TestAppContext) {
     set_expr(&h, &mut vcx, "strike > 5000");
     assert_eq!(h.notice(&vcx), None);
     assert_eq!(hidden(&h, &vcx), 3);
+    // A refusal after a scope that hid lines shows them all again: the
+    // pricer never keeps a narrowing the frame no longer holds.
+    set_expr(&h, &mut vcx, "book = 'X'");
+    assert_eq!(hidden(&h, &vcx), 0);
+    assert_eq!(h.tree(&vcx).len(), 3);
 }
 
 /// The cursor on P's 5200 leg; a scope then hides that leg: the cursor
@@ -413,6 +418,28 @@ fn a_counted_group_over_a_hidden_line_is_refused(cx: &mut gpui::TestAppContext) 
         Err("a line in that range is hidden by the scope".to_string())
     );
     assert_eq!(rows(&h, &vcx), before);
+    assert!(!h.tile.read_with(&vcx, |t, _| t.undo.can_undo()));
+}
+
+/// A typed count of `usize::MAX` refuses through the command door: the
+/// door's range and the core edit's end saturate instead of overflowing.
+#[gpui::test]
+fn a_huge_counted_group_refuses_without_overflowing(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "SPX Z26 4000 P", "SPX Z26 3000 P"]);
+    // Off row 0, so `row + count` would overflow.
+    h.motion(&mut vcx, "down", None);
+    let before = rows(&h, &vcx);
+    assert_eq!(
+        h.command(&mut vcx, "group 18446744073709551615"),
+        Err("group needs a contiguous run of top-level lines".to_string())
+    );
+    assert_eq!(rows(&h, &vcx), before);
+    set_expr(&h, &mut vcx, "strike != 3000");
+    assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(1), "fixture: on the 4000 line");
+    assert_eq!(
+        h.command(&mut vcx, "group 18446744073709551615"),
+        Err("a line in that range is hidden by the scope".to_string())
+    );
     assert!(!h.tile.read_with(&vcx, |t, _| t.undo.can_undo()));
 }
 
