@@ -327,6 +327,11 @@ Each flat value column is `{ column, label, type, required, format?,
 choices? }`. `type` is `f64`, `i64`, `date`, or `utf8`; `required` (a
 boolean) says whether an inserted row must fill the cell; `choices` is a
 closed, non-empty list of distinct strings and applies to `utf8` only.
+`choices` must match the document kind's own vocabulary for that column
+(the dividend kind's `status`: `estimated`, `declared`, `paid`,
+`cancelled`). Load does not check this, because a document kind does not
+expose its vocabulary; a choice the kind does not know is accepted by the
+editor and then refused by the kind's writer on every upload.
 
 A `format` table accepts the view format keys `precision` (0–12),
 `thousands`, `negative`, and `scale`, over a base of no places, no grouping,
@@ -341,13 +346,17 @@ a malformed format value is an error rather than a view reader's warning.
 
 The panel's name must be lower-case ASCII letters, digits, and `_`, starting
 with a letter, and must not be another module's kind (`blotter`,
-`timeseries`, `pricer`, `diagnostics`, `placeholder`). Beyond that, a panel
+`timeseries`, `pricer`, `diagnostics`, `placeholder`). It must not end in a
+placement suffix (`_horizontal`, `_vertical`, `_stacked`): the shell spells
+each kind's add-tile placements `tile::add_<kind>_<placement>`, so
+`[cvi_stacked]` would claim the `cvi` panel's stack action. Beyond that, a panel
 is refused with one Error at `panels.<name>[.<field>]` when:
 
 - a key is unknown, a required key is missing, or a value has the wrong
   shape or type, including a malformed `format` and an `f64` without a
   `precision`;
-- its `dataset` is not declared, or is not a document dataset;
+- its `dataset` is not declared, or is not a document dataset (reported at
+  `.document`, where the document kind is matched against it);
 - its `document` names no registered document kind, or a kind whose columns
   and types do not match the dataset's document columns;
 - a named column is missing from the dataset, has the wrong role (a header
@@ -372,6 +381,10 @@ is refused with one Error at `panels.<name>[.<field>]` when:
 - a column the document kind writes is not named by the panel. The
   dataset's document key is exempt, because the tile supplies it, and so is
   a pivot's one unnamed value column, which is its grid;
+- the `header`, the flat `columns.values`, or a pivot's values (its grid
+  column, then each `slice`) do not follow the document kind's column order.
+  Upload emits them in the panel's order and the kind's writer refuses any
+  other, so a reordered panel would load and paint but never upload;
 - an action id is not registered, or is listed twice.
 
 A refused panel is not a tile kind: it has no add-tile action and no picker
@@ -386,9 +399,12 @@ Any panel over an undeclared dataset is refused, the builtin ones included.
 layer, so a configuration that has a `views` document but no market-data
 datasets starts with `config 2 errors`. No layer can remove a builtin panel
 — an override of the same name must itself be a valid panel — so clear
-them by declaring both document datasets, as
-[`examples/demo-config/datasets.toml`](../../examples/demo-config/datasets.toml)
-does. The panels are then accepted and show nothing until a source
+them by declaring both document datasets with the same key, axes, columns,
+roles, and types as
+[`examples/demo-config/datasets.toml`](../../examples/demo-config/datasets.toml).
+The document kinds and the panels check every column, so a declaration that
+differs in any of these leaves the panel refused with a different Error.
+Declared that way, the panels are accepted and show nothing until a source
 publishes their documents. Without any `views` document no data module
 starts, panels included, and no panel is checked.
 

@@ -399,4 +399,7 @@ scope whose ID collides with an existing action is skipped with a warning.
 Each module kind has four add actions: default split, horizontal split, vertical
 split, and stack. The parser reserves the `_horizontal`, `_vertical`, and
 `_stacked` suffixes for placement, so kind names ending in those suffixes are
-ambiguous as default-direction add IDs.
+ambiguous as default-direction add IDs. The panel reader refuses such a panel
+name; any other kind ending in a suffix, or one whose add IDs another
+registration already holds, gets no add actions and an Error in the config
+section rather than a startup panic.
