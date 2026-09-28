@@ -226,6 +226,28 @@ fn a_column_the_view_lacks_stops_at_its_edit_stage(cx: &mut gpui::TestAppContext
     });
 }
 
+/// A column no dataset of the view declares (a derived dimension the view lists as
+/// an ordinary `dimension` column, so the tile cannot flag it) is not offered by the
+/// Schema list: a pick could only fail.
+#[gpui::test]
+fn schema_omits_a_column_no_dataset_declares(cx: &mut gpui::TestAppContext) {
+    let mut t = tree(Some(1));
+    t.columns.push(TileColumn {
+        name: "desk".into(),
+        label: "desk".into(),
+        derived: false,
+    });
+    let (shell, mut cx) = shell_with_tile(cx, Some(t));
+    open_palette_action(&mut cx, "Edit column in schema");
+    let options = shell.read_with(&cx, |s, _| {
+        s.choice_dialog
+            .as_ref()
+            .map(|d| d.list.options().to_vec())
+            .unwrap_or_default()
+    });
+    assert_eq!(options, ["book", "NPV · npv"]);
+}
+
 #[gpui::test]
 fn enter_with_every_row_filtered_out_commits_nothing(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = shell_with_tile(cx, Some(tree(Some(1))));

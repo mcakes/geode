@@ -2986,6 +2986,13 @@ run_mutation "edit column: the list is offered over a dialog that cannot open" \
   geode-shell \
   a_covered_views_dialog_refuses_before_the_list_opens
 
+run_mutation "edit column: schema offers a column no dataset declares" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '        tile.columns.retain(|_| keep.next().unwrap_or(false));' \
+  '        tile.columns.retain(|_| keep.next().is_some());' \
+  geode-shell \
+  schema_omits_a_column_no_dataset_declares
+
 run_mutation "edit column: the blotter reports the tree column as active" \
   crates/geode-blotter/src/core/plan.rs \
   '        let active = (cursor_col > 0 && cursor_col < self.columns.len()).then(|| cursor_col - 1);' \

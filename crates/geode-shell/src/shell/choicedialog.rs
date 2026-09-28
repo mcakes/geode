@@ -491,11 +491,25 @@ pub fn open_columns(
         .focused_tile()
         .and_then(|t| view.occupants.get(&t))
         .and_then(|o| o.content.tile_columns(cx));
-    let Some(tile) = tile else {
+    let Some(mut tile) = tile else {
         view.notice = Some(NO_TILE_COLUMNS);
         cx.notify();
         return;
     };
+    // Schema offers only what some dataset of the view declares, against the
+    // current config; the tile's `derived` flag misses derived dimensions.
+    if domain == Domain::Schema
+        && let Some(declared) = objectdialog::render::schema_declared(
+            view,
+            &tile.view,
+            tile.columns.iter().map(|c| c.name.as_str()),
+        )
+    {
+        let active = tile.active_column().map(|c| c.name.clone());
+        let mut keep = declared.into_iter();
+        tile.columns.retain(|_| keep.next().unwrap_or(false));
+        tile.active = active.and_then(|name| tile.columns.iter().position(|c| c.name == name));
+    }
     if !dialog::can_open_object(view, domain) {
         cx.notify();
         return;

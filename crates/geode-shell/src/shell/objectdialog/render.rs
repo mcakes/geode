@@ -750,6 +750,39 @@ fn resolve_column_object(
     }
 }
 
+/// The views and schema as the edit-column route reads them: pending edits folded in.
+fn views_and_schema(shell: &ShellView) -> (Vec<ViewSpec>, SchemaSpec) {
+    let folded = apply::config_with_pending(shell);
+    let config = folded.as_ref().unwrap_or(&shell.services.config);
+    let (views, _) = load_views(config);
+    let schema = config
+        .doc("datasets")
+        .map(|doc| SchemaSpec::from_doc(doc).0)
+        .unwrap_or_default();
+    (views, schema)
+}
+
+/// Which of `columns` the Schema route can open for `view`: those some dataset of the
+/// view declares, by the same `owner_of` the commit resolves through. A tile cannot
+/// flag a derived dimension the view lists as a plain `dimension` column, so the
+/// Schema list asks the config instead of offering a row whose pick could only fail.
+/// `None` when the view is undefined: the list then filters nothing, and the commit
+/// reports the missing view.
+pub(in crate::shell) fn schema_declared<'a>(
+    shell: &ShellView,
+    view: &str,
+    columns: impl IntoIterator<Item = &'a str>,
+) -> Option<Vec<bool>> {
+    let (views, schema) = views_and_schema(shell);
+    let spec = views.iter().find(|v| v.name == view)?;
+    Some(
+        columns
+            .into_iter()
+            .map(|c| DatasetPresentationSpec::owner_of(spec, c, &schema).is_some())
+            .collect(),
+    )
+}
+
 /// Open `domain`'s dialog straight onto `column`'s Column stage for a tile's `view`
 /// (`config::view_column` / `config::schema_column`). Resolves the object against the
 /// pending-aware config at this moment, not the tile's copy, because a reload or a
@@ -770,13 +803,7 @@ pub(in crate::shell) fn open_column(
         return;
     }
     let object = {
-        let folded = apply::config_with_pending(shell);
-        let config = folded.as_ref().unwrap_or(&shell.services.config);
-        let (views, _) = load_views(config);
-        let schema = config
-            .doc("datasets")
-            .map(|doc| SchemaSpec::from_doc(doc).0)
-            .unwrap_or_default();
+        let (views, schema) = views_and_schema(shell);
         resolve_column_object(domain, &views, &schema, view, column)
     };
     open(shell, domain, window, cx);
