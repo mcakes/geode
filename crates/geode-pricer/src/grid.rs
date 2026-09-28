@@ -391,6 +391,23 @@ mod tests {
     }
 
     #[test]
+    fn a_package_summary_names_a_repeated_strike_once() {
+        // A straddle shape: a call and a put at one strike and expiry.
+        let mut s = Sheet::new("t");
+        push(&mut s, vec![line(spx(5000.0, OptionKind::Call), 1)]);
+        push(&mut s, vec![line(spx(5000.0, OptionKind::Put), 1)]);
+        s.apply(crate::core::Edit::Group {
+            first: 0,
+            count: 2,
+            template: crate::core::Template::CUSTOM,
+            id: None,
+        })
+        .unwrap();
+        let m = build(&s, &Expansion::default());
+        assert_eq!(m.rows[0].text.as_ref(), "Z26 5000");
+    }
+
+    #[test]
     fn cells_carry_the_core_text_and_state() {
         let mut s = sheet();
         let answers: Vec<_> = (0..s.len())

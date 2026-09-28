@@ -24815,6 +24815,75 @@ run_mutation "pricer plan: move_column reorders" \
   '            self.columns.push(c);' \
   geode-pricer move_column_reorders_the_plan_and_position_of_finds_by_name
 
+# Only a package's last leg takes the corner connector; without it every
+# leg would hang from a tee and the package would never close.
+run_mutation "pricer grid: the last leg takes the corner" \
+  crates/geode-pricer/src/grid.rs \
+  '                        last: sheet.children(p).end == r + 1,' \
+  '                        last: false,' \
+  geode-pricer the_last_leg_of_every_package_takes_the_corner_connector
+
+# A package row's note counts its own legs.
+run_mutation "pricer grid: a package counts its legs" \
+  crates/geode-pricer/src/grid.rs \
+  '                    SharedString::from(leg_note(sheet.children(r).len())),' \
+  '                    SharedString::from(leg_note(0)),' \
+  geode-pricer the_tree_text_is_prepared_per_row_kind
+
+# One leg reads "1 leg", not "1 legs".
+run_mutation "pricer grid: one leg is singular" \
+  crates/geode-pricer/src/grid.rs \
+  '    if n == 1 {' \
+  '    if false {' \
+  geode-pricer a_one_leg_package_counts_one_leg_and_its_leg_is_last
+
+# A package summary names each strike once; a straddle would otherwise
+# read "5000/5000".
+run_mutation "pricer grid: summary strikes are distinct" \
+  crates/geode-pricer/src/grid.rs \
+  '            if !strikes.contains(&k) {' \
+  '            if true {' \
+  geode-pricer a_package_summary_names_a_repeated_strike_once
+
+# A leg's and a bare line's tree text is its full shorthand (the find key
+# shares the same string, so this anchor leaves search intact).
+run_mutation "pricer grid: a leg's text is its shorthand" \
+  crates/geode-pricer/src/grid.rs \
+  $'                        SharedString::default(),\n                        s.clone(),' \
+  $'                        SharedString::default(),\n                        SharedString::default(),' \
+  geode-pricer the_tree_text_is_prepared_per_row_kind
+
+# Tee for every leg but the last, corner for the last.
+run_mutation "pricer tree: connector glyphs" \
+  crates/geode-pricer/src/delegate.rs \
+  '    if last { "└" } else { "├" }' \
+  '    if last { "├" } else { "└" }' \
+  geode-pricer a_leg_takes_a_tee_and_the_last_leg_a_corner
+
+# A leg's connector takes its parent's lane, directly under the package's
+# chevron; at its own depth it would sit one step to the right.
+run_mutation "pricer tree: a leg's connector sits in its parent's slot" \
+  crates/geode-pricer/src/delegate.rs \
+  '        GridRowKind::Leg { .. } => depth.saturating_sub(1),' \
+  '        GridRowKind::Leg { .. } => depth,' \
+  geode-pricer the_tree_column_paints_connectors_a_chip_and_a_leg_count
+
+# The gutter is muted off the cursor row on every row kind, a package's
+# included; only the cursor row takes the own paint.
+run_mutation "pricer gutter: a package row is muted off the cursor" \
+  crates/geode-pricer/src/delegate.rs \
+  $'            self.paints.own\n        } else {\n            self.paints.muted' \
+  $'            self.paints.own\n        } else {\n            self.paints.own' \
+  geode-pricer the_tree_column_paints_connectors_a_chip_and_a_leg_count
+
+# The template chip's text is floored against the chip's fill on every
+# bundled theme.
+run_mutation "pricer paint: chip text is floored" \
+  crates/geode-pricer/src/paint.rs \
+  '            chip_text: floor_on_all(chip.text, &chip_grounds),' \
+  '            chip_text: chip.text,' \
+  geode-pricer every_pricer_paint_is_readable_on_every_bundled_theme
+
 
 # A bare j/k wraps at the ends of a grid; without it a trader at the last
 # row has to page back to the top.

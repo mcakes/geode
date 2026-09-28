@@ -5915,9 +5915,10 @@ pub(crate) mod tests {
 
     /// Column 0 paints option C: the package row a chevron, a template chip,
     /// the summary and the muted leg count; each leg a connector and its
-    /// shorthand; a bare line its shorthand alone — and no row a ground.
-    /// The legs' connectors sit in the package chevron's lane and their
-    /// text starts where the chip starts, with line numbers off or on.
+    /// shorthand; a bare line its shorthand alone. The legs' connectors sit
+    /// in the package chevron's lane and their text starts where the chip
+    /// starts, with line numbers off or on. That no row paints a ground is
+    /// structural (`render_tr` paints none) and not asserted here.
     #[gpui::test]
     fn the_tree_column_paints_connectors_a_chip_and_a_leg_count(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "-5 SPX Z26 4800/5200 CS"]);

@@ -41,10 +41,12 @@ use std::sync::Arc;
 /// legs`) at the largest font (checked below), in pixels like every width
 /// here; not resizable. Longer summaries ellipsize; the leg count stays.
 const TREE_WIDTH: f32 = 210.0;
-/// One depth step, and the chevron slot every row reserves
-/// (empty on a line or leg), both on the rem scale: roots share one
-/// leading edge whether or not they carry a chevron, and a leg sits
-/// exactly one step in from its package.
+/// One depth step, and the slot every row reserves at its lane, both on
+/// the rem scale. The slot holds a package's chevron or a leg's connector
+/// and is empty on a bare line, so roots share one leading edge whether or
+/// not they carry a chevron. A leg's connector takes its parent's lane
+/// (`lane_depth`), so it hangs directly under the package's chevron and the
+/// leg's text starts where the package's chip starts.
 const INDENT: f32 = 14.0;
 const CHEVRON_SLOT: f32 = 14.0;
 /// A template chip's horizontal padding, each side, and the gap between
