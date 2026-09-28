@@ -5,7 +5,9 @@
 //!
 //! Vols arrive computed upstream: a quote missing any of the three vols is
 //! refused, so nothing downstream averages bid and ask. Quotes are sorted
-//! by strike at parse and a repeated strike is refused. Wire tag names
+//! by strike at parse and a repeated strike is refused. A negative vol or
+//! price and a non-positive spot reference are refused; crossed or locked
+//! quotes are accepted as market states. Wire tag names
 //! remain unverified against any desk XSD.
 
 use chrono::{DateTime, NaiveDate};
@@ -175,6 +177,17 @@ fn positive(what: &str, v: f64) -> Result<f64, ParseError> {
     }
 }
 
+/// A vol or price below zero is impossible, not merely odd. Zero and
+/// crossed or locked quotes (bid vol above ask vol, mid outside them) are
+/// plausible market states and pass.
+fn non_negative(what: &str, v: f64) -> Result<f64, ParseError> {
+    if v < 0.0 {
+        Err(parse_err(format!("{what} {v} is negative")))
+    } else {
+        Ok(v)
+    }
+}
+
 /// Open-element path with reusable name buffers. Sibling quotes reuse
 /// capacity rather than allocating a name for each element.
 #[derive(Default)]
@@ -318,7 +331,7 @@ fn parse(bytes: &[u8]) -> Result<ParsedDocument, ParseError> {
                         if spot_ref.is_some() {
                             return Err(already_filled("spotRef"));
                         }
-                        spot_ref = Some(number("spotRef", trimmed)?);
+                        spot_ref = Some(positive("spotRef", number("spotRef", trimmed)?)?);
                     }
                     Shape::Leaf(Leaf::QuoteTime) => {
                         if quote_time.is_some() {
@@ -337,7 +350,7 @@ fn parse(bytes: &[u8]) -> Result<ParsedDocument, ParseError> {
                         if quote.fields[i].is_some() {
                             return Err(already_filled(tag));
                         }
-                        quote.fields[i] = Some(number(tag, trimmed)?);
+                        quote.fields[i] = Some(non_negative(tag, number(tag, trimmed)?)?);
                     }
                     Shape::Quote => {
                         // Every child is required. A quote without a strike
@@ -550,12 +563,21 @@ fn write(rows: &DocumentRows) -> Result<Vec<u8>, WriteError> {
             w[1], w[0]
         )));
     }
-    // The parser refuses a non-positive strike or forward.
+    // The parser refuses a non-positive strike, forward or spot reference,
+    // and a negative vol or price.
     if let Some(k) = strikes.iter().find(|k| **k <= 0.0 || k.is_nan()) {
         return Err(write_err(format!("strike {k} is not positive")));
     }
     if *forward <= 0.0 || forward.is_nan() {
         return Err(write_err(format!("forward {forward} is not positive")));
+    }
+    if *spot_ref <= 0.0 || spot_ref.is_nan() {
+        return Err(write_err(format!("spot_ref {spot_ref} is not positive")));
+    }
+    for (name, column) in VALUES.iter().zip(values) {
+        if let Some(v) = column.iter().find(|v| **v < 0.0) {
+            return Err(write_err(format!("{name} {v} is negative")));
+        }
     }
     rfc3339("quote_time", quote_time).map_err(write_err)?;
 
@@ -867,6 +889,65 @@ role = "attribute"
         assert!(err(&DOC.replace("<bid>95.5</bid>", "<bid>NaN</bid>")).contains("not finite"));
     }
 
+    /// A negative vol or price and a non-positive spot reference are
+    /// refused at parse, naming the wire tag. The five value fields are
+    /// taken from the middle quote so the whole tag list is covered.
+    #[test]
+    fn a_negative_vol_or_price_or_non_positive_spot_ref_is_refused() {
+        for (tag, good) in [
+            ("bidVol", "0.19"),
+            ("askVol", "0.2"),
+            ("midVol", "0.195"),
+            ("bid", "120.25"),
+            ("ask", "124.5"),
+        ] {
+            let block = quote_block(1);
+            let from = format!("<{tag}>{good}</{tag}>");
+            assert!(block.contains(&from), "{from}");
+            let doc = DOC.replace(
+                block,
+                &block.replace(&from, &format!("<{tag}>-0.5</{tag}>")),
+            );
+            assert_eq!(err(&doc), format!("{tag} -0.5 is negative"), "{tag}");
+        }
+        for spot in ["0", "-7650"] {
+            assert_eq!(
+                err(&DOC.replace(
+                    "<spotRef>7650</spotRef>",
+                    &format!("<spotRef>{spot}</spotRef>")
+                )),
+                format!("spotRef {spot} is not positive")
+            );
+        }
+    }
+
+    /// Zero vols and prices, and crossed or locked quotes (bid vol above
+    /// ask vol, mid outside bid and ask) are plausible on the wire and
+    /// pass through: the kind refuses impossible values, not odd markets.
+    #[test]
+    fn a_crossed_or_zero_quote_still_parses() {
+        let block = quote_block(1);
+        let crossed = block
+            .replace("<bidVol>0.19</bidVol>", "<bidVol>0.25</bidVol>")
+            .replace("<midVol>0.195</midVol>", "<midVol>0.3</midVol>")
+            .replace("<bid>120.25</bid>", "<bid>0</bid>");
+        let parsed = OptionChainKind
+            .parse(DOC.replace(block, &crossed).as_bytes())
+            .unwrap();
+        let mut rows = expected();
+        rows.values[0].1 = Column::F64(vec![0.2, 0.25, 0.18]);
+        rows.values[2].1 = Column::F64(vec![0.205, 0.3, 0.185]);
+        rows.values[3].1 = Column::F64(vec![95.5, 0.0, 130.0]);
+        assert_eq!(parsed.rows, rows);
+        assert_eq!(
+            OptionChainKind
+                .parse(&OptionChainKind.write(&rows).unwrap())
+                .unwrap()
+                .rows,
+            rows
+        );
+    }
+
     #[test]
     fn a_repeated_singleton_is_refused() {
         let twice = DOC.replace(
@@ -962,6 +1043,26 @@ role = "attribute"
             OptionChainKind.write(&empty).unwrap_err().message,
             "option chain document has no rows"
         );
+        for (i, name) in VALUES.iter().enumerate() {
+            let mut negative = expected();
+            let Column::F64(v) = &mut negative.values[i].1 else {
+                unreachable!()
+            };
+            v[1] = -0.5;
+            assert_eq!(
+                OptionChainKind.write(&negative).unwrap_err().message,
+                format!("{name} -0.5 is negative"),
+                "{name}"
+            );
+        }
+        for spot in [0.0, -7650.0] {
+            let mut rows = expected();
+            rows.attributes[1].1 = Value::F64(spot);
+            assert_eq!(
+                OptionChainKind.write(&rows).unwrap_err().message,
+                format!("spot_ref {spot} is not positive")
+            );
+        }
     }
 
     proptest::proptest! {

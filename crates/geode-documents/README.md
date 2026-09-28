@@ -39,13 +39,16 @@ cargo bench -p geode-documents     # document parse and write
 - Option-chain quotes are sorted by strike at parse, and a repeated strike is
   refused naming it, so a chain's strikes are always strictly ascending. Every
   quote must carry all five values: vols arrive computed upstream, so a quote
-  missing one is refused rather than filled by averaging bid and ask.
-  `quoteTime` must be an RFC 3339 time and is stored as its wire text, since
-  document columns cannot be timestamps. The writer refuses anything the
-  parser would never produce (strikes not strictly ascending, a non-positive
-  strike or forward, an expiry not spelled `YYYY-MM-DD`, a blank or padded
-  underlying, a non-RFC 3339 quote time, no rows), so it emits only what the
-  parser could have produced. `TAGS` in `src/chain.rs` pairs the quote's wire
+  missing one is refused rather than filled by averaging bid and ask. A
+  negative vol or price and a non-positive `spotRef` are refused as
+  impossible; zero values and crossed or locked quotes (bid vol above ask vol,
+  mid outside bid and ask) are plausible market states and pass. `quoteTime`
+  must be an RFC 3339 time and is stored as its wire text, since document
+  columns cannot be timestamps. The writer refuses anything the parser would
+  never produce (strikes not strictly ascending, a non-positive strike,
+  forward or spot reference, a negative vol or price, an expiry not spelled
+  `YYYY-MM-DD`, a blank or padded underlying, a non-RFC 3339 quote time, no
+  rows), so it emits only what the parser could have produced. `TAGS` in `src/chain.rs` pairs the quote's wire
   tags with column names; they are unverified against any desk XSD.
 - Parse and write failures return typed errors; the data service owns source
   health and diagnostic routing.

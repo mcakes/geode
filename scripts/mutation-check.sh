@@ -16365,6 +16365,32 @@ run_mutation "vol chain kind: a duplicate strike is refused" \
   '    if let Some(w) = rows.windows(2).find(|_| false) {' \
   geode-documents a_duplicate_strike_is_refused_naming_it
 
+run_mutation "vol chain kind: a negative vol or price is refused at parse" \
+  crates/geode-documents/src/chain.rs \
+  '    if v < 0.0 {
+        Err(parse_err(format!("{what} {v} is negative")))' \
+  '    if false {
+        Err(parse_err(format!("{what} {v} is negative")))' \
+  geode-documents a_negative_vol_or_price_or_non_positive_spot_ref_is_refused
+
+run_mutation "vol chain kind: a non-positive spot reference is refused at parse" \
+  crates/geode-documents/src/chain.rs \
+  'Some(positive("spotRef", number("spotRef", trimmed)?)?);' \
+  'Some(number("spotRef", trimmed)?);' \
+  geode-documents a_negative_vol_or_price_or_non_positive_spot_ref_is_refused
+
+run_mutation "vol chain kind: write refuses a negative vol or price" \
+  crates/geode-documents/src/chain.rs \
+  '        if let Some(v) = column.iter().find(|v| **v < 0.0) {' \
+  '        if let Some(v) = column.iter().find(|_| false) {' \
+  geode-documents write_refuses_what_parse_would_never_produce
+
+run_mutation "vol chain kind: write refuses a non-positive spot reference" \
+  crates/geode-documents/src/chain.rs \
+  '    if *spot_ref <= 0.0 || spot_ref.is_nan() {' \
+  '    if spot_ref.is_nan() {' \
+  geode-documents write_refuses_what_parse_would_never_produce
+
 run_mutation "vol chain generator: the half-spread is capped at half the mid" \
   crates/geode-demo-data/src/documents.rs \
   '        (0.0025 + 0.03 * (strike / forward - 1.0).abs()).min(mid / 2.0)' \
