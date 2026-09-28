@@ -22,7 +22,7 @@ Config directories:
 
 | Layer | Where |
 |---|---|
-| Builtin | compiled in (`geode_shell::defaults`, plus `builtin_layer`'s keymap, the pricer's bundled views and templates, and its `pricer_sheets` dataset) |
+| Builtin | compiled in (`geode_shell::defaults`, plus `builtin_layer`'s keymap, the pricer's bundled views and templates, and its two datasets: `pricer_sheets` and the computed `pricer`) |
 | Desk | `$GEODE_DESK_CONFIG`, if set |
 | User | `$APPDATA/geode` when set, otherwise `$HOME/.config/geode` |
 
@@ -98,9 +98,10 @@ cargo check -p geode-app --features profiling
   `data_setup` and `ConfigReloaded` arms.
 - Every local-write outcome for `pricer_sheets` reaches the pricer factory
   (`save_answered`/`forget_answered`), in the writer's order: a pricer tile
-  can wait on one exact outcome with no timeout. `pin_pricer_sheets` keeps
-  the builtin declaration against a differing layer redeclaration, at
-  startup and on reload, with an error diagnostic.
+  can wait on one exact outcome with no timeout. `pin_app_datasets` keeps
+  the builtin declaration of `pricer_sheets` and of the computed `pricer`
+  against a differing layer redeclaration, at startup and on reload, with
+  an error diagnostic.
 - At quit, `stop_at_quit` attempts each pricer tile's unsaved-sheet flush
   before starting data shutdown on a background executor. Admitted writes
   precede `Shutdown` and the writer drains them, but submission/write failures

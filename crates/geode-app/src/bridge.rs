@@ -242,11 +242,11 @@ fn pin_app_dataset(
         return None;
     }
     let builtin = LayerDoc::builtin("datasets", declaration)
-        .unwrap_or_else(|e| panic!("the app's `{name}` declaration is well-formed TOML: {e}"));
+        .unwrap_or_else(|e| panic!("the app's `{name}` declaration is not well-formed TOML: {e}"));
     let (alone, _) = SchemaSpec::from_doc(&merge_docs("datasets", &[builtin]));
     let declared = alone
         .dataset(name)
-        .unwrap_or_else(|| panic!("the app's declaration declares `{name}`"))
+        .unwrap_or_else(|| panic!("the app's declaration does not declare `{name}`"))
         .clone();
     let slot = schema.datasets.iter().position(|d| d.name == name);
     if slot.is_some_and(|i| schema.datasets[i] == declared) {
@@ -4956,6 +4956,11 @@ role = "key"
         assert_eq!(d.layer, Some(geode_core::config::Layer::Desk));
         assert_eq!(d.file.as_deref(), Some(file.as_path()));
         assert!(d.message.contains("ignored"), "{}", d.message);
+        assert!(
+            d.message.contains("view, scope or grouping"),
+            "{}",
+            d.message
+        );
     }
 
     /// A reload re-reads `datasets` for the blotter's validation schema:
