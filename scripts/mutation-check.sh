@@ -20694,9 +20694,18 @@ run_mutation "pricer tile: a tick does not stale the sheet" \
 
 run_mutation "pricer tile: the flip barrier waits for the pricer" \
   crates/geode-pricer/src/tile.rs \
-  '                    if f.arrived(key, now) {' \
-  '                    if false && f.arrived(key, now) {' \
+  '            following::arrive_immediately(&mut FrameDoor::new(&frame, cx), QueryKey(this.id.0));' \
+  '            let _ = (&frame, QueryKey(this.id.0));' \
   geode-pricer the_tile_answers_a_flip_barrier_it_has_nothing_coming_for
+
+# Diagnostics submits no frame query, so nothing else answers a barrier
+# that enrolls it. Mutated away, every following tile on screen waits out
+# `FLIP_DEADLINE` on each scope, grouping or as-of change.
+run_mutation "diagnostics module: the tile answers a flip barrier itself" \
+  crates/geode-diagnostics/src/tile.rs \
+  '            following::arrive_immediately(&mut FrameDoor::new(&frame, cx), QueryKey(this.tile.0));' \
+  '            let _ = (&frame, QueryKey(this.tile.0));' \
+  geode-diagnostics the_tile_answers_a_flip_barrier_it_has_nothing_coming_for
 
 run_mutation "pricer tile: the entry field is dropped unblurred" \
   crates/geode-pricer/src/tile.rs \

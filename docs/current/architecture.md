@@ -30,8 +30,8 @@ wire formats: geode-documents ────────────────�
 A feature module depends on `geode-shell` directly (the `TileContent`
 contract, key chips, the rem scale) as well as through `geode-tile`, and may
 also name `geode-widgets`, `geode-chart` and `geode-core` directly.
-`geode-diagnostics` has no popover, menu, confirm or notice line and does not
-depend on `geode-tile`.
+`geode-diagnostics` has no popover, menu, confirm or notice line; it depends
+on `geode-tile` only for the flip-barrier arrival.
 
 `geode-core` is shared vocabulary without window, database, or network
 ownership. Typed interpretation and merging are I/O-free; its configuration
