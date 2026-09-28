@@ -22697,6 +22697,16 @@ run_mutation "context: the compiler drops context columns" \
   '    for u in view.context_dimensions(schema, dims).into_iter().take(0) {' \
   geode-data a_context_key_is_unanimous_where_one_position_sits_under_the_row
 
+run_mutation "context: queries stop carrying the context columns" \
+  crates/geode-data/src/service.rs \
+  '            context: self
+                .context_columns
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),' \
+  '            context: Vec::new(),' \
+  geode-data context_columns_reach_the_query
+
 # A reload must reach the underlying list, or a desk edit to it waits for
 # a restart.
 run_mutation "pricer app: a reload leaves the underlying list stale" \

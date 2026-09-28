@@ -20,7 +20,8 @@ pub use egress::{UploadOutcome, UploadParams};
 pub use handle::{DataHandle, REQUEST_BOUND, Refusal, Request};
 pub use pricing::{PricerConfig, PricerRegistry};
 pub use service::{
-    DataEvent, DataService, DataServiceConfig, EventSink, FetchParams, LocalForget, QueryParams,
+    ContextColumns, DataEvent, DataService, DataServiceConfig, EventSink, FetchParams, LocalForget,
+    QueryParams,
 };
 
 #[cfg(test)]

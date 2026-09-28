@@ -40,9 +40,16 @@ use geode_core::snapshot::Provenance;
 use geode_core::source_config::SourceShape;
 use geode_core::view::ViewSpec;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::mpsc::Receiver;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
+
+/// The host's context columns (`ViewSpec::context`), shared between the
+/// `DataHandle` that sets them and the service that copies them onto each
+/// query's view. A mutex rather than a request: they are set once at
+/// startup, read per query, and a request would need its own arm in every
+/// request match.
+pub type ContextColumns = Arc<Mutex<Vec<String>>>;
 
 pub struct DataServiceConfig {
     pub db_path: PathBuf,
@@ -724,6 +731,9 @@ pub struct DataService {
     /// that makes "is this a fetch source" a lookup rather than a
     /// re-derivation from the schema.
     fetch_datasets: std::collections::HashMap<String, String>,
+    /// Copied onto every query's view as `ViewSpec::context`; see
+    /// [`ContextColumns`].
+    context_columns: ContextColumns,
     pool: QueryPool,
     pricing: PricingWorker,
     scheduler: Scheduler,
@@ -1439,12 +1449,27 @@ impl DataService {
             fetchers: std::sync::Mutex::new(fetchers),
             identities,
             fetch_datasets,
+            context_columns: Arc::default(),
             pool,
             pricing,
             scheduler,
             ingest,
             conn,
         })
+    }
+
+    /// Replace the context columns every later query carries.
+    pub fn set_context_columns(&self, columns: Vec<String>) {
+        *self
+            .context_columns
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = columns;
+    }
+
+    /// Read the context columns from `shared` from now on (the handle's
+    /// copy, so `DataHandle::set_context_columns` reaches a running service).
+    pub fn share_context_columns(&mut self, shared: ContextColumns) {
+        self.context_columns = shared;
     }
 
     /// A service delivering into a channel, for callers that block on
@@ -1552,6 +1577,16 @@ impl DataService {
                 &regrouped
             }
         };
+        // Every query carries the host's context columns; the configured
+        // view never does (it is shared across queries and reloads).
+        let contextual = ViewSpec {
+            context: self
+                .context_columns
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+            ..spec.clone()
+        };
 
         Ok(self.pool.submit(QueryRequest {
             key: params.key,
@@ -1561,7 +1596,7 @@ impl DataService {
             grouping: spec.grouping.clone(),
             work: Work::Read(Box::new(ReadQuery::view(
                 Arc::clone(&self.read_config),
-                spec.clone(),
+                contextual,
                 params.scope.clone(),
                 params.as_of.clone(),
                 params.max_depth,
@@ -3798,6 +3833,35 @@ mod tests {
             svc.query(&wrong).is_err(),
             "an undeclared column fails at compile time"
         );
+        svc.shutdown();
+    }
+
+    #[test]
+    fn context_columns_reach_the_query() {
+        let (_db, _src, svc, rx) = service();
+        svc.set_context_columns(vec!["position_ref".into()]);
+        let mut p = params(1, "tree", &Scope::default(), AsOf::Live, 1);
+        p.grouping = Some(vec!["lhu".into()]);
+        svc.query(&p).unwrap();
+        let snap = next(&rx).snapshot.unwrap();
+        let ix = snap
+            .column_index("position_ref")
+            .expect("a hidden context column");
+        assert!(
+            snap.meta_at(ix).unwrap().mixed_flag.is_some(),
+            "linked to its flag"
+        );
+        svc.shutdown();
+    }
+
+    #[test]
+    fn a_query_without_context_columns_compiles_as_before() {
+        let (_db, _src, svc, rx) = service();
+        let mut p = params(1, "tree", &Scope::default(), AsOf::Live, 1);
+        p.grouping = Some(vec!["lhu".into()]);
+        svc.query(&p).unwrap();
+        let snap = next(&rx).snapshot.unwrap();
+        assert_eq!(snap.column_index("position_ref"), None);
         svc.shutdown();
     }
 

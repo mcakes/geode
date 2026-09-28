@@ -10,7 +10,8 @@
 
 use crate::egress::{UploadOutcome, UploadParams};
 use crate::service::{
-    DataEvent, DataService, DataServiceConfig, EventSink, FetchParams, LocalForget, QueryParams,
+    ContextColumns, DataEvent, DataService, DataServiceConfig, EventSink, FetchParams, LocalForget,
+    QueryParams,
 };
 use crate::supervise::REQUEST_LOOP;
 use geode_core::config::{Diagnostic, Severity};
@@ -109,6 +110,8 @@ struct Inner {
     /// dying loop is refused `Stopped` rather than admitted to a queue that
     /// nothing will read. A deliberate shutdown does not set it.
     stopped: Arc<AtomicBool>,
+    /// Shared with the running service, which copies them onto each query.
+    context_columns: ContextColumns,
 }
 
 impl Inner {
@@ -309,6 +312,26 @@ impl DataHandle {
         }
     }
 
+    /// The columns every later query computes each row's single value of,
+    /// beyond the view's own (see `ViewSpec::context`). Set by `geode-app`
+    /// once the module roster is complete; queries before that carry none.
+    pub fn set_context_columns(&self, columns: Vec<String>) {
+        *self
+            .inner
+            .context_columns
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = columns;
+    }
+
+    /// The current context columns.
+    pub fn context_columns(&self) -> Vec<String> {
+        self.inner
+            .context_columns
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     /// Submissions refused `Busy` so far (a full request queue). `Stopped`
     /// refusals are not counted: they describe a service that is gone, not one
     /// that is behind.
@@ -344,6 +367,7 @@ impl DataHandle {
                     thread: Mutex::new(None),
                     dropped: AtomicU64::new(0),
                     stopped: Arc::default(),
+                    context_columns: Arc::default(),
                 }),
             },
             rx,
@@ -379,9 +403,19 @@ impl DataService {
         let stopped = Arc::new(AtomicBool::new(false));
         let loop_stopped = Arc::clone(&stopped);
         let loop_sink = Arc::clone(&sink);
+        let context_columns = ContextColumns::default();
+        let service_context = Arc::clone(&context_columns);
         let thread =
             crate::supervise::spawn_supervised(REQUEST_LOOP.to_string(), sink, move || {
-                serve(config, loop_sink, rx, service_views, loop_stopped, probe)
+                serve(
+                    config,
+                    loop_sink,
+                    rx,
+                    service_views,
+                    loop_stopped,
+                    service_context,
+                    probe,
+                )
             })
             .expect("spawning the data service thread");
         DataHandle {
@@ -391,6 +425,7 @@ impl DataService {
                 thread: Mutex::new(Some(thread)),
                 dropped: AtomicU64::new(0),
                 stopped,
+                context_columns,
             }),
         }
     }
@@ -679,6 +714,7 @@ fn serve(
     rx: Receiver<Request>,
     pending_views: PendingViews,
     stopped: Arc<AtomicBool>,
+    context_columns: ContextColumns,
     probe: Probe,
 ) {
     let mut service = match DataService::open(config, Arc::clone(&sink)) {
@@ -699,6 +735,7 @@ fn serve(
             return;
         }
     };
+    service.share_context_columns(context_columns);
     if !service.diagnostics().is_empty() {
         let _ = sink(DataEvent::Diagnostics(service.diagnostics().to_vec()));
     }
@@ -880,7 +917,15 @@ mod tests {
         let pending = Arc::clone(&handle.inner.pending_views);
         // The service starts only after the queue filled and both reloads arrived.
         let service = std::thread::spawn(move || {
-            serve(config, sink, requests, pending, Arc::default(), no_probe)
+            serve(
+                config,
+                sink,
+                requests,
+                pending,
+                Arc::default(),
+                Arc::default(),
+                no_probe,
+            )
         });
         loop {
             if let DataEvent::Query(outcome) =
