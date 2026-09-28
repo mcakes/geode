@@ -22904,6 +22904,34 @@ run_mutation "context: startup never publishes the context columns" \
   '    let _ = roster.context_columns();' \
   geode-app the_production_roster_opens_market_data_on_an_underlying
 
+# The row menu leads with the column the user clicked, not context order.
+run_mutation "row menu: the clicked column does not lead" \
+  crates/geode-shell/src/dimension.rs \
+  '    if let Some(first) = &ctx.first {' \
+  '    if let Some(first) = &None::<String> {' \
+  geode-shell the_clicked_column_leads
+
+# A column with no kinds and no actions gets no heading.
+run_mutation "row menu: an empty section is painted" \
+  crates/geode-shell/src/dimension.rs \
+  '        if section.is_empty() {' \
+  '        if false {' \
+  geode-shell an_empty_or_actionless_context_has_no_rows
+
+# A kind accepting two present columns is offered once, under the first.
+run_mutation "row menu: a kind repeats in every accepted section" \
+  crates/geode-shell/src/dimension.rs \
+  '            if placed.contains(&kind) {' \
+  '            if false {' \
+  geode-shell a_kind_accepting_two_present_columns_sits_in_the_first_only
+
+# An action's column must be a context column, or no row carries its value.
+run_mutation "row menu: action columns are not context columns" \
+  crates/geode-shell/src/module.rs \
+  '        for a in &self.actions {' \
+  '        for a in self.actions.iter().take(0) {' \
+  geode-shell context_columns_include_action_columns_after_factory_columns
+
 # A reload must reach the underlying list, or a desk edit to it waits for
 # a restart.
 run_mutation "pricer app: a reload leaves the underlying list stale" \

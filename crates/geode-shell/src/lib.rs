@@ -13,6 +13,7 @@ pub mod config_write;
 pub mod defaults;
 pub mod diagnostics;
 pub mod dialogmode;
+pub mod dimension;
 pub mod exprcomplete;
 pub mod fonts;
 pub mod fontsize;

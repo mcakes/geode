@@ -33,6 +33,7 @@ mod pin;
 #[cfg(feature = "profiling")]
 pub mod profiling_hook;
 mod render;
+pub mod row_menu;
 pub mod scale;
 pub mod scope_expr_view;
 mod session_io;

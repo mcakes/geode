@@ -10,6 +10,7 @@
 
 use crate::actions::{ActionId, ActionRegistry};
 use crate::diagnostics::Diagnostics;
+use crate::dimension::DimensionAction;
 use crate::frame::FrameRef;
 use crate::keymap::KeyContext;
 use crate::keymap::fragments;
@@ -416,6 +417,7 @@ impl<F: ModuleFactory + ?Sized> ModuleFactory for Rc<F> {
 #[derive(Default)]
 pub struct ModuleRoster {
     factories: Vec<Box<dyn ModuleFactory>>,
+    actions: Vec<Rc<dyn DimensionAction>>,
 }
 
 impl ModuleRoster {
@@ -425,6 +427,15 @@ impl ModuleRoster {
 
     pub fn add(&mut self, factory: Box<dyn ModuleFactory>) {
         self.factories.push(factory);
+    }
+
+    /// Register a row menu action; the menu lists them in this order.
+    pub fn add_action(&mut self, action: Rc<dyn DimensionAction>) {
+        self.actions.push(action);
+    }
+
+    pub fn actions(&self) -> &[Rc<dyn DimensionAction>] {
+        &self.actions
     }
 
     pub fn register_actions(&self, registry: &mut ActionRegistry) {
@@ -444,16 +455,23 @@ impl ModuleRoster {
         self.factories.iter().map(|f| f.kind()).collect()
     }
 
-    /// Every column some factory accepts, first mention first. `geode-app`
-    /// hands this to the data service so each row carries these values.
+    /// Every column some factory accepts, then every action's column, first
+    /// mention first. `geode-app` hands this to the data service so each
+    /// row carries these values.
     pub fn context_columns(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
+        let mut push = |c: &str| {
+            if !out.iter().any(|o| o == c) {
+                out.push(c.to_string());
+            }
+        };
         for f in &self.factories {
             for c in f.accepts() {
-                if !out.iter().any(|o| o == c) {
-                    out.push(c.to_string());
-                }
+                push(c);
             }
+        }
+        for a in &self.actions {
+            push(a.column());
         }
         out
     }
@@ -1554,6 +1572,49 @@ pub mod recording {
             }
         }
     }
+
+    /// A dimension action for hosting tests: records each run's context.
+    pub struct RecordingAction {
+        pub id: &'static str,
+        pub title: &'static str,
+        pub column: &'static str,
+        pub available: Result<(), SharedString>,
+        pub runs: Rc<RefCell<Vec<DimensionContext>>>,
+    }
+
+    impl RecordingAction {
+        pub fn new(id: &'static str, title: &'static str, column: &'static str) -> Self {
+            Self {
+                id,
+                title,
+                column,
+                available: Ok(()),
+                runs: Rc::default(),
+            }
+        }
+    }
+
+    impl crate::dimension::DimensionAction for RecordingAction {
+        fn id(&self) -> &'static str {
+            self.id
+        }
+
+        fn title(&self) -> SharedString {
+            SharedString::new_static(self.title)
+        }
+
+        fn column(&self) -> &'static str {
+            self.column
+        }
+
+        fn available(&self, _: &DimensionContext) -> Result<(), SharedString> {
+            self.available.clone()
+        }
+
+        fn run(&self, ctx: &DimensionContext, _: &mut crate::shell::row_menu::ActionCx<'_, '_>) {
+            self.runs.borrow_mut().push(ctx.clone());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1590,6 +1651,28 @@ mod tests {
         b.accepts = &["position_ref", "underlying_ref"];
         roster.add(Box::new(a));
         roster.add(Box::new(b));
+        assert_eq!(
+            roster.context_columns(),
+            vec!["underlying_ref".to_string(), "position_ref".into()]
+        );
+    }
+
+    #[test]
+    fn context_columns_include_action_columns_after_factory_columns() {
+        let mut roster = ModuleRoster::new();
+        let mut a = recording::RecordingFactory::new("a");
+        a.accepts = &["underlying_ref"];
+        roster.add(Box::new(a));
+        roster.add_action(std::rc::Rc::new(recording::RecordingAction::new(
+            "x",
+            "X",
+            "position_ref",
+        )));
+        roster.add_action(std::rc::Rc::new(recording::RecordingAction::new(
+            "y",
+            "Y",
+            "underlying_ref",
+        )));
         assert_eq!(
             roster.context_columns(),
             vec!["underlying_ref".to_string(), "position_ref".into()]
