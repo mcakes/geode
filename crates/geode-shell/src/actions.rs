@@ -225,7 +225,7 @@ mod tests {
         let mut reg = ActionRegistry::default();
         reg.register(def("motion::down", "Cursor down")).unwrap();
         for old in ["a::down", "b::down", "c::down"] {
-            reg.register_rename(old, "motion::down").unwrap();
+            assert_eq!(reg.register_rename(old, "motion::down"), Ok(()), "{old}");
         }
         for old in ["a::down", "b::down", "c::down"] {
             assert_eq!(
