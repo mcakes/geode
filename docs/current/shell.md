@@ -227,8 +227,12 @@ ending it would split one edit into two undo entries. Pinning and unpinning
 rebind the field the same way.
 
 The toolbar's first readout control is a pin glyph, before the as-of chip:
-a bare, muted verb while the active workspace is unpinned, a neutral chip
-while it is pinned. Its tooltip is "Pin the frame to workspace N" or "Frame
+a bare, muted verb while the active workspace is unpinned, a solid chip in
+the theme's primary color while it is pinned (`Tone::Active`: the fill is
+moved toward `foreground` where a theme's primary sits too close to its title
+bar, so the on state reads at a glance on every bundled theme). The glyph
+keeps a chip's height in both states, so toggling it does not shift the
+readout. Its tooltip is "Pin the frame to workspace N" or "Frame
 pinned to workspace N". A click toggles the pin, as does the palette action
 `frame::pin_workspace` ("Toggle the frame pin for this workspace", category
 Frame), which has no default binding. The pin covers scope, grouping, and

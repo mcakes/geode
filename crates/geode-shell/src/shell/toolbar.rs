@@ -5,7 +5,7 @@
 //!
 //! The readout's first control is the pin glyph, which toggles whether the
 //! active workspace holds its own frame lane; it paints as a selected
-//! neutral chip while pinned and as a bare verb otherwise. The readout
+//! solid primary chip while pinned and as a bare verb otherwise. The readout
 //! then separates pin, as-of, grouping, and scope with inset hairlines.
 //! The as-of chip alone uses warning colors. Grouping opens a picker and
 //! stays visibly pressed while it is open. Filled selection chips contain
@@ -49,6 +49,11 @@ const FILTER_WIDTH: f32 = 200.0;
 /// pixels — a hit target inside a 20 px chip, and the same box for the
 /// `+`/save glyphs so the verbs sit on the chips' centre line.
 pub(super) const GLYPH_BOX: f32 = 14.0;
+
+/// The pin glyph's square in both states, in design pixels: a chip's
+/// height, so the filled pinned state reads as a chip and toggling it
+/// does not shift the readout.
+const PIN_BOX: f32 = 20.0;
 
 /// The inset hairline between two segments, in design pixels: shorter
 /// than the row so it reads as a segment boundary inside the bar, not a
@@ -592,10 +597,10 @@ pub fn toolbar(
     } else {
         (PIN_TITLES[i], PIN_HINT)
     };
-    // Pinned paints as a selected, hazard-free state (the Neutral chip);
-    // unpinned is a bare verb like `+` and save.
+    // Pinned paints solid in the theme's primary (`Tone::Active`) so the
+    // on state reads at a glance; unpinned is a bare verb like `+` and save.
     let (pin_fg, pin_bg, pin_states) = if pin.pinned {
-        let pinned_paint = chip::chip_paint(theme, chip::Tone::Neutral);
+        let pinned_paint = chip::chip_paint(theme, chip::Tone::Active);
         (
             pinned_paint.text,
             pinned_paint.fill,
@@ -609,8 +614,8 @@ pub fn toolbar(
         .flex()
         .items_center()
         .justify_center()
-        .size(scale::design(GLYPH_BOX))
-        .rounded(glyph_radius)
+        .size(scale::design(PIN_BOX))
+        .rounded(chip_radius)
         .text_color(pin_fg)
         .when_some(pin_bg, |el, bg| el.bg(bg))
         .child(Icon::new(CatalogIcon::Pin).small())

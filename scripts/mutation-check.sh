@@ -23813,3 +23813,24 @@ if (( anchors_only )); then
   # Static checks over every selected entry; see scripts/mutation_anchors.py.
   python3 scripts/mutation_anchors.py "$anchors" || exit 1
 fi
+
+# ---- Pinned glyph visibility (2026-09-28) ----
+# An active chip's fill is floored against the title bar; the raw primary
+# sits too close to the bar on several bundled themes.
+run_mutation "chip: an active fill is floored against the title bar" \
+  crates/geode-shell/src/shell/chip.rs \
+  '            let fill = readable_on(
+                over(theme.primary, background),
+                bar,
+                to_rgb(theme.foreground),
+            );' \
+  '            let fill = over(theme.primary, background);' \
+  geode-shell an_active_chip_stands_out_from_the_title_bar_on_every_bundled_theme
+
+# Its text is floored against that fill; primary_foreground alone is
+# unreadable on several bundled themes.
+run_mutation "chip: active text is floored against its fill" \
+  crates/geode-shell/src/shell/chip.rs \
+  '                text: to_hsla(readable_on(to_rgb(theme.primary_foreground), fill, pole)),' \
+  '                text: theme.primary_foreground,' \
+  geode-shell every_chip_tone_is_readable_on_every_bundled_theme
