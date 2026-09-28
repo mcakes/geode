@@ -14,7 +14,7 @@ use super::plan::{ColumnKind, ColumnPlan};
 pub fn values_at(snapshot: &Snapshot, plan: &ColumnPlan, row: usize) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     for (name, value) in plan.grouping.iter().zip(path_of(snapshot, plan, row)) {
-        if let Some(v) = value {
+        if let Some(v) = value.filter(|v| !v.is_empty()) {
             push(&mut out, name, v);
         }
     }
@@ -97,7 +97,9 @@ mod tests {
     /// Rows: 0 root; 1 L1; 2 L2; 3 L1/SPX; 4 L1/NDX. Grouping lhu,
     /// underlying_ref. Hidden context column position_ref (index 4, flag 5,
     /// named as the compiler names it): P7 on row 3, mixed on row 1 and the
-    /// root, NULL on row 2, P9 on row 4.
+    /// root, NULL on row 2, P9 on row 4. Row 1 carries a value under its
+    /// mixed flag, so the reader must honour the flag, not rely on the
+    /// compiler writing NULL there.
     fn fixture() -> (Snapshot, ColumnPlan) {
         let snap = Snapshot::for_tests(
             vec![
@@ -119,7 +121,7 @@ mod tests {
                 ),
                 (
                     meta("position_ref", Some(5)),
-                    TestColumn::Str(vec![None, None, None, Some("P7"), Some("P9")]),
+                    TestColumn::Str(vec![None, Some("P1"), None, Some("P7"), Some("P9")]),
                 ),
                 (
                     meta("position_ref#mixed", None),
@@ -213,6 +215,23 @@ mod tests {
         let view = view("[t]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n");
         let plan = ColumnPlan::build(&view, &["lhu".to_string()], &snap);
         assert!(values_at(&snap, &plan, 1).is_empty(), "never the text NULL");
+    }
+
+    #[test]
+    fn an_empty_grouping_label_is_absent() {
+        let snap = Snapshot::for_tests(
+            vec![
+                (meta("lhu", None), TestColumn::Dict(vec![None, s("")])),
+                (meta("row_depth", None), TestColumn::I32(vec![0, 1])),
+            ],
+            1,
+        );
+        let view = view("[t]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n");
+        let plan = ColumnPlan::build(&view, &["lhu".to_string()], &snap);
+        assert!(
+            values_at(&snap, &plan, 1).is_empty(),
+            "never an empty value"
+        );
     }
 
     #[test]

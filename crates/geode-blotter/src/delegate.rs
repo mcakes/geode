@@ -1640,6 +1640,7 @@ mod tests {
         d.cursor.row = at(&d, 3);
         let context = d.dimension_context().expect("a snapshot is applied");
         assert_eq!(context.get("underlying_ref"), Some("SPX"));
+        assert!(context.selection.is_empty(), "no selection yet");
         d.cursor.row = at(&d, 1);
         let context = d.dimension_context().expect("a snapshot is applied");
         assert_eq!(

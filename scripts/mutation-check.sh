@@ -22729,8 +22729,8 @@ run_mutation "context: blotter reads an empty column as a value" \
 
 run_mutation "context: blotter turns a NULL grouping value into text" \
   crates/geode-blotter/src/core/context.rs \
-  '        if let Some(v) = value {' \
-  '        if let Some(v) = value.or(Some("NULL".into())) {' \
+  '        if let Some(v) = value.filter(|v| !v.is_empty()) {' \
+  '        if let Some(v) = value.or(Some("NULL".into())).filter(|v| !v.is_empty()) {' \
   geode-blotter a_null_grouping_value_is_absent
 
 run_mutation "context: blotter lists a column twice" \
