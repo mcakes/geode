@@ -640,10 +640,9 @@ run_mutation 'provenance: resolved vs requested time' \
 # incorrectly putting a draft Behind and requiring a rebase.
 run_mutation "provenance: a live document reports its partition's generation, not the dataset's" \
   crates/geode-data/src/query/read.rs \
-  '                        generation: catalog.live_generation(
+  '                        generation: catalog.live_generation_under(
                             &params.dataset,
                             &join_key(&params.document_key),
-                            None,
                         )?,' \
   '                        generation: catalog.dataset_generation(&params.dataset)?,' \
   geode-data a_live_document_request_reports_its_own_documents_freshness
@@ -5078,7 +5077,7 @@ run_mutation "publication routing: dataset watches advance" \
 
 run_mutation "publication routing: document watches advance" \
   crates/geode-shell/src/frame.rs \
-  '.get(&publish.batch)' \
+  '.get(&batch[..end])' \
   '.get("never-a-document")' \
   geode-shell publication_watches_are_exact_retained_and_reclaimed
 
@@ -10196,14 +10195,14 @@ run_mutation "document: a document with no rows is refused" \
 
 run_mutation "document query: as-of pins the resolved generation" \
   crates/geode-data/src/query/document.rs \
-  '                    (relation, format!(" and gen_id = {}", g.gen_id))' \
-  '                    (relation, String::new())' \
+  '                    [only] => format!(" and gen_id = {}", only.gen_id),' \
+  '                    [_only] => String::new(),' \
   geode-data an_as_of_document_query_reads_the_resolved_generation_from_the_archive
 
 run_mutation "document query: rows come back in axis order" \
   crates/geode-data/src/query/document.rs \
-  '.map(|a| format!("\"{a}\""))' \
-  '.rev().map(|a| format!("\"{a}\""))' \
+  '        .chain(ds.axes.iter())' \
+  '        .chain(ds.axes.iter().rev())' \
   geode-data a_live_document_query_selects_one_key_in_axis_order
 
 run_mutation "document query: a value is DeterminedNonAdditive" \
@@ -10233,22 +10232,21 @@ run_mutation 'worker: a document compile error is that key'"'"'s outcome' \
 
 run_mutation "document query: the resolved generation is this document's own" \
   crates/geode-data/src/query/document.rs \
-  '            let resolved = gens.into_iter().find(|g| g.batch == batch);' \
-  '            let resolved = gens.into_iter().next();' \
+  '                .filter(|g| is_key_prefix(&prefix, &g.batch))' \
+  '                .filter(|_| true)' \
   geode-data an_as_of_document_query_resolves_each_key_to_its_own_generation
 
 run_mutation "document query: no generation as of t is no rows, not every row" \
   crates/geode-data/src/query/document.rs \
-  '                None => (relation, " and false".to_string()),' \
-  '                None => (relation, String::new()),' \
+  '                (relation, " and false".to_string())' \
+  '                (relation, String::new())' \
   geode-data an_as_of_before_the_first_publish_compiles_and_returns_no_rows
 
 run_mutation 'service: a live document'"'"'s freshness is its own, not the dataset'"'"'s stalest' \
   crates/geode-data/src/query/read.rs \
-  '                            .live_source_time(
+  '                            .live_source_time_under(
                                 &params.dataset,
                                 &join_key(&params.document_key),
-                                None,
                             )?' \
   '                            .dataset_as_of(&params.dataset, &[])?' \
   geode-data a_live_document_request_reports_its_own_documents_freshness
@@ -11397,17 +11395,19 @@ run_mutation "demo bus: publishes every key once at start" \
   '    for producer in producers.iter_mut() {
         let keys = producer.keys.clone();
         for key in &keys {
-            if stop.load(Ordering::Relaxed) {
-                return;
+            for _ in 0..producer.startup_repeats.max(1) {
+                if stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                publish_one(
+                    &feed,
+                    &producer.kind,
+                    producer.topic_prefix,
+                    producer.next.as_mut(),
+                    key,
+                    &mut warned_full,
+                );
             }
-            publish_one(
-                &feed,
-                &producer.kind,
-                producer.topic_prefix,
-                producer.next.as_mut(),
-                key,
-                &mut warned_full,
-            );
         }
     }
 ' \
