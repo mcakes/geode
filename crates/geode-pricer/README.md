@@ -116,8 +116,10 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   changes whether a qty rescales by weight) closes with `MOVED`.
 - Shorthand rendering uses a template only while the legs still match its
   current table (an overflowing quantity never matches); otherwise it prints
-  the legs one per line. The grid keeps the shorthand as the row's find key
-  and paints only a package's template token. Loading accepts unresolved
+  the legs one per line. The grid keeps a line's or leg's shorthand as both
+  its painted tree text and its find key; a package paints a one-line
+  summary of its legs' expiries and strikes, and its find key is its
+  template form. Loading accepts unresolved
   template names because stored instruments remain sufficient for repricing.
 - `TemplateSet::from_doc_over` keeps the last valid definition per name.
   An entry dropped with an error keeps the previous set's definition of
