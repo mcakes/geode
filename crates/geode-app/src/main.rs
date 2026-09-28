@@ -1108,6 +1108,332 @@ label = "skew"
         }
     }
 
+    struct NoLevels;
+    impl LevelControl for NoLevels {
+        fn set(&self, _: &LogLevels) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// The real startup composition over a temporary demo root with `user`
+    /// as the user layer and no desk layer, the session restored as `main`
+    /// restores it. Never the real config directories.
+    fn compose(
+        cx: &mut gpui::TestAppContext,
+        demo: &Path,
+        user: &Path,
+    ) -> (ShellServices, bridge::Bridge) {
+        let mut pricers = geode_data::PricerRegistry::default();
+        pricers.register(Arc::new(geode_pricing::MockPricer::new()));
+        let (mut services, _desk, _user, bridge, _diagnostics) = cx.update(|cx| {
+            build_shell_services(
+                Some(demo),
+                (None, Some(user.to_path_buf())),
+                Arc::new(Ring::new(16)),
+                Arc::new(NoLevels),
+                geode_data::adapter::AdapterRegistry::default(),
+                pricers,
+                cx,
+            )
+        });
+        restore_session(&mut services);
+        (
+            services,
+            bridge.expect("the demo layer declares datasets and views"),
+        )
+    }
+
+    /// A session whose workspace 1 holds one focused tile of `kind`.
+    fn write_session(user: &Path, kind: &str) {
+        let mut table = session::to_toml(
+            &Workspaces::new(),
+            &session::TileRecords::new(),
+            None,
+            &session::PinnedRecords::new(),
+            &geode_shell::palette_usage::PaletteUsage::new(),
+        );
+        let ws1: toml::Table = format!(
+            "focused = 1\n[node]\nkind = \"leaf\"\nid = 1\n[tiles.1]\nmodule = \"{kind}\"\n"
+        )
+        .parse()
+        .unwrap();
+        let Some(toml::Value::Table(ws)) = table.get_mut("workspaces") else {
+            panic!("to_toml writes a workspaces table");
+        };
+        ws.insert("1".to_string(), toml::Value::Table(ws1));
+        std::fs::write(user.join("session.toml"), toml::to_string(&table).unwrap()).unwrap();
+    }
+
+    /// Open the shell window as `main` does, market-data key overrides
+    /// after component init, and paint one frame. The bridge is not
+    /// attached: its event drain would be woken from the real data thread,
+    /// which gpui's test scheduler refuses as nondeterministic.
+    fn open(
+        cx: &mut gpui::TestAppContext,
+        services: ShellServices,
+    ) -> (gpui::WindowHandle<Root>, gpui::VisualTestContext) {
+        cx.update(gpui_component::init);
+        cx.update(geode_marketdata::init);
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(services, None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        vcx.run_until_parked();
+        (window, vcx)
+    }
+
+    fn shell_of(
+        window: &gpui::WindowHandle<Root>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> gpui::Entity<ShellView> {
+        window
+            .read_with(cx, |root, _| root.view().clone())
+            .unwrap()
+            .downcast::<ShellView>()
+            .unwrap()
+    }
+
+    /// A user panel over `cvi_params` with its own title and format becomes
+    /// a tile kind and opens a working panel: it restores from a session,
+    /// its factory carries the configured spec, `g m` offers it, and the
+    /// shared marketdata keys reach it.
+    #[gpui::test]
+    fn a_user_panel_over_cvi_params_becomes_a_working_tile_kind(cx: &mut gpui::TestAppContext) {
+        use geode_shell::diagnostics::fnv1a;
+        use geode_shell::tiling::TileId;
+        let demo = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(user.path().join("panels.toml"), WIDE_CVI_PANEL).unwrap();
+        write_session(user.path(), "cvi_wide");
+        let (services, bridge) = compose(cx, demo.path(), user.path());
+        assert!(
+            services.composition_diagnostics.is_empty(),
+            "{:?}",
+            services.composition_diagnostics
+        );
+        assert!(services.roster.kinds().contains(&"cvi_wide"));
+        let wide = bridge
+            .panels
+            .iter()
+            .find(|f| f.kind() == "cvi_wide")
+            .expect("the user panel has a factory");
+        assert_eq!(wide.spec().title, "CVI (wide)");
+        assert_eq!(wide.spec().format.precision, 6);
+        assert_eq!(
+            wide.spec().slice_value("forward").unwrap().format.precision,
+            3
+        );
+        assert_eq!(
+            wide.accepts(),
+            &[geode_core::launch::ContextField::Underlying],
+            "`g m` offers every panel"
+        );
+        let tail = services.action_tail.clone();
+        let (window, mut vcx) = open(cx, services);
+        let shell = shell_of(&window, &mut vcx);
+        assert_eq!(
+            shell.read_with(&vcx, |s, _| s.occupant_kind(TileId(1))),
+            Some("cvi_wide")
+        );
+        vcx.simulate_keystrokes(".");
+        vcx.run_until_parked();
+        let menu = fnv1a("marketdata::menu");
+        assert_eq!(
+            tail.lock().unwrap().recent().filter(|h| *h == menu).count(),
+            1,
+            "the shared marketdata keys reach the configured panel"
+        );
+        bridge.handle.shutdown();
+    }
+
+    /// Existing sessions keep working: a saved `cvi` tile restores as the
+    /// config-built CVI panel, not a placeholder.
+    #[gpui::test]
+    fn a_saved_cvi_tile_restores_as_the_config_built_cvi_panel(cx: &mut gpui::TestAppContext) {
+        use geode_shell::tiling::TileId;
+        let demo = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        write_session(user.path(), "cvi");
+        let (services, bridge) = compose(cx, demo.path(), user.path());
+        let (window, mut vcx) = open(cx, services);
+        let shell = shell_of(&window, &mut vcx);
+        assert_eq!(
+            shell.read_with(&vcx, |s, _| s.occupant_kind(TileId(1))),
+            Some("cvi")
+        );
+        bridge.handle.shutdown();
+    }
+
+    /// A refused panel is absent from the tile picker, and its Error reaches
+    /// the status bar's config count and the diagnostics tile through the
+    /// real startup composition.
+    #[gpui::test]
+    fn a_refused_panel_is_absent_from_the_picker_and_named_in_diagnostics(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use geode_shell::actions::ActionId;
+        let demo = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        let bad = WIDE_CVI_PANEL.replace("cvi_wide", "vol_bad").replacen(
+            "dataset = \"cvi_params\"",
+            "dataset = \"nonesuch\"",
+            1,
+        );
+        std::fs::write(user.path().join("panels.toml"), bad).unwrap();
+        let (services, bridge) = compose(cx, demo.path(), user.path());
+        assert!(!services.roster.kinds().contains(&"vol_bad"));
+        assert!(
+            services
+                .registry
+                .get(&ActionId("tile::add_vol_bad".into()))
+                .is_none(),
+            "no add-tile row, so no picker entry"
+        );
+        let (window, mut vcx) = open(cx, services);
+        let shell = shell_of(&window, &mut vcx);
+        let (summary, named) = shell.read_with(&vcx, |s, cx| {
+            let d = s.diagnostics().read(cx);
+            (
+                d.summary().to_string(),
+                d.config
+                    .iter()
+                    .any(|d| d.path.as_deref() == Some("panels.vol_bad.dataset")),
+            )
+        });
+        assert!(summary.contains("config 1 error"), "{summary}");
+        assert!(named, "the diagnostics tile names the refused panel");
+        bridge.handle.shutdown();
+    }
+
+    /// The likeliest real refusal: a user `[cvi]` holding only a title
+    /// replaces the builtin whole and is refused. A saved `cvi` tile
+    /// restores as the placeholder and its record is kept, so a fix and a
+    /// restart bring it back.
+    #[gpui::test]
+    fn a_partial_cvi_override_is_refused_and_saved_cvi_tiles_keep_their_records(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use geode_shell::tiling::TileId;
+        let demo = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(
+            user.path().join("panels.toml"),
+            "config_version = 1\n[cvi]\ntitle = \"Mine\"\n",
+        )
+        .unwrap();
+        write_session(user.path(), "cvi");
+        let (services, bridge) = compose(cx, demo.path(), user.path());
+        assert_eq!(
+            services
+                .composition_diagnostics
+                .iter()
+                .map(|d| d.path.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ["panels.cvi.dataset"]
+        );
+        let path = services.session_path.clone().unwrap();
+        let (window, mut vcx) = open(cx, services);
+        let shell = shell_of(&window, &mut vcx);
+        assert_eq!(
+            shell.read_with(&vcx, |s, _| s.occupant_kind(TileId(1))),
+            Some(geode_shell::module::placeholder::PLACEHOLDER_KIND)
+        );
+        shell.read_with(&vcx, |s, cx| s.save_session(cx));
+        assert_eq!(
+            session::load(&path).tiles.get(&1).map(|r| r.kind.as_str()),
+            Some("cvi"),
+            "the record is kept for a later restart"
+        );
+        bridge.handle.shutdown();
+    }
+
+    /// Editing `panels` paints `restart required` and changes nothing under
+    /// an open panel: the same kind, the same spec, no new kind.
+    #[gpui::test]
+    fn editing_panels_asks_for_a_restart_and_changes_no_open_panel(cx: &mut gpui::TestAppContext) {
+        use geode_shell::tiling::TileId;
+        let demo = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(user.path().join("panels.toml"), WIDE_CVI_PANEL).unwrap();
+        write_session(user.path(), "cvi_wide");
+        let (services, bridge) = compose(cx, demo.path(), user.path());
+        let builtin = services.builtin.clone();
+        let spec_before = bridge
+            .panels
+            .iter()
+            .find(|f| f.kind() == "cvi_wide")
+            .unwrap()
+            .spec()
+            .clone();
+        let (window, mut vcx) = open(cx, services);
+        let shell = shell_of(&window, &mut vcx);
+        assert_eq!(
+            shell.read_with(&vcx, |s, cx| s
+                .diagnostics()
+                .read(cx)
+                .restart_required
+                .clone()),
+            None,
+            "a clean start asks for nothing"
+        );
+        std::fs::write(
+            user.path().join("panels.toml"),
+            format!(
+                "{}\n{}",
+                WIDE_CVI_PANEL.replace("CVI (wide)", "CVI (renamed)"),
+                WIDE_CVI_PANEL
+                    .replace("config_version = 1\n", "")
+                    .replace("cvi_wide", "cvi_new")
+            ),
+        )
+        .unwrap();
+        let candidate = Config::load(&ConfigSources {
+            builtin,
+            desk: None,
+            user: Some(user.path().to_path_buf()),
+        });
+        shell.update(&mut vcx, |s, cx| s.apply_reload_for_test(candidate, cx));
+        vcx.run_until_parked();
+        let restart = shell.read_with(&vcx, |s, cx| {
+            s.diagnostics().read(cx).restart_required.clone()
+        });
+        assert!(
+            restart.as_deref().is_some_and(|m| m.contains("panels")),
+            "{restart:?}"
+        );
+        assert_eq!(
+            shell.read_with(&vcx, |s, _| s.occupant_kind(TileId(1))),
+            Some("cvi_wide")
+        );
+        let after = bridge
+            .panels
+            .iter()
+            .find(|f| f.kind() == "cvi_wide")
+            .unwrap()
+            .spec()
+            .clone();
+        assert!(
+            Arc::ptr_eq(&spec_before, &after),
+            "the open panel's spec is untouched"
+        );
+        assert_eq!(after.title, "CVI (wide)");
+        // The factories are the roster's only source of panel kinds and
+        // nothing rebuilds them: `cvi_new` does not appear mid-session.
+        assert_eq!(
+            bridge.panels.iter().map(|f| f.kind()).collect::<Vec<_>>(),
+            ["cvi", "dividend", "cvi_wide"]
+        );
+        bridge.handle.shutdown();
+    }
+
     /// Production workspace source uses tracing so level filters and the
     /// ring/file/stderr sinks see its diagnostics. Debug prints are allowed only
     /// under tests directories or recognized inline test gates.
