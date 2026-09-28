@@ -2951,6 +2951,48 @@ run_mutation "object stack: a covered open field loses its typed text and caret"
   geode-shell \
   an_open_value_field_survives_a_stacked_colors_dialog
 
+run_mutation "edit column: the cursor column is preselected" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '        list.place(active.as_deref());' \
+  '        list.place(None);' \
+  geode-shell \
+  the_cursor_column_is_preselected
+
+run_mutation "edit column: schema lists derived columns" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '            if domain == Domain::Schema && c.derived {' \
+  '            if false {' \
+  geode-shell \
+  schema_omits_derived_columns
+
+run_mutation "edit column: schema opens the view's dataset for a joined column" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        Domain::Schema => DatasetPresentationSpec::owner_of(spec, column, schema)' \
+  '        Domain::Schema => Some(spec.dataset.as_str())' \
+  geode-shell \
+  schema_resolves_a_joined_column_to_its_owning_dataset
+
+run_mutation "edit column: the route stops at the edit stage" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '            if !enter_column_stage(shell, column, cx) {' \
+  '            if true {' \
+  geode-shell \
+  enter_opens_views_on_the_cursor_column
+
+run_mutation "edit column: the list is offered over a dialog that cannot open" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '    if !dialog::can_open_object(view, domain) {' \
+  '    if false {' \
+  geode-shell \
+  a_covered_views_dialog_refuses_before_the_list_opens
+
+run_mutation "edit column: the blotter reports the tree column as active" \
+  crates/geode-blotter/src/core/plan.rs \
+  '        let active = (cursor_col > 0 && cursor_col < self.columns.len()).then(|| cursor_col - 1);' \
+  '        let active = (cursor_col < self.columns.len()).then(|| cursor_col.saturating_sub(1));' \
+  geode-blotter \
+  the_tree_column_is_no_active_column
+
 run_mutation "dialog stack: every chord reaches through a dialog" \
   crates/geode-shell/src/shell/input.rs \
   '                        && dialog::opens_dialog(&action)' \
