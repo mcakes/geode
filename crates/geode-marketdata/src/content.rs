@@ -88,9 +88,10 @@ pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
 ///
 /// The grid motions are not here: the panel publishes `grid` in every mode,
 /// and the shell's builtin keymap binds the shared `motion::*` ids once for
-/// every grid tile under `grid` with `mode == normal || mode == visual`. The menu's steps are not here either:
-/// the panel publishes `tilelist` while its action menu is open, and the
-/// builtin keymap binds the shared `motion::menu_down`/`menu_up` there.
+/// every grid tile under `grid` with `mode == normal || mode == visual`. The
+/// menu's steps are not here either: the panel publishes `tilelist` while its
+/// action menu is open, and the builtin keymap binds the shared
+/// `motion::menu_down`/`menu_up` there.
 ///
 /// Visual mode is a live `V`/`v` selection. Its consuming verbs are single
 /// keys (`y`, `d`): the doubled normal-mode forms would leave the first

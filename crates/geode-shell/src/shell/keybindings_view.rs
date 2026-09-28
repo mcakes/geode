@@ -770,7 +770,7 @@ fn on_row_clicked(
 /// Submit a rebind through the ordered configuration writer. Capture arguments before
 /// detaching; no file I/O or optimistic keymap mutation occurs on the UI thread. Errors
 /// and [`Displacement::OldKeyNotFound`] are logged. The accepted watcher reload updates
-/// bindings and dialog rows.
+/// bindings and dialog rows. [`rebind_plan`] decides the write.
 fn spawn_rebind(
     row: &KeybindingRow,
     new_keystrokes: Vec<Keystroke>,
@@ -825,7 +825,8 @@ const RECOVERY: &str = "press r to restore it";
 ///
 /// Removing a user key can reveal a lower-layer binding on the same key. It does not
 /// reset the action's other overrides, and Reset cannot reconstruct the removed user
-/// entry. A lower-layer shadow can be removed by Reset.
+/// entry. A lower-layer shadow can be removed by Reset. A Motion row is the exception:
+/// it clears every override and silences the shared fallback key ([`unbind_plan`]).
 ///
 /// Return a refusal or dispatched-write notice; no visible row yields no notice.
 /// Completion is asynchronous and rows change only after an accepted reload.

@@ -377,7 +377,7 @@ impl DiagnosticsTile {
     }
 
     /// One shared motion over the section's rows. Only a bare `G` in the Log
-    /// section follows the tail; every other motion stops following, so a
+    /// section follows the tail; every other row motion stops following, so a
     /// trader reading a row is not dragged away by new records. The tile has
     /// no columns, so column motions are not handled.
     fn apply_motion(&mut self, m: geode_tile::motion::Motion, cx: &mut Context<Self>) -> bool {

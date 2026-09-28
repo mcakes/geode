@@ -37,7 +37,7 @@ GPUI globals or provide rendering helpers.
 | `diagnostics` | Source health, generations, independent config/data diagnostics, stopped data threads (`StoppedThread`, `thread_label`) and the prepared `StoppedSegment`, the `Busy`-refusal total, section versions, cached status summary, and watched/explicit catalog demand. See the [diagnostics contract](../../docs/current/shell.md#diagnostics-state-and-demand). |
 | `colfit` | The pure column-fit measure behind `:autosize` and `tile::autosize_columns`: `FitMetrics` (mono advance at `text_sm`, the `XSmall` cell padding and cursor border at the window's rem, clamped to 2.5–40 rem), the `FittedWidths` map by stable column key, and its lenient `column_widths` session read/write, which clamps a restored width to 25–560 px. `NO_TABLE` and `NOTHING_TO_FIT` are the two refusals. See [autosized columns](../../docs/current/features.md#autosized-columns). |
 | `perf` | The always-compiled frame-time histogram. |
-| `defaults` | The builtin action set and keymap, the Builtin config layer; `MOTION_ACTIONS` (the shared `motion::*` vocabulary, category "Motion", handled by no shell code so it falls through to the focused tile) and `GRID_MOTION_CONTEXT`, the one context the grid motions ship under. |
+| `defaults` | The builtin action set and keymap, the Builtin config layer; `MOTION_ACTIONS` (the shared `motion::*` vocabulary, category "Motion", handled by no shell code so it falls through to the focused tile) and `GRID_MOTION_CONTEXT`, the one context the grid motions ship under; `shared_motion_context` names where the keybindings dialog writes a Motion row's edits, after clearing the action's user overrides. |
 
 **Window integration**
 

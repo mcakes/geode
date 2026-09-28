@@ -224,13 +224,13 @@ takes motions, and the `tilelist` flag (`KeyContext::tilelist`) while one of
 its menus or popup lists is open. Grid motions are bound under the single
 context `grid && (mode == normal || mode == visual)`
 (`defaults::GRID_MOTION_CONTEXT`), so one user override under that context, or
-one rebind from the keybindings dialog (which writes into the displayed
-binding's context), reaches every grid tile in both modes. A grid under an open
-menu reports `mode == menu`, so its motions stay out while the menu steps take
-`j`/`k`/arrows under `tilelist`. Within each context the named keys are bound
-first and the vim keys last, so hints and the dialog show the vim key. `g g` is
-the builtin keymap's one multi-key sequence; module fragments add their own `g`
-sequences beside it.
+one rebind of a Motion row from the keybindings dialog, reaches every grid tile
+in both modes; see [editing a Motion row](#editing-a-motion-row). A grid under
+an open menu reports `mode == menu`, so its motions stay out while the menu
+steps take `j`/`k`/arrows under `tilelist`. Within each context the named keys
+are bound first and the vim keys last, so hints and the dialog show the vim
+key. `g g` is the builtin keymap's one multi-key sequence; module fragments add
+their own `g` sequences beside it.
 
 The grid rules in `geode_tile::motion`:
 
@@ -324,7 +324,8 @@ a different TOML key or context string.
 | Rebind to the same spelling | Write the new value and skip displacement |
 | Unbind a user key | Remove it, exposing any lower-layer binding |
 | Unbind a builtin/desk key | Write a user `"none"` shadow |
-| Reset one action | Remove its user bindings and shadows covering its live lower-layer bindings |
+| Reset one action | Remove its user bindings, shadows covering its live lower-layer bindings, and orphan shadows on their keys |
+| Rebind or unbind a Motion row | Reset the action, then write the shared context ([below](#editing-a-motion-row)) |
 | Reset all | Remove every user `bindings` entry, including hand-written entries; retain other fields |
 
 Rebind and unbind use the **first** matching raw context string, creating an
@@ -353,6 +354,32 @@ through normal reload. The temporary `.tmp` file is outside the reload scanner's
 TOML filter. Parse and shape errors leave the original file untouched; shared
 [write semantics](configuration.md#runtime-edits) define I/O failure and
 durability limits.
+
+### Editing a Motion row
+
+An edit of a `motion::*` row is global. An old-id override (say
+`n = "blotter::down"` under `blotter && mode == normal`) keeps working with a
+load warning and is what the row displays, but a rebind or unbind does not
+write into that module context. In one transaction it first removes every user
+override of the action, the same set `r` removes, then writes the shared
+context: `GRID_MOTION_CONTEXT` for the grid motions, `tilelist` for
+`motion::menu_down`/`menu_up` (`defaults::shared_motion_context`). A rebind
+writes the new key there and a `"none"` over the shipped fallback key; an
+unbind writes only the `"none"`, which `r` lifts. Capturing the fallback key
+itself only clears. Re-capturing the displayed key is a no-op only when every
+override already sits in the shared context.
+
+`r` on a Motion row removes the old-id overrides in every module context and
+their `"none"` shadows. A dialog rebind made before the rename wrote the old
+module key and a `"none"` over the `j` the module then shipped, both under the
+module's context. `j` now ships under the grid context, so the shadow covers no
+lower binding by raw context string, yet it still silences `j` in that module.
+Reset therefore also collects an orphan shadow: a user `"none"` that shadows no
+lower-layer binding at all and sits on the keys of one of the action's live
+lower-layer bindings. An orphan on keys several actions share is collected for
+each of them; removing it only exposes lower layers. After the reset the Motion
+row's shipped binding applies in every tile. `shift+r` removes every user
+binding, old ids included.
 
 ## Display resolution and action registration limits
 

@@ -8,7 +8,9 @@
 //! the new key, then removes a displaced user key or shadows a lower-layer key
 //! with `"none"`. A same-key rebind skips displacement. A missing old user key is
 //! reported in the successful outcome, so callers can warn about stale state.
-//! Removing a user key exposes any lower-layer binding on that key.
+//! Removing a user key exposes any lower-layer binding on that key. The
+//! `_clearing` variants first remove a reset's override set in the same
+//! transaction; a shared motion's dialog edit uses them to be global.
 //!
 //! Reset removes the named overrides from every matching context entry. Reset all
 //! removes the entire user `bindings` array, including hand-written entries.

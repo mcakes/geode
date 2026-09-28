@@ -42,8 +42,8 @@ cargo bench -p geode-timeseries
 - The series list and the three menus publish `tilelist` (beside
   `popup == series|menu`), so the shared menu steps (`j`/`k`, arrows) reach
   them as the internal `list_down`/`list_up` verbs; the list wraps, a menu
-  clamps over its enabled rows. The tile never publishes `grid`, so its own `h`/`l` pan and
-  `g`/`shift+g` jump are never shadowed by a grid motion.
+  clamps over its enabled rows. The tile never publishes `grid`, so its own
+  `h`/`l` pan and `g`/`shift+g` jump are never shadowed by a grid motion.
 - `:` remains local to this tile.
 - A series is named by its label (`Slot::label`); slot numbers never reach
   the screen, a notice, or the `:` vocabulary. `:rule`, `:color`, `:yaxis`,

@@ -96,13 +96,14 @@ so does the diagnostics cursor (rows only). The rules:
 
 Each tile's own behaviour around the shared result:
 
-- Market-data: `k` on row 0, bare or counted, enters the header attribute
-  strip instead of wrapping when the kind has attributes (see
+- Market-data: any upward row motion from row 0 (`k`/`up`, `ctrl+u`,
+  `ctrl+b`, `pageup`), bare or counted, enters the header attribute strip
+  instead of wrapping when the kind has attributes (see
   [market-data](#market-data-documents)).
 - Pricer: a motion dispatched from the palette while the entry bar, the cell
   editor or the action menu is open closes it first, then moves.
 - Diagnostics: a bare `G` in the Log section resumes following the tail; any
-  other motion, a counted `G` included, stops following.
+  other row motion, a counted `G` included, stops following.
 - Blotter: the column motions move its column cursor.
 - Timeseries has no grid cursor and never publishes `grid`, so its own `h`/`l`
   pan the view and `g`/`shift+g` jump it to the start and end.
@@ -705,8 +706,9 @@ text, not keys; `c` paints as a key. Both menus tick the value in force and
 open with the highlight on it (on `Custom dates…` while the range is absolute).
 The shared menu keys (`j`/`k` or the arrows) move, Enter or a click applies
 and closes, and Escape closes; a second `r` or `f` closes its own menu. A
-frequency the 500,000-point cap refuses over the current range, as resolved under the frame's as-of, is a disabled row
-reading `over cap`; choosing it shows the full cap message as the notice. The
+frequency the 500,000-point cap refuses over the current range, as resolved
+under the frame's as-of, is a disabled row reading `over cap`; choosing it
+shows the full cap message as the notice. The
 rows follow range, frequency, and as-of changes while the menu is open. A
 preset the cap refuses at the current frequency is refused when chosen, with
 the reason as the notice and the menu left open. `:range` and `:freq` remain
@@ -861,9 +863,9 @@ binary lacks is named in danger text with its recovery (`set [pricing]
 adapter and restart`).
 
 The sheet moves on the [shared motions](#motion). Column 0 of the cursor
-is the first plan column; the tree column is never a target. An empty sheet takes no motion. A motion dispatched from the
-palette while the entry bar, the cell editor or the action menu is open closes
-it first, then moves.
+is the first plan column; the tree column is never a target. An empty sheet
+takes no motion. A motion dispatched from the palette while the entry bar, the
+cell editor or the action menu is open closes it first, then moves.
 
 Column headers are words carrying their unit (`spot %`, `vol pt`, `barrier
 type`, `priced at`), and default widths are checked against labels and representative large
