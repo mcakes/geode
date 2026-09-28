@@ -1103,12 +1103,28 @@ pub mod chain {
         })
     }
 
-    /// The CVI's last term, for expiries past its range.
-    fn last_term(cvi: &DocumentRows) -> Option<NaiveDate> {
+    /// The CVI's term dates.
+    fn terms(cvi: &DocumentRows) -> Option<&[NaiveDate]> {
         cvi.axes.iter().find_map(|(n, c)| match c {
-            Column::Date(d) if n == "term" => d.iter().max().copied(),
+            Column::Date(d) if n == "term" => Some(d.as_slice()),
             _ => None,
         })
+    }
+
+    /// The CVI's first term, for expiries before its range.
+    fn first_term(cvi: &DocumentRows) -> Option<NaiveDate> {
+        terms(cvi)?.iter().min().copied()
+    }
+
+    /// The CVI's last term, for expiries past its range.
+    fn last_term(cvi: &DocumentRows) -> Option<NaiveDate> {
+        terms(cvi)?.iter().max().copied()
+    }
+
+    /// The half-spread in vol: wider in the wings, and never as wide as
+    /// `mid` itself, so the bid vol stays above zero at the vol floor.
+    fn half_spread(mid: f64, strike: f64, forward: f64) -> f64 {
+        (0.0025 + 0.03 * (strike / forward - 1.0).abs()).min(mid / 2.0)
     }
 
     impl ChainGenerator {
@@ -1151,30 +1167,33 @@ pub mod chain {
             state.next = (state.next + 1) % EXPIRIES;
             let expiry = self.expiries[idx];
 
+            let first = first_term(cvi).expect("a demo CVI document has terms");
             let last = last_term(cvi).expect("a demo CVI document has terms");
-            let curve_date = expiry.min(last);
-            let slice = |strikes: Vec<f64>| {
+            // The model refuses a date outside the terms: an expiry beyond
+            // either end takes that end's smile.
+            let curve_date = expiry.clamp(first, last);
+            let slice = |grid: Grid| {
                 DemoVolModel
                     .slice(
                         cvi,
                         &SliceRequest {
                             expiry: curve_date,
                             coordinate: Coordinate::Strike,
-                            grid: Grid::At(strikes),
+                            grid,
                             density: false,
                         },
                     )
                     .expect("the demo CVI slices at any date within its terms")
             };
-            // The slice carries the forward whatever the grid.
-            let forward = slice(vec![1.0]).forward;
+            // An empty grid returns the forward alone.
+            let forward = slice(Grid::Dense(0)).forward;
             let inc = nice_step(forward * 0.0055);
             let atm = (forward / inc).round() * inc;
             let strikes: Vec<f64> = (-BELOW..=ABOVE)
                 .map(|i| atm + i as f64 * inc)
                 .filter(|k| *k > 0.0)
                 .collect();
-            let curve = slice(strikes.clone());
+            let curve = slice(Grid::At(strikes.clone()));
 
             let State { residuals, rng, .. } = state;
             let residuals = &mut residuals[idx];
@@ -1201,7 +1220,7 @@ pub mod chain {
             let mut ask = Vec::with_capacity(n);
             for (i, p) in curve.points.iter().enumerate() {
                 let mid = (p.vol + residuals[i]).max(MIN_VOL);
-                let h = (0.0025 + 0.03 * (p.strike / forward - 1.0).abs()).min(mid / 2.0);
+                let h = half_spread(mid, p.strike, forward);
                 let (b, a) = (mid - h, mid + h);
                 mid_vol.push(mid);
                 bid_vol.push(b);
@@ -1316,11 +1335,12 @@ pub mod chain {
         fn mid_sits_within_the_residual_bound_of_the_stand_in_curve() {
             let mut g = ChainGenerator::new(1, vec!["SPX".into()], anchor());
             let cvi = cvi();
-            // Publish every expiry five times so residuals have walked; keep
-            // the first expiry's latest document.
+            // Publish every expiry sixty times so the first expiry's
+            // residuals walk ~60 steps of RESIDUAL_STEP, far enough to hit
+            // the bound unclamped; keep the first expiry's latest document.
             let first = g.next_document("SPX", &cvi, now());
             let mut doc = first.clone();
-            for _ in 0..(EXPIRIES * 5) {
+            for _ in 0..(EXPIRIES * 60) {
                 let d = g.next_document("SPX", &cvi, now());
                 if d.key == first.key {
                     doc = d;
@@ -1350,7 +1370,7 @@ pub mod chain {
         }
 
         #[test]
-        fn bid_and_ask_bracket_mid_even_at_the_vol_floor() {
+        fn bid_and_ask_bracket_mid_and_prices_are_ordered() {
             let mut g = ChainGenerator::new(1, vec!["SPX".into()], anchor());
             let cvi = cvi();
             for _ in 0..EXPIRIES {
@@ -1424,6 +1444,38 @@ pub mod chain {
                     .collect::<Vec<_>>(),
                 ["bid_vol", "ask_vol", "mid_vol", "bid", "ask"]
             );
+        }
+
+        #[test]
+        fn the_half_spread_never_reaches_mid_even_at_the_floor() {
+            let forward = 7650.0;
+            for strike in [forward * 0.5, forward, forward * 1.5] {
+                let h = half_spread(MIN_VOL, strike, forward);
+                let bid = MIN_VOL - h;
+                assert!(bid > 0.0 && bid < MIN_VOL, "K {strike}: bid vol {bid}");
+            }
+        }
+
+        #[test]
+        fn an_expiry_past_the_cvi_prices_at_its_own_time_to_expiry() {
+            // The last expiry lies past the CVI's terms: its smile is the
+            // last term's, but its time to expiry is its own.
+            let mut g = ChainGenerator::new(1, vec!["SPX".into()], anchor());
+            let cvi = cvi();
+            let doc = (0..EXPIRIES)
+                .map(|_| g.next_document("SPX", &cvi, now()))
+                .last()
+                .unwrap();
+            let expiry = NaiveDate::parse_from_str(&doc.key[1], "%Y-%m-%d").unwrap();
+            assert!(expiry > last_term(&cvi).unwrap());
+            let anchor_date = date_attr(&cvi, "anchor_date").unwrap();
+            let t = (expiry - anchor_date).num_days() as f64 / 365.0;
+            let forward = f64_attr(&doc, "forward").unwrap();
+            let strikes = f64s(&doc, "strike");
+            let i = strikes.iter().position(|k| *k >= forward).unwrap();
+            let expected = black::call_price(forward, strikes[i], f64s(&doc, "ask_vol")[i], t);
+            let ask = f64s(&doc, "ask")[i];
+            assert!((ask - expected).abs() < 1e-9, "ask {ask} vs {expected}");
         }
 
         #[test]
