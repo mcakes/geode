@@ -18,17 +18,17 @@ use std::time::Duration;
 
 use geode_core::config::{ConfigSources, Diagnostic, LayerDoc, Severity};
 use geode_core::log::{LevelControl, LogLevels, Ring, RingLayer};
-use geode_diagnostics::DiagnosticsFactory;
+use geode_diagnostics::DiagnosticsPageFactory;
 use geode_shell::actions::ActionRegistry;
 use geode_shell::defaults::{
     BUILTIN_KEYMAP, mod_alias_from_config, modules_default_diagnostic, register_add_actions,
-    register_builtin_actions, register_pick_actions, register_scope_actions,
+    register_builtin_actions, register_page_actions, register_pick_actions, register_scope_actions,
 };
 use geode_shell::diagnostics::ActionTail;
 use geode_shell::fonts;
 use geode_shell::keymap::build_keymap;
 use geode_shell::keymap::fragments;
-use geode_shell::module::ModuleRoster;
+use geode_shell::module::{ModuleRoster, PageRoster};
 use geode_shell::session;
 use geode_shell::shell::{LogServices, ShellServices, ShellView, pickable_columns, saved_scopes};
 use geode_shell::theme;
@@ -115,6 +115,9 @@ fn main() {
             // The mock pricing implementation is available in every build.
             let mut pricers = geode_data::PricerRegistry::default();
             pricers.register(Arc::new(geode_pricing::MockPricer::new()));
+            // The demo vol model likewise; `[vol] model` selects it by name.
+            let mut vol_models = geode_data::VolModelRegistry::default();
+            vol_models.register(Arc::new(geode_pricing::DemoVolModel));
 
             let (mut services, desk, user, bridge, diagnostics_factory) = build_shell_services(
                 demo_root.as_deref(),
@@ -123,6 +126,7 @@ fn main() {
                 log_control,
                 adapters,
                 pricers,
+                vol_models,
                 cx,
             );
 
@@ -196,7 +200,8 @@ fn main() {
             }
 
             // Themes are restored from layered config; the session supplies
-            // layout, module records, frame state and palette usage.
+            // layout, module records, frame state, palette usage and page
+            // state.
             restore_session(&mut services);
 
             // Save current session state synchronously at quit, including changes
@@ -268,10 +273,10 @@ fn main() {
                     let frame = shell.read(cx).frame().clone();
                     let last_config_version =
                         std::rc::Rc::new(std::cell::Cell::new(frame.read(cx).config_version()));
-                    // Register this observer before diagnostics tiles register theirs.
-                    // GPUI invokes observers in registration order: the shared factory
-                    // configuration must be current before a tile consumes the same
-                    // version bump and rebuilds its config section.
+                    // Register this observer before the diagnostics page registers its
+                    // own. GPUI invokes observers in registration order: the shared
+                    // factory configuration must be current before the page consumes
+                    // the same version bump and rebuilds its config section.
                     cx.observe(&frame, move |frame, cx| {
                         let now = frame.read(cx).config_version();
                         if now != last_config_version.get() {
@@ -369,8 +374,11 @@ fn usage(reason: &str) -> String {
 }
 
 /// Register modules backed by the bridge's shared factories and data handle.
-/// The roster's `Rc` forwarding exposes every factory method, including launch
-/// context acceptance, while the bridge retains the factories for live reloads.
+/// The roster's `Rc` forwarding exposes every factory method, including
+/// `accepts` and `launch_state`, while the bridge retains the factories for
+/// live reloads.
+/// Finally hands the roster's context columns to the data handle, so every
+/// query carries them.
 fn add_bridge_modules(roster: &mut ModuleRoster, bridge: &bridge::Bridge) {
     roster.add(Box::new(bridge.factory.clone()));
     // One tile kind per accepted panel, in `panels` order; only the first
@@ -380,20 +388,24 @@ fn add_bridge_modules(roster: &mut ModuleRoster, bridge: &bridge::Bridge) {
     }
     roster.add(Box::new(bridge.timeseries.clone()));
     roster.add(Box::new(bridge.pricer.clone()));
+    // Last, once every factory (and, from Part 2, every dimension action)
+    // is registered: each row then carries the values they open on.
+    bridge.handle.set_context_columns(roster.context_columns());
 }
 
 /// Every builtin config doc: the shell's keymap, the pricer's two bundled
 /// views and seven package templates (a desk or user layer overrides a
-/// view or a template by name), the pricer's `pricer_sheets` dataset, the
-/// builtin market-data panels, and the `--demo` layer.
+/// view or a template by name), the pricer's two datasets (`pricer_sheets`,
+/// its local documents, and `pricer`, its computed vocabulary), the builtin
+/// market-data panels, and the `--demo` layer.
 fn builtin_layer(demo_root: Option<&Path>) -> Vec<LayerDoc> {
     let mut builtin = vec![
         LayerDoc::builtin("keymap", BUILTIN_KEYMAP).expect("builtin keymap TOML is well-formed"),
-        LayerDoc::builtin(
-            geode_pricer::core::PRICER_VIEWS_DOC,
-            geode_pricer::core::BUILTIN_VIEWS,
-        )
-        .expect("BUILTIN_VIEWS is well-formed TOML"),
+        // The pricer's two bundled views, over its computed `pricer` dataset.
+        // `views` merges per view name: a demo, desk or user views doc adds
+        // its own views beside these and overrides one by name.
+        LayerDoc::builtin("views", geode_pricer::core::BUILTIN_VIEWS)
+            .expect("BUILTIN_VIEWS is well-formed TOML"),
         LayerDoc::builtin(
             geode_pricer::core::PRICER_TEMPLATES_DOC,
             geode_pricer::core::BUILTIN_TEMPLATES,
@@ -401,7 +413,7 @@ fn builtin_layer(demo_root: Option<&Path>) -> Vec<LayerDoc> {
         .expect("BUILTIN_TEMPLATES is well-formed TOML"),
         // The pricer's sheets, a local document dataset every build
         // declares. `datasets` merges per dataset name, so a demo, desk or
-        // user `datasets` doc adds its own datasets beside this one.
+        // user `datasets` doc adds its own datasets beside these two.
         LayerDoc::builtin("datasets", geode_pricer::core::PRICER_SHEETS_DECLARATION)
             .expect("PRICER_SHEETS_DECLARATION is well-formed TOML"),
         // The builtin market-data panels. `panels` replaces per panel name,
@@ -412,6 +424,10 @@ fn builtin_layer(demo_root: Option<&Path>) -> Vec<LayerDoc> {
             geode_marketdata::core::BUILTIN_PANELS,
         )
         .expect("BUILTIN_PANELS is well-formed TOML"),
+        // The pricer's vocabulary as a computed dataset: views, scopes and
+        // groupings see its columns; nothing stores or queries it.
+        LayerDoc::builtin("datasets", geode_pricer::core::PRICER_DATASET_DECLARATION)
+            .expect("PRICER_DATASET_DECLARATION is well-formed TOML"),
     ];
     if let Some(root) = demo_root {
         builtin.extend(demo::layer(&root.join("src")));
@@ -435,6 +451,9 @@ fn builtin_layer(demo_root: Option<&Path>) -> Vec<LayerDoc> {
 /// part of the builtin layer, below desk and user overrides. Provider registries
 /// are passed to data setup; logging uses the existing subscriber and applies
 /// configured levels through its reload control.
+// The composition root's inputs: config directories, logging and the three
+// provider registries, each consumed once here.
+#[allow(clippy::too_many_arguments)]
 fn build_shell_services(
     demo_root: Option<&Path>,
     dirs: (Option<PathBuf>, Option<PathBuf>),
@@ -442,13 +461,14 @@ fn build_shell_services(
     log_control: Arc<dyn LevelControl>,
     adapters: geode_data::adapter::AdapterRegistry,
     pricers: geode_data::PricerRegistry,
+    vol_models: geode_data::VolModelRegistry,
     cx: &mut App,
 ) -> (
     ShellServices,
     Option<PathBuf>,
     Option<PathBuf>,
     Option<bridge::Bridge>,
-    Rc<DiagnosticsFactory>,
+    Rc<DiagnosticsPageFactory>,
 ) {
     let (desk, user) = dirs;
     let builtin = builtin_layer(demo_root);
@@ -487,10 +507,14 @@ fn build_shell_services(
     // placeholder; a deprecated modules.default setting is diagnosed below.
     let mut roster = ModuleRoster::new();
 
+    let mut pages = PageRoster::new();
     // Diagnostics needs no data handle and is always registered. Return its
     // shared factory so the window's frame-config observer can refresh it.
-    let diagnostics_factory = Rc::new(DiagnosticsFactory::new(log_ring.clone(), config.clone()));
-    roster.add(Box::new(diagnostics_factory.clone()));
+    let diagnostics_factory = Rc::new(DiagnosticsPageFactory::new(
+        log_ring.clone(),
+        config.clone(),
+    ));
+    pages.add(Box::new(diagnostics_factory.clone()));
 
     // Data-backed factories require a successful data setup. If setup is absent,
     // those kinds have no add-tile actions and restored tiles remain placeholders.
@@ -504,7 +528,7 @@ fn build_shell_services(
     // Refused panels: printed here and carried into the shell's config
     // section, where they stay until a restart can change which panels exist.
     let mut composition_diagnostics = Vec::new();
-    let bridge = bridge::data_setup(&config, db, adapters, pricers).map(|setup| {
+    let bridge = bridge::data_setup(&config, db, adapters, pricers, vol_models).map(|setup| {
         composition_diagnostics = setup.panel_diagnostics.clone();
         let find_style = FindStyle::from_config(&config);
         let stale_after = bridge::stale_after_from_config(&config);
@@ -526,6 +550,10 @@ fn build_shell_services(
     composition_diagnostics.extend(add_diags);
     // Register module actions before resolving their keybindings.
     roster.register_actions(&mut registry);
+    // Page toggles and each page's own actions, likewise before the keymap.
+    let page_titles: Vec<(&str, &str)> = pages.entries().map(|e| (e.kind, e.title)).collect();
+    register_page_actions(&mut registry, &page_titles);
+    pages.register_actions(&mut registry);
 
     // Log modifier-alias and deprecated-setting diagnostics here. ShellView
     // recomputes these for its diagnostics entity; they are separate from the
@@ -541,7 +569,12 @@ fn build_shell_services(
     // Insert validated module bindings above builtin defaults and below desk/user
     // layers. Their diagnostics depend on the completed roster and registry, so
     // carry them into ShellServices alongside keymap compilation diagnostics.
-    let (fragments, frag_diags) = roster.keymap_fragments();
+    let (mut fragments, mut frag_diags) = roster.keymap_fragments();
+    // Page fragments after module fragments: the toggle bindings are
+    // shell-generated docs the roster emits unchecked.
+    let (page_fragments, page_diags) = pages.keymap_fragments();
+    fragments.extend(page_fragments);
+    frag_diags.extend(page_diags);
     for diag in &frag_diags {
         print_diagnostic(diag);
     }
@@ -588,7 +621,7 @@ fn build_shell_services(
         action_tail: Arc::new(Mutex::new(ActionTail::new())),
         // What `build_keymap` reported above. Printed already; carried
         // here because `ShellView::new` cannot recompute it (it needs
-        // this registry, not just the config) and the diagnostics tile's
+        // this registry, not just the config) and the diagnostics page's
         // config section would otherwise miss it until a hot reload.
         keymap_diagnostics: keymap_diags,
         // The checked fragments themselves, so `apply_reload` can splice
@@ -597,12 +630,14 @@ fn build_shell_services(
         keymap_fragments: fragments,
         keymap_fragment_diagnostics: frag_diags,
         composition_diagnostics,
+        pages,
+        restored_pages: std::collections::BTreeMap::new(),
     };
     (services, desk, user, bridge, diagnostics_factory)
 }
 
-/// Load layout, module records, frame state and palette usage from the
-/// session file before the shell is constructed. Recovery warnings are
+/// Load layout, module records, frame state, palette usage and page state
+/// from the session file before the shell is constructed. Recovery warnings are
 /// logged; a missing or unreadable session starts fresh.
 fn restore_session(services: &mut ShellServices) {
     let Some(path) = &services.session_path else {
@@ -617,6 +652,7 @@ fn restore_session(services: &mut ShellServices) {
     services.restored_frame = restored.frame;
     services.restored_pinned = restored.pinned;
     services.restored_palette_usage = restored.palette_usage;
+    services.restored_pages = restored.pages;
 }
 
 /// Log a configuration or keymap diagnostic at `geode::config`, using its
@@ -752,6 +788,8 @@ label = "skew"
         assert!(parse_args(&["--nonesuch".to_string()]).is_err());
     }
 
+    /// The two bundled views are `views` doc entries over the `pricer`
+    /// dataset the same layer declares, so they validate clean at load.
     #[test]
     fn the_builtin_layer_carries_the_two_pricer_views() {
         let builtin = builtin_layer(None);
@@ -760,13 +798,31 @@ label = "skew"
             desk: None,
             user: None,
         });
-        let (views, diags) =
-            geode_pricer::core::Views::from_doc(config.doc("pricer_views").expect("the doc"));
+        assert!(config.doc("pricer_views").is_none(), "retired");
+        let (specs, diags) = geode_core::config::load_views(&config);
+        assert!(diags.is_empty(), "{diags:?}");
+        let (views, diags) = geode_pricer::core::Views::from_specs(&specs);
         assert!(diags.is_empty(), "{diags:?}");
         assert_eq!(
             views.names().collect::<Vec<_>>(),
-            vec!["vanilla", "barrier"]
+            vec!["barrier", "vanilla"]
         );
+        // Both views also honour the builtin `datasets` declaration under
+        // the same validation a desk or user view gets at load: every
+        // column they name is one the computed `pricer` dataset declares.
+        let (schema, diags) = geode_core::schema::SchemaSpec::from_doc(
+            config.doc("datasets").expect("the builtin datasets doc"),
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let dims = geode_core::dimensions::DerivedDimensions::default();
+        for spec in &specs {
+            let diags = spec.validate(&schema, &dims);
+            assert!(
+                diags.iter().all(|d| d.severity != Severity::Error),
+                "{}: {diags:?}",
+                spec.name
+            );
+        }
     }
 
     /// The seven built-in templates are a builtin-layer doc a desk or user
@@ -899,6 +955,7 @@ label = "skew"
             dir.path().join("geode.duckdb"),
             geode_data::adapter::AdapterRegistry::default(),
             geode_data::PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
         )
         .unwrap();
         assert!(
@@ -956,15 +1013,12 @@ label = "skew"
             dir.path().join("geode.duckdb"),
             geode_data::adapter::AdapterRegistry::default(),
             geode_data::PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
         )
         .unwrap();
         let bridge =
             cx.update(|cx| bridge::start(setup, FindStyle::default(), Duration::from_secs(60), cx));
         let mut roster = ModuleRoster::new();
-        roster.add(Box::new(Rc::new(DiagnosticsFactory::new(
-            Arc::new(Ring::new(16)),
-            config.clone(),
-        ))));
         add_bridge_modules(&mut roster, &bridge);
         let panels: Vec<&str> = bridge.panels.iter().map(|f| f.kind()).collect();
         for kind in roster.kinds().into_iter().filter(|k| !panels.contains(k)) {
@@ -1034,25 +1088,35 @@ label = "skew"
         // application roster to check their combined fragments and action IDs.
         let mut pricers = geode_data::PricerRegistry::default();
         pricers.register(std::sync::Arc::new(geode_pricing::MockPricer::new()));
+        let mut vol_models = geode_data::VolModelRegistry::default();
+        vol_models.register(std::sync::Arc::new(geode_pricing::DemoVolModel));
         let setup = bridge::data_setup(
             &config,
             dir.path().join("geode.duckdb"),
             geode_data::adapter::AdapterRegistry::default(),
             pricers,
+            vol_models,
         )
         .expect("the demo layer declares datasets and views");
         let bridge =
             cx.update(|cx| bridge::start(setup, FindStyle::default(), Duration::from_secs(60), cx));
         let mut roster = ModuleRoster::new();
-        roster.add(Box::new(Rc::new(DiagnosticsFactory::new(
+        add_bridge_modules(&mut roster, &bridge);
+        let mut pages = PageRoster::new();
+        pages.add(Box::new(Rc::new(DiagnosticsPageFactory::new(
             Arc::new(Ring::new(16)),
             config.clone(),
         ))));
-        add_bridge_modules(&mut roster, &bridge);
         register_add_actions(&mut registry, &roster.kinds());
         roster.register_actions(&mut registry);
+        let page_titles: Vec<(&str, &str)> = pages.entries().map(|e| (e.kind, e.title)).collect();
+        register_page_actions(&mut registry, &page_titles);
+        pages.register_actions(&mut registry);
 
-        let (fragments, frag_diags) = roster.keymap_fragments();
+        let (mut fragments, mut frag_diags) = roster.keymap_fragments();
+        let (page_fragments, page_diags) = pages.keymap_fragments();
+        fragments.extend(page_fragments);
+        frag_diags.extend(page_diags);
         assert!(frag_diags.is_empty(), "{frag_diags:?}");
         let layered = fragments::splice(config.layered_docs("keymap"), &fragments);
         let (mod_alias, mod_diags) = mod_alias_from_config(&config);
@@ -1065,13 +1129,14 @@ label = "skew"
         );
     }
 
-    /// The production roster exposes underlying-based launch state for every
-    /// accepted panel (the builtin CVI and dividend here). Exercising
-    /// startup's registration path checks that shared factory forwarding
-    /// preserves `accepts` and `launch_state`.
+    /// The production roster exposes `underlying_ref`-based launch state for
+    /// every accepted panel (the builtin CVI and dividend here), names that
+    /// column in `context_columns`, and startup hands that list to the data
+    /// handle. Exercising startup's registration path checks that shared
+    /// factory forwarding preserves `accepts` and `launch_state`.
     #[gpui::test]
     fn the_production_roster_opens_market_data_on_an_underlying(cx: &mut gpui::TestAppContext) {
-        use geode_core::launch::{ContextField, LaunchContext};
+        use geode_core::context::DimensionContext;
         let dir = tempfile::tempdir().unwrap();
         let (config, _) = ShellServices::config_and_builtin(ConfigSources {
             builtin: builtin_layer(Some(dir.path())),
@@ -1082,6 +1147,7 @@ label = "skew"
             dir.path().join("geode.duckdb"),
             geode_data::adapter::AdapterRegistry::default(),
             geode_data::PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
         )
         .expect("the demo layer declares datasets and views");
         let bridge =
@@ -1089,22 +1155,17 @@ label = "skew"
         let mut roster = ModuleRoster::new();
         add_bridge_modules(&mut roster, &bridge);
 
-        let spx = LaunchContext {
-            underlying: Some("SPX".into()),
-        };
+        let spx = DimensionContext::of(&[("lhu", "7"), ("underlying_ref", "SPX")]);
         let accepting: Vec<&str> = roster
             .kinds()
             .into_iter()
-            .filter(|k| {
-                roster
-                    .factory(k)
-                    .is_some_and(|f| spx.covered_by(f.accepts()))
-            })
+            .filter(|k| roster.factory(k).is_some_and(|f| spx.offers(f.accepts())))
             .collect();
         assert_eq!(accepting, vec!["cvi", "dividend"]);
+        assert_eq!(roster.context_columns(), vec!["underlying_ref".to_string()]);
         for kind in ["cvi", "dividend"] {
             let f = roster.factory(kind).unwrap();
-            assert_eq!(f.accepts(), &[ContextField::Underlying], "{kind}");
+            assert_eq!(f.accepts(), &["underlying_ref"], "{kind}");
             let state = f.launch_state(&spx).expect("a state for an underlying");
             assert_eq!(
                 state.get("underlying"),
@@ -1112,6 +1173,11 @@ label = "skew"
                 "{kind}"
             );
         }
+        assert_eq!(
+            bridge.handle.context_columns(),
+            vec!["underlying_ref".to_string()],
+            "startup hands the roster's context columns to the data service"
+        );
     }
 
     struct NoLevels;
@@ -1139,6 +1205,7 @@ label = "skew"
                 Arc::new(NoLevels),
                 geode_data::adapter::AdapterRegistry::default(),
                 pricers,
+                geode_data::VolModelRegistry::default(),
                 cx,
             )
         });
@@ -1157,6 +1224,7 @@ label = "skew"
             None,
             &session::PinnedRecords::new(),
             &geode_shell::palette_usage::PaletteUsage::new(),
+            &session::PageRecords::new(),
         );
         let ws1: toml::Table = format!(
             "focused = 1\n[node]\nkind = \"leaf\"\nid = 1\n[tiles.1]\nmodule = \"{kind}\"\n"
@@ -1240,7 +1308,7 @@ label = "skew"
         );
         assert_eq!(
             wide.accepts(),
-            &[geode_core::launch::ContextField::Underlying],
+            &["underlying_ref"],
             "`g m` offers every panel"
         );
         let tail = services.action_tail.clone();

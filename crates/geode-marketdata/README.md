@@ -120,8 +120,8 @@ cargo bench -p geode-marketdata    # matrix model and draft
   `TableDelegate::column` has no window to read a rem from.
 - A panel opened through an add (palette, tile picker, `open_with`,
   duplicate) with no underlying opens the underlying picker at once; a
-  restored panel does not. Every panel kind accepts an underlying launch
-  context.
+  restored panel does not. Every panel kind accepts `["underlying_ref"]`, the
+  `DimensionContext` column it opens on.
 - The grid selection is anchored by row label and column name and
   re-resolved in `sync_cursor` on every cursor or model change; a lost anchor
   clears it with a notice, never a nearest-row guess. `cursor_to_attr` and

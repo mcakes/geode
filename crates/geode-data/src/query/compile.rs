@@ -492,6 +492,15 @@ pub(crate) fn compile_view_with_cache(
     let ds = schema
         .dataset(&view.dataset)
         .ok_or_else(|| compile_error(view, format!("unknown dataset '{}'", view.dataset)))?;
+    if ds.computed {
+        return Err(compile_error(
+            view,
+            format!(
+                "dataset '{}' is computed by a module and has no tables",
+                ds.name
+            ),
+        ));
+    }
 
     let n = view.grouping.len();
     let depth = max_depth.min(n);
@@ -559,6 +568,13 @@ pub(crate) fn compile_view_with_cache(
                 ));
             }
             None => {}
+        }
+    }
+    // Context columns the host asked for (ViewSpec::context): optional, so
+    // one no grain can supply is dropped, never an error.
+    for u in view.context_dimensions(schema, dims) {
+        if let Some(grain) = u.grain {
+            unanimous.push((u.name.to_string(), grain));
         }
     }
     // The companion flag is a result column of its own; a view column that
@@ -902,6 +918,14 @@ pub(crate) fn compile_view_with_cache(
                 format!("join names unknown dataset '{}'", join.dataset),
             ));
         };
+        // A computed dataset has no relation to join against, so the join
+        // can never be honoured, required or not.
+        if joined_ds.is_computed() {
+            return Err(compile_error(
+                view,
+                format!("join names computed dataset '{}'", join.dataset),
+            ));
+        }
 
         // The key must be on the spine *as materialized*. Testing the
         // whole grouping would reference a column the bounded spine does
@@ -1438,6 +1462,103 @@ sql = "delta01 / nullif(peak, 0)"
         assert_eq!(
             rows[0][1], "None",
             "a key below max_depth is NULL, not an error: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn a_view_over_a_computed_dataset_is_refused_before_any_table_is_touched() {
+        let (_d, store) = fixture();
+        let doc = merge_docs(
+            "datasets",
+            &[LayerDoc::builtin(
+                "datasets",
+                "[pricer]\ncomputed = true\n[pricer.columns.instrument_ref]\ntype = \"utf8\"\nrole = \"key\"\n[pricer.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"underlying\"\n",
+            )
+            .unwrap()],
+        );
+        let schema = SchemaSpec::from_doc(&doc).0;
+        let view = ViewSpec {
+            name: "vanilla".into(),
+            dataset: "pricer".into(),
+            columns: vec![geode_core::view::ViewColumn::measure("npv")],
+            ..ViewSpec::default()
+        };
+        let err = compile_view(
+            store.writer(),
+            &view,
+            &schema,
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("computed by a module"), "{err}");
+    }
+
+    /// An optional join to an unknown dataset is skipped; an optional join
+    /// to a computed one is not, because the dataset is known and has no
+    /// relation the compiler could ever join. `required` does not soften it.
+    #[test]
+    fn a_join_to_a_computed_dataset_is_refused_even_when_optional() {
+        let (_d, store) = fixture();
+        let doc = merge_docs(
+            "datasets",
+            &[LayerDoc::builtin(
+                "datasets",
+                r#"
+[instrument_ref]
+computed = true
+[instrument_ref.columns.book]
+type = "utf8"
+role = "dimension"
+[instrument_ref.columns.lhu]
+type = "utf8"
+role = "dimension"
+[instrument_ref.columns.position_ref]
+type = "utf8"
+role = "key"
+[instrument_ref.columns.counterparty]
+type = "utf8"
+role = "dimension"
+[instrument_ref.columns.instrument_ref]
+type = "utf8"
+role = "key"
+[instrument_ref.columns.strike]
+type = "f64"
+role = "attribute"
+grain = "instrument"
+"#,
+            )
+            .unwrap()],
+        );
+        let (computed, diags) = SchemaSpec::from_doc(&doc);
+        assert!(
+            diags
+                .iter()
+                .all(|d| d.severity != geode_core::config::Severity::Error),
+            "the computed fixture must parse cleanly: {diags:?}"
+        );
+        let mut schema = schema();
+        schema.datasets.extend(computed.datasets);
+
+        let mut optional = joined_view();
+        optional.joins[0].required = false;
+
+        let err = compile_view(
+            store.writer(),
+            &optional,
+            &schema,
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("join names computed dataset 'instrument_ref'"),
+            "an optional join to a computed dataset is refused, not skipped: {message}"
         );
     }
 
@@ -4285,6 +4406,86 @@ grain = "underlying"
         let found: Vec<_> = rows.iter().filter(|r| r.0 == path).collect();
         assert_eq!(found.len(), 1, "one row at '{path}': {rows:?}");
         (found[0].1.clone(), found[0].2.clone())
+    }
+
+    /// `(tree path, value, mixed)` for `column` on every row.
+    fn context_rows(
+        store: &crate::store::Store,
+        q: &CompiledQuery,
+        column: &str,
+    ) -> Vec<(String, Option<String>, bool)> {
+        let conn = store.writer();
+        let mut stmt = conn
+            .prepare(&q.sql)
+            .unwrap_or_else(|e| panic!("prepare failed: {e}\n{}", q.sql));
+        let grouping = q.grouping.clone();
+        let rows = stmt
+            .query_map(duckdb::params_from_iter(q.params.iter()), |r| {
+                let depth: i64 = r.get("row_depth")?;
+                let path: Vec<String> = grouping
+                    .iter()
+                    .take(depth as usize)
+                    .map(|g| {
+                        r.get::<_, Option<String>>(g.as_str())
+                            .map(|v| v.unwrap_or_default())
+                    })
+                    .collect::<Result<_, _>>()?;
+                let value: Option<String> = r.get(column)?;
+                let flag: bool = r.get(mixed_flag_name(column).as_str())?;
+                Ok((path.join("/"), value, flag))
+            })
+            .unwrap_or_else(|e| panic!("execute failed: {e}\n{}", q.sql));
+        rows.map(|r| r.unwrap()).collect()
+    }
+
+    fn with_context(mut view: ViewSpec, columns: &[&str]) -> ViewSpec {
+        view.context = columns.iter().map(|c| c.to_string()).collect();
+        view
+    }
+
+    #[test]
+    fn a_context_key_is_unanimous_where_one_position_sits_under_the_row() {
+        let (_dir, store) = unanimity_fixture();
+        let view = with_context(unanimity_view("[\"lhu\"]", &["npv"]), &["position_ref"]);
+        let q = compile_unanimity(&store, &view, 1);
+        let rows = context_rows(&store, &q, "position_ref");
+        let at = |p: &str| rows.iter().find(|r| r.0 == p).cloned().unwrap();
+        assert_eq!(
+            at("L2"),
+            ("L2".into(), Some("P5".into()), false),
+            "one position"
+        );
+        assert_eq!(at("L0"), ("L0".into(), None, true), "P1 and P2: mixed");
+        assert_eq!(
+            at(""),
+            ("".into(), None, true),
+            "the grand total holds five"
+        );
+    }
+
+    #[test]
+    fn a_context_column_the_dataset_lacks_is_skipped() {
+        let (_dir, store) = unanimity_fixture();
+        let view = with_context(unanimity_view("[\"lhu\"]", &["npv"]), &["nemo_id"]);
+        let q = compile_unanimity(&store, &view, 1);
+        assert!(!q.sql.contains("nemo_id"), "{}", q.sql);
+    }
+
+    #[test]
+    fn a_shown_context_column_is_not_emitted_twice() {
+        let (_dir, store) = unanimity_fixture();
+        // `strike` is already an ungrouped dimension column of this view.
+        let view = with_context(unanimity_view("[\"lhu\"]", &["npv"]), &["strike"]);
+        let q = compile_unanimity(&store, &view, 1);
+        assert_eq!(q.columns.iter().filter(|c| c.name == "strike").count(), 1);
+    }
+
+    #[test]
+    fn a_grouped_context_column_is_not_emitted() {
+        let (_dir, store) = unanimity_fixture();
+        let view = with_context(unanimity_view("[\"lhu\"]", &["npv"]), &["lhu"]);
+        let q = compile_unanimity(&store, &view, 1);
+        assert!(!q.columns.iter().any(|c| c.name == mixed_flag_name("lhu")));
     }
 
     fn value(v: &str) -> Shown {

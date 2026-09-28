@@ -251,10 +251,13 @@ fn seed_catalog(h: &Harness, vcx: &mut gpui::VisualTestContext, sources: &[(&str
         })
         .collect();
     h.diagnostics.update(vcx, |d, cx| {
-        d.set_catalog(geode_core::query::CatalogSnapshot {
-            identities,
-            ..Default::default()
-        });
+        d.set_catalog(
+            geode_core::query::CatalogSnapshot {
+                identities,
+                ..Default::default()
+            },
+            std::time::SystemTime::UNIX_EPOCH,
+        );
         cx.notify();
     });
 }

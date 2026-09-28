@@ -6,7 +6,7 @@
 
 use crate::core::PanelSpec;
 use crate::tile::MarketDataTile;
-use geode_core::launch::{ContextField, LaunchContext};
+use geode_core::context::DimensionContext;
 use geode_data::DataHandle;
 use geode_shell::actions::{ActionDef, ActionId, ActionRegistry};
 use geode_shell::diagnostics::Diagnostics;
@@ -196,6 +196,8 @@ impl TileContent for MarketDataContent {
             Delivery::Query(outcome) => self.tile.update(cx, |t, cx| t.deliver(outcome, cx)),
             // This tile never prices; an outcome addressed here is a routing bug.
             Delivery::Price(_) => {}
+            // This tile asks no vol slices; an outcome addressed here is a routing bug.
+            Delivery::VolSlices(_) => {}
             // This tile asks no series query and holds no
             // `(identity, source)` pair.
             Delivery::Series(_) | Delivery::SeriesFetched { .. } => {}
@@ -337,15 +339,15 @@ impl ModuleFactory for MarketDataFactory {
 
     /// Every panel is one document per underlying, so every panel kind
     /// opens on one.
-    fn accepts(&self) -> &'static [ContextField] {
-        &[ContextField::Underlying]
+    fn accepts(&self) -> &'static [&'static str] {
+        &["underlying_ref"]
     }
 
     /// `{ underlying = ["<u>"] }`: the one-element display key
     /// `MarketDataTile::new` already restores from, so a launched panel
     /// starts exactly as a restored one on that key would.
-    fn launch_state(&self, ctx: &LaunchContext) -> Option<toml::Table> {
-        let u = ctx.underlying.clone()?;
+    fn launch_state(&self, ctx: &DimensionContext) -> Option<toml::Table> {
+        let u = ctx.get("underlying_ref")?.to_string();
         let mut t = toml::Table::new();
         t.insert(
             "underlying".into(),
@@ -548,20 +550,15 @@ mod tests {
     fn a_panel_accepts_an_underlying_and_translates_it_to_its_restored_key() {
         let (data, _rx) = DataHandle::for_tests();
         let f = MarketDataFactory::new(data, Arc::clone(&CVI), Duration::from_secs(900));
-        assert_eq!(f.accepts(), &[geode_core::launch::ContextField::Underlying]);
+        assert_eq!(f.accepts(), &["underlying_ref"]);
         let state = f
-            .launch_state(&geode_core::launch::LaunchContext {
-                underlying: Some("SPX".into()),
-            })
+            .launch_state(&DimensionContext::of(&[("underlying_ref", "SPX")]))
             .expect("a state for an underlying");
         assert_eq!(
             state.get("underlying"),
             Some(&toml::Value::Array(vec![toml::Value::String("SPX".into())]))
         );
-        assert_eq!(
-            f.launch_state(&geode_core::launch::LaunchContext::default()),
-            None
-        );
+        assert_eq!(f.launch_state(&DimensionContext::default()), None);
     }
 
     /// An additional panel factory contributes no duplicate keymap fragment,

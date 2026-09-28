@@ -291,6 +291,7 @@ pub mod cvi {
                 key: vec!["underlying_ref".to_string()],
                 axes: vec!["term".to_string(), "node".to_string()],
                 local: false,
+                computed: false,
                 columns: vec![
                     col(
                         "underlying_ref",

@@ -398,6 +398,7 @@ mod tests {
             dir.path().join("geode.duckdb"),
             geode_data::adapter::AdapterRegistry::default(),
             geode_data::PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
         )
         .expect("the demo layer declares datasets and views");
         let dividend = setup
@@ -425,7 +426,7 @@ mod tests {
         use geode_data::adapter::AdapterRegistry;
         use geode_data::egress::UploadParams;
         use geode_data::query::as_of::AsOf;
-        use geode_data::{DataEvent, DataService, PricerRegistry};
+        use geode_data::{DataEvent, DataService, PricerRegistry, VolModelRegistry};
 
         // An empty directory rather than a nonexistent path: the demo
         // layer's own `[demo]` csv_dir source polls it, and this test has
@@ -443,6 +444,8 @@ mod tests {
         adapters.register(bus);
         let mut pricers = PricerRegistry::default();
         pricers.register(Arc::new(geode_pricing::MockPricer::new()));
+        let mut vol_models = VolModelRegistry::default();
+        vol_models.register(Arc::new(geode_pricing::DemoVolModel));
 
         let db_dir = tempfile::tempdir().unwrap();
         let setup = crate::bridge::data_setup(
@@ -450,6 +453,7 @@ mod tests {
             db_dir.path().join("geode.duckdb"),
             adapters,
             pricers,
+            vol_models,
         )
         .expect("the demo layer carries both a datasets and a views document");
         assert!(setup.diagnostics.is_empty(), "{:?}", setup.diagnostics);
@@ -579,7 +583,7 @@ mod tests {
         use geode_data::adapter::AdapterRegistry;
         use geode_data::egress::UploadParams;
         use geode_data::query::as_of::AsOf;
-        use geode_data::{DataEvent, DataService, PricerRegistry};
+        use geode_data::{DataEvent, DataService, PricerRegistry, VolModelRegistry};
         use geode_marketdata::core::upload::{assemble, echo_differs};
         use geode_marketdata::core::{Draft, MatrixModel, builtin_panel};
         use std::sync::mpsc::Receiver;
@@ -595,12 +599,15 @@ mod tests {
         adapters.register(bus);
         let mut pricers = PricerRegistry::default();
         pricers.register(Arc::new(geode_pricing::MockPricer::new()));
+        let mut vol_models = VolModelRegistry::default();
+        vol_models.register(Arc::new(geode_pricing::DemoVolModel));
         let db_dir = tempfile::tempdir().unwrap();
         let setup = crate::bridge::data_setup(
             &config,
             db_dir.path().join("geode.duckdb"),
             adapters,
             pricers,
+            vol_models,
         )
         .expect("the demo layer opens");
         let (service, rx) = DataService::open_channel(setup.config).expect("the store opens");

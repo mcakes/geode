@@ -600,6 +600,7 @@ grain = "underlying"
             key: vec![column.into()],
             axes: vec![],
             local: false,
+            computed: false,
             series_retention: None,
         }
     }

@@ -130,7 +130,7 @@ changes still rebuild.
   scheduler; the sweep API is exercised by tests. Their archives can grow
   without that automatic bound. Local documents (pricer sheets) are swept to
   200 archived generations; series retention runs during append.
-- While a diagnostics tile is visible, every publication (each sheet autosave
+- While the diagnostics page is visible, every publication (each sheet autosave
   included) rebuilds the catalog on the service thread, listing every
   generation of every sheet (up to 201 each), and the diagnostics entity
   compares the new snapshot whole on the UI thread. Unmeasured; with hundreds of sheets it may need

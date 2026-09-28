@@ -317,6 +317,14 @@ mod demo_config_integration {
         pricers
     }
 
+    /// The same for the default `demo` vol model: an empty registry would
+    /// gain a spurious "vol model" diagnostic.
+    fn test_vol_models() -> geode_data::VolModelRegistry {
+        let mut vol_models = geode_data::VolModelRegistry::default();
+        vol_models.register(std::sync::Arc::new(geode_pricing::DemoVolModel));
+        vol_models
+    }
+
     /// Registers the demo bus required by the `sophis` egress target.
     ///
     /// Keep the returned feed alive through `data_setup`: egress resolution
@@ -349,6 +357,7 @@ mod demo_config_integration {
             "/tmp/geode-demo/100000-42/geode.duckdb".into(),
             adapters,
             test_pricers(),
+            test_vol_models(),
         )
         .expect("datasets + views are both present in the demo layer");
         assert!(setup.diagnostics.is_empty(), "{:?}", setup.diagnostics);
@@ -408,6 +417,7 @@ mod demo_config_integration {
             "/tmp/geode-demo/100000-42/geode.duckdb".into(),
             adapters,
             test_pricers(),
+            test_vol_models(),
         )
         .expect("datasets + views are both present in the demo layer");
         assert!(setup.diagnostics.is_empty(), "{:?}", setup.diagnostics);

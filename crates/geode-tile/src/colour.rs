@@ -1,11 +1,11 @@
-//! Cached named colours for the theme's resolved inputs.
+//! Cached named colours for the theme's resolved inputs, shared by every tile that paints a named colour.
 //!
 //! Each defined name resolves its base and sign variants once per cache fill.
 //! Hue definitions require interpolation and gamut clipping; cell painting
 //! reuses the result. A changed [`Anchors`]/[`Tokens`] pair clears the map on
 //! lookup. Definition changes require an explicit [`ColourCache::invalidate`].
 //!
-//! The delegate memoizes theme-to-input conversion separately and supplies
+//! The caller memoizes theme-to-input conversion separately and supplies
 //! these plain values, so this cache has no dependency on a GPUI theme object.
 
 use geode_core::colour::{Anchors, NamedColours, Sign, Tokens, resolve_signed};

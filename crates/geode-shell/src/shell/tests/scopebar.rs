@@ -51,6 +51,8 @@ fn test_services_with_ctrl_alias() -> ShellServices {
         keymap_fragments: Vec::new(),
         keymap_fragment_diagnostics: Vec::new(),
         composition_diagnostics: Vec::new(),
+        pages: crate::module::PageRoster::new(),
+        restored_pages: std::collections::BTreeMap::new(),
     }
 }
 
@@ -397,6 +399,8 @@ pub(super) fn services_with_builtin_docs(docs: Vec<LayerDoc>) -> ShellServices {
         keymap_fragments: Vec::new(),
         keymap_fragment_diagnostics: Vec::new(),
         composition_diagnostics: Vec::new(),
+        pages: crate::module::PageRoster::new(),
+        restored_pages: std::collections::BTreeMap::new(),
     }
 }
 

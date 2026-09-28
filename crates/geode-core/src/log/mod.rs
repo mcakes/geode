@@ -1,5 +1,5 @@
 //! Bounded in-process log storage, tracing integration, and runtime level control.
-//! The diagnostics tile reads the ring; `[log]` configures Geode target levels.
+//! The diagnostics page reads the ring; `[log]` configures Geode target levels.
 use crate::config::{Config, Diagnostic, Severity};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -8,7 +8,7 @@ use tracing_subscriber::filter::Targets;
 
 /// Geode tracing targets configurable by their suffix in `[log]`, such as
 /// `ingest` for `geode::ingest`.
-pub const TARGETS: [&str; 7] = [
+pub const TARGETS: [&str; 8] = [
     "geode::ingest",
     "geode::query",
     "geode::config",
@@ -16,6 +16,7 @@ pub const TARGETS: [&str; 7] = [
     "geode::shell",
     "geode::theme",
     "geode::pricing",
+    "geode::vol",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -605,18 +606,24 @@ mod tests {
     }
 
     #[test]
-    fn pricing_is_a_known_log_target() {
-        assert_eq!(TARGETS.len(), 7);
+    fn pricing_and_vol_are_known_log_targets() {
+        assert_eq!(TARGETS.len(), 8);
         assert!(TARGETS.contains(&"geode::pricing"));
-        let config =
-            crate::config::test_support::config_from("app", "[log]\npricing = \"debug\"\n");
+        assert!(TARGETS.contains(&"geode::vol"));
+        let config = crate::config::test_support::config_from(
+            "app",
+            "[log]\npricing = \"debug\"\nvol = \"debug\"\n",
+        );
         let (levels, diags) = LogLevels::from_doc(&config);
         assert!(diags.is_empty(), "{diags:?}");
-        assert!(
-            levels
-                .targets
-                .iter()
-                .any(|(t, l)| t == "pricing" && *l == tracing::Level::DEBUG)
-        );
+        for target in ["pricing", "vol"] {
+            assert!(
+                levels
+                    .targets
+                    .iter()
+                    .any(|(t, l)| t == target && *l == tracing::Level::DEBUG),
+                "{target}"
+            );
+        }
     }
 }

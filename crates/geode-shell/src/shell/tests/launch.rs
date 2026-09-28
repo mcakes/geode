@@ -1,4 +1,4 @@
-//! Launch context: `TileContent::launched` reaches a tile `add_tile`
+//! Launching: `TileContent::launched` reaches a tile `add_tile`
 //! created (add, duplicate) once it is focused, never a restored one;
 //! `tile::open_with` lists the kinds accepting the focused tile's
 //! context and creates the pick with the factory's translated state.
@@ -6,7 +6,7 @@
 use super::*;
 use crate::defaults::AddPlacement;
 use crate::module::recording::{Recorded, RecordingFactory};
-use geode_core::launch::{ContextField, LaunchContext};
+use geode_core::context::DimensionContext;
 
 type Log = std::rc::Rc<std::cell::RefCell<Vec<Recorded>>>;
 
@@ -95,6 +95,7 @@ fn a_restored_tile_is_not_launched(cx: &mut gpui::TestAppContext) {
         None,
         &crate::session::PinnedRecords::new(),
         &crate::palette_usage::PaletteUsage::new(),
+        &crate::session::PageRecords::new(),
     );
     let ws1: toml::Table = r#"
         focused = 1
@@ -169,18 +170,18 @@ const LAUNCH_FRAGMENT: &str = "[[bindings]]\ncontext = \"rec\"\n[bindings.keys]\
 /// underlying, ships `g m`) and "plain" (accepts nothing). Returns rec's
 /// log and its shared context cell.
 fn launch_services(
-    context: LaunchContext,
+    context: DimensionContext,
 ) -> (
     ShellServices,
     Log,
-    std::rc::Rc<std::cell::RefCell<LaunchContext>>,
+    std::rc::Rc<std::cell::RefCell<Option<DimensionContext>>>,
 ) {
     let mut rec = RecordingFactory::new("rec");
     rec.fragment = Some(LAUNCH_FRAGMENT);
-    rec.accepts = &[ContextField::Underlying];
-    *rec.launch_context.borrow_mut() = context;
+    rec.accepts = &["underlying_ref"];
+    *rec.dimension_context.borrow_mut() = Some(context);
     let log = rec.log.clone();
-    let cell = rec.launch_context.clone();
+    let cell = rec.dimension_context.clone();
     let plain = RecordingFactory::new("plain");
     let services = services_with_recorders(vec![rec, plain]);
     assert!(
@@ -191,10 +192,8 @@ fn launch_services(
     (services, log, cell)
 }
 
-fn spx() -> LaunchContext {
-    LaunchContext {
-        underlying: Some("SPX".into()),
-    }
+fn spx() -> DimensionContext {
+    DimensionContext::of(&[("underlying_ref", "SPX")])
 }
 
 fn underlying_state(u: &str) -> toml::Table {
@@ -258,6 +257,42 @@ fn g_m_lists_the_accepting_kinds_and_a_pick_creates_with_the_context(
     );
 }
 
+/// A blotter row names several columns; a kind accepting one of them is
+/// offered, and the dialog is titled by that column's value.
+#[gpui::test]
+fn g_m_offers_a_kind_accepting_one_of_several_columns(cx: &mut gpui::TestAppContext) {
+    let ctx = DimensionContext::of(&[
+        ("lhu", "7"),
+        ("underlying_ref", "SPX"),
+        ("position_ref", "P7"),
+    ]);
+    let (services, log, _cell) = launch_services(ctx);
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("ctrl-v");
+    draw(&mut vcx);
+    vcx.simulate_keystrokes("g m");
+    draw(&mut vcx);
+    let title = shell.read_with(&vcx, |s, _| s.choice_dialog.as_ref().map(|d| d.title()));
+    assert_eq!(title.as_deref(), Some("Open SPX in\u{2026}"));
+    assert!(
+        vcx.debug_bounds("tile-choice-Rec").is_some(),
+        "lhu and position_ref do not block it"
+    );
+    assert!(vcx.debug_bounds("tile-choice-Plain").is_none());
+    vcx.simulate_keystrokes("enter");
+    draw(&mut vcx);
+    let new = focused(&shell, &vcx);
+    let expected = underlying_state("SPX");
+    assert!(
+        log.borrow()
+            .iter()
+            .any(|r| matches!(r, Recorded::Created(t, Some(s)) if *t == new && *s == expected)),
+        "{:?}",
+        log.borrow()
+    );
+}
+
 /// The context is read when the dialog opens: a cursor move on the source
 /// while it is open does not change what the pick creates.
 #[gpui::test]
@@ -269,9 +304,7 @@ fn the_context_is_captured_when_the_dialog_opens(cx: &mut gpui::TestAppContext) 
     draw(&mut vcx);
     vcx.simulate_keystrokes("g m");
     draw(&mut vcx);
-    *cell.borrow_mut() = LaunchContext {
-        underlying: Some("NDX".into()),
-    };
+    *cell.borrow_mut() = Some(DimensionContext::of(&[("underlying_ref", "NDX")]));
     vcx.simulate_keystrokes("enter");
     draw(&mut vcx);
     let new = focused(&shell, &vcx);
@@ -288,7 +321,7 @@ fn the_context_is_captured_when_the_dialog_opens(cx: &mut gpui::TestAppContext) 
 /// An empty context falls back to the plain tile-kind picker.
 #[gpui::test]
 fn g_m_with_an_empty_context_opens_the_plain_tile_picker(cx: &mut gpui::TestAppContext) {
-    let (services, _log, _cell) = launch_services(LaunchContext::default());
+    let (services, _log, _cell) = launch_services(DimensionContext::default());
     let (window, mut vcx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut vcx);
     vcx.simulate_keystrokes("ctrl-v");
@@ -305,12 +338,40 @@ fn g_m_with_an_empty_context_opens_the_plain_tile_picker(cx: &mut gpui::TestAppC
     );
 }
 
-/// No accepting kind: no dialog, and the notice names why.
+/// A row whose context holds only columns no factory registers (an `lhu`
+/// subtotal) opens the plain tile picker, as an empty context does, even
+/// though a kind accepting another column is on the roster.
 #[gpui::test]
-fn g_m_with_no_accepting_kind_shows_the_notice(cx: &mut gpui::TestAppContext) {
+fn g_m_on_a_row_with_no_context_column_opens_the_plain_picker(cx: &mut gpui::TestAppContext) {
+    let (services, _log, _cell) = launch_services(DimensionContext::of(&[("lhu", "L1")]));
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("ctrl-v");
+    draw(&mut vcx);
+    vcx.simulate_keystrokes("g m");
+    draw(&mut vcx);
+    assert!(
+        matches!(
+            dialog_target(&shell, &vcx),
+            Some(crate::shell::choicedialog::Target::TileKind { .. })
+        ),
+        "{:?}",
+        dialog_target(&shell, &vcx)
+    );
+    assert_eq!(shell.read_with(&vcx, |s, _| s.notice), None);
+}
+
+/// A roster where no kind accepts anything registers no context column, so
+/// even an `underlying_ref` context opens the plain picker, not the notice.
+/// The notice (a registered column no listed kind accepts) is unreachable
+/// in Part 1: every registered column comes from some factory's `accepts`,
+/// and that factory is then listed. Part 2's action columns make it
+/// reachable.
+#[gpui::test]
+fn g_m_with_no_accepting_kind_opens_the_plain_picker(cx: &mut gpui::TestAppContext) {
     let mut rec = RecordingFactory::new("rec");
     rec.fragment = Some(LAUNCH_FRAGMENT);
-    *rec.launch_context.borrow_mut() = spx();
+    *rec.dimension_context.borrow_mut() = Some(spx());
     let services = services_with_recorders(vec![rec]);
     let (window, mut vcx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut vcx);
@@ -318,9 +379,13 @@ fn g_m_with_no_accepting_kind_shows_the_notice(cx: &mut gpui::TestAppContext) {
     draw(&mut vcx);
     vcx.simulate_keystrokes("g m");
     draw(&mut vcx);
-    assert!(dialog_target(&shell, &vcx).is_none());
-    assert_eq!(
-        shell.read_with(&vcx, |s, _| s.notice),
-        Some(crate::shell::input::NO_MODULE_OPENS)
+    assert!(
+        matches!(
+            dialog_target(&shell, &vcx),
+            Some(crate::shell::choicedialog::Target::TileKind { .. })
+        ),
+        "{:?}",
+        dialog_target(&shell, &vcx)
     );
+    assert_eq!(shell.read_with(&vcx, |s, _| s.notice), None);
 }

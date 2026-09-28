@@ -23,7 +23,8 @@ use crate::core::undo::UndoStack;
 use crate::core::views::ColumnPlan;
 use crate::core::{Place, RowSpec};
 use crate::delegate::{
-    CellPointer, ChevronClicked, DateFieldPaint, EditorField, EditorPaint, SheetDelegate,
+    CellPointer, ChevronClicked, ColumnMoved, DateFieldPaint, EditorField, EditorPaint,
+    SheetDelegate,
 };
 use crate::grid::GridModel;
 use crate::header::{self, HeaderInputs, HeaderModel};
@@ -667,8 +668,8 @@ impl PricerTile {
                 .cell_selectable(true)
                 .row_header(false)
                 .loop_selection(false)
-                .col_resizable(false)
-                .col_movable(false)
+                .col_resizable(true)
+                .col_movable(true)
                 .sortable(false)
         });
         cx.subscribe_in(&table, window, |this, _, event: &TableEvent, window, cx| {
@@ -680,6 +681,10 @@ impl PricerTile {
             window,
             |this, _, event: &ChevronClicked, window, cx| this.chevron_clicked(event.0, window, cx),
         )
+        .detach();
+        cx.subscribe_in(&table, window, |this, _, event: &ColumnMoved, _, cx| {
+            this.column_moved(event.from, event.to, cx)
+        })
         .detach();
         // Shift+click and drag: the delegate's own pointer events, which
         // reach `pointer` on mouse-down, ahead of the table's `SelectCell`
@@ -3840,10 +3845,12 @@ impl PricerTile {
 
     /// The sheet's view as a column plan, or the first loaded view with a
     /// standing notice (the sheet keeps its own `view`, so a view that
-    /// comes back on the next reload is used again).
+    /// comes back on the next reload is used again). A view whose every
+    /// column is hidden plans none and says so, since an empty grid with a
+    /// silent header reads as a broken tile.
     pub(crate) fn resolve_plan(&mut self) {
         let views = self.shared.views.borrow();
-        let (plan, notice) = match views.get(&self.sheet.view) {
+        let (plan, mut notice) = match views.get(&self.sheet.view) {
             Some(v) => (ColumnPlan::build(v), None),
             None => match views.names().next().and_then(|n| views.get(n)) {
                 Some(v) => (
@@ -3863,6 +3870,9 @@ impl PricerTile {
             },
         };
         drop(views);
+        if plan.columns.is_empty() && notice.is_none() {
+            notice = Some(format!("view '{}' has no visible column", self.sheet.view).into());
+        }
         self.plan = plan;
         self.view_notice = notice;
         self.cursor.col = self
@@ -3889,9 +3899,14 @@ impl PricerTile {
     pub(crate) fn install_model(&mut self, cx: &mut Context<Self>) {
         let model = Rc::clone(&self.model);
         let loading = self.loading;
+        // The factory's current `colors.toml`: a reload's rebuild lands
+        // here, so the delegate sees the new definitions with the model
+        // planned under them.
+        let colours = self.shared.colours.borrow().clone();
         self.table.update(cx, |t, cx| {
             t.delegate_mut().model = model;
             t.delegate_mut().loading = loading;
+            t.delegate_mut().set_colours(colours);
             // Before `refresh`, which re-reads the tree column's width.
             t.delegate_mut().refresh_numbers();
             t.refresh(cx);
@@ -4005,15 +4020,43 @@ impl PricerTile {
         self.cursor.line.and_then(|id| self.model.grid_row_of(id))
     }
 
-    /// The launch context at the cursor: the cursor row's sole underlying.
-    pub(crate) fn launch_context(&self) -> geode_core::launch::LaunchContext {
-        geode_core::launch::LaunchContext {
-            underlying: self
-                .cursor_row()
-                .and_then(|g| self.model.rows.get(g))
-                .and_then(|r| r.row)
-                .and_then(|row| self.sheet.sole_underlying(row)),
-        }
+    /// The context at the cursor: the cursor row's sole underlying, as
+    /// `underlying_ref`. A package across underlyings names none (an empty
+    /// context); with no cursor row (an empty sheet) there is no context.
+    pub(crate) fn dimension_context(&self) -> Option<geode_core::context::DimensionContext> {
+        let g = self.cursor_row()?;
+        let u = self
+            .model
+            .rows
+            .get(g)
+            .and_then(|r| r.row)
+            .and_then(|row| self.sheet.sole_underlying(row));
+        Some(match u {
+            Some(u) => geode_core::context::DimensionContext::of(&[("underlying_ref", &u)]),
+            None => geode_core::context::DimensionContext::default(),
+        })
+    }
+
+    /// The plan's columns for the shell's `Edit column in view…`; the
+    /// cursor column is active. The tree column is not a view column, so
+    /// it is neither listed nor ever the active one; an empty plan lists
+    /// nothing and the cursor rests on no column.
+    pub fn tile_columns(&self) -> Option<geode_core::tile_columns::TileColumns> {
+        use geode_core::tile_columns::{TileColumn, TileColumns};
+        Some(TileColumns {
+            view: self.sheet.view.clone(),
+            columns: self
+                .plan
+                .columns
+                .iter()
+                .map(|c| TileColumn {
+                    name: c.def.name.to_string(),
+                    label: c.label.clone(),
+                    derived: false,
+                })
+                .collect(),
+            active: (self.cursor.col < self.plan.columns.len()).then_some(self.cursor.col),
+        })
     }
 
     /// Point the cursor at grid row `row` (clamped to a cursor row).
@@ -4107,6 +4150,21 @@ impl PricerTile {
             self.cursor.line = Some(id);
             self.tree_verb(None, cx);
         }
+    }
+
+    /// A header drag dropped: reorder the open tile's plan. The cursor
+    /// names its column by vocabulary name across the move so it stays on
+    /// what the trader was looking at rather than whatever slid into its
+    /// slot; the grid model is built from the plan, so the rebuild
+    /// permutes every row's cells. The order never reaches the view: the
+    /// next `resolve_plan` (a view change, a reload) restores the view's.
+    fn column_moved(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        let under_cursor = self.plan.columns.get(self.cursor.col).map(|c| c.def.name);
+        self.plan.move_column(from, to);
+        if let Some(i) = under_cursor.and_then(|name| self.plan.position_of(name)) {
+            self.cursor.col = i;
+        }
+        self.rebuild(cx);
     }
 
     /// The `(grid row, plan column)` the open editor sits on.
@@ -4282,6 +4340,40 @@ impl PricerTile {
                 self.rebuild_chrome();
                 cx.notify();
             }
+            // A resize handle released. The table holds the dragged width
+            // in its own column groups only, and every rebuild's `refresh`
+            // rebuilds those from `column()`; recording the width under
+            // the column's vocabulary name, as `:autosize` does, is what
+            // keeps it past the next edit. The table reports every
+            // column, so only a width that differs from what `column()`
+            // gives is recorded: pinning the untouched ones would silently
+            // override a view width changed later. The tree's entry is
+            // stored without the gutter, as `column()` adds it back.
+            TableEvent::ColumnWidthsChanged(widths) => {
+                use gpui_component::table::TableDelegate as _;
+                self.table.update(cx, |t, cx| {
+                    let current: Vec<f32> = (0..widths.len())
+                        .map(|ix| f32::from(t.delegate().column(ix, cx).width))
+                        .collect();
+                    let d = t.delegate_mut();
+                    let gutter = d.gutter_px();
+                    for (ix, width) in widths.iter().enumerate() {
+                        let width = f32::from(*width);
+                        if width == current[ix] {
+                            continue;
+                        }
+                        let (key, stored) = match SheetDelegate::plan_col(ix) {
+                            None => (crate::delegate::TREE_KEY.to_string(), width - gutter),
+                            Some(c) => match d.model.columns.get(c) {
+                                Some(col) => (col.name.to_string(), width),
+                                None => continue,
+                            },
+                        };
+                        d.fitted.insert(key, stored);
+                    }
+                });
+                cx.notify();
+            }
             // `SelectRow`/`SelectColumn` are what `sync_cursor` itself
             // emits: deliberately unmatched.
             _ => {}
@@ -4446,10 +4538,11 @@ pub(crate) mod tests {
     use crate::core::{Edit, Place, RowSpec, Sheet, TemplateSet, Views, to_rows};
     use crate::store::{MemorySheetStore, SheetStore as _};
     use chrono::Datelike as _;
+    use geode_core::colour::NamedColours;
     use geode_core::groupings::GroupingSlots;
     use geode_core::log::LogLevels;
     use geode_core::pricing::Expiry;
-    use geode_core::pricing::{PriceOutcome, PriceParams, PriceResult};
+    use geode_core::pricing::{Currency, Measure, PriceOutcome, PriceParams, PriceResult};
     use geode_core::query::QueryKey;
     use geode_core::scopes::SavedScopes;
     use geode_data::{DataHandle, Request};
@@ -4866,14 +4959,17 @@ pub(crate) mod tests {
 
     #[allow(dead_code)]
     pub(crate) fn result(price: f64) -> PriceResult {
-        PriceResult {
-            price,
-            delta: 0.5,
-            gamma: 0.01,
-            vega: 1.0,
-            theta: -0.5,
-            rho: 0.1,
+        let mut r = PriceResult::zero(Currency::USD);
+        r.set(Measure::Npv, false, price);
+        r.set(Measure::Delta01, false, 0.5);
+        r.set(Measure::Gamma01, false, 0.01);
+        r.set(Measure::Vega01, false, 1.0);
+        r.set(Measure::CleanThetaBusinessDay, false, -0.5);
+        r.set(Measure::Rho010, false, 0.1);
+        for m in Measure::ALL {
+            r.set(m, true, r.get(m, false) * 1.08);
         }
+        r
     }
 
     // ---- the factory, restore and session ----
@@ -5024,23 +5120,44 @@ pub(crate) mod tests {
         assert_eq!(r.cursor, Some(crate::core::LineId(2)));
     }
 
-    /// The cursor line's underlying is the tile's launch context; an empty
-    /// sheet has none.
+    /// The cursor line's underlying is the tile's dimension context, as
+    /// `underlying_ref`.
     #[gpui::test]
-    fn the_launch_context_is_the_cursor_lines_underlying(cx: &mut gpui::TestAppContext) {
+    fn the_dimension_context_is_the_cursor_lines_underlying(cx: &mut gpui::TestAppContext) {
         let (store, mut record) = seeded(&["SPX Z26 5000 C", "NDX Z26 20000 C"]);
         record.insert("cursor".into(), toml::Value::Integer(2));
         let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
         h.visible(&mut vcx, true);
-        let ctx = vcx.update(|_, cx| h.content.launch_context(cx));
-        assert_eq!(ctx.underlying.as_deref(), Some("NDX"));
+        let ctx = vcx
+            .update(|_, cx| h.content.dimension_context(cx))
+            .expect("a pricer always has a context");
+        assert_eq!(ctx.get("underlying_ref"), Some("NDX"));
     }
 
+    /// With no cursor row there is no context, so `g m` opens the plain
+    /// picker.
     #[gpui::test]
-    fn an_empty_sheet_has_no_launch_context(cx: &mut gpui::TestAppContext) {
+    fn an_empty_sheet_has_no_dimension_context(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
-        let empty = vcx.update(|_, cx| h.content.launch_context(cx));
-        assert!(empty.is_empty());
+        let ctx = vcx.update(|_, cx| h.content.dimension_context(cx));
+        assert_eq!(ctx, None);
+    }
+
+    /// A package across two underlyings has a cursor row but names no
+    /// underlying: an empty context, not none.
+    #[gpui::test]
+    fn a_package_across_two_underlyings_has_an_empty_dimension_context(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "NDX Z26 20000 C"]);
+        h.dispatch(&mut vcx, "group", Some(2));
+        h.motion(&mut vcx, "top", None);
+        let top = &h.tree(&vcx)[0];
+        assert!(top.starts_with("CUSTOM SPX/NDX"), "the package, on top: {top}");
+        let ctx = vcx
+            .update(|_, cx| h.content.dimension_context(cx))
+            .expect("a cursor row has a context");
+        assert!(ctx.is_empty(), "{ctx:?}");
     }
 
     #[gpui::test]
@@ -5053,29 +5170,30 @@ pub(crate) mod tests {
         assert!(h.columns(&vcx).contains(&"barrier".to_string()));
         assert_eq!(
             h.command(&mut vcx, "view nope"),
-            Err("no view 'nope' (have: vanilla, barrier)".into())
+            Err("no view 'nope' (have: barrier, vanilla)".into())
         );
         let words = h.tile.read_with(&vcx, |t, _| t.completions("view ", 5));
-        assert_eq!(words, vec!["vanilla", "barrier"]);
+        assert_eq!(words, vec!["barrier", "vanilla"]);
     }
 
     #[gpui::test]
     fn a_reloaded_views_doc_reaches_an_open_tile(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C"]);
         let doc = geode_core::config::merge_docs(
-            "pricer_views",
+            "views",
             &[geode_core::config::LayerDoc::builtin(
-                "pricer_views",
-                "[slim]\ncolumns = [\"qty\", \"price\"]\n",
+                "views",
+                "[slim]\ndataset = \"pricer\"\n[[slim.columns]]\nname = \"qty\"\nkind = \"dimension\"\n[[slim.columns]]\nname = \"npv\"\n",
             )
             .unwrap()],
         );
-        let (views, diags) = Views::from_doc(&doc);
-        assert!(diags.is_empty());
+        let (views, diags) = Views::from_specs(&geode_core::view::ViewSpec::from_doc(&doc).0);
+        assert!(diags.is_empty(), "{diags:?}");
         vcx.update(|_, cx| {
             h.factory.reload(
                 views,
                 TemplateSet::builtin(),
+                NamedColours::default(),
                 None,
                 std::time::Duration::from_secs(60),
                 cx,
@@ -5083,7 +5201,7 @@ pub(crate) mod tests {
         });
         assert_eq!(
             h.columns(&vcx),
-            vec!["qty", "price"],
+            vec!["qty", "npv"],
             "the sheet's `vanilla` is gone, so the first view shows"
         );
         assert_eq!(
@@ -5091,6 +5209,452 @@ pub(crate) mod tests {
             Some("view 'vanilla' is not defined; showing 'slim'")
         );
         assert_eq!(h.factory.settings().refresh, None);
+    }
+
+    /// A view whose every column the merged presentation hides plans no
+    /// column: the header says so, and the cursor keys have nothing to
+    /// step onto but do not panic.
+    #[gpui::test]
+    fn a_view_with_every_column_hidden_shows_a_header_notice(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C"]);
+        let doc = geode_core::config::merge_docs(
+            "views",
+            &[geode_core::config::LayerDoc::builtin(
+                "views",
+                "[vanilla]\ndataset = \"pricer\"\n[[vanilla.columns]]\nname = \"npv\"\n",
+            )
+            .unwrap()],
+        );
+        let mut specs = geode_core::view::ViewSpec::from_doc(&doc).0;
+        specs[0]
+            .presentation
+            .entry("npv".into())
+            .or_default()
+            .hidden = Some(true);
+        let (views, diags) = Views::from_specs(&specs);
+        assert!(diags.is_empty(), "{diags:?}");
+        vcx.update(|_, cx| {
+            h.factory.reload(
+                views,
+                TemplateSet::builtin(),
+                NamedColours::default(),
+                None,
+                std::time::Duration::from_secs(60),
+                cx,
+            )
+        });
+        vcx.run_until_parked();
+        h.draw(&mut vcx);
+        assert!(h.columns(&vcx).is_empty(), "{:?}", h.columns(&vcx));
+        assert_eq!(
+            h.notice(&vcx).as_deref(),
+            Some("view 'vanilla' has no visible column")
+        );
+        keys(&h, &mut vcx, "j l l h k");
+        assert!(h.columns(&vcx).is_empty());
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor.col), 0);
+    }
+
+    // ---- movable and resizable columns ----
+
+    /// The table's header drag lands in the delegate's `move_column` hook
+    /// with TABLE indices (the tree is 0); this is that call.
+    fn move_column(h: &Harness, vcx: &mut VisualTestContext, from: usize, to: usize) {
+        use gpui_component::table::TableDelegate as _;
+        vcx.update(|window, cx| {
+            h.tile.update(cx, |t, cx| {
+                t.table.update(cx, |table, cx| {
+                    table.delegate_mut().move_column(from, to, window, cx);
+                })
+            })
+        });
+        vcx.run_until_parked();
+        h.draw(vcx);
+    }
+
+    /// A header drag reorders the open tile's plan: the grid's cells follow
+    /// the column, the cursor stays on the column it was on, and an edit's
+    /// rebuild keeps the new order.
+    #[gpui::test]
+    fn a_moved_column_survives_an_edit_and_the_cursor_follows_its_column(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 4000 P"]);
+        let _ = h.prices();
+        goto_column(&h, &mut vcx, "qty");
+        assert_eq!(h.cursor(&vcx).map(|c| c.1), Some(0));
+        assert_eq!(h.cell(&vcx, 0, "qty"), "1");
+
+        move_column(&h, &mut vcx, 1, 3);
+        assert_eq!(h.columns(&vcx)[2], "qty");
+        assert_eq!(h.cursor(&vcx).map(|c| c.1), Some(2), "cursor follows qty");
+        assert_eq!(
+            h.cell(&vcx, 0, "qty"),
+            "1",
+            "the cell moved with its column"
+        );
+
+        h.dispatch(&mut vcx, "edit", None);
+        assert_eq!(
+            editor_text(&h, &vcx).as_deref(),
+            Some("1"),
+            "the editor opened on qty"
+        );
+        select_all_and_type(&h, &mut vcx, "7");
+        h.dispatch(&mut vcx, "commit", None);
+        h.draw(&mut vcx);
+        assert_eq!(h.columns(&vcx)[2], "qty");
+        assert_eq!(h.cursor(&vcx).map(|c| c.1), Some(2));
+        assert_eq!(h.cell(&vcx, 0, "qty"), "7");
+    }
+
+    /// The tree column is pinned: a drag naming it, from either end, moves
+    /// nothing.
+    #[gpui::test]
+    fn the_tree_column_neither_moves_nor_is_moved_before(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 4000 P"]);
+        let before = h.columns(&vcx);
+        move_column(&h, &mut vcx, crate::delegate::TREE_COL, 2);
+        assert_eq!(h.columns(&vcx), before);
+        move_column(&h, &mut vcx, 2, crate::delegate::TREE_COL);
+        assert_eq!(h.columns(&vcx), before);
+    }
+
+    /// An editor open during the move follows its column, as it does
+    /// across every rebuild: the text stays and the commit lands on qty,
+    /// not on whatever slid into plan slot 0.
+    #[gpui::test]
+    fn an_open_editor_follows_its_moved_column(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 4000 P"]);
+        let _ = h.prices();
+        goto_column(&h, &mut vcx, "qty");
+        h.dispatch(&mut vcx, "edit", None);
+        select_all_and_type(&h, &mut vcx, "7");
+        move_column(&h, &mut vcx, 1, 3);
+        assert_eq!(h.mode(&mut vcx), "insert", "the editor stays open");
+        assert_eq!(editor_text(&h, &vcx).as_deref(), Some("7"));
+        assert_eq!(h.cursor(&vcx).map(|c| c.1), Some(2));
+        h.dispatch(&mut vcx, "commit", None);
+        h.draw(&mut vcx);
+        assert_eq!(h.cell(&vcx, 0, "qty"), "7");
+        assert_eq!(h.cell(&vcx, 0, "underlying_ref"), "SPX");
+    }
+
+    /// The order is the open tile's alone: switching views rebuilds the
+    /// plan from the view, so coming back to `vanilla` restores its order.
+    #[gpui::test]
+    fn a_view_change_rebuilds_the_order(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 4000 P"]);
+        let vanilla = h.columns(&vcx);
+        move_column(&h, &mut vcx, 1, 3);
+        assert_ne!(h.columns(&vcx), vanilla);
+        h.command(&mut vcx, "view barrier").unwrap();
+        h.command(&mut vcx, "view vanilla").unwrap();
+        assert_eq!(h.columns(&vcx), vanilla);
+    }
+
+    /// A pointer resize's width is kept the way an autosized one is: the
+    /// table reports it on release and the tile records it under the
+    /// column's vocabulary name, so the refresh every rebuild runs re-reads
+    /// it instead of the view's width. `:autosize reset` drops it.
+    #[gpui::test]
+    fn a_pointer_resize_survives_a_rebuild_and_autosize_reset_drops_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui_component::table::TableDelegate as _;
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 4000 P"]);
+        let default = width_of_column(&h, &vcx, "qty");
+        let tree = width_of_column(&h, &vcx, crate::delegate::TREE_KEY);
+        let qty_ix = 1 + h.columns(&vcx).iter().position(|c| c == "qty").unwrap();
+        // What the table emits when the drag handle is released: every
+        // column's width by table index.
+        let mut widths: Vec<gpui::Pixels> = h.tile.read_with(&vcx, |t, cx| {
+            let d = t.table.read(cx).delegate();
+            (0..d.columns_count(cx))
+                .map(|ix| d.column(ix, cx).width)
+                .collect()
+        });
+        widths[qty_ix] = gpui::px(default + 37.0);
+        h.tile.update(&mut vcx, |t, cx| {
+            t.table.update(cx, |_, cx| {
+                cx.emit(gpui_component::table::TableEvent::ColumnWidthsChanged(
+                    widths,
+                ))
+            })
+        });
+        vcx.run_until_parked();
+        assert_eq!(width_of_column(&h, &vcx, "qty"), default + 37.0);
+        assert_eq!(width_of_column(&h, &vcx, crate::delegate::TREE_KEY), tree);
+        // Only the dragged column is recorded: an untouched one would
+        // otherwise override a view width changed later.
+        assert_eq!(
+            fitted_of(&h, &vcx).keys().collect::<Vec<_>>(),
+            vec!["qty"],
+            "only the dragged column is recorded"
+        );
+
+        h.tile.update(&mut vcx, |t, cx| t.rebuild(cx));
+        assert_eq!(width_of_column(&h, &vcx, "qty"), default + 37.0);
+
+        h.command(&mut vcx, "autosize reset").unwrap();
+        assert_eq!(width_of_column(&h, &vcx, "qty"), default);
+    }
+
+    // ---- column colours ----
+
+    /// Reload the factory with `views` (a builtin-layer `views.toml` text)
+    /// and `colours`, as the app's reload observer does.
+    fn reload_views(h: &Harness, vcx: &mut VisualTestContext, views: &str, colours: NamedColours) {
+        let doc = geode_core::config::merge_docs(
+            "views",
+            &[geode_core::config::LayerDoc::builtin("views", views).unwrap()],
+        );
+        let (views, diags) = Views::from_specs(&geode_core::view::ViewSpec::from_doc(&doc).0);
+        assert!(diags.is_empty(), "{diags:?}");
+        vcx.update(|_, cx| {
+            h.factory.reload(
+                views,
+                TemplateSet::builtin(),
+                colours,
+                None,
+                std::time::Duration::from_secs(60),
+                cx,
+            )
+        });
+        vcx.run_until_parked();
+        h.draw(vcx);
+    }
+
+    /// The text colour `render_cell` paints one cell with, by grid row and
+    /// vocabulary name, read through the delegate's own paint decision
+    /// after a draw.
+    fn text_colour(
+        h: &Harness,
+        vcx: &mut VisualTestContext,
+        row: usize,
+        column: &str,
+    ) -> gpui::Hsla {
+        let col = h
+            .columns(vcx)
+            .iter()
+            .position(|c| c == column)
+            .expect("column");
+        h.draw(vcx);
+        h.tile.update(vcx, |t, cx| {
+            t.table.update(cx, |table, cx| {
+                table.delegate_mut().text_colour(row, col, cx.theme())
+            })
+        })
+    }
+
+    /// The colour `render_th` paints a header with, `None` for the
+    /// inherited foreground.
+    fn header_colour(h: &Harness, vcx: &mut VisualTestContext, column: &str) -> Option<gpui::Hsla> {
+        let col = h
+            .columns(vcx)
+            .iter()
+            .position(|c| c == column)
+            .expect("column");
+        h.draw(vcx);
+        h.tile.update(vcx, |t, cx| {
+            t.table.update(cx, |table, cx| {
+                table.delegate_mut().header_colour(col, cx.theme())
+            })
+        })
+    }
+
+    /// One batch answered with `delta01` set per line, in line order.
+    fn answer_deltas(h: &Harness, vcx: &mut VisualTestContext, deltas: &[f64]) {
+        let batch = h.prices().pop().expect("a price request");
+        assert_eq!(
+            batch.lines.len(),
+            deltas.len(),
+            "fixture: one delta per line"
+        );
+        h.deliver(
+            vcx,
+            PriceOutcome {
+                key: batch.key,
+                tag: batch.tag,
+                submitted: std::time::Instant::now(),
+                results: batch
+                    .lines
+                    .iter()
+                    .zip(deltas)
+                    .map(|(l, d)| {
+                        let mut r = result(12.5);
+                        r.set(Measure::Delta01, false, *d);
+                        (l.id, l.revision, Ok(r))
+                    })
+                    .collect(),
+            },
+        );
+    }
+
+    /// A measure's vocabulary default is `sign`, so the uncoloured
+    /// column says `none` explicitly.
+    const SIGNED_VIEW: &str = "[vanilla]\ndataset = \"pricer\"\n\
+        [[vanilla.columns]]\nname = \"npv\"\nformat = { color = \"none\" }\n\
+        [[vanilla.columns]]\nname = \"delta01\"\nformat = { color = \"sign\" }\n";
+
+    /// A `sign` column paints a negative measure in the theme's bearish
+    /// colour and a positive one bullish; a column whose colour is `none`
+    /// keeps the state paint, and a stale cell is muted whatever its sign.
+    #[gpui::test]
+    fn a_negative_measure_paints_bearish_under_sign_colour(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "SPX Z26 4000 P"]);
+        reload_views(&h, &mut vcx, SIGNED_VIEW, NamedColours::default());
+        answer_deltas(&h, &mut vcx, &[-5.0, 5.0]);
+        assert_eq!(h.cell(&vcx, 0, "delta01"), "-5.0000");
+        let (bearish, bullish, own) = vcx.update(|_, cx| {
+            let t = cx.theme();
+            (
+                t.chart_bearish,
+                t.chart_bullish,
+                crate::paint::Paints::derive(t).own,
+            )
+        });
+        assert_ne!(bearish, own, "fixture: bearish reads apart from own");
+        assert_ne!(bullish, own, "fixture: bullish reads apart from own");
+        assert_eq!(text_colour(&h, &mut vcx, 0, "delta01"), bearish);
+        assert_eq!(text_colour(&h, &mut vcx, 1, "delta01"), bullish);
+        assert_eq!(
+            text_colour(&h, &mut vcx, 0, "npv"),
+            own,
+            "no colour on the column: the state paint"
+        );
+        assert_eq!(
+            header_colour(&h, &mut vcx, "delta01"),
+            None,
+            "a sign column's header is uncoloured"
+        );
+        // Reprice: every line goes stale, and a stale cell is muted
+        // however negative its last value was.
+        h.dispatch(&mut vcx, "price", None);
+        let muted = vcx.update(|_, cx| crate::paint::Paints::derive(cx.theme()).muted);
+        assert_eq!(text_colour(&h, &mut vcx, 0, "delta01"), muted);
+    }
+
+    /// A named colour from `colors.toml` tints the column's cells and its
+    /// header with the resolved base, through the shared colour cache.
+    #[gpui::test]
+    fn a_named_colour_tints_the_column(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C"]);
+        let (colours, diags) = NamedColours::from_doc(&geode_core::config::merge_docs(
+            "colors",
+            &[geode_core::config::LayerDoc::builtin("colors", "[rose]\nhue = 10\n").unwrap()],
+        ));
+        assert!(diags.is_empty(), "{diags:?}");
+        reload_views(
+            &h,
+            &mut vcx,
+            "[vanilla]\ndataset = \"pricer\"\n\
+             [[vanilla.columns]]\nname = \"npv\"\nformat = { color = \"rose\" }\n\
+             [[vanilla.columns]]\nname = \"delta01\"\nformat = { color = \"none\" }\n",
+            colours.clone(),
+        );
+        answer_deltas(&h, &mut vcx, &[0.5]);
+        let (expected, own) = vcx.update(|_, cx| {
+            let theme = cx.theme();
+            let resolved = geode_tile::colour::ColourCache::new()
+                .get(
+                    &colours,
+                    "rose",
+                    &geode_shell::shell::colours::anchors_from_theme(theme),
+                    &geode_shell::shell::colours::tokens_from_theme(theme),
+                )
+                .expect("rose is defined");
+            (resolved, crate::paint::Paints::derive(theme).own)
+        });
+        assert_ne!(expected.base, own, "fixture: rose reads apart from own");
+        assert_eq!(text_colour(&h, &mut vcx, 0, "npv"), expected.base);
+        assert_eq!(header_colour(&h, &mut vcx, "npv"), Some(expected.base));
+        assert_eq!(
+            text_colour(&h, &mut vcx, 0, "delta01"),
+            own,
+            "the other column is untouched"
+        );
+        assert_eq!(header_colour(&h, &mut vcx, "delta01"), None);
+    }
+
+    /// A second reload that redefines a name repaints the column: the
+    /// delegate's resolve cache is invalidated when the factory hands it
+    /// new definitions, or the cell would keep the first resolved value
+    /// (the cache clears itself only on a changed theme input).
+    #[gpui::test]
+    fn a_second_colour_reload_repaints_a_named_column(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C"]);
+        let rose = |doc: &str| {
+            let (colours, diags) = NamedColours::from_doc(&geode_core::config::merge_docs(
+                "colors",
+                &[geode_core::config::LayerDoc::builtin("colors", doc).unwrap()],
+            ));
+            assert!(diags.is_empty(), "{diags:?}");
+            colours
+        };
+        let view = "[vanilla]\ndataset = \"pricer\"\n\
+             [[vanilla.columns]]\nname = \"npv\"\nformat = { color = \"rose\" }\n";
+        let resolved = |vcx: &mut VisualTestContext, colours: &NamedColours| {
+            vcx.update(|_, cx| {
+                let theme = cx.theme();
+                geode_tile::colour::ColourCache::new()
+                    .get(
+                        colours,
+                        "rose",
+                        &geode_shell::shell::colours::anchors_from_theme(theme),
+                        &geode_shell::shell::colours::tokens_from_theme(theme),
+                    )
+                    .expect("rose is defined")
+                    .base
+            })
+        };
+        let first = rose("[rose]\nhue = 10\n");
+        reload_views(&h, &mut vcx, view, first.clone());
+        answer_deltas(&h, &mut vcx, &[0.5]);
+        let first_base = resolved(&mut vcx, &first);
+        assert_eq!(text_colour(&h, &mut vcx, 0, "npv"), first_base);
+
+        let second = rose("[rose]\nhue = 200\n");
+        let second_base = resolved(&mut vcx, &second);
+        assert_ne!(first_base, second_base, "fixture: the two hues read apart");
+        reload_views(&h, &mut vcx, view, second);
+        assert_eq!(
+            text_colour(&h, &mut vcx, 0, "npv"),
+            second_base,
+            "the redefined name repaints; the first resolve is not kept"
+        );
+    }
+
+    /// The shell's `Edit column in view…` reads the tile's columns: the
+    /// plan in order under the sheet's view name, the cursor's column
+    /// active, none derived (a pricer view declares only dataset columns).
+    #[gpui::test]
+    fn tile_columns_list_the_plan_with_the_cursor_column_active(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C"]);
+        // Two columns right (`l l`): the harness hosts no keymap, so the
+        // shared motion `l` is bound to is dispatched directly.
+        h.motion(&mut vcx, "right", Some(2));
+        let tc = h
+            .tile
+            .read_with(&vcx, |t, _| t.tile_columns())
+            .expect("a plan");
+        assert_eq!(tc.view, "vanilla");
+        assert_eq!(
+            tc.columns
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>(),
+            h.columns(&vcx)
+        );
+        assert_eq!(
+            tc.columns
+                .iter()
+                .map(|c| c.label.as_str())
+                .collect::<Vec<_>>(),
+            h.labels(&vcx)
+        );
+        assert_eq!(tc.active, Some(2));
+        assert!(tc.columns.iter().all(|c| !c.derived));
     }
 
     /// A pricer has no frame query result to await. It acknowledges the flip barrier
@@ -5376,6 +5940,98 @@ pub(crate) mod tests {
         );
     }
 
+    /// Column 0 paints option C: the package row a chevron, a template chip,
+    /// the summary and the muted leg count; each leg a connector and its
+    /// shorthand; a bare line its shorthand alone. The legs' connectors sit
+    /// in the package chevron's lane and their text starts where the chip
+    /// starts, with line numbers off or on. That no row paints a ground is
+    /// structural (`render_tr` paints none) and not asserted here.
+    #[gpui::test]
+    fn the_tree_column_paints_connectors_a_chip_and_a_leg_count(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "-5 SPX Z26 4800/5200 CS"]);
+        h.motion(&mut vcx, "down", None);
+        h.dispatch(&mut vcx, "toggle", None);
+        h.draw(&mut vcx);
+        assert_eq!(h.tree(&vcx).len(), 4, "line, package, two legs");
+        let check = |vcx: &mut VisualTestContext, lane: &str| {
+            let bounds = |vcx: &mut VisualTestContext, sel: &'static str| {
+                vcx.debug_bounds(sel)
+                    .unwrap_or_else(|| panic!("{sel} painted ({lane})"))
+            };
+            for sel in [
+                "pricer-chevron-1",
+                "pricer-chip-1",
+                "pricer-tree-text-1",
+                "pricer-note-1",
+                "pricer-connector-2",
+                "pricer-connector-3",
+                "pricer-tree-text-2",
+                "pricer-tree-text-3",
+                "pricer-tree-text-0",
+            ] {
+                bounds(vcx, sel);
+            }
+            for sel in [
+                "pricer-chip-0",
+                "pricer-note-0",
+                "pricer-connector-0",
+                "pricer-connector-1",
+                "pricer-chip-2",
+                "pricer-note-2",
+                "pricer-chevron-0",
+                "pricer-chevron-2",
+            ] {
+                assert!(
+                    vcx.debug_bounds(sel).is_none(),
+                    "{sel} is not painted ({lane})"
+                );
+            }
+            let chip = bounds(vcx, "pricer-chip-1");
+            let text = bounds(vcx, "pricer-tree-text-1");
+            let note = bounds(vcx, "pricer-note-1");
+            assert!(
+                chip.left() < text.left() && text.left() < note.left(),
+                "chip, summary, leg count in order ({lane}): {chip:?} {text:?} {note:?}"
+            );
+            let chevron = bounds(vcx, "pricer-chevron-1");
+            for leg in ["pricer-connector-2", "pricer-connector-3"] {
+                let connector = bounds(vcx, leg);
+                assert!(
+                    (connector.center().x - chevron.center().x).abs() < gpui::px(1.0),
+                    "{leg} sits in the package chevron's lane ({lane}): \
+                     {connector:?} vs {chevron:?}"
+                );
+            }
+            for row in ["pricer-tree-text-2", "pricer-tree-text-0"] {
+                let t = bounds(vcx, row);
+                assert!(
+                    (t.left() - chip.left()).abs() < gpui::px(1.0),
+                    "{row} starts where the chip starts ({lane}): {t:?} vs {chip:?}"
+                );
+            }
+        };
+        check(&mut vcx, "line numbers off");
+        vcx.update(|_, cx| {
+            cx.set_global(UiSettings {
+                line_numbers: LineNumbers::On,
+            })
+        });
+        h.draw(&mut vcx);
+        check(&mut vcx, "line numbers on");
+
+        // The gutter: muted off the cursor row, a package's included (it
+        // has no ground of its own any more), own on the cursor row.
+        h.motion(&mut vcx, "up", None);
+        h.draw(&mut vcx);
+        assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(0));
+        h.tile.read_with(&vcx, |t, cx| {
+            let d = t.table.read(cx).delegate();
+            assert_eq!(d.gutter_paint(0), d.paints.own, "the cursor row");
+            assert_eq!(d.gutter_paint(1), d.paints.muted, "the package row");
+            assert_eq!(d.gutter_paint(2), d.paints.muted, "a leg");
+        });
+    }
+
     #[gpui::test]
     fn tree_verbs_open_and_close_packages_and_a_leg_collapses_to_its_package(
         cx: &mut gpui::TestAppContext,
@@ -5556,9 +6212,9 @@ pub(crate) mod tests {
             1
         );
         h.answer(&mut vcx, b, 12.5);
-        assert_eq!(h.cell(&vcx, 0, "price"), "12.50");
+        assert_eq!(h.cell(&vcx, 0, "npv"), "12.50");
         assert_eq!(
-            h.cell(&vcx, 1, "price"),
+            h.cell(&vcx, 1, "npv"),
             "0.00",
             "−5 × 12.5 + 5 × 12.5: the package sums signed legs"
         );
@@ -5603,13 +6259,9 @@ pub(crate) mod tests {
             "the new batch carries the old one's lines too"
         );
         h.answer(&mut vcx, &first, 99.0);
-        assert_eq!(
-            h.cell(&vcx, 2, "price"),
-            "",
-            "the older tag installs nothing"
-        );
+        assert_eq!(h.cell(&vcx, 2, "npv"), "", "the older tag installs nothing");
         h.answer(&mut vcx, &second, 12.5);
-        assert_eq!(h.cell(&vcx, 2, "price"), "12.50");
+        assert_eq!(h.cell(&vcx, 2, "npv"), "12.50");
     }
 
     #[gpui::test]
@@ -5637,11 +6289,11 @@ pub(crate) mod tests {
             },
         );
         assert_eq!(
-            h.cell(&vcx, 0, "price"),
+            h.cell(&vcx, 0, "npv"),
             "",
             "line 1's answer is for an older request"
         );
-        assert_eq!(h.cell(&vcx, 2, "price"), "12.50", "the rest install");
+        assert_eq!(h.cell(&vcx, 2, "npv"), "12.50", "the rest install");
         let again = h.prices();
         assert_eq!(again.len(), 1);
         assert_eq!(
@@ -5658,7 +6310,7 @@ pub(crate) mod tests {
         let mut other = b.clone();
         other.key = QueryKey(99);
         h.answer(&mut vcx, &other, 12.5);
-        assert_eq!(h.cell(&vcx, 0, "price"), "");
+        assert_eq!(h.cell(&vcx, 0, "npv"), "");
     }
 
     #[gpui::test]
@@ -5691,7 +6343,7 @@ pub(crate) mod tests {
             },
         );
         assert_eq!(
-            h.cell(&vcx, 1, "price"),
+            h.cell(&vcx, 1, "npv"),
             "—",
             "a failed leg fails its package"
         );
@@ -5931,8 +6583,14 @@ pub(crate) mod tests {
         };
         let (views, settings) = (h.factory.views_for_tests(), h.factory.settings());
         vcx.update(|_, cx| {
-            h.factory
-                .reload(views, flipped, settings.refresh, settings.stale_after, cx)
+            h.factory.reload(
+                views,
+                flipped,
+                NamedColours::default(),
+                settings.refresh,
+                settings.stale_after,
+                cx,
+            )
         });
         h.draw(&mut vcx);
         assert_eq!(h.tags(&vcx)[0], "RR", "the stored package keeps its name");
@@ -5983,8 +6641,14 @@ pub(crate) mod tests {
         };
         let (views, settings) = (h.factory.views_for_tests(), h.factory.settings());
         vcx.update(|_, cx| {
-            h.factory
-                .reload(views, flipped, settings.refresh, settings.stale_after, cx)
+            h.factory.reload(
+                views,
+                flipped,
+                NamedColours::default(),
+                settings.refresh,
+                settings.stale_after,
+                cx,
+            )
         });
         h.draw(&mut vcx);
         assert!(h.entry_text(&vcx).is_some(), "the bar stays open");
@@ -6471,6 +7135,7 @@ pub(crate) mod tests {
             h.factory.reload(
                 views,
                 condor_set(),
+                NamedColours::default(),
                 settings.refresh,
                 settings.stale_after,
                 cx,
@@ -6717,8 +7382,14 @@ pub(crate) mod tests {
         };
         let (views, settings) = (h.factory.views_for_tests(), h.factory.settings());
         vcx.update(|_, cx| {
-            h.factory
-                .reload(views, redefined, settings.refresh, settings.stale_after, cx)
+            h.factory.reload(
+                views,
+                redefined,
+                NamedColours::default(),
+                settings.refresh,
+                settings.stale_after,
+                cx,
+            )
         });
         h.draw(&mut vcx);
         let legs = |h: &Harness, vcx: &VisualTestContext| {
@@ -6836,7 +7507,7 @@ pub(crate) mod tests {
         vcx.simulate_input("p");
         h.draw(&mut vcx);
         h.dispatch(&mut vcx, "commit", None);
-        assert_eq!(h.cell(&vcx, 0, "type"), "P");
+        assert_eq!(h.cell(&vcx, 0, "option_type"), "P");
         // An unknown underlying commits as typed.
         h.motion(&mut vcx, "line_start", None);
         h.motion(&mut vcx, "right", None); // underlying
@@ -6844,7 +7515,7 @@ pub(crate) mod tests {
         vcx.simulate_input("ndx");
         h.draw(&mut vcx);
         h.dispatch(&mut vcx, "commit", None);
-        assert_eq!(h.cell(&vcx, 0, "underlying"), "NDX");
+        assert_eq!(h.cell(&vcx, 0, "underlying_ref"), "NDX");
         // A closed vocabulary refuses a query nothing matches.
         h.motion(&mut vcx, "right", Some(3)); // type
         h.dispatch(&mut vcx, "edit", None);
@@ -6918,16 +7589,22 @@ pub(crate) mod tests {
         assert!(!focused(&mut vcx), "blurred, then dropped");
     }
 
-    fn slim_views(columns: &str) -> Views {
+    /// One `slim` view over the pricer dataset naming `columns`, written
+    /// as a `views` doc (a non-measure carries `kind = "dimension"`).
+    fn slim_views(columns: &[&str]) -> Views {
+        let mut text = String::from("[slim]\ndataset = \"pricer\"\n");
+        for name in columns {
+            text.push_str(&format!("[[slim.columns]]\nname = \"{name}\"\n"));
+            let def = crate::core::column(name).expect("a vocabulary column");
+            if !matches!(def.kind, crate::core::ColumnKind::Measure { .. }) {
+                text.push_str("kind = \"dimension\"\n");
+            }
+        }
         let doc = geode_core::config::merge_docs(
-            "pricer_views",
-            &[geode_core::config::LayerDoc::builtin(
-                "pricer_views",
-                &format!("[slim]\ncolumns = [{columns}]\n"),
-            )
-            .unwrap()],
+            "views",
+            &[geode_core::config::LayerDoc::builtin("views", &text).unwrap()],
         );
-        let (views, diags) = Views::from_doc(&doc);
+        let (views, diags) = Views::from_specs(&geode_core::view::ViewSpec::from_doc(&doc).0);
         assert!(diags.is_empty(), "{diags:?}");
         views
     }
@@ -6947,18 +7624,19 @@ pub(crate) mod tests {
         h.dispatch(&mut vcx, "edit", None);
         assert_eq!(editor_paint_col(&h, &vcx), Some(3), "fixture");
         set_editor(&h, &mut vcx, "5100");
-        let views = slim_views("\"qty\", \"strike\", \"underlying\"");
+        let views = slim_views(&["qty", "strike", "underlying_ref"]);
         vcx.update(|_, cx| {
             h.factory.reload(
                 views,
                 TemplateSet::builtin(),
+                NamedColours::default(),
                 None,
                 std::time::Duration::from_secs(60),
                 cx,
             )
         });
         vcx.run_until_parked();
-        assert_eq!(h.columns(&vcx), vec!["qty", "strike", "underlying"]);
+        assert_eq!(h.columns(&vcx), vec!["qty", "strike", "underlying_ref"]);
         assert_eq!(h.mode(&mut vcx), "insert", "the field stays open");
         assert_eq!(editor_paint_col(&h, &vcx), Some(1), "strike's new column");
         assert_eq!(
@@ -6980,11 +7658,12 @@ pub(crate) mod tests {
         h.motion(&mut vcx, "right", Some(3)); // strike
         h.dispatch(&mut vcx, "edit", None);
         assert!(focused(&mut vcx), "fixture: the field owns focus");
-        let views = slim_views("\"qty\", \"price\"");
+        let views = slim_views(&["qty", "npv"]);
         vcx.update(|_, cx| {
             h.factory.reload(
                 views,
                 TemplateSet::builtin(),
+                NamedColours::default(),
                 None,
                 std::time::Duration::from_secs(60),
                 cx,
@@ -7013,7 +7692,7 @@ pub(crate) mod tests {
         click_at(&mut vcx, at, 1);
         h.draw(&mut vcx);
         assert_eq!(h.mode(&mut vcx), "normal");
-        assert_eq!(h.cell(&vcx, 0, "type"), "P");
+        assert_eq!(h.cell(&vcx, 0, "option_type"), "P");
         assert!(
             !focused(&mut vcx),
             "the pick closes the field: blurred, then dropped"
@@ -7343,11 +8022,12 @@ pub(crate) mod tests {
         let (h, mut vcx) = open_seeded(cx, &DATED);
         open_expiry(&h, &mut vcx, 0);
         assert_eq!(editor_paint_col(&h, &vcx), Some(2), "fixture");
-        let views = slim_views("\"expiry\", \"qty\"");
+        let views = slim_views(&["expiry", "qty"]);
         vcx.update(|_, cx| {
             h.factory.reload(
                 views,
                 TemplateSet::builtin(),
+                NamedColours::default(),
                 None,
                 std::time::Duration::from_secs(60),
                 cx,
@@ -7374,11 +8054,12 @@ pub(crate) mod tests {
         let (h, mut vcx) = open_seeded(cx, &DATED);
         open_expiry(&h, &mut vcx, 0);
         assert!(focused(&mut vcx), "fixture: the field owns focus");
-        let views = slim_views("\"qty\", \"price\"");
+        let views = slim_views(&["qty", "npv"]);
         vcx.update(|_, cx| {
             h.factory.reload(
                 views,
                 TemplateSet::builtin(),
+                NamedColours::default(),
                 None,
                 std::time::Duration::from_secs(60),
                 cx,
@@ -7416,7 +8097,7 @@ pub(crate) mod tests {
         h.dispatch(&mut vcx, "undo", None);
         assert_eq!(h.tree(&vcx).len(), 3);
         assert_eq!(
-            h.cell(&vcx, 2, "price"),
+            h.cell(&vcx, 2, "npv"),
             "12.50",
             "its last result came back with it"
         );
@@ -7505,15 +8186,11 @@ pub(crate) mod tests {
         h.dispatch(&mut vcx, "group", Some(2));
         assert_eq!(
             h.tree(&vcx)[0],
-            "CUSTOM SPX Z26",
+            "CUSTOM SPX Z26 5000/4000",
             "a custom package, opened"
         );
         assert_eq!(h.tree(&vcx).len(), 4);
-        assert_eq!(
-            h.cell(&vcx, 0, "price"),
-            "2.00",
-            "its sum: two legs of 1.00"
-        );
+        assert_eq!(h.cell(&vcx, 0, "npv"), "2.00", "its sum: two legs of 1.00");
         assert!(h.prices().is_empty(), "grouping changes no request");
         h.motion(&mut vcx, "down", None); // a leg: g u acts on its package
         h.dispatch(&mut vcx, "ungroup", None);
@@ -7601,7 +8278,7 @@ pub(crate) mod tests {
         assert_eq!(h.mode(&mut vcx), "normal");
         assert_eq!(h.prices()[0].lines.len(), 4);
         h.dispatch(&mut vcx, "menu", None);
-        h.motion(&mut vcx, "menu_down", Some(8)); // past the sheet rows to the second view: barrier
+        h.motion(&mut vcx, "menu_down", Some(7)); // past the sheet rows to the first view: barrier
         h.dispatch(&mut vcx, "menu_pick", None);
         assert!(h.columns(&vcx).contains(&"barrier".to_string()));
     }
@@ -7686,8 +8363,9 @@ pub(crate) mod tests {
         h.motion(&mut vcx, "menu_down", Some(20)); // view: barrier, the last row
         vcx.update(|_, cx| {
             h.factory.reload(
-                slim_views("\"qty\", \"price\""),
+                slim_views(&["qty", "npv"]),
                 TemplateSet::builtin(),
+                NamedColours::default(),
                 None,
                 std::time::Duration::from_secs(60),
                 cx,
@@ -7946,7 +8624,7 @@ pub(crate) mod tests {
             h.tree(&vcx),
             vec![
                 "SPX Z26 5000 C".to_string(),
-                "CS SPX Z26".to_string(),
+                "CS SPX Z26 5000/4800/5200".to_string(),
                 "SPX Z26 5000 C".to_string(),
                 "-5 SPX Z26 4800 C".to_string(),
                 "5 SPX Z26 5200 C".to_string(),
@@ -8155,7 +8833,7 @@ pub(crate) mod tests {
         h.draw(&mut vcx);
         h.dispatch(&mut vcx, "commit", None);
         assert_eq!(
-            h.cell(&vcx, 0, "underlying"),
+            h.cell(&vcx, 0, "underlying_ref"),
             "HSI",
             "a subsequence match is not the trader's answer"
         );
@@ -8164,7 +8842,7 @@ pub(crate) mod tests {
         h.draw(&mut vcx);
         h.dispatch(&mut vcx, "commit", None);
         assert_eq!(
-            h.cell(&vcx, 0, "underlying"),
+            h.cell(&vcx, 0, "underlying_ref"),
             "HSCEI",
             "the option itself, typed in any case"
         );
@@ -8181,7 +8859,7 @@ pub(crate) mod tests {
         assert_eq!(highlighted.as_deref(), Some("NKY"));
         h.dispatch(&mut vcx, "commit", None);
         assert_eq!(
-            h.cell(&vcx, 0, "underlying"),
+            h.cell(&vcx, 0, "underlying_ref"),
             "NKY",
             "a moved highlight is a choice"
         );
@@ -8189,7 +8867,7 @@ pub(crate) mod tests {
         open_underlying(&h, &mut vcx);
         h.dispatch(&mut vcx, "commit", None);
         assert_eq!(h.mode(&mut vcx), "normal");
-        assert_eq!(h.cell(&vcx, 0, "underlying"), "NKY");
+        assert_eq!(h.cell(&vcx, 0, "underlying_ref"), "NKY");
         assert_eq!(h.footer(&vcx), None);
     }
 
@@ -8612,9 +9290,9 @@ pub(crate) mod tests {
         let after = h.prices().remove(0);
         assert_eq!(after.tag, before.tag + 1);
         h.answer(&mut vcx, &before, 99.0);
-        assert_eq!(h.cell(&vcx, 0, "price"), "", "the older tag is dropped");
+        assert_eq!(h.cell(&vcx, 0, "npv"), "", "the older tag is dropped");
         h.answer(&mut vcx, &after, 12.5);
-        assert_eq!(h.cell(&vcx, 0, "price"), "12.50");
+        assert_eq!(h.cell(&vcx, 0, "npv"), "12.50");
     }
 
     /// Three roots A, B, C: strikes 5000, 4000, 3000.
@@ -8916,8 +9594,8 @@ pub(crate) mod tests {
                 "Remove sheet… | :rm",
                 "—",
                 "[View]",
-                "✓ vanilla",
                 "  barrier",
+                "✓ vanilla",
             ]
         );
         for (id, title) in crate::content::ACTIONS {
@@ -8969,12 +9647,12 @@ pub(crate) mod tests {
     fn a_pointer_move_over_a_menu_row_moves_the_highlight(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
         h.dispatch(&mut vcx, "menu", None);
-        let at = centre_of(&mut vcx, "pricer-menu-row-18"); // barrier
+        let at = centre_of(&mut vcx, "pricer-menu-row-17"); // barrier
         vcx.simulate_mouse_move(at, None, gpui::Modifiers::default());
         let highlighted = h
             .tile
             .read_with(&vcx, |t, _| t.menu.as_ref().and_then(|m| m.highlighted()));
-        assert_eq!(highlighted, Some(18));
+        assert_eq!(highlighted, Some(17));
         h.dispatch(&mut vcx, "menu_pick", None);
         assert!(h.columns(&vcx).contains(&"barrier".to_string()));
     }
@@ -9473,7 +10151,7 @@ pub(crate) mod tests {
 
     fn set_catalog(h: &Harness, vcx: &mut VisualTestContext, names: &[&str]) {
         h.diagnostics.update(vcx, |d, cx| {
-            d.set_catalog(catalog(names));
+            d.set_catalog(catalog(names), std::time::SystemTime::UNIX_EPOCH);
             cx.notify();
         });
         vcx.run_until_parked();
@@ -9555,7 +10233,7 @@ pub(crate) mod tests {
         h.diagnostics.update(&mut vcx, |d, cx| {
             let mut c = catalog(&["gamma"]);
             c.datasets[0].name = "cvi_params".into();
-            d.set_catalog(c);
+            d.set_catalog(c, std::time::SystemTime::UNIX_EPOCH);
             cx.notify();
         });
         vcx.run_until_parked();
@@ -10027,7 +10705,7 @@ pub(crate) mod tests {
     }
 
     /// A removed sheet stays removed when the catalog the diagnostics
-    /// entity holds is stale: with the diagnostics tile closed, nothing
+    /// entity holds is stale: with the diagnostics page closed, nothing
     /// refreshes it after the forget, and any later publish (another
     /// sheet's autosave, a feed) re-reads it. Only a confirmed save of the
     /// name makes it known again.

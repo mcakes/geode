@@ -8,12 +8,11 @@ use super::*;
 use crate::core::cell::READ_ONLY;
 use crate::core::package::{self, package_qty};
 use crate::core::select::{
-    RISK, Skip, Skips, group_plan, lines_of, move_plan, risk_totals, set_notice, step_notice,
-    top_most,
+    Skip, Skips, group_plan, lines_of, move_plan, risk_totals, set_notice, step_notice, top_most,
 };
 use crate::core::sheet::OwnShifts;
 use geode_core::grid::selection::Lost;
-use geode_core::pricing::Instrument;
+use geode_core::pricing::{Instrument, Measure};
 use std::collections::BTreeMap;
 
 /// The refusal for `v`/`V` on a row with no line behind it.
@@ -114,18 +113,25 @@ impl PricerTile {
         }
     }
 
-    /// One footer cell per risk column the view shows, totalled over the
-    /// top-most selected rows: a package already carries its legs, so a
-    /// total over both would double them. An incomplete total is `—`,
+    /// One footer cell per measure column the view shows, totalled over
+    /// the top-most selected rows: a package already carries its legs, so
+    /// a total over both would double them. An incomplete total is `—`,
     /// never a partial sum that reads as the position's.
     fn prepare_totals(&mut self) {
         let top = top_most(&self.sheet, &self.selected_sheet_rows());
-        let sums = risk_totals(&self.sheet, &top);
+        let planned: Vec<_> = self
+            .plan
+            .columns
+            .iter()
+            .filter_map(|c| match c.def.kind {
+                ColumnKind::Measure { measure, usd } => Some(((measure, usd), c)),
+                _ => None,
+            })
+            .collect();
+        let measures: Vec<(Measure, bool)> = planned.iter().map(|(m, _)| *m).collect();
+        let sums = risk_totals(&self.sheet, &top, &measures);
         self.totals.clear();
-        for (kind, sum) in RISK.iter().zip(sums) {
-            let Some(planned) = self.plan.columns.iter().find(|c| c.def.kind == *kind) else {
-                continue;
-            };
+        for ((_, planned), sum) in planned.into_iter().zip(sums) {
             let cell = match sum {
                 Some(v) => {
                     let f = geode_core::format::format_number(v, &planned.format);

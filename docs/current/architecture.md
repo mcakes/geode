@@ -38,7 +38,7 @@ ownership. Typed interpretation and merging are I/O-free; its configuration
 loader reads disk documents through `Config::read_docs` and `Config::load`.
 Types shared across a forbidden dependency boundary live there: scopes,
 schema, query outcomes, snapshots, health, document rows, series requests,
-and pricing requests.
+pricing requests, and vol-slice requests.
 
 `geode-shell` owns the window and interaction model. It does not depend on the
 data service or on feature modules. `geode-data` owns sources, DuckDB, and
@@ -46,7 +46,9 @@ background data work. It does not depend on the shell or feature modules.
 
 `geode-tile` is the kit tiles are built from: the popover, the `.` action
 menu, the in-tile y/n confirm and the notice line, as models with one
-painter each, and the `following` flip-barrier state machine every following
+painter each, the `colour` cache (`ColourCache`/`Resolved`: one resolve per
+named color per theme input, shared by the blotter and pricer cell
+painters), and the `following` flip-barrier state machine every following
 tile runs for its own query. It depends on `geode-shell` for its paint doors
 and the live keymap, never on `geode-data` or a feature module, and the shell
 never depends on it. A tile mechanism two modules would otherwise each write

@@ -69,6 +69,12 @@ context = "workspace"
 "ctrl+{" = "dock::move_left"
 "ctrl+}" = "dock::move_right"
 "ctrl+?" = "dock::move_bottom"
+
+# Context-free: a workspace switch is application navigation, reachable
+# from a page (whose context stack carries no `workspace`) as well as
+# from the tile surface.
+[[bindings]]
+[bindings.keys]
 "mod+1" = "workspace::switch_1"
 "mod+2" = "workspace::switch_2"
 "mod+3" = "workspace::switch_3"
@@ -78,9 +84,6 @@ context = "workspace"
 "mod+7" = "workspace::switch_7"
 "mod+8" = "workspace::switch_8"
 "mod+9" = "workspace::switch_9"
-
-[[bindings]]
-[bindings.keys]
 "ctrl+k" = "palette::toggle"
 "ctrl+shift+p" = "palette::toggle"
 "ctrl+," = "settings::open"
@@ -102,6 +105,11 @@ context = "tile"
 [bindings.keys]
 ":" = "tile::command_line"
 "/" = "tile::find"
+
+[[bindings]]
+context = "page"
+[bindings.keys]
+"escape" = "page::close"
 
 # Grid motions, shipped once for every tile that publishes `grid`. Named
 # keys come first and vim keys last in the same context, so a hint and the
@@ -256,6 +264,9 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         "Workspace",
     );
     action(reg, "workspace::close_tile", "Close tile", "Workspace");
+    // A page replaces the tile surface while open; `escape` in context `page`
+    // closes it unless the page consumes the close itself.
+    action(reg, "page::close", "Close page", "Workspace");
     // Dock toggles retain hidden occupants. Move sends the focused tile to a
     // dock, or back to the tree when that dock is already focused.
     action(reg, "dock::toggle_left", "Toggle left dock", "Dock");
@@ -396,8 +407,9 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     // The tile picker lists roster kinds. Its id is outside the `tile::add_`
     // prefix so parse_add_action cannot mistake it for a specific module kind.
     action(reg, "tile::add", "Add a tile…", "Tiles");
-    // Pulls the focused tile's launch context and lists the kinds that
-    // accept it. Outside the `tile::add_` prefix, like `tile::add`.
+    // Pulls the focused tile's dimension context and lists the kinds that
+    // accept one of its columns. Outside the `tile::add_` prefix, like
+    // `tile::add`.
     action(reg, "tile::open_with", "Open with context…", "Tiles");
     // Fits the focused tile's table columns to their content
     // (`TileContent::autosize_columns`). Palette-only: no default key.
@@ -607,6 +619,19 @@ pub fn register_add_actions(reg: &mut ActionRegistry, kinds: &[&str]) -> Vec<Dia
         }
     }
     diags
+}
+
+/// Register one toggle per page kind, mirroring `register_add_actions`:
+/// `page::toggle_<kind>` titled "<Title>: Open page" in category `<Title>`.
+pub fn register_page_actions(reg: &mut ActionRegistry, pages: &[(&str, &str)]) {
+    for (kind, title) in pages {
+        action(
+            reg,
+            &format!("page::toggle_{kind}"),
+            &format!("{title}: Open page"),
+            title,
+        );
+    }
 }
 
 /// A kind's palette title (`blotter` → `Blotter`) — also the tile
@@ -906,7 +931,7 @@ mod tests {
     #[test]
     fn register_add_actions_registers_four_rows_per_kind_in_the_tiles_category() {
         let mut reg = ActionRegistry::default();
-        register_add_actions(&mut reg, &["blotter", "diagnostics"]);
+        register_add_actions(&mut reg, &["blotter", "pricer"]);
         let expect = |id: &str, title: &str| {
             let def = reg
                 .iter()
@@ -919,7 +944,7 @@ mod tests {
         expect("tile::add_blotter_horizontal", "Blotter: Split Horizontal");
         expect("tile::add_blotter_vertical", "Blotter: Split Vertical");
         expect("tile::add_blotter_stacked", "Blotter: Stack");
-        expect("tile::add_diagnostics", "Diagnostics: Split");
+        expect("tile::add_pricer", "Pricer: Split");
         assert_eq!(reg.iter().count(), 8);
         let mut empty = ActionRegistry::default();
         register_add_actions(&mut empty, &[]);
@@ -993,6 +1018,18 @@ mod tests {
             diags[0].message
         );
         assert!(!reg.contains(&ActionId("tile::add_rec".into())));
+    }
+
+    #[test]
+    fn page_actions_register_one_toggle_per_kind() {
+        let mut reg = ActionRegistry::default();
+        register_page_actions(&mut reg, &[("diagnostics", "Diagnostics")]);
+        let def = reg
+            .get(&ActionId("page::toggle_diagnostics".into()))
+            .expect("registered");
+        assert_eq!(def.title, "Diagnostics: Open page");
+        assert_eq!(def.category, "Diagnostics");
+        assert_eq!(reg.iter().count(), 1);
     }
 
     #[test]

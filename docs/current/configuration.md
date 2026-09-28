@@ -22,8 +22,8 @@ are part of several document contracts.
 
 Top-level entries in `views`, `view_presentation`, `dataset_presentation`,
 `layouts`, `groupings`, `scopes`, `datasets`, `sources`, `egress`, `dimensions`,
-`colors`, `expressions`, `pricer_views`, `pricer_templates`, `panels`, and
-`overrides` replace whole named objects.
+`colors`, `expressions`, `pricer_templates`, `panels`, and `overrides`
+replace whole named objects.
 Overriding one source therefore requires its complete configuration, including
 required fields; omitted fields do not inherit from the lower-layer source.
 
@@ -59,7 +59,7 @@ The main configuration documents have distinct owners:
 | Document | Defines |
 |---|---|
 | `app.toml` | Theme, primary modifier, UI settings, logging, time zone, pricing and timeseries settings |
-| `datasets.toml` | Dataset families, columns, roles, types, grains, retention, and local publication |
+| `datasets.toml` | Dataset families, columns, roles, types, grains, retention, local publication, and `computed` |
 | `views.toml` | Queryable views, joins, columns, expressions, grouping, and sorting |
 | `sources.toml` | File, subscription, and fetch sources with readiness and adapter settings |
 | `egress.toml` | Upload targets: adapter and a per-document address template |
@@ -162,20 +162,34 @@ publication remains positional. Rebuild a demo database after changing column
 membership, roles, grains, or order. A production schema migration must be an
 explicit operation.
 
-Every build declares one dataset in its builtin layer: `pricer_sheets`, the
-line pricer's local document dataset (see [the line pricer](features.md)).
-`datasets` merges per dataset name, so a demo, desk, or user `datasets`
-document adds its datasets beside it, and a `datasets` document always
-exists. Because its tables are written positionally, the app keeps its own
-declaration: a layer that redeclares `pricer_sheets` identically is accepted
-silently, and any other redeclaration — different columns, order, or flags,
-or one invalid enough that the reader dropped it — is replaced by the builtin
-declaration at startup and on reload, with an error diagnostic naming the
-redeclaring layer and file. The Schema dialog still lists `pricer_sheets`; an
-edit saved there is such a redeclaration. Local datasets are not offered as
-the dataset choice in the Views and Sources dialogs: no view reads the app's
-own documents, and the source reader refuses a local dataset. A value that
-already names one is kept, as any current value is.
+Every build declares two datasets in its builtin layer: `pricer_sheets`, the
+line pricer's local document dataset, and `pricer`, its computed vocabulary
+dataset (see [the line pricer](features.md)). `datasets` merges per dataset
+name, so a demo, desk, or user `datasets` document adds its datasets beside
+them, and a `datasets` document always exists. The app keeps its own
+declaration of both — `pricer_sheets` because its tables are written
+positionally, `pricer` because a differing declaration would change what a
+view, scope, or grouping over the pricer means: a layer that redeclares
+either identically is accepted silently, and any other redeclaration —
+different columns, order, or flags, or one invalid enough that the reader
+dropped it — is replaced by the builtin declaration at startup and on reload,
+with an error diagnostic naming the redeclaring layer and file. The Schema
+dialog still lists both for presentation edits; a redeclaration can only
+come from a `datasets` document. Local
+datasets are not offered as the dataset choice in the Views and Sources
+dialogs: no view reads the app's own documents, and the source reader refuses
+a local dataset. A value that already names one is kept, as any current value
+is.
+
+A measures-family dataset may set `computed = true`: a module answers for it
+in process. No source may feed it (the source reader refuses one), no table is
+created, and any query naming it is refused with `dataset '<name>' is computed
+by a module and has no tables`. Its value is vocabulary: its columns take part
+in scope completion, groupings and the Views dialog's dataset choice exactly as
+a stored dataset's do, while the Sources dialog and the frame's value pickers
+leave it out. `computed` on a document or series dataset is an error and is
+cleared. The line pricer's `pricer` dataset is the one computed dataset every
+build declares.
 
 ## Source configuration
 
@@ -499,7 +513,7 @@ Accepted candidates update runtime state according to their inputs:
 | `expressions`, `datasets`, or `dimensions` | Rebuild named expressions; a changed or redefined entry bumps the frame's config version so a tile whose scope references it requeries |
 | `datasets` or `dimensions` | Rebuild dimension-picker columns |
 | Views, either presentation document, dimensions, or colors | Emit `ConfigReloaded` for the app bridge |
-| Sources, datasets, egress, panels, or `app.pricing.adapter` differing from startup | Mark restart required; return to the startup inputs to clear it |
+| Sources, datasets, egress, panels, `app.pricing.adapter`, or `app.vol.model` differing from startup | Mark restart required; return to the startup inputs to clear it |
 
 Document-change checks compare the original per-layer documents, including
 their paths, rather than just merged values. Source and dataset changes can
@@ -585,10 +599,17 @@ timer. An absent `underlyings` clears the list, including on reload; a
 non-array value at startup leaves it empty. With an empty list the bar says
 no underlyings are configured.
 
-`pricer_views` holds the pricer's named column views. The builtin layer
-carries the two bundled views; like other named objects, a desk or user entry
-replaces a whole view. A reload reaches open pricer tiles, and a tile whose
-view disappeared shows the first defined view with a header notice.
+The pricer's views are ordinary `views.toml` views whose `dataset` is
+`pricer`. The builtin layer carries `vanilla` and `barrier`; a desk or user
+entry replaces a whole view by name, and `view_presentation.toml` and
+`dataset_presentation.toml` apply as they do to any view. A pricer view may
+not declare `joins` or a `derived` column: either is an error diagnostic on
+the view, and the pricer drops that view rather than paint part of it. A
+`pricer_views` document is no longer read; its presence is an error naming
+`views.toml`. A reload that changes a view, either overlay or the colors
+reaches open pricer tiles; a tile whose view disappeared shows the first
+`pricer` view with a header notice, and a view whose every column is hidden
+says so in the header.
 
 `pricer_templates` holds the package templates the pricer's shorthand
 accepts. The builtin layer carries seven: `CS`, `PS`, `STRD`, `STRG`, `RR`,
@@ -636,6 +657,14 @@ reversal for every sheet. A reload reaches open pricer tiles without a
 restart. Rows already on a sheet keep their legs and prices; see
 [the pricer](features.md) for how a package prints once its template is
 removed or redefined.
+
+## Vol
+
+`[vol]` in `app.toml` selects the vol-surface evaluator the data service's
+vol slice requests use. `model` names a model the binary registers; the
+default and the only one in every build is `demo`, a smooth stand-in that is
+not a financial model. A name the binary lacks warns at startup and every vol
+slice answers with that reason. Changing `model` marks restart required, as `[pricing] adapter` does.
 
 ## Maintaining configuration
 

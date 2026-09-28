@@ -3,7 +3,6 @@
 //! rows and aggregates; render reads cached text, glyphs, and selection state.
 //! Theme and gutter presentation use separate memos to avoid repeated work.
 
-use crate::colour_cache::{ColourCache, Resolved as ColourResolved};
 use crate::core::cache::{FormatCache, cell};
 use crate::core::cursor::{Cursor, find_by_path, restore_by_path};
 use crate::core::expansion::{Expansion, Path, depth_bound, path_of};
@@ -22,6 +21,7 @@ use geode_shell::linenumbers::{GUTTER_GAP_PX, LineNumbers, gutter_number};
 use geode_shell::shell::aggregates::{AggregateCell, CellPaint};
 use geode_shell::shell::colours::{anchors_from_theme, theme_signature, tokens_from_theme};
 use geode_shell::shell::control::{self, PointerStates as _};
+use geode_tile::colour::{ColourCache, Resolved as ColourResolved};
 use gpui::prelude::*;
 use gpui::{
     App, ClickEvent, Context, Div, EventEmitter, Hsla, IntoElement, MouseButton, MouseDownEvent,
@@ -163,7 +163,7 @@ pub struct BlotterDelegate {
     /// reload requeries visible tiles, so changed definitions reach this
     /// delegate with the next applied snapshot.
     colours: Arc<NamedColours>,
-    /// One resolve per name per theme; see `colour_cache`'s module doc.
+    /// One resolve per name per theme; see `geode_tile::colour`'s module doc.
     colour_cache: ColourCache,
     /// Theme-derived `Anchors`/`Tokens`, memoized behind all 28 input colours.
     /// Named-cell, header, and footer lookups compare the signature on each
@@ -483,11 +483,24 @@ impl BlotterDelegate {
         self.shown.get(self.cursor.row).map(|r| *r as usize)
     }
 
-    /// The cursor row's underlying under the applied grouping, or `None`
-    /// (see [`crate::core::launch::underlying_at`]).
-    pub fn cursor_underlying(&self) -> Option<String> {
+    /// The cursor row's dimension context: its single-valued columns and,
+    /// when the cursor row is inside the live selection, each selected
+    /// top-most row's. `None` before the first snapshot.
+    pub fn dimension_context(&self) -> Option<geode_core::context::DimensionContext> {
+        let snapshot = self.snapshot.as_ref()?;
         let plan = self.plan.as_ref()?;
-        crate::core::launch::underlying_at(&self.cursor_path()?, &plan.grouping)
+        let row = *self.shown.get(self.cursor.row)? as usize;
+        let selection = match &self.resolved {
+            Some(r) if r.rows.contains(&self.cursor.row) => {
+                crate::core::context::selection_values(snapshot, plan, &self.shown, r)
+            }
+            _ => Vec::new(),
+        };
+        Some(geode_core::context::DimensionContext {
+            values: crate::core::context::values_at(snapshot, plan, row),
+            selection,
+            ..Default::default()
+        })
     }
 
     /// Start a selection of `kind` at the cursor. With a live selection,
@@ -1579,10 +1592,10 @@ mod tests {
         assert_eq!(DETERMINED_MARK, "\u{2020}", "the determined mark is DAGGER");
     }
 
-    /// The root is always in `shown` (`flatten` pushes every root before
-    /// descending), so the grand-total row is reachable by the cursor too.
+    /// The context follows the cursor row, and carries the selection's
+    /// rows only while the cursor is inside the selection.
     #[test]
-    fn the_cursor_underlying_follows_the_cursor_row() {
+    fn the_dimension_context_follows_the_cursor_row_and_selection() {
         let mut d = BlotterDelegate::new();
         d.apply_snapshot(snapshot(), &view(), &grouping());
         d.expansion
@@ -1591,18 +1604,27 @@ mod tests {
         let at = |d: &BlotterDelegate, snap_row: u32| {
             d.shown.iter().position(|r| *r == snap_row).unwrap()
         };
+        d.cursor.row = at(&d, 3);
+        let context = d.dimension_context().expect("a snapshot is applied");
+        assert_eq!(context.get("underlying_ref"), Some("SPX"));
+        assert!(context.selection.is_empty(), "no selection yet");
         d.cursor.row = at(&d, 1);
+        let context = d.dimension_context().expect("a snapshot is applied");
         assert_eq!(
-            d.cursor_underlying(),
+            context.get("underlying_ref"),
             None,
             "L1 is above the underlying level"
         );
+
         d.cursor.row = at(&d, 3);
-        assert_eq!(d.cursor_underlying(), Some("SPX".into()));
+        d.start_selection(SelectKind::Rows);
         d.cursor.row = at(&d, 4);
-        assert_eq!(d.cursor_underlying(), Some("NDX".into()));
-        d.cursor.row = at(&d, 0);
-        assert_eq!(d.cursor_underlying(), None, "the grand total");
+        d.refresh_selection();
+        let context = d.dimension_context().unwrap();
+        assert_eq!(context.selection.len(), 2, "SPX and NDX, cursor inside");
+        d.cursor.row = at(&d, 1);
+        let context = d.dimension_context().unwrap();
+        assert_eq!(context.selection.len(), 0, "the cursor left the selection");
     }
 
     /// The pinned table does not record visible ranges of length zero or

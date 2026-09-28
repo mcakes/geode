@@ -283,13 +283,11 @@ pub(crate) mod tests {
             match req.instrument.underlying() {
                 "FAIL" => Err(PricingError("refused".into())),
                 "BOOM" => panic!("the fake pricer exploded"),
-                _ => Ok(PriceResult {
-                    price: 1.0,
-                    delta: 0.5,
-                    gamma: 0.0,
-                    vega: 0.0,
-                    theta: 0.0,
-                    rho: 0.0,
+                _ => Ok({
+                    let mut r = PriceResult::zero(geode_core::pricing::Currency::USD);
+                    r.set(geode_core::pricing::Measure::Npv, false, 1.0);
+                    r.set(geode_core::pricing::Measure::Delta01, false, 0.5);
+                    r
                 }),
             }
         }

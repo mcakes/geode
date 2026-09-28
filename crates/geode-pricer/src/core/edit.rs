@@ -551,7 +551,7 @@ mod tests {
     use super::*;
     use crate::core::sheet::tests::{at, callspread, line, push, result, spx};
     use crate::core::sheet::{Delivered, LineId, LineState, Place, Sheet};
-    use geode_core::pricing::OptionKind;
+    use geode_core::pricing::{Measure, OptionKind};
 
     #[test]
     fn undo_of_a_remove_reinstates_rows_with_ids_and_results_and_requests_nothing() {
@@ -698,7 +698,7 @@ mod tests {
         assert_eq!(undo.inverse, vec![Edit::SetQty { row: 0, qty: 1 }]);
         // A leg's qty re-sums the package at once (a 1×2 ratio).
         s.apply(Edit::SetQty { row: 3, qty: -2 }).unwrap();
-        assert_eq!(s.result(1).unwrap().price, 10.0 - 20.0);
+        assert_eq!(s.result(1).unwrap().get(Measure::Npv, false), 10.0 - 20.0);
         assert_eq!(s.state(1), &LineState::Fresh);
         assert_eq!(
             s.apply(Edit::SetQty { row: 0, qty: 0 }).unwrap_err(),
@@ -1052,7 +1052,7 @@ mod tests {
         assert_eq!(s.id(0), LineId(4), "a fresh id");
         assert_eq!(s.children(0), 1..3);
         assert_eq!(ids(&s), vec![4, 1, 2, 3]);
-        assert_eq!(s.result(0).unwrap().price, 10.0 - 10.0);
+        assert_eq!(s.result(0).unwrap().get(Measure::Npv, false), 10.0 - 10.0);
         assert_eq!(
             s.state(0),
             &LineState::Fresh,

@@ -106,10 +106,10 @@ fn the_footer_totals_position_risk_over_top_most_rows(cx: &mut gpui::TestAppCont
     let totals = h.tile.read_with(&vcx, |t, _| t.totals.clone());
     let price = totals
         .iter()
-        .find(|c| c.label.as_ref() == "price")
+        .find(|c| c.label.as_ref() == "npv")
         .expect("a price total");
     // Two 1-lot lines at 1.00, plus the package's own folded sum (read it off its cell).
-    let package: f64 = h.cell(&vcx, 1, "price").parse().unwrap();
+    let package: f64 = h.cell(&vcx, 1, "npv").parse().unwrap();
     let expected = 1.0 + 1.0 + package;
     assert_eq!(price.text.as_ref(), format!("{expected:.2}"));
     assert_eq!(
@@ -180,7 +180,7 @@ fn the_footer_totals_count_an_open_packages_legs_once(cx: &mut gpui::TestAppCont
     h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "expand", None);
     assert_eq!(h.tree(&vcx).len(), 5, "fixture: the package is open");
-    let cell = |row| -> f64 { h.cell(&vcx, row, "price").parse().unwrap() };
+    let cell = |row| -> f64 { h.cell(&vcx, row, "npv").parse().unwrap() };
     let (a, package, b) = (cell(0), cell(1), cell(4));
     assert!(package.abs() > 0.5, "fixture: the legs do not cancel");
     h.motion(&mut vcx, "top", None);
@@ -189,7 +189,7 @@ fn the_footer_totals_count_an_open_packages_legs_once(cx: &mut gpui::TestAppCont
     let price = h.tile.read_with(&vcx, |t, _| {
         t.totals
             .iter()
-            .find(|c| c.label.as_ref() == "price")
+            .find(|c| c.label.as_ref() == "npv")
             .map(|c| c.text.to_string())
     });
     assert_eq!(price, Some(format!("{:.2}", a + package + b)));
@@ -228,7 +228,7 @@ fn the_totals_follow_a_delivery_not_only_a_cursor_move(cx: &mut gpui::TestAppCon
         h.tile.read_with(vcx, |t, _| {
             t.totals
                 .iter()
-                .find(|c| c.label.as_ref() == "price")
+                .find(|c| c.label.as_ref() == "npv")
                 .map(|c| c.text.to_string())
         })
     };
@@ -471,7 +471,7 @@ fn g_p_over_root_lines_groups_them_and_u_restores(cx: &mut gpui::TestAppContext)
     h.dispatch(&mut vcx, "visual_rows", None);
     h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "group", None);
-    assert_eq!(h.tree(&vcx)[0], "CUSTOM SPX Z26");
+    assert_eq!(h.tree(&vcx)[0], "CUSTOM SPX Z26 5000/4000");
     assert_eq!(h.mode(&mut vcx), "normal", "g p ends the selection");
     assert_eq!(h.tree(&vcx).len(), 4, "the new package is open on its legs");
     assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(0), "the cursor is on it");
@@ -772,7 +772,7 @@ fn a_picked_type_commits_to_every_selected_line(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &BOOK);
     // Typed on the C line: the cursor cell's own option typed out is no
     // pick (see the untouched tests below).
-    select_up_to_the_c_line(&h, &mut vcx, "type");
+    select_up_to_the_c_line(&h, &mut vcx, "option_type");
     h.dispatch(&mut vcx, "edit", None);
     set_editor(&h, &mut vcx, "p");
     h.dispatch(&mut vcx, "commit", None);
@@ -780,7 +780,7 @@ fn a_picked_type_commits_to_every_selected_line(cx: &mut gpui::TestAppContext) {
     assert!(lines.iter().all(|s| s.ends_with(" P")), "{lines:?}");
     h.dispatch(&mut vcx, "escape", None);
     h.dispatch(&mut vcx, "undo", None);
-    assert_eq!(h.cell(&vcx, 0, "type"), "C");
+    assert_eq!(h.cell(&vcx, 0, "option_type"), "C");
 }
 
 #[gpui::test]
@@ -821,14 +821,14 @@ fn select_up_to_the_c_line(h: &Harness, vcx: &mut VisualTestContext, column: &st
 #[gpui::test]
 fn an_untouched_choice_enter_over_a_selection_writes_nothing(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &BOOK);
-    select_up_to_the_c_line(&h, &mut vcx, "type");
+    select_up_to_the_c_line(&h, &mut vcx, "option_type");
     h.prices();
     h.dispatch(&mut vcx, "edit", None);
     assert_eq!(editor_text(&h, &vcx).as_deref(), Some(""), "a choice list");
     h.dispatch(&mut vcx, "commit", None);
     assert_eq!(editor_text(&h, &vcx), None, "enter closes the editor");
-    assert_eq!(h.cell(&vcx, 2, "type"), "P", "not the cursor's C");
-    assert_eq!(h.cell(&vcx, 1, "type"), "C");
+    assert_eq!(h.cell(&vcx, 2, "option_type"), "P", "not the cursor's C");
+    assert_eq!(h.cell(&vcx, 1, "option_type"), "C");
     assert_eq!(notice(&h, &vcx), None, "no notice");
     assert!(!can_undo(&h, &vcx), "no undo entry");
     assert!(h.prices().is_empty(), "nothing repriced");
@@ -837,14 +837,18 @@ fn an_untouched_choice_enter_over_a_selection_writes_nothing(cx: &mut gpui::Test
     h.dispatch(&mut vcx, "edit", None);
     set_editor(&h, &mut vcx, "c");
     h.dispatch(&mut vcx, "commit", None);
-    assert_eq!(h.cell(&vcx, 2, "type"), "P", "the typed opening value");
+    assert_eq!(
+        h.cell(&vcx, 2, "option_type"),
+        "P",
+        "the typed opening value"
+    );
     assert!(!can_undo(&h, &vcx));
 }
 
 #[gpui::test]
 fn a_moved_choice_over_a_selection_writes_every_line_in_one_undo(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &BOOK);
-    select_up_to_the_c_line(&h, &mut vcx, "type");
+    select_up_to_the_c_line(&h, &mut vcx, "option_type");
     h.dispatch(&mut vcx, "edit", None);
     h.dispatch(&mut vcx, "insert_down", None); // C → P
     h.dispatch(&mut vcx, "commit", None);
@@ -854,12 +858,12 @@ fn a_moved_choice_over_a_selection_writes_every_line_in_one_undo(cx: &mut gpui::
     h.dispatch(&mut vcx, "escape", None);
     h.dispatch(&mut vcx, "undo", None);
     assert_eq!(
-        h.cell(&vcx, 0, "type"),
+        h.cell(&vcx, 0, "option_type"),
         "C",
         "one undo takes every write back"
     );
-    assert_eq!(h.cell(&vcx, 1, "type"), "C");
-    assert_eq!(h.cell(&vcx, 2, "type"), "P");
+    assert_eq!(h.cell(&vcx, 1, "option_type"), "C");
+    assert_eq!(h.cell(&vcx, 2, "option_type"), "P");
     assert!(!can_undo(&h, &vcx), "the writes were one entry");
 }
 
@@ -905,7 +909,7 @@ fn an_unchanged_untyped_date_over_a_selection_writes_nothing(cx: &mut gpui::Test
 #[gpui::test]
 fn an_untouched_package_text_cell_over_a_selection_writes_nothing(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &BOOK);
-    goto_column(&h, &mut vcx, "type");
+    goto_column(&h, &mut vcx, "option_type");
     h.motion(&mut vcx, "bottom", None);
     h.dispatch(&mut vcx, "visual_rows", None);
     h.motion(&mut vcx, "up", None); // the package row
@@ -913,7 +917,7 @@ fn an_untouched_package_text_cell_over_a_selection_writes_nothing(cx: &mut gpui:
     assert_eq!(editor_text(&h, &vcx).as_deref(), Some("C"), "fixture: text");
     h.dispatch(&mut vcx, "commit", None);
     assert_eq!(editor_text(&h, &vcx), None, "enter closes the editor");
-    assert_eq!(h.cell(&vcx, 2, "type"), "P", "not the package's C");
+    assert_eq!(h.cell(&vcx, 2, "option_type"), "P", "not the package's C");
     assert_eq!(notice(&h, &vcx), None);
     assert!(!can_undo(&h, &vcx));
 }
@@ -1161,7 +1165,7 @@ fn a_block_step_steps_each_block_column_and_counts_what_does_not_step(
     let (h, mut vcx) = open_seeded(cx, &BOOK);
     goto_column(&h, &mut vcx, "strike");
     h.dispatch(&mut vcx, "visual_block", None);
-    h.motion(&mut vcx, "right", Some(2)); // strike, type, spot_shift
+    h.motion(&mut vcx, "right", Some(3)); // strike, type, currency, spot_shift
     h.dispatch(&mut vcx, "edit", None);
     assert_eq!(
         editor_text(&h, &vcx).as_deref(),
@@ -1181,7 +1185,8 @@ fn a_block_step_steps_each_block_column_and_counts_what_does_not_step(
     assert_eq!(editor_text(&h, &vcx).as_deref(), Some("1"));
     assert_eq!(
         notice(&h, &vcx).as_deref(),
-        Some("stepped 2 cells +1, skipped 1 (1 not numeric)")
+        Some("stepped 2 cells +1, skipped 2 (1 read-only, 1 not numeric)"),
+        "currency is read-only, type is not numeric"
     );
     assert_eq!(h.cell(&vcx, 1, "strike"), "4800/5200", "outside the block");
 }
@@ -1707,11 +1712,12 @@ fn a_drag_that_started_off_the_cells_selects_nothing(cx: &mut gpui::TestAppConte
 #[gpui::test]
 fn a_plain_press_beside_the_cells_clears_the_selection(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &BOOK);
-    let views = slim_views("\"qty\", \"strike\"");
+    let views = slim_views(&["qty", "strike"]);
     vcx.update(|_, cx| {
         h.factory.reload(
             views,
             TemplateSet::builtin(),
+            geode_core::colour::NamedColours::default(),
             None,
             std::time::Duration::from_secs(60),
             cx,

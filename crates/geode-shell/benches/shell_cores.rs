@@ -288,6 +288,7 @@ fn bench_session(c: &mut Criterion) {
                 None,
                 &geode_shell::session::PinnedRecords::new(),
                 &geode_shell::palette_usage::PaletteUsage::new(),
+                &geode_shell::session::PageRecords::new(),
             ))
         })
     });
@@ -298,6 +299,7 @@ fn bench_session(c: &mut Criterion) {
         None,
         &geode_shell::session::PinnedRecords::new(),
         &geode_shell::palette_usage::PaletteUsage::new(),
+        &geode_shell::session::PageRecords::new(),
     );
     group.bench_function("from_toml_9_workspaces", |b| {
         b.iter(|| {

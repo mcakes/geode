@@ -19,7 +19,7 @@ The pure core (`core`, no element, entity, window, or data service):
 | `undo` | The tile's bounded, strictly last-in first-out undo/redo stack. |
 | `shorthand` | Parsing and rendering lines and packages against a `TemplateSet`. |
 | `template` | Template names, the `pricer_templates` reader and `TemplateSet`. |
-| `columns`, `views` | Column vocabulary, prepared column plans, and cell text. |
+| `columns`, `dataset`, `views` | Column vocabulary, its `pricer` dataset declaration (computed; mirrors the vocabulary), views read from `views.toml` over the `pricer` dataset (hidden columns skipped), prepared column plans, and cell text. |
 | `package` | A package row's aggregated cells: its legs' distinct values in leg order joined with `/`, and the package quantity while the legs fit its template; how an edit to one of those cells maps onto its legs. |
 | `cell` | Cell commit validation, the typeahead vocabularies, the expiry date commit, and nudging. |
 | `entry` | Where `o` and `shift+o` land, lifting a typed package out of a leg position, the entry bar's label, and entry history. |
@@ -37,12 +37,12 @@ The tile:
 | `store` | The `SheetStore` seam, addressed by key/tag with `Loaded::Refused(Refusal)` for a load that never went out and `save`/`forget` returning `Result<(), Refusal>`; `MemorySheetStore` (in-memory, the tests' fake, whose `set_save_refusal`/`set_load_refusal`/`set_forget_refusal` choose the refusal kind and `set_refusing`/`set_load_refused` are `Busy` shorthands) and `DuckSheetStore` (the store `geode-app` wires: `pricer_sheets` document reads/writes over `DataHandle`, with a `known`-names cache fed from the diagnostics catalog and the store's own confirmed writes). |
 | `grid` | The prepared `GridModel`, rebuilt on change. |
 | `paint` | The per-theme paint memo, floored to a readable ratio. |
-| `delegate` | The table delegate: cells, the tree column (indent, chevron, template tag), editor, expiry date field. |
+| `delegate` | The table delegate: cells and their column colors (sign, named), the connector tree column (indent; a package's chevron, template chip, summary and muted leg count; a leg's `├`/`└` connector and shorthand; a bare line's shorthand), editor, expiry date field. |
 | `header` | The prepared header row (notices as `geode_tile::notice::Notice`), the sheet name control and rename field, and the footer. |
 | `popup` | The typeahead, the entry bar's completion list, the sheet picker (`sheet_rows`, `SheetPicker`), and `PricerPick` (what a menu row does). The menu, popup geometry, the `:rm` confirm and the header notices paint through `geode-tile`. |
 | `session` | The tile's session record, including `:autosize`'s fitted widths (`column_widths`, read leniently). |
 | `content` | The factory, keymap fragment (verbs, field keys and the menu's pick and close keys; the grid motions and the menu steps are the shell's shared `motion::*` bindings), actions, the retired motion ids' renames (`RENAMED_ACTIONS`), settings, and the read-only `UnderlyingSource` seam. |
-| `tile` | `PricerTile`: modes (a key context that publishes `grid`, and `tilelist` while the action menu is open so the shared menu steps reach it), verbs, repricing, write-behind, load. Every `motion::*` id runs as one verb through `geode_tile::motion`, so it closes an open field or menu first like any other verb. |
+| `tile` | `PricerTile`: modes (a key context that publishes `grid`, and `tilelist` while the action menu is open so the shared menu steps reach it), verbs, repricing, write-behind, load. Every `motion::*` id runs as one verb through `geode_tile::motion`, so it closes an open field or menu first like any other verb. `tile_columns` reports the plan's columns under the sheet's view with the cursor's column active, so the shell's `Edit column in view…` opens the Views dialog there. |
 | `tile::select` | The `V`/`v` selection's state doors (start, clear, re-resolve, footer extent and totals), the selection verbs, the one-typed-value commit, and the live step (`bulk_step`, `settle_bulk`, `take_back_steps`). |
 
 The application uses `DuckSheetStore`: sheets are `pricer_sheets` documents in
@@ -91,7 +91,11 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   stale marking, and sheet metadata updates have separate paths.
 - Package rows derive from their legs; they are not independent instruments.
   Their pricing timestamp is the oldest present leg-attempt timestamp,
-  including failed attempts.
+  including failed attempts. The fold keeps the legs' currency when they
+  agree and marks it `Currency::MIXED` when they differ: a package whose
+  legs priced in different currencies paints `—` in its local-currency
+  measure columns, while the `_usd` columns still sum. Its `currency` cell
+  joins the legs' codes with `/`, so the gap says which currencies met.
 - A package row's qty and eight text columns aggregate its legs: the
   distinct values, compared as values, in leg order joined with `/` and
   spelled as a line's cell spells them. Barrier columns read only barrier
@@ -112,8 +116,11 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   changes whether a qty rescales by weight) closes with `MOVED`.
 - Shorthand rendering uses a template only while the legs still match its
   current table (an overflowing quantity never matches); otherwise it prints
-  the legs one per line. The grid keeps the shorthand as the row's find key
-  and paints only a package's template token. Loading accepts unresolved
+  the legs one per line. The grid keeps a line's or leg's shorthand as both
+  its painted tree text and its find key; a package paints a template
+  chip, a one-line summary of its legs' expiries and strikes, and a leg
+  count, and its find key is its template form (a custom package's is its
+  template token, underlyings and that summary). Loading accepts unresolved
   template names because stored instruments remain sufficient for repricing.
 - `TemplateSet::from_doc_over` keeps the last valid definition per name.
   An entry dropped with an error keeps the previous set's definition of
@@ -189,9 +196,11 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   column disappears, the field closes with `MOVED`; deferred window access
   blurs its retained input only if it still owns focus. Chrome rebuilds
   refresh open-menu rows and keep the highlight on an action or view.
-- `g m` opens the module picker with the cursor row's underlying as launch
-  context. A package contributes an underlying only when all its legs share
-  one; an empty sheet or mixed-underlying package contributes none.
+- `g m` opens the module picker on a `DimensionContext` holding the cursor
+  row's underlying as `underlying_ref`. A package contributes an underlying
+  only when all its legs share one; a mixed-underlying package gives an empty
+  context and an empty sheet (no cursor row) gives none, so both open the
+  plain tile picker.
 - The tile arrives at flip barriers itself; it submits no view query
   (`geode_tile::following::arrive_immediately`).
 - An empty sheet is never saved. A sheet whose load failed is never saved
@@ -275,8 +284,18 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   when the query equals it case-insensitively or the highlight was moved with
   a key or a click; a pointer hover moves the highlight but does not count as
   moving it, so otherwise `enter` commits the typed text.
-- A package row's ground is painted by `render_tr` on the row,
-  never per cell, so the table's hover and selected-row fills stay visible.
+- No row paints a ground of its own: the tree column carries the package
+  structure, and `render_tr` keeps only the row press door, so the table's
+  hover and selected-row fills are the only row grounds. Package rows share
+  the line palette; the template chip takes the neutral chip pair
+  (`Paints::chip_fill`, `chip_text`), its text floored on the fill over all
+  three row grounds.
+- A leg's connector sits in its package's chevron lane and its text starts
+  where the package's chip starts, the edge a bare line's text shares. The
+  tree cell lays out slot, chip, text and note with one `TREE_GAP` between
+  each (`delegate::tree_gaps`); `fit_columns` and the `TREE_WIDTH` test
+  measure the same parts. `TREE_WIDTH` fits `▾ CS Z26 4800/5200 · 2 legs` at
+  the Large font; a longer summary ellipsizes and the leg count stays whole.
 - The line-number gutter (`[ui] line_numbers`, read from the `UiSettings`
   global and observed) sits beside the tree cell, outside its depth indent,
   so numbers share one lane at every depth. The tree column widens by the
@@ -286,11 +305,20 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   Relative mode measures from the cursor row and numbers absolutely with no
   cursor row. `refresh_numbers` prepares the text and width outside render,
   before every `refresh`, keyed by row count, relative cursor row and
-  mode. Gutter text uses the row's floored muted paint (the row's
-  own text paint on the cursor row).
+  mode. Gutter text uses the floored muted paint (the own text paint on the
+  cursor row, `SheetDelegate::gutter_paint`).
 - `paint` prepares grid-row text colors and tests their contrast across
   every bundled theme. Row text is checked against its base, hover, and
   selection backgrounds; menu colors are `geode_tile::menu::MenuPaint`'s.
+- A view column's `color` paints as in the blotter: `sign` tints a negative
+  measure bearish and a positive one bullish, a named color from
+  `colors.toml` tints the column and its header (resolved through
+  `geode_tile::colour::ColourCache`, invalidated when the factory's
+  `colors` `Arc` changes); a stale cell stays muted and a failed one danger
+  whatever the column's color (`paint::cell_colour`). Bearish, bullish and
+  named-color text is not floored against the hover and selected row
+  grounds the way the row palette is; a display check across the bundled
+  themes is pending.
   This sweep does not cover every header or typeahead
   token, and the bounded adjustment is not a guarantee for arbitrary themes.
 - A disabled action can hold the menu highlight but paints no highlight
@@ -322,6 +350,9 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   (`top_most`), since a package already carries its legs. Totals are
   `qty × value` per line and the folded sum per package, and a column with
   any unpriced or failed row is `None` (painted `—`), never a partial sum.
+  A local-currency total over rows whose results are not all in one
+  currency (a mixed package counts as differing) is `None` too; the `_usd`
+  totals still sum.
 - A typed commit writes the cursor's column only, under `V` and `v`, each
   line judged on its own instrument, as one `apply_edits` batch. A selected
   package's qty (commit or step) goes through `package::commit`, so the legs
@@ -375,7 +406,22 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   to fit" while the sheet loads or has no rows. It stores the widths by
   vocabulary name (`__tree` for the tree) in the session record. A font
   change does not rescale fitted widths; run `:autosize` again. A fitted
-  width also overrides a view width changed later, until `:autosize reset`.
+  width also overrides a view width changed later, until `:autosize reset`
+  or the next `:autosize`, which replaces every kept width with a fresh fit.
+- Columns can be dragged to reorder and resized with the pointer; both act
+  on the open tile only. A drag lands in the delegate's `move_column` hook,
+  which emits `ColumnMoved` (plan indices) for the tile to apply to its
+  `ColumnPlan`; the cursor re-finds its column by name and the rebuild
+  permutes every row's cells. A view change or reload rebuilds the plan from
+  the view, restoring its order. A released resize handle reports
+  `ColumnWidthsChanged`, and the tile records the width under the column's
+  vocabulary name beside the `:autosize` fits, since the refresh every
+  rebuild runs re-reads `column()` and would otherwise drop it; `:autosize
+  reset` drops it with them, and the next `:autosize` replaces it. A rebuild
+  during a held resize drag (a delivery or timer reprice while the handle is
+  down) resets the in-progress width, so that drag is lost on release. The
+  tree column is pinned and neither moves nor resizes. Persistent order and
+  width belong to the Views dialog.
 - Grid selections are one contiguous row range or rectangle. There is no
   paste of a yanked TSV block (`p` puts only rows a `V` yank remembered), a
   count is ignored by `d`, `shift+j`/`shift+k`, `g p` and `g u` while selecting,

@@ -12,11 +12,10 @@ Current behavior and rationale:
 
 | Module | Holds |
 |---|---|
-| `core` | Column plans, expansion paths, visible-row traversal, cursor movement (`core::cursor`, moved by `geode_tile::motion`), find, selection summaries, cursor-row launch context, TSV export, command parsing, and visible-window formatting without GPUI. |
+| `core` | Column plans, expansion paths, visible-row traversal, cursor movement (`core::cursor`, moved by `geode_tile::motion`), find, selection summaries, cursor-row dimension context, TSV export, command parsing, and visible-window formatting without GPUI. |
 | `delegate` | `TableDelegate` adapter with prepared rows and cached cell text. Holds `:autosize`'s fitted widths by column name, which `column()` prefers over the plan's; `fit_columns` measures the header and the format cache's window only. Owns selection and paint caches; reports cell gestures and chevron clicks to the tile. |
 | `tile` | `BlotterTile`, the entity per tile: a key context that publishes `grid` (so the shell's shared `motion::*` keys reach it), `dispatch` routing every `motion::*` id through `geode_tile::motion`, local query overrides, requests through `DataHandle`, frame observation over `geode_tile::following`, snapshot application, header and footer rendering. The header notice is a `geode_tile::notice::Notice`: dropped sorts and selections are warnings, query and configuration failures danger. |
 | `content` | The `TileContent` wrapper and `BlotterFactory`, the roster entry the app builds with the data handle. |
-| `colour_cache` | Caches each named color's base and sign variants until theme inputs or definitions change. |
 
 ## Commands
 
@@ -34,7 +33,11 @@ cargo bench -p geode-blotter   # the pure core
   or no cached rows, a fit refuses with "nothing loaded to fit" and keeps
   its widths.
 - A view switch clears the fitted widths, and a restored record whose view
-  is gone starts without them. `apply_snapshot` drops only the tree column's
+  is gone starts without them. A view over a computed dataset is never the
+  blotter's: `:view` neither completes nor opens it, and a record naming one
+  opens the fallback view with the refusal as its notice, held through the
+  fallback's first snapshot. The fallback (default, else first) skips
+  computed views as well. `apply_snapshot` drops only the tree column's
   width (key `""`) when the grouping differs from the plan's. That method is
   the one place every grouping change reaches the delegate. The session
   record keeps the widths under `column_widths`.
@@ -87,9 +90,13 @@ cargo bench -p geode-blotter   # the pure core
   ancestor, avoiding double-counted group totals. Only compiler-marked
   summable columns with additive values produce a footer total; `†` marks
   non-additive values and `‡` marks unsummable columns.
-- `g m` opens another module using the cursor row's underlying. The grouping
-  must contain `underlying_ref`, and the cursor must be at or below its level
-  with a non-NULL value. A visual selection does not change the launch context.
+- `g m` opens another module on the cursor row's dimension context
+  (`core::context`): every column with one value there, read from the
+  grouping path (a subtotal carries only its own levels and those above), the
+  shown dimension columns, then the hidden context columns the data service
+  adds. A NULL, empty or mixed value is absent. The context also carries the
+  selection's rows while the cursor is inside a visual selection; `g m` opens
+  on the cursor row's values alone.
 - `tile_columns` reports the plan's non-tree columns and the cursor's column
   for the shell's edit-column actions; the tree column is never active, and
   derived view columns are flagged so Schema can leave them out.

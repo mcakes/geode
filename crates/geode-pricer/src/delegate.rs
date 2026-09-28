@@ -1,43 +1,83 @@
 //! Table delegate over a prepared `Rc<GridModel>` installed by the tile. Cursor, loading
 //! state, and cell editor are read-only mirrors of tile state. Column zero
-//! is a pinned tree column with indentation, a fixed chevron slot, and a
-//! package's template tag; the cell cursor does not enter it.
+//! is a pinned connector tree the cell cursor does not enter: a package
+//! paints a chevron, its template as a neutral chip, its shorthand summary
+//! and a muted leg count; a leg its connector (`├`, `└` for the last) in
+//! its package's chevron lane and its full shorthand; a bare line its
+//! shorthand alone, on the edge the legs' text shares.
 //!
-//! Package backgrounds belong to `render_tr`. The table replaces row
-//! backgrounds for hover and selection; per-cell fills would obscure those states.
+//! No row paints a ground of its own: the tree column carries the
+//! structure, and hover and selection are the table's row grounds, which
+//! per-row or per-cell fills would obscure.
 
 use crate::grid::{GridModel, GridRowKind};
-use crate::paint::Paints;
+use crate::paint::{CellColour, Paints, cell_colour};
 use crate::popup::{ChoicePaint, render_choice};
 use crate::tile::PricerTile;
+use geode_core::colour::{Anchors, NamedColours, Tokens};
 use geode_core::grid::selection::{Resolved, SelectKind};
+use geode_core::view::Colour;
 use geode_shell::colfit::{FitMetrics, FittedWidths};
 use geode_shell::fonts;
 use geode_shell::linenumbers::{GUTTER_GAP_PX, LineNumbers, gutter_number, gutter_px};
+use geode_shell::shell::colours::{anchors_from_theme, theme_signature, tokens_from_theme};
 use geode_shell::shell::control::{self, PointerStates as _};
 use geode_shell::shell::scale;
+use geode_tile::colour::{ColourCache, Resolved as ColourResolved};
 use geode_widgets::datefield::{self, DateTimeField, SegmentPaint, SegmentText};
 use gpui::prelude::*;
 use gpui::{
-    App, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, SharedString, Stateful, TextAlign, WeakEntity, Window, div, px,
-    relative,
+    App, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, Hsla, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, SharedString, Stateful, TextAlign, WeakEntity,
+    Window, div, px, relative,
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::table::{Column, ColumnFixed, TableDelegate, TableState};
 use gpui_component::{ActiveTheme as _, Theme, h_flex};
 use std::rc::Rc;
+use std::sync::Arc;
 
-/// The tree column: a leg's indent, the chevron slot and the widest
-/// allowed template name, 8 characters, at the largest font size (checked
-/// below), in pixels like every width here; not resizable.
-const TREE_WIDTH: f32 = 100.0;
-/// One depth step, and the chevron slot every row reserves
-/// (empty on a line or leg), both on the rem scale: roots share one
-/// leading edge whether or not they carry a chevron, and a leg sits
-/// exactly one step in from its package.
+/// The tree column: fits a two-leg call spread's package row
+/// (`▾ CS Z26 4800/5200 · 2 legs`, a real 13-character summary) at the
+/// largest font (checked below), in pixels like every width here; not
+/// resizable. Longer summaries ellipsize; the leg count stays.
+const TREE_WIDTH: f32 = 230.0;
+/// One depth step, and the slot every row reserves at its lane, both on
+/// the rem scale. The slot holds a package's chevron or a leg's connector
+/// and is empty on a bare line, so roots share one leading edge whether or
+/// not they carry a chevron. A leg's connector takes its parent's lane
+/// (`lane_depth`), so it hangs directly under the package's chevron and the
+/// leg's text starts where the package's chip starts.
 const INDENT: f32 = 14.0;
 const CHEVRON_SLOT: f32 = 14.0;
+/// A template chip's horizontal padding, each side, and the gap between
+/// the tree cell's parts (slot, chip, text, note), in design px.
+const CHIP_PAD_X: f32 = 4.0;
+const TREE_GAP: f32 = 6.0;
+
+/// A leg's connector: a tee for every leg but its package's last, which
+/// takes a corner.
+pub(crate) fn connector(last: bool) -> &'static str {
+    if last { "└" } else { "├" }
+}
+
+/// How many `TREE_GAP`s the tree cell paints: one between each pair of
+/// adjacent parts. The slot and the text are always present; a chip and a
+/// note only when the row has them. The cell lays its parts out with one
+/// flex `gap`, so this is what `render_cell` paints and what
+/// `fit_columns` and the width test measure.
+pub(crate) fn tree_gaps(chip: bool, note: bool) -> usize {
+    1 + usize::from(chip) + usize::from(note)
+}
+
+/// The depth a row's tree cell indents by: a leg's connector sits in its
+/// package's chevron slot, one step out from the leg's own depth.
+fn lane_depth(kind: GridRowKind, depth: usize) -> usize {
+    match kind {
+        GridRowKind::Leg { .. } => depth.saturating_sub(1),
+        _ => depth,
+    }
+}
 /// What the empty table says: the next action, not an icon.
 pub(crate) const EMPTY_TEXT: &str = "No lines — press o to add one";
 pub(crate) const LOADING_TEXT: &str = "Loading sheet…";
@@ -71,6 +111,18 @@ type NumbersStamp = (usize, Option<usize>, LineNumbers);
 pub struct ChevronClicked(pub usize);
 
 impl EventEmitter<ChevronClicked> for TableState<SheetDelegate> {}
+
+/// A header drag dropped: the PLAN column at `from` now sits at `to`.
+/// Emitted by the table's `move_column` hook; the tile owns the plan, so
+/// the delegate reorders nothing of its own and the next `install_model`
+/// hands it the permuted model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColumnMoved {
+    pub from: usize,
+    pub to: usize,
+}
+
+impl EventEmitter<ColumnMoved> for TableState<SheetDelegate> {}
 
 /// Every mouse selection gesture a cell, the tree cell or the line-number
 /// gutter recognises, carried to the tile's `pointer`: the one door a
@@ -262,6 +314,26 @@ pub struct SheetDelegate {
     /// editor, its own cell — and so cancel the edit the press was aimed
     /// into.
     inner_press: Option<InnerPress>,
+    /// The `colors.toml` definitions the tile last handed down
+    /// (`set_colours`), the named-colour resolutions cached against them,
+    /// and the theme inputs those resolutions were made under: the
+    /// theme's full colour signature with the `Anchors`/`Tokens` pair
+    /// derived from it, re-derived only when the signature moves.
+    colours: Arc<NamedColours>,
+    colour_cache: ColourCache,
+    theme_inputs: Option<([Hsla; 28], Anchors, Tokens)>,
+}
+
+/// The name column `plan_col` carries a `Colour::Named` of, if it does.
+///
+/// A free function over the model rather than a `&self` method: the
+/// returned `&str` borrows `model` alone, leaving the delegate's other
+/// fields free for the `&mut` the colour cache needs.
+fn named_colour_of(model: &GridModel, plan_col: usize) -> Option<&str> {
+    match model.columns.get(plan_col).map(|c| &c.colour) {
+        Some(Colour::Named(name)) => Some(name.as_str()),
+        _ => None,
+    }
 }
 
 impl SheetDelegate {
@@ -283,12 +355,103 @@ impl SheetDelegate {
             drag_last: None,
             drag_origin: None,
             inner_press: None,
+            colours: Arc::new(NamedColours::default()),
+            colour_cache: ColourCache::new(),
+            theme_inputs: None,
         }
     }
 
+    /// The tile hands these down with every model it installs. A
+    /// different `Arc` means a reloaded `colors.toml`: everything resolved
+    /// so far was resolved from the old definitions, so the cache goes
+    /// with it. Pointer equality, not a deep compare — the factory shares
+    /// exactly one `Arc` per loaded doc, so the same pointer IS the same
+    /// definitions, and the common case (every rebuild, no reload) costs
+    /// one pointer compare.
+    pub(crate) fn set_colours(&mut self, colours: Arc<NamedColours>) {
+        if !Arc::ptr_eq(&self.colours, &colours) {
+            self.colours = colours;
+            self.colour_cache.invalidate();
+        }
+    }
+
+    /// Re-derive `theme_inputs` if and only if one of the twenty-eight
+    /// theme colours the derivation reads has moved.
+    ///
+    /// The compare is the FULL signature, not a sentinel or two: a theme
+    /// change that leaves `background`/`foreground` equal while moving an
+    /// anchor would otherwise keep painting the old colour, and the
+    /// `ColourCache` sitting behind this could never catch it — the stale
+    /// derived pair IS its key. The steady path is 28 `Hsla` copies and
+    /// 28 `Hsla` compares, with no `Hsla -> Rgb` conversion at all.
+    fn ensure_theme_inputs(&mut self, theme: &Theme) {
+        let signature = theme_signature(theme);
+        match &self.theme_inputs {
+            Some((have, ..)) if *have == signature => {}
+            _ => {
+                self.theme_inputs = Some((
+                    signature,
+                    anchors_from_theme(theme),
+                    tokens_from_theme(theme),
+                ));
+            }
+        }
+    }
+
+    /// Column `plan_col`'s named colour resolved under `theme`, with its
+    /// sign variants: `None` for a plain or `sign` column and for a name
+    /// `colors.toml` does not define (whose cells paint as if plain).
+    fn themed_cell_colour(&mut self, plan_col: usize, theme: &Theme) -> Option<ColourResolved> {
+        self.ensure_theme_inputs(theme);
+        // Four disjoint field borrows in one body — `model`, `colours` and
+        // `theme_inputs` shared, `colour_cache` mutable. A `&self` method
+        // for the name would borrow the whole delegate and shut the
+        // cache's own `&mut` out.
+        let name = named_colour_of(&self.model, plan_col)?;
+        let (_, anchors, tokens) = self.theme_inputs.as_ref().expect("set just above");
+        self.colour_cache.get(&self.colours, name, anchors, tokens)
+    }
+
+    /// The text colour `render_cell` paints the cell at (`row_ix`,
+    /// `plan_col`) with: the state paint, unless the cell is an own value
+    /// in a column whose `color` says otherwise (`paint::cell_colour`).
+    /// A row or column the model lacks is the own paint.
+    pub(crate) fn text_colour(&mut self, row_ix: usize, plan_col: usize, theme: &Theme) -> Hsla {
+        let model = Rc::clone(&self.model);
+        let Some(row) = model.rows.get(row_ix) else {
+            return self.paints.own;
+        };
+        let Some(cell) = row.cells.get(plan_col) else {
+            return self.paints.own;
+        };
+        let base = self.paints.text(cell.state);
+        let colour = model
+            .columns
+            .get(plan_col)
+            .map_or(&Colour::None, |c| &c.colour);
+        match cell_colour(colour, cell.state, cell.sign) {
+            CellColour::State => base,
+            CellColour::Bearish => theme.chart_bearish,
+            CellColour::Bullish => theme.chart_bullish,
+            CellColour::Named(sign) => self
+                .themed_cell_colour(plan_col, theme)
+                .map_or(base, |c| c.for_sign(Some(sign))),
+        }
+    }
+
+    /// The colour `render_th` paints column `plan_col`'s label with: a
+    /// named colour's base (a header has no sign), `None` for the
+    /// component's own foreground.
+    pub(crate) fn header_colour(&mut self, plan_col: usize, theme: &Theme) -> Option<Hsla> {
+        self.themed_cell_colour(plan_col, theme).map(|c| c.base)
+    }
+
     /// Fit the tree column and every plan column to its header and every
-    /// grid row's prepared text. The tree column adds each row's indent and
-    /// the chevron slot, both on the rem scale as `render_cell` paints them.
+    /// grid row's prepared text. The tree column measures exactly what
+    /// `render_cell` paints: the row's lane indent, the chevron slot, the
+    /// gaps between its parts (`tree_gaps`) and, when present, the chip
+    /// (its padding and tag), then the text and the note; indent, slot,
+    /// padding and gaps on the rem scale.
     ///
     /// `None` with nothing to measure: the sheet is still loading, or has
     /// no rows.
@@ -300,12 +463,20 @@ impl SheetDelegate {
         let mut out = FittedWidths::new();
         out.insert(
             TREE_KEY.to_string(),
-            m.fit(
-                self.model
-                    .rows
-                    .iter()
-                    .map(|r| design(r.depth as f32 * INDENT + CHEVRON_SLOT) + m.text_px(&r.tag)),
-            ),
+            m.fit(self.model.rows.iter().map(|r| {
+                let (chip, note) = (!r.tag.is_empty(), !r.note.is_empty());
+                let depth = lane_depth(r.kind, r.depth);
+                let chip_px = if chip {
+                    design(2.0 * CHIP_PAD_X) + m.text_px(&r.tag)
+                } else {
+                    0.0
+                };
+                design(
+                    depth as f32 * INDENT + CHEVRON_SLOT + tree_gaps(chip, note) as f32 * TREE_GAP,
+                ) + chip_px
+                    + m.text_px(&r.text)
+                    + m.text_px(&r.note)
+            })),
         );
         for (col, c) in self.model.columns.iter().enumerate() {
             let cells = self
@@ -354,6 +525,17 @@ impl SheetDelegate {
         self.gutter
     }
 
+    /// The gutter's text paint on grid row `row`: the row's own paint on
+    /// the cursor row, muted elsewhere. Every row shares the line palette
+    /// (no row has a ground of its own), so the row's kind does not enter.
+    pub(crate) fn gutter_paint(&self, row: usize) -> Hsla {
+        if self.cursor.is_some_and(|(r, _)| r == row) {
+            self.paints.own
+        } else {
+            self.paints.muted
+        }
+    }
+
     /// The cached gutter text for grid row `row`; `None` when off. Reads
     /// the cache as painted — it does not refresh it.
     #[cfg(test)]
@@ -375,13 +557,14 @@ impl SheetDelegate {
     }
 
     /// Derive chevron pointer states against row_hover, the background the table paints
-    /// under the pointer. Package-muted text is contrast-adjusted there too.
+    /// under the pointer. The chevron's rest text is the row palette's muted paint,
+    /// already floored on that hover ground.
     fn chevron_states(&mut self, theme: &Theme) -> control::ControlPaint {
         let inputs = control::ControlInputs::new(
             theme,
             control::Rest::Bare,
             self.paints.row_hover,
-            self.paints.package_muted,
+            self.paints.muted,
         );
         match &self.chevron {
             Some((have, paint)) if *have == inputs => *paint,
@@ -444,10 +627,28 @@ impl TableDelegate for SheetDelegate {
             },
             sort: None,
             width: px(self.fitted.get(c.name).copied().unwrap_or(c.width)),
-            movable: false,
-            resizable: false,
+            movable: true,
+            resizable: true,
             ..Column::default()
         }
+    }
+
+    /// A header drag dropped. Both indices are TABLE indices; the tree
+    /// column never moves and nothing moves before it (it is `fixed`, so
+    /// the table refuses those drops itself, and this guard keeps a plan
+    /// index from going negative should that change). The tile owns the
+    /// plan, so the move is reported, not applied here.
+    fn move_column(
+        &mut self,
+        col_ix: usize,
+        to_ix: usize,
+        _window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) {
+        let (Some(from), Some(to)) = (Self::plan_col(col_ix), Self::plan_col(to_ix)) else {
+            return;
+        };
+        cx.emit(ColumnMoved { from, to });
     }
 
     fn render_th(
@@ -457,6 +658,9 @@ impl TableDelegate for SheetDelegate {
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let column = self.column(col_ix, cx);
+        // A named colour's base on the label; the component owns the rest
+        // of the header (padding, borders) and its foreground otherwise.
+        let colour = Self::plan_col(col_ix).and_then(|c| self.header_colour(c, cx.theme()));
         div()
             .size_full()
             .flex()
@@ -465,12 +669,14 @@ impl TableDelegate for SheetDelegate {
                 el.justify_end()
             })
             .font_family(fonts::MONO)
+            .when_some(colour, |el, c| el.text_color(c))
             .debug_selector(|| format!("pricer-th-{col_ix}"))
             .child(column.name)
     }
 
-    /// A package row's ground, on the row (see the module doc). A filler
-    /// row past the model paints nothing and reports nothing.
+    /// The row keeps only its press door: no row paints a ground of its
+    /// own (see the module doc). A filler row past the model reports
+    /// nothing.
     ///
     /// A press on the row outside every cell (the table's trailing filler)
     /// is still a click on that row: it reports a press at the cursor's
@@ -484,13 +690,7 @@ impl TableDelegate for SheetDelegate {
         _window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> Stateful<Div> {
-        let ground = match self.model.rows.get(row_ix).map(|r| r.kind) {
-            Some(GridRowKind::Package { .. }) => Some(self.paints.package_ground),
-            _ => None,
-        };
-        let row = div()
-            .id(("row", row_ix))
-            .when_some(ground, |el, g| el.bg(g));
+        let row = div().id(("row", row_ix));
         if row_ix >= self.model.rows.len() {
             return row;
         }
@@ -533,9 +733,10 @@ impl TableDelegate for SheetDelegate {
     /// A cell, with the gutter beside the tree cell when line numbers are
     /// on. The gutter sits OUTSIDE the tree cell, so the depth indent
     /// starts after it (one lane of numbers whatever the depth) and the
-    /// cell's own contents never cover it. The row's ground (a package's,
-    /// hover, selection) paints under it, so it takes the row's floored
-    /// muted paint, and the cursor row the row's own text paint.
+    /// cell's own contents never cover it. The row's ground (the table's
+    /// own, hover, selection) paints under it, so it takes the floored
+    /// muted paint, and the cursor row the own text paint
+    /// (`gutter_paint`).
     fn render_td(
         &mut self,
         row_ix: usize,
@@ -547,17 +748,7 @@ impl TableDelegate for SheetDelegate {
         if col_ix != TREE_COL || self.line_numbers == LineNumbers::Off {
             return cell;
         }
-        let package = matches!(
-            self.model.rows.get(row_ix).map(|r| r.kind),
-            Some(GridRowKind::Package { .. })
-        );
-        let on_cursor = self.cursor.is_some_and(|(row, _)| row == row_ix);
-        let paint = match (on_cursor, package) {
-            (true, false) => self.paints.own,
-            (true, true) => self.paints.package_own,
-            (false, false) => self.paints.muted,
-            (false, true) => self.paints.package_muted,
-        };
+        let paint = self.gutter_paint(row_ix);
         let text = self.numbers.get(row_ix).cloned().unwrap_or_default();
         div()
             .size_full()
@@ -583,8 +774,8 @@ impl TableDelegate for SheetDelegate {
 }
 
 /// The selection tint: an absolute overlay painted as a cell's first
-/// child, so it sits under the text, a package row's ground (painted on
-/// the row) still shows through, and the cursor's border paints over it.
+/// child, so it sits under the text, the table's row ground still shows
+/// through, and the cursor's border paints over it.
 fn selection_tint(theme: &Theme) -> Div {
     div().absolute().inset_0().bg(theme.selection.opacity(0.35))
 }
@@ -608,7 +799,6 @@ impl SheetDelegate {
         let Some(row) = model.rows.get(row_ix) else {
             return div().into_any_element();
         };
-        let package = matches!(row.kind, GridRowKind::Package { .. });
         let (active_border, radius) = {
             let t = cx.theme();
             (t.table_active_border, t.radius_tokens().sm)
@@ -630,9 +820,10 @@ impl SheetDelegate {
             });
         let base = base.when(tinted, |el| el.relative().child(selection_tint(cx.theme())));
         let Some(plan_col) = Self::plan_col(col_ix) else {
-            // The tree column: indent by depth, then the fixed chevron
-            // slot (a chevron on a package, empty otherwise), then the
-            // row's tag (a package's template token).
+            // The tree column: the lane indent, then the fixed slot (a
+            // package's chevron, a leg's connector, empty on a bare line),
+            // then a package's chip, the row's text and a package's leg
+            // count, one `TREE_GAP` between each (`tree_gaps`).
             let slot = div()
                 .w(scale::design(CHEVRON_SLOT))
                 .h_full()
@@ -640,56 +831,84 @@ impl SheetDelegate {
                 .flex()
                 .items_center()
                 .justify_center();
-            let el = base.pl(scale::design(row.depth as f32 * INDENT));
-            let slot = match row.kind {
+            let depth = lane_depth(row.kind, row.depth);
+            let el = base
+                .pl(scale::design(depth as f32 * INDENT))
+                .gap(scale::design(TREE_GAP));
+            let (slot, text_paint) = match row.kind {
                 GridRowKind::Package { open } => {
                     let states = self.chevron_states(cx.theme());
-                    slot.child(
-                        div()
-                            .id(("pricer-chevron", row_ix))
-                            .size_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(radius)
-                            .text_color(paints.package_muted)
-                            .pointer_states(states)
-                            .debug_selector(|| format!("pricer-chevron-{row_ix}"))
-                            // Recorded, not stopped: the tree cell reports
-                            // it as a plain press (it clears a selection
-                            // and never starts one) and the shell's
-                            // tile-level press still arrives.
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _: &MouseDownEvent, _, _| {
-                                    this.delegate_mut().inner_press = Some(InnerPress::Chevron);
-                                }),
-                            )
-                            .on_click(cx.listener(move |this, e: &ClickEvent, _window, cx| {
-                                cx.stop_propagation();
-                                // Toggle only on the first press of a double-click.
-                                if e.click_count() > 1 {
-                                    return;
-                                }
-                                this.set_selected_row(row_ix, cx);
-                                cx.emit(ChevronClicked(row_ix));
-                            }))
-                            .child(if open { "▾" } else { "▸" }),
-                    )
+                    let chevron = div()
+                        .id(("pricer-chevron", row_ix))
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(radius)
+                        .text_color(paints.muted)
+                        .pointer_states(states)
+                        .debug_selector(|| format!("pricer-chevron-{row_ix}"))
+                        // Recorded, not stopped: the tree cell reports
+                        // it as a plain press (it clears a selection
+                        // and never starts one) and the shell's
+                        // tile-level press still arrives.
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _: &MouseDownEvent, _, _| {
+                                this.delegate_mut().inner_press = Some(InnerPress::Chevron);
+                            }),
+                        )
+                        .on_click(cx.listener(move |this, e: &ClickEvent, _window, cx| {
+                            cx.stop_propagation();
+                            // Toggle only on the first press of a double-click.
+                            if e.click_count() > 1 {
+                                return;
+                            }
+                            this.set_selected_row(row_ix, cx);
+                            cx.emit(ChevronClicked(row_ix));
+                        }))
+                        .child(if open { "▾" } else { "▸" });
+                    (slot.child(chevron), paints.own)
                 }
-                _ => slot,
+                GridRowKind::Leg { last } => (
+                    slot.text_color(paints.muted)
+                        .debug_selector(|| format!("pricer-connector-{row_ix}"))
+                        .child(connector(last)),
+                    paints.muted,
+                ),
+                GridRowKind::Line => (slot, paints.own),
             };
+            let chip = (!row.tag.is_empty()).then(|| {
+                div()
+                    .flex_shrink_0()
+                    .px(scale::design(CHIP_PAD_X))
+                    .rounded(radius)
+                    .bg(paints.chip_fill)
+                    .text_color(paints.chip_text)
+                    .debug_selector(|| format!("pricer-chip-{row_ix}"))
+                    .child(row.tag.clone())
+            });
+            // The note stays whole when the summary ellipsizes.
+            let note = (!row.note.is_empty()).then(|| {
+                div()
+                    .flex_shrink_0()
+                    .text_color(paints.muted)
+                    .debug_selector(|| format!("pricer-note-{row_ix}"))
+                    .child(row.note.clone())
+            });
             return Self::wire_pointer(el, cx, row_ix, None)
-                .text_color(paints.text(crate::core::CellState::Own, package))
                 .child(slot)
+                .children(chip)
                 .child(
                     div()
-                        .flex_1()
                         .min_w_0()
                         .overflow_hidden()
                         .text_ellipsis()
-                        .child(row.tag.clone()),
+                        .text_color(text_paint)
+                        .debug_selector(|| format!("pricer-tree-text-{row_ix}"))
+                        .child(row.text.clone()),
                 )
+                .children(note)
                 .into_any_element();
         };
         let at_cursor = self.cursor == Some((row_ix, plan_col));
@@ -745,10 +964,11 @@ impl SheetDelegate {
             // Ellipsize left-aligned text; the footer retains full failure reasons.
             // Numeric cells keep their digits and rely on column width rather than
             // ellipsis.
-            None => el
-                .when_some(row.cells.get(plan_col), |el, cell| {
+            None => {
+                let colour = self.text_colour(row_ix, plan_col, cx.theme());
+                el.when_some(row.cells.get(plan_col), |el, cell| {
                     let text = cell.text.clone();
-                    el.text_color(paints.text(cell.state, package)).map(|el| {
+                    el.text_color(colour).map(|el| {
                         if right {
                             el.child(text)
                         } else {
@@ -762,7 +982,8 @@ impl SheetDelegate {
                         }
                     })
                 })
-                .into_any_element(),
+                .into_any_element()
+            }
         }
     }
 }
@@ -889,6 +1110,21 @@ mod tests {
     }
 
     #[test]
+    fn a_leg_takes_a_tee_and_the_last_leg_a_corner() {
+        assert_eq!(super::connector(false), "├");
+        assert_eq!(super::connector(true), "└");
+    }
+
+    /// The gaps between the tree cell's painted parts: the slot always,
+    /// then a chip, the text always, then a note.
+    #[test]
+    fn the_tree_cell_counts_a_gap_between_each_pair_of_parts() {
+        assert_eq!(super::tree_gaps(false, false), 1, "slot, text");
+        assert_eq!(super::tree_gaps(true, false), 2);
+        assert_eq!(super::tree_gaps(true, true), 3, "slot, chip, text, note");
+    }
+
+    #[test]
     fn off_numbers_nothing() {
         assert!(
             number_rows(LineNumbers::Off, 4, Some(0))
@@ -921,18 +1157,20 @@ mod width_tests {
             ColumnKind::Qty => fmt(-10000.0),
             ColumnKind::Strike | ColumnKind::Barrier => fmt(12345.67),
             ColumnKind::SpotShift | ColumnKind::VolShift => signed(-99.9, &def.default_format),
-            ColumnKind::Price
-            | ColumnKind::Delta
-            | ColumnKind::Gamma
-            | ColumnKind::Vega
-            | ColumnKind::Theta
-            | ColumnKind::Rho => fmt(-1_234_567.89),
+            ColumnKind::Measure { .. } => fmt(-1_234_567.89),
             // Representative text values for the width check.
-            ColumnKind::Underlying => "SX5E".into(),
+            ColumnKind::SheetName => "untitled-1".into(),
+            // Ids are minted per sheet from 1; five digits is a long session.
+            ColumnKind::PositionRef => "p10000".into(),
+            ColumnKind::InstrumentRef => "i10000".into(),
+            // A template name is at most MAX_TEMPLATE_NAME (8) characters.
+            ColumnKind::Template => "STRANGLE".into(),
+            ColumnKind::Currency => "USD".into(),
+            ColumnKind::UnderlyingRef => "SX5E".into(),
             // The cell reads `20DEC26`, but `i` edits it in the date field,
             // which paints `YYYY-MM-DD` inside the same width.
             ColumnKind::Expiry => "2026-12-20".into(),
-            ColumnKind::Type => "C".into(),
+            ColumnKind::OptionType => "C".into(),
             ColumnKind::BarrierType => "DO".into(),
             ColumnKind::PricedAt => "23:59:59".into(),
             // Prose: a failure's reason may be longer than any width; it
@@ -969,20 +1207,24 @@ mod width_tests {
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
-    /// Column 0 holds a leg's indent, the chevron slot and the widest tag
-    /// at the largest font size. Indent and slot are on the rem scale;
-    /// the column is fixed pixels.
+    /// Column 0 holds a two-leg package row, `▾ CS Z26 4800/5200 · 2
+    /// legs` (a call spread's real summary), at the largest font size: the chevron slot, the chip's padding,
+    /// the gaps between the four parts and the three texts. Slot, padding
+    /// and gaps are on the rem scale; the column is fixed pixels. `·`
+    /// is one glyph.
     #[test]
-    fn the_tree_column_fits_the_widest_tag() {
-        use super::{CHEVRON_SLOT, INDENT, TREE_WIDTH};
+    fn the_tree_column_fits_a_two_leg_package_row() {
+        use super::{CHEVRON_SLOT, CHIP_PAD_X, TREE_GAP, TREE_WIDTH, tree_gaps};
         let rem = FontSize::Large.rem_px();
         let advance = rem * TABLE_TEXT_REM * MONO_ADVANCE_EM;
         let pad = Size::XSmall.table_cell_padding();
         let padding = f32::from(pad.left) + f32::from(pad.right);
-        // The longest name `check_name` allows.
-        let widest = crate::core::MAX_TEMPLATE_NAME;
-        let need = (INDENT + CHEVRON_SLOT) * rem / geode_shell::shell::scale::DESIGN_REM
-            + widest as f32 * advance
+        let design = |x: f32| x * rem / geode_shell::shell::scale::DESIGN_REM;
+        let (tag, text, note) = ("CS", "Z26 4800/5200", "· 2 legs");
+        let gaps = tree_gaps(true, true);
+        assert_eq!(gaps, 3, "slot, chip, summary and note: three gaps");
+        let need = design(CHEVRON_SLOT + 2.0 * CHIP_PAD_X + gaps as f32 * TREE_GAP)
+            + (tag.chars().count() + text.chars().count() + note.chars().count()) as f32 * advance
             + padding;
         assert!(need <= TREE_WIDTH, "needs {need:.1}px in {TREE_WIDTH}px");
         assert!(

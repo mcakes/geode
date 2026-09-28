@@ -4,12 +4,12 @@
 
 pub mod cache;
 pub mod commands;
+pub mod context;
 pub mod cursor;
 pub mod expansion;
 pub mod find;
 pub mod flatten;
 pub mod format;
-pub mod launch;
 pub mod plan;
 pub mod select;
 pub mod yank;

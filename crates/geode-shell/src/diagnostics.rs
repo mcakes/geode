@@ -1,4 +1,4 @@
-//! Operational state shared by the status bar and diagnostics tiles. The app
+//! Operational state shared by the status bar and the diagnostics page. The app
 //! bridge supplies source and catalog events; config load/reload supplies its
 //! own diagnostic batches. [`Diagnostics::summary`] caches the status text.
 //!
@@ -35,7 +35,7 @@ const REQUEST_LOOP: &str = "geode-data";
 pub struct StoppedThread {
     /// The spawn name the data layer reported.
     pub thread: String,
-    /// What the status bar and the diagnostics tile call it.
+    /// What the status bar and the diagnostics page call it.
     pub label: String,
     pub reason: String,
     pub at: SystemTime,
@@ -68,6 +68,7 @@ pub fn thread_label(thread: &str) -> String {
         "geode-ingest" => "ingest",
         "geode-discovery" => "discovery",
         "geode-pricing" => "pricing",
+        "geode-vol" => "vol model",
         other => other,
     }
     .to_string()
@@ -110,8 +111,13 @@ fn stopped_segment(stopped: &[StoppedThread]) -> Option<StoppedSegment> {
     })
 }
 
+/// The kind under which the diagnostics page registers. The shell's status
+/// bar summary click dispatches `page::toggle_<this>`; the feature crate's
+/// factory returns it from `kind()`.
+pub const DIAGNOSTICS_PAGE_KIND: &str = "diagnostics";
+
 /// Why the bridge should read the catalog. Explicit requests (for example an
-/// identity picker) remain valid without a visible diagnostics tile.
+/// identity picker) remain valid without a visible diagnostics page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CatalogRequest {
     Watched,
@@ -269,8 +275,11 @@ pub struct Diagnostics {
     pub frame_hist: FrameHistogram,
     /// The latest catalog outcome, including its as-of and resource metrics.
     pub catalog: Option<CatalogSnapshot>,
+    /// When `catalog` was stored, as the caller of [`Self::set_catalog`]
+    /// supplied it. `None` until the first snapshot.
+    pub catalog_at: Option<SystemTime>,
     pub levels: LogLevels,
-    /// Visible diagnostics tile count, maintained by `watch`/`unwatch`.
+    /// Visible diagnostics page count, maintained by `watch`/`unwatch`.
     /// Watched catalog refreshes and histogram copies require at least one
     /// watcher; explicit catalog consumers are independent.
     watchers: u32,
@@ -279,6 +288,9 @@ pub struct Diagnostics {
     versions: DiagVersions,
     pending_level: Option<(String, Level)>,
     pending_overlay_toggle: bool,
+    /// The shell's `perf_overlay` as of its last toggle, mirrored by
+    /// [`Self::set_overlay_visible`]; see that method.
+    overlay_visible: bool,
     pending_catalog_request: bool,
     pending_explicit_catalog: bool,
     /// Status summary cached by combined version. A cache hit shares the
@@ -302,12 +314,14 @@ impl Diagnostics {
             restart_required: None,
             frame_hist: FrameHistogram::new(),
             catalog: None,
+            catalog_at: None,
             levels,
             watchers: 0,
             version: 0,
             versions: DiagVersions::default(),
             pending_level: None,
             pending_overlay_toggle: false,
+            overlay_visible: false,
             pending_catalog_request: false,
             pending_explicit_catalog: false,
             summary_cache: RefCell::new((u64::MAX, Rc::from(""))),
@@ -518,8 +532,11 @@ impl Diagnostics {
     /// Store a changed catalog snapshot and refresh the per-dataset slices.
     /// Dataset names remain in the map, but a dataset omitted from the new
     /// snapshot has its catalog cleared so stale generations cannot linger.
-    /// An equal snapshot leaves versions unchanged.
-    pub fn set_catalog(&mut self, snapshot: CatalogSnapshot) {
+    /// An equal snapshot leaves versions unchanged, and `catalog_at` with
+    /// them: `at` is the time the stored snapshot arrived, not the time the
+    /// database was last asked, so a repeat answer that changes nothing does
+    /// not move it either.
+    pub fn set_catalog(&mut self, snapshot: CatalogSnapshot, at: SystemTime) {
         if self.catalog.as_ref() == Some(&snapshot) {
             return;
         }
@@ -530,6 +547,7 @@ impl Diagnostics {
             self.datasets.entry(ds.name.clone()).or_default().catalog = Some(ds.clone());
         }
         self.catalog = Some(snapshot);
+        self.catalog_at = Some(at);
         self.version += 1;
         self.versions.data += 1;
     }
@@ -567,7 +585,7 @@ impl Diagnostics {
         true
     }
 
-    /// Remove a visible tile's watch, saturating at zero. The last watcher
+    /// Remove a visible page's watch, saturating at zero. The last watcher
     /// clears pending watched demand, while explicit consumers retain their
     /// requests. The caller must notify observers after the visibility change.
     pub fn unwatch(&mut self) {
@@ -644,6 +662,24 @@ impl Diagnostics {
 
     pub fn take_pending_overlay_toggle(&mut self) -> bool {
         std::mem::take(&mut self.pending_overlay_toggle)
+    }
+
+    /// Whether the performance overlay is showing, mirrored here by the
+    /// shell on every toggle so a page can paint a controlled switch. Bumps
+    /// the perf counter so a perf-section observer repaints. Returns whether
+    /// the value changed.
+    pub fn set_overlay_visible(&mut self, visible: bool) -> bool {
+        if self.overlay_visible == visible {
+            return false;
+        }
+        self.overlay_visible = visible;
+        self.version += 1;
+        self.versions.perf += 1;
+        true
+    }
+
+    pub fn overlay_visible(&self) -> bool {
+        self.overlay_visible
     }
 
     /// Consume queued demand, preserving explicit consumers when diagnostics hides.
@@ -1151,9 +1187,9 @@ mod tests {
     fn set_catalog_is_a_no_op_for_a_byte_identical_snapshot() {
         let mut d = Diagnostics::new(LogLevels::default());
         let snap = CatalogSnapshot::default();
-        d.set_catalog(snap.clone());
+        d.set_catalog(snap.clone(), SystemTime::UNIX_EPOCH);
         let v = d.version();
-        d.set_catalog(snap);
+        d.set_catalog(snap, SystemTime::UNIX_EPOCH);
         assert_eq!(d.version(), v, "identical snapshot, no rebuild");
     }
 
@@ -1161,19 +1197,25 @@ mod tests {
     #[test]
     fn set_catalog_drops_a_dataset_missing_from_a_newer_snapshot() {
         let mut d = Diagnostics::new(LogLevels::default());
-        d.set_catalog(CatalogSnapshot {
-            datasets: vec![DatasetCatalog {
-                name: "risk".into(),
+        d.set_catalog(
+            CatalogSnapshot {
+                datasets: vec![DatasetCatalog {
+                    name: "risk".into(),
+                    ..Default::default()
+                }],
                 ..Default::default()
-            }],
-            ..Default::default()
-        });
+            },
+            SystemTime::UNIX_EPOCH,
+        );
         assert!(d.datasets["risk"].catalog.is_some());
-        d.set_catalog(CatalogSnapshot {
-            datasets: vec![],
-            threads: 1,
-            ..Default::default()
-        });
+        d.set_catalog(
+            CatalogSnapshot {
+                datasets: vec![],
+                threads: 1,
+                ..Default::default()
+            },
+            SystemTime::UNIX_EPOCH,
+        );
         assert!(
             d.datasets["risk"].catalog.is_none(),
             "a dataset missing from the newer snapshot is cleared"
@@ -1495,6 +1537,7 @@ mod tests {
             ("geode-ingest", "ingest"),
             ("geode-discovery", "discovery"),
             ("geode-pricing", "pricing"),
+            ("geode-vol", "vol model"),
             ("geode-query-0", "query worker 0"),
             ("geode-fetch-kdb", "fetch kdb"),
             ("geode-subscribe-cvi", "subscription cvi"),

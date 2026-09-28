@@ -14958,6 +14958,7 @@ cells = {{ ex = {{ type = "date", value = "2027-06-18" }}, amount = 0.75, status
             None,
             &geode_shell::session::PinnedRecords::new(),
             &geode_shell::palette_usage::PaletteUsage::new(),
+            &geode_shell::session::PageRecords::new(),
         );
         let ws1: toml::Table = format!(
             r#"
@@ -15005,6 +15006,8 @@ edits = [["2026-11-20", "-1", 9.5]]
             keymap_fragments: fragments,
             keymap_fragment_diagnostics: Vec::new(),
             composition_diagnostics: Vec::new(),
+            pages: geode_shell::module::PageRoster::new(),
+            restored_pages: std::collections::BTreeMap::new(),
         };
         let shell_slot = Rc::new(RefCell::new(None));
         let window = cx

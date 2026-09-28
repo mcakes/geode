@@ -46,6 +46,20 @@ impl ShellView {
         tiles
     }
 
+    /// The retained page's state (open or not), plus every table still in
+    /// `restored_pages`: kinds never opened, unknown kinds, and the last
+    /// state of a page another kind replaced. All of them survive a save.
+    pub(super) fn current_pages(&self, cx: &App) -> session::PageRecords {
+        let mut pages: session::PageRecords = self.services.restored_pages.clone();
+        if let Some(page) = &self.page {
+            pages.insert(
+                page.occupant.kind.to_string(),
+                page.occupant.content.serialize(cx),
+            );
+        }
+        pages
+    }
+
     /// The module kind occupying `tile`, or `None` if it has no occupant
     /// (not a tile at all, or not yet created).
     pub fn occupant_kind(&self, tile: TileId) -> Option<&'static str> {
@@ -91,6 +105,7 @@ impl ShellView {
             keyed @ (Delivery::Query(_)
             | Delivery::Series(_)
             | Delivery::Price(_)
+            | Delivery::VolSlices(_)
             | Delivery::Upload(_)) => {
                 if let Some(key) = keyed.key()
                     && let Some(o) = self.occupants.get(&TileId(key.0))
@@ -120,6 +135,11 @@ impl ShellView {
     /// set avoids a fresh allocation each frame.
     fn fill_active_tiles(&self, out: &mut HashSet<TileId>) {
         out.clear();
+        // A page covers the tile surface: nothing beneath is visible, so no tile
+        // is announced shown and no flip barrier waits on one.
+        if self.page_open() {
+            return;
+        }
         let ws = self.services.workspaces.active();
         out.extend(ws.tree().visible_tiles());
         for (_, dock) in ws.docks().iter() {
@@ -135,6 +155,11 @@ impl ShellView {
     /// allocation between uses.
     pub(super) fn visible_tile_keys(&self, out: &mut Vec<QueryKey>) {
         out.clear();
+        // A page covers the tile surface: nothing beneath is visible, so no tile
+        // is announced shown and no flip barrier waits on one.
+        if self.page_open() {
+            return;
+        }
         // Placeholders never query or arrive; waiting on them would hold every
         // flip until its deadline.
         let has_real_occupant = |id: &TileId| {
@@ -380,7 +405,10 @@ impl ShellView {
         // be included in `holds_shell_focus`. A tile still on screen that owns
         // the focus keeps it too: a pull hides a neighbour while the focused
         // tile may be typing, and taking its input would strand the open
-        // editor. Focus no painted tile claims is still taken back.
+        // editor. Focus no painted tile claims is still taken back. An open
+        // page is what hid the tiles, and it holds the focus on purpose: the
+        // net must not pull it off the page (or the page's own input) on the
+        // very render that hides them.
         if any_tile_left_the_screen
             && let Some(focused) = window.focused(cx)
             && !self.holds_shell_focus(&focused, cx)
@@ -388,6 +416,12 @@ impl ShellView {
                 self.occupants
                     .get(id)
                     .is_some_and(|o| o.content.holds_focus(window, cx))
+            })
+            && !self.page.as_ref().filter(|p| p.open).is_some_and(|p| {
+                p.occupant
+                    .content
+                    .focus_handle(cx)
+                    .contains_focused(window, cx)
             })
         {
             self.focus_handle.focus(window, cx);
@@ -516,6 +550,15 @@ impl ShellView {
         cx: &App,
     ) -> Option<Vec<crate::keymap::KeyContext>> {
         window.focused(cx)?;
+        if let Some(page) = self.page.as_ref().filter(|p| p.open) {
+            // The full stack, unfiltered: `insert_contexts` applies the
+            // `mode == insert` filter to bare keys itself, so a page whose
+            // context carries no `mode` lets bare keys reach its input.
+            if !page.occupant.content.holds_focus(window, cx) {
+                return None;
+            }
+            return Some(self.context_stack(cx));
+        }
         let tile = self.services.workspaces.active().focused_tile()?;
         if !self.occupants.get(&tile)?.content.holds_focus(window, cx) {
             return None;

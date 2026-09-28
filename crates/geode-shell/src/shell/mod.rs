@@ -25,6 +25,7 @@ pub mod keys;
 pub mod listrow;
 pub mod objectdialog;
 mod occupants;
+mod page;
 mod palette_ctl;
 pub mod perf_overlay;
 pub mod picker;
@@ -62,7 +63,7 @@ use crate::fontsize::FontSize;
 use crate::frame::{Frame, FrameRef, FrameVersions};
 use crate::keymap::{Keymap, Matcher, Modifiers};
 use crate::log_persist;
-use crate::module::{ModuleRoster, TileOccupant};
+use crate::module::{ModuleRoster, PageRoster, TileOccupant};
 use crate::palette::PaletteState;
 use crate::perf::FrameHistogram;
 use crate::reload;
@@ -147,6 +148,12 @@ pub struct ShellServices {
     /// panels exist, so a fix on disk shows `restart required` beside the
     /// standing error until then.
     pub composition_diagnostics: Vec<Diagnostic>,
+    /// The app's registered pages, in sidebar order. Empty in tests that
+    /// build no page.
+    pub pages: PageRoster,
+    /// `[pages.<kind>]` tables from the loaded session, consumed by the
+    /// page's first open. Unmatched tables are carried to the next save.
+    pub restored_pages: std::collections::BTreeMap<String, toml::Table>,
 }
 
 /// Runtime logging services: the diagnostics ring, the palette's level
@@ -211,7 +218,7 @@ impl EventEmitter<ShellEvent> for ShellView {}
 /// method with its own stale-tag/stale-column guard.
 pub const PICKER_KEY: QueryKey = QueryKey(u64::MAX - 1);
 
-/// The coalescing key the diagnostics tile's `Request::Catalog` submits
+/// The coalescing key the diagnostics page's `Request::Catalog` submits
 /// under — same reservation reasoning as [`PICKER_KEY`]
 /// just above, one lower so the two can never collide with each other or
 /// with a real tile's `TileId`-derived key.
@@ -262,7 +269,9 @@ pub fn pickable_columns(config: &Config) -> Vec<Pickable> {
         .unwrap_or_default();
 
     let mut out: Vec<Pickable> = Vec::new();
-    for dataset in &schema.datasets {
+    // A computed dataset's values cannot be listed (no relation); its
+    // columns that another dataset shares are picked through that dataset.
+    for dataset in schema.datasets.iter().filter(|d| !d.computed) {
         for column in dataset.categorical_columns() {
             if let Some(p) = out.iter_mut().find(|p| p.column == column) {
                 p.datasets.push(dataset.name.clone());
@@ -479,6 +488,10 @@ pub struct ShellView {
     /// initially empty. Compared every tick to catch module-only state changes.
     /// Updated before disk I/O; a failed write does not reset this baseline.
     last_tiles_written: crate::session::TileRecords,
+    /// Page records from the last successfully serialized periodic snapshot,
+    /// initially empty. Compared every tick like `last_tiles_written`, since
+    /// a page's state changes do not set the layout flag.
+    last_pages_written: crate::session::PageRecords,
     /// The frame's generation counter captured by the last successfully
     /// serialized periodic snapshot, initially zero. Every scope, grouping,
     /// as-of, pin, and unpin change in any lane advances it, so it detects
@@ -540,6 +553,14 @@ pub struct ShellView {
     /// palette-reachable, bound `mod+shift+p`). Display-only: toggling it
     /// changes nothing about recording, which always runs.
     perf_overlay: bool,
+    /// The one page this window has created, open or not. Created on its
+    /// first `page::toggle_<kind>` and retained so a round trip keeps its
+    /// state; `open` is the only flag a toggle changes. `None` until then.
+    page: Option<page::OpenPage>,
+    /// The registered pages' sidebar entries, collected once at construction:
+    /// the roster never changes after startup, and the sidebar paints from
+    /// this on every render without collecting.
+    page_entries: Vec<crate::module::PageEntry>,
     /// The shared frame, created here so every occupant can hold it.
     frame: Entity<Frame>,
     /// Shared diagnostics state, fed by the app bridge and config load/reload.
@@ -648,6 +669,9 @@ pub struct ShellView {
     /// Reload compares against this baseline to determine whether a restart is
     /// required. The rest of `[pricing]`, including `refresh`, remains live.
     pricing_baseline: Option<toml::Value>,
+    /// The startup `[vol] model` value used to build the data engine's vol
+    /// worker, compared on reload exactly as `pricing_baseline` is.
+    vol_baseline: Option<toml::Value>,
     /// Cached [`pickable_columns`] for the current datasets and dimensions.
     /// Reload rebuilds this list; startup registers per-column actions once.
     /// Columns added later remain reachable through the two-stage `frame::pick`
@@ -752,7 +776,8 @@ impl ShellView {
         // value for Escape to restore; `Change` feeds every keystroke
         // into the session, coalescing into one undo entry; `PressEnter`
         // and `Blur` both close the session (`end_scope_session`) — Enter
-        // additionally hands focus back to the shell root, `Blur` doesn't
+        // additionally hands focus home (`focus_home`: the open page, else
+        // the shell root), `Blur` doesn't
         // need to (something else already has it). Escape's own restore
         // is handled in `handle_key_down`'s filter-focused branch, ahead
         // of this subscription ever seeing the resulting `Blur`.
@@ -778,7 +803,7 @@ impl ShellView {
                 InputEvent::PressEnter { .. } => {
                     view.filter_session_base = None;
                     view.active_frame().update(cx, |f, _| f.end_scope_session());
-                    view.focus_handle.focus(window, cx);
+                    view.focus_home(window, cx);
                     cx.notify();
                 }
                 InputEvent::Blur => {
@@ -1241,10 +1266,13 @@ impl ShellView {
         // engine's pricer was chosen from — see
         // `pricing_baseline`'s field doc.
         let pricing_baseline = services.config.get("app", "pricing.adapter").cloned();
+        // And for the `[vol] model` key — see `vol_baseline`'s field doc.
+        let vol_baseline = services.config.get("app", "vol.model").cloned();
         // The dimension pickers' column list — see
         // `pickable`'s field doc.
         let pickable = pickable_columns(&services.config);
         let expr_vocab = std::rc::Rc::new(expr_vocab(&services.config));
+        let page_entries: Vec<crate::module::PageEntry> = services.pages.entries().collect();
 
         Self {
             services,
@@ -1272,6 +1300,7 @@ impl ShellView {
             last_reload: reload::ReloadOutcome::Unchanged,
             session_dirty: false,
             last_tiles_written: crate::session::TileRecords::new(),
+            last_pages_written: crate::session::PageRecords::new(),
             last_frame_generation_written: 0,
             pending_focus_restore: false,
             overlay_return_to_filter: false,
@@ -1282,6 +1311,8 @@ impl ShellView {
             perf: FrameHistogram::new(),
             last_render_started: None,
             perf_overlay: false,
+            page: None,
+            page_entries,
             frame,
             diagnostics,
             pending_tiles: BTreeMap::new(),
@@ -1305,6 +1336,7 @@ impl ShellView {
             egress_baseline,
             panels_baseline,
             pricing_baseline,
+            vol_baseline,
             pickable,
             expr_vocab,
             picker: None,
@@ -1393,8 +1425,9 @@ impl ShellView {
 
     /// Where focus goes when an overlay closes: back to the scope bar's
     /// text field if it was focused when the overlay opened
-    /// (`overlay_return_to_filter`, consumed here), the shell root
+    /// (`overlay_return_to_filter`, consumed here), home (`focus_home`)
     /// otherwise. The one door both `close_modal` and `close_palette` use.
+    /// The field is painted over a page too, so either return is live there.
     pub(super) fn return_focus_from_overlay(
         &mut self,
         window: &mut Window,
@@ -1406,7 +1439,8 @@ impl ShellView {
                 .focus_handle(cx)
                 .focus(window, cx);
         } else {
-            self.focus_handle.focus(window, cx);
+            // The open page's handle when one is open, else the shell root.
+            self.focus_home(window, cx);
         }
     }
 
@@ -1537,9 +1571,22 @@ impl ShellView {
             }
         }
         if pending_overlay {
-            self.perf_overlay = !self.perf_overlay;
+            let next = !self.perf_overlay;
+            self.set_perf_overlay(next, cx);
         }
         cx.notify();
+    }
+
+    /// Set the overlay and mirror it into `Diagnostics` in one place. Both
+    /// the keyboard action and the entity's toggle channel come through here
+    /// so the page's switch and the readout can never disagree.
+    pub(super) fn set_perf_overlay(&mut self, visible: bool, cx: &mut Context<Self>) {
+        self.perf_overlay = visible;
+        self.diagnostics.update(cx, |d, cx| {
+            if d.set_overlay_visible(visible) {
+                cx.notify();
+            }
+        });
     }
 
     /// Set a grouping slot in memory and notify the frame observer, which
@@ -1670,6 +1717,12 @@ impl ShellView {
     #[cfg(any(test, feature = "test-support"))]
     pub fn dialog_input(&self) -> &Entity<InputState> {
         &self.dialog_input
+    }
+
+    /// The open choice dialog's target, for module-hosting tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn choice_dialog_target(&self) -> Option<choicedialog::Target> {
+        self.choice_dialog.as_ref().map(|d| d.target.clone())
     }
 
     /// Deliver a distinct-value reply from the app bridge. `EXPR_KEY` routes

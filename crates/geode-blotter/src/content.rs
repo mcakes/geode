@@ -144,6 +144,8 @@ impl TileContent for BlotterContent {
             Delivery::Query(outcome) => self.tile.update(cx, |t, cx| t.deliver(outcome, cx)),
             // This tile never prices; an outcome addressed here is a routing bug.
             Delivery::Price(_) => {}
+            // This tile asks no vol slices; an outcome addressed here is a routing bug.
+            Delivery::VolSlices(_) => {}
             // This tile asks no series query and holds no
             // `(identity, source)` pair.
             Delivery::Series(_) | Delivery::SeriesFetched { .. } => {}
@@ -166,8 +168,8 @@ impl TileContent for BlotterContent {
     fn serialize(&self, cx: &App) -> toml::Table {
         self.tile.read(cx).serialize(cx)
     }
-    fn launch_context(&self, cx: &App) -> geode_core::launch::LaunchContext {
-        self.tile.read(cx).launch_context(cx)
+    fn dimension_context(&self, cx: &App) -> Option<geode_core::context::DimensionContext> {
+        self.tile.read(cx).dimension_context(cx)
     }
     fn tile_columns(&self, cx: &App) -> Option<geode_core::tile_columns::TileColumns> {
         self.tile.read(cx).tile_columns(cx)

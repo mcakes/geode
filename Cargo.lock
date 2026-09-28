@@ -2617,6 +2617,7 @@ dependencies = [
  "geode-shell",
  "geode-tile",
  "gpui-component",
+ "gpui-kit-assets",
  "gpui-pre",
  "toml 1.1.4+spec-1.1.0",
  "tracing",
@@ -2674,6 +2675,7 @@ dependencies = [
 name = "geode-pricing"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "geode-core",
 ]
 

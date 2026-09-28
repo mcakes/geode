@@ -50,6 +50,10 @@ pub(crate) fn compile_distinct_with_cache(
     // One cache covers this statement's compilation. ENUM type names are
     // dataset-qualified, so entries from different datasets cannot collide.
     for ds in &schema.datasets {
+        // computed: no relation to read values from.
+        if ds.computed {
+            continue;
+        }
         // Document datasets have their own relation and no grain to find in
         // the measure-dataset search below.
         if ds.is_document() {

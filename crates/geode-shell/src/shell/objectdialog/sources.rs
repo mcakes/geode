@@ -105,11 +105,12 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
         .map(|doc| SchemaSpec::from_doc(doc).0)
         .unwrap_or_default();
     // A local dataset is written by the app and never fed by a source (the
-    // source reader refuses one), so it is not offered.
+    // source reader refuses one), so it is not offered; computed: a module
+    // answers for it and no source may feed it.
     let mut datasets: Vec<&str> = schema
         .datasets
         .iter()
-        .filter(|d| !d.local)
+        .filter(|d| !d.local && !d.computed)
         .map(|d| d.name.as_str())
         .collect();
     datasets.sort_unstable();
@@ -521,6 +522,36 @@ mod tests {
             dataset.kind
         );
     }
+
+    /// A computed dataset is answered by a module in process and no source
+    /// may feed it (the source reader refuses one), so it is not offered.
+    #[test]
+    fn the_dataset_choice_offers_no_computed_dataset() {
+        let config = Config::load(&ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin(
+                    "datasets",
+                    &format!(
+                        "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n{}",
+                        COMPUTED_DATASET
+                    ),
+                )
+                .unwrap(),
+            ],
+            desk: None,
+            user: None,
+        });
+        let fields = fields(&config, None);
+        let dataset = fields.iter().find(|f| f.key == "dataset").unwrap();
+        assert!(
+            matches!(&dataset.kind, FieldKind::Choice { options, .. } if options == &["risk"]),
+            "{:?}",
+            dataset.kind
+        );
+    }
+
+    const COMPUTED_DATASET: &str =
+        "[pricer]\ncomputed = true\n[pricer.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\n";
 
     const LOCAL_DATASET: &str = r#"[sheets]
 family = "document"

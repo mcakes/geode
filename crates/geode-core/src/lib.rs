@@ -1,11 +1,13 @@
 //! Shared vocabulary and pure logic for Geode: configuration, schema,
-//! scopes, query values, snapshots, health, launch contexts, documents,
-//! series, pricing, market-data panels, and editor nudging.
+//! scopes, query values, snapshots, health, the dimension context at a
+//! tile's cursor, documents, series, pricing, market-data panels, and editor
+//! nudging.
 
 pub mod attribution;
 pub mod clock;
 pub mod colour;
 pub mod config;
+pub mod context;
 pub mod dimensions;
 pub mod document;
 pub mod egress_config;
@@ -13,7 +15,6 @@ pub mod format;
 pub mod grid;
 pub mod groupings;
 pub mod health;
-pub mod launch;
 pub mod log;
 pub mod named;
 pub mod nudge;
@@ -30,3 +31,4 @@ pub mod source_config;
 pub mod tile_columns;
 pub mod tree;
 pub mod view;
+pub mod vol;

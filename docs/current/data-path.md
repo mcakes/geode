@@ -107,7 +107,8 @@ Every long-lived data thread is spawned through
 [`supervise::spawn_supervised`](../../crates/geode-data/src/supervise.rs): the
 request loop (`geode-data`), the ingest writer (`geode-ingest`), discovery
 (`geode-discovery`), each read-pool worker (`geode-query-N`), pricing
-(`geode-pricing`), and one thread per fetch source (`geode-fetch-<source>`),
+(`geode-pricing`), the vol worker (`geode-vol`), and one thread per fetch
+source (`geode-fetch-<source>`),
 subscribed source (`geode-subscribe-<source>`), and egress target
 (`geode-egress-<target>`). A body that unwinds past every containment boundary
 emits one `DataEvent::ThreadStopped { thread, reason }` carrying the panic
@@ -398,7 +399,9 @@ A view query compiles scope predicates and grouping into one statement for
 all tree depths. Each measure is aggregated at its own grain, then joined at
 the grouping cardinality. The result is an immutable columnar `Snapshot`:
 expanding a tree node works on the prepared result rather than issuing another
-database query. User supplied scope values are bound as parameters.
+database query. User supplied scope values are bound as parameters. A computed
+dataset has no relation: the compiler refuses a view or join over it, and
+distinct-value requests skip it.
 
 A scope reaching compilation still carrying a named-expression reference
 (`Scope.named` nonempty) is refused outright, with `StoreError::Scope("scope
@@ -521,8 +524,8 @@ a measure aggregate at that grain, joined to the spine the same way, with the
 grain's scope predicate and era. When a measure aggregate already reads that
 grain the two aggregates ride its scan; otherwise one `dim_<table>` CTE per grain
 holds them. That CTE is joined to the spine but never feeds it, so adding a
-display column never adds or removes tree rows. Views without ungrouped
-dimension columns do not add this aggregation.
+display column never adds or removes tree rows. A view adds this aggregation
+only for the columns it shows ungrouped and for the context columns below.
 
 The result carries the value in the column's own type, so a numeric dimension
 sorts as a number and paints its shortest exact form (`4250`, `4250.5`), and a
@@ -540,6 +543,29 @@ underlying table when the grouping forces the underlying grain) does not take
 part; choosing the coarsest carrying grain minimises this. A derived
 column over the dimension sees only the value column, so where the input is
 mixed the derived cell is blank, not marked.
+
+**Context columns.** A query can also carry columns the view does not show,
+so the shell can read one row's value of each (the dimension context behind
+`g m`). `ViewSpec::context` holds them. It is runtime-only, never read from
+config, and validation ignores it. The data service fills it on a copy of the
+view for every query, from the list set with `DataHandle::set_context_columns`;
+`geode-app` publishes `ModuleRoster::context_columns` (the union of every
+factory's `accepts`) there at startup. `ViewSpec::context_dimensions` keeps a
+listed column only when the primary dataset declares it as a key or a
+dimension, the dataset is not a document or series dataset, and the view
+neither groups by it, nor shows it, nor derives it, nor takes it off a join;
+each column appears once. A column the dataset lacks is dropped silently,
+since the list spans datasets, and so is one no declared grain carries
+alongside the grouping: context columns are optional, never a compile error.
+
+Each kept column is computed by the unanimity rule above, so every view query
+carries a value and `<column>#mixed` pair for it. The pair is hidden only in
+the sense that the blotter plan builds from `view.columns` and never paints
+it; it is in the snapshot. The cost is per query: when a measure aggregate
+already reads the column's grain the pair's two aggregates ride that scan;
+otherwise the grain gets its own `dim_<table>` CTE: one more scan of that
+table and one more join to the spine, shared by every column read at that
+grain.
 
 ## Retention and maintenance
 

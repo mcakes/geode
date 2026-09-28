@@ -19,13 +19,13 @@ use geode_data::documents::DocumentRegistry;
 use geode_data::source::SourceSpec;
 use geode_data::{
     DataEvent, DataHandle, DataService, DataServiceConfig, EventSink, PricerConfig, PricerRegistry,
-    Refusal,
+    Refusal, VolConfig, VolModelRegistry,
 };
 use geode_marketdata::MarketDataFactory;
 use geode_pricer::content::{PricerFactory, PricerSettings, UnderlyingList};
 use geode_pricer::core::{
-    PRICER_SHEETS_DATASET, PRICER_SHEETS_DECLARATION, PRICER_TEMPLATES_DOC, PRICER_VIEWS_DOC,
-    TemplateSet, Views,
+    PRICER_DATASET, PRICER_DATASET_DECLARATION, PRICER_SHEETS_DATASET, PRICER_SHEETS_DECLARATION,
+    PRICER_TEMPLATES_DOC, PRICER_VIEWS_DOC, TemplateSet, Views,
 };
 use geode_pricer::store::DuckSheetStore;
 use geode_shell::diagnostics::{CatalogRequest, Diagnostics, SourceSummary};
@@ -72,9 +72,10 @@ pub struct DataSetup {
     pub panel_diagnostics: Vec<Diagnostic>,
 }
 
-/// Tile kinds other modules own. A panel of one of these names would put
-/// two factories behind one kind, and a saved blotter could restore as a
-/// panel.
+/// Tile and page kinds other modules own. A panel of one of these names
+/// would put two factories behind one kind, and a saved blotter could
+/// restore as a panel. `diagnostics` is a page kind; it also names the
+/// page's keymap context and session table, so a panel may not take it.
 pub(crate) const MODULE_KINDS: &[&str] = &[
     "blotter",
     "timeseries",
@@ -116,13 +117,15 @@ fn load_panels_from_config(
 
 /// Build setup when both datasets and views documents are present. Empty
 /// parsed definitions still produce Some with any diagnostics; missing either
-/// document returns None. Adapters and pricers come from the caller's registry;
-/// builtin document kinds are registered here for every setup.
+/// document returns None. Adapters, pricers and vol models come from the
+/// caller's registries; builtin document kinds are registered here for every
+/// setup.
 pub fn data_setup(
     config: &Config,
     db_path: PathBuf,
     adapters: AdapterRegistry,
     pricers: PricerRegistry,
+    vol_models: VolModelRegistry,
 ) -> Option<DataSetup> {
     let datasets = config.doc("datasets")?;
     // Require a views document, then use load_views for presentation overlays.
@@ -131,7 +134,7 @@ pub fn data_setup(
     let mut diagnostics = Vec::new();
     let (mut schema, d) = SchemaSpec::from_doc(datasets);
     diagnostics.extend(d);
-    diagnostics.extend(pin_pricer_sheets(&mut schema, config));
+    diagnostics.extend(pin_app_datasets(&mut schema, config));
     let (views, d) = load_views(config);
     diagnostics.extend(d);
     let (dimensions, d) = config
@@ -184,7 +187,31 @@ pub fn data_setup(
             PricerConfig::missing(&pricer_name)
         }
     };
-    let (pricer_views, view_diags) = pricer_views_from_config(config);
+    // Resolve the configured vol model, defaulting to the demo stand-in. An
+    // unavailable name warns and leaves the model absent; the vol worker
+    // answers every job with that reason while the service still opens.
+    let vol_name = config
+        .get("app", "vol.model")
+        .and_then(|v| v.as_str())
+        .unwrap_or(geode_pricing::DEMO_VOL_MODEL)
+        .to_string();
+    let vol = match vol_models.get(&vol_name) {
+        Some(m) => VolConfig::with(m),
+        None => {
+            diagnostics.push(Diagnostic {
+                severity: Severity::Warning,
+                layer: config.explain("app", "vol.model"),
+                file: None,
+                message: format!(
+                    "vol model \"{vol_name}\" ([vol] model) is not built into this binary (have: {}); every vol slice will say so",
+                    vol_models.names().join(", ")
+                ),
+                path: Some("app.vol.model".to_string()),
+            });
+            VolConfig::missing(&vol_name)
+        }
+    };
+    let (pricer_views, view_diags) = pricer_views_from_specs(config, &views);
     diagnostics.extend(view_diags);
     let (pricer_templates, template_diags) =
         pricer_templates_from_config(config, &TemplateSet::builtin(), "built-in");
@@ -227,6 +254,7 @@ pub fn data_setup(
                 documents
             },
             pricer,
+            vol,
             egress,
         },
         views,
@@ -244,33 +272,65 @@ pub fn data_setup(
     })
 }
 
-/// Keep `pricer_sheets` exactly as the app declares it. Its tables are
-/// created once and written positionally (`insert … select *`), so a desk
-/// or user layer redeclaring it with other columns, or the same columns in
-/// another order, would put sheet values into the wrong columns of an
-/// existing database while reads by name decode a plausible wrong sheet.
-/// A redeclaration that differs (or is invalid, and so dropped from the
+/// Keep the app's own datasets exactly as it declares them. `pricer_sheets`
+/// tables are created once and written positionally (`insert … select *`),
+/// so a desk or user layer redeclaring it with other columns, or the same
+/// columns in another order, would put sheet values into the wrong columns
+/// of an existing database while reads by name decode a plausible wrong
+/// sheet. `pricer` is the vocabulary views, scopes and groupings compile
+/// against, so a differing redeclaration would silently change what they
+/// mean. Each is pinned by `pin_app_dataset`; a config with neither (no
+/// builtin layer) is left alone.
+fn pin_app_datasets(schema: &mut SchemaSpec, config: &Config) -> Vec<Diagnostic> {
+    [
+        pin_app_dataset(
+            schema,
+            config,
+            PRICER_SHEETS_DATASET,
+            PRICER_SHEETS_DECLARATION,
+            "a different column list would put sheet values in the wrong columns",
+        ),
+        pin_app_dataset(
+            schema,
+            config,
+            PRICER_DATASET,
+            PRICER_DATASET_DECLARATION,
+            "a differing declaration would change what a view, scope or grouping over the \
+             pricer means",
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// Keep dataset `name` exactly as the app's `declaration` reads. A
+/// redeclaration that differs (or is invalid, and so dropped from the
 /// schema) is replaced by the builtin one and reported as an error naming
-/// the layer and file; an identical one is accepted silently. A config with
-/// no `pricer_sheets` at all (no builtin layer) is left alone.
-fn pin_pricer_sheets(schema: &mut SchemaSpec, config: &Config) -> Option<Diagnostic> {
+/// the layer and file, with `why` explaining what a differing declaration
+/// would break; an identical one is accepted silently. A config with no
+/// `name` at all (no builtin layer) is left alone.
+fn pin_app_dataset(
+    schema: &mut SchemaSpec,
+    config: &Config,
+    name: &str,
+    declaration: &str,
+    why: &str,
+) -> Option<Diagnostic> {
     if !config
         .doc("datasets")
-        .is_some_and(|d| d.value.contains_key(PRICER_SHEETS_DATASET))
+        .is_some_and(|d| d.value.contains_key(name))
     {
         return None;
     }
-    let builtin = LayerDoc::builtin("datasets", PRICER_SHEETS_DECLARATION)
-        .expect("PRICER_SHEETS_DECLARATION is well-formed TOML");
+    let builtin = LayerDoc::builtin("datasets", declaration)
+        .unwrap_or_else(|e| panic!("the app's `{name}` declaration is not well-formed TOML: {e}"));
     let (alone, _) = SchemaSpec::from_doc(&merge_docs("datasets", &[builtin]));
     let declared = alone
-        .dataset(PRICER_SHEETS_DATASET)
-        .expect("PRICER_SHEETS_DECLARATION declares pricer_sheets")
+        .dataset(name)
+        .unwrap_or_else(|| panic!("the app's declaration does not declare `{name}`"))
         .clone();
-    let slot = schema
-        .datasets
-        .iter()
-        .position(|d| d.name == PRICER_SHEETS_DATASET);
+    let slot = schema.datasets.iter().position(|d| d.name == name);
     if slot.is_some_and(|i| schema.datasets[i] == declared) {
         return None;
     }
@@ -282,17 +342,16 @@ fn pin_pricer_sheets(schema: &mut SchemaSpec, config: &Config) -> Option<Diagnos
         .layered_docs("datasets")
         .iter()
         .rev()
-        .find(|d| d.layer != Layer::Builtin && d.table.contains_key(PRICER_SHEETS_DATASET));
+        .find(|d| d.layer != Layer::Builtin && d.table.contains_key(name));
     Some(Diagnostic {
         severity: Severity::Error,
         layer: redeclared.map(|d| d.layer),
         file: redeclared.map(|d| d.file.clone()),
         message: format!(
-            "`{PRICER_SHEETS_DATASET}` is declared by the app; this redeclaration is ignored \
-             (its table's columns are fixed, and a different column list would put sheet \
-             values in the wrong columns)"
+            "`{name}` is declared by the app; this redeclaration is ignored \
+             (its columns are fixed: {why})"
         ),
-        path: Some(format!("datasets.{PRICER_SHEETS_DATASET}")),
+        path: Some(format!("datasets.{name}")),
     })
 }
 
@@ -403,13 +462,24 @@ pub fn pricing_underlyings_from_config(config: &Config) -> (Option<Vec<String>>,
     (Some(names), diags)
 }
 
-/// The `pricer_views` doc, or the bundled two when no layer has one (the
-/// builtin layer always does in the app; a test config may not).
-pub fn pricer_views_from_config(config: &Config) -> (Views, Vec<Diagnostic>) {
-    match config.doc(PRICER_VIEWS_DOC) {
-        Some(doc) => Views::from_doc(doc),
-        None => (Views::builtin(), Vec::new()),
+/// The pricer's views out of `specs`, the `load_views` result for `config`
+/// (the caller has already collected `load_views`'s own diagnostics, so
+/// only the pricer's are returned here). A `pricer_views` document is no
+/// longer read: its presence is an error naming where the views now live,
+/// so a desk or user layer still carrying one is told rather than silently
+/// ignored.
+pub fn pricer_views_from_specs(config: &Config, specs: &[ViewSpec]) -> (Views, Vec<Diagnostic>) {
+    let (views, mut diags) = Views::from_specs(specs);
+    if config.doc(PRICER_VIEWS_DOC).is_some() {
+        diags.push(Diagnostic {
+            severity: Severity::Error,
+            layer: None,
+            file: None,
+            message: "pricer_views is no longer read; declare views over dataset \"pricer\" in views.toml".into(),
+            path: Some(PRICER_VIEWS_DOC.into()),
+        });
     }
+    (views, diags)
 }
 
 /// The `pricer_templates` doc, or the built-in set when no layer has one
@@ -428,14 +498,23 @@ pub fn pricer_templates_from_config(
     }
 }
 
-/// Inputs to the pricer's live reload: merged `pricer_views` and
-/// `pricer_templates`, raw `app.pricing.refresh` and `app.pricing.underlyings`,
-/// and the resolved stale threshold. Equal keys leave factory views, templates,
-/// suggestions, and timers alone and avoid repeating invalid-value warnings.
-/// The selected pricing adapter is fixed at service startup and excluded here.
+/// Inputs to the pricer's live reload: the merged `views` doc with both
+/// presentation overlays (the pricer's column plan is built from all three),
+/// the colors they may name (a named column's cells and header are painted
+/// from them, so a `colors.toml` edit alone must reach open tiles), the
+/// retired `pricer_views` doc (so one added at runtime raises its
+/// retirement diagnostic without a restart), merged `pricer_templates`, raw
+/// `app.pricing.refresh` and `app.pricing.underlyings`, and the resolved
+/// stale threshold. Equal keys leave factory views, templates, suggestions,
+/// and timers alone and avoid repeating invalid-value warnings. The selected
+/// pricing adapter is fixed at service startup and excluded here.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PricerConfigKey {
     views: Option<toml::Table>,
+    view_presentation: Option<toml::Table>,
+    dataset_presentation: Option<toml::Table>,
+    colors: Option<toml::Table>,
+    pricer_views: Option<toml::Table>,
     templates: Option<toml::Table>,
     refresh: Option<toml::Value>,
     underlyings: Option<toml::Value>,
@@ -444,7 +523,13 @@ pub struct PricerConfigKey {
 
 pub fn pricer_config_key(config: &Config) -> PricerConfigKey {
     PricerConfigKey {
-        views: config.doc(PRICER_VIEWS_DOC).map(|d| d.value.clone()),
+        views: config.doc("views").map(|d| d.value.clone()),
+        view_presentation: config.doc("view_presentation").map(|d| d.value.clone()),
+        dataset_presentation: config.doc("dataset_presentation").map(|d| d.value.clone()),
+        colors: config
+            .doc(geode_core::config::COLORS_DOC)
+            .map(|d| d.value.clone()),
+        pricer_views: config.doc(PRICER_VIEWS_DOC).map(|d| d.value.clone()),
         templates: config.doc(PRICER_TEMPLATES_DOC).map(|d| d.value.clone()),
         refresh: config.get("app", "pricing.refresh").cloned(),
         underlyings: config.get("app", "pricing.underlyings").cloned(),
@@ -581,7 +666,7 @@ pub fn start(
     let factory = Rc::new(BlotterFactory::new(
         handle.clone(),
         setup.views,
-        setup.colours,
+        setup.colours.clone(),
         schema,
         dimensions,
         find_style,
@@ -604,7 +689,10 @@ pub fn start(
             setup.pricer_templates.clone(),
             pricer_settings,
         )
-        .with_underlyings(underlyings.clone()),
+        .with_underlyings(underlyings.clone())
+        // The same startup colors as the blotter: a named `color` on a
+        // pricer view column resolves against them.
+        .with_colours(setup.colours),
     );
     // Panels and blotters use the same configured stale threshold.
     let panels = panel_factories(&handle, panels, stale_after, &egress_targets);
@@ -834,7 +922,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 let mut pin_diags = Vec::new();
                 if let Some(mut schema) = config.doc("datasets").map(|d| SchemaSpec::from_doc(d).0)
                 {
-                    pin_diags.extend(pin_pricer_sheets(&mut schema, config));
+                    pin_diags.extend(pin_app_datasets(&mut schema, config));
                     factory.set_schema(schema);
                 }
                 factory.set_dims(dims.clone());
@@ -919,14 +1007,22 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
             last.set(now);
             // Read everything out of the config before the factory takes
             // `cx` mutably.
-            let (views, templates, mut diags, refresh, stale_after) = {
+            let (views, templates, colours, mut diags, refresh, stale_after) = {
                 let config = shell.read(cx).config();
                 let key = pricer_config_key(config);
                 if last_key.borrow().as_ref() == Some(&key) {
                     return;
                 }
                 *last_key.borrow_mut() = Some(key);
-                let (views, diags) = pricer_views_from_config(config);
+                // `load_views`'s own diagnostics are the ConfigReloaded
+                // observer's to report, as are the colors doc's; only the
+                // pricer's are collected here.
+                let (specs, _) = load_views(config);
+                let (views, diags) = pricer_views_from_specs(config, &specs);
+                let (colours, _) = config
+                    .doc(geode_core::config::COLORS_DOC)
+                    .map(NamedColours::from_doc)
+                    .unwrap_or_default();
                 let (refresh, refresh_diag) = pricing_refresh_from_config(config);
                 // A bad entry keeps the running definition of its name.
                 let (templates, template_diags) =
@@ -942,12 +1038,13 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 (
                     views,
                     templates,
+                    colours,
                     diags,
                     refresh,
                     stale_after_from_config(config),
                 )
             };
-            pricer.reload(views, templates, refresh, stale_after, cx);
+            pricer.reload(views, templates, colours, refresh, stale_after, cx);
             for d in &diags {
                 tracing::warn!(target: "geode::pricing", "{d}");
             }
@@ -1118,10 +1215,10 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                                     // does not starve presentation of consistent snapshots.
                                     // An old as-of, however, must never replace the current one.
                                     if snapshot.as_of == current_as_of {
-                                        d.set_catalog(snapshot);
+                                        d.set_catalog(snapshot, SystemTime::now());
                                     } else {
                                         // Explicit consumers need a current answer even when
-                                        // no diagnostics tile observes the frame's as-of.
+                                        // no diagnostics page observes the frame's as-of.
                                         match request {
                                             CatalogRequest::Watched => d.request_catalog_refresh(),
                                             CatalogRequest::Explicit => d.request_catalog(),
@@ -1243,6 +1340,12 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             s.deliver(Delivery::Price(outcome), window, cx)
                         });
                     }
+                    // Route vol slices to the keyed occupant; the shell discards absent recipients.
+                    DataEvent::VolSlices(outcome) => {
+                        shell.update(cx, |s, cx| {
+                            s.deliver(Delivery::VolSlices(outcome), window, cx)
+                        });
+                    }
                     // A data thread died despite containment, or the request
                     // loop never opened. Its segment and the diagnostics row
                     // stay until restart. Logging is not repeated here: the
@@ -1276,14 +1379,16 @@ mod tests {
     use geode_core::log::Ring;
     use geode_core::query::{AsOf, CatalogOutcome, CatalogSnapshot, QueryKey};
     use geode_data::source::SourceSpec;
-    use geode_diagnostics::DiagnosticsFactory;
+    use geode_diagnostics::DiagnosticsPageFactory;
     use geode_marketdata::core::builtin_panel;
     use geode_pricer::store::MemorySheetStore;
     use geode_shell::actions::ActionRegistry;
-    use geode_shell::defaults::{BUILTIN_KEYMAP, default_mod, register_builtin_actions};
+    use geode_shell::defaults::{
+        BUILTIN_KEYMAP, default_mod, register_builtin_actions, register_page_actions,
+    };
     use geode_shell::keymap::build_keymap;
     use geode_shell::module::recording::{Recorded, RecordingFactory};
-    use geode_shell::module::{ModuleFactory, ModuleRoster};
+    use geode_shell::module::{ModuleFactory, ModuleRoster, PageFactory};
     use geode_shell::session::TileRecords;
     use geode_shell::shell::ShellServices;
     use geode_shell::tiling::{TileId, Workspaces};
@@ -1495,6 +1600,8 @@ role = "key"
             keymap_fragments: Vec::new(),
             keymap_fragment_diagnostics: Vec::new(),
             composition_diagnostics: Vec::new(),
+            pages: geode_shell::module::PageRoster::new(),
+            restored_pages: std::collections::BTreeMap::new(),
         }
     }
 
@@ -1537,6 +1644,8 @@ role = "key"
             keymap_fragments: Vec::new(),
             keymap_fragment_diagnostics: Vec::new(),
             composition_diagnostics: Vec::new(),
+            pages: geode_shell::module::PageRoster::new(),
+            restored_pages: std::collections::BTreeMap::new(),
         };
         (services, log)
     }
@@ -1700,7 +1809,7 @@ role = "key"
             Config::load(&ConfigSources {
                 builtin: vec![
                     LayerDoc::builtin("app", app).unwrap(),
-                    LayerDoc::builtin("pricer_views", views).unwrap(),
+                    LayerDoc::builtin("views", views).unwrap(),
                     LayerDoc::builtin(PRICER_TEMPLATES_DOC, templates).unwrap(),
                 ],
                 desk: None,
@@ -1709,7 +1818,7 @@ role = "key"
         };
         let app = "[theme]\nname = \"a\"\n[log]\nlevel = \"info\"\n\
                    [pricing]\nrefresh = \"10s\"\n[blotter]\nstale_after = \"5m\"\n";
-        let views = "[slim]\ncolumns = [\"qty\", \"price\"]\n";
+        let views = SLIM_VIEW;
         let templates = "[RR]\nlegs = [ { weight = -1, strike = 1, kind = \"P\" }, \
                          { weight = 1, strike = 2, kind = \"C\" } ]\n";
         let base = pricer_config_key(&config(app, views, templates));
@@ -1728,9 +1837,13 @@ role = "key"
             "a [log] edit"
         );
         assert_ne!(
-            pricer_config_key(&config(app, &views.replace("\"qty\", ", ""), templates)),
+            pricer_config_key(&config(
+                app,
+                &views.replace("name = \"qty\"\nkind = \"dimension\"\n", ""),
+                templates
+            )),
             base,
-            "a pricer_views edit"
+            "a views edit"
         );
         assert_ne!(
             pricer_config_key(&config(app, views, &templates.replace("-1", "-2"))),
@@ -1800,31 +1913,156 @@ role = "key"
         assert!(!diags.is_empty(), "the bad entry is reported");
     }
 
+    /// A `views` doc with a blotter view and one pricer view (`slim`, over
+    /// the computed `pricer` dataset).
+    const SLIM_VIEW: &str = "[tree]\ndataset = \"risk\"\n[slim]\ndataset = \"pricer\"\n\
+                             [[slim.columns]]\nname = \"qty\"\nkind = \"dimension\"\n\
+                             [[slim.columns]]\nname = \"npv\"\n";
+
+    /// The pricer's views are the `views` doc's entries over `pricer`: the
+    /// app's builtin layer carries the bundled two, and a view over another
+    /// dataset beside them is not the pricer's.
     #[test]
-    fn pricer_views_fall_back_to_the_bundled_two_with_no_doc() {
+    fn pricer_views_come_from_the_views_doc_over_the_pricer_dataset() {
         let config = Config::load(&ConfigSources {
-            builtin: vec![],
+            builtin: crate::builtin_layer(None),
             desk: None,
             user: None,
         });
-        let (views, diags) = pricer_views_from_config(&config);
-        assert!(diags.is_empty());
+        let (specs, _) = load_views(&config);
+        let (views, diags) = pricer_views_from_specs(&config, &specs);
+        assert!(diags.is_empty(), "{diags:?}");
         assert_eq!(
             views.names().collect::<Vec<_>>(),
-            vec!["vanilla", "barrier"]
+            vec!["barrier", "vanilla"]
+        );
+
+        let mut builtin = crate::builtin_layer(None);
+        builtin.push(
+            LayerDoc::builtin(
+                "views",
+                "[tree]\ndataset = \"risk_snapshot\"\n[[tree.columns]]\nname = \"npv\"\n",
+            )
+            .unwrap(),
+        );
+        let config = Config::load(&ConfigSources {
+            builtin,
+            desk: None,
+            user: None,
+        });
+        let (specs, _) = load_views(&config);
+        assert!(specs.iter().any(|s| s.name == "tree"), "fixture: merged in");
+        let (views, diags) = pricer_views_from_specs(&config, &specs);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(
+            views.names().collect::<Vec<_>>(),
+            vec!["barrier", "vanilla"],
+            "a view over another dataset is not a pricer view"
         );
     }
 
-    /// Pricer view reloads follow the frame's config revision. An edit confined
-    /// to `pricer_views` does not emit `ShellEvent::ConfigReloaded`.
+    /// A layer still carrying the retired document is told where the
+    /// views now live, once, as an error on that document.
+    #[test]
+    fn a_pricer_views_doc_is_an_error_naming_views_toml() {
+        let mut builtin = crate::builtin_layer(None);
+        builtin.push(
+            LayerDoc::builtin(PRICER_VIEWS_DOC, "[slim]\ncolumns = [\"qty\", \"npv\"]\n").unwrap(),
+        );
+        let config = Config::load(&ConfigSources {
+            builtin,
+            desk: None,
+            user: None,
+        });
+        let (specs, _) = load_views(&config);
+        let (views, diags) = pricer_views_from_specs(&config, &specs);
+        assert_eq!(
+            views.names().collect::<Vec<_>>(),
+            vec!["barrier", "vanilla"],
+            "the retired doc adds no view"
+        );
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].severity, Severity::Error);
+        assert!(
+            diags[0].message.contains("views.toml"),
+            "{}",
+            diags[0].message
+        );
+        assert_eq!(diags[0].path.as_deref(), Some(PRICER_VIEWS_DOC));
+    }
+
+    /// The pricer's column plan is built from the merged presentation, so
+    /// an edit to either overlay alone must reach open pricer tiles.
+    #[test]
+    fn a_presentation_only_edit_changes_the_pricer_key() {
+        let config = |extra: Option<LayerDoc>| {
+            let mut builtin = vec![LayerDoc::builtin("views", SLIM_VIEW).unwrap()];
+            builtin.extend(extra);
+            Config::load(&ConfigSources {
+                builtin,
+                desk: None,
+                user: None,
+            })
+        };
+        let base = pricer_config_key(&config(None));
+        assert_ne!(
+            pricer_config_key(&config(Some(
+                LayerDoc::builtin("view_presentation", "[slim]\nhidden = [\"npv\"]\n").unwrap()
+            ))),
+            base,
+            "a view_presentation edit"
+        );
+        assert_ne!(
+            pricer_config_key(&config(Some(
+                LayerDoc::builtin(
+                    "dataset_presentation",
+                    "[pricer.columns.npv]\nlabel = \"PX\"\n"
+                )
+                .unwrap()
+            ))),
+            base,
+            "a dataset_presentation edit"
+        );
+        assert_ne!(
+            pricer_config_key(&config(Some(
+                LayerDoc::builtin(geode_core::config::COLORS_DOC, "[warm]\nhue = 30\n").unwrap()
+            ))),
+            base,
+            "a colors edit"
+        );
+    }
+
+    /// The retired doc is part of the key: one added at runtime, with no
+    /// other pricer-relevant edit, must still reach the reload path that
+    /// raises its retirement diagnostic.
+    #[test]
+    fn a_runtime_added_pricer_views_doc_changes_the_pricer_key() {
+        let config = |extra: Option<LayerDoc>| {
+            let mut builtin = vec![LayerDoc::builtin("views", SLIM_VIEW).unwrap()];
+            builtin.extend(extra);
+            Config::load(&ConfigSources {
+                builtin,
+                desk: None,
+                user: None,
+            })
+        };
+        let base = pricer_config_key(&config(None));
+        assert_ne!(
+            pricer_config_key(&config(Some(
+                LayerDoc::builtin(PRICER_VIEWS_DOC, "[slim]\ncolumns = [\"qty\", \"npv\"]\n")
+                    .unwrap()
+            ))),
+            base,
+            "a pricer_views doc appearing"
+        );
+    }
+
+    /// Pricer view reloads follow the frame's config revision: the observer
+    /// re-reads the `views` doc and hands the factory its `pricer` views.
     #[gpui::test]
     fn a_config_reload_hands_the_pricer_factory_its_views(cx: &mut gpui::TestAppContext) {
         let services = test_shell_services_with_sources(ConfigSources {
-            builtin: vec![
-                LayerDoc::builtin("views", "[tree]\ndataset = \"risk\"\n").unwrap(),
-                LayerDoc::builtin("pricer_views", "[slim]\ncolumns = [\"qty\", \"price\"]\n")
-                    .unwrap(),
-            ],
+            builtin: vec![LayerDoc::builtin("views", SLIM_VIEW).unwrap()],
             desk: None,
             user: None,
         });
@@ -1837,7 +2075,7 @@ role = "key"
         let bridge = test_bridge(handle);
         assert_eq!(
             bridge.pricer.view_names(),
-            vec!["vanilla", "barrier"],
+            vec!["barrier", "vanilla"],
             "fixture: built with the bundled views"
         );
         cx.update(|cx| attach(&bridge, window, cx));
@@ -2031,6 +2269,7 @@ role = "key"
             dir.path().join("t.duckdb"),
             AdapterRegistry::default(),
             geode_data::PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
         )
         .unwrap();
         assert!(
@@ -2069,11 +2308,7 @@ role = "key"
         cx: &mut gpui::TestAppContext,
     ) {
         let services = test_shell_services_with_sources(ConfigSources {
-            builtin: vec![
-                LayerDoc::builtin("views", "[tree]\ndataset = \"risk\"\n").unwrap(),
-                LayerDoc::builtin("pricer_views", "[slim]\ncolumns = [\"qty\", \"price\"]\n")
-                    .unwrap(),
-            ],
+            builtin: vec![LayerDoc::builtin("views", SLIM_VIEW).unwrap()],
             desk: None,
             user: None,
         });
@@ -2108,6 +2343,7 @@ role = "key"
             bridge.pricer.reload(
                 Views::builtin(),
                 TemplateSet::builtin(),
+                NamedColours::default(),
                 None,
                 Duration::from_secs(1),
                 cx,
@@ -2116,7 +2352,7 @@ role = "key"
         bump(&mut vcx);
         assert_eq!(
             bridge.pricer.view_names(),
-            vec!["vanilla", "barrier"],
+            vec!["barrier", "vanilla"],
             "an unchanged pricer config reloads nothing"
         );
         assert_eq!(bridge.pricer.settings().refresh, None);
@@ -2132,11 +2368,7 @@ role = "key"
         cx: &mut gpui::TestAppContext,
     ) {
         let services = test_shell_services_with_sources(ConfigSources {
-            builtin: vec![
-                LayerDoc::builtin("views", "[tree]\ndataset = \"risk\"\n").unwrap(),
-                LayerDoc::builtin("pricer_views", "[slim]\ncolumns = [\"qty\", \"price\"]\n")
-                    .unwrap(),
-            ],
+            builtin: vec![LayerDoc::builtin("views", SLIM_VIEW).unwrap()],
             desk: None,
             user: None,
         });
@@ -2162,7 +2394,7 @@ role = "key"
         vcx.run_until_parked();
         assert_eq!(
             bridge.pricer.view_names(),
-            vec!["vanilla", "barrier"],
+            vec!["barrier", "vanilla"],
             "the first unchanged reload reached nothing"
         );
     }
@@ -2198,6 +2430,7 @@ role = "key"
             None,
             &geode_shell::session::PinnedRecords::new(),
             &geode_shell::palette_usage::PaletteUsage::new(),
+            &geode_shell::session::PageRecords::new(),
         );
         let ws1: toml::Table = r#"
             focused = 1
@@ -2249,6 +2482,33 @@ role = "key"
         assert!(
             !dispatched("workspace::duplicate_horizontal"),
             "a capital typed into the entry field ran a shell binding"
+        );
+    }
+
+    /// The palette's `Edit column in view…` reads the focused pricer tile's
+    /// columns and opens the Views column picker over the pricer's view.
+    #[gpui::test]
+    fn edit_column_in_view_opens_over_the_pricer_view(cx: &mut gpui::TestAppContext) {
+        let services = test_shell_services_with_a_pricer_tile();
+        let window = open_pricer_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        vcx.simulate_keystrokes("ctrl-k");
+        vcx.simulate_input("Edit column in view");
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let target = shell.read_with(&vcx, |s, _| s.choice_dialog_target());
+        assert!(
+            matches!(
+                target,
+                Some(geode_shell::shell::choicedialog::Target::Column { ref view, .. }) if view == "vanilla"
+            ),
+            "{target:?}"
         );
     }
 
@@ -2813,6 +3073,7 @@ role = "key"
             None,
             &geode_shell::session::PinnedRecords::new(),
             &geode_shell::palette_usage::PaletteUsage::new(),
+            &geode_shell::session::PageRecords::new(),
         );
         let ws1: toml::Table = format!(
             r#"
@@ -2932,6 +3193,7 @@ role = "key"
             None,
             &geode_shell::session::PinnedRecords::new(),
             &geode_shell::palette_usage::PaletteUsage::new(),
+            &geode_shell::session::PageRecords::new(),
         );
         let ws1: toml::Table = r#"
             focused = 1
@@ -3284,8 +3546,14 @@ role = "key"
         let config = Config::load(&sources);
         let mut pricers = geode_data::PricerRegistry::default();
         pricers.register(std::sync::Arc::new(geode_pricing::MockPricer::new()));
-        let setup = data_setup(&config, db, AdapterRegistry::default(), pricers)
-            .expect("the demo layer declares datasets and views");
+        let setup = data_setup(
+            &config,
+            db,
+            AdapterRegistry::default(),
+            pricers,
+            geode_data::VolModelRegistry::default(),
+        )
+        .expect("the demo layer declares datasets and views");
         let bridge =
             cx.update(|cx| start(setup, FindStyle::default(), Duration::from_secs(60), cx));
         let (services, tiles) = with_a_pricer_tile_on(
@@ -3339,6 +3607,7 @@ role = "key"
             db,
             AdapterRegistry::default(),
             geode_data::PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
         )
         .unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -3526,6 +3795,7 @@ role = "key"
             dir.path().join("a.duckdb"),
             AdapterRegistry::default(),
             pricers.clone(),
+            geode_data::VolModelRegistry::default(),
         )
         .unwrap();
         assert_eq!(setup.config.pricer.name, "mock");
@@ -3549,6 +3819,7 @@ role = "key"
             dir.path().join("b.duckdb"),
             AdapterRegistry::default(),
             pricers,
+            geode_data::VolModelRegistry::default(),
         )
         .unwrap();
         assert_eq!(setup.config.pricer.name, "vendor");
@@ -3566,12 +3837,88 @@ role = "key"
         );
     }
 
+    /// Resolve `[vol] model` through the supplied registry the way the pricer
+    /// resolves. An unknown name warns, names what the binary has, and leaves
+    /// the model absent without preventing setup; no `[vol]` table means the
+    /// demo model.
+    #[test]
+    fn an_unknown_vol_model_warns_and_leaves_the_model_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_with_app = |app_text: &str| {
+            let mut builtin = vec![
+                LayerDoc::builtin(
+                    "datasets",
+                    "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n[risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n",
+                )
+                .unwrap(),
+                LayerDoc::builtin("views", "[v]\ndataset = \"risk\"\ngrouping = [\"book\"]\n")
+                    .unwrap(),
+            ];
+            if !app_text.is_empty() {
+                builtin.push(LayerDoc::builtin("app", app_text).unwrap());
+            }
+            Config::load(&ConfigSources {
+                builtin,
+                ..ConfigSources::default()
+            })
+        };
+
+        let config = config_with_app("[vol]\nmodel = \"vendor\"\n");
+        let setup = data_setup(
+            &config,
+            dir.path().join("a.duckdb"),
+            AdapterRegistry::default(),
+            geode_data::PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
+        )
+        .unwrap();
+        assert_eq!(setup.config.vol.name, "vendor");
+        assert!(setup.config.vol.model.is_none());
+        let d = setup
+            .diagnostics
+            .iter()
+            .find(|d| d.message.contains("vol model"))
+            .unwrap();
+        assert_eq!(d.severity, Severity::Warning);
+        assert_eq!(
+            d.message,
+            "vol model \"vendor\" ([vol] model) is not built into this binary \
+             (have: ); every vol slice will say so"
+        );
+        assert_eq!(d.path.as_deref(), Some("app.vol.model"));
+
+        // The default: no [vol] table at all resolves to the registered demo model.
+        let mut vol_models = geode_data::VolModelRegistry::default();
+        vol_models.register(Arc::new(geode_pricing::DemoVolModel));
+        let config = config_with_app("");
+        let setup = data_setup(
+            &config,
+            dir.path().join("b.duckdb"),
+            AdapterRegistry::default(),
+            geode_data::PricerRegistry::default(),
+            vol_models,
+        )
+        .unwrap();
+        assert_eq!(setup.config.vol.name, "demo");
+        assert!(setup.config.vol.model.is_some());
+        assert!(
+            !setup
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("vol model")),
+            "{:?}",
+            setup.diagnostics
+        );
+    }
+
     /// Verify setup carries every local dataset name and excludes non-local ones.
     /// The routing test supplies its set directly, so it cannot prove this extraction.
     #[test]
     fn data_setup_names_every_local_dataset_and_only_those() {
         let mut pricers = geode_data::PricerRegistry::default();
         pricers.register(Arc::new(geode_pricing::MockPricer::new()));
+        let mut vol_models = geode_data::VolModelRegistry::default();
+        vol_models.register(Arc::new(geode_pricing::DemoVolModel));
         let dir = tempfile::tempdir().unwrap();
         let config = Config::load(&ConfigSources {
             builtin: vec![
@@ -3599,6 +3946,7 @@ role = "key"
             dir.path().join("c.duckdb"),
             AdapterRegistry::default(),
             pricers,
+            vol_models,
         )
         .unwrap();
         assert!(setup.diagnostics.is_empty(), "{:?}", setup.diagnostics);
@@ -3684,10 +4032,20 @@ role = "key"
         assert_eq!(frame.read_with(&vcx, |f, _| f.data_version()), before + 1);
     }
 
-    /// A pricing outcome must reach the recording occupant, not merely survive
-    /// the drain loop. Inspect its delivery log through the real bridge and shell.
-    #[gpui::test]
-    fn a_price_event_is_delivered_to_the_shell_as_delivery_price(cx: &mut gpui::TestAppContext) {
+    /// A shell holding one recording tile with a real bridge attached, so a
+    /// keyed delivery test can send an event and read the occupant's log.
+    struct RecordingTile {
+        vcx: gpui::VisualTestContext,
+        log: Rc<RefCell<Vec<Recorded>>>,
+        events: crate::events::Sender,
+        tile: TileId,
+        /// Kept alive so the factories outlive the attached drain.
+        _bridge: Bridge,
+        /// Kept alive so the handle's channel stays open.
+        _rx: std::sync::mpsc::Receiver<geode_data::Request>,
+    }
+
+    fn recording_tile_with_bridge(cx: &mut gpui::TestAppContext) -> RecordingTile {
         let (services, log) = test_shell_services_with_rec_roster();
         let window = open_test_window(cx, services);
         let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
@@ -3697,7 +4055,7 @@ role = "key"
 
         // Opening the recording module creates the first tile in the empty
         // workspace. Its allocated id is 1; verify the occupant before using that
-        // id as the pricing outcome's destination.
+        // id as an outcome's destination.
         vcx.update(|window, cx| {
             shell.update(cx, |s, cx| {
                 s.open_module("rec", window, cx);
@@ -3713,7 +4071,7 @@ role = "key"
             "open_module(\"rec\", ..) must have created a tile at TileId(1)"
         );
 
-        let (handle, _rx) = DataHandle::for_tests();
+        let (handle, rx) = DataHandle::for_tests();
         let factory = Rc::new(BlotterFactory::new(
             handle.clone(),
             Vec::new(),
@@ -3723,7 +4081,7 @@ role = "key"
             FindStyle::default(),
             Duration::from_secs(900),
         ));
-        let (tx, rx) = crate::events::channel();
+        let (tx, events) = crate::events::channel();
         let bridge = Bridge {
             panels: Vec::new(),
             timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
@@ -3733,7 +4091,7 @@ role = "key"
             pricer: test_pricer(&handle),
             handle,
             factory,
-            events: rx,
+            events,
             dropped: Arc::new(AtomicU64::new(0)),
             sources: Vec::new(),
             local_datasets: Default::default(),
@@ -3741,18 +4099,62 @@ role = "key"
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
-        tx.try_send(DataEvent::Price(geode_core::pricing::PriceOutcome {
-            key: QueryKey(tile.0),
-            tag: 5,
-            submitted: std::time::Instant::now(),
-            results: Vec::new(),
-        }))
-        .unwrap();
-        vcx.run_until_parked();
+        RecordingTile {
+            vcx,
+            log,
+            events: tx,
+            tile,
+            _bridge: bridge,
+            _rx: rx,
+        }
+    }
+
+    /// A pricing outcome must reach the recording occupant, not merely survive
+    /// the drain loop. Inspect its delivery log through the real bridge and shell.
+    #[gpui::test]
+    fn a_price_event_is_delivered_to_the_shell_as_delivery_price(cx: &mut gpui::TestAppContext) {
+        let fixture = recording_tile_with_bridge(cx);
+        let tile = fixture.tile;
+        fixture
+            .events
+            .try_send(DataEvent::Price(geode_core::pricing::PriceOutcome {
+                key: QueryKey(tile.0),
+                tag: 5,
+                submitted: std::time::Instant::now(),
+                results: Vec::new(),
+            }))
+            .unwrap();
+        fixture.vcx.run_until_parked();
         assert!(
-            log.borrow().contains(&Recorded::Priced(tile, 5)),
+            fixture.log.borrow().contains(&Recorded::Priced(tile, 5)),
             "the Price delivery must reach the tile's occupant: {:?}",
-            log.borrow()
+            fixture.log.borrow()
+        );
+    }
+
+    /// A vol-slice outcome takes the same keyed route as a price: the drain
+    /// must hand it to the shell as `Delivery::VolSlices` and the tile's
+    /// occupant must see it.
+    #[gpui::test]
+    fn a_vol_slices_event_is_delivered_to_the_shell_as_delivery_vol_slices(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let fixture = recording_tile_with_bridge(cx);
+        let tile = fixture.tile;
+        fixture
+            .events
+            .try_send(DataEvent::VolSlices(geode_core::vol::VolSliceOutcome {
+                key: QueryKey(tile.0),
+                tag: 6,
+                submitted: std::time::Instant::now(),
+                results: Vec::new(),
+            }))
+            .unwrap();
+        fixture.vcx.run_until_parked();
+        assert!(
+            fixture.log.borrow().contains(&Recorded::VolSliced(tile, 6)),
+            "the VolSlices delivery must reach the tile's occupant: {:?}",
+            fixture.log.borrow()
         );
     }
 
@@ -3849,6 +4251,7 @@ role = "key"
             None,
             &geode_shell::session::PinnedRecords::new(),
             &geode_shell::palette_usage::PaletteUsage::new(),
+            &geode_shell::session::PageRecords::new(),
         );
         let ws1: toml::Table = r#"
             focused = 1
@@ -4328,6 +4731,48 @@ role = "key"
         );
     }
 
+    /// The pricer's reload observer hands the factory the config's named
+    /// colors with the views, so a `colors.toml` edit repaints an open
+    /// pricer tile's named columns.
+    #[gpui::test]
+    fn a_reload_hands_the_pricer_the_new_colours(cx: &mut gpui::TestAppContext) {
+        let services = test_shell_services_with_sources(ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin("views", SLIM_VIEW).unwrap(),
+                LayerDoc::builtin("colors", "[delta]\nhue = 240\n").unwrap(),
+            ],
+            desk: None,
+            user: None,
+        });
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let (handle, _rx) = DataHandle::for_tests();
+        let bridge = test_bridge(handle);
+        cx.update(|cx| attach(&bridge, window, cx));
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        assert!(
+            bridge.pricer.colours().get("delta").is_none(),
+            "fixture: the factory starts with no colours at all"
+        );
+        vcx.update(|_, cx| {
+            let frame = shell.read(cx).frame().clone();
+            frame.update(cx, |f, cx| {
+                f.note_config_reloaded();
+                cx.notify();
+            });
+        });
+        vcx.run_until_parked();
+        assert!(
+            bridge.pricer.colours().get("delta").is_some(),
+            "the reload must hand the pricer the config's colours"
+        );
+    }
+
     /// The real observer and drain accept only the active request's tag.
     /// A foreign response must neither update the catalog nor free its slot.
     #[gpui::test]
@@ -4477,12 +4922,12 @@ role = "key"
         }
     }
 
-    /// Open a real diagnostics tile through its factory and bridge. After the
-    /// initial catalog request completes, changing frame as-of must produce a
-    /// second request carrying the new value. A pending-bit assertion alone would
+    /// Open the real diagnostics page through its factory and bridge. After
+    /// the initial catalog request completes, changing frame as-of must
+    /// produce a second request carrying the new value. A pending-bit assertion alone would
     /// not prove that the observer submits the request.
     #[gpui::test]
-    fn an_as_of_change_on_a_visible_diagnostics_tile_requests_a_second_catalog_with_the_new_as_of(
+    fn an_as_of_change_on_the_visible_diagnostics_page_requests_a_second_catalog_with_the_new_as_of(
         cx: &mut gpui::TestAppContext,
     ) {
         let window = open_test_window(cx, test_shell_services());
@@ -4526,19 +4971,19 @@ role = "key"
         let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
         let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
 
-        // A real diagnostics tile, created through the real factory, the
-        // same door `main.rs`'s roster and `ensure_occupants` use.
+        // The real diagnostics page, created through the real factory, the
+        // same door `main.rs`'s page roster and `open_page` use.
         let diagnostics_factory =
-            DiagnosticsFactory::new(Arc::new(Ring::new(64)), Config::default());
+            DiagnosticsPageFactory::new(Arc::new(Ring::new(64)), Config::default());
         let occupant = vcx.update(|window, cx| {
             diagnostics_factory.create(
-                TileId(999),
                 None,
                 geode_shell::frame::FrameRef::new(
                     frame.clone(),
                     geode_shell::tiling::WorkspaceIx::FIRST,
                 ),
                 diagnostics.clone(),
+                Rc::new(|_, _, _| {}),
                 window,
                 cx,
             )
@@ -4731,9 +5176,9 @@ role = "key"
         );
     }
 
-    /// A desk layer's `datasets.toml` whose body is `pricer_sheets`
-    /// declared as `declaration`, and the sources loading it over the
-    /// builtin layer.
+    /// A desk layer's `datasets.toml` whose body is `declaration` (any
+    /// datasets text: a `pricer_sheets` or `pricer` redeclaration), and
+    /// the sources loading it over the builtin layer.
     fn with_desk_pricer_sheets(dir: &Path, declaration: &str) -> (ConfigSources, PathBuf) {
         let desk = dir.join("desk");
         std::fs::create_dir_all(&desk).unwrap();
@@ -4776,6 +5221,7 @@ role = "key"
             dir.path().join("geode.duckdb"),
             AdapterRegistry::default(),
             geode_data::PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
         )
         .unwrap();
         let builtin = crate::builtin_layer(None);
@@ -4809,12 +5255,73 @@ role = "key"
             dir.path().join("geode.duckdb"),
             AdapterRegistry::default(),
             geode_data::PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
         )
         .unwrap();
         assert!(
             pricer_sheets_pin_diagnostic(&setup.diagnostics).is_none(),
             "{:?}",
             setup.diagnostics
+        );
+    }
+
+    /// The builtin layer declares the pricer's vocabulary as a computed
+    /// dataset, so views, scopes and groupings can name its columns.
+    #[test]
+    fn the_pricer_dataset_is_declared_computed_in_every_build() {
+        let config = Config::load(&ConfigSources {
+            builtin: crate::builtin_layer(None),
+            desk: None,
+            user: None,
+        });
+        let (schema, _) = SchemaSpec::from_doc(config.doc("datasets").unwrap());
+        let ds = schema
+            .dataset(geode_pricer::core::PRICER_DATASET)
+            .expect("declared by the builtin layer");
+        assert!(ds.computed);
+        assert_eq!(ds.columns.len(), 44);
+    }
+
+    /// The app owns `pricer` too: a differing redeclaration would change
+    /// what a view, scope or grouping over the pricer means, so it is
+    /// ignored with an error naming the layer and its file.
+    #[test]
+    fn a_layer_redeclaring_pricer_differently_is_ignored_with_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sources, file) = with_desk_pricer_sheets(
+            dir.path(),
+            "[pricer]\ncomputed = false\n[pricer.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\n",
+        );
+        let config = Config::load(&sources);
+        let setup = data_setup(
+            &config,
+            dir.path().join("geode.duckdb"),
+            AdapterRegistry::default(),
+            geode_data::PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
+        )
+        .unwrap();
+        let ds = setup
+            .config
+            .schema
+            .dataset(geode_pricer::core::PRICER_DATASET)
+            .expect("the app's declaration");
+        assert!(
+            ds.computed && ds.columns.len() == 44,
+            "the service runs the app's declaration"
+        );
+        let d = setup
+            .diagnostics
+            .iter()
+            .find(|d| d.path.as_deref() == Some("datasets.pricer") && d.severity == Severity::Error)
+            .expect("an error diagnostic");
+        assert_eq!(d.layer, Some(geode_core::config::Layer::Desk));
+        assert_eq!(d.file.as_deref(), Some(file.as_path()));
+        assert!(d.message.contains("ignored"), "{}", d.message);
+        assert!(
+            d.message.contains("view, scope or grouping"),
+            "{}",
+            d.message
         );
     }
 
@@ -4859,7 +5366,8 @@ role = "key"
                 &none,
                 "/tmp/x.duckdb".into(),
                 AdapterRegistry::default(),
-                PricerRegistry::default()
+                PricerRegistry::default(),
+                geode_data::VolModelRegistry::default()
             )
             .is_none()
         );
@@ -4880,6 +5388,7 @@ role = "key"
             "/tmp/x.duckdb".into(),
             AdapterRegistry::default(),
             PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
         )
         .unwrap();
         assert_eq!(setup.config.sources.len(), 1);
@@ -4918,6 +5427,7 @@ role = "key"
             "/tmp/x.duckdb".into(),
             AdapterRegistry::default(),
             PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
         )
         .unwrap();
         let view = &setup.views[0];
@@ -4959,6 +5469,7 @@ role = "key"
             "/tmp/x.duckdb".into(),
             AdapterRegistry::default(),
             PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
         )
         .unwrap();
         let v = setup.views.iter().find(|v| v.name == "v").unwrap();
@@ -4998,6 +5509,7 @@ role = "key"
             "/tmp/x.duckdb".into(),
             AdapterRegistry::default(),
             PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
         )
         .unwrap();
         assert!(
@@ -5062,6 +5574,7 @@ role = "key"
             dir.path().join("geode.duckdb"),
             AdapterRegistry::default(),
             pricers,
+            geode_data::VolModelRegistry::default(),
         )
         .expect("the demo layer declares datasets and views");
         let bridge =
@@ -5092,6 +5605,7 @@ role = "key"
             dir.join("geode.duckdb"),
             AdapterRegistry::default(),
             geode_data::PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
         )
         .expect("the demo layer declares datasets and views")
     }
@@ -5172,6 +5686,7 @@ role = "key"
             dir.path().join("geode.duckdb"),
             AdapterRegistry::default(),
             geode_data::PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
         )
         .expect("the pricer's builtin datasets and an empty views doc");
         assert!(setup.panels.is_empty());
@@ -5401,7 +5916,7 @@ role = "key"
 
     /// A forget changes what the database holds without any `Published`,
     /// so the bridge must re-read a watched catalog on `Forgotten` or the
-    /// diagnostics tile keeps listing the deleted document.
+    /// diagnostics page keeps listing the deleted document.
     #[gpui::test]
     fn a_forgotten_document_rereads_a_watched_catalog(cx: &mut gpui::TestAppContext) {
         let f = catalog_fixture(cx);
@@ -5651,7 +6166,7 @@ role = "key"
         });
         let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
         let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
-        // This is the identity picker's request door: no diagnostics tile exists.
+        // This is the identity picker's request door: no diagnostics page exists.
         diagnostics.update(&mut vcx, |d, cx| {
             d.request_catalog();
             cx.notify();
@@ -5717,8 +6232,9 @@ role = "key"
         );
     }
 
-    /// The grid tile kinds the shared motion keys must reach.
-    const GRID_KINDS: &[&str] = &["blotter", "cvi", "pricer", "diagnostics"];
+    /// The grid tile kinds the shared motion keys must reach. The
+    /// diagnostics page is the fourth grid; `page_dispatch_counts` opens it.
+    const GRID_KINDS: &[&str] = &["blotter", "cvi", "pricer"];
 
     /// DataTable key suppression for every grid module, once per test app.
     fn init_grid_modules(cx: &mut gpui::TestAppContext) {
@@ -5728,10 +6244,11 @@ role = "key"
         cx.update(geode_pricer::init);
     }
 
-    /// A shell whose roster holds every grid factory, wired as `main` wires
-    /// it (actions, renames, fragments, builtin keymap, `user` as the user
-    /// layer), with one restored tile of `kind` focused. Returns the keymap
-    /// build's diagnostics beside the services.
+    /// A shell whose roster holds every grid factory and whose page roster
+    /// holds the diagnostics page, wired as `main` wires them (actions,
+    /// renames, fragments, the page toggle, builtin keymap, `user` as the
+    /// user layer), with one restored tile of `kind` focused. Returns the
+    /// keymap build's diagnostics beside the services.
     fn shell_with_one_grid_tile(
         kind: &str,
         user: Option<&str>,
@@ -5760,13 +6277,20 @@ role = "key"
             TemplateSet::builtin(),
             PricerSettings::default(),
         )));
-        roster.add(Box::new(DiagnosticsFactory::new(
+        let mut pages = geode_shell::module::PageRoster::new();
+        pages.add(Box::new(DiagnosticsPageFactory::new(
             Arc::new(Ring::new(16)),
             services.config.clone(),
         )));
         roster.register_actions(&mut services.registry);
-        let (fragments, diags) = roster.keymap_fragments();
+        let page_titles: Vec<(&str, &str)> = pages.entries().map(|e| (e.kind, e.title)).collect();
+        register_page_actions(&mut services.registry, &page_titles);
+        pages.register_actions(&mut services.registry);
+        let (mut fragments, diags) = roster.keymap_fragments();
         assert!(diags.is_empty(), "{diags:?}");
+        let (page_fragments, page_diags) = pages.keymap_fragments();
+        assert!(page_diags.is_empty(), "{page_diags:?}");
+        fragments.extend(page_fragments);
         let mut docs = vec![LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap()];
         if let Some(text) = user {
             docs.push(LayerDoc {
@@ -5780,12 +6304,14 @@ role = "key"
         let (keymap, keymap_diags) = build_keymap(&layered, services.mod_alias, &services.registry);
         services.keymap = keymap;
         services.roster = roster;
+        services.pages = pages;
         let mut table = geode_shell::session::to_toml(
             &Workspaces::new(),
             &TileRecords::new(),
             None,
             &geode_shell::session::PinnedRecords::new(),
             &geode_shell::palette_usage::PaletteUsage::new(),
+            &geode_shell::session::PageRecords::new(),
         );
         let ws1: toml::Table = format!(
             "focused = 1\n[node]\nkind = \"leaf\"\nid = 1\n[tiles.1]\nmodule = \"{kind}\"\n"
@@ -6058,15 +6584,52 @@ role = "key"
         assert_reaches_no_other_grid_tile(cx, "pricer", user);
     }
 
-    /// An override written against the retired `diagnostics::down` keeps
-    /// working in the diagnostics tile, only there, and warns naming both.
+    /// `keys` typed with the diagnostics page open over a blotter tile:
+    /// `mod+d` first, then `keys`. The tile beneath is out of the context
+    /// stack, so only the page can take them.
+    fn page_dispatch_counts(
+        cx: &mut gpui::TestAppContext,
+        user: Option<&str>,
+        keys: &[&str],
+        ids: &[&str],
+    ) -> Vec<usize> {
+        let mut all = vec!["alt-d"];
+        all.extend_from_slice(keys);
+        dispatch_counts(cx, "blotter", user, &all, ids)
+    }
+
+    /// One user override of a shared motion, under the shipped context,
+    /// reaches the diagnostics page: it publishes `grid` like the tiles.
     #[gpui::test]
-    fn an_old_diagnostics_down_override_still_moves_diagnostics_only_and_warns(
+    fn a_shared_motion_override_reaches_the_diagnostics_page(cx: &mut gpui::TestAppContext) {
+        use geode_shell::defaults::GRID_MOTION_CONTEXT;
+        init_grid_modules(cx);
+        let user = format!(
+            "[[bindings]]\ncontext = \"{GRID_MOTION_CONTEXT}\"\n[bindings.keys]\n\"q\" = \"motion::down\"\n"
+        );
+        let (_, diags) = shell_with_one_grid_tile("blotter", Some(&user));
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(
+            page_dispatch_counts(
+                cx,
+                Some(&user),
+                &["q", "j"],
+                &["page::toggle_diagnostics", "motion::down"]
+            ),
+            vec![1, 2],
+            "the page opened, and the override and the shipped j both reach it"
+        );
+    }
+
+    /// An override written against the retired `diagnostics::down` keeps
+    /// working on the diagnostics page, only there, and warns naming both.
+    #[gpui::test]
+    fn an_old_diagnostics_down_override_still_moves_the_page_only_and_warns(
         cx: &mut gpui::TestAppContext,
     ) {
         init_grid_modules(cx);
         let user = "[[bindings]]\ncontext = \"diagnostics\"\n[bindings.keys]\n\"q\" = \"diagnostics::down\"\n";
-        let (_, diags) = shell_with_one_grid_tile("diagnostics", Some(user));
+        let (_, diags) = shell_with_one_grid_tile("blotter", Some(user));
         assert_eq!(diags.len(), 1, "{diags:?}");
         assert_eq!(diags[0].severity, Severity::Warning);
         assert!(
@@ -6076,8 +6639,13 @@ role = "key"
             diags[0].message
         );
         assert_eq!(
-            dispatch_counts(cx, "diagnostics", Some(user), &["q"], &["motion::down"]),
-            vec![1]
+            page_dispatch_counts(
+                cx,
+                Some(user),
+                &["q"],
+                &["page::toggle_diagnostics", "motion::down"]
+            ),
+            vec![1, 1]
         );
         assert_reaches_no_other_grid_tile(cx, "diagnostics", user);
     }
