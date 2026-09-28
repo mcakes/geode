@@ -7,7 +7,10 @@
 //! without preventing startup.
 
 pub mod black;
+pub mod demo_vol;
 pub mod spline;
+
+pub use demo_vol::{DEMO_VOL_MODEL, DemoVolModel};
 
 use geode_core::pricing::{
     Instrument, MarketOverrides, OptionKind, PriceRequest, PriceResult, Pricer, PricingError,
