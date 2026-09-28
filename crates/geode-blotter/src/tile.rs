@@ -655,8 +655,10 @@ impl BlotterTile {
     fn requery(&mut self, cx: &mut Context<Self>) {
         // A new query supersedes staged work even when frame versions are
         // unchanged, as with tile-local filters and grouping overrides.
-        self.following.drop_stage();
+        // Every path that asks again clears it in `begin`; this path asks
+        // nothing, so it drops the stage itself.
         let Some(view) = self.view() else {
+            self.following.drop_stage();
             self.error = Some(Notice::danger(format!(
                 "view '{}' is not configured",
                 self.view_name
