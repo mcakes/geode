@@ -7,11 +7,8 @@ publish.workspace = true
 [dependencies]
 rand = "0.9"
 serde_json = "1.0.151"
-# `documents::cvi::CviGenerator` produces `geode_core::document::
-# DocumentRows` (market-data-documents plan, Task 10) — this crate never
-# writes XML itself (`geode-documents` does that), so this is the only
-# new dependency the generator needs. Layering rule: `geode-demo-data`
-# depends on `geode-core` alone, never `geode-documents` or `geode-data`.
+# Document generators return core DocumentRows; XML serialization and source
+# I/O belong to their callers. No dependency on geode-documents or geode-data.
 geode-core.workspace = true
 chrono = "0.4.42"
 
@@ -19,14 +16,7 @@ chrono = "0.4.42"
 bench = false
 
 [dev-dependencies]
-# Test-feature parity (2026-09-19): `cargo test --workspace` resolves
-# geode-core WITH `test-support` (geode-shell's dev-dependencies turn it
-# on, and cargo unifies features across every member it builds together),
-# so a `cargo test -p` of this crate alone must ask for the same thing or
-# it builds a second geode-core — and everything above it — that differs
-# only in that feature. One artifact per crate per profile is the rule;
-# `cargo tree -p <member> -i geode-core --format '{p} [{f}]'` must agree
-# with `cargo tree --workspace` for every member.
+# Match workspace test features so package-only tests reuse core artifacts.
 geode-core = { workspace = true, features = ["test-support"] }
 criterion = "0.8.2"
 tempfile = "3.27.0"
@@ -39,8 +29,7 @@ harness = false
 name = "dividend"
 harness = false
 
-# Workspace invariant (CLAUDE.md): every target opts out of the built-in
-# libtest harness so `cargo bench` runs criterion cleanly.
+# Only the Criterion targets participate in benchmark runs.
 [[example]]
 name = "emit"
 bench = false

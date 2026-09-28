@@ -5390,11 +5390,8 @@ mod tests {
         assert_eq!(
             shown_texts(&h2.b, &vcx2),
             vec!["".to_string(), "M1".into(), "M2".into()],
-            "I-1 (final whole-branch review): B is PINNED, so a \
-             grouping-only mutation is not something it follows — the V1 \
-             payload is still the answer to its latest question, and the \
-             only answer it will ever get for that scope. Dropping it left \
-             the pre-V1 rows painted with `acted` claiming B was current"
+            "B is pinned, so a grouping-only change must retain the V1 payload \
+             answering its latest request"
         );
 
         // A watched data publication requeries B while its earlier answer is

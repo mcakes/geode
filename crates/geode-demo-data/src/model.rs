@@ -1,5 +1,5 @@
 //! Struct-of-arrays batch at the source file's grain: one row per ordered
-//! underlying pair per instrument (spec §10.3's documented reading).
+//! underlying pair per instrument.
 
 /// One Vec per column, index = row. Column names are the canonical
 /// (snake_case) names; `emit` maps them to the source's header spelling.
@@ -56,8 +56,8 @@ impl RiskBatch {
         self.len() == 0
     }
 
-    /// Canonical column order. `emit` writes headers and rows in this order,
-    /// and the `_USD` twin of each measure is written immediately after it.
+    /// Identity columns in emission order. Measure groups follow; each
+    /// configured `_USD` twin immediately follows its base measure.
     pub const IDENTITY: &'static [&'static str] = &[
         "business_date",
         "book",
@@ -101,8 +101,7 @@ impl RiskBatch {
 
     pub const POSITION_MEASURES: &'static [&'static str] = &["daily_trading_pnl", "sc"];
 
-    /// Read a measure column by canonical name; used by `emit` so the
-    /// writer stays a loop over names rather than 30 hand-written fields.
+    /// Read a measure column by canonical name. Panics for unknown names.
     pub fn measure(&self, name: &str) -> &[f64] {
         match name {
             "delta01" => &self.delta01,

@@ -1434,8 +1434,7 @@ fn handle_edit_key_inner(
                 {
                     false
                 }
-                // Any other modifier: claimed and dropped, as it was
-                // before this key did anything at all here.
+                // Other modifiers are consumed without moving between fields.
                 _ => return true,
             };
             // Apply the stage's write gate before filter-mode stepping.
@@ -4306,9 +4305,8 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 .child(hint_line),
         );
 
-    // The live `Input` renders only when it actually owns the keystrokes — see this
-    // module's own "one switch" note, now also the edit stage's rule. `slash_filters:
-    // true` for the same reason as browse's own call.
+    // The live `Input` renders only while it owns the keystrokes. Normal mode
+    // shows a frozen filter row whose click enters filter mode, as in browse.
     let frozen_query = (state.mode == DialogMode::Normal).then_some(dialog::FrozenFilter {
         query: draft.query.as_str(),
         slash_filters: true,

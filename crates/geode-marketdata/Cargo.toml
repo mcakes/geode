@@ -7,16 +7,9 @@ publish.workspace = true
 [lib]
 bench = false
 
-# `geode-core` for `Snapshot`/`ColumnFormat`/`format_number`, `geode-shell`
-# for the module-hosting contract the tile plugs into (`TileContent`,
-# `Frame`, `Diagnostics`, the keymap vocabulary), `geode-data` for
-# `DataHandle` alone — the one door a module asks for data through (global
-# constraints: never `geode-blotter`, never `geode-diagnostics`) —
-# `gpui`/`gpui-component` for the tile itself, `chrono` for the local-clock
-# header and the staleness reading, `toml` for the session round trip,
-# `geode-widgets` for the segmented date field (its core and painter live
-# there since the as-of dialog work, 2026-09-20), `geode-tile` for the action
-# menu, popups, the upload confirm and notices.
+# The tile uses the shell hosting contract and DataHandle for data requests.
+# Shared interaction behavior comes from geode-tile; segmented date input
+# comes from geode-widgets. Feature modules do not depend on siblings.
 [dependencies]
 geode-core.workspace = true
 geode-shell.workspace = true

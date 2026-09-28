@@ -462,13 +462,10 @@ mod tests {
 
     #[test]
     fn the_predicate_names_a_gen_id_in_list_and_no_or_chain() {
-        // Cheap and load-bearing: anchors the harness against a
-        // regression back to the per-generation OR chain, and against an
-        // IN-list that does not actually name the resolved ids. A range
-        // (the form this replaced) degenerates on a real archive: books
-        // refresh independently, so `[lo, hi]` widens toward the whole
-        // archive and prunes nothing (docs/perf.md, "the range prefilter
-        // degenerates on a real archive").
+        // The predicate lists the resolved generation IDs with IN.
+        // Books refresh independently, so a `[lo, hi]` range can span
+        // most of the archive and defeat pruning. See docs/perf.md,
+        // "the range prefilter degenerates on a real archive".
         let (_d, store) = fixture();
         let gens = resolve_after_rebuild(
             &store,

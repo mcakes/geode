@@ -476,7 +476,7 @@ mod tests {
         assert_eq!(t.get("version").and_then(|v| v.as_integer()), Some(2));
         assert!(
             back.slots().iter().all(|s| s.state == SlotState::Idle),
-            "slot state is not persisted (§9.11)"
+            "slot state is not persisted"
         );
         assert_eq!(*back.range(), Range::Relative(Preset::M6));
         assert_eq!(back.frequency(), Frequency::H1);

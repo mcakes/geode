@@ -1,6 +1,5 @@
-//! Benchmarks data generation itself. Exists in phase 0 primarily to
-//! establish the workspace's criterion harness; phase 2 adds the
-//! query/snapshot pipeline benchmarks that the spec's budgets (§7) gate on.
+//! Measures seeded risk generation at 100,000 and 1,000,000 rows.
+//! Each iteration allocates a fresh batch; ingestion and queries are excluded.
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use geode_demo_data::{GeneratorConfig, generate};

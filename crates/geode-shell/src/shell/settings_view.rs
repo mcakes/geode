@@ -1405,7 +1405,7 @@ mod tests {
         assert_eq!(
             route(n, true, false, &bare("i")),
             OpenChoice,
-            "spec 2026-09-19 §3.3/§7: i opens the row's typeahead"
+            "i opens the row's typeahead"
         );
         assert_eq!(
             route(n, true, false, &bare("enter")),

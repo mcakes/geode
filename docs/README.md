@@ -21,6 +21,9 @@ Start with the documents that describe Geode **as it works now**:
 | [Performance](current/performance.md) | Budgets, instrumentation, reference values, and known gaps |
 | [Measurement log](perf.md) | Chronological benchmark results and investigations |
 
+`modules.md` is an undated feature-ideas inventory, not a current capability
+reference or committed roadmap.
+
 `phase-history.md` and `superpowers/` are an archive of proposals,
 implementation steps, rulings, and review findings. They may describe
 superseded designs and are not part of the normal reading path. Consult the

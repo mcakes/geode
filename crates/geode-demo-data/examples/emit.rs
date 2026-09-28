@@ -1,8 +1,8 @@
 //! Write a demo source directory: `cargo run -p geode-demo-data --example emit -- <dir> [rows]`
 //!
-//! Exists so the throwaway data probe (spec §7, `geode-app/src/probe.rs`)
-//! can be pointed at something real without a live desk share. The
-//! generator is deterministic, so the same seed gives the same files.
+//! Generates local ingestion fixtures with seed 42 and one date slot.
+//! The optional row count defaults to 100,000; the final CSV is left
+//! without a sentinel in a fresh directory to exercise pending discovery.
 
 use geode_demo_data::{EmitOptions, GeneratorConfig, emit_directory, generate};
 
