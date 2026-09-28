@@ -2619,6 +2619,48 @@ mod tests {
     }
 
     #[test]
+    fn a_vol_request_reaches_the_sink_and_cancel_reaches_the_vol_worker() {
+        // The vol twin of the pricing test above. A 40 ms per-job delay
+        // keeps key 21's five-job batch running when both keys are
+        // cancelled, so a cancel that never reached the vol worker would
+        // deliver all five results and then run key 22.
+        let (_d, service, rx) = local_service_with_delay(Duration::from_millis(40));
+        let expiries = [
+            "2026-01-01",
+            "2026-02-01",
+            "2026-03-01",
+            "2026-04-01",
+            "2026-05-01",
+        ];
+        service.vol_slices(crate::vol::worker::tests::params(21, 3, &expiries));
+        service.vol_slices(crate::vol::worker::tests::params(22, 1, &["2026-06-01"]));
+        std::thread::sleep(Duration::from_millis(60));
+        service.cancel(QueryKey(22));
+        service.cancel(QueryKey(21));
+        let o = until(&rx, |e| match e {
+            DataEvent::VolSlices(o) if o.key == QueryKey(21) => Some(o),
+            _ => None,
+        });
+        assert_eq!(o.tag, 3);
+        assert!(
+            o.results.len() < expiries.len(),
+            "cancel stopped the running batch early: {}",
+            o.results.len()
+        );
+        // Key 22 was queued when cancelled and never answers.
+        let deadline = std::time::Instant::now() + Duration::from_millis(500);
+        while std::time::Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            match rx.recv_timeout(remaining.min(Duration::from_millis(50))) {
+                Ok(DataEvent::VolSlices(o)) if o.key == QueryKey(22) => {
+                    panic!("key 22 was cancelled and must not have run")
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
     fn a_full_vol_queue_answers_the_refused_batch_with_an_error_per_job() {
         // A slow model holds the worker; fill the queue; the next batch is
         // refused from the service thread with one error per job.
