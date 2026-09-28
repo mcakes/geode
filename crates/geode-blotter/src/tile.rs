@@ -441,6 +441,17 @@ impl BlotterTile {
         }
     }
 
+    /// The presented columns and the cursor's column, for the shell's
+    /// edit-column actions. `None` until a plan exists or when the view is
+    /// no longer configured.
+    pub fn tile_columns(&self, cx: &App) -> Option<geode_core::tile_columns::TileColumns> {
+        let view = self.view()?;
+        let d = self.table.read(cx).delegate();
+        d.plan
+            .as_ref()
+            .map(|plan| plan.tile_columns(&view, d.cursor.col))
+    }
+
     pub fn last_query(&self) -> Option<(u64, Vec<String>)> {
         (self.tag > 0).then(|| (self.tag, self.last_grouping.clone()))
     }
