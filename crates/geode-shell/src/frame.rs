@@ -21,6 +21,7 @@ use crate::perf::RequeryStats;
 use crate::scopebar::{self, ScopeBarModel};
 use crate::tiling::WorkspaceIx;
 use geode_core::config::Layer;
+use geode_core::document::{KEY_SEPARATOR, is_key_prefix};
 use geode_core::groupings::GroupingSlots;
 use geode_core::named::NamedExpressions;
 use geode_core::query::{AsOf, QueryKey};
@@ -72,8 +73,18 @@ pub struct PublicationWatch {
 }
 
 impl PublicationWatch {
+    /// Whether a publish of `batch` in `dataset` concerns this watch: a
+    /// dataset-wide watch hears a dataset-wide notice; a document watch
+    /// hears a batch that is its key or lies under it (`is_key_prefix`),
+    /// so a watch on an underlying hears every expiry of a two-part-key
+    /// dataset.
     pub fn matches(&self, dataset: &str, batch: Option<&str>) -> bool {
-        self.dataset == dataset && self.batch.as_deref() == batch
+        self.dataset == dataset
+            && match (self.batch.as_deref(), batch) {
+                (None, None) => true,
+                (Some(watched), Some(published)) => is_key_prefix(watched, published),
+                _ => false,
+            }
     }
 }
 
@@ -415,7 +426,9 @@ impl Frame {
         self.pending_persist.take()
     }
 
-    /// Watch a whole dataset (`None`) or one document's encoded batch key.
+    /// Watch a whole dataset (`None`) or a document's encoded batch key:
+    /// `Some(key)` watches that document, or every document under it when
+    /// `key` is a shorter prefix of a multi-part key.
     /// Registration does not notify observers. A new watch starts at the current
     /// revision; the consumer must issue its initial query when adopting it.
     pub fn watch_publications(&mut self, dataset: &str, batch: Option<&str>) -> PublicationWatch {
@@ -455,12 +468,18 @@ impl Frame {
             if let Some(revision) = watches.dataset.upgrade() {
                 revision.set(self.versions.data);
             }
-            if let Some(revision) = watches
-                .documents
-                .get(&publish.batch)
-                .and_then(Weak::upgrade)
-            {
-                revision.set(self.versions.data);
+            // Every key-part prefix of the batch, then the batch itself:
+            // a watch on `SPX` hears `SPX␟2026-10-16`, never `SPXW␟…`.
+            let batch = publish.batch.as_str();
+            let ends = batch
+                .match_indices(KEY_SEPARATOR)
+                .map(|(i, _)| i)
+                .chain(std::iter::once(batch.len()));
+            for end in ends {
+                if let Some(revision) = watches.documents.get(&batch[..end]).and_then(Weak::upgrade)
+                {
+                    revision.set(self.versions.data);
+                }
             }
         }
         self.recent_publishes.push_front(publish);
@@ -2078,6 +2097,54 @@ mod tests {
             f.shared().versions_for([&spx_twin]).data,
             f.shared().versions().data
         );
+    }
+
+    #[test]
+    fn a_prefix_watch_fires_for_its_own_documents_only() {
+        use geode_core::document::join_key;
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let key =
+            |parts: &[&str]| join_key(&parts.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        let publish = |dataset: &str, batch: &str| Publish {
+            dataset: dataset.into(),
+            batch: batch.into(),
+            books: 0,
+            at: chrono::Utc::now(),
+        };
+        let spx = f.watch_publications("option_chain", Some(&key(&["SPX"])));
+        let spx_oct = f.watch_publications("option_chain", Some(&key(&["SPX", "2026-10-16"])));
+
+        let before = f.shared().versions_for([&spx]).data;
+        f.note_published(publish("option_chain", &key(&["SPX", "2026-11-20"])));
+        assert!(
+            f.shared().versions_for([&spx]).data > before,
+            "a November publish is under SPX"
+        );
+        assert_eq!(
+            f.shared().versions_for([&spx_oct]).data,
+            before,
+            "and not under SPX October"
+        );
+        assert!(spx.matches("option_chain", Some(&key(&["SPX", "2026-11-20"]))));
+        assert!(!spx_oct.matches("option_chain", Some(&key(&["SPX", "2026-11-20"]))));
+
+        let before = f.shared().versions_for([&spx]).data;
+        f.note_published(publish("option_chain", &key(&["SPXW", "2026-10-16"])));
+        assert_eq!(
+            f.shared().versions_for([&spx]).data,
+            before,
+            "SPXW is a string extension, not a key under SPX"
+        );
+        assert!(!spx.matches("option_chain", Some(&key(&["SPXW", "2026-10-16"]))));
+
+        f.note_published(publish("option_chain", &key(&["SPX", "2026-10-16"])));
+        assert!(
+            f.shared().versions_for([&spx_oct]).data > before
+                && f.shared().versions_for([&spx]).data > before,
+            "both fire"
+        );
+        assert!(spx.matches("option_chain", Some(&key(&["SPX", "2026-10-16"]))));
+        assert!(spx_oct.matches("option_chain", Some(&key(&["SPX", "2026-10-16"]))));
     }
 
     fn named(text: &str) -> geode_core::named::NamedExpressions {
