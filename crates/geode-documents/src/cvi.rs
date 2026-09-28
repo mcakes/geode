@@ -944,8 +944,8 @@ role = "attribute"
 
     #[test]
     fn builtin_kinds_offers_the_cvi_kind() {
+        // The count is `dividend.rs`'s `builtin_kinds_offers_every_kind`.
         let kinds = crate::builtin_kinds();
-        assert_eq!(kinds.len(), 2);
         assert!(kinds.iter().any(|k| k.name() == NAME));
     }
 
