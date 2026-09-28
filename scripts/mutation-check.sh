@@ -25327,6 +25327,88 @@ run_mutation "chip: active text is floored against its fill" \
   '                text: theme.primary_foreground,' \
   geode-shell every_chip_tone_is_readable_on_every_bundled_theme
 
+# ---- In-process scope evaluator ----
+# The evaluator copies what DuckDB does with scope_sql's predicate; the
+# parity fixture in geode-data is the detecting test for the SQL facts.
+run_mutation "scope eval: NaN orders above every number" \
+  crates/geode-core/src/scope/eval.rs \
+  '                (true, false) => Ordering::Greater,' \
+  '                (true, false) => Ordering::Less,' \
+  geode-data evaluate_agrees_with_scope_sql_on_every_operator
+
+run_mutation "scope eval: a number widens an i64 comparison to DOUBLE" \
+  crates/geode-core/src/scope/eval.rs \
+  '            ColumnType::I64 if any_num => Domain::F64,' \
+  '            ColumnType::I64 if false => Domain::F64,' \
+  geode-data evaluate_agrees_with_scope_sql_on_every_operator
+
+run_mutation "scope eval: a number casts a text column to DOUBLE" \
+  crates/geode-core/src/scope/eval.rs \
+  '            ColumnType::Utf8 if any_num => Domain::F64,' \
+  '            ColumnType::Utf8 if false => Domain::F64,' \
+  geode-data evaluate_agrees_with_scope_sql_on_every_operator
+
+run_mutation "scope eval: a derived constant folds before a literal converts" \
+  crates/geode-core/src/scope/eval.rs \
+  '        if let Some(c) = self.constant(dims) {' \
+  '        if let Some(c) = None::<bool> {' \
+  geode-data evaluate_agrees_with_scope_sql_on_every_operator
+
+run_mutation "scope eval: text to BIGINT rounds half away from zero" \
+  crates/geode-core/src/scope/eval.rs \
+  '    let r = f.round();' \
+  '    let r = f.trunc();' \
+  geode-data evaluate_agrees_with_scope_sql_on_every_operator
+
+run_mutation "scope eval: an unmapped derived selection keeps nothing before any refusal" \
+  crates/geode-core/src/scope/eval.rs \
+  '                return Ok(false);
+            }
+            scopeable(ds, dims, &sel.column)?;' \
+  '            }
+            scopeable(ds, dims, &sel.column)?;' \
+  geode-data evaluate_agrees_with_scope_sql_on_every_operator
+
+run_mutation "scope eval: a text filter with no textual column folds to false" \
+  crates/geode-core/src/scope/eval.rs \
+  '        if self.text.is_some() && textual.is_empty() {' \
+  '        if false {' \
+  geode-data a_text_filter_over_a_dataset_with_no_textual_column_matches_nothing
+
+run_mutation "scope eval: like's _ matches one character" \
+  crates/geode-core/src/scope/eval.rs \
+  '        if j < p.len() && (p[j] == '\''_'\'' || (p[j] != '\''%'\'' && p[j] == v[i])) {' \
+  '        if j < p.len() && (p[j] != '\''%'\'' && p[j] == v[i]) {' \
+  geode-core like_matches_wildcards_case_insensitively_with_no_escape
+
+run_mutation "scope eval: Kleene and is UNKNOWN when neither side is FALSE" \
+  crates/geode-core/src/scope/eval.rs \
+  'fn and(a: Option<bool>, b: Option<bool>) -> Option<bool> {
+    match (a, b) {
+        (Some(false), _) | (_, Some(false)) => Some(false),
+        (Some(true), Some(true)) => Some(true),
+        _ => None,' \
+  'fn and(a: Option<bool>, b: Option<bool>) -> Option<bool> {
+    match (a, b) {
+        (Some(false), _) | (_, Some(false)) => Some(false),
+        (Some(true), Some(true)) => Some(true),
+        _ => Some(false),' \
+  geode-core and_and_or_follow_kleene_logic
+
+run_mutation "scope eval: Kleene or is UNKNOWN when neither side is TRUE" \
+  crates/geode-core/src/scope/eval.rs \
+  'fn or(a: Option<bool>, b: Option<bool>) -> Option<bool> {
+    match (a, b) {
+        (Some(true), _) | (_, Some(true)) => Some(true),
+        (Some(false), Some(false)) => Some(false),
+        _ => None,' \
+  'fn or(a: Option<bool>, b: Option<bool>) -> Option<bool> {
+    match (a, b) {
+        (Some(true), _) | (_, Some(true)) => Some(true),
+        (Some(false), Some(false)) => Some(false),
+        _ => Some(false),' \
+  geode-core and_and_or_follow_kleene_logic
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

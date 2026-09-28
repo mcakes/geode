@@ -271,14 +271,10 @@ impl Scope {
                 }
             }
         }
-        // Constants fold the whole predicate before any literal converts:
-        // a text filter with nothing to search is `false`.
+        // A text filter with nothing to search is the constant `false`,
+        // which DuckDB folds before converting the expression's literals.
+        // The expression folds its own constants in `eval`.
         if self.text.is_some() && textual.is_empty() {
-            return Ok(false);
-        }
-        if let Some(e) = &self.expression
-            && e.constant(dims) == Some(false)
-        {
             return Ok(false);
         }
 
