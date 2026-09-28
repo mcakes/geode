@@ -1615,6 +1615,45 @@ impl Draft {
         })
     }
 
+    /// `r` in a column stage: the selected field stops being set at the stage's layer.
+    /// The fold that follows reseeds it with the value it now inherits. `Err` is the
+    /// notice for a field that already inherits, or a row with nothing to inherit.
+    pub fn inherit_selected(&mut self) -> Result<Fold, String> {
+        let Some(column) = self.column.clone() else {
+            return Err(String::new());
+        };
+        let Some(EditRow::Field(index)) = self.selected_row() else {
+            return Err("nothing to inherit on this row".to_string());
+        };
+        let Some(key) = views::COLUMN_KEYS
+            .iter()
+            .copied()
+            .find(|k| *k == self.fields[index].key)
+        else {
+            return Err("nothing to inherit on this row".to_string());
+        };
+        let to = self.fell_to(key);
+        let set = self.presentation_set.entry(column).or_default();
+        if !set.has(key) {
+            return Err(format!("{key} already follows {}", to.phrase()));
+        }
+        set.set(key, false);
+        Ok(Fold { key, to })
+    }
+
+    /// `shift+r` in a column stage: every field stops being set at the stage's layer.
+    pub fn inherit_all(&mut self) -> Result<(), String> {
+        let Some(column) = self.column.clone() else {
+            return Err(String::new());
+        };
+        let set = self.presentation_set.entry(column).or_default();
+        if !set.any() {
+            return Err("nothing is set on this column".to_string());
+        }
+        *set = views::PresentationKeys::default();
+        Ok(())
+    }
+
     /// What `key` inherits from in the open column stage.
     pub fn fell_to(&self, key: &str) -> FellTo {
         let Some(ctx) = self.column_ctx.as_ref() else {
@@ -6304,6 +6343,61 @@ mod tests {
         draft.set_query(String::new());
         draft.apply_text_entry(&|_, text| Ok(text.to_string()));
         assert!(!npv_sets(&draft, "label"));
+    }
+
+    /// `r`: a set field stops being set; the fold that follows shows what it inherits.
+    #[test]
+    fn inherit_selected_unsets_the_key_and_reseeds_it() {
+        let mut draft = npv_stage_on("precision");
+        let FieldKind::Number { value: shown, .. } = draft.fields[draft.selected].kind else {
+            panic!("precision is a number");
+        };
+        assert_eq!(draft.toggle_selected(), Step::Changed);
+        draft.fold_column();
+        assert!(npv_sets(&draft, "precision"));
+        let to = draft.fell_to("precision");
+        assert_eq!(
+            draft.inherit_selected(),
+            Ok(Fold {
+                key: "precision",
+                to
+            })
+        );
+        assert!(!npv_sets(&draft, "precision"));
+        draft.fold_column();
+        assert!(
+            matches!(draft.fields[draft.selected].kind, FieldKind::Number { value, .. } if value == shown),
+            "back to the inherited value"
+        );
+    }
+
+    #[test]
+    fn inherit_selected_on_an_inherited_key_says_it_already_follows() {
+        let mut draft = npv_stage_on("precision");
+        let to = draft.fell_to("precision");
+        assert_eq!(
+            draft.inherit_selected(),
+            Err(format!("precision already follows {}", to.phrase()))
+        );
+    }
+
+    #[test]
+    fn inherit_all_clears_every_key_or_says_nothing_is_set() {
+        let mut draft = npv_stage_on("precision");
+        assert_eq!(
+            draft.inherit_all(),
+            Err("nothing is set on this column".to_string())
+        );
+        draft.toggle_selected();
+        draft.selected = draft
+            .fields
+            .iter()
+            .position(|f| f.key == "thousands")
+            .unwrap();
+        draft.toggle_selected();
+        assert!(npv_sets(&draft, "precision") && npv_sets(&draft, "thousands"));
+        assert_eq!(draft.inherit_all(), Ok(()));
+        assert!(!draft.presentation_set["npv"].any());
     }
 
     /// Outside a column stage there is no column to pin for.

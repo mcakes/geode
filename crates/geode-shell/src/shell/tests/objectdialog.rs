@@ -6262,16 +6262,20 @@ fn the_schema_column_row_opens_the_column_stage_and_writes_the_dataset_overlay(
         "risk › book"
     );
     assert!(cx.debug_bounds("objectdialog-field-width").is_some());
-    // Delete and Revert are refused by the column-stage gate, with the same wording as
-    // the Views column stage.
-    for key in ["d", "r"] {
-        cx.simulate_keystrokes(key);
-        cx.run_until_parked();
-        assert_eq!(
-            dialog_state(&shell, &cx, |s| s.notice.clone()),
-            Some(format!("{key} is not a verb in a column's stage"))
-        );
-    }
+    // Delete is refused by the column-stage gate, with the same wording as the Views
+    // column stage; `r` inherits, and an inherited Schema field follows each view.
+    cx.simulate_keystrokes("d");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()).as_deref(),
+        Some("d is not a verb in a column's stage")
+    );
+    cx.simulate_keystrokes("r");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()).as_deref(),
+        Some("label already follows each view")
+    );
 
     cx.simulate_keystrokes("j i"); // width
     cx.run_until_parked();
@@ -7273,48 +7277,219 @@ fn a_failed_write_in_the_column_stage_steps_back_to_the_view(cx: &mut gpui::Test
 /// whole object. Give the view a real presentation override so Revert would otherwise
 /// arm. After Escape returns to the view, Revert must become available again.
 #[gpui::test]
-fn delete_and_revert_are_refused_in_the_column_stage(cx: &mut gpui::TestAppContext) {
+fn delete_is_refused_and_r_inherits_in_the_column_stage(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
     cx.simulate_keystrokes("j enter"); // npv's column stage
     cx.run_until_parked();
     cx.simulate_keystrokes("j j space"); // scale → k, a real override
     cx.run_until_parked();
-    // The override has to reach MEMORY before either verb is asked
-    // about it: an ordinary field edit applies at the debounced flush,
-    // and `derive_rows` reads the live config — without this the row is
-    // not `overridden` yet and `r` would have been refused anyway,
-    // which would make the assertions below prove nothing.
     flush_config_write(&mut cx);
 
-    for key in ["d", "r"] {
-        cx.simulate_keystrokes(key);
-        cx.run_until_parked();
-        assert_eq!(
-            dialog_state(&shell, &cx, |s| s.notice.clone()),
-            Some(format!("{key} is not a verb in a column's stage")),
-            "{key} answered about the view from inside a column's stage"
-        );
-        assert_eq!(
-            dialog_state(&shell, &cx, |s| s.confirm),
-            None,
-            "{key} armed a confirm the crumb has navigated away from"
-        );
-        assert!(
-            edit_draft(&shell, &cx, |d| d.column().is_some()),
-            "{key} left the column stage"
-        );
-    }
+    cx.simulate_keystrokes("d");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()).as_deref(),
+        Some("d is not a verb in a column's stage")
+    );
+    cx.simulate_keystrokes("r");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()).as_deref(),
+        Some("scale follows the default again")
+    );
+    assert_eq!(dialog_state(&shell, &cx, |s| s.confirm), None);
+    assert!(edit_draft(&shell, &cx, |d| d.column().is_some()));
 
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     assert!(edit_draft(&shell, &cx, |d| d.column().is_none()));
+    flush_config_write(&mut cx);
+    cx.simulate_keystrokes("j j"); // back onto a row the object dialog can revert from
+    cx.simulate_keystrokes("r");
+    cx.run_until_parked();
+    assert_ne!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()).as_deref(),
+        Some("scale follows the default again"),
+        "outside the column stage r is the view's own verb again"
+    );
+}
+
+/// The npv column stage of the desk `tree` view over `services`, with a writable
+/// user directory; the cursor on the stage's first row (label).
+fn npv_stage(
+    cx: &mut gpui::TestAppContext,
+    services: ShellServices,
+    dir: &std::path::Path,
+) -> (Entity<ShellView>, gpui::VisualTestContext) {
+    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir, "config::views");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("j enter");
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| d.column() == Some("npv")));
+    (shell, cx)
+}
+
+fn user_presentation(dir: &std::path::Path) -> String {
+    std::fs::read_to_string(dir.join("view_presentation.toml")).unwrap_or_default()
+}
+
+fn notice(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> Option<String> {
+    dialog_state(shell, cx, |s| s.notice.clone())
+}
+
+/// `r` on a set color: the notice names what it follows and the key leaves the file.
+#[gpui::test]
+fn r_inherits_a_set_view_color_and_the_key_leaves_the_overlay(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = npv_stage(cx, services_with_a_desk_view(), dir.path());
+    cx.simulate_keystrokes("j j j j j j space"); // color
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+    assert!(user_presentation(dir.path()).contains("color"), "pinned");
     cx.simulate_keystrokes("r");
     cx.run_until_parked();
     assert_eq!(
-        dialog_state(&shell, &cx, |s| s.confirm),
-        Some(objectdialog::Confirm::Revert),
-        "the refusal is the column stage's alone — r still arms on the view"
+        notice(&shell, &cx).as_deref(),
+        Some("color follows the default again")
+    );
+    flush_config_write(&mut cx);
+    assert!(
+        !user_presentation(dir.path()).contains("color"),
+        "{}",
+        user_presentation(dir.path())
+    );
+}
+
+/// A pin equal to its parent changes no field value when released; the release is
+/// still written.
+#[gpui::test]
+fn r_on_a_pinned_equal_value_removes_the_key(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let pinned = "[tree.columns.npv]\nlabel = \"NPV\"\n";
+    std::fs::write(dir.path().join("view_presentation.toml"), pinned).unwrap();
+    let services = desk_view_services(&[("view_presentation", pinned)]);
+    let (shell, mut cx) = npv_stage(cx, services, dir.path());
+    assert!(edit_draft(&shell, &cx, |d| d.presentation_set["npv"].has("label")));
+    cx.simulate_keystrokes("r"); // the cursor is on label
+    cx.run_until_parked();
+    assert_eq!(
+        notice(&shell, &cx).as_deref(),
+        Some("label follows the desk again")
+    );
+    flush_config_write(&mut cx);
+    assert!(
+        !user_presentation(dir.path()).contains("label"),
+        "{}",
+        user_presentation(dir.path())
+    );
+}
+
+#[gpui::test]
+fn shift_r_inherits_every_field(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = npv_stage(cx, services_with_a_desk_view(), dir.path());
+    cx.simulate_keystrokes("j j space j j space"); // scale, thousands
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+    assert!(user_presentation(dir.path()).contains("[tree.columns.npv]"));
+    cx.simulate_keystrokes("shift-r");
+    cx.run_until_parked();
+    assert_eq!(
+        notice(&shell, &cx).as_deref(),
+        Some("every field follows the layers below")
+    );
+    flush_config_write(&mut cx);
+    assert!(
+        !user_presentation(dir.path()).contains("[tree.columns.npv]"),
+        "{}",
+        user_presentation(dir.path())
+    );
+    cx.simulate_keystrokes("shift-r");
+    cx.run_until_parked();
+    assert_eq!(
+        notice(&shell, &cx).as_deref(),
+        Some("nothing is set on this column")
+    );
+}
+
+/// A set field's ↺ is `r` on that row.
+#[gpui::test]
+fn the_inherit_control_does_what_r_does(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = npv_stage(cx, services_with_a_desk_view(), dir.path());
+    assert!(
+        cx.debug_bounds("objectdialog-field-inherit-color")
+            .is_none(),
+        "an inherited field has no ↺"
+    );
+    cx.simulate_keystrokes("j j j j j j space"); // color
+    cx.simulate_keystrokes("k k k k k k"); // cursor away from color
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+    let control = cx
+        .debug_bounds("objectdialog-field-inherit-color")
+        .expect("a set field paints its ↺");
+    cx.simulate_click(control.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(
+        notice(&shell, &cx).as_deref(),
+        Some("color follows the default again")
+    );
+    flush_config_write(&mut cx);
+    assert!(!user_presentation(dir.path()).contains("color"));
+    assert!(
+        cx.debug_bounds("objectdialog-field-inherit-color")
+            .is_none()
+    );
+}
+
+#[gpui::test]
+fn r_on_an_inherited_field_writes_nothing(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = npv_stage(cx, services_with_a_desk_view(), dir.path());
+    cx.simulate_keystrokes("r"); // label, inherited from the desk
+    cx.run_until_parked();
+    assert_eq!(
+        notice(&shell, &cx).as_deref(),
+        Some("label already follows the desk")
+    );
+    assert!(shell.read_with(&cx, |s, _| s.pending_config_write.is_none()));
+}
+
+/// Choosing the value already shown pins it; after closing and reopening the dialog
+/// the pin reads back from the file as the view's own value.
+#[gpui::test]
+fn a_pin_equal_to_the_parent_survives_a_reload(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = npv_stage(cx, services_with_a_desk_view(), dir.path());
+    cx.simulate_keystrokes("j j j j j"); // negative
+    assert!(
+        cx.debug_bounds("objectdialog-field-provenance-negative")
+            .is_none()
+    );
+    cx.simulate_keystrokes("i enter"); // choose the lit (current) option
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+    assert!(
+        user_presentation(dir.path()).contains("negative = \"minus\""),
+        "{}",
+        user_presentation(dir.path())
+    );
+    cx.simulate_keystrokes("escape escape escape");
+    cx.run_until_parked();
+    assert!(shell.read_with(&cx, |s, _| s.object_dialog.is_none()));
+    dispatch_action(&shell, "config::views", &mut cx);
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("j enter");
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| d.presentation_set["npv"].has("negative")));
+    assert!(
+        cx.debug_bounds("objectdialog-field-provenance-negative")
+            .is_some()
     );
 }
 

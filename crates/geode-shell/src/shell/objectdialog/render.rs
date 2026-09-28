@@ -1622,6 +1622,10 @@ fn handle_edit_key_inner(
             }
         }
         NormalCommand::Verb('d') => arm_delete(shell, cx),
+        // In a column stage `r` and `shift+r` release the field(s) to the layers below;
+        // everywhere else `r` is the object's revert.
+        NormalCommand::Verb('r') if in_column_stage(shell) => inherit_row(shell, cx),
+        NormalCommand::Verb('R') if in_column_stage(shell) => inherit_all_rows(shell, cx),
         NormalCommand::Verb('r') => arm_revert(shell),
         NormalCommand::Verb('o') => overwrite_scope(shell, cx),
         // `x` removes a member into its catalogue. Route its own refusal directly to
@@ -2734,13 +2738,63 @@ fn named_expression_users(shell: &ShellView, name: &str, cx: &App) -> Option<Str
 /// Arm reversion when a user definition or presentation overlays an inherited object.
 /// User-only objects cannot revert because no inherited object remains. The view
 /// overlay counts even when its definition was never copied.
-fn arm_revert(shell: &mut ShellView) {
-    // Revert affects the whole object and associated view presentation, so it is
-    // unavailable from a single-column projection.
-    if in_column_stage(shell) {
-        not_a_column_verb(shell, "r");
+/// `r` in a column stage: the selected field inherits again. Blocked by a pending
+/// confirmation like every row mutation.
+fn inherit_row(shell: &mut ShellView, cx: &mut Context<ShellView>) {
+    if armed_confirm(shell).is_some() {
         return;
     }
+    match draft_mut(shell).map(Draft::inherit_selected) {
+        Some(Ok(Fold { key, to })) => {
+            revalidate(shell);
+            set_notice(shell, format!("{key} follows {} again", to.phrase()));
+            commit_change(shell, cx);
+        }
+        Some(Err(notice)) if !notice.is_empty() => set_notice(shell, notice),
+        _ => {}
+    }
+    cx.notify();
+}
+
+/// `shift+r` in a column stage: every field inherits again.
+fn inherit_all_rows(shell: &mut ShellView, cx: &mut Context<ShellView>) {
+    if armed_confirm(shell).is_some() {
+        return;
+    }
+    match draft_mut(shell).map(Draft::inherit_all) {
+        Some(Ok(())) => {
+            revalidate(shell);
+            set_notice(shell, "every field follows the layers below".to_string());
+            commit_change(shell, cx);
+        }
+        Some(Err(notice)) if !notice.is_empty() => set_notice(shell, notice),
+        _ => {}
+    }
+    cx.notify();
+}
+
+/// A click on a set field's ↺: `r` on that row, the cursor moved there first.
+fn on_inherit_clicked(
+    shell: &mut ShellView,
+    position: usize,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    if let Some(state) = shell.object_dialog.as_mut()
+        && state.notice.take().is_some()
+    {
+        cx.notify();
+    }
+    if let Some(draft) = draft_mut(shell)
+        && position < draft.visible_rows().len()
+    {
+        draft.selected = position;
+    }
+    inherit_row(shell, cx);
+    dialog::sync_dialog_text(shell, window, cx);
+}
+
+fn arm_revert(shell: &mut ShellView) {
     // `arm_delete`'s own values-stage guard, for the same reason.
     if in_values_stage(shell) {
         not_a_values_verb(shell);
@@ -3575,10 +3629,14 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     let flagged = draft.flagged_rows(domain.doc());
     // the column stage's layers, resolved once per render. `None` off the stage — see
     // `provenance_slot`.
-    let provenance_inputs = draft
-        .column_ctx
-        .as_ref()
-        .map(dataset_columns::ProvenanceInputs::new);
+    let provenance_inputs = draft.column_ctx.as_ref().map(|ctx| {
+        let set = draft
+            .column()
+            .and_then(|column| draft.presentation_set.get(column))
+            .copied()
+            .unwrap_or_default();
+        dataset_columns::ProvenanceInputs::new(ctx, set)
+    });
     // Choice entry paints its ranked options instead of the object's field rows.
     let list: AnyElement = if let Some(choice) =
         draft.choice.as_ref().filter(|_| draft.choice_entry())
@@ -3674,6 +3732,10 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                             // fills `layer` below on its own rows, which are not
                             // column-stage rows, so the two never both appear.
                             .children(provenance_inputs.as_ref().map(|inputs| {
+                                // A set field's badge reads in the foreground and carries
+                                // ↺; an inherited one is muted and has none, and a
+                                // same-size spacer keeps the values in one column.
+                                let is_set = inputs.set.has(&field.key);
                                 badge_slot(
                                     &PROVENANCE_NAMES,
                                     dataset_columns::provenance_of(inputs, field).map(|p| {
@@ -3682,9 +3744,42 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                                             format!("objectdialog-field-provenance-{}", field.key),
                                         )
                                     }),
+                                    if is_set {
+                                        theme.foreground
+                                    } else {
+                                        theme.muted_foreground
+                                    },
                                     theme,
                                     cx,
                                 )
+                            }))
+                            .children(provenance_inputs.as_ref().map(|inputs| {
+                                let is_set = inputs.set.has(&field.key);
+                                let key = field.key.clone();
+                                let control = div()
+                                    .id(("objectdialog-field-inherit", m.row))
+                                    .px_1()
+                                    .rounded(theme.radius_tokens().sm)
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child("\u{21ba}");
+                                if is_set {
+                                    let entity = entity.clone();
+                                    control
+                                        .pointer_states(tick_states)
+                                        .debug_selector(move || {
+                                            format!("objectdialog-field-inherit-{key}")
+                                        })
+                                        .on_mouse_down(MouseButton::Left, move |_e, window, cx| {
+                                            cx.stop_propagation();
+                                            entity.update(cx, |shell, cx| {
+                                                on_inherit_clicked(shell, position, window, cx);
+                                            });
+                                        })
+                                        .into_any_element()
+                                } else {
+                                    control.invisible().into_any_element()
+                                }
                             }))
                             // the layer a schema row's value came from — `None` on
                             // every writable domain (`Field:: layer`'s own doc has the
@@ -3698,6 +3793,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                                             format!("objectdialog-field-layer-{}", field.key),
                                         )
                                     }),
+                                    theme.muted_foreground,
                                     theme,
                                     cx,
                                 )
@@ -4194,6 +4290,20 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         hints.extend(change_hint(false));
         if types {
             hints.push(i_hint(selected_row));
+        }
+        // `r` names itself only on a set row; `shift+r` while anything is set.
+        let set = draft
+            .column()
+            .and_then(|column| draft.presentation_set.get(column))
+            .copied()
+            .unwrap_or_default();
+        if let Some(EditRow::Field(i)) = selected_row
+            && draft.fields.get(i).is_some_and(|f| set.has(&f.key))
+        {
+            hints.push(Hint::new(HintRow::Edit, &["r"], "inherit"));
+        }
+        if set.any() {
+            hints.push(Hint::new(HintRow::Edit, &["shift+r"], "inherit all"));
         }
         hints.extend(leave(format!("back to {}", draft.name)));
         hints
@@ -4697,6 +4807,7 @@ const LAYER_NAMES: [&str; 3] = [
 fn badge_slot(
     names: &[&'static str],
     badge: Option<(&'static str, String)>,
+    fg: gpui::Hsla,
     theme: &gpui_component::Theme,
     cx: &App,
 ) -> AnyElement {
@@ -4719,13 +4830,7 @@ fn badge_slot(
             .top_0()
             .right_0()
             .whitespace_nowrap()
-            .child(dialog::badge(
-                name,
-                theme.muted_foreground,
-                theme.border,
-                Some(selector),
-                cx,
-            ))
+            .child(dialog::badge(name, fg, theme.border, Some(selector), cx))
     });
     div()
         .relative()

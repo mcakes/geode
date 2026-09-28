@@ -1285,8 +1285,8 @@ pub fn help(key: &str) -> &'static str {
 /// Shared help for the seven presentation fields in either column-stage domain.
 pub fn column_help(key: &str) -> &'static str {
     match key {
-        "label" => "The header text — empty stops overriding what the desk or dataset level sets",
-        "width" => "Column width in pixels, or auto for the kind's default width",
+        "label" => "The header text — empty or r inherits the desk or dataset label",
+        "width" => "Column width in pixels; auto or r inherits",
         "scale" => "Divide values for display: none, k (thousands), M (millions)",
         "precision" => "Decimal places shown, 0 to 12",
         "thousands" => "Group digits with thousands separators",
