@@ -16290,7 +16290,7 @@ run_mutation "vol chain prefix: a shorter key reads every document under it" \
   '    let key_predicate = ds.key[..]' \
   geode-data a_prefix_query_returns_every_document_under_it_in_key_then_axis_order
 
-run_mutation "vol chain prefix: as-of pins every matched generation" \
+run_mutation "vol chain prefix: as-of matches every document under the key" \
   crates/geode-data/src/query/document.rs \
   '                .filter(|g| is_key_prefix(&prefix, &g.batch))' \
   '                .filter(|g| g.batch == prefix)' \
@@ -16301,6 +16301,30 @@ run_mutation "vol chain prefix: freshness needs the separator" \
   '        let under = format!("{prefix}{}", geode_core::document::KEY_SEPARATOR);' \
   '        let under = prefix.to_string();' \
   geode-data a_prefix_never_matches_a_longer_underlying
+
+run_mutation "vol chain prefix: an as-of read pins each matched generation" \
+  crates/geode-data/src/query/document.rs \
+  '                        format!(" and gen_id in ({ids})")' \
+  '                        String::new()' \
+  geode-data an_as_of_prefix_read_returns_each_document_that_existed_then
+
+run_mutation "vol chain prefix: an as-of read reports its oldest source time" \
+  crates/geode-data/src/query/document.rs \
+  '                    .min()' \
+  '                    .max()' \
+  geode-data an_as_of_prefix_read_returns_each_document_that_existed_then
+
+run_mutation "vol chain prefix: a generation only when one document matched" \
+  crates/geode-data/src/query/document.rs \
+  '                if let [only] = matched.as_slice() {' \
+  '                if let [only, ..] = matched.as_slice() {' \
+  geode-data an_as_of_prefix_read_returns_each_document_that_existed_then
+
+run_mutation "vol chain prefix: rows order by the open key parts first" \
+  crates/geode-data/src/query/document.rs \
+  '    let order = ds.key[given..]' \
+  '    let order = ds.key[arity..]' \
+  geode-data a_prefix_query_returns_every_document_under_it_in_key_then_axis_order
 
 run_mutation "vol chain prefix: a publish fires each key prefix's watch" \
   crates/geode-shell/src/frame.rs \

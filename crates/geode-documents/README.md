@@ -36,17 +36,17 @@ cargo bench -p geode-documents     # document parse and write
 - CVI and dividend wire tag names remain unverified against the desk's XSD.
   `SLICE_VALUES` in `src/cvi.rs` and `TAGS` in `src/dividend.rs` pair wire
   tags with column names for both parser and writer.
-- Option-chain quotes are sorted by strike at parse, and a repeated strike
-  is refused naming it, so a chain's strikes are always strictly ascending.
-  Every quote must carry all five values: vols arrive computed upstream, so
-  a quote missing one is refused rather than filled by averaging bid and
-  ask. `quoteTime` must be an RFC 3339 time and is stored as its wire text,
-  since document columns cannot be timestamps. The writer refuses anything
-  the parser would never produce (strikes not strictly ascending, a
-  non-positive strike or forward, an expiry not spelled `YYYY-MM-DD`, a
-  blank or padded underlying, a non-RFC 3339 quote time, no rows), so it
-  emits only what the parser could have produced. `TAGS` in `src/chain.rs` pairs the quote's wire tags
-  with column names; they are unverified against any desk XSD.
+- Option-chain quotes are sorted by strike at parse, and a repeated strike is
+  refused naming it, so a chain's strikes are always strictly ascending. Every
+  quote must carry all five values: vols arrive computed upstream, so a quote
+  missing one is refused rather than filled by averaging bid and ask.
+  `quoteTime` must be an RFC 3339 time and is stored as its wire text, since
+  document columns cannot be timestamps. The writer refuses anything the
+  parser would never produce (strikes not strictly ascending, a non-positive
+  strike or forward, an expiry not spelled `YYYY-MM-DD`, a blank or padded
+  underlying, a non-RFC 3339 quote time, no rows), so it emits only what the
+  parser could have produced. `TAGS` in `src/chain.rs` pairs the quote's wire
+  tags with column names; they are unverified against any desk XSD.
 - Parse and write failures return typed errors; the data service owns source
   health and diagnostic routing.
 - The same kind writes demo and uploaded documents and parses subscribed

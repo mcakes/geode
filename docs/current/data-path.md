@@ -604,10 +604,10 @@ not promise complete history across all grains and partitions.
 The application does not schedule live/archive sweeps for measure datasets or
 feed-published documents; the API is called only by tests for those. Feed
 archives therefore grow with every publish: each republish archives the
-outgoing generation, for the demo's `opra_sim` option chains (twelve
-documents per underlying, one per expiry) as for its CVI documents (one per
-underlying). Local documents (`local = true`) are the exception: they keep
-200 archived generations per document (`LOCAL_KEEP_GENERATIONS`; with the live one, at most
+outgoing generation, for the demo's `opra_sim` option chains (twelve documents
+per underlying, one per expiry) as for its CVI documents (one per underlying).
+Local documents (`local = true`) are the exception: they keep 200 archived
+generations per document (`LOCAL_KEEP_GENERATIONS`; with the live one, at most
 201), with no age limit. After each successful local publish the ingest writer
 counts the saved document's generation summary rows; only when that document
 has crossed the bound does it sweep the whole dataset, then delete, in a

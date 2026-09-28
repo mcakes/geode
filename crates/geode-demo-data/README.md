@@ -1,11 +1,11 @@
 # geode-demo-data
 
-Seeded risk batches, CSV fixtures, and synthetic CVI, dividend and option-chain
-documents. Risk batches use one vector per column; document generators return
-`geode_core::document::DocumentRows`. The workspace dependencies are
-`geode-core` and `geode-pricing`, a calculation leaf whose stand-in vol model
-prices the option chains. The application supplies document serialization and publishing
-through `geode-documents` and the data service.
+Seeded risk batches, CSV fixtures, and synthetic CVI, dividend and
+option-chain documents. Risk batches use one vector per column; document
+generators return `geode_core::document::DocumentRows`. The workspace
+dependencies are `geode-core` and `geode-pricing`, a calculation leaf whose
+stand-in vol model prices the option chains. The application supplies document
+serialization and publishing through `geode-documents` and the data service.
 
 See [demo and application composition](../../docs/current/features.md#demo-and-application-composition)
 for startup, caching, and ingestion ownership.
@@ -98,22 +98,19 @@ The application loads [examples/demo-config](../../examples/demo-config) below
 desk and user configuration. Its files declare:
 
 - `datasets.toml`: risk column names, roles and grains, document schemas,
-  and the shared series cache.
+  and the shared series cache. Among the document schemas, `option_chain`
+  (key `underlying_ref, expiry`, axis `strike`) is filled by the generated
+  `opra_sim` source from the demo bus's `marketdata/chain/>` topics,
+  coalescing per key over 500 ms like the CVI and dividend sources. Chains
+  are subscribed only; the demo egress target does not upload them.
 - `views.toml`: the default `tree` view and a 100-column `wide` view.
 - `dimensions.toml` and `groupings.toml`: book-to-desk mapping and grouping slots.
-- `datasets.toml` also declares `option_chain` (key `underlying_ref, expiry`,
-  axis `strike`), which the generated `opra_sim` source fills from the demo
-  bus's `marketdata/chain/>` topics, coalescing per key over 500 ms like the
-  CVI and dividend sources. Chains are subscribed only; the demo egress
-  target does not upload them.
 - `app.toml`: blotter staleness, the default series source, and pricer
   underlying suggestions matching `demo_underlyings`.
 
 `geode --demo [rows]` caches source files and its database under
 `$TMPDIR/geode-demo/<rows>-42/`. Schema changes require clearing that directory;
-existing payload tables are not migrated automatically. After a schema
-change such as the `option_chain` declaration, delete that directory so
-`--demo` starts from a fresh database.
+existing payload tables are not migrated automatically.
 
 ## Commands
 
