@@ -318,7 +318,11 @@ fn a_non_dialog_chord_is_inert_behind_a_dialog(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn opens_dialog_matches_what_dispatch_pushes(cx: &mut gpui::TestAppContext) {
     // Flagged actions that legitimately refuse in this fixture, each with the reason.
-    const REFUSES_IN_FIXTURE: &[&str] = &[];
+    const REFUSES_IN_FIXTURE: &[&str] = &[
+        // No focused tile answers `tile_columns` here: a status notice, no list.
+        "config::view_column",
+        "config::schema_column",
+    ];
     let (window, mut vcx) = open_shell(cx, super::picker::services_with_pickable());
     let shell = shell_of(&window, &mut vcx);
     let ids: Vec<crate::actions::ActionId> = shell.read_with(&vcx, |s, _| {

@@ -732,7 +732,6 @@ pub(in crate::shell) fn open_object(
 /// The object an edit-column route opens for `column` of `view`: the view itself for
 /// Views; for Schema, the first dataset of the view (primary, then joins) that declares
 /// the column — the owner dataset presentation resolves to. `Err` is the footer notice.
-#[allow(dead_code)] // wired by the choice dialog in the next commit
 fn resolve_column_object(
     domain: Domain,
     views: &[ViewSpec],
@@ -757,7 +756,6 @@ fn resolve_column_object(
 /// queued edit may have changed the view since the tile planned. Each failure lands in
 /// the dialog's footer notice at the stage it reached: an unresolvable object stays in
 /// Browse, a column the object no longer has stops on its Edit stage.
-#[allow(dead_code)] // wired by the choice dialog in the next commit
 pub(in crate::shell) fn open_column(
     shell: &mut ShellView,
     domain: Domain,

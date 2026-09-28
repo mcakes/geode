@@ -15,6 +15,10 @@
 //! `tile::open_with` uses the same tile rows, filtered to kinds accepting
 //! the focused tile's launch context, titled `Open {underlying} in…`; a
 //! pick always splits.
+//!
+//! `config::view_column` / `config::schema_column` list the focused tile's
+//! presented columns (Schema without derived ones), the cursor's column
+//! highlighted; a pick opens that dialog on the column's Column stage.
 
 use std::rc::Rc;
 
@@ -25,6 +29,7 @@ use gpui_component::{ActiveTheme as _, v_flex};
 use geode_core::groupings::GroupingSlots;
 use geode_core::launch::LaunchContext;
 use geode_core::log::{Level, LogLevels, TARGETS};
+use geode_core::tile_columns::{TileColumn, TileColumns};
 
 use crate::choice::{self, ChoiceKey, ChoiceList};
 use crate::defaults::{AddPlacement, capitalize};
@@ -33,6 +38,7 @@ use crate::module::placeholder::PLACEHOLDER_KIND;
 
 use super::ShellView;
 use super::dialog;
+use super::objectdialog::{self, Domain};
 use super::picker::{Hint, hint_row};
 use super::scale;
 
@@ -59,6 +65,14 @@ pub enum Target {
     TileKindWith {
         kinds: Vec<String>,
         context: LaunchContext,
+    },
+    /// The focused tile's columns for `config::view_column` (Views) or
+    /// `config::schema_column` (Schema), captured at open: `names[i]` is the
+    /// column declared option `i` stands for.
+    Column {
+        domain: Domain,
+        view: String,
+        names: Vec<String>,
     },
     /// Log-level stage: `None` shows targets; `Some(target)` shows levels.
     LogLevel {
@@ -154,6 +168,39 @@ impl ChoiceDialogState {
         }
     }
 
+    /// The column rows for `tile` (derived columns left out for Schema: no
+    /// dataset declares them), the highlight on the cursor's column when it
+    /// is listed, else the first. `None` when no row is left.
+    pub fn columns(domain: Domain, tile: &TileColumns) -> Option<Self> {
+        let mut options = Vec::new();
+        let mut names = Vec::new();
+        let mut active = None;
+        for (ix, c) in tile.columns.iter().enumerate() {
+            if domain == Domain::Schema && c.derived {
+                continue;
+            }
+            let text = column_row_text(c);
+            if tile.active == Some(ix) {
+                active = Some(text.clone());
+            }
+            options.push(text);
+            names.push(c.name.clone());
+        }
+        if names.is_empty() {
+            return None;
+        }
+        let mut list = ChoiceList::new(options, choice::DEFAULT_CAP);
+        list.place(active.as_deref());
+        Some(Self {
+            list,
+            target: Target::Column {
+                domain,
+                view: tile.view.clone(),
+                names,
+            },
+        })
+    }
+
     /// The modal's title: the chrome's fixed words, or `Open {underlying}…`
     /// for a context launch.
     pub fn title(&self) -> SharedString {
@@ -161,6 +208,10 @@ impl ChoiceDialogState {
             Target::TileKindWith { context, .. } => match &context.underlying {
                 Some(u) => format!("Open {u} in\u{2026}").into(),
                 None => chrome(&self.target).0.into(),
+            },
+            Target::Column { domain, view, .. } => match domain {
+                Domain::Schema => format!("Edit column in schema \u{b7} {view}").into(),
+                _ => format!("Edit column in view \u{b7} {view}").into(),
             },
             Target::Grouping { .. } | Target::TileKind { .. } | Target::LogLevel { .. } => {
                 chrome(&self.target).0.into()
@@ -221,6 +272,15 @@ impl ChoiceDialogState {
             Target::TileKindWith { kinds, context } => {
                 Pick::KindWith(kinds[declared].clone(), context.clone())
             }
+            Target::Column {
+                domain,
+                view,
+                names,
+            } => Pick::Column {
+                domain: *domain,
+                view: view.clone(),
+                column: names[declared].clone(),
+            },
             Target::LogLevel { targets, chosen } => match chosen {
                 None => Pick::LogTarget(targets[declared].clone()),
                 Some(target) => Pick::LogLevel(target.clone(), LEVEL_WORDS[declared].1),
@@ -246,7 +306,11 @@ impl ChoiceDialogState {
     pub fn highlighted_slot(&self) -> Option<Option<u8>> {
         match self.highlighted_pick()? {
             Pick::Slot(slot) => Some(slot),
-            Pick::Kind(_) | Pick::KindWith(..) | Pick::LogTarget(_) | Pick::LogLevel(..) => None,
+            Pick::Kind(_)
+            | Pick::KindWith(..)
+            | Pick::Column { .. }
+            | Pick::LogTarget(_)
+            | Pick::LogLevel(..) => None,
         }
     }
 }
@@ -262,6 +326,12 @@ pub enum Pick {
     /// `ShellView::add_tile` of this kind, with the factory's
     /// `launch_state` of this context.
     KindWith(String, LaunchContext),
+    /// `objectdialog::render::open_column` for this column of `view`.
+    Column {
+        domain: Domain,
+        view: String,
+        column: String,
+    },
     /// Step 1 of `Set log level…`: replace the rows with the levels.
     LogTarget(String),
     /// Step 2: `Diagnostics::request_level`.
@@ -280,6 +350,16 @@ pub fn grouping_rows(slots: &GroupingSlots) -> (Vec<String>, Vec<Option<u8>>) {
         }
     }
     (options, targets)
+}
+
+/// A column row: the painted label, then the column name when they differ,
+/// so typing either filters to it and two equal labels stay distinct.
+fn column_row_text(c: &TileColumn) -> String {
+    if c.label == c.name {
+        c.name.clone()
+    } else {
+        format!("{} · {}", c.label, c.name)
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -317,6 +397,17 @@ const TILE_HINTS: &[Hint] = &[
     Hint::Text("close"),
 ];
 
+const COLUMN_HINTS: &[Hint] = &[
+    Hint::Text("type to filter ·"),
+    Hint::Key("up"),
+    Hint::Key("down"),
+    Hint::Text("move ·"),
+    Hint::Key("enter"),
+    Hint::Text("edit ·"),
+    Hint::Key("escape"),
+    Hint::Text("close"),
+];
+
 const LOG_HINTS: &[Hint] = &[
     Hint::Text("type to filter ·"),
     Hint::Key("up"),
@@ -339,6 +430,8 @@ fn chrome(target: &Target) -> (&'static str, &'static str, &'static str, &'stati
         // underlying; `tile::open_with` never builds it that way. `title()`
         // supplies `Open {underlying} in…` instead.
         Target::TileKindWith { .. } => ("Open in\u{2026}", "tile", "tile-hints", TILE_HINTS),
+        // Fallback only: `title()` names the view and the dialog.
+        Target::Column { .. } => ("Edit column", "column", "column-hints", COLUMN_HINTS),
         Target::LogLevel { .. } => ("Log level", "loglevel", "loglevel-hints", LOG_HINTS),
     }
 }
@@ -372,6 +465,46 @@ pub fn open_tile_kinds_with(
     cx: &mut Context<ShellView>,
 ) {
     let state = ChoiceDialogState::tile_kinds_with(kinds, context);
+    open(view, state, window, cx);
+}
+
+/// Status notice: the focused tile presents no configured view's columns.
+pub(crate) const NO_TILE_COLUMNS: &str = "this tile has no dataset columns";
+/// Status notice: every column of the tile's view is derived, so Schema has
+/// nothing to open.
+pub(crate) const NO_SCHEMA_COLUMNS: &str = "no schema columns in this tile's view";
+
+/// Open the column list for `domain` (Views or Schema) over the focused
+/// tile's columns — `config::view_column` / `config::schema_column`. The
+/// target dialog's stack refusal runs first, so a list is never offered for
+/// a dialog that could not open on its pick.
+pub fn open_columns(
+    view: &mut ShellView,
+    domain: Domain,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    let tile = view
+        .services
+        .workspaces
+        .active()
+        .focused_tile()
+        .and_then(|t| view.occupants.get(&t))
+        .and_then(|o| o.content.tile_columns(cx));
+    let Some(tile) = tile else {
+        view.notice = Some(NO_TILE_COLUMNS);
+        cx.notify();
+        return;
+    };
+    if !dialog::can_open_object(view, domain) {
+        cx.notify();
+        return;
+    }
+    let Some(state) = ChoiceDialogState::columns(domain, &tile) else {
+        view.notice = Some(NO_SCHEMA_COLUMNS);
+        cx.notify();
+        return;
+    };
     open(view, state, window, cx);
 }
 
@@ -479,6 +612,16 @@ fn commit(shell: &mut ShellView, pick: Pick, window: &mut Window, cx: &mut Conte
                 .factory(&kind)
                 .and_then(|f| f.launch_state(&context));
             shell.add_tile(&kind, AddPlacement::Split(None), state, window, cx);
+        }
+        Pick::Column {
+            domain,
+            view,
+            column,
+        } => {
+            // Close first so the object dialog pushes onto the stack the list
+            // was opened over, not onto the list.
+            shell.close_modal(window, cx);
+            objectdialog::render::open_column(shell, domain, &view, &column, window, cx);
         }
         Pick::LogTarget(target) => {
             // Step 2 replaces the rows in place; the modal stays open and
@@ -642,6 +785,84 @@ fn build(
 mod tests {
     use super::*;
     use crate::keymap::parse_keystroke;
+    use geode_core::tile_columns::{TileColumn, TileColumns};
+
+    fn tile() -> TileColumns {
+        let c = |name: &str, label: &str, derived: bool| TileColumn {
+            name: name.into(),
+            label: label.into(),
+            derived,
+        };
+        TileColumns {
+            view: "tree".into(),
+            columns: vec![
+                c("model_code", "model_code", false),
+                c("npv", "NPV", false),
+                c("npv_x2", "npv_x2", true),
+            ],
+            active: Some(1),
+        }
+    }
+
+    #[test]
+    fn column_rows_name_the_column_when_the_label_differs() {
+        let s = ChoiceDialogState::columns(Domain::Views, &tile()).unwrap();
+        assert_eq!(s.list.options(), ["model_code", "NPV · npv", "npv_x2"]);
+    }
+
+    #[test]
+    fn the_cursor_column_is_preselected() {
+        let s = ChoiceDialogState::columns(Domain::Views, &tile()).unwrap();
+        assert_eq!(
+            s.highlighted_pick(),
+            Some(Pick::Column {
+                domain: Domain::Views,
+                view: "tree".into(),
+                column: "npv".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn schema_omits_derived_columns() {
+        let s = ChoiceDialogState::columns(Domain::Schema, &tile()).unwrap();
+        assert_eq!(s.list.options(), ["model_code", "NPV · npv"]);
+    }
+
+    #[test]
+    fn a_derived_cursor_column_preselects_nothing_in_schema() {
+        let mut t = tile();
+        t.active = Some(2);
+        let s = ChoiceDialogState::columns(Domain::Schema, &t).unwrap();
+        assert_eq!(
+            s.highlighted_pick(),
+            Some(Pick::Column {
+                domain: Domain::Schema,
+                view: "tree".into(),
+                column: "model_code".into(),
+            }),
+            "first row"
+        );
+    }
+
+    #[test]
+    fn no_active_column_places_the_first_row() {
+        let mut t = tile();
+        t.active = None;
+        let s = ChoiceDialogState::columns(Domain::Views, &t).unwrap();
+        assert!(matches!(
+            s.highlighted_pick(),
+            Some(Pick::Column { ref column, .. }) if column == "model_code"
+        ));
+    }
+
+    #[test]
+    fn a_schema_list_with_only_derived_columns_is_none() {
+        let mut t = tile();
+        t.columns.retain(|c| c.derived);
+        t.active = None;
+        assert_eq!(ChoiceDialogState::columns(Domain::Schema, &t), None);
+    }
 
     fn slots() -> GroupingSlots {
         let mut s = GroupingSlots::default();
