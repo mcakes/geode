@@ -24338,6 +24338,65 @@ run_mutation "panels: a named panel replaces whole across layers" \
   '        "panels" => None,' \
   geode-core a_user_panel_replaces_the_builtin_one_whole
 
+# A kind whose columns disagree with the dataset writes documents the store
+# refuses, or parses ones the grid misreads.
+run_mutation "panels: a kind that does not fit the dataset refuses" \
+  crates/geode-core/src/panel/check.rs \
+  '    let fits = check_kind_against(kind.as_ref(), ds);' \
+  '    let fits: Result<(), String> = Ok(());' \
+  geode-core a_document_kind_that_does_not_fit_the_dataset_is_refused
+
+# The key is read from the columns before the row axis; a row axis that is
+# not the first axis folds an axis into the key.
+run_mutation "panels: the row axis must be the dataset's first axis" \
+  crates/geode-core/src/panel/check.rs \
+  '    if ds.axes.first().map(String::as_str) != Some(spec.rows.column.as_str()) {' \
+  '    if false {' \
+  geode-core a_row_axis_that_is_not_the_first_axis_is_refused
+
+run_mutation "panels: a declared type the dataset contradicts refuses" \
+  crates/geode-core/src/panel/check.rs \
+  '    if col.ty != ty {' \
+  '    if false {' \
+  geode-core a_header_type_the_dataset_contradicts_is_refused
+
+# A dropped slice leaves two unnamed values: the model refuses every delivery.
+run_mutation "panels: a pivot must leave exactly one ladder value" \
+  crates/geode-core/src/panel/check.rs \
+  '    let [value] = ladder.as_slice() else {' \
+  '    let [value, ..] = ladder.as_slice() else {' \
+  geode-core a_pivot_that_leaves_two_value_columns_is_refused
+
+# Slice editors parse by the panel's value type: an i64 panel over an f64
+# slice would refuse a fractional forward.
+run_mutation "panels: a slice must be the panel's value type" \
+  crates/geode-core/src/panel/check.rs \
+  '        if col.ty != spec.value_type {' \
+  '        if false {' \
+  geode-core a_slice_whose_type_differs_from_the_value_type_is_refused
+
+run_mutation "panels: a numeric axis could produce a numeric slice label" \
+  crates/geode-core/src/panel/check.rs \
+  '            ColumnType::F64 | ColumnType::I64 => s.label.trim().parse::<f64>().is_ok(),' \
+  '            ColumnType::F64 | ColumnType::I64 => false,' \
+  geode-core a_slice_label_a_numeric_axis_could_produce_is_refused
+
+# A text axis paints labels from the data; a slice label could collide with
+# one and send an edit to the wrong column.
+run_mutation "panels: a slice over a text axis refuses" \
+  crates/geode-core/src/panel/check.rs \
+  '            _ => return Err(data_labelled_axis(i, axis, axis_ty, &s.label)),' \
+  '            _ => false,' \
+  geode-core a_slice_over_a_text_axis_is_refused
+
+# A panel that leaves a written column unnamed could never upload a whole
+# document.
+run_mutation "panels: a panel must name every column its kind writes" \
+  crates/geode-core/src/panel/check.rs \
+  '    if missing.is_empty() {' \
+  '    if true {' \
+  geode-core a_flat_panel_missing_a_value_column_is_refused
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
