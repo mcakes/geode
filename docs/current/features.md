@@ -1158,10 +1158,10 @@ typed, or a text field (a package's expiry or type cell) on its opening text.
 A moved or clicked option, a typed option, a changed date, a typed segment,
 or edited text commits to the cursor's column as above.
 
-**Footer totals.** While a selection is live the footer leads with its extent
-(`3 rows × 12 cols`), then one position total for each risk column the view
-shows (price, delta, gamma, vega, theta, rho), painted as that column paints
-its numbers. A line counts `qty × value`; a package counts its own folded sum,
+**Footer totals.** While a selection is live the footer shows its extent
+(`3 rows × 12 cols`) at the left and, at the right under the risk columns,
+one position total for each risk column the view shows (price, delta, gamma,
+vega, theta, rho), painted as that column paints its numbers. A line counts `qty × value`; a package counts its own folded sum,
 which is already weighted by its legs' quantities. Totals are over the
 top-most selected rows, so an open package selected with its legs is not
 counted twice. A column with any selected row unpriced or failed shows a muted

@@ -317,7 +317,13 @@ pub(crate) fn render_footer(
         .border_color(theme.border)
         .debug_selector(|| "pricer-footer".into());
     match (text, extent) {
-        (None, Some(extent)) => row.child(aggregates::strip(Some(extent), totals, &[], theme)),
+        // The extent reads from the left edge; the totals sit at the right,
+        // under the risk columns they total, which the pricer's views place
+        // towards the right of the sheet.
+        (None, Some(extent)) => row
+            .justify_between()
+            .child(aggregates::strip(Some(extent), &[], &[], theme))
+            .child(aggregates::strip(None, totals, &[], theme)),
         _ => row
             .text_color(chip_paint(theme, Tone::DangerText).text)
             .children(text.cloned()),

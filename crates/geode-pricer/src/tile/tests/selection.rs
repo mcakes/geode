@@ -95,6 +95,35 @@ fn the_footer_totals_position_risk_over_top_most_rows(cx: &mut gpui::TestAppCont
     );
 }
 
+/// The extent reads from the footer's left edge and the totals sit at its
+/// right, under the risk columns they total.
+#[gpui::test]
+fn the_footer_totals_float_right_and_the_extent_left(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    answer_all(&h, &mut vcx, 1.0);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    let last = h
+        .tile
+        .read_with(&vcx, |t, _| t.totals.last().map(|c| c.label.to_string()))
+        .expect("a total");
+    h.draw(&mut vcx);
+    let footer = vcx
+        .debug_bounds("pricer-footer")
+        .expect("the footer paints");
+    let extent = vcx
+        .debug_bounds("aggregate-extent")
+        .expect("the extent paints");
+    let selector: &'static str = Box::leak(format!("aggregate-{last}").into_boxed_str());
+    let total = vcx.debug_bounds(selector).expect("the last total paints");
+    let mid = footer.origin.x + footer.size.width / 2.0;
+    assert!(extent.right() < mid, "the extent stays left");
+    assert!(total.left() > mid, "the totals float right");
+    assert!(
+        footer.right() - total.right() < gpui::px(24.0),
+        "the last total ends at the footer's right edge (less its padding)"
+    );
+}
+
 /// An open package selected with its legs: the package's folded sum
 /// already carries them, so the legs are not counted again.
 #[gpui::test]
