@@ -695,6 +695,22 @@ mod tests {
             views.names().collect::<Vec<_>>(),
             vec!["barrier", "vanilla"]
         );
+        // Both views also honour the builtin `datasets` declaration under
+        // the same validation a desk or user view gets at load: every
+        // column they name is one the computed `pricer` dataset declares.
+        let (schema, diags) = geode_core::schema::SchemaSpec::from_doc(
+            config.doc("datasets").expect("the builtin datasets doc"),
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let dims = geode_core::dimensions::DerivedDimensions::default();
+        for spec in &specs {
+            let diags = spec.validate(&schema, &dims);
+            assert!(
+                diags.iter().all(|d| d.severity != Severity::Error),
+                "{}: {diags:?}",
+                spec.name
+            );
+        }
     }
 
     /// The seven built-in templates are a builtin-layer doc a desk or user

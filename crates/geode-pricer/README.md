@@ -91,7 +91,11 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   stale marking, and sheet metadata updates have separate paths.
 - Package rows derive from their legs; they are not independent instruments.
   Their pricing timestamp is the oldest present leg-attempt timestamp,
-  including failed attempts.
+  including failed attempts. The fold keeps the legs' currency when they
+  agree and marks it `Currency::MIXED` when they differ: a package whose
+  legs priced in different currencies paints `—` in its local-currency
+  measure columns, while the `_usd` columns still sum. Its `currency` cell
+  joins the legs' codes with `/`, so the gap says which currencies met.
 - A package row's qty and eight text columns aggregate its legs: the
   distinct values, compared as values, in leg order joined with `/` and
   spelled as a line's cell spells them. Barrier columns read only barrier
@@ -331,6 +335,9 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   (`top_most`), since a package already carries its legs. Totals are
   `qty × value` per line and the folded sum per package, and a column with
   any unpriced or failed row is `None` (painted `—`), never a partial sum.
+  A local-currency total over rows whose results are not all in one
+  currency (a mixed package counts as differing) is `None` too; the `_usd`
+  totals still sum.
 - A typed commit writes the cursor's column only, under `V` and `v`, each
   line judged on its own instrument, as one `apply_edits` batch. A selected
   package's qty (commit or step) goes through `package::commit`, so the legs

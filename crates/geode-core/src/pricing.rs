@@ -138,11 +138,22 @@ pub struct PriceRequest {
 /// ISO 4217 code: three uppercase ASCII letters. `Copy` so a
 /// [`PriceResult`] stays `Copy` (the sheet copies results into records
 /// and folds them per leg).
+///
+/// [`Currency::MIXED`] is the one value that is not a code: it marks a
+/// fold over results that priced in differing currencies, whose local
+/// arrays are then sums of unlike units. It never comes from a pricer
+/// (`parse` accepts letters only) and displays as `—`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Currency([u8; 3]);
 
 impl Currency {
     pub const USD: Currency = Currency(*b"USD");
+
+    /// A fold over differing currencies. Not a code: `parse` can never
+    /// produce it, so a pricer cannot report it, and a local-currency
+    /// figure carrying it is a gap, not a number, wherever it is painted
+    /// or summed. The `_usd` arrays under it are still comparable.
+    pub const MIXED: Currency = Currency(*b"???");
 
     /// `None` unless exactly three uppercase ASCII letters.
     pub fn parse(s: &str) -> Option<Currency> {
@@ -154,7 +165,15 @@ impl Currency {
         }
     }
 
+    pub fn is_mixed(&self) -> bool {
+        *self == Currency::MIXED
+    }
+
+    /// The code, or `—` for [`Currency::MIXED`].
     pub fn as_str(&self) -> &str {
+        if self.is_mixed() {
+            return "—";
+        }
         std::str::from_utf8(&self.0).expect("constructed from ASCII letters")
     }
 }
@@ -533,5 +552,16 @@ mod tests {
         for bad in ["usd", "US", "USDD", "U$D", "ÜSD"] {
             assert_eq!(Currency::parse(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn mixed_is_no_code_and_displays_as_a_gap() {
+        assert!(Currency::MIXED.is_mixed());
+        assert!(!Currency::USD.is_mixed());
+        assert_eq!(Currency::MIXED.to_string(), "—");
+        assert_eq!(Currency::MIXED.as_str(), "—");
+        // No spelling reaches the sentinel through the pricer's seam.
+        assert_eq!(Currency::parse("???"), None);
+        assert_eq!(Currency::parse("—"), None);
     }
 }

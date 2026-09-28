@@ -12,10 +12,11 @@ use geode_core::pricing::{Instrument, OptionKind, Strike};
 use geode_core::view::ColumnFormat;
 
 /// Whether a package row aggregates its legs for `kind`: qty, the eight
-/// input columns, the currency (the fold takes its first leg's, which
-/// would misreport legs priced in different currencies) and the
-/// instrument (a package has none, so the cell stays blank). Results,
-/// status and the package's own identity columns stay the package's own.
+/// input columns, the currency (the fold marks legs priced in differing
+/// currencies `MIXED`, which would paint `—`; the legs' codes joined
+/// with `/` say which currencies) and the instrument (a package has
+/// none, so the cell stays blank). Results, status and the package's
+/// own identity columns stay the package's own.
 pub fn aggregates(kind: ColumnKind) -> bool {
     matches!(
         kind,

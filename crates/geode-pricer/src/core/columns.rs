@@ -724,6 +724,16 @@ fn number(
         },
         state => match sheet.result(row) {
             None => blank(),
+            // A package whose legs priced in unlike currencies has no
+            // local figure: the folded sum would read as a real one. The
+            // `_usd` twin is converted per leg and still sums. Painted as
+            // a stale cell is (muted `—`): no state names "no such
+            // figure", and muted is the reading a gap needs.
+            Some(r) if !usd && r.currency.is_mixed() => CellText {
+                text: "—".into(),
+                state: CellState::Stale,
+                sign: None,
+            },
             Some(r) => {
                 let formatted = format_number(r.get(measure, usd), format);
                 CellText {
@@ -1211,6 +1221,42 @@ mod tests {
                 sign: None
             }
         );
+    }
+
+    #[test]
+    fn a_mixed_currency_package_paints_a_gap_in_local_measures_and_sums_usd() {
+        let mut s = Sheet::new("t");
+        push(&mut s, vec![callspread(-5)]); // legs: -5 × 4800 call, +5 × 5200 call
+        let mut eur = result(40.0);
+        eur.currency = geode_core::pricing::Currency::parse("EUR").unwrap();
+        s.deliver(s.id(1), 1, Ok(result(100.0)), at(0));
+        s.deliver(s.id(2), 1, Ok(eur), at(0));
+        assert!(s.result(0).unwrap().currency.is_mixed());
+        assert_eq!(
+            cell(&s, 0, "npv"),
+            CellText {
+                text: "—".into(),
+                state: CellState::Stale,
+                sign: None
+            },
+            "a local sum over USD and EUR is a gap"
+        );
+        assert_eq!(cell(&s, 0, "delta01").text, "—");
+        // -5 × 108 + 5 × 43.2 = -324
+        assert_eq!(
+            cell(&s, 0, "npv_usd"),
+            CellText {
+                text: "-324.00".into(),
+                state: CellState::Own,
+                sign: Some(Sign::Negative)
+            },
+            "the usd twin still sums"
+        );
+        assert_eq!(cell(&s, 0, "currency").text, "USD/EUR");
+        // Each leg is a bare line in its own currency.
+        assert_eq!(cell(&s, 1, "npv").text, "100.00");
+        assert_eq!(cell(&s, 2, "npv").text, "40.00");
+        assert_eq!(cell(&s, 2, "currency").text, "EUR");
     }
 
     #[test]

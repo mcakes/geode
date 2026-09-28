@@ -16272,6 +16272,20 @@ run_mutation "pricer core: a failed leg still sums" \
   '            self.result[p] = if complete {' \
   geode-pricer a_package_sums_qty_times_value_over_its_legs_with_signed_quantities
 
+# A local-currency sum over USD and EUR legs is a sum of unlike units: the
+# fold marks the package MIXED, and a local cell or total paints a gap.
+run_mutation "pricer core: a package over differing currencies keeps the first leg's" \
+  crates/geode-pricer/src/core/sheet.rs \
+  '                        if acc.currency != r.currency {' \
+  '                        if false {' \
+  geode-pricer a_package_over_differing_currencies_folds_to_a_mixed_currency
+
+run_mutation "pricer totals: a mixed-currency local total is a gap" \
+  crates/geode-pricer/src/core/select.rs \
+  '    if currency.is_some_and(|c| c.is_mixed()) {' \
+  '    if false {' \
+  geode-pricer risk_totals_over_differing_currencies_are_a_gap_locally_and_a_sum_in_usd
+
 run_mutation "pricer core: undo of a remove re-requests the row" \
   crates/geode-pricer/src/core/sheet.rs \
   '        self.state.insert(at, rec.state);' \
@@ -16316,10 +16330,12 @@ run_mutation "pricer shorthand: the third Friday is the first" \
   '    first.checked_add_days(chrono::Days::new(u64::from(to_friday)))' \
   geode-pricer a_month_code_resolves_to_the_third_friday
 
-run_mutation "pricer views: an unknown column is only a warning" \
+# `ViewSpec::validate` already errors on the unknown column at load; the
+# pricer's own drop notice is a warning so a typo is one error, not two.
+run_mutation "pricer views: an unknown column drop is a second error" \
   crates/geode-pricer/src/core/views.rs \
-  '                severity: Severity::Error,' \
   '                severity: Severity::Warning,' \
+  '                severity: Severity::Error,' \
   geode-pricer an_unknown_measure_is_dropped_from_the_pricer_view_not_the_view
 
 # Strike numbers with a gap make `K1/K2/K3` ambiguous; such a template
@@ -23945,8 +23961,8 @@ run_mutation "pricer views: hidden leaves the plan" \
 # one misspelt name.
 run_mutation "pricer views: unknown column dropped, view kept" \
   crates/geode-pricer/src/core/views.rs \
-  $'                    diags.push(bad(format!("unknown column \'{}\'; dropped", c.name())));\n                    continue;' \
-  $'                    diags.push(bad(format!("unknown column \'{}\'; dropped", c.name())));\n                    columns.clear();\n                    break;' \
+  $'                    diags.push(warn(format!("unknown column \'{}\'; dropped", c.name())));\n                    continue;' \
+  $'                    diags.push(warn(format!("unknown column \'{}\'; dropped", c.name())));\n                    columns.clear();\n                    break;' \
   geode-pricer an_unknown_measure_is_dropped_from_the_pricer_view_not_the_view
 
 # A `pricer_views` document is no longer read; its presence is an error

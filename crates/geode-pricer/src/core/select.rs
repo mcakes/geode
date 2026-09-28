@@ -6,7 +6,7 @@
 
 use crate::core::edit::Edit;
 use crate::core::sheet::{LineState, Sheet};
-use geode_core::pricing::Measure;
+use geode_core::pricing::{Currency, Measure};
 use std::collections::BTreeMap;
 
 /// The leaf lines under `rows`, each once, in sheet order: a line is
@@ -103,11 +103,19 @@ pub fn move_plan(sheet: &Sheet, top: &[usize], down: bool) -> Result<Edit, &'sta
 ///
 /// No rows is `None` too, not zero: a total of nothing reads as a flat
 /// position, which is a claim the selection never made.
+///
+/// A local-currency total (`usd == false`) over rows whose results are
+/// not all in one currency is `None` as well — a mixed package counts
+/// as differing — since a sum of unlike units would read as a real
+/// one. The `_usd` totals are converted per row and still sum.
 pub fn risk_totals(sheet: &Sheet, top: &[usize], measures: &[(Measure, bool)]) -> Vec<Option<f64>> {
     if top.is_empty() {
         return vec![None; measures.len()];
     }
     let mut sums = vec![Some(0.0f64); measures.len()];
+    // The one currency the contributing results share, or `MIXED` once
+    // two differ (a package already folded mixed differs from any code).
+    let mut currency: Option<Currency> = None;
     for &r in top {
         let weight = if sheet.is_package(r) {
             1.0
@@ -118,11 +126,24 @@ pub fn risk_totals(sheet: &Sheet, top: &[usize], measures: &[(Measure, bool)]) -
             (LineState::Failed(_), _) | (_, None) => None,
             (_, Some(v)) => Some(v),
         };
+        if let Some(v) = picked {
+            currency = Some(match currency {
+                Some(c) if c != v.currency => Currency::MIXED,
+                _ => v.currency,
+            });
+        }
         for (s, &(m, usd)) in sums.iter_mut().zip(measures) {
             *s = match (*s, picked) {
                 (Some(a), Some(v)) => Some(a + weight * v.get(m, usd)),
                 _ => None,
             };
+        }
+    }
+    if currency.is_some_and(|c| c.is_mixed()) {
+        for (s, &(_, usd)) in sums.iter_mut().zip(measures) {
+            if !usd {
+                *s = None;
+            }
         }
     }
     sums
@@ -354,6 +375,45 @@ mod tests {
             None,
             "no partial sum"
         );
+    }
+
+    /// Install `price` as row `row`'s result in `currency`.
+    fn price_in(s: &mut Sheet, row: usize, price: f64, currency: &str) {
+        let mut r = result(price);
+        r.currency = Currency::parse(currency).unwrap();
+        let d = s.deliver(s.id(row), s.revision(row), Ok(r), at(0));
+        assert_eq!(d, crate::core::sheet::Delivered::Installed);
+    }
+
+    #[test]
+    fn risk_totals_over_differing_currencies_are_a_gap_locally_and_a_sum_in_usd() {
+        const NPV_BOTH: [(Measure, bool); 2] = [(Measure::Npv, false), (Measure::Npv, true)];
+        let mut s = sheet(vec![call(5000.0, 2), put(4000.0, 1)]);
+        price_in(&mut s, 0, 1.5, "USD");
+        price_in(&mut s, 1, 0.25, "EUR");
+        assert_eq!(
+            risk_totals(&s, &[0, 1], &NPV_BOTH),
+            vec![None, Some((2.0 * 1.5 + 0.25) * 1.08)],
+            "USD + EUR: no local sum, the usd twin sums"
+        );
+        assert_eq!(
+            risk_totals(&s, &[1], &NPV_BOTH),
+            vec![Some(0.25), Some(0.25 * 1.08)],
+            "one EUR line alone totals in EUR"
+        );
+        price_in(&mut s, 1, 0.25, "USD");
+        assert_eq!(
+            risk_totals(&s, &[0, 1], &NPV_BOTH),
+            vec![Some(2.0 * 1.5 + 0.25), Some((2.0 * 1.5 + 0.25) * 1.08)],
+            "two USD lines total both ways"
+        );
+        // A package folded over USD and EUR legs is mixed on its own.
+        let mut p = sheet(vec![callspread(-5)]);
+        price_in(&mut p, 1, 3.0, "USD");
+        price_in(&mut p, 2, 1.0, "EUR");
+        let t = risk_totals(&p, &[0], &NPV_BOTH);
+        assert_eq!(t[0], None, "a mixed package is a gap");
+        assert_eq!(t[1], Some(p.result(0).unwrap().get(Measure::Npv, true)));
     }
 
     #[test]

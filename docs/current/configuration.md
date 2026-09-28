@@ -171,7 +171,8 @@ either identically is accepted silently, and any other redeclaration —
 different columns, order, or flags, or one invalid enough that the reader
 dropped it — is replaced by the builtin declaration at startup and on reload,
 with an error diagnostic naming the redeclaring layer and file. The Schema
-dialog still lists both; an edit saved there is such a redeclaration. Local
+dialog still lists both for presentation edits; a redeclaration can only
+come from a `datasets` document. Local
 datasets are not offered as the dataset choice in the Views and Sources
 dialogs: no view reads the app's own documents, and the source reader refuses
 a local dataset. A value that already names one is kept, as any current value

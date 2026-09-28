@@ -129,9 +129,11 @@ default widths. Each tile runs one method for both doors.
   from which to rescale rem. After a font-size change, fitted widths behave
   like configured ones: run `:autosize` again. The blotter's header is painted
   in the UI font but measured with the mono advance, which usually
-  overestimates it slightly. Market data and the pricer keep
-  `col_resizable(false)`. A blotter column dragged wider still returns to its
-  fitted or configured width on the next refresh.
+  overestimates it slightly. Market data keeps `col_resizable(false)`; the
+  pricer's columns resize and reorder by pointer, on the open tile only, as
+  its known gaps under "Pricing and the line pricer" describe. A blotter
+  column dragged wider still returns to its fitted or configured width on
+  the next refresh.
 
 ## Blotter
 
@@ -832,8 +834,9 @@ Result columns
 carry risk_snapshot's names — `npv`, `delta01`, `gamma01`, `vega01`,
 `rho010`, `clean_theta_business_day` and the rest — each with a `_usd` twin
 the pricer converts itself; a column means the same thing in a blotter and a
-pricer sheet. A package's local-currency sums add its legs in whatever
-currency each priced in; the `_usd` columns are the comparable ones across
+pricer sheet. A package whose legs priced in different currencies, or a
+selection total over such lines, paints `—` in its local-currency measure
+columns; the `_usd` columns still sum, and are the comparable ones across
 currencies. Both bundled views end in a `status` column, which says
 `pricing…` on a stale line and a failed line's reason, so neither state is
 shown by color alone. The tree column reserves a fixed chevron slot on every

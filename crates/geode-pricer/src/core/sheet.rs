@@ -424,7 +424,10 @@ impl Sheet {
     /// Fold package results as `Σ qty_leg × value_leg`. Failure takes precedence over
     /// staleness and names the first failed leg; otherwise any stale leg makes the
     /// package stale. A result exists only for a nonempty package whose legs all have
-    /// results and none has failed. `priced_at` is the oldest present leg timestamp,
+    /// results and none has failed. Its currency is the legs' when they agree and
+    /// [`Currency::MIXED`] when they differ: the local arrays are then sums of
+    /// unlike units, and a local cell or total over them paints a gap rather than
+    /// a plausible number. `priced_at` is the oldest present leg timestamp,
     /// including failed attempts.
     pub fn fold_packages(&mut self) {
         for p in 0..self.len() {
@@ -458,6 +461,12 @@ impl Sheet {
                         let q = self.qty[leg] as f64;
                         let acc = sum.get_or_insert_with(|| PriceResult::zero(r.currency));
                         acc.add_scaled(q, &r);
+                        // The first leg names the currency; a leg in another
+                        // makes the local sum one of unlike units. Once mixed
+                        // it stays mixed: no leg's currency equals the marker.
+                        if acc.currency != r.currency {
+                            acc.currency = Currency::MIXED;
+                        }
                     }
                     None => complete = false,
                 }
@@ -467,9 +476,10 @@ impl Sheet {
                     (Some(a), None) => Some(a),
                 };
             }
-            // An empty package (no legs) folds to zero, as it always has.
+            // An empty package has no sum (`complete` is false), so `sum` is
+            // `None` exactly when the result must be.
             self.result[p] = if complete && failed.is_none() {
-                sum.or(Some(PriceResult::zero(Currency::USD)))
+                sum
             } else {
                 None
             };
@@ -1097,6 +1107,28 @@ pub(crate) mod tests {
             other => panic!("{other:?}"),
         }
         assert_eq!(s.result(0), None, "a failed leg makes the sum uncomputable");
+    }
+
+    #[test]
+    fn a_package_over_differing_currencies_folds_to_a_mixed_currency() {
+        let mut s = Sheet::new("t");
+        push(&mut s, vec![callspread(-5)]);
+        let (long, short) = (s.id(1), s.id(2));
+        let mut eur = result(40.0);
+        eur.currency = Currency::parse("EUR").unwrap();
+        s.deliver(long, 1, Ok(result(100.0)), at(0));
+        s.deliver(short, 1, Ok(eur), at(1));
+        let sum = s.result(0).unwrap();
+        assert!(
+            sum.currency.is_mixed(),
+            "USD and EUR legs: {:?}",
+            sum.currency
+        );
+        assert_eq!(sum.get(Measure::Npv, true), -324.0, "usd still folds");
+        assert_eq!(s.state(0), &LineState::Fresh);
+        // Repricing the EUR leg in USD makes the package USD again.
+        s.deliver(short, 1, Ok(result(40.0)), at(2));
+        assert_eq!(s.result(0).unwrap().currency, Currency::USD);
     }
 
     #[test]

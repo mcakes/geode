@@ -137,8 +137,10 @@ impl Views {
     /// columns against the vocabulary. A view with a join or a derived
     /// column is refused whole: the pricer evaluates nothing, so painting
     /// the columns it could resolve would show a view that is not the one
-    /// declared. An unknown column is dropped from the view with an error;
-    /// a view left with no column is dropped. Diagnostics are rooted at
+    /// declared. An unknown column is dropped from the view with a warning
+    /// naming the drop (`ViewSpec::validate` already reports the column as
+    /// an error at load, so a typo yields one error, not two); a view left
+    /// with no column is dropped. Diagnostics are rooted at
     /// `views.<view>`, the path the Views dialog and the diagnostics tile
     /// already know.
     pub fn from_specs(specs: &[ViewSpec]) -> (Views, Vec<Diagnostic>) {
@@ -152,6 +154,10 @@ impl Views {
                 file: None,
                 message: format!("view '{name}': {m}"),
                 path: Some(format!("views.{name}")),
+            };
+            let warn = |m: String| Diagnostic {
+                severity: Severity::Warning,
+                ..bad(m)
             };
             let mut refused = false;
             if !spec.joins.is_empty() {
@@ -177,7 +183,7 @@ impl Views {
             let mut columns: Vec<ViewColumn> = Vec::with_capacity(spec.columns.len());
             for c in &spec.columns {
                 let Some(def) = column(c.name()) else {
-                    diags.push(bad(format!("unknown column '{}'; dropped", c.name())));
+                    diags.push(warn(format!("unknown column '{}'; dropped", c.name())));
                     continue;
                 };
                 if columns.iter().any(|v| v.def.name == def.name) {
@@ -431,11 +437,18 @@ mod tests {
             "[x]\ndataset = \"pricer\"\n[[x.columns]]\nname = \"npv\"\n[[x.columns]]\nname = \"daily_pnl\"\n",
         ));
         assert_eq!(views.get("x").unwrap().columns.len(), 1);
+        // A warning: `ViewSpec::validate` already errors on the column at
+        // load, so the drop is named once more, not counted twice.
         assert!(
             diags
                 .iter()
                 .any(|d| d.message.contains("unknown column 'daily_pnl'")
-                    && d.severity == Severity::Error),
+                    && d.severity == Severity::Warning
+                    && d.path.as_deref() == Some("views.x")),
+            "{diags:?}"
+        );
+        assert!(
+            diags.iter().all(|d| d.severity != Severity::Error),
             "{diags:?}"
         );
     }
