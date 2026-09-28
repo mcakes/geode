@@ -599,10 +599,11 @@ mod tests {
         }
         let cat = Catalog::new(store.writer());
         let spx = join_key(&["SPX".to_string()]);
+        // SPX October's newest is 14:10, November's 14:05: the stalest.
         assert_eq!(
             cat.live_source_time_under("option_chain", &spx).unwrap(),
-            Some(ts("2026-09-12T14:10:00Z")),
-            "SPXW's newer 14:12 republish leaked into SPX's freshness"
+            Some(ts("2026-09-12T14:05:00Z")),
+            "SPX's freshness is its stalest expiry's, and SPXW is not under SPX"
         );
         let spxw = join_key(&["SPXW".to_string()]);
         assert_eq!(
@@ -674,7 +675,7 @@ mod tests {
     }
 
     #[test]
-    fn prefix_freshness_is_the_newest_source_time_and_greatest_generation_under_it() {
+    fn prefix_freshness_is_the_stalest_source_time_and_greatest_generation_under_it() {
         let (_d, store, _schema) = chain_fixture();
         let cat = Catalog::new(store.writer());
         let spx = join_key(&["SPX".to_string()]);
@@ -687,6 +688,16 @@ mod tests {
         assert_eq!(
             cat.live_generation_under("option_chain", &spx).unwrap(),
             greatest
+        );
+        // Each expiry's own newest source time; the prefix reports the older.
+        let stalest = [&oct, &nov]
+            .iter()
+            .filter_map(|b| cat.live_source_time("option_chain", b, None).unwrap())
+            .min();
+        assert!(stalest.is_some());
+        assert_eq!(
+            cat.live_source_time_under("option_chain", &spx).unwrap(),
+            stalest
         );
         // A full key's `_under` answer equals the exact-batch answer.
         assert_eq!(

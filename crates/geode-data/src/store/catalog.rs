@@ -372,18 +372,23 @@ impl<'a> Catalog<'a> {
 
     /// [`Self::live_source_time`] over every bookless partition whose batch
     /// is `prefix` or lies under it ([`geode_core::document::is_key_prefix`]):
-    /// the newest source time among them. A full key answers exactly as
-    /// `live_source_time(dataset, key, None)` does.
+    /// each matched document's newest live source time, then the oldest of
+    /// those. A set of documents is as fresh as its stalest member, as
+    /// [`Self::dataset_as_of`] labels a view by its oldest book; the newest
+    /// would let one fresh expiry hide a stale one. A full key answers
+    /// exactly as `live_source_time(dataset, key, None)` does.
     pub fn live_source_time_under(
         &self,
         dataset: &str,
         prefix: &str,
     ) -> Result<Option<DateTime<Utc>>, StoreError> {
-        let sql = "select max(fg.source_time) from file_generations fg
-                 join file_books fb on fb.file_id = fg.file_id
-                 where fg.dataset = ? and (fg.batch = ? or starts_with(fg.batch, ?))
-                   and fb.book is null
-                   and coalesce(fg.archived_only, false) = false";
+        let sql = "select min(t) from (
+                   select max(fg.source_time) as t from file_generations fg
+                   join file_books fb on fb.file_id = fg.file_id
+                   where fg.dataset = ? and (fg.batch = ? or starts_with(fg.batch, ?))
+                     and fb.book is null
+                     and coalesce(fg.archived_only, false) = false
+                   group by fg.batch)";
         self.under(sql, dataset, prefix)
     }
 

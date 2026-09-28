@@ -657,7 +657,7 @@ values describe the same database snapshot.
 
 | Read | Generation reported |
 |---|---|
-| Live document | Newest live-published generation of the requested key's partition; for a key prefix, the greatest across every partition under it. |
+| Live document | Newest live-published generation of the requested key's partition; for a key prefix, the greatest across every partition under it (a change marker; the reported source time is the stalest matched document's). |
 | Historical document | Generation selected for that key at the requested instant; for a key prefix, `None` unless exactly one document matched. |
 | Live view | Greatest live-published generation ID across each input dataset, regardless of query scope. |
 | Historical view | `None`; each partition resolves independently. |
@@ -671,18 +671,18 @@ An absent generation means unknown, not unchanged. The document panel compares
 known generation IDs as well as source times. Its source-time fallback cannot
 distinguish corrected republishes at the same source time.
 
-A live prefix read takes its freshness from
-`Catalog::live_source_time_under` and `live_generation_under`: the newest
-live source time and the greatest generation ID among the bookless
-partitions whose batch is the key or lies under it. Generation IDs come from
-one store sequence, so the reported generation changes whenever any matched
-document republishes, which is what a consumer comparing generations needs.
-The source time is the newest, not the stalest, so a live prefix read
-labels a set of documents by its latest arrival; a historical prefix read
-reports the oldest matched source time. The SQL matches `batch = key or
-starts_with(batch, key‖separator)`, the SQL form of `is_key_prefix`; it
-takes no wildcard, so an `_` or `%` in a key cannot widen the match, and the
-two must be kept in agreement.
+A live prefix read takes its freshness from the bookless partitions whose
+batch is the key or lies under it. `Catalog::live_source_time_under` takes
+each matched document's newest live source time, then the oldest of those:
+like a view labelled by its oldest book, a set of documents is as fresh as
+its stalest member, so one freshly republished expiry cannot hide a stale
+one. A historical prefix read reports the oldest matched source time for the
+same reason. `live_generation_under` reports the greatest generation ID
+instead, because it is a change marker: generation IDs come from one store
+sequence, so it changes whenever any matched document republishes. The SQL
+matches `batch = key or starts_with(batch, key‖separator)`, the SQL form of
+`is_key_prefix`; it takes no wildcard, so an `_` or `%` in a key cannot widen
+the match, and the two must be kept in agreement.
 
 Health is keyed by **source**. Discovery and load outcomes occupy separate
 lanes because a clean, content-blind poll cannot prove that the last publish
