@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use geode_core::config::Config;
 use geode_core::log::{Level, Ring};
@@ -34,7 +34,7 @@ use crate::levels::{self, LevelRow, LevelsState};
 use crate::log::{LogFilter, LogTail};
 use crate::log_view::{self, LogView};
 use crate::model::{self, Badges, Tone};
-use crate::prepared::{self, PreparedTable};
+use crate::prepared::{self, PreparedTable, SINCE_COLUMN, SINCE_SEPARATOR};
 use crate::section::Section;
 use crate::table::SectionDelegate;
 
@@ -46,6 +46,9 @@ const ALL_TARGETS: &str = "all";
 
 /// The target select's delegate: `all`, then every target in the tail.
 type TargetSelect = SelectState<SearchableVec<SharedString>>;
+
+/// How often the Sources ages tick while the section is shown.
+const AGES_TICK: Duration = Duration::from_secs(1);
 
 /// The diagnostics counter each section's builder reads. Comparing only
 /// this counter keeps an unrelated change, such as a perf tick, from
@@ -79,6 +82,9 @@ pub struct DiagnosticsPage {
     filter_input: Entity<InputState>,
     table: Entity<TableState<SectionDelegate>>,
     prepared: Rc<PreparedTable>,
+    /// The Sources rows' health `since` times, in `prepared` row order,
+    /// for the ages tick; empty on every other section.
+    source_since: Vec<Option<SystemTime>>,
     /// The Config section's left panel: the current or historical
     /// diagnostics. Pointer-driven; the keys stay with `table`.
     diag_table: Entity<TableState<SectionDelegate>>,
@@ -125,8 +131,10 @@ pub struct DiagnosticsPage {
     visible: bool,
     /// A page input holds focus; see `key_context`.
     insert_mode: bool,
-    #[allow(dead_code)]
+    /// The Sources ages tick; held only while visible on Sources, so
+    /// dropping it is what stops the loop.
     ages_timer: Option<Task<()>>,
+    /// The instant the Since ages were last computed at.
     #[allow(dead_code)]
     ages_now: SystemTime,
     last_diag_versions: DiagVersions,
@@ -310,6 +318,7 @@ impl DiagnosticsPage {
             filter_input,
             table,
             prepared: Rc::new(PreparedTable::empty()),
+            source_since: Vec::new(),
             diag_table,
             diag_prepared: Rc::new(PreparedTable::empty()),
             diag_cursor: 0,
@@ -408,12 +417,16 @@ impl DiagnosticsPage {
         // The Config section's left panel is built alongside its cursor
         // table: both read inputs the config version covers.
         let mut diag_prepared = None;
+        let mut source_since = Vec::new();
         let prepared = {
             let d = self.diagnostics.read(cx);
             let frame = self.frame.read(cx);
             match self.section {
                 Section::Sources => {
-                    prepared::sources_table(&model::source_rows(d, clock), now, &filter)
+                    let (table, since) =
+                        prepared::sources_table(&model::source_rows(d, clock), now, &filter);
+                    source_since = since;
+                    table
                 }
                 Section::Data => {
                     self.catalog_matches = model::catalog_matches_frame(d, frame.as_of());
@@ -451,6 +464,7 @@ impl DiagnosticsPage {
             }
         };
         self.prepared = Rc::new(prepared);
+        self.source_since = source_since;
         let len = self.prepared.rows.len();
         let ix = self.section as usize;
         if self.section == Section::Log && self.follow {
@@ -845,9 +859,71 @@ impl DiagnosticsPage {
         self.title.clone()
     }
 
+    /// One-second ticks while the page is visible and Sources is selected.
+    /// A tick refreshes age text in place; it never runs a section builder.
+    /// Dropping the task stops the loop, so a hidden page or another
+    /// section costs nothing per second.
     fn sync_ages_timer(&mut self, cx: &mut Context<Self>) {
-        // The Sources ages timer lands with the Perf section; no timer yet.
-        let _ = cx;
+        let wanted = self.visible && self.section == Section::Sources;
+        if !wanted {
+            self.ages_timer = None;
+            return;
+        }
+        if self.ages_timer.is_some() {
+            return;
+        }
+        self.ages_timer = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(AGES_TICK).await;
+                if this.update(cx, |page, cx| page.tick_ages(cx)).is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// Rewrite the Since cells from the retained `since` times. The
+    /// prepared table is cloned only when an age text changed, and the
+    /// rebuild counter never moves: a tick is not a rebuild.
+    pub(crate) fn tick_ages(&mut self, cx: &mut Context<Self>) {
+        if self.section != Section::Sources {
+            return;
+        }
+        let now = SystemTime::now();
+        self.ages_now = now;
+        let fresh: Vec<(usize, SharedString)> = self
+            .prepared
+            .rows
+            .iter()
+            .zip(self.source_since.iter())
+            .enumerate()
+            .filter_map(|(ix, (row, since))| {
+                let since = (*since)?;
+                let cell = &row.cells.get(SINCE_COLUMN)?.text;
+                let hms = cell
+                    .split_once(SINCE_SEPARATOR)
+                    .map_or(cell.as_ref(), |(h, _)| h);
+                let text = format!(
+                    "{hms}{SINCE_SEPARATOR}{}",
+                    model::age_text(Some(since), now)
+                );
+                (cell.as_ref() != text).then(|| (ix, SharedString::from(text)))
+            })
+            .collect();
+        if fresh.is_empty() {
+            return;
+        }
+        let mut table = (*self.prepared).clone();
+        for (ix, text) in fresh {
+            table.rows[ix].cells[SINCE_COLUMN].text = text;
+        }
+        let shared = Rc::new(table);
+        self.prepared = shared.clone();
+        self.table.update(cx, |t, cx| {
+            t.delegate_mut().set(shared);
+            t.refresh(cx);
+        });
+        cx.notify();
     }
 
     fn filter_input_el(&self) -> Input {
@@ -982,9 +1058,7 @@ impl gpui::Render for DiagnosticsPage {
         );
         let toolbar = self.render_toolbar(cx);
         let body: AnyElement = match self.section {
-            Section::Perf => {
-                crate::perf_view::render(self.perf.as_ref(), weak, cx).into_any_element()
-            }
+            Section::Perf => crate::perf_view::render(self.perf.as_ref(), weak, cx),
             Section::Config => config_view::render(
                 ConfigView {
                     diag_table: &self.diag_table,
@@ -1912,5 +1986,123 @@ mod tests {
                 .update(&mut vcx, |d, _| d.take_catalog_request()),
             Some(geode_shell::diagnostics::CatalogRequest::Explicit)
         );
+    }
+
+    #[gpui::test]
+    fn the_overlay_switch_flips_through_the_entity_channel(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        vcx.update(|window, cx| {
+            h.page.update(cx, |p, cx| {
+                p.set_visible(true, cx);
+                p.set_section(Section::Perf, window, cx);
+            });
+            let _ = window.draw(cx);
+        });
+        let b = vcx.debug_bounds("diagnostics-overlay-switch").unwrap();
+        vcx.simulate_click(b.center(), gpui::Modifiers::default());
+        assert!(
+            h.diagnostics
+                .update(&mut vcx, |d, _| d.take_pending_overlay_toggle())
+        );
+        // The shell mirrors the value back; the page repaints on the perf
+        // counter.
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.set_overlay_visible(true);
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        assert!(
+            h.page
+                .read_with(&vcx, |p, _| p.perf.as_ref().unwrap().overlay)
+        );
+    }
+
+    #[gpui::test]
+    fn the_ages_timer_runs_only_while_visible_on_sources(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        assert!(
+            h.page.read_with(&vcx, |p, _| p.ages_timer.is_none()),
+            "hidden: no timer"
+        );
+        h.page.update(&mut vcx, |p, cx| p.set_visible(true, cx));
+        assert!(h.page.read_with(&vcx, |p, _| p.ages_timer.is_some()));
+        vcx.update(|window, cx| {
+            h.page
+                .update(cx, |p, cx| p.set_section(Section::Log, window, cx));
+        });
+        assert!(
+            h.page.read_with(&vcx, |p, _| p.ages_timer.is_none()),
+            "log: no timer"
+        );
+        vcx.update(|window, cx| {
+            h.page
+                .update(cx, |p, cx| p.set_section(Section::Sources, window, cx));
+        });
+        assert!(h.page.read_with(&vcx, |p, _| p.ages_timer.is_some()));
+        // The loop reaches `tick_ages`: a retained `since` moved back is
+        // repainted after one tick of the executor's clock.
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.note_health("s", Health::Ok, String::new(), SystemTime::now());
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        h.page.update(&mut vcx, |p, _| {
+            p.source_since[0] = Some(SystemTime::now() - Duration::from_secs(30));
+        });
+        let before = h.page.read_with(&vcx, |p, _| p.rebuild_count);
+        vcx.executor().advance_clock(AGES_TICK);
+        vcx.run_until_parked();
+        let since = h.page.read_with(&vcx, |p, _| {
+            p.prepared().rows[0].cells[SINCE_COLUMN].text.clone()
+        });
+        assert!(since.ends_with(" · 30 s"), "{since}");
+        assert_eq!(h.page.read_with(&vcx, |p, _| p.rebuild_count), before);
+        h.page.update(&mut vcx, |p, cx| p.set_visible(false, cx));
+        assert!(h.page.read_with(&vcx, |p, _| p.ages_timer.is_none()));
+    }
+
+    #[gpui::test]
+    fn a_tick_refreshes_ages_without_rebuilding_rows(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.note_health("s", Health::Ok, String::new(), SystemTime::now());
+            cx.notify();
+        });
+        h.page.update(&mut vcx, |p, cx| p.set_visible(true, cx));
+        let before = h.page.read_with(&vcx, |p, _| p.rebuild_count);
+        let since_cell = |vcx: &gpui::VisualTestContext| {
+            h.page.read_with(vcx, |p, _| {
+                p.prepared().rows[0].cells[SINCE_COLUMN].text.clone()
+            })
+        };
+        let hms = since_cell(&vcx);
+        let hms = hms.split_once(SINCE_SEPARATOR).map(|(h, _)| h.to_string());
+        assert!(hms.is_some(), "clock text then age");
+        // An unchanged age publishes nothing: the same table stays shared.
+        let table_before = h.page.read_with(&vcx, |p, _| Rc::as_ptr(p.prepared()));
+        h.page.update(&mut vcx, |p, cx| p.tick_ages(cx));
+        assert_eq!(h.page.read_with(&vcx, |p, _| p.rebuild_count), before);
+        assert_eq!(
+            h.page.read_with(&vcx, |p, _| Rc::as_ptr(p.prepared())),
+            table_before
+        );
+        assert!(since_cell(&vcx).ends_with(" s"));
+        // A moved-back `since` rewrites only the age, keeping the clock text.
+        h.page.update(&mut vcx, |p, _| {
+            p.source_since[0] = Some(SystemTime::now() - Duration::from_secs(30));
+        });
+        h.page.update(&mut vcx, |p, cx| p.tick_ages(cx));
+        assert_eq!(h.page.read_with(&vcx, |p, _| p.rebuild_count), before);
+        assert_eq!(
+            since_cell(&vcx).as_ref(),
+            format!("{}{SINCE_SEPARATOR}30 s", hms.unwrap())
+        );
+        // The table entity paints the rewritten cell, not the stale one.
+        let painted = h.page.read_with(&vcx, |p, cx| {
+            p.table.read(cx).delegate().table().rows[0].cells[SINCE_COLUMN]
+                .text
+                .clone()
+        });
+        assert!(painted.ends_with(" · 30 s"), "{painted}");
     }
 }

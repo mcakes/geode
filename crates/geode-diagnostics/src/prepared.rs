@@ -140,15 +140,33 @@ pub const SOURCE_COLUMNS: [ColumnSpec; 8] = [
     col("loading", "Loading", 260.0),
 ];
 
-pub fn sources_table(rows: &[SourceRow], now: SystemTime, filter: &str) -> PreparedTable {
+/// The Since column's index in [`SOURCE_COLUMNS`]: the one cell the page's
+/// ages tick rewrites in place.
+pub const SINCE_COLUMN: usize = 2;
+
+/// Between a Since cell's clock text and its age; the ages tick splits on
+/// it to keep the clock text and replace the age.
+pub const SINCE_SEPARATOR: &str = " · ";
+
+/// The Sources table and, aligned with its filtered rows, each row's health
+/// `since` time. The page's ages timer rewrites the Since cells from that
+/// list in place, so it must index the rows the table paints, not every
+/// typed row.
+pub fn sources_table(
+    rows: &[SourceRow],
+    now: SystemTime,
+    filter: &str,
+) -> (PreparedTable, Vec<Option<SystemTime>>) {
+    let mut since_times = Vec::new();
     let rows = rows
         .iter()
         .filter(|r| filter.is_empty() || r.name.contains(filter) || r.health.contains(filter))
         .map(|r| {
+            since_times.push(r.since);
             let since = if r.since_hms.is_empty() {
                 String::new()
             } else {
-                format!("{} · {}", r.since_hms, age_text(r.since, now))
+                format!("{}{SINCE_SEPARATOR}{}", r.since_hms, age_text(r.since, now))
             };
             let mut detail: Vec<SharedString> = r.detail.iter().map(|s| s.clone().into()).collect();
             if !r.history.is_empty() {
@@ -178,10 +196,13 @@ pub fn sources_table(rows: &[SourceRow], now: SystemTime, filter: &str) -> Prepa
             }
         })
         .collect();
-    PreparedTable {
-        columns: SOURCE_COLUMNS.to_vec(),
-        rows,
-    }
+    (
+        PreparedTable {
+            columns: SOURCE_COLUMNS.to_vec(),
+            rows,
+        },
+        since_times,
+    )
 }
 
 pub const DATA_COLUMNS: [ColumnSpec; 8] = [
@@ -567,15 +588,19 @@ mod tests {
             detail: vec!["adapter: X".into(), "fetch".into()],
             history: vec![("00:00:01".into(), geode_shell::diagnostics::Health::Ok)],
         }];
-        let t = sources_table(&rows, now, "");
-        let since = &t.rows[0].cells[2].text;
+        let (t, since_times) = sources_table(&rows, now, "");
+        assert_eq!(SOURCE_COLUMNS[SINCE_COLUMN].key, "since");
+        let since = &t.rows[0].cells[SINCE_COLUMN].text;
         assert_eq!(since.as_ref(), "00:01:10 · 30 s");
+        assert_eq!(since_times, vec![rows[0].since], "aligned with the rows");
         assert_eq!(
             t.rows[0].detail.len(),
             3,
             "spec lines then one history line"
         );
         assert!(t.rows[0].detail[2].contains("Ok 00:00:01"));
-        assert!(sources_table(&rows, now, "zzz").rows.is_empty());
+        let (filtered, since_times) = sources_table(&rows, now, "zzz");
+        assert!(filtered.rows.is_empty());
+        assert!(since_times.is_empty(), "a filtered-out row has no since");
     }
 }
