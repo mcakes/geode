@@ -716,9 +716,7 @@ impl BlotterTile {
                 // is the retry.
                 self.error = Some(Notice::danger(message));
                 // Supersede any query still in flight: its outcome is for the
-                // previous scope and must not paint over this error. `acted`
-                // stays set: redefining the name bumps the config version,
-                // which is the retry.
+                // previous scope and must not paint over this error.
                 self.following.begin(versions, Instant::now());
                 let key = QueryKey(self.tile.0);
                 self.following.submitted(

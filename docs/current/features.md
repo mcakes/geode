@@ -14,10 +14,13 @@ deliveries through `TileContent`.
 
 A module owns its domain state. It observes the shared `Frame`, requests data
 through `DataHandle`, and prepares the immutable or retained model used by its
-renderer. Hidden tiles may release subscriptions but keep an in-flight query,
-whose reply applies when it lands. On becoming visible they compare followed
-versions and request anything stale. A closed tile cancels its query and
-answers any flip barrier still waiting on it.
+renderer. Hidden tiles may release subscriptions. A hidden following tile
+(blotter, market data, timeseries) keeps its in-flight query, whose reply
+applies when it lands unless a counter the tile follows moved since it asked;
+such a reply is dropped, not applied. On becoming visible these tiles compare
+followed versions and request anything stale. A closed following tile cancels
+its query and answers any flip barrier still waiting on it. The pricer's own
+hide rule is described with the pricer.
 
 Every module follows these interaction rules:
 
@@ -145,7 +148,9 @@ Publication watches are scoped to the datasets the view reads. Global frame
 changes use the flip barrier: promotion requires the staged snapshot's followed
 counters to match, including watched data and configuration. Local pins exempt
 the corresponding frame changes; tile-local requeries clear any staged result.
-Hiding a blotter keeps its view query in flight; closing it cancels the query
+Hiding a blotter keeps its view query in flight and applies the reply while
+hidden, unless a followed counter moved since the query was asked: that reply
+is dropped and the tile asks again when shown. Closing it cancels the query
 and answers the barrier. A view the configuration no longer defines is shown
 as `view '<name>' is not configured` and answers the barrier at once rather
 than holding the other tiles to the deadline; a late outcome for the old view
@@ -593,7 +598,8 @@ frame flip are staged until promotion is allowed. This coordinates ready
 results, but the barrier timeout can release them while lagging tiles still
 show older data. The tile follows frame as-of changes and ignores grouping
 and scope. Hiding keeps a series query in flight, and its answer applies
-while hidden. Returning a hidden tile to visibility refetches its source pairs
+while hidden unless the followed as-of moved since it was asked, in which case
+it is dropped. Returning a hidden tile to visibility refetches its source pairs
 (hidden tiles hear no fetch completions), and the refetch's completion
 requeries; the show itself queries only if the as-of moved while hidden.
 Closing the tile cancels its series query and answers any open flip barrier;

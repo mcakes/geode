@@ -315,10 +315,11 @@ impl<T> FollowingQuery<T> {
                     // The same check promotion makes: a counter the tile
                     // follows moved since it asked (in practice only while
                     // hidden: a visible tile requeries on the change, and
-                    // the old tag goes stale), so the answer is to a question nobody is
-                    // asking. Applying it would paint, and run any side
-                    // effect of applying, under the old versions. Not wanted
-                    // by the barrier, so not an arrival either.
+                    // the old tag goes stale), so the answer is to a
+                    // question nobody is asking. Applying it would paint,
+                    // and run any side effect of applying, under the old
+                    // versions. Not wanted by the barrier, so not an arrival
+                    // either.
                     if asked.is_some_and(|under| differs(under, now)) {
                         return Delivered::Superseded;
                     }
