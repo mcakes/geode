@@ -37,7 +37,7 @@ The tile:
 | `store` | The `SheetStore` seam, addressed by key/tag with `Loaded::Refused(Refusal)` for a load that never went out and `save`/`forget` returning `Result<(), Refusal>`; `MemorySheetStore` (in-memory, the tests' fake, whose `set_save_refusal`/`set_load_refusal`/`set_forget_refusal` choose the refusal kind and `set_refusing`/`set_load_refused` are `Busy` shorthands) and `DuckSheetStore` (the store `geode-app` wires: `pricer_sheets` document reads/writes over `DataHandle`, with a `known`-names cache fed from the diagnostics catalog and the store's own confirmed writes). |
 | `grid` | The prepared `GridModel`, rebuilt on change. |
 | `paint` | The per-theme paint memo, floored to a readable ratio. |
-| `delegate` | The table delegate: cells and their column colors (sign, named), the tree column (indent, chevron, template tag), editor, expiry date field. |
+| `delegate` | The table delegate: cells and their column colors (sign, named), the connector tree column (indent; a package's chevron, template chip, summary and muted leg count; a leg's `├`/`└` connector and shorthand; a bare line's shorthand), editor, expiry date field. |
 | `header` | The prepared header row (notices as `geode_tile::notice::Notice`), the sheet name control and rename field, and the footer. |
 | `popup` | The typeahead, the entry bar's completion list, the sheet picker (`sheet_rows`, `SheetPicker`), and `PricerPick` (what a menu row does). The menu, popup geometry, the `:rm` confirm and the header notices paint through `geode-tile`. |
 | `session` | The tile's session record, including `:autosize`'s fitted widths (`column_widths`, read leniently). |
@@ -116,8 +116,11 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   changes whether a qty rescales by weight) closes with `MOVED`.
 - Shorthand rendering uses a template only while the legs still match its
   current table (an overflowing quantity never matches); otherwise it prints
-  the legs one per line. The grid keeps the shorthand as the row's find key
-  and paints only a package's template token. Loading accepts unresolved
+  the legs one per line. The grid keeps a line's or leg's shorthand as both
+  its painted tree text and its find key; a package paints a template
+  chip, a one-line summary of its legs' expiries and strikes, and a leg
+  count, and its find key is its template form (a custom package's is its
+  template token, underlyings and that summary). Loading accepts unresolved
   template names because stored instruments remain sufficient for repricing.
 - `TemplateSet::from_doc_over` keeps the last valid definition per name.
   An entry dropped with an error keeps the previous set's definition of
@@ -281,8 +284,18 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   when the query equals it case-insensitively or the highlight was moved with
   a key or a click; a pointer hover moves the highlight but does not count as
   moving it, so otherwise `enter` commits the typed text.
-- A package row's ground is painted by `render_tr` on the row,
-  never per cell, so the table's hover and selected-row fills stay visible.
+- No row paints a ground of its own: the tree column carries the package
+  structure, and `render_tr` keeps only the row press door, so the table's
+  hover and selected-row fills are the only row grounds. Package rows share
+  the line palette; the template chip takes the neutral chip pair
+  (`Paints::chip_fill`, `chip_text`), its text floored on the fill over all
+  three row grounds.
+- A leg's connector sits in its package's chevron lane and its text starts
+  where the package's chip starts, the edge a bare line's text shares. The
+  tree cell lays out slot, chip, text and note with one `TREE_GAP` between
+  each (`delegate::tree_gaps`); `fit_columns` and the `TREE_WIDTH` test
+  measure the same parts. `TREE_WIDTH` fits `▾ CS Z26 4800/5200 · 2 legs` at
+  the Large font; a longer summary ellipsizes and the leg count stays whole.
 - The line-number gutter (`[ui] line_numbers`, read from the `UiSettings`
   global and observed) sits beside the tree cell, outside its depth indent,
   so numbers share one lane at every depth. The tree column widens by the
@@ -292,8 +305,8 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   Relative mode measures from the cursor row and numbers absolutely with no
   cursor row. `refresh_numbers` prepares the text and width outside render,
   before every `refresh`, keyed by row count, relative cursor row and
-  mode. Gutter text uses the row's floored muted paint (the row's
-  own text paint on the cursor row).
+  mode. Gutter text uses the floored muted paint (the own text paint on the
+  cursor row, `SheetDelegate::gutter_paint`).
 - `paint` prepares grid-row text colors and tests their contrast across
   every bundled theme. Row text is checked against its base, hover, and
   selection backgrounds; menu colors are `geode_tile::menu::MenuPaint`'s.
@@ -303,8 +316,8 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   `geode_tile::colour::ColourCache`, invalidated when the factory's
   `colors` `Arc` changes); a stale cell stays muted and a failed one danger
   whatever the column's color (`paint::cell_colour`). Bearish, bullish and
-  named-color text on a package row is not floored against the package
-  ground the way the row's own paint is; a display check across the bundled
+  named-color text is not floored against the hover and selected row
+  grounds the way the row palette is; a display check across the bundled
   themes is pending.
   This sweep does not cover every header or typeahead
   token, and the bounded adjustment is not a guarantee for arbitrary themes.

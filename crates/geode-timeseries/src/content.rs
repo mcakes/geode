@@ -204,6 +204,8 @@ impl TileContent for TimeseriesContent {
             // This tile asks no view query and prices nothing; either
             // here is a routing bug.
             Delivery::Query(_) | Delivery::Price(_) => {}
+            // This tile asks no vol slices; an outcome addressed here is a routing bug.
+            Delivery::VolSlices(_) => {}
             // This tile never uploads; an outcome addressed here is a routing bug.
             Delivery::Upload(_) => {}
         }

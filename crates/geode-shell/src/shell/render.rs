@@ -122,9 +122,11 @@ impl Render for ShellView {
         // (`fill_active_tiles` yields nothing then).
         self.ensure_occupants(window, cx);
 
-        // An open page replaces the workspace: toolbar, stripe, tile surface,
-        // divider strips, and drag catchers are neither built nor painted; the
-        // sidebar and status bar stay. The page must be in the element tree
+        // An open page replaces the tile surface and the command line: the
+        // tile surface, divider strips, and drag catchers are neither built
+        // nor painted. The toolbar (the window's title bar), its as-of
+        // stripe, the sidebar, and the status bar stay, so the frame's
+        // controls stay live over the page. The page must be in the element tree
         // while it holds focus: gpui dispatches keys for an unrendered focus
         // handle from the window root, above this view's key listener.
         let page_open = self.page_open();
@@ -237,24 +239,24 @@ impl Render for ShellView {
         // The body's content beside the sidebar, its height, and the focused
         // tile's window-space rect (for the command line and stack list;
         // `None` under a page, where neither can be armed). A page takes the
-        // toolbar's and stripe's rows too and none of the workspace layout
-        // below is computed for it.
+        // tile surface's rect exactly, below the toolbar and stripe, and none
+        // of the workspace layout below is computed for it.
         let (content, body_height, focused_rect): (gpui::AnyElement, f32, Option<Rect>) =
             match page_view {
                 Some(view) => {
-                    let height = content_height + toolbar_height + stripe_height;
+                    let page_height = content_height;
                     (
                         div()
                             .id("shell-page")
                             .debug_selector(|| "shell-page".to_string())
                             .w(px(tile_width))
-                            .h(px(height))
+                            .h(px(page_height))
                             .flex_none()
                             .overflow_hidden()
                             .bg(cx.theme().background)
                             .child(view)
                             .into_any_element(),
-                        height,
+                        page_height,
                         None,
                     )
                 }
@@ -506,32 +508,28 @@ impl Render for ShellView {
                 entity.update(cx, |view, cx| view.toggle_workspace_pin(window, cx));
             }
         };
-        // No toolbar work at all while a page is open (see `page_open` above).
-        let toolbar = if page_open {
-            None
-        } else {
-            Some(toolbar::toolbar(
-                &self.filter_input,
-                &bar_model,
-                grouping_open,
-                scope_open,
-                add_menu,
-                on_chip_close,
-                on_chip_open,
-                on_add,
-                on_save,
-                on_load,
-                on_grouping,
-                on_as_of,
-                on_term_open,
-                on_term_close,
-                on_named_open,
-                on_named_close,
-                pin,
-                on_pin,
-                cx,
-            ))
-        };
+        // Built with or without a page: the toolbar is the title bar.
+        let toolbar = toolbar::toolbar(
+            &self.filter_input,
+            &bar_model,
+            grouping_open,
+            scope_open,
+            add_menu,
+            on_chip_close,
+            on_chip_open,
+            on_add,
+            on_save,
+            on_load,
+            on_grouping,
+            on_as_of,
+            on_term_open,
+            on_term_close,
+            on_named_open,
+            on_named_close,
+            pin,
+            on_pin,
+            cx,
+        );
 
         let body = h_flex()
             .w_full()
@@ -611,10 +609,10 @@ impl Render for ShellView {
             )
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .when_some(toolbar, |el, toolbar| el.child(toolbar))
-            // Paint the warning stripe only for `AsOf::At` and no page. Its
+            .child(toolbar)
+            // Paint the warning stripe only for `AsOf::At`, page or not. Its
             // height was already subtracted from the tile surface.
-            .when(is_historical && !page_open, |el| {
+            .when(is_historical, |el| {
                 el.child(
                     div()
                         .w_full()

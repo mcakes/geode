@@ -3,12 +3,13 @@
 //! `SharedString` cells and their `CellState`, so painting does not format cell values.
 //!
 //! Colours live separately in `Paints`: a theme change replaces the palette without
-//! rebuilding these rows. The delegate supplies the tree column from each row's depth,
-//! package state, and tag. Shorthand is retained as a search key, not a painted column.
+//! rebuilding these rows. The delegate paints the tree column from each row's depth,
+//! kind, tag, text and note, all prepared here. A row's shorthand is also its search
+//! key.
 
 use crate::core::columns::{CellState, ColumnKind, cell_text};
 use crate::core::sheet::{LineId, RowKind, Sheet};
-use crate::core::shorthand::render_expiry;
+use crate::core::shorthand::{render_expiry, render_strike};
 use crate::core::tree::{Expansion, visible_rows};
 use crate::core::views::ColumnPlan;
 use geode_core::clock::Clock;
@@ -36,8 +37,14 @@ pub struct GridColumn {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GridRowKind {
     Line,
-    Leg,
-    Package { open: bool },
+    /// `last`: the final leg of its package in sheet order — it takes the
+    /// corner connector (`└`), every other leg the tee (`├`).
+    Leg {
+        last: bool,
+    },
+    Package {
+        open: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +65,12 @@ pub struct GridRow {
     /// Tree-column tag: a package's template token (`CS`, `CUSTOM`), empty on a
     /// line or leg.
     pub tag: SharedString,
+    /// Tree-column text: a package's summary (`package_summary`); a leg's
+    /// or a bare line's full one-line shorthand (`-2 SPX Z26 5000 C`).
+    pub text: SharedString,
+    /// Tree-column note: a package's leg count (`· 1 leg`, `· 2 legs`),
+    /// empty on a line or leg.
+    pub note: SharedString,
     /// Find key derived from shorthand. It can match text that does not appear in
     /// the current view's columns.
     pub search: SharedString,
@@ -87,19 +100,20 @@ fn right_aligned(kind: ColumnKind) -> bool {
     )
 }
 
-/// A package's search key: its template form while the legs still match
-/// the table (the grammar round-trips it), else its template token with
-/// its legs' distinct underlyings and expiries.
-fn package_search(sheet: &Sheet, row: usize) -> String {
-    let text = sheet.shorthand(row);
-    if !text.is_empty() && !text.contains('\n') {
-        return text;
-    }
-    let RowKind::Package { template } = sheet.kind(row) else {
-        return text;
-    };
+/// A package's legs' distinct underlyings, rendered expiries and rendered
+/// strikes, each in leg order. The one collection both the painted
+/// summary and the fallback find key read, so `/` finds what column 0
+/// paints.
+struct LegParts {
+    unds: Vec<String>,
+    exps: Vec<String>,
+    strikes: Vec<String>,
+}
+
+fn leg_parts(sheet: &Sheet, row: usize) -> LegParts {
     let mut unds: Vec<String> = Vec::new();
     let mut exps: Vec<String> = Vec::new();
+    let mut strikes: Vec<String> = Vec::new();
     for leg in sheet.children(row) {
         if let Some(i) = sheet.instrument(leg) {
             let u = i.underlying().to_string();
@@ -110,16 +124,65 @@ fn package_search(sheet: &Sheet, row: usize) -> String {
             if !exps.contains(&e) {
                 exps.push(e);
             }
+            let k = render_strike(i.strike());
+            if !strikes.contains(&k) {
+                strikes.push(k);
+            }
         }
     }
-    let mut parts = vec![template.token().to_string()];
-    if !unds.is_empty() {
-        parts.push(unds.join("/"));
+    LegParts {
+        unds,
+        exps,
+        strikes,
     }
-    if !exps.is_empty() {
-        parts.push(exps.join("/"));
+}
+
+/// `parts` joined with spaces, empty parts dropped.
+fn join_parts(parts: &[String]) -> String {
+    parts
+        .iter()
+        .filter(|p| !p.is_empty())
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A package's search key: its template form while the legs still match
+/// the table (the grammar round-trips it), else its template token with
+/// its legs' distinct underlyings, then the painted summary (expiries,
+/// then strikes), so a custom package's painted text is findable.
+fn package_search(sheet: &Sheet, row: usize) -> String {
+    let text = sheet.shorthand(row);
+    if !text.is_empty() && !text.contains('\n') {
+        return text;
     }
-    parts.join(" ")
+    let RowKind::Package { template } = sheet.kind(row) else {
+        return text;
+    };
+    let p = leg_parts(sheet, row);
+    join_parts(&[
+        template.token().to_string(),
+        p.unds.join("/"),
+        p.exps.join("/"),
+        p.strikes.join("/"),
+    ])
+}
+
+/// A package's tree-column summary: its legs' distinct expiries, then
+/// their distinct strikes, each in leg order joined with `/`
+/// (`Z26 4800/5200`). One line whatever form the package's own
+/// shorthand takes; empty when no leg carries an instrument.
+pub(crate) fn package_summary(sheet: &Sheet, row: usize) -> String {
+    let p = leg_parts(sheet, row);
+    join_parts(&[p.exps.join("/"), p.strikes.join("/")])
+}
+
+fn leg_note(n: usize) -> String {
+    if n == 1 {
+        "· 1 leg".to_string()
+    } else {
+        format!("· {n} legs")
+    }
 }
 
 impl GridModel {
@@ -149,17 +212,30 @@ impl GridModel {
                 RowKind::Package { .. } => GridRowKind::Package {
                     open: expansion.is_open(sheet.id(r)),
                 },
-                RowKind::Line | RowKind::Underlying if sheet.parent(r).is_some() => {
-                    GridRowKind::Leg
-                }
-                RowKind::Line | RowKind::Underlying => GridRowKind::Line,
+                RowKind::Line | RowKind::Underlying => match sheet.parent(r) {
+                    Some(p) => GridRowKind::Leg {
+                        last: sheet.children(p).end == r + 1,
+                    },
+                    None => GridRowKind::Line,
+                },
             };
-            let (tag, search) = match sheet.kind(r) {
+            let (tag, text, note, search) = match sheet.kind(r) {
                 RowKind::Package { template } => (
                     SharedString::new_static(template.token()),
-                    package_search(sheet, r),
+                    SharedString::from(package_summary(sheet, r)),
+                    SharedString::from(leg_note(sheet.children(r).len())),
+                    SharedString::from(package_search(sheet, r)),
                 ),
-                _ => (SharedString::default(), sheet.shorthand(r)),
+                _ => {
+                    // One shorthand, shared by the painted text and the find key.
+                    let s = SharedString::from(sheet.shorthand(r));
+                    (
+                        SharedString::default(),
+                        s.clone(),
+                        SharedString::default(),
+                        s,
+                    )
+                }
             };
             rows.push(GridRow {
                 kind,
@@ -167,7 +243,9 @@ impl GridModel {
                 id: Some(sheet.id(r)),
                 depth: sheet.depth(r),
                 tag,
-                search: search.into(),
+                text,
+                note,
+                search,
                 cells: plan
                     .columns
                     .iter()
@@ -233,7 +311,7 @@ mod tests {
         let open = build(&s, &e);
         assert_eq!(open.rows.len(), 5);
         assert_eq!(open.rows[1].kind, GridRowKind::Package { open: true });
-        assert_eq!(open.rows[2].kind, GridRowKind::Leg);
+        assert_eq!(open.rows[2].kind, GridRowKind::Leg { last: false });
         assert_eq!(open.rows[2].depth, 1);
         assert_eq!(open.rows[2].tag.as_ref(), "", "a leg: no tag");
         assert_eq!(open.rows[4].search.as_ref(), "SPX Z26 4000 P");
@@ -243,6 +321,130 @@ mod tests {
             plan().columns.len(),
             "the tree column is the delegate's own"
         );
+    }
+
+    /// Column 0's prepared strings: a package's summary (distinct expiries,
+    /// then distinct strikes, leg order) and leg count; a leg's and a bare
+    /// line's full shorthand; nothing formatted at paint.
+    #[test]
+    fn the_tree_text_is_prepared_per_row_kind() {
+        let s = sheet(); // [A, P(L1, L2), B]
+        let mut e = Expansion::default();
+        e.set(s.id(1), true);
+        let m = build(&s, &e);
+        assert_eq!(m.rows[0].text.as_ref(), "SPX Z26 5000 C");
+        assert_eq!(m.rows[0].note.as_ref(), "", "a bare line has no note");
+        assert_eq!(m.rows[1].text.as_ref(), "Z26 4800/5200");
+        assert_eq!(m.rows[1].note.as_ref(), "· 2 legs");
+        assert_eq!(m.rows[2].text.as_ref(), "SPX Z26 4800 C");
+        assert_eq!(m.rows[3].text.as_ref(), "-1 SPX Z26 5200 C");
+        assert_eq!(m.rows[2].note.as_ref(), "", "a leg has no note");
+        assert_eq!(m.rows[4].text.as_ref(), "SPX Z26 4000 P");
+    }
+
+    #[test]
+    fn the_last_leg_of_every_package_takes_the_corner_connector() {
+        // Ends in a package, so the last leg is the sheet's last row.
+        let mut s = Sheet::new("t");
+        push(&mut s, vec![callspread(1)]);
+        push(&mut s, vec![line(spx(4000.0, OptionKind::Put), 1)]);
+        push(&mut s, vec![callspread(2)]);
+        let mut e = Expansion::default();
+        e.open_all(&s);
+        let m = build(&s, &e);
+        let kinds: Vec<GridRowKind> = m.rows.iter().map(|r| r.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                GridRowKind::Package { open: true },
+                GridRowKind::Leg { last: false },
+                GridRowKind::Leg { last: true },
+                GridRowKind::Line,
+                GridRowKind::Package { open: true },
+                GridRowKind::Leg { last: false },
+                GridRowKind::Leg { last: true },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_one_leg_package_counts_one_leg_and_its_leg_is_last() {
+        let mut s = Sheet::new("t");
+        push(&mut s, vec![callspread(1)]);
+        s.apply(crate::core::Edit::Remove { at: 2 }).unwrap();
+        let mut e = Expansion::default();
+        e.open_all(&s);
+        let m = build(&s, &e);
+        assert_eq!(m.rows.len(), 2);
+        assert_eq!(m.rows[0].note.as_ref(), "· 1 leg");
+        assert_eq!(m.rows[0].text.as_ref(), "Z26 4800");
+        assert_eq!(m.rows[1].kind, GridRowKind::Leg { last: true });
+    }
+
+    #[test]
+    fn a_list_form_package_summary_is_one_line() {
+        // A custom package (legs match no template table) renders its
+        // shorthand one leg per line; the summary must not.
+        let mut s = Sheet::new("t");
+        push(&mut s, vec![line(spx(5000.0, OptionKind::Call), 1)]);
+        push(&mut s, vec![line(spx(4000.0, OptionKind::Put), 1)]);
+        s.apply(crate::core::Edit::Group {
+            first: 0,
+            count: 2,
+            template: crate::core::Template::CUSTOM,
+            id: None,
+        })
+        .unwrap();
+        assert!(
+            s.shorthand(0).contains('\n'),
+            "precondition: list form, {:?}",
+            s.shorthand(0)
+        );
+        let m = build(&s, &Expansion::default());
+        assert!(!m.rows[0].text.contains('\n'), "{:?}", m.rows[0].text);
+        assert_eq!(m.rows[0].text.as_ref(), "Z26 5000/4000");
+        assert_eq!(m.rows[0].note.as_ref(), "· 2 legs");
+    }
+
+    #[test]
+    fn a_list_form_package_finds_its_painted_summary() {
+        // A custom package's find key falls back from its list-form
+        // shorthand; `/` must still match the summary column 0 paints.
+        let mut s = Sheet::new("t");
+        push(&mut s, vec![line(spx(5000.0, OptionKind::Call), 1)]);
+        push(&mut s, vec![line(spx(4000.0, OptionKind::Put), 1)]);
+        s.apply(crate::core::Edit::Group {
+            first: 0,
+            count: 2,
+            template: crate::core::Template::CUSTOM,
+            id: None,
+        })
+        .unwrap();
+        let m = build(&s, &Expansion::default());
+        assert_eq!(m.rows[0].text.as_ref(), "Z26 5000/4000");
+        assert!(
+            m.rows[0].search.contains(m.rows[0].text.as_ref()),
+            "{:?} does not find {:?}",
+            m.rows[0].search,
+            m.rows[0].text
+        );
+    }
+
+    #[test]
+    fn a_package_summary_names_a_repeated_strike_once() {
+        // A straddle shape: a call and a put at one strike and expiry.
+        let mut s = Sheet::new("t");
+        push(&mut s, vec![line(spx(5000.0, OptionKind::Call), 1)]);
+        push(&mut s, vec![line(spx(5000.0, OptionKind::Put), 1)]);
+        s.apply(crate::core::Edit::Group {
+            first: 0,
+            count: 2,
+            template: crate::core::Template::CUSTOM,
+            id: None,
+        })
+        .unwrap();
+        let m = build(&s, &Expansion::default());
+        assert_eq!(m.rows[0].text.as_ref(), "Z26 5000");
     }
 
     #[test]
@@ -327,6 +529,6 @@ mod tests {
         .unwrap();
         let m = build(&s, &Expansion::default());
         assert_eq!(m.rows[0].tag.as_ref(), "CUSTOM");
-        assert_eq!(m.rows[0].search.as_ref(), "CUSTOM SPX Z26");
+        assert_eq!(m.rows[0].search.as_ref(), "CUSTOM SPX Z26 5000/4000");
     }
 }

@@ -63,6 +63,8 @@ mod watching {
                 Delivery::Query(_) => {}
                 // This tile never prices — nothing addressed here.
                 Delivery::Price(_) => {}
+                // This tile asks no vol slices — nothing addressed here.
+                Delivery::VolSlices(_) => {}
                 // This tile asks no series query and holds no
                 // `(identity, source)` pair.
                 Delivery::Series(_) | Delivery::SeriesFetched { .. } => {}
@@ -1761,6 +1763,91 @@ fn a_price_delivery_is_routed_by_key_like_a_query(cx: &mut gpui::TestAppContext)
     assert!(
         !log.iter()
             .any(|r| matches!(r, crate::module::recording::Recorded::Priced(t, _) if *t == first)),
+        "{log:?}"
+    );
+}
+
+#[gpui::test]
+fn a_vol_slices_delivery_is_routed_to_its_tile_by_key(cx: &mut gpui::TestAppContext) {
+    use crate::module::Delivery;
+    use geode_core::query::QueryKey;
+    use geode_core::vol::VolSliceOutcome;
+    use std::time::Instant;
+
+    let (services, log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
+    let first = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
+    let second = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+
+    cx.update(|window, cx| {
+        shell.update(cx, |s, cx| {
+            s.deliver(
+                Delivery::VolSlices(VolSliceOutcome {
+                    key: QueryKey(second.0),
+                    tag: 9,
+                    submitted: Instant::now(),
+                    results: Vec::new(),
+                }),
+                window,
+                cx,
+            );
+        });
+    });
+
+    {
+        let log = log.borrow();
+        assert!(
+            log.iter().any(
+                |r| matches!(r, crate::module::recording::Recorded::VolSliced(t, 9) if *t == second)
+            ),
+            "{log:?}"
+        );
+        assert!(
+            !log.iter().any(
+                |r| matches!(r, crate::module::recording::Recorded::VolSliced(t, _) if *t == first)
+            ),
+            "{log:?}"
+        );
+    }
+
+    // A batch answered after its tile closed has no recipient: the shell
+    // drops it (no occupant, no panic) rather than handing it to a
+    // neighbour.
+    cx.simulate_keystrokes("ctrl-w");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+        let _ = window.draw(cx);
+    });
+    cx.update(|window, cx| {
+        shell.update(cx, |s, cx| {
+            s.deliver(
+                Delivery::VolSlices(VolSliceOutcome {
+                    key: QueryKey(second.0),
+                    tag: 10,
+                    submitted: Instant::now(),
+                    results: Vec::new(),
+                }),
+                window,
+                cx,
+            );
+        });
+    });
+    let log = log.borrow();
+    assert!(
+        log.iter()
+            .any(|r| matches!(r, crate::module::recording::Recorded::Closed(t) if *t == second)),
+        "ctrl-w closed the focused tile: {log:?}"
+    );
+    assert!(
+        !log.iter()
+            .any(|r| matches!(r, crate::module::recording::Recorded::VolSliced(_, 10))),
         "{log:?}"
     );
 }

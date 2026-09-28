@@ -264,7 +264,7 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         "Workspace",
     );
     action(reg, "workspace::close_tile", "Close tile", "Workspace");
-    // A page replaces the workspace while open; `escape` in context `page`
+    // A page replaces the tile surface while open; `escape` in context `page`
     // closes it unless the page consumes the close itself.
     action(reg, "page::close", "Close page", "Workspace");
     // Dock toggles retain hidden occupants. Move sends the focused tile to a

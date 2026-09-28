@@ -1,4 +1,5 @@
-//! One page at a time over the workspace. A page is created on first open
+//! One page at a time over the tile surface; the toolbar, sidebar, and
+//! status bar stay. A page is created on first open
 //! and retained for the window's lifetime so its state survives a round trip;
 //! `open` is the only flag that changes between toggles.
 

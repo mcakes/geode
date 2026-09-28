@@ -296,6 +296,7 @@ fn service_with(
         documents: Default::default(),
         egress: Vec::new(),
         pricer: Default::default(),
+        vol: Default::default(),
     })
     .unwrap();
     (db, src, service, rx, loaded)
@@ -325,6 +326,7 @@ fn reopen(
         documents: Default::default(),
         egress: Vec::new(),
         pricer: Default::default(),
+        vol: Default::default(),
     })
     .unwrap()
 }
@@ -421,6 +423,7 @@ fn service_with_history(
         documents: Default::default(),
         egress: Vec::new(),
         pricer: Default::default(),
+        vol: Default::default(),
     })
     .unwrap();
     (db, src, service, rx, loaded, between)

@@ -368,7 +368,7 @@ Accepted candidates update runtime state according to their inputs:
 | `expressions`, `datasets`, or `dimensions` | Rebuild named expressions; a changed or redefined entry bumps the frame's config version so a tile whose scope references it requeries |
 | `datasets` or `dimensions` | Rebuild dimension-picker columns |
 | Views, either presentation document, dimensions, or colors | Emit `ConfigReloaded` for the app bridge |
-| Sources, datasets, egress, or `app.pricing.adapter` differing from startup | Mark restart required; return to the startup inputs to clear it |
+| Sources, datasets, egress, `app.pricing.adapter`, or `app.vol.model` differing from startup | Mark restart required; return to the startup inputs to clear it |
 
 Document-change checks compare the original per-layer documents, including
 their paths, rather than just merged values. Source and dataset changes can
@@ -512,6 +512,14 @@ reversal for every sheet. A reload reaches open pricer tiles without a
 restart. Rows already on a sheet keep their legs and prices; see
 [the pricer](features.md) for how a package prints once its template is
 removed or redefined.
+
+## Vol
+
+`[vol]` in `app.toml` selects the vol-surface evaluator the data service's
+vol slice requests use. `model` names a model the binary registers; the
+default and the only one in every build is `demo`, a smooth stand-in that is
+not a financial model. A name the binary lacks warns at startup and every vol
+slice answers with that reason. Changing `model` marks restart required, as `[pricing] adapter` does.
 
 ## Maintaining configuration
 

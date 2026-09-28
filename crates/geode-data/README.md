@@ -77,6 +77,7 @@ for capacity, coalescing, and worker shutdown behavior.
 | `store` | The DuckDB store: DDL generated from the schema, the per-file publish transaction and backfill guard, document publish, the series family's bitemporal append (`append_series`, the one door series rows enter by), retention, and the freshness catalog in source time. |
 | `query` | Scope lowering, grain-aware view compilation, distinct values, document and series queries, catalog reads, and the read pool. View/document planning, provenance, and execution share a worker transaction; superseded results are dropped. |
 | `pricing` | App-supplied pricer registry and a separate bounded worker queue. Queued batches coalesce by key; cancellation stops a running batch at the next line boundary. |
+| `vol` | App-supplied vol model registry and a bounded worker queue shaped like `pricing`'s: batches coalesce by key, cancellation stops a running batch at the next job boundary, a panicking job fails alone. |
 | `documents` | The `DocumentKind` registry the app fills. |
 | `egress` | Startup target resolution and per-target workers that encode and send, with eight waiting jobs. Refusals answer from the service thread; encoding and transport results, including contained panics, answer from the worker as keyed/tagged upload outcomes. |
 | `health` | Re-export of `geode_core::health::Health`. |

@@ -1271,8 +1271,63 @@ fn a_pricing_change_requires_a_restart_and_a_revert_clears_it(cx: &mut gpui::Tes
     assert!(shell.read_with(&cx, |s, _| s.restart_required.is_none()));
 }
 
-/// Only `[pricing] adapter` belongs to the restart baseline. Changes to the live
-/// `refresh` setting must not request restart.
+/// The vol model is selected at startup exactly as the pricing adapter is.
+/// Changing `[vol] model` requires restart; reverting to the startup baseline
+/// clears that message.
+#[gpui::test]
+fn a_vol_model_change_requires_a_restart_and_a_revert_clears_it(cx: &mut gpui::TestAppContext) {
+    let (services, _log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = events.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&shell, move |_, event: &ShellEvent, _| {
+            sink.borrow_mut().push(event.clone())
+        })
+        .detach();
+    });
+
+    let mut with_vol = Config::load(&ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            LayerDoc::builtin("app", "[vol]\nmodel = \"vendor\"\n").unwrap(),
+        ],
+        ..ConfigSources::default()
+    });
+    shell.update(&mut cx, |s, cx| {
+        s.apply_reload(std::mem::take(&mut with_vol), cx)
+    });
+    assert!(
+        events
+            .borrow()
+            .iter()
+            .any(|e| matches!(e, ShellEvent::RestartRequired(m) if m.contains("vol"))),
+        "{:?}",
+        events.borrow()
+    );
+
+    events.borrow_mut().clear();
+    let mut reverted = Config::load(&ConfigSources {
+        builtin: vec![LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap()],
+        ..ConfigSources::default()
+    });
+    shell.update(&mut cx, |s, cx| {
+        s.apply_reload(std::mem::take(&mut reverted), cx)
+    });
+    assert!(
+        !events
+            .borrow()
+            .iter()
+            .any(|e| matches!(e, ShellEvent::RestartRequired(_))),
+        "back at the baseline: {:?}",
+        events.borrow()
+    );
+    assert!(shell.read_with(&cx, |s, _| s.restart_required.is_none()));
+}
+
+/// Of `[pricing]`, only `adapter` belongs to the restart baseline (beside
+/// `[vol] model`). Changes to the live `refresh` setting must not request restart.
 #[gpui::test]
 fn a_pricing_refresh_change_needs_no_restart(cx: &mut gpui::TestAppContext) {
     let (services, _log) = services_with_recorder();

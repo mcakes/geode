@@ -808,8 +808,8 @@ committing and report its segment error. Segment display text is allocated by
 
 ## Diagnostics
 
-`geode-diagnostics` is the first [page](shell.md#pages): a surface over the
-workspace presenting shell-owned operational state in five sections, with
+`geode-diagnostics` is the first [page](shell.md#pages): a surface in place
+of the tile surface presenting shell-owned operational state in five sections, with
 sources, stored data, configuration, logs, and performance. The shell's
 `Diagnostics` entity, the shared log ring, the loaded configuration, and the
 frame's requery statistics supply the state. `page::toggle_diagnostics`,
@@ -818,7 +818,10 @@ sidebar button, the palette row "Diagnostics: Open page", or the status
 bar's diagnostics summary; Escape with nothing above the page closes it, as
 does any workspace switch. The page is retained while the window lives, so
 filters, cursors, expansion, and the log tail survive a close and reopen;
-the session saves only the selected section.
+the session saves only the selected section. The toolbar stays above the
+page with every frame control live, so the as-of the Data section's
+resolved markers follow is the one the toolbar shows and can change
+(subject to the pinned-workspace limit below).
 
 The header carries the title, state chips derived from the same inputs as
 the status summary (worst source health with its count, config errors, data
@@ -975,13 +978,22 @@ selection total over such lines, paints `—` in its local-currency measure
 columns; the `_usd` columns still sum, and are the comparable ones across
 currencies. Both bundled views end in a `status` column, which says
 `pricing…` on a stale line and a failed line's reason, so neither state is
-shown by color alone. The tree column reserves a fixed chevron slot on every
-row, so roots share one leading edge and legs sit one step in. Column 0
-carries structure only: the depth indent, the chevron slot and a package's
-template token (`CS`, `CUSTOM`); a line or leg has no tag. Find (`/`, `n`,
-`N`) still matches each row's full shorthand, which no column paints. A long
-text cell ends in `…`; a number never truncates. Cell text is
-floored to the readable ratio on the row's own ground and on the table's
+shown by color alone. Column 0 is a connector tree. A package row shows its
+chevron, its template (`CS`, `CUSTOM`) as a neutral chip, a summary of its
+legs' distinct expiries and strikes (`Z26 4800/5200`) and a muted leg count
+(`· 2 legs`). Each leg hangs from `├` (`└` on the package's last leg) under
+the package's chevron, with its full shorthand in muted text; a bare line
+shows its full shorthand. Every row reserves the slot, so roots share one
+leading edge, and a leg's text starts where its package's chip starts. No
+row carries a ground of its own: the table's hover and selected-row fills
+are the only row grounds. Column 0 is fixed at a width that fits a two-leg
+call spread's package row (`▾ CS Z26 4800/5200 · 2 legs`) at the largest
+font; a longer summary ends in `…` and the leg count stays whole. Find (`/`,
+`n`, `N`) matches the shorthand column 0 paints on a line or leg; a
+package's find key is still its template form (`SPX Z26 4800/5200 CS`), and
+a custom package's is its template token, underlyings and the summary it
+paints (`CUSTOM SPX Z26 5000/4000`). A long text cell ends in `…`; a number
+never truncates. Cell text is floored to the readable ratio on the table's base,
 hover and selected-row grounds.
 
 The entry bar sits between the header and the column headers. A muted label
@@ -1010,8 +1022,9 @@ closes the bar has to land on a row the list does not cover.
 
 `[ui] line_numbers` adds a gutter beside the tree column, before the depth
 indent, so numbers share one lane; the tree column widens by the gutter.
-Lines, packages, and an open package's legs are numbered in painted order —
-the index `NG` jumps to. Relative mode shows distance
+Numbers are muted on every row kind, a package's included, and take the
+normal text color on the cursor row. Lines, packages, and an open package's
+legs are numbered in painted order — the index `NG` jumps to. Relative mode shows distance
 from the cursor row, with its absolute number on that row, and numbers
 absolutely when there is no cursor row.
 
@@ -1289,7 +1302,7 @@ name an unrelated line of the next one. `:name` keeps it: a rename changes no
 line id.
 
 The tint, the theme's selection color, overlays each cell under its text, so
-a package row's ground and a stale or failed cell's text color still show;
+a stale or failed cell's text color still shows;
 the cursor keeps its border over it. A row selection also tints the tree
 column as each row's handle.
 

@@ -23,6 +23,7 @@ use crate::query::series::compile_series;
 use crate::source::SourceSpec;
 use crate::store::catalog::BookFreshness;
 use crate::store::{Catalog, Store, StoreError};
+use crate::vol::{VolConfig, VolSink, VolWorker};
 use chrono::{DateTime, Utc};
 use geode_core::config::{Diagnostic, Severity};
 use geode_core::dimensions::DerivedDimensions;
@@ -39,6 +40,7 @@ use geode_core::series::{SERIES_POINT_CAP, SeriesOutcome, SeriesParams, SlotKind
 use geode_core::snapshot::Provenance;
 use geode_core::source_config::SourceShape;
 use geode_core::view::ViewSpec;
+use geode_core::vol::{VolSliceOutcome, VolSliceParams};
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
@@ -69,6 +71,8 @@ pub struct DataServiceConfig {
     pub documents: DocumentRegistry,
     /// Pricing implementation registered by `geode-app`.
     pub pricer: PricerConfig,
+    /// Vol model registered by geode-app.
+    pub vol: VolConfig,
     /// Upload targets, already passed through `egress::resolve`. Each gets
     /// its own worker thread at open; empty means every upload answers
     /// "unknown target".
@@ -87,6 +91,8 @@ pub enum DataEvent {
     Catalog(CatalogOutcome),
     /// Pricing result, addressed by the requesting tile's key.
     Price(PriceOutcome),
+    /// Vol slice batch result, addressed by the requesting tile's key.
+    VolSlices(VolSliceOutcome),
     /// File or document publication. Dataset, batch, and books identify the
     /// partitions whose subscribers need invalidation; the app coalesces bursts.
     Published {
@@ -736,6 +742,7 @@ pub struct DataService {
     context_columns: ContextColumns,
     pool: QueryPool,
     pricing: PricingWorker,
+    vol: VolWorker,
     scheduler: Scheduler,
     ingest: Arc<IngestHandle>,
     /// A dedicated read connection for service-side catalog and coverage reads.
@@ -863,6 +870,12 @@ impl DataService {
             Arc::new(move |o| sink(DataEvent::Price(o)))
         };
         let pricing = PricingWorker::spawn(config.pricer.clone(), price_sink, Arc::clone(&sink));
+
+        let vol_sink: VolSink = {
+            let sink = Arc::clone(&sink);
+            Arc::new(move |o| sink(DataEvent::VolSlices(o)))
+        };
+        let vol = VolWorker::spawn(config.vol.clone(), vol_sink, Arc::clone(&sink));
 
         let ingest_sink: IngestSink = {
             let sink = Arc::clone(&sink);
@@ -1452,6 +1465,7 @@ impl DataService {
             context_columns: Arc::default(),
             pool,
             pricing,
+            vol,
             scheduler,
             ingest,
             conn,
@@ -1689,6 +1703,31 @@ impl DataService {
         }));
     }
 
+    /// Queue vol work without waiting. Refusal produces a terminal
+    /// `VolSliceOutcome` with an error per job so callers do not wait forever.
+    pub fn vol_slices(&self, params: VolSliceParams) {
+        let key = params.key;
+        let tag = params.tag;
+        let submitted = params.submitted;
+        let jobs = params.jobs.len();
+        if self.vol.request(params) {
+            return;
+        }
+        tracing::warn!(
+            target: "geode::vol",
+            "the vol queue is full; batch for key {} tag {tag} was refused",
+            key.0
+        );
+        let _ = (self.sink)(DataEvent::VolSlices(VolSliceOutcome {
+            key,
+            tag,
+            submitted,
+            results: (0..jobs)
+                .map(|_| Err("the vol queue is full; resubmit".to_string()))
+                .collect(),
+        }));
+    }
+
     /// Publish an app-authored document. The dataset
     /// must be declared `local = true`: anything else is refused with an
     /// error diagnostic and nothing is written. Accepted, the rows go
@@ -1825,6 +1864,7 @@ impl DataService {
     pub fn cancel(&self, key: QueryKey) {
         self.pool.cancel(key);
         self.pricing.cancel(key);
+        self.vol.cancel(key);
     }
 
     /// Answer a fetch the request loop could not run the way the fetch worker
@@ -2074,6 +2114,7 @@ impl DataService {
         }
         self.pool.shutdown();
         self.pricing.shutdown();
+        self.vol.shutdown();
         self.scheduler.shutdown();
         self.ingest.shutdown();
     }
@@ -2125,6 +2166,7 @@ mod tests {
             documents: Default::default(),
             egress: Vec::new(),
             pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
         })
         .unwrap();
         (db, src, service, rx)
@@ -2166,6 +2208,7 @@ mod tests {
             documents: Default::default(),
             egress: Vec::new(),
             pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
         })
         .unwrap();
         (db, src, service, rx)
@@ -2263,6 +2306,7 @@ mod tests {
             documents: Default::default(),
             egress: Vec::new(),
             pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
         })
         .unwrap();
         (dir, service, rx)
@@ -2270,11 +2314,11 @@ mod tests {
 
     /// A service over a `local = true` document dataset (`sheets`) plus
     /// the CVI fixture dataset (not `local`), with a `FakePricer` behind
-    /// the pricing worker — the fixture the publish and pricing tests
-    /// share. `delay` is the fake's own
-    /// per-line delay: `Duration::ZERO` for most tests, non-zero where a
-    /// test needs a batch to still be running when it submits the next
-    /// one (the cancel and full-queue tests below).
+    /// the pricing worker and a `FakeVolModel` behind the vol worker —
+    /// the fixture the publish, pricing and vol tests share. `delay` is
+    /// each fake's own per-job delay: `Duration::ZERO` for most tests,
+    /// non-zero where a test needs a batch to still be running when it
+    /// submits the next one (the cancel and full-queue tests below).
     fn local_service_with_delay(
         delay: Duration,
     ) -> (
@@ -2300,6 +2344,10 @@ mod tests {
                 asked: Default::default(),
                 delay,
                 overrides_seen: Default::default(),
+            })),
+            vol: crate::vol::VolConfig::with(Arc::new(crate::vol::worker::tests::FakeVolModel {
+                asked: Default::default(),
+                delay,
             })),
         })
         .unwrap();
@@ -2652,6 +2700,97 @@ mod tests {
         assert!(saw_queue_full_error, "at least one batch was refused");
     }
 
+    #[test]
+    fn a_vol_batch_is_answered_by_the_worker_under_its_key_and_tag() {
+        let (_d, service, rx) = local_service();
+        service.vol_slices(crate::vol::worker::tests::params(
+            11,
+            1,
+            &["2026-10-16", "1999-01-01"],
+        ));
+        let outcome = loop {
+            match rx.recv_timeout(Duration::from_secs(10)).expect("an event") {
+                DataEvent::VolSlices(o) => break o,
+                _ => continue,
+            }
+        };
+        assert_eq!((outcome.key, outcome.tag), (QueryKey(11), 1));
+        assert!(outcome.results[0].is_ok());
+        assert_eq!(outcome.results[1].as_ref().unwrap_err(), "refused");
+    }
+
+    #[test]
+    fn a_vol_request_reaches_the_sink_and_cancel_reaches_the_vol_worker() {
+        // The vol twin of the pricing test above. A 40 ms per-job delay
+        // keeps key 21's five-job batch running when both keys are
+        // cancelled, so a cancel that never reached the vol worker would
+        // deliver all five results and then run key 22.
+        let (_d, service, rx) = local_service_with_delay(Duration::from_millis(40));
+        let expiries = [
+            "2026-01-01",
+            "2026-02-01",
+            "2026-03-01",
+            "2026-04-01",
+            "2026-05-01",
+        ];
+        service.vol_slices(crate::vol::worker::tests::params(21, 3, &expiries));
+        service.vol_slices(crate::vol::worker::tests::params(22, 1, &["2026-06-01"]));
+        std::thread::sleep(Duration::from_millis(60));
+        service.cancel(QueryKey(22));
+        service.cancel(QueryKey(21));
+        let o = until(&rx, |e| match e {
+            DataEvent::VolSlices(o) if o.key == QueryKey(21) => Some(o),
+            _ => None,
+        });
+        assert_eq!(o.tag, 3);
+        assert!(
+            o.results.len() < expiries.len(),
+            "cancel stopped the running batch early: {}",
+            o.results.len()
+        );
+        // Key 22 was queued when cancelled and never answers.
+        let deadline = std::time::Instant::now() + Duration::from_millis(500);
+        while std::time::Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            match rx.recv_timeout(remaining.min(Duration::from_millis(50))) {
+                Ok(DataEvent::VolSlices(o)) if o.key == QueryKey(22) => {
+                    panic!("key 22 was cancelled and must not have run")
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn a_full_vol_queue_answers_the_refused_batch_with_an_error_per_job() {
+        // A slow model holds the worker; fill the queue; the next batch is
+        // refused from the service thread with one error per job.
+        let (_d, service, rx) = local_service_with_delay(Duration::from_millis(300));
+        let first = 1_000u64;
+        service.vol_slices(crate::vol::worker::tests::params(first, 1, &["2026-01-01"]));
+        std::thread::sleep(Duration::from_millis(20));
+        let bound = crate::vol::VOL_BOUND as u64;
+        for k in (first + 1)..=(first + bound) {
+            service.vol_slices(crate::vol::worker::tests::params(k, 1, &["2026-01-01"]));
+        }
+        service.vol_slices(crate::vol::worker::tests::params(
+            first + bound + 1,
+            7,
+            &["2026-01-01", "2026-02-01"],
+        ));
+        let refused = loop {
+            match rx.recv_timeout(Duration::from_secs(10)).expect("an event") {
+                DataEvent::VolSlices(o) if o.key == QueryKey(first + bound + 1) => break o,
+                _ => continue,
+            }
+        };
+        assert_eq!(refused.tag, 7);
+        assert_eq!(refused.results.len(), 2);
+        for r in &refused.results {
+            assert_eq!(r.as_ref().unwrap_err(), "the vol queue is full; resubmit");
+        }
+    }
+
     /// A service with one SUBSCRIBED source on an
     /// in-process `ChannelAdapter` — the same code path a broker source
     /// takes, with only the wire faked (`ChannelAdapter`'s own doc).
@@ -2718,6 +2857,7 @@ mod tests {
             documents,
             egress: Vec::new(),
             pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
         })
         .unwrap();
         (dir, feed, service, rx)
@@ -2856,6 +2996,7 @@ mod tests {
             documents: Default::default(),
             egress: Vec::new(),
             pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
         })
         .unwrap();
         (dir, calls, service, rx)
@@ -2915,6 +3056,7 @@ mod tests {
             documents: Default::default(),
             egress: Vec::new(),
             pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
         })
         .unwrap();
         let message = until(&rx, |e| match e {
@@ -2983,6 +3125,7 @@ mod tests {
             documents: Default::default(),
             egress: Vec::new(),
             pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
         })
         .unwrap();
         service.ingest.submit(crate::ingest::WorkPlan {
@@ -3295,6 +3438,7 @@ mod tests {
                 documents: Default::default(),
                 egress: Vec::new(),
                 pricer: PricerConfig::default(),
+                vol: crate::vol::VolConfig::default(),
             },
             sink,
         );
@@ -3528,6 +3672,7 @@ mod tests {
             documents: Default::default(),
             egress: Vec::new(),
             pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
         })
         .unwrap();
         let health = loop {
@@ -4086,6 +4231,7 @@ mod tests {
                 documents: Default::default(),
                 egress: Vec::new(),
                 pricer: PricerConfig::default(),
+                vol: crate::vol::VolConfig::default(),
             },
             sink,
         )
@@ -4120,6 +4266,7 @@ mod tests {
             documents: Default::default(),
             egress: Vec::new(),
             pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
         })
         .expect("a broken view must not stop the service opening")
         .0
@@ -4158,6 +4305,7 @@ mod tests {
             documents: Default::default(),
             egress: Vec::new(),
             pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
         })
         .expect("a broken view must not stop the service opening");
 
@@ -4214,6 +4362,7 @@ mod tests {
             documents: Default::default(),
             egress: Vec::new(),
             pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
         })
         .expect("a broken view must not stop the service opening");
         assert!(
@@ -4487,6 +4636,7 @@ mod tests {
             documents: Default::default(),
             egress: Vec::new(),
             pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
         })
         .unwrap();
 
@@ -4556,6 +4706,7 @@ mod tests {
             documents: Default::default(),
             egress: Vec::new(),
             pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
         })
         .unwrap();
 
@@ -4655,6 +4806,7 @@ mod tests {
             documents: Default::default(),
             egress: Vec::new(),
             pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
         })
         .unwrap();
 
@@ -4732,6 +4884,7 @@ mod tests {
             documents: Default::default(),
             egress: Vec::new(),
             pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
         })
         .unwrap();
 
@@ -4853,6 +5006,7 @@ source_name = "NPV"
             documents: Default::default(),
             egress: Vec::new(),
             pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
         })
         .unwrap();
 
@@ -4936,6 +5090,7 @@ source_name = "NPV"
             documents: Default::default(),
             egress: Vec::new(),
             pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
         })
         .unwrap();
 
@@ -5036,6 +5191,7 @@ source_name = "NPV"
             documents: Default::default(),
             egress: Vec::new(),
             pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
         }
     }
 
@@ -5831,6 +5987,7 @@ source_name = "NPV"
             documents: Default::default(),
             egress: Vec::new(),
             pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
         })
         .unwrap();
 
@@ -5930,6 +6087,7 @@ source_name = "NPV"
             documents: Default::default(),
             egress: Vec::new(),
             pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
         })
         .unwrap();
 
@@ -6024,6 +6182,7 @@ source_name = "NPV"
             documents: Default::default(),
             egress: Vec::new(),
             pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
         })
         .unwrap();
 
@@ -6133,6 +6292,7 @@ source_name = "NPV"
             documents: Default::default(),
             egress: Vec::new(),
             pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
         })
         .unwrap();
 
@@ -6206,6 +6366,7 @@ source_name = "NPV"
             documents: Default::default(),
             egress: Vec::new(),
             pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
         })
         .unwrap();
 
@@ -6263,6 +6424,7 @@ source_name = "NPV"
             documents: Default::default(),
             egress: Vec::new(),
             pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
         })
         .unwrap();
 
@@ -6417,6 +6579,7 @@ source_name = "NPV"
                 documents: Default::default(),
                 egress: Vec::new(),
                 pricer: PricerConfig::default(),
+                vol: crate::vol::VolConfig::default(),
             },
             sink,
         );

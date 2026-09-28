@@ -659,6 +659,9 @@ pub struct ShellView {
     /// Reload compares against this baseline to determine whether a restart is
     /// required. The rest of `[pricing]`, including `refresh`, remains live.
     pricing_baseline: Option<toml::Value>,
+    /// The startup `[vol] model` value used to build the data engine's vol
+    /// worker, compared on reload exactly as `pricing_baseline` is.
+    vol_baseline: Option<toml::Value>,
     /// Cached [`pickable_columns`] for the current datasets and dimensions.
     /// Reload rebuilds this list; startup registers per-column actions once.
     /// Columns added later remain reachable through the two-stage `frame::pick`
@@ -763,7 +766,8 @@ impl ShellView {
         // value for Escape to restore; `Change` feeds every keystroke
         // into the session, coalescing into one undo entry; `PressEnter`
         // and `Blur` both close the session (`end_scope_session`) — Enter
-        // additionally hands focus back to the shell root, `Blur` doesn't
+        // additionally hands focus home (`focus_home`: the open page, else
+        // the shell root), `Blur` doesn't
         // need to (something else already has it). Escape's own restore
         // is handled in `handle_key_down`'s filter-focused branch, ahead
         // of this subscription ever seeing the resulting `Blur`.
@@ -789,7 +793,7 @@ impl ShellView {
                 InputEvent::PressEnter { .. } => {
                     view.filter_session_base = None;
                     view.active_frame().update(cx, |f, _| f.end_scope_session());
-                    view.focus_handle.focus(window, cx);
+                    view.focus_home(window, cx);
                     cx.notify();
                 }
                 InputEvent::Blur => {
@@ -1247,6 +1251,8 @@ impl ShellView {
         // engine's pricer was chosen from — see
         // `pricing_baseline`'s field doc.
         let pricing_baseline = services.config.get("app", "pricing.adapter").cloned();
+        // And for the `[vol] model` key — see `vol_baseline`'s field doc.
+        let vol_baseline = services.config.get("app", "vol.model").cloned();
         // The dimension pickers' column list — see
         // `pickable`'s field doc.
         let pickable = pickable_columns(&services.config);
@@ -1314,6 +1320,7 @@ impl ShellView {
             datasets_baseline,
             egress_baseline,
             pricing_baseline,
+            vol_baseline,
             pickable,
             expr_vocab,
             picker: None,
@@ -1402,8 +1409,9 @@ impl ShellView {
 
     /// Where focus goes when an overlay closes: back to the scope bar's
     /// text field if it was focused when the overlay opened
-    /// (`overlay_return_to_filter`, consumed here), the shell root
+    /// (`overlay_return_to_filter`, consumed here), home (`focus_home`)
     /// otherwise. The one door both `close_modal` and `close_palette` use.
+    /// The field is painted over a page too, so either return is live there.
     pub(super) fn return_focus_from_overlay(
         &mut self,
         window: &mut Window,
@@ -1415,8 +1423,7 @@ impl ShellView {
                 .focus_handle(cx)
                 .focus(window, cx);
         } else {
-            // The open page's handle when one is open (the filter field is
-            // not painted then, so the flag above is never set over a page).
+            // The open page's handle when one is open, else the shell root.
             self.focus_home(window, cx);
         }
     }

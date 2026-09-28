@@ -921,7 +921,8 @@ impl ShellView {
         // A dispatched chord is consumed so it cannot also insert a character. If
         // the action changes the frame text while focus stays here, reflect that
         // result into the field. `set_value` emits no Change event, avoiding a
-        // feedback loop. Escape restores the entry text and returns shell focus.
+        // feedback loop. Escape restores the entry text and returns focus home:
+        // the open page's handle, else the shell root.
         if self
             .filter_input
             .read(cx)
@@ -971,7 +972,9 @@ impl ShellView {
                         }
                     });
                 }
-                self.focus_handle.focus(window, cx);
+                // Home is the open page's handle over a page, whose own
+                // bindings are unreachable from the shell root.
+                self.focus_home(window, cx);
                 cx.notify();
             }
             return;

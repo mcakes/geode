@@ -23,6 +23,7 @@ use geode_core::query::{
 };
 use geode_core::series::{SeriesOutcome, SeriesParams};
 use geode_core::view::ViewSpec;
+use geode_core::vol::{VolSliceOutcome, VolSliceParams};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
@@ -67,6 +68,8 @@ pub enum Request {
     Catalog(CatalogParams),
     /// Pricing batch, answered by the pricing worker with DataEvent::Price.
     Price(PriceParams),
+    /// Vol slice batch, answered by the vol worker with DataEvent::VolSlices.
+    VolSlices(VolSliceParams),
     /// App-authored document for a dataset declared local.
     Publish(LocalPublish),
     /// Delete one local document's whole history, answered with
@@ -235,6 +238,14 @@ impl DataHandle {
     /// instead produces an error for each line.
     pub fn price(&self, params: PriceParams) -> Result<(), Refusal> {
         self.send(Request::Price(params))
+    }
+
+    /// Queue a vol slice batch. `Err(Busy)` means the queue was full and a
+    /// later submission can succeed; `Err(Stopped)` means the service can no
+    /// longer serve and no outcome is owed. A subsequent vol-worker refusal
+    /// instead produces an error for each job.
+    pub fn vol_slices(&self, params: VolSliceParams) -> Result<(), Refusal> {
+        self.send(Request::VolSlices(params))
     }
 
     /// Queue local publication. `Err(Busy)` means the queue was full and a
@@ -503,6 +514,12 @@ enum PanicAnswer {
         submitted: Instant,
         lines: Vec<(u64, u64)>,
     },
+    VolSlices {
+        key: QueryKey,
+        tag: u64,
+        submitted: Instant,
+        jobs: usize,
+    },
     Upload {
         key: QueryKey,
         tag: u64,
@@ -574,6 +591,15 @@ impl PanicAnswer {
                     tag: p.tag,
                     submitted: p.submitted,
                     lines: p.lines.iter().map(|l| (l.id, l.revision)).collect(),
+                },
+            ),
+            Request::VolSlices(p) => (
+                "vol_slices",
+                PanicAnswer::VolSlices {
+                    key: p.key,
+                    tag: p.tag,
+                    submitted: p.submitted,
+                    jobs: p.jobs.len(),
                 },
             ),
             Request::Upload(p) => (
@@ -668,6 +694,19 @@ impl PanicAnswer {
                     tag,
                     submitted,
                     results,
+                }));
+            }
+            PanicAnswer::VolSlices {
+                key,
+                tag,
+                submitted,
+                jobs,
+            } => {
+                let _ = sink(DataEvent::VolSlices(VolSliceOutcome {
+                    key,
+                    tag,
+                    submitted,
+                    results: (0..jobs).map(|_| Err(reason.clone())).collect(),
                 }));
             }
             PanicAnswer::Upload { key, tag, target } => {
@@ -850,6 +889,7 @@ fn dispatch(service: &DataService, sink: &EventSink, req: Request) {
             let _ = sink(DataEvent::Catalog(service.catalog(&params)));
         }
         Request::Price(params) => service.price(params),
+        Request::VolSlices(params) => service.vol_slices(params),
         Request::Publish(publish) => service.publish(publish),
         Request::Forget(forget) => service.forget(forget),
         Request::Upload(params) => service.upload(params),
@@ -911,6 +951,7 @@ mod tests {
             documents: crate::documents::DocumentRegistry::default(),
             egress: Vec::new(),
             pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
         };
         let (tx, outcomes) = channel();
         let sink: EventSink = Arc::new(move |event| tx.send(event).is_ok());
@@ -1088,6 +1129,7 @@ mod tests {
                     )],
                 }],
                 pricer: PricerConfig::default(),
+                vol: crate::vol::VolConfig::default(),
             },
             sink,
         );
@@ -1298,6 +1340,7 @@ mod tests {
                 documents: crate::documents::DocumentRegistry::default(),
                 egress: Vec::new(),
                 pricer: crate::pricing::PricerConfig::default(),
+                vol: crate::vol::VolConfig::default(),
             },
             sink,
         );
@@ -1366,6 +1409,7 @@ mod tests {
                 documents: crate::documents::DocumentRegistry::default(),
                 egress: Vec::new(),
                 pricer: crate::pricing::PricerConfig::default(),
+                vol: crate::vol::VolConfig::default(),
             },
             sink,
         );
@@ -1434,6 +1478,7 @@ mod tests {
                 documents: crate::documents::DocumentRegistry::default(),
                 egress: Vec::new(),
                 pricer: crate::pricing::PricerConfig::default(),
+                vol: crate::vol::VolConfig::default(),
             },
             sink,
         );
@@ -1513,6 +1558,7 @@ mod tests {
                 documents: crate::documents::DocumentRegistry::default(),
                 egress: Vec::new(),
                 pricer: crate::pricing::PricerConfig::default(),
+                vol: crate::vol::VolConfig::default(),
             },
             sink,
         );
@@ -1558,6 +1604,7 @@ mod tests {
                 documents: Default::default(),
                 egress: Vec::new(),
                 pricer: PricerConfig::missing("vendor"),
+                vol: crate::vol::VolConfig::default(),
             },
             sink,
         );
@@ -1598,6 +1645,53 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_missing_vol_model_names_itself_through_the_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut schema = geode_core::schema::SchemaSpec::default();
+        schema.datasets.push(local_dataset());
+        let (tx, outcomes) = std::sync::mpsc::channel();
+        let sink: EventSink = Arc::new(move |e| tx.send(e).is_ok());
+        let handle = DataService::spawn(
+            DataServiceConfig {
+                db_path: dir.path().join("geode.duckdb"),
+                schema,
+                views: Vec::new(),
+                dimensions: DerivedDimensions::default(),
+                query_workers: 1,
+                sources: Vec::new(),
+                adapters: Default::default(),
+                documents: Default::default(),
+                egress: Vec::new(),
+                pricer: PricerConfig::default(),
+                vol: crate::vol::VolConfig::missing("vendor"),
+            },
+            sink,
+        );
+        handle
+            .vol_slices(crate::vol::worker::tests::params(1, 1, &["2026-10-16"]))
+            .unwrap();
+        let outcome = loop {
+            match outcomes
+                .recv_timeout(Duration::from_secs(10))
+                .expect("an event")
+            {
+                DataEvent::VolSlices(o) => break o,
+                _ => continue,
+            }
+        };
+        assert_eq!(
+            outcome.results[0].as_ref().unwrap_err(),
+            "vol model \"vendor\" is not built into this binary"
+        );
+        handle.shutdown();
+        assert_eq!(
+            handle.vol_slices(crate::vol::worker::tests::params(1, 2, &["2026-10-16"])),
+            Err(Refusal::Stopped),
+            "refused after shutdown"
+        );
+    }
+
     /// A real service over the local `sheets` dataset and the non-local CVI
     /// dataset, for the forget tests.
     fn local_handle() -> (
@@ -1631,6 +1725,7 @@ mod tests {
                 documents: Default::default(),
                 egress: Vec::new(),
                 pricer: PricerConfig::default(),
+                vol: crate::vol::VolConfig::default(),
             },
             sink,
         );
@@ -1864,6 +1959,7 @@ mod tests {
                 documents: crate::documents::DocumentRegistry::default(),
                 egress: Vec::new(),
                 pricer: crate::pricing::PricerConfig::default(),
+                vol: crate::vol::VolConfig::default(),
             },
             sink,
         );
@@ -1902,6 +1998,7 @@ mod tests {
                 documents: crate::documents::DocumentRegistry::default(),
                 egress: Vec::new(),
                 pricer: crate::pricing::PricerConfig::default(),
+                vol: crate::vol::VolConfig::default(),
             },
             sink,
         );
@@ -1930,6 +2027,7 @@ mod tests {
             Request::Series(p) => p.key == MARKED,
             Request::Catalog(p) => p.key == MARKED,
             Request::Price(p) => p.key == MARKED,
+            Request::VolSlices(p) => p.key == MARKED,
             Request::Upload(p) => p.key == MARKED,
             Request::Fetch(p) => p.key == MARKED,
             Request::Publish(p) => p.dataset == "marked",
@@ -1971,6 +2069,7 @@ mod tests {
             documents: Default::default(),
             egress: Vec::new(),
             pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
         }
     }
 
@@ -2110,6 +2209,24 @@ mod tests {
             seen.iter().any(|e| matches!(e, DataEvent::Price(o)
             if o.key == MARKED && o.tag == 3 && o.results.len() == 2
                 && o.results.iter().all(|(_, _, r)| r.as_ref().is_err_and(|r| panicked(r, "price"))))),
+            "{seen:?}"
+        );
+    }
+
+    #[test]
+    fn a_request_loop_panic_on_a_vol_batch_answers_every_job_with_the_reason() {
+        let (_d, h, rx) = probed(panic_marked_arms);
+        h.vol_slices(crate::vol::worker::tests::params(
+            MARKED.0,
+            3,
+            &["2026-10-16", "2026-11-20"],
+        ))
+        .unwrap();
+        let seen = serves_on(&h, &rx);
+        assert!(
+            seen.iter().any(|e| matches!(e, DataEvent::VolSlices(o)
+            if o.key == MARKED && o.tag == 3 && o.results.len() == 2
+                && o.results.iter().all(|r| r.as_ref().is_err_and(|r| panicked(r, "vol_slices"))))),
             "{seen:?}"
         );
     }
