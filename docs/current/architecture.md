@@ -38,7 +38,7 @@ ownership. Typed interpretation and merging are I/O-free; its configuration
 loader reads disk documents through `Config::read_docs` and `Config::load`.
 Types shared across a forbidden dependency boundary live there: scopes,
 schema, query outcomes, snapshots, health, document rows, series requests,
-and pricing requests.
+pricing requests, and vol-slice requests.
 
 `geode-shell` owns the window and interaction model. It does not depend on the
 data service or on feature modules. `geode-data` owns sources, DuckDB, and

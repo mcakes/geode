@@ -107,7 +107,8 @@ Every long-lived data thread is spawned through
 [`supervise::spawn_supervised`](../../crates/geode-data/src/supervise.rs): the
 request loop (`geode-data`), the ingest writer (`geode-ingest`), discovery
 (`geode-discovery`), each read-pool worker (`geode-query-N`), pricing
-(`geode-pricing`), and one thread per fetch source (`geode-fetch-<source>`),
+(`geode-pricing`), the vol worker (`geode-vol`), and one thread per fetch
+source (`geode-fetch-<source>`),
 subscribed source (`geode-subscribe-<source>`), and egress target
 (`geode-egress-<target>`). A body that unwinds past every containment boundary
 emits one `DataEvent::ThreadStopped { thread, reason }` carrying the panic

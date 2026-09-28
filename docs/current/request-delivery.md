@@ -118,7 +118,7 @@ delivery, not applied to a window.
 
 | Event | Pending-state rule |
 |---|---|
-| Query, series, distinct, catalog, price | One entry per event kind and request key; a lower tag cannot replace a higher one. Equal tags replace. |
+| Query, series, distinct, catalog, price, vol slices | One entry per event kind and request key; a lower tag cannot replace a higher one. Equal tags replace. |
 | Upload outcome | One entry per tile key and upload tag. Different uploads from one tile remain distinct; duplicate outcomes for the same pair replace. |
 | Publication | One entry per dataset/batch; union affected books and retain the greatest generation ID. |
 | Local-write outcome (saved, save failed, forgotten, forget failed) | Never coalesced: each is keyed by its arrival sequence and every one is delivered, in the writer's order. A writer may be waiting on one exact outcome (a pricer load deferred behind a queued save), so a later outcome for the same document must not replace it. The count is bounded by the writes the app queued, not by a feed's rate. |
@@ -142,7 +142,8 @@ every event through `window.update`. A closed window ends the drain on its
 next event; while idle, the task can remain awaiting the mailbox. This is
 arrival-driven delivery with no fixed frame-latency guarantee.
 
-Keyed query, series, pricing, and upload results go to the matching shell occupant;
+Keyed query, series, pricing, vol-slice, and upload results go to the matching
+shell occupant;
 absent occupants are ignored. Fetch completion broadcasts to visible
 occupants, whose modules decide whether they watch that source/identity.
 Distinct results go to the picker, which checks its current tag, column, and
