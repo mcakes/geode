@@ -1645,6 +1645,21 @@ impl ShellView {
         self.apply_reload(config, cx);
     }
 
+    /// The running shell's services (registry, roster) — cross-crate test
+    /// reach, the same door as `picker()`: `geode-app`'s composition tests
+    /// check that a reload added no tile kind and no add-tile action.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn services(&self) -> &ShellServices {
+        &self.services
+    }
+
+    /// The title `tile`'s occupant paints, or `None` without an occupant —
+    /// cross-crate test reach, the same door as `picker()`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn occupant_title(&self, tile: TileId, cx: &gpui::App) -> Option<gpui::SharedString> {
+        self.occupants.get(&tile).map(|o| o.content.title(cx))
+    }
+
     /// The configured clock (`AppClock`), for the shell's own painters.
     pub fn clock(&self, cx: &gpui::App) -> geode_core::clock::Clock {
         cx.global::<crate::clock::AppClock>().0

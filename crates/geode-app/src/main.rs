@@ -1201,10 +1201,11 @@ label = "skew"
             .unwrap()
     }
 
-    /// A user panel over `cvi_params` with its own title and format becomes
-    /// a tile kind and opens a working panel: it restores from a session,
-    /// its factory carries the configured spec, `g m` offers it, and the
-    /// shared marketdata keys reach it.
+    /// A user panel over `cvi_params` becomes a tile kind: it restores from
+    /// a session, its factory carries the configured spec, `g m` offers it,
+    /// and the shared marketdata keys reach it. That it paints its own
+    /// title and formats is `geode-marketdata`'s
+    /// `a_user_layer_panel_paints_its_own_title_and_formats`.
     #[gpui::test]
     fn a_user_panel_over_cvi_params_becomes_a_working_tile_kind(cx: &mut gpui::TestAppContext) {
         use geode_shell::diagnostics::fnv1a;
@@ -1355,10 +1356,12 @@ label = "skew"
         bridge.handle.shutdown();
     }
 
-    /// Editing `panels` paints `restart required` and changes nothing under
-    /// an open panel: the same kind, the same spec, no new kind.
+    /// Editing `panels` paints `restart required` and changes nothing in
+    /// the running shell: the open panel keeps its kind and its title, and
+    /// a panel the edit adds gets no roster kind and no add-tile action.
     #[gpui::test]
     fn editing_panels_asks_for_a_restart_and_changes_no_open_panel(cx: &mut gpui::TestAppContext) {
+        use geode_shell::actions::ActionId;
         use geode_shell::tiling::TileId;
         let demo = tempfile::tempdir().unwrap();
         let user = tempfile::tempdir().unwrap();
@@ -1366,15 +1369,14 @@ label = "skew"
         write_session(user.path(), "cvi_wide");
         let (services, bridge) = compose(cx, demo.path(), user.path());
         let builtin = services.builtin.clone();
-        let spec_before = bridge
-            .panels
-            .iter()
-            .find(|f| f.kind() == "cvi_wide")
-            .unwrap()
-            .spec()
-            .clone();
         let (window, mut vcx) = open(cx, services);
         let shell = shell_of(&window, &mut vcx);
+        let title = |vcx: &gpui::VisualTestContext| {
+            shell.read_with(vcx, |s, cx| {
+                s.occupant_title(TileId(1), cx).map(|t| t.to_string())
+            })
+        };
+        assert_eq!(title(&vcx).as_deref(), Some("CVI (wide)"));
         assert_eq!(
             shell.read_with(&vcx, |s, cx| s
                 .diagnostics()
@@ -1413,24 +1415,27 @@ label = "skew"
             shell.read_with(&vcx, |s, _| s.occupant_kind(TileId(1))),
             Some("cvi_wide")
         );
-        let after = bridge
-            .panels
-            .iter()
-            .find(|f| f.kind() == "cvi_wide")
-            .unwrap()
-            .spec()
-            .clone();
-        assert!(
-            Arc::ptr_eq(&spec_before, &after),
-            "the open panel's spec is untouched"
-        );
-        assert_eq!(after.title, "CVI (wide)");
-        // The factories are the roster's only source of panel kinds and
-        // nothing rebuilds them: `cvi_new` does not appear mid-session.
         assert_eq!(
-            bridge.panels.iter().map(|f| f.kind()).collect::<Vec<_>>(),
-            ["cvi", "dividend", "cvi_wide"]
+            title(&vcx).as_deref(),
+            Some("CVI (wide)"),
+            "the open panel keeps its title, not the edited one"
         );
+        let (kinds, add_row, startup_row) = shell.read_with(&vcx, |s, _| {
+            let registry = &s.services().registry;
+            (
+                s.services().roster.kinds(),
+                registry
+                    .get(&ActionId("tile::add_cvi_new".into()))
+                    .is_some(),
+                registry
+                    .get(&ActionId("tile::add_cvi_wide".into()))
+                    .is_some(),
+            )
+        });
+        assert!(startup_row, "the startup panel's add-tile action is there");
+        assert!(kinds.contains(&"cvi_wide"), "{kinds:?}");
+        assert!(!kinds.contains(&"cvi_new"), "{kinds:?}");
+        assert!(!add_row, "no add-tile action for a panel added mid-session");
         bridge.handle.shutdown();
     }
 

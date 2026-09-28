@@ -6016,6 +6016,97 @@ mod tests {
         );
     }
 
+    /// A user-layer panel over `cvi_params`, read as the application reads
+    /// it (builtin panels beneath, merged, the full structural reader),
+    /// paints its own title and formats: the ladder at the user's six
+    /// places and `fwd` at three, where the builtin CVI paints four and two.
+    #[gpui::test]
+    fn a_user_layer_panel_paints_its_own_title_and_formats(cx: &mut gpui::TestAppContext) {
+        use crate::core::spec::{BUILTIN_PANELS, builtin_kind_actions};
+        use geode_core::config::{Layer, LayerDoc, merge_docs};
+        use geode_core::panel::{PANELS_DOC, read_panels};
+        const WIDE: &str = r#"config_version = 1
+
+[cvi_wide]
+title = "CVI (wide)"
+dataset = "cvi_params"
+document = "cvi_params"
+actions = ["marketdata::cvi_reanchor"]
+
+[cvi_wide.value]
+type = "f64"
+format = { precision = 6 }
+
+[cvi_wide.rows]
+column = "term"
+identity = "date"
+label = "shown"
+
+[cvi_wide.columns]
+axis = "node"
+
+[[cvi_wide.header]]
+column = "anchor_date"
+label = "anchor"
+type = "date"
+
+[[cvi_wide.header]]
+column = "spot_ref"
+label = "spot"
+type = "f64"
+
+[[cvi_wide.slice]]
+column = "forward"
+label = "fwd"
+format = { precision = 3 }
+
+[[cvi_wide.slice]]
+column = "atm"
+label = "atm"
+
+[[cvi_wide.slice]]
+column = "skew"
+label = "skew"
+"#;
+        let builtin = LayerDoc::builtin(PANELS_DOC, BUILTIN_PANELS).unwrap();
+        let user = LayerDoc {
+            layer: Layer::User,
+            file: "panels.toml".into(),
+            ..LayerDoc::builtin(PANELS_DOC, WIDE).unwrap()
+        };
+        let (panels, diags) = read_panels(
+            &merge_docs(PANELS_DOC, &[builtin, user]),
+            &builtin_kind_actions(),
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let spec = panels
+            .into_iter()
+            .find(|p| p.kind == "cvi_wide")
+            .expect("the user panel reads");
+
+        let (h, mut vcx) = open_spec(cx, &Arc::new(spec), None);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+
+        let (chips, title) = h.tile.read_with(&vcx, |t, _| (t.header_texts(), t.title()));
+        assert!(chips.iter().any(|c| c == "CVI (wide)"), "{chips:?}");
+        assert_eq!(title.as_ref(), "CVI (wide) · SPX.Z");
+        assert_eq!(
+            h.row_texts(&vcx, 0),
+            vec![
+                "4500.000",
+                "0.180000",
+                "-1.000000",
+                "0.100000",
+                "0.200000",
+                "0.300000"
+            ],
+            "fwd at the slice's three places; atm, skew and the ladder at the panel's six"
+        );
+    }
+
     /// Stack markers appear first in the header only for a stack with multiple members.
     #[gpui::test]
     fn the_stack_marker_paints_only_while_a_member(cx: &mut gpui::TestAppContext) {

@@ -24452,6 +24452,14 @@ run_mutation "panels: startup carries refused panels into the config section" \
   '' \
   geode-app a_refused_panel_is_absent_from_the_picker_and_named_in_diagnostics
 
+# A configured panel paints its ladder in its own format; pinned to the
+# builtin CVI's four places, a user panel's six-place vols round silently.
+run_mutation "panels: a configured panel paints its own ladder format" \
+  crates/geode-marketdata/src/core/matrix.rs \
+  '        std::iter::repeat_with(|| CellKind::Number(spec.format.clone())).take(grid.columns.len()),' \
+  '        std::iter::repeat_with(|| CellKind::Number(geode_core::view::ColumnFormat { precision: 4, ..spec.format.clone() })).take(grid.columns.len()),' \
+  geode-marketdata a_user_layer_panel_paints_its_own_title_and_formats
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
