@@ -164,7 +164,11 @@ the frame's global data revision, matching dataset/document watches, and
 recent-publication history. Local autosave skips those frame updates. The
 history timestamp is event arrival time, not source freshness. Although the
 mailbox retains the book union, the bridge currently records its count;
-frame invalidation is by dataset or document batch, not individual book.
+frame invalidation is by dataset or document batch, not individual book. A
+document watch registered on a key prefix advances for a publish of any batch
+under that prefix at a key-part boundary, so one watch on an underlying
+follows every expiry of a two-part-key dataset such as `option_chain` (see
+[workspace lanes](shell.md#workspace-lanes)).
 
 Every local-write outcome for `pricer_sheets` goes to the pricer factory,
 named by the sheet (the dataset's one-part key makes the batch the sheet

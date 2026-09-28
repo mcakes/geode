@@ -78,10 +78,11 @@ impl Drop for DemoBus {
 /// Startup attempts `startup_repeats` publishes per key, in producer order
 /// then key order, without waiting for a cadence. Ingestion and delivery
 /// remain asynchronous. Subsequent publishes follow [`round_robin_schedule`],
-/// with one wait per publish across all producers. Jitter is seeded and capped at `cadence`,
-/// giving nonnegative waits from `cadence - jitter` through `cadence + jitter`
-/// at millisecond jitter resolution. Adding producers lengthens the schedule
-/// without multiplying its steady-state publication rate.
+/// with one wait per publish across all producers. Jitter is seeded and
+/// capped at `cadence`, giving nonnegative waits from `cadence - jitter`
+/// through `cadence + jitter` at millisecond jitter resolution. Adding
+/// producers lengthens the schedule without multiplying its steady-state
+/// publication rate.
 ///
 /// Shutdown is checked between publishes and during waits. Thread creation
 /// failure panics.
@@ -128,7 +129,8 @@ fn sleep_checking_stop(duration: Duration, stop: &AtomicBool) -> bool {
 /// `None` (its input is not ready yet) skips this publish silently.
 /// Serialization errors log a warning and skip this publish. A full or
 /// disconnected inbound queue drops the message; the feed counts refusals
-/// and the bus warns only on the first. There is no immediate retry. Generator and serializer panics are not caught.
+/// and the bus warns only on the first. There is no immediate retry.
+/// Generator and serializer panics are not caught.
 fn publish_one(
     feed: &ChannelFeed,
     kind: &Arc<dyn DocumentKind>,

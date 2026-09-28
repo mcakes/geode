@@ -16274,6 +16274,94 @@ run_mutation "app: vol slices coalesce by key" \
   '        DataEvent::VolSlices(_) => Key::Diagnostics,' \
   geode-app vol_slices_coalesce_by_key_and_a_lower_tag_never_replaces_a_higher_one
 
+# ---- Vol slice Part 2: option chains, prefix query and watch ----
+# Entry names start "vol chain" so one substring selects exactly this set
+# ("chain" alone also selects older groupings entries).
+
+run_mutation "vol chain prefix: a string prefix is not a key prefix" \
+  crates/geode-core/src/document.rs \
+  '        Some(rest) => rest.starts_with(KEY_SEPARATOR),' \
+  '        Some(_) => true,' \
+  geode-core a_key_prefix_matches_only_at_a_part_boundary
+
+run_mutation "vol chain prefix: a shorter key reads every document under it" \
+  crates/geode-data/src/query/document.rs \
+  '    let key_predicate = ds.key[..given]' \
+  '    let key_predicate = ds.key[..]' \
+  geode-data a_prefix_query_returns_every_document_under_it_in_key_then_axis_order
+
+run_mutation "vol chain prefix: as-of pins every matched generation" \
+  crates/geode-data/src/query/document.rs \
+  '                .filter(|g| is_key_prefix(&prefix, &g.batch))' \
+  '                .filter(|g| g.batch == prefix)' \
+  geode-data an_as_of_prefix_read_returns_each_document_that_existed_then
+
+run_mutation "vol chain prefix: freshness needs the separator" \
+  crates/geode-data/src/store/catalog.rs \
+  '        let under = format!("{prefix}{}", geode_core::document::KEY_SEPARATOR);' \
+  '        let under = prefix.to_string();' \
+  geode-data a_prefix_never_matches_a_longer_underlying
+
+run_mutation "vol chain prefix: a publish fires each key prefix's watch" \
+  crates/geode-shell/src/frame.rs \
+  '                .match_indices(KEY_SEPARATOR)' \
+  '                .match_indices("\u{0}\u{0}never")' \
+  geode-shell a_prefix_watch_fires_for_its_own_documents_only
+
+run_mutation "vol chain watch: is_for is exact, not a prefix match" \
+  crates/geode-shell/src/frame.rs \
+  '        self.dataset == dataset && self.batch.as_deref() == batch' \
+  '        self.dataset == dataset && self.batch.is_some() == batch.is_some()' \
+  geode-shell is_for_is_exact_where_matches_is_a_prefix
+
+run_mutation "vol chain kind: quotes are sorted by strike" \
+  crates/geode-documents/src/chain.rs \
+  '    rows.sort_by(|a, b| a.0.total_cmp(&b.0));' \
+  '    rows.sort_by(|a, b| b.0.total_cmp(&a.0));' \
+  geode-documents quotes_arrive_in_any_order_and_are_sorted_by_strike
+
+run_mutation "vol chain kind: a duplicate strike is refused" \
+  crates/geode-documents/src/chain.rs \
+  '    if let Some(w) = rows.windows(2).find(|w| w[0].0 == w[1].0) {' \
+  '    if let Some(w) = rows.windows(2).find(|_| false) {' \
+  geode-documents a_duplicate_strike_is_refused_naming_it
+
+run_mutation "vol chain generator: the half-spread is capped at half the mid" \
+  crates/geode-demo-data/src/documents.rs \
+  '        (0.0025 + 0.03 * (strike / forward - 1.0).abs()).min(mid / 2.0)' \
+  '        0.0025 + 0.03 * (strike / forward - 1.0).abs()' \
+  geode-demo-data the_half_spread_never_reaches_mid_even_at_the_floor
+
+run_mutation "vol chain generator: residuals stay within their bound" \
+  crates/geode-demo-data/src/documents.rs \
+  '                *r = (*r + step).clamp(-RESIDUAL_BOUND, RESIDUAL_BOUND);' \
+  '                *r += step;' \
+  geode-demo-data mid_sits_within_the_residual_bound_of_the_stand_in_curve
+
+run_mutation "vol chain generator: prices use the expiry's own time" \
+  crates/geode-demo-data/src/documents.rs \
+  '            let t = ((expiry - anchor).num_days() as f64).max(0.5) / 365.0;' \
+  '            let t = ((curve_date - anchor).num_days() as f64).max(0.5) / 365.0;' \
+  geode-demo-data an_expiry_past_the_cvi_prices_at_its_own_time_to_expiry
+
+run_mutation "vol chain bus: the startup burst repeats per key" \
+  crates/geode-app/src/demo_bus.rs \
+  '            for _ in 0..producer.startup_repeats.max(1) {' \
+  '            for _ in 0..1 {' \
+  geode-app the_startup_burst_publishes_every_expiry_of_every_chain
+
+run_mutation "vol chain bus: a chain with no CVI yet is skipped" \
+  crates/geode-app/src/demo_bus.rs \
+  '        .cloned()?;' \
+  '        .cloned().expect("mutant: assume a CVI");' \
+  geode-app the_chain_producer_skips_an_underlying_with_no_cvi_yet
+
+run_mutation "vol chain bus: the CVI producer stores what it publishes" \
+  crates/geode-app/src/demo_bus.rs \
+  '        .insert(key.to_string(), doc.clone());' \
+  '        .clear();' \
+  geode-app the_cvi_producer_stores_what_it_publishes
+
 # ---- Tile stacks ---- A stack paints only its active member. Focus, close,
 # move, restoration and drop operations keep that member and the stack's
 # bookkeeping consistent.

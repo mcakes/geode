@@ -487,6 +487,20 @@ dimensions resolve to their source columns, and derived measures inherit
 their inputs' attribution. Non-attributable results must return NULL, with
 validity preserved through `Snapshot`, as well as carry the attribution marker.
 
+A document request names its document by key. A key with fewer parts than the
+dataset declares reads **every document under it**: `["SPX"]` on
+`option_chain` (keyed `underlying, expiry`) returns every SPX expiry in one
+snapshot, ordered by the key parts left open and then the axes, so each
+document's rows stay together. A key with more parts than declared, or with
+none, is refused. Matching is by key part, never by string prefix, so `SPX`
+never reads `SPXW`'s documents (`geode_core::document::is_key_prefix`). An
+as-of prefix read resolves each matched document's generation independently
+and pins that set, so a document first published after the instant is
+absent and a republished one reads its older generation. Provenance follows
+the historical view rule: the oldest matched source time, and a generation ID
+only when exactly one document matched, since no single ID names several. See
+[`document.rs`](../../crates/geode-data/src/query/document.rs).
+
 Attribution says whether a value belongs to its row; it does not say whether
 a column adds up. The compiler records that separately as
 `ColumnMeta::summable`, true only for a plain measure whose schema aggregate
@@ -588,7 +602,11 @@ the call. Checkpointing is a separate operation that can also stall writes.
 not promise complete history across all grains and partitions.
 
 The application does not schedule live/archive sweeps for measure datasets or
-feed-published documents; the API is called only by tests for those. Local
+feed-published documents; the API is called only by tests for those. Feed
+archives therefore grow with every publish: each republish archives the
+outgoing generation, for the demo's `opra_sim` option chains (twelve
+documents per underlying, one per expiry) as for its CVI documents (one per
+underlying). Local
 documents (`local = true`) are the exception: they keep 200 archived
 generations per document (`LOCAL_KEEP_GENERATIONS`; with the live one, at most
 201), with no age limit. After each successful local publish the ingest writer
@@ -640,8 +658,8 @@ values describe the same database snapshot.
 
 | Read | Generation reported |
 |---|---|
-| Live document | Newest live-published generation of the requested key's partition. |
-| Historical document | Generation selected for that key at the requested instant. |
+| Live document | Newest live-published generation of the requested key's partition; for a key prefix, the greatest across every partition under it. |
+| Historical document | Generation selected for that key at the requested instant; for a key prefix, `None` unless exactly one document matched. |
 | Live view | Greatest live-published generation ID across each input dataset, regardless of query scope. |
 | Historical view | `None`; each partition resolves independently. |
 
@@ -653,6 +671,19 @@ historical request before the document's first retained generation.
 An absent generation means unknown, not unchanged. The document panel compares
 known generation IDs as well as source times. Its source-time fallback cannot
 distinguish corrected republishes at the same source time.
+
+A live prefix read takes its freshness from
+`Catalog::live_source_time_under` and `live_generation_under`: the newest
+live source time and the greatest generation ID among the bookless
+partitions whose batch is the key or lies under it. Generation IDs come from
+one store sequence, so the reported generation changes whenever any matched
+document republishes, which is what a consumer comparing generations needs.
+The source time is the newest, not the stalest, so a live prefix read
+labels a set of documents by its latest arrival; a historical prefix read
+reports the oldest matched source time. The SQL matches `batch = key or
+starts_with(batch, key‖separator)`, the SQL form of `is_key_prefix`; it
+takes no wildcard, so an `_` or `%` in a key cannot widen the match, and the
+two must be kept in agreement.
 
 Health is keyed by **source**. Discovery and load outcomes occupy separate
 lanes because a clean, content-blind poll cannot prove that the last publish
@@ -698,7 +729,9 @@ Sources sharing a dataset therefore receive the same persisted degradation
 at startup, which can conservatively over-report a source's load health.
 Seeds use publication's batch key so a corrected load can clear them.
 
-Non-local publication events advance matching dataset/document watches; local
+Non-local publication events advance matching dataset/document watches; a
+document watch on a key prefix advances for every document under it, at the
+same key-part boundary a prefix read uses. Local
 publications update diagnostics without advancing frame revisions. Query
 results are addressed to the requesting key. Series fetch completion is
 broadcast to visible occupants by `(identity, source)` so modules watching
