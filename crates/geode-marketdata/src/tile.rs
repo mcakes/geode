@@ -4815,11 +4815,11 @@ mod tests {
     use super::*;
     use crate::commands;
     use crate::content::MarketDataFactory;
+    use crate::core::DraftState;
     use crate::core::draft::RowEdit;
     use crate::core::spec::{RowAxis, RowIdentity, RowLabel, ValueColumn};
     use crate::core::test_fixtures;
-    use crate::core::test_fixtures::at;
-    use crate::core::{CVI, DIVIDEND, DraftState};
+    use crate::core::test_fixtures::{CVI, DIVIDEND, at};
     use crate::delegate::LABEL_COL;
     use geode_core::attribution::{Attribution, ScopeSemantics};
     use geode_core::groupings::GroupingSlots;

@@ -417,7 +417,7 @@ impl ModuleFactory for MarketDataFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{CVI, DIVIDEND};
+    use crate::core::test_fixtures::{CVI, DIVIDEND};
     use geode_data::DataHandle;
     use geode_shell::actions::{ActionDef, ActionId, ActionRegistry};
     use geode_shell::defaults::default_mod;

@@ -20,7 +20,7 @@ use geode_data::{
     Refusal,
 };
 use geode_marketdata::MarketDataFactory;
-use geode_marketdata::core::{CVI, DIVIDEND};
+use geode_marketdata::core::builtin_panel;
 use geode_pricer::content::{PricerFactory, PricerSettings, UnderlyingList};
 use geode_pricer::core::{
     PRICER_SHEETS_DATASET, PRICER_SHEETS_DECLARATION, PRICER_TEMPLATES_DOC, PRICER_VIEWS_DOC,
@@ -532,7 +532,7 @@ pub fn start(
         marketdata: Rc::new(
             MarketDataFactory::new(
                 handle.clone(),
-                Arc::clone(&CVI),
+                builtin_panel("cvi"),
                 // Document panels and blotters use the same configured stale threshold.
                 stale_after,
             )
@@ -542,7 +542,7 @@ pub fn start(
         // fragment once, while each factory keeps its own actions and filters the
         // shared egress targets to its document kind.
         dividend: Rc::new(
-            MarketDataFactory::new(handle.clone(), Arc::clone(&DIVIDEND), stale_after)
+            MarketDataFactory::new(handle.clone(), builtin_panel("dividend"), stale_after)
                 .without_keymap()
                 .with_egress(egress_targets),
         ),
@@ -1550,13 +1550,13 @@ role = "key"
             )),
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
-                Arc::clone(&CVI),
+                builtin_panel("cvi"),
                 Duration::from_secs(900),
             )),
             dividend: Rc::new(
                 MarketDataFactory::new(
                     handle.clone(),
-                    Arc::clone(&DIVIDEND),
+                    builtin_panel("dividend"),
                     Duration::from_secs(900),
                 )
                 .without_keymap(),
@@ -3579,13 +3579,13 @@ role = "key"
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
-                Arc::clone(&CVI),
+                builtin_panel("cvi"),
                 Duration::from_secs(900),
             )),
             dividend: Rc::new(
                 MarketDataFactory::new(
                     handle.clone(),
-                    Arc::clone(&DIVIDEND),
+                    builtin_panel("dividend"),
                     Duration::from_secs(900),
                 )
                 .without_keymap(),
@@ -3686,13 +3686,13 @@ role = "key"
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
-                Arc::clone(&CVI),
+                builtin_panel("cvi"),
                 Duration::from_secs(900),
             )),
             dividend: Rc::new(
                 MarketDataFactory::new(
                     handle.clone(),
-                    Arc::clone(&DIVIDEND),
+                    builtin_panel("dividend"),
                     Duration::from_secs(900),
                 )
                 .without_keymap(),
@@ -3751,13 +3751,13 @@ role = "key"
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
-                Arc::clone(&CVI),
+                builtin_panel("cvi"),
                 Duration::from_secs(900),
             )),
             dividend: Rc::new(
                 MarketDataFactory::new(
                     handle.clone(),
-                    Arc::clone(&DIVIDEND),
+                    builtin_panel("dividend"),
                     Duration::from_secs(900),
                 )
                 .without_keymap(),
@@ -3878,13 +3878,13 @@ role = "key"
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
-                Arc::clone(&CVI),
+                builtin_panel("cvi"),
                 Duration::from_secs(900),
             )),
             dividend: Rc::new(
                 MarketDataFactory::new(
                     handle.clone(),
-                    Arc::clone(&DIVIDEND),
+                    builtin_panel("dividend"),
                     Duration::from_secs(900),
                 )
                 .without_keymap(),
@@ -3948,13 +3948,13 @@ role = "key"
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
-                Arc::clone(&CVI),
+                builtin_panel("cvi"),
                 Duration::from_secs(900),
             )),
             dividend: Rc::new(
                 MarketDataFactory::new(
                     handle.clone(),
-                    Arc::clone(&DIVIDEND),
+                    builtin_panel("dividend"),
                     Duration::from_secs(900),
                 )
                 .without_keymap(),
@@ -4024,13 +4024,13 @@ role = "key"
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
-                Arc::clone(&CVI),
+                builtin_panel("cvi"),
                 Duration::from_secs(900),
             )),
             dividend: Rc::new(
                 MarketDataFactory::new(
                     handle.clone(),
-                    Arc::clone(&DIVIDEND),
+                    builtin_panel("dividend"),
                     Duration::from_secs(900),
                 )
                 .without_keymap(),
@@ -4093,13 +4093,13 @@ role = "key"
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
-                Arc::clone(&CVI),
+                builtin_panel("cvi"),
                 Duration::from_secs(900),
             )),
             dividend: Rc::new(
                 MarketDataFactory::new(
                     handle.clone(),
-                    Arc::clone(&DIVIDEND),
+                    builtin_panel("dividend"),
                     Duration::from_secs(900),
                 )
                 .without_keymap(),
@@ -4195,13 +4195,13 @@ role = "key"
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
-                Arc::clone(&CVI),
+                builtin_panel("cvi"),
                 Duration::from_secs(900),
             )),
             dividend: Rc::new(
                 MarketDataFactory::new(
                     handle.clone(),
-                    Arc::clone(&DIVIDEND),
+                    builtin_panel("dividend"),
                     Duration::from_secs(900),
                 )
                 .without_keymap(),
@@ -4276,13 +4276,13 @@ role = "key"
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
-                Arc::clone(&CVI),
+                builtin_panel("cvi"),
                 Duration::from_secs(900),
             )),
             dividend: Rc::new(
                 MarketDataFactory::new(
                     handle.clone(),
-                    Arc::clone(&DIVIDEND),
+                    builtin_panel("dividend"),
                     Duration::from_secs(900),
                 )
                 .without_keymap(),
@@ -4352,13 +4352,13 @@ role = "key"
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
-                Arc::clone(&CVI),
+                builtin_panel("cvi"),
                 Duration::from_secs(900),
             )),
             dividend: Rc::new(
                 MarketDataFactory::new(
                     handle.clone(),
-                    Arc::clone(&DIVIDEND),
+                    builtin_panel("dividend"),
                     Duration::from_secs(900),
                 )
                 .without_keymap(),
@@ -4419,13 +4419,13 @@ role = "key"
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
-                Arc::clone(&CVI),
+                builtin_panel("cvi"),
                 Duration::from_secs(900),
             )),
             dividend: Rc::new(
                 MarketDataFactory::new(
                     handle.clone(),
-                    Arc::clone(&DIVIDEND),
+                    builtin_panel("dividend"),
                     Duration::from_secs(900),
                 )
                 .without_keymap(),
@@ -4524,13 +4524,13 @@ role = "key"
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
-                Arc::clone(&CVI),
+                builtin_panel("cvi"),
                 Duration::from_secs(900),
             )),
             dividend: Rc::new(
                 MarketDataFactory::new(
                     handle.clone(),
-                    Arc::clone(&DIVIDEND),
+                    builtin_panel("dividend"),
                     Duration::from_secs(900),
                 )
                 .without_keymap(),
@@ -4596,13 +4596,13 @@ role = "key"
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
-                Arc::clone(&CVI),
+                builtin_panel("cvi"),
                 Duration::from_secs(900),
             )),
             dividend: Rc::new(
                 MarketDataFactory::new(
                     handle.clone(),
-                    Arc::clone(&DIVIDEND),
+                    builtin_panel("dividend"),
                     Duration::from_secs(900),
                 )
                 .without_keymap(),
@@ -4747,13 +4747,13 @@ role = "key"
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
-                Arc::clone(&CVI),
+                builtin_panel("cvi"),
                 Duration::from_secs(900),
             )),
             dividend: Rc::new(
                 MarketDataFactory::new(
                     handle.clone(),
-                    Arc::clone(&DIVIDEND),
+                    builtin_panel("dividend"),
                     Duration::from_secs(900),
                 )
                 .without_keymap(),
@@ -5229,13 +5229,13 @@ role = "key"
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
-                Arc::clone(&CVI),
+                builtin_panel("cvi"),
                 Duration::from_secs(900),
             )),
             dividend: Rc::new(
                 MarketDataFactory::new(
                     handle.clone(),
-                    Arc::clone(&DIVIDEND),
+                    builtin_panel("dividend"),
                     Duration::from_secs(900),
                 )
                 .without_keymap(),
@@ -5770,7 +5770,7 @@ role = "key"
         )));
         roster.add(Box::new(MarketDataFactory::new(
             handle.clone(),
-            Arc::clone(&CVI),
+            builtin_panel("cvi"),
             Duration::from_secs(900),
         )));
         roster.add(Box::new(PricerFactory::new(

@@ -1,7 +1,8 @@
 //! Market-data model preparation and draft transitions, without entities
-//! or windows. `spec` defines compiled panels; `matrix` prepares and patches
-//! display cells; `draft` stores edits with the labels needed for rebase;
-//! `upload` assembles typed rows and compares delivered echoes.
+//! or windows. `spec` re-exports the panel vocabulary and the builtin
+//! panels; `matrix` prepares and patches display cells; `draft` stores edits
+//! with the labels needed for rebase; `upload` assembles typed rows and
+//! compares delivered echoes.
 
 pub mod bulk;
 pub mod cursor;
@@ -24,6 +25,6 @@ pub use geode_widgets::datefield::{
 };
 pub use matrix::{Cell, CellKind, MatrixModel, RowModel, cell_text};
 pub use spec::{
-    BUILTIN_KIND_ACTIONS, BUILTIN_PANELS, CVI, Columns, DIVIDEND, KindAction, PanelSpec, STATUSES,
-    builtin_kind_actions, builtin_panel,
+    BUILTIN_KIND_ACTIONS, BUILTIN_PANELS, Columns, KindAction, PanelSpec, builtin_kind_actions,
+    builtin_panel,
 };

@@ -837,7 +837,7 @@ pub(crate) fn cell_paint(theme: &Theme, sent: bool, edited: bool, state: RowStat
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::core::{CVI, DIVIDEND};
+    use crate::core::test_fixtures::{CVI, DIVIDEND};
     use geode_core::colour::{READABLE_RATIO, Rgb, contrast_ratio};
     use geode_shell::shell::colours::to_rgb;
 

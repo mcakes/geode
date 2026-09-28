@@ -128,7 +128,7 @@ pub fn rows(i: &MenuInputs, clock: Clock) -> Vec<Row<ActionId>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::CVI;
+    use crate::core::test_fixtures::CVI;
     use geode_tile::menu::{first_enabled, step};
 
     fn inputs(badge: DraftBadge) -> MenuInputs<'static> {

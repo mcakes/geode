@@ -16,7 +16,7 @@ use geode_core::view::ColumnFormat;
 use geode_marketdata::core::draft::{DocumentBase, Draft};
 use geode_marketdata::core::matrix::MatrixModel;
 use geode_marketdata::core::spec::{
-    CVI, Columns, HeaderAttr, PanelSpec, RowAxis, RowIdentity, RowLabel, ValueColumn,
+    Columns, HeaderAttr, PanelSpec, RowAxis, RowIdentity, RowLabel, ValueColumn, builtin_panel,
 };
 use std::hint::black_box;
 use std::sync::{Arc, LazyLock};
@@ -197,12 +197,13 @@ fn schedule(rows: usize) -> Snapshot {
 }
 
 fn bench(c: &mut Criterion) {
+    let cvi_panel = builtin_panel("cvi");
     let mut g = c.benchmark_group("marketdata_core");
 
     let sketch = cvi(20, 30);
     let clean = Draft::default();
     g.bench_function("model_build_pivot_20x30", |b| {
-        b.iter(|| black_box(MatrixModel::build(&sketch, &CVI, &clean).expect("a full grid")))
+        b.iter(|| black_box(MatrixModel::build(&sketch, &cvi_panel, &clean).expect("a full grid")))
     });
 
     let flat = schedule(10_000);
@@ -236,7 +237,7 @@ fn bench(c: &mut Criterion) {
     // Measure re-preparing one edited cell on each model shape. Reuse
     // the same cell and draft edit to isolate steady-state patch cost.
     let pivot_cell = (1, 5);
-    let pivot_labels = MatrixModel::build(&sketch, &CVI, &Draft::default())
+    let pivot_labels = MatrixModel::build(&sketch, &cvi_panel, &Draft::default())
         .unwrap()
         .label_of(pivot_cell);
     let mut pivot_draft = Draft::default();
@@ -247,14 +248,14 @@ fn bench(c: &mut Criterion) {
         &base(),
     );
     let mut pivot_patched =
-        MatrixModel::build(&sketch, &CVI, &pivot_draft).expect("a full grid, edit painted");
+        MatrixModel::build(&sketch, &cvi_panel, &pivot_draft).expect("a full grid, edit painted");
     g.bench_function("patch_cell_pivot_20x30", |b| {
         b.iter(|| {
             black_box(pivot_patched.patch_cell(
                 pivot_cell.0,
                 pivot_cell.1,
                 &sketch,
-                &CVI,
+                &cvi_panel,
                 &pivot_draft,
             ))
         })

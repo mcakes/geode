@@ -3,8 +3,8 @@
 The market-data panel module: one tile per `PanelSpec`, painting one
 document of a document dataset as a grid (pivoted on two axes, or a row
 per document row with the value columns laid flat) with a draft of unsent
-edits over the top. CVI and DIVIDEND are the panel specs built; each
-panel's roster kind is its own (`cvi`, `dividend`) while every panel
+edits over the top. CVI and DIVIDEND ship as builtin panel configuration
+(`core/builtin_panels.toml`); each panel's roster kind is its own (`cvi`, `dividend`) while every panel
 shares the `marketdata` key context. `:upload [target]` assembles the entire
 painted document with its draft and asks for confirmation. Bare `y` submits;
 any other key cancels and is consumed. The frame and painted generation must
@@ -24,7 +24,7 @@ Current behavior and rationale:
 
 | Module | Holds |
 |---|---|
-| `core::spec`, `core::matrix` | Panel vocabulary (the owned types live in `geode_core::panel`; `spec` re-exports them beside the compiled-in CVI and dividend panels) and prepared grids built from a snapshot plus draft. |
+| `core::spec`, `core::matrix` | Panel vocabulary (re-exported from `geode_core::panel`), `BUILTIN_KIND_ACTIONS`, and the builtin panels (`BUILTIN_PANELS`, `builtin_panel`); prepared grids built from a snapshot plus draft. |
 | `core::draft` | Typed edits, label-based rebase, same-date group guards, and `DocumentBase` identity (source time plus optional store generation). |
 | `core::upload` | Typed whole-document assembly and row-order-independent echo comparison; minted labels are ignored and floats allow one ULP. |
 | `core::cursor`, `core::menu` | Grid navigation over `geode_tile::motion` (the shared rules; `step_clamped` for a live selection), with the attribute strip outside the wrap cycle, and the action list's rows (`geode_tile::menu` rows over action ids, hints as live chords). Numeric nudging and date fields are re-exported from `geode-core` and `geode-widgets`. |

@@ -455,9 +455,9 @@ fn value_eq(a: &Value, b: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::spec::{CVI, DIVIDEND};
     use crate::core::test_fixtures::{
-        BASE, CVI_NODES, CVI_TERMS, at, date, fixture_cvi_rows, fixture_dividend_rows, snapshot_of,
+        BASE, CVI, CVI_NODES, CVI_TERMS, DIVIDEND, at, date, fixture_cvi_rows,
+        fixture_dividend_rows, snapshot_of,
     };
     use geode_core::config::{LayerDoc, merge_docs};
     use geode_core::document::{Column, Value};

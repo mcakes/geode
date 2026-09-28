@@ -62,18 +62,6 @@ pub fn builtin_panel(name: &str) -> Arc<PanelSpec> {
         .unwrap_or_else(|| panic!("no builtin panel '{name}'"))
 }
 
-/// The builtin CVI panel: one document per underlying, terms by nodes.
-pub static CVI: LazyLock<Arc<PanelSpec>> = LazyLock::new(|| builtin_panel("cvi"));
-
-/// Closed dividend-status vocabulary. Feature crates do not depend on
-/// sibling document implementations, so this declaration is checked against
-/// `geode_documents::dividend::STATUSES` by a composition-root test in
-/// `geode-app`; the demo generator's vocabulary is checked there too.
-pub const STATUSES: [&str; 4] = ["estimated", "declared", "paid", "cancelled"];
-
-/// The builtin dividend panel: one schedule per underlying, a row per payment.
-pub static DIVIDEND: LazyLock<Arc<PanelSpec>> = LazyLock::new(|| builtin_panel("dividend"));
-
 #[cfg(test)]
 mod tests {
     use super::*;

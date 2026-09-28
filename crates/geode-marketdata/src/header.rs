@@ -576,7 +576,7 @@ pub(crate) fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::CVI;
+    use crate::core::test_fixtures::CVI;
 
     fn model_with_header(entries: &[(&str, &str, &str)]) -> MatrixModel {
         MatrixModel {

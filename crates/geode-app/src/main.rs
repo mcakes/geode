@@ -804,18 +804,18 @@ mod tests {
     #[test]
     fn the_second_panel_ships_no_second_fragment_but_still_gets_an_add_tile_row() {
         use geode_data::DataHandle;
-        use geode_marketdata::core::{CVI, DIVIDEND};
+        use geode_marketdata::core::builtin_panel;
         use geode_shell::actions::ActionId;
 
         let mut roster = ModuleRoster::new();
         let (data, _rx) = DataHandle::for_tests();
         roster.add(Box::new(Rc::new(MarketDataFactory::new(
             data.clone(),
-            Arc::clone(&CVI),
+            builtin_panel("cvi"),
             Duration::from_secs(60),
         ))));
         roster.add(Box::new(Rc::new(
-            MarketDataFactory::new(data, Arc::clone(&DIVIDEND), Duration::from_secs(60))
+            MarketDataFactory::new(data, builtin_panel("dividend"), Duration::from_secs(60))
                 .without_keymap(),
         )));
 

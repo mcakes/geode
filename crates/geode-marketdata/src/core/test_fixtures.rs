@@ -7,13 +7,18 @@
 use crate::core::draft::{DocumentBase, Draft};
 use crate::core::matrix::MatrixModel;
 use crate::core::spec::{
-    Columns, DIVIDEND, PanelSpec, RowAxis, RowIdentity, RowLabel, ValueColumn,
+    Columns, PanelSpec, RowAxis, RowIdentity, RowLabel, ValueColumn, builtin_panel,
 };
 use geode_core::attribution::{Attribution, ScopeSemantics};
 use geode_core::schema::ColumnType;
 use geode_core::snapshot::{ColumnMeta, Freshness, Provenance, Snapshot, TestColumn};
 use geode_core::view::{Colour, ColumnFormat, Negative, Scale};
 use std::sync::{Arc, LazyLock};
+
+/// The shipped panels as the builtin TOML reads, for tests that need the
+/// real CVI or dividend spec.
+pub(crate) static CVI: LazyLock<Arc<PanelSpec>> = LazyLock::new(|| builtin_panel("cvi"));
+pub(crate) static DIVIDEND: LazyLock<Arc<PanelSpec>> = LazyLock::new(|| builtin_panel("dividend"));
 
 pub(crate) const BASE: &str = "2026-09-12T14:00:00Z";
 
@@ -342,7 +347,7 @@ pub(crate) fn ladder_snapshot(rows: &[(i64, f64)]) -> Snapshot {
     )
 }
 
-/// A [`crate::core::DIVIDEND`] document: `(dividend_id, ex_date,
+/// A [`DIVIDEND`] document: `(dividend_id, ex_date,
 /// announced_date, pay_date, amount, status)` per row — the shipped
 /// panel's own five value columns, for the one production-route test that
 /// must prove `MarketDataTile::bump`'s `column_type` reads the REAL spec's
@@ -562,7 +567,7 @@ pub(crate) fn snapshot_of_at(
 pub(crate) const CVI_TERMS: [&str; 2] = ["2026-10-16", "2026-11-20"];
 pub(crate) const CVI_NODES: [f64; 3] = [-20.0, -1.0, 3.5];
 
-/// A [`crate::core::CVI`] document in the kind's own long form: two terms
+/// A [`CVI`] document in the kind's own long form: two terms
 /// × three nodes, term-major, `param` running 0.1 … 0.6, each term's
 /// `forward`/`atm`/`skew` repeated on every node row of its slice, and the
 /// dataset's own value (`param, forward, atm, skew`) and attribute

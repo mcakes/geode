@@ -1085,11 +1085,10 @@ mod tests {
     use super::*;
     use crate::core::draft::{Draft, DraftState};
     use crate::core::spec::{
-        CVI, Columns, HeaderAttr, PanelSpec, RowAxis, RowIdentity, RowLabel, SliceValue,
-        ValueColumn,
+        Columns, HeaderAttr, PanelSpec, RowAxis, RowIdentity, RowLabel, SliceValue, ValueColumn,
     };
     use crate::core::test_fixtures::{
-        SCHEDULE, at, date, schedule_snapshot, schedule_snapshot_with_extra_value,
+        CVI, SCHEDULE, at, date, schedule_snapshot, schedule_snapshot_with_extra_value,
     };
     use geode_core::attribution::{Attribution, ScopeSemantics};
     use geode_core::document::Value;
