@@ -6,8 +6,8 @@ use super::{
     paint::{MenuPaint, row_paint},
 };
 use crate::popover::{self, ROW_HEIGHT, ROW_INSET};
-use geode_shell::shell::control::PointerStates as _;
-use geode_shell::shell::{kbd, scale};
+use crate::shell::control::PointerStates as _;
+use crate::shell::{kbd, scale};
 use gpui::prelude::*;
 use gpui::{
     Anchor, AnyElement, App, Context, Deferred, ElementId, Entity, MouseButton, SharedString,
@@ -149,7 +149,7 @@ mod tests {
     use super::super::tests::{Id, bindings};
     use super::super::*;
     use super::*;
-    use geode_shell::tips::Chords;
+    use crate::tips::Chords;
     use gpui::{Modifiers, Point, Render, TestAppContext, VisualTestContext, px};
     use std::sync::Arc;
 
@@ -169,8 +169,8 @@ mod tests {
         menu.rows()[0].action().unwrap().lane().clone()
     }
 
-    fn keys(spec: &str) -> Vec<geode_shell::keymap::Keystroke> {
-        geode_shell::keymap::parse_binding(spec, geode_shell::keymap::Modifiers::NONE).unwrap()
+    fn keys(spec: &str) -> Vec<crate::keymap::Keystroke> {
+        crate::keymap::parse_binding(spec, crate::keymap::Modifiers::NONE).unwrap()
     }
 
     #[gpui::test]

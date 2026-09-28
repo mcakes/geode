@@ -14023,7 +14023,7 @@ run_mutation "mdmenu: an unrelated action closes the popup first" \
 # open. Falling through to close-and-dispatch would execute the refused
 # action.
 run_mutation "mdmenu: a greyed row is a notice, not a dispatch" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '            Err(reason) => Err(reason.clone()),' \
   '            Err(_) => Ok(action.pick.clone()),' \
   geode-marketdata enter_on_a_greyed_row_notices_and_keeps_the_menu
@@ -15169,7 +15169,7 @@ run_mutation "blotter motion: retired ids rename to the shared ones" \
 # The host's hover-gated counter detects the leak; keyboard tests do not
 # exercise this hit-testing boundary.
 run_mutation "mdmenu: the popup occludes what is painted beneath it" \
-  crates/geode-tile/src/menu/render.rs \
+  crates/geode-shell/src/menu/render.rs \
   '        // Occlude what the menu covers so its hover and presses do not also reach it.
         .occlude()' \
   '        // Occlude what the menu covers so its hover and presses do not also reach it.' \
@@ -15179,7 +15179,7 @@ run_mutation "mdmenu: the popup occludes what is painted beneath it" \
 # Hovering a row moves the highlight. Mutated to a no-op, the row still
 # paints and clicks; only the highlight stays where the keys left it.
 run_mutation "mdmenu: hovering a menu row moves the highlight" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '        self.highlighted = Some(index);
         true' \
   '        let _ = index;
@@ -15390,7 +15390,7 @@ run_mutation "mdmenu: a kind row hints its live chord" \
 # Menu navigation skips disabled rows, so a downward step cannot land on
 # unavailable Upload.
 run_mutation "mdmenu: stepping skips disabled rows" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '            (at + 1..rows.len()).find(|&i| rows[i].lands())' \
   '            (at + 1..rows.len()).find(|&i| rows[i].is_action())' \
   geode-marketdata \
@@ -15399,7 +15399,7 @@ run_mutation "mdmenu: stepping skips disabled rows" \
 # The same mutation seen through the tile's `menu_down` route: two steps
 # from `Load underlying…` no longer reach `rebase edits`.
 run_mutation "mdmenu: menu_down skips disabled rows in the tile" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '            (at + 1..rows.len()).find(|&i| rows[i].lands())' \
   '            (at + 1..rows.len()).find(|&i| rows[i].is_action())' \
   geode-marketdata \
@@ -15407,7 +15407,7 @@ run_mutation "mdmenu: menu_down skips disabled rows in the tile" \
 
 # Stepping never lands on a separator or a section heading.
 run_mutation "mdmenu: stepping skips separators and sections" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '            (at + 1..rows.len()).find(|&i| rows[i].lands())' \
   '            (at + 1..rows.len()).next()' \
   geode-marketdata \
@@ -20515,7 +20515,7 @@ run_mutation "timeseries mouse: an empty tile disables the slot rows" \
 
 # Stepping never lands on a separator or a section heading.
 run_mutation "timeseries mouse: menu stepping skips non-rows" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '            (at + 1..rows.len()).find(|&i| rows[i].lands())' \
   '            (at + 1..rows.len()).next()' \
   geode-timeseries stepping_skips_separators_and_sections_and_clamps
@@ -20523,7 +20523,7 @@ run_mutation "timeseries mouse: menu stepping skips non-rows" \
 # Menu motion skips disabled rows. Otherwise an empty tile can highlight
 # Hide instead of advancing to an available action.
 run_mutation "timeseries menu: stepping skips disabled rows" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '            (at + 1..rows.len()).find(|&i| rows[i].lands())' \
   '            (at + 1..rows.len()).find(|&i| rows[i].is_action())' \
   geode-timeseries stepping_skips_disabled_rows
@@ -20605,7 +20605,7 @@ run_mutation "timeseries frequency menu: an as-of change refreshes the cap reaso
 # a frequency's short label) as text: a label routed to the key lane would
 # paint as nothing, or as a key it is not.
 run_mutation "timeseries menus: a short label is text, not a key" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '        Hint::Label(text) => Lane::Text(text.clone()),' \
   '        Hint::Label(_) => Lane::Empty,' \
   geode-timeseries the_range_menu_writes_the_presets_out_ticks_the_current_and_ends_on_custom
@@ -20703,7 +20703,7 @@ run_mutation "timeseries frequency menu: a pick writes that frequency" \
 # A disabled row's pick is the notice and nothing else: mutated, the
 # action list's greyed `Remove` closes the menu and dispatches.
 run_mutation "timeseries menus: a disabled row explains and stays" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '            Err(reason) => Err(reason.clone()),' \
   '            Err(_) => Ok(action.pick.clone()),' \
   geode-timeseries the_actions_button_toggles_the_menu_and_a_row_click_dispatches_or_explains
@@ -20834,7 +20834,7 @@ run_mutation "pricer tile: an open menu re-checks its rows on a rebuild" \
   geode-pricer a_reload_under_an_open_menu_relists_its_views
 
 run_mutation "pricer tile: a re-checked menu clamps its highlight" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '        self.highlighted = snap(&self.rows, self.highlighted);' \
   '' \
   geode-pricer a_reload_under_an_open_menu_relists_its_views
@@ -20842,7 +20842,7 @@ run_mutation "pricer tile: a re-checked menu clamps its highlight" \
 # The menu's highlight steps over separators and section headers: a
 # highlight on structure makes `enter` pick nothing.
 run_mutation "pricer popup: menu steps land on pickable rows only" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '            (at + 1..rows.len()).find(|&i| rows[i].lands())' \
   '            (at + 1..rows.len()).next()' \
   geode-pricer the_menu_groups_its_rows_names_keys_and_says_why_a_row_is_disabled
@@ -20850,7 +20850,7 @@ run_mutation "pricer popup: menu steps land on pickable rows only" \
 # Menu motion skips disabled rows, so Group advances past an unavailable
 # Ungroup to Delete row.
 run_mutation "pricer popup: menu steps skip disabled rows" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '            (at + 1..rows.len()).find(|&i| rows[i].lands())' \
   '            (at + 1..rows.len()).find(|&i| rows[i].is_action())' \
   geode-pricer the_menu_groups_its_rows_names_keys_and_says_why_a_row_is_disabled
@@ -20866,7 +20866,7 @@ run_mutation "pricer tile: the delegate mirrors loading" \
 # A disabled menu row never takes the highlight fill: a fill there is a
 # misleading hover response on a row that will only refuse.
 run_mutation "pricer popup: a disabled menu row takes no fill" \
-  crates/geode-tile/src/menu/paint.rs \
+  crates/geode-shell/src/menu/paint.rs \
   '        (_, false) => RowPaint {
             fill: None,' \
   '        (_, false) => RowPaint {
@@ -24427,137 +24427,137 @@ run_mutation "tile notice: warning paints the danger token" \
 
 # A popup hangs by the corner its caller names.
 run_mutation "tile popover: a popup ignores its corner" \
-  crates/geode-tile/src/popover.rs \
+  crates/geode-shell/src/popover.rs \
   '            .anchor(corner)' \
   '            .anchor(Anchor::TopLeft)' \
-  geode-tile a_popup_hangs_from_its_anchor_corner
+  geode-shell a_popup_hangs_from_its_anchor_corner
 
 # A popup near the window edge keeps the snap margin.
 run_mutation "tile popover: a popup snaps to the window edge itself" \
-  crates/geode-tile/src/popover.rs \
+  crates/geode-shell/src/popover.rs \
   '            .snap_to_window_with_margin(px(SNAP_MARGIN))' \
   '            .snap_to_window_with_margin(px(0.))' \
-  geode-tile a_popup_near_the_edge_snaps_inside_the_margin
+  geode-shell a_popup_near_the_edge_snaps_inside_the_margin
 
 # ---- geode-tile: menu door ---------------------------------------------
 #
 # Stepping lands on actions only: a highlight on structure makes `enter`
 # pick nothing.
 run_mutation "tile menu: stepping lands on separators" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '            (at + 1..rows.len()).find(|&i| rows[i].lands())' \
   '            (at + 1..rows.len()).next()' \
-  geode-tile stepping_skips_separators_and_sections_and_clamps
+  geode-shell stepping_skips_separators_and_sections_and_clamps
 
 # Nor on a disabled action: `j` lands on a greyed row that only refuses.
 run_mutation "tile menu: stepping lands on disabled rows" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '            (at + 1..rows.len()).find(|&i| rows[i].lands())' \
   '            (at + 1..rows.len()).find(|&i| rows[i].is_action())' \
-  geode-tile stepping_skips_disabled_actions
+  geode-shell stepping_skips_disabled_actions
 
 # From a separator, a section or no cursor, a step lands on the first
 # enabled action.
 run_mutation "tile menu: a step from structure searches from it" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '    let Some(from) = from.filter(|&i| rows.get(i).is_some_and(Row::is_action)) else {' \
   '    let Some(from) = from else {' \
-  geode-tile stepping_from_a_non_action_row_lands_on_the_first_enabled_action
+  geode-shell stepping_from_a_non_action_row_lands_on_the_first_enabled_action
 
 # An all-disabled menu has no cursor.
 run_mutation "tile menu: an all-disabled menu gets a cursor" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '    rows.iter().position(Row::lands)' \
   '    rows.iter().position(Row::is_action)' \
-  geode-tile an_all_disabled_menu_has_no_cursor
+  geode-shell an_all_disabled_menu_has_no_cursor
 
 # A rebuilt menu's highlight looks back before it looks forward.
 run_mutation "tile menu: snap only looks forward" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '        .find(|&i| rows.get(i).is_some_and(Row::is_action))
         .or_else(|| (at..rows.len()).find(|&i| rows[i].is_action()))' \
   '        .find(|_| false)
         .or_else(|| (at..rows.len()).find(|&i| rows[i].is_action()))' \
-  geode-tile snap_keeps_or_finds_the_nearest_action
+  geode-shell snap_keeps_or_finds_the_nearest_action
 
 # A hint is the live chord: mutated, every chord row falls to its unbound form.
 run_mutation "tile menu: a hint ignores the live keymap" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '        Hint::Chord { action, unbound } => match chord_for(bindings, action) {' \
   '        Hint::Chord { action: _, unbound } => match None::<Vec<Keystroke>> {' \
-  geode-tile a_hint_resolves_to_the_live_chord_or_its_unbound_form
+  geode-shell a_hint_resolves_to_the_live_chord_or_its_unbound_form
 
 run_mutation "tile menu: a rebind does not reach the hint" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '        Hint::Chord { action, unbound } => match chord_for(bindings, action) {' \
   '        Hint::Chord { action: _, unbound } => match None::<Vec<Keystroke>> {' \
-  geode-tile a_hint_follows_a_user_rebind_through_the_live_keymap
+  geode-shell a_hint_follows_a_user_rebind_through_the_live_keymap
 
 # An unbound verb row names its `:` verb.
 run_mutation "tile menu: an unbound verb paints nothing" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '                Unbound::Verb(verb) => Lane::Text(verb.clone()),' \
   '                Unbound::Verb(_) => Lane::Empty,' \
-  geode-tile a_hint_resolves_to_the_live_chord_or_its_unbound_form
+  geode-shell a_hint_resolves_to_the_live_chord_or_its_unbound_form
 
 # A label is text in the lane; routed to the key lane it would paint nothing.
 run_mutation "tile menu: a label paints nothing" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '        Hint::Label(text) => Lane::Text(text.clone()),' \
   '        Hint::Label(_) => Lane::Empty,' \
-  geode-tile a_hint_resolves_to_the_live_chord_or_its_unbound_form
+  geode-shell a_hint_resolves_to_the_live_chord_or_its_unbound_form
 
 # A capped row keeps the lane narrow with its short reason.
 run_mutation "tile menu: a short reason is ignored" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '            (Err(reason), _) => Trailing::Text(self.short_reason.as_ref().unwrap_or(reason)),' \
   '            (Err(reason), _) => Trailing::Text(reason),' \
-  geode-tile a_disabled_row_trails_its_short_reason_else_its_reason
+  geode-shell a_disabled_row_trails_its_short_reason_else_its_reason
 
 # A disabled row's pick is its reason, never the verb it refuses.
 run_mutation "tile menu: a disabled pick dispatches" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '            Err(reason) => Err(reason.clone()),' \
   '            Err(_) => Ok(action.pick.clone()),' \
-  geode-tile a_pick_of_a_disabled_row_is_its_reason
+  geode-shell a_pick_of_a_disabled_row_is_its_reason
 
 # Hover lands on action rows only.
 run_mutation "tile menu: hover lights structure" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '        if self.highlighted == Some(index) || !self.rows.get(index).is_some_and(Row::is_action) {' \
   '        if self.highlighted == Some(index) {' \
-  geode-tile highlight_moves_only_onto_action_rows_and_reports_a_change
+  geode-shell highlight_moves_only_onto_action_rows_and_reports_a_change
 
 # A rebuild snaps the highlight.
 run_mutation "tile menu: a rebuild keeps an out-of-range highlight" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '        self.highlighted = snap(&self.rows, self.highlighted);' \
   '' \
-  geode-tile replace_rows_resolves_hints_and_snaps_the_highlight
+  geode-shell replace_rows_resolves_hints_and_snaps_the_highlight
 
 # A disabled row takes no fill.
 run_mutation "tile menu: a disabled row takes the fill" \
-  crates/geode-tile/src/menu/paint.rs \
+  crates/geode-shell/src/menu/paint.rs \
   '        (_, false) => RowPaint {
             fill: None,' \
   '        (_, false) => RowPaint {
             fill: Some(p.active_fill),' \
-  geode-tile only_an_enabled_lit_row_takes_the_fill
+  geode-shell only_an_enabled_lit_row_takes_the_fill
 
 # The floor moves toward the pole with more contrast.
 run_mutation "tile menu: the floor moves toward the weaker pole" \
-  crates/geode-tile/src/menu/paint.rs \
+  crates/geode-shell/src/menu/paint.rs \
   '    if contrast_ratio(BLACK, ground) >= contrast_ratio(WHITE, ground) {' \
   '    if contrast_ratio(BLACK, ground) < contrast_ratio(WHITE, ground) {' \
-  geode-tile a_color_equal_to_its_ground_floors_to_the_readable_ratio
+  geode-shell a_color_equal_to_its_ground_floors_to_the_readable_ratio
 
 # The menu occludes what it covers.
 run_mutation "tile menu: the menu does not occlude" \
-  crates/geode-tile/src/menu/render.rs \
+  crates/geode-shell/src/menu/render.rs \
   '        // Occlude what the menu covers so its hover and presses do not also reach it.
         .occlude()' \
   '        // Occlude what the menu covers so its hover and presses do not also reach it.' \
-  geode-tile a_hover_lights_its_row_and_the_menu_occludes_what_it_covers
+  geode-shell a_hover_lights_its_row_and_the_menu_occludes_what_it_covers
 
 # ---- geode-tile: confirm door ------------------------------------------
 #

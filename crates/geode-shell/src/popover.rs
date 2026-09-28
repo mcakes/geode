@@ -2,8 +2,11 @@
 //! the deferred anchor that lifts a popup above the tile's clip and keeps
 //! it on screen, and the common row frame. What a popup lists is the
 //! module's content; this door owns where and how it floats.
+//!
+//! The shell owns the popover (the menu is built on it); geode-tile
+//! re-exports it as `geode_tile::popover`.
 
-use geode_shell::shell::{kbd, scale};
+use crate::shell::{kbd, scale};
 use gpui::prelude::*;
 use gpui::{
     Anchor, AnchoredPositionMode, App, Deferred, Div, ElementId, Hsla, MouseButton, Stateful,

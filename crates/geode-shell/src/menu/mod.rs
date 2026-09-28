@@ -9,10 +9,12 @@
 //! enabled actions; from a separator, a section or no cursor it lands on the
 //! first enabled action. An all-disabled menu has no cursor.
 //!
-//! The keys that step are the shared `motion::menu_down`/`menu_up` (the
-//! shell's builtin bindings under `tilelist`, which the tile publishes while
-//! its menu is open); what picks and closes stays the module's own. The
+//! The keys that step are geode-tile's shared `motion::menu_down`/`menu_up`
+//! (the shell's builtin bindings under `tilelist`, which the tile publishes
+//! while its menu is open); what picks and closes stays the module's own. The
 //! module maps both onto [`Menu::step`] and [`Menu::pick`].
+//!
+//! The shell owns the menu; geode-tile re-exports it as `geode_tile::menu`.
 
 mod paint;
 mod render;
@@ -22,9 +24,9 @@ pub use render::{MenuHost, MenuIds, TICK_SLOT, render_menu};
 
 use std::sync::Arc;
 
-use geode_shell::actions::ActionId;
-use geode_shell::keymap::{Binding, Keystroke};
-use geode_shell::tips::{Chords, chord_for};
+use crate::actions::ActionId;
+use crate::keymap::{Binding, Keystroke};
+use crate::tips::{Chords, chord_for};
 use gpui::{App, SharedString};
 
 /// A module's pick type: what a row does when picked. `element_name` names
@@ -381,10 +383,10 @@ pub fn live_bindings(cx: &App) -> Arc<Vec<Binding>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::actions::{ActionDef, ActionRegistry};
+    use crate::defaults::default_mod;
+    use crate::keymap::{Modifiers, build_keymap, parse_binding};
     use geode_core::config::{Layer, LayerDoc};
-    use geode_shell::actions::{ActionDef, ActionRegistry};
-    use geode_shell::defaults::default_mod;
-    use geode_shell::keymap::{Modifiers, build_keymap, parse_binding};
 
     #[derive(Clone, Debug, PartialEq)]
     pub(crate) struct Id(pub &'static str);

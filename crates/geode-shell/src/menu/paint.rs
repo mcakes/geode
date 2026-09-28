@@ -4,9 +4,9 @@
 //! white contrasts more with the ground: floored toward the color itself, a
 //! color equal to its ground has nothing to move toward and stays unreadable.
 
+use crate::shell::colours::{over, to_hsla, to_rgb};
+use crate::shell::control::{self, ControlPaint, Rest};
 use geode_core::colour::{Rgb, contrast_ratio, readable_on};
-use geode_shell::shell::colours::{over, to_hsla, to_rgb};
-use geode_shell::shell::control::{self, ControlPaint, Rest};
 use gpui::Hsla;
 use gpui_component::Theme;
 
@@ -149,7 +149,7 @@ mod tests {
     #[gpui::test]
     fn every_menu_paint_is_readable_on_every_bundled_theme(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
-        let (service, _) = geode_shell::theme::load_bundled();
+        let (service, _) = crate::theme::load_bundled();
         let mut failures = Vec::new();
         let mut checked = 0;
         for name in service.names() {
