@@ -24444,6 +24444,14 @@ run_mutation "panels: a panel may not take another module's kind" \
   '        .partition(|_| true);' \
   geode-app a_panel_named_after_another_module_is_refused
 
+# Startup carries refused panels into the shell's config section; mutated,
+# a refused panel vanishes from the tile picker with no error counted.
+run_mutation "panels: startup carries refused panels into the config section" \
+  crates/geode-app/src/main.rs \
+  '        composition_diagnostics = setup.panel_diagnostics.clone();' \
+  '' \
+  geode-app a_refused_panel_is_absent_from_the_picker_and_named_in_diagnostics
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
