@@ -816,7 +816,7 @@ adapter and restart`).
 
 Column headers are words carrying their unit (`spot %`, `vol pt`, `barrier
 type`, `priced at`), and default widths are checked against labels and representative large
-values (`-1,234,567.8900` for a greek, `-1,234,567.89` for a price) at the
+values (`-1,234,567.8900` for a greek, `-1,234,567.89` for npv) at the
 largest supported font size. These examples do not bound every possible
 value. A view's `label` and `width` override the defaults. Columns are
 managed as any view's: the Views dialog's column stage (order, hidden, label,
@@ -824,9 +824,9 @@ width, format, color) applies to a pricer view, and `hidden` columns leave
 the plan. `Edit column in view…` from the palette opens the Views dialog on
 the pricer's view at the cursor's column, as it does for a blotter. A view
 column's `color` applies as in the blotter: `sign` paints a negative measure
-in the theme's bearish colour and a positive one bullish, a named colour from
+in the theme's bearish color and a positive one bullish, a named color from
 `colors.toml` tints the column and its header; a stale cell stays muted and a
-failed one danger whatever the column's colour. Measures default to `sign`;
+failed one danger whatever the column's color. Measures default to `sign`;
 a column says `color = "none"` to opt out.
 Result columns
 carry risk_snapshot's names — `npv`, `delta01`, `gamma01`, `vega01`,
@@ -1427,8 +1427,9 @@ underlyings; result cells are not sign-colored. Columns can be dragged to
 reorder and resized with the pointer; both act on the open tile only. A view
 change or reload restores the view's order; a dragged width is kept the way
 an `:autosize` fit is (by vocabulary name in the session record, over the
-view's width) until `:autosize reset`. The tree column is pinned and neither
-moves nor resizes. Persistent order and width belong to the Views dialog.
+view's width) until `:autosize reset` or the next `:autosize`, which
+replaces every kept width. The tree column is pinned and neither moves nor
+resizes. Persistent order and width belong to the Views dialog.
 
 In-process pricing remains an upstream leaf. A feature submits definitions
 through the data-service request path and receives outcomes through shell

@@ -1680,6 +1680,29 @@ Aggregation does not show above the earlier 1.85 ms reading; the two runs
 differ by machine load more than by the change. Well inside the 8 ms
 budget.
 
+### Pricer vocabulary: 28 measures (2026-09-28)
+
+`cargo bench -p geode-pricer -- 'grid_build_1000|deliver_all_1000'` (Criterion
+takes one filter, so both ran under one regex), the same fixture as above,
+after `PriceResult` widened from six measures to the fourteen bumped
+measures with a USD twin each: a `Currency` and two `[f64; 14]` arrays, 232
+bytes per result, 28 result columns in the paint vocabulary. Apple M5 Pro,
+rustc 1.96.0, bench profile, 100 samples. **The machine was loaded** (load
+average 9–15, this checkout's own bench build having finished moments
+before).
+
+| Benchmark | What it is | Result |
+|---|---|---|
+| `deliver_all_1000` | one full reprice landing as a batch: ~900 232-byte results installed and ONE `fold_packages` over 28 arrays | 179 µs (179.23 µs; interval 178.92–179.57 µs, 2 outliers) |
+| `grid_build_1000` | one whole `GridModel::build`, 100 two-leg package rows aggregated, the bundled `vanilla` view | 1.09 ms (1.0947 ms; interval 1.0831–1.1055 ms, 17 outliers, 16 high severe) |
+
+`deliver_all_1000` moved from 175 µs to 179 µs: the wider copy and the
+28-array fold cost about 4 µs across 900 results, inside run-to-run noise.
+`grid_build_1000` reads 1.09 ms against the previous 1.42 ms; the earlier
+run was taken under a heavier load (20–25), so the difference is not
+attributed to the change. Both stay well inside the 8 ms budget, and the
+worst keystroke (a sheet-wide `:shift` plus the rebuild) under 3 ms.
+
 ## Timeseries chart (spec §8, Part 3)
 
 What one **cache miss** costs the render thread in `geode-chart`: the

@@ -16318,13 +16318,9 @@ run_mutation "pricer shorthand: the third Friday is the first" \
 
 run_mutation "pricer views: an unknown column is only a warning" \
   crates/geode-pricer/src/core/views.rs \
-  '                        Severity::Error,
-                        &format!("columns.{i}"),
-                        format!("unknown column '"'"'{col_name}'"'"'; dropped"),' \
-  '                        Severity::Warning,
-                        &format!("columns.{i}"),
-                        format!("unknown column '"'"'{col_name}'"'"'; dropped"),' \
-  geode-pricer an_unknown_column_is_an_error_and_dropped
+  '                severity: Severity::Error,' \
+  '                severity: Severity::Warning,' \
+  geode-pricer an_unknown_measure_is_dropped_from_the_pricer_view_not_the_view
 
 # Strike numbers with a gap make `K1/K2/K3` ambiguous; such a template
 # must be dropped.
@@ -16439,10 +16435,10 @@ run_mutation "pricer templates: a reload leaves the open bar's history stale" \
 run_mutation "pricer app: a reload hands the factory the builtin templates" \
   crates/geode-app/src/bridge.rs \
   '            };
-            pricer.reload(views, templates, refresh, stale_after, cx);' \
+            pricer.reload(views, templates, colours, refresh, stale_after, cx);' \
   '            };
             let _ = templates;
-            pricer.reload(views, TemplateSet::builtin(), refresh, stale_after, cx);' \
+            pricer.reload(views, TemplateSet::builtin(), colours, refresh, stale_after, cx);' \
   geode-app a_config_reload_hands_the_pricer_factory_its_templates
 
 # On a reload, "previous" is the running set, not an empty one.
@@ -19349,8 +19345,8 @@ run_mutation "pricer cell: an empty shift commits zero" \
 
 run_mutation "pricer app: a config reload never reaches the pricer" \
   crates/geode-app/src/bridge.rs \
-  '            pricer.reload(views, templates, refresh, stale_after, cx);' \
-  '            let _ = (views, templates, refresh, stale_after);' \
+  '            pricer.reload(views, templates, colours, refresh, stale_after, cx);' \
+  '            let _ = (views, templates, colours, refresh, stale_after);' \
   geode-app a_config_reload_hands_the_pricer_factory_its_views
 
 # The free underlying typeahead: ranking is a subsequence match, so an
@@ -20276,13 +20272,13 @@ run_mutation "pricer: a save refused at submission is counted as queued" \
 # positionally, so a layer's redeclaration would misplace values.
 run_mutation "data_setup: a redeclared pricer_sheets is kept" \
   crates/geode-app/src/bridge.rs \
-  '    diagnostics.extend(pin_pricer_sheets(&mut schema, config));' \
+  '    diagnostics.extend(pin_app_datasets(&mut schema, config));' \
   '' \
   geode-app a_layer_redeclaring_pricer_sheets_differently_is_ignored_with_an_error
 
 run_mutation "reload: a redeclared pricer_sheets is kept" \
   crates/geode-app/src/bridge.rs \
-  '                    pin_diags.extend(pin_pricer_sheets(&mut schema, config));' \
+  '                    pin_diags.extend(pin_app_datasets(&mut schema, config));' \
   '                    let _ = &mut schema;' \
   geode-app a_reload_ignores_and_reports_a_redeclared_pricer_sheets
 
@@ -20301,8 +20297,8 @@ run_mutation "views dialog: a local dataset is offered" \
 
 run_mutation "sources dialog: a local dataset is offered" \
   crates/geode-shell/src/shell/objectdialog/sources.rs \
-  '        .filter(|d| !d.local)' \
-  '        .filter(|d| !d.name.is_empty())' \
+  '        .filter(|d| !d.local && !d.computed)' \
+  '        .filter(|d| !d.name.is_empty() && !d.computed)' \
   geode-shell the_dataset_choice_offers_no_local_dataset
 
 # ---- Pricer sheet storage and confirmation ----
@@ -22665,8 +22661,8 @@ run_mutation "pricer select: lines_of keeps a leg twice" \
 # carries its legs, so totalling both would double them.
 run_mutation "pricer select: totals count a selected package's legs again" \
   crates/geode-pricer/src/tile/select.rs \
-  $'        let top = top_most(&self.sheet, &self.selected_sheet_rows());\n        let sums = risk_totals' \
-  $'        let top = self.selected_sheet_rows();\n        let sums = risk_totals' \
+  $'    fn prepare_totals(&mut self) {\n        let top = top_most(&self.sheet, &self.selected_sheet_rows());' \
+  $'    fn prepare_totals(&mut self) {\n        let top = self.selected_sheet_rows();' \
   geode-pricer the_footer_totals_count_an_open_packages_legs_once
 
 # A line's total is a position total: its qty times the unit value.
@@ -22679,8 +22675,8 @@ run_mutation "pricer select: totals drop the qty weighting" \
 # An unpriced or failed row makes its column incomplete, never a partial sum.
 run_mutation "pricer select: an unpriced row counts as zero in the totals" \
   crates/geode-pricer/src/core/select.rs \
-  '            (LineState::Failed(_), _) | (_, None) => None,' \
-  '            (LineState::Failed(_), _) | (_, None) => Some([0.0; 6]),' \
+  '                _ => None,' \
+  '                _ => *s,' \
   geode-pricer risk_totals_are_position_totals_and_refuse_an_incomplete_column
 
 # An incomplete total paints as a refused dash, not a number.
@@ -23801,6 +23797,269 @@ run_mutation "following: a releasing reply asked before a followed change is sup
   '                    Promotion::Superseded => Delivered::Held,' \
   geode-tile a_releasing_delivery_asked_before_a_followed_change_is_superseded
 
+# ---- Pricer vocabulary: 28 measures, computed datasets, pricer views (2026-09-28) ----
+# A `_usd` column reads the USD array; reading the local one would paint
+# a local-currency number under a USD header.
+run_mutation "pricing: usd twin reads the usd array" \
+  crates/geode-core/src/pricing.rs \
+  '        if usd {
+            self.usd[m.index()]
+        } else {' \
+  '        if usd {
+            self.local[m.index()]
+        } else {' \
+  geode-core usd_twin_reads_the_usd_array
+
+# A package fold sums both arrays; dropping the USD fold leaves every
+# `_usd` cell on a package row at zero.
+run_mutation "pricing: add_scaled folds usd too" \
+  crates/geode-core/src/pricing.rs \
+  '            self.usd[i] += q * other.usd[i];' \
+  '            let _ = other.usd[i];' \
+  geode-core add_scaled_sums_both_arrays_and_keeps_its_own_currency
+
+# A currency is exactly three uppercase ASCII letters; `usd` or `Eur` is
+# not one, and a lowercase code would be a second spelling of the same key.
+run_mutation "pricing: a currency is three uppercase letters" \
+  crates/geode-core/src/pricing.rs \
+  '        if b.len() == 3 && b.iter().all(|c| c.is_ascii_uppercase()) {' \
+  '        if b.len() == 3 && b.iter().all(|c| c.is_ascii_alphabetic()) {' \
+  geode-core a_currency_is_three_uppercase_ascii_letters
+
+# The mock converts USD from the local array by the underlying's rate; a
+# zeroed USD array makes the npv ratio 0, which the rate check refuses.
+run_mutation "mock pricer: usd is converted from local" \
+  crates/geode-pricing/src/lib.rs \
+  '        let mut usd = local;' \
+  '        let mut usd = [0.0; Measure::COUNT];' \
+  geode-pricing bumped_measures_share_the_analytic_signs_and_usd_is_converted
+
+# A computed dataset has no relation, so the "no grain key" note would
+# ask for a key no table will ever carry.
+run_mutation "schema: computed suppresses the grain key note" \
+  crates/geode-core/src/schema/mod.rs \
+  '    if !ds.computed {' \
+  '    if true {' \
+  geode-core computed_is_read_on_a_measure_dataset_and_suppresses_the_grain_key_note
+
+# `computed` is a measures-family fact; on a document dataset it is an
+# error and cleared, or a document family would silently lose its tables.
+run_mutation "schema: computed is an error off the measures family" \
+  crates/geode-core/src/schema/mod.rs \
+  '    if ds.computed && ds.family != Family::Measures {' \
+  '    if false {' \
+  geode-core computed_on_a_document_dataset_is_an_error_and_cleared
+
+# A source naming a computed dataset would ingest into a table that does
+# not exist; it is refused at parse with a field-addressed diagnostic.
+run_mutation "sources: a computed dataset refuses a source" \
+  crates/geode-core/src/source_config.rs \
+  '                Some(d) if schema.dataset(d).is_some_and(|ds| ds.computed) => {' \
+  '                Some(d) if schema.dataset(d).is_some_and(|_| false) => {' \
+  geode-core a_source_naming_a_computed_dataset_is_refused
+
+# The compiler refuses a view over a computed dataset before any table is
+# named, so the refusal is the module's text and not a DuckDB binder error.
+run_mutation "compile: a computed dataset is refused" \
+  crates/geode-data/src/query/compile.rs \
+  '    if ds.computed {' \
+  '    if false {' \
+  geode-data a_view_over_a_computed_dataset_is_refused_before_any_table_is_touched
+
+# A join to a computed dataset can never be honoured, required or not:
+# an optional one skipped instead of refused would make a dead view.
+run_mutation "compile: a computed join is refused even when optional" \
+  crates/geode-data/src/query/compile.rs \
+  '        if joined_ds.is_computed() {' \
+  '        if false {' \
+  geode-data a_join_to_a_computed_dataset_is_refused_even_when_optional
+
+# The store creates no table for a computed dataset; one created would
+# show in the catalog as an empty dataset a source could be pointed at.
+run_mutation "service: a computed dataset gets no table" \
+  crates/geode-data/src/service.rs \
+  '        for ds in config.schema.datasets.iter().filter(|d| !d.computed) {
+            store.apply_schema(ds)?;' \
+  '        for ds in config.schema.datasets.iter().filter(|_| true) {
+            store.apply_schema(ds)?;' \
+  geode-data a_computed_dataset_creates_no_table_and_is_absent_from_the_catalog
+
+# The Sources dialog's dataset choice offers only datasets a source can
+# feed; a computed one picked there would be refused at save.
+run_mutation "sources dialog: a computed dataset is not offered" \
+  crates/geode-shell/src/shell/objectdialog/sources.rs \
+  '        .filter(|d| !d.local && !d.computed)' \
+  '        .filter(|d| !d.local)' \
+  geode-shell the_dataset_choice_offers_no_computed_dataset
+
+# A computed dataset's values cannot be listed (no relation); a pickable
+# over it would submit a values query that fails to compile.
+run_mutation "pickables: a computed dataset is skipped" \
+  crates/geode-shell/src/shell/mod.rs \
+  '    for dataset in schema.datasets.iter().filter(|d| !d.computed) {' \
+  '    for dataset in schema.datasets.iter().filter(|_| true) {' \
+  geode-shell pickables_skip_a_computed_dataset
+
+# The dataset declaration and the paint vocabulary are one list in one
+# order; a column declared out of order would let a view name a column
+# the grid cannot paint where the declaration says it is.
+run_mutation "pricer dataset: declaration mirrors COLUMNS" \
+  crates/geode-pricer/src/core/dataset.rs \
+  '[pricer.columns.expiry]
+type = "utf8"
+role = "dimension"
+grain = "instrument"
+[pricer.columns.strike]' \
+  '[pricer.columns.strike]
+type = "utf8"
+role = "dimension"
+grain = "instrument"
+[pricer.columns.expiry]' \
+  geode-pricer the_declaration_names_exactly_the_paint_vocabulary
+
+# Only a view whose dataset is `pricer` is a pricer view; a blotter view
+# taken in would be offered on the pricer and paint nothing it names.
+run_mutation "pricer views: only dataset pricer" \
+  crates/geode-pricer/src/core/views.rs \
+  '        for spec in specs.iter().filter(|s| s.dataset == PRICER_DATASET) {' \
+  '        for spec in specs.iter().filter(|_| true) {' \
+  geode-pricer a_view_over_another_dataset_is_not_a_pricer_view
+
+# A view with a join or a derived column is unhonourable on a computed
+# dataset and is dropped whole rather than painted in part.
+run_mutation "pricer views: derived refuses the view" \
+  crates/geode-pricer/src/core/views.rs \
+  '            if refused {' \
+  '            if false {' \
+  geode-pricer a_pricer_view_with_a_derived_column_or_join_is_refused
+
+# A hidden view column leaves the plan, as it does in the blotter.
+run_mutation "pricer views: hidden leaves the plan" \
+  crates/geode-pricer/src/core/views.rs \
+  '                .filter(|c| !c.presentation.hidden.unwrap_or(false))' \
+  '                .filter(|_| true)' \
+  geode-pricer a_hidden_column_is_left_out_of_the_plan
+
+# An unknown column drops only itself (validation already errored on it
+# at load); dropping the whole view would take a working view away for
+# one misspelt name.
+run_mutation "pricer views: unknown column dropped, view kept" \
+  crates/geode-pricer/src/core/views.rs \
+  $'                    diags.push(bad(format!("unknown column \'{}\'; dropped", c.name())));\n                    continue;' \
+  $'                    diags.push(bad(format!("unknown column \'{}\'; dropped", c.name())));\n                    columns.clear();\n                    break;' \
+  geode-pricer an_unknown_measure_is_dropped_from_the_pricer_view_not_the_view
+
+# A `pricer_views` document is no longer read; its presence is an error
+# naming `views.toml`, or a desk's old views file would be ignored silently.
+run_mutation "app: pricer_views is an error" \
+  crates/geode-app/src/bridge.rs \
+  '    if config.doc(PRICER_VIEWS_DOC).is_some() {' \
+  '    if false {' \
+  geode-app a_pricer_views_doc_is_an_error_naming_views_toml
+
+# The `pricer` dataset is pinned to the app's declaration: a layer
+# redeclaring it differently is replaced with an error, since a differing
+# declaration changes what a view, scope or grouping over it means.
+run_mutation "app: the pricer pin replaces a differing redeclaration" \
+  crates/geode-app/src/bridge.rs \
+  '        pin_app_dataset(
+            schema,
+            config,
+            PRICER_DATASET,
+            PRICER_DATASET_DECLARATION,
+            "a differing declaration would change what a view, scope or grouping over the \
+             pricer means",
+        ),' \
+  '        None,' \
+  geode-app a_layer_redeclaring_pricer_differently_is_ignored_with_an_error
+
+# A presentation-only edit must change the pricer key, or a reload that
+# only relabels a column would leave open pricer tiles on the old labels.
+run_mutation "app: presentation edits reach the pricer key" \
+  crates/geode-app/src/bridge.rs \
+  '        view_presentation: config.doc("view_presentation").map(|d| d.value.clone()),' \
+  '        view_presentation: None,' \
+  geode-app a_presentation_only_edit_changes_the_pricer_key
+
+# A `pricer_views` document added at runtime changes the key, so the
+# reload that reports it as an error reaches the tiles too.
+run_mutation "app: a runtime-added pricer_views doc changes the key" \
+  crates/geode-app/src/bridge.rs \
+  '        pricer_views: config.doc(PRICER_VIEWS_DOC).map(|d| d.value.clone()),' \
+  '        pricer_views: None,' \
+  geode-app a_runtime_added_pricer_views_doc_changes_the_pricer_key
+
+# The blotter neither completes nor opens a view over a computed dataset;
+# offered, `:view` would open it and refuse at once.
+run_mutation "blotter: computed views are not offered" \
+  crates/geode-blotter/src/tile.rs \
+  '        showable_in(&self.schema.borrow(), view)' \
+  '        let _ = view;
+        true' \
+  geode-blotter view_completion_and_command_exclude_views_over_a_computed_dataset
+
+# A fresh tile's fallback view skips computed datasets too, or a pricer
+# view sorting first would be the view every new blotter opens on and refuses.
+run_mutation "blotter: the fallback view skips computed datasets" \
+  crates/geode-blotter/src/tile.rs \
+  '                    .or_else(|| views.iter().find(|v| showable_in(&schema, v)))' \
+  '                    .or_else(|| views.iter().find(|_| true))' \
+  geode-blotter a_fresh_tile_skips_a_computed_view_that_sorts_first
+
+# A column colour applies only to an own cell: a stale cell stays muted
+# and a failed one danger whatever the column says, so state is never
+# hidden by a tint.
+run_mutation "pricer colour: state paint wins over a column colour" \
+  crates/geode-pricer/src/paint.rs \
+  '    if !matches!(state, CellState::Own) {' \
+  '    if false {' \
+  geode-pricer colour_applies_only_to_an_own_numeric_cell
+
+# New colour definitions must invalidate the resolve cache, or a reload
+# that recolours a name keeps painting the old resolved value.
+run_mutation "pricer colour: new colours invalidate the cache" \
+  crates/geode-pricer/src/delegate.rs \
+  '            self.colour_cache.invalidate();' \
+  '            let _ = ();' \
+  geode-app a_reload_hands_the_pricer_the_new_colours
+
+# `tile_columns` marks the cursor's column active so `Edit column in
+# view…` opens the Views dialog on that column, not the first.
+run_mutation "pricer tile_columns: the cursor column is active" \
+  crates/geode-pricer/src/tile.rs \
+  '            active: (self.cursor.col < self.plan.columns.len()).then_some(self.cursor.col),' \
+  '            active: (self.cursor.col < self.plan.columns.len()).then_some(0),' \
+  geode-pricer tile_columns_list_the_plan_with_the_cursor_column_active
+
+# A header drag lands the column at the drop index; appending instead
+# would move every dragged column to the end.
+run_mutation "pricer plan: move_column reorders" \
+  crates/geode-pricer/src/core/views.rs \
+  '            self.columns.insert(to, c);' \
+  '            self.columns.push(c);' \
+  geode-pricer move_column_reorders_the_plan_and_position_of_finds_by_name
+
+# ---- Pinned glyph visibility (2026-09-28) ----
+# An active chip's fill is floored against the title bar; the raw primary
+# sits too close to the bar on several bundled themes.
+run_mutation "chip: an active fill is floored against the title bar" \
+  crates/geode-shell/src/shell/chip.rs \
+  '            let fill = readable_on(
+                over(theme.primary, background),
+                bar,
+                to_rgb(theme.foreground),
+            );' \
+  '            let fill = over(theme.primary, background);' \
+  geode-shell an_active_chip_stands_out_from_the_title_bar_on_every_bundled_theme
+
+# Its text is floored against that fill; primary_foreground alone is
+# unreadable on several bundled themes.
+run_mutation "chip: active text is floored against its fill" \
+  crates/geode-shell/src/shell/chip.rs \
+  '                text: to_hsla(readable_on(to_rgb(theme.primary_foreground), fill, pole)),' \
+  '                text: theme.primary_foreground,' \
+  geode-shell every_chip_tone_is_readable_on_every_bundled_theme
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
@@ -23833,23 +24092,3 @@ if (( anchors_only )); then
   python3 scripts/mutation_anchors.py "$anchors" || exit 1
 fi
 
-# ---- Pinned glyph visibility (2026-09-28) ----
-# An active chip's fill is floored against the title bar; the raw primary
-# sits too close to the bar on several bundled themes.
-run_mutation "chip: an active fill is floored against the title bar" \
-  crates/geode-shell/src/shell/chip.rs \
-  '            let fill = readable_on(
-                over(theme.primary, background),
-                bar,
-                to_rgb(theme.foreground),
-            );' \
-  '            let fill = over(theme.primary, background);' \
-  geode-shell an_active_chip_stands_out_from_the_title_bar_on_every_bundled_theme
-
-# Its text is floored against that fill; primary_foreground alone is
-# unreadable on several bundled themes.
-run_mutation "chip: active text is floored against its fill" \
-  crates/geode-shell/src/shell/chip.rs \
-  '                text: to_hsla(readable_on(to_rgb(theme.primary_foreground), fill, pole)),' \
-  '                text: theme.primary_foreground,' \
-  geode-shell every_chip_tone_is_readable_on_every_bundled_theme

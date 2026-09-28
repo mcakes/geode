@@ -296,7 +296,10 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   `colors.toml` tints the column and its header (resolved through
   `geode_tile::colour::ColourCache`, invalidated when the factory's
   `colors` `Arc` changes); a stale cell stays muted and a failed one danger
-  whatever the column's color (`paint::cell_colour`).
+  whatever the column's color (`paint::cell_colour`). Bearish, bullish and
+  named-color text on a package row is not floored against the package
+  ground the way the row's own paint is; a display check across the bundled
+  themes is pending.
   This sweep does not cover every header or typeahead
   token, and the bounded adjustment is not a guarantee for arbitrary themes.
 - A disabled action can hold the menu highlight but paints no highlight
@@ -381,7 +384,8 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   to fit" while the sheet loads or has no rows. It stores the widths by
   vocabulary name (`__tree` for the tree) in the session record. A font
   change does not rescale fitted widths; run `:autosize` again. A fitted
-  width also overrides a view width changed later, until `:autosize reset`.
+  width also overrides a view width changed later, until `:autosize reset`
+  or the next `:autosize`, which replaces every kept width with a fresh fit.
 - Columns can be dragged to reorder and resized with the pointer; both act
   on the open tile only. A drag lands in the delegate's `move_column` hook,
   which emits `ColumnMoved` (plan indices) for the tile to apply to its
@@ -391,8 +395,11 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   `ColumnWidthsChanged`, and the tile records the width under the column's
   vocabulary name beside the `:autosize` fits, since the refresh every
   rebuild runs re-reads `column()` and would otherwise drop it; `:autosize
-  reset` drops it with them. The tree column is pinned and neither moves nor
-  resizes. Persistent order and width belong to the Views dialog.
+  reset` drops it with them, and the next `:autosize` replaces it. A rebuild
+  during a held resize drag (a delivery or timer reprice while the handle is
+  down) resets the in-progress width, so that drag is lost on release. The
+  tree column is pinned and neither moves nor resizes. Persistent order and
+  width belong to the Views dialog.
 - Grid selections are one contiguous row range or rectangle. There is no
   paste of a yanked TSV block (`p` puts only rows a `V` yank remembered), a
   count is ignored by `d`, `shift+j`/`shift+k`, `g p` and `g u` while selecting,

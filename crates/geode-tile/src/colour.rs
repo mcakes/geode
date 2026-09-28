@@ -5,7 +5,7 @@
 //! reuses the result. A changed [`Anchors`]/[`Tokens`] pair clears the map on
 //! lookup. Definition changes require an explicit [`ColourCache::invalidate`].
 //!
-//! The delegate memoizes theme-to-input conversion separately and supplies
+//! The caller memoizes theme-to-input conversion separately and supplies
 //! these plain values, so this cache has no dependency on a GPUI theme object.
 
 use geode_core::colour::{Anchors, NamedColours, Sign, Tokens, resolve_signed};
