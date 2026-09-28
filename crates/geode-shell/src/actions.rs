@@ -217,4 +217,22 @@ mod tests {
             Some(&"workspace::focus_left".to_string())
         );
     }
+
+    /// Several modules' retired ids may all rename to one shared id; each
+    /// old id is still renamed once.
+    #[test]
+    fn several_retired_ids_may_rename_to_one_current_id() {
+        let mut reg = ActionRegistry::default();
+        reg.register(def("motion::down", "Cursor down")).unwrap();
+        for old in ["a::down", "b::down", "c::down"] {
+            assert_eq!(reg.register_rename(old, "motion::down"), Ok(()), "{old}");
+        }
+        for old in ["a::down", "b::down", "c::down"] {
+            assert_eq!(
+                reg.renamed(&ActionId(old.into())),
+                Some(&ActionId("motion::down".into()))
+            );
+        }
+        assert!(reg.register_rename("a::down", "motion::down").is_err());
+    }
 }

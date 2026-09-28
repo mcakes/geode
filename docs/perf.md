@@ -1240,7 +1240,11 @@ Pinned by `the_frame_histogram_is_copied_only_while_watched` and
 `refresh_frame_hist_is_a_no_op_when_the_histogram_is_unchanged`
 (`crates/geode-shell/src/diagnostics.rs`).
 
-**Display recipe — not yet run, template rows below.** The claim to
+**Display recipe — superseded.** The tile this recipe opens no longer
+exists (the diagnostics page replaced it on 2026-09-27); the equivalent
+reading for the page is the painted-frame item listed under "Diagnostics
+page" at the end of this log. The template is kept for the method.
+The claim to
 verify: opening a diagnostics tile with the log section following (so
 it is draining the ring on every relevant tick) must not move the
 frame-time histogram's p95 against a baseline with no diagnostics tile
@@ -1680,6 +1684,31 @@ Aggregation does not show above the earlier 1.85 ms reading; the two runs
 differ by machine load more than by the change. Well inside the 8 ms
 budget.
 
+### Pricer vocabulary: 28 measures (2026-09-28)
+
+`cargo bench -p geode-pricer -- 'grid_build_1000|deliver_all_1000'` (Criterion
+takes one filter, so both ran under one regex), the same fixture as above,
+after `PriceResult` widened from six measures to the fourteen bumped
+measures with a USD twin each: a `Currency` and two `[f64; 14]` arrays, 232
+bytes per result, 28 result columns in the paint vocabulary. Apple M5 Pro,
+rustc 1.96.0, bench profile, 100 samples. **The machine was loaded** (load
+average 9–15, this checkout's own bench build having finished moments
+before).
+
+| Benchmark | What it is | Result |
+|---|---|---|
+| `deliver_all_1000` | one full reprice landing as a batch: ~900 232-byte results installed and ONE `fold_packages` over 28 arrays | 179 µs (179.23 µs; interval 178.92–179.57 µs, 2 outliers) |
+| `grid_build_1000` | one whole `GridModel::build`, 100 two-leg package rows aggregated, the bundled `vanilla` view | 1.09 ms (1.0947 ms; interval 1.0831–1.1055 ms, 17 outliers, 16 high severe) |
+
+`deliver_all_1000` moved from 175 µs to 179 µs: the wider copy and the
+28-array fold cost about 4 µs across 900 results, inside run-to-run noise.
+`grid_build_1000` reads 1.09 ms against the previous 1.42 ms; the earlier
+run was taken under a heavier load (20–25), so the difference is not
+attributed to the change. Both stay well inside the 8 ms budget; the
+worst keystroke (a sheet-wide `:shift` plus the rebuild) reads under 3 ms
+from the earlier six-measure `apply_undo_sheet_shift_1000` figure, which
+was not re-run here.
+
 ## Timeseries chart (spec §8, Part 3)
 
 What one **cache miss** costs the render thread in `geode-chart`: the
@@ -1959,3 +1988,49 @@ budget with both columns even under this load. The added cost is the two
 `min`/`max`/`count` pairs per underlying row and one numeric, one text, and
 two boolean columns across the Arrow boundary. An unloaded re-measure is still
 owed before these become reference values.
+
+## Diagnostics page: the Log rebuild over a full tail (headless)
+
+The page rebuilds the selected section when that section's inputs change
+(`docs/current/features.md#diagnostics`); the Log section's rebuild is the
+widest, because it walks the whole retained tail. This reading times
+`DiagnosticsPage::rebuild` for the Log section with the tail full, from a
+`TestAppContext` window with no display: **a headless rebuild, not a
+painted frame**. Recipe:
+
+```sh
+cargo test -p geode-diagnostics --release -- --ignored log_rebuild_timing --nocapture
+```
+
+The ignored test (`page::tests::log_rebuild_timing_over_a_full_tail`) opens
+the page on Log over an 8,192-slot ring, pushes 4,096 records (one in five
+an error, one in five a warning, one in five debug, the rest info, each with
+a 50-character message), drains them with one notify, then times twenty
+further `rebuild` calls and prints the median and the maximum.
+
+Conditions: Apple M5 Pro (18 cores, 48 GB), macOS 26.4, rustc 1.96.0,
+2026-09-27, an otherwise idle machine; twenty rebuilds after the first
+drain.
+
+| build | median rebuild | max rebuild |
+| --- | ---: | ---: |
+| debug (`cargo test`, unoptimized) | 28.1 ms | 30.6 ms |
+| release (`--release`) | 4.65 ms | 7.23 ms |
+
+What a rebuild here includes: the drain (a no-op after the first), the
+4,096 record clones into typed rows with a clock-formatted timestamp each,
+the 4,096 prepared rows with their detail line, the table's `set` and
+`refresh`, the target-select item comparison, the badge pass over the tail
+(the error count), and the header chips. It runs once per drain that
+brings records while Log is shown, never per frame, and the tail is capped
+at 4,096 so it cannot grow past this shape. In release it sits inside the
+8 ms pure-UI budget, with the maximum close to it; a tail of long messages
+or a slower machine would take it over, in which case the next step is to
+stop rebuilding the whole prepared table on an append (retain the prepared
+rows and push only the drained ones), not to widen the budget.
+
+What it does not measure: the paint of the visible rows (the table
+virtualises), the rail and header, and the frame-time p95 with the page
+open beside a blotter under a held `j`. That painted reading, taken from
+the perf overlay with the counters reset before the hold, stays on the
+display-check list for this branch.

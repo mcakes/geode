@@ -36,7 +36,7 @@ Reader defaults, partial validation, and presentation rules are described in
 | `tree` | The parent/child index of a rollup result, built once on the query worker. |
 | `document` | Columnar document rows, keys, attributes, parser/writer traits, and schema validation for feed and application-authored documents. |
 | `series` | Timeseries requests, bucket frequencies and rules, aligned results, and fetch provenance. `series::expr` parses arithmetic over source names and resolves references to slot IDs. |
-| `pricing` | Option definitions, shifts, market overrides, pricing requests and outcomes, the `Pricer` interface, and local document publications. Implementations live in `geode-pricing`; the pricing library resolves tenors and percent strikes. |
+| `pricing` | Instrument, request, `Measure` (14 bumped measures) and `PriceResult` (local and USD), the `Pricer` trait, shifts, market overrides, and local document publications. Implementations live in `geode-pricing`; the pricing library resolves tenors and percent strikes. |
 | `clock` | Configured display zone, local-time resolution, and business-day presets. Rejects ambiguous or nonexistent local times; storage timestamps remain UTC. |
 | `source_config` | I/O-free source parsing: defaults, dataset-family routing, topic and timestamp-field validation, and field-addressed diagnostics. Source tables replace whole objects across layers. |
 | `egress_config` | I/O-free upload-target parsing and field-addressed diagnostics. Invalid targets are skipped; address templates substitute raw key parts joined by `/`. Targets replace whole objects across layers. Runtime workers retain startup configuration until restart. |

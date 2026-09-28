@@ -745,7 +745,9 @@ impl DataService {
         // use, so `publish`'s refusal path can send through it directly.
         let stored_sink = Arc::clone(&sink);
         let store = Store::open(&config.db_path)?;
-        for ds in &config.schema.datasets {
+        // A computed dataset is answered by a module in process; it owns no
+        // table and so has no generation summary to rebuild.
+        for ds in config.schema.datasets.iter().filter(|d| !d.computed) {
             store.apply_schema(ds)?;
         }
         Catalog::new(store.writer()).ensure_tables()?;
@@ -754,7 +756,7 @@ impl DataService {
         // summary entries. This does not validate or repair a partially populated
         // summary; repairing one requires clearing that dataset's summary before
         // reopening.
-        for ds in &config.schema.datasets {
+        for ds in config.schema.datasets.iter().filter(|d| !d.computed) {
             let tables = crate::store::ddl::history_of(&ds.name, ds);
             let summarised: i64 = {
                 let sql = "select count(*) from generations where dataset = ?";
@@ -1337,7 +1339,7 @@ impl DataService {
                     // because nothing has been lost yet and a trader
                     // should read "waiting", not "broken"; `Lost` carries
                     // the adapter's reason through verbatim, since that
-                    // string is the whole of what the diagnostics tile
+                    // string is the whole of what the diagnostics page
                     // can say about a vendor library's failure.
                     let (worst, detail) = match state {
                         ConnectionState::Connected => (Health::Ok, String::new()),
@@ -2133,6 +2135,70 @@ mod tests {
         })
         .unwrap();
         (db, src, service, rx)
+    }
+
+    const COMPUTED_PRICER: &str = "[pricer]\ncomputed = true\n[pricer.columns.instrument_ref]\ntype = \"utf8\"\nrole = \"key\"\n[pricer.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"underlying\"\n";
+
+    /// `service()` with the computed `pricer` dataset declared beside the
+    /// stored `risk_snapshot` fixture.
+    fn service_with_computed() -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        DataService,
+        std::sync::mpsc::Receiver<DataEvent>,
+    ) {
+        let (db, src, store, ds, _emitted) = crate::ingest::load::tests_support::fixture();
+        drop(store);
+
+        let doc = geode_core::config::merge_docs(
+            "datasets",
+            &[geode_core::config::LayerDoc::builtin("datasets", COMPUTED_PRICER).unwrap()],
+        );
+        let (computed, diags) = SchemaSpec::from_doc(&doc);
+        assert!(
+            diags.iter().all(|d| d.severity != Severity::Error),
+            "the computed fixture must parse cleanly: {diags:?}"
+        );
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(ds);
+        schema.datasets.extend(computed.datasets);
+        let (service, rx) = DataService::open_channel(DataServiceConfig {
+            db_path: db.path().join("geode.duckdb"),
+            schema,
+            views: vec![crate::ingest::load::tests_support::tree_view()],
+            dimensions: DerivedDimensions::default(),
+            query_workers: 2,
+            sources: Vec::new(),
+            adapters: Default::default(),
+            documents: Default::default(),
+            egress: Vec::new(),
+            pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
+        })
+        .unwrap();
+        (db, src, service, rx)
+    }
+
+    #[test]
+    fn a_computed_dataset_creates_no_table_and_is_absent_from_the_catalog() {
+        let (_db, _src, svc, _rx) = service_with_computed();
+        let tables: Vec<String> = svc
+            .conn
+            .prepare(
+                "select table_name from information_schema.tables where table_name like 'pricer%'",
+            )
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            tables.is_empty(),
+            "a computed dataset owns no table: {tables:?}"
+        );
+        let catalog = build_catalog(&svc.conn, &svc.config.schema, &AsOf::Live).unwrap();
+        assert!(catalog.datasets.iter().all(|d| d.name != "pricer"));
+        svc.shutdown();
     }
 
     /// A service opened over a document dataset, with SPX.Z published

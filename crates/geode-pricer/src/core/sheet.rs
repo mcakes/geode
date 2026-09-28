@@ -9,7 +9,9 @@
 use crate::core::shorthand::{render_line, render_package};
 use crate::core::template::{Template, TemplateSet};
 use chrono::{DateTime, Utc};
-use geode_core::pricing::{Instrument, MarketOverrides, PriceRequest, PriceResult, Shifts};
+use geode_core::pricing::{
+    Currency, Instrument, MarketOverrides, PriceRequest, PriceResult, Shifts,
+};
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
@@ -422,7 +424,10 @@ impl Sheet {
     /// Fold package results as `Σ qty_leg × value_leg`. Failure takes precedence over
     /// staleness and names the first failed leg; otherwise any stale leg makes the
     /// package stale. A result exists only for a nonempty package whose legs all have
-    /// results and none has failed. `priced_at` is the oldest present leg timestamp,
+    /// results and none has failed. Its currency is the legs' when they agree and
+    /// [`Currency::MIXED`] when they differ: the local arrays are then sums of
+    /// unlike units, and a local cell or total over them paints a gap rather than
+    /// a plausible number. `priced_at` is the oldest present leg timestamp,
     /// including failed attempts.
     pub fn fold_packages(&mut self) {
         for p in 0..self.len() {
@@ -432,14 +437,7 @@ impl Sheet {
             let legs = self.children(p);
             // An empty package has no sum.
             let mut complete = !legs.is_empty();
-            let mut sum = PriceResult {
-                price: 0.0,
-                delta: 0.0,
-                gamma: 0.0,
-                vega: 0.0,
-                theta: 0.0,
-                rho: 0.0,
-            };
+            let mut sum: Option<PriceResult> = None;
             let mut stale = false;
             let mut failed: Option<String> = None;
             let mut oldest: Option<DateTime<Utc>> = None;
@@ -461,12 +459,14 @@ impl Sheet {
                 match self.result[leg] {
                     Some(r) => {
                         let q = self.qty[leg] as f64;
-                        sum.price += q * r.price;
-                        sum.delta += q * r.delta;
-                        sum.gamma += q * r.gamma;
-                        sum.vega += q * r.vega;
-                        sum.theta += q * r.theta;
-                        sum.rho += q * r.rho;
+                        let acc = sum.get_or_insert_with(|| PriceResult::zero(r.currency));
+                        acc.add_scaled(q, &r);
+                        // The first leg names the currency; a leg in another
+                        // makes the local sum one of unlike units. Once mixed
+                        // it stays mixed: no leg's currency equals the marker.
+                        if acc.currency != r.currency {
+                            acc.currency = Currency::MIXED;
+                        }
                     }
                     None => complete = false,
                 }
@@ -476,8 +476,10 @@ impl Sheet {
                     (Some(a), None) => Some(a),
                 };
             }
+            // An empty package has no sum (`complete` is false), so `sum` is
+            // `None` exactly when the result must be.
             self.result[p] = if complete && failed.is_none() {
-                Some(sum)
+                sum
             } else {
                 None
             };
@@ -664,7 +666,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::core::edit::{Edit, EditError};
     use chrono::TimeZone;
-    use geode_core::pricing::{Expiry, OptionKind, Strike, Vanilla};
+    use geode_core::pricing::{Expiry, Measure, OptionKind, Strike, Vanilla};
 
     pub(crate) fn spx(strike: f64, kind: OptionKind) -> Instrument {
         Instrument::Vanilla(Vanilla {
@@ -688,14 +690,17 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn result(price: f64) -> PriceResult {
-        PriceResult {
-            price,
-            delta: price / 10.0,
-            gamma: 0.01,
-            vega: 1.0,
-            theta: -0.5,
-            rho: 0.1,
+        let mut r = PriceResult::zero(Currency::USD);
+        r.set(Measure::Npv, false, price);
+        r.set(Measure::Delta01, false, price / 10.0);
+        r.set(Measure::Gamma01, false, 0.01);
+        r.set(Measure::Vega01, false, 1.0);
+        r.set(Measure::CleanThetaBusinessDay, false, -0.5);
+        r.set(Measure::Rho010, false, 0.1);
+        for m in Measure::ALL {
+            r.set(m, true, r.get(m, false) * 1.08);
         }
+        r
     }
 
     pub(crate) fn at(secs: i64) -> DateTime<Utc> {
@@ -711,6 +716,22 @@ pub(crate) mod tests {
                 rows,
             })
             .unwrap();
+    }
+
+    /// A sheet named `book` holding one CS package (rows 0, 1, 2: the
+    /// package and its two legs) then one bare line (row 3), both parsed
+    /// through the shorthand the package tests use.
+    pub(crate) fn sheet_with_package_and_line() -> Sheet {
+        let mut s = Sheet::new("book");
+        push(
+            &mut s,
+            vec![
+                crate::core::shorthand::parse_builtin("SPX Z26 100/105 CS").unwrap(),
+                crate::core::shorthand::parse_builtin("NDX H27 95 P").unwrap(),
+            ],
+        );
+        assert_eq!(s.len(), 4, "a package, two legs, a line");
+        s
     }
 
     fn ndx(strike: f64, kind: OptionKind) -> Instrument {
@@ -1062,12 +1083,14 @@ pub(crate) mod tests {
         s.deliver(short, 1, Ok(result(40.0)), at(1));
         let sum = s.result(0).unwrap();
         // -5 × 100 + 5 × 40 = -300; delta: -5 × 10 + 5 × 4 = -30; gamma: 0 (−5 + 5 = 0 × 0.01)
-        assert_eq!(sum.price, -300.0);
-        assert_eq!(sum.delta, -30.0);
-        assert_eq!(sum.gamma, 0.0);
-        assert_eq!(sum.vega, 0.0);
-        assert_eq!(sum.theta, 0.0);
-        assert_eq!(sum.rho, 0.0);
+        assert_eq!(sum.get(Measure::Npv, false), -300.0);
+        assert_eq!(sum.get(Measure::Delta01, false), -30.0);
+        assert_eq!(sum.get(Measure::Gamma01, false), 0.0);
+        assert_eq!(sum.get(Measure::Gamma02, false), 0.0);
+        assert_eq!(sum.get(Measure::Vega01, false), 0.0);
+        assert_eq!(sum.get(Measure::CleanThetaBusinessDay, false), 0.0);
+        assert_eq!(sum.get(Measure::Rho010, false), 0.0);
+        assert_eq!(sum.get(Measure::Npv, true), -324.0, "usd folds too");
         assert_eq!(s.state(0), &LineState::Fresh);
         assert_eq!(
             s.priced_at(0),
@@ -1084,6 +1107,28 @@ pub(crate) mod tests {
             other => panic!("{other:?}"),
         }
         assert_eq!(s.result(0), None, "a failed leg makes the sum uncomputable");
+    }
+
+    #[test]
+    fn a_package_over_differing_currencies_folds_to_a_mixed_currency() {
+        let mut s = Sheet::new("t");
+        push(&mut s, vec![callspread(-5)]);
+        let (long, short) = (s.id(1), s.id(2));
+        let mut eur = result(40.0);
+        eur.currency = Currency::parse("EUR").unwrap();
+        s.deliver(long, 1, Ok(result(100.0)), at(0));
+        s.deliver(short, 1, Ok(eur), at(1));
+        let sum = s.result(0).unwrap();
+        assert!(
+            sum.currency.is_mixed(),
+            "USD and EUR legs: {:?}",
+            sum.currency
+        );
+        assert_eq!(sum.get(Measure::Npv, true), -324.0, "usd still folds");
+        assert_eq!(s.state(0), &LineState::Fresh);
+        // Repricing the EUR leg in USD makes the package USD again.
+        s.deliver(short, 1, Ok(result(40.0)), at(2));
+        assert_eq!(s.result(0).unwrap().currency, Currency::USD);
     }
 
     #[test]
@@ -1128,7 +1173,7 @@ pub(crate) mod tests {
         assert_eq!(delivered, vec![Delivered::Installed]);
         assert_eq!(s.state(0), &LineState::Fresh);
         // -5 × 100 + 5 × 40 = -300
-        assert_eq!(s.result(0).unwrap().price, -300.0);
+        assert_eq!(s.result(0).unwrap().get(Measure::Npv, false), -300.0);
         assert_eq!(s.priced_at(0), Some(at(3)), "the oldest leg's");
         // Unknown and not-a-line answers come back in place too.
         assert_eq!(
@@ -1142,7 +1187,7 @@ pub(crate) mod tests {
             vec![Delivered::UnknownLine, Delivered::NotALine]
         );
         assert_eq!(
-            s.result(0).unwrap().price,
+            s.result(0).unwrap().get(Measure::Npv, false),
             -300.0,
             "neither touched the fold"
         );

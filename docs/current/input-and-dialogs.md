@@ -18,12 +18,12 @@ this order:
 | Palette over a dialog stack | Takes precedence over the modal handler below: the palette owns keys while it is open, whether or not a dialog is open beneath it. Every action is listed; an `opens_dialog` action pushes, and any other action runs behind the stack and returns focus to the top dialog. Three actions that would open real transient chrome behind the stack (`tile::command_line`, `tile::find`, `stack::pick`) are refused instead, as are workspace switches (`workspace::switch_*`) and the pin toggle (`frame::pin_workspace`) — see [palette and which-key](#palette-and-which-key). |
 | Shell modal or component dialog | Excludes the ordinary matcher. A shell modal's handler gets first refusal. A chord it declines is dispatched only if it is bound to a dialog-opening action or the palette toggle; every other chord stays inert. Unclaimed Escape closes the top dialog. |
 | Focused per-tile command line | Handles its own keys. The effective palette toggle remains available and cancels the line. |
-| Focused scope text field | Typing bypasses the matcher. Single-key chords resolve against the workspace context only. |
-| Occupant holding focus in insert mode | Single-key chords use the whole context stack; bare keys use only contexts carrying `mode == insert`. |
+| Focused scope text field | Typing bypasses the matcher. Single-key chords resolve against the workspace context only, with or without an open page. Escape restores the entry text; Escape and Enter return focus home: the open page's handle, else the shell root. |
+| Open page or occupant holding focus in insert mode | Single-key chords use the whole context stack; bare keys use only contexts carrying `mode == insert`. The open page's `holds_focus` is consulted before any tile's. Because the page's own context carries `mode == insert` then, its bare-key bindings must sit in a `mode == normal` table or they fire inside the input; see [keymaps](keymaps.md#context-predicates). |
 | Palette toggle and open palette | The toggle resolves directly against the effective single-key binding; an open palette owns remaining keys. |
 | Stack member list | Consumes non-chord keys. Chords fall through to ordinary matching. |
 | Active tile or divider drag | Escape stops the drag before ordinary matching. |
-| Ordinary keymap | Resolves against workspace, then tile and occupant contexts when present. |
+| Ordinary keymap | Resolves against workspace, then tile and occupant contexts when present. While a page is open the stack is `page`, then the page's own context, then `palette` when open; neither `workspace` nor `tile` is present. |
 
 Here a chord carries Control, Alt, or Command; Shift alone still counts as
 typing. Input components can consume their own editing shortcuts before the
@@ -39,8 +39,23 @@ not claim the key. A closed modal's closer owns focus instead.
 
 Actions from the palette and ordinary matcher share `ShellView::dispatch`.
 Workspace actions mark session state dirty and reconcile structural focus;
-unhandled action ids are offered to the focused occupant. Counts reach stack
-cycling and module dispatch; the general workspace router ignores them.
+unhandled action ids are offered to the open page, else the focused
+occupant. Counts reach stack cycling and module dispatch; the general
+workspace router ignores them.
+
+With a [page](shell.md#pages) open, Escape is taken in this order: an open
+modal closes and the page stays; the palette closes and focus returns to
+the page; the focused scope field takes it, restoring its entry text and
+returning focus to the page; a focused page input takes it
+through the page's own `mode == insert` binding, which blurs the input back
+to normal mode; then the `page` context's `escape` resolves to
+`page::close`, which the page sees first and may consume when it has
+something of its own to dismiss, and otherwise the shell closes the page.
+`mod+d` is the diagnostics page's context-free toggle. Under a modal both
+the toggle and `page::close` are refused with the close-the-dialog notice,
+because the dialog was opened over the page. The workspace switches
+`mod+1` to `mod+9` are context-free, so a switch closes the page from
+wherever it is and lands on that workspace's focused tile.
 
 ## Modal lifetime and focus
 
@@ -96,16 +111,16 @@ cannot depend on such an event to keep text synchronized.
 
 Each entry records the workspace active when it was pushed
 (`ShellModal::workspace`). Frame dialogs — the dimension picker, as-of,
-grouping, the frame expression dialog, and the Scopes dialog's frame
-actions — read and commit the lane of the workspace recorded on the stack's
+grouping, the scope picker, the frame expression dialog, and the Scopes
+dialog's frame actions — read and commit the lane of the workspace recorded on the stack's
 base entry, through `ShellView::target_frame`, so a dialog opened in a pinned
 workspace changes only that workspace's lane (see
 [workspace lanes](shell.md#workspace-lanes)).
 
 Known limitation: apart from object dialogs, the stack holds one instance per
 `DialogKind`, so a second request for a live kind cannot open beside the first
-even from a different call site. The three `choicedialog` pickers (grouping,
-tile kind, log level) share one kind and one state field, so none of them can
+even from a different call site. The `choicedialog` pickers (grouping, scope,
+tile kind, column, log level) share one kind and one state field, so none of them can
 open while another is anywhere in the stack.
 
 A multi-screen dialog registers its back step with `dialog::set_back`: a
@@ -210,6 +225,15 @@ while the dialog stays bound to the lane it opened in, so the toolbar would
 mix two lanes (historical tiles without the historical stripe, for example).
 Refusing them keeps the dialog's lane and the active lane the same workspace
 for as long as a dialog is open.
+
+While a page is open the three transient-chrome actions above are refused
+with `close the page first (esc)`, and so are `tile::add`, every per-kind add action,
+`tile::open_with`, `tile::autosize_columns`, and every `workspace::`,
+`dock::`, and `stack::` action except the workspace switches: the page
+covers the tile surface they would open on or change, and a layout edited
+behind a page is a change the trader cannot see (`Close tile` would destroy
+an unseen tile with no undo). A switch closes the page and then switches.
+The palette reaches every other action over a page.
 
 [`palette`](../../crates/geode-shell/src/palette.rs) matches action title and
 category, not action id. Category matches receive half weight, rounded up.
@@ -388,7 +412,7 @@ needed to adopt a changed clock configuration. Commits update the frame's as-of
 and close the dialog. As-of undo swaps with the previous value rather than
 walking a history stack.
 
-## Grouping, tile, log, and column choices
+## Grouping, scope, tile, log, and column choices
 
 [`shell/choicedialog.rs`](../../crates/geode-shell/src/shell/choicedialog.rs)
 uses a filter-only `ChoiceList` with a target-specific commit. Tab completes,
@@ -398,6 +422,7 @@ level stage.
 | Target | Rows and commit |
 |---|---|
 | Grouping | View default, then filled slots 1–9; opens on the active choice. Empty-query digits commit directly, with zero choosing the default. Unfilled digits are consumed. Commit rechecks slot existence, reports removal if needed, then closes. |
+| Scope (`frame::scope`, `mod+o`, and the toolbar's load glyph) | One row per saved scope, named, in the saved set's name order, read from the target frame's live saved scopes at open, so a scope saved or reloaded since startup is listed (the palette's `scope::<name>` rows are registered once at startup). Opens on the first saved scope equal to the frame's current scope, else the first row, so Enter on an untouched picker changes nothing. Commit loads through `ShellView::load_saved_scope`, the `scope::<name>` actions' own path: one undoable `set_scope` step in the target lane. A name removed by a reload while the picker was open loads nothing, closes, and reports "that saved scope no longer exists". With no saved scope the list is replaced by a hint to narrow the scope and save it with the save glyph (painted once the scope is non-empty) or `scope::save_current` (its chord when bound, else its palette title); Enter there does nothing and the footer offers only Escape. |
 | Tile kind | Roster order excluding the placeholder. Closes before adding to the tile focused at commit time: fills a placeholder or splits a real tile using the configured placement. |
 | Tile kind with context (`tile::open_with`) | The same rows, pre-filtered to kinds whose factory accepts the focused tile's captured launch context, titled `Open {underlying} in…`. Commit always splits, passing the factory's translated `launch_state` as the new tile's restored record. |
 | Column (`config::view_column`, `config::schema_column`) | The focused tile's presented columns from `TileContent::tile_columns`, captured at open; a row reads the header label, then ` · name` when they differ. Schema omits columns no dataset of the view declares in current configuration (derived view columns, and derived dimensions a view lists as plain dimension columns). Opens on the cursor's column, else the first row. Before the list opens, a tile with no columns refuses with "this tile has no dataset columns", a Schema list with nothing left with "no schema columns in this tile's view", and a target dialog already in the stack with the stack's own refusal. Commit closes the list, then opens the dialog on that column's Column stage (see [configuration dialogs](configuration-dialogs.md#stages-and-ownership)). Palette-only, no default binding. |

@@ -27,18 +27,6 @@ use std::time::Duration;
 /// subset; the remaining actions are reachable through menus, commands, or the
 /// palette. PanelSpec contributes kind-specific actions separately.
 pub const ACTIONS: &[(&str, &str)] = &[
-    ("marketdata::down", "Cursor down"),
-    ("marketdata::up", "Cursor up"),
-    ("marketdata::left", "Cursor left"),
-    ("marketdata::right", "Cursor right"),
-    ("marketdata::top", "Cursor to top"),
-    ("marketdata::bottom", "Cursor to bottom"),
-    ("marketdata::first_col", "First column"),
-    ("marketdata::last_col", "Last column"),
-    ("marketdata::page_down", "Half page down"),
-    ("marketdata::page_up", "Half page up"),
-    ("marketdata::page_down_full", "Full page down"),
-    ("marketdata::page_up_full", "Full page up"),
     ("marketdata::yank", "Yank cell"),
     ("marketdata::yank_row", "Yank row"),
     ("marketdata::yank_col", "Yank column"),
@@ -49,8 +37,6 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("marketdata::find_prev", "Find previous"),
     ("marketdata::escape", "Escape"),
     ("marketdata::menu", "Actions menu"),
-    ("marketdata::menu_down", "Menu: next"),
-    ("marketdata::menu_up", "Menu: previous"),
     ("marketdata::menu_pick", "Menu: pick"),
     ("marketdata::menu_close", "Menu: close"),
     ("marketdata::insert_up", "Insert: up"),
@@ -77,22 +63,45 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("marketdata::auto_replace", "Auto: replace edits"),
 ];
 
+/// Retired action ids and their successors: a user keymap that still names
+/// an old id binds the new one, with a warning (`ActionRegistry::renamed`).
+pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
+    ("marketdata::down", "motion::down"),
+    ("marketdata::up", "motion::up"),
+    ("marketdata::left", "motion::left"),
+    ("marketdata::right", "motion::right"),
+    ("marketdata::top", "motion::top"),
+    ("marketdata::bottom", "motion::bottom"),
+    ("marketdata::page_down", "motion::half_page_down"),
+    ("marketdata::page_up", "motion::half_page_up"),
+    ("marketdata::page_down_full", "motion::page_down"),
+    ("marketdata::page_up_full", "motion::page_up"),
+    ("marketdata::first_col", "motion::line_start"),
+    ("marketdata::last_col", "motion::line_end"),
+    ("marketdata::menu_down", "motion::menu_down"),
+    ("marketdata::menu_up", "motion::menu_up"),
+];
+
 /// Module bindings supplied above shell defaults and below desk/user overrides.
 /// Normal, visual, insert, and menu contexts match MarketDataTile's current input
 /// state.
 ///
-/// Visual mode is a live `V`/`v` selection. It keeps the motions, and its
-/// consuming verbs are single keys (`y`, `d`): the doubled normal-mode forms
-/// would leave the first press waiting for a second there.
+/// The grid motions are not here: the panel publishes `grid` in every mode,
+/// and the shell's builtin keymap binds the shared `motion::*` ids once for
+/// every grid tile under `grid` with `mode == normal || mode == visual`. The
+/// menu's steps are not here either: the panel publishes `tilelist` while its
+/// action menu is open, and the builtin keymap binds the shared
+/// `motion::menu_down`/`menu_up` there.
+///
+/// Visual mode is a live `V`/`v` selection. Its consuming verbs are single
+/// keys (`y`, `d`): the doubled normal-mode forms would leave the first
+/// press waiting for a second there.
 ///
 /// Insert bindings handle commit, cancel, and small/large vertical steps. The
 /// tile interprets steps as picker navigation or numeric editing according to the
 /// active surface. Bare keys use insert-carrying contexts; Control/Alt/Command
 /// chords still resolve against the full shell stack. No chord is bound in this
 /// insert block, keeping shared commands such as the palette available.
-///
-/// Column extremes accept Home/End and the bare ^/$ key spellings. The latter
-/// bindings match the event spelling supplied by the shell's key conversion.
 ///
 /// The visual block comes first so the normal block is the later one: a
 /// palette, menu or tooltip hint names an action's LAST live binding
@@ -102,22 +111,6 @@ pub const DEFAULT_KEYMAP: &str = r#"
 [[bindings]]
 context = "marketdata && mode == visual"
 [bindings.keys]
-"j" = "marketdata::down"
-"k" = "marketdata::up"
-"h" = "marketdata::left"
-"l" = "marketdata::right"
-"g g" = "marketdata::top"
-"shift+g" = "marketdata::bottom"
-"^" = "marketdata::first_col"
-"$" = "marketdata::last_col"
-"home" = "marketdata::first_col"
-"end" = "marketdata::last_col"
-"ctrl+d" = "marketdata::page_down"
-"ctrl+u" = "marketdata::page_up"
-"ctrl+f" = "marketdata::page_down_full"
-"ctrl+b" = "marketdata::page_up_full"
-"pagedown" = "marketdata::page_down_full"
-"pageup" = "marketdata::page_up_full"
 "y" = "marketdata::yank"
 "d" = "marketdata::delete_row"
 "i" = "marketdata::edit"
@@ -129,22 +122,6 @@ context = "marketdata && mode == visual"
 [[bindings]]
 context = "marketdata && mode == normal"
 [bindings.keys]
-"j" = "marketdata::down"
-"k" = "marketdata::up"
-"h" = "marketdata::left"
-"l" = "marketdata::right"
-"g g" = "marketdata::top"
-"shift+g" = "marketdata::bottom"
-"^" = "marketdata::first_col"
-"$" = "marketdata::last_col"
-"home" = "marketdata::first_col"
-"end" = "marketdata::last_col"
-"ctrl+d" = "marketdata::page_down"
-"ctrl+u" = "marketdata::page_up"
-"ctrl+f" = "marketdata::page_down_full"
-"ctrl+b" = "marketdata::page_up_full"
-"pagedown" = "marketdata::page_down_full"
-"pageup" = "marketdata::page_up_full"
 "y" = "marketdata::yank"
 "y y" = "marketdata::yank_row"
 "y c" = "marketdata::yank_col"
@@ -176,10 +153,6 @@ context = "marketdata && mode == insert"
 [[bindings]]
 context = "marketdata && mode == menu"
 [bindings.keys]
-"j" = "marketdata::menu_down"
-"k" = "marketdata::menu_up"
-"down" = "marketdata::menu_down"
-"up" = "marketdata::menu_up"
 "enter" = "marketdata::menu_pick"
 "escape" = "marketdata::menu_close"
 "." = "marketdata::menu_close"
@@ -399,6 +372,11 @@ impl ModuleFactory for MarketDataFactory {
                 category: "Market data".to_string(),
             });
         }
+        // A second panel factory's repeat answers "renamed twice", which is
+        // the correct outcome for the shared vocabulary, like the ids above.
+        for (old, new) in RENAMED_ACTIONS {
+            let _ = registry.register_rename(old, new);
+        }
     }
 
     fn create(
@@ -457,6 +435,33 @@ mod tests {
                 .expect("no duplicate ids");
         }
         registry
+    }
+
+    /// The shell's builtin keymap spliced under this fragment, over the
+    /// builtin and module actions: the grid motions live only in the former.
+    fn keymap_with_builtins() -> geode_shell::keymap::Keymap {
+        let builtin =
+            geode_core::config::LayerDoc::builtin("keymap", geode_shell::defaults::BUILTIN_KEYMAP)
+                .unwrap();
+        let fragment = fragment_doc(CVI.kind, DEFAULT_KEYMAP).unwrap();
+        let docs = geode_shell::keymap::fragments::splice(&[builtin], &[fragment]);
+        let mut reg = registry();
+        geode_shell::defaults::register_builtin_actions(&mut reg);
+        let (keymap, diags) = build_keymap(&docs, default_mod(), &reg);
+        assert!(diags.is_empty(), "{diags:?}");
+        keymap
+    }
+
+    /// The stack the shell publishes over a focused grid-mode panel.
+    fn panel_stack(mode: &str) -> [KeyContext; 3] {
+        [
+            KeyContext::new("workspace"),
+            KeyContext::new("tile"),
+            KeyContext::new("marketdata")
+                .grid()
+                .pair("mode", mode)
+                .counts(),
+        ]
     }
 
     /// Registered actions intentionally absent from the default keymap. This list
@@ -629,22 +634,14 @@ mod tests {
 
     /// Column-extreme punctuation matches as bare characters even when numeric
     /// counts are enabled on the context, in normal mode and while a
-    /// selection is live (the visual block repeats the motions).
+    /// selection is live. The keys come from the shell's shared motions,
+    /// reached through the panel's `grid` flag.
     #[test]
     fn caret_and_dollar_resolve_to_the_column_extremes() {
-        let doc = fragment_doc(CVI.kind, DEFAULT_KEYMAP).unwrap();
-        let (keymap, diags) = build_keymap(&[doc], default_mod(), &registry());
-        assert!(diags.is_empty(), "{diags:?}");
+        let keymap = keymap_with_builtins();
         for mode in ["normal", "visual"] {
-            let stack = [
-                KeyContext::new("workspace"),
-                KeyContext::new("tile"),
-                KeyContext::new("marketdata").pair("mode", mode).counts(),
-            ];
-            for (spec, expected) in [
-                ("^", "marketdata::first_col"),
-                ("$", "marketdata::last_col"),
-            ] {
+            let stack = panel_stack(mode);
+            for (spec, expected) in [("^", "motion::line_start"), ("$", "motion::line_end")] {
                 let keystroke = parse_keystroke(spec, default_mod()).unwrap();
                 match Matcher::default().press(&keymap, keystroke, &stack) {
                     MatchResult::Matched { action, .. } => {
@@ -717,32 +714,30 @@ mod tests {
         }
     }
 
-    /// Normal mode opens the menu with dot and the picker with u. Menu mode
-    /// handles letter/arrow navigation, Enter, Escape, and dot to close.
+    /// Normal mode opens the menu with dot and the picker with u. With the
+    /// menu open, the builtin keymap's shared menu steps take j/k and the
+    /// arrows (the grid's motions stay out under `mode == menu`), and the
+    /// fragment keeps Enter, Escape, and dot to close.
     #[test]
     fn dot_and_u_bind_in_normal_mode_and_the_menu_keys_in_menu_mode() {
-        let doc = fragment_doc(CVI.kind, DEFAULT_KEYMAP).unwrap();
-        let (keymap, diags) = build_keymap(&[doc], default_mod(), &registry());
-        assert!(diags.is_empty(), "{diags:?}");
-        let normal = [
-            KeyContext::new("workspace"),
-            KeyContext::new("tile"),
-            KeyContext::new("marketdata")
-                .pair("mode", "normal")
-                .counts(),
-        ];
+        let keymap = keymap_with_builtins();
+        let normal = panel_stack("normal");
         let menu = [
             KeyContext::new("workspace"),
             KeyContext::new("tile"),
-            KeyContext::new("marketdata").pair("mode", "menu").counts(),
+            KeyContext::new("marketdata")
+                .grid()
+                .tilelist()
+                .pair("mode", "menu")
+                .counts(),
         ];
         for (stack, spec, expected) in [
             (&normal, ".", "marketdata::menu"),
             (&normal, "u", "marketdata::load_underlying"),
-            (&menu, "j", "marketdata::menu_down"),
-            (&menu, "k", "marketdata::menu_up"),
-            (&menu, "down", "marketdata::menu_down"),
-            (&menu, "up", "marketdata::menu_up"),
+            (&menu, "j", "motion::menu_down"),
+            (&menu, "k", "motion::menu_up"),
+            (&menu, "down", "motion::menu_down"),
+            (&menu, "up", "motion::menu_up"),
             (&menu, "enter", "marketdata::menu_pick"),
             (&menu, "escape", "marketdata::menu_close"),
             (&menu, ".", "marketdata::menu_close"),
@@ -760,23 +755,14 @@ mod tests {
     /// doubled `y y`/`d d` prefix would leave `y` and `d` waiting there).
     #[test]
     fn v_and_shift_v_start_the_two_selections_and_visual_binds_single_key_verbs() {
-        let doc = fragment_doc(CVI.kind, DEFAULT_KEYMAP).unwrap();
-        let (keymap, diags) = build_keymap(&[doc], default_mod(), &registry());
-        assert!(diags.is_empty(), "{diags:?}");
-        let stack_for = |mode: &str| {
-            [
-                KeyContext::new("workspace"),
-                KeyContext::new("tile"),
-                KeyContext::new("marketdata").pair("mode", mode).counts(),
-            ]
-        };
-        let (normal, visual) = (stack_for("normal"), stack_for("visual"));
+        let keymap = keymap_with_builtins();
+        let (normal, visual) = (panel_stack("normal"), panel_stack("visual"));
         for (stack, spec, expected) in [
             (&normal, "v", "marketdata::visual_block"),
             (&normal, "shift+v", "marketdata::visual_rows"),
             (&visual, "v", "marketdata::visual_block"),
             (&visual, "shift+v", "marketdata::visual_rows"),
-            (&visual, "j", "marketdata::down"),
+            (&visual, "j", "motion::down"),
             (&visual, "y", "marketdata::yank"),
             (&visual, "d", "marketdata::delete_row"),
             (&visual, "i", "marketdata::edit"),
@@ -787,6 +773,39 @@ mod tests {
                 MatchResult::Matched { action, .. } => assert_eq!(action.0, expected, "{spec}"),
                 other => panic!("{spec}: expected a match, got {other:?}"),
             }
+        }
+    }
+
+    /// A user keymap written against a retired motion id keeps binding the
+    /// shared id it became.
+    #[test]
+    fn every_retired_motion_id_renames_to_its_shared_id() {
+        let (data, _rx) = DataHandle::for_tests();
+        let factory = MarketDataFactory::new(data, &CVI, Duration::from_secs(60));
+        let mut registry = ActionRegistry::default();
+        geode_shell::defaults::register_builtin_actions(&mut registry);
+        factory.register_actions(&mut registry);
+        for (old, new) in [
+            ("marketdata::down", "motion::down"),
+            ("marketdata::up", "motion::up"),
+            ("marketdata::left", "motion::left"),
+            ("marketdata::right", "motion::right"),
+            ("marketdata::top", "motion::top"),
+            ("marketdata::bottom", "motion::bottom"),
+            ("marketdata::page_down", "motion::half_page_down"),
+            ("marketdata::page_up", "motion::half_page_up"),
+            ("marketdata::page_down_full", "motion::page_down"),
+            ("marketdata::page_up_full", "motion::page_up"),
+            ("marketdata::first_col", "motion::line_start"),
+            ("marketdata::menu_down", "motion::menu_down"),
+            ("marketdata::menu_up", "motion::menu_up"),
+            ("marketdata::last_col", "motion::line_end"),
+        ] {
+            assert_eq!(
+                registry.renamed(&ActionId(old.into())),
+                Some(&ActionId(new.into())),
+                "{old}"
+            );
         }
     }
 

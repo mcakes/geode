@@ -27,7 +27,24 @@ use std::time::Duration;
 /// Compatibility aliases for user keymaps. `blotter::visual` resolves to
 /// `blotter::visual_rows` with a rename warning, preserving whole-row
 /// selection. `blotter::visual_block` selects a rectangular cell range.
-pub const RENAMED_ACTIONS: &[(&str, &str)] = &[("blotter::visual", "blotter::visual_rows")];
+/// The retired motion ids resolve to the shell's shared `motion::*` ids, so
+/// an override written against them keeps working in the blotter's own
+/// context (with the warning naming both ids).
+pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
+    ("blotter::visual", "blotter::visual_rows"),
+    ("blotter::down", "motion::down"),
+    ("blotter::up", "motion::up"),
+    ("blotter::left", "motion::left"),
+    ("blotter::right", "motion::right"),
+    ("blotter::top", "motion::top"),
+    ("blotter::bottom", "motion::bottom"),
+    ("blotter::page_down", "motion::half_page_down"),
+    ("blotter::page_up", "motion::half_page_up"),
+    ("blotter::page_down_full", "motion::page_down"),
+    ("blotter::page_up_full", "motion::page_up"),
+    ("blotter::first_col", "motion::line_start"),
+    ("blotter::last_col", "motion::line_end"),
+];
 
 /// Default bindings returned through [`ModuleFactory::default_keymap`].
 /// The app combines this fragment with the shell's built-ins; desk and user
@@ -35,34 +52,24 @@ pub const RENAMED_ACTIONS: &[(&str, &str)] = &[("blotter::visual", "blotter::vis
 /// registered by its factory.
 ///
 /// The contexts match `BlotterTile::key_context`: `normal` has the full grammar;
-/// `visual` has motions on both axes, yank, selection toggles, and Escape.
+/// `visual` has yank, selection toggles, and Escape.
 /// `v` selects a block and `V` selects rows. Pressing the active kind again
 /// clears the selection; pressing the other kind switches it, keeping the anchor.
-/// `^`/`$` and `home`/`end` move to the first/last column. Shifted punctuation
-/// binds as the bare character without a separate `shift` modifier.
+/// Shifted punctuation binds as the bare character without a separate `shift`
+/// modifier.
+///
+/// This fragment binds no motions. `j`/`k`/`h`/`l`, the arrows, `g g`/`G`,
+/// `ctrl+d`/`u`/`f`/`b`, `pageup`/`pagedown`, `^`/`$` and `home`/`end` come
+/// from the shell's shared `motion::*` bindings under `grid`, which
+/// `BlotterTile::key_context` publishes in both modes; this fragment binds
+/// only blotter verbs.
 /// `g m` invokes the shell's `tile::open_with` using the cursor row's context.
 /// Module fragments may bind shell actions within the module's own context.
 pub const DEFAULT_KEYMAP: &str = r#"
 [[bindings]]
 context = "blotter && mode == normal"
 [bindings.keys]
-"j" = "blotter::down"
-"k" = "blotter::up"
-"h" = "blotter::left"
-"l" = "blotter::right"
-"g g" = "blotter::top"
 "g m" = "tile::open_with"
-"shift+g" = "blotter::bottom"
-"ctrl+d" = "blotter::page_down"
-"ctrl+u" = "blotter::page_up"
-"ctrl+f" = "blotter::page_down_full"
-"ctrl+b" = "blotter::page_up_full"
-"pagedown" = "blotter::page_down_full"
-"pageup" = "blotter::page_up_full"
-"home" = "blotter::first_col"
-"end" = "blotter::last_col"
-"^" = "blotter::first_col"
-"$" = "blotter::last_col"
 "z o" = "blotter::expand"
 "z c" = "blotter::collapse"
 "z a" = "blotter::toggle"
@@ -81,22 +88,6 @@ context = "blotter && mode == normal"
 [[bindings]]
 context = "blotter && mode == visual"
 [bindings.keys]
-"j" = "blotter::down"
-"k" = "blotter::up"
-"h" = "blotter::left"
-"l" = "blotter::right"
-"g g" = "blotter::top"
-"shift+g" = "blotter::bottom"
-"ctrl+d" = "blotter::page_down"
-"ctrl+u" = "blotter::page_up"
-"ctrl+f" = "blotter::page_down_full"
-"ctrl+b" = "blotter::page_up_full"
-"pagedown" = "blotter::page_down_full"
-"pageup" = "blotter::page_up_full"
-"home" = "blotter::first_col"
-"end" = "blotter::last_col"
-"^" = "blotter::first_col"
-"$" = "blotter::last_col"
 "y" = "blotter::yank"
 "v" = "blotter::visual_block"
 "shift+v" = "blotter::visual_rows"
@@ -381,12 +372,14 @@ mod tests {
         }
     }
 
-    /// `^`/`$` move to the first/last column. Both are shifted punctuation
-    /// on a US layout, so they bind as bare characters with `shift` cleared.
-    /// Parsing alone cannot detect a binding with the wrong modifier.
-    #[test]
-    fn caret_and_dollar_resolve_to_the_column_extremes() {
+    /// The keymap `main` builds for a blotter: the shell's builtin layer
+    /// (which carries the shared motions) spliced with this fragment.
+    fn keymap_with_builtins() -> geode_shell::keymap::Keymap {
         let doc = fragment_doc("blotter", DEFAULT_KEYMAP).unwrap();
+        let builtin =
+            geode_core::config::LayerDoc::builtin("keymap", geode_shell::defaults::BUILTIN_KEYMAP)
+                .unwrap();
+        let docs = geode_shell::keymap::fragments::splice(&[builtin], &[doc]);
         let mut registry = ActionRegistry::default();
         geode_shell::defaults::register_builtin_actions(&mut registry);
         for (id, title) in ACTIONS {
@@ -396,14 +389,32 @@ mod tests {
                 category: "Blotter".to_string(),
             });
         }
-        let (keymap, diags) = build_keymap(&[doc], default_mod(), &registry);
+        let (keymap, diags) = build_keymap(&docs, default_mod(), &registry);
         assert!(diags.is_empty(), "{diags:?}");
-        let stack = [
+        keymap
+    }
+
+    /// The stack the shell publishes over a focused blotter in `mode`.
+    fn blotter_stack(mode: &str) -> [KeyContext; 3] {
+        [
             KeyContext::new("workspace"),
             KeyContext::new("tile"),
-            KeyContext::new("blotter").pair("mode", "normal").counts(),
-        ];
-        for (spec, expected) in [("^", "blotter::first_col"), ("$", "blotter::last_col")] {
+            KeyContext::new("blotter")
+                .grid()
+                .pair("mode", mode)
+                .counts(),
+        ]
+    }
+
+    /// `^`/`$` move to the first/last column. Both are shifted punctuation
+    /// on a US layout, so they bind as bare characters with `shift` cleared.
+    /// Parsing alone cannot detect a binding with the wrong modifier. The
+    /// keys come from the shell's shared motions, reached through `grid`.
+    #[test]
+    fn caret_and_dollar_resolve_to_the_column_extremes() {
+        let keymap = keymap_with_builtins();
+        let stack = blotter_stack("normal");
+        for (spec, expected) in [("^", "motion::line_start"), ("$", "motion::line_end")] {
             let keystroke = parse_keystroke(spec, default_mod()).unwrap();
             match Matcher::default().press(&keymap, keystroke, &stack) {
                 MatchResult::Matched { action, .. } => assert_eq!(action.0, expected, "{spec}"),
@@ -455,43 +466,60 @@ mod tests {
 
     #[test]
     fn v_and_shift_v_start_the_two_selections_and_h_moves_in_visual() {
-        let doc = fragment_doc("blotter", DEFAULT_KEYMAP).unwrap();
-        let mut registry = ActionRegistry::default();
-        // `g m` names the shell's `tile::open_with`; without the builtins
-        // registered the keymap build would warn and skip it.
-        geode_shell::defaults::register_builtin_actions(&mut registry);
-        for (id, title) in ACTIONS {
-            let _ = registry.register(ActionDef {
-                id: ActionId((*id).to_string()),
-                title: (*title).to_string(),
-                category: "Blotter".to_string(),
-            });
-        }
-        let (keymap, diags) = build_keymap(&[doc], default_mod(), &registry);
-        assert!(diags.is_empty(), "{diags:?}");
-        let normal = [
-            KeyContext::new("workspace"),
-            KeyContext::new("tile"),
-            KeyContext::new("blotter").pair("mode", "normal").counts(),
-        ];
-        let visual = [
-            KeyContext::new("workspace"),
-            KeyContext::new("tile"),
-            KeyContext::new("blotter").pair("mode", "visual").counts(),
-        ];
+        let keymap = keymap_with_builtins();
+        let normal = blotter_stack("normal");
+        let visual = blotter_stack("visual");
         for (stack, spec, expected) in [
             (&normal, "v", "blotter::visual_block"),
             (&normal, "shift+v", "blotter::visual_rows"),
             (&visual, "v", "blotter::visual_block"),
             (&visual, "shift+v", "blotter::visual_rows"),
-            (&visual, "h", "blotter::left"),
-            (&visual, "l", "blotter::right"),
+            (&visual, "h", "motion::left"),
+            (&visual, "l", "motion::right"),
         ] {
             let keystroke = parse_keystroke(spec, default_mod()).unwrap();
             match Matcher::default().press(&keymap, keystroke, stack) {
                 MatchResult::Matched { action, .. } => assert_eq!(action.0, expected, "{spec}"),
                 other => panic!("{spec}: expected a match, got {other:?}"),
             }
+        }
+    }
+
+    /// Every retired blotter motion id binds its shared successor.
+    #[test]
+    fn every_retired_motion_id_renames_to_its_shared_id() {
+        let (handle, _rx) = geode_data::DataHandle::for_tests();
+        let factory = BlotterFactory::new(
+            handle,
+            Vec::new(),
+            NamedColours::default(),
+            SchemaSpec::default(),
+            DerivedDimensions::default(),
+            FindStyle::default(),
+            Duration::from_secs(900),
+        );
+        let mut registry = ActionRegistry::default();
+        geode_shell::defaults::register_builtin_actions(&mut registry);
+        factory.register_actions(&mut registry);
+        for (old, new) in [
+            ("blotter::down", "motion::down"),
+            ("blotter::up", "motion::up"),
+            ("blotter::left", "motion::left"),
+            ("blotter::right", "motion::right"),
+            ("blotter::top", "motion::top"),
+            ("blotter::bottom", "motion::bottom"),
+            ("blotter::page_down", "motion::half_page_down"),
+            ("blotter::page_up", "motion::half_page_up"),
+            ("blotter::page_down_full", "motion::page_down"),
+            ("blotter::page_up_full", "motion::page_up"),
+            ("blotter::first_col", "motion::line_start"),
+            ("blotter::last_col", "motion::line_end"),
+        ] {
+            assert_eq!(
+                registry.renamed(&ActionId(old.into())),
+                Some(&ActionId(new.into())),
+                "{old}"
+            );
         }
     }
 
@@ -513,7 +541,8 @@ mod tests {
         assert_eq!(factory.contexts(), vec!["blotter"]);
     }
 
-    /// `g m` sits beside `g g` in normal mode and names the shell's action.
+    /// `g m` binds the shell's action in normal mode. `g g` is not here: it is
+    /// the shell's shared `motion::top`, reached through `grid`.
     #[test]
     fn g_m_opens_with_context_in_normal_mode() {
         let t: toml::Table = DEFAULT_KEYMAP.parse().unwrap();
@@ -524,7 +553,7 @@ mod tests {
             .find(|b| b["context"].as_str() == Some("blotter && mode == normal"))
             .unwrap();
         assert_eq!(normal["keys"]["g m"].as_str(), Some("tile::open_with"));
-        assert_eq!(normal["keys"]["g g"].as_str(), Some("blotter::top"));
+        assert!(normal["keys"].get("g g").is_none());
     }
 
     /// One tile per open window, its own `VisualTestContext`.

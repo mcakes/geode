@@ -1,5 +1,5 @@
 //! Bounded in-process log storage, tracing integration, and runtime level control.
-//! The diagnostics tile reads the ring; `[log]` configures Geode target levels.
+//! The diagnostics page reads the ring; `[log]` configures Geode target levels.
 use crate::config::{Config, Diagnostic, Severity};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;

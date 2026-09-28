@@ -35,7 +35,6 @@ use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::tips;
 use geode_shell::vimfind::{FindDirection, FindStyle};
-use geode_shell::vimnav::NavCommand;
 use geode_tile::following::{Delivered, FollowingQuery, FrameDoor, Promotion, Unanswered};
 use geode_tile::notice::{self, Notice};
 use gpui::prelude::*;
@@ -62,18 +61,6 @@ const FOOTER_HEIGHT: f32 = 20.0;
 pub const DEFAULT_STALE_AFTER: Duration = Duration::from_secs(15 * 60);
 
 pub const ACTIONS: &[(&str, &str)] = &[
-    ("blotter::down", "Cursor down"),
-    ("blotter::up", "Cursor up"),
-    ("blotter::left", "Cursor left"),
-    ("blotter::right", "Cursor right"),
-    ("blotter::top", "Cursor to top"),
-    ("blotter::bottom", "Cursor to bottom"),
-    ("blotter::page_down", "Half page down"),
-    ("blotter::page_up", "Half page up"),
-    ("blotter::page_down_full", "Page down"),
-    ("blotter::page_up_full", "Page up"),
-    ("blotter::first_col", "First column"),
-    ("blotter::last_col", "Last column"),
     ("blotter::expand", "Expand node"),
     ("blotter::collapse", "Collapse node"),
     ("blotter::toggle", "Toggle node"),
@@ -178,6 +165,12 @@ pub struct BlotterTile {
     /// Header notice. Dropped sorts and selections are warnings; query and
     /// configuration failures are danger.
     pub error: Option<Notice>,
+    /// The refusal a restored view over a computed dataset opened with,
+    /// pending the first delivery. That delivery is the fallback view's
+    /// own snapshot, landing before the trader could read the header, so
+    /// `apply` raises the notice again instead of letting it clear; the
+    /// next delivery follows something the trader did and clears it.
+    restored_view_refusal: Option<String>,
     find: Option<FindState>,
     /// This tile's view query under the flip barrier (see
     /// `geode_tile::following`), with the grouping each result was asked
@@ -224,25 +217,43 @@ impl BlotterTile {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let view_name = restored
-            .and_then(|t| t.get("view").and_then(|v| v.as_str()).map(str::to_string))
-            .filter(|n| views.borrow().iter().any(|v| &v.name == n))
+        let restored_name = restored.and_then(|t| t.get("view").and_then(|v| v.as_str()));
+        // A restored view over a computed dataset exists but is a module's
+        // to show: the fallback below applies as for a missing view, and
+        // the tile opens with the refusal as its notice so the trader
+        // learns why the record's view did not come back.
+        let restored_view_computed = restored_name.and_then(|n| {
+            let views = views.borrow();
+            views
+                .iter()
+                .find(|v| v.name == n && !showable_in(&schema.borrow(), v))
+                .map(computed_view_refusal)
+        });
+        let view_name = restored_name
+            .map(str::to_string)
+            .filter(|n| {
+                views
+                    .borrow()
+                    .iter()
+                    .any(|v| &v.name == n && showable_in(&schema.borrow(), v))
+            })
             .or_else(|| {
                 // Without a valid restored view, use the explicit default, then the
                 // first configured view. `ViewSpec::from_doc` orders that fallback
-                // by name when no default is set.
+                // by name when no default is set. Both arms skip a computed
+                // view: the merged list holds the pricer's views beside the
+                // blotter's, and one of those sorting first must not become
+                // the view a fresh tile opens on and refuses.
                 let views = views.borrow();
+                let schema = schema.borrow();
                 views
                     .iter()
-                    .find(|v| v.is_default)
-                    .or_else(|| views.first())
+                    .find(|v| v.is_default && showable_in(&schema, v))
+                    .or_else(|| views.iter().find(|v| showable_in(&schema, v)))
                     .map(|v| v.name.clone())
             })
             .unwrap_or_default();
-        let restored_view_kept = restored
-            .and_then(|t| t.get("view"))
-            .and_then(|v| v.as_str())
-            == Some(view_name.as_str());
+        let restored_view_kept = restored_name == Some(view_name.as_str());
         let pin = match restored {
             Some(t) if t.get("pinned_slot").and_then(|v| v.as_integer()).is_some() => {
                 Pin::Slot(t["pinned_slot"].as_integer().unwrap() as u8)
@@ -431,7 +442,8 @@ impl BlotterTile {
             stack: None,
             delivered_at: None,
             visible: false,
-            error: None,
+            error: restored_view_computed.clone().map(Notice::danger),
+            restored_view_refusal: restored_view_computed,
             find: None,
             following: FollowingQuery::new(),
         }
@@ -631,6 +643,11 @@ impl BlotterTile {
     /// columns and selected row, and delivery time starts the paint timer.
     /// The immutable snapshot is shared directly with the delegate.
     fn apply(&mut self, snapshot: Arc<Snapshot>, grouping: Vec<String>, cx: &mut Context<Self>) {
+        // Raised before the notices below so a fresher one about this very
+        // snapshot (a dropped sort or selection) still wins the one slot.
+        if let Some(refusal) = self.restored_view_refusal.take() {
+            self.error = Some(Notice::danger(refusal));
+        }
         if let Some(view) = self.view() {
             // The plan is (re)built from `view` here, so the definitions
             // its `Colour::Named` columns resolve against are refreshed
@@ -680,6 +697,10 @@ impl BlotterTile {
                 "view '{}' is not configured",
                 self.view_name
             )));
+            // No query goes out, so no delivery will ever consume a
+            // refusal pending from the record; the unconfigured view is
+            // the tile's whole story now.
+            self.restored_view_refusal = None;
             let versions = self.versions(cx);
             self.following.begin(versions, Instant::now());
             let key = QueryKey(self.tile.0);
@@ -863,9 +884,16 @@ impl BlotterTile {
         format!("{} · {}", view_name, GroupingSlots::label_of(grouping)).into()
     }
 
+    /// A view the blotter can query: not over a computed dataset.
+    fn showable(&self, view: &ViewSpec) -> bool {
+        showable_in(&self.schema.borrow(), view)
+    }
+
     pub fn key_context(&self, cx: &App) -> KeyContext {
         let d = self.table.read(cx).delegate();
-        let mut ctx = KeyContext::new("blotter").pair(
+        // `grid` is the flag the shell's shared motion bindings are written
+        // under: without it no motion key reaches the blotter.
+        let mut ctx = KeyContext::new("blotter").grid().pair(
             "mode",
             if d.selection.is_some() {
                 "visual"
@@ -1014,48 +1042,22 @@ impl BlotterTile {
         count: Option<u32>,
         cx: &mut Context<Self>,
     ) -> bool {
+        if let Some(m) = geode_tile::motion::parse(action, count) {
+            self.with_delegate(cx, |d| {
+                let len = d.shown.len();
+                let cols = d.plan.as_ref().map_or(0, |p| p.columns.len());
+                // A bare j/k wraps outside a selection only: wrapping past
+                // the anchor would silently invert it.
+                let selecting = d.selection.is_some();
+                d.cursor.apply(m, len, cols, selecting);
+            });
+            self.sync_cursor(cx);
+            return true;
+        }
         let Some(name) = action.0.strip_prefix("blotter::") else {
             return false;
         };
         match name {
-            // The step sizes are `vimnav`'s own convention, shared with
-            // every dialog list: `ctrl+d`/`ctrl+u` ±5, `ctrl+f`/`ctrl+b`
-            // (and `pagedown`/`pageup`) ±10 — fixed offsets, not vim's
-            // viewport-relative scroll, since the count prefix already
-            // multiplies them.
-            "down" | "up" | "top" | "bottom" | "page_down" | "page_up" | "page_down_full"
-            | "page_up_full" => {
-                let cmd = match name {
-                    "down" => NavCommand::Move(1),
-                    "up" => NavCommand::Move(-1),
-                    "top" => NavCommand::Top,
-                    "bottom" => NavCommand::Bottom,
-                    "page_down" => NavCommand::Move(5),
-                    "page_up" => NavCommand::Move(-5),
-                    "page_down_full" => NavCommand::Move(10),
-                    _ => NavCommand::Move(-10),
-                };
-                self.with_delegate(cx, |d| {
-                    let len = d.shown.len();
-                    // A bare j/k wraps outside a selection only —
-                    // wrapping past the anchor would silently invert it.
-                    let wrap = d.selection.is_none();
-                    d.cursor.move_rows(len, cmd, count, wrap);
-                });
-                self.sync_cursor(cx);
-            }
-            "left" | "right" | "first_col" | "last_col" => {
-                self.with_delegate(cx, |d| {
-                    let cols = d.plan.as_ref().map_or(0, |p| p.columns.len());
-                    match name {
-                        "left" => d.cursor.move_cols(cols, -1, count),
-                        "right" => d.cursor.move_cols(cols, 1, count),
-                        "first_col" => d.cursor.col = 0,
-                        _ => d.cursor.col = cols.saturating_sub(1),
-                    }
-                });
-                self.sync_cursor(cx);
-            }
             "expand" | "collapse" | "toggle" => {
                 let open = match name {
                     "expand" => Some(true),
@@ -1271,9 +1273,19 @@ impl BlotterTile {
                 }
             }
             Command::View(name) => {
-                if !self.views.borrow().iter().any(|v| v.name == name) {
-                    return Err(format!("no view named '{name}'"));
+                {
+                    let views = self.views.borrow();
+                    let Some(view) = views.iter().find(|v| v.name == name) else {
+                        return Err(format!("no view named '{name}'"));
+                    };
+                    if !self.showable(view) {
+                        return Err(computed_view_refusal(view));
+                    }
                 }
+                // A refusal still pending from the session record is about
+                // the record's view, not this one: the new view's first
+                // snapshot must not raise it.
+                self.restored_view_refusal = None;
                 self.view_name = name;
                 // Another view is another column set: its fitted widths
                 // would name columns that may mean something else there.
@@ -1397,7 +1409,13 @@ impl BlotterTile {
                 dimensions.push(d.name.clone());
             }
         }
-        let views = self.views.borrow().iter().map(|v| v.name.clone()).collect();
+        let views = self
+            .views
+            .borrow()
+            .iter()
+            .filter(|v| self.showable(v))
+            .map(|v| v.name.clone())
+            .collect();
         completions(
             line,
             cursor,
@@ -1551,6 +1569,26 @@ impl BlotterTile {
             })
             .collect()
     }
+}
+
+/// A view the blotter can query: not over a computed dataset. Such a
+/// dataset has no tables and a module answers for its views, so the
+/// blotter refuses them itself rather than showing the trader a query
+/// refusal for a view that was never its to show. A view over a dataset
+/// the schema does not name is left to the query path's own diagnostic.
+fn showable_in(schema: &SchemaSpec, view: &ViewSpec) -> bool {
+    !schema
+        .dataset(&view.dataset)
+        .is_some_and(|d| d.is_computed())
+}
+
+/// The refusal for a view over a computed dataset — one text for the
+/// `:view` command and the restore-fallback notice.
+fn computed_view_refusal(view: &ViewSpec) -> String {
+    format!(
+        "view '{}' is over computed dataset '{}', which a module answers for; the blotter cannot show it",
+        view.name, view.dataset
+    )
 }
 
 /// Format an RFC 3339 freshness timestamp as `HH:MM` on the trader's clock.
@@ -1906,7 +1944,10 @@ mod tests {
                      [d.columns.underlying_ref]\ntype = \"utf8\"\nrole = \"dimension\"\ntextual = true\n\
                      [d.columns.model_code]\ntype = \"utf8\"\nrole = \"dimension\"\ngrain = \"instrument\"\n\
                      [d.columns.delta01]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"underlying\"\n\
-                     [d.columns.daily_trading_pnl]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"underlying\"\n";
+                     [d.columns.daily_trading_pnl]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"underlying\"\n\
+                     [pricer]\ncomputed = true\n\
+                     [pricer.columns.instrument_ref]\ntype = \"utf8\"\nrole = \"key\"\n\
+                     [pricer.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"underlying\"\n";
         let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
         let (schema, diags) = SchemaSpec::from_doc(&doc);
         assert!(diags.is_empty(), "{diags:?}");
@@ -2267,6 +2308,184 @@ mod tests {
         let (h, vcx) = open_with_views(cx, None, views_with_explicit_default("wide"));
         let state = h.tile.read_with(&vcx, |t, cx| t.serialize(cx));
         assert_eq!(state["view"].as_str(), Some("wide"));
+    }
+
+    /// Views parsed from one builtin `views` layer, for the fixtures that
+    /// mix the blotter's views with ones over the computed `pricer`.
+    fn views_from(text: &str) -> Vec<ViewSpec> {
+        ViewSpec::from_doc(&merge_docs(
+            "views",
+            &[LayerDoc::builtin("views", text).unwrap()],
+        ))
+        .0
+    }
+
+    /// One blotter view over `d` beside one over the computed `pricer`
+    /// dataset, as `views.toml` holds them side by side in the real app.
+    fn tree_and_vanilla() -> Vec<ViewSpec> {
+        views_from(
+            "[tree]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n[[tree.columns]]\nname = \"delta01\"\n\
+             [vanilla]\ndataset = \"pricer\"\n[[vanilla.columns]]\nname = \"npv\"\n",
+        )
+    }
+
+    /// A computed view that sorts before every blotter view, with no
+    /// `default`: the shape the shipped configuration has, where the
+    /// pricer's `barrier` sorts before the demo's `tree`.
+    fn apricot_and_tree() -> Vec<ViewSpec> {
+        views_from(
+            "[apricot]\ndataset = \"pricer\"\n[[apricot.columns]]\nname = \"npv\"\n\
+             [tree]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n[[tree.columns]]\nname = \"delta01\"\n",
+        )
+    }
+
+    /// The first-configured fallback skips a computed view, or a fresh
+    /// tile would open on a view the blotter itself refuses.
+    #[gpui::test]
+    fn a_fresh_tile_skips_a_computed_view_that_sorts_first(cx: &mut gpui::TestAppContext) {
+        let (h, vcx) = open_with_views(cx, None, apricot_and_tree());
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.view_name.clone()), "tree");
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.error_text()), None);
+    }
+
+    /// A record naming the computed view that sorts first falls back past
+    /// it to the first blotter view, with the refusal as its notice.
+    #[gpui::test]
+    fn restoring_a_computed_view_that_sorts_first_falls_back_past_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let restored: toml::Table = "view = \"apricot\"".parse().unwrap();
+        let (h, vcx) = open_with_views(cx, Some(&restored), apricot_and_tree());
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.view_name.clone()), "tree");
+        let notice = h
+            .tile
+            .read_with(&vcx, |t, _| t.error_text())
+            .expect("the fallback carries a notice");
+        assert!(notice.contains("computed dataset 'pricer'"), "{notice}");
+    }
+
+    /// Switching views while the fallback's first query is still out
+    /// drops the pending refusal: it was about the record, and the new
+    /// view's first snapshot answers the trader, not the record.
+    #[gpui::test]
+    fn a_view_switch_drops_the_pending_restore_refusal(cx: &mut gpui::TestAppContext) {
+        let restored: toml::Table = "view = \"vanilla\"".parse().unwrap();
+        let views = views_from(
+            "[tree]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n[[tree.columns]]\nname = \"delta01\"\n\
+             [vanilla]\ndataset = \"pricer\"\n[[vanilla.columns]]\nname = \"npv\"\n\
+             [wide]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n[[wide.columns]]\nname = \"delta01\"\n",
+        );
+        let (h, mut vcx) = open_with_views(cx, Some(&restored), views);
+        h.tile.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        let _first = next_query(&h.requests);
+        h.tile.update_in(&mut vcx, |t, window, cx| {
+            t.command("view wide", window, cx).unwrap()
+        });
+        let p = next_query(&h.requests);
+        deliver(&h, &mut vcx, p.tag, Ok(snapshot()));
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.error_text()),
+            None,
+            "the new view's first snapshot carries no refusal about the record"
+        );
+    }
+
+    /// With every configured view computed there is no fallback: the tile
+    /// reports the unconfigured view and nothing stays pending for a
+    /// delivery that can never come.
+    #[gpui::test]
+    fn an_all_computed_configuration_leaves_no_pending_refusal(cx: &mut gpui::TestAppContext) {
+        let restored: toml::Table = "view = \"vanilla\"".parse().unwrap();
+        let views =
+            views_from("[vanilla]\ndataset = \"pricer\"\n[[vanilla.columns]]\nname = \"npv\"\n");
+        let (h, mut vcx) = open_with_views(cx, Some(&restored), views);
+        h.tile.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.error_text()),
+            Some("view '' is not configured".into())
+        );
+        assert!(
+            h.tile
+                .read_with(&vcx, |t, _| t.restored_view_refusal.is_none())
+        );
+    }
+
+    /// A view over a computed dataset is a module's to answer: the blotter
+    /// neither offers it in `:view` completion nor opens it by command.
+    #[gpui::test]
+    fn view_completion_and_command_exclude_views_over_a_computed_dataset(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_with_views(cx, None, tree_and_vanilla());
+        let words = h
+            .tile
+            .read_with(&vcx, |t, cx| t.completions("view ", 5, cx));
+        assert_eq!(
+            words,
+            vec!["tree"],
+            "a computed dataset's view is not offered"
+        );
+        let err = h
+            .tile
+            .update_in(&mut vcx, |t, window, cx| {
+                t.command("view vanilla", window, cx)
+            })
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "view 'vanilla' is over computed dataset 'pricer', which a module answers for; the blotter cannot show it"
+        );
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.view_name.clone()),
+            "tree",
+            "the current view is kept"
+        );
+    }
+
+    /// A session record naming a view over a computed dataset restores
+    /// the default view instead, and says why in the tile's notice.
+    #[gpui::test]
+    fn restoring_a_view_over_a_computed_dataset_falls_back_to_the_default(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let restored: toml::Table = "view = \"vanilla\"".parse().unwrap();
+        let (h, vcx) = open_with_views(cx, Some(&restored), tree_and_vanilla());
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.view_name.clone()), "tree");
+        let notice = h
+            .tile
+            .read_with(&vcx, |t, _| t.error_text())
+            .expect("the fallback carries a notice");
+        assert!(notice.contains("computed dataset 'pricer'"), "{notice}");
+    }
+
+    /// The fallback view's own first snapshot lands within milliseconds of
+    /// opening; a notice it cleared would never be read. It outlives that
+    /// delivery and clears on the next, which follows something the
+    /// trader did.
+    #[gpui::test]
+    fn the_restore_fallback_notice_outlives_the_fallback_views_first_delivery(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let restored: toml::Table = "view = \"vanilla\"".parse().unwrap();
+        let (h, mut vcx) = open_with_views(cx, Some(&restored), tree_and_vanilla());
+        h.tile.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut vcx, p.tag, Ok(snapshot()));
+        let notice = h
+            .tile
+            .read_with(&vcx, |t, _| t.error_text())
+            .expect("the notice survives the fallback view's first snapshot");
+        assert!(notice.contains("computed dataset 'pricer'"), "{notice}");
+        h.tile.update_in(&mut vcx, |t, window, cx| {
+            t.command("group lhu", window, cx).unwrap()
+        });
+        let p = next_query(&h.requests);
+        deliver(&h, &mut vcx, p.tag, Ok(snapshot()));
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.error_text()),
+            None,
+            "a delivery after the trader acted clears it"
+        );
     }
 
     /// Two tiles sharing one frame, one `DataHandle`/`Receiver<Request>`
@@ -2812,7 +3031,7 @@ mod tests {
     #[gpui::test]
     fn shift_click_extends_a_block_from_the_cursor(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = delivered(cx);
-        act(&h, &mut cx, "blotter::right"); // cursor (0, 1)
+        act(&h, &mut cx, "motion::right"); // cursor (0, 1)
         let at = centre(&mut cx, "blotter-cell-2-2");
         cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::shift());
         cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::shift());
@@ -2822,7 +3041,7 @@ mod tests {
             .unwrap();
         assert_eq!((r.kind, r.rows, r.cols), (SelectKind::Block, 0..3, 1..3));
         // The keyboard keeps extending what the mouse started.
-        act(&h, &mut cx, "blotter::up");
+        act(&h, &mut cx, "motion::up");
         let r = h
             .tile
             .read_with(&cx, |t, cx| t.table().read(cx).delegate().resolved.clone())
@@ -2861,7 +3080,7 @@ mod tests {
             })
         };
         act(&h, &mut cx, "blotter::visual_rows");
-        act(&h, &mut cx, "blotter::down"); // rows 0..=1, cursor on 1
+        act(&h, &mut cx, "motion::down"); // rows 0..=1, cursor on 1
         assert_eq!(state(&mut cx), (true, 1), "fixture");
 
         let at = beside(&mut cx, 1);
@@ -2886,7 +3105,7 @@ mod tests {
     fn painting_the_tile_resolves_the_footer_colors(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = delivered(cx);
         act(&h, &mut cx, "blotter::visual_rows");
-        act(&h, &mut cx, "blotter::down");
+        act(&h, &mut cx, "motion::down");
         cx.run_until_parked();
         let (groups, paints) = h.tile.read_with(&cx, |t, cx| {
             let d = t.table().read(cx).delegate();
@@ -2903,7 +3122,7 @@ mod tests {
     fn a_selection_prepares_its_extent(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = delivered(cx);
         act(&h, &mut cx, "blotter::visual_block"); // the tree column only
-        act(&h, &mut cx, "blotter::down");
+        act(&h, &mut cx, "motion::down");
         let extent = |cx: &mut gpui::VisualTestContext| {
             h.tile.read_with(cx, |t, cx| {
                 let d = t.table().read(cx).delegate();
@@ -2911,7 +3130,7 @@ mod tests {
             })
         };
         assert_eq!(extent(&mut cx), (true, Some("2 rows × 1 col".into())));
-        act(&h, &mut cx, "blotter::right"); // into delta01: now summarised
+        act(&h, &mut cx, "motion::right"); // into delta01: now summarised
         assert_eq!(extent(&mut cx), (false, Some("2 rows × 2 cols".into())));
         act(&h, &mut cx, "blotter::escape");
         assert_eq!(extent(&mut cx), (true, None));
@@ -2924,8 +3143,8 @@ mod tests {
     fn the_cursor_echo_never_clears_a_keyboard_selection(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = delivered(cx);
         act(&h, &mut cx, "blotter::visual_rows");
-        act(&h, &mut cx, "blotter::down");
-        act(&h, &mut cx, "blotter::down");
+        act(&h, &mut cx, "motion::down");
+        act(&h, &mut cx, "motion::down");
         cx.run_until_parked();
         let r = h
             .tile
@@ -3038,7 +3257,7 @@ mod tests {
     fn shift_v_selects_rows_and_y_copies_them_with_every_column(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = delivered(cx);
         act(&h, &mut cx, "blotter::visual_rows");
-        act(&h, &mut cx, "blotter::down");
+        act(&h, &mut cx, "motion::down");
         act(&h, &mut cx, "blotter::yank");
         assert_eq!(
             clip(&mut cx).as_deref(),
@@ -3058,10 +3277,10 @@ mod tests {
     #[gpui::test]
     fn v_selects_a_block_and_y_copies_only_the_block(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = delivered(cx);
-        act(&h, &mut cx, "blotter::right"); // cursor (0, delta01)
+        act(&h, &mut cx, "motion::right"); // cursor (0, delta01)
         act(&h, &mut cx, "blotter::visual_block");
-        act(&h, &mut cx, "blotter::down");
-        act(&h, &mut cx, "blotter::right"); // block rows 0..2 × cols 1..3
+        act(&h, &mut cx, "motion::down");
+        act(&h, &mut cx, "motion::right"); // block rows 0..2 × cols 1..3
         act(&h, &mut cx, "blotter::yank");
         assert_eq!(
             clip(&mut cx).as_deref(),
@@ -3083,7 +3302,7 @@ mod tests {
             })
         };
         act(&h, &mut cx, "blotter::visual_rows");
-        act(&h, &mut cx, "blotter::down");
+        act(&h, &mut cx, "motion::down");
         act(&h, &mut cx, "blotter::visual_block");
         assert_eq!(kind(&mut cx), Some(SelectKind::Block));
         let rows = h.tile.read_with(&cx, |t, cx| {
@@ -3121,10 +3340,10 @@ mod tests {
     #[gpui::test]
     fn the_footer_sums_a_group_and_its_child_once(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = delivered(cx);
-        act(&h, &mut cx, "blotter::down"); // L1
+        act(&h, &mut cx, "motion::down"); // L1
         act(&h, &mut cx, "blotter::expand"); // shown: root, L1, SPX, L2
         act(&h, &mut cx, "blotter::visual_rows");
-        act(&h, &mut cx, "blotter::down"); // L1 + SPX
+        act(&h, &mut cx, "motion::down"); // L1 + SPX
         let summary = h
             .tile
             .read_with(&cx, |t, cx| t.table().read(cx).delegate().summary.clone());
@@ -3138,9 +3357,9 @@ mod tests {
     #[gpui::test]
     fn a_redelivery_keeps_the_selection_on_the_same_rows(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = delivered(cx);
-        act(&h, &mut cx, "blotter::down"); // L1
+        act(&h, &mut cx, "motion::down"); // L1
         act(&h, &mut cx, "blotter::visual_rows");
-        act(&h, &mut cx, "blotter::down"); // L1..L2 = rows 1..3
+        act(&h, &mut cx, "motion::down"); // L1..L2 = rows 1..3
         // expand_all reflattens at once (SPX is materialised, so it lands
         // between L1 and L2) and always requeries.
         act(&h, &mut cx, "blotter::expand_all");
@@ -3166,13 +3385,13 @@ mod tests {
     #[gpui::test]
     fn a_selection_whose_anchor_row_vanishes_clears_with_a_notice(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = delivered(cx);
-        act(&h, &mut cx, "blotter::bottom"); // L2
+        act(&h, &mut cx, "motion::bottom"); // L2
         act(&h, &mut cx, "blotter::visual_rows");
         // Narrow to rows that exclude L2.
         h.tile.update(&mut cx, |t, cx| {
             t.table()
                 .update(cx, |t, _| t.delegate_mut().set_narrowed(Some(vec![0, 1])));
-            t.dispatch(&ActionId("blotter::up".into()), None, cx);
+            t.dispatch(&ActionId("motion::up".into()), None, cx);
         });
         let (sel, err) = h.tile.read_with(&cx, |t, cx| {
             (
@@ -3243,7 +3462,7 @@ mod tests {
             t.with_delegate(cx, |d| d.cursor.col = model_ix);
         });
         act(&h, &mut cx, "blotter::visual_block");
-        act(&h, &mut cx, "blotter::right");
+        act(&h, &mut cx, "motion::right");
 
         h.tile.update(&mut cx, |t, _| {
             t.views
@@ -3284,13 +3503,13 @@ mod tests {
             h.tile
                 .update(cx, |t, cx| t.dispatch(&ActionId(id.into()), count, cx))
         };
-        assert!(act(&mut cx, "blotter::down", Some(2)));
+        assert!(act(&mut cx, "motion::down", Some(2)));
         assert_eq!(
             h.tile
                 .read_with(&cx, |t, cx| t.table().read(cx).delegate().cursor.row),
             2
         );
-        act(&mut cx, "blotter::up", None);
+        act(&mut cx, "motion::up", None);
         // `ctrl+f`/`ctrl+b`: the ±10 step every dialog list has. Ten
         // outruns this snapshot, so it clamps to the last row, and
         // `ctrl+b` from there lands on row 0 — not on row -8.
@@ -3298,11 +3517,11 @@ mod tests {
             h.tile
                 .read_with(cx, |t, cx| t.table().read(cx).delegate().cursor.row)
         };
-        assert!(act(&mut cx, "blotter::page_down_full", None));
+        assert!(act(&mut cx, "motion::page_down", None));
         assert_eq!(row(&mut cx), 2, "ctrl+f clamps to the last row");
-        assert!(act(&mut cx, "blotter::page_up_full", None));
+        assert!(act(&mut cx, "motion::page_up", None));
         assert_eq!(row(&mut cx), 0, "ctrl+b clamps to the first row");
-        act(&mut cx, "blotter::down", Some(1));
+        act(&mut cx, "motion::down", Some(1));
         act(&mut cx, "blotter::expand", None);
         let rows = h
             .tile
@@ -3320,7 +3539,7 @@ mod tests {
         // DFS order puts SPX (L1's already-materialised child) right
         // after L1 in `shown`; the row that genuinely lacks a fetched
         // child at this point is L2, two rows down from L1.
-        act(&mut cx, "blotter::down", Some(2));
+        act(&mut cx, "motion::down", Some(2));
         act(&mut cx, "blotter::expand", None);
         let p = next_query(&h.requests);
         assert_eq!(
@@ -3328,9 +3547,9 @@ mod tests {
             "opening at the bound requeries one level deeper"
         );
 
-        act(&mut cx, "blotter::top", None);
+        act(&mut cx, "motion::top", None);
         act(&mut cx, "blotter::visual_rows", None);
-        act(&mut cx, "blotter::down", Some(1));
+        act(&mut cx, "motion::down", Some(1));
         act(&mut cx, "blotter::yank", None);
         let clip = cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
         assert_eq!(
@@ -3364,14 +3583,14 @@ mod tests {
         };
         assert_eq!(shown_rows(&h, &cx), vec![0, 1, 2]);
 
-        assert!(act(&mut cx, "blotter::bottom"));
+        assert!(act(&mut cx, "motion::bottom"));
         assert_eq!(cursor_row(&h, &cx), 2);
-        assert!(act(&mut cx, "blotter::down"));
+        assert!(act(&mut cx, "motion::down"));
         assert_eq!(cursor_row(&h, &cx), 0, "a bare j wraps in normal mode");
 
-        assert!(act(&mut cx, "blotter::bottom"));
+        assert!(act(&mut cx, "motion::bottom"));
         assert!(act(&mut cx, "blotter::visual_rows"));
-        assert!(act(&mut cx, "blotter::down"));
+        assert!(act(&mut cx, "motion::down"));
         assert_eq!(
             cursor_row(&h, &cx),
             2,
@@ -3388,6 +3607,39 @@ mod tests {
             Some(2..3),
             "and the selection anchor is intact"
         );
+    }
+
+    /// The blotter publishes `grid`, the flag the shell's shared motion
+    /// bindings are written under; without it no motion key reaches it.
+    #[gpui::test]
+    fn the_key_context_publishes_the_grid_flag(cx: &mut gpui::TestAppContext) {
+        let (h, cx) = open(cx);
+        let ctx = h.tile.read_with(&cx, |t, cx| t.key_context(cx));
+        assert!(ctx.has_flag(geode_shell::keymap::GRID));
+        assert_eq!(ctx.get("mode"), Some("normal"));
+    }
+
+    /// Motions over a blotter with no rows yet change nothing.
+    #[gpui::test]
+    fn motions_on_an_empty_blotter_change_nothing(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        for (id, count) in [
+            ("motion::down", None),
+            ("motion::bottom", None),
+            ("motion::bottom", Some(5)),
+            ("motion::line_end", None),
+            ("motion::up", Some(3)),
+        ] {
+            assert!(
+                h.tile
+                    .update(&mut cx, |t, cx| t.dispatch(&ActionId(id.into()), count, cx))
+            );
+            let (row, col) = h.tile.read_with(&cx, |t, cx| {
+                let d = t.table().read(cx).delegate();
+                (d.cursor.row, d.cursor.col)
+            });
+            assert_eq!((row, col), (0, 0), "{id} {count:?}");
+        }
     }
 
     #[gpui::test]
@@ -3525,7 +3777,7 @@ mod tests {
         assert!(act(&mut cx, "blotter::sort_cycle_abs"));
         assert_eq!(sort(&mut cx), None);
 
-        act(&mut cx, "blotter::right");
+        act(&mut cx, "motion::right");
         act(&mut cx, "blotter::sort_cycle");
         assert_eq!(sort(&mut cx), Some(("delta01".to_string(), SortOrder::Asc)));
         assert_eq!(header(&mut cx), "delta01");
@@ -3791,10 +4043,10 @@ mod tests {
 
         // Rows: root 9, L1 5, L2 4, L1/SPX 5. Open L1 and put the cursor
         // on L2, so that an ascending sort moves L2 above L1's subtree.
-        act(&mut cx, "blotter::down");
+        act(&mut cx, "motion::down");
         act(&mut cx, "blotter::expand");
-        act(&mut cx, "blotter::down");
-        act(&mut cx, "blotter::down");
+        act(&mut cx, "motion::down");
+        act(&mut cx, "motion::down");
         assert_eq!(
             row_of(&mut cx),
             (3, 2),
@@ -4549,7 +4801,7 @@ mod tests {
         let p = next_query(&h.requests);
         deliver(&h, &mut cx, p.tag, Ok(snapshot()));
         h.tile.update(&mut cx, |t, cx| {
-            t.dispatch(&ActionId("blotter::down".into()), None, cx);
+            t.dispatch(&ActionId("motion::down".into()), None, cx);
             t.dispatch(&ActionId("blotter::expand".into()), None, cx);
         });
         assert_eq!(shown_rows(&h, &cx), vec![0, 1, 3, 2]);
@@ -4754,7 +5006,7 @@ mod tests {
         // already materialised — no requery needed, per
         // `motions_expansion_and_yank`).
         h.tile.update(&mut cx, |t, cx| {
-            t.dispatch(&ActionId("blotter::down".into()), None, cx)
+            t.dispatch(&ActionId("motion::down".into()), None, cx)
         });
         h.tile.update(&mut cx, |t, cx| {
             t.dispatch(&ActionId("blotter::expand".into()), None, cx)
@@ -4816,7 +5068,7 @@ mod tests {
         deliver(&h, &mut cx, p.tag, Ok(attributed_snapshot()));
 
         h.tile.update(&mut cx, |t, cx| {
-            t.dispatch(&ActionId("blotter::down".into()), None, cx)
+            t.dispatch(&ActionId("motion::down".into()), None, cx)
         });
         h.tile.update(&mut cx, |t, cx| {
             t.dispatch(&ActionId("blotter::expand".into()), None, cx)
@@ -4884,7 +5136,7 @@ mod tests {
         );
 
         h.tile.update(&mut cx, |t, cx| {
-            t.dispatch(&ActionId("blotter::last_col".into()), None, cx)
+            t.dispatch(&ActionId("motion::line_end".into()), None, cx)
         });
         cx.update(|window, cx| {
             let _ = window.draw(cx);
@@ -4982,7 +5234,7 @@ mod tests {
         );
 
         h.tile.update(&mut cx, |t, cx| {
-            t.dispatch(&ActionId("blotter::down".into()), Some(2), cx)
+            t.dispatch(&ActionId("motion::down".into()), Some(2), cx)
         });
         cx.update(|window, cx| {
             let _ = window.draw(cx);
@@ -5867,7 +6119,7 @@ mod tests {
         });
         assert_eq!(
             resolved,
-            Some(crate::colour_cache::Resolved::plain(
+            Some(geode_tile::colour::Resolved::plain(
                 geode_shell::shell::colours::to_hsla(danger)
             )),
             "the tile's own colours must reach the delegate with the plan"

@@ -353,6 +353,7 @@ fn current_tiles_reflects_live_occupants_and_restored_state_reaches_the_factory(
         None,
         &crate::session::PinnedRecords::new(),
         &crate::palette_usage::PaletteUsage::new(),
+        &crate::session::PageRecords::new(),
     );
     let ws1: toml::Table = r#"
         focused = 1

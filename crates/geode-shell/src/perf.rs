@@ -132,6 +132,16 @@ impl FrameHistogram {
         self.discarded_idle
     }
 
+    /// Per-bucket counts, aligned with [`BUCKET_UPPER_BOUNDS_MICROS`].
+    pub fn buckets(&self) -> &[u32; NUM_BUCKETS] {
+        &self.buckets
+    }
+
+    /// Samples above the last bound but below the idle cutoff.
+    pub fn overflow(&self) -> u32 {
+        self.overflow
+    }
+
     /// Approximate percentile (`p` in 0..=100), as microseconds: the upper
     /// bound of the bucket containing the p-th sample, capped at the
     /// observed max (so p100 — and any percentile landing in the top or

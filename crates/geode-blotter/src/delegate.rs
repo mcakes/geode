@@ -3,7 +3,6 @@
 //! rows and aggregates; render reads cached text, glyphs, and selection state.
 //! Theme and gutter presentation use separate memos to avoid repeated work.
 
-use crate::colour_cache::{ColourCache, Resolved as ColourResolved};
 use crate::core::cache::{FormatCache, cell};
 use crate::core::cursor::{Cursor, find_by_path, restore_by_path};
 use crate::core::expansion::{Expansion, Path, depth_bound, path_of};
@@ -22,6 +21,7 @@ use geode_shell::linenumbers::{GUTTER_GAP_PX, LineNumbers, gutter_number};
 use geode_shell::shell::aggregates::{AggregateCell, CellPaint};
 use geode_shell::shell::colours::{anchors_from_theme, theme_signature, tokens_from_theme};
 use geode_shell::shell::control::{self, PointerStates as _};
+use geode_tile::colour::{ColourCache, Resolved as ColourResolved};
 use gpui::prelude::*;
 use gpui::{
     App, ClickEvent, Context, Div, EventEmitter, Hsla, IntoElement, MouseButton, MouseDownEvent,
@@ -163,7 +163,7 @@ pub struct BlotterDelegate {
     /// reload requeries visible tiles, so changed definitions reach this
     /// delegate with the next applied snapshot.
     colours: Arc<NamedColours>,
-    /// One resolve per name per theme; see `colour_cache`'s module doc.
+    /// One resolve per name per theme; see `geode_tile::colour`'s module doc.
     colour_cache: ColourCache,
     /// Theme-derived `Anchors`/`Tokens`, memoized behind all 28 input colours.
     /// Named-cell, header, and footer lookups compare the signature on each

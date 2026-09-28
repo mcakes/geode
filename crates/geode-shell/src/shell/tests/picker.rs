@@ -67,6 +67,8 @@ pub(super) fn services_with_pickable() -> ShellServices {
         keymap_diagnostics: Vec::new(),
         keymap_fragments: Vec::new(),
         keymap_fragment_diagnostics: Vec::new(),
+        pages: crate::module::PageRoster::new(),
+        restored_pages: std::collections::BTreeMap::new(),
     }
 }
 

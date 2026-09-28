@@ -61,6 +61,11 @@ pub struct DatasetSpec {
     /// Application-written document dataset. Source declarations cannot feed
     /// it, and publishes do not advance the frame's external-data version.
     pub local: bool,
+    /// Measures family only: a module computes this dataset in process.
+    /// No source may feed it, no table is created for it, and the query
+    /// path refuses it; its value is vocabulary (columns, roles, grains)
+    /// that views, scopes, groupings and the Views dialog share.
+    pub computed: bool,
     /// Series family only: its retention windows. `None` on every other
     /// family, `Some` (possibly both unbounded) on a series dataset.
     pub series_retention: Option<SeriesRetention>,
@@ -69,6 +74,10 @@ pub struct DatasetSpec {
 impl DatasetSpec {
     pub fn is_document(&self) -> bool {
         self.family == Family::Document
+    }
+
+    pub fn is_computed(&self) -> bool {
+        self.computed
     }
 
     pub fn is_series(&self) -> bool {
@@ -259,6 +268,24 @@ impl SchemaSpec {
                     }
                 },
             };
+            let computed = match ds_value.get("computed") {
+                None => false,
+                Some(v) => match v.as_bool() {
+                    Some(b) => b,
+                    None => {
+                        diags.push(Diagnostic {
+                            severity: Severity::Warning,
+                            layer: None,
+                            file: None,
+                            message: format!(
+                                "dataset '{ds_name}': 'computed' must be true or false; treated as false"
+                            ),
+                            path: Some(format!("datasets.{ds_name}.computed")),
+                        });
+                        false
+                    }
+                },
+            };
             let string_list =
                 |field: &str, diags: &mut Vec<Diagnostic>| -> Result<Vec<String>, ()> {
                     match ds_value.get(field) {
@@ -313,6 +340,7 @@ impl SchemaSpec {
                 key,
                 axes,
                 local,
+                computed,
                 series_retention: None,
             };
             if family == Family::Series {
@@ -450,6 +478,20 @@ fn validate_dataset(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
         ds.local = false;
     }
 
+    if ds.computed && ds.family != Family::Measures {
+        diags.push(Diagnostic {
+            severity: Severity::Error,
+            layer: None,
+            file: None,
+            message: format!(
+                "dataset '{}': 'computed' is accepted on the measures family only",
+                ds.name
+            ),
+            path: Some(format!("datasets.{}.computed", ds.name)),
+        });
+        ds.computed = false;
+    }
+
     if ds.is_series() {
         diags.extend(validate_series(ds));
         return diags;
@@ -491,22 +533,25 @@ fn validate_dataset(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
     // Every grain in use groups by its key columns, so each must be
     // declared. Undeclared, the generated SQL references a column the
     // staging table does not have and the whole load fails on a binder
-    // error rather than a readable diagnostic.
-    for grain in ds.grains() {
-        for key in grain.key_columns() {
-            if ds.column(key).is_none() {
-                // The key column itself is the one this diagnostic is
-                // *about* even though it is not declared — pointing the
-                // path at it (rather than the dataset as a whole) is what
-                // lets a trader jump straight to where it should be added.
-                diags.push(note(
-                    format!("datasets.{}.columns.{}", ds.name, key),
-                    format!(
-                        "dataset '{}': grain {:?} requires key column '{}', which \
-                         is not declared",
-                        ds.name, grain, key
-                    ),
-                ));
+    // error rather than a readable diagnostic. A computed dataset has no
+    // staging table to bind, so an undeclared key column costs nothing.
+    if !ds.computed {
+        for grain in ds.grains() {
+            for key in grain.key_columns() {
+                if ds.column(key).is_none() {
+                    // The key column itself is the one this diagnostic is
+                    // *about* even though it is not declared — pointing the
+                    // path at it (rather than the dataset as a whole) is what
+                    // lets a trader jump straight to where it should be added.
+                    diags.push(note(
+                        format!("datasets.{}.columns.{}", ds.name, key),
+                        format!(
+                            "dataset '{}': grain {:?} requires key column '{}', which \
+                             is not declared",
+                            ds.name, grain, key
+                        ),
+                    ));
+                }
             }
         }
     }
@@ -1211,6 +1256,89 @@ role = "measure"
         assert_eq!(d.severity, Severity::Error);
         assert!(d.message.contains("document family"), "{}", d.message);
         assert!(!schema.dataset("risk").unwrap().local, "cleared");
+    }
+
+    #[test]
+    fn computed_is_read_on_a_measure_dataset_and_suppresses_the_grain_key_note() {
+        let (schema, diags) = SchemaSpec::from_doc(&doc(r#"
+[pricer]
+computed = true
+[pricer.columns.instrument_ref]
+type = "utf8"
+role = "key"
+[pricer.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+[pricer.columns.npv]
+type = "f64"
+role = "measure"
+grain = "underlying"
+"#));
+        let ds = schema.dataset("pricer").expect("kept");
+        assert!(ds.computed && ds.is_computed());
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.message.contains("requires key column")),
+            "no staging table, so no key-column note: {diags:?}"
+        );
+        assert_eq!(
+            ds.groupable_columns(),
+            vec!["instrument_ref", "underlying_ref"]
+        );
+    }
+
+    #[test]
+    fn computed_on_a_document_dataset_is_an_error_and_cleared() {
+        let (schema, diags) = SchemaSpec::from_doc(&doc(r#"
+[sheets]
+family = "document"
+computed = true
+key = ["sheet"]
+axes = ["line"]
+[sheets.columns.sheet]
+type = "utf8"
+role = "dimension"
+[sheets.columns.line]
+type = "i64"
+role = "axis"
+[sheets.columns.qty]
+type = "i64"
+role = "value"
+"#));
+        let d = diags
+            .iter()
+            .find(|d| d.path.as_deref() == Some("datasets.sheets.computed"))
+            .expect("a diagnostic at the key");
+        assert_eq!(d.severity, Severity::Error);
+        assert!(d.message.contains("measures family only"), "{}", d.message);
+        assert!(!schema.dataset("sheets").unwrap().computed, "cleared");
+    }
+
+    #[test]
+    fn a_non_bool_computed_is_a_warning_and_false() {
+        let (schema, diags) = SchemaSpec::from_doc(&doc(
+            "[risk]\ncomputed = \"yes\"\n[risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\n",
+        ));
+        assert!(!schema.dataset("risk").unwrap().computed);
+        let d = diags
+            .iter()
+            .find(|d| d.path.as_deref() == Some("datasets.risk.computed"))
+            .unwrap();
+        assert_eq!(d.severity, Severity::Warning);
+    }
+
+    #[test]
+    fn an_ordinary_measure_dataset_still_gets_the_grain_key_note() {
+        let (_, diags) = SchemaSpec::from_doc(&doc(
+            "[risk]\n[risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"instrument\"\n",
+        ));
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.message.contains("requires key column 'book'")),
+            "{diags:?}"
+        );
     }
 
     #[test]

@@ -40,6 +40,8 @@ has the surface. The pricer and market-data use all four, timeseries the
 popups, menus and notice line, and the blotter the notice line. Diagnostics
 has none of them.
 
+- Grid motions and menu steps are the shared motion vocabulary; see
+  [Motion](#motion).
 - A popup is deferred above the tile's clip and snaps inside the window with
   an 8-pixel margin. An action menu occludes what it covers, so its hover and
   presses do not reach the tile beneath.
@@ -71,6 +73,50 @@ has none of them.
   tile.
 - A notice is a status (muted), warning or danger line in the theme's text
   tones; which of a tile's notices shows is the tile's own precedence.
+
+### Motion
+
+The motion keys are one shared vocabulary: the shell's `motion::*` actions
+(palette category "Motion"), bound once in the builtin keymap and applied by
+`geode_tile::motion` (see [shared motions](keymaps.md#shared-motions)). A tile
+whose grid cursor takes motions publishes `grid`, and every grid motion is
+bound under the one context `grid && (mode == normal || mode == visual)`, so
+remapping a motion in the keybindings dialog changes it in every grid tile at
+once. The blotter, the market-data panel and the line pricer move on them, and
+so does the diagnostics page's cursor (rows only). The rules:
+
+- A bare `j`/`k` (`down`/`up`) wraps at the ends, except while a selection is
+  live, where it clamps: wrapping past the anchor would invert the selection.
+- Every counted move clamps, `1j` included.
+- A bare `g g`/`G` goes to the first/last row; a counted one goes to that
+  1-based row, clamped to the last (`5G` and `5gg` both land on row 5).
+- `ctrl+d`/`ctrl+u` move 5 rows and `ctrl+f`/`ctrl+b` (and
+  `pagedown`/`pageup`) 10, times the count.
+- `h`/`l` clamp at the first and last column; `^`/`home` and `$`/`end` go to
+  the first and last column.
+- The arrow keys are bound beside the vim keys, so they move every grid tile.
+- A grid with no rows or columns ignores every motion.
+
+Each tile's own behaviour around the shared result:
+
+- Market-data: any upward row motion from row 0 (`k`/`up`, `ctrl+u`,
+  `ctrl+b`, `pageup`), bare or counted, enters the header attribute strip
+  instead of wrapping when the kind has attributes (see
+  [market-data](#market-data-documents)).
+- Pricer: a motion dispatched from the palette while the entry bar, the cell
+  editor or the action menu is open closes it first, then moves.
+- Diagnostics: a bare `G` in the Log section resumes following the tail; any
+  other row motion, a counted `G` included, stops following.
+- Blotter: the column motions move its column cursor.
+- Timeseries has no grid cursor and never publishes `grid`, so its own `h`/`l`
+  pan the view and `g`/`shift+g` jump it to the start and end.
+
+Menu and popup-list steps are the shared `motion::menu_down`/`menu_up`
+(`j`/`down`, `k`/`up`), bound once under `tilelist`, which a tile publishes
+while its `.` menu, or timeseries' series list or range/frequency menu, is
+open. An open menu over a grid takes those keys and the grid stays put; a
+count steps that many rows. What a step means stays the list's own: a menu
+clamps over its enabled rows, the series list wraps like the chips.
 
 ### Autosized columns
 
@@ -112,9 +158,16 @@ default widths. Each tile runs one method for both doors.
   40 rem at the 14 px rem).
 - **Blotter specifics.** Switching the blotter's view clears its fitted widths.
   A restored record whose view no longer exists opens the fallback view
-  without them. A grouping change drops the tree column's fitted width,
-  because its labels and depths belong to the grouping, and keeps the other
-  columns' widths.
+  without them. A view over a computed dataset, such as the pricer's, is
+  neither offered by `:view` completion nor opened by `:view`, which refuses
+  with `view '<name>' is over computed dataset '<dataset>', which a module
+  answers for; the blotter cannot show it`; a record naming one opens the
+  fallback view with that refusal as its notice, which outlives the fallback
+  view's first snapshot. The fallback (the explicit default, else the first
+  configured view) skips computed views too, so a fresh tile never opens on
+  one that sorts first. A grouping change drops the tree column's fitted
+  width, because its labels and depths belong to the grouping, and keeps the
+  other columns' widths.
 - **Fitted beats configured.** A fitted width overrides the configured one,
   including a `presentation.width` or pricer view width changed later, until
   `:autosize reset` or a refit.
@@ -122,9 +175,11 @@ default widths. Each tile runs one method for both doors.
   from which to rescale rem. After a font-size change, fitted widths behave
   like configured ones: run `:autosize` again. The blotter's header is painted
   in the UI font but measured with the mono advance, which usually
-  overestimates it slightly. Market data and the pricer keep
-  `col_resizable(false)`. A blotter column dragged wider still returns to its
-  fitted or configured width on the next refresh.
+  overestimates it slightly. Market data keeps `col_resizable(false)`; the
+  pricer's columns resize and reorder by pointer, on the open tile only, as
+  its known gaps under "Pricing and the line pricer" describe. A blotter
+  column dragged wider still returns to its fitted or configured width on
+  the next refresh.
 
 ## Blotter
 
@@ -180,6 +235,9 @@ the plain tile picker.
 planned non-tree columns with the cursor's column highlighted
 (`TileContent::tile_columns`). Hidden columns and dimensions folded into the
 tree are not in the plan and are not offered; reach them through the dialogs.
+
+Motions follow the [shared rules](#motion); the column motions (`h`/`l`,
+the arrows, `^`/`$`, `home`/`end`) move the blotter's column cursor.
 
 ### Selection
 
@@ -317,6 +375,13 @@ reason becomes the notice.
 A panel opened through an add (palette, tile picker, `open_with`, duplicate)
 with no underlying opens the underlying picker at once; a restored panel does
 not. Every panel kind accepts an underlying launch context.
+
+The panel moves on the [shared motions](#motion). The header attribute
+strip sits outside the wrap cycle: `k` (or `up`) on row 0, bare or counted,
+enters the strip when the kind has attributes. From the strip, a downward
+motion returns to row 0 at the column the cursor left from; `g g`/`G` return
+to the grid at that column, uncounted to the first or last row and counted to
+row N. A live selection's motions clamp and never enter the strip.
 
 `[ui] line_numbers` adds a gutter beside the grid's pinned column: the row
 label when shown, otherwise the first value column. The column widens for the
@@ -656,10 +721,11 @@ labels, then `Custom dates…` (`c`). `f` and the frequency trigger open the
 frequency menu: the six frequencies with their short labels. Short labels are
 text, not keys; `c` paints as a key. Both menus tick the value in force and
 open with the highlight on it (on `Custom dates…` while the range is absolute).
-`j`/`k` move, Enter or a click applies and closes, and Escape closes; a second
-`r` or `f` closes its own menu. A frequency the 500,000-point cap refuses over
-the current range, as resolved under the frame's as-of, is a disabled row
-reading `over cap`; choosing it shows the full cap message as the notice. The
+The shared menu keys (`j`/`k` or the arrows) move, Enter or a click applies
+and closes, and Escape closes; a second `r` or `f` closes its own menu. A
+frequency the 500,000-point cap refuses over the current range, as resolved
+under the frame's as-of, is a disabled row reading `over cap`; choosing it
+shows the full cap message as the notice. The
 rows follow range, frequency, and as-of changes while the menu is open. A
 preset the cap refuses at the current frequency is refused when chosen, with
 the reason as the notice and the menu left open. `:range` and `:freq` remain
@@ -738,45 +804,118 @@ committing and report its segment error. Segment display text is allocated by
 
 ## Diagnostics
 
-`geode-diagnostics` presents shell-owned operational state: sources, stored
-data, configuration, logs, and performance. The shell's `Diagnostics` entity
-and shared log ring supply the state. `:section <name>` and `[`/`]` select a
-section; log-level and performance-overlay changes use application actions.
-The session saves the section and filter.
+`geode-diagnostics` is the first [page](shell.md#pages): a surface in place
+of the tile surface presenting shell-owned operational state in five sections, with
+sources, stored data, configuration, logs, and performance. The shell's
+`Diagnostics` entity, the shared log ring, the loaded configuration, and the
+frame's requery statistics supply the state. `page::toggle_diagnostics`,
+bound to `mod+d` by default, opens and closes it from the keymap, the
+sidebar button, the palette row "Diagnostics: Open page", or the status
+bar's diagnostics summary; Escape with nothing above the page closes it, as
+does any workspace switch. The page is retained while the window lives, so
+filters, cursors, expansion, and the log tail survive a close and reopen;
+the session saves only the selected section. The toolbar stays above the
+page with every frame control live, so the as-of the Data section's
+resolved markers follow is the one the toolbar shows and can change
+(subject to the pinned-workspace limit below).
 
-| Section | Contents |
+The header carries the title, state chips derived from the same inputs as
+the status summary (worst source health with its count, config errors, data
+errors, and the catalog's arrival time or "catalog pending"), and a back
+control that dispatches `page::close`. A rail on the left lists the
+sections, each with a badge: the worst-health dot and source count, the
+dataset count, config error and warning counts, the error count in the
+retained log tail, and the frame p95. A click or the bracket keys select a
+section. The content pane is the section's toolbar, its table, and a detail
+strip: the table component paints every row at one height, so a row cannot
+grow, and the strip shows the cursor row's detail lines instead.
+
+| Section | Table and toolbar |
 |---|---|
-| Sources | Stopped data threads first (label, reason, and time; they stay until restart), then descriptions, health, loading activity, and poll times; worst reported health first, unreported sources last |
-| Data | Dataset and partition generations, with the resolved generation highlighted for a historical frame as-of |
-| Config | Current config-load diagnostics, data-layer diagnostics, prior load batches, and effective values with layer provenance |
-| Log | A bounded local tail of new records, with substring filtering and cursor following |
-| Perf | Frame and requery timing, dropped-event count, and database resource metrics from the catalog |
+| Sources | Source, Health (title-case label with the reason), Since (clock time and age), Shape, Last poll, Next poll, Ready, Loading. Worst reported health first by variant then name; unreported sources last, and a source known only from an ingest load gets a "no report yet" row with its loading text. Toolbar: a filter over name and health. Detail: the spec lines by shape and the health history. |
+| Data | One expandable row per dataset with Partitions, Latest gen, Published, Rows, Resolved, Live, and Loaded; a dataset expands to its generations, the one resolved under a historical frame as-of marked. Toolbar: filter, a chip reading `catalog as-of = frame` or `catalog pending`, Refresh catalog, Expand all, Collapse all. |
+| Config | Two panels. Left: the current diagnostics batch (config and data lanes) or, behind the History button, the prior batches newest first with their batch time; a click there moves only that panel's detail strip. Right, the cursor table: one expandable row per document and one row per leaf with Key, Value, and the Layer from `Config::explain`; a filter over `document.key` and value; an Open config directory button. |
+| Log | Time with milliseconds, Lvl, Target, and Message over the retained tail. Toolbar: level toggles, a target select over the targets seen in the tail plus `all`, a text filter over message and target, Follow, Clear, and Levels. Detail: the full record with a Copy button that puts it on the clipboard. |
+| Perf | No table. Stat tiles for frame p50 · p95 · max with the sample count and the 8 ms budget, requery submit→snapshot with the 50 ms budget, requery snapshot→paint, and dropped events; a frame-interval histogram whose bars past the budget take the warning tone; database and DuckDB memory tiles from the catalog; and the Performance overlay switch. |
 
-The tile rebuilds only the selected section. Diagnostics counters, frame
-as-of/config versions, and the log ring sequence gate observer work according
-to the section's inputs. Clock changes and local section, filter, or collapse
-changes also rebuild. Rendering shares prepared rows and cached header text;
-an unrelated performance tick does not walk the config documents.
+Keys in the page's own context: `j`/`k` move the cursor, `g g`/`G` jump,
+`ctrl+d`/`ctrl+u` move five rows and `ctrl+f`/`ctrl+b` ten, all with count
+prefixes; `[`/`]` cycle sections; `z o`/`z c` and Enter expand or collapse
+the cursor row where it expands (Data datasets, Config documents; a
+double-click does the same, a single click only selects); `/` focuses the
+section's filter input, which puts the page in insert mode, and Escape there
+returns to normal mode. On Perf, which paints no input, `/` does nothing.
+The state-changing controls have keyboard routes through the palette (Set
+log level…, Toggle performance overlay, Open config directory) and Follow
+has `G`; the remaining toolbar controls are pointer-only for now (see the
+limits below).
 
-The tile does not query ordinary view data, but it still participates in frame
-arrival so a global flip cannot wait on it indefinitely. Catalog requests are
-bounded and coalesced by the app bridge. Hiding the diagnostics surface removes
-watched demand while explicit catalog consumers can keep their own demand.
-An as-of change requests a fresh catalog while the tile is visible. Until the
-catalog's as-of matches the frame, resolved-generation markers are hidden.
+Controls that change application state go through a request channel or the
+shell-actions handle, never a direct call. A Levels pick queues
+`request_level` and the overlay switch `request_overlay_toggle`; the shell
+drains, applies, persists, and mirrors them, so the switch shows the shell's
+value. Refresh catalog queues an explicit catalog request the bridge serves;
+Open config directory dispatches `config::open_directory`. The Levels
+popover lists the default level, read-only, then the known targets, then
+any target a hand-edited `[log]` names outside that list, each with five
+level buttons. It offers no way to add a target: `[log]` keeps only the
+known targets across a reload, so an added one could not persist. A section
+change blurs a focused filter and closes the popover first, because the next
+section may paint neither.
 
-Each tile retains at most 4,096 log records and reuses its drain buffer. It
-starts at the ring's current sequence when opened. If the ring overwrites
-unread records, the next drain reports that gap; this is not a cumulative
-loss counter. Moving the cursor stops following, and `G` resumes it.
+The page rebuilds only the selected section, and only when that section's
+inputs changed: its `DiagVersions` counter, plus the frame as-of for Data,
+the config version for Config, or new ring records for Log. Clock changes
+and local section, filter, or expansion changes also rebuild. Badges and
+header chips refresh on any counter change or new record whatever section
+is shown, and that refresh is where the log tail is drained, so the Log
+badge counts errors in the whole tail. A hidden page drains nothing: a wrap
+while it is closed is reported by the drain that shows it again.
 
-Source ages reflect the last row rebuild rather than a ticking timer; the
-absolute timestamp remains visible. Config output is capped at 2,000 leaves
-per document with an omitted-count row, although traversal still visits all
-leaves. `/` filters the config and log sections by substring.
+The cursor moves on the [shared motions](#motion), rows only (the page
+publishes `grid` beside its mode, so the motions reach it in normal mode and
+stay out while the filter holds focus). Any motion stops following; a bare
+`G` resumes it, and a counted `G` jumps to that row without following. On an
+empty section a motion changes nothing, so a following empty log keeps
+following through `g g`.
 
-See the [crate guide](../../crates/geode-diagnostics/README.md) for the module
-map and observer, notification, and allocation contracts.
+Visibility drives watched demand: opening calls `watch` and closing
+`unwatch`, so a closed page holds no catalog demand while explicit
+consumers keep theirs. An as-of change requests a fresh catalog while the
+page is visible; until the catalog's as-of matches the frame, the resolved
+markers are hidden and the Data chip reads pending. The page submits no
+view query, and no flip barrier waits on it: the tiles beneath are hidden
+while it is open.
+
+The tail retains at most 4,096 records, starts at the ring's sequence when
+the page is first created, and reuses its drain buffer. If the ring
+overwrites unread records, the next drain leads the table with a loss row
+naming the gap measured at that drain, not a cumulative total; Clear
+forgets the retained records without moving the drain point. Following
+keeps the cursor on the last row; moving the cursor stops it, and `G` or
+the Follow switch resumes it.
+
+Source ages tick once a second while the page is visible and Sources is
+selected, rewriting the Since cells in place without a rebuild; on any
+other section, or a hidden page, the timer is dropped. Every other
+timestamp comes from the last rebuild.
+
+Limits: every table row has one height, so detail lives in the strip; the
+Config left panel is pointer-only, the keys staying with the
+effective-values table, and so are Clear, Copy, Refresh catalog, Expand all,
+Collapse all, the level toggles, and the target select, which have no
+page binding or palette action yet; columns resize but do not move or sort, since no
+section defines a sort order yet; the config explainer shows at most 2,000
+leaves per document with an omitted-count row but still traverses every
+leaf; stopped data threads show on the status bar, not in Sources. The page
+reads the frame of the workspace that was active when it was first opened:
+reopened over a different pinned workspace, its Data section follows that
+first workspace's as-of and its catalog chip can stay at "catalog pending"
+until the page is opened again from that workspace. A rebind on open is the
+planned fix.
+
+See the [crate guide](../../crates/geode-diagnostics/README.md) for the
+module map and the observer, notification, and allocation contracts.
 
 ## Pricing and the line pricer
 
@@ -807,11 +946,33 @@ an empty loaded sheet says `No lines — press o to add one`. A pricer this
 binary lacks is named in danger text with its recovery (`set [pricing]
 adapter and restart`).
 
+The sheet moves on the [shared motions](#motion). Column 0 of the cursor
+is the first plan column; the tree column is never a target. An empty sheet
+takes no motion. A motion dispatched from the palette while the entry bar, the
+cell editor or the action menu is open closes it first, then moves.
+
 Column headers are words carrying their unit (`spot %`, `vol pt`, `barrier
 type`, `priced at`), and default widths are checked against labels and representative large
-values (`-1,234,567.8900` for a greek, `-1,234,567.89` for a price) at the
+values (`-1,234,567.8900` for a greek, `-1,234,567.89` for npv) at the
 largest supported font size. These examples do not bound every possible
-value. A view's `label` and `width` override the defaults. Both bundled views end in a `status` column, which says
+value. A view's `label` and `width` override the defaults. Columns are
+managed as any view's: the Views dialog's column stage (order, hidden, label,
+width, format, color) applies to a pricer view, and `hidden` columns leave
+the plan. `Edit column in view…` from the palette opens the Views dialog on
+the pricer's view at the cursor's column, as it does for a blotter. A view
+column's `color` applies as in the blotter: `sign` paints a negative measure
+in the theme's bearish color and a positive one bullish, a named color from
+`colors.toml` tints the column and its header; a stale cell stays muted and a
+failed one danger whatever the column's color. Measures default to `sign`;
+a column says `color = "none"` to opt out.
+Result columns
+carry risk_snapshot's names — `npv`, `delta01`, `gamma01`, `vega01`,
+`rho010`, `clean_theta_business_day` and the rest — each with a `_usd` twin
+the pricer converts itself; a column means the same thing in a blotter and a
+pricer sheet. A package whose legs priced in different currencies, or a
+selection total over such lines, paints `—` in its local-currency measure
+columns; the `_usd` columns still sum, and are the comparable ones across
+currencies. Both bundled views end in a `status` column, which says
 `pricing…` on a stale line and a failed line's reason, so neither state is
 shown by color alone. The tree column reserves a fixed chevron slot on every
 row, so roots share one leading edge and legs sit one step in. Column 0
@@ -1101,7 +1262,7 @@ without one), plus this session's confirmed saves, less its confirmed
 removals. A later catalog adds names and never drops one, and never brings
 back a name this session removed, until a save under that name is
 confirmed: the catalog the diagnostics entity holds is refreshed only while
-a diagnostics tile is visible, so it can predate the removal. A name whose save is
+the diagnostics page is visible, so it can predate the removal. A name whose save is
 queued but not yet confirmed counts as taken: a new tile's `untitled-N` and
 `:name` skip it.
 
@@ -1243,8 +1404,9 @@ or edited text commits to the cursor's column as above.
 
 **Footer totals.** While a selection is live the footer shows its extent
 (`3 rows × 12 cols`) at the left and, at the right under the risk columns,
-one position total for each risk column the view shows (price, delta, gamma,
-vega, theta, rho), painted as that column paints its numbers. A line counts
+one position total for each measure column the view shows (`npv`, `delta01`,
+and every other measure, local or `_usd`), painted as that column paints its
+numbers. A line counts
 `qty × value`; a package counts its own folded sum, which is already weighted
 by its legs' quantities. Totals are over the
 top-most selected rows, so an open package selected with its legs is not
@@ -1399,8 +1561,13 @@ generations remain available only within the retention limit.
   stopped — restart Geode`.
 
 Other known gaps: the underlying typeahead does not yet offer catalogue
-underlyings; result cells are not sign-colored; column widths are the
-vocabulary's fixed pixel widths and cannot be resized.
+underlyings. Columns can be dragged to
+reorder and resized with the pointer; both act on the open tile only. A view
+change or reload restores the view's order; a dragged width is kept the way
+an `:autosize` fit is (by vocabulary name in the session record, over the
+view's width) until `:autosize reset` or the next `:autosize`, which
+replaces every kept width. The tree column is pinned and neither moves nor
+resizes. Persistent order and width belong to the Views dialog.
 
 In-process pricing remains an upstream leaf. A feature submits definitions
 through the data-service request path and receives outcomes through shell

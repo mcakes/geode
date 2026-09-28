@@ -27,7 +27,7 @@ GPUI globals or provide rendering helpers.
 | Module | Holds |
 |---|---|
 | `tiling` | Split/leaf/stack trees, workspaces, docks, divider and drop-zone geometry. Rendering and navigation share tree geometry; see [tiling contracts](../../docs/current/tiling.md) for focus, transfer, resize, and restoration rules. |
-| `keymap` | Keystrokes, predicates, layered binding resolution, sequences, counts, and module fragments. See [keymaps and actions](../../docs/current/keymaps.md) for matching, filtering, and editor limitations. |
+| `keymap` | Keystrokes, predicates, layered binding resolution, sequences, counts, and module fragments. `GRID`/`TILELIST` are the flags a tile publishes for the shared motions. See [keymaps and actions](../../docs/current/keymaps.md) for matching, filtering, and editor limitations. |
 | `actions` | The shared action registry; the keymap maps keys to action ids and the palette lists them. |
 | `frame` | The shared frame: scope with undo/redo, the active grouping slot, as-of, recent publishes, saved scopes, named expressions (`expressions.toml`, rebuilt on reload), and the data and config generations, as one value every tile observes. The selection lives in lanes — one shared, one per pinned workspace (`pin`, `unpin`) — read through `FrameView` and written through `FrameViewMut`; every lane's generations come from one counter, so a number names one value in any lane. See [workspace lanes](../../docs/current/shell.md#workspace-lanes). `effective_scope` composes the frame and tile scope layers and resolves named references, returning the first missing or invalid one as an error instead of a scope. |
 | `frame_ref` | `FrameRef`, the workspace-bound frame handle a module receives: `read`/`update` resolve to that workspace's lane. |
@@ -40,7 +40,7 @@ GPUI globals or provide rendering helpers.
 | `diagnostics` | Source health, generations, independent config/data diagnostics, stopped data threads (`StoppedThread`, `thread_label`) and the prepared `StoppedSegment`, the `Busy`-refusal total, section versions, cached status summary, and watched/explicit catalog demand. See the [diagnostics contract](../../docs/current/shell.md#diagnostics-state-and-demand). |
 | `colfit` | The pure column-fit measure behind `:autosize` and `tile::autosize_columns`: `FitMetrics` (mono advance at `text_sm`, the `XSmall` cell padding and cursor border at the window's rem, clamped to 2.5–40 rem), the `FittedWidths` map by stable column key, and its lenient `column_widths` session read/write, which clamps a restored width to 25–560 px. `NO_TABLE` and `NOTHING_TO_FIT` are the two refusals. See [autosized columns](../../docs/current/features.md#autosized-columns). |
 | `perf` | The always-compiled frame-time histogram. |
-| `defaults` | The builtin action set and keymap, the Builtin config layer. |
+| `defaults` | The builtin action set and keymap, the Builtin config layer; `MOTION_ACTIONS` (the shared `motion::*` vocabulary, category "Motion", handled by no shell code so it falls through to the focused tile) and `GRID_MOTION_CONTEXT`, the one context the grid motions ship under; `shared_motion_context` names where the keybindings dialog writes a Motion row's edits, after clearing the action's user overrides. |
 
 **Window integration**
 
@@ -49,9 +49,11 @@ GPUI globals or provide rendering helpers.
 | `shell` | `ShellView`, the window owner: tile occupants and focus, input dispatch, rendering, drag and drop, chrome (the status bar's first left segment is the stopped data-thread segment), dialogs and palette, hot reload, and session I/O. `aggregates` renders selection extents and totals prepared by grid tiles. Shared color helpers and `kbd` keep chrome presentation consistent. Tests live in `shell/tests/`. |
 | `shell/pin` | The workspace pin toggle (`frame::pin_workspace` and the toolbar glyph), the workspace-switch hook that re-seeds the flip baseline, and the scope field's rebinding to the active lane. |
 | `shell/dialog` | Modal stack ownership, opening, shared-input synchronization, and focus restoration. Only the top dialog renders and receives keys. A kind cannot open twice; pop restores the covered dialog's text and caret. See [modal lifetime](../../docs/current/input-and-dialogs.md#modal-lifetime-and-focus). |
+| `shell/choicedialog` | The filter-only choice modal behind the grouping picker, the scope picker (`frame::scope`: the frame's live saved scopes, loaded through `ShellView::load_saved_scope`), the tile-kind and `tile::open_with` pickers, the column lists, and `Set log level…`. One `Target` per use decides rows, title, footer and commit. See [choices](../../docs/current/input-and-dialogs.md#grouping-scope-tile-log-and-column-choices). |
 | `shell/scope_expr_view` | Frame expression editing in Whole, Term, and Add modes. Whole/Add stage named-expression chips; `mod+s` saves typed text as a named definition. Term mode can replace one guarded term with a named reference. |
 | `shell/expr_suggest` | Shared expression-completion controller and renderer for frame, Scopes, and Expressions fields. Observes text and caret changes, requests values under reserved `EXPR_KEY`, and accepts rows through undoable range replacement. Tab accepts; Shift-Tab, Up/Down, and Ctrl-P/Ctrl-N move the highlight. Named rows stage references only in frame Whole/Add mode. Named-definition fields request unscoped values; unresolved scope references report an error before requesting. |
-| `module` | The module-hosting contract: `TileContent` (including `closed`, called once on removal after `set_visible(false)`, `launch_context`, `tile_columns`, `launched`, and `autosize_columns`, whose default refuses with `colfit::NO_TABLE`; `tile::autosize_columns` calls it on the focused occupant only and shows a refusal as a notice), `ModuleFactory` (including `accepts` and `launch_state`), `ModuleRoster`, `Delivery`, `StackHandle`. `module::recording` is the test double a downstream crate hosts a neighbour with. |
+| `module` | The module-hosting contract: `TileContent` (including `closed`, called once on removal after `set_visible(false)`, `launch_context`, `tile_columns`, `launched`, and `autosize_columns`, whose default refuses with `colfit::NO_TABLE`; `tile::autosize_columns` calls it on the focused occupant only and shows a refusal as a notice), `ModuleFactory` (including `accepts` and `launch_state`), `ModuleRoster`, `Delivery`, `StackHandle`; and the page seam beside it: `PageContent`, `PageFactory` (with `toggle_binding`), `PageOccupant`, `PageRoster` (whose `keymap_fragments` also emits the shell-generated toggle doc), and the `ShellActions` handle. `module::recording` is the test double a downstream crate hosts a neighbour or a page with. See [pages](../../docs/current/shell.md#pages). |
+| `shell/page` | One page at a time in place of the tile surface (the toolbar and status bar stay): `open_page` (create on first open, then show and focus; a different kind replaces the retained page after stashing its state), `close_page`, `toggle_page`, `focus_home`, and the deferred `shell_actions` handle a page dispatches registered actions through. |
 | `shell/objectdialog` | Domain drafts, staged editing, validation, overrides, and debounced persistence. `render::open_object` opens a named object's edit stage or reports that it is undefined; `render::open_column` opens a tile's view (or the column's owning dataset) on one column's Column stage, reporting each failure in the footer. `apply::queue_object` queues a whole user-layer definition with pending edits. The Expressions adapter validates named definitions and identifies referring scopes before deletion. See [configuration dialogs](../../docs/current/configuration-dialogs.md) for ownership and failure boundaries. |
 
 ## Globals
@@ -118,6 +120,14 @@ change most often hits:
   re-arms `pending_focus_restore`. A module that drops a focused
   `InputState` must `window.blur(cx)` first, or every chord dies for the
   rest of the session.
+- A page hides the tiles beneath it: `fill_active_tiles` yields nothing and
+  `visible_tile_keys` is empty while one is open, so every occupant hears
+  `set_visible(false)` and no flip barrier waits on a tile nobody can see.
+  The context stack is `page` then the page's own context, never
+  `workspace` or `tile`; `page::toggle_*` and `page::close` are refused
+  under a modal; focus returns to the open page's handle (`focus_home`),
+  not the shell root, when an overlay closes and after Escape or Enter in
+  the scope field.
 - Colors go through the doors: `chip_paint` for semantic chips,
   `row_paint` for list rows, `control::paint` for hover and pressed
   states. Each has a sweep over every bundled theme with no exception list.
@@ -129,7 +139,7 @@ change most often hits:
 - Diagnostics request methods cannot notify observers themselves. Visibility
   and catalog-demand changes require a caller notification even though they
   leave diagnostic data versions unchanged. Explicit catalog demand survives
-  the last diagnostics tile hiding.
+  the diagnostics page hiding.
 - A stopped data thread is recorded once and never cleared: nothing restarts
   it, so its status segment stays until Geode restarts. The segment's text and
   tooltip are built in `note_thread_stopped`, not at paint. See

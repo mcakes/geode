@@ -2038,11 +2038,11 @@ run_mutation "keybindings: d removes where it should shadow a lower layer" \
 # would silence the binding it is meant to restore.
 run_mutation "keybindings: r shadows instead of removing the user's override" \
   crates/geode-shell/src/keymap_edit.rs \
-  '                if keys.remove(&o.key).is_some() {
-                    removed += 1;
-                }' \
-  '                set_key(keys, o.key.as_str(), value("none"));
-                removed += 1;' \
+  '            if keys.remove(&o.key).is_some() {
+                removed += 1;
+            }' \
+  '            set_key(keys, o.key.as_str(), value("none"));
+            removed += 1;' \
   geode-shell \
   r_resets_a_user_override_by_removing_it
 
@@ -2056,6 +2056,51 @@ run_mutation "keymap: a reset misses the none shadow half of a rebind" \
   geode-shell \
   r_on_a_rebound_builtin_removes_the_new_key_and_lifts_the_shadow
 
+# An old dialog rebind of a module id since renamed into a shared motion
+# left a "none" under the module context over a key that now ships under
+# the grid context. It shadows nothing textually but still silences the
+# key there; without the orphan rule `r` leaves the key dead.
+run_mutation "keymap: a reset leaves an old module rebind's orphan shadow" \
+  crates/geode-shell/src/keymap/build.rs \
+  '            covers_live || orphan' \
+  '            covers_live' \
+  geode-shell \
+  an_old_module_rebind_of_a_retired_motion_is_all_the_motions_override
+
+# A Motion row edit is global: written into the displayed binding's
+# context, it lands in an old override's module context and every other
+# grid tile keeps the old key.
+run_mutation "keybindings: a Motion row rebind writes the displayed module context" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '                context: Some(shared.to_string()),
+                new_key,' \
+  '                context: row.current.as_ref().and_then(|b| b.context_source.clone()),
+                new_key,' \
+  geode-shell \
+  rebinding_a_motion_row_writes_the_shared_context_and_clears_old_overrides
+
+# The same mutation through the app's real modules and tiles: the new key
+# must move every grid tile, not the blotter alone.
+run_mutation "motion e2e: a Motion row rebind writes the displayed module context" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '                context: Some(shared.to_string()),
+                new_key,' \
+  '                context: row.current.as_ref().and_then(|b| b.context_source.clone()),
+                new_key,' \
+  geode-app \
+  a_motion_row_rebind_over_an_old_blotter_override_moves_every_grid_tile
+
+# A Motion row rebind clears the action's old per-module overrides in the
+# same write; left in place they still win in their module contexts.
+run_mutation "keybindings: a Motion row rebind leaves old module overrides" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '            clear: row.overrides.clone(),
+            write,' \
+  '            clear: Vec::new(),
+            write,' \
+  geode-shell \
+  rebinding_a_motion_row_writes_the_shared_context_and_clears_old_overrides
+
 # A shadow silences the LIVE lower binding on its key. Where the desk
 # re-purposed a builtin key to another action, the user's shadow is the
 # desk action's override; claiming it for the builtin action's row would
@@ -2063,8 +2108,8 @@ run_mutation "keymap: a reset misses the none shadow half of a rebind" \
 # one, and leave this one exactly as unbound as before.
 run_mutation "keymap: a reset lifts a shadow over a key a lower layer re-purposed" \
   crates/geode-shell/src/keymap/build.rs \
-  '                    && !lower[i + 1..].iter().any(|later| shadows(later, l))' \
-  '' \
+  '    let live = |i: usize, l: &Binding| !lower[i + 1..].iter().any(|later| shadows(later, l));' \
+  '    let live = |_: usize, _: &Binding| true;' \
   geode-shell \
   a_shadow_over_a_key_a_lower_layer_repurposed_is_the_repurposers_override
 
@@ -2083,8 +2128,8 @@ run_mutation "keymap: a reset takes another action's user binding" \
 # removing someone else's binding.
 run_mutation "keymap: a reset takes a shadow from an unrelated context" \
   crates/geode-shell/src/keymap/build.rs \
-  '                    && shadows(b, l)' \
-  '                    && l.keystrokes == b.keystrokes' \
+  '                .any(|(i, l)| l.action == *action && shadows(b, l) && live(i, l));' \
+  '                .any(|(i, l)| l.action == *action && l.keystrokes == b.keystrokes && live(i, l));' \
   geode-shell \
   a_shadow_in_a_different_context_is_not_this_actions_override
 
@@ -2112,22 +2157,22 @@ run_mutation "keymap: a reset names the rendered key, not the file's spelling" \
 # behind on every miss.
 run_mutation "keymap_edit: a reset creates the entry it was going to remove from" \
   crates/geode-shell/src/keymap_edit.rs \
-  '            for entry in bindings.iter_mut().filter(|entry| {
-                entry.get("context").and_then(Item::as_str) == o.context_source.as_deref()
-            }) {
-                let Some(keys) = entry.get_mut("keys").and_then(Item::as_table_like_mut) else {
-                    continue;
-                };
-                if keys.remove(&o.key).is_some() {
-                    removed += 1;
-                }
-            }' \
-  '            {
-                let keys = keys_table_for(bindings, o.context_source.as_deref());
-                if keys.remove(&o.key).is_some() {
-                    removed += 1;
-                }
-            }' \
+  '        for entry in bindings.iter_mut().filter(|entry| {
+            entry.get("context").and_then(Item::as_str) == o.context_source.as_deref()
+        }) {
+            let Some(keys) = entry.get_mut("keys").and_then(Item::as_table_like_mut) else {
+                continue;
+            };
+            if keys.remove(&o.key).is_some() {
+                removed += 1;
+            }
+        }' \
+  '        {
+            let keys = keys_table_for(bindings, o.context_source.as_deref());
+            if keys.remove(&o.key).is_some() {
+                removed += 1;
+            }
+        }' \
   geode-shell \
   resetting_a_key_that_is_not_there_counts_nothing_and_creates_no_entry
 
@@ -2239,13 +2284,7 @@ run_mutation "keybindings: r cannot lift the user's own none shadow" \
 # notice before run_until_parked rather than only checking the file.
 run_mutation "keybindings: d performs its write without acknowledging it" \
   crates/geode-shell/src/shell/keybindings_view.rs \
-  '        .or_else(|| {
-            Some(if is_user_layer {
-                format!("removing your {key} binding")
-            } else {
-                format!("silencing {key} — {RECOVERY}")
-            })
-        })
+  '        .or(Some(notice))
 ' \
   '' \
   geode-shell \
@@ -2281,12 +2320,12 @@ run_mutation "keybindings: d promises the retired retype recovery" \
 # knowing.
 run_mutation "keybindings: d removes the user's key by its rendered spelling" \
   crates/geode-shell/src/shell/keybindings_view.rs \
-  '    let key = if is_user_layer {
-        bound.key_source.clone()
-    } else {
-        palette::render_binding(&bound.keystrokes)
-    };' \
-  '    let key = palette::render_binding(&bound.keystrokes);' \
+  '            key: if is_user_layer {
+                bound.key_source.clone()
+            } else {
+                palette::render_binding(&bound.keystrokes)
+            },' \
+  '            key: palette::render_binding(&bound.keystrokes),' \
   geode-shell \
   d_on_a_user_binding_spelled_with_mod_removes_it_by_the_files_spelling
 
@@ -3160,10 +3199,133 @@ run_mutation "session: tile state round-trips" \
 
 run_mutation "session: a state-only change alone still flushes" \
   crates/geode-shell/src/shell/session_io.rs \
-  '        if !self.session_dirty && !frame_dirty && !usage_dirty && tiles == self.last_tiles_written {' \
-  '        if !self.session_dirty && !frame_dirty && !usage_dirty {' \
+  '            && tiles == self.last_tiles_written' \
+  '            && true' \
   geode-shell \
   a_module_state_change_alone_flushes_once_with_the_new_state
+
+# A page's state moves without any shell action (no layout flag), so the
+# snapshot comparison is the only thing that gets it to disk.
+run_mutation "session: a page-state-only change alone still flushes" \
+  crates/geode-shell/src/shell/session_io.rs \
+  '            && pages == self.last_pages_written' \
+  '            && true' \
+  geode-shell \
+  a_page_state_change_alone_flushes_once_and_is_quiet_afterwards
+
+# ---- pages over the workspace
+
+# The tiles beneath an open page are hidden by `ensure_occupants`'s
+# visibility pass alone: with the guard gone they stay announced visible.
+run_mutation "page: tiles beneath an open page are hidden" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '        if self.page_open() {
+            return;
+        }
+        let ws = self.services.workspaces.active();
+        out.extend(ws.tree().visible_tiles());' \
+  '        if false {
+            return;
+        }
+        let ws = self.services.workspaces.active();
+        out.extend(ws.tree().visible_tiles());' \
+  geode-shell \
+  tiles_beneath_are_hidden_on_open_and_shown_on_close
+
+# The tiles leaving the screen on the render after a page opens must not
+# pull focus off the page through the tile-left-the-screen net.
+run_mutation "page: hiding the tiles beneath does not pull focus off the page" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '            && !self.page.as_ref().filter(|p| p.open).is_some_and(|p| {
+                p.occupant
+                    .content
+                    .focus_handle(cx)
+                    .contains_focused(window, cx)
+            })' \
+  '            && true' \
+  geode-shell \
+  tiles_beneath_are_hidden_on_open_and_shown_on_close
+
+# No flip barrier waits on a tile the page covers.
+run_mutation "page: no visible tile keys while a page is open" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '        if self.page_open() {
+            return;
+        }
+        // Placeholders never query or arrive; waiting on them would hold every' \
+  '        if false {
+            return;
+        }
+        // Placeholders never query or arrive; waiting on them would hold every' \
+  geode-shell \
+  tiles_beneath_are_hidden_on_open_and_shown_on_close
+
+# A synchronous handle re-enters the page entity that invoked it and panics
+# on the double lease.
+run_mutation "page: the ShellActions handle defers its dispatch" \
+  crates/geode-shell/src/shell/page.rs \
+  '                window.defer(cx, move |window, cx| {
+                    let _ = weak.update(cx, |view, cx| {
+                        view.dispatch(&action, None, window, cx);
+                        cx.notify();
+                    });
+                });' \
+  '                let _ = weak.update(cx, |view, cx| {
+                    view.dispatch(&action, None, window, cx);
+                    cx.notify();
+                });' \
+  geode-shell \
+  a_page_may_close_itself_through_shell_actions_from_inside_its_own_update
+
+# Focus returned to the shell root over a page leaves the page's own
+# bindings unreachable.
+run_mutation "page: closing an overlay over a page returns focus to the page" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            // The open page'"'"'s handle when one is open, else the shell root.
+            self.focus_home(window, cx);' \
+  '            // The open page'"'"'s handle when one is open, else the shell root.
+            self.focus_handle.focus(window, cx);' \
+  geode-shell \
+  closing_the_palette_over_a_page_returns_focus_to_the_page
+
+run_mutation "page: page::close under a modal is refused" \
+  crates/geode-shell/src/shell/input.rs \
+  '            if self.modal_open() {
+                self.notice = Some(CLOSE_DIALOG_FIRST);
+                return;
+            }
+            if self.page_open() {' \
+  '            if false {
+                self.notice = Some(CLOSE_DIALOG_FIRST);
+                return;
+            }
+            if self.page_open() {' \
+  geode-shell \
+  page_close_under_a_modal_is_refused
+
+run_mutation "status: the diagnostics summary click opens the page" \
+  crates/geode-shell/src/shell/render.rs \
+  '                    &crate::actions::ActionId(format!(
+                        "page::toggle_{}",
+                        crate::diagnostics::DIAGNOSTICS_PAGE_KIND
+                    )),' \
+  '                    &crate::actions::ActionId(String::new()),' \
+  geode-shell \
+  clicking_the_diagnostics_summary_opens_the_page
+
+run_mutation "sidebar: the page button dispatches the toggle" \
+  crates/geode-shell/src/shell/sidebar.rs \
+  '                        view.dispatch(&ActionId(toggle.to_string()), None, window, cx);' \
+  '                        let _ = (&view, toggle, &window);' \
+  geode-shell \
+  the_sidebar_button_toggles_the_page_and_shows_it_active
+
+run_mutation "sidebar: the open page's button takes the active treatment" \
+  crates/geode-shell/src/shell/sidebar.rs \
+  '        let is_open = open_page == Some(entry.kind);' \
+  '        let is_open = false;' \
+  geode-shell \
+  the_sidebar_button_toggles_the_page_and_shows_it_active
 
 # ---- command line
 
@@ -3461,12 +3623,13 @@ run_mutation "find: fzf narrows and vim does not" \
   geode-blotter \
   vim_style_jumps_as_typed_commits_and_repeats
 
-run_mutation "cursor: a counted G is a row number" \
-  crates/geode-blotter/src/core/cursor.rs \
-  '                self.row = (c.max(1) as usize - 1).min(len.saturating_sub(1));' \
-  '                self.row = len.saturating_sub(1); let _ = c;' \
+run_mutation "blotter motion: a counted G is a row number" \
+  crates/geode-tile/src/motion.rs \
+  '        Motion::Top(Some(n)) | Motion::Bottom(Some(n)) => (n.max(1) as usize - 1).min(last),' \
+  '        Motion::Top(Some(_)) => 0,
+        Motion::Bottom(Some(_)) => last,' \
   geode-blotter \
-  row_motion_is_counted_and_clamped
+  row_and_column_motions_go_through_the_shared_rules
 
 run_mutation "cache: a NULL measure is None, never a number" \
   crates/geode-blotter/src/core/cache.rs \
@@ -4653,8 +4816,8 @@ run_mutation "palette: the backtrack continues a run by the discounted bonus" \
 # layout change.
 run_mutation "palette usage: a usage change alone dirties the session flush" \
   crates/geode-shell/src/shell/session_io.rs \
-  '        if !self.session_dirty && !frame_dirty && !usage_dirty && tiles == self.last_tiles_written {' \
-  '        if !self.session_dirty && !frame_dirty && tiles == self.last_tiles_written {' \
+  '            && !usage_dirty' \
+  '            && true' \
   geode-shell a_palette_dispatch_reaches_the_session_flush
 
 run_mutation "bar: a keystroke sets the frame text" \
@@ -6280,48 +6443,679 @@ run_mutation "diagnostics: NEW-1 — summary omits the data error count" \
   '' \
   geode-shell a_config_reload_does_not_clobber_a_standing_data_diagnostic
 
-# ---- Diagnostics module -----------------------------------------------
+# --- The diagnostics page over the shell page seam (2026-09-27) ---------
+#
+# The tile's entries (dropped at 6d18af3d) are re-anchored here where the
+# contract survived the move: sources worst-first, the resolved marker and
+# its as-of gate, the log filter, array recursion in the config explainer,
+# the tail seeded from the ring's sequence, the observer's version compare,
+# and the source shapes. The rest are the page's own.
 
-run_mutation "diagnostics module: sources sorted best-first instead of worst-first" \
-  crates/geode-diagnostics/src/sections.rs \
-  '    reported.sort_by(|a, b| b.1.health.cmp(&a.1.health).then_with(|| a.0.cmp(b.0)));' \
-  '    reported.sort_by(|a, b| a.1.health.cmp(&b.1.health).then_with(|| a.0.cmp(b.0)));' \
-  geode-diagnostics sources_are_sorted_worst_first_with_their_detail
+# ---- the shell's side of the seam
 
-run_mutation "diagnostics module: the resolved-generation marker points at the wrong generation" \
-  crates/geode-diagnostics/src/sections.rs \
-  '                    && part.resolved_gen == Some(generation.gen_id);' \
-  '                    && part.resolved_gen == Some(generation.gen_id + 1);' \
-  geode-diagnostics data_rows_mark_the_resolved_generation_under_an_as_of
-
-run_mutation "diagnostics module: the log filter matches every row regardless of target or level" \
-  crates/geode-diagnostics/src/sections.rs \
-  '        .filter(|r| filter.is_empty() || r.text.contains(filter))
-        .collect()' \
-  '        .filter(|_r| true)
-        .collect()' \
-  geode-diagnostics log_rows_filter_by_target_or_level_text
-
-run_mutation "diagnostics module: move_cursor never clears follow" \
-  crates/geode-diagnostics/src/tile.rs \
-  '        self.cursor = target as usize;
-        self.follow = false;' \
-  '        self.cursor = target as usize;' \
-  geode-diagnostics the_log_section_follows_the_tail_until_the_cursor_moves
-
-run_mutation "diagnostics module: the diagnostics observer rebuilds on every notify, not just a real version change" \
-  crates/geode-diagnostics/src/tile.rs \
-  '            this.last_diag_versions = now;
-            if relevant {
-                this.rebuild(cx);
+run_mutation "shell page: a toggle under a modal opens the page beneath the dialog" \
+  crates/geode-shell/src/shell/input.rs \
+  '            if self.modal_open() {
+                self.notice = Some(CLOSE_DIALOG_FIRST);
+                return;
             }
-        })
-        .detach();' \
-  '            this.last_diag_versions = now;
-            this.rebuild(cx);
-        })
-        .detach();' \
-  geode-diagnostics an_unchanged_entity_does_not_rebuild_rows
+            let kind = kind.to_string();' \
+  '            let kind = kind.to_string();' \
+  geode-shell \
+  toggle_under_a_modal_is_refused
+
+run_mutation "shell page: a workspace switch leaves the page open" \
+  crates/geode-shell/src/shell/input.rs \
+  '        if self.page_open() && action.0.starts_with("workspace::switch_") {' \
+  '        if false {' \
+  geode-shell \
+  a_workspace_switch_closes_the_page
+
+run_mutation "shell page: nothing is refused over a page" \
+  crates/geode-shell/src/shell/input.rs \
+  '        if self.page_open() && refused_over_a_page(&action.0) {' \
+  '        if false {' \
+  geode-shell \
+  layout_edits_are_refused_while_a_page_is_open
+
+# `Close tile` from the palette over a page destroys an unseen tile with no
+# undo; only the switches are exempt.
+run_mutation "shell page: the workspace family reaches the router over a page" \
+  crates/geode-shell/src/shell/input.rs \
+  '        return !id.starts_with("workspace::switch_");' \
+  '        return false;' \
+  geode-shell \
+  layout_edits_are_refused_while_a_page_is_open
+
+# Spelled with an impossible prefix rather than `false` so the mutant
+# compiles without a warning.
+run_mutation "shell page: the dock and stack families reach the router over a page" \
+  crates/geode-shell/src/shell/input.rs \
+  '    id.starts_with("dock::")
+        || id.starts_with("stack::")' \
+  '    id.starts_with("dock::::")
+        || id.starts_with("stack::::")' \
+  geode-shell \
+  layout_edits_are_refused_while_a_page_is_open
+
+# The insert branch is entered on `holds_focus`, the window's truth; a page
+# whose `mode` flag has not caught up with the focused input still reports
+# `normal`, and only this filter keeps its `mode == normal` binding from
+# firing on the typed key. The named test types into a page input before
+# any focus event is delivered.
+run_mutation "shell page: bare keys in insert mode resolve against every context with a mode" \
+  crates/geode-shell/src/shell/input.rs \
+  '                .filter(|c| c.get("mode") == Some("insert"))' \
+  '                .filter(|c| c.get("mode").is_some())' \
+  geode-shell \
+  a_workspace_switch_chord_from_a_focused_page_input_closes_the_page
+
+run_mutation "shell page: the context stack keeps workspace under a page" \
+  crates/geode-shell/src/shell/input.rs \
+  '            let mut stack = vec![
+                KeyContext::new("page"),
+                page.occupant.content.key_context(cx),
+            ];' \
+  '            let mut stack = vec![
+                KeyContext::new("workspace"),
+                KeyContext::new("page"),
+                page.occupant.content.key_context(cx),
+            ];' \
+  geode-shell \
+  the_context_stack_is_page_then_kind_while_open
+
+run_mutation "shell page: a consumed close still closes the page" \
+  crates/geode-shell/src/shell/input.rs \
+  '                if !consumed {' \
+  '                if true {' \
+  geode-shell \
+  a_page_that_consumes_close_stays_open
+
+run_mutation "shell page: open never focuses the page" \
+  crates/geode-shell/src/shell/page.rs \
+  '        page.open = true;
+        page.occupant.content.set_visible(true, cx);
+        page.occupant.content.focus_handle(cx).focus(window, cx);' \
+  '        page.open = true;
+        page.occupant.content.set_visible(true, cx);' \
+  geode-shell \
+  toggle_opens_then_closes_the_page_and_announces_visibility
+
+run_mutation "shell page: close leaves focus on the hidden page" \
+  crates/geode-shell/src/shell/page.rs \
+  '        page.occupant.content.set_visible(false, cx);
+        self.focus_handle.focus(window, cx);
+        self.session_dirty = true;' \
+  '        page.occupant.content.set_visible(false, cx);
+        self.session_dirty = true;' \
+  geode-shell \
+  toggle_opens_then_closes_the_page_and_announces_visibility
+
+run_mutation "shell page: focus_home is the shell root even over a page" \
+  crates/geode-shell/src/shell/page.rs \
+  '        match self.page.as_ref().filter(|p| p.open) {
+            Some(page) => page.occupant.content.focus_handle(cx).focus(window, cx),
+            None => self.focus_handle.focus(window, cx),
+        }' \
+  '        self.focus_handle.focus(window, cx);' \
+  geode-shell \
+  escape_under_a_modal_closes_the_modal_not_the_page
+
+run_mutation "shell page: a restored table never reaches create" \
+  crates/geode-shell/src/shell/page.rs \
+  '            let restored = self.services.restored_pages.remove(kind);' \
+  '            let restored: Option<toml::Table> = None;' \
+  geode-shell \
+  a_restored_pages_table_reaches_the_factory_create
+
+run_mutation "shell page: a replaced page loses its state" \
+  crates/geode-shell/src/shell/page.rs \
+  '            self.services.restored_pages.insert(
+                page.occupant.kind.to_string(),
+                page.occupant.content.serialize(cx),
+            );' \
+  '' \
+  geode-shell \
+  a_replaced_page_kind_keeps_its_state_through_the_next_flush
+
+run_mutation "shell page: the page also takes the toolbar's and stripe's rows" \
+  crates/geode-shell/src/shell/render.rs \
+  '                    let page_height = content_height;' \
+  '                    let page_height = content_height + toolbar_height + stripe_height;' \
+  geode-shell \
+  the_page_paints_below_the_toolbar_above_the_status_bar
+
+run_mutation "shell page: escape in the scope field over a page focuses the shell root" \
+  crates/geode-shell/src/shell/input.rs \
+  '                // bindings are unreachable from the shell root.
+                self.focus_home(window, cx);' \
+  '                // bindings are unreachable from the shell root.
+                self.focus_handle.focus(window, cx);' \
+  geode-shell \
+  escape_in_the_scope_input_over_a_page_returns_focus_to_the_page
+
+run_mutation "shell page: session omits pages" \
+  crates/geode-shell/src/session.rs \
+  '    if !pages.is_empty() {' \
+  '    if false {' \
+  geode-shell \
+  pages_round_trip_and_an_unknown_kind_is_kept
+
+run_mutation "shell: the overlay mirror never updates" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            if d.set_overlay_visible(visible) {' \
+  '            if false {' \
+  geode-shell \
+  the_overlay_mirror_follows_a_keyboard_toggle
+
+run_mutation "sidebar: the page tooltip names no chord" \
+  crates/geode-shell/src/shell/sidebar.rs \
+  '                    entry.title,
+                    Some(entry.toggle_action),
+                    None,' \
+  '                    entry.title,
+                    None,
+                    None,' \
+  geode-shell \
+  hovering_the_sidebar_page_button_names_the_page_and_its_chord
+
+run_mutation "page roster: the toggle binding is never emitted" \
+  crates/geode-shell/src/module.rs \
+  '            if let Some(key) = factory.toggle_binding() {' \
+  '            if let Some(key) = None::<&str> {' \
+  geode-shell \
+  page_roster_emits_checked_fragments_and_an_unchecked_toggle_doc
+
+run_mutation "defaults: escape in the page context closes nothing" \
+  crates/geode-shell/src/defaults.rs \
+  '"escape" = "page::close"' \
+  '"escape" = "none"' \
+  geode-shell \
+  escape_closes_the_page_through_page_close
+
+run_mutation "defaults: workspace switches are contextual again, unreachable from a page" \
+  crates/geode-shell/src/defaults.rs \
+  '[[bindings]]
+[bindings.keys]
+"mod+1" = "workspace::switch_1"' \
+  '[[bindings]]
+context = "workspace"
+[bindings.keys]
+"mod+1" = "workspace::switch_1"' \
+  geode-shell \
+  a_workspace_switch_closes_the_page
+
+# ---- the diagnostics page: observers, visibility, and the ages timer
+
+run_mutation "diagnostics page: open never watches" \
+  crates/geode-diagnostics/src/page.rs \
+  '            if visible {
+                d.watch();
+            } else {
+                d.unwatch();
+            }' \
+  '            if visible {
+                d.unwatch();
+            } else {
+                d.unwatch();
+            }' \
+  geode-diagnostics \
+  visibility_watches_and_requests_a_catalog
+
+run_mutation "diagnostics page: the observer rebuilds on every notify" \
+  crates/geode-diagnostics/src/page.rs \
+  '            if relevant {
+                this.rebuild(cx);
+            } else if any {
+                this.refresh_badges(cx);
+            }' \
+  '            this.rebuild(cx);' \
+  geode-diagnostics \
+  an_unchanged_entity_does_not_rebuild
+
+run_mutation "diagnostics page: the frame observer rebuilds Sources on a config change" \
+  crates/geode-diagnostics/src/page.rs \
+  '                Section::Sources | Section::Log | Section::Perf => false,' \
+  '                Section::Sources | Section::Log | Section::Perf => as_of_changed || config_changed,' \
+  geode-diagnostics \
+  a_config_version_change_rebuilds_only_the_config_section
+
+run_mutation "diagnostics page: an as-of change while visible never requests a fresh catalog" \
+  crates/geode-diagnostics/src/page.rs \
+  '            if as_of_changed && this.visible {' \
+  '            if false {' \
+  geode-diagnostics \
+  resolved_markers_wait_for_a_matching_catalog
+
+run_mutation "diagnostics page: an as-of change while visible never requests a fresh catalog (bridge drain, end to end)" \
+  crates/geode-diagnostics/src/page.rs \
+  '            if as_of_changed && this.visible {' \
+  '            if false {' \
+  geode-app \
+  an_as_of_change_on_the_visible_diagnostics_page_requests_a_second_catalog_with_the_new_as_of
+
+run_mutation "diagnostics page: the Data chip ignores the catalog as-of" \
+  crates/geode-diagnostics/src/page.rs \
+  '                    self.catalog_matches = model::catalog_matches_frame(d, frame.as_of());' \
+  '                    self.catalog_matches = true;' \
+  geode-diagnostics \
+  resolved_markers_wait_for_a_matching_catalog
+
+run_mutation "diagnostics page: the ages timer runs on every section" \
+  crates/geode-diagnostics/src/page.rs \
+  '        let wanted = self.visible && self.section == Section::Sources;' \
+  '        let wanted = self.visible;' \
+  geode-diagnostics \
+  the_ages_timer_runs_only_while_visible_on_sources
+
+run_mutation "diagnostics page: a tick rebuilds the section instead of rewriting ages" \
+  crates/geode-diagnostics/src/page.rs \
+  '        if self.section != Section::Sources {
+            return;
+        }
+        let fresh: Vec<(usize, SharedString)> = self' \
+  '        if self.section != Section::Sources {
+            return;
+        }
+        self.rebuild(cx);
+        let fresh: Vec<(usize, SharedString)> = self' \
+  geode-diagnostics \
+  a_tick_refreshes_ages_without_rebuilding_rows
+
+run_mutation "diagnostics page: a section change leaves the filter focused" \
+  crates/geode-diagnostics/src/page.rs \
+  '        if self.holds_focus(window, cx) {
+            self.focus_handle.focus(window, cx);
+        }
+        self.levels.open = false;' \
+  '        self.levels.open = false;' \
+  geode-diagnostics \
+  switching_to_a_section_without_the_input_blurs_it_first
+
+run_mutation "diagnostics page: leaving Log keeps the Levels popover open" \
+  crates/geode-diagnostics/src/page.rs \
+  '        self.levels.open = false;
+        self.section = section;' \
+  '        self.section = section;' \
+  geode-diagnostics \
+  leaving_the_log_section_closes_the_levels_popover
+
+run_mutation "diagnostics page: the rail and content column do not stretch" \
+  crates/geode-diagnostics/src/page.rs \
+  '                    .items_stretch()
+                    .child(rail)' \
+  '                    .child(rail)' \
+  geode-diagnostics \
+  clicking_a_dataset_row_then_enter_collapses_it
+
+run_mutation "diagnostics page: the Config panels do not stretch" \
+  crates/geode-diagnostics/src/config_view.rs \
+  '        .items_stretch()
+        .child(left)' \
+  '        .child(left)' \
+  geode-diagnostics \
+  clicking_a_diagnostics_panel_row_moves_only_its_own_detail
+
+run_mutation "diagnostics page: the History label never pluralizes" \
+  crates/geode-diagnostics/src/page.rs \
+  '        self.history_label = SharedString::from(if prior == 1 {' \
+  '        self.history_label = SharedString::from(if false {' \
+  geode-diagnostics \
+  the_config_section_paints_current_diagnostics_and_switches_to_history
+
+# A table on the bare `diagnostics` context passes the fragment check, yet
+# its bare keys fire inside the focused filter: the insert route keeps every
+# context carrying `mode == insert`, which the page's does then.
+run_mutation "diagnostics keymap: the bare keys lose their mode clause" \
+  crates/geode-diagnostics/src/lib.rs \
+  'context = "diagnostics && mode == normal"' \
+  'context = "diagnostics"' \
+  geode-diagnostics \
+  every_default_keymap_table_names_a_mode
+
+# The table's root tracks its own handle: a row click would move focus into
+# it, and its `escape` then clears the selection instead of closing the page.
+run_mutation "diagnostics page: a row click hands focus to the table" \
+  crates/geode-diagnostics/src/table.rs \
+  '        .capture_any_mouse_down(|_event, window, _cx| window.prevent_default())
+' \
+  '' \
+  geode-diagnostics \
+  a_row_click_selects_without_taking_focus_from_the_page
+
+# A closed page is retained for the window: without the guard every poll,
+# publication, and config batch builds a section nobody sees.
+run_mutation "diagnostics page: a hidden page rebuilds on every diagnostics notify" \
+  crates/geode-diagnostics/src/page.rs \
+  '            if !this.visible {
+                this.last_diag_versions = now;
+                return;
+            }
+            let has_new = this.log.has_new();' \
+  '            let has_new = this.visible && this.log.has_new();' \
+  geode-diagnostics \
+  a_hidden_page_neither_rebuilds_nor_refreshes_badges_until_shown
+
+run_mutation "diagnostics page: a hidden page rebuilds on every frame notify" \
+  crates/geode-diagnostics/src/page.rs \
+  '            if !this.visible {
+                this.last_frame_versions = now;
+                return;
+            }
+            let as_of_changed' \
+  '            let as_of_changed' \
+  geode-diagnostics \
+  a_hidden_page_neither_rebuilds_nor_refreshes_badges_until_shown
+
+# A `mod+d` with the popover open must not reopen the page with it armed.
+run_mutation "diagnostics page: hiding leaves the Levels popover open" \
+  crates/geode-diagnostics/src/page.rs \
+  '        if !visible {
+            self.set_levels_open(false, cx);
+        }' \
+  '' \
+  geode-diagnostics \
+  leaving_the_log_section_closes_the_levels_popover
+
+# ---- the diagnostics page: data rows and badges
+
+run_mutation "diagnostics data: sources sorted best-first instead of worst-first" \
+  crates/geode-diagnostics/src/model.rs \
+  '    reported.sort_by(|a, b| rank(b.1).cmp(&rank(a.1)).then_with(|| a.0.cmp(b.0)));' \
+  '    reported.sort_by(|a, b| rank(a.1).cmp(&rank(b.1)).then_with(|| a.0.cmp(b.0)));' \
+  geode-diagnostics \
+  sources_order_worst_first_then_name_and_unreported_last
+
+run_mutation "diagnostics data: an ingest-only source gets no row" \
+  crates/geode-diagnostics/src/model.rs \
+  '        unreported.push((a.source.as_str(), &unknown));' \
+  '        let _ = (a.source.as_str(), &unknown);' \
+  geode-diagnostics \
+  a_loading_row_shows_for_an_unreported_source_too
+
+# `spec.shape` stays read, so a `-D warnings` test profile cannot turn this
+# into a BUILD verdict.
+run_mutation "diagnostics data: a subscribed source is described as a directory one" \
+  crates/geode-diagnostics/src/model.rs \
+  '        Some(spec) => match spec.shape {' \
+  '        Some(spec) => match if spec.shape == SourceShape::Fetch { SourceShape::Fetch } else { SourceShape::Directory } {' \
+  geode-diagnostics \
+  a_source_row_describes_its_shape_from_the_summary
+
+run_mutation "diagnostics data: a fetch source is described as a subscribed one (empty topics)" \
+  crates/geode-diagnostics/src/model.rs \
+  '                vec![format!("adapter: {}", spec.adapter), "fetch".to_string()],' \
+  '                vec![format!("adapter: {}", spec.adapter), format!("topics: {}", spec.topics.join(", "))],' \
+  geode-diagnostics \
+  a_source_row_describes_its_shape_from_the_summary
+
+run_mutation "diagnostics data: markers ignore the catalog as-of" \
+  crates/geode-diagnostics/src/model.rs \
+  '    let matches = catalog_matches_frame(d, as_of);' \
+  '    let matches = true;' \
+  geode-diagnostics \
+  resolved_markers_need_a_matching_catalog_and_a_historical_frame
+
+run_mutation "diagnostics data: the resolved marker points at the wrong generation" \
+  crates/geode-diagnostics/src/model.rs \
+  '                    let marked = !as_of.is_live() && matches && part.resolved_gen == Some(g.gen_id);' \
+  '                    let marked = !as_of.is_live() && matches && part.resolved_gen == Some(g.gen_id + 1);' \
+  geode-diagnostics \
+  resolved_markers_need_a_matching_catalog_and_a_historical_frame
+
+run_mutation "diagnostics config: the explainer stops recursing into arrays" \
+  crates/geode-diagnostics/src/model.rs \
+  '        toml::Value::Array(items) => {
+            for (i, v) in items.iter().enumerate() {
+                walk_value(v, &format!("{path}.{i}"), out);
+            }
+        }
+        other => out.push((path.to_string(), other.to_string())),' \
+  '        other => out.push((path.to_string(), other.to_string())),' \
+  geode-diagnostics \
+  config_docs_carry_provenance_recurse_into_arrays_and_filter
+
+run_mutation "diagnostics data: badges ignore warnings" \
+  crates/geode-diagnostics/src/model.rs \
+  '        .filter(|r| r.severity == Severity::Warning)
+        .count();' \
+  '        .count() * 0;' \
+  geode-diagnostics \
+  badges_count_errors_and_warnings_and_worst_health
+
+run_mutation "diagnostics data: the health chip counts by full value, not by label" \
+  crates/geode-diagnostics/src/model.rs \
+  '            .filter(|s| s.health.as_ref().map(Health::label) == Some(worst.label()))' \
+  '            .filter(|s| s.health.as_ref() == Some(worst))' \
+  geode-diagnostics \
+  the_health_chip_counts_by_label_not_by_reason
+
+run_mutation "diagnostics perf: the catalog tiles read the block count as bytes" \
+  crates/geode-diagnostics/src/model.rs \
+  '            format_bytes(c.used_blocks.saturating_mul(c.block_size)),' \
+  '            format_bytes(c.used_blocks),' \
+  geode-diagnostics \
+  perf_model_carries_buckets_overflow_and_the_overlay_mirror
+
+run_mutation "diagnostics perf: the thread tile stays empty after a catalog arrives" \
+  crates/geode-diagnostics/src/model.rs \
+  '            c.threads.to_string(),' \
+  '            String::new(),' \
+  geode-diagnostics \
+  perf_model_carries_buckets_overflow_and_the_overlay_mirror
+
+run_mutation "diagnostics perf: the overflow bucket is dropped" \
+  crates/geode-diagnostics/src/model.rs \
+  '    buckets.push((u64::MAX, h.overflow()));' \
+  '' \
+  geode-diagnostics \
+  perf_model_carries_buckets_overflow_and_the_overlay_mirror
+
+run_mutation "diagnostics perf: the overlay mirror is never read" \
+  crates/geode-diagnostics/src/model.rs \
+  '        overlay: d.overlay_visible(),' \
+  '        overlay: false,' \
+  geode-diagnostics \
+  perf_model_carries_buckets_overflow_and_the_overlay_mirror
+
+run_mutation "diagnostics perf: bars past the budget are not tinted" \
+  crates/geode-diagnostics/src/perf_view.rs \
+  '            (h, *bound > FRAME_BUDGET_MICROS)' \
+  '            (h, false)' \
+  geode-diagnostics \
+  bar_heights_scale_to_the_tallest_bucket_and_tint_past_the_budget
+
+# ---- the diagnostics page: the log tail, its filters, and the Levels popover
+
+run_mutation "diagnostics log: since is seeded from 0, not the ring's latest_seq" \
+  crates/geode-diagnostics/src/log.rs \
+  '        let since = ring.latest_seq();' \
+  '        let since = 0;' \
+  geode-diagnostics \
+  a_tail_starts_at_the_current_sequence_and_caps_at_log_cap
+
+run_mutation "diagnostics log: loss gap is never measured" \
+  crates/geode-diagnostics/src/log.rs \
+  '            .map(|oldest| oldest.saturating_sub(self.since + 1))' \
+  '            .map(|_| 0)' \
+  geode-diagnostics \
+  a_wrap_between_drains_reports_the_gap_measured_at_that_drain
+
+run_mutation "diagnostics log: the filter ignores level and target" \
+  crates/geode-diagnostics/src/log.rs \
+  '        self.levels[Self::level_index(r.level)]
+            && self.target.as_deref().is_none_or(|t| t == r.target)' \
+  '        true' \
+  geode-diagnostics \
+  the_filter_gates_on_level_target_and_text
+
+run_mutation "diagnostics log: a notice row paints in the first column" \
+  crates/geode-diagnostics/src/prepared.rs \
+  '            RowKind::Notice if col_ix == widest_column(&self.columns) => row.cells.first(),' \
+  '            RowKind::Notice if col_ix == 0 => row.cells.first(),' \
+  geode-diagnostics \
+  a_notice_row_paints_its_cell_in_the_widest_column_only
+
+run_mutation "diagnostics log: the tail is drained only for the Log table, not the badge" \
+  crates/geode-diagnostics/src/page.rs \
+  '        self.drain_tail();
+        let clock = Self::clock(cx);' \
+  '        let clock = Self::clock(cx);' \
+  geode-diagnostics \
+  the_log_rail_badge_counts_errors_while_another_section_is_selected
+
+run_mutation "diagnostics log: follow never stops" \
+  crates/geode-diagnostics/src/page.rs \
+  '        if self.section == Section::Log {
+            self.follow = false;
+        }' \
+  '' \
+  geode-diagnostics \
+  the_log_section_follows_until_the_cursor_moves_and_bottom_resumes
+
+# ---- the diagnostics page: the shared motion vocabulary
+
+# The shell binds the shared motions under `grid`; a page that stops
+# publishing the flag takes no motion key at all.
+run_mutation "diagnostics motion: the key context publishes grid" \
+  crates/geode-diagnostics/src/page.rs \
+  '        KeyContext::new("diagnostics")
+            .grid()' \
+  '        KeyContext::new("diagnostics")' \
+  geode-diagnostics \
+  the_key_context_publishes_grid_and_normal_mode
+
+run_mutation "motion e2e: a shared override reaches the diagnostics page" \
+  crates/geode-diagnostics/src/page.rs \
+  '        KeyContext::new("diagnostics")
+            .grid()' \
+  '        KeyContext::new("diagnostics")' \
+  geode-app \
+  a_shared_motion_override_reaches_the_diagnostics_page
+
+# The count typed before a motion must reach the shared step through the
+# page's own dispatch.
+run_mutation "diagnostics motion: the page drops the count" \
+  crates/geode-diagnostics/src/page.rs \
+  '        if let Some(m) = motion::parse(action, count) {' \
+  '        if let Some(m) = motion::parse(action, None) {' \
+  geode-diagnostics \
+  a_count_prefix_multiplies_page_down
+
+# The page pages through the shared rules: `3 ctrl+d` moves fifteen rows
+# only while the count multiplies the step, and `ctrl+f` moves ten.
+run_mutation "diagnostics motion: a count multiplies ctrl+d" \
+  crates/geode-tile/src/motion.rs \
+  '    let n = i64::from(count.unwrap_or(1).max(1));' \
+  '    let n = 1i64;' \
+  geode-diagnostics \
+  a_count_prefix_multiplies_page_down
+
+run_mutation "diagnostics motion: ctrl+f and ctrl+b page by ten" \
+  crates/geode-tile/src/motion.rs \
+  'pub const FULL_PAGE: i64 = 10;' \
+  'pub const FULL_PAGE: i64 = 5;' \
+  geode-diagnostics \
+  ctrl_f_and_ctrl_b_page_by_ten
+
+# `G` means "tail the log" only bare; `5G` means "look at row 5".
+run_mutation "diagnostics motion: only a bare G follows the log" \
+  crates/geode-diagnostics/src/page.rs \
+  '        let follow = self.section == Section::Log && m == Motion::Bottom(None);' \
+  '        let follow = self.section == Section::Log && matches!(m, Motion::Bottom(_));' \
+  geode-diagnostics \
+  bare_g_follows_the_log_and_a_counted_g_only_jumps
+
+# A motion that lands on the cursor row still stops following; the seat
+# alone does not, because it did not move.
+run_mutation "diagnostics motion: a motion stops following" \
+  crates/geode-diagnostics/src/page.rs \
+  '        if self.section == Section::Log {
+            self.follow = follow;
+        }' \
+  '        if self.section == Section::Log {
+            self.follow = self.follow || follow;
+        }' \
+  geode-diagnostics \
+  bare_g_follows_the_log_and_a_counted_g_only_jumps
+
+# A bare `j` on the last row wraps to the first, in the Log section too.
+run_mutation "diagnostics motion: a bare j wraps at the end" \
+  crates/geode-diagnostics/src/page.rs \
+  '        self.set_cursor(motion::row(self.cursor(), len, m, false), cx);' \
+  '        self.set_cursor(motion::row(self.cursor(), len, m, true), cx);' \
+  geode-diagnostics \
+  bare_g_follows_the_log_and_a_counted_g_only_jumps
+
+# An empty section is left alone: a following empty log keeps following.
+run_mutation "diagnostics motion: an empty section stops following" \
+  crates/geode-diagnostics/src/page.rs \
+  '        if len == 0 && !follow {
+            return true;
+        }' \
+  '        if len == 0 && !follow {
+            self.follow = false;
+            return true;
+        }' \
+  geode-diagnostics \
+  bare_g_follows_the_log_and_a_counted_g_only_jumps
+
+# An old user binding on a retired id must bind its shared successor, not
+# some other motion.
+run_mutation "diagnostics motion: retired ids rename to the shared ones" \
+  crates/geode-diagnostics/src/lib.rs \
+  'pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
+    ("diagnostics::down", "motion::down"),' \
+  'pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
+    ("diagnostics::down", "motion::up"),' \
+  geode-diagnostics \
+  every_retired_motion_id_renames_to_its_shared_id
+
+run_mutation "motion e2e: an old diagnostics override reaches the page" \
+  crates/geode-diagnostics/src/lib.rs \
+  'pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
+    ("diagnostics::down", "motion::down"),' \
+  'pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
+    ("diagnostics::down", "motion::up"),' \
+  geode-app \
+  an_old_diagnostics_down_override_still_moves_the_page_only_and_warns
+
+run_mutation "diagnostics log: a programmatic target is not reselected" \
+  crates/geode-diagnostics/src/page.rs \
+  '        if !changed && !self.select_stale {
+            return;
+        }' \
+  '        if !changed {
+            return;
+        }' \
+  geode-diagnostics \
+  level_toggles_and_the_target_select_filter_the_tail
+
+run_mutation "diagnostics data: a double-click only selects" \
+  crates/geode-diagnostics/src/page.rs \
+  '                TableEvent::DoubleClickedRow(ix) => {
+                    this.set_cursor(*ix, cx);
+                    this.toggle_expansion_at_cursor(None, cx);
+                }' \
+  '                TableEvent::DoubleClickedRow(_) => {}' \
+  geode-diagnostics \
+  clicking_a_dataset_row_then_enter_collapses_it
+
+run_mutation "diagnostics log: a levels pick requests nothing" \
+  crates/geode-diagnostics/src/page.rs \
+  '            d.request_level(target, level);' \
+  '            let _ = (target, level);' \
+  geode-diagnostics \
+  a_levels_pick_requests_the_level_through_the_entity
+
+run_mutation "diagnostics levels: a longer name inherits from a shorter prefix" \
+  crates/geode-diagnostics/src/levels.rs \
+  '            short == *t || (short.starts_with(t) && short[t.len()..].starts_with("::"))' \
+  '            short == *t || short.starts_with(t)' \
+  geode-diagnostics \
+  rows_list_default_then_known_targets_then_extras_with_inheritance
+
+# --- Task 5: the geode-diagnostics module ---------------------------
 
 run_mutation "shell: open_module never finds an existing occupant, so a second call re-opens a second tile" \
   crates/geode-shell/src/shell/add_tile.rs \
@@ -6344,26 +7138,7 @@ run_mutation "shell: open_module never finds an existing occupant, so a second c
   '        let found: Option<(TileId, Option<DockSide>)> = None;' \
   geode-shell open_module_twice_yields_one_tile_of_that_kind_focused
 
-run_mutation "diagnostics module: the log section never reports records lost to a ring wrap" \
-  crates/geode-diagnostics/src/tile.rs \
-  '                self.lost_records = self
-                    .ring
-                    .oldest_seq()
-                    .map(|oldest| oldest.saturating_sub(self.since + 1))
-                    .unwrap_or(0);' \
-  '                self.lost_records = 0;' \
-  geode-diagnostics the_log_section_reports_lost_records_when_the_ring_wrapped_past_since
-
 # ---- Diagnostics rendering and module activation ----------------------
-
-run_mutation "diagnostics module: MAJ-1 — sync_scroll never scrolls the list" \
-  crates/geode-diagnostics/src/tile.rs \
-  '    fn sync_scroll(&self) {
-        self.scroll
-            .scroll_to_item(self.cursor, ScrollStrategy::Nearest);
-    }' \
-  '    fn sync_scroll(&self) {}' \
-  geode-diagnostics pressing_bottom_scrolls_the_list_to_the_last_row
 
 run_mutation "shell: MAJ-2 — ensure_occupants drops a vanished tile's occupant without unwatching it" \
   crates/geode-shell/src/shell/occupants.rs \
@@ -6397,69 +7172,10 @@ run_mutation "shell: MAJ-3 — note_config_reloaded goes back behind the views_c
                     f.note_config_reloaded();' \
   geode-shell a_reload_that_does_not_touch_views_or_dimensions_still_bumps_the_config_version
 
-run_mutation "diagnostics module: MAJ-5 — a real log drain allocates a fresh buffer instead of reusing drain_buf" \
-  crates/geode-diagnostics/src/tile.rs \
-  '                self.ring.drain_since(self.since, &mut self.drain_buf);' \
-  '                let mut fresh_drain_buf = Vec::new();
-                self.ring.drain_since(self.since, &mut fresh_drain_buf);
-                self.drain_buf = fresh_drain_buf;' \
-  geode-diagnostics a_no_op_log_drain_does_not_grow_the_drain_buffer
-
-run_mutation "diagnostics module: the frame observer rebuilds Sources/Log/Perf on an as_of-or-config change too (successor of the retired MAJ-6 frame_versions_relevant_eq entry — that function was deleted by MAJ-4)" \
-  crates/geode-diagnostics/src/tile.rs \
-  '                Section::Sources | Section::Log | Section::Perf => false,' \
-  '                Section::Sources | Section::Log | Section::Perf => as_of_changed || config_changed,' \
-  geode-diagnostics a_config_reload_while_showing_sources_does_not_rebuild
-
-run_mutation "diagnostics module: MAJ-7 — an as-of change while visible never requests a fresh catalog" \
-  crates/geode-diagnostics/src/tile.rs \
-  '            if as_of_changed && this.visible {
-                this.diagnostics.update(cx, |d, cx| {
-                    d.request_catalog_refresh();
-                    cx.notify();
-                });
-            }' \
-  '            if false {
-                this.diagnostics.update(cx, |d, cx| {
-                    d.request_catalog_refresh();
-                    cx.notify();
-                });
-            }' \
-  geode-diagnostics an_as_of_change_while_visible_requests_a_fresh_catalog
-
-run_mutation "diagnostics module: MAJ-8 — the config explainer stops recursing into arrays" \
-  crates/geode-diagnostics/src/sections.rs \
-  '        toml::Value::Array(items) => {
-            for (i, v) in items.iter().enumerate() {
-                walk_value(v, &format!("{path}.{i}"), out);
-            }
-        }
-        other => out.push((path.to_string(), other.to_string())),' \
-  '        other => out.push((path.to_string(), other.to_string())),' \
-  geode-diagnostics config_rows_recurses_into_arrays_with_indexed_paths
-
-run_mutation "diagnostics module: MIN-4 — page_down/page_up drop the count multiplier" \
-  crates/geode-diagnostics/src/tile.rs \
-  '            "page_down" => self.move_cursor(5 * n, cx),
-            "page_up" => self.move_cursor(-5 * n, cx),' \
-  '            "page_down" => self.move_cursor(5, cx),
-            "page_up" => self.move_cursor(-5, cx),' \
-  geode-diagnostics a_count_prefix_multiplies_page_down
-
-run_mutation "diagnostics module: ctrl+f/ctrl+b page by ten, not by five" \
-  crates/geode-diagnostics/src/tile.rs \
-  '            "page_down_full" => self.move_cursor(10 * n, cx),
-            "page_up_full" => self.move_cursor(-10 * n, cx),' \
-  '            "page_down_full" => self.move_cursor(5 * n, cx),
-            "page_up_full" => self.move_cursor(-5 * n, cx),' \
-  geode-diagnostics ctrl_f_and_ctrl_b_page_by_ten
-
-run_mutation "blotter: ctrl+b moves back ten, not forward" \
-  crates/geode-blotter/src/tile.rs \
-  '                    "page_down_full" => NavCommand::Move(10),
-                    _ => NavCommand::Move(-10),' \
-  '                    "page_down_full" => NavCommand::Move(10),
-                    _ => NavCommand::Move(10),' \
+run_mutation "blotter motion: ctrl+b moves back ten, not forward" \
+  crates/geode-tile/src/motion.rs \
+  '        PAGE_UP => rows(-FULL_PAGE),' \
+  '        PAGE_UP => rows(FULL_PAGE),' \
   geode-blotter motions_expansion_and_yank
 
 run_mutation "line numbers: the relative cursor row shows its absolute number, not 0" \
@@ -6522,21 +7238,6 @@ run_mutation "blotter gutter: a changed setting refreshes the table's column gro
         }' \
   geode-blotter the_line_numbers_global_paints_a_gutter_on_the_next_draw
 
-run_mutation "diagnostics module: MIN-5 — set_visible(false) unwatches but never notifies" \
-  crates/geode-diagnostics/src/tile.rs \
-  '            self.diagnostics.update(cx, |d, cx| {
-                d.unwatch();
-                cx.notify();
-            });
-        }
-    }' \
-  '            self.diagnostics.update(cx, |d, _cx| {
-                d.unwatch();
-            });
-        }
-    }' \
-  geode-diagnostics set_visible_false_unwatches_and_notifies
-
 # The pending-tile map prevents a second request from adding another
 # diagnostics tile before the first request has an occupant.
 run_mutation "shell: MIN-7 — open_module loses its same-pending-kind guard" \
@@ -6547,26 +7248,6 @@ run_mutation "shell: MIN-7 — open_module loses its same-pending-kind guard" \
         self.add_tile(kind, AddPlacement::Split(None), None, window, cx);' \
   '        self.add_tile(kind, AddPlacement::Split(None), None, window, cx);' \
   geode-shell two_open_module_calls_for_the_same_kind_before_any_render_add_only_once
-
-run_mutation "diagnostics module: MIN-11 — the header never shows the filtered pill" \
-  crates/geode-diagnostics/src/tile.rs \
-  '        if !self.filter.is_empty() {
-            header = header.child(
-                div()
-                    .text_color(neutral_chip.text)' \
-  '        if false {
-            header = header.child(
-                div()
-                    .text_color(neutral_chip.text)' \
-  geode-diagnostics a_filtered_tile_shows_the_filtered_pill
-
-# ---- Visible diagnostics refresh on as-of changes ----------------------
-
-run_mutation "diagnostics module: MAJ-7 — an as-of change while visible never requests a fresh catalog (bridge drain, end to end)" \
-  crates/geode-diagnostics/src/tile.rs \
-  '            if as_of_changed && this.visible {' \
-  '            if false {' \
-  geode-app an_as_of_change_on_a_visible_diagnostics_tile_requests_a_second_catalog_with_the_new_as_of
 
 # ---- Panic boundaries: ingest, crash files, and action tail ------------
 
@@ -6827,83 +7508,6 @@ run_mutation "service: the load lane is keyed by source only, so any batch's cle
   '        let batch = "";
         let kept = unchanged_stamp(lanes.load.get(batch), &health, &detail);' \
   geode-data a_clean_publish_of_one_batch_leaves_another_batchs_degraded_standing
-
-run_mutation "diagnostics tile: the diagnostics observer compares the current section's version, not just any version" \
-  crates/geode-diagnostics/src/tile.rs \
-  '                diag_version_for_section(this.section, now)
-                    != diag_version_for_section(this.section, this.last_diag_versions)' \
-  '                true' \
-  geode-diagnostics refresh_frame_hist_does_not_rebuild_the_config_section
-
-run_mutation "sections: the perf section shows database/memory bytes and threads once a catalog arrives" \
-  crates/geode-diagnostics/src/sections.rs \
-  '                "database {} (checkpointed) · memory {} · threads {}",' \
-  '                "db {} (checkpointed) · mem {} · thr {}",' \
-  geode-diagnostics perf_rows_show_database_bytes_memory_bytes_and_threads_once_a_catalog_arrives
-
-run_mutation "diagnostics tile: set_section replaces the cached header text" \
-  crates/geode-diagnostics/src/tile.rs \
-  '        self.header_text = header_text_for(section);' \
-  '        let _ = header_text_for(section);' \
-  geode-diagnostics the_header_text_is_cached_across_paints_and_replaced_on_section_change
-
-run_mutation "diagnostics tile: since is seeded from the ring's current latest_seq, not 0" \
-  crates/geode-diagnostics/src/tile.rs \
-  '            since: initial_since,' \
-  '            since: 0,' \
-  geode-diagnostics a_freshly_opened_tile_does_not_claim_records_it_never_had
-
-run_mutation "sections: the resolved-generation marker requires the snapshot's own as_of to match the frame's" \
-  crates/geode-diagnostics/src/sections.rs \
-  '                let marked = !as_of.is_live()
-                    && snapshot_matches_as_of
-                    && part.resolved_gen == Some(generation.gen_id);' \
-  '                let marked = !as_of.is_live()
-                    && part.resolved_gen == Some(generation.gen_id);' \
-  geode-diagnostics data_rows_suppresses_the_marker_when_the_snapshot_as_of_does_not_match_the_frames
-
-
-run_mutation "sections: a source's path, priority and readiness are separate rows, not one long one" \
-  crates/geode-diagnostics/src/sections.rs \
-  '            out.push(row(format!("path: {paths}"), 1, Tone::Muted));
-            out.push(row(
-                format!(
-                    "adapter: {} · priority: {} · readiness: {}",
-                    spec.adapter, spec.priority, spec.readiness
-                ),
-                1,
-                Tone::Muted,
-            ));' \
-  '            out.push(row(
-                format!(
-                    "path: {paths} · adapter: {} · priority: {} · readiness: {}",
-                    spec.adapter, spec.priority, spec.readiness
-                ),
-                1,
-                Tone::Muted,
-            ));' \
-  geode-diagnostics a_sources_spec_detail_is_split_into_short_rows
-
-run_mutation "commands: section parses each name, not just the first" \
-  crates/geode-diagnostics/src/commands.rs \
-  '        Some("section") => {' \
-  '        Some("section") => {
-            return Ok(Command::Section(Section::Log));' \
-  geode-diagnostics section_parses_each_name_and_rejects_unknown
-
-run_mutation "commands: diagnostics completions split words on the shell's delimiters, not just a space" \
-  crates/geode-diagnostics/src/commands.rs \
-  '        .split(|c: char| c.is_whitespace() || c == '"'"','"'"')' \
-  '        .split('"'"' '"'"')' \
-  geode-diagnostics completions_split_words_the_way_the_shell_does
-
-# `:level` refuses the command without changing log levels.
-run_mutation "locality: :level never reaches the Diagnostics entity" \
-  crates/geode-diagnostics/src/tile.rs \
-  '            Command::Refused(message) => return Err(message.to_string()),' \
-  '            Command::Refused(_) => { self.diagnostics.update(cx, |d, cx| { d.request_overlay_toggle(); cx.notify(); }); }' \
-  geode-diagnostics \
-  every_colon_command_leaves_the_app_alone
 
 # ---- Scope expression dialog ------------------------------------------
 
@@ -8017,10 +8621,10 @@ run_mutation "focus: an abandoned editor in the focused tile does not keep anoth
 run_mutation "focus: a window with nothing focused gets the shell root back" \
   crates/geode-shell/src/shell/render.rs \
   '        if window.focused(cx).is_none() {
-            self.focus_handle.focus(window, cx);
+            self.focus_home(window, cx);
         }' \
   '        if false {
-            self.focus_handle.focus(window, cx);
+            self.focus_home(window, cx);
         }' \
   geode-shell a_window_with_nothing_focused_gets_the_shell_root_back_on_the_next_frame
 
@@ -8032,10 +8636,10 @@ run_mutation "focus: a window with nothing focused gets the shell root back" \
 run_mutation "focus: the no-focus net never steals from a live focused element" \
   crates/geode-shell/src/shell/render.rs \
   '        if window.focused(cx).is_none() {
-            self.focus_handle.focus(window, cx);
+            self.focus_home(window, cx);
         }' \
   '        if !self.focus_handle.is_focused(window) {
-            self.focus_handle.focus(window, cx);
+            self.focus_home(window, cx);
         }' \
   geode-shell the_focus_net_leaves_a_live_focused_input_alone
 
@@ -8045,12 +8649,12 @@ run_mutation "focus: the no-focus net never steals from a live focused element" 
 # to isolate this backstop from dispatch's pending-focus restoration.
 run_mutation "focus: a departed tile's focus returns to the shell root" \
   crates/geode-shell/src/shell/occupants.rs \
-  '                    .is_some_and(|o| o.content.holds_focus(window, cx))
+  '                    .contains_focused(window, cx)
             })
         {
             self.focus_handle.focus(window, cx);
         }' \
-  '                    .is_some_and(|o| o.content.holds_focus(window, cx))
+  '                    .contains_focused(window, cx)
             })
         {
             let _ = &focused;
@@ -10891,20 +11495,6 @@ run_mutation "sources: a subscribed source stores the paths it just said it igno
   '' \
   geode-core a_subscribed_sources_paths_are_warned_about_and_cleared
 
-run_mutation "sections: a subscribed source is described as a directory one (path and readiness)" \
-  crates/geode-diagnostics/src/sections.rs \
-  '    match spec.shape {' \
-  '    match SourceShape::Directory {' \
-  geode-diagnostics a_subscribed_source_shows_its_adapter_and_topics_not_paths
-
-# Fetch sources display fetch details. Rendering subscribed-source rows
-# instead shows an empty topics list for a source that receives no pushes.
-run_mutation "sections: a fetch source is described as a subscribed one (empty topics)" \
-  crates/geode-diagnostics/src/sections.rs \
-  '            out.push(row("fetch", 1, Tone::Muted));' \
-  '            out.push(row(format!("topics: {}", spec.topics.join(", ")), 1, Tone::Muted));' \
-  geode-diagnostics a_fetch_source_shows_its_adapter_and_that_it_is_fetched
-
 run_mutation "cvi: a second <term> inside one slice wins silently instead of being refused" \
   crates/geode-documents/src/cvi.rs \
   '                        if slice.term.is_some() {
@@ -11156,11 +11746,11 @@ run_mutation "blotter: a tile hands the delegate its colours" \
   a_delivered_snapshot_hands_the_delegate_the_tiles_colours
 
 # The cache empties when an anchor changes.
-run_mutation "blotter: the colour cache invalidates on a changed anchor" \
-  crates/geode-blotter/src/colour_cache.rs \
+run_mutation "tile: the colour cache invalidates on a changed anchor" \
+  crates/geode-tile/src/colour.rs \
   '        if self.key.as_ref() != Some(&key) {' \
   '        if self.key.is_none() {' \
-  geode-blotter \
+  geode-tile \
   a_steady_theme_costs_no_recompute_and_a_changed_anchor_empties_the_cache
 
 # An unknown name paints in foreground, never a stale colour.
@@ -11287,15 +11877,15 @@ run_mutation "colours: the swatch triad follows tint_sign" \
   geode-shell \
   ticking_tint_by_sign_paints_the_two_variant_swatches
 
-# The blotter cache resolves each tint variant under its own sign. Returning
-# the base for the positive variant removes its tint. These tests inspect
-# the cached colours; rendered text colour is not observable in
+# The tile kit's colour cache resolves each tint variant under its own sign.
+# Returning the base for the positive variant removes its tint. These tests
+# inspect the cached colours; rendered text colour is not observable in
 # TestAppContext.
-run_mutation "blotter: the colour cache resolves the sign variants" \
-  crates/geode-blotter/src/colour_cache.rs \
+run_mutation "tile: the colour cache resolves the sign variants" \
+  crates/geode-tile/src/colour.rs \
   '            positive: to_hsla(resolve_signed(def, Sign::Positive, anchors, tokens)),' \
   '            positive: to_hsla(resolve_signed(def, Sign::Zero, anchors, tokens)),' \
-  geode-blotter \
+  geode-tile \
   a_tinted_definition_resolves_three_variants_and_an_untinted_one_three_of_the_base
 
 run_mutation "objectdialog: r inherits in the column stage" \
@@ -11597,14 +12187,6 @@ run_mutation "objectdialog: a column stage offers no destructive action" \
   a_column_stage_offers_no_destructive_action
 
 # ---- Source routing and delivery identity ----
-
-# Source shape determines whether a source is a directory; adapter choice
-# and an empty topic list are not substitutes for that discriminator.
-run_mutation "parked: sections discriminates a source by shape, not by topics.is_empty()" \
-  crates/geode-diagnostics/src/sections.rs \
-  '    match spec.shape {' \
-  '    match (if spec.topics.is_empty() { SourceShape::Directory } else { SourceShape::Subscribed }) {' \
-  geode-diagnostics a_subscribed_source_with_no_topics_still_shows_the_subscribed_shape
 
 run_mutation "parked: a topic pattern with a non-final '>' is accepted rather than refused" \
   crates/geode-core/src/source_config.rs \
@@ -12931,57 +13513,13 @@ run_mutation "mdtable: a click while editing cancels the editor" \
   geode-marketdata \
   a_click_while_editing_cancels_the_editor_then_moves
 
-# ---- First-column navigation ---- The market-data keymap binds caret to
-# the first column. Replacing it with zero leaves other bindings intact; the
-# test resolves caret against the built keymap.
-# The anchor includes the normal-mode context to distinguish the same
-# motions in visual mode.
-run_mutation "mdkeys: ^ is the panel's first-column key, matching the blotter" \
-  crates/geode-marketdata/src/content.rs \
-  'context = "marketdata && mode == normal"
-[bindings.keys]
-"j" = "marketdata::down"
-"k" = "marketdata::up"
-"h" = "marketdata::left"
-"l" = "marketdata::right"
-"g g" = "marketdata::top"
-"shift+g" = "marketdata::bottom"
-"^" = "marketdata::first_col"' \
-  'context = "marketdata && mode == normal"
-[bindings.keys]
-"j" = "marketdata::down"
-"k" = "marketdata::up"
-"h" = "marketdata::left"
-"l" = "marketdata::right"
-"g g" = "marketdata::top"
-"shift+g" = "marketdata::bottom"
-"0" = "marketdata::first_col"' \
-  geode-marketdata \
-  caret_and_dollar_resolve_to_the_column_extremes
-
-# The visual block repeats the motions, `^` included: while a selection is
-# live, `^` extends it to the first column. Mutated back to `0`, `^` in
-# visual mode matches nothing.
-run_mutation "mdkeys: ^ is the first-column key in visual mode too" \
-  crates/geode-marketdata/src/content.rs \
-  'context = "marketdata && mode == visual"
-[bindings.keys]
-"j" = "marketdata::down"
-"k" = "marketdata::up"
-"h" = "marketdata::left"
-"l" = "marketdata::right"
-"g g" = "marketdata::top"
-"shift+g" = "marketdata::bottom"
-"^" = "marketdata::first_col"' \
-  'context = "marketdata && mode == visual"
-[bindings.keys]
-"j" = "marketdata::down"
-"k" = "marketdata::up"
-"h" = "marketdata::left"
-"l" = "marketdata::right"
-"g g" = "marketdata::top"
-"shift+g" = "marketdata::bottom"
-"0" = "marketdata::first_col"' \
+# ---- First-column navigation ---- The panel takes `^` from the shell's
+# shared grid motions (it publishes `grid` in normal and visual modes).
+# Rebound to `0`, `^` on the panel matches nothing in either mode.
+run_mutation "md motion: ^ is the panel's first-column key" \
+  crates/geode-shell/src/defaults.rs \
+  '"^" = "motion::line_start"' \
+  '"0" = "motion::line_start"' \
   geode-marketdata \
   caret_and_dollar_resolve_to_the_column_extremes
 
@@ -13399,25 +13937,25 @@ run_mutation "mdheader: a dirty draft sets the dot flag" \
 
 # `k` on the top row enters the strip only when there IS an attribute to
 # land on. Mutated so the guard can never pass, `k` on row 0 always steps
-# within the grid (clamped in place, since row 0 cannot go higher) and the
-# strip is unreachable by keyboard at all.
-run_mutation "mdcursor: k on the top row enters the strip" \
+# within the grid (a bare `k` wraps to the last row, a counted one clamps
+# at row 0) and the strip is unreachable by keyboard at all.
+run_mutation "md motion: k on the top row enters the strip" \
   crates/geode-marketdata/src/core/cursor.rs \
-  '        (Cursor::Cell { row: 0, col }, Motion::Rows(n)) if n < 0 && grid.attrs > 0 => {' \
-  '        (Cursor::Cell { row: 0, col }, Motion::Rows(n)) if n < 0 && grid.attrs > usize::MAX - 1 => {' \
+  '        (Cursor::Cell { row: 0, col }, Motion::Rows { by, .. }) if by < 0 && grid.attrs > 0 => {' \
+  '        (Cursor::Cell { row: 0, col }, Motion::Rows { by, .. }) if by < 0 && grid.attrs > usize::MAX - 1 => {' \
   geode-marketdata k_on_the_top_row_enters_the_strip_at_the_nearest_attribute
 
 # `j` (or any downward motion) out of the strip returns to the grid column
 # the cursor left FROM, remembered in `last_grid_col`. Mutated to land on
 # column 0 instead, a trader who entered the strip from column 3 lands
 # back on column 0 rather than where they started.
-run_mutation "mdcursor: j from the strip returns to the remembered column" \
+run_mutation "md motion: j from the strip returns to the remembered column" \
   crates/geode-marketdata/src/core/cursor.rs \
-  '        (Cursor::Attr(_), Motion::Rows(n)) if n > 0 => Cursor::Cell {
+  '        (Cursor::Attr(_), Motion::Rows { by, .. }) if by > 0 => Cursor::Cell {
             row: 0,
             col: (*last_grid_col).min(max_col),
         },' \
-  '        (Cursor::Attr(_), Motion::Rows(n)) if n > 0 => Cursor::Cell {
+  '        (Cursor::Attr(_), Motion::Rows { by, .. }) if by > 0 => Cursor::Cell {
             row: 0,
             col: 0,
         },' \
@@ -13723,16 +14261,19 @@ run_mutation "mdattr: a multi-word set value is joined with spaces" \
   '            let value = (!tail.is_empty()).then(|| tail.join(""));' \
   geode-marketdata set_parses_an_attribute_with_or_without_a_value
 
-# Arrow keys move the menu highlight like j and k. Removing down from the
-# fragment leaves it unresolved in the open menu.
-run_mutation "mdmenu: the arrow keys move the menu highlight" \
-  crates/geode-marketdata/src/content.rs \
-  '"k" = "marketdata::menu_up"
-"down" = "marketdata::menu_down"
-"up" = "marketdata::menu_up"
-"enter" = "marketdata::menu_pick"' \
-  '"k" = "marketdata::menu_up"
-"enter" = "marketdata::menu_pick"' \
+# Arrow keys step an open tile menu like j and k. Narrowing the builtin
+# arrow block to normal mode leaves them unresolved over the market-data
+# panel's open menu, which reports `mode == menu`.
+run_mutation "tile list: the arrows step an open menu" \
+  crates/geode-shell/src/defaults.rs \
+  'context = "tilelist"
+[bindings.keys]
+"down" = "motion::menu_down"
+"up" = "motion::menu_up"' \
+  'context = "tilelist && mode == normal"
+[bindings.keys]
+"down" = "motion::menu_down"
+"up" = "motion::menu_up"' \
   geode-marketdata dot_and_u_bind_in_normal_mode_and_the_menu_keys_in_menu_mode
 
 # Double-clicking a grid cell opens its editor. Refusing every model column
@@ -13986,19 +14527,132 @@ run_mutation "vimnav: a bare ±1 wraps (spec §20.5)" \
   geode-shell \
   apply_wraps_a_single_step_at_both_ends
 
-run_mutation "blotter cursor: visual mode clamps a bare step (spec §20.5)" \
+run_mutation "blotter motion: visual mode clamps a bare step" \
   crates/geode-blotter/src/core/cursor.rs \
-  '        self.row = if wrap {' \
-  '        self.row = if true {' \
+  '        self.row = motion::row(self.row, len, m, selecting);' \
+  '        self.row = motion::row(self.row, len, m, false);' \
   geode-blotter \
   visual_mode_clamps_a_bare_step
 
-run_mutation "marketdata: the row axis wraps a bare step, the column axis never does (spec §20.5)" \
+run_mutation "md motion: the grid wraps a bare step" \
   crates/geode-marketdata/src/core/cursor.rs \
-  '            row: vimnav::apply(row, grid.rows, NavCommand::Move(n as i64)),' \
-  '            row: vimnav::apply_clamped(row, grid.rows, NavCommand::Move(n as i64)),' \
+  '            row: motion::row(row, grid.rows, m, false),' \
+  '            row: motion::row(row, grid.rows, m, true),' \
   geode-marketdata \
   a_bare_row_step_wraps_and_the_full_page_keys_move_ten
+
+# Every shared motion id reaches the panel's one motion arm; a panel that
+# stops recognising them takes no motion key at all.
+run_mutation "md motion: the panel routes the shared motions" \
+  crates/geode-marketdata/src/tile.rs \
+  '        let verb = if shared_motion.is_some() {' \
+  '        let verb = if false {' \
+  geode-marketdata a_bare_row_step_wraps_and_the_full_page_keys_move_ten
+
+# The shell binds the shared motions under `grid`; a panel that stops
+# publishing the flag takes no motion key at all.
+run_mutation "md motion: the key context publishes grid" \
+  crates/geode-marketdata/src/tile.rs \
+  'KeyContext::new("marketdata").grid()' \
+  'KeyContext::new("marketdata")' \
+  geode-marketdata the_panel_publishes_grid_and_a_counted_g_jumps_to_that_row
+
+run_mutation "motion e2e: a shared override reaches the market-data panel" \
+  crates/geode-marketdata/src/tile.rs \
+  'KeyContext::new("marketdata").grid()' \
+  'KeyContext::new("marketdata")' \
+  geode-app a_shared_motion_override_reaches_each_grid_tile
+
+# `g g`/`G` from the strip under a count land on that row, not the end.
+run_mutation "md motion: a counted G from the strip is that row" \
+  crates/geode-marketdata/src/core/cursor.rs \
+  '            row: motion::row(0, grid.rows, m, false),' \
+  '            row: grid.rows - 1,' \
+  geode-marketdata counted_top_and_bottom_from_the_strip_land_on_that_row
+
+# A palette motion under an open selection editor would move the edit's
+# operand; it refuses like `V`/`v`/`escape`.
+run_mutation "md motion: a motion under a selection editor refuses" \
+  crates/geode-marketdata/src/tile/select.rs \
+  '            "motion" | "visual_rows" | "visual_block" | "escape" => true,' \
+  '            "visual_rows" | "visual_block" | "escape" => true,' \
+  geode-marketdata selection_changing_verbs_refuse_while_a_selection_editor_is_open
+
+# An old user binding on a retired id must bind its shared successor, not
+# some other motion.
+run_mutation "md motion: retired ids rename to the shared ones" \
+  crates/geode-marketdata/src/content.rs \
+  'pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
+    ("marketdata::down", "motion::down"),' \
+  'pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
+    ("marketdata::down", "motion::up"),' \
+  geode-marketdata every_retired_motion_id_renames_to_its_shared_id
+
+# Every shared motion id reaches the pricer's one motion verb; a pricer that
+# stops recognising them takes no motion key at all.
+run_mutation "pricer motion: the tile routes the shared motions" \
+  crates/geode-pricer/src/tile.rs \
+  '        let verb = if shared_motion.is_some() {' \
+  '        let verb = if false {' \
+  geode-pricer motions_move_the_cursor_and_never_into_the_tree_column
+
+# Outside a selection a bare `j` on the last row wraps to the first.
+run_mutation "pricer motion: a bare j wraps outside a selection" \
+  crates/geode-pricer/src/tile.rs \
+  '            let selecting = self.selection.is_some();' \
+  '            let selecting = true;' \
+  geode-pricer motions_move_the_cursor_and_never_into_the_tree_column
+
+# Under a live selection a bare `j`/`k` at an end clamps; a wrap would carry
+# the moving corner across the anchor.
+run_mutation "pricer motion: a selection clamps a bare step" \
+  crates/geode-pricer/src/tile.rs \
+  '            let selecting = self.selection.is_some();' \
+  '            let selecting = false;' \
+  geode-pricer a_bare_step_at_either_end_clamps_under_a_selection
+
+# A palette motion over an open entry bar closes the bar before moving,
+# like every verb that is not the bar's own.
+run_mutation "pricer motion: a motion closes an open field first" \
+  crates/geode-pricer/src/tile.rs \
+  '            if !matches!(verb, "add_below" | "add_above") {
+                self.close_entry(window, cx);
+            }' \
+  '            if !matches!(verb, "add_below" | "add_above" | "motion") {
+                self.close_entry(window, cx);
+            }' \
+  geode-pricer a_motion_closes_an_open_entry_bar_then_moves
+
+# An empty sheet takes no motion, a column move included.
+run_mutation "pricer motion: an empty sheet takes no column move" \
+  crates/geode-pricer/src/tile.rs \
+  $'        let rows: Vec<usize> = self.cursor_rows().collect();\n        if rows.is_empty() {\n            return;\n        }\n        if m.moves_rows() {' \
+  $'        let rows: Vec<usize> = self.cursor_rows().collect();\n        if rows.is_empty() && m.moves_rows() {\n            return;\n        }\n        if m.moves_rows() {' \
+  geode-pricer the_pricer_publishes_grid_and_motions_on_an_empty_sheet_do_nothing
+
+# The shell binds the shared motions under `grid`; a pricer that stops
+# publishing the flag takes no motion key at all.
+run_mutation "pricer motion: the key context publishes grid" \
+  crates/geode-pricer/src/tile.rs \
+  'KeyContext::new("pricer").grid().pair("mode", mode)' \
+  'KeyContext::new("pricer").pair("mode", mode)' \
+  geode-pricer the_pricer_publishes_grid_and_motions_on_an_empty_sheet_do_nothing
+
+run_mutation "motion e2e: a shared override reaches the pricer" \
+  crates/geode-pricer/src/tile.rs \
+  'KeyContext::new("pricer").grid().pair("mode", mode)' \
+  'KeyContext::new("pricer").pair("mode", mode)' \
+  geode-app a_shared_motion_override_reaches_each_grid_tile
+
+# An old user binding on a retired id must bind its shared successor, not
+# some other motion.
+run_mutation "pricer motion: retired ids rename to the shared ones" \
+  crates/geode-pricer/src/content.rs \
+  'pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
+    ("pricer::down", "motion::down"),' \
+  'pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
+    ("pricer::down", "motion::up"),' \
+  geode-pricer every_retired_motion_id_renames_to_its_shared_id
 
 run_mutation "picker: the values list moves through vimnav::apply, not a private ±1 (spec §20.5)" \
   crates/geode-shell/src/shell/picker.rs \
@@ -14470,12 +15124,44 @@ run_mutation "dialog: the object-dialog frozen-row click is dropped while a conf
 # The tile enables row wrapping only when no selection is active.
 # Forcing wrap on makes a bare j jump from the last row to the first
 # and reverses the selected range across its anchor.
-run_mutation "tile: a bare step wraps in normal mode only (spec §20.5)" \
+run_mutation "blotter motion: a bare step wraps in normal mode only" \
   crates/geode-blotter/src/tile.rs \
-  '                    let wrap = d.selection.is_none();' \
-  '                    let wrap = true;' \
+  '                let selecting = d.selection.is_some();' \
+  '                let selecting = false;' \
   geode-blotter \
   a_bare_j_wraps_in_normal_mode_and_clamps_in_visual
+
+# The blotter hands every shared motion id to the shared rules; dropping
+# the route leaves every motion key dispatching to nothing.
+run_mutation "blotter motion: the tile routes the shared motions" \
+  crates/geode-blotter/src/tile.rs \
+  '        if let Some(m) = geode_tile::motion::parse(action, count) {' \
+  '        if let Some(m) = geode_tile::motion::parse(action, count).filter(|_| false) {' \
+  geode-blotter motions_expansion_and_yank
+
+# The shell binds the shared motions under `grid`; a blotter that stops
+# publishing the flag takes no motion key at all.
+run_mutation "blotter motion: the key context publishes grid" \
+  crates/geode-blotter/src/tile.rs \
+  'KeyContext::new("blotter").grid()' \
+  'KeyContext::new("blotter")' \
+  geode-blotter the_key_context_publishes_the_grid_flag
+
+run_mutation "motion e2e: a shared override reaches the blotter" \
+  crates/geode-blotter/src/tile.rs \
+  'KeyContext::new("blotter").grid()' \
+  'KeyContext::new("blotter")' \
+  geode-app a_shared_motion_override_reaches_each_grid_tile
+
+# An old user binding on a retired id must bind its shared successor, not
+# some other motion.
+run_mutation "blotter motion: retired ids rename to the shared ones" \
+  crates/geode-blotter/src/content.rs \
+  '    ("blotter::visual", "blotter::visual_rows"),
+    ("blotter::down", "motion::down"),' \
+  '    ("blotter::visual", "blotter::visual_rows"),
+    ("blotter::down", "motion::up"),' \
+  geode-blotter every_retired_motion_id_renames_to_its_shared_id
 
 # ---- Popup hover and occlusion ---------------------------------------
 #
@@ -16000,6 +16686,104 @@ run_mutation "grouping: a dialog opened from a mouse-down keeps its field's focu
   geode-shell \
   a_terms_body_edits_that_term_alone
 
+# ---- Scope picker: frame::scope, mod-o and the toolbar load glyph ----
+
+# The picker opens on the saved scope EQUAL to the frame's current one, so
+# a bare `enter` changes nothing.
+run_mutation "scope-picker: the highlight opens on the current scope" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '        list.place(active);' \
+  '        list.place(None);' \
+  geode-shell \
+  the_scope_equal_to_the_current_one_is_lit
+
+run_mutation "scope-picker: enter on an untouched picker keeps the current scope" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '        list.place(active);' \
+  '        list.place(None);' \
+  geode-shell \
+  the_picker_opens_on_the_current_scope_and_enter_keeps_it
+
+# A pick loads through `load_saved_scope` (one undoable `set_scope` step);
+# applying the saved scope and dropping the history is not undoable.
+run_mutation "scope-picker: a pick loads through the undoable load_saved_scope" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '            if shell.load_saved_scope(&name, cx).is_err() {' \
+  '            if shell
+                .target_frame()
+                .update(cx, |f, _| {
+                    let s = f.saved_scopes().get(&name).cloned();
+                    s.map(|s| {
+                        f.set_scope(s);
+                        f.clear_history();
+                    })
+                })
+                .is_none()
+            {' \
+  geode-shell \
+  mod_o_then_typing_and_enter_loads_the_scope_undoably
+
+# A name gone since the open loads nothing AND says so.
+run_mutation "scope-picker: a vanished scope is reported on the status bar" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '            if shell.load_saved_scope(&name, cx).is_err() {' \
+  '            if shell.load_saved_scope(&name, cx).is_err() && false {' \
+  geode-shell \
+  picking_a_scope_removed_under_the_picker_says_so
+
+# The rows are the frame's LIVE saved scopes, not the configuration as
+# loaded (which a scope saved or reloaded into the frame since has not
+# reached).
+run_mutation "scope-picker: rows are the frame's live saved scopes" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '        ChoiceDialogState::scopes(frame.saved_scopes(), frame.scope())' \
+  '        ChoiceDialogState::scopes(
+            &super::hot_reload::rebuild_saved_scopes(&view.services.config, false),
+            frame.scope(),
+        )' \
+  geode-shell \
+  a_scope_saved_after_startup_is_listed_and_loads
+
+# `mod+o` reaches the picker through the dispatch arm.
+run_mutation "scope-picker: frame::scope opens the picker" \
+  crates/geode-shell/src/shell/input.rs \
+  '            choicedialog::open_scopes(self, window, cx);' \
+  '            let _ = (window, cx);' \
+  geode-shell \
+  mod_o_then_typing_and_enter_loads_the_scope_undoably
+
+# The toolbar's load glyph goes through the same open door as `mod+o`.
+run_mutation "scope-picker: the load glyph click opens the picker" \
+  crates/geode-shell/src/shell/render.rs \
+  '                choicedialog::open_scopes(view, window, cx);' \
+  '                let _ = (view, window, cx);' \
+  geode-shell \
+  clicking_the_load_glyph_opens_a_typeable_picker
+
+# The load glyph reads pressed while its picker is up.
+run_mutation "scope-picker: the load glyph holds its pressed state while open" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '            scope_open.then_some("scope-load-chip-open"),' \
+  '            None,' \
+  geode-shell \
+  clicking_the_load_glyph_opens_a_typeable_picker
+
+# With no saved scope the list gives way to the how-to-save hint.
+run_mutation "scope-picker: an empty set paints the save hint" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '    let body = if no_scopes {' \
+  '    let body = if false {' \
+  geode-shell \
+  with_no_saved_scopes_the_picker_says_how_to_save_one
+
+# With no saved scope Enter is inert, so the footer offers only Escape.
+run_mutation "scope-picker: an empty set's footer drops enter" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '        ("scope-empty-hints", SCOPE_EMPTY_HINTS)' \
+  '        (hints_selector, hints)' \
+  geode-shell \
+  with_no_saved_scopes_the_picker_says_how_to_save_one
+
 # ---- Tile picker: placeholder double-click, tile::add and mod-n ----
 
 # Only a PLACEHOLDER's double-click is the door — a real tile's may
@@ -16399,6 +17183,20 @@ run_mutation "pricer core: a failed leg still sums" \
   '            self.result[p] = if complete {' \
   geode-pricer a_package_sums_qty_times_value_over_its_legs_with_signed_quantities
 
+# A local-currency sum over USD and EUR legs is a sum of unlike units: the
+# fold marks the package MIXED, and a local cell or total paints a gap.
+run_mutation "pricer core: a package over differing currencies keeps the first leg's" \
+  crates/geode-pricer/src/core/sheet.rs \
+  '                        if acc.currency != r.currency {' \
+  '                        if false {' \
+  geode-pricer a_package_over_differing_currencies_folds_to_a_mixed_currency
+
+run_mutation "pricer totals: a mixed-currency local total is a gap" \
+  crates/geode-pricer/src/core/select.rs \
+  '    if currency.is_some_and(|c| c.is_mixed()) {' \
+  '    if false {' \
+  geode-pricer risk_totals_over_differing_currencies_are_a_gap_locally_and_a_sum_in_usd
+
 run_mutation "pricer core: undo of a remove re-requests the row" \
   crates/geode-pricer/src/core/sheet.rs \
   '        self.state.insert(at, rec.state);' \
@@ -16443,15 +17241,13 @@ run_mutation "pricer shorthand: the third Friday is the first" \
   '    first.checked_add_days(chrono::Days::new(u64::from(to_friday)))' \
   geode-pricer a_month_code_resolves_to_the_third_friday
 
-run_mutation "pricer views: an unknown column is only a warning" \
+# `ViewSpec::validate` already errors on the unknown column at load; the
+# pricer's own drop notice is a warning so a typo is one error, not two.
+run_mutation "pricer views: an unknown column drop is a second error" \
   crates/geode-pricer/src/core/views.rs \
-  '                        Severity::Error,
-                        &format!("columns.{i}"),
-                        format!("unknown column '"'"'{col_name}'"'"'; dropped"),' \
-  '                        Severity::Warning,
-                        &format!("columns.{i}"),
-                        format!("unknown column '"'"'{col_name}'"'"'; dropped"),' \
-  geode-pricer an_unknown_column_is_an_error_and_dropped
+  '                severity: Severity::Warning,' \
+  '                severity: Severity::Error,' \
+  geode-pricer an_unknown_measure_is_dropped_from_the_pricer_view_not_the_view
 
 # Strike numbers with a gap make `K1/K2/K3` ambiguous; such a template
 # must be dropped.
@@ -16566,10 +17362,10 @@ run_mutation "pricer templates: a reload leaves the open bar's history stale" \
 run_mutation "pricer app: a reload hands the factory the builtin templates" \
   crates/geode-app/src/bridge.rs \
   '            };
-            pricer.reload(views, templates, refresh, stale_after, cx);' \
+            pricer.reload(views, templates, colours, refresh, stale_after, cx);' \
   '            };
             let _ = templates;
-            pricer.reload(views, TemplateSet::builtin(), refresh, stale_after, cx);' \
+            pricer.reload(views, TemplateSet::builtin(), colours, refresh, stale_after, cx);' \
   geode-app a_config_reload_hands_the_pricer_factory_its_templates
 
 # On a reload, "previous" is the running set, not an empty one.
@@ -18555,7 +19351,7 @@ run_mutation "catalog refresh: old as-of results are discarded" \
   crates/geode-app/src/bridge.rs \
   'snapshot.as_of == current_as_of' \
   'true' \
-  geode-app an_as_of_change_on_a_visible_diagnostics_tile_requests_a_second_catalog_with_the_new_as_of
+  geode-app an_as_of_change_on_the_visible_diagnostics_page_requests_a_second_catalog_with_the_new_as_of
 
 
 run_mutation "catalog refresh: refused submissions retry" \
@@ -19193,15 +19989,6 @@ run_mutation "pricer tile: the flip barrier waits for the pricer" \
   '            let _ = (&frame, QueryKey(this.id.0));' \
   geode-pricer the_tile_answers_a_flip_barrier_it_has_nothing_coming_for
 
-# Diagnostics submits no frame query, so nothing else answers a barrier
-# that enrolls it. Mutated away, every following tile on screen waits out
-# `FLIP_DEADLINE` on each scope, grouping or as-of change.
-run_mutation "diagnostics module: the tile answers a flip barrier itself" \
-  crates/geode-diagnostics/src/tile.rs \
-  '            following::arrive_immediately(&mut FrameDoor::new(&frame, cx), QueryKey(this.tile.0));' \
-  '            let _ = (&frame, QueryKey(this.tile.0));' \
-  geode-diagnostics the_tile_answers_a_flip_barrier_it_has_nothing_coming_for
-
 run_mutation "pricer tile: the entry field is dropped unblurred" \
   crates/geode-pricer/src/tile.rs \
   '        if entry.input.read(cx).focus_handle(cx).is_focused(window) {' \
@@ -19476,8 +20263,8 @@ run_mutation "pricer cell: an empty shift commits zero" \
 
 run_mutation "pricer app: a config reload never reaches the pricer" \
   crates/geode-app/src/bridge.rs \
-  '            pricer.reload(views, templates, refresh, stale_after, cx);' \
-  '            let _ = (views, templates, refresh, stale_after);' \
+  '            pricer.reload(views, templates, colours, refresh, stale_after, cx);' \
+  '            let _ = (views, templates, colours, refresh, stale_after);' \
   geode-app a_config_reload_hands_the_pricer_factory_its_views
 
 # The free underlying typeahead: ranking is a subsequence match, so an
@@ -20403,13 +21190,13 @@ run_mutation "pricer: a save refused at submission is counted as queued" \
 # positionally, so a layer's redeclaration would misplace values.
 run_mutation "data_setup: a redeclared pricer_sheets is kept" \
   crates/geode-app/src/bridge.rs \
-  '    diagnostics.extend(pin_pricer_sheets(&mut schema, config));' \
+  '    diagnostics.extend(pin_app_datasets(&mut schema, config));' \
   '' \
   geode-app a_layer_redeclaring_pricer_sheets_differently_is_ignored_with_an_error
 
 run_mutation "reload: a redeclared pricer_sheets is kept" \
   crates/geode-app/src/bridge.rs \
-  '                    pin_diags.extend(pin_pricer_sheets(&mut schema, config));' \
+  '                    pin_diags.extend(pin_app_datasets(&mut schema, config));' \
   '                    let _ = &mut schema;' \
   geode-app a_reload_ignores_and_reports_a_redeclared_pricer_sheets
 
@@ -20428,8 +21215,8 @@ run_mutation "views dialog: a local dataset is offered" \
 
 run_mutation "sources dialog: a local dataset is offered" \
   crates/geode-shell/src/shell/objectdialog/sources.rs \
-  '        .filter(|d| !d.local)' \
-  '        .filter(|d| !d.name.is_empty())' \
+  '        .filter(|d| !d.local && !d.computed)' \
+  '        .filter(|d| !d.name.is_empty() && !d.computed)' \
   geode-shell the_dataset_choice_offers_no_local_dataset
 
 # ---- Pricer sheet storage and confirmation ----
@@ -22469,13 +23256,7 @@ run_mutation "status: the stopped segment's click does nothing" \
   crates/geode-shell/src/shell/status.rs \
   '                    stopped_click(window, cx);' \
   '                    let _ = (&stopped_click, window, cx);' \
-  geode-shell clicking_the_stopped_segment_opens_the_diagnostics_tile
-
-run_mutation "sections: stopped threads are not listed" \
-  crates/geode-diagnostics/src/sections.rs \
-  '    if !d.stopped.is_empty() {' \
-  '    if false {' \
-  geode-diagnostics stopped_threads_lead_the_sources_section
+  geode-shell clicking_the_stopped_segment_opens_the_diagnostics_page
 
 run_mutation "bridge: a stopped thread never reaches diagnostics" \
   crates/geode-app/src/bridge.rs \
@@ -22792,8 +23573,8 @@ run_mutation "pricer select: lines_of keeps a leg twice" \
 # carries its legs, so totalling both would double them.
 run_mutation "pricer select: totals count a selected package's legs again" \
   crates/geode-pricer/src/tile/select.rs \
-  $'        let top = top_most(&self.sheet, &self.selected_sheet_rows());\n        let sums = risk_totals' \
-  $'        let top = self.selected_sheet_rows();\n        let sums = risk_totals' \
+  $'    fn prepare_totals(&mut self) {\n        let top = top_most(&self.sheet, &self.selected_sheet_rows());' \
+  $'    fn prepare_totals(&mut self) {\n        let top = self.selected_sheet_rows();' \
   geode-pricer the_footer_totals_count_an_open_packages_legs_once
 
 # A line's total is a position total: its qty times the unit value.
@@ -22806,8 +23587,8 @@ run_mutation "pricer select: totals drop the qty weighting" \
 # An unpriced or failed row makes its column incomplete, never a partial sum.
 run_mutation "pricer select: an unpriced row counts as zero in the totals" \
   crates/geode-pricer/src/core/select.rs \
-  '            (LineState::Failed(_), _) | (_, None) => None,' \
-  '            (LineState::Failed(_), _) | (_, None) => Some([0.0; 6]),' \
+  '                _ => None,' \
+  '                _ => *s,' \
   geode-pricer risk_totals_are_position_totals_and_refuse_an_incomplete_column
 
 # An incomplete total paints as a refused dash, not a number.
@@ -23928,6 +24709,457 @@ run_mutation "following: a releasing reply asked before a followed change is sup
   '                    Promotion::Superseded => Delivered::Held,' \
   geode-tile a_releasing_delivery_asked_before_a_followed_change_is_superseded
 
+# ---- Pricer vocabulary: 28 measures, computed datasets, pricer views (2026-09-28) ----
+# A `_usd` column reads the USD array; reading the local one would paint
+# a local-currency number under a USD header.
+run_mutation "pricing: usd twin reads the usd array" \
+  crates/geode-core/src/pricing.rs \
+  '        if usd {
+            self.usd[m.index()]
+        } else {' \
+  '        if usd {
+            self.local[m.index()]
+        } else {' \
+  geode-core usd_twin_reads_the_usd_array
+
+# A package fold sums both arrays; dropping the USD fold leaves every
+# `_usd` cell on a package row at zero.
+run_mutation "pricing: add_scaled folds usd too" \
+  crates/geode-core/src/pricing.rs \
+  '            self.usd[i] += q * other.usd[i];' \
+  '            let _ = other.usd[i];' \
+  geode-core add_scaled_sums_both_arrays_and_keeps_its_own_currency
+
+# A currency is exactly three uppercase ASCII letters; `usd` or `Eur` is
+# not one, and a lowercase code would be a second spelling of the same key.
+run_mutation "pricing: a currency is three uppercase letters" \
+  crates/geode-core/src/pricing.rs \
+  '        if b.len() == 3 && b.iter().all(|c| c.is_ascii_uppercase()) {' \
+  '        if b.len() == 3 && b.iter().all(|c| c.is_ascii_alphabetic()) {' \
+  geode-core a_currency_is_three_uppercase_ascii_letters
+
+# The mock converts USD from the local array by the underlying's rate; a
+# zeroed USD array makes the npv ratio 0, which the rate check refuses.
+run_mutation "mock pricer: usd is converted from local" \
+  crates/geode-pricing/src/lib.rs \
+  '        let mut usd = local;' \
+  '        let mut usd = [0.0; Measure::COUNT];' \
+  geode-pricing bumped_measures_share_the_analytic_signs_and_usd_is_converted
+
+# A computed dataset has no relation, so the "no grain key" note would
+# ask for a key no table will ever carry.
+run_mutation "schema: computed suppresses the grain key note" \
+  crates/geode-core/src/schema/mod.rs \
+  '    if !ds.computed {' \
+  '    if true {' \
+  geode-core computed_is_read_on_a_measure_dataset_and_suppresses_the_grain_key_note
+
+# `computed` is a measures-family fact; on a document dataset it is an
+# error and cleared, or a document family would silently lose its tables.
+run_mutation "schema: computed is an error off the measures family" \
+  crates/geode-core/src/schema/mod.rs \
+  '    if ds.computed && ds.family != Family::Measures {' \
+  '    if false {' \
+  geode-core computed_on_a_document_dataset_is_an_error_and_cleared
+
+# A source naming a computed dataset would ingest into a table that does
+# not exist; it is refused at parse with a field-addressed diagnostic.
+run_mutation "sources: a computed dataset refuses a source" \
+  crates/geode-core/src/source_config.rs \
+  '                Some(d) if schema.dataset(d).is_some_and(|ds| ds.computed) => {' \
+  '                Some(d) if schema.dataset(d).is_some_and(|_| false) => {' \
+  geode-core a_source_naming_a_computed_dataset_is_refused
+
+# The compiler refuses a view over a computed dataset before any table is
+# named, so the refusal is the module's text and not a DuckDB binder error.
+run_mutation "compile: a computed dataset is refused" \
+  crates/geode-data/src/query/compile.rs \
+  '    if ds.computed {' \
+  '    if false {' \
+  geode-data a_view_over_a_computed_dataset_is_refused_before_any_table_is_touched
+
+# A join to a computed dataset can never be honoured, required or not:
+# an optional one skipped instead of refused would make a dead view.
+run_mutation "compile: a computed join is refused even when optional" \
+  crates/geode-data/src/query/compile.rs \
+  '        if joined_ds.is_computed() {' \
+  '        if false {' \
+  geode-data a_join_to_a_computed_dataset_is_refused_even_when_optional
+
+# The store creates no table for a computed dataset; one created would
+# show in the catalog as an empty dataset a source could be pointed at.
+run_mutation "service: a computed dataset gets no table" \
+  crates/geode-data/src/service.rs \
+  '        for ds in config.schema.datasets.iter().filter(|d| !d.computed) {
+            store.apply_schema(ds)?;' \
+  '        for ds in config.schema.datasets.iter().filter(|_| true) {
+            store.apply_schema(ds)?;' \
+  geode-data a_computed_dataset_creates_no_table_and_is_absent_from_the_catalog
+
+# The Sources dialog's dataset choice offers only datasets a source can
+# feed; a computed one picked there would be refused at save.
+run_mutation "sources dialog: a computed dataset is not offered" \
+  crates/geode-shell/src/shell/objectdialog/sources.rs \
+  '        .filter(|d| !d.local && !d.computed)' \
+  '        .filter(|d| !d.local)' \
+  geode-shell the_dataset_choice_offers_no_computed_dataset
+
+# A computed dataset's values cannot be listed (no relation); a pickable
+# over it would submit a values query that fails to compile.
+run_mutation "pickables: a computed dataset is skipped" \
+  crates/geode-shell/src/shell/mod.rs \
+  '    for dataset in schema.datasets.iter().filter(|d| !d.computed) {' \
+  '    for dataset in schema.datasets.iter().filter(|_| true) {' \
+  geode-shell pickables_skip_a_computed_dataset
+
+# The dataset declaration and the paint vocabulary are one list in one
+# order; a column declared out of order would let a view name a column
+# the grid cannot paint where the declaration says it is.
+run_mutation "pricer dataset: declaration mirrors COLUMNS" \
+  crates/geode-pricer/src/core/dataset.rs \
+  '[pricer.columns.expiry]
+type = "utf8"
+role = "dimension"
+grain = "instrument"
+[pricer.columns.strike]' \
+  '[pricer.columns.strike]
+type = "utf8"
+role = "dimension"
+grain = "instrument"
+[pricer.columns.expiry]' \
+  geode-pricer the_declaration_names_exactly_the_paint_vocabulary
+
+# Only a view whose dataset is `pricer` is a pricer view; a blotter view
+# taken in would be offered on the pricer and paint nothing it names.
+run_mutation "pricer views: only dataset pricer" \
+  crates/geode-pricer/src/core/views.rs \
+  '        for spec in specs.iter().filter(|s| s.dataset == PRICER_DATASET) {' \
+  '        for spec in specs.iter().filter(|_| true) {' \
+  geode-pricer a_view_over_another_dataset_is_not_a_pricer_view
+
+# A view with a join or a derived column is unhonourable on a computed
+# dataset and is dropped whole rather than painted in part.
+run_mutation "pricer views: derived refuses the view" \
+  crates/geode-pricer/src/core/views.rs \
+  '            if refused {' \
+  '            if false {' \
+  geode-pricer a_pricer_view_with_a_derived_column_or_join_is_refused
+
+# A hidden view column leaves the plan, as it does in the blotter.
+run_mutation "pricer views: hidden leaves the plan" \
+  crates/geode-pricer/src/core/views.rs \
+  '                .filter(|c| !c.presentation.hidden.unwrap_or(false))' \
+  '                .filter(|_| true)' \
+  geode-pricer a_hidden_column_is_left_out_of_the_plan
+
+# An unknown column drops only itself (validation already errored on it
+# at load); dropping the whole view would take a working view away for
+# one misspelt name.
+run_mutation "pricer views: unknown column dropped, view kept" \
+  crates/geode-pricer/src/core/views.rs \
+  $'                    diags.push(warn(format!("unknown column \'{}\'; dropped", c.name())));\n                    continue;' \
+  $'                    diags.push(warn(format!("unknown column \'{}\'; dropped", c.name())));\n                    columns.clear();\n                    break;' \
+  geode-pricer an_unknown_measure_is_dropped_from_the_pricer_view_not_the_view
+
+# A `pricer_views` document is no longer read; its presence is an error
+# naming `views.toml`, or a desk's old views file would be ignored silently.
+run_mutation "app: pricer_views is an error" \
+  crates/geode-app/src/bridge.rs \
+  '    if config.doc(PRICER_VIEWS_DOC).is_some() {' \
+  '    if false {' \
+  geode-app a_pricer_views_doc_is_an_error_naming_views_toml
+
+# The `pricer` dataset is pinned to the app's declaration: a layer
+# redeclaring it differently is replaced with an error, since a differing
+# declaration changes what a view, scope or grouping over it means.
+run_mutation "app: the pricer pin replaces a differing redeclaration" \
+  crates/geode-app/src/bridge.rs \
+  '        pin_app_dataset(
+            schema,
+            config,
+            PRICER_DATASET,
+            PRICER_DATASET_DECLARATION,
+            "a differing declaration would change what a view, scope or grouping over the \
+             pricer means",
+        ),' \
+  '        None,' \
+  geode-app a_layer_redeclaring_pricer_differently_is_ignored_with_an_error
+
+# A presentation-only edit must change the pricer key, or a reload that
+# only relabels a column would leave open pricer tiles on the old labels.
+run_mutation "app: presentation edits reach the pricer key" \
+  crates/geode-app/src/bridge.rs \
+  '        view_presentation: config.doc("view_presentation").map(|d| d.value.clone()),' \
+  '        view_presentation: None,' \
+  geode-app a_presentation_only_edit_changes_the_pricer_key
+
+# A `pricer_views` document added at runtime changes the key, so the
+# reload that reports it as an error reaches the tiles too.
+run_mutation "app: a runtime-added pricer_views doc changes the key" \
+  crates/geode-app/src/bridge.rs \
+  '        pricer_views: config.doc(PRICER_VIEWS_DOC).map(|d| d.value.clone()),' \
+  '        pricer_views: None,' \
+  geode-app a_runtime_added_pricer_views_doc_changes_the_pricer_key
+
+# The blotter neither completes nor opens a view over a computed dataset;
+# offered, `:view` would open it and refuse at once.
+run_mutation "blotter: computed views are not offered" \
+  crates/geode-blotter/src/tile.rs \
+  '        showable_in(&self.schema.borrow(), view)' \
+  '        let _ = view;
+        true' \
+  geode-blotter view_completion_and_command_exclude_views_over_a_computed_dataset
+
+# A fresh tile's fallback view skips computed datasets too, or a pricer
+# view sorting first would be the view every new blotter opens on and refuses.
+run_mutation "blotter: the fallback view skips computed datasets" \
+  crates/geode-blotter/src/tile.rs \
+  '                    .or_else(|| views.iter().find(|v| showable_in(&schema, v)))' \
+  '                    .or_else(|| views.iter().find(|_| true))' \
+  geode-blotter a_fresh_tile_skips_a_computed_view_that_sorts_first
+
+# A column colour applies only to an own cell: a stale cell stays muted
+# and a failed one danger whatever the column says, so state is never
+# hidden by a tint.
+run_mutation "pricer colour: state paint wins over a column colour" \
+  crates/geode-pricer/src/paint.rs \
+  '    if !matches!(state, CellState::Own) {' \
+  '    if false {' \
+  geode-pricer colour_applies_only_to_an_own_numeric_cell
+
+# New colour definitions must invalidate the resolve cache, or a reload
+# that recolours a name keeps painting the old resolved value.
+run_mutation "pricer colour: new colours invalidate the cache" \
+  crates/geode-pricer/src/delegate.rs \
+  '            self.colour_cache.invalidate();' \
+  '            let _ = ();' \
+  geode-pricer a_second_colour_reload_repaints_a_named_column
+
+# `tile_columns` marks the cursor's column active so `Edit column in
+# view…` opens the Views dialog on that column, not the first.
+run_mutation "pricer tile_columns: the cursor column is active" \
+  crates/geode-pricer/src/tile.rs \
+  '            active: (self.cursor.col < self.plan.columns.len()).then_some(self.cursor.col),' \
+  '            active: (self.cursor.col < self.plan.columns.len()).then_some(0),' \
+  geode-pricer tile_columns_list_the_plan_with_the_cursor_column_active
+
+# A header drag lands the column at the drop index; appending instead
+# would move every dragged column to the end.
+run_mutation "pricer plan: move_column reorders" \
+  crates/geode-pricer/src/core/views.rs \
+  '            self.columns.insert(to, c);' \
+  '            self.columns.push(c);' \
+  geode-pricer move_column_reorders_the_plan_and_position_of_finds_by_name
+
+
+# A bare j/k wraps at the ends of a grid; without it a trader at the last
+# row has to page back to the top.
+run_mutation "shared motion: a bare single step wraps" \
+  crates/geode-tile/src/motion.rs \
+  '            if !counted && !selecting && by.abs() == 1 {' \
+  '            if false {' \
+  geode-tile a_bare_single_step_wraps_at_both_ends
+
+# A live selection clamps a bare step; a wrap would put the cursor across
+# the anchor and invert the selection.
+run_mutation "shared motion: a selection clamps a bare step" \
+  crates/geode-tile/src/motion.rs \
+  '            if !counted && !selecting && by.abs() == 1 {' \
+  '            if !counted && by.abs() == 1 {' \
+  geode-tile a_live_selection_clamps_a_bare_step
+
+# A counted step clamps, a count of one included.
+run_mutation "shared motion: a counted step clamps" \
+  crates/geode-tile/src/motion.rs \
+  '            if !counted && !selecting && by.abs() == 1 {' \
+  '            if !selecting && by.abs() == 1 {' \
+  geode-tile a_counted_step_clamps_even_a_count_of_one
+
+run_mutation "shared motion: a counted top or bottom is a 1-based row" \
+  crates/geode-tile/src/motion.rs \
+  '        Motion::Top(Some(n)) | Motion::Bottom(Some(n)) => (n.max(1) as usize - 1).min(last),' \
+  '        Motion::Top(Some(_)) => 0,
+        Motion::Bottom(Some(_)) => last,' \
+  geode-tile a_counted_top_or_bottom_jumps_to_that_row
+
+# A cursor left past the end after the rows shrank steps from the last
+# row; from its stale index a bare wrap would land somewhere unrelated.
+run_mutation "shared motion: a stale row past the end steps from the last row" \
+  crates/geode-tile/src/motion.rs \
+  '            let from = at.min(last);' \
+  '            let from = at;' \
+  geode-tile a_stale_position_past_the_end_moves_from_the_last_row
+
+run_mutation "shared motion: a stale column past the end steps from the last column" \
+  crates/geode-tile/src/motion.rs \
+  'Motion::Cols(by) => (at.min(last) as i64)' \
+  'Motion::Cols(by) => (at as i64)' \
+  geode-tile a_stale_position_past_the_end_moves_from_the_last_row
+
+run_mutation "shared motion: half a page is five rows" \
+  crates/geode-tile/src/motion.rs \
+  'pub const HALF_PAGE: i64 = 5;' \
+  'pub const HALF_PAGE: i64 = 10;' \
+  geode-tile the_page_motions_move_five_and_ten_times_the_count
+
+run_mutation "shared motion: a page is ten rows" \
+  crates/geode-tile/src/motion.rs \
+  'pub const FULL_PAGE: i64 = 10;' \
+  'pub const FULL_PAGE: i64 = 5;' \
+  geode-tile the_page_motions_move_five_and_ten_times_the_count
+
+run_mutation "shared motion: the count multiplies a page" \
+  crates/geode-tile/src/motion.rs \
+  '    let n = i64::from(count.unwrap_or(1).max(1));' \
+  '    let n = 1i64;' \
+  geode-tile the_page_motions_move_five_and_ten_times_the_count
+
+run_mutation "shared motion: line end is the last column" \
+  crates/geode-tile/src/motion.rs \
+  '        Motion::LineEnd => last,' \
+  '        Motion::LineEnd => at,' \
+  geode-tile columns_clamp_and_line_start_and_end_reach_the_extremes
+
+run_mutation "shared motion: an empty axis leaves the row alone" \
+  crates/geode-tile/src/motion.rs \
+  '    if len == 0 {
+        return at;
+    }' \
+  '    if len == 0 {
+        return 0;
+    }' \
+  geode-tile an_empty_axis_is_a_no_op
+
+# One shipped context covers both grid modes, so one override remaps both.
+run_mutation "motion keys: the grid context covers visual mode" \
+  crates/geode-shell/src/defaults.rs \
+  'context = "grid && (mode == normal || mode == visual)"
+[bindings.keys]
+"j" = "motion::down"' \
+  'context = "grid && mode == normal"
+[bindings.keys]
+"j" = "motion::down"' \
+  geode-shell grid_motions_resolve_in_normal_and_visual_grid_contexts_only
+
+run_mutation "motion keys: j is the shipped down" \
+  crates/geode-shell/src/defaults.rs \
+  '"j" = "motion::down"' \
+  '"j" = "motion::up"' \
+  geode-shell grid_motions_resolve_in_normal_and_visual_grid_contexts_only
+
+run_mutation "motion keys: an open tile list takes j" \
+  crates/geode-shell/src/defaults.rs \
+  'context = "tilelist"
+[bindings.keys]
+"j" = "motion::menu_down"' \
+  'context = "tilelist && mode == normal"
+[bindings.keys]
+"j" = "motion::menu_down"' \
+  geode-shell an_open_tile_list_takes_j_and_k_as_menu_steps_not_grid_motions
+
+# A tile with an open menu or popup list publishes `tilelist`, so the shared
+# menu steps reach it; without the flag j/k resolve to nothing there (or to
+# the grid) and the menu never moves.
+run_mutation "tile list: the md menu publishes tilelist" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if mode == "menu" {
+            ctx = ctx.tilelist();
+        }' \
+  '' \
+  geode-marketdata tilelist_keys_step_the_open_menu_and_leave_the_grid
+
+# The panel maps the shared step onto its own menu verb; unmapped, the
+# shared id is unhandled and the open menu's highlight stays.
+run_mutation "tile list: the md menu takes the shared step" \
+  crates/geode-marketdata/src/tile.rs \
+  '        } else if action.0 == geode_tile::motion::MENU_DOWN {
+            "menu_down"' \
+  '        } else if action.0 == "never" {
+            "menu_down"' \
+  geode-marketdata tilelist_keys_step_the_open_menu_and_leave_the_grid
+
+run_mutation "tile list: the pricer menu publishes tilelist" \
+  crates/geode-pricer/src/tile.rs \
+  '        if mode == "menu" {
+            cx = cx.tilelist();
+        }' \
+  '' \
+  geode-pricer tilelist_keys_step_the_open_menu_and_leave_the_grid
+
+run_mutation "tile list: the pricer menu takes the shared step" \
+  crates/geode-pricer/src/tile.rs \
+  '        } else if action.0 == geode_tile::motion::MENU_DOWN {
+            "menu_down"' \
+  '        } else if action.0 == "never" {
+            "menu_down"' \
+  geode-pricer tilelist_keys_step_the_open_menu_and_leave_the_grid
+
+run_mutation "tile list: the timeseries popups publish tilelist" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  'ctx = ctx.pair("popup", pair).tilelist();' \
+  'ctx = ctx.pair("popup", pair);' \
+  geode-timeseries tilelist_keys_step_the_open_list
+
+# The down step must reach the list as a down step: with it swapped, the
+# action menu's clamped highlight cannot leave its first enabled row.
+run_mutation "tile list: the timeseries list takes the shared step" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '            geode_tile::motion::MENU_DOWN => "list_down",' \
+  '            geode_tile::motion::MENU_DOWN => "list_up",' \
+  geode-timeseries tilelist_keys_step_the_open_list
+
+# Through the real shell and keymap: with the pricer's menu open, j and
+# down send the menu step, never the grid's motion.
+run_mutation "motion e2e: an open pricer menu takes j" \
+  crates/geode-pricer/src/tile.rs \
+  '        if mode == "menu" {
+            cx = cx.tilelist();
+        }' \
+  '' \
+  geode-app a_menu_motion_steps_the_open_pricer_menu_not_its_grid
+
+run_mutation "motion keys: the motions register under Motion" \
+  crates/geode-shell/src/defaults.rs \
+  '        action(reg, id, title, "Motion");' \
+  '        action(reg, id, title, "Workspace");' \
+  geode-shell each_motion_is_listed_once_under_motion_with_its_vim_key
+
+run_mutation "motion keys: several retired ids rename to one" \
+  crates/geode-shell/src/actions.rs \
+  '        self.renames.insert(old, ActionId(new.to_string()));' \
+  '        if self.renames.values().any(|n| n.0 == new) {
+            return Err(format!("{new} already has a retired id"));
+        }
+        self.renames.insert(old, ActionId(new.to_string()));' \
+  geode-shell several_retired_ids_may_rename_to_one_current_id
+
+run_mutation "motion keys: a grid occupant receives the shared motions" \
+  crates/geode-shell/src/module.rs \
+  '            if self.grid { ctx.grid() } else { ctx }' \
+  '            ctx' \
+  geode-shell a_shared_motion_key_reaches_a_grid_occupant_with_its_count
+
+# ---- Pinned glyph visibility ----
+# An active chip's fill is floored against the title bar; the raw primary
+# sits too close to the bar on several bundled themes.
+run_mutation "chip: an active fill is floored against the title bar" \
+  crates/geode-shell/src/shell/chip.rs \
+  '            let fill = readable_on(
+                over(theme.primary, background),
+                bar,
+                to_rgb(theme.foreground),
+            );' \
+  '            let fill = over(theme.primary, background);' \
+  geode-shell an_active_chip_stands_out_from_the_title_bar_on_every_bundled_theme
+
+# Its text is floored against that fill; primary_foreground alone is
+# unreadable on several bundled themes.
+run_mutation "chip: active text is floored against its fill" \
+  crates/geode-shell/src/shell/chip.rs \
+  '                text: to_hsla(readable_on(to_rgb(theme.primary_foreground), fill, pole)),' \
+  '                text: theme.primary_foreground,' \
+  geode-shell every_chip_tone_is_readable_on_every_bundled_theme
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
@@ -23956,27 +25188,14 @@ if (( build_failures || anchor_failures )); then
   exit 1
 fi
 if (( anchors_only )); then
+  # An entry registered below this point never runs and is never checked:
+  # the run has already ended. Refuse the file rather than pass it.
+  here=$LINENO
+  last=$(grep -n '^run_mutation ' "$0" | tail -1 | cut -d: -f1)
+  if (( last > here )); then
+    echo "ORDER     run_mutation at line $last sits after the end-of-run block" >&2
+    exit 1
+  fi
   # Static checks over every selected entry; see scripts/mutation_anchors.py.
   python3 scripts/mutation_anchors.py "$anchors" || exit 1
 fi
-
-# ---- Pinned glyph visibility (2026-09-28) ----
-# An active chip's fill is floored against the title bar; the raw primary
-# sits too close to the bar on several bundled themes.
-run_mutation "chip: an active fill is floored against the title bar" \
-  crates/geode-shell/src/shell/chip.rs \
-  '            let fill = readable_on(
-                over(theme.primary, background),
-                bar,
-                to_rgb(theme.foreground),
-            );' \
-  '            let fill = over(theme.primary, background);' \
-  geode-shell an_active_chip_stands_out_from_the_title_bar_on_every_bundled_theme
-
-# Its text is floored against that fill; primary_foreground alone is
-# unreadable on several bundled themes.
-run_mutation "chip: active text is floored against its fill" \
-  crates/geode-shell/src/shell/chip.rs \
-  '                text: to_hsla(readable_on(to_rgb(theme.primary_foreground), fill, pole)),' \
-  '                text: theme.primary_foreground,' \
-  geode-shell every_chip_tone_is_readable_on_every_bundled_theme

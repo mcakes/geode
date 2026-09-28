@@ -12,11 +12,10 @@ Current behavior and rationale:
 
 | Module | Holds |
 |---|---|
-| `core` | Column plans, expansion paths, visible-row traversal, cursor movement, find, selection summaries, cursor-row launch context, TSV export, command parsing, and visible-window formatting without GPUI. |
+| `core` | Column plans, expansion paths, visible-row traversal, cursor movement (`core::cursor`, moved by `geode_tile::motion`), find, selection summaries, cursor-row launch context, TSV export, command parsing, and visible-window formatting without GPUI. |
 | `delegate` | `TableDelegate` adapter with prepared rows and cached cell text. Holds `:autosize`'s fitted widths by column name, which `column()` prefers over the plan's; `fit_columns` measures the header and the format cache's window only. Owns selection and paint caches; reports cell gestures and chevron clicks to the tile. |
-| `tile` | `BlotterTile`, the entity per tile: local query overrides, requests through `DataHandle`, frame observation over `geode_tile::following`, snapshot application, header and footer rendering. The header notice is a `geode_tile::notice::Notice`: dropped sorts and selections are warnings, query and configuration failures danger. |
+| `tile` | `BlotterTile`, the entity per tile: a key context that publishes `grid` (so the shell's shared `motion::*` keys reach it), `dispatch` routing every `motion::*` id through `geode_tile::motion`, local query overrides, requests through `DataHandle`, frame observation over `geode_tile::following`, snapshot application, header and footer rendering. The header notice is a `geode_tile::notice::Notice`: dropped sorts and selections are warnings, query and configuration failures danger. |
 | `content` | The `TileContent` wrapper and `BlotterFactory`, the roster entry the app builds with the data handle. |
-| `colour_cache` | Caches each named color's base and sign variants until theme inputs or definitions change. |
 
 ## Commands
 
@@ -34,7 +33,11 @@ cargo bench -p geode-blotter   # the pure core
   or no cached rows, a fit refuses with "nothing loaded to fit" and keeps
   its widths.
 - A view switch clears the fitted widths, and a restored record whose view
-  is gone starts without them. `apply_snapshot` drops only the tree column's
+  is gone starts without them. A view over a computed dataset is never the
+  blotter's: `:view` neither completes nor opens it, and a record naming one
+  opens the fallback view with the refusal as its notice, held through the
+  fallback's first snapshot. The fallback (default, else first) skips
+  computed views as well. `apply_snapshot` drops only the tree column's
   width (key `""`) when the grouping differs from the plan's. That method is
   the one place every grouping change reaches the delegate. The session
   record keeps the widths under `column_widths`.
@@ -77,6 +80,12 @@ cargo bench -p geode-blotter   # the pure core
   Losing the anchor row, or a block's anchor column, clears the selection
   with a notice. The compatibility action `blotter::visual` resolves to
   `blotter::visual_rows` with a warning.
+- The fragment binds no motions. The key context publishes `grid` in both
+  modes; `dispatch` hands every `motion::*` id to `Cursor::apply`, which
+  clamps a bare step while a selection is live. The twelve retired motion
+  ids (`blotter::down` … `blotter::last_col`) are renames in
+  `RENAMED_ACTIONS`, so an old user binding still moves the blotter, in its
+  own context, with a warning.
 - Selection summaries include only the selected rows without a selected
   ancestor, avoiding double-counted group totals. Only compiler-marked
   summable columns with additive values produce a footer total; `†` marks

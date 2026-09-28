@@ -7,26 +7,31 @@
 //! backgrounds for hover and selection; per-cell fills would obscure those states.
 
 use crate::grid::{GridModel, GridRowKind};
-use crate::paint::Paints;
+use crate::paint::{CellColour, Paints, cell_colour};
 use crate::popup::{ChoicePaint, render_choice};
 use crate::tile::PricerTile;
+use geode_core::colour::{Anchors, NamedColours, Tokens};
 use geode_core::grid::selection::{Resolved, SelectKind};
+use geode_core::view::Colour;
 use geode_shell::colfit::{FitMetrics, FittedWidths};
 use geode_shell::fonts;
 use geode_shell::linenumbers::{GUTTER_GAP_PX, LineNumbers, gutter_number, gutter_px};
+use geode_shell::shell::colours::{anchors_from_theme, theme_signature, tokens_from_theme};
 use geode_shell::shell::control::{self, PointerStates as _};
 use geode_shell::shell::scale;
+use geode_tile::colour::{ColourCache, Resolved as ColourResolved};
 use geode_widgets::datefield::{self, DateTimeField, SegmentPaint, SegmentText};
 use gpui::prelude::*;
 use gpui::{
-    App, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, SharedString, Stateful, TextAlign, WeakEntity, Window, div, px,
-    relative,
+    App, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, Hsla, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, SharedString, Stateful, TextAlign, WeakEntity,
+    Window, div, px, relative,
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::table::{Column, ColumnFixed, TableDelegate, TableState};
 use gpui_component::{ActiveTheme as _, Theme, h_flex};
 use std::rc::Rc;
+use std::sync::Arc;
 
 /// The tree column: a leg's indent, the chevron slot and the widest
 /// allowed template name, 8 characters, at the largest font size (checked
@@ -71,6 +76,18 @@ type NumbersStamp = (usize, Option<usize>, LineNumbers);
 pub struct ChevronClicked(pub usize);
 
 impl EventEmitter<ChevronClicked> for TableState<SheetDelegate> {}
+
+/// A header drag dropped: the PLAN column at `from` now sits at `to`.
+/// Emitted by the table's `move_column` hook; the tile owns the plan, so
+/// the delegate reorders nothing of its own and the next `install_model`
+/// hands it the permuted model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColumnMoved {
+    pub from: usize,
+    pub to: usize,
+}
+
+impl EventEmitter<ColumnMoved> for TableState<SheetDelegate> {}
 
 /// Every mouse selection gesture a cell, the tree cell or the line-number
 /// gutter recognises, carried to the tile's `pointer`: the one door a
@@ -262,6 +279,26 @@ pub struct SheetDelegate {
     /// editor, its own cell — and so cancel the edit the press was aimed
     /// into.
     inner_press: Option<InnerPress>,
+    /// The `colors.toml` definitions the tile last handed down
+    /// (`set_colours`), the named-colour resolutions cached against them,
+    /// and the theme inputs those resolutions were made under: the
+    /// theme's full colour signature with the `Anchors`/`Tokens` pair
+    /// derived from it, re-derived only when the signature moves.
+    colours: Arc<NamedColours>,
+    colour_cache: ColourCache,
+    theme_inputs: Option<([Hsla; 28], Anchors, Tokens)>,
+}
+
+/// The name column `plan_col` carries a `Colour::Named` of, if it does.
+///
+/// A free function over the model rather than a `&self` method: the
+/// returned `&str` borrows `model` alone, leaving the delegate's other
+/// fields free for the `&mut` the colour cache needs.
+fn named_colour_of(model: &GridModel, plan_col: usize) -> Option<&str> {
+    match model.columns.get(plan_col).map(|c| &c.colour) {
+        Some(Colour::Named(name)) => Some(name.as_str()),
+        _ => None,
+    }
 }
 
 impl SheetDelegate {
@@ -283,7 +320,96 @@ impl SheetDelegate {
             drag_last: None,
             drag_origin: None,
             inner_press: None,
+            colours: Arc::new(NamedColours::default()),
+            colour_cache: ColourCache::new(),
+            theme_inputs: None,
         }
+    }
+
+    /// The tile hands these down with every model it installs. A
+    /// different `Arc` means a reloaded `colors.toml`: everything resolved
+    /// so far was resolved from the old definitions, so the cache goes
+    /// with it. Pointer equality, not a deep compare — the factory shares
+    /// exactly one `Arc` per loaded doc, so the same pointer IS the same
+    /// definitions, and the common case (every rebuild, no reload) costs
+    /// one pointer compare.
+    pub(crate) fn set_colours(&mut self, colours: Arc<NamedColours>) {
+        if !Arc::ptr_eq(&self.colours, &colours) {
+            self.colours = colours;
+            self.colour_cache.invalidate();
+        }
+    }
+
+    /// Re-derive `theme_inputs` if and only if one of the twenty-eight
+    /// theme colours the derivation reads has moved.
+    ///
+    /// The compare is the FULL signature, not a sentinel or two: a theme
+    /// change that leaves `background`/`foreground` equal while moving an
+    /// anchor would otherwise keep painting the old colour, and the
+    /// `ColourCache` sitting behind this could never catch it — the stale
+    /// derived pair IS its key. The steady path is 28 `Hsla` copies and
+    /// 28 `Hsla` compares, with no `Hsla -> Rgb` conversion at all.
+    fn ensure_theme_inputs(&mut self, theme: &Theme) {
+        let signature = theme_signature(theme);
+        match &self.theme_inputs {
+            Some((have, ..)) if *have == signature => {}
+            _ => {
+                self.theme_inputs = Some((
+                    signature,
+                    anchors_from_theme(theme),
+                    tokens_from_theme(theme),
+                ));
+            }
+        }
+    }
+
+    /// Column `plan_col`'s named colour resolved under `theme`, with its
+    /// sign variants: `None` for a plain or `sign` column and for a name
+    /// `colors.toml` does not define (whose cells paint as if plain).
+    fn themed_cell_colour(&mut self, plan_col: usize, theme: &Theme) -> Option<ColourResolved> {
+        self.ensure_theme_inputs(theme);
+        // Four disjoint field borrows in one body — `model`, `colours` and
+        // `theme_inputs` shared, `colour_cache` mutable. A `&self` method
+        // for the name would borrow the whole delegate and shut the
+        // cache's own `&mut` out.
+        let name = named_colour_of(&self.model, plan_col)?;
+        let (_, anchors, tokens) = self.theme_inputs.as_ref().expect("set just above");
+        self.colour_cache.get(&self.colours, name, anchors, tokens)
+    }
+
+    /// The text colour `render_cell` paints the cell at (`row_ix`,
+    /// `plan_col`) with: the state paint, unless the cell is an own value
+    /// in a column whose `color` says otherwise (`paint::cell_colour`).
+    /// A row or column the model lacks is the own paint.
+    pub(crate) fn text_colour(&mut self, row_ix: usize, plan_col: usize, theme: &Theme) -> Hsla {
+        let model = Rc::clone(&self.model);
+        let Some(row) = model.rows.get(row_ix) else {
+            return self.paints.own;
+        };
+        let package = matches!(row.kind, GridRowKind::Package { .. });
+        let Some(cell) = row.cells.get(plan_col) else {
+            return self.paints.text(crate::core::CellState::Own, package);
+        };
+        let base = self.paints.text(cell.state, package);
+        let colour = model
+            .columns
+            .get(plan_col)
+            .map_or(&Colour::None, |c| &c.colour);
+        match cell_colour(colour, cell.state, cell.sign) {
+            CellColour::State => base,
+            CellColour::Bearish => theme.chart_bearish,
+            CellColour::Bullish => theme.chart_bullish,
+            CellColour::Named(sign) => self
+                .themed_cell_colour(plan_col, theme)
+                .map_or(base, |c| c.for_sign(Some(sign))),
+        }
+    }
+
+    /// The colour `render_th` paints column `plan_col`'s label with: a
+    /// named colour's base (a header has no sign), `None` for the
+    /// component's own foreground.
+    pub(crate) fn header_colour(&mut self, plan_col: usize, theme: &Theme) -> Option<Hsla> {
+        self.themed_cell_colour(plan_col, theme).map(|c| c.base)
     }
 
     /// Fit the tree column and every plan column to its header and every
@@ -444,10 +570,28 @@ impl TableDelegate for SheetDelegate {
             },
             sort: None,
             width: px(self.fitted.get(c.name).copied().unwrap_or(c.width)),
-            movable: false,
-            resizable: false,
+            movable: true,
+            resizable: true,
             ..Column::default()
         }
+    }
+
+    /// A header drag dropped. Both indices are TABLE indices; the tree
+    /// column never moves and nothing moves before it (it is `fixed`, so
+    /// the table refuses those drops itself, and this guard keeps a plan
+    /// index from going negative should that change). The tile owns the
+    /// plan, so the move is reported, not applied here.
+    fn move_column(
+        &mut self,
+        col_ix: usize,
+        to_ix: usize,
+        _window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) {
+        let (Some(from), Some(to)) = (Self::plan_col(col_ix), Self::plan_col(to_ix)) else {
+            return;
+        };
+        cx.emit(ColumnMoved { from, to });
     }
 
     fn render_th(
@@ -457,6 +601,9 @@ impl TableDelegate for SheetDelegate {
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let column = self.column(col_ix, cx);
+        // A named colour's base on the label; the component owns the rest
+        // of the header (padding, borders) and its foreground otherwise.
+        let colour = Self::plan_col(col_ix).and_then(|c| self.header_colour(c, cx.theme()));
         div()
             .size_full()
             .flex()
@@ -465,6 +612,7 @@ impl TableDelegate for SheetDelegate {
                 el.justify_end()
             })
             .font_family(fonts::MONO)
+            .when_some(colour, |el, c| el.text_color(c))
             .debug_selector(|| format!("pricer-th-{col_ix}"))
             .child(column.name)
     }
@@ -745,10 +893,11 @@ impl SheetDelegate {
             // Ellipsize left-aligned text; the footer retains full failure reasons.
             // Numeric cells keep their digits and rely on column width rather than
             // ellipsis.
-            None => el
-                .when_some(row.cells.get(plan_col), |el, cell| {
+            None => {
+                let colour = self.text_colour(row_ix, plan_col, cx.theme());
+                el.when_some(row.cells.get(plan_col), |el, cell| {
                     let text = cell.text.clone();
-                    el.text_color(paints.text(cell.state, package)).map(|el| {
+                    el.text_color(colour).map(|el| {
                         if right {
                             el.child(text)
                         } else {
@@ -762,7 +911,8 @@ impl SheetDelegate {
                         }
                     })
                 })
-                .into_any_element(),
+                .into_any_element()
+            }
         }
     }
 }
@@ -921,18 +1071,20 @@ mod width_tests {
             ColumnKind::Qty => fmt(-10000.0),
             ColumnKind::Strike | ColumnKind::Barrier => fmt(12345.67),
             ColumnKind::SpotShift | ColumnKind::VolShift => signed(-99.9, &def.default_format),
-            ColumnKind::Price
-            | ColumnKind::Delta
-            | ColumnKind::Gamma
-            | ColumnKind::Vega
-            | ColumnKind::Theta
-            | ColumnKind::Rho => fmt(-1_234_567.89),
+            ColumnKind::Measure { .. } => fmt(-1_234_567.89),
             // Representative text values for the width check.
-            ColumnKind::Underlying => "SX5E".into(),
+            ColumnKind::SheetName => "untitled-1".into(),
+            // Ids are minted per sheet from 1; five digits is a long session.
+            ColumnKind::PositionRef => "p10000".into(),
+            ColumnKind::InstrumentRef => "i10000".into(),
+            // A template name is at most MAX_TEMPLATE_NAME (8) characters.
+            ColumnKind::Template => "STRANGLE".into(),
+            ColumnKind::Currency => "USD".into(),
+            ColumnKind::UnderlyingRef => "SX5E".into(),
             // The cell reads `20DEC26`, but `i` edits it in the date field,
             // which paints `YYYY-MM-DD` inside the same width.
             ColumnKind::Expiry => "2026-12-20".into(),
-            ColumnKind::Type => "C".into(),
+            ColumnKind::OptionType => "C".into(),
             ColumnKind::BarrierType => "DO".into(),
             ColumnKind::PricedAt => "23:59:59".into(),
             // Prose: a failure's reason may be longer than any width; it

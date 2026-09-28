@@ -9,7 +9,9 @@
 //! then separates pin, as-of, grouping, and scope with inset hairlines.
 //! The as-of chip alone uses warning colors. Grouping opens a picker and
 //! stays visibly pressed while it is open. Filled selection chips contain
-//! a separate, occluding close target; add/save actions are bare glyphs.
+//! a separate, occluding close target; add/load/save actions are bare
+//! glyphs. The load glyph opens the scope picker and, like the grouping
+//! readout, stays pressed while it is open.
 //!
 //! Scope chips show dimensions, named expressions, top-level expression
 //! terms, and any
@@ -185,7 +187,9 @@ fn divider(selector: &'static str, colour: Hsla) -> impl IntoElement {
 /// one element, so a struct would only move the assembly for no reader
 /// benefit. `grouping_open` is whether the grouping picker is up right
 /// now — the readout paints its pressed fill for as long as it is (a
-/// control that owns a popup stays visibly pressed until it closes).
+/// control that owns a popup stays visibly pressed until it closes);
+/// `scope_open` is the same for the scope picker and the load glyph, which
+/// `on_load` opens.
 /// `add_menu` is the add-a-filter menu's painted panel while it is open
 /// ([`super::addfilter::render`]); the `+` hangs it under itself and holds
 /// its pressed fill for as long as it is there. `on_term_open` and
@@ -197,11 +201,13 @@ pub fn toolbar(
     filter_input: &Entity<InputState>,
     model: &ScopeBarModel,
     grouping_open: bool,
+    scope_open: bool,
     add_menu: Option<AnyElement>,
     on_chip_close: impl Fn(&str, &mut Window, &mut App) + Clone + 'static,
     on_chip_open: impl Fn(&str, &mut Window, &mut App) + Clone + 'static,
     on_add: impl Fn(&mut Window, &mut App) + Clone + 'static,
     on_save: impl Fn(&mut Window, &mut App) + Clone + 'static,
+    on_load: impl Fn(&mut Window, &mut App) + Clone + 'static,
     on_grouping: impl Fn(&mut Window, &mut App) + Clone + 'static,
     on_as_of: impl Fn(&mut Window, &mut App) + Clone + 'static,
     on_term_open: impl Fn(usize, &mut Window, &mut App) + Clone + 'static,
@@ -514,6 +520,32 @@ pub fn toolbar(
                         .child(menu),
                 )
             }),
+    );
+    // The load glyph opens the scope picker (`frame::scope`). Always
+    // painted: loading a saved scope is as useful on an empty scope as on
+    // a full one, and the picker says how to save one when none exist. It
+    // sits before the conditional save glyph so save appearing never moves
+    // it, and it holds its pressed fill while the picker is up, as the
+    // grouping readout does. `FolderOpen` is in the default icon bundle.
+    verbs = verbs.child(
+        verb(
+            "scope-load-chip",
+            Icon::new(CatalogIcon::FolderOpen),
+            chip_fg,
+            glyph_radius,
+            glyph_states,
+            scope_open.then_some("scope-load-chip-open"),
+            || "scope-load-chip".to_string(),
+        )
+        .tooltip(tips::tip(
+            "tip-scope-load-chip",
+            "Load a named scope",
+            Some("frame::scope"),
+            None,
+        ))
+        .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+            on_load(window, cx)
+        }),
     );
     if model.savable {
         // Show Save only when the scope is savable. Its icon comes from the

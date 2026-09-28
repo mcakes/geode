@@ -13,7 +13,8 @@
 //! opposite endpoints.
 
 use crate::core::columns::CellState;
-use geode_core::colour::{READABLE_RATIO, Rgb, contrast_ratio, readable_on};
+use geode_core::colour::{READABLE_RATIO, Rgb, Sign, contrast_ratio, readable_on};
+use geode_core::view::Colour;
 use geode_shell::shell::chip::{Tone, chip_paint};
 use geode_shell::shell::colours::{over, to_hsla, to_rgb};
 use gpui::Hsla;
@@ -147,6 +148,33 @@ impl Paints {
     }
 }
 
+/// Which colour a painted cell takes, decided from the column's declared
+/// colour, the cell's state and its value's sign. State colours (muted
+/// stale, danger failed) win over any column colour: a wrong-looking
+/// number must never read as a healthy one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CellColour {
+    /// The state paint (`Paints::text`).
+    State,
+    Bearish,
+    Bullish,
+    /// The column's named colour, in the variant for this sign (a text
+    /// cell's `Zero` is the base).
+    Named(Sign),
+}
+
+pub(crate) fn cell_colour(colour: &Colour, state: CellState, sign: Option<Sign>) -> CellColour {
+    if !matches!(state, CellState::Own) {
+        return CellColour::State;
+    }
+    match (colour, sign) {
+        (Colour::Sign, Some(Sign::Negative)) => CellColour::Bearish,
+        (Colour::Sign, Some(Sign::Positive)) => CellColour::Bullish,
+        (Colour::Named(_), sign) => CellColour::Named(sign.unwrap_or(Sign::Zero)),
+        _ => CellColour::State,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,6 +292,47 @@ mod tests {
                  {READABLE_RATIO}:1 once floored"
             );
         }
+    }
+
+    #[test]
+    fn colour_applies_only_to_an_own_numeric_cell() {
+        let (neg, pos) = (Some(Sign::Negative), Some(Sign::Positive));
+        assert_eq!(
+            cell_colour(&Colour::Sign, CellState::Own, neg),
+            CellColour::Bearish
+        );
+        assert_eq!(
+            cell_colour(&Colour::Sign, CellState::Own, pos),
+            CellColour::Bullish
+        );
+        assert_eq!(
+            cell_colour(&Colour::Sign, CellState::Own, Some(Sign::Zero)),
+            CellColour::State,
+            "zero has no sign"
+        );
+        assert_eq!(
+            cell_colour(&Colour::Sign, CellState::Stale, neg),
+            CellColour::State,
+            "stale stays muted"
+        );
+        assert_eq!(
+            cell_colour(&Colour::Sign, CellState::Failed, neg),
+            CellColour::State,
+            "failed stays danger"
+        );
+        assert_eq!(
+            cell_colour(&Colour::None, CellState::Own, neg),
+            CellColour::State
+        );
+        assert_eq!(
+            cell_colour(&Colour::Named("rose".into()), CellState::Own, neg),
+            CellColour::Named(Sign::Negative)
+        );
+        assert_eq!(
+            cell_colour(&Colour::Named("rose".into()), CellState::Own, None),
+            CellColour::Named(Sign::Zero),
+            "text in a named column takes the base"
+        );
     }
 
     #[gpui::test]

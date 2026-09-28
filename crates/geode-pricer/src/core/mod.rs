@@ -8,6 +8,7 @@ pub mod clip;
 pub mod columns;
 pub mod commands;
 pub mod complete;
+pub mod dataset;
 pub mod edit;
 pub mod entry;
 pub mod package;
@@ -25,6 +26,7 @@ pub use columns::{
     Applies, COLUMNS, CellState, CellText, ColumnDef, ColumnKind, cell_text, column,
 };
 pub use complete::{Completion, Inputs, MAX_ROWS, Slot, Suggestion, slot_at};
+pub use dataset::{PRICER_DATASET, PRICER_DATASET_DECLARATION};
 pub use edit::{Edit, EditError, Undo};
 pub use sheet::{
     Delivered, LineId, LineSpec, LineState, OwnShifts, Place, Refresh, RowKind, RowRecord, RowSpec,

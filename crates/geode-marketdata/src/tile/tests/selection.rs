@@ -20,27 +20,27 @@ fn resolved(h: &Harness, vcx: &gpui::VisualTestContext) -> Option<Shape> {
 fn v_starts_a_block_and_motions_extend_it_clamped(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     h.with_document(&mut vcx);
-    h.dispatch(&mut vcx, "right", Some(SLICE as u32));
+    h.motion(&mut vcx, "right", Some(SLICE as u32));
     h.dispatch(&mut vcx, "visual_block", None);
     assert_eq!(h.mode(&vcx), "visual");
-    h.dispatch(&mut vcx, "right", None);
-    h.dispatch(&mut vcx, "down", Some(5)); // clamps at the last row, no wrap
+    h.motion(&mut vcx, "right", None);
+    h.motion(&mut vcx, "down", Some(5)); // clamps at the last row, no wrap
     assert_eq!(resolved(&h, &vcx), Some((SelectKind::Block, 0..2, 3..5)));
-    h.dispatch(&mut vcx, "up", Some(9)); // clamps at row 0, never the strip
+    h.motion(&mut vcx, "up", Some(9)); // clamps at row 0, never the strip
     assert_eq!(
         h.tile.read_with(&vcx, |t, _| t.cursor()),
         Cursor::Cell { row: 0, col: 4 }
     );
     // A single `k` at row 0 is where normal mode enters the strip, and a
     // single `j` at the last row is where it wraps; both clamp here.
-    h.dispatch(&mut vcx, "up", None);
+    h.motion(&mut vcx, "up", None);
     assert_eq!(
         h.tile.read_with(&vcx, |t, _| t.cursor()),
         Cursor::Cell { row: 0, col: 4 }
     );
     assert_eq!(resolved(&h, &vcx), Some((SelectKind::Block, 0..1, 3..5)));
-    h.dispatch(&mut vcx, "down", None);
-    h.dispatch(&mut vcx, "down", None);
+    h.motion(&mut vcx, "down", None);
+    h.motion(&mut vcx, "down", None);
     assert_eq!(resolved(&h, &vcx), Some((SelectKind::Block, 0..2, 3..5)));
 }
 
@@ -51,7 +51,7 @@ fn shift_v_switches_kind_keeping_the_anchor_and_the_same_key_clears(cx: &mut gpu
     let (h, mut vcx) = open(cx);
     h.with_document(&mut vcx);
     h.dispatch(&mut vcx, "visual_block", None);
-    h.dispatch(&mut vcx, "down", None);
+    h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "visual_rows", None);
     assert_eq!(
         resolved(&h, &vcx),
@@ -92,7 +92,7 @@ fn escape_clears_only_the_selection_first(cx: &mut gpui::TestAppContext) {
 fn v_in_the_attribute_strip_is_refused(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     h.with_document(&mut vcx);
-    h.dispatch(&mut vcx, "up", None); // row 0 → the strip
+    h.motion(&mut vcx, "up", None); // row 0 → the strip
     h.dispatch(&mut vcx, "visual_block", None);
     assert_eq!(resolved(&h, &vcx), None);
     assert!(
@@ -135,7 +135,7 @@ fn a_key_switch_clears_the_selection(cx: &mut gpui::TestAppContext) {
 fn an_anchor_row_that_disappears_clears_the_selection_with_a_notice(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     let tag = h.with_document_tagged(&mut vcx);
-    h.dispatch(&mut vcx, "down", None); // anchor on row 1
+    h.motion(&mut vcx, "down", None); // anchor on row 1
     h.dispatch(&mut vcx, "visual_rows", None);
     // A newer one-term generation: the anchor's term (TERMS[1]) is gone. The
     // draft is clean, so it simply paints.
@@ -158,10 +158,10 @@ fn an_anchor_row_that_disappears_clears_the_selection_with_a_notice(cx: &mut gpu
 fn the_block_tints_its_cells_and_the_footer_shows_the_extent(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     h.with_document(&mut vcx);
-    h.dispatch(&mut vcx, "right", Some(SLICE as u32));
+    h.motion(&mut vcx, "right", Some(SLICE as u32));
     h.dispatch(&mut vcx, "visual_block", None);
-    h.dispatch(&mut vcx, "down", None);
-    h.dispatch(&mut vcx, "right", None);
+    h.motion(&mut vcx, "down", None);
+    h.motion(&mut vcx, "right", None);
     let selected = h
         .tile
         .read_with(&vcx, |t, cx| t.table.read(cx).delegate().selected.clone());
@@ -198,7 +198,7 @@ fn an_attribute_click_clears_the_selection_without_a_notice(cx: &mut gpui::TestA
     let (h, mut vcx) = open(cx);
     h.with_document(&mut vcx);
     h.dispatch(&mut vcx, "visual_block", None);
-    h.dispatch(&mut vcx, "down", None);
+    h.motion(&mut vcx, "down", None);
     let at = centre_of(&mut vcx, &format!("marketdata-attr-{TILE}-1"));
     click_at(&mut vcx, at, 1);
     assert_eq!(resolved(&h, &vcx), None);
@@ -220,7 +220,7 @@ fn y_over_rows_copies_a_header_and_every_painted_column_then_ends_the_selection(
     let (h, mut vcx) = open(cx);
     h.with_document(&mut vcx);
     h.dispatch(&mut vcx, "visual_rows", None);
-    h.dispatch(&mut vcx, "down", None);
+    h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "yank", None);
     let text = clipboard(&mut vcx).expect("copied");
     let lines: Vec<&str> = text.lines().collect();
@@ -257,10 +257,10 @@ fn y_over_rows_copies_a_header_and_every_painted_column_then_ends_the_selection(
 fn y_over_a_block_copies_its_columns_header_and_cells_only(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     h.with_document(&mut vcx);
-    h.dispatch(&mut vcx, "right", Some(SLICE as u32 + 1));
+    h.motion(&mut vcx, "right", Some(SLICE as u32 + 1));
     h.dispatch(&mut vcx, "visual_block", None);
-    h.dispatch(&mut vcx, "down", None);
-    h.dispatch(&mut vcx, "right", None);
+    h.motion(&mut vcx, "down", None);
+    h.motion(&mut vcx, "right", None);
     h.dispatch(&mut vcx, "yank", None);
     let columns = h
         .tile
@@ -280,7 +280,7 @@ fn d_over_rows_deletes_them_in_one_draft_change_and_ends_the_selection(
     let (h, mut vcx) = open(cx);
     h.with_document(&mut vcx);
     h.dispatch(&mut vcx, "visual_rows", None);
-    h.dispatch(&mut vcx, "down", None);
+    h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "delete_row", None);
     let states = h.tile.read_with(&vcx, |t, _| {
         t.model().rows.iter().map(|r| r.state).collect::<Vec<_>>()
@@ -380,10 +380,10 @@ fn bump_with_no_axis_moves_every_selected_number_and_keeps_the_selection(
 ) {
     let (h, mut vcx) = open(cx);
     h.with_document(&mut vcx);
-    h.dispatch(&mut vcx, "right", Some(SLICE as u32));
+    h.motion(&mut vcx, "right", Some(SLICE as u32));
     h.dispatch(&mut vcx, "visual_block", None);
-    h.dispatch(&mut vcx, "down", None);
-    h.dispatch(&mut vcx, "right", None);
+    h.motion(&mut vcx, "down", None);
+    h.motion(&mut vcx, "right", None);
     h.command(&mut vcx, "bump 0.01").unwrap();
     assert_eq!(h.row_texts(&vcx, 0)[3..], ["0.1100", "0.2100", "0.3000"]);
     assert_eq!(h.row_texts(&vcx, 1)[3..], ["0.4100", "0.5100", "0.6000"]);
@@ -407,7 +407,7 @@ fn bump_with_no_axis_moves_every_selected_number_and_keeps_the_selection(
 fn a_one_cell_selection_bump_says_cell(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     h.with_document(&mut vcx);
-    h.dispatch(&mut vcx, "right", Some(SLICE as u32));
+    h.motion(&mut vcx, "right", Some(SLICE as u32));
     h.dispatch(&mut vcx, "visual_block", None);
     h.command(&mut vcx, "bump 0.01").unwrap();
     assert_eq!(notice_of(&h, &vcx).as_deref(), Some("bumped 1 cell"));
@@ -532,9 +532,9 @@ fn open_mixed(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTestContex
 #[gpui::test]
 fn a_selection_bump_reaches_an_inserted_rows_cells(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_with_inserted_row(cx);
-    h.dispatch(&mut vcx, "up", None); // D1
+    h.motion(&mut vcx, "up", None); // D1
     h.dispatch(&mut vcx, "visual_rows", None);
-    h.dispatch(&mut vcx, "down", None); // D1 + new-1
+    h.motion(&mut vcx, "down", None); // D1 + new-1
     h.command(&mut vcx, "bump 1").unwrap();
     assert_eq!(h.cell(&vcx, 0, 1).0, "2.2500");
     assert_eq!(h.cell(&vcx, 1, 1).0, "3.5000");
@@ -595,11 +595,11 @@ fn a_selection_bump_lands_each_declared_type_and_composes(cx: &mut gpui::TestApp
 #[gpui::test]
 fn a_selection_bump_counts_what_it_skipped_by_reason(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_with_inserted_row(cx);
-    h.dispatch(&mut vcx, "bottom", None); // D2
+    h.motion(&mut vcx, "bottom", None); // D2
     h.dispatch(&mut vcx, "delete_row", None);
-    h.dispatch(&mut vcx, "top", None);
+    h.motion(&mut vcx, "top", None);
     h.dispatch(&mut vcx, "visual_rows", None);
-    h.dispatch(&mut vcx, "bottom", None);
+    h.motion(&mut vcx, "bottom", None);
     h.command(&mut vcx, "bump 1").unwrap();
     assert_eq!(
         notice_of(&h, &vcx).as_deref(),
@@ -619,8 +619,8 @@ fn a_selection_bump_counts_what_it_skipped_by_reason(cx: &mut gpui::TestAppConte
 #[gpui::test]
 fn a_selection_bump_with_no_numbers_refuses(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_with_inserted_row(cx);
-    h.dispatch(&mut vcx, "top", None);
-    h.dispatch(&mut vcx, "first_col", None); // ex_date
+    h.motion(&mut vcx, "top", None);
+    h.motion(&mut vcx, "line_start", None); // ex_date
     h.dispatch(&mut vcx, "visual_block", None);
     let before = h.tile.read_with(&vcx, |t, _| t.draft().len());
     let refused = h.command(&mut vcx, "bump 1").unwrap_err();
@@ -637,10 +637,10 @@ fn a_selection_bump_with_no_numbers_refuses(cx: &mut gpui::TestAppContext) {
 fn i_over_a_block_writes_one_value_to_every_accepting_cell(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     h.with_document(&mut vcx);
-    h.dispatch(&mut vcx, "right", Some(SLICE as u32));
+    h.motion(&mut vcx, "right", Some(SLICE as u32));
     h.dispatch(&mut vcx, "visual_block", None);
-    h.dispatch(&mut vcx, "down", None);
-    h.dispatch(&mut vcx, "right", None);
+    h.motion(&mut vcx, "down", None);
+    h.motion(&mut vcx, "right", None);
     h.dispatch(&mut vcx, "edit", None);
     assert_eq!(h.mode(&vcx), "insert");
     h.set_editor(&mut vcx, "0.25");
@@ -662,9 +662,9 @@ fn i_over_a_block_writes_one_value_to_every_accepting_cell(cx: &mut gpui::TestAp
 fn a_flat_block_commit_skips_cells_that_refuse_and_counts_them(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_flat(cx);
     h.with_flat_document(&mut vcx);
-    h.dispatch(&mut vcx, "right", None); // amount
+    h.motion(&mut vcx, "right", None); // amount
     h.dispatch(&mut vcx, "visual_rows", None);
-    h.dispatch(&mut vcx, "down", None);
+    h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "edit", None);
     h.set_editor(&mut vcx, "2");
     h.dispatch(&mut vcx, "commit", None);
@@ -731,9 +731,9 @@ fn a_choice_pick_over_a_selection_writes_the_option_to_every_choice_cell(
 ) {
     let (h, mut vcx) = open_flat(cx);
     h.with_flat_document(&mut vcx);
-    h.dispatch(&mut vcx, "right", Some(2)); // status
+    h.motion(&mut vcx, "right", Some(2)); // status
     h.dispatch(&mut vcx, "visual_rows", None);
-    h.dispatch(&mut vcx, "down", None);
+    h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "edit", None);
     assert!(h.tile.read_with(&vcx, |t, _| t.choice_popup_open()));
     h.set_choice_text(&mut vcx, "paid");
@@ -758,7 +758,7 @@ fn a_date_commit_over_a_selection_writes_every_date_cell(cx: &mut gpui::TestAppC
     let (h, mut vcx) = open_flat(cx);
     h.with_flat_document(&mut vcx);
     h.dispatch(&mut vcx, "visual_block", None); // ex column
-    h.dispatch(&mut vcx, "down", None); // cursor on D2's 2027-03-19
+    h.motion(&mut vcx, "down", None); // cursor on D2's 2027-03-19
     h.dispatch(&mut vcx, "edit", None);
     draw(&mut vcx);
     type_keys(&mut vcx, "2"); // the day segment: 2027-03-02
@@ -771,10 +771,10 @@ fn a_date_commit_over_a_selection_writes_every_date_cell(cx: &mut gpui::TestAppC
 /// A block over the first two nodes of both terms, the cursor ending on
 /// row 1's second node.
 fn select_two_nodes_by_two_terms(h: &Harness, vcx: &mut gpui::VisualTestContext) {
-    h.dispatch(vcx, "right", Some(SLICE as u32));
+    h.motion(vcx, "right", Some(SLICE as u32));
     h.dispatch(vcx, "visual_block", None);
-    h.dispatch(vcx, "down", None);
-    h.dispatch(vcx, "right", None);
+    h.motion(vcx, "down", None);
+    h.motion(vcx, "right", None);
     // cursor ends on row 1, col 4 (0.5000)
 }
 
@@ -820,7 +820,7 @@ fn a_block_steps_each_column_at_its_own_places(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     h.with_document(&mut vcx);
     h.dispatch(&mut vcx, "visual_block", None); // anchor on fwd (2 places)
-    h.dispatch(&mut vcx, "right", None); // … through atm (4 places)
+    h.motion(&mut vcx, "right", None); // … through atm (4 places)
     h.dispatch(&mut vcx, "edit", None);
     h.dispatch(&mut vcx, "insert_down", None);
     assert_eq!(h.row_texts(&vcx, 0)[..2], ["4499.99", "0.1799"]);
@@ -1121,10 +1121,10 @@ fn a_typed_commit_after_the_selection_cleared_mid_step_keeps_the_value(
     let (h, mut vcx) = open(cx);
     h.command(&mut vcx, "auto rebase").unwrap();
     let tag = h.with_document_tagged(&mut vcx);
-    h.dispatch(&mut vcx, "down", None);
-    h.dispatch(&mut vcx, "right", Some(SLICE as u32 + 1));
+    h.motion(&mut vcx, "down", None);
+    h.motion(&mut vcx, "right", Some(SLICE as u32 + 1));
     h.dispatch(&mut vcx, "visual_block", None); // anchor on the second term
-    h.dispatch(&mut vcx, "up", None); // cursor on the first term's 0.2000
+    h.motion(&mut vcx, "up", None); // cursor on the first term's 0.2000
     h.dispatch(&mut vcx, "edit", None);
     h.dispatch(&mut vcx, "insert_up", None);
     h.deliver(
@@ -1241,7 +1241,7 @@ fn open_note_amount(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTest
 fn an_untouched_commit_on_a_text_cell_writes_nothing(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_note_amount(cx);
     h.dispatch(&mut vcx, "visual_rows", None); // cursor on D1's note
-    h.dispatch(&mut vcx, "down", None);
+    h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "edit", None);
     assert_eq!(h.editor_value(&vcx).as_deref(), Some("plain"));
     h.dispatch(&mut vcx, "commit", None);
@@ -1274,9 +1274,9 @@ fn an_untouched_commit_on_a_text_cell_writes_nothing(cx: &mut gpui::TestAppConte
 fn an_untouched_choice_commit_over_a_selection_writes_nothing(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_flat(cx);
     h.with_flat_document(&mut vcx);
-    h.dispatch(&mut vcx, "right", Some(2)); // status: declared / estimated
+    h.motion(&mut vcx, "right", Some(2)); // status: declared / estimated
     h.dispatch(&mut vcx, "visual_rows", None);
-    h.dispatch(&mut vcx, "down", None);
+    h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "edit", None);
     assert!(h.tile.read_with(&vcx, |t, _| t.choice_popup_open()));
     h.dispatch(&mut vcx, "commit", None);
@@ -1301,7 +1301,7 @@ fn an_untouched_date_commit_over_a_selection_writes_nothing(cx: &mut gpui::TestA
     let (h, mut vcx) = open_flat(cx);
     h.with_flat_document(&mut vcx);
     h.dispatch(&mut vcx, "visual_block", None); // ex column
-    h.dispatch(&mut vcx, "down", None);
+    h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "edit", None);
     h.dispatch(&mut vcx, "commit", None);
     assert_eq!(h.col_texts(&vcx, 0), vec!["2026-12-18", "2027-03-19"]);
@@ -1369,7 +1369,7 @@ fn shift_click_anchors_at_the_cursor_and_extends_a_block_to_the_click(
 ) {
     let (h, mut vcx) = open(cx);
     h.with_document(&mut vcx);
-    h.dispatch(&mut vcx, "right", Some(SLICE as u32)); // cursor on (0, 3)
+    h.motion(&mut vcx, "right", Some(SLICE as u32)); // cursor on (0, 3)
     let clicks = h.host_clicks();
     shift_press(&mut vcx, "marketdata-cell-1-6"); // model (1, 5)
     assert_eq!(resolved(&h, &vcx).map(|r| (r.1, r.2)), Some((0..2, 3..6)));
@@ -1442,7 +1442,7 @@ fn a_drag_that_started_off_the_cells_selects_nothing(cx: &mut gpui::TestAppConte
 fn a_plain_press_beside_the_cells_clears_the_selection(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     h.with_document(&mut vcx);
-    h.dispatch(&mut vcx, "right", Some(2));
+    h.motion(&mut vcx, "right", Some(2));
     h.dispatch(&mut vcx, "visual_block", None);
     draw(&mut vcx);
     let last = vcx
@@ -1492,7 +1492,7 @@ fn on_a_hidden_label_panel_the_gutter_selects_rows(cx: &mut gpui::TestAppContext
 fn a_click_inside_the_open_editor_keeps_it_open(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     h.with_document(&mut vcx);
-    h.dispatch(&mut vcx, "right", Some(4)); // (0, 4): 0.2000
+    h.motion(&mut vcx, "right", Some(4)); // (0, 4): 0.2000
     h.dispatch(&mut vcx, "edit", None);
     draw(&mut vcx);
     let at = centre_of(&mut vcx, "marketdata-editor-0-5");
@@ -1514,7 +1514,7 @@ fn a_click_inside_the_open_editor_keeps_it_open(cx: &mut gpui::TestAppContext) {
 fn a_double_click_inside_the_open_editor_keeps_the_typed_text(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     h.with_document(&mut vcx);
-    h.dispatch(&mut vcx, "right", Some(4));
+    h.motion(&mut vcx, "right", Some(4));
     h.dispatch(&mut vcx, "edit", None);
     h.set_editor(&mut vcx, "0.75");
     draw(&mut vcx);
@@ -1637,7 +1637,7 @@ fn i_on_a_slice_value_in_a_rows_selection_is_refused(cx: &mut gpui::TestAppConte
     let (h, mut vcx) = open(cx);
     h.with_document(&mut vcx);
     h.dispatch(&mut vcx, "visual_rows", None); // cursor on fwd
-    h.dispatch(&mut vcx, "down", None);
+    h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "edit", None);
     assert!(h.editor_value(&vcx).is_none(), "no editor opens");
     assert_eq!(h.mode(&vcx), "visual");
@@ -1654,9 +1654,9 @@ fn i_on_a_slice_value_in_a_rows_selection_is_refused(cx: &mut gpui::TestAppConte
 fn i_on_a_slice_value_in_a_block_edits_it(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     h.with_document(&mut vcx);
-    h.dispatch(&mut vcx, "right", None); // atm
+    h.motion(&mut vcx, "right", None); // atm
     h.dispatch(&mut vcx, "visual_block", None);
-    h.dispatch(&mut vcx, "left", None); // cursor on fwd
+    h.motion(&mut vcx, "left", None); // cursor on fwd
     h.dispatch(&mut vcx, "edit", None);
     assert_eq!(h.editor_value(&vcx).as_deref(), Some("4500.00"));
     h.set_editor(&mut vcx, "4600");
@@ -1749,15 +1749,22 @@ fn selection_changing_verbs_refuse_while_a_selection_editor_is_open(cx: &mut gpu
     h.dispatch(&mut vcx, "edit", None);
     let shape = resolved(&h, &vcx);
     let cursor = h.tile.read_with(&vcx, |t, _| t.cursor());
-    for verb in ["down", "visual_rows", "visual_block", "escape", "yank"] {
-        h.dispatch(&mut vcx, verb, None);
-        assert_eq!(resolved(&h, &vcx), shape, "{verb}");
-        assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor()), cursor, "{verb}");
-        assert_eq!(h.editor_value(&vcx).as_deref(), Some("0.5000"), "{verb}");
+    for id in [
+        "motion::down",
+        "marketdata::visual_rows",
+        "marketdata::visual_block",
+        "marketdata::escape",
+        "marketdata::yank",
+    ] {
+        let action = ActionId(id.into());
+        vcx.update(|window, cx| h.content.dispatch(&action, None, window, cx));
+        assert_eq!(resolved(&h, &vcx), shape, "{id}");
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor()), cursor, "{id}");
+        assert_eq!(h.editor_value(&vcx).as_deref(), Some("0.5000"), "{id}");
         assert_eq!(
             notice_of(&h, &vcx).as_deref(),
             Some("finish the edit first — enter or escape"),
-            "{verb}"
+            "{id}"
         );
     }
 }
@@ -1769,10 +1776,10 @@ fn selection_changing_verbs_refuse_while_a_selection_editor_is_open(cx: &mut gpu
 fn arrows_nudge_the_text_once_a_delivery_drops_the_selection(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     let tag = h.with_document_tagged(&mut vcx);
-    h.dispatch(&mut vcx, "down", None);
-    h.dispatch(&mut vcx, "right", Some(SLICE as u32 + 1));
+    h.motion(&mut vcx, "down", None);
+    h.motion(&mut vcx, "right", Some(SLICE as u32 + 1));
     h.dispatch(&mut vcx, "visual_block", None); // anchor on the second term
-    h.dispatch(&mut vcx, "up", None); // cursor on the first term's 0.2000
+    h.motion(&mut vcx, "up", None); // cursor on the first term's 0.2000
     h.dispatch(&mut vcx, "edit", None);
     h.deliver(
         &mut vcx,
