@@ -3474,11 +3474,12 @@ run_mutation "asof-pin: the request carries the pin" \
   geode-blotter \
   asof_pins_the_tile_and_leaves_the_frame_alone
 
-# A pinned tile does not follow the frame's as-of counter.
+# A pinned tile does not follow the frame's as-of counter. The policy is
+# the tile's `Followed` value, copied out for `geode_tile::following`.
 run_mutation "asof-pin: a pinned tile does not follow the frame's as-of" \
   crates/geode-blotter/src/tile.rs \
-  '            || (matches!(self.tile_as_of, TileAsOf::Follow) && versions.as_of != now.as_of)' \
-  '            || versions.as_of != now.as_of' \
+  '            as_of: matches!(self.tile_as_of, TileAsOf::Follow),' \
+  '            as_of: true,' \
   geode-blotter \
   a_pinned_tile_ignores_the_frames_as_of_and_answers_the_barrier
 
@@ -3832,19 +3833,22 @@ run_mutation "delegate: any_determined reflects the whole cached window" \
 
 # ---- blotter tile
 
+# The rule now lives in `geode_tile::following`; this module's route stays
+# the named test.
 run_mutation "tile: a stale tag is dropped" \
-  crates/geode-blotter/src/tile.rs \
-  '        if outcome.tag != self.tag {' \
+  crates/geode-tile/src/following.rs \
+  '        if tag != self.tag {' \
   '        if false {' \
   geode-blotter \
   a_stale_outcome_is_dropped_an_error_keeps_the_last_snapshot_and_timing_is_recorded
 
 # differs_on_followed checks only versions the tile follows. Both requery
 # and staged-result promotion rely on that comparison.
+# The follow policy is the tile's `Followed` value.
 run_mutation "tile: a pinned tile ignores the slot" \
   crates/geode-blotter/src/tile.rs \
-  '            || (self.pin == Pin::None && versions.grouping != now.grouping)' \
-  '            || versions.grouping != now.grouping' \
+  '            grouping: self.pin == Pin::None,' \
+  '            grouping: true,' \
   geode-blotter \
   a_frame_slot_change_requeries_once_and_a_pinned_tile_ignores_it
 
@@ -3857,10 +3861,12 @@ run_mutation "tile: the depth bound is requested, not everything" \
 
 run_mutation "tile: a query error keeps the last snapshot" \
   crates/geode-blotter/src/tile.rs \
-  '                self.error = Some(Notice::danger(e));' \
-  '                self.error = Some(Notice::danger(e));
+  '            Delivered::Failed(e) => self.error = Some(Notice::danger(e)),' \
+  '            Delivered::Failed(e) => {
+                self.error = Some(Notice::danger(e));
                 self.table
-                    .update(cx, |t, _| *t.delegate_mut() = BlotterDelegate::new());' \
+                    .update(cx, |t, _| *t.delegate_mut() = BlotterDelegate::new());
+            }' \
   geode-blotter \
   a_stale_outcome_is_dropped_an_error_keeps_the_last_snapshot_and_timing_is_recorded
 
@@ -4794,20 +4800,20 @@ run_mutation "as-of: the stripe is painted only when historical" \
 
 # ---- flip barrier
 
+# The rule now lives in `geode_tile::following`; this module's route stays
+# the named test.
 run_mutation "flip: failure counts as arrival" \
-  crates/geode-blotter/src/tile.rs \
-  '                self.frame.update(cx, |f, cx| {
-                    if f.arrived(key, acted) {
-                        cx.notify();
-                    }
-                });' \
-  '                let _ = (key, acted);' \
+  crates/geode-tile/src/following.rs \
+  '                if let Some(under) = asked {
+                    barrier.arrive(key, under);
+                }' \
+  '                let _ = (asked, key);' \
   geode-blotter two_tiles_promote_in_the_same_pass_and_a_failure_releases_the_barrier
 
 run_mutation "flip: a staged snapshot waits for the barrier" \
-  crates/geode-blotter/src/tile.rs \
-  '                if wants {' \
-  '                if false {' \
+  crates/geode-tile/src/following.rs \
+  '                let Some(held_under) = asked.filter(|&under| barrier.wants(key, under)) else {' \
+  '                let Some(held_under) = asked.filter(|_| false) else {' \
   geode-blotter two_tiles_promote_in_the_same_pass_and_a_failure_releases_the_barrier
 
 run_mutation "flip: the deadline releases" \
@@ -4861,18 +4867,23 @@ run_mutation "publication routing: joined datasets invalidate the view" \
   '.chain(std::iter::empty())' \
   geode-blotter publication_bursts_query_only_base_and_join_consumers
 
+# The rule now lives in `geode_tile::following`; this module's route stays
+# the named test.
 run_mutation "publication routing: a blotter query must really arrive" \
-  crates/geode-blotter/src/tile.rs \
-  'if !awaiting && self.frame.read(cx).barrier_wants(key, now) {' \
-  'if self.frame.read(cx).barrier_wants(key, now) {' \
+  crates/geode-tile/src/following.rs \
+  '        if answering_now || !barrier.wants(key, now) {' \
+  '        if !barrier.wants(key, now) {' \
   geode-blotter unrelated_publications_neither_answer_a_query_nor_discard_its_stage
 
+# Promotion runs in `geode_tile::following`; the versions it compares are
+# still this tile's own (`versions_for` its publication watches). Only the
+# promotion's input is mutated: mutating the shared `now` would also feed
+# the requery check, where an unrelated publish is caught by the requery it
+# then causes, leaving the promotion assertion unproven.
 run_mutation "publication routing: blotter promotion uses its own dependencies" \
   crates/geode-blotter/src/tile.rs \
-  'let now = self.versions(cx);
-        if !self.differs_on_followed(versions, now) {' \
-  'let now = self.frame.read(cx).versions();
-        if !self.differs_on_followed(versions, now) {' \
+  '        let promoted = self.following.on_flip(now, differs);' \
+  '        let promoted = self.following.on_flip(self.frame.read(cx).versions(), differs);' \
   geode-blotter unrelated_publications_neither_answer_a_query_nor_discard_its_stage
 
 run_mutation "publication routing: panels watch an exact document" \
@@ -4881,32 +4892,36 @@ run_mutation "publication routing: panels watch an exact document" \
   'frame.watch_publications(self.spec.dataset, None)' \
   geode-marketdata publications_only_requery_the_selected_document
 
+# The rule now lives in `geode_tile::following`; this module's route stays
+# the named test.
 run_mutation "publication routing: a document query must really arrive" \
-  crates/geode-marketdata/src/tile.rs \
-  'if self.query_in_flight
-            && self' \
-  'if false
-            && self' \
+  crates/geode-tile/src/following.rs \
+  '        if answering_now || !barrier.wants(key, now) {' \
+  '        if !barrier.wants(key, now) {' \
   geode-marketdata unrelated_documents_cannot_release_a_barrier_or_discard_a_valid_stage
 
+# Promotion runs in `geode_tile::following`; the versions it compares are
+# still this panel's own (`versions_for` its publication watch). Only the
+# promotion's input is mutated: mutating the shared `now` is caught first by
+# the requery an unrelated publish would then cause, which leaves the
+# promotion assertion unproven.
 run_mutation "publication routing: panel promotion uses its own dependencies" \
   crates/geode-marketdata/src/tile.rs \
-  'if !Self::differs_on_followed(versions, self.versions(cx)) {' \
-  'if !Self::differs_on_followed(versions, self.frame.read(cx).versions()) {' \
+  '            let promoted = this.following.on_flip(now, Self::differs_on_followed);' \
+  '            let promoted = this.following.on_flip(this.frame.read(cx).versions(), Self::differs_on_followed);' \
   geode-marketdata unrelated_documents_cannot_release_a_barrier_or_discard_a_valid_stage
 
 run_mutation "publication routing: a series query must really arrive" \
-  crates/geode-timeseries/src/tile/data.rs \
-  'if self.query_in_flight
-            && self' \
-  'if false
-            && self' \
+  crates/geode-tile/src/following.rs \
+  '        if answering_now || !barrier.wants(key, now) {' \
+  '        if !barrier.wants(key, now) {' \
   geode-timeseries a_delivery_becomes_the_chart_model_and_a_stale_tag_is_dropped
 
 run_mutation "flip: a non-following tile still arrives on its own" \
   crates/geode-blotter/src/tile.rs \
-  '            if !awaiting && self.frame.read(cx).barrier_wants(key, now) {' \
-  '            if false {' \
+  '            self.following
+                .self_arrive(&mut FrameDoor::new(&self.frame, cx), key, now);' \
+  '            let _ = (key, now);' \
   geode-blotter a_pinned_tile_arrives_from_on_frame_changed_without_requerying
 
 # A staged snapshot carries the versions it answers. Promotion rejects a
@@ -4918,17 +4933,22 @@ run_mutation "flip: a non-following tile still arrives on its own" \
 # The promotion gate compares followed versions through differs_on_followed.
 # The hidden-tile test isolates that gate because no requery clears the
 # stage first. A pinned tile may still promote across changes it ignores.
+# The gate now lives in `geode_tile::following`; this module's route stays
+# the named test.
 run_mutation "flip: promote only applies a staged snapshot that still answers what the tile follows" \
-  crates/geode-blotter/src/tile.rs \
-  '        if !self.differs_on_followed(versions, now) {' \
-  '        if true {' \
+  crates/geode-tile/src/following.rs \
+  '        if differs(staged_under, now) {' \
+  '        if false {' \
   geode-blotter a_stage_is_dropped_when_a_counter_the_tile_follows_has_moved
 
+# The clear lives in `FollowingQuery::begin`, which every path runs,
+# including the two that ask nothing (an unresolved named scope and an
+# unconfigured view, whose own entries are below).
 run_mutation "flip: a fresh requery clears whatever was staged before it" \
-  crates/geode-blotter/src/tile.rs \
-  '        self.staged = None;
-' \
-  '' \
+  crates/geode-tile/src/following.rs \
+  '    pub fn begin(&mut self, versions: FrameVersions, submitted: Instant) -> u64 {
+        self.staged = None;' \
+  '    pub fn begin(&mut self, versions: FrameVersions, submitted: Instant) -> u64 {' \
   geode-blotter a_tile_local_requery_clears_the_stage_a_barrier_left_behind
 
 # ---- local-time parsing and refused distinct requests
@@ -6281,11 +6301,22 @@ run_mutation "shell: MAJ-2 — ensure_occupants drops a vanished tile's occupant
   '        for (id, o) in self.occupants.iter() {
             if !all.contains(id) {
                 o.content.set_visible(false, cx);
+                o.content.closed(cx);
             }
         }
         self.occupants.retain(|id, _| all.contains(id));' \
   '        self.occupants.retain(|id, _| all.contains(id));' \
   geode-shell closing_a_watching_tile_unwatches_the_diagnostics_entity
+
+# A removed occupant hears `closed` after `set_visible(false)`. Mutated
+# away, a following tile's close never cancels its query or answers the
+# barrier, so closing the tile a flip waits on holds every other tile to
+# `FLIP_DEADLINE`. The test also pins that a workspace switch never closes.
+run_mutation "hosting: a removed occupant is told it closed" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '                o.content.closed(cx);' \
+  '                let _ = &o.content;' \
+  geode-shell closing_a_tile_tells_its_occupant_it_closed_and_a_workspace_switch_does_not
 
 run_mutation "shell: MAJ-3 — note_config_reloaded goes back behind the views_changed gate" \
   crates/geode-shell/src/shell/hot_reload.rs \
@@ -11837,9 +11868,11 @@ run_mutation "matrix: flatten refuses a repeated row label" \
 # ---- Market-data delivery ---- Stale outcomes are dropped. Applying an
 # answer for a superseded key or as-of paints the wrong document under the
 # current title.
+# The rule now lives in `geode_tile::following`; this module's route stays
+# the named test.
 run_mutation "mdtile: a stale tag is dropped" \
-  crates/geode-marketdata/src/tile.rs \
-  '        if outcome.tag != self.tag {' \
+  crates/geode-tile/src/following.rs \
+  '        if tag != self.tag {' \
   '        if false {' \
   geode-marketdata \
   a_stale_tag_is_dropped
@@ -11967,20 +12000,25 @@ run_mutation "mdpark: revert touches only the current underlying" \
 # The panel answers barriers for changes it does not requery for. Otherwise
 # other tiles wait the full barrier deadline for a delivery that cannot
 # arrive.
+# The rule now lives in `geode_tile::following`; this module's route stays
+# the named test.
 run_mutation "mdtile: a panel self-arrives on a change it does not requery for" \
   crates/geode-marketdata/src/tile.rs \
-  '                this.self_arrive(now, cx);' \
-  '                let _ = now;' \
+  '                this.following
+                    .self_arrive(&mut FrameDoor::new(&this.frame, cx), key, now);' \
+  '                let _ = (key, now);' \
   geode-marketdata \
   a_panel_self_arrives_on_a_scope_change_it_does_not_requery_for
 
 # A successful delivery answers its barrier. Anchor the release call to
 # distinguish this path from refusal and failure paths; skipping it delays
 # all tiles until the deadline.
+# The rule now lives in `geode_tile::following`; this module's route stays
+# the named test.
 run_mutation "mdtile: a delivery answers the flip barrier" \
-  crates/geode-marketdata/src/tile.rs \
-  '                    if self.arrive_and_release(cx) {' \
-  '                    if false {' \
+  crates/geode-tile/src/following.rs \
+  '                if !barrier.arrive(key, held_under) {' \
+  '                if true {' \
   geode-marketdata \
   a_panel_arrives_on_delivery_after_an_as_of_change
 
@@ -11988,44 +12026,62 @@ run_mutation "mdtile: a delivery answers the flip barrier" \
 # separate promise: one broken tile must never hold every other tile open
 # until the deadline. Mutated away, a document whose select failed holds
 # every blotter for the full 250 ms.
+# The rule now lives in `geode_tile::following`; this module's route stays
+# the named test.
 run_mutation "mdtile: a failed delivery answers the barrier too" \
-  crates/geode-marketdata/src/tile.rs \
-  '                self.notice = Some(e.into());
-                self.arrive(cx);' \
-  '                self.notice = Some(e.into());' \
+  crates/geode-tile/src/following.rs \
+  '                if let Some(under) = asked {
+                    barrier.arrive(key, under);
+                }' \
+  '                let _ = (asked, key);' \
   geode-marketdata \
   a_failed_delivery_still_arrives
 
 # A refused submit has no future outcome. Release its barrier and clear the
 # acted versions so the panel can retry instead of retaining last-good data
 # indefinitely.
+# The rule now lives in `geode_tile::following`; this module's route stays
+# the named test.
 run_mutation "mdtile: a refused submit arrives and clears acted" \
-  crates/geode-marketdata/src/tile.rs \
-  '            self.arrive(cx);
-            self.acted = None;' \
-  '            // refused: neither answered nor retried' \
+  crates/geode-tile/src/following.rs \
+  '            barrier.arrive(key, asked);
+        }
+        self.in_flight = None;' \
+  '            let _ = (key, asked);
+        }
+        self.in_flight = None;' \
   geode-marketdata \
   a_refused_request_arrives_at_the_barrier_and_retries
 
-# Hiding a panel cancels its request and clears the acted versions.
-# Otherwise showing it again treats the cancelled request as current and
-# leaves old data painted.
-run_mutation "mdtile: hiding a panel clears what it acted on" \
+# Hiding a panel cancels nothing: the outstanding request finishes, its
+# reply applies while hidden, and it still answers any barrier it was
+# enrolled in. Mutated to cancel and close on hide, a tab switch in the
+# middle of a flip throws the answer away.
+run_mutation "mdtile: hiding a panel keeps its question" \
   crates/geode-marketdata/src/tile.rs \
-  '            self.data.cancel(QueryKey(self.id.0));' \
-  '            self.data.cancel(QueryKey(self.id.0));
-            return;' \
+  '        self.visible = visible;
+        if visible {
+            // The catalog' \
+  '        self.visible = visible;
+        if !visible {
+            self.data.cancel(QueryKey(self.id.0));
+            self.following.close(&mut FrameDoor::new(&self.frame, cx), QueryKey(self.id.0));
+        }
+        if visible {
+            // The catalog' \
   geode-marketdata \
-  a_tile_hidden_mid_flight_requeries_on_reshow
+  a_panel_hidden_mid_flight_paints_the_reply_and_asks_nothing_on_reshow
 
 # A key change clears staged data because it changes no frame version.
 # Without the clear, a hidden panel can promote the previous key's snapshot
 # under the new header when the barrier releases.
+# The rule now lives in `geode_tile::following`; this module's route stays
+# the named test.
 run_mutation "mdtile: a key change drops what was staged for the old key" \
-  crates/geode-marketdata/src/tile.rs \
-  '        self.staged = None;
-        // A different document is a different question: the next' \
-  '        // A different document is a different question: the next' \
+  crates/geode-tile/src/following.rs \
+  '    pub fn reset(&mut self) {
+        self.staged = None;' \
+  '    pub fn reset(&mut self) {' \
   geode-marketdata \
   a_key_change_drops_what_was_staged_for_the_old_key
 
@@ -12042,14 +12098,12 @@ run_mutation "mdtile: a key line always asks for a fresh catalog" \
 # Stage deliveries while a barrier is open. Applying the panel's fast
 # document response immediately would paint its new as-of before other tiles
 # are ready.
+# The rule now lives in `geode_tile::following`; this module's route stays
+# the named test.
 run_mutation "mdtile: a delivery under an open barrier is staged" \
-  crates/geode-marketdata/src/tile.rs \
-  '                let wants = acted.is_some_and(|acted| {
-                    self.frame
-                        .read(cx)
-                        .barrier_wants(QueryKey(self.id.0), acted)
-                });' \
-  '                let wants = false;' \
+  crates/geode-tile/src/following.rs \
+  '                let Some(held_under) = asked.filter(|&under| barrier.wants(key, under)) else {' \
+  '                let Some(held_under) = asked.filter(|_| false) else {' \
   geode-marketdata \
   a_delivery_under_an_open_barrier_is_staged_until_the_flip
 
@@ -12463,10 +12517,12 @@ run_mutation "mdrevert: revert clears the behind-refusal notice it resolves" \
 # A scope or grouping change can replace the barrier without requerying this
 # panel; requiring the original barrier identity would discard its only
 # response for that as-of.
+# The rule now lives in `geode_tile::following`; this module's route stays
+# the named test.
 run_mutation "final: a panel stage survives a barrier replaced by a change it does not follow" \
-  crates/geode-marketdata/src/tile.rs \
-  '        if !Self::differs_on_followed(versions, self.versions(cx)) {' \
-  '        if versions.same_flip_identity(self.frame.read(cx).versions()) {' \
+  crates/geode-tile/src/following.rs \
+  '        if differs(staged_under, now) {' \
+  '        if !staged_under.same_flip_identity(now) {' \
   geode-marketdata \
   a_stage_survives_a_barrier_replaced_by_a_change_the_panel_does_not_follow
 
@@ -12474,10 +12530,12 @@ run_mutation "final: a panel stage survives a barrier replaced by a change it do
 # under it (reachable while hidden, where nothing requeries) must still be
 # dropped. Same anchor, opposite mutation — the two entries together are
 # what keep the gate from being either half of a tautology.
+# The rule now lives in `geode_tile::following`; this module's route stays
+# the named test.
 run_mutation "final: a panel stage is dropped once a counter it follows has moved" \
-  crates/geode-marketdata/src/tile.rs \
-  '        if !Self::differs_on_followed(versions, self.versions(cx)) {' \
-  '        if true {' \
+  crates/geode-tile/src/following.rs \
+  '        if differs(staged_under, now) {' \
+  '        if false {' \
   geode-marketdata \
   a_stage_is_dropped_when_a_counter_the_panel_follows_has_moved
 
@@ -12485,10 +12543,11 @@ run_mutation "final: a panel stage is dropped once a counter it follows has move
 # barrier replacement. Requiring the original barrier identity leaves old
 # rows indefinitely because the pinned tile does not requery for that
 # grouping change.
+# The gate now lives in `geode_tile::following`.
 run_mutation "final: a pinned blotter promotes the stage a replaced barrier left it" \
-  crates/geode-blotter/src/tile.rs \
-  '        if !self.differs_on_followed(versions, now) {' \
-  '        if versions.same_flip_identity(now) {' \
+  crates/geode-tile/src/following.rs \
+  '        if differs(staged_under, now) {' \
+  '        if !staged_under.same_flip_identity(now) {' \
   geode-blotter a_second_mutation_during_a_barrier_wait_clears_the_stale_staged_snapshot
 
 # Resolve restored drafts only against a nonempty, successfully built model.
@@ -17808,8 +17867,8 @@ run_mutation "timeseries: an add fetches before it queries" \
 # barrier waits for). Applied, it paints the old question's points under
 # the new question's header.
 run_mutation "timeseries: a stale tag is dropped" \
-  crates/geode-timeseries/src/tile/data.rs \
-  '        if outcome.tag != self.tag {' \
+  crates/geode-tile/src/following.rs \
+  '        if tag != self.tag {' \
   '        if false {' \
   geode-timeseries \
   a_delivery_becomes_the_chart_model_and_a_stale_tag_is_dropped
@@ -17844,15 +17903,20 @@ run_mutation "timeseries: a pair the tile does not hold is ignored" \
   geode-timeseries \
   a_fetched_ok_marks_the_pair_idle_and_queries_once_and_an_err_marks_it_failed
 
-# A hidden tile paints nothing, so an in-flight query for it is a round
-# trip spent for nothing — and one the pool would rather spend on a
-# visible chart.
-run_mutation "timeseries: a hidden tile cancels in flight" \
+# Hiding keeps the series query in flight: its answer applies while the
+# tile is hidden, and a hidden tile enrolled in a flip still answers it.
+# Mutated to cancel and close on hide, the answer is thrown away.
+# The rule was reversed: hiding keeps the query; the entry now guards that.
+run_mutation "timeseries: hiding keeps the query in flight" \
   crates/geode-timeseries/src/tile/mod.rs \
-  '            self.data.cancel(QueryKey(self.id.0));' \
-  '            let _ = QueryKey(self.id.0);' \
+  '            self.view_waiting = false;
+            self.in_flight.clear();' \
+  '            self.data.cancel(QueryKey(self.id.0));
+            self.following.close(&mut FrameDoor::new(&self.frame, cx), QueryKey(self.id.0));
+            self.view_waiting = false;
+            self.in_flight.clear();' \
   geode-timeseries \
-  a_hidden_tile_cancels_and_a_shown_one_requeries_and_a_restored_one_refetches_once
+  a_hidden_tile_keeps_its_query_and_a_shown_one_refetches_and_a_restored_one_refetches_once
 
 # Enter accepts the highlighted option. Accepting the first declared row
 # instead can select a different source from the one shown by the highlight.
@@ -18123,7 +18187,8 @@ run_mutation "timeseries: an as-of change drops the in-flight set" \
 run_mutation "timeseries: the as-of refetch is gated on a real as-of move" \
   crates/geode-timeseries/src/tile/mod.rs \
   '                if this
-                    .acted
+                    .following
+                    .acted()
                     .is_some_and(|acted| Self::differs_on_followed(acted, now))
                 {' \
   '                if true
@@ -18943,9 +19008,18 @@ run_mutation "pricer tile: a tick does not stale the sheet" \
 
 run_mutation "pricer tile: the flip barrier waits for the pricer" \
   crates/geode-pricer/src/tile.rs \
-  '                    if f.arrived(key, now) {' \
-  '                    if false && f.arrived(key, now) {' \
+  '            following::arrive_immediately(&mut FrameDoor::new(&frame, cx), QueryKey(this.id.0));' \
+  '            let _ = (&frame, QueryKey(this.id.0));' \
   geode-pricer the_tile_answers_a_flip_barrier_it_has_nothing_coming_for
+
+# Diagnostics submits no frame query, so nothing else answers a barrier
+# that enrolls it. Mutated away, every following tile on screen waits out
+# `FLIP_DEADLINE` on each scope, grouping or as-of change.
+run_mutation "diagnostics module: the tile answers a flip barrier itself" \
+  crates/geode-diagnostics/src/tile.rs \
+  '            following::arrive_immediately(&mut FrameDoor::new(&frame, cx), QueryKey(this.tile.0));' \
+  '            let _ = (&frame, QueryKey(this.tile.0));' \
+  geode-diagnostics the_tile_answers_a_flip_barrier_it_has_nothing_coming_for
 
 run_mutation "pricer tile: the entry field is dropped unblurred" \
   crates/geode-pricer/src/tile.rs \
@@ -21176,7 +21250,7 @@ run_mutation "timeseries completion: nothing loaded says so" \
 # the density strip and percentiles until the pan stops.
 run_mutation "timeseries: a view move waits for the query in flight" \
   crates/geode-timeseries/src/tile/mod.rs \
-  '            if self.query_in_flight {' \
+  '            if self.following.in_flight() {' \
   '            if false {' \
   geode-timeseries a_view_move_while_a_query_is_out_waits_for_its_answer
 
@@ -21184,9 +21258,32 @@ run_mutation "timeseries: a view move waits for the query in flight" \
 # stay on the window the pan started from.
 run_mutation "timeseries: an answer releases the waiting view" \
   crates/geode-timeseries/src/tile/data.rs \
-  '        if !self.view_waiting || self.query_in_flight || self.staged.is_some() {' \
+  '        if !self.view_waiting || self.following.in_flight() || self.following.is_staged() {' \
   '        if true {' \
   geode-timeseries a_view_move_while_a_query_is_out_waits_for_its_answer
+
+# The post-step after a delivery: `release_view` runs after every answered
+# query, so a pan that waited behind it asks for its own window.
+run_mutation "timeseries: a delivery releases the waiting view" \
+  crates/geode-timeseries/src/tile/data.rs \
+  '        self.release_view(cx);
+        cx.notify();
+    }' \
+  '        cx.notify();
+    }' \
+  geode-timeseries a_view_move_while_a_query_is_out_waits_for_its_answer
+
+# A series request that never went out has no outcome to arrive with; the
+# helper arrives for it, or every other tile waits out the deadline.
+run_mutation "timeseries: a refused submit answers the barrier" \
+  crates/geode-tile/src/following.rs \
+  '            barrier.arrive(key, asked);
+        }
+        self.in_flight = None;' \
+  '            let _ = (key, asked);
+        }
+        self.in_flight = None;' \
+  geode-timeseries a_refused_submit_notices_and_still_answers_the_barrier
 
 # ---- Scope expression suggestions: the caret reader.
 # After an operator the caret wants a value; reading it as a finished term
@@ -23270,6 +23367,170 @@ run_mutation "mdmenu: a rebind does not reach the menu" \
   '            this.chords = geode_tile::menu::live_bindings(cx);' \
   '            let _ = geode_tile::menu::live_bindings(cx);' \
   geode-marketdata an_open_menu_follows_a_keymap_reload
+
+# geode_tile::following carries the barrier rules for every following tile.
+# These entries name its own pure tests; each module's re-aimed entries name
+# the module route.
+# A pinned tile reading the shared lane's versions would stage and promote
+# against a scope it never followed.
+run_mutation "following: the door reads the tile's own lane" \
+  crates/geode-tile/src/following.rs \
+  '        self.frame.read(self.cx).versions()' \
+  '        self.frame.entity().read(self.cx).shared().versions()' \
+  geode-tile the_door_reads_the_tiles_own_lane
+
+run_mutation "following: KeepActed remembers what a local refusal answered" \
+  crates/geode-tile/src/following.rs \
+  '        if unanswered == Unanswered::Retry {' \
+  '        if true {' \
+  geode-tile keep_acted_arrives_and_remembers_what_it_answered
+
+run_mutation "following: a closing tile answers the barrier" \
+  crates/geode-tile/src/following.rs \
+  '        barrier.arrive(key, closing_under)' \
+  '        false' \
+  geode-tile close_releases_a_barrier_it_was_the_last_wait_of
+
+run_mutation "following: a closing tile supersedes its tag" \
+  crates/geode-tile/src/following.rs \
+  '    pub fn close(&mut self, barrier: &mut impl Barrier, key: QueryKey) -> bool {
+        self.tag += 1;' \
+  '    pub fn close(&mut self, barrier: &mut impl Barrier, key: QueryKey) -> bool {' \
+  geode-tile close_supersedes_the_question_and_answers_the_barrier
+
+run_mutation "following: arrive_immediately answers" \
+  crates/geode-tile/src/following.rs \
+  '    barrier.wants(key, now) && barrier.arrive(key, now)' \
+  '    barrier.wants(key, now) && false' \
+  geode-tile arrive_immediately_answers_only_a_barrier_that_wants_the_key
+
+run_mutation "following: a releasing arrival notifies the frame" \
+  crates/geode-tile/src/following.rs \
+  '            if released {
+                cx.notify();
+            }' \
+  '            let _ = &cx;' \
+  geode-tile a_releasing_arrival_through_the_door_notifies_the_frame
+
+# A flip promotes before the tile's visibility check: a panel hidden after
+# it staged still lands its answer when the barrier releases. Mutated to
+# promote only while visible, the hidden panel holds a stage nobody
+# promotes until it is shown again.
+run_mutation "mdtile: a hidden panel's stage promotes on the flip" \
+  crates/geode-marketdata/src/tile.rs \
+  '            let promoted = this.following.on_flip(now, Self::differs_on_followed);' \
+  '            let promoted = if this.visible { this.following.on_flip(now, Self::differs_on_followed) } else { Promotion::Empty };' \
+  geode-marketdata a_stage_held_when_the_panel_hides_promotes_on_the_flip
+
+# A refused submission forgets the versions it was asked under, so the
+# next frame change is a real retry. Mutated to keep them, the panel
+# decides it already asked and sits on last-good.
+run_mutation "mdtile: a refused submit forgets what it asked" \
+  crates/geode-tile/src/following.rs \
+  '        if unanswered == Unanswered::Retry {' \
+  '        if false {' \
+  geode-marketdata a_refused_request_arrives_at_the_barrier_and_retries
+
+# Closing a following tile cancels its query by key and answers any open
+# barrier still waiting on it (`closed`, never a hide). Each module's close
+# route is its own named test; the three "a close answers the barrier"
+# entries share the helper line with the geode-tile entry above and differ
+# in package and filter.
+run_mutation "mdtile: a close cancels the request by key" \
+  crates/geode-marketdata/src/tile.rs \
+  '        self.data.cancel(key);
+        self.following' \
+  '        self.following' \
+  geode-marketdata closing_a_panel_mid_flip_cancels_its_request_and_releases_the_barrier
+
+run_mutation "mdtile: a close answers the barrier" \
+  crates/geode-tile/src/following.rs \
+  '        barrier.arrive(key, closing_under)' \
+  '        false' \
+  geode-marketdata closing_a_panel_mid_flip_cancels_its_request_and_releases_the_barrier
+
+# A panel hidden mid-flip answers the barrier with its reply. Mutated to
+# skip the arrival, the other tiles wait out the deadline.
+run_mutation "mdtile: a panel hidden mid-flip still answers the barrier" \
+  crates/geode-tile/src/following.rs \
+  '                if !barrier.arrive(key, held_under) {' \
+  '                if true {' \
+  geode-marketdata a_panel_hidden_mid_flip_still_answers_the_barrier
+
+run_mutation "timeseries: a close cancels the query by key" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '        self.data.cancel(key);
+        self.following' \
+  '        self.following' \
+  geode-timeseries closing_the_tile_mid_flip_cancels_its_query_and_releases_the_barrier
+
+run_mutation "timeseries: a close answers the barrier" \
+  crates/geode-tile/src/following.rs \
+  '        barrier.arrive(key, closing_under)' \
+  '        false' \
+  geode-timeseries closing_the_tile_mid_flip_cancels_its_query_and_releases_the_barrier
+
+run_mutation "blotter: a close cancels the query by key" \
+  crates/geode-blotter/src/tile.rs \
+  '        self.data.cancel(key);
+        self.following' \
+  '        self.following' \
+  geode-blotter closing_a_tile_mid_flip_cancels_its_query_and_releases_the_barrier
+
+run_mutation "blotter: a close answers the barrier" \
+  crates/geode-tile/src/following.rs \
+  '        barrier.arrive(key, closing_under)' \
+  '        false' \
+  geode-blotter closing_a_tile_mid_flip_cancels_its_query_and_releases_the_barrier
+
+# A view the configuration no longer defines is the tile's own error and
+# sends no query; one broken tile never holds the rest open, so it answers
+# the barrier as a refused submission does. Mutated to report the
+# submission as sent, the flip waits out its deadline for an answer that
+# never comes.
+run_mutation "blotter: an unconfigured view answers the barrier" \
+  crates/geode-blotter/src/tile.rs \
+  '            let key = QueryKey(self.tile.0);
+            self.following.submitted(
+                false,' \
+  '            let key = QueryKey(self.tile.0);
+            self.following.submitted(
+                true,' \
+  geode-blotter a_view_removed_under_an_open_barrier_answers_it
+
+# The same path asks a new question through `begin`: it supersedes the
+# query still out for the old view, drops any stage, and records the
+# reload's versions as what it answered (`KeepActed`). Mutated away, the
+# tile keeps the pre-reload versions, so every later frame notification,
+# the barrier release's own included, re-runs the failing requery. (A late
+# outcome for the old view is dropped either way: `deliver` supersedes an
+# answer asked before a followed counter moved.)
+run_mutation "blotter: an unconfigured view supersedes the old view's query" \
+  crates/geode-blotter/src/tile.rs \
+  '            let versions = self.versions(cx);
+            self.following.begin(versions, Instant::now());' \
+  '            let versions = self.versions(cx);
+            let _ = versions;' \
+  geode-blotter a_view_removed_under_an_open_barrier_answers_it
+
+# A direct delivery (no barrier wants it) makes the same followed-counter
+# check promotion makes. Mutated away, a market-data panel hidden across an
+# as-of change applies the old as-of's document when its reply lands, and
+# runs the draft policy (`:auto replace` drops the edits) on it.
+run_mutation "mdtile: a reply to an as-of left behind while hidden is dropped" \
+  crates/geode-tile/src/following.rs \
+  '                    if asked.is_some_and(|under| differs(under, now)) {' \
+  '                    if false {' \
+  geode-marketdata a_reply_to_an_as_of_left_behind_while_hidden_runs_no_draft_policy
+
+# A reply whose own arrival releases the barrier but was asked before a
+# followed counter moved is dropped, not held: reported as held, the blotter
+# clears its error for an answer it never paints.
+run_mutation "following: a releasing reply asked before a followed change is superseded" \
+  crates/geode-tile/src/following.rs \
+  '                    Promotion::Superseded => Delivered::Superseded,' \
+  '                    Promotion::Superseded => Delivered::Held,' \
+  geode-tile a_releasing_delivery_asked_before_a_followed_change_is_superseded
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

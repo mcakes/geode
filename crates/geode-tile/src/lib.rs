@@ -4,6 +4,7 @@
 //! depends on this crate.
 
 pub mod confirm;
+pub mod following;
 pub mod menu;
 pub mod notice;
 pub mod popover;

@@ -7,9 +7,10 @@
 //! to retain the chart's cached paths; only visible-window statistics need a
 //! new query. Refusals become notices or inline popup errors.
 //!
-//! `data` owns fetch tracking, tagged series delivery, and flip-barrier
-//! staging. Only the frame's as-of counter invalidates an established series
-//! request; flip releases staged results without triggering a query.
+//! `data` owns fetch tracking and tagged series delivery over
+//! `geode_tile::following` (the flip-barrier staging). Only the frame's as-of
+//! counter invalidates an established series request; flip releases staged
+//! results without triggering a query.
 //! `popups` owns opening, input, commit, and dismissal for local editors.
 
 use std::cell::RefCell;
@@ -59,6 +60,7 @@ use crate::popup::{
     PopupKind, RangePopup, SeriesPopup, Which, render_picker, render_range, render_series_popup,
 };
 use crate::tile::pointer::{ChartBounds, Drag};
+use geode_tile::following::{Delivered, FollowingQuery, FrameDoor, Promotion, Unanswered};
 use geode_tile::menu::{Menu, MenuHost, MenuIds, Row};
 
 mod data;
@@ -126,18 +128,12 @@ pub struct TimeseriesTile {
     /// chips' swatches and the chart model's line colors are both
     /// resolved against it.
     theme_key: Option<[Hsla; 28]>,
-    /// The tag of the request in flight, so a stale answer is dropped.
-    tag: u64,
-    /// The frame versions the request in flight was made under.
-    acted: Option<FrameVersions>,
-    query_in_flight: bool,
+    /// The series query under the flip barrier (see `geode_tile::following`):
+    /// only the frame's as-of invalidates it.
+    following: FollowingQuery<SeriesResult>,
     /// A view move is waiting for the request in flight to answer before it
     /// asks for its own window's statistics. See [`Self::view_moved`].
     view_waiting: bool,
-    /// A delivery staged behind the flip barrier.
-    staged: Option<(SeriesResult, FrameVersions)>,
-    /// Most recently observed flip generation, whether or not a result was staged.
-    last_flip: u64,
     visible: bool,
     /// The next delivery resets the view to the new full range.
     reset_view: bool,
@@ -232,9 +228,16 @@ impl TimeseriesTile {
             // Read through the tile's own handle: the observed entity alone
             // would answer for the shared lane, not this workspace's.
             let now = this.frame.read(cx).versions();
-            if now.flip != this.last_flip {
-                this.last_flip = now.flip;
-                this.promote(cx);
+            // The post-step: every promotion that took something releases a
+            // view move waiting behind it.
+            match this.following.on_flip(now, Self::differs_on_followed) {
+                Promotion::Empty => {}
+                Promotion::Superseded => this.release_view(cx),
+                Promotion::Apply(result) => {
+                    this.apply_result(result, cx);
+                    cx.notify();
+                    this.release_view(cx);
+                }
             }
             // An open frequency menu's disabled rows are the point cap
             // over the range AS RESOLVED under the frame's as-of, so any
@@ -249,7 +252,11 @@ impl TimeseriesTile {
             }
             // Established series requests follow as-of only. Frame scope, grouping,
             // and unrelated dataset publications do not change their inputs.
-            if !this.model.slots().is_empty() && this.follows_changed(now) {
+            if !this.model.slots().is_empty()
+                && this
+                    .following
+                    .follows_changed(now, Self::differs_on_followed)
+            {
                 // Changing as-of can move both ends of a relative range. Clear fetch
                 // tracking even though the stored Range is unchanged, then ask for gaps
                 // before querying cached points.
@@ -258,7 +265,8 @@ impl TimeseriesTile {
                 // makes `follows_changed` true, but resubmitting its unanswered fetches on
                 // every unrelated frame notification would duplicate work.
                 if this
-                    .acted
+                    .following
+                    .acted()
                     .is_some_and(|acted| Self::differs_on_followed(acted, now))
                 {
                     this.in_flight.clear();
@@ -272,7 +280,9 @@ impl TimeseriesTile {
                 // else on this path re-prepares them.
                 this.rebuild_chrome(cx);
             } else {
-                this.self_arrive(now, cx);
+                let key = QueryKey(this.id.0);
+                this.following
+                    .self_arrive(&mut FrameDoor::new(&this.frame, cx), key, now);
             }
         })
         .detach();
@@ -339,12 +349,8 @@ impl TimeseriesTile {
             chart_version: 1,
             last_chart_key,
             theme_key: None,
-            tag: 0,
-            acted: None,
-            query_in_flight: false,
+            following: FollowingQuery::new(),
             view_waiting: false,
-            staged: None,
-            last_flip: 0,
             visible: false,
             reset_view: false,
             in_flight: HashSet::new(),
@@ -409,9 +415,7 @@ impl TimeseriesTile {
     /// retained result and changed followed versions, also query immediately.
     /// Otherwise a successful fetch completion triggers the query, including
     /// `Ok(0)` when the data tier already covers the span.
-    /// Hiding attempts query cancellation and clears request/fetch tracking.
-    /// Cancellation has no acknowledgement and does not stop upstream fetches
-    /// or retract results already emitted by the data tier.
+    /// Hiding keeps the series query; closing (`closed`) cancels it.
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         if self.visible == visible {
             return;
@@ -424,23 +428,35 @@ impl TimeseriesTile {
                 self.fetch_pending(cx);
             }
             let now = self.frame.read(cx).versions();
-            if self.result.is_some() && !self.model.slots().is_empty() && self.follows_changed(now)
+            if self.result.is_some()
+                && !self.model.slots().is_empty()
+                && self
+                    .following
+                    .follows_changed(now, Self::differs_on_followed)
             {
                 self.requery(cx);
             }
         } else {
-            // An in-flight query nothing will paint is a round trip
-            // spent for nothing.
-            self.data.cancel(QueryKey(self.id.0));
-            // Clear acted versions so showing a tile cannot treat its cancelled
-            // request as completed work.
-            self.acted = None;
-            self.query_in_flight = false;
+            // Hidden tiles hear no fetch completions (the shell broadcasts
+            // `SeriesFetched` to visible tiles only), so fetch tracking is
+            // dropped and every show refetches. The series query itself is
+            // kept: its answer applies when it lands.
             self.view_waiting = false;
             self.in_flight.clear();
         }
         self.rebuild_chrome(cx);
         cx.notify();
+    }
+
+    /// The shell is removing this tile: cancel the series query by key and
+    /// answer any barrier still waiting on it. Fetches run on; their
+    /// completions reach no one. Runs inside the shell's occupant
+    /// reconciliation, so it updates only the frame and the data handle.
+    pub fn closed(&mut self, cx: &mut Context<Self>) {
+        let key = QueryKey(self.id.0);
+        self.data.cancel(key);
+        self.following
+            .close(&mut FrameDoor::new(&self.frame, cx), key);
     }
 
     /// This tile ignores the shell's find events; its local popup actions own
@@ -716,7 +732,7 @@ impl TimeseriesTile {
     /// latest view ([`Self::release_view`]).
     fn view_moved(&mut self, changed: Changed, cx: &mut Context<Self>) {
         if changed.query() && self.visible && !self.model.slots().is_empty() {
-            if self.query_in_flight {
+            if self.following.in_flight() {
                 self.view_waiting = true;
             } else {
                 self.requery(cx);
@@ -894,7 +910,7 @@ impl TimeseriesTile {
     /// arrive?" has to hand `barrier_wants`.
     #[cfg(test)]
     pub(crate) fn acted(&self) -> Option<FrameVersions> {
-        self.acted
+        self.following.acted()
     }
 }
 

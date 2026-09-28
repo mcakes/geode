@@ -525,6 +525,69 @@ fn closing_a_tile_drops_its_occupant_and_switching_workspaces_toggles_visibility
     );
 }
 
+/// Closing a tile tells its occupant it closed, after telling it it is
+/// hidden; a workspace switch hides without closing. Following tiles cancel
+/// only on `closed`, so a switch reported as a close would cancel a query
+/// whose answer the trader expects on return.
+#[gpui::test]
+fn closing_a_tile_tells_its_occupant_it_closed_and_a_workspace_switch_does_not(
+    cx: &mut gpui::TestAppContext,
+) {
+    use crate::module::recording::Recorded;
+    let (services, log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    cx.simulate_keystrokes("ctrl-v");
+    let shell = shell_of(&window, &mut cx);
+    let tile = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    cx.simulate_keystrokes("alt-2");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.simulate_keystrokes("alt-1");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(
+        log.borrow()
+            .iter()
+            .any(|r| matches!(r, Recorded::Visible(t, false) if *t == tile)),
+        "the switch did hide the tile: {:?}",
+        log.borrow()
+    );
+    assert!(
+        !log.borrow()
+            .iter()
+            .any(|r| matches!(r, Recorded::Closed(_))),
+        "a switch hides; it never closes: {:?}",
+        log.borrow()
+    );
+
+    cx.simulate_keystrokes("ctrl-w");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+        let _ = window.draw(cx);
+    });
+    let log = log.borrow();
+    let hidden = log
+        .iter()
+        .rposition(|r| matches!(r, Recorded::Visible(t, false) if *t == tile))
+        .expect("hidden before removal");
+    let closed = log
+        .iter()
+        .position(|r| matches!(r, Recorded::Closed(t) if *t == tile))
+        .expect("closing a tile tells its occupant");
+    assert!(hidden < closed, "hidden first, then closed: {log:?}");
+    assert_eq!(
+        log.iter()
+            .filter(|r| matches!(r, Recorded::Closed(_)))
+            .count(),
+        1,
+        "closed once, and only the closed tile: {log:?}"
+    );
+}
+
 #[gpui::test]
 fn a_click_on_a_tile_leaves_the_shell_focused_on_the_next_frame(cx: &mut gpui::TestAppContext) {
     // GPUI focuses tracked elements on mouse-down. The tile click handler arms

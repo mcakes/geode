@@ -30,8 +30,8 @@ wire formats: geode-documents ────────────────�
 A feature module depends on `geode-shell` directly (the `TileContent`
 contract, key chips, the rem scale) as well as through `geode-tile`, and may
 also name `geode-widgets`, `geode-chart` and `geode-core` directly.
-`geode-diagnostics` has no popover, menu, confirm or notice line and does not
-depend on `geode-tile`.
+`geode-diagnostics` has no popover, menu, confirm or notice line; it depends
+on `geode-tile` only for the flip-barrier arrival.
 
 `geode-core` is shared vocabulary without window, database, or network
 ownership. Typed interpretation and merging are I/O-free; its configuration
@@ -46,10 +46,11 @@ background data work. It does not depend on the shell or feature modules.
 
 `geode-tile` is the kit tiles are built from: the popover, the `.` action
 menu, the in-tile y/n confirm and the notice line, as models with one
-painter each. It depends on `geode-shell` for its paint doors and the live
-keymap, never on `geode-data` or a feature module, and the shell never
-depends on it. A tile mechanism two modules would otherwise each write lives
-there.
+painter each, and the `following` flip-barrier state machine every following
+tile runs for its own query. It depends on `geode-shell` for its paint doors
+and the live keymap, never on `geode-data` or a feature module, and the shell
+never depends on it. A tile mechanism two modules would otherwise each write
+lives there.
 
 Feature crates such as `geode-blotter`, `geode-marketdata`,
 `geode-timeseries`, `geode-diagnostics`, and `geode-pricer` implement the

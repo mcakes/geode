@@ -190,7 +190,8 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 - `g m` opens the module picker with the cursor row's underlying as launch
   context. A package contributes an underlying only when all its legs share
   one; an empty sheet or mixed-underlying package contributes none.
-- The tile arrives at flip barriers itself; it submits no view query.
+- The tile arrives at flip barriers itself; it submits no view query
+  (`geode_tile::following::arrive_immediately`).
 - An empty sheet is never saved. A sheet whose load failed is never saved
   (`save_blocked`); a change not yet queued by the store (`dirty`), or whose
   queued save was reported failed (`save_failed`), is saved when the tile

@@ -50,7 +50,8 @@ cargo test -p geode-diagnostics
 - The app refreshes the factory's shared config before tile frame observers
   rebuild the config section. Preserve that observer registration order.
 - The tile submits no view query, so it signals its own arrival at the flip
-  barrier. Otherwise other tiles would wait for the 250 ms deadline.
+  barrier. Otherwise other tiles would wait for the 250 ms deadline
+  (`geode_tile::following::arrive_immediately`).
 - Historical resolved-generation markers display only when the catalog and
   frame as-of match; an outstanding refresh must not show a stale selection.
 - The sources section paints a source's two detail rows by

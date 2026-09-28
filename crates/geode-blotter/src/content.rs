@@ -163,6 +163,9 @@ impl TileContent for BlotterContent {
     fn set_visible(&self, visible: bool, cx: &mut App) {
         self.tile.update(cx, |t, cx| t.set_visible(visible, cx))
     }
+    fn closed(&self, cx: &mut App) {
+        self.tile.update(cx, |t, cx| t.closed(cx))
+    }
     fn set_stack(&self, stack: Option<StackHandle>, cx: &mut App) {
         self.tile.update(cx, |t, cx| t.set_stack(stack, cx))
     }

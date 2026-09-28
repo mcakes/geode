@@ -19,6 +19,7 @@ use geode_shell::module::{FindEvent, StackHandle};
 use geode_shell::shell::chip;
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
+use geode_tile::following::{self, FrameDoor};
 use gpui::prelude::*;
 use gpui::{
     App, Context, Entity, IntoElement, ScrollStrategy, SharedString, UniformListScrollHandle,
@@ -194,14 +195,7 @@ impl DiagnosticsTile {
             // submit no view query whose result could signal arrival. Arrive
             // here so other tiles do not wait for the 250 ms deadline.
             // `barrier_wants` excludes tiles outside the active barrier.
-            let key = QueryKey(this.tile.0);
-            if frame.read(cx).barrier_wants(key, now) {
-                frame.update(cx, |f, cx| {
-                    if f.arrived(key, now) {
-                        cx.notify();
-                    }
-                });
-            }
+            following::arrive_immediately(&mut FrameDoor::new(&frame, cx), QueryKey(this.tile.0));
         })
         .detach();
 

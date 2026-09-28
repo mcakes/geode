@@ -50,6 +50,7 @@ use geode_shell::tiling::TileId;
 use geode_shell::vimfind::{FindDirection, find_match};
 use geode_shell::vimnav::NavCommand;
 use geode_tile::confirm::{self, Confirm, ConfirmHost};
+use geode_tile::following::{self, FrameDoor};
 use geode_tile::menu::{self, ActionRow, Hint, Menu, MenuHost, MenuIds, Row};
 use geode_widgets::datefield::{DateTimeField, FieldKey, Precision, Segment, route};
 use gpui::prelude::*;
@@ -648,18 +649,10 @@ impl PricerTile {
         // Pricing does not follow frame queries, so there is no result to wait for.
         // Arrive immediately to avoid holding other tiles behind the flip barrier.
         cx.observe(frame.entity(), |this, _, cx| {
-            // Read through the tile's own handle: the observed entity alone
+            // Arrive through the tile's own handle: the observed entity alone
             // would answer for the shared lane, not this workspace's.
             let frame = this.frame.clone();
-            let key = QueryKey(this.id.0);
-            let now = frame.read(cx).versions();
-            if frame.read(cx).barrier_wants(key, now) {
-                frame.update(cx, |f, cx| {
-                    if f.arrived(key, now) {
-                        cx.notify();
-                    }
-                });
-            }
+            following::arrive_immediately(&mut FrameDoor::new(&frame, cx), QueryKey(this.id.0));
         })
         .detach();
         // Derive shared paints once per theme change, outside cell rendering.
