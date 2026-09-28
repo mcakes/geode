@@ -18699,10 +18699,10 @@ run_mutation "bridge: a DataEvent::Upload reaches the shell" \
 # removes every configured target from the running service.
 run_mutation "bridge: data_setup wires the resolved egress list into DataServiceConfig" \
   crates/geode-app/src/bridge.rs \
-  '            pricer,
+  '            vol,
             egress,
         },' \
-  '            pricer,
+  '            vol,
             egress: Vec::new(),
         },' \
   geode-app \
