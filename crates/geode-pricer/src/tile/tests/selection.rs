@@ -742,7 +742,7 @@ fn a_picked_type_commits_to_every_selected_line(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &BOOK);
     // Typed on the C line: the cursor cell's own option typed out is no
     // pick (see the untouched tests below).
-    select_up_to_the_c_line(&h, &mut vcx, "type");
+    select_up_to_the_c_line(&h, &mut vcx, "option_type");
     h.dispatch(&mut vcx, "edit", None);
     set_editor(&h, &mut vcx, "p");
     h.dispatch(&mut vcx, "commit", None);
@@ -750,7 +750,7 @@ fn a_picked_type_commits_to_every_selected_line(cx: &mut gpui::TestAppContext) {
     assert!(lines.iter().all(|s| s.ends_with(" P")), "{lines:?}");
     h.dispatch(&mut vcx, "escape", None);
     h.dispatch(&mut vcx, "undo", None);
-    assert_eq!(h.cell(&vcx, 0, "type"), "C");
+    assert_eq!(h.cell(&vcx, 0, "option_type"), "C");
 }
 
 #[gpui::test]
@@ -791,14 +791,14 @@ fn select_up_to_the_c_line(h: &Harness, vcx: &mut VisualTestContext, column: &st
 #[gpui::test]
 fn an_untouched_choice_enter_over_a_selection_writes_nothing(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &BOOK);
-    select_up_to_the_c_line(&h, &mut vcx, "type");
+    select_up_to_the_c_line(&h, &mut vcx, "option_type");
     h.prices();
     h.dispatch(&mut vcx, "edit", None);
     assert_eq!(editor_text(&h, &vcx).as_deref(), Some(""), "a choice list");
     h.dispatch(&mut vcx, "commit", None);
     assert_eq!(editor_text(&h, &vcx), None, "enter closes the editor");
-    assert_eq!(h.cell(&vcx, 2, "type"), "P", "not the cursor's C");
-    assert_eq!(h.cell(&vcx, 1, "type"), "C");
+    assert_eq!(h.cell(&vcx, 2, "option_type"), "P", "not the cursor's C");
+    assert_eq!(h.cell(&vcx, 1, "option_type"), "C");
     assert_eq!(notice(&h, &vcx), None, "no notice");
     assert!(!can_undo(&h, &vcx), "no undo entry");
     assert!(h.prices().is_empty(), "nothing repriced");
@@ -807,14 +807,18 @@ fn an_untouched_choice_enter_over_a_selection_writes_nothing(cx: &mut gpui::Test
     h.dispatch(&mut vcx, "edit", None);
     set_editor(&h, &mut vcx, "c");
     h.dispatch(&mut vcx, "commit", None);
-    assert_eq!(h.cell(&vcx, 2, "type"), "P", "the typed opening value");
+    assert_eq!(
+        h.cell(&vcx, 2, "option_type"),
+        "P",
+        "the typed opening value"
+    );
     assert!(!can_undo(&h, &vcx));
 }
 
 #[gpui::test]
 fn a_moved_choice_over_a_selection_writes_every_line_in_one_undo(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &BOOK);
-    select_up_to_the_c_line(&h, &mut vcx, "type");
+    select_up_to_the_c_line(&h, &mut vcx, "option_type");
     h.dispatch(&mut vcx, "edit", None);
     h.dispatch(&mut vcx, "insert_down", None); // C → P
     h.dispatch(&mut vcx, "commit", None);
@@ -824,12 +828,12 @@ fn a_moved_choice_over_a_selection_writes_every_line_in_one_undo(cx: &mut gpui::
     h.dispatch(&mut vcx, "escape", None);
     h.dispatch(&mut vcx, "undo", None);
     assert_eq!(
-        h.cell(&vcx, 0, "type"),
+        h.cell(&vcx, 0, "option_type"),
         "C",
         "one undo takes every write back"
     );
-    assert_eq!(h.cell(&vcx, 1, "type"), "C");
-    assert_eq!(h.cell(&vcx, 2, "type"), "P");
+    assert_eq!(h.cell(&vcx, 1, "option_type"), "C");
+    assert_eq!(h.cell(&vcx, 2, "option_type"), "P");
     assert!(!can_undo(&h, &vcx), "the writes were one entry");
 }
 
@@ -875,7 +879,7 @@ fn an_unchanged_untyped_date_over_a_selection_writes_nothing(cx: &mut gpui::Test
 #[gpui::test]
 fn an_untouched_package_text_cell_over_a_selection_writes_nothing(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &BOOK);
-    goto_column(&h, &mut vcx, "type");
+    goto_column(&h, &mut vcx, "option_type");
     h.dispatch(&mut vcx, "bottom", None);
     h.dispatch(&mut vcx, "visual_rows", None);
     h.dispatch(&mut vcx, "up", None); // the package row
@@ -883,7 +887,7 @@ fn an_untouched_package_text_cell_over_a_selection_writes_nothing(cx: &mut gpui:
     assert_eq!(editor_text(&h, &vcx).as_deref(), Some("C"), "fixture: text");
     h.dispatch(&mut vcx, "commit", None);
     assert_eq!(editor_text(&h, &vcx), None, "enter closes the editor");
-    assert_eq!(h.cell(&vcx, 2, "type"), "P", "not the package's C");
+    assert_eq!(h.cell(&vcx, 2, "option_type"), "P", "not the package's C");
     assert_eq!(notice(&h, &vcx), None);
     assert!(!can_undo(&h, &vcx));
 }
@@ -1131,7 +1135,7 @@ fn a_block_step_steps_each_block_column_and_counts_what_does_not_step(
     let (h, mut vcx) = open_seeded(cx, &BOOK);
     goto_column(&h, &mut vcx, "strike");
     h.dispatch(&mut vcx, "visual_block", None);
-    h.dispatch(&mut vcx, "right", Some(2)); // strike, type, spot_shift
+    h.dispatch(&mut vcx, "right", Some(3)); // strike, type, currency, spot_shift
     h.dispatch(&mut vcx, "edit", None);
     assert_eq!(
         editor_text(&h, &vcx).as_deref(),
@@ -1151,7 +1155,8 @@ fn a_block_step_steps_each_block_column_and_counts_what_does_not_step(
     assert_eq!(editor_text(&h, &vcx).as_deref(), Some("1"));
     assert_eq!(
         notice(&h, &vcx).as_deref(),
-        Some("stepped 2 cells +1, skipped 1 (1 not numeric)")
+        Some("stepped 2 cells +1, skipped 2 (1 read-only, 1 not numeric)"),
+        "currency is read-only, type is not numeric"
     );
     assert_eq!(h.cell(&vcx, 1, "strike"), "4800/5200", "outside the block");
 }
@@ -1223,7 +1228,7 @@ fn a_block_step_over_strike_and_barrier_moves_both(cx: &mut gpui::TestAppContext
     h.command(&mut vcx, "view barrier").unwrap();
     goto_column(&h, &mut vcx, "strike");
     h.dispatch(&mut vcx, "visual_block", None);
-    h.dispatch(&mut vcx, "right", Some(2)); // strike, type, barrier
+    h.dispatch(&mut vcx, "right", Some(3)); // strike, type, currency, barrier
     h.dispatch(&mut vcx, "edit", None);
     assert_eq!(editor_text(&h, &vcx).as_deref(), Some("4000"));
     h.dispatch(&mut vcx, "insert_up", None);
@@ -1231,7 +1236,7 @@ fn a_block_step_over_strike_and_barrier_moves_both(cx: &mut gpui::TestAppContext
     assert_eq!(h.cell(&vcx, 0, "barrier"), "4001");
     assert_eq!(
         notice(&h, &vcx).as_deref(),
-        Some("stepped 2 cells +1, skipped 1 (1 not numeric)")
+        Some("stepped 2 cells +1, skipped 2 (1 read-only, 1 not numeric)")
     );
     h.dispatch(&mut vcx, "commit", None);
     h.dispatch(&mut vcx, "escape", None);

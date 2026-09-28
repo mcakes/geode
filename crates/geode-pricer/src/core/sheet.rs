@@ -708,6 +708,22 @@ pub(crate) mod tests {
             .unwrap();
     }
 
+    /// A sheet named `book` holding one CS package (rows 0, 1, 2: the
+    /// package and its two legs) then one bare line (row 3), both parsed
+    /// through the shorthand the package tests use.
+    pub(crate) fn sheet_with_package_and_line() -> Sheet {
+        let mut s = Sheet::new("book");
+        push(
+            &mut s,
+            vec![
+                crate::core::shorthand::parse_builtin("SPX Z26 100/105 CS").unwrap(),
+                crate::core::shorthand::parse_builtin("NDX H27 95 P").unwrap(),
+            ],
+        );
+        assert_eq!(s.len(), 4, "a package, two legs, a line");
+        s
+    }
+
     fn ndx(strike: f64, kind: OptionKind) -> Instrument {
         let Instrument::Vanilla(mut v) = spx(strike, kind) else {
             unreachable!()

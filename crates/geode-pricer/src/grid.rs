@@ -66,9 +66,14 @@ pub struct GridModel {
 fn right_aligned(kind: ColumnKind) -> bool {
     !matches!(
         kind,
-        ColumnKind::Underlying
+        ColumnKind::SheetName
+            | ColumnKind::PositionRef
+            | ColumnKind::InstrumentRef
+            | ColumnKind::Template
+            | ColumnKind::UnderlyingRef
             | ColumnKind::Expiry
-            | ColumnKind::Type
+            | ColumnKind::OptionType
+            | ColumnKind::Currency
             | ColumnKind::BarrierType
             | ColumnKind::PricedAt
             | ColumnKind::Status

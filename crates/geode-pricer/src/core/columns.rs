@@ -3,7 +3,7 @@
 //! theme colours. Formatting takes the configured clock explicitly and needs no GPUI
 //! context.
 
-use crate::core::sheet::{LineState, Sheet};
+use crate::core::sheet::{LineState, RowKind, Sheet};
 use crate::core::shorthand::{render_barrier_kind, render_expiry, render_strike};
 use geode_core::format::format_number;
 use geode_core::pricing::{Instrument, Measure, OptionKind};
@@ -11,11 +11,22 @@ use geode_core::view::{Colour, ColumnFormat, Negative, Scale};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ColumnKind {
+    /// The sheet's name, on every row.
+    SheetName,
+    /// The row's position: a package or bare line is its own, a leg is
+    /// its package's.
+    PositionRef,
+    /// A line's instrument identity; a package has none.
+    InstrumentRef,
+    /// A package's template token; blank on a line.
+    Template,
     Qty,
-    Underlying,
+    UnderlyingRef,
     Expiry,
     Strike,
-    Type,
+    OptionType,
+    /// The result's currency, blank until priced.
+    Currency,
     Barrier,
     BarrierType,
     SpotShift,
@@ -154,12 +165,50 @@ use Applies::{BarrierLines, EveryLine, EveryRow};
 /// The fixed column vocabulary. A static allocation lets `column()` return references
 /// with a `'static` lifetime even though formats can contain owned named-colour
 /// strings.
-pub static COLUMNS: [ColumnDef; 39] = [
+pub static COLUMNS: [ColumnDef; 44] = [
+    // The identity columns take risk_snapshot's spellings, so a scope or a
+    // grouping written against the blotter reads the same on a sheet.
+    def(
+        "sheet",
+        "sheet",
+        ColumnKind::SheetName,
+        false,
+        EveryRow,
+        TEXT,
+        88.0,
+    ),
+    def(
+        "position_ref",
+        "position",
+        ColumnKind::PositionRef,
+        false,
+        EveryRow,
+        TEXT,
+        72.0,
+    ),
+    def(
+        "instrument_ref",
+        "instrument",
+        ColumnKind::InstrumentRef,
+        false,
+        EveryRow,
+        TEXT,
+        88.0,
+    ),
+    def(
+        "template",
+        "template",
+        ColumnKind::Template,
+        false,
+        EveryRow,
+        TEXT,
+        72.0,
+    ),
     def("qty", "qty", ColumnKind::Qty, true, EveryLine, TEXT, 56.0),
     def(
+        "underlying_ref",
         "underlying",
-        "underlying",
-        ColumnKind::Underlying,
+        ColumnKind::UnderlyingRef,
         true,
         EveryLine,
         TEXT,
@@ -184,13 +233,22 @@ pub static COLUMNS: [ColumnDef; 39] = [
         88.0,
     ),
     def(
+        "option_type",
         "type",
-        "type",
-        ColumnKind::Type,
+        ColumnKind::OptionType,
         true,
         EveryLine,
         TEXT,
         48.0,
+    ),
+    def(
+        "currency",
+        "currency",
+        ColumnKind::Currency,
+        false,
+        EveryRow,
+        TEXT,
+        72.0,
     ),
     def(
         "barrier",
@@ -694,11 +752,31 @@ pub fn cell_text(
         return blank();
     }
     match def.kind {
+        ColumnKind::SheetName => own(sheet.name.as_str()),
+        // A leg's position is its package's; a root row is its own.
+        ColumnKind::PositionRef => {
+            own(format!("p{}", sheet.id(sheet.parent(row).unwrap_or(row)).0))
+        }
+        ColumnKind::InstrumentRef => {
+            if sheet.is_package(row) {
+                blank()
+            } else {
+                own(format!("i{}", sheet.id(row).0))
+            }
+        }
+        ColumnKind::Template => match sheet.kind(row) {
+            RowKind::Package { template } => own(template.token()),
+            RowKind::Line | RowKind::Underlying => blank(),
+        },
+        ColumnKind::Currency => match sheet.result(row) {
+            Some(r) => own(r.currency.as_str()),
+            None => blank(),
+        },
         ColumnKind::Qty => own(sheet.qty(row).to_string()),
-        ColumnKind::Underlying => own(instrument.expect("applies").underlying()),
+        ColumnKind::UnderlyingRef => own(instrument.expect("applies").underlying()),
         ColumnKind::Expiry => own(render_expiry(instrument.expect("applies").expiry())),
         ColumnKind::Strike => own(render_strike(instrument.expect("applies").strike())),
-        ColumnKind::Type => own(match instrument.expect("applies").kind() {
+        ColumnKind::OptionType => own(match instrument.expect("applies").kind() {
             OptionKind::Call => "C",
             OptionKind::Put => "P",
         }),
@@ -778,11 +856,16 @@ mod tests {
         assert_eq!(
             names,
             vec![
+                "sheet",
+                "position_ref",
+                "instrument_ref",
+                "template",
                 "qty",
-                "underlying",
+                "underlying_ref",
                 "expiry",
                 "strike",
-                "type",
+                "option_type",
+                "currency",
                 "barrier",
                 "barrier_type",
                 "spot_shift",
@@ -833,16 +916,33 @@ mod tests {
             editable,
             vec![
                 "qty",
-                "underlying",
+                "underlying_ref",
                 "expiry",
                 "strike",
-                "type",
+                "option_type",
                 "barrier",
                 "barrier_type",
                 "spot_shift",
                 "vol_shift"
             ]
         );
+        // The identity and currency columns read the row, so a package
+        // paints them too; their labels stay words that fit the width.
+        for (name, label) in [
+            ("sheet", "sheet"),
+            ("position_ref", "position"),
+            ("instrument_ref", "instrument"),
+            ("template", "template"),
+            ("currency", "currency"),
+        ] {
+            let c = column(name).unwrap();
+            assert_eq!(c.label, label);
+            assert!(!c.editable, "{name}");
+            assert_eq!(c.applies_to, Applies::EveryRow, "{name}");
+            assert_eq!(c.default_format, TEXT, "{name}");
+        }
+        assert_eq!(column("underlying_ref").unwrap().label, "underlying");
+        assert_eq!(column("option_type").unwrap().label, "type");
         assert_eq!(column("barrier").unwrap().applies_to, Applies::BarrierLines);
         assert_eq!(
             column("barrier_type").unwrap().applies_to,
@@ -882,6 +982,52 @@ mod tests {
     }
 
     #[test]
+    fn identity_columns_paint_the_row_ids_and_the_sheet() {
+        // One package (CS: two legs) then one bare line, built by a shared
+        // helper: rows 0 (package), 1 and 2 (legs), 3 (the bare line).
+        let s = crate::core::sheet::tests::sheet_with_package_and_line();
+        let (pkg, leg, bare) = (0, 1, 3);
+        let text = |row, name| cell(&s, row, name).text;
+        assert_eq!(text(pkg, "sheet"), "book");
+        assert_eq!(text(pkg, "position_ref"), format!("p{}", s.id(pkg).0));
+        assert_eq!(
+            text(pkg, "instrument_ref"),
+            "",
+            "a package is no instrument"
+        );
+        assert_eq!(
+            text(leg, "position_ref"),
+            format!("p{}", s.id(pkg).0),
+            "a leg belongs to its package's position"
+        );
+        assert_eq!(text(leg, "instrument_ref"), format!("i{}", s.id(leg).0));
+        assert_eq!(
+            text(bare, "position_ref"),
+            format!("p{}", s.id(bare).0),
+            "a bare line is its own position"
+        );
+        assert_eq!(text(bare, "instrument_ref"), format!("i{}", s.id(bare).0));
+        assert_eq!(text(pkg, "template"), "CS");
+        assert_eq!(text(bare, "template"), "");
+        assert_eq!(text(bare, "currency"), "", "blank until priced");
+        assert_eq!(cell(&s, bare, "currency").state, CellState::Blank);
+    }
+
+    #[test]
+    fn a_priced_line_paints_its_currency() {
+        let mut s = crate::core::sheet::tests::sheet_with_package_and_line();
+        let bare = 3;
+        s.deliver_all(vec![(s.id(bare), 1, Ok(result(1.0)))], at(0));
+        assert_eq!(
+            cell(&s, bare, "currency"),
+            CellText {
+                text: "USD".into(),
+                state: CellState::Own
+            }
+        );
+    }
+
+    #[test]
     fn instrument_cells_render_the_grammar_and_a_package_aggregates_them() {
         let mut s = Sheet::new("t");
         let barrier =
@@ -901,10 +1047,10 @@ mod tests {
                 state: CellState::Own
             }
         );
-        assert_eq!(cell(&s, 0, "underlying").text, "SPX");
+        assert_eq!(cell(&s, 0, "underlying_ref").text, "SPX");
         assert_eq!(cell(&s, 0, "expiry").text, "Z26");
         assert_eq!(cell(&s, 0, "strike").text, "4250.5");
-        assert_eq!(cell(&s, 0, "type").text, "C");
+        assert_eq!(cell(&s, 0, "option_type").text, "C");
         assert_eq!(
             cell(&s, 0, "barrier"),
             CellText {
@@ -916,7 +1062,7 @@ mod tests {
         assert_eq!(cell(&s, 0, "barrier_type").state, CellState::Blank);
         assert_eq!(cell(&s, 1, "qty").text, "-3");
         assert_eq!(cell(&s, 1, "expiry").text, "20DEC26");
-        assert_eq!(cell(&s, 1, "type").text, "P");
+        assert_eq!(cell(&s, 1, "option_type").text, "P");
         assert_eq!(
             cell(&s, 1, "barrier"),
             CellText {
@@ -934,10 +1080,10 @@ mod tests {
         // The package row aggregates its legs.
         for (name, text) in [
             ("qty", "1"),
-            ("underlying", "SPX"),
+            ("underlying_ref", "SPX"),
             ("expiry", "Z26"),
             ("strike", "4800/5200"),
-            ("type", "C"),
+            ("option_type", "C"),
         ] {
             assert_eq!(
                 cell(&s, 2, name),

@@ -923,11 +923,18 @@ mod width_tests {
             ColumnKind::SpotShift | ColumnKind::VolShift => signed(-99.9, &def.default_format),
             ColumnKind::Measure { .. } => fmt(-1_234_567.89),
             // Representative text values for the width check.
-            ColumnKind::Underlying => "SX5E".into(),
+            ColumnKind::SheetName => "untitled-1".into(),
+            // Ids are minted per sheet from 1; five digits is a long session.
+            ColumnKind::PositionRef => "p10000".into(),
+            ColumnKind::InstrumentRef => "i10000".into(),
+            // A template name is at most MAX_TEMPLATE_NAME (8) characters.
+            ColumnKind::Template => "STRANGLE".into(),
+            ColumnKind::Currency => "USD".into(),
+            ColumnKind::UnderlyingRef => "SX5E".into(),
             // The cell reads `20DEC26`, but `i` edits it in the date field,
             // which paints `YYYY-MM-DD` inside the same width.
             ColumnKind::Expiry => "2026-12-20".into(),
-            ColumnKind::Type => "C".into(),
+            ColumnKind::OptionType => "C".into(),
             ColumnKind::BarrierType => "DO".into(),
             ColumnKind::PricedAt => "23:59:59".into(),
             // Prose: a failure's reason may be longer than any width; it

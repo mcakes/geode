@@ -97,7 +97,7 @@ pub fn editor_for(
         ColumnKind::VolShift => {
             CellEditor::Text(sheet.shift(row).vol_pts.map(plain).unwrap_or_default())
         }
-        ColumnKind::Type => CellEditor::Choice {
+        ColumnKind::OptionType => CellEditor::Choice {
             options: TYPES.iter().map(|s| s.to_string()).collect(),
             current: kind_token(i.kind()).to_string(),
             free: false,
@@ -107,7 +107,7 @@ pub fn editor_for(
             current: render_barrier_kind(barrier(i)?.1).to_string(),
             free: false,
         },
-        ColumnKind::Underlying => {
+        ColumnKind::UnderlyingRef => {
             let mut options: Vec<String> = (0..sheet.len())
                 .filter_map(|r| sheet.instrument(r).map(|i| i.underlying().to_string()))
                 .collect();
@@ -119,7 +119,14 @@ pub fn editor_for(
                 free: true,
             }
         }
-        ColumnKind::Measure { .. } | ColumnKind::PricedAt | ColumnKind::Status => {
+        ColumnKind::SheetName
+        | ColumnKind::PositionRef
+        | ColumnKind::InstrumentRef
+        | ColumnKind::Template
+        | ColumnKind::Currency
+        | ColumnKind::Measure { .. }
+        | ColumnKind::PricedAt
+        | ColumnKind::Status => {
             return Err(READ_ONLY);
         }
     })
@@ -228,7 +235,7 @@ pub(crate) fn edit_on(
             }
             Ok(Edit::SetQty { row, qty })
         }
-        ColumnKind::Underlying => {
+        ColumnKind::UnderlyingRef => {
             if t.is_empty() || t.contains(char::is_whitespace) {
                 return Err(format!("underlying '{t}': one word"));
             }
@@ -248,7 +255,7 @@ pub(crate) fn edit_on(
             let s = parse_strike(t)?;
             Ok(set(row, with_vanilla(i, |v| v.strike = s)))
         }
-        ColumnKind::Type => {
+        ColumnKind::OptionType => {
             let k = match t.to_ascii_uppercase().as_str() {
                 "C" => OptionKind::Call,
                 "P" => OptionKind::Put,
@@ -293,9 +300,14 @@ pub(crate) fn edit_on(
                 ..own
             },
         }),
-        ColumnKind::Measure { .. } | ColumnKind::PricedAt | ColumnKind::Status => {
-            Err(READ_ONLY.into())
-        }
+        ColumnKind::SheetName
+        | ColumnKind::PositionRef
+        | ColumnKind::InstrumentRef
+        | ColumnKind::Template
+        | ColumnKind::Currency
+        | ColumnKind::Measure { .. }
+        | ColumnKind::PricedAt
+        | ColumnKind::Status => Err(READ_ONLY.into()),
     }
 }
 
@@ -439,7 +451,7 @@ mod tests {
         let mut s = one_line();
         push(&mut s, vec![line(spx(4000.0, OptionKind::Put), 1)]);
         assert_eq!(
-            editor_for(&s, 0, ColumnKind::Type, fmt(ColumnKind::Type)),
+            editor_for(&s, 0, ColumnKind::OptionType, fmt(ColumnKind::OptionType)),
             Ok(CellEditor::Choice {
                 options: vec!["C".into(), "P".into()],
                 current: "C".into(),
@@ -447,7 +459,12 @@ mod tests {
             })
         );
         assert_eq!(
-            editor_for(&s, 0, ColumnKind::Underlying, fmt(ColumnKind::Underlying)),
+            editor_for(
+                &s,
+                0,
+                ColumnKind::UnderlyingRef,
+                fmt(ColumnKind::UnderlyingRef)
+            ),
             Ok(CellEditor::Choice {
                 options: vec!["SPX".into()],
                 current: "SPX".into(),
@@ -525,13 +542,14 @@ mod tests {
             panic!()
         };
         assert_eq!(instrument.expiry(), &Expiry::Tenor("3m".into()));
-        let Ok(Some(Edit::SetInstrument { instrument, .. })) = commit(&s, 0, ColumnKind::Type, "p")
+        let Ok(Some(Edit::SetInstrument { instrument, .. })) =
+            commit(&s, 0, ColumnKind::OptionType, "p")
         else {
             panic!()
         };
         assert_eq!(instrument.kind(), OptionKind::Put);
         let Ok(Some(Edit::SetInstrument { instrument, .. })) =
-            commit(&s, 0, ColumnKind::Underlying, "ndx")
+            commit(&s, 0, ColumnKind::UnderlyingRef, "ndx")
         else {
             panic!()
         };
@@ -578,15 +596,15 @@ mod tests {
                 .contains("positive")
         );
         assert_eq!(
-            commit(&s, 0, ColumnKind::Type, "X"),
+            commit(&s, 0, ColumnKind::OptionType, "X"),
             Err("type 'X': C or P".into())
         );
         assert_eq!(
-            commit(&s, 0, ColumnKind::Underlying, "S P"),
+            commit(&s, 0, ColumnKind::UnderlyingRef, "S P"),
             Err("underlying 'S P': one word".into())
         );
         assert_eq!(
-            commit(&s, 0, ColumnKind::Underlying, "A/B"),
+            commit(&s, 0, ColumnKind::UnderlyingRef, "A/B"),
             Err("underlying 'A/B': one word, no /".into()),
             "a / would make a package's underlying cell a list"
         );
@@ -717,7 +735,7 @@ mod tests {
             Ok(CellEditor::Text("Z26".into()))
         );
         assert_eq!(
-            editor_for(&s, 0, ColumnKind::Type, fmt(ColumnKind::Type)),
+            editor_for(&s, 0, ColumnKind::OptionType, fmt(ColumnKind::OptionType)),
             Ok(CellEditor::Text("C".into()))
         );
         assert_eq!(editor_for(&s, 0, NPV, fmt(NPV)), Err(READ_ONLY));
@@ -787,8 +805,8 @@ mod tests {
             (ColumnKind::Strike, "5000"),
             (ColumnKind::Strike, "5000.0"),
             (ColumnKind::Expiry, "Z26"),
-            (ColumnKind::Type, "c"),
-            (ColumnKind::Underlying, "spx"),
+            (ColumnKind::OptionType, "c"),
+            (ColumnKind::UnderlyingRef, "spx"),
             (ColumnKind::SpotShift, ""),
             (ColumnKind::VolShift, "  "),
         ] {

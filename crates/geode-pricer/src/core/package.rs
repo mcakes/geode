@@ -11,21 +11,36 @@ use crate::core::shorthand::{render_barrier_kind, render_expiry, render_package,
 use geode_core::pricing::{Instrument, OptionKind, Strike};
 use geode_core::view::ColumnFormat;
 
-/// Whether a package row aggregates its legs for `kind`: qty and the eight
-/// text columns. Results and status stay the package's own.
+/// Whether a package row aggregates its legs for `kind`: qty, the eight
+/// input columns, the currency (the fold takes its first leg's, which
+/// would misreport legs priced in different currencies) and the
+/// instrument (a package has none, so the cell stays blank). Results,
+/// status and the package's own identity columns stay the package's own.
 pub fn aggregates(kind: ColumnKind) -> bool {
     matches!(
         kind,
         ColumnKind::Qty
-            | ColumnKind::Underlying
+            | ColumnKind::UnderlyingRef
             | ColumnKind::Expiry
             | ColumnKind::Strike
-            | ColumnKind::Type
+            | ColumnKind::OptionType
+            | ColumnKind::Currency
+            | ColumnKind::InstrumentRef
             | ColumnKind::Barrier
             | ColumnKind::BarrierType
             | ColumnKind::SpotShift
             | ColumnKind::VolShift
     )
+}
+
+/// Whether a package cell for `kind` opens an editor: it aggregates and
+/// its column is editable. A read-only aggregate (currency) must refuse
+/// at open, as a line's read-only cell does, not at commit.
+fn edits(kind: ColumnKind) -> bool {
+    aggregates(kind)
+        && crate::core::columns::COLUMNS
+            .iter()
+            .any(|c| c.kind == kind && c.editable)
 }
 
 /// The legs of a package grouped by one column's value, groups in the
@@ -131,7 +146,7 @@ pub(crate) fn groups(
         ColumnKind::Qty => group_by(sheet.children(row).map(|l| (l, sheet.qty(l))), |q| {
             same(q.to_string())
         }),
-        ColumnKind::Underlying => group_by(legs().map(|(l, i)| (l, i.underlying())), |u| {
+        ColumnKind::UnderlyingRef => group_by(legs().map(|(l, i)| (l, i.underlying())), |u| {
             same(u.to_string())
         }),
         ColumnKind::Expiry => group_by(legs().map(|(l, i)| (l, i.expiry())), |e| {
@@ -140,7 +155,7 @@ pub(crate) fn groups(
         ColumnKind::Strike => group_by(legs().map(|(l, i)| (l, i.strike())), |k| {
             same(render_strike(*k))
         }),
-        ColumnKind::Type => group_by(legs().map(|(l, i)| (l, i.kind())), |k| {
+        ColumnKind::OptionType => group_by(legs().map(|(l, i)| (l, i.kind())), |k| {
             same(
                 match k {
                     OptionKind::Call => "C",
@@ -155,6 +170,14 @@ pub(crate) fn groups(
         ColumnKind::BarrierType => group_by(barrier_legs().map(|(l, b)| (l, b.barrier)), |k| {
             same(render_barrier_kind(*k).to_string())
         }),
+        // Priced legs only: an unpriced package's currency is blank, as
+        // an unpriced line's is.
+        ColumnKind::Currency => group_by(
+            sheet
+                .children(row)
+                .filter_map(|l| sheet.result(l).map(|r| (l, r.currency))),
+            |c| same(c.as_str().to_string()),
+        ),
         ColumnKind::SpotShift | ColumnKind::VolShift => {
             let pick = shift_pick(kind).expect("a shift column");
             let sheet_value = pick(sheet.sheet_shift());
@@ -215,7 +238,7 @@ pub fn editor_text(
     kind: ColumnKind,
     format: &ColumnFormat,
 ) -> Option<String> {
-    if !aggregates(kind) {
+    if !edits(kind) {
         return None;
     }
     if kind == ColumnKind::Qty
@@ -254,7 +277,7 @@ pub fn commit(
     text: &str,
 ) -> Result<Vec<Edit>, String> {
     let read_only = || String::from(crate::core::cell::READ_ONLY);
-    if !aggregates(kind) {
+    if !edits(kind) {
         return Err(read_only());
     }
     let t = text.trim();
@@ -372,13 +395,57 @@ mod tests {
         (c.text, c.state)
     }
 
+    /// The fold gives a package its first leg's currency; the cell paints
+    /// every priced leg's instead, so mixed legs read `USD/EUR`, and it
+    /// refuses to edit at open as any read-only cell does.
+    #[test]
+    fn a_package_paints_its_legs_distinct_currencies_and_refuses_to_edit_them() {
+        use crate::core::sheet::tests::{at, result};
+        use geode_core::pricing::{Currency, PriceResult};
+        let mut s = sheet_of(&["-5 SPX Z26 7400/7800 CS"]);
+        let legs: Vec<usize> = s.children(0).collect();
+        assert_eq!(
+            text(&s, 0, "currency"),
+            (String::new(), CellState::Blank),
+            "unpriced"
+        );
+        assert_eq!(
+            text(&s, 0, "instrument_ref"),
+            (String::new(), CellState::Blank),
+            "a package is no instrument"
+        );
+        s.deliver(s.id(legs[0]), 1, Ok(result(1.0)), at(0));
+        assert_eq!(text(&s, 0, "currency"), ("USD".into(), CellState::Own));
+        let eur = PriceResult::zero(Currency::parse("EUR").unwrap());
+        s.deliver(s.id(legs[1]), 1, Ok(eur), at(1));
+        assert_eq!(text(&s, 0, "currency").0, "USD/EUR", "leg order");
+        assert_eq!(
+            editor_text(&s, 0, ColumnKind::Currency, fmt(ColumnKind::Currency)),
+            None
+        );
+        assert_eq!(
+            crate::core::cell::editor_for(&s, 0, ColumnKind::Currency, fmt(ColumnKind::Currency)),
+            Err(crate::core::cell::READ_ONLY)
+        );
+        assert_eq!(
+            commit(
+                &s,
+                0,
+                ColumnKind::Currency,
+                fmt(ColumnKind::Currency),
+                "USD"
+            ),
+            Err(crate::core::cell::READ_ONLY.to_string())
+        );
+    }
+
     #[test]
     fn a_call_spread_shows_one_underlying_one_expiry_and_both_strikes() {
         let s = sheet_of(&["-5 SPX Z26 7400/7800 CS"]);
-        assert_eq!(text(&s, 0, "underlying").0, "SPX");
+        assert_eq!(text(&s, 0, "underlying_ref").0, "SPX");
         assert_eq!(text(&s, 0, "expiry").0, "Z26");
         assert_eq!(text(&s, 0, "strike").0, "7400/7800");
-        assert_eq!(text(&s, 0, "type").0, "C");
+        assert_eq!(text(&s, 0, "option_type").0, "C");
         assert_eq!(
             text(&s, 0, "qty"),
             ("-5".into(), CellState::Own),
@@ -401,7 +468,7 @@ mod tests {
             "7600",
             "a straddle's one strike"
         );
-        assert_eq!(text(&s, pkg(0), "type").0, "C/P");
+        assert_eq!(text(&s, pkg(0), "option_type").0, "C/P");
         assert_eq!(
             text(&s, pkg(1), "strike").0,
             "7400/7600/7800",
@@ -412,7 +479,11 @@ mod tests {
             "H27/Z26",
             "leg order: CAL's first leg is the far expiry"
         );
-        assert_eq!(text(&s, pkg(3), "type").0, "P/C", "RR: short put leg first");
+        assert_eq!(
+            text(&s, pkg(3), "option_type").0,
+            "P/C",
+            "RR: short put leg first"
+        );
     }
 
     #[test]
@@ -562,8 +633,8 @@ mod tests {
     #[test]
     fn a_single_value_goes_to_every_leg() {
         let mut s = sheet_of(&["-5 SPX Z26 7400/7800 CS"]);
-        assert_eq!(apply(&mut s, 0, "underlying", "sx5e"), Ok(2));
-        assert_eq!(text(&s, 0, "underlying").0, "SX5E");
+        assert_eq!(apply(&mut s, 0, "underlying_ref", "sx5e"), Ok(2));
+        assert_eq!(text(&s, 0, "underlying_ref").0, "SX5E");
         assert_eq!(apply(&mut s, 0, "expiry", "H27"), Ok(2));
         assert_eq!(text(&s, 0, "expiry").0, "H27");
         assert_eq!(apply(&mut s, 0, "strike", "7600"), Ok(2));
@@ -657,11 +728,11 @@ mod tests {
         assert_eq!(s.shorthand(0), "-5 SPX Z26 7800/7400 CS");
         // A change that breaks the table keeps the name and prints the legs.
         assert_eq!(
-            apply(&mut s, 0, "type", "P/C"),
+            apply(&mut s, 0, "option_type", "P/C"),
             Err("1 value: C".into()),
             "one type shown: one value or refused"
         );
-        assert_eq!(apply(&mut s, 0, "type", "P"), Ok(2));
+        assert_eq!(apply(&mut s, 0, "option_type", "P"), Ok(2));
         assert!(
             s.shorthand(0).contains('\n'),
             "puts no longer fit CS: legs one per line"

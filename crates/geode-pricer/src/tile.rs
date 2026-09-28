@@ -6770,7 +6770,7 @@ pub(crate) mod tests {
         vcx.simulate_input("p");
         h.draw(&mut vcx);
         h.dispatch(&mut vcx, "commit", None);
-        assert_eq!(h.cell(&vcx, 0, "type"), "P");
+        assert_eq!(h.cell(&vcx, 0, "option_type"), "P");
         // An unknown underlying commits as typed.
         h.dispatch(&mut vcx, "first_col", None);
         h.dispatch(&mut vcx, "right", None); // underlying
@@ -6778,7 +6778,7 @@ pub(crate) mod tests {
         vcx.simulate_input("ndx");
         h.draw(&mut vcx);
         h.dispatch(&mut vcx, "commit", None);
-        assert_eq!(h.cell(&vcx, 0, "underlying"), "NDX");
+        assert_eq!(h.cell(&vcx, 0, "underlying_ref"), "NDX");
         // A closed vocabulary refuses a query nothing matches.
         h.dispatch(&mut vcx, "right", Some(3)); // type
         h.dispatch(&mut vcx, "edit", None);
@@ -6881,7 +6881,7 @@ pub(crate) mod tests {
         h.dispatch(&mut vcx, "edit", None);
         assert_eq!(editor_paint_col(&h, &vcx), Some(3), "fixture");
         set_editor(&h, &mut vcx, "5100");
-        let views = slim_views("\"qty\", \"strike\", \"underlying\"");
+        let views = slim_views("\"qty\", \"strike\", \"underlying_ref\"");
         vcx.update(|_, cx| {
             h.factory.reload(
                 views,
@@ -6892,7 +6892,7 @@ pub(crate) mod tests {
             )
         });
         vcx.run_until_parked();
-        assert_eq!(h.columns(&vcx), vec!["qty", "strike", "underlying"]);
+        assert_eq!(h.columns(&vcx), vec!["qty", "strike", "underlying_ref"]);
         assert_eq!(h.mode(&mut vcx), "insert", "the field stays open");
         assert_eq!(editor_paint_col(&h, &vcx), Some(1), "strike's new column");
         assert_eq!(
@@ -6947,7 +6947,7 @@ pub(crate) mod tests {
         click_at(&mut vcx, at, 1);
         h.draw(&mut vcx);
         assert_eq!(h.mode(&mut vcx), "normal");
-        assert_eq!(h.cell(&vcx, 0, "type"), "P");
+        assert_eq!(h.cell(&vcx, 0, "option_type"), "P");
         assert!(
             !focused(&mut vcx),
             "the pick closes the field: blurred, then dropped"
@@ -8047,7 +8047,7 @@ pub(crate) mod tests {
         h.draw(&mut vcx);
         h.dispatch(&mut vcx, "commit", None);
         assert_eq!(
-            h.cell(&vcx, 0, "underlying"),
+            h.cell(&vcx, 0, "underlying_ref"),
             "HSI",
             "a subsequence match is not the trader's answer"
         );
@@ -8056,7 +8056,7 @@ pub(crate) mod tests {
         h.draw(&mut vcx);
         h.dispatch(&mut vcx, "commit", None);
         assert_eq!(
-            h.cell(&vcx, 0, "underlying"),
+            h.cell(&vcx, 0, "underlying_ref"),
             "HSCEI",
             "the option itself, typed in any case"
         );
@@ -8073,7 +8073,7 @@ pub(crate) mod tests {
         assert_eq!(highlighted.as_deref(), Some("NKY"));
         h.dispatch(&mut vcx, "commit", None);
         assert_eq!(
-            h.cell(&vcx, 0, "underlying"),
+            h.cell(&vcx, 0, "underlying_ref"),
             "NKY",
             "a moved highlight is a choice"
         );
@@ -8081,7 +8081,7 @@ pub(crate) mod tests {
         open_underlying(&h, &mut vcx);
         h.dispatch(&mut vcx, "commit", None);
         assert_eq!(h.mode(&mut vcx), "normal");
-        assert_eq!(h.cell(&vcx, 0, "underlying"), "NKY");
+        assert_eq!(h.cell(&vcx, 0, "underlying_ref"), "NKY");
         assert_eq!(h.footer(&vcx), None);
     }
 

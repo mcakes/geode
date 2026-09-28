@@ -13,11 +13,11 @@ pub const PRICER_VIEWS_DOC: &str = "pricer_views";
 /// status so pending pricing and failures are visible in text as well as through cell
 /// colours.
 pub const BUILTIN_VIEWS: &str = r#"[vanilla]
-columns = ["qty", "underlying", "expiry", "strike", "type", "spot_shift", "vol_shift",
+columns = ["qty", "underlying_ref", "expiry", "strike", "option_type", "currency", "spot_shift", "vol_shift",
            "npv", "delta01", "gamma01", "vega01", "clean_theta_business_day", "rho010", "status"]
 
 [barrier]
-columns = ["qty", "underlying", "expiry", "strike", "type", "barrier", "barrier_type", "spot_shift", "vol_shift",
+columns = ["qty", "underlying_ref", "expiry", "strike", "option_type", "currency", "barrier", "barrier_type", "spot_shift", "vol_shift",
            "npv", "delta01", "gamma01", "vega01", "clean_theta_business_day", "rho010", "status"]
 "#;
 
@@ -247,10 +247,11 @@ mod tests {
             names(vanilla),
             vec![
                 "qty",
-                "underlying",
+                "underlying_ref",
                 "expiry",
                 "strike",
-                "type",
+                "option_type",
+                "currency",
                 "spot_shift",
                 "vol_shift",
                 "npv",
@@ -267,10 +268,11 @@ mod tests {
             names(barrier),
             vec![
                 "qty",
-                "underlying",
+                "underlying_ref",
                 "expiry",
                 "strike",
-                "type",
+                "option_type",
+                "currency",
                 "barrier",
                 "barrier_type",
                 "spot_shift",
