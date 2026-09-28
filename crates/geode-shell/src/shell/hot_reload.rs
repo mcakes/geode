@@ -114,8 +114,8 @@ impl ShellView {
     ///
     /// An accepted candidate updates shell settings, rebuilds affected frame
     /// state, and advances the frame's config revision. View-related changes
-    /// emit `ConfigReloaded` before frame notifications. Source, dataset, and
-    /// pricing-adapter differences from startup require a data-service restart;
+    /// emit `ConfigReloaded` before frame notifications. Source, dataset, egress,
+    /// panels and pricing-adapter differences from startup require a restart;
     /// returning to those baselines clears the restart message.
     pub(super) fn apply_reload(&mut self, mut new_config: Config, cx: &mut Context<Self>) {
         let (mod_alias, mod_diags) = mod_alias_from_config(&new_config);
@@ -146,6 +146,7 @@ impl ShellView {
         // They must remain visible without blocking user reloads.
         let mut config_section = new_config.diagnostics.clone();
         config_section.extend(self.services.keymap_fragment_diagnostics.iter().cloned());
+        config_section.extend(self.services.composition_diagnostics.iter().cloned());
         self.diagnostics.update(cx, |d, cx| {
             let before = d.version();
             d.note_config(config_section, SystemTime::now());
@@ -209,6 +210,7 @@ impl ShellView {
                 ("sources", &self.sources_baseline),
                 ("datasets", &self.datasets_baseline),
                 ("egress", &self.egress_baseline),
+                ("panels", &self.panels_baseline),
             ]
             .into_iter()
             .filter(|(name, baseline)| !docs_equal(new_config.layered_docs(name), baseline))

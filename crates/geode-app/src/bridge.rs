@@ -1431,6 +1431,7 @@ role = "key"
             keymap_diagnostics: Vec::new(),
             keymap_fragments: Vec::new(),
             keymap_fragment_diagnostics: Vec::new(),
+            composition_diagnostics: Vec::new(),
         }
     }
 
@@ -1472,6 +1473,7 @@ role = "key"
             keymap_diagnostics: Vec::new(),
             keymap_fragments: Vec::new(),
             keymap_fragment_diagnostics: Vec::new(),
+            composition_diagnostics: Vec::new(),
         };
         (services, log)
     }

@@ -14913,6 +14913,7 @@ edits = [["2026-11-20", "-1", 9.5]]
             keymap_diagnostics: Vec::new(),
             keymap_fragments: fragments,
             keymap_fragment_diagnostics: Vec::new(),
+            composition_diagnostics: Vec::new(),
         };
         let shell_slot = Rc::new(RefCell::new(None));
         let window = cx

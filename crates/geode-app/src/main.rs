@@ -581,6 +581,7 @@ fn build_shell_services(
         // doc comment for why they are carried rather than recomputed.
         keymap_fragments: fragments,
         keymap_fragment_diagnostics: frag_diags,
+        composition_diagnostics: Vec::new(),
     };
     (services, desk, user, bridge, diagnostics_factory)
 }

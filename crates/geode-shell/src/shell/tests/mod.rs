@@ -243,6 +243,7 @@ pub(super) fn services_with_recorders(
         keymap_diagnostics: Vec::new(),
         keymap_fragments,
         keymap_fragment_diagnostics,
+        composition_diagnostics: Vec::new(),
     }
 }
 
