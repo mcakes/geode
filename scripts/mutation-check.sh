@@ -24792,6 +24792,15 @@ run_mutation "mdtile: a reply to an as-of left behind while hidden is dropped" \
   '                    if false {' \
   geode-marketdata a_reply_to_an_as_of_left_behind_while_hidden_runs_no_draft_policy
 
+# A reply whose own arrival releases the barrier but was asked before a
+# followed counter moved is dropped, not held: reported as held, the blotter
+# clears its error for an answer it never paints.
+run_mutation "following: a releasing reply asked before a followed change is superseded" \
+  crates/geode-tile/src/following.rs \
+  '                    Promotion::Superseded => Delivered::Superseded,' \
+  '                    Promotion::Superseded => Delivered::Held,' \
+  geode-tile a_releasing_delivery_asked_before_a_followed_change_is_superseded
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

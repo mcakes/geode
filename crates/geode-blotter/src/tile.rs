@@ -5555,6 +5555,8 @@ mod tests {
     fn closing_a_tile_mid_flip_cancels_its_query_and_releases_the_barrier(
         cx: &mut gpui::TestAppContext,
     ) {
+        // The shell's recorder test pins that removal reaches `closed`;
+        // this test pins what `closed` does.
         let (h, mut vcx) = open_two(cx);
         h.a.update(&mut vcx, |t, cx| t.set_visible(true, cx));
         h.b.update(&mut vcx, |t, cx| t.set_visible(true, cx));

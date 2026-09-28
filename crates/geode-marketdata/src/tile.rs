@@ -1601,7 +1601,10 @@ impl MarketDataTile {
 
     /// Hiding cancels nothing and forgets nothing: the outstanding request
     /// finishes and its reply applies when it lands (it still answers any
-    /// barrier it was enrolled in). Showing again requeries only if a
+    /// barrier it was enrolled in), unless a counter this panel follows
+    /// moved since it asked: that reply is dropped as `Superseded`, not
+    /// applied, so no draft policy runs against a document nobody asked
+    /// about. Showing again requeries only if a
     /// counter this panel follows moved since it last asked. Closing is
     /// `closed`.
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
@@ -6458,6 +6461,8 @@ mod tests {
     fn closing_a_panel_mid_flip_cancels_its_request_and_releases_the_barrier(
         cx: &mut gpui::TestAppContext,
     ) {
+        // The shell's recorder test pins that removal reaches `closed`;
+        // this test pins what `closed` does.
         let (h, mut vcx) = open(cx);
         h.command(&mut vcx, "key SPX.Z").unwrap();
         h.visible(&mut vcx, true);

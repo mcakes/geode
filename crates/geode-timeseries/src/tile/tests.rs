@@ -1694,6 +1694,8 @@ fn an_as_of_change_while_hidden_requeries_on_reshow(cx: &mut gpui::TestAppContex
 fn closing_the_tile_mid_flip_cancels_its_query_and_releases_the_barrier(
     cx: &mut gpui::TestAppContext,
 ) {
+    // The shell's recorder test pins that removal reaches `closed`;
+    // this test pins what `closed` does.
     let (h, mut vcx) = open_loaded(cx, 5);
     h.requests();
     let at = chrono::Utc::now() - chrono::Duration::days(30);

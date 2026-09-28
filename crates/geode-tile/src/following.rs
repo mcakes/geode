@@ -204,7 +204,7 @@ impl<T> FollowingQuery<T> {
     /// barrier replaced by a change the tile does not follow (a scope
     /// keystroke under a document panel) must not discard the only answer
     /// to the tile's current question.
-    pub fn promote(
+    fn promote(
         &mut self,
         now: FrameVersions,
         differs: impl Fn(FrameVersions, FrameVersions) -> bool,
@@ -332,9 +332,14 @@ impl<T> FollowingQuery<T> {
                 if !barrier.arrive(key, held_under) {
                     return Delivered::Held;
                 }
+                // Released at once but superseded: a followed counter moved
+                // since the question was asked, so there is nothing to apply
+                // and nothing left held. Reporting it as held would let the
+                // caller treat a dropped answer as a pending one.
                 match self.promote(now, differs) {
                     Promotion::Apply(value) => Delivered::Apply(value),
-                    Promotion::Empty | Promotion::Superseded => Delivered::Held,
+                    Promotion::Superseded => Delivered::Superseded,
+                    Promotion::Empty => Delivered::Held,
                 }
             }
             Err(error) => {
@@ -577,6 +582,30 @@ mod tests {
             q.follows_changed(f.versions(), follows_config),
             "so the next show asks again"
         );
+    }
+
+    /// A reply whose own arrival releases the barrier, asked before a
+    /// followed counter moved (a change that opens no barrier of its own),
+    /// is dropped: it answers the barrier but applies nothing.
+    #[test]
+    fn a_releasing_delivery_asked_before_a_followed_change_is_superseded() {
+        let mut f = fresh_frame();
+        let t0 = Instant::now();
+        let v = flip_scope(&mut f, "a", &[K], t0);
+        let mut q = FollowingQuery::<u32>::new();
+        let tag = q.begin(v, t0);
+        f.note_config_reloaded();
+        assert!(
+            f.barrier_wants(K, v),
+            "the barrier still waits on the reply"
+        );
+        assert_eq!(
+            q.deliver::<&str>(tag, Ok(4), f.versions(), follows_config, &mut f, K),
+            Delivered::Superseded
+        );
+        assert!(!f.barrier_open(), "its arrival released the barrier");
+        assert!(!q.is_staged(), "and nothing is left held");
+        assert!(!q.in_flight());
     }
 
     #[test]
