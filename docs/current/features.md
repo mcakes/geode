@@ -821,7 +821,8 @@ largest supported font size. These examples do not bound every possible
 value. A view's `label` and `width` override the defaults. Columns are
 managed as any view's: the Views dialog's column stage (order, hidden, label,
 width, format, color) applies to a pricer view, and `hidden` columns leave
-the plan. `Edit column in view…` does not yet read a pricer tile's columns.
+the plan. `Edit column in view…` from the palette opens the Views dialog on
+the pricer's view at the cursor's column, as it does for a blotter.
 Result columns
 carry risk_snapshot's names — `npv`, `delta01`, `gamma01`, `vega01`,
 `rho010`, `clean_theta_business_day` and the rest — each with a `_usd` twin

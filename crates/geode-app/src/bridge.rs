@@ -2376,6 +2376,33 @@ role = "key"
         );
     }
 
+    /// The palette's `Edit column in view…` reads the focused pricer tile's
+    /// columns and opens the Views column picker over the pricer's view.
+    #[gpui::test]
+    fn edit_column_in_view_opens_over_the_pricer_view(cx: &mut gpui::TestAppContext) {
+        let services = test_shell_services_with_a_pricer_tile();
+        let window = open_pricer_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        vcx.simulate_keystrokes("ctrl-k");
+        vcx.simulate_input("Edit column in view");
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let target = shell.read_with(&vcx, |s, _| s.choice_dialog_target());
+        assert!(
+            matches!(
+                target,
+                Some(geode_shell::shell::choicedialog::Target::Column { ref view, .. }) if view == "vanilla"
+            ),
+            "{target:?}"
+        );
+    }
+
     /// The sheet picker's filter and the rename field, both opened by the
     /// pointer on the header's sheet name, are insert focus for the shell
     /// too: a shifted letter typed after the click is text, never a shell

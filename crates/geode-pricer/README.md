@@ -42,7 +42,7 @@ The tile:
 | `popup` | The typeahead, the entry bar's completion list, the sheet picker (`sheet_rows`, `SheetPicker`), and `PricerPick` (what a menu row does). The menu, popup geometry, the `:rm` confirm and the header notices paint through `geode-tile`. |
 | `session` | The tile's session record, including `:autosize`'s fitted widths (`column_widths`, read leniently). |
 | `content` | The factory, keymap fragment, actions, settings, and the read-only `UnderlyingSource` seam. |
-| `tile` | `PricerTile`: modes, verbs, repricing, write-behind, load. |
+| `tile` | `PricerTile`: modes, verbs, repricing, write-behind, load; `tile_columns` reports the plan's columns under the sheet's view with the cursor's column active, so the shell's `Edit column in view…` opens the Views dialog there. |
 | `tile::select` | The `V`/`v` selection's state doors (start, clear, re-resolve, footer extent and totals), the selection verbs, the one-typed-value commit, and the live step (`bulk_step`, `settle_bulk`, `take_back_steps`). |
 
 The application uses `DuckSheetStore`: sheets are `pricer_sheets` documents in

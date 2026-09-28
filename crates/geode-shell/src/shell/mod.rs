@@ -1615,6 +1615,12 @@ impl ShellView {
         &self.dialog_input
     }
 
+    /// The open choice dialog's target, for module-hosting tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn choice_dialog_target(&self) -> Option<choicedialog::Target> {
+        self.choice_dialog.as_ref().map(|d| d.target.clone())
+    }
+
     /// Deliver a distinct-value reply from the app bridge. `EXPR_KEY` routes
     /// to the open expression field's suggestions. `SCOPES_KEY` routes
     /// to the object dialog's Values stage. Other replies reach the dimension

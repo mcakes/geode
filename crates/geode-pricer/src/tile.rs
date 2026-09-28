@@ -4013,6 +4013,28 @@ impl PricerTile {
         }
     }
 
+    /// The plan's columns for the shell's `Edit column in view…`; the
+    /// cursor column is active. The tree column is not a view column, so
+    /// it is neither listed nor ever the active one; an empty plan lists
+    /// nothing and the cursor rests on no column.
+    pub fn tile_columns(&self) -> Option<geode_core::tile_columns::TileColumns> {
+        use geode_core::tile_columns::{TileColumn, TileColumns};
+        Some(TileColumns {
+            view: self.sheet.view.clone(),
+            columns: self
+                .plan
+                .columns
+                .iter()
+                .map(|c| TileColumn {
+                    name: c.def.name.to_string(),
+                    label: c.label.clone(),
+                    derived: false,
+                })
+                .collect(),
+            active: (self.cursor.col < self.plan.columns.len()).then_some(self.cursor.col),
+        })
+    }
+
     /// Point the cursor at grid row `row` (clamped to a cursor row).
     pub(crate) fn set_cursor_row(&mut self, row: usize) {
         let rows: Vec<usize> = self.cursor_rows().collect();
@@ -5129,6 +5151,38 @@ pub(crate) mod tests {
         keys(&h, &mut vcx, "j l l h k");
         assert!(h.columns(&vcx).is_empty());
         assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor.col), 0);
+    }
+
+    /// The shell's `Edit column in view…` reads the tile's columns: the
+    /// plan in order under the sheet's view name, the cursor's column
+    /// active, none derived (a pricer view declares only dataset columns).
+    #[gpui::test]
+    fn tile_columns_list_the_plan_with_the_cursor_column_active(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C"]);
+        // Two columns right (`l l`): the harness hosts no keymap, so the
+        // verb `l` is bound to is dispatched directly.
+        h.dispatch(&mut vcx, "right", Some(2));
+        let tc = h
+            .tile
+            .read_with(&vcx, |t, _| t.tile_columns())
+            .expect("a plan");
+        assert_eq!(tc.view, "vanilla");
+        assert_eq!(
+            tc.columns
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>(),
+            h.columns(&vcx)
+        );
+        assert_eq!(
+            tc.columns
+                .iter()
+                .map(|c| c.label.as_str())
+                .collect::<Vec<_>>(),
+            h.labels(&vcx)
+        );
+        assert_eq!(tc.active, Some(2));
+        assert!(tc.columns.iter().all(|c| !c.derived));
     }
 
     /// A pricer has no frame query result to await. It acknowledges the flip barrier
