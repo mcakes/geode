@@ -7,6 +7,7 @@
 //! without preventing startup.
 
 pub mod black;
+pub mod spline;
 
 use geode_core::pricing::{
     Instrument, MarketOverrides, OptionKind, PriceRequest, PriceResult, Pricer, PricingError,
