@@ -7,11 +7,12 @@
 //! kind, tag, text and note, all prepared here. A row's shorthand is also its search
 //! key.
 
-use crate::core::columns::{CellState, ColumnKind, cell_text};
+use crate::core::columns::{CellState, ColumnKind, cell_text, subset_cell_text};
 use crate::core::sheet::{LineId, RowKind, Sheet};
 use crate::core::shorthand::{render_expiry, render_strike};
 use crate::core::tree::{Expansion, visible_rows};
 use crate::core::views::ColumnPlan;
+use crate::core::visibility::Visibility;
 use geode_core::clock::Clock;
 use geode_core::colour::Sign;
 use geode_core::view::Colour;
@@ -42,8 +43,11 @@ pub enum GridRowKind {
     Leg {
         last: bool,
     },
+    /// `partial`: the scope hides some of its legs; the row aggregates
+    /// only the shown ones and is read-only.
     Package {
         open: bool,
+        partial: bool,
     },
 }
 
@@ -68,8 +72,8 @@ pub struct GridRow {
     /// Tree-column text: a package's summary (`package_summary`); a leg's
     /// or a bare line's full one-line shorthand (`-2 SPX Z26 5000 C`).
     pub text: SharedString,
-    /// Tree-column note: a package's leg count (`· 1 leg`, `· 2 legs`),
-    /// empty on a line or leg.
+    /// Tree-column note: a package's leg count (`· 1 leg`, `· 2 legs`;
+    /// `· 1 of 2 legs` when the scope hides some), empty on a line or leg.
     pub note: SharedString,
     /// Find key derived from shorthand. It can match text that does not appear in
     /// the current view's columns.
@@ -110,11 +114,11 @@ struct LegParts {
     strikes: Vec<String>,
 }
 
-fn leg_parts(sheet: &Sheet, row: usize) -> LegParts {
+fn leg_parts(sheet: &Sheet, legs: impl IntoIterator<Item = usize>) -> LegParts {
     let mut unds: Vec<String> = Vec::new();
     let mut exps: Vec<String> = Vec::new();
     let mut strikes: Vec<String> = Vec::new();
-    for leg in sheet.children(row) {
+    for leg in legs {
         if let Some(i) = sheet.instrument(leg) {
             let u = i.underlying().to_string();
             if !unds.contains(&u) {
@@ -159,7 +163,7 @@ fn package_search(sheet: &Sheet, row: usize) -> String {
     let RowKind::Package { template } = sheet.kind(row) else {
         return text;
     };
-    let p = leg_parts(sheet, row);
+    let p = leg_parts(sheet, sheet.children(row));
     join_parts(&[
         template.token().to_string(),
         p.unds.join("/"),
@@ -173,22 +177,33 @@ fn package_search(sheet: &Sheet, row: usize) -> String {
 /// (`Z26 4800/5200`). One line whatever form the package's own
 /// shorthand takes; empty when no leg carries an instrument.
 pub(crate) fn package_summary(sheet: &Sheet, row: usize) -> String {
-    let p = leg_parts(sheet, row);
+    legs_summary(sheet, sheet.children(row))
+}
+
+/// [`package_summary`] over some of a package's legs.
+fn legs_summary(sheet: &Sheet, legs: impl IntoIterator<Item = usize>) -> String {
+    let p = leg_parts(sheet, legs);
     join_parts(&[p.exps.join("/"), p.strikes.join("/")])
 }
 
-fn leg_note(n: usize) -> String {
-    if n == 1 {
-        "· 1 leg".to_string()
-    } else {
-        format!("· {n} legs")
+/// `shown` of `total` legs: `· 2 legs`, or `· 1 of 2 legs` when the scope
+/// hides some.
+fn leg_note(shown: usize, total: usize) -> String {
+    match (shown, total) {
+        (1, 1) => "· 1 leg".to_string(),
+        (n, t) if n == t => format!("· {n} legs"),
+        (n, t) => format!("· {n} of {t} legs"),
     }
 }
 
 impl GridModel {
+    /// Rows hidden by `visibility` are left out; a package whose scope
+    /// hides some of its legs paints its shown legs' aggregate
+    /// (`subset_cell_text`), summary and `· N of M legs` note.
     pub fn build(
         sheet: &Sheet,
         expansion: &Expansion,
+        visibility: &Visibility,
         plan: &ColumnPlan,
         clock: Clock,
     ) -> GridModel {
@@ -208,24 +223,43 @@ impl GridModel {
         let visible = visible_rows(sheet, expansion);
         let mut rows = Vec::with_capacity(visible.len());
         for r in visible {
+            if !visibility.is_shown(r) {
+                continue;
+            }
+            // A partly hidden package: its shown legs and their fold,
+            // computed once for every cell of the row.
+            let subset = (sheet.is_package(r) && visibility.is_partial(sheet, r)).then(|| {
+                let legs = visibility.shown_legs(sheet, r);
+                let folded = sheet.fold_legs(legs.iter().copied());
+                (legs, folded)
+            });
             let kind = match sheet.kind(r) {
                 RowKind::Package { .. } => GridRowKind::Package {
                     open: expansion.is_open(sheet.id(r)),
+                    partial: subset.is_some(),
                 },
                 RowKind::Line | RowKind::Underlying => match sheet.parent(r) {
+                    // The last shown leg takes the corner connector.
                     Some(p) => GridRowKind::Leg {
-                        last: sheet.children(p).end == r + 1,
+                        last: !(r + 1..sheet.children(p).end).any(|l| visibility.is_shown(l)),
                     },
                     None => GridRowKind::Line,
                 },
             };
             let (tag, text, note, search) = match sheet.kind(r) {
-                RowKind::Package { template } => (
-                    SharedString::new_static(template.token()),
-                    SharedString::from(package_summary(sheet, r)),
-                    SharedString::from(leg_note(sheet.children(r).len())),
-                    SharedString::from(package_search(sheet, r)),
-                ),
+                RowKind::Package { template } => {
+                    let total = sheet.children(r).len();
+                    let (summary, shown) = match &subset {
+                        Some((legs, _)) => (legs_summary(sheet, legs.iter().copied()), legs.len()),
+                        None => (package_summary(sheet, r), total),
+                    };
+                    (
+                        SharedString::new_static(template.token()),
+                        SharedString::from(summary),
+                        SharedString::from(leg_note(shown, total)),
+                        SharedString::from(package_search(sheet, r)),
+                    )
+                }
                 _ => {
                     // One shorthand, shared by the painted text and the find key.
                     let s = SharedString::from(sheet.shorthand(r));
@@ -250,7 +284,12 @@ impl GridModel {
                     .columns
                     .iter()
                     .map(|c| {
-                        let t = cell_text(sheet, r, c.def, &c.format, clock);
+                        let t = match &subset {
+                            Some((legs, folded)) => {
+                                subset_cell_text(sheet, r, legs, folded, c.def, &c.format, clock)
+                            }
+                            None => cell_text(sheet, r, c.def, &c.format, clock),
+                        };
                         GridCell {
                             text: t.text.into(),
                             state: t.state,
@@ -290,7 +329,7 @@ mod tests {
     }
 
     fn build(s: &Sheet, e: &Expansion) -> GridModel {
-        GridModel::build(s, e, &plan(), Clock::utc())
+        GridModel::build(s, e, &Visibility::all(s), &plan(), Clock::utc())
     }
 
     #[test]
@@ -298,7 +337,13 @@ mod tests {
         let s = sheet();
         let closed = build(&s, &Expansion::default());
         assert_eq!(closed.rows.len(), 3);
-        assert_eq!(closed.rows[1].kind, GridRowKind::Package { open: false });
+        assert_eq!(
+            closed.rows[1].kind,
+            GridRowKind::Package {
+                open: false,
+                partial: false
+            }
+        );
         assert_eq!(closed.rows[1].search.as_ref(), "SPX Z26 4800/5200 CS");
         assert_eq!(
             closed.rows[1].tag.as_ref(),
@@ -310,7 +355,13 @@ mod tests {
         e.set(s.id(1), true);
         let open = build(&s, &e);
         assert_eq!(open.rows.len(), 5);
-        assert_eq!(open.rows[1].kind, GridRowKind::Package { open: true });
+        assert_eq!(
+            open.rows[1].kind,
+            GridRowKind::Package {
+                open: true,
+                partial: false
+            }
+        );
         assert_eq!(open.rows[2].kind, GridRowKind::Leg { last: false });
         assert_eq!(open.rows[2].depth, 1);
         assert_eq!(open.rows[2].tag.as_ref(), "", "a leg: no tag");
@@ -356,11 +407,17 @@ mod tests {
         assert_eq!(
             kinds,
             vec![
-                GridRowKind::Package { open: true },
+                GridRowKind::Package {
+                    open: true,
+                    partial: false
+                },
                 GridRowKind::Leg { last: false },
                 GridRowKind::Leg { last: true },
                 GridRowKind::Line,
-                GridRowKind::Package { open: true },
+                GridRowKind::Package {
+                    open: true,
+                    partial: false
+                },
                 GridRowKind::Leg { last: false },
                 GridRowKind::Leg { last: true },
             ]
@@ -513,6 +570,82 @@ mod tests {
             "a measure's vocabulary default"
         );
         assert_eq!(m.columns[col("qty")].colour, Colour::None);
+    }
+
+    /// `strike >= 5000` over [A 5000 C, P(4800 C, -1 × 5200 C), B 4000 P]:
+    /// A and the 5200 leg show.
+    fn scoped(s: &Sheet) -> Visibility {
+        let scope = geode_core::scope::Scope {
+            expression: Some(geode_core::scope::parse_expr("strike >= 5000").unwrap()),
+            ..Default::default()
+        };
+        crate::core::visibility::apply_scope(s, &scope, &Default::default(), Clock::utc()).unwrap()
+    }
+
+    fn col(name: &str) -> usize {
+        plan()
+            .columns
+            .iter()
+            .position(|c| c.def.name == name)
+            .unwrap()
+    }
+
+    #[test]
+    fn a_partly_hidden_package_paints_its_shown_legs_aggregate_and_note() {
+        let mut s = sheet();
+        let answers = vec![
+            (s.id(0), s.revision(0), Ok(result(7.0))),
+            (s.id(2), s.revision(2), Ok(result(3.0))),
+            (s.id(3), s.revision(3), Ok(result(2.0))),
+            (s.id(4), s.revision(4), Ok(result(1.0))),
+        ];
+        s.deliver_all(answers, at(0));
+        let mut e = Expansion::default();
+        e.set(s.id(1), true);
+        let v = scoped(&s);
+        let m = GridModel::build(&s, &e, &v, &plan(), Clock::utc());
+        let p = &m.rows[1];
+        assert_eq!(p.row, Some(1));
+        assert_eq!(
+            p.kind,
+            GridRowKind::Package {
+                open: true,
+                partial: true
+            }
+        );
+        assert_eq!(p.note.as_ref(), "· 1 of 2 legs");
+        assert_eq!(p.text.as_ref(), "Z26 5200", "the shown legs' summary");
+        assert_eq!(p.cells[col("strike")].text.as_ref(), "5200");
+        assert_eq!(p.cells[col("qty")].text.as_ref(), "-1", "the leg's own qty");
+        assert_eq!(
+            p.cells[col("npv")].text.as_ref(),
+            "-2.00",
+            "qty × price of the shown leg, not the package's -1.00 fold"
+        );
+        assert_eq!(p.cells[col("npv")].sign, Some(Sign::Negative));
+        assert_eq!(m.rows[2].row, Some(3));
+        assert_eq!(
+            m.rows[2].kind,
+            GridRowKind::Leg { last: true },
+            "the last shown leg takes the corner"
+        );
+        // Unscoped, the same package paints its whole fold.
+        let all = build(&s, &e);
+        assert_eq!(all.rows[1].cells[col("npv")].text.as_ref(), "1.00");
+        assert_eq!(all.rows[1].note.as_ref(), "· 2 legs");
+    }
+
+    #[test]
+    fn hidden_rows_are_not_in_the_model() {
+        let s = sheet();
+        let mut e = Expansion::default();
+        e.set(s.id(1), true);
+        let v = scoped(&s);
+        assert_eq!(v.hidden, 2, "the 4800 leg and B");
+        let m = GridModel::build(&s, &e, &v, &plan(), Clock::utc());
+        let rows: Vec<Option<usize>> = m.rows.iter().map(|r| r.row).collect();
+        assert_eq!(rows, vec![Some(0), Some(1), Some(3)]);
+        assert_eq!(m.grid_row_of(s.id(4)), None);
     }
 
     #[test]

@@ -123,18 +123,29 @@ pub(crate) fn package_qty(sheet: &Sheet, row: usize) -> Option<(i64, Vec<i64>)> 
     Some((q, def.legs.iter().map(|l| l.weight).collect()))
 }
 
-/// The groups of `row`'s legs for `kind`; empty for a column that does not
-/// aggregate or a package with no leg the column reads.
+/// The groups of all of `row`'s legs for `kind`; empty for a column that
+/// does not aggregate or a package with no leg the column reads.
 pub(crate) fn groups(
     sheet: &Sheet,
     row: usize,
     kind: ColumnKind,
     format: &ColumnFormat,
 ) -> Vec<Group> {
+    let legs: Vec<usize> = sheet.children(row).collect();
+    groups_over(sheet, &legs, kind, format)
+}
+
+/// The groups of `legs` (some or all of one package's legs, in sheet
+/// order) for `kind`.
+fn groups_over(
+    sheet: &Sheet,
+    rows: &[usize],
+    kind: ColumnKind,
+    format: &ColumnFormat,
+) -> Vec<Group> {
     let legs = || {
-        sheet
-            .children(row)
-            .filter_map(|l| sheet.instrument(l).map(|i| (l, i)))
+        rows.iter()
+            .filter_map(|&l| sheet.instrument(l).map(|i| (l, i)))
     };
     let barrier_legs = || {
         legs().filter_map(|(l, i)| match i {
@@ -144,7 +155,7 @@ pub(crate) fn groups(
     };
     let same = |s: String| (s.clone(), s);
     match kind {
-        ColumnKind::Qty => group_by(sheet.children(row).map(|l| (l, sheet.qty(l))), |q| {
+        ColumnKind::Qty => group_by(rows.iter().map(|&l| (l, sheet.qty(l))), |q| {
             same(q.to_string())
         }),
         ColumnKind::UnderlyingRef => group_by(legs().map(|(l, i)| (l, i.underlying())), |u| {
@@ -174,9 +185,8 @@ pub(crate) fn groups(
         // Priced legs only: an unpriced package's currency is blank, as
         // an unpriced line's is.
         ColumnKind::Currency => group_by(
-            sheet
-                .children(row)
-                .filter_map(|l| sheet.result(l).map(|r| (l, r.currency))),
+            rows.iter()
+                .filter_map(|&l| sheet.result(l).map(|r| (l, r.currency))),
             |c| same(c.as_str().to_string()),
         ),
         ColumnKind::SpotShift | ColumnKind::VolShift => {
@@ -188,9 +198,8 @@ pub(crate) fn groups(
             // cell never shows two parts that read alike. The edit
             // spelling is set per group below.
             let mut gs = group_by_key(
-                sheet
-                    .children(row)
-                    .map(|l| (l, pick(sheet.shift(l)).or(sheet_value))),
+                rows.iter()
+                    .map(|&l| (l, pick(sheet.shift(l)).or(sheet_value))),
                 display,
                 |v| (display(v), String::new()),
             );
@@ -332,10 +341,29 @@ pub fn commit(
     Ok(edits)
 }
 
-/// A package row's cell for `kind` (see the module doc).
+/// A package row's cell for `kind` over all of its legs (see the module
+/// doc).
 pub fn aggregate(sheet: &Sheet, row: usize, kind: ColumnKind, format: &ColumnFormat) -> CellText {
+    let legs: Vec<usize> = sheet.children(row).collect();
+    aggregate_over(sheet, row, &legs, kind, format)
+}
+
+/// Package `package`'s cell for `kind` over `legs`, some or all of its
+/// legs in sheet order: the one aggregation a package row, a package
+/// showing only its in-scope legs, and (later) a split package's
+/// occurrence under one grouping node share. The package quantity is
+/// shown only over the whole leg set — a subset of a template's legs
+/// does not fit the template, so it shows its legs' own quantities.
+pub fn aggregate_over(
+    sheet: &Sheet,
+    package: usize,
+    legs: &[usize],
+    kind: ColumnKind,
+    format: &ColumnFormat,
+) -> CellText {
     if kind == ColumnKind::Qty
-        && let Some((q, _)) = package_qty(sheet, row)
+        && legs.len() == sheet.children(package).len()
+        && let Some((q, _)) = package_qty(sheet, package)
     {
         return CellText {
             text: q.to_string(),
@@ -343,7 +371,7 @@ pub fn aggregate(sheet: &Sheet, row: usize, kind: ColumnKind, format: &ColumnFor
             sign: None,
         };
     }
-    let gs = groups(sheet, row, kind, format);
+    let gs = groups_over(sheet, legs, kind, format);
     // Only when every group is empty (no leg the column reads, or a shift
     // nobody sets) is the cell blank; an unset group among set ones paints
     // `UNSET`, so the parts still line up with the legs' values.
@@ -356,9 +384,7 @@ pub fn aggregate(sheet: &Sheet, row: usize, kind: ColumnKind, format: &ColumnFor
     }
     let text = painted(&gs);
     let state = match shift_pick(kind) {
-        Some(pick) if sheet.children(row).all(|l| pick(sheet.shift(l)).is_none()) => {
-            CellState::Inherited
-        }
+        Some(pick) if legs.iter().all(|&l| pick(sheet.shift(l)).is_none()) => CellState::Inherited,
         _ => CellState::Own,
     };
     // A package's aggregated text (a strike list, a shift per group) is

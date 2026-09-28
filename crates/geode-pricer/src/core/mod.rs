@@ -20,17 +20,19 @@ pub mod template;
 pub mod tree;
 pub mod undo;
 pub mod views;
+pub mod visibility;
 
 pub use cell::{CellEditor, READ_ONLY};
 pub use columns::{
     Applies, COLUMNS, CellState, CellText, ColumnDef, ColumnKind, cell_text, column,
+    subset_cell_text,
 };
 pub use complete::{Completion, Inputs, MAX_ROWS, Slot, Suggestion, slot_at};
-pub use dataset::{PRICER_DATASET, PRICER_DATASET_DECLARATION};
+pub use dataset::{PRICER_DATASET, PRICER_DATASET_DECLARATION, pricer_dataset};
 pub use edit::{Edit, EditError, Undo};
 pub use sheet::{
-    Delivered, LineId, LineSpec, LineState, OwnShifts, Place, Refresh, RowKind, RowRecord, RowSpec,
-    Sheet,
+    Delivered, Folded, LineId, LineSpec, LineState, OwnShifts, Place, Refresh, RowKind, RowRecord,
+    RowSpec, Sheet,
 };
 pub use shorthand::{ParseError, parse, render_expiry, render_line, render_package, render_strike};
 pub use storage::{
@@ -45,3 +47,4 @@ pub use undo::{UNDO_DEPTH, UndoStack};
 pub use views::{
     BUILTIN_VIEWS, ColumnPlan, PRICER_VIEWS_DOC, PlannedColumn, PricerView, ViewColumn, Views,
 };
+pub use visibility::{SheetRow, Visibility, apply_scope};

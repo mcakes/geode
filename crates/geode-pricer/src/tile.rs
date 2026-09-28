@@ -3887,6 +3887,7 @@ impl PricerTile {
         self.model = Rc::new(GridModel::build(
             &self.sheet,
             &self.expansion,
+            &crate::core::Visibility::all(&self.sheet),
             &self.plan,
             self.clock,
         ));

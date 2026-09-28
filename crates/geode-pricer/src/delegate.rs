@@ -836,7 +836,7 @@ impl SheetDelegate {
                 .pl(scale::design(depth as f32 * INDENT))
                 .gap(scale::design(TREE_GAP));
             let (slot, text_paint) = match row.kind {
-                GridRowKind::Package { open } => {
+                GridRowKind::Package { open, .. } => {
                     let states = self.chevron_states(cx.theme());
                     let chevron = div()
                         .id(("pricer-chevron", row_ix))

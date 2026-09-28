@@ -3,6 +3,10 @@
 //! Computed — no source, no table, no query; the tile answers for it.
 //! The column list mirrors `columns::COLUMNS` exactly (one test pins it).
 
+use geode_core::config::{LayerDoc, merge_docs};
+use geode_core::schema::{DatasetSpec, SchemaSpec};
+use std::sync::OnceLock;
+
 pub const PRICER_DATASET: &str = "pricer";
 
 /// Pushed into the builtin `datasets` layer by `geode-app` beside
@@ -22,6 +26,7 @@ computed = true
 [pricer.columns.sheet]
 type = "utf8"
 role = "dimension"
+textual = true
 grain = "position"
 [pricer.columns.position_ref]
 type = "utf8"
@@ -32,6 +37,7 @@ role = "key"
 [pricer.columns.template]
 type = "utf8"
 role = "dimension"
+textual = true
 grain = "position"
 [pricer.columns.qty]
 type = "i64"
@@ -40,9 +46,11 @@ grain = "instrument"
 [pricer.columns.underlying_ref]
 type = "utf8"
 role = "dimension"
+textual = true
 [pricer.columns.expiry]
 type = "utf8"
 role = "dimension"
+textual = true
 grain = "instrument"
 [pricer.columns.strike]
 type = "f64"
@@ -52,10 +60,12 @@ categorical = false
 [pricer.columns.option_type]
 type = "utf8"
 role = "dimension"
+textual = true
 grain = "instrument"
 [pricer.columns.currency]
 type = "utf8"
 role = "dimension"
+textual = true
 grain = "instrument"
 [pricer.columns.barrier]
 type = "f64"
@@ -65,6 +75,7 @@ categorical = false
 [pricer.columns.barrier_type]
 type = "utf8"
 role = "dimension"
+textual = true
 grain = "instrument"
 [pricer.columns.spot_shift]
 type = "f64"
@@ -193,22 +204,42 @@ grain = "underlying"
 [pricer.columns.priced_at]
 type = "utf8"
 role = "dimension"
+textual = true
 grain = "instrument"
 categorical = false
 [pricer.columns.status]
 type = "utf8"
 role = "dimension"
+textual = true
 grain = "instrument"
 categorical = false
 "#;
+
+/// The `pricer` dataset, parsed once from [`PRICER_DATASET_DECLARATION`].
+/// The declaration is frozen (a desk or user redeclaration is replaced by
+/// the builtin), so the module reads its own copy instead of the merged
+/// schema: the evaluator and the cells cannot disagree about a column's
+/// type.
+pub fn pricer_dataset() -> &'static DatasetSpec {
+    static DATASET: OnceLock<DatasetSpec> = OnceLock::new();
+    DATASET.get_or_init(|| {
+        let doc = LayerDoc::builtin("datasets", PRICER_DATASET_DECLARATION)
+            .expect("the pricer declaration is valid TOML");
+        let (schema, diags) = SchemaSpec::from_doc(&merge_docs("datasets", &[doc]));
+        debug_assert!(diags.is_empty(), "{diags:?}");
+        schema
+            .dataset(PRICER_DATASET)
+            .cloned()
+            .expect("the declaration declares pricer")
+    })
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::columns::COLUMNS;
-    use geode_core::config::{LayerDoc, merge_docs};
     use geode_core::pricing::Measure;
-    use geode_core::schema::{ColumnRole, SchemaSpec};
+    use geode_core::schema::ColumnRole;
 
     fn schema() -> SchemaSpec {
         let (schema, diags) = SchemaSpec::from_doc(&merge_docs(
@@ -268,5 +299,29 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The text filter searches textual columns (as `scope_sql` does), so
+    /// the pricer marks every utf8 dimension textual: the filter then
+    /// searches what the sheet paints as text, and never a key or a number.
+    #[test]
+    fn exactly_the_nine_utf8_dimensions_are_textual() {
+        let ds = pricer_dataset();
+        let textual: Vec<&str> = ds.textual_columns().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            textual,
+            vec![
+                "sheet",
+                "template",
+                "underlying_ref",
+                "expiry",
+                "option_type",
+                "currency",
+                "barrier_type",
+                "priced_at",
+                "status"
+            ]
+        );
+        assert_eq!(ds, schema().dataset(PRICER_DATASET).unwrap());
     }
 }

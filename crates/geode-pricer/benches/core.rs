@@ -10,7 +10,7 @@ use geode_core::clock::Clock;
 use geode_core::pricing::{Currency, Measure, PriceResult};
 use geode_pricer::core::{
     ColumnPlan, Edit, Expansion, LineId, OwnShifts, Place, RowSpec, Sheet, TemplateSet, Views,
-    from_rows, parse, to_rows,
+    Visibility, from_rows, parse, to_rows,
 };
 use geode_pricer::grid::GridModel;
 use std::hint::black_box;
@@ -161,8 +161,17 @@ fn bench(c: &mut Criterion) {
     expansion.open_all(&s);
     let views = Views::builtin();
     let plan = ColumnPlan::build(views.get("vanilla").expect("bundled"));
+    let visibility = Visibility::all(&s);
     g.bench_function("grid_build_1000", |b| {
-        b.iter(|| black_box(GridModel::build(&s, &expansion, &plan, Clock::utc())))
+        b.iter(|| {
+            black_box(GridModel::build(
+                &s,
+                &expansion,
+                &visibility,
+                &plan,
+                Clock::utc(),
+            ))
+        })
     });
 
     g.finish();

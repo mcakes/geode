@@ -6,6 +6,7 @@
 
 use crate::core::edit::Edit;
 use crate::core::sheet::{LineState, Sheet};
+use crate::core::visibility::Visibility;
 use geode_core::pricing::{Currency, Measure};
 use std::collections::BTreeMap;
 
@@ -109,20 +110,50 @@ pub fn move_plan(sheet: &Sheet, top: &[usize], down: bool) -> Result<Edit, &'sta
 /// as differing — since a sum of unlike units would read as a real
 /// one. The `_usd` totals are converted per row and still sum.
 pub fn risk_totals(sheet: &Sheet, top: &[usize], measures: &[(Measure, bool)]) -> Vec<Option<f64>> {
-    if top.is_empty() {
+    totals(sheet, top, measures, None)
+}
+
+/// [`risk_totals`] under a scope: a hidden row counts nothing, and a
+/// package whose scope hides some legs counts its shown legs' fold
+/// ([`Sheet::fold_legs`], the fold its row paints), never its full sum.
+/// A selection left with no shown row is `None`, as no rows is.
+pub fn risk_totals_visible(
+    sheet: &Sheet,
+    top: &[usize],
+    measures: &[(Measure, bool)],
+    visibility: &Visibility,
+) -> Vec<Option<f64>> {
+    totals(sheet, top, measures, Some(visibility))
+}
+
+fn totals(
+    sheet: &Sheet,
+    top: &[usize],
+    measures: &[(Measure, bool)],
+    visibility: Option<&Visibility>,
+) -> Vec<Option<f64>> {
+    let shown = |r: usize| visibility.is_none_or(|v| v.is_shown(r));
+    if !top.iter().any(|&r| shown(r)) {
         return vec![None; measures.len()];
     }
     let mut sums = vec![Some(0.0f64); measures.len()];
     // The one currency the contributing results share, or `MIXED` once
     // two differ (a package already folded mixed differs from any code).
     let mut currency: Option<Currency> = None;
-    for &r in top {
+    for &r in top.iter().filter(|&&r| shown(r)) {
         let weight = if sheet.is_package(r) {
             1.0
         } else {
             sheet.qty(r) as f64
         };
-        let picked = match (sheet.state(r), sheet.result(r)) {
+        let subset = visibility
+            .filter(|v| sheet.is_package(r) && v.is_partial(sheet, r))
+            .map(|v| sheet.fold_legs(v.shown_legs(sheet, r)));
+        let (state, result) = match &subset {
+            Some(f) => (&f.state, f.result.as_ref()),
+            None => (sheet.state(r), sheet.result(r)),
+        };
+        let picked = match (state, result) {
             (LineState::Failed(_), _) | (_, None) => None,
             (_, Some(v)) => Some(v),
         };
@@ -448,6 +479,46 @@ mod tests {
             risk_totals(&s, &[0], &NPV_DELTA)[0],
             Some(3.0),
             "what the grid shows counts"
+        );
+    }
+
+    #[test]
+    fn totals_over_a_partly_hidden_package_count_only_its_shown_legs() {
+        // [line 5000 C ×2, CS(-5): 4800 C ×-5, 5200 C ×5], scoped to
+        // `strike > 5000`: the line and the 4800 leg are hidden.
+        let mut s = sheet(vec![call(5000.0, 2), callspread(-5)]);
+        assert_eq!((s.qty(2), s.qty(3)), (-5, 5));
+        price(&mut s, 0, 4.0);
+        price(&mut s, 2, 1.0);
+        price(&mut s, 3, 0.5);
+        let scope = geode_core::scope::Scope {
+            expression: Some(geode_core::scope::parse_expr("strike > 5000").unwrap()),
+            ..Default::default()
+        };
+        let v = crate::core::visibility::apply_scope(
+            &s,
+            &scope,
+            &Default::default(),
+            geode_core::clock::Clock::utc(),
+        )
+        .unwrap();
+        assert_eq!(
+            risk_totals(&s, &[0, 1], &NPV_DELTA)[0],
+            Some(2.0 * 4.0 - 5.0 * 1.0 + 5.0 * 0.5),
+            "unscoped: the line and the package's full fold"
+        );
+        let t = risk_totals_visible(&s, &[0, 1], &NPV_DELTA, &v);
+        assert_eq!(t[0], Some(5.0 * 0.5), "the shown 5200 leg only");
+        assert_eq!(t[1], Some(5.0 * 0.05));
+        assert_eq!(
+            risk_totals_visible(&s, &[0], &NPV_DELTA, &v),
+            vec![None; 2],
+            "a hidden row alone totals nothing"
+        );
+        assert_eq!(
+            risk_totals_visible(&s, &[0, 1], &NPV_DELTA, &Visibility::all(&s)),
+            risk_totals(&s, &[0, 1], &NPV_DELTA),
+            "everything shown is the unscoped total"
         );
     }
 
