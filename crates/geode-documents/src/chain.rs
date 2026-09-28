@@ -447,7 +447,17 @@ fn check_vocabulary(rows: &DocumentRows) -> Result<(), WriteError> {
             rows.key.len()
         )));
     }
-    if NaiveDate::parse_from_str(&rows.key[1], DATE_FORMAT).is_err() {
+    let underlying = &rows.key[0];
+    if underlying.is_empty() || underlying.trim() != underlying {
+        return Err(write_err(format!(
+            "option chain underlying '{underlying}' is blank or padded"
+        )));
+    }
+    // chrono parses leniently ("2026-1-5", a leading space or sign), so the
+    // key must re-format to itself: parse only ever produces that spelling.
+    let canonical = NaiveDate::parse_from_str(&rows.key[1], DATE_FORMAT)
+        .map(|d| d.format(DATE_FORMAT).to_string());
+    if canonical.as_deref() != Ok(rows.key[1].as_str()) {
         return Err(write_err(format!(
             "option chain expiry key '{}' is not a date (YYYY-MM-DD)",
             rows.key[1]
@@ -539,6 +549,13 @@ fn write(rows: &DocumentRows) -> Result<Vec<u8>, WriteError> {
             "strikes must be strictly ascending ({} follows {})",
             w[1], w[0]
         )));
+    }
+    // The parser refuses a non-positive strike or forward.
+    if let Some(k) = strikes.iter().find(|k| **k <= 0.0 || k.is_nan()) {
+        return Err(write_err(format!("strike {k} is not positive")));
+    }
+    if *forward <= 0.0 || forward.is_nan() {
+        return Err(write_err(format!("forward {forward} is not positive")));
     }
     rfc3339("quote_time", quote_time).map_err(write_err)?;
 
@@ -892,6 +909,43 @@ role = "attribute"
         assert_eq!(
             OptionChainKind.write(&unsorted).unwrap_err().message,
             "strikes must be strictly ascending (7600 follows 7700)"
+        );
+        let mut equal = expected();
+        equal.axes[0].1 = Column::F64(vec![7500.0, 7500.0, 7700.0]);
+        assert_eq!(
+            OptionChainKind.write(&equal).unwrap_err().message,
+            "strikes must be strictly ascending (7500 follows 7500)"
+        );
+        // chrono parses leniently; the key must be the canonical spelling
+        // parse would have produced, or it reads back as a different key.
+        for lenient in ["2026-1-5", " 2026-10-16"] {
+            let mut rows = expected();
+            rows.key[1] = lenient.into();
+            assert_eq!(
+                OptionChainKind.write(&rows).unwrap_err().message,
+                format!("option chain expiry key '{lenient}' is not a date (YYYY-MM-DD)")
+            );
+        }
+        let mut zero_strike = expected();
+        zero_strike.axes[0].1 = Column::F64(vec![0.0, 7600.0, 7700.0]);
+        assert_eq!(
+            OptionChainKind.write(&zero_strike).unwrap_err().message,
+            "strike 0 is not positive"
+        );
+        let mut negative_forward = expected();
+        negative_forward.attributes[0].1 = Value::F64(-1.0);
+        assert_eq!(
+            OptionChainKind
+                .write(&negative_forward)
+                .unwrap_err()
+                .message,
+            "forward -1 is not positive"
+        );
+        let mut padded = expected();
+        padded.key[0] = " SPX".into();
+        assert_eq!(
+            OptionChainKind.write(&padded).unwrap_err().message,
+            "option chain underlying ' SPX' is blank or padded"
         );
         let mut bad_time = expected();
         bad_time.attributes[2].1 = Value::Utf8("soon".into());
