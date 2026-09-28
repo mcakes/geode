@@ -23405,6 +23405,12 @@ run_mutation "shared motion: a stale row past the end steps from the last row" \
   '            let from = at;' \
   geode-tile a_stale_position_past_the_end_moves_from_the_last_row
 
+run_mutation "shared motion: a stale column past the end steps from the last column" \
+  crates/geode-tile/src/motion.rs \
+  'Motion::Cols(by) => (at.min(last) as i64)' \
+  'Motion::Cols(by) => (at as i64)' \
+  geode-tile a_stale_position_past_the_end_moves_from_the_last_row
+
 run_mutation "shared motion: half a page is five rows" \
   crates/geode-tile/src/motion.rs \
   'pub const HALF_PAGE: i64 = 5;' \
