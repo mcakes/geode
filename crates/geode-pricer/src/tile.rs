@@ -5913,6 +5913,97 @@ pub(crate) mod tests {
         );
     }
 
+    /// Column 0 paints option C: the package row a chevron, a template chip,
+    /// the summary and the muted leg count; each leg a connector and its
+    /// shorthand; a bare line its shorthand alone — and no row a ground.
+    /// The legs' connectors sit in the package chevron's lane and their
+    /// text starts where the chip starts, with line numbers off or on.
+    #[gpui::test]
+    fn the_tree_column_paints_connectors_a_chip_and_a_leg_count(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "-5 SPX Z26 4800/5200 CS"]);
+        h.motion(&mut vcx, "down", None);
+        h.dispatch(&mut vcx, "toggle", None);
+        h.draw(&mut vcx);
+        assert_eq!(h.tree(&vcx).len(), 4, "line, package, two legs");
+        let check = |vcx: &mut VisualTestContext, lane: &str| {
+            let bounds = |vcx: &mut VisualTestContext, sel: &'static str| {
+                vcx.debug_bounds(sel)
+                    .unwrap_or_else(|| panic!("{sel} painted ({lane})"))
+            };
+            for sel in [
+                "pricer-chevron-1",
+                "pricer-chip-1",
+                "pricer-tree-text-1",
+                "pricer-note-1",
+                "pricer-connector-2",
+                "pricer-connector-3",
+                "pricer-tree-text-2",
+                "pricer-tree-text-3",
+                "pricer-tree-text-0",
+            ] {
+                bounds(vcx, sel);
+            }
+            for sel in [
+                "pricer-chip-0",
+                "pricer-note-0",
+                "pricer-connector-0",
+                "pricer-connector-1",
+                "pricer-chip-2",
+                "pricer-note-2",
+                "pricer-chevron-0",
+                "pricer-chevron-2",
+            ] {
+                assert!(
+                    vcx.debug_bounds(sel).is_none(),
+                    "{sel} is not painted ({lane})"
+                );
+            }
+            let chip = bounds(vcx, "pricer-chip-1");
+            let text = bounds(vcx, "pricer-tree-text-1");
+            let note = bounds(vcx, "pricer-note-1");
+            assert!(
+                chip.left() < text.left() && text.left() < note.left(),
+                "chip, summary, leg count in order ({lane}): {chip:?} {text:?} {note:?}"
+            );
+            let chevron = bounds(vcx, "pricer-chevron-1");
+            for leg in ["pricer-connector-2", "pricer-connector-3"] {
+                let connector = bounds(vcx, leg);
+                assert!(
+                    (connector.center().x - chevron.center().x).abs() < gpui::px(1.0),
+                    "{leg} sits in the package chevron's lane ({lane}): \
+                     {connector:?} vs {chevron:?}"
+                );
+            }
+            for row in ["pricer-tree-text-2", "pricer-tree-text-0"] {
+                let t = bounds(vcx, row);
+                assert!(
+                    (t.left() - chip.left()).abs() < gpui::px(1.0),
+                    "{row} starts where the chip starts ({lane}): {t:?} vs {chip:?}"
+                );
+            }
+        };
+        check(&mut vcx, "line numbers off");
+        vcx.update(|_, cx| {
+            cx.set_global(UiSettings {
+                line_numbers: LineNumbers::On,
+            })
+        });
+        h.draw(&mut vcx);
+        check(&mut vcx, "line numbers on");
+
+        // The gutter: muted off the cursor row, a package's included (it
+        // has no ground of its own any more), own on the cursor row.
+        h.motion(&mut vcx, "up", None);
+        h.draw(&mut vcx);
+        assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(0));
+        h.tile.read_with(&vcx, |t, cx| {
+            let d = t.table.read(cx).delegate();
+            assert_eq!(d.gutter_paint(0), d.paints.own, "the cursor row");
+            assert_eq!(d.gutter_paint(1), d.paints.muted, "the package row");
+            assert_eq!(d.gutter_paint(2), d.paints.muted, "a leg");
+        });
+    }
+
     #[gpui::test]
     fn tree_verbs_open_and_close_packages_and_a_leg_collapses_to_its_package(
         cx: &mut gpui::TestAppContext,

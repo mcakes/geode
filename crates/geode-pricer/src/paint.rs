@@ -1,6 +1,8 @@
 //! Prepared grid-row text colours, recomputed on theme changes.
-//! CellState selects own, muted stale/inherited, or failure text; package rows have a
-//! separate palette. GridModel remains independent of the theme.
+//! CellState selects own, muted stale/inherited, or failure text. Package rows share
+//! the line palette: the tree column carries the structure, so no row paints a ground
+//! of its own. A package's template chip takes the neutral chip pair (`chip_fill`,
+//! `chip_text`). GridModel remains independent of the theme.
 //!
 //! Row text is adjusted against its base background and the table's hover and selection
 //! backgrounds, which replace that base. The bundled-theme test checks these prepared
@@ -72,15 +74,15 @@ pub struct Paints {
     pub own: Hsla,
     pub muted: Hsla,
     pub danger: Hsla,
-    /// Opaque: `secondary` composited over the table ground.
-    pub package_ground: Hsla,
     /// Opaque: `table_hover` over the table ground — what the table
-    /// paints on a row under the pointer, replacing the row's own ground
-    /// (a package's included). The chevron's only interactive ground.
+    /// paints on a row under the pointer, replacing the row's own ground.
+    /// The chevron's only interactive ground.
     pub row_hover: Hsla,
-    pub package_own: Hsla,
-    pub package_muted: Hsla,
-    pub package_danger: Hsla,
+    /// A package's template chip: the neutral chip's fill (`secondary`,
+    /// possibly translucent) and its text, floored on that fill composited
+    /// over each of the row's three grounds (own, hover, selected).
+    pub chip_fill: Hsla,
+    pub chip_text: Hsla,
     /// The expiry date field's active segment text on its `primary` fill,
     /// and a mid-typing segment's on its `accent` fill. The field paints
     /// on the cursor row, whose ground may be the line's own, hover or
@@ -93,22 +95,21 @@ pub struct Paints {
 impl Paints {
     pub fn derive(theme: &Theme) -> Paints {
         let ground: Rgb = over(theme.table, to_rgb(theme.background));
-        let package: Rgb = over(theme.secondary, ground);
         let danger = chip_paint(theme, Tone::DangerText).text;
         // A row's text reads on its own ground and on the two the table
         // paints over it (hover, selected), which replace it.
         let [hover, selected] = Self::row_grounds(theme);
         let line = [ground, hover, selected];
-        let pkg = [package, hover, selected];
+        let chip = chip_paint(theme, Tone::Neutral);
+        let chip_fill = chip.fill.expect("a neutral chip has a fill");
+        let chip_grounds = line.map(|g| over(chip_fill, g));
         Paints {
             own: floor_on_all(theme.foreground, &line),
             muted: floor_on_all(theme.muted_foreground, &line),
             danger: floor_on_all(danger, &line),
-            package_ground: to_hsla(package),
             row_hover: to_hsla(hover),
-            package_own: floor_on_all(theme.foreground, &pkg),
-            package_muted: floor_on_all(theme.muted_foreground, &pkg),
-            package_danger: floor_on_all(danger, &pkg),
+            chip_fill,
+            chip_text: floor_on_all(chip.text, &chip_grounds),
             date_active_text: floor_on_all(
                 theme.primary_foreground,
                 &line.map(|g| over(theme.primary, g)),
@@ -121,8 +122,7 @@ impl Paints {
     }
 
     /// Table hover and selection backgrounds composited over the table base. Selection
-    /// uses table_active when list.active_highlight is enabled, otherwise accent. Both
-    /// replace a package row's own background.
+    /// uses table_active when list.active_highlight is enabled, otherwise accent.
     pub(crate) fn row_grounds(theme: &Theme) -> [Rgb; 2] {
         let ground: Rgb = over(theme.table, to_rgb(theme.background));
         let selected = if theme.list.active_highlight {
@@ -136,14 +136,11 @@ impl Paints {
         ]
     }
 
-    pub fn text(&self, state: CellState, package: bool) -> Hsla {
-        match (state, package) {
-            (CellState::Stale | CellState::Inherited, false) => self.muted,
-            (CellState::Stale | CellState::Inherited, true) => self.package_muted,
-            (CellState::Failed, false) => self.danger,
-            (CellState::Failed, true) => self.package_danger,
-            (CellState::Own | CellState::Blank, false) => self.own,
-            (CellState::Own | CellState::Blank, true) => self.package_own,
+    pub fn text(&self, state: CellState) -> Hsla {
+        match state {
+            CellState::Stale | CellState::Inherited => self.muted,
+            CellState::Failed => self.danger,
+            CellState::Own | CellState::Blank => self.own,
         }
     }
 }
@@ -202,16 +199,15 @@ mod tests {
                 let theme = cx.theme();
                 let p = Paints::derive(theme);
                 let ground = over(theme.table, to_rgb(theme.background));
-                let package = to_rgb(p.package_ground);
                 for (label, text, bg) in [
                     ("own", p.own, ground),
                     ("muted", p.muted, ground),
                     ("danger", p.danger, ground),
-                    ("package own", p.package_own, package),
-                    ("package muted", p.package_muted, package),
-                    ("package danger", p.package_danger, package),
-                    // The row palette is also checked on hover and selection
-                    // backgrounds below.
+                    // A package's template chip: its text on its fill
+                    // composited over the row's ground.
+                    ("chip", p.chip_text, over(p.chip_fill, ground)),
+                    // The row palette and the chip are also checked on
+                    // hover and selection backgrounds below.
                     // The date field's segment fills composited over the
                     // row's own ground; hover and selected below.
                     (
@@ -231,28 +227,28 @@ mod tests {
                         .into_iter()
                         .zip(["hover", "selected"])
                         .flat_map(|(bg, which)| {
-                            [
-                                ("own", p.own),
-                                ("muted", p.muted),
-                                ("danger", p.danger),
-                                ("package own", p.package_own),
-                                ("package muted", p.package_muted),
-                                ("package danger", p.package_danger),
-                            ]
-                            .map(|(label, text)| (leak(format!("{label} on {which}")), text, bg))
-                            .into_iter()
-                            .chain([
-                                (
-                                    leak(format!("date active on {which}")),
-                                    p.date_active_text,
-                                    over(theme.primary, bg),
-                                ),
-                                (
-                                    leak(format!("date typing on {which}")),
-                                    p.date_typing_text,
-                                    over(theme.accent, bg),
-                                ),
-                            ])
+                            [("own", p.own), ("muted", p.muted), ("danger", p.danger)]
+                                .map(|(label, text)| {
+                                    (leak(format!("{label} on {which}")), text, bg)
+                                })
+                                .into_iter()
+                                .chain([
+                                    (
+                                        leak(format!("chip on {which}")),
+                                        p.chip_text,
+                                        over(p.chip_fill, bg),
+                                    ),
+                                    (
+                                        leak(format!("date active on {which}")),
+                                        p.date_active_text,
+                                        over(theme.primary, bg),
+                                    ),
+                                    (
+                                        leak(format!("date typing on {which}")),
+                                        p.date_typing_text,
+                                        over(theme.accent, bg),
+                                    ),
+                                ])
                         }),
                 ) {
                     checked += 1;
@@ -263,6 +259,8 @@ mod tests {
                 }
             });
         }
+        // Eighteen pairs a theme (six on the row's own ground, six on each
+        // of hover and selected) over at least forty bundled themes.
         assert!(
             checked >= 18 * 40,
             "every bundled theme was swept ({checked})"
@@ -336,16 +334,15 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_state_picks_its_colour_and_a_package_row_its_own(cx: &mut gpui::TestAppContext) {
+    fn a_state_picks_its_colour(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
         cx.update(|cx| {
             let p = Paints::derive(cx.theme());
-            assert_eq!(p.text(CellState::Own, false), p.own);
-            assert_eq!(p.text(CellState::Stale, false), p.muted);
-            assert_eq!(p.text(CellState::Inherited, false), p.muted);
-            assert_eq!(p.text(CellState::Failed, false), p.danger);
-            assert_eq!(p.text(CellState::Own, true), p.package_own);
-            assert_eq!(p.text(CellState::Failed, true), p.package_danger);
+            assert_eq!(p.text(CellState::Own), p.own);
+            assert_eq!(p.text(CellState::Blank), p.own);
+            assert_eq!(p.text(CellState::Stale), p.muted);
+            assert_eq!(p.text(CellState::Inherited), p.muted);
+            assert_eq!(p.text(CellState::Failed), p.danger);
         });
     }
 }
