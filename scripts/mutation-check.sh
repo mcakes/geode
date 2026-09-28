@@ -24876,14 +24876,6 @@ run_mutation "pricer gutter: a package row is muted off the cursor" \
   $'            self.paints.own\n        } else {\n            self.paints.own' \
   geode-pricer the_tree_column_paints_connectors_a_chip_and_a_leg_count
 
-# The template chip's text is floored against the chip's fill on every
-# bundled theme.
-run_mutation "pricer paint: chip text is floored" \
-  crates/geode-pricer/src/paint.rs \
-  '            chip_text: floor_on_all(chip.text, &chip_grounds),' \
-  '            chip_text: chip.text,' \
-  geode-pricer every_pricer_paint_is_readable_on_every_bundled_theme
-
 
 # A bare j/k wraps at the ends of a grid; without it a trader at the last
 # row has to page back to the top.

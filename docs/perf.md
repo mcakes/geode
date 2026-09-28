@@ -1709,6 +1709,27 @@ worst keystroke (a sheet-wide `:shift` plus the rebuild) reads under 3 ms
 from the earlier six-measure `apply_undo_sheet_shift_1000` figure, which
 was not re-run here.
 
+### Pricer tree column (2026-09-28)
+
+`cargo bench -p geode-pricer --bench core -- grid_build_1000`, the same
+fixture, after column 0 became a connector tree: the build now formats a
+summary (distinct expiries, then distinct strikes) and a leg-count note per
+package, and a line or leg shares one shorthand string between its painted
+`text` and its `search` key. Apple M5 Pro, rustc 1.96.0, bench profile, 100
+samples, run twice back to back. **The machine was heavily loaded** (load
+average 45 then 27 over one minute, 64–81 over five and fifteen; other
+sessions' builds).
+
+| Run | Load (1 min) | Result |
+|---|---|---|
+| first | 45 → 36 | 2.15 ms (2.1511 ms; interval 2.0513–2.2641 ms, 2 outliers) |
+| second | 34 → 27 | 1.66 ms (1.6560 ms; interval 1.6247–1.6956 ms, 8 high severe) |
+
+Against slice 1's 1.09 ms (taken at load 9–15) the reading is higher, but
+the two runs here differ by 23% with only the load changing, so the
+difference is not attributed to the change; a quiet-machine re-run is
+owed. Either reading is well inside the 8 ms budget.
+
 ## Timeseries chart (spec §8, Part 3)
 
 What one **cache miss** costs the render thread in `geode-chart`: the
