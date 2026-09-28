@@ -198,6 +198,26 @@ pub fn effective_binding<'a>(bindings: &'a [Binding], action: &ActionId) -> Opti
         .map(|(_, b)| b)
 }
 
+/// The effective binding for `action` among the builtin and desk layers alone:
+/// what the action falls back to once every user override is gone. Shadowing
+/// uses [`effective_binding`]'s source-string approximation.
+pub fn effective_lower_binding<'a>(
+    bindings: &'a [Binding],
+    action: &ActionId,
+) -> Option<&'a Binding> {
+    bindings
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, b)| b.layer != Layer::User && b.action == *action)
+        .find(|(i, b)| {
+            !bindings[i + 1..]
+                .iter()
+                .any(|later| later.layer != Layer::User && shadows(later, b))
+        })
+        .map(|(_, b)| b)
+}
+
 /// Collect user entries to remove when resetting `action`: bindings naming
 /// the action, plus `"none"` entries covering its live lower-layer bindings.
 ///
@@ -206,18 +226,33 @@ pub fn effective_binding<'a>(bindings: &'a [Binding], action: &ActionId) -> Opti
 /// from restoring a key that the desk assigned to another. Context coverage uses
 /// [`effective_binding`]'s source-string approximation. Results retain original
 /// key spellings and are sorted and deduplicated by context and key.
+///
+/// An orphan unbind also belongs to `action`: a user `"none"` that shadows no
+/// lower-layer binding at all under that approximation, on the keys of one of
+/// `action`'s live lower-layer bindings. A dialog rebind of a module binding
+/// that was later retired into a shared action (a renamed id now shipped once
+/// under a shared context) leaves exactly this: the shipped key moved to
+/// another context string, so the shadow no longer matches it textually, yet
+/// it still silences that key wherever its own context holds. Missing it kept
+/// the key dead after `r`. An orphan on a key several actions share is
+/// collected for each of them; removing it restores lower layers only.
 pub fn user_overrides_for(bindings: &[Binding], action: &ActionId) -> Vec<UserOverride> {
     let lower: Vec<&Binding> = bindings.iter().filter(|b| b.layer != Layer::User).collect();
+    let live = |i: usize, l: &Binding| !lower[i + 1..].iter().any(|later| shadows(later, l));
     let mut out: Vec<UserOverride> = Vec::new();
     for b in bindings.iter().filter(|b| b.layer == Layer::User) {
         let is_override = if b.action == *action {
             true
         } else if b.action.0 == UNBOUND_ACTION {
-            lower.iter().enumerate().any(|(i, l)| {
-                l.action == *action
-                    && shadows(b, l)
-                    && !lower[i + 1..].iter().any(|later| shadows(later, l))
-            })
+            let covers_live = lower
+                .iter()
+                .enumerate()
+                .any(|(i, l)| l.action == *action && shadows(b, l) && live(i, l));
+            let orphan = !lower.iter().any(|l| shadows(b, l))
+                && lower.iter().enumerate().any(|(i, l)| {
+                    l.action == *action && l.keystrokes == b.keystrokes && live(i, l)
+                });
+            covers_live || orphan
         } else {
             false
         };
@@ -482,16 +517,76 @@ mod tests {
     #[test]
     fn a_shadow_in_a_different_context_is_not_this_actions_override() {
         // Different context strings are treated as independent by display/reset
-        // resolution, even though predicates can overlap during dispatch.
+        // resolution, even though predicates can overlap during dispatch. The
+        // shadow silences the lower `blotter` binding on its key, so it is that
+        // binding's action's override, not an orphan this action adopts.
+        let builtin = doc(
+            Layer::Builtin,
+            "[[bindings]]\ncontext = \"workspace\"\n[bindings.keys]\n\"mod+h\" = \"workspace::focus_left\"\n\n\
+             [[bindings]]\ncontext = \"blotter\"\n[bindings.keys]\n\"mod+h\" = \"workspace::focus_right\"\n",
+        );
+        let user = doc(
+            Layer::User,
+            "[[bindings]]\ncontext = \"blotter\"\n[bindings.keys]\n\"mod+h\" = \"none\"\n",
+        );
+        assert!(overrides(&[builtin.clone(), user.clone()], &focus_left()).is_empty());
+        let focus_right = ActionId("workspace::focus_right".to_string());
+        assert_eq!(
+            overrides(&[builtin, user], &focus_right),
+            vec![(Some("blotter".to_string()), "mod+h".to_string())]
+        );
+    }
+
+    /// A shadow whose context covers no lower binding at all is an orphan:
+    /// what a dialog rebind left over a module key since retired into a
+    /// shared action. It still silences that key wherever its context
+    /// holds, so resetting the action the key now reaches removes it.
+    #[test]
+    fn an_orphan_shadow_on_a_live_key_of_the_action_is_its_override() {
         let builtin = doc(
             Layer::Builtin,
             "[[bindings]]\ncontext = \"workspace\"\n[bindings.keys]\n\"mod+h\" = \"workspace::focus_left\"\n",
         );
         let user = doc(
             Layer::User,
-            "[[bindings]]\ncontext = \"blotter\"\n[bindings.keys]\n\"mod+h\" = \"none\"\n",
+            "[[bindings]]\ncontext = \"blotter\"\n[bindings.keys]\n\"mod+h\" = \"none\"\n\"mod+y\" = \"none\"\n",
         );
-        assert!(overrides(&[builtin, user], &focus_left()).is_empty());
+        assert_eq!(
+            overrides(&[builtin, user], &focus_left()),
+            vec![(Some("blotter".to_string()), "mod+h".to_string())],
+            "the orphan on focus_left's key is its override; the one on an \
+             unbound key is nobody's"
+        );
+    }
+
+    /// The case the orphan rule exists for, on the shipped keymap: a rebind
+    /// of the retired `blotter::down` under the blotter's visual context
+    /// wrote `n` and a `j` shadow there. `j` now ships once under the grid
+    /// context, so the shadow shadows nothing textually, yet it is Motion:
+    /// down's override beside the renamed `n`.
+    #[test]
+    fn an_old_module_rebind_of_a_retired_motion_is_all_the_motions_override() {
+        let mut reg = ActionRegistry::default();
+        crate::defaults::register_builtin_actions(&mut reg);
+        reg.register_rename("blotter::down", "motion::down")
+            .unwrap();
+        let builtin = LayerDoc::builtin("keymap", crate::defaults::BUILTIN_KEYMAP).unwrap();
+        let user = doc(
+            Layer::User,
+            "[[bindings]]\ncontext = \"blotter && mode == visual\"\n[bindings.keys]\n\
+             \"n\" = \"blotter::down\"\n\"j\" = \"none\"\n",
+        );
+        let (keymap, _) = build_keymap(&[builtin, user], Modifiers::ALT, &reg);
+        let got: Vec<(Option<String>, String)> =
+            user_overrides_for(keymap.bindings(), &ActionId("motion::down".to_string()))
+                .into_iter()
+                .map(|o| (o.context_source, o.key))
+                .collect();
+        let ctx = Some("blotter && mode == visual".to_string());
+        assert_eq!(
+            got,
+            vec![(ctx.clone(), "j".to_string()), (ctx, "n".to_string())]
+        );
     }
 
     #[test]

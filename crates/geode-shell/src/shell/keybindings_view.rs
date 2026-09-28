@@ -32,11 +32,12 @@ use crate::actions::{ActionId, ActionRegistry};
 use crate::dialogmode::{self, DialogMode, EscapeStep, NormalCommand};
 use crate::footer::{Hint, HintRow};
 use crate::keymap::{
-    Binding, Keymap, Keystroke, Modifiers, UserOverride, effective_binding, user_overrides_for,
+    Binding, Keymap, Keystroke, Modifiers, UserOverride, effective_binding,
+    effective_lower_binding, user_overrides_for,
 };
 use crate::keymap_edit::{
-    Displacement, Rebind, ResetOutcome, Unbind, apply_rebind, apply_reset, apply_reset_all,
-    apply_unbind,
+    Displacement, Rebind, ResetOutcome, Unbind, apply_rebind_clearing, apply_reset,
+    apply_reset_all, apply_unbind_clearing,
 };
 use crate::listfilter::{self, Ranked};
 use crate::palette;
@@ -83,6 +84,11 @@ pub struct KeybindingRow {
     /// from the whole keymap, never inferred from `current`, which is
     /// `None` on a shadowed row and only the new key on a rebound one.
     pub overrides: Vec<UserOverride>,
+    /// For a shared motion row only: the builtin/desk binding the action
+    /// falls back to once `overrides` are gone ([`effective_lower_binding`]).
+    /// A Motion row's rebind and unbind displace this key in the shared
+    /// context, whatever `current` shows. `None` on every other row.
+    pub base: Option<BoundKey>,
 }
 
 /// Derive registered actions with their display binding and user override set, sorted
@@ -97,18 +103,22 @@ pub fn derive_rows(registry: &ActionRegistry, keymap: &Keymap) -> Vec<Keybinding
     let mut rows: Vec<KeybindingRow> = registry
         .iter()
         .map(|def| {
-            let current = effective_binding(bindings, &def.id).map(|b| BoundKey {
+            let bound = |b: &Binding| BoundKey {
                 keystrokes: b.keystrokes.clone(),
                 context_source: b.context_source.clone(),
                 layer: b.layer,
                 key_source: b.key_source.clone(),
-            });
+            };
+            let base = crate::defaults::shared_motion_context(&def.id)
+                .and_then(|_| effective_lower_binding(bindings, &def.id))
+                .map(bound);
             KeybindingRow {
                 action: def.id.clone(),
                 title: def.title.clone(),
                 category: def.category.clone(),
-                current,
+                current: effective_binding(bindings, &def.id).map(bound),
                 overrides: user_overrides_for(bindings, &def.id),
+                base,
             }
         })
         .collect();
@@ -319,11 +329,117 @@ pub fn searchable_text(row: &KeybindingRow) -> String {
 }
 
 /// Detect a capture equal to the displayed binding. The caller skips persistence and
-/// its reload cycle for this no-op. Any sequence on an unbound row is new.
+/// its reload cycle for this no-op. Any sequence on an unbound row is new. A
+/// Motion row with an override outside its shared context is never a no-op:
+/// the capture still has that override to clear ([`rebind_plan`]).
 pub fn is_same_key_recapture(row: &KeybindingRow, new_keystrokes: &[Keystroke]) -> bool {
-    row.current
-        .as_ref()
-        .is_some_and(|bound| bound.keystrokes == new_keystrokes)
+    let all_shared = match crate::defaults::shared_motion_context(&row.action) {
+        None => true,
+        Some(shared) => row
+            .overrides
+            .iter()
+            .all(|o| o.context_source.as_deref() == Some(shared)),
+    };
+    all_shared
+        && row
+            .current
+            .as_ref()
+            .is_some_and(|bound| bound.keystrokes == new_keystrokes)
+}
+
+/// One dialog edit: the user overrides removed first, then an optional write,
+/// in one transaction.
+#[derive(Debug, Clone)]
+pub struct EditPlan<W> {
+    pub clear: Vec<UserOverride>,
+    /// `None` when clearing alone completes the edit.
+    pub write: Option<W>,
+}
+
+/// What committing `new_keystrokes` on `row` writes.
+///
+/// An ordinary row rebinds inside its displayed binding's context. A Motion
+/// row's edit is global: it clears every user override of the action (old
+/// per-module ids, their `"none"` shadows, and earlier shared edits), then
+/// writes the new key under the shared context and shadows the fallback
+/// ([`KeybindingRow::base`]) there. Writing into the displayed context would
+/// land a module context while an old-id override is displayed, leaving the
+/// other grid tiles on the old key. Capturing the fallback key itself only
+/// clears.
+pub fn rebind_plan(row: &KeybindingRow, new_keystrokes: &[Keystroke]) -> EditPlan<Rebind> {
+    let new_key = palette::render_binding(new_keystrokes);
+    let action = row.action.0.clone();
+    if let Some(shared) = crate::defaults::shared_motion_context(&row.action) {
+        let write = (row.base.as_ref().map(|b| b.keystrokes.as_slice()) != Some(new_keystrokes))
+            .then(|| Rebind {
+                context: Some(shared.to_string()),
+                new_key,
+                action,
+                old_key: row
+                    .base
+                    .as_ref()
+                    .map(|b| palette::render_binding(&b.keystrokes)),
+                old_key_is_user_layer: false,
+            });
+        return EditPlan {
+            clear: row.overrides.clone(),
+            write,
+        };
+    }
+    let rebind = Rebind {
+        context: row.current.as_ref().and_then(|b| b.context_source.clone()),
+        new_key,
+        action,
+        // A user-layer old key is REMOVED from the user file, so it must
+        // be named by the file's spelling; a lower-layer one is shadowed
+        // under a fresh key, where the rendered spelling is as good.
+        old_key: row.current.as_ref().map(|b| {
+            if b.layer == Layer::User {
+                b.key_source.clone()
+            } else {
+                palette::render_binding(&b.keystrokes)
+            }
+        }),
+        old_key_is_user_layer: row.current.as_ref().is_some_and(|b| b.layer == Layer::User),
+    };
+    EditPlan {
+        clear: Vec::new(),
+        write: Some(rebind),
+    }
+}
+
+/// What `d` on `row` writes; `None` on an unbound row.
+///
+/// An ordinary row removes its displayed user key or shadows its displayed
+/// lower-layer key, in that binding's context. A Motion row clears every user
+/// override of the action and shadows the fallback key under the shared
+/// context, so the motion is silenced in every tile rather than only where an
+/// old-id override was displayed. With no fallback, clearing alone unbinds it.
+pub fn unbind_plan(row: &KeybindingRow) -> Option<EditPlan<Unbind>> {
+    let bound = row.current.as_ref()?;
+    if let Some(shared) = crate::defaults::shared_motion_context(&row.action) {
+        return Some(EditPlan {
+            clear: row.overrides.clone(),
+            write: row.base.as_ref().map(|b| Unbind {
+                context: Some(shared.to_string()),
+                key: palette::render_binding(&b.keystrokes),
+                is_user_layer: false,
+            }),
+        });
+    }
+    let is_user_layer = bound.layer == Layer::User;
+    Some(EditPlan {
+        clear: Vec::new(),
+        write: Some(Unbind {
+            context: bound.context_source.clone(),
+            key: if is_user_layer {
+                bound.key_source.clone()
+            } else {
+                palette::render_binding(&bound.keystrokes)
+            },
+            is_user_layer,
+        }),
+    })
 }
 
 // ---------------------------------------------------------------------
@@ -669,38 +785,29 @@ fn spawn_rebind(
         );
         return;
     };
-    let rebind = Rebind {
-        context: row.current.as_ref().and_then(|b| b.context_source.clone()),
-        new_key: palette::render_binding(&new_keystrokes),
-        action: row.action.0.clone(),
-        // A user-layer old key is REMOVED from the user file, so it must
-        // be named by the file's spelling; a lower-layer one is shadowed
-        // under a fresh key, where the rendered spelling is as good.
-        old_key: row.current.as_ref().map(|b| {
-            if b.layer == Layer::User {
-                b.key_source.clone()
-            } else {
-                palette::render_binding(&b.keystrokes)
-            }
-        }),
-        old_key_is_user_layer: row.current.as_ref().is_some_and(|b| b.layer == Layer::User),
-    };
+    let EditPlan { clear, write } = rebind_plan(row, &new_keystrokes);
+    let action = row.action.0.clone();
     crate::config_write::submit(&user_dir.clone(), cx.background_executor(), move || {
-        match apply_rebind(&user_dir, &rebind) {
+        let Some(rebind) = write else {
+            // The capture is the shared fallback key: clearing is the edit.
+            if let Err(e) = apply_reset(&user_dir, &clear) {
+                tracing::warn!(target: "geode::config", "failed to reset {action}: {e}");
+            }
+            return;
+        };
+        match apply_rebind_clearing(&user_dir, &clear, &rebind) {
             Ok(outcome) if outcome.displacement == Displacement::OldKeyNotFound => {
                 tracing::warn!(
                     target: "geode::config",
-                    "the previous binding for {} was not found where expected while \
+                    "the previous binding for {action} was not found where expected while \
                      saving the new one — it may still be reachable from wherever it \
-                     actually lives",
-                    rebind.action
+                     actually lives"
                 );
             }
             Ok(_) => {}
             Err(e) => tracing::warn!(
                 target: "geode::config",
-                "failed to save the new binding for {}: {e}",
-                rebind.action
+                "failed to save the new binding for {action}: {e}"
             ),
         }
     })
@@ -732,27 +839,17 @@ fn unbind_selected(
         // Report the missing target without submitting a write.
         return Some(format!("{} is already unbound", row.title));
     };
-    let is_user_layer = bound.layer == Layer::User;
-    let key = if is_user_layer {
-        bound.key_source.clone()
-    } else {
-        palette::render_binding(&bound.keystrokes)
+    let plan = unbind_plan(row).expect("a bound row has an unbind plan");
+    let notice = match &plan.write {
+        Some(u) if u.is_user_layer => format!("removing your {} binding", u.key),
+        Some(u) => format!("silencing {} — {RECOVERY}", u.key),
+        // A Motion row with no fallback: clearing the overrides unbinds it.
+        None => format!("removing your {} binding", bound.key_source),
     };
-    let unbind = Unbind {
-        context: bound.context_source.clone(),
-        key: key.clone(),
-        is_user_layer,
-    };
-    spawn_unbind(unbind, row.action.0.clone(), user_dir, cx)
+    spawn_unbind(plan, row.action.0.clone(), user_dir, cx)
         // Describe a dispatched write, not a confirmed result. A stale on-disk key or
         // write failure is logged; the watcher reload supplies the eventual row.
-        .or_else(|| {
-            Some(if is_user_layer {
-                format!("removing your {key} binding")
-            } else {
-                format!("silencing {key} — {RECOVERY}")
-            })
-        })
+        .or(Some(notice))
 }
 
 /// Remove the selected action's complete user override set in one write. This includes
@@ -858,7 +955,7 @@ fn no_user_dir_notice(what: &str) -> String {
 /// Return a notice only if the user configuration directory is unavailable. The
 /// detached writer reports its result through logs.
 fn spawn_unbind(
-    unbind: Unbind,
+    plan: EditPlan<Unbind>,
     action: String,
     user_dir: &Option<PathBuf>,
     cx: &mut Context<ShellView>,
@@ -867,7 +964,16 @@ fn spawn_unbind(
         return Some(no_user_dir_notice(&action));
     };
     crate::config_write::submit(&user_dir.clone(), cx.background_executor(), move || {
-        match apply_unbind(&user_dir, &unbind) {
+        let EditPlan { clear, write } = plan;
+        let Some(unbind) = write else {
+            if let Err(e) = apply_reset(&user_dir, &clear) {
+                tracing::warn!(target: "geode::config",
+                    "failed to change the binding for {action}: {e}"
+                );
+            }
+            return;
+        };
+        match apply_unbind_clearing(&user_dir, &clear, &unbind) {
             Ok(outcome) if unbind.is_user_layer && !outcome.removed => {
                 tracing::warn!(target: "geode::config",
                     "the binding for {action} was not found where \
@@ -1553,6 +1659,7 @@ mod tests {
                 key_source: "ctrl+h".to_string(),
             }),
             overrides: Vec::new(),
+            base: None,
         }
     }
 
@@ -1577,6 +1684,7 @@ mod tests {
             category: "Workspace".to_string(),
             current: None,
             overrides: Vec::new(),
+            base: None,
         };
         assert!(!is_same_key_recapture(&row, &[ctrl("h")]));
     }
@@ -1598,6 +1706,7 @@ mod tests {
             category: category.to_string(),
             current: None,
             overrides: Vec::new(),
+            base: None,
         })
         .to_vec()
     }

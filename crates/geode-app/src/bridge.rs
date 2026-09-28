@@ -5728,6 +5728,69 @@ role = "key"
         }
     }
 
+    /// Rebinding Motion: down from the keybindings dialog while an old
+    /// `blotter::down` rebind (its key plus a `"none"` over the `j` the
+    /// blotter shipped) is displayed. The dialog's plan clears both and
+    /// writes the shared grid context, so the new key moves every grid tile,
+    /// the arrow still does, and `j` is silenced everywhere rather than in
+    /// the blotter alone.
+    #[gpui::test]
+    fn a_motion_row_rebind_over_an_old_blotter_override_moves_every_grid_tile(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use geode_shell::keymap::parse_keystroke;
+        use geode_shell::shell::keybindings_view::{derive_rows, rebind_plan};
+        init_grid_modules(cx);
+        let old = "config_version = 1\n\n[[bindings]]\ncontext = \"blotter && mode == normal\"\n\
+                   [bindings.keys]\n\"n\" = \"blotter::down\"\n\"j\" = \"none\"\n";
+        assert_eq!(
+            dispatch_counts(cx, "blotter", Some(old), &["j", "n"], &["motion::down"]),
+            vec![1],
+            "fixture: j is dead in the blotter and the old n moves it"
+        );
+        let (services, _) = shell_with_one_grid_tile("blotter", Some(old));
+        let rows = derive_rows(&services.registry, &services.keymap);
+        let row = rows
+            .iter()
+            .find(|r| r.action.0 == "motion::down")
+            .expect("a Motion: down row");
+        let n = parse_keystroke("n", services.mod_alias).unwrap();
+        let plan = rebind_plan(row, &[n]);
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("keymap.toml"), old).unwrap();
+        geode_shell::keymap_edit::apply_rebind_clearing(
+            dir.path(),
+            &plan.clear,
+            plan.write.as_ref().expect("a new key is a write"),
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(dir.path().join("keymap.toml")).unwrap();
+        // The emptied blotter entry stays (its comments would); its keys go.
+        assert!(!text.contains("blotter::down"), "{text}");
+        assert_eq!(
+            text.matches("\"none\"").count(),
+            1,
+            "one shared shadow: {text}"
+        );
+
+        for kind in GRID_KINDS {
+            let (_, diags) = shell_with_one_grid_tile(kind, Some(&text));
+            assert!(diags.is_empty(), "{kind}: {diags:?}");
+            assert_eq!(
+                dispatch_counts(
+                    cx,
+                    kind,
+                    Some(&text),
+                    &["n", "j", "down"],
+                    &["motion::down"]
+                ),
+                vec![2],
+                "{kind}: n and down move, j is silenced\n{text}"
+            );
+        }
+    }
+
     /// An override written against the retired `marketdata::down` keeps
     /// working in the market-data panel, only there, and warns naming both.
     #[gpui::test]

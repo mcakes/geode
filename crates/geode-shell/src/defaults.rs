@@ -174,6 +174,21 @@ pub const MOTION_ACTIONS: &[(&str, &str)] = &[
     ("motion::menu_up", "Menu: previous"),
 ];
 
+/// The context a shared motion ships under, `None` for any other action.
+/// The keybindings dialog writes a Motion row's edits here rather than into
+/// the displayed binding's context, which an old per-module override can
+/// make a module context: an edit of a shared motion is global.
+pub fn shared_motion_context(action: &ActionId) -> Option<&'static str> {
+    let id = action.0.as_str();
+    if !MOTION_ACTIONS.iter().any(|(m, _)| *m == id) {
+        None
+    } else if matches!(id, "motion::menu_down" | "motion::menu_up") {
+        Some(crate::keymap::TILELIST)
+    } else {
+        Some(GRID_MOTION_CONTEXT)
+    }
+}
+
 fn action(reg: &mut ActionRegistry, id: &str, title: &str, category: &str) {
     reg.register(ActionDef {
         id: ActionId(id.to_string()),

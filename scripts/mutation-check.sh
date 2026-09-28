@@ -2038,11 +2038,11 @@ run_mutation "keybindings: d removes where it should shadow a lower layer" \
 # would silence the binding it is meant to restore.
 run_mutation "keybindings: r shadows instead of removing the user's override" \
   crates/geode-shell/src/keymap_edit.rs \
-  '                if keys.remove(&o.key).is_some() {
-                    removed += 1;
-                }' \
-  '                set_key(keys, o.key.as_str(), value("none"));
-                removed += 1;' \
+  '            if keys.remove(&o.key).is_some() {
+                removed += 1;
+            }' \
+  '            set_key(keys, o.key.as_str(), value("none"));
+            removed += 1;' \
   geode-shell \
   r_resets_a_user_override_by_removing_it
 
@@ -2056,6 +2056,51 @@ run_mutation "keymap: a reset misses the none shadow half of a rebind" \
   geode-shell \
   r_on_a_rebound_builtin_removes_the_new_key_and_lifts_the_shadow
 
+# An old dialog rebind of a module id since renamed into a shared motion
+# left a "none" under the module context over a key that now ships under
+# the grid context. It shadows nothing textually but still silences the
+# key there; without the orphan rule `r` leaves the key dead.
+run_mutation "keymap: a reset leaves an old module rebind's orphan shadow" \
+  crates/geode-shell/src/keymap/build.rs \
+  '            covers_live || orphan' \
+  '            covers_live' \
+  geode-shell \
+  an_old_module_rebind_of_a_retired_motion_is_all_the_motions_override
+
+# A Motion row edit is global: written into the displayed binding's
+# context, it lands in an old override's module context and every other
+# grid tile keeps the old key.
+run_mutation "keybindings: a Motion row rebind writes the displayed module context" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '                context: Some(shared.to_string()),
+                new_key,' \
+  '                context: row.current.as_ref().and_then(|b| b.context_source.clone()),
+                new_key,' \
+  geode-shell \
+  rebinding_a_motion_row_writes_the_shared_context_and_clears_old_overrides
+
+# The same mutation through the app's real modules and tiles: the new key
+# must move every grid tile, not the blotter alone.
+run_mutation "motion e2e: a Motion row rebind writes the displayed module context" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '                context: Some(shared.to_string()),
+                new_key,' \
+  '                context: row.current.as_ref().and_then(|b| b.context_source.clone()),
+                new_key,' \
+  geode-app \
+  a_motion_row_rebind_over_an_old_blotter_override_moves_every_grid_tile
+
+# A Motion row rebind clears the action's old per-module overrides in the
+# same write; left in place they still win in their module contexts.
+run_mutation "keybindings: a Motion row rebind leaves old module overrides" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '            clear: row.overrides.clone(),
+            write,' \
+  '            clear: Vec::new(),
+            write,' \
+  geode-shell \
+  rebinding_a_motion_row_writes_the_shared_context_and_clears_old_overrides
+
 # A shadow silences the LIVE lower binding on its key. Where the desk
 # re-purposed a builtin key to another action, the user's shadow is the
 # desk action's override; claiming it for the builtin action's row would
@@ -2063,8 +2108,8 @@ run_mutation "keymap: a reset misses the none shadow half of a rebind" \
 # one, and leave this one exactly as unbound as before.
 run_mutation "keymap: a reset lifts a shadow over a key a lower layer re-purposed" \
   crates/geode-shell/src/keymap/build.rs \
-  '                    && !lower[i + 1..].iter().any(|later| shadows(later, l))' \
-  '' \
+  '    let live = |i: usize, l: &Binding| !lower[i + 1..].iter().any(|later| shadows(later, l));' \
+  '    let live = |_: usize, _: &Binding| true;' \
   geode-shell \
   a_shadow_over_a_key_a_lower_layer_repurposed_is_the_repurposers_override
 
@@ -2083,8 +2128,8 @@ run_mutation "keymap: a reset takes another action's user binding" \
 # removing someone else's binding.
 run_mutation "keymap: a reset takes a shadow from an unrelated context" \
   crates/geode-shell/src/keymap/build.rs \
-  '                    && shadows(b, l)' \
-  '                    && l.keystrokes == b.keystrokes' \
+  '                .any(|(i, l)| l.action == *action && shadows(b, l) && live(i, l));' \
+  '                .any(|(i, l)| l.action == *action && l.keystrokes == b.keystrokes && live(i, l));' \
   geode-shell \
   a_shadow_in_a_different_context_is_not_this_actions_override
 
@@ -2112,22 +2157,22 @@ run_mutation "keymap: a reset names the rendered key, not the file's spelling" \
 # behind on every miss.
 run_mutation "keymap_edit: a reset creates the entry it was going to remove from" \
   crates/geode-shell/src/keymap_edit.rs \
-  '            for entry in bindings.iter_mut().filter(|entry| {
-                entry.get("context").and_then(Item::as_str) == o.context_source.as_deref()
-            }) {
-                let Some(keys) = entry.get_mut("keys").and_then(Item::as_table_like_mut) else {
-                    continue;
-                };
-                if keys.remove(&o.key).is_some() {
-                    removed += 1;
-                }
-            }' \
-  '            {
-                let keys = keys_table_for(bindings, o.context_source.as_deref());
-                if keys.remove(&o.key).is_some() {
-                    removed += 1;
-                }
-            }' \
+  '        for entry in bindings.iter_mut().filter(|entry| {
+            entry.get("context").and_then(Item::as_str) == o.context_source.as_deref()
+        }) {
+            let Some(keys) = entry.get_mut("keys").and_then(Item::as_table_like_mut) else {
+                continue;
+            };
+            if keys.remove(&o.key).is_some() {
+                removed += 1;
+            }
+        }' \
+  '        {
+            let keys = keys_table_for(bindings, o.context_source.as_deref());
+            if keys.remove(&o.key).is_some() {
+                removed += 1;
+            }
+        }' \
   geode-shell \
   resetting_a_key_that_is_not_there_counts_nothing_and_creates_no_entry
 
@@ -2239,13 +2284,7 @@ run_mutation "keybindings: r cannot lift the user's own none shadow" \
 # notice before run_until_parked rather than only checking the file.
 run_mutation "keybindings: d performs its write without acknowledging it" \
   crates/geode-shell/src/shell/keybindings_view.rs \
-  '        .or_else(|| {
-            Some(if is_user_layer {
-                format!("removing your {key} binding")
-            } else {
-                format!("silencing {key} — {RECOVERY}")
-            })
-        })
+  '        .or(Some(notice))
 ' \
   '' \
   geode-shell \
@@ -2281,12 +2320,12 @@ run_mutation "keybindings: d promises the retired retype recovery" \
 # knowing.
 run_mutation "keybindings: d removes the user's key by its rendered spelling" \
   crates/geode-shell/src/shell/keybindings_view.rs \
-  '    let key = if is_user_layer {
-        bound.key_source.clone()
-    } else {
-        palette::render_binding(&bound.keystrokes)
-    };' \
-  '    let key = palette::render_binding(&bound.keystrokes);' \
+  '            key: if is_user_layer {
+                bound.key_source.clone()
+            } else {
+                palette::render_binding(&bound.keystrokes)
+            },' \
+  '            key: palette::render_binding(&bound.keystrokes),' \
   geode-shell \
   d_on_a_user_binding_spelled_with_mod_removes_it_by_the_files_spelling
 
