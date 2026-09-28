@@ -435,7 +435,11 @@ fn a_huge_counted_group_refuses_without_overflowing(cx: &mut gpui::TestAppContex
     );
     assert_eq!(rows(&h, &vcx), before);
     set_expr(&h, &mut vcx, "strike != 3000");
-    assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(1), "fixture: on the 4000 line");
+    assert_eq!(
+        h.cursor(&vcx).map(|c| c.0),
+        Some(1),
+        "fixture: on the 4000 line"
+    );
     assert_eq!(
         h.command(&mut vcx, "group 18446744073709551615"),
         Err("a line in that range is hidden by the scope".to_string())

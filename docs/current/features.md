@@ -1281,6 +1281,89 @@ the diagnostics page is visible, so it can predate the removal. A name whose sav
 queued but not yet confirmed counts as taken: a new tile's `untitled-N` and
 `:name` skip it.
 
+### The frame's scope
+
+The tile follows its frame's scope. The sheet is not stored data, so the
+scope is evaluated in process, by `geode_core::scope::eval`, over each sheet
+line as a row of the `pricer` dataset; that evaluator is pinned to the SQL a
+blotter's query runs (see [the parity contract](data-path.md#queries-and-time-travel)),
+so a scope means the same thing on both. The scope is the frame's effective
+scope with its named expressions resolved; the pricer has no tile scope
+layer (`:filter`).
+
+A line's values are the ones its cells paint. Text columns read the painted
+text; `strike`, `barrier` and the shifts read the number as typed (a percent
+strike reads its percent); `qty` reads the integer. A measure reads result ×
+qty, the position value `risk_snapshot` means by the same name, although the
+line's cell paints the per-unit result: `npv < 0` keeps a short line whose
+per-unit npv is positive. A leg's `template` is its package's token, because
+`template` is a position-grain column and a leg's position is its package; a
+bare line has none. A blank cell, a measure on an unpriced or failed line,
+and the currency of an unpriced line are NULL. NULL follows SQL: only TRUE
+keeps a line, so `npv > 0` hides an unpriced line and so does
+`not (currency = 'USD')`. The text filter searches the nine textual
+dimensions (see [configuration](configuration.md)).
+
+The scope is re-applied on every model rebuild: an edit, a price delivery, a
+load or reload, a clock change and a frame change. A scope over a measure or
+`status` moves lines in and out as prices arrive. The tile answers the
+frame's flip barrier on every frame change, whether the scope applied, was
+refused, or is ignored under `:unscoped`.
+
+What the pricer drops and what it refuses:
+
+- A dimension selection on a column `pricer` lacks (a desk-wide `book`
+  selection) is dropped, as any dataset drops a selection it cannot answer.
+  It does not blank the pricer.
+- An expression naming a column `pricer` lacks refuses the whole scope, with
+  `scope refused: 'book' is not a pricer column`. The pricer never evaluates
+  the half of `underlying_ref = 'SPX' and book = 'X'` it knows.
+- A comparison DuckDB would reject refuses the whole scope with
+  `scope refused: <reason>`, even when only one line's value fails
+  (`underlying_ref = 5` casts every underlying to a number).
+- A refused scope hides nothing. The refusal stands in the header as a
+  danger notice while it holds, through deliveries and edits, and goes when
+  the frame's scope becomes one the pricer can honour. A transient notice
+  covers it while that notice lasts.
+
+Hidden lines stay in the sheet: they keep pricing, saving and repricing on
+the refresh timer. The header counts them in muted text as `N hidden`, absent
+at zero. A package shows when any of its legs does. A package whose legs
+are partly hidden paints only its shown legs: its leg count reads
+`· N of M legs`, and its summary, aggregating columns, results, status,
+priced time and find key cover only those legs. A selection total counts the
+shown legs too. Painting the whole package's fold under a row whose legs are
+partly hidden would be a plausible wrong total.
+
+A partly hidden package's row is read-only. These refuse with
+`package partly hidden by the scope: edit its legs` and change nothing: `i`,
+`enter` or a double-click on its cells; a typed commit or a live step over a
+selection containing it; and the structural verbs `d`, `shift+j`/`shift+k`,
+`g p` and `g u`, from keys, the `.` menu, `:group` or `:ungroup`, because
+each would act on the hidden legs too. A selection containing one refuses
+whole. Yank, put, fold and find still work, and a shown leg edits and
+deletes as usual. A counted `g p` takes the next sheet rows, hidden ones
+included, so it refuses with `a line in that range is hidden by the scope`
+when any of them is hidden. `:unscoped` shows the whole package to edit it.
+
+When the scope hides the cursor's line, the cursor moves to the nearest
+shown line above it in sheet order, else the nearest below, not to whatever
+row slid into its index. A cursor restored from the session onto a hidden
+line recovers the same way.
+
+`:unscoped` makes the tile ignore the frame's scope and show every line; the
+header paints a warning `unscoped` chip whose tooltip says it ignores the
+shared scope and that `:unscoped` re-attaches it. The flag rides the tile's
+session record, as the blotter's does. `:unscoped` again re-applies the
+frame's current scope at once.
+
+Known limitations: `shift+j`/`shift+k` on a shown line can swap it with a
+hidden sibling, which changes sheet order with no visible change; the `.`
+menu keeps `delete` and `ungroup` enabled on a partly hidden package and
+refuses on pick rather than showing them disabled; evaluating the scope over
+1,000 lines and rebuilding the grid is measured in
+[performance](performance.md).
+
 ### Selection
 
 The sheet's grid selection follows the [blotter's](#selection): `V`

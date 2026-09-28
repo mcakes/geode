@@ -1730,6 +1730,44 @@ the two runs here differ by 23% with only the load changing, so the
 difference is not attributed to the change; a quiet-machine re-run is
 owed. Either reading is well inside the 8 ms budget.
 
+### Pricer scope (2026-09-28)
+
+What a frame-scope change or any rebuild under a scope costs the pricer
+tile: `apply_scope` evaluates the scope over every sheet line, then
+`GridModel::build` prepares the rows it shows. Fixture: the `grid_build_1000`
+sheet (1,000 entries, 1,200 rows, every package open, every line priced), the
+scope `underlying_ref = 'SPX' and strike >= 5000 and npv != 0` plus the text
+filter `spx`, which hides about half the lines (`strike >= 5000`; the bench
+asserts between 400 and 700 hidden). Every line matches the text filter, so
+all nine textual columns are read on every line. `expr_evaluate_row` is the
+core evaluator alone: a three-term expression and a text filter over one
+kept row of a four-column dataset.
+
+`cargo bench -p geode-pricer --bench core -- 'apply_scope_1000|grid_build_1000'`
+twice back to back, then `cargo bench -p geode-core --bench scope --
+expr_evaluate_row`. Apple M5 Pro, rustc 1.96.0, bench profile, 100 samples.
+Load average (1 min) 16.7 → 9.3 → 6.0 across the runs, falling from 50–60
+over five and fifteen minutes (other sessions' builds had just finished).
+
+| Benchmark | Run 1 | Run 2 |
+|---|---|---|
+| `grid_build_1000` (unscoped, reference) | 1.65 ms (1.6499; 1.6461–1.6534) | 1.67 ms (1.6671; 1.6642–1.6699) |
+| `apply_scope_1000` | 1.93 ms (1.9317; 1.9245–1.9383) | 1.92 ms (1.9165; 1.9066–1.9267) |
+| `grid_build_1000_scoped` | 684 µs (684.21; 682.62–685.76) | 693 µs (692.62; 689.92–697.02) |
+| `scope/expr_evaluate_row` (core) | 570 ns (570.10; 567.18–572.76) | — |
+
+A scoped rebuild is `apply_scope` plus the scoped build: about 2.6 ms, inside
+the 8 ms budget. `apply_scope` costs about 1.7 µs per line against the
+evaluator's 0.57 µs per row: the rest is `SheetRow` reading each column the
+way its cell paints it (`cell_text` formats the nine textual columns the text
+filter searches). The scoped build is cheaper than the unscoped one because
+it prepares half the rows.
+
+Earlier runs of the same benches during a load spike are not comparable and
+are recorded only as a warning: at load 34–43 `apply_scope_1000` read
+5.67 ms and the scoped build 806 µs; at load 34 → 129 they read 11.3 ms and
+18.5 ms with intervals several milliseconds wide.
+
 ## Timeseries chart (spec §8, Part 3)
 
 What one **cache miss** costs the render thread in `geode-chart`: the

@@ -188,6 +188,16 @@ leave it out. `computed` on a document or series dataset is an error and is
 cleared. The line pricer's `pricer` dataset is the one computed dataset every
 build declares.
 
+The `pricer` declaration marks its nine utf8 dimensions `textual = true`:
+`sheet`, `template`, `underlying_ref`, `expiry`, `option_type`, `currency`,
+`barrier_type`, `priced_at` and `status`. Its keys (`position_ref`,
+`instrument_ref`) are not textual. The frame's text filter searches exactly
+these columns on a pricer sheet, as it searches a stored dataset's textual
+columns (see [the evaluator's parity contract](data-path.md#queries-and-time-travel)).
+Derived dimensions in `dimensions.toml` apply to the pricer's scope as to a
+blotter's: a `dimensions` edit alone reloads the pricer, and the reload hands
+its factory the new dimensions before every open tile re-applies its scope.
+
 ## Source configuration
 
 `sources.toml` has one top-level table per source, such as `[risk_files]`.

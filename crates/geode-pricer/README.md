@@ -28,7 +28,8 @@ The pure core (`core`, no element, entity, window, or data service):
 | `tree` | Package expansion and the visible-row walk. |
 | `commands` | The `:` vocabulary (including `:autosize [reset]`): parse and completions. |
 | `storage` | The frozen `pricer_sheets` declaration; conversion between sheets, document rows, and a document answer. |
-| `select` | What a grid selection reaches on the sheet: the leaf lines an edit writes (`lines_of`), the top-most rows a verb or total acts on (`top_most`), the `g p` and `shift+j`/`shift+k` plans with their refusals, position risk totals (`risk_totals`), and the bulk notices' skip counts. |
+| `select` | What a grid selection reaches on the sheet: the leaf lines an edit writes (`lines_of`), the top-most rows a verb or total acts on (`top_most`), the `g p` and `shift+j`/`shift+k` plans with their refusals, position risk totals (`risk_totals`, and `risk_totals_visible`, which counts only a partly hidden package's shown legs), and the bulk notices' skip counts. |
+| `visibility` | Which lines the frame's scope hides: `apply_scope` runs `geode_core::scope::eval` over each line as a `pricer` dataset row (`SheetRow`, the values its cells paint; measures result × qty; a leg's `template` its package's) and returns a `Visibility` (shown per sheet row, hidden line count), or a refusal that hides nothing. Selections on columns `pricer` lacks are dropped; an expression naming one refuses. |
 
 The tile:
 
@@ -42,8 +43,8 @@ The tile:
 | `popup` | The typeahead, the entry bar's completion list, the sheet picker (`sheet_rows`, `SheetPicker`), and `PricerPick` (what a menu row does). The menu, popup geometry, the `:rm` confirm and the header notices paint through `geode-tile`. |
 | `session` | The tile's session record, including `:autosize`'s fitted widths (`column_widths`, read leniently). |
 | `content` | The factory, keymap fragment (verbs, field keys and the menu's pick and close keys; the grid motions and the menu steps are the shell's shared `motion::*` bindings), actions, the retired motion ids' renames (`RENAMED_ACTIONS`), settings, and the read-only `UnderlyingSource` seam. |
-| `tile` | `PricerTile`: modes (a key context that publishes `grid`, and `tilelist` while the action menu is open so the shared menu steps reach it), verbs, repricing, write-behind, load. Every `motion::*` id runs as one verb through `geode_tile::motion`, so it closes an open field or menu first like any other verb. `tile_columns` reports the plan's columns under the sheet's view with the cursor's column active, so the shell's `Edit column in view…` opens the Views dialog there. |
-| `tile::select` | The `V`/`v` selection's state doors (start, clear, re-resolve, footer extent and totals), the selection verbs, the one-typed-value commit, and the live step (`bulk_step`, `settle_bulk`, `take_back_steps`). |
+| `tile` | `PricerTile`: modes (a key context that publishes `grid`, and `tilelist` while the action menu is open so the shared menu steps reach it), verbs, repricing, write-behind, load. Every `motion::*` id runs as one verb through `geode_tile::motion`, so it closes an open field or menu first like any other verb. `tile_columns` reports the plan's columns under the sheet's view with the cursor's column active, so the shell's `Edit column in view…` opens the Views dialog there. The frame observer re-reads the frame's effective scope (the empty scope under `:unscoped`), rebuilds when it changed, then answers the flip barrier on every path; `rebuild` applies the scope before every `GridModel::build`, keeps a refusal as a standing header notice, and moves a cursor whose line the scope hid to the nearest shown line above (else below) in sheet order. |
+| `tile::select` | `partly_hidden_refusal`, the one door every structural verb (`d`, `shift+j`/`shift+k`, `g p`, `g u`, and `:group`/`:ungroup`) passes before it mutates; the `V`/`v` selection's state doors (start, clear, re-resolve, footer extent and totals), the selection verbs, the one-typed-value commit, and the live step (`bulk_step`, `settle_bulk`, `take_back_steps`). |
 
 The application uses `DuckSheetStore`: sheets are `pricer_sheets` documents in
 DuckDB and survive a restart. Session records retain sheet names and UI state;
@@ -64,6 +65,17 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 
 ## Invariants
 
+- A scope the pricer cannot evaluate refuses whole and hides nothing: an
+  expression column `pricer` lacks, or an evaluator error on any one line
+  (the SQL it mirrors fails the whole query). Never drop the failing term or
+  line and keep the rest; that narrows the sheet in a way no query does.
+  Hidden lines stay in the sheet and keep pricing and saving.
+- A package shows when any leg does. A partly hidden package's row paints its
+  shown legs only (`· N of M legs`, summary, aggregates, fold, find key,
+  selection totals) and is read-only: cell edits and every structural verb
+  refuse with `PARTLY_HIDDEN`, a selection containing one refuses whole, and
+  a counted `g p` over a hidden line refuses with `HIDDEN_IN_RANGE`. A new
+  verb that mutates a package's legs must pass `partly_hidden_refusal`.
 - Completion never runs in render; the tile refreshes it on every text change,
   history step, commit and reload, and a Tab at a moved caret re-ranks first.
   A completion write is one range replace (one undo step) whose own `Change`

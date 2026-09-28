@@ -1,5 +1,5 @@
-//! Parsing, edits and undo, result installation, storage conversion, and grid
-//! preparation for 1,000 shorthand entries. Every tenth entry is a two-leg
+//! Parsing, edits and undo, result installation, storage conversion, scope
+//! evaluation, and grid preparation for 1,000 shorthand entries. Every tenth entry is a two-leg
 //! package, so the sheet contains 1,200 rows. These benchmarks measure local
 //! model work, excluding pricing execution, database I/O, and painting.
 //! Budgets and reference measurements are in `docs/current/performance.md`.
@@ -7,10 +7,12 @@
 use chrono::Utc;
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use geode_core::clock::Clock;
+use geode_core::dimensions::DerivedDimensions;
 use geode_core::pricing::{Currency, Measure, PriceResult};
+use geode_core::scope::{Scope, parse_expr};
 use geode_pricer::core::{
     ColumnPlan, Edit, Expansion, LineId, OwnShifts, Place, RowSpec, Sheet, TemplateSet, Views,
-    Visibility, from_rows, parse, to_rows,
+    Visibility, apply_scope, from_rows, parse, to_rows,
 };
 use geode_pricer::grid::GridModel;
 use std::hint::black_box;
@@ -168,6 +170,41 @@ fn bench(c: &mut Criterion) {
                 &s,
                 &expansion,
                 &visibility,
+                &plan,
+                Clock::utc(),
+            ))
+        })
+    });
+
+    // The scope the tile applies on every rebuild: a three-term expression
+    // and a text filter over every line of the priced, opened sheet above.
+    // `strike >= 5000` hides about half the lines (strikes run 4000–5995),
+    // so the scoped build skips half the rows and folds the partly hidden
+    // packages' shown legs.
+    let scope = Scope {
+        expression: Some(
+            parse_expr("underlying_ref = 'SPX' and strike >= 5000 and npv != 0")
+                .expect("bench expression parses"),
+        ),
+        text: Some("spx".into()),
+        ..Scope::default()
+    };
+    let dims = DerivedDimensions::default();
+    let scoped = apply_scope(&s, &scope, &dims, Clock::utc()).expect("the scope applies");
+    assert!(
+        scoped.hidden > 400 && scoped.hidden < 700,
+        "about half hidden: {}",
+        scoped.hidden
+    );
+    g.bench_function("apply_scope_1000", |b| {
+        b.iter(|| black_box(apply_scope(&s, &scope, &dims, Clock::utc()).expect("applies")))
+    });
+    g.bench_function("grid_build_1000_scoped", |b| {
+        b.iter(|| {
+            black_box(GridModel::build(
+                &s,
+                &expansion,
+                &scoped,
                 &plan,
                 Clock::utc(),
             ))

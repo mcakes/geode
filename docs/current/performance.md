@@ -79,6 +79,9 @@ the measurement log for fixture and hardware details.
 | Line-pricer sheet shift + undo | 1,000 entries / 1,200 sheet rows | 1.52 ms |
 | Line-pricer single cell edit + undo | 1,000 entries / 1,200 sheet rows | 6.66 µs |
 | Line-pricer grid build | 1,000 entries / 1,200 sheet rows, every package open, each package row's `/`-joined leg values | 1.42 ms |
+| Line-pricer scope apply | 1,000 entries / 1,200 sheet rows, three-term expression plus text filter, half hidden | 1.92 ms |
+| Line-pricer scoped grid build | the same sheet under that scope | 692 µs |
+| In-process scope evaluation | one row, three-term expression plus text filter | 570 ns |
 | Scope expression suggestion refresh | 20,000 cached values, ranked and capped at 50 | 6.82 ms |
 
 The flat 10,000-row market-data build sits at the UI budget boundary. Ordinary
@@ -105,7 +108,9 @@ changes still rebuild.
   asks for the latest window when it answers, so statistics refresh at the
   query's own rate during a pan rather than being interrupted by each event.
 - A pricer grid model is rebuilt on edit, delivery, expansion, view, clock or
-  entry change, never in render; paints are a per-theme memo.
+  entry change, never in render; paints are a per-theme memo. Every rebuild
+  first re-evaluates the frame's scope over every line (`apply_scope`),
+  synchronously on the UI thread; the two together are the 8 ms budget.
 - Config dialogs derive rows at each render, key-handling, and click-resolution
   call site; they do not retain a row cache. Small row sets have measured costs
   in the tens of microseconds. Keybinding resolution repeatedly scans bindings
