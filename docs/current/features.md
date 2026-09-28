@@ -831,7 +831,12 @@ Collapse all, the level toggles, and the target select, which have no
 page binding or palette action yet; columns resize but do not move or sort, since no
 section defines a sort order yet; the config explainer shows at most 2,000
 leaves per document with an omitted-count row but still traverses every
-leaf; stopped data threads show on the status bar, not in Sources.
+leaf; stopped data threads show on the status bar, not in Sources. The page
+reads the frame of the workspace that was active when it was first opened:
+reopened over a different pinned workspace, its Data section follows that
+first workspace's as-of and its catalog chip can stay at "catalog pending"
+until the page is opened again from that workspace. A rebind on open is the
+planned fix.
 
 See the [crate guide](../../crates/geode-diagnostics/README.md) for the
 module map and the observer, notification, and allocation contracts.

@@ -225,8 +225,8 @@ mix two lanes (historical tiles without the historical stripe, for example).
 Refusing them keeps the dialog's lane and the active lane the same workspace
 for as long as a dialog is open.
 
-While a page is open the same three are refused with `close the page first
-(esc)`, and so are `tile::add`, every per-kind add action,
+While a page is open the three transient-chrome actions above are refused
+with `close the page first (esc)`, and so are `tile::add`, every per-kind add action,
 `tile::open_with`, `tile::autosize_columns`, and every `workspace::`,
 `dock::`, and `stack::` action except the workspace switches: the page
 covers the tile surface they would open on or change, and a layout edited
