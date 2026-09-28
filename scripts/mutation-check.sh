@@ -15499,6 +15499,36 @@ run_mutation "vol: a non-positive strike fails the job" \
   '                if let Some(bad) = strikes.iter().find(|k| !(**k).is_finite()) {' \
   geode-pricing a_non_positive_strike_fails_the_job_naming_it
 
+run_mutation "vol: a term on the anchor sits before the next day's" \
+  crates/geode-pricing/src/demo_vol.rs \
+  '    let days = if days <= 0 { MIN_DAYS } else { days as f64 };' \
+  '    let days = (days as f64).max(1.0);' \
+  geode-pricing an_anchor_day_and_next_day_term_still_slice_the_far_term
+
+run_mutation "vol: terms coincident in time refuse the document" \
+  crates/geode-pricing/src/demo_vol.rs \
+  '        if let Some(pair) = out.windows(2).find(|w| w[1].t <= w[0].t) {' \
+  '        if let Some(pair) = out.windows(2).find(|_| false) {' \
+  geode-pricing terms_that_share_a_year_fraction_are_refused
+
+run_mutation "vol: a node at or below -100% refuses its term" \
+  crates/geode-pricing/src/demo_vol.rs \
+  '            if rows.iter().any(|&i| nodes[i] <= -100.0) {' \
+  '            if rows.iter().any(|&i| nodes[i] < -100.0) {' \
+  geode-pricing a_node_at_or_below_minus_one_hundred_is_refused
+
+run_mutation "vol: density needs strictly ascending strikes" \
+  crates/geode-pricing/src/demo_vol.rs \
+  '        if req.density && strikes.windows(2).any(|w| w[1] <= w[0]) {' \
+  '        if req.density && strikes.windows(2).any(|w| w[1] < w[0]) {' \
+  geode-pricing density_on_strikes_not_strictly_ascending_is_refused
+
+run_mutation "vol restart: a [vol] model change requires a restart" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '            if new_config.get("app", "vol.model").cloned() != self.vol_baseline {' \
+  '            if false && new_config.get("app", "vol.model").cloned() != self.vol_baseline {' \
+  geode-shell a_vol_model_change_requires_a_restart_and_a_revert_clears_it
+
 run_mutation "vol worker: a replacement for a queued key takes its slot" \
   crates/geode-data/src/vol/worker.rs \
   '        if let Some(slot) = q.pending.get_mut(&key) {
@@ -15533,6 +15563,12 @@ run_mutation "vol service: a full queue answers every job" \
                 .collect(),' \
   '            results: Vec::new(),' \
   geode-data a_full_vol_queue_answers_the_refused_batch_with_an_error_per_job
+
+run_mutation "vol service: cancel reaches the vol worker" \
+  crates/geode-data/src/service.rs \
+  '        self.vol.cancel(key);' \
+  '' \
+  geode-data a_vol_request_reaches_the_sink_and_cancel_reaches_the_vol_worker
 
 run_mutation "vol handle: a request-loop panic answers every job" \
   crates/geode-data/src/handle.rs \
