@@ -2036,8 +2036,26 @@ Criterion median.
 The first baseline (`--save-baseline panels-before`, load 36) read
 791 µs / 21.8 ms / 474 ns for the same three benches. No pair shows the
 post-change binary slower beyond the run-to-run swing; the load rules out a
-10 % bound either way. An unloaded re-measure is owed before these replace
-the reference values in `docs/current/performance.md`.
+10 % bound either way.
+
+Re-measured with the same two binaries in alternation once the machine was
+quieter (one-minute load average 2–7 for the first two rounds; the later
+rounds rose to 35 again and are left out). Criterion medians:
+
+| bench | before r1 | after r1 | before r2 | after r2 |
+| --- | ---: | ---: | ---: | ---: |
+| model_build_pivot_20x30 | 312 µs | 316 µs | 317 µs | 314 µs |
+| model_build_values_10000x5 | 8.15 ms | 8.17 ms | 8.45 ms | 8.06 ms |
+| patch_cell_values_10000x5 | 171 ns | 161 ns | 170 ns | 165 ns |
+| draft_rebase_1000_edits | 3.23 ms | 3.26 ms | 3.08 ms | 3.33 ms |
+
+Builds and patches are unchanged within run-to-run noise. The draft rebase
+reads 1–8 % slower after in every round, loaded or not; at 3.3 ms for a
+thousand edits it stays well inside the 8 ms budget. The flat 10,000-row
+build sits at the budget boundary before and after alike, as
+`docs/current/performance.md` already records. Both binaries read above that
+guide's reference values on this day, so the reference values are left
+as they are.
 
 ## Diagnostics page: the Log rebuild over a full tail (headless)
 
