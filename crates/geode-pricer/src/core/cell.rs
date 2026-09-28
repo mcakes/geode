@@ -119,14 +119,9 @@ pub fn editor_for(
                 free: true,
             }
         }
-        ColumnKind::Price
-        | ColumnKind::Delta
-        | ColumnKind::Gamma
-        | ColumnKind::Vega
-        | ColumnKind::Theta
-        | ColumnKind::Rho
-        | ColumnKind::PricedAt
-        | ColumnKind::Status => return Err(READ_ONLY),
+        ColumnKind::Measure { .. } | ColumnKind::PricedAt | ColumnKind::Status => {
+            return Err(READ_ONLY);
+        }
     })
 }
 
@@ -298,14 +293,9 @@ pub(crate) fn edit_on(
                 ..own
             },
         }),
-        ColumnKind::Price
-        | ColumnKind::Delta
-        | ColumnKind::Gamma
-        | ColumnKind::Vega
-        | ColumnKind::Theta
-        | ColumnKind::Rho
-        | ColumnKind::PricedAt
-        | ColumnKind::Status => Err(READ_ONLY.into()),
+        ColumnKind::Measure { .. } | ColumnKind::PricedAt | ColumnKind::Status => {
+            Err(READ_ONLY.into())
+        }
     }
 }
 
@@ -371,7 +361,14 @@ mod tests {
     use crate::core::edit::Edit;
     use crate::core::sheet::tests::{callspread, line, push, spx};
     use crate::core::sheet::{OwnShifts, Sheet};
-    use geode_core::pricing::{Barrier, BarrierKind, Expiry, Instrument, OptionKind, Strike};
+    use geode_core::pricing::{
+        Barrier, BarrierKind, Expiry, Instrument, Measure, OptionKind, Strike,
+    };
+
+    const NPV: ColumnKind = ColumnKind::Measure {
+        measure: Measure::Npv,
+        usd: false,
+    };
 
     /// The column's default format, as a view without overrides plans it.
     fn fmt(kind: ColumnKind) -> &'static ColumnFormat {
@@ -474,12 +471,11 @@ mod tests {
         let mut s = one_line();
         push(&mut s, vec![callspread(1)]);
         for kind in [
-            ColumnKind::Price,
-            ColumnKind::Delta,
-            ColumnKind::Gamma,
-            ColumnKind::Vega,
-            ColumnKind::Theta,
-            ColumnKind::Rho,
+            NPV,
+            ColumnKind::Measure {
+                measure: Measure::Delta01,
+                usd: true,
+            },
             ColumnKind::PricedAt,
             ColumnKind::Status,
             ColumnKind::Barrier,
@@ -494,8 +490,11 @@ mod tests {
         // A package's own columns (results, status) stay read-only; its
         // aggregated columns edit through text.
         for kind in [
-            ColumnKind::Price,
-            ColumnKind::Delta,
+            NPV,
+            ColumnKind::Measure {
+                measure: Measure::Delta01,
+                usd: true,
+            },
             ColumnKind::PricedAt,
             ColumnKind::Status,
         ] {
@@ -591,7 +590,7 @@ mod tests {
             Err("underlying 'A/B': one word, no /".into()),
             "a / would make a package's underlying cell a list"
         );
-        assert_eq!(commit(&s, 0, ColumnKind::Price, "1"), Err(READ_ONLY.into()));
+        assert_eq!(commit(&s, 0, NPV, "1"), Err(READ_ONLY.into()));
         let b = barrier_line();
         assert_eq!(
             commit(&b, 0, ColumnKind::BarrierType, "UP"),
@@ -721,10 +720,7 @@ mod tests {
             editor_for(&s, 0, ColumnKind::Type, fmt(ColumnKind::Type)),
             Ok(CellEditor::Text("C".into()))
         );
-        assert_eq!(
-            editor_for(&s, 0, ColumnKind::Price, fmt(ColumnKind::Price)),
-            Err(READ_ONLY)
-        );
+        assert_eq!(editor_for(&s, 0, NPV, fmt(NPV)), Err(READ_ONLY));
         assert_eq!(
             nudge(ColumnKind::Strike, "4800/5200", 1),
             Err("a list does not nudge".into())

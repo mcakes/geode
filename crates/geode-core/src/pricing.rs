@@ -135,15 +135,174 @@ pub struct PriceRequest {
     pub shifts: Shifts,
 }
 
-/// Per unit of the instrument, every field.
+/// ISO 4217 code: three uppercase ASCII letters. `Copy` so a
+/// [`PriceResult`] stays `Copy` (the sheet copies results into records
+/// and folds them per leg).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Currency([u8; 3]);
+
+impl Currency {
+    pub const USD: Currency = Currency(*b"USD");
+
+    /// `None` unless exactly three uppercase ASCII letters.
+    pub fn parse(s: &str) -> Option<Currency> {
+        let b = s.as_bytes();
+        if b.len() == 3 && b.iter().all(|c| c.is_ascii_uppercase()) {
+            Some(Currency([b[0], b[1], b[2]]))
+        } else {
+            None
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.0).expect("constructed from ASCII letters")
+    }
+}
+
+impl std::fmt::Display for Currency {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The result vocabulary: risk_snapshot's bumped measures, under its
+/// names. Each has a `_usd` twin the pricer also supplies, already
+/// converted. The variant order is the column order everywhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Measure {
+    Npv,
+    Delta01,
+    Delta02,
+    Delta05,
+    Gamma01,
+    Gamma02,
+    Gamma05,
+    Vega01,
+    NormalizedVega01,
+    Skew01,
+    Rho010,
+    RhoRfr010,
+    RhoOis010,
+    CleanThetaBusinessDay,
+}
+
+impl Measure {
+    pub const COUNT: usize = 14;
+    pub const ALL: [Measure; Measure::COUNT] = [
+        Measure::Npv,
+        Measure::Delta01,
+        Measure::Delta02,
+        Measure::Delta05,
+        Measure::Gamma01,
+        Measure::Gamma02,
+        Measure::Gamma05,
+        Measure::Vega01,
+        Measure::NormalizedVega01,
+        Measure::Skew01,
+        Measure::Rho010,
+        Measure::RhoRfr010,
+        Measure::RhoOis010,
+        Measure::CleanThetaBusinessDay,
+    ];
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Measure::Npv => "npv",
+            Measure::Delta01 => "delta01",
+            Measure::Delta02 => "delta02",
+            Measure::Delta05 => "delta05",
+            Measure::Gamma01 => "gamma01",
+            Measure::Gamma02 => "gamma02",
+            Measure::Gamma05 => "gamma05",
+            Measure::Vega01 => "vega01",
+            Measure::NormalizedVega01 => "normalized_vega01",
+            Measure::Skew01 => "skew01",
+            Measure::Rho010 => "rho010",
+            Measure::RhoRfr010 => "rho_rfr010",
+            Measure::RhoOis010 => "rho_ois010",
+            Measure::CleanThetaBusinessDay => "clean_theta_business_day",
+        }
+    }
+
+    pub const fn usd_name(self) -> &'static str {
+        match self {
+            Measure::Npv => "npv_usd",
+            Measure::Delta01 => "delta01_usd",
+            Measure::Delta02 => "delta02_usd",
+            Measure::Delta05 => "delta05_usd",
+            Measure::Gamma01 => "gamma01_usd",
+            Measure::Gamma02 => "gamma02_usd",
+            Measure::Gamma05 => "gamma05_usd",
+            Measure::Vega01 => "vega01_usd",
+            Measure::NormalizedVega01 => "normalized_vega01_usd",
+            Measure::Skew01 => "skew01_usd",
+            Measure::Rho010 => "rho010_usd",
+            Measure::RhoRfr010 => "rho_rfr010_usd",
+            Measure::RhoOis010 => "rho_ois010_usd",
+            Measure::CleanThetaBusinessDay => "clean_theta_business_day_usd",
+        }
+    }
+
+    /// `(measure, usd)` for either spelling; `None` for any other name.
+    pub fn from_name(name: &str) -> Option<(Measure, bool)> {
+        Measure::ALL.iter().find_map(|m| {
+            if m.name() == name {
+                Some((*m, false))
+            } else if m.usd_name() == name {
+                Some((*m, true))
+            } else {
+                None
+            }
+        })
+    }
+
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// Per unit of the instrument: every measure in the line's currency and
+/// in USD, both scaled and converted by the pricer. `Copy` is
+/// load-bearing (see [`Currency`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PriceResult {
-    pub price: f64,
-    pub delta: f64,
-    pub gamma: f64,
-    pub vega: f64,
-    pub theta: f64,
-    pub rho: f64,
+    pub currency: Currency,
+    pub local: [f64; Measure::COUNT],
+    pub usd: [f64; Measure::COUNT],
+}
+
+impl PriceResult {
+    pub const fn zero(currency: Currency) -> PriceResult {
+        PriceResult {
+            currency,
+            local: [0.0; Measure::COUNT],
+            usd: [0.0; Measure::COUNT],
+        }
+    }
+
+    pub fn get(&self, m: Measure, usd: bool) -> f64 {
+        if usd {
+            self.usd[m.index()]
+        } else {
+            self.local[m.index()]
+        }
+    }
+
+    pub fn set(&mut self, m: Measure, usd: bool, v: f64) {
+        if usd {
+            self.usd[m.index()] = v
+        } else {
+            self.local[m.index()] = v
+        }
+    }
+
+    /// `self += q × other` over both arrays; the currency stays `self`'s.
+    pub fn add_scaled(&mut self, q: f64, other: &PriceResult) {
+        for i in 0..Measure::COUNT {
+            self.local[i] += q * other.local[i];
+            self.usd[i] += q * other.usd[i];
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -305,5 +464,74 @@ mod tests {
         );
         assert_eq!(b.vanilla().strike, Strike::Absolute(5000.0));
         assert_eq!(call.expiry(), b.expiry());
+    }
+
+    #[test]
+    fn every_measure_has_a_distinct_name_and_usd_twin() {
+        let mut names: Vec<&str> = Measure::ALL.iter().map(|m| m.name()).collect();
+        names.extend(Measure::ALL.iter().map(|m| m.usd_name()));
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 28, "28 distinct names: {names:?}");
+        for m in Measure::ALL {
+            assert_eq!(m.usd_name(), format!("{}_usd", m.name()));
+            assert_eq!(Measure::from_name(m.name()), Some((m, false)));
+            assert_eq!(Measure::from_name(m.usd_name()), Some((m, true)));
+            assert_eq!(Measure::ALL[m.index()], m);
+        }
+        assert_eq!(
+            Measure::from_name("delta"),
+            None,
+            "the analytic names are gone"
+        );
+        assert_eq!(Measure::Npv.name(), "npv");
+        assert_eq!(
+            Measure::CleanThetaBusinessDay.usd_name(),
+            "clean_theta_business_day_usd"
+        );
+    }
+
+    #[test]
+    fn usd_twin_reads_the_usd_array() {
+        let mut r = PriceResult::zero(Currency::USD);
+        r.set(Measure::Delta01, false, 2.0);
+        r.set(Measure::Delta01, true, 3.0);
+        assert_eq!(r.get(Measure::Delta01, false), 2.0);
+        assert_eq!(r.get(Measure::Delta01, true), 3.0);
+        assert_eq!(r.get(Measure::Delta02, true), 0.0);
+    }
+
+    #[test]
+    fn add_scaled_sums_both_arrays_and_keeps_its_own_currency() {
+        let mut sum = PriceResult::zero(Currency::parse("EUR").unwrap());
+        let mut leg = PriceResult::zero(Currency::USD);
+        leg.set(Measure::Npv, false, 10.0);
+        leg.set(Measure::Npv, true, 11.0);
+        sum.add_scaled(-2.0, &leg);
+        sum.add_scaled(1.0, &leg);
+        assert_eq!(sum.get(Measure::Npv, false), -10.0);
+        assert_eq!(sum.get(Measure::Npv, true), -11.0);
+        assert_eq!(sum.currency.as_str(), "EUR");
+    }
+
+    #[test]
+    fn a_malformed_currency_is_a_pricing_error_not_a_panic() {
+        // The seam's contract: a library that cannot spell its currency
+        // answers an error; `Currency::parse` is how it checks.
+        let attempt = |code: &str| {
+            Currency::parse(code).ok_or_else(|| PricingError(format!("bad currency '{code}'")))
+        };
+        assert!(attempt("usd").is_err());
+        assert!(attempt("USD").is_ok());
+    }
+
+    #[test]
+    fn a_currency_is_three_uppercase_ascii_letters() {
+        assert_eq!(Currency::parse("USD"), Some(Currency::USD));
+        assert_eq!(Currency::parse("HKD").unwrap().to_string(), "HKD");
+        for bad in ["usd", "US", "USDD", "U$D", "ÜSD"] {
+            assert_eq!(Currency::parse(bad), None, "{bad}");
+        }
     }
 }

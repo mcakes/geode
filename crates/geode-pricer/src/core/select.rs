@@ -4,20 +4,10 @@
 //! and move plans with their refusals, position risk totals, and the
 //! one notice line that counts what a bulk edit wrote and skipped.
 
-use crate::core::columns::ColumnKind;
 use crate::core::edit::Edit;
 use crate::core::sheet::{LineState, Sheet};
+use geode_core::pricing::Measure;
 use std::collections::BTreeMap;
-
-/// The footer's risk columns, in [`risk_totals`]' order.
-pub const RISK: [ColumnKind; 6] = [
-    ColumnKind::Price,
-    ColumnKind::Delta,
-    ColumnKind::Gamma,
-    ColumnKind::Vega,
-    ColumnKind::Theta,
-    ColumnKind::Rho,
-];
 
 /// The leaf lines under `rows`, each once, in sheet order: a line is
 /// itself, a package is its legs whether it is open or not. A package
@@ -104,32 +94,33 @@ pub fn move_plan(sheet: &Sheet, top: &[usize], down: bool) -> Result<Edit, &'sta
     }
 }
 
-/// Position totals over top-most rows, in [`RISK`] order: `qty × value`
-/// for a line, the package's own folded sum (already qty-weighted) for
-/// a package. A column with any row unpriced or failed is `None`: an
-/// incomplete total would read as a real one. A failed line keeps its
-/// old result, so the state is checked, not only the result.
+/// Position totals over top-most rows, one per `(measure, usd)` in
+/// `measures`' order: `qty × value` for a line, the package's own folded
+/// sum (already qty-weighted) for a package. A column with any row
+/// unpriced or failed is `None`: an incomplete total would read as a
+/// real one. A failed line keeps its old result, so the state is
+/// checked, not only the result.
 ///
 /// No rows is `None` too, not zero: a total of nothing reads as a flat
 /// position, which is a claim the selection never made.
-pub fn risk_totals(sheet: &Sheet, top: &[usize]) -> [Option<f64>; 6] {
+pub fn risk_totals(sheet: &Sheet, top: &[usize], measures: &[(Measure, bool)]) -> Vec<Option<f64>> {
     if top.is_empty() {
-        return [None; 6];
+        return vec![None; measures.len()];
     }
-    let mut sums = [Some(0.0f64); 6];
+    let mut sums = vec![Some(0.0f64); measures.len()];
     for &r in top {
         let weight = if sheet.is_package(r) {
             1.0
         } else {
             sheet.qty(r) as f64
         };
-        let picks = match (sheet.state(r), sheet.result(r)) {
+        let picked = match (sheet.state(r), sheet.result(r)) {
             (LineState::Failed(_), _) | (_, None) => None,
-            (_, Some(v)) => Some([v.price, v.delta, v.gamma, v.vega, v.theta, v.rho]),
+            (_, Some(v)) => Some(v),
         };
-        for (i, s) in sums.iter_mut().enumerate() {
-            *s = match (*s, picks) {
-                (Some(a), Some(p)) => Some(a + weight * p[i]),
+        for (s, &(m, usd)) in sums.iter_mut().zip(measures) {
+            *s = match (*s, picked) {
+                (Some(a), Some(v)) => Some(a + weight * v.get(m, usd)),
                 _ => None,
             };
         }
@@ -227,6 +218,9 @@ mod tests {
         let d = s.deliver(s.id(row), s.revision(row), Ok(result(price)), at(0));
         assert_eq!(d, crate::core::sheet::Delivered::Installed);
     }
+
+    /// The two measures the totals tests read: npv, then delta01.
+    const NPV_DELTA: [(Measure, bool); 2] = [(Measure::Npv, false), (Measure::Delta01, false)];
 
     #[test]
     fn lines_of_dedupes_a_package_and_its_legs() {
@@ -345,11 +339,21 @@ mod tests {
         let mut s = sheet(vec![call(5000.0, 2), put(4000.0, 1)]);
         price(&mut s, 0, 1.5);
         price(&mut s, 1, 0.25);
-        let t = risk_totals(&s, &[0, 1]);
+        let t = risk_totals(&s, &[0, 1], &NPV_DELTA);
         assert_eq!(t[0], Some(2.0 * 1.5 + 0.25), "qty × unit price per line");
         assert_eq!(t[1], Some(2.0 * 0.15 + 0.025), "delta is weighted too");
+        let usd = risk_totals(&s, &[0, 1], &[(Measure::Npv, true)]);
+        assert_eq!(
+            usd[0],
+            Some((2.0 * 1.5 + 0.25) * 1.08),
+            "a usd twin totals the usd array"
+        );
         let unpriced = sheet(vec![call(5000.0, 1), put(4000.0, 1)]);
-        assert_eq!(risk_totals(&unpriced, &[0, 1])[0], None, "no partial sum");
+        assert_eq!(
+            risk_totals(&unpriced, &[0, 1], &NPV_DELTA)[0],
+            None,
+            "no partial sum"
+        );
     }
 
     #[test]
@@ -358,8 +362,8 @@ mod tests {
         let mut s = sheet(vec![callspread(-5)]);
         price(&mut s, 1, 3.0);
         price(&mut s, 2, 1.0);
-        let folded = s.result(0).expect("folded").price;
-        assert_eq!(risk_totals(&s, &[0])[0], Some(folded));
+        let folded = s.result(0).expect("folded").get(Measure::Npv, false);
+        assert_eq!(risk_totals(&s, &[0], &NPV_DELTA)[0], Some(folded));
     }
 
     #[test]
@@ -368,7 +372,7 @@ mod tests {
         price(&mut s, 0, 1.0);
         s.deliver(s.id(0), s.revision(0), Err("boom".into()), at(1));
         assert!(s.result(0).is_some(), "a failure retains the old result");
-        assert_eq!(risk_totals(&s, &[0]), [None; 6]);
+        assert_eq!(risk_totals(&s, &[0], &NPV_DELTA), vec![None; 2]);
     }
 
     #[test]
@@ -381,7 +385,7 @@ mod tests {
         assert_eq!(s.state(0), &LineState::Stale);
         assert!(s.result(0).is_some(), "the old result is still painted");
         assert_eq!(
-            risk_totals(&s, &[0])[0],
+            risk_totals(&s, &[0], &NPV_DELTA)[0],
             Some(3.0),
             "what the grid shows counts"
         );
@@ -391,7 +395,7 @@ mod tests {
     fn risk_totals_over_no_rows_are_incomplete_not_zero() {
         let mut s = sheet(vec![call(5000.0, 1)]);
         price(&mut s, 0, 1.0);
-        assert_eq!(risk_totals(&s, &[]), [None; 6]);
+        assert_eq!(risk_totals(&s, &[], &NPV_DELTA), vec![None; 2]);
     }
 
     #[test]

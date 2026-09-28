@@ -811,7 +811,13 @@ Column headers are words carrying their unit (`spot %`, `vol pt`, `barrier
 type`, `priced at`), and default widths are checked against labels and representative large
 values (`-1,234,567.8900` for a greek, `-1,234,567.89` for a price) at the
 largest supported font size. These examples do not bound every possible
-value. A view's `label` and `width` override the defaults. Both bundled views end in a `status` column, which says
+value. A view's `label` and `width` override the defaults. Result columns
+carry risk_snapshot's names — `npv`, `delta01`, `gamma01`, `vega01`,
+`rho010`, `clean_theta_business_day` and the rest — each with a `_usd` twin
+the pricer converts itself; a column means the same thing in a blotter and a
+pricer sheet. A package's local-currency sums add its legs in whatever
+currency each priced in; the `_usd` columns are the comparable ones across
+currencies. Both bundled views end in a `status` column, which says
 `pricing…` on a stale line and a failed line's reason, so neither state is
 shown by color alone. The tree column reserves a fixed chevron slot on every
 row, so roots share one leading edge and legs sit one step in. Column 0
@@ -1243,8 +1249,9 @@ or edited text commits to the cursor's column as above.
 
 **Footer totals.** While a selection is live the footer shows its extent
 (`3 rows × 12 cols`) at the left and, at the right under the risk columns,
-one position total for each risk column the view shows (price, delta, gamma,
-vega, theta, rho), painted as that column paints its numbers. A line counts
+one position total for each measure column the view shows (`npv`, `delta01`,
+and every other measure, local or `_usd`), painted as that column paints its
+numbers. A line counts
 `qty × value`; a package counts its own folded sum, which is already weighted
 by its legs' quantities. Totals are over the
 top-most selected rows, so an open package selected with its legs is not

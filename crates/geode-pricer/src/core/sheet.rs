@@ -9,7 +9,9 @@
 use crate::core::shorthand::{render_line, render_package};
 use crate::core::template::{Template, TemplateSet};
 use chrono::{DateTime, Utc};
-use geode_core::pricing::{Instrument, MarketOverrides, PriceRequest, PriceResult, Shifts};
+use geode_core::pricing::{
+    Currency, Instrument, MarketOverrides, PriceRequest, PriceResult, Shifts,
+};
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
@@ -432,14 +434,7 @@ impl Sheet {
             let legs = self.children(p);
             // An empty package has no sum.
             let mut complete = !legs.is_empty();
-            let mut sum = PriceResult {
-                price: 0.0,
-                delta: 0.0,
-                gamma: 0.0,
-                vega: 0.0,
-                theta: 0.0,
-                rho: 0.0,
-            };
+            let mut sum: Option<PriceResult> = None;
             let mut stale = false;
             let mut failed: Option<String> = None;
             let mut oldest: Option<DateTime<Utc>> = None;
@@ -461,12 +456,8 @@ impl Sheet {
                 match self.result[leg] {
                     Some(r) => {
                         let q = self.qty[leg] as f64;
-                        sum.price += q * r.price;
-                        sum.delta += q * r.delta;
-                        sum.gamma += q * r.gamma;
-                        sum.vega += q * r.vega;
-                        sum.theta += q * r.theta;
-                        sum.rho += q * r.rho;
+                        let acc = sum.get_or_insert_with(|| PriceResult::zero(r.currency));
+                        acc.add_scaled(q, &r);
                     }
                     None => complete = false,
                 }
@@ -476,8 +467,9 @@ impl Sheet {
                     (Some(a), None) => Some(a),
                 };
             }
+            // An empty package (no legs) folds to zero, as it always has.
             self.result[p] = if complete && failed.is_none() {
-                Some(sum)
+                sum.or(Some(PriceResult::zero(Currency::USD)))
             } else {
                 None
             };
@@ -664,7 +656,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::core::edit::{Edit, EditError};
     use chrono::TimeZone;
-    use geode_core::pricing::{Expiry, OptionKind, Strike, Vanilla};
+    use geode_core::pricing::{Expiry, Measure, OptionKind, Strike, Vanilla};
 
     pub(crate) fn spx(strike: f64, kind: OptionKind) -> Instrument {
         Instrument::Vanilla(Vanilla {
@@ -688,14 +680,17 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn result(price: f64) -> PriceResult {
-        PriceResult {
-            price,
-            delta: price / 10.0,
-            gamma: 0.01,
-            vega: 1.0,
-            theta: -0.5,
-            rho: 0.1,
+        let mut r = PriceResult::zero(Currency::USD);
+        r.set(Measure::Npv, false, price);
+        r.set(Measure::Delta01, false, price / 10.0);
+        r.set(Measure::Gamma01, false, 0.01);
+        r.set(Measure::Vega01, false, 1.0);
+        r.set(Measure::CleanThetaBusinessDay, false, -0.5);
+        r.set(Measure::Rho010, false, 0.1);
+        for m in Measure::ALL {
+            r.set(m, true, r.get(m, false) * 1.08);
         }
+        r
     }
 
     pub(crate) fn at(secs: i64) -> DateTime<Utc> {
@@ -1062,12 +1057,14 @@ pub(crate) mod tests {
         s.deliver(short, 1, Ok(result(40.0)), at(1));
         let sum = s.result(0).unwrap();
         // -5 × 100 + 5 × 40 = -300; delta: -5 × 10 + 5 × 4 = -30; gamma: 0 (−5 + 5 = 0 × 0.01)
-        assert_eq!(sum.price, -300.0);
-        assert_eq!(sum.delta, -30.0);
-        assert_eq!(sum.gamma, 0.0);
-        assert_eq!(sum.vega, 0.0);
-        assert_eq!(sum.theta, 0.0);
-        assert_eq!(sum.rho, 0.0);
+        assert_eq!(sum.get(Measure::Npv, false), -300.0);
+        assert_eq!(sum.get(Measure::Delta01, false), -30.0);
+        assert_eq!(sum.get(Measure::Gamma01, false), 0.0);
+        assert_eq!(sum.get(Measure::Gamma02, false), 0.0);
+        assert_eq!(sum.get(Measure::Vega01, false), 0.0);
+        assert_eq!(sum.get(Measure::CleanThetaBusinessDay, false), 0.0);
+        assert_eq!(sum.get(Measure::Rho010, false), 0.0);
+        assert_eq!(sum.get(Measure::Npv, true), -324.0, "usd folds too");
         assert_eq!(s.state(0), &LineState::Fresh);
         assert_eq!(
             s.priced_at(0),
@@ -1128,7 +1125,7 @@ pub(crate) mod tests {
         assert_eq!(delivered, vec![Delivered::Installed]);
         assert_eq!(s.state(0), &LineState::Fresh);
         // -5 × 100 + 5 × 40 = -300
-        assert_eq!(s.result(0).unwrap().price, -300.0);
+        assert_eq!(s.result(0).unwrap().get(Measure::Npv, false), -300.0);
         assert_eq!(s.priced_at(0), Some(at(3)), "the oldest leg's");
         // Unknown and not-a-line answers come back in place too.
         assert_eq!(
@@ -1142,7 +1139,7 @@ pub(crate) mod tests {
             vec![Delivered::UnknownLine, Delivered::NotALine]
         );
         assert_eq!(
-            s.result(0).unwrap().price,
+            s.result(0).unwrap().get(Measure::Npv, false),
             -300.0,
             "neither touched the fold"
         );

@@ -76,10 +76,10 @@ fn the_footer_totals_position_risk_over_top_most_rows(cx: &mut gpui::TestAppCont
     let totals = h.tile.read_with(&vcx, |t, _| t.totals.clone());
     let price = totals
         .iter()
-        .find(|c| c.label.as_ref() == "price")
+        .find(|c| c.label.as_ref() == "npv")
         .expect("a price total");
     // Two 1-lot lines at 1.00, plus the package's own folded sum (read it off its cell).
-    let package: f64 = h.cell(&vcx, 1, "price").parse().unwrap();
+    let package: f64 = h.cell(&vcx, 1, "npv").parse().unwrap();
     let expected = 1.0 + 1.0 + package;
     assert_eq!(price.text.as_ref(), format!("{expected:.2}"));
     assert_eq!(
@@ -150,7 +150,7 @@ fn the_footer_totals_count_an_open_packages_legs_once(cx: &mut gpui::TestAppCont
     h.dispatch(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "expand", None);
     assert_eq!(h.tree(&vcx).len(), 5, "fixture: the package is open");
-    let cell = |row| -> f64 { h.cell(&vcx, row, "price").parse().unwrap() };
+    let cell = |row| -> f64 { h.cell(&vcx, row, "npv").parse().unwrap() };
     let (a, package, b) = (cell(0), cell(1), cell(4));
     assert!(package.abs() > 0.5, "fixture: the legs do not cancel");
     h.dispatch(&mut vcx, "top", None);
@@ -159,7 +159,7 @@ fn the_footer_totals_count_an_open_packages_legs_once(cx: &mut gpui::TestAppCont
     let price = h.tile.read_with(&vcx, |t, _| {
         t.totals
             .iter()
-            .find(|c| c.label.as_ref() == "price")
+            .find(|c| c.label.as_ref() == "npv")
             .map(|c| c.text.to_string())
     });
     assert_eq!(price, Some(format!("{:.2}", a + package + b)));
@@ -198,7 +198,7 @@ fn the_totals_follow_a_delivery_not_only_a_cursor_move(cx: &mut gpui::TestAppCon
         h.tile.read_with(vcx, |t, _| {
             t.totals
                 .iter()
-                .find(|c| c.label.as_ref() == "price")
+                .find(|c| c.label.as_ref() == "npv")
                 .map(|c| c.text.to_string())
         })
     };

@@ -243,7 +243,7 @@ mod tests {
         let price = plan()
             .columns
             .iter()
-            .position(|c| c.def.name == "price")
+            .position(|c| c.def.name == "npv")
             .unwrap();
         assert_eq!(m.rows[0].cells[price].text.as_ref(), "12.50");
         assert_eq!(m.rows[0].cells[price].state, CellState::Own);

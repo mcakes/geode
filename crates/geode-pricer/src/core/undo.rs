@@ -92,7 +92,7 @@ mod tests {
     use crate::core::edit::Edit;
     use crate::core::sheet::tests::{at, callspread, line, push, result, spx};
     use crate::core::sheet::{LineId, Place};
-    use geode_core::pricing::OptionKind;
+    use geode_core::pricing::{Measure, OptionKind};
 
     fn ids(s: &Sheet) -> Vec<LineId> {
         (0..s.len()).map(|r| s.id(r)).collect()
@@ -146,13 +146,17 @@ mod tests {
             .collect();
         s.deliver_all(answers, at(0));
         let before = ids(&s);
-        let prices: Vec<_> = (0..s.len()).map(|r| s.result(r).map(|x| x.price)).collect();
+        let prices: Vec<_> = (0..s.len())
+            .map(|r| s.result(r).map(|x| x.get(Measure::Npv, false)))
+            .collect();
 
         assert_eq!(stack.undo(&mut s), Ok(true));
         assert!(s.is_empty(), "one undo takes back the whole insert");
         assert_eq!(stack.redo(&mut s), Ok(true));
         assert_eq!(ids(&s), before, "redo reinstates the same ids");
-        let after: Vec<_> = (0..s.len()).map(|r| s.result(r).map(|x| x.price)).collect();
+        let after: Vec<_> = (0..s.len())
+            .map(|r| s.result(r).map(|x| x.get(Measure::Npv, false)))
+            .collect();
         assert_eq!(after, prices, "…and their results: nothing is re-requested");
         assert!(s.stale_lines().next().is_none());
     }

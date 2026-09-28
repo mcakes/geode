@@ -14,11 +14,11 @@ pub const PRICER_VIEWS_DOC: &str = "pricer_views";
 /// colours.
 pub const BUILTIN_VIEWS: &str = r#"[vanilla]
 columns = ["qty", "underlying", "expiry", "strike", "type", "spot_shift", "vol_shift",
-           "price", "delta", "gamma", "vega", "theta", "rho", "status"]
+           "npv", "delta01", "gamma01", "vega01", "clean_theta_business_day", "rho010", "status"]
 
 [barrier]
 columns = ["qty", "underlying", "expiry", "strike", "type", "barrier", "barrier_type", "spot_shift", "vol_shift",
-           "price", "delta", "gamma", "vega", "theta", "rho", "status"]
+           "npv", "delta01", "gamma01", "vega01", "clean_theta_business_day", "rho010", "status"]
 "#;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -253,12 +253,12 @@ mod tests {
                 "type",
                 "spot_shift",
                 "vol_shift",
-                "price",
-                "delta",
-                "gamma",
-                "vega",
-                "theta",
-                "rho",
+                "npv",
+                "delta01",
+                "gamma01",
+                "vega01",
+                "clean_theta_business_day",
+                "rho010",
                 "status"
             ]
         );
@@ -275,35 +275,39 @@ mod tests {
                 "barrier_type",
                 "spot_shift",
                 "vol_shift",
-                "price",
-                "delta",
-                "gamma",
-                "vega",
-                "theta",
-                "rho",
+                "npv",
+                "delta01",
+                "gamma01",
+                "vega01",
+                "clean_theta_business_day",
+                "rho010",
                 "status"
             ]
         );
         assert_eq!(Views::builtin(), views);
-        assert!(views.get("npv").is_none());
+        assert!(views.get("price").is_none());
     }
 
     #[test]
     fn an_unknown_column_is_an_error_and_dropped() {
         let (views, diags) =
-            Views::from_doc(&doc("[v]\ncolumns = [\"qty\", \"npv\", \"price\"]\n"));
-        assert_eq!(names(views.get("v").unwrap()), vec!["qty", "price"]);
+            Views::from_doc(&doc("[v]\ncolumns = [\"qty\", \"nonesuch\", \"npv\"]\n"));
+        assert_eq!(names(views.get("v").unwrap()), vec!["qty", "npv"]);
         assert_eq!(diags.len(), 1, "{diags:?}");
         assert_eq!(diags[0].severity, Severity::Error);
         assert_eq!(diags[0].path.as_deref(), Some("pricer_views.v.columns.1"));
-        assert!(diags[0].message.contains("npv"), "{}", diags[0].message);
+        assert!(
+            diags[0].message.contains("nonesuch"),
+            "{}",
+            diags[0].message
+        );
         assert!(diags[0].message.contains("dropped"), "{}", diags[0].message);
     }
 
     #[test]
     fn a_view_with_no_valid_column_is_dropped_with_an_error() {
         let (views, diags) = Views::from_doc(&doc(
-            "config_version = 1\n[empty]\ncolumns = []\n[bad]\ncolumns = [\"npv\"]\n[ok]\ncolumns = [\"price\"]\n[notatable]\n",
+            "config_version = 1\n[empty]\ncolumns = []\n[bad]\ncolumns = [\"nonesuch\"]\n[ok]\ncolumns = [\"npv\"]\n[notatable]\n",
         ));
         assert_eq!(views.names().collect::<Vec<_>>(), vec!["ok"]);
         let paths: Vec<&str> = diags.iter().filter_map(|d| d.path.as_deref()).collect();
@@ -318,7 +322,7 @@ mod tests {
                 .all(|d| d.severity == Severity::Error)
         );
         // A view whose `columns` is missing or not an array.
-        let (views, diags) = Views::from_doc(&doc("[v]\nname = \"x\"\n[w]\ncolumns = \"price\"\n"));
+        let (views, diags) = Views::from_doc(&doc("[v]\nname = \"x\"\n[w]\ncolumns = \"npv\"\n"));
         assert!(views.is_empty());
         assert_eq!(
             diags
@@ -333,12 +337,12 @@ mod tests {
     #[test]
     fn the_table_form_carries_label_width_and_format() {
         let (views, diags) = Views::from_doc(&doc(
-            "[v]\ncolumns = [\n  \"qty\",\n  { name = \"price\", label = \"PX\", width = 120, format = { precision = 4, thousands = false } },\n  { name = \"delta\", format = { precision = 99 } },\n  { label = \"no name\" },\n  { name = \"qty\" },\n  { name = \"vega\", width = -1 },\n]\n",
+            "[v]\ncolumns = [\n  \"qty\",\n  { name = \"npv\", label = \"PX\", width = 120, format = { precision = 4, thousands = false } },\n  { name = \"delta01\", format = { precision = 99 } },\n  { label = \"no name\" },\n  { name = \"qty\" },\n  { name = \"vega01\", width = -1 },\n]\n",
         ));
         let v = views.get("v").unwrap();
         assert_eq!(
             names(v),
-            vec!["qty", "price", "delta", "vega"],
+            vec!["qty", "npv", "delta01", "vega01"],
             "the nameless and the repeat are dropped"
         );
         let price = &v.columns[1];
@@ -382,7 +386,7 @@ mod tests {
     #[test]
     fn a_plan_resolves_label_width_and_format_from_the_defaults_under_the_presentation() {
         let (views, _) = Views::from_doc(&doc(
-            "[v]\ncolumns = [\"qty\", { name = \"price\", label = \"PX\", width = 120, format = { precision = 4 } }, \"barrier\"]\n",
+            "[v]\ncolumns = [\"qty\", { name = \"npv\", label = \"PX\", width = 120, format = { precision = 4 } }, \"barrier\"]\n",
         ));
         let plan = ColumnPlan::build(views.get("v").unwrap());
         assert_eq!(plan.columns.len(), 3);

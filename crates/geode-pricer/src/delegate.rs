@@ -921,12 +921,7 @@ mod width_tests {
             ColumnKind::Qty => fmt(-10000.0),
             ColumnKind::Strike | ColumnKind::Barrier => fmt(12345.67),
             ColumnKind::SpotShift | ColumnKind::VolShift => signed(-99.9, &def.default_format),
-            ColumnKind::Price
-            | ColumnKind::Delta
-            | ColumnKind::Gamma
-            | ColumnKind::Vega
-            | ColumnKind::Theta
-            | ColumnKind::Rho => fmt(-1_234_567.89),
+            ColumnKind::Measure { .. } => fmt(-1_234_567.89),
             // Representative text values for the width check.
             ColumnKind::Underlying => "SX5E".into(),
             // The cell reads `20DEC26`, but `i` edits it in the date field,

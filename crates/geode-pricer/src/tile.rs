@@ -4441,7 +4441,7 @@ pub(crate) mod tests {
     use geode_core::groupings::GroupingSlots;
     use geode_core::log::LogLevels;
     use geode_core::pricing::Expiry;
-    use geode_core::pricing::{PriceOutcome, PriceParams, PriceResult};
+    use geode_core::pricing::{Currency, Measure, PriceOutcome, PriceParams, PriceResult};
     use geode_core::query::QueryKey;
     use geode_core::scopes::SavedScopes;
     use geode_data::{DataHandle, Request};
@@ -4853,14 +4853,17 @@ pub(crate) mod tests {
 
     #[allow(dead_code)]
     pub(crate) fn result(price: f64) -> PriceResult {
-        PriceResult {
-            price,
-            delta: 0.5,
-            gamma: 0.01,
-            vega: 1.0,
-            theta: -0.5,
-            rho: 0.1,
+        let mut r = PriceResult::zero(Currency::USD);
+        r.set(Measure::Npv, false, price);
+        r.set(Measure::Delta01, false, 0.5);
+        r.set(Measure::Gamma01, false, 0.01);
+        r.set(Measure::Vega01, false, 1.0);
+        r.set(Measure::CleanThetaBusinessDay, false, -0.5);
+        r.set(Measure::Rho010, false, 0.1);
+        for m in Measure::ALL {
+            r.set(m, true, r.get(m, false) * 1.08);
         }
+        r
     }
 
     // ---- the factory, restore and session ----
@@ -5053,7 +5056,7 @@ pub(crate) mod tests {
             "pricer_views",
             &[geode_core::config::LayerDoc::builtin(
                 "pricer_views",
-                "[slim]\ncolumns = [\"qty\", \"price\"]\n",
+                "[slim]\ncolumns = [\"qty\", \"npv\"]\n",
             )
             .unwrap()],
         );
@@ -5070,7 +5073,7 @@ pub(crate) mod tests {
         });
         assert_eq!(
             h.columns(&vcx),
-            vec!["qty", "price"],
+            vec!["qty", "npv"],
             "the sheet's `vanilla` is gone, so the first view shows"
         );
         assert_eq!(
@@ -5491,9 +5494,9 @@ pub(crate) mod tests {
             1
         );
         h.answer(&mut vcx, b, 12.5);
-        assert_eq!(h.cell(&vcx, 0, "price"), "12.50");
+        assert_eq!(h.cell(&vcx, 0, "npv"), "12.50");
         assert_eq!(
-            h.cell(&vcx, 1, "price"),
+            h.cell(&vcx, 1, "npv"),
             "0.00",
             "−5 × 12.5 + 5 × 12.5: the package sums signed legs"
         );
@@ -5538,13 +5541,9 @@ pub(crate) mod tests {
             "the new batch carries the old one's lines too"
         );
         h.answer(&mut vcx, &first, 99.0);
-        assert_eq!(
-            h.cell(&vcx, 2, "price"),
-            "",
-            "the older tag installs nothing"
-        );
+        assert_eq!(h.cell(&vcx, 2, "npv"), "", "the older tag installs nothing");
         h.answer(&mut vcx, &second, 12.5);
-        assert_eq!(h.cell(&vcx, 2, "price"), "12.50");
+        assert_eq!(h.cell(&vcx, 2, "npv"), "12.50");
     }
 
     #[gpui::test]
@@ -5572,11 +5571,11 @@ pub(crate) mod tests {
             },
         );
         assert_eq!(
-            h.cell(&vcx, 0, "price"),
+            h.cell(&vcx, 0, "npv"),
             "",
             "line 1's answer is for an older request"
         );
-        assert_eq!(h.cell(&vcx, 2, "price"), "12.50", "the rest install");
+        assert_eq!(h.cell(&vcx, 2, "npv"), "12.50", "the rest install");
         let again = h.prices();
         assert_eq!(again.len(), 1);
         assert_eq!(
@@ -5593,7 +5592,7 @@ pub(crate) mod tests {
         let mut other = b.clone();
         other.key = QueryKey(99);
         h.answer(&mut vcx, &other, 12.5);
-        assert_eq!(h.cell(&vcx, 0, "price"), "");
+        assert_eq!(h.cell(&vcx, 0, "npv"), "");
     }
 
     #[gpui::test]
@@ -5626,7 +5625,7 @@ pub(crate) mod tests {
             },
         );
         assert_eq!(
-            h.cell(&vcx, 1, "price"),
+            h.cell(&vcx, 1, "npv"),
             "—",
             "a failed leg fails its package"
         );
@@ -6915,7 +6914,7 @@ pub(crate) mod tests {
         h.dispatch(&mut vcx, "right", Some(3)); // strike
         h.dispatch(&mut vcx, "edit", None);
         assert!(focused(&mut vcx), "fixture: the field owns focus");
-        let views = slim_views("\"qty\", \"price\"");
+        let views = slim_views("\"qty\", \"npv\"");
         vcx.update(|_, cx| {
             h.factory.reload(
                 views,
@@ -7309,7 +7308,7 @@ pub(crate) mod tests {
         let (h, mut vcx) = open_seeded(cx, &DATED);
         open_expiry(&h, &mut vcx, 0);
         assert!(focused(&mut vcx), "fixture: the field owns focus");
-        let views = slim_views("\"qty\", \"price\"");
+        let views = slim_views("\"qty\", \"npv\"");
         vcx.update(|_, cx| {
             h.factory.reload(
                 views,
@@ -7351,7 +7350,7 @@ pub(crate) mod tests {
         h.dispatch(&mut vcx, "undo", None);
         assert_eq!(h.tree(&vcx).len(), 3);
         assert_eq!(
-            h.cell(&vcx, 2, "price"),
+            h.cell(&vcx, 2, "npv"),
             "12.50",
             "its last result came back with it"
         );
@@ -7444,11 +7443,7 @@ pub(crate) mod tests {
             "a custom package, opened"
         );
         assert_eq!(h.tree(&vcx).len(), 4);
-        assert_eq!(
-            h.cell(&vcx, 0, "price"),
-            "2.00",
-            "its sum: two legs of 1.00"
-        );
+        assert_eq!(h.cell(&vcx, 0, "npv"), "2.00", "its sum: two legs of 1.00");
         assert!(h.prices().is_empty(), "grouping changes no request");
         h.dispatch(&mut vcx, "down", None); // a leg: g u acts on its package
         h.dispatch(&mut vcx, "ungroup", None);
@@ -7583,7 +7578,7 @@ pub(crate) mod tests {
         h.dispatch(&mut vcx, "menu_down", Some(20)); // view: barrier, the last row
         vcx.update(|_, cx| {
             h.factory.reload(
-                slim_views("\"qty\", \"price\""),
+                slim_views("\"qty\", \"npv\""),
                 TemplateSet::builtin(),
                 None,
                 std::time::Duration::from_secs(60),
@@ -8509,9 +8504,9 @@ pub(crate) mod tests {
         let after = h.prices().remove(0);
         assert_eq!(after.tag, before.tag + 1);
         h.answer(&mut vcx, &before, 99.0);
-        assert_eq!(h.cell(&vcx, 0, "price"), "", "the older tag is dropped");
+        assert_eq!(h.cell(&vcx, 0, "npv"), "", "the older tag is dropped");
         h.answer(&mut vcx, &after, 12.5);
-        assert_eq!(h.cell(&vcx, 0, "price"), "12.50");
+        assert_eq!(h.cell(&vcx, 0, "npv"), "12.50");
     }
 
     /// Three roots A, B, C: strikes 5000, 4000, 3000.

@@ -686,10 +686,11 @@ mod tests {
             editor_text(&s, 0, ColumnKind::Qty, fmt(ColumnKind::Qty)).as_deref(),
             Some("-5")
         );
-        assert_eq!(
-            editor_text(&s, 0, ColumnKind::Price, fmt(ColumnKind::Price)),
-            None
-        );
+        let npv = ColumnKind::Measure {
+            measure: geode_core::pricing::Measure::Npv,
+            usd: false,
+        };
+        assert_eq!(editor_text(&s, 0, npv, fmt(npv)), None);
         assert_eq!(
             editor_text(&s, 0, ColumnKind::Barrier, fmt(ColumnKind::Barrier)),
             None,

@@ -7,7 +7,7 @@
 use chrono::Utc;
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use geode_core::clock::Clock;
-use geode_core::pricing::PriceResult;
+use geode_core::pricing::{Currency, Measure, PriceResult};
 use geode_pricer::core::{
     ColumnPlan, Edit, Expansion, LineId, OwnShifts, Place, RowSpec, Sheet, TemplateSet, Views,
     from_rows, parse, to_rows,
@@ -111,13 +111,11 @@ fn bench(c: &mut Criterion) {
             (
                 s.id(r),
                 s.revision(r),
-                Ok(PriceResult {
-                    price: 12.5,
-                    delta: 0.5,
-                    gamma: 0.01,
-                    vega: 1.0,
-                    theta: -0.5,
-                    rho: 0.1,
+                Ok({
+                    let mut r = PriceResult::zero(Currency::USD);
+                    r.set(Measure::Npv, false, 12.5);
+                    r.set(Measure::Delta01, false, 0.5);
+                    r
                 }),
             )
         })
@@ -149,13 +147,11 @@ fn bench(c: &mut Criterion) {
             (
                 s.id(r),
                 s.revision(r),
-                Ok(PriceResult {
-                    price: 12.5,
-                    delta: 0.5,
-                    gamma: 0.01,
-                    vega: 1.0,
-                    theta: -0.5,
-                    rho: 0.1,
+                Ok({
+                    let mut r = PriceResult::zero(Currency::USD);
+                    r.set(Measure::Npv, false, 12.5);
+                    r.set(Measure::Delta01, false, 0.5);
+                    r
                 }),
             )
         })
