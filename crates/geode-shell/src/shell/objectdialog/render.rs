@@ -752,8 +752,8 @@ fn resolve_column_object(
 
 /// The views and schema as the edit-column route reads them: pending edits folded in.
 fn views_and_schema(shell: &ShellView) -> (Vec<ViewSpec>, SchemaSpec) {
-    let folded = apply::config_with_pending(shell);
-    let config = folded.as_ref().unwrap_or(&shell.services.config);
+    let pending = apply::config_with_pending(shell);
+    let config = pending.as_ref().unwrap_or(&shell.services.config);
     let (views, _) = load_views(config);
     let schema = config
         .doc("datasets")
