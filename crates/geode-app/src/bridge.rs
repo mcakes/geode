@@ -2192,7 +2192,7 @@ role = "key"
         );
     }
 
-    /// "Add lines…" committed from the shell palette while the bar is open
+    /// "Add lines below…" committed from the shell palette while the bar is open
     /// leaves the bar, its text, and focus in its field. The palette's
     /// commit returns focus to the shell root before it dispatches, so an
     /// open bar that kept only its text would read `mode == insert`
@@ -2224,7 +2224,7 @@ role = "key"
             let _ = window.draw(cx);
         });
         assert_eq!(count("palette::toggle"), 1, "fixture: the palette opened");
-        vcx.simulate_input("Add lines");
+        vcx.simulate_input("Add lines below");
         vcx.simulate_keystrokes("enter");
         vcx.run_until_parked();
         vcx.update(|window, cx| {
