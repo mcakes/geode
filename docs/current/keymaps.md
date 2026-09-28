@@ -73,7 +73,11 @@ binding on one of them keeps its own context (for example
 market-data panel's retired ids rename the same way from the `marketdata::`
 prefix (`marketdata::down` → `motion::down`, `marketdata::page_down_full` →
 `motion::page_down`, `marketdata::first_col` → `motion::line_start`, and so
-on), and a binding on one keeps its `marketdata && …` context.
+on), and a binding on one keeps its `marketdata && …` context. The line
+pricer's retired ids rename the same way from the `pricer::` prefix
+(`pricer::down` → `motion::down`, `pricer::page_down` →
+`motion::half_page_down`, `pricer::last_col` → `motion::line_end`, and so on),
+and a binding on one keeps its `pricer && …` context.
 
 ## Key spelling and primary modifier
 
@@ -146,8 +150,11 @@ field's segment (see [features](features.md#selection-2)). An inherited shift
 steps from the value it paints, in the live step and the single-cell nudge
 alike. Over a selection, an `enter` that leaves the cursor cell as it opened
 (an unmoved choice, an untyped date on its opening day, unedited text) writes
-nothing and closes the editor. The pricer's `pricer && mode == visual` block
-repeats the normal motions and binds `y` (`pricer::yank`), `d`
+nothing and closes the editor. Its motions, arrows, `^`/`$` and `home`/`end`
+included, are the shared grid motions (the pricer publishes `grid`); a motion
+dispatched from the palette while the entry bar, the cell editor or the action
+menu is open closes it first, then moves. The pricer's
+`pricer && mode == visual` block binds `y` (`pricer::yank`), `d`
 (`pricer::delete`), `shift+j`/`shift+k`, `g p`, `g u`, `i` and `enter`
 (`pricer::edit`), `v`, `V` and `escape` as the selection's verbs.
 Normal-mode keys it does not list — the doubled `y y`, `y c` and `d d`, `p`,
@@ -262,6 +269,9 @@ A grid module's fragment binds no motions: they come from the shared
 verbs (expansion, selection, yank, find, sort, `g m`, escape).
 The market-data panel's fragment binds its verbs and its `mode == menu`
 keys; `k` on row 0 still enters the attribute strip around the shared result.
+The line pricer's fragment binds its verbs (`g p`, `g u` and `g m` among
+them, beside the shell's `g g`: a first `g` waits for the second key), its
+`mode == insert` field keys and its `mode == menu` keys.
 
 A fragment may name any action, not only ones its own module registers, so
 long as its context is the module's own: both the blotter's and the pricer's

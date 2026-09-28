@@ -46,8 +46,8 @@ has none of them.
   move clamps, `1j` included; a counted `g g` or `G` goes to that 1-based
   row; `ctrl+d`/`ctrl+u` move 5 rows and `ctrl+f`/`ctrl+b` (and
   `pagedown`/`pageup`) 10, times the count; columns clamp; a grid with no
-  rows or columns does not move. The blotter and the market-data panel move
-  on them. See [shared
+  rows or columns does not move. The blotter, the market-data panel and the
+  line pricer move on them. See [shared
   motions](keymaps.md#shared-motions).
 - A popup is deferred above the tile's clip and snaps inside the window with
   an 8-pixel margin. An action menu occludes what it covers, so its hover and
@@ -820,6 +820,15 @@ paints `loading…` muted in the header and `Loading sheet…` in the empty tabl
 an empty loaded sheet says `No lines — press o to add one`. A pricer this
 binary lacks is named in danger text with its recovery (`set [pricing]
 adapter and restart`).
+
+The sheet moves on the [shared grid motions](#shared-tile-interaction): a
+bare `j` on the last row wraps to the first (and `k` on the first to the
+last), clamping instead while a selection is live; `1j` clamps; `5G`/`5gg`
+land on row 5; the arrow keys, `^`/`$` and `home`/`end` move the cursor as
+before. Column 0 of the cursor is the first plan column; the tree column is
+never a target. An empty sheet takes no motion. A motion dispatched from the
+palette while the entry bar, the cell editor or the action menu is open closes
+it first, then moves.
 
 Column headers are words carrying their unit (`spot %`, `vol pt`, `barrier
 type`, `priced at`), and default widths are checked against labels and representative large

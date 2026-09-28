@@ -120,11 +120,6 @@ pub struct PendingRemove {
     sheet: String,
 }
 
-/// Fixed row steps for `ctrl+d`/`ctrl+u` and `ctrl+f`/`ctrl+b`, multiplied
-/// by the command count.
-pub(crate) const HALF_PAGE: usize = 5;
-pub(crate) const FULL_PAGE: usize = 10;
-
 /// Incremental search over visible tree labels. Find moves the cursor without
 /// filtering or reordering the sheet.
 struct FindState {
@@ -786,9 +781,14 @@ impl PricerTile {
     // ---- what the shell reads ----------------------------------------
 
     /// `normal`, `insert`, `menu` or `visual`, with `select = rows|block`
-    /// while a selection is live.
+    /// while a selection is live. `grid` is set in every mode; the shell's
+    /// shared motion bindings confine themselves to normal and visual, so
+    /// an open field or menu keeps its own keys.
     pub fn key_context(&self) -> KeyContext {
-        let cx = KeyContext::new("pricer").pair("mode", self.mode()).counts();
+        let cx = KeyContext::new("pricer")
+            .grid()
+            .pair("mode", self.mode())
+            .counts();
         match self.selection.as_ref().map(|s| s.kind) {
             Some(SelectKind::Rows) => cx.pair("select", "rows"),
             Some(SelectKind::Block) => cx.pair("select", "block"),
@@ -2499,7 +2499,14 @@ impl PricerTile {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(verb) = action.0.strip_prefix("pricer::") else {
+        let shared_motion = geode_tile::motion::parse(action, count);
+        // A shared motion runs as the one "motion" verb, so the field and
+        // menu closing below applies to it as to any other verb.
+        let verb = if shared_motion.is_some() {
+            "motion"
+        } else if let Some(verb) = action.0.strip_prefix("pricer::") {
+            verb
+        } else {
             return false;
         };
         let n = count.unwrap_or(1).max(1) as usize;
@@ -2527,21 +2534,11 @@ impl PricerTile {
             self.menu = None;
         }
         match verb {
-            "down" => self.step_rows(n as isize),
-            "up" => self.step_rows(-(n as isize)),
-            "page_down" => self.step_rows((HALF_PAGE * n) as isize),
-            "page_up" => self.step_rows(-((HALF_PAGE * n) as isize)),
-            "page_down_full" => self.step_rows((FULL_PAGE * n) as isize),
-            "page_up_full" => self.step_rows(-((FULL_PAGE * n) as isize)),
-            "top" => self.jump_row(count.map(|c| c as usize).unwrap_or(1)),
-            "bottom" => self.jump_row(count.map(|c| c as usize).unwrap_or(usize::MAX)),
-            "left" => self.cursor.col = self.cursor.col.saturating_sub(n),
-            "right" => {
-                let last = self.plan.columns.len().saturating_sub(1);
-                self.cursor.col = (self.cursor.col + n).min(last);
+            "motion" => {
+                if let Some(m) = shared_motion {
+                    self.apply_motion(m);
+                }
             }
-            "first_col" => self.cursor.col = 0,
-            "last_col" => self.cursor.col = self.plan.columns.len().saturating_sub(1),
             "toggle" => return self.tree_verb(None, cx),
             "expand" => return self.tree_verb(Some(true), cx),
             "collapse" => return self.tree_verb(Some(false), cx),
@@ -3001,24 +2998,25 @@ impl PricerTile {
         }
     }
 
-    fn step_rows(&mut self, delta: isize) {
+    /// One shared motion over the rows the cursor may rest on and the plan's
+    /// columns. A live selection clamps a bare step: a wrap would carry the
+    /// cursor across the anchor. An empty sheet takes no motion at all,
+    /// column moves included, so the first line added is met at column 0.
+    fn apply_motion(&mut self, m: geode_tile::motion::Motion) {
         let rows: Vec<usize> = self.cursor_rows().collect();
         if rows.is_empty() {
             return;
         }
-        let pos = self
-            .cursor_row()
-            .and_then(|r| rows.iter().position(|x| *x == r))
-            .unwrap_or(0) as isize;
-        let to = (pos + delta).clamp(0, rows.len() as isize - 1) as usize;
-        self.set_cursor_row(rows[to]);
-    }
-
-    /// `g g` / `shift+g`: the first/last row, or the `count`th (1-based).
-    fn jump_row(&mut self, nth: usize) {
-        let rows: Vec<usize> = self.cursor_rows().collect();
-        if let Some(r) = rows.get(nth.saturating_sub(1).min(rows.len().saturating_sub(1))) {
-            self.set_cursor_row(*r);
+        if m.moves_rows() {
+            let at = self
+                .cursor_row()
+                .and_then(|r| rows.iter().position(|x| *x == r))
+                .unwrap_or(0);
+            let selecting = self.selection.is_some();
+            let to = geode_tile::motion::row(at, rows.len(), m, selecting);
+            self.set_cursor_row(rows[to]);
+        } else {
+            self.cursor.col = geode_tile::motion::col(self.cursor.col, self.plan.columns.len(), m);
         }
     }
 
@@ -4264,6 +4262,11 @@ pub(crate) mod tests {
             let id = ActionId(format!("pricer::{verb}"));
             vcx.update(|window, cx| self.content.dispatch(&id, count, window, cx))
         }
+        /// Dispatch a shared `motion::{id}`, the id the shell's keys send.
+        pub fn motion(&self, vcx: &mut VisualTestContext, id: &str, count: Option<u32>) -> bool {
+            let id = ActionId(format!("motion::{id}"));
+            vcx.update(|window, cx| self.content.dispatch(&id, count, window, cx))
+        }
         pub fn visible(&self, vcx: &mut VisualTestContext, visible: bool) {
             vcx.update(|_, cx| self.content.set_visible(visible, cx));
         }
@@ -4763,6 +4766,46 @@ pub(crate) mod tests {
 
     // ---- motions, tree verbs, yank and find ----
 
+    /// A motion arriving with the entry bar open (a palette dispatch) closes
+    /// the bar first, then moves.
+    #[gpui::test]
+    fn a_motion_closes_an_open_entry_bar_then_moves(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "add_below", None);
+        assert!(h.entry_text(&vcx).is_some(), "fixture: the bar is open");
+        assert!(h.motion(&mut vcx, "down", None));
+        assert!(h.entry_text(&vcx).is_none(), "the bar closed");
+        assert_eq!(h.cursor(&vcx), Some((1, 0)));
+    }
+
+    /// The pricer publishes `grid`, so the shell's shared motion keys reach
+    /// it; on an empty sheet every motion leaves the cursor where it was.
+    #[gpui::test]
+    fn the_pricer_publishes_grid_and_motions_on_an_empty_sheet_do_nothing(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.visible(&mut vcx, true);
+        assert_eq!(h.cursor(&vcx), None, "fixture: a fresh sheet has no rows");
+        assert!(
+            h.tile
+                .read_with(&vcx, |t, _| t.key_context())
+                .has_flag(geode_shell::keymap::GRID)
+        );
+        let col = |vcx: &VisualTestContext| h.tile.read_with(vcx, |t, _| t.cursor.col);
+        assert_eq!(col(&vcx), 0, "fixture");
+        for (id, count) in [
+            ("down", None),
+            ("bottom", Some(5)),
+            ("line_end", None),
+            ("right", Some(2)),
+        ] {
+            h.motion(&mut vcx, id, count);
+            assert_eq!(h.cursor(&vcx), None, "{id}");
+            assert_eq!(col(&vcx), 0, "{id}: no column move either");
+        }
+    }
+
     #[gpui::test]
     fn motions_move_the_cursor_and_never_into_the_tree_column(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
@@ -4771,28 +4814,40 @@ pub(crate) mod tests {
             Some((0, 0)),
             "a restore with no cursor lands on the first row"
         );
-        h.dispatch(&mut vcx, "down", Some(2));
+        h.motion(&mut vcx, "down", Some(2));
         assert_eq!(h.cursor(&vcx), Some((2, 0)));
-        h.dispatch(&mut vcx, "down", None);
-        assert_eq!(h.cursor(&vcx), Some((2, 0)), "clamped at the last row");
-        h.dispatch(&mut vcx, "top", None);
+        h.motion(&mut vcx, "down", None);
+        assert_eq!(
+            h.cursor(&vcx),
+            Some((0, 0)),
+            "a bare j at the last row wraps to the first"
+        );
+        h.motion(&mut vcx, "up", None);
+        assert_eq!(
+            h.cursor(&vcx),
+            Some((2, 0)),
+            "and a bare k at the first wraps to the last"
+        );
+        h.motion(&mut vcx, "down", Some(1));
+        assert_eq!(h.cursor(&vcx), Some((2, 0)), "a counted step clamps");
+        h.motion(&mut vcx, "top", None);
         assert_eq!(h.cursor(&vcx), Some((0, 0)));
-        h.dispatch(&mut vcx, "bottom", None);
+        h.motion(&mut vcx, "bottom", None);
         assert_eq!(h.cursor(&vcx), Some((2, 0)));
-        h.dispatch(&mut vcx, "left", None);
+        h.motion(&mut vcx, "left", None);
         assert_eq!(
             h.cursor(&vcx),
             Some((2, 0)),
             "column 0 is the first plan column; the tree is not a target"
         );
-        h.dispatch(&mut vcx, "right", Some(3));
+        h.motion(&mut vcx, "right", Some(3));
         assert_eq!(h.cursor(&vcx), Some((2, 3)));
-        h.dispatch(&mut vcx, "last_col", None);
+        h.motion(&mut vcx, "line_end", None);
         let last = h.columns(&vcx).len() - 1;
         assert_eq!(h.cursor(&vcx), Some((2, last)));
-        h.dispatch(&mut vcx, "first_col", None);
+        h.motion(&mut vcx, "line_start", None);
         assert_eq!(h.cursor(&vcx), Some((2, 0)));
-        h.dispatch(&mut vcx, "page_up", None);
+        h.motion(&mut vcx, "half_page_up", None);
         assert_eq!(
             h.cursor(&vcx),
             Some((0, 0)),
@@ -4859,7 +4914,7 @@ pub(crate) mod tests {
         );
         assert_eq!(texts(&mut vcx), ["1", "2", "3"]);
 
-        h.dispatch(&mut vcx, "down", None);
+        h.motion(&mut vcx, "down", None);
         h.dispatch(&mut vcx, "toggle", None);
         h.draw(&mut vcx);
         assert_eq!(
@@ -4881,13 +4936,13 @@ pub(crate) mod tests {
             ["1", "2", "1", "2", "3"],
             "cursor on the package (row 2): its own number, then distances"
         );
-        h.dispatch(&mut vcx, "down", Some(2));
+        h.motion(&mut vcx, "down", Some(2));
         assert_eq!(
             texts(&mut vcx),
             ["3", "2", "1", "4", "1"],
             "a move re-numbers"
         );
-        h.dispatch(&mut vcx, "bottom", Some(2));
+        h.motion(&mut vcx, "bottom", Some(2));
         assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(1));
         assert_eq!(texts(&mut vcx)[1], "2", "`2G` lands on the row numbered 2");
 
@@ -4907,14 +4962,14 @@ pub(crate) mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
-        h.dispatch(&mut vcx, "down", None);
+        h.motion(&mut vcx, "down", None);
         h.dispatch(&mut vcx, "toggle", None);
         assert_eq!(
             h.tree(&vcx).len(),
             5,
             "space opens the package under the cursor"
         );
-        h.dispatch(&mut vcx, "down", None);
+        h.motion(&mut vcx, "down", None);
         assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(2), "on the first leg");
         h.dispatch(&mut vcx, "collapse", None);
         assert_eq!(h.tree(&vcx).len(), 3);
@@ -4925,7 +4980,7 @@ pub(crate) mod tests {
         );
         h.dispatch(&mut vcx, "expand", None);
         assert_eq!(h.tree(&vcx).len(), 5);
-        h.dispatch(&mut vcx, "down", None);
+        h.motion(&mut vcx, "down", None);
         h.dispatch(&mut vcx, "collapse_all", None);
         assert_eq!(h.tree(&vcx).len(), 3);
         assert_eq!(
@@ -4987,7 +5042,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn yy_yanks_the_rows_shorthand_and_yc_the_column(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
-        h.dispatch(&mut vcx, "down", None);
+        h.motion(&mut vcx, "down", None);
         h.dispatch(&mut vcx, "yank_row", None);
         let clip = vcx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
         assert_eq!(clip.as_deref(), Some("-5 SPX Z26 4800/5200 CS"));
@@ -4995,7 +5050,7 @@ pub(crate) mod tests {
             h.tile.read_with(&vcx, |t, _| t.register.is_some()),
             "p puts what y y yanked"
         );
-        h.dispatch(&mut vcx, "right", Some(3)); // strike
+        h.motion(&mut vcx, "right", Some(3)); // strike
         h.dispatch(&mut vcx, "yank_col", None);
         let clip = vcx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
         assert_eq!(
@@ -5221,12 +5276,12 @@ pub(crate) mod tests {
             "—",
             "a failed leg fails its package"
         );
-        h.dispatch(&mut vcx, "down", None);
+        h.motion(&mut vcx, "down", None);
         assert!(
             h.footer(&vcx).unwrap().ends_with("refused by the mock"),
             "the cursor row's failure in the footer"
         );
-        h.dispatch(&mut vcx, "down", None);
+        h.motion(&mut vcx, "down", None);
         assert_eq!(h.footer(&vcx), None);
     }
 
@@ -5467,7 +5522,7 @@ pub(crate) mod tests {
             stored.contains('\n'),
             "its legs no longer fit the new RR: one per line, got {stored}"
         );
-        h.dispatch(&mut vcx, "bottom", None); // the line
+        h.motion(&mut vcx, "bottom", None); // the line
         h.dispatch(&mut vcx, "add_below", None);
         typed(&h, &mut vcx, "SPX Z26 4800/5200 RR");
         h.dispatch(&mut vcx, "commit", None);
@@ -5605,9 +5660,9 @@ pub(crate) mod tests {
     #[gpui::test]
     fn o_on_a_leg_inserts_the_next_leg(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
-        h.dispatch(&mut vcx, "down", None);
+        h.motion(&mut vcx, "down", None);
         h.dispatch(&mut vcx, "expand", None);
-        h.dispatch(&mut vcx, "down", None); // the first leg
+        h.motion(&mut vcx, "down", None); // the first leg
         h.dispatch(&mut vcx, "add_below", None);
         typed(&h, &mut vcx, "SPX Z26 5000 C");
         h.dispatch(&mut vcx, "commit", None);
@@ -5622,7 +5677,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn o_on_a_closed_package_opens_it_and_lands_on_its_first_leg(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
-        h.dispatch(&mut vcx, "down", None); // P, closed
+        h.motion(&mut vcx, "down", None); // P, closed
         assert_eq!(h.tree(&vcx).len(), 3, "fixture: P is closed");
         h.dispatch(&mut vcx, "add_below", None);
         typed(&h, &mut vcx, "SPX Z26 5000 C");
@@ -5639,7 +5694,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_package_typed_inside_a_package_lands_after_it(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
-        h.dispatch(&mut vcx, "down", None);
+        h.motion(&mut vcx, "down", None);
         h.dispatch(&mut vcx, "add_below", None); // a package row: its first leg
         assert_eq!(h.entry_label(&vcx).as_deref(), Some("into CS"));
         typed(&h, &mut vcx, "SPX Z26 4000/4400 PS");
@@ -5742,7 +5797,7 @@ pub(crate) mod tests {
         h.draw(&mut vcx);
         assert_eq!(h.mode(&mut vcx), "normal", "a click cancels, never commits");
         h.dispatch(&mut vcx, "add_below", None);
-        h.dispatch(&mut vcx, "down", None); // from the palette: not an entry verb
+        h.motion(&mut vcx, "down", None); // from the palette: not an entry verb
         assert_eq!(h.mode(&mut vcx), "normal");
         assert!(!focused(&mut vcx));
     }
@@ -6034,7 +6089,7 @@ pub(crate) mod tests {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
         let b = h.prices().remove(0);
         h.answer(&mut vcx, &b, 12.5);
-        h.dispatch(&mut vcx, "right", Some(3)); // strike
+        h.motion(&mut vcx, "right", Some(3)); // strike
         h.dispatch(&mut vcx, "edit", None);
         assert_eq!(h.mode(&mut vcx), "insert");
         assert_eq!(editor_text(&h, &vcx).as_deref(), Some("5000"));
@@ -6071,13 +6126,13 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_read_only_cell_and_a_package_row_say_so(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
-        h.dispatch(&mut vcx, "last_col", None); // rho
+        h.motion(&mut vcx, "line_end", None); // rho
         h.dispatch(&mut vcx, "edit", None);
         assert_eq!(h.mode(&mut vcx), "normal");
         assert_eq!(h.footer(&vcx).as_deref(), Some(crate::core::READ_ONLY));
         // A package's aggregated columns edit through text; its own result
         // columns stay read-only.
-        h.dispatch(&mut vcx, "down", None); // the package, still on rho
+        h.motion(&mut vcx, "down", None); // the package, still on rho
         h.dispatch(&mut vcx, "edit", None);
         assert_eq!(h.mode(&mut vcx), "normal");
         assert_eq!(h.footer(&vcx).as_deref(), Some(crate::core::READ_ONLY));
@@ -6091,9 +6146,9 @@ pub(crate) mod tests {
             .iter()
             .position(|c| c == column)
             .unwrap_or_else(|| panic!("no {column} column"));
-        h.dispatch(vcx, "first_col", None);
+        h.motion(vcx, "line_start", None);
         if at > 0 {
-            h.dispatch(vcx, "right", Some(at as u32));
+            h.motion(vcx, "right", Some(at as u32));
         }
     }
 
@@ -6216,7 +6271,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn up_and_down_nudge_by_the_texts_precision_and_shift_steps_ten(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
-        h.dispatch(&mut vcx, "right", Some(3));
+        h.motion(&mut vcx, "right", Some(3));
         h.dispatch(&mut vcx, "edit", None);
         h.dispatch(&mut vcx, "insert_up", None);
         assert_eq!(editor_text(&h, &vcx).as_deref(), Some("5001"));
@@ -6255,7 +6310,7 @@ pub(crate) mod tests {
             .iter()
             .position(|c| c == "spot_shift")
             .unwrap();
-        h.dispatch(&mut vcx, "right", Some(spot as u32));
+        h.motion(&mut vcx, "right", Some(spot as u32));
         h.dispatch(&mut vcx, "edit", None);
         set_editor(&h, &mut vcx, "2");
         h.dispatch(&mut vcx, "commit", None);
@@ -6277,7 +6332,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_type_cell_opens_a_typeahead_that_filters_and_enter_picks(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
-        h.dispatch(&mut vcx, "right", Some(4)); // type
+        h.motion(&mut vcx, "right", Some(4)); // type
         h.dispatch(&mut vcx, "edit", None);
         assert_eq!(h.mode(&mut vcx), "insert");
         assert!(
@@ -6289,15 +6344,15 @@ pub(crate) mod tests {
         h.dispatch(&mut vcx, "commit", None);
         assert_eq!(h.cell(&vcx, 0, "type"), "P");
         // An unknown underlying commits as typed.
-        h.dispatch(&mut vcx, "first_col", None);
-        h.dispatch(&mut vcx, "right", None); // underlying
+        h.motion(&mut vcx, "line_start", None);
+        h.motion(&mut vcx, "right", None); // underlying
         h.dispatch(&mut vcx, "edit", None);
         vcx.simulate_input("ndx");
         h.draw(&mut vcx);
         h.dispatch(&mut vcx, "commit", None);
         assert_eq!(h.cell(&vcx, 0, "underlying"), "NDX");
         // A closed vocabulary refuses a query nothing matches.
-        h.dispatch(&mut vcx, "right", Some(3)); // type
+        h.motion(&mut vcx, "right", Some(3)); // type
         h.dispatch(&mut vcx, "edit", None);
         vcx.simulate_input("x");
         h.draw(&mut vcx);
@@ -6310,7 +6365,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn the_editor_gives_up_focus_before_it_is_dropped(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
-        h.dispatch(&mut vcx, "right", Some(3));
+        h.motion(&mut vcx, "right", Some(3));
         h.dispatch(&mut vcx, "edit", None);
         assert!(focused(&mut vcx));
         h.dispatch(&mut vcx, "cancel", None);
@@ -6319,7 +6374,7 @@ pub(crate) mod tests {
         set_editor(&h, &mut vcx, "5100");
         h.dispatch(&mut vcx, "commit", None);
         assert!(!focused(&mut vcx), "commit: blurred, then dropped");
-        h.dispatch(&mut vcx, "right", None); // type: the typeahead's field too
+        h.motion(&mut vcx, "right", None); // type: the typeahead's field too
         h.dispatch(&mut vcx, "edit", None);
         assert!(focused(&mut vcx));
         h.dispatch(&mut vcx, "cancel", None);
@@ -6329,7 +6384,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_click_cancels_an_open_editor_and_never_commits(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
-        h.dispatch(&mut vcx, "right", Some(3));
+        h.motion(&mut vcx, "right", Some(3));
         h.dispatch(&mut vcx, "edit", None);
         set_editor(&h, &mut vcx, "5100");
         let at = centre_of(&mut vcx, "pricer-cell-2-2");
@@ -6356,7 +6411,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn an_editor_whose_line_went_away_closes_with_moved(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
-        h.dispatch(&mut vcx, "right", Some(3));
+        h.motion(&mut vcx, "right", Some(3));
         h.dispatch(&mut vcx, "edit", None);
         set_editor(&h, &mut vcx, "5100");
         h.tile
@@ -6394,7 +6449,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn an_open_editor_follows_its_column_through_a_view_reload(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
-        h.dispatch(&mut vcx, "right", Some(3)); // strike: plan column 3
+        h.motion(&mut vcx, "right", Some(3)); // strike: plan column 3
         h.dispatch(&mut vcx, "edit", None);
         assert_eq!(editor_paint_col(&h, &vcx), Some(3), "fixture");
         set_editor(&h, &mut vcx, "5100");
@@ -6428,7 +6483,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_view_reload_without_the_edited_column_closes_the_editor(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
-        h.dispatch(&mut vcx, "right", Some(3)); // strike
+        h.motion(&mut vcx, "right", Some(3)); // strike
         h.dispatch(&mut vcx, "edit", None);
         assert!(focused(&mut vcx), "fixture: the field owns focus");
         let views = slim_views("\"qty\", \"price\"");
@@ -6456,7 +6511,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_click_on_a_typeahead_row_picks_it(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
-        h.dispatch(&mut vcx, "right", Some(4)); // type
+        h.motion(&mut vcx, "right", Some(4)); // type
         h.dispatch(&mut vcx, "edit", None);
         let cell = centre_of(&mut vcx, "pricer-editor-0-5");
         let at = centre_of(&mut vcx, "pricer-choice-row-1"); // "P"
@@ -6494,7 +6549,7 @@ pub(crate) mod tests {
             })
         };
         // Strike: right-aligned. Table column = plan column + 1.
-        h.dispatch(&mut vcx, "right", Some(3));
+        h.motion(&mut vcx, "right", Some(3));
         h.dispatch(&mut vcx, "edit", None);
         let cell = vcx.debug_bounds("pricer-cell-0-4").expect("strike cell");
         let text = text_bounds(&h, &mut vcx);
@@ -6506,8 +6561,8 @@ pub(crate) mod tests {
         assert!(text.top() >= cell.top() && text.bottom() <= cell.bottom());
         h.dispatch(&mut vcx, "cancel", None);
         // Underlying: a left-aligned typeahead field.
-        h.dispatch(&mut vcx, "first_col", None);
-        h.dispatch(&mut vcx, "right", None);
+        h.motion(&mut vcx, "line_start", None);
+        h.motion(&mut vcx, "right", None);
         h.dispatch(&mut vcx, "edit", None);
         let cell = vcx
             .debug_bounds("pricer-cell-0-2")
@@ -6574,9 +6629,9 @@ pub(crate) mod tests {
 
     fn open_expiry(h: &Harness, vcx: &mut VisualTestContext, row: usize) {
         if row > 0 {
-            h.dispatch(vcx, "down", Some(row as u32));
+            h.motion(vcx, "down", Some(row as u32));
         }
-        h.dispatch(vcx, "right", Some(2));
+        h.motion(vcx, "right", Some(2));
         h.dispatch(vcx, "edit", None);
         h.draw(vcx);
     }
@@ -6739,7 +6794,7 @@ pub(crate) mod tests {
     fn an_unchanged_text_commit_is_no_edit(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
         let _ = h.prices();
-        h.dispatch(&mut vcx, "right", Some(3)); // strike
+        h.motion(&mut vcx, "right", Some(3)); // strike
         h.dispatch(&mut vcx, "edit", None);
         set_editor(&h, &mut vcx, "5000.0");
         h.dispatch(&mut vcx, "commit", None);
@@ -6857,7 +6912,7 @@ pub(crate) mod tests {
     fn dd_then_u_restores_the_row_with_its_numbers_and_no_request(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
         answer_all(&h, &mut vcx, 12.5);
-        h.dispatch(&mut vcx, "bottom", None);
+        h.motion(&mut vcx, "bottom", None);
         h.dispatch(&mut vcx, "delete", None);
         assert_eq!(h.tree(&vcx).len(), 2);
         assert!(
@@ -6899,7 +6954,7 @@ pub(crate) mod tests {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
         answer_all(&h, &mut vcx, 12.5);
         h.dispatch(&mut vcx, "yank_row", None);
-        h.dispatch(&mut vcx, "bottom", None);
+        h.motion(&mut vcx, "bottom", None);
         h.dispatch(&mut vcx, "put_below", None);
         assert_eq!(
             h.tree(&vcx),
@@ -6916,11 +6971,11 @@ pub(crate) mod tests {
         assert_ne!(ids.0, ids.1, "a put takes fresh ids");
         assert_eq!(h.prices()[0].lines.len(), 1, "and asks for its own price");
         // A package put from a leg lands at a root boundary.
-        h.dispatch(&mut vcx, "top", None);
-        h.dispatch(&mut vcx, "down", None);
+        h.motion(&mut vcx, "top", None);
+        h.motion(&mut vcx, "down", None);
         h.dispatch(&mut vcx, "yank_row", None);
         h.dispatch(&mut vcx, "expand", None);
-        h.dispatch(&mut vcx, "down", None); // first leg
+        h.motion(&mut vcx, "down", None); // first leg
         h.dispatch(&mut vcx, "put_above", None);
         let roots = h.tile.read_with(&vcx, |t, _| t.sheet.roots().count());
         assert_eq!(roots, 5);
@@ -6944,7 +6999,7 @@ pub(crate) mod tests {
         );
         h.dispatch(&mut vcx, "move_down", Some(5));
         assert_eq!(h.footer(&vcx).as_deref(), Some("cannot move past the end"));
-        h.dispatch(&mut vcx, "top", None);
+        h.motion(&mut vcx, "top", None);
         h.dispatch(&mut vcx, "move_down", None); // the package hops down
         assert_eq!(h.tree(&vcx)[1], "-5 SPX Z26 4800/5200 CS");
     }
@@ -6966,7 +7021,7 @@ pub(crate) mod tests {
             "its sum: two legs of 1.00"
         );
         assert!(h.prices().is_empty(), "grouping changes no request");
-        h.dispatch(&mut vcx, "down", None); // a leg: g u acts on its package
+        h.motion(&mut vcx, "down", None); // a leg: g u acts on its package
         h.dispatch(&mut vcx, "ungroup", None);
         assert_eq!(h.tile.read_with(&vcx, |t, _| t.sheet.roots().count()), 3);
         h.dispatch(&mut vcx, "group", Some(9));
@@ -7351,9 +7406,9 @@ pub(crate) mod tests {
     fn put_below_onto_a_collapsed_packages_leg_slot_opens_it(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
         answer_all(&h, &mut vcx, 12.5);
-        h.dispatch(&mut vcx, "top", None);
+        h.motion(&mut vcx, "top", None);
         h.dispatch(&mut vcx, "yank_row", None); // yank A: a line
-        h.dispatch(&mut vcx, "down", None); // the still-collapsed package
+        h.motion(&mut vcx, "down", None); // the still-collapsed package
         h.dispatch(&mut vcx, "put_below", None);
         assert_eq!(
             h.tree(&vcx),
@@ -7547,8 +7602,8 @@ pub(crate) mod tests {
     const UNDERLYINGS: [&str; 3] = ["SPX Z26 5000 C", "HSCEI Z26 9000 C", "NKY Z26 30000 C"];
 
     fn open_underlying(h: &Harness, vcx: &mut VisualTestContext) {
-        h.dispatch(vcx, "first_col", None);
-        h.dispatch(vcx, "right", None); // underlying
+        h.motion(vcx, "line_start", None);
+        h.motion(vcx, "right", None); // underlying
         h.dispatch(vcx, "edit", None);
         assert!(
             h.tile
@@ -7734,7 +7789,7 @@ pub(crate) mod tests {
         assert_eq!(h.mode(&mut vcx), "menu");
         h.command(&mut vcx, "price").unwrap();
         assert_eq!(h.mode(&mut vcx), "normal", "`:` closed the menu");
-        h.dispatch(&mut vcx, "right", Some(3));
+        h.motion(&mut vcx, "right", Some(3));
         h.dispatch(&mut vcx, "edit", None);
         set_editor(&h, &mut vcx, "5100");
         assert_eq!(h.mode(&mut vcx), "insert");
@@ -7748,7 +7803,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_chevron_click_cancels_an_open_editor(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
-        h.dispatch(&mut vcx, "right", Some(3));
+        h.motion(&mut vcx, "right", Some(3));
         h.dispatch(&mut vcx, "edit", None);
         set_editor(&h, &mut vcx, "5100");
         let at = centre_of(&mut vcx, "pricer-chevron-1");
@@ -7767,7 +7822,7 @@ pub(crate) mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
-        h.dispatch(&mut vcx, "down", None); // P
+        h.motion(&mut vcx, "down", None); // P
         h.dispatch(&mut vcx, "expand", None);
         h.dispatch(&mut vcx, "delete", None);
         assert_eq!(h.tree(&vcx).len(), 2);
@@ -7787,9 +7842,9 @@ pub(crate) mod tests {
     #[gpui::test]
     fn undo_of_a_leg_delete_opens_its_package_and_lands_on_the_leg(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
-        h.dispatch(&mut vcx, "down", None); // P
+        h.motion(&mut vcx, "down", None); // P
         h.dispatch(&mut vcx, "expand", None);
-        h.dispatch(&mut vcx, "down", None); // its first leg
+        h.motion(&mut vcx, "down", None); // its first leg
         h.dispatch(&mut vcx, "delete", None);
         h.dispatch(&mut vcx, "collapse_all", None);
         assert_eq!(h.tree(&vcx).len(), 3);
@@ -7801,7 +7856,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn g_u_then_u_on_an_open_package_regroups_it_open(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
-        h.dispatch(&mut vcx, "down", None); // P
+        h.motion(&mut vcx, "down", None); // P
         h.dispatch(&mut vcx, "expand", None);
         h.dispatch(&mut vcx, "ungroup", None);
         assert_eq!(h.tile.read_with(&vcx, |t, _| t.sheet.roots().count()), 4);
@@ -8378,7 +8433,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_pointer_move_over_a_typeahead_row_moves_its_highlight(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
-        h.dispatch(&mut vcx, "right", Some(4)); // type: C, P
+        h.motion(&mut vcx, "right", Some(4)); // type: C, P
         h.dispatch(&mut vcx, "edit", None);
         let at = centre_of(&mut vcx, "pricer-choice-row-1");
         vcx.simulate_mouse_move(at, None, gpui::Modifiers::default());
@@ -9575,7 +9630,7 @@ pub(crate) mod tests {
         // A palette dispatch under the question answers "no" too.
         h.command(&mut vcx, "rm old").unwrap();
         h.draw(&mut vcx);
-        h.dispatch(&mut vcx, "down", None);
+        h.motion(&mut vcx, "down", None);
         assert_eq!(prompt(&h, &vcx), None);
         assert!(!focused(&mut vcx));
         assert!(h.store.forgets().is_empty());

@@ -13914,6 +13914,66 @@ run_mutation "md motion: retired ids rename to the shared ones" \
     ("marketdata::down", "motion::up"),' \
   geode-marketdata every_retired_motion_id_renames_to_its_shared_id
 
+# Every shared motion id reaches the pricer's one motion verb; a pricer that
+# stops recognising them takes no motion key at all.
+run_mutation "pricer motion: the tile routes the shared motions" \
+  crates/geode-pricer/src/tile.rs \
+  '        let verb = if shared_motion.is_some() {' \
+  '        let verb = if false {' \
+  geode-pricer motions_move_the_cursor_and_never_into_the_tree_column
+
+# Outside a selection a bare `j` on the last row wraps to the first.
+run_mutation "pricer motion: a bare j wraps outside a selection" \
+  crates/geode-pricer/src/tile.rs \
+  '            let selecting = self.selection.is_some();' \
+  '            let selecting = true;' \
+  geode-pricer motions_move_the_cursor_and_never_into_the_tree_column
+
+# A palette motion over an open entry bar closes the bar before moving,
+# like every verb that is not the bar's own.
+run_mutation "pricer motion: a motion closes an open field first" \
+  crates/geode-pricer/src/tile.rs \
+  '            if verb != "add_below" {
+                self.close_entry(window, cx);
+            }' \
+  '            if verb != "add_below" && verb != "motion" {
+                self.close_entry(window, cx);
+            }' \
+  geode-pricer a_motion_closes_an_open_entry_bar_then_moves
+
+# An empty sheet takes no motion, a column move included.
+run_mutation "pricer motion: an empty sheet takes no column move" \
+  crates/geode-pricer/src/tile.rs \
+  $'        let rows: Vec<usize> = self.cursor_rows().collect();\n        if rows.is_empty() {\n            return;\n        }\n        if m.moves_rows() {' \
+  $'        let rows: Vec<usize> = self.cursor_rows().collect();\n        if rows.is_empty() && m.moves_rows() {\n            return;\n        }\n        if m.moves_rows() {' \
+  geode-pricer the_pricer_publishes_grid_and_motions_on_an_empty_sheet_do_nothing
+
+# The shell binds the shared motions under `grid`; a pricer that stops
+# publishing the flag takes no motion key at all.
+run_mutation "pricer motion: the key context publishes grid" \
+  crates/geode-pricer/src/tile.rs \
+  '        let cx = KeyContext::new("pricer")
+            .grid()' \
+  '        let cx = KeyContext::new("pricer")' \
+  geode-pricer the_pricer_publishes_grid_and_motions_on_an_empty_sheet_do_nothing
+
+run_mutation "motion e2e: a shared override reaches the pricer" \
+  crates/geode-pricer/src/tile.rs \
+  '        let cx = KeyContext::new("pricer")
+            .grid()' \
+  '        let cx = KeyContext::new("pricer")' \
+  geode-app a_shared_motion_override_reaches_each_grid_tile
+
+# An old user binding on a retired id must bind its shared successor, not
+# some other motion.
+run_mutation "pricer motion: retired ids rename to the shared ones" \
+  crates/geode-pricer/src/content.rs \
+  'pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
+    ("pricer::down", "motion::down"),' \
+  'pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
+    ("pricer::down", "motion::up"),' \
+  geode-pricer every_retired_motion_id_renames_to_its_shared_id
+
 run_mutation "picker: the values list moves through vimnav::apply, not a private ±1 (spec §20.5)" \
   crates/geode-shell/src/shell/picker.rs \
   '            p.selected = vimnav::apply(p.selected, len, cmd); // values' \

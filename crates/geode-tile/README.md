@@ -20,7 +20,7 @@ Current architecture:
 | `notice` | `Notice` (prepared text and a `Tone`: `Status`, `Warning`, `Danger`) and its one paint in theme tokens. Precedence between a tile's notice slots stays the tile's. |
 | `popover` | Popup geometry (`ROW_HEIGHT`, `ROW_INSET`, `MIN_WIDTH`, `SNAP_MARGIN`), the popover `surface`, `anchor_popup` (deferred, anchored, snapped, priority 1), and the `row_shell`/`empty_row` row frames. |
 
-Used by the pricer (all four doors, and `following::arrive_immediately` at
+Used by the pricer (all four doors, `motion` for its grid cursor, and `following::arrive_immediately` at
 flip barriers), market-data (all four, `motion` for its grid cursor, and `following` for
 its document request), timeseries (popover, menu, notice, and `following` for its series
 query), the blotter (notice, `motion` for its grid cursor, and `following` for its view query) and
