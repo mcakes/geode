@@ -2850,6 +2850,107 @@ run_mutation "dialog stack: a palette over the stack records the return-to-field
   geode-shell \
   the_last_pop_returns_to_the_field_after_a_palette_mid_stack
 
+run_mutation "object stack: the same domain lower in the stack is pushed again" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '            .any(|parked| parked.state.domain == domain);' \
+  '            .any(|_| false);' \
+  geode-shell \
+  three_object_dialogs_pop_in_order
+
+run_mutation "object stack: a popped cover does not bring back the dialog it covered" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                dialog::unpark_object_dialog(self);' \
+  '                {}' \
+  geode-shell \
+  colors_pushes_over_a_views_column_stage_and_escape_returns_to_it
+
+run_mutation "object stack: the covered state parks with the stack top, not its owner" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '        .rev()
+        .find(|m| m.kind == DialogKind::Object);' \
+  '        .rev()
+        .next();' \
+  geode-shell \
+  a_choice_list_between_two_object_dialogs_keeps_the_lower_one
+
+run_mutation "object stack: save-current names the covered dialog instead of Scopes" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    if !dialog::can_open_object(shell, Domain::Scopes) {' \
+  '    if !dialog::can_open(shell, dialog::DialogKind::Object) {' \
+  geode-shell \
+  scope_save_current_stacks_over_views_without_touching_it
+
+run_mutation "object stack: a failed write rebuilds every open draft" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '        .filter(|state| pending.origins.contains(&state.domain))' \
+  '        .filter(|_| true)' \
+  geode-shell \
+  a_failed_stacked_write_leaves_the_covered_draft_alone
+
+run_mutation "object stack: a batch forgets a second contributing domain" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '        && !pending.origins.contains(&domain)' \
+  '        && pending.origins.is_empty()' \
+  geode-shell \
+  a_shared_batch_failure_rebuilds_every_contributing_draft
+
+run_mutation "object stack: a covered Scopes dialog misses its values reply" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        .find(|state| state.domain == Domain::Scopes)' \
+  '        .take(1)
+        .find(|state| state.domain == Domain::Scopes)' \
+  geode-shell \
+  a_covered_scopes_values_stage_receives_its_delivery
+
+run_mutation "object stack: a covered expression field misses its values reply" \
+  crates/geode-shell/src/shell/expr_suggest.rs \
+  '            .chain(super::dialog::parked_objects_mut(&mut view.modals))' \
+  '            .chain(super::dialog::parked_objects_mut(&mut []))' \
+  geode-shell \
+  a_covered_expression_field_receives_its_values
+
+run_mutation "object stack: a reload leaves a covered expression field stale" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                    .chain(super::dialog::parked_objects_mut(&mut self.modals))' \
+  '                    .chain(super::dialog::parked_objects_mut(&mut []))' \
+  geode-shell \
+  a_reload_refreshes_a_covered_object_expression_field
+
+run_mutation "object stack: a color refresh leaves the baseline behind" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        for fields in [&mut self.fields, &mut self.baseline] {' \
+  '        for fields in [&mut self.fields] {' \
+  geode-shell \
+  refreshing_color_options_keeps_the_draft_clean
+
+run_mutation "object stack: a reload never refreshes covered color choices" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '            super::objectdialog::render::refresh_color_choices(self);' \
+  '            {}' \
+  geode-shell \
+  a_color_created_in_a_stacked_dialog_is_offered_to_the_covered_column
+
+run_mutation "object stack: an open color typeahead keeps the old options" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            *list = rebuilt;' \
+  '            let _ = rebuilt;' \
+  geode-shell \
+  refreshing_rebuilds_an_open_color_typeahead
+
+run_mutation "object stack: a covered color typeahead keeps the old options through the palette route" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            *list = rebuilt;' \
+  '            let _ = rebuilt;' \
+  geode-shell \
+  an_open_color_typeahead_lists_a_color_created_above_it
+
+run_mutation "object stack: a covered open field loses its typed text and caret" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                dialog::unpark_object_dialog(self);' \
+  '                {}' \
+  geode-shell \
+  an_open_value_field_survives_a_stacked_colors_dialog
+
 run_mutation "dialog stack: every chord reaches through a dialog" \
   crates/geode-shell/src/shell/input.rs \
   '                        && dialog::opens_dialog(&action)' \
@@ -3907,8 +4008,8 @@ run_mutation "tile: the depth bound is requested, not everything" \
 
 run_mutation "tile: a query error keeps the last snapshot" \
   crates/geode-blotter/src/tile.rs \
-  '                self.error = Some((e, Tone::DangerText));' \
-  '                self.error = Some((e, Tone::DangerText));
+  '                self.error = Some(Notice::danger(e));' \
+  '                self.error = Some(Notice::danger(e));
                 self.table
                     .update(cx, |t, _| *t.delegate_mut() = BlotterDelegate::new());' \
   geode-blotter \
@@ -5456,8 +5557,9 @@ run_mutation "objectdialog: the browse list ignores the query it displays" \
 # records for `settings`.
 run_mutation "objectdialog: closing the modal leaves the dialog's state behind" \
   crates/geode-shell/src/shell/mod.rs \
-  '            DialogKind::Object => self.object_dialog = None,' \
-  '            DialogKind::Object => {}' \
+  '                self.object_dialog = None;
+                // The next object dialog down' \
+  '                // The next object dialog down' \
   geode-shell \
   slash_filters_and_escape_walks_the_ladder
 
@@ -5566,9 +5668,9 @@ run_mutation "objectdialog: an edit assigns the config instead of going through 
 # Only a test counting the events can see it.
 run_mutation "objectdialog: the config fan-out fires per keystroke instead of riding the debounce" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
-  '    schedule_flush(shell, user_dir, edits, revert, delay, cx);' \
+  '    schedule_flush(shell, user_dir, edits, revert, delay, origin, cx);' \
   '    apply_in_memory(shell, &user_dir, &edits, cx);
-    schedule_flush(shell, user_dir, edits, revert, delay, cx);' \
+    schedule_flush(shell, user_dir, edits, revert, delay, origin, cx);' \
   geode-shell \
   the_config_fan_out_is_debounced_and_goes_through_the_one_applier
 
@@ -5776,7 +5878,8 @@ run_mutation "objectdialog: a removal bypasses the batch again" \
   '    let Some(user_dir) = shell.user_dir.clone() else {
         return Some("no writable user config directory — nothing was removed".to_string());
     };
-    queue_batch(shell, edits, user_dir, Duration::ZERO, cx);
+    let origin = shell.object_dialog.as_ref().map(|s| s.domain);
+    queue_batch(shell, edits, user_dir, Duration::ZERO, origin, cx);
     None
 }' \
   '    let Some(user_dir) = shell.user_dir.clone() else {
@@ -8058,11 +8161,13 @@ run_mutation "objectdialog: a removal waits on the write debounce" \
   '    let Some(user_dir) = shell.user_dir.clone() else {
         return Some("no writable user config directory — nothing was removed".to_string());
     };
-    queue_batch(shell, edits, user_dir, Duration::ZERO, cx);' \
+    let origin = shell.object_dialog.as_ref().map(|s| s.domain);
+    queue_batch(shell, edits, user_dir, Duration::ZERO, origin, cx);' \
   '    let Some(user_dir) = shell.user_dir.clone() else {
         return Some("no writable user config directory — nothing was removed".to_string());
     };
-    queue_batch(shell, edits, user_dir, WRITE_DEBOUNCE, cx);' \
+    let origin = shell.object_dialog.as_ref().map(|s| s.domain);
+    queue_batch(shell, edits, user_dir, WRITE_DEBOUNCE, origin, cx);' \
   geode-shell deleting_a_user_layer_object_leaves_the_browse_list_before_the_watcher_could_fire
 
 # `Domain::objects` used to ask `Destination::Presentation.doc(self)`
@@ -8213,13 +8318,13 @@ run_mutation "objectdialog: create does not wait for the edit debounce" \
   '    if let Some(draft) = shell.object_dialog.as_mut().and_then(|s| s.draft.as_mut()) {
         draft.mark_saved();
     }
-    queue_batch(shell, edits, user_dir, Duration::ZERO, cx);
+    queue_batch(shell, edits, user_dir, Duration::ZERO, Some(domain), cx);
     None
 }' \
   '    if let Some(draft) = shell.object_dialog.as_mut().and_then(|s| s.draft.as_mut()) {
         draft.mark_saved();
     }
-    queue_batch(shell, edits, user_dir, WRITE_DEBOUNCE, cx);
+    queue_batch(shell, edits, user_dir, WRITE_DEBOUNCE, Some(domain), cx);
     None
 }' \
   geode-shell \
@@ -11876,9 +11981,9 @@ run_mutation "objectdialog: enter names i on a row i can open" \
 # with it, or the crumb keeps naming a column whose fields are gone.
 run_mutation "objectdialog: a reverted write leaves the column stage" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
-  '                rebuilt.select_item_named(&column);
-                state.stage = Stage::Edit { object };' \
-  '                rebuilt.select_item_named(&column);' \
+  '            rebuilt.select_item_named(&column);
+            state.stage = Stage::Edit { object };' \
+  '            rebuilt.select_item_named(&column);' \
   geode-shell \
   a_failed_write_in_the_column_stage_steps_back_to_the_view
 
@@ -14613,20 +14718,9 @@ run_mutation "mdmenu: an unrelated action closes the popup first" \
 # `Ok` arm's own close-and-dispatch, a greyed "Upload" row would close
 # the popup and dispatch `marketdata::upload` anyway.
 run_mutation "mdmenu: a greyed row is a notice, not a dispatch" \
-  crates/geode-marketdata/src/tile.rs \
-  '            Err(reason) => {
-                self.notice = Some((*reason).into());
-                self.rebuild_chrome();
-                cx.notify();
-            }' \
-  '            Err(reason) => {
-                let id = id.clone();
-                self.notice = Some((*reason).into());
-                self.rebuild_chrome();
-                cx.notify();
-                self.close_popup_with_window(window, cx);
-                self.dispatch(&id, None, window, cx);
-            }' \
+  crates/geode-tile/src/menu/mod.rs \
+  '            Err(reason) => Err(reason.clone()),' \
+  '            Err(_) => Ok(action.pick.clone()),' \
   geode-marketdata enter_on_a_greyed_row_notices_and_keeps_the_menu
 
 # Fix round 1, IMPORTANT-1: the `⋯` button's capture-phase handler must
@@ -14683,18 +14777,10 @@ run_mutation "mdmenu: a command line closes the popup" \
 # every one of them — a dead row over a live door.
 run_mutation "mdpark: the menu's load row stays live on a dirty draft" \
   crates/geode-marketdata/src/core/menu.rs \
-  '        action(
-            "marketdata::load_underlying",
-            "Load underlying…",
-            "u",
-            Ok(()),
-        ),' \
-  '        action(
-            "marketdata::load_underlying",
-            "Load underlying…",
-            "u",
-            if dirty { Err("revert or upload first") } else { Ok(()) },
-        ),' \
+  '            Hint::chord("marketdata::load_underlying"),
+            Ok(()),' \
+  '            Hint::chord("marketdata::load_underlying"),
+            if dirty { Err("revert or upload first") } else { Ok(()) },' \
   geode-marketdata a_dirty_draft_leaves_load_live_and_a_built_upload_is_live
 
 # Blur, THEN drop (`close_editor`'s own order, here for the picker):
@@ -15787,21 +15873,21 @@ run_mutation "tile: a bare step wraps in normal mode only (spec §20.5)" \
 # The host's hover-gated counter detects the leak; keyboard tests do not
 # exercise this hit-testing boundary.
 run_mutation "mdmenu: the popup occludes what is painted beneath it" \
-  crates/geode-marketdata/src/popup.rs \
-  '        .debug_selector(move || format!("marketdata-menu-{tile_id}"))
-        // Occlude the grid so popup hover and press events do not also hit its rows.
+  crates/geode-tile/src/menu/render.rs \
+  '        // Occlude what the menu covers so its hover and presses do not also reach it.
         .occlude()' \
-  '        .debug_selector(move || format!("marketdata-menu-{tile_id}"))' \
+  '        // Occlude what the menu covers so its hover and presses do not also reach it.' \
   geode-marketdata \
   hovering_a_menu_row_moves_the_highlight_and_occludes_the_grid
 
 # Hovering a row moves the highlight. Mutated to a no-op, the row still
 # paints and clicks; only the highlight stays where the keys left it.
 run_mutation "mdmenu: hovering a menu row moves the highlight" \
-  crates/geode-marketdata/src/tile.rs \
-  '        m.highlighted = index;
-        cx.notify();' \
-  '        let _ = index;' \
+  crates/geode-tile/src/menu/mod.rs \
+  '        self.highlighted = Some(index);
+        true' \
+  '        let _ = index;
+        false' \
   geode-marketdata \
   hovering_a_menu_row_moves_the_highlight_and_occludes_the_grid
 
@@ -15996,33 +16082,52 @@ run_mutation "mdauto: an empty new document never auto-rebases a draft away" \
 # menu no longer says which policy is in force.
 run_mutation "mdauto: exactly one policy row is checked" \
   crates/geode-marketdata/src/core/menu.rs \
-  '            checked: Some(p == policy),' \
-  '            checked: Some(true),' \
+  '                .checked(p == policy),' \
+  '                .checked(true),' \
   geode-marketdata \
   exactly_one_policy_row_is_checked_and_it_follows_the_policy
+
+# A policy row's hint names its action, so a user binding shows in the menu;
+# mutated to no hint, a bound policy row trails nothing and an unbound one
+# loses its `:auto` verb.
+run_mutation "mdmenu: a policy row hints its live chord" \
+  crates/geode-marketdata/src/core/menu.rs \
+  '                .hint(Hint::chord_or_verb(id, verb))' \
+  '                .hint(Hint::None)' \
+  geode-marketdata \
+  a_menu_hint_follows_a_policy_and_kind_rebind
+
+# A kind action's row resolves the user's binding; mutated to no hint, the
+# row's lane stays empty whatever the keymap binds.
+run_mutation "mdmenu: a kind row hints its live chord" \
+  crates/geode-marketdata/src/core/menu.rs \
+  '                Hint::chord(k.id),' \
+  '                Hint::None,' \
+  geode-marketdata \
+  a_menu_hint_follows_a_policy_and_kind_rebind
 
 # `j` steps over a disabled row as over a separator (user report
 # 2026-09-25); mutated, a downward step lands on greyed `Upload`.
 run_mutation "mdmenu: stepping skips disabled rows" \
-  crates/geode-marketdata/src/core/menu.rs \
-  '            (at + 1..rows.len()).find(|&i| lands(&rows[i]))' \
-  '            (at + 1..rows.len()).find(|&i| matches!(rows[i], MenuRow::Action { .. }))' \
+  crates/geode-tile/src/menu/mod.rs \
+  '            (at + 1..rows.len()).find(|&i| rows[i].lands())' \
+  '            (at + 1..rows.len()).find(|&i| rows[i].is_action())' \
   geode-marketdata \
   navigation_skips_disabled_rows
 
 # The same mutation seen through the tile's `menu_down` route: two steps
 # from `Load underlying…` no longer reach `rebase edits`.
 run_mutation "mdmenu: menu_down skips disabled rows in the tile" \
-  crates/geode-marketdata/src/core/menu.rs \
-  '            (at + 1..rows.len()).find(|&i| lands(&rows[i]))' \
-  '            (at + 1..rows.len()).find(|&i| matches!(rows[i], MenuRow::Action { .. }))' \
+  crates/geode-tile/src/menu/mod.rs \
+  '            (at + 1..rows.len()).find(|&i| rows[i].lands())' \
+  '            (at + 1..rows.len()).find(|&i| rows[i].is_action())' \
   geode-marketdata \
   the_menu_ticks_the_policy_and_a_pick_sets_it
 
 # Stepping never lands on a separator or a section heading.
 run_mutation "mdmenu: stepping skips separators and sections" \
-  crates/geode-marketdata/src/core/menu.rs \
-  '            (at + 1..rows.len()).find(|&i| lands(&rows[i]))' \
+  crates/geode-tile/src/menu/mod.rs \
+  '            (at + 1..rows.len()).find(|&i| rows[i].lands())' \
   '            (at + 1..rows.len()).next()' \
   geode-marketdata \
   navigation_skips_separators_and_starts_on_the_first_enabled_row
@@ -18223,19 +18328,19 @@ run_mutation "pricer rm: an unknown name arms the confirm" \
   geode-pricer colon_rm_refuses_open_and_unknown_sheets
 
 run_mutation "pricer rm: any key confirms" \
-  crates/geode-pricer/src/tile.rs \
-  '        if ks.key == "y" && !ks.modifiers.modified() {
-            self.submit_remove(window, cx);' \
-  '        if true {
-            self.submit_remove(window, cx);' \
+  crates/geode-tile/src/confirm.rs \
+  '    if ks.key == "y" && !ks.modifiers.modified() {
+        host.confirmed(payload, window, cx);' \
+  '    if true {
+        host.confirmed(payload, window, cx);' \
   geode-pricer any_other_key_cancels_the_rm_confirm_and_is_consumed
 
 run_mutation "pricer rm: a modified y confirms" \
-  crates/geode-pricer/src/tile.rs \
-  '        if ks.key == "y" && !ks.modifiers.modified() {
-            self.submit_remove(window, cx);' \
-  '        if ks.key == "y" {
-            self.submit_remove(window, cx);' \
+  crates/geode-tile/src/confirm.rs \
+  '    if ks.key == "y" && !ks.modifiers.modified() {
+        host.confirmed(payload, window, cx);' \
+  '    if ks.key == "y" {
+        host.confirmed(payload, window, cx);' \
   geode-pricer any_other_key_cancels_the_rm_confirm_and_is_consumed
 
 run_mutation "pricer rm: y forgets nothing" \
@@ -18251,37 +18356,25 @@ run_mutation "pricer rm: the confirm is not insert mode" \
   geode-pricer colon_rm_asks_and_y_forgets
 
 run_mutation "pricer rm: focus leaving leaves the question standing" \
-  crates/geode-pricer/src/tile.rs \
-  '        let blur = cx.on_blur(&focus, window, |this, window, cx| {
-            if this.confirm.is_some() {
-                this.cancel_remove(window, cx);
-            }
-        });' \
-  '        let blur = cx.on_blur(&focus, window, |_, _, _| {});' \
+  crates/geode-tile/src/confirm.rs \
+  '    let blur = cx.on_blur(&focus, window, |host: &mut T, window, cx| {
+        cancel(host, window, cx);
+    });' \
+  '    let blur = cx.on_blur(&focus, window, |_: &mut T, _, _| {});' \
   geode-pricer focus_leaving_or_a_pointer_press_cancels_the_rm_confirm
 
 run_mutation "pricer rm: a pointer press leaves the question standing" \
-  crates/geode-pricer/src/tile.rs \
-  '        if self.confirm.is_some() {
-            self.cancel_remove(window, cx);
-        }
-    }
-
-    /// Drop the armed confirm' \
-  '        let _ = (window, cx);
-    }
-
-    /// Drop the armed confirm' \
+  crates/geode-tile/src/confirm.rs \
+  '            tile.update(cx, |t, cx| cancel(t, window, cx));' \
+  '            let _ = (&tile, window, cx);' \
   geode-pricer focus_leaving_or_a_pointer_press_cancels_the_rm_confirm
 
 run_mutation "pricer rm: the confirm drops still focused" \
-  crates/geode-pricer/src/tile.rs \
-  '        let pending = self.confirm.take()?;
-        if pending.focus.is_focused(window) {
+  crates/geode-tile/src/confirm.rs \
+  '        if self.focus.is_focused(window) {
             window.blur(cx);
         }' \
-  '        let pending = self.confirm.take()?;
-        let _ = (window, cx);' \
+  '        let _ = (&self.focus, &window, &cx);' \
   geode-pricer any_other_key_cancels_the_rm_confirm_and_is_consumed
 
 run_mutation "pricer rm: a failed forget is painted nowhere" \
@@ -19446,24 +19539,24 @@ run_mutation "timeseries: an expression parse error keeps the field open" \
 # starts on it; an absolute range ticks `Custom dates…` instead.
 run_mutation "timeseries range menu: the preset in force is ticked" \
   crates/geode-timeseries/src/core/menu.rs \
-  '            checked: Some(*current == Range::Relative(p)),' \
-  '            checked: Some(false),' \
+  '                    .checked(*current == Range::Relative(p)),' \
+  '                    .checked(false),' \
   geode-timeseries \
   the_range_menu_writes_the_presets_out_ticks_the_current_and_ends_on_custom
 
 run_mutation "timeseries range menu: an absolute range ticks custom dates" \
   crates/geode-timeseries/src/core/menu.rs \
-  '        checked: Some(matches!(current, Range::Absolute { .. })),' \
-  '        checked: Some(false),' \
+  '            .checked(matches!(current, Range::Absolute { .. })),' \
+  '            .checked(false),' \
   geode-timeseries \
   an_absolute_range_ticks_custom_dates_and_starts_there
 
 run_mutation "timeseries menus: the highlight starts on the value in force" \
   crates/geode-timeseries/src/core/menu.rs \
-  '                    checked: Some(true),
-                    pick: Pick::Range(_) | Pick::CustomRange | Pick::Frequency(_),' \
-  '                    checked: Some(false),
-                    pick: Pick::Range(_) | Pick::CustomRange | Pick::Frequency(_),' \
+  '                a.tick() == Some(true)
+                    && a.is_enabled()' \
+  '                a.tick() == Some(false)
+                    && a.is_enabled()' \
   geode-timeseries \
   the_range_menu_writes_the_presets_out_ticks_the_current_and_ends_on_custom
 
@@ -19551,7 +19644,7 @@ run_mutation "timeseries dates editor: the insert layer's cancel returns to the 
 
 run_mutation "timeseries dates editor: escape lands the highlight on custom dates" \
   crates/geode-timeseries/src/tile/popups.rs \
-  '            m.highlighted = custom;' \
+  '            m.menu.highlight(custom);' \
   '            let _ = custom;' \
   geode-timeseries \
   escape_in_the_editor_returns_to_the_range_menu_and_escape_again_closes
@@ -20148,9 +20241,10 @@ run_mutation "panel: upload refused while Behind" \
 # must not also bubble to the shell root and move the cursor or feed the
 # keymap.
 run_mutation "panel: the confirm consumes a non-y key" \
-  crates/geode-marketdata/src/header.rs \
-  '                    if tile.update(cx, |t, cx| t.confirm_key(event, window, cx)) {' \
-  '                    if tile.update(cx, |t, cx| t.confirm_key(event, window, cx)) && false {' \
+  crates/geode-tile/src/confirm.rs \
+  '            if tile.update(cx, |t, cx| key(t, event, window, cx)) {
+                cx.stop_propagation();' \
+  '            if tile.update(cx, |t, cx| key(t, event, window, cx)) {' \
   geode-marketdata \
   any_other_key_cancels_the_confirm_and_is_consumed
 
@@ -20181,8 +20275,8 @@ run_mutation "panel: upload y cancels when the draft changed under the question"
 # prompt painted over the newer header.
 run_mutation "panel: a rebase under the confirm withdraws it" \
   crates/geode-marketdata/src/tile.rs \
-  '        let moved = |p: &PendingUpload| p.draft != self.draft || now != painted;' \
-  '        let moved = |p: &PendingUpload| !same_edits(&p.draft, &self.draft);' \
+  '        let moved = |c: &Confirm<PendingUpload>| c.payload().draft != self.draft || now != painted;' \
+  '        let moved = |c: &Confirm<PendingUpload>| !same_edits(&c.payload().draft, &self.draft);' \
   geode-marketdata \
   a_rebase_under_the_question_withdraws_the_confirm
 
@@ -20269,9 +20363,9 @@ run_mutation "panel: the confirmed line clears at the next edit" \
 # keyboard up with `disable_focus` (which also forbids any later focus), the
 # net cannot restore it and `j` goes nowhere.
 run_mutation "panel: the tile answers keys after the upload confirm ends" \
-  crates/geode-marketdata/src/tile.rs \
-  '        if pending.focus.is_focused(window) {' \
-  '        if pending.focus.is_focused(window) { window.disable_focus(cx); } if false {' \
+  crates/geode-tile/src/confirm.rs \
+  '        if self.focus.is_focused(window) {' \
+  '        if self.focus.is_focused(window) { window.disable_focus(cx); } if false {' \
   geode-marketdata \
   the_tile_answers_keys_after_the_upload_confirm_ends
 
@@ -20380,11 +20474,11 @@ run_mutation "panel: the confirm counts attribute edits" \
 # Focus leaving the tile cancels the confirm (spec §6). Mutated to ignore
 # the blur, the question stands behind whatever took the keyboard.
 run_mutation "panel: focus loss cancels the upload confirm" \
-  crates/geode-marketdata/src/tile.rs \
-  '        let blur = cx.on_blur(&focus, window, |this, window, cx| {
-            if this.pending_upload.is_some() {' \
-  '        let blur = cx.on_blur(&focus, window, |this, window, cx| {
-            if false && this.pending_upload.is_some() {' \
+  crates/geode-tile/src/confirm.rs \
+  '    let blur = cx.on_blur(&focus, window, |host: &mut T, window, cx| {
+        cancel(host, window, cx);
+    });' \
+  '    let blur = cx.on_blur(&focus, window, |_: &mut T, _, _| {});' \
   geode-marketdata \
   focus_leaving_the_tile_cancels_the_confirm
 
@@ -21102,17 +21196,17 @@ run_mutation "timeseries mouse: an empty tile disables the slot rows" \
 
 # Stepping never lands on a separator or a section heading.
 run_mutation "timeseries mouse: menu stepping skips non-rows" \
-  crates/geode-timeseries/src/core/menu.rs \
-  '            (at + 1..rows.len()).find(|&i| lands(&rows[i]))' \
+  crates/geode-tile/src/menu/mod.rs \
+  '            (at + 1..rows.len()).find(|&i| rows[i].lands())' \
   '            (at + 1..rows.len()).next()' \
   geode-timeseries stepping_skips_separators_and_sections_and_clamps
 
 # Nor on a disabled row (user report 2026-09-25): mutated, `j` from
 # `Range…` on an empty tile lands on the greyed `Hide`.
 run_mutation "timeseries menu: stepping skips disabled rows" \
-  crates/geode-timeseries/src/core/menu.rs \
-  '            (at + 1..rows.len()).find(|&i| lands(&rows[i]))' \
-  '            (at + 1..rows.len()).find(|&i| matches!(rows[i], MenuRow::Action { .. }))' \
+  crates/geode-tile/src/menu/mod.rs \
+  '            (at + 1..rows.len()).find(|&i| rows[i].lands())' \
+  '            (at + 1..rows.len()).find(|&i| rows[i].is_action())' \
   geode-timeseries stepping_skips_disabled_rows
 
 # The ⋯ button toggles in the CAPTURE phase, ahead of the open menu's
@@ -21193,16 +21287,16 @@ run_mutation "timeseries frequency menu: an as-of change refreshes the cap reaso
 # a frequency's short label) as text: a label routed to the key lane would
 # paint as nothing, or as a key it is not.
 run_mutation "timeseries menus: a short label is text, not a key" \
-  crates/geode-timeseries/src/core/menu.rs \
-  '                (Ok(()), Some(label)) => Trailing::Text(label.clone()),' \
-  '                (Ok(()), Some(_)) => Trailing::Keys(hint),' \
+  crates/geode-tile/src/menu/mod.rs \
+  '        Hint::Label(text) => Lane::Text(text.clone()),' \
+  '        Hint::Label(_) => Lane::Empty,' \
   geode-timeseries the_range_menu_writes_the_presets_out_ticks_the_current_and_ends_on_custom
 
 # A capped row's trailing column is short; the full refusal is the notice.
 run_mutation "timeseries frequency menu: a capped row shows a short reason" \
   crates/geode-timeseries/src/core/menu.rs \
-  '            short_reason: Some(SharedString::new_static(OVER_CAP)),' \
-  '            short_reason: None,' \
+  '                .short_reason(OVER_CAP)' \
+  '' \
   geode-timeseries the_frequency_menu_ticks_the_current_and_disables_what_the_cap_refuses
 
 # The range trigger paints its open state while the dates editor, not
@@ -21266,8 +21360,8 @@ run_mutation "timeseries triggers: the range trigger opens the range menu" \
 # carrying the model's own reason (pure rows, and the tile's question).
 run_mutation "timeseries frequency menu: a capped row is disabled" \
   crates/geode-timeseries/src/core/menu.rs \
-  '            enabled: refusal(f).map_err(SharedString::from),' \
-  '            enabled: Ok(()),' \
+  '                .enabled(refusal(f).map_err(SharedString::from))' \
+  '                .enabled(Ok(()))' \
   geode-timeseries the_frequency_menu_ticks_the_current_and_disables_what_the_cap_refuses
 
 run_mutation "timeseries frequency menu: the tile asks the cap per row" \
@@ -21291,12 +21385,25 @@ run_mutation "timeseries frequency menu: a pick writes that frequency" \
 # A disabled row's pick is the notice and nothing else: mutated, the
 # action list's greyed `Remove` closes the menu and dispatches.
 run_mutation "timeseries menus: a disabled row explains and stays" \
-  crates/geode-timeseries/src/tile/popups.rs \
-  '            self.notice = Some(reason.clone());
-            cx.notify();
-            return;' \
-  '            let _ = reason;' \
+  crates/geode-tile/src/menu/mod.rs \
+  '            Err(reason) => Err(reason.clone()),' \
+  '            Err(_) => Ok(action.pick.clone()),' \
   geode-timeseries the_actions_button_toggles_the_menu_and_a_row_click_dispatches_or_explains
+
+# The tile's own half of that rule: the refused pick's reason becomes the
+# notice. Mutated, the greyed `Remove` keeps the menu up but says nothing.
+run_mutation "timeseries menus: a disabled row's reason is the notice" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '                self.notice = Some(reason);' \
+  '                let _ = reason;' \
+  geode-timeseries the_actions_button_toggles_the_menu_and_a_row_click_dispatches_or_explains
+
+# An open menu's hints follow a keymap reload.
+run_mutation "timeseries menus: a keymap reload leaves the open menu's hints" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '                m.menu.rehint(&geode_tile::menu::live_bindings(cx));' \
+  '                let _ = &m.menu;' \
+  geode-timeseries an_open_menu_follows_a_keymap_reload
 
 # The action list's `Frequency…` row opens the frequency menu.
 run_mutation "timeseries action list: Frequency opens the frequency menu" \
@@ -21404,30 +21511,30 @@ run_mutation "pricer tile: a rebuild-closed editor blurs before it drops" \
 # answer or reload changes them with no verb to close the menu.
 run_mutation "pricer tile: an open menu re-checks its rows on a rebuild" \
   crates/geode-pricer/src/tile.rs \
-  '                m.items = items;' \
+  '                m.replace_rows(items, &self.chords);' \
   '                let _ = items;' \
   geode-pricer a_reload_under_an_open_menu_relists_its_views
 
 run_mutation "pricer tile: a re-checked menu clamps its highlight" \
-  crates/geode-pricer/src/tile.rs \
-  '                m.highlighted = crate::popup::snap(&items, m.highlighted);' \
+  crates/geode-tile/src/menu/mod.rs \
+  '        self.highlighted = snap(&self.rows, self.highlighted);' \
   '' \
   geode-pricer a_reload_under_an_open_menu_relists_its_views
 
 # The menu's highlight steps over separators and section headers: a
 # highlight on structure makes `enter` pick nothing.
 run_mutation "pricer popup: menu steps land on pickable rows only" \
-  crates/geode-pricer/src/popup.rs \
-  '            (at + 1..items.len()).find(|&i| items[i].lands())' \
-  '            (at + 1..items.len()).next()' \
-  geode-pricer the_highlight_steps_over_separators_and_sections_and_clamps
+  crates/geode-tile/src/menu/mod.rs \
+  '            (at + 1..rows.len()).find(|&i| rows[i].lands())' \
+  '            (at + 1..rows.len()).next()' \
+  geode-pricer the_menu_groups_its_rows_names_keys_and_says_why_a_row_is_disabled
 
 # Nor on a disabled row (user report 2026-09-25): mutated, `j` from
 # Group lands on the greyed Ungroup instead of Delete row.
 run_mutation "pricer popup: menu steps skip disabled rows" \
-  crates/geode-pricer/src/popup.rs \
-  '            (at + 1..items.len()).find(|&i| items[i].lands())' \
-  '            (at + 1..items.len()).find(|&i| items[i].pickable())' \
+  crates/geode-tile/src/menu/mod.rs \
+  '            (at + 1..rows.len()).find(|&i| rows[i].lands())' \
+  '            (at + 1..rows.len()).find(|&i| rows[i].is_action())' \
   geode-pricer the_menu_groups_its_rows_names_keys_and_says_why_a_row_is_disabled
 
 # The empty table says "Loading sheet…" only while the tile is loading:
@@ -21441,12 +21548,20 @@ run_mutation "pricer tile: the delegate mirrors loading" \
 # A disabled menu row never takes the highlight fill: a fill there is a
 # misleading hover response on a row that will only refuse.
 run_mutation "pricer popup: a disabled menu row takes no fill" \
-  crates/geode-pricer/src/popup.rs \
-  '        (_, false) => MenuRowPaint {
+  crates/geode-tile/src/menu/paint.rs \
+  '        (_, false) => RowPaint {
             fill: None,' \
-  '        (_, false) => MenuRowPaint {
-            fill: Some(accent),' \
+  '        (_, false) => RowPaint {
+            fill: Some(p.active_fill),' \
   geode-pricer a_pointer_over_a_disabled_menu_row_lands_without_a_fill
+
+# The pricer menu's hints are the live keymap's: a user rebind shows, and
+# an open menu follows a keymap reload.
+run_mutation "pricer menu: a rebind does not reach the menu" \
+  crates/geode-pricer/src/tile.rs \
+  '            this.chords = menu::live_bindings(cx);' \
+  '            let _ = menu::live_bindings(cx);' \
+  geode-pricer an_open_menu_follows_a_keymap_reload
 
 # Row text is floored on the hover and selected-row grounds too: the
 # table paints them in place of the row's own ground.
@@ -21807,10 +21922,10 @@ run_mutation "pricer rm: a sheet open in another tile arms the confirm" \
 
 # Every key under the armed confirm is the confirm's alone.
 run_mutation "pricer rm: a key under the confirm reaches the tile too" \
-  crates/geode-pricer/src/header.rs \
-  '                        if tile.update(cx, |t, cx| t.confirm_key(event, window, cx)) {
-                            cx.stop_propagation();' \
-  '                        if tile.update(cx, |t, cx| t.confirm_key(event, window, cx)) {' \
+  crates/geode-tile/src/confirm.rs \
+  '            if tile.update(cx, |t, cx| key(t, event, window, cx)) {
+                cx.stop_propagation();' \
+  '            if tile.update(cx, |t, cx| key(t, event, window, cx)) {' \
   geode-app a_key_answering_the_rm_confirm_reaches_nothing_else
 
 # The table's own escape would clear its selection and stop the key before
@@ -23778,8 +23893,8 @@ run_mutation "bridge: refused submissions are not read" \
 
 run_mutation "blotter: a stopped query refusal reads as something else" \
   crates/geode-blotter/src/tile.rs \
-  '            self.error = Some((format!("query refused: {refusal}"), Tone::DangerText));' \
-  '            self.error = Some(({ let _ = refusal; "query refused".to_string() }, Tone::DangerText));' \
+  '            self.error = Some(Notice::danger(format!("query refused: {refusal}")));' \
+  '            self.error = Some(Notice::danger({ let _ = refusal; "query refused".to_string() }));' \
   geode-blotter a_refused_query_says_busy_or_stopped
 
 run_mutation "mdtile: a document refusal loses its kind" \
@@ -24528,6 +24643,227 @@ run_mutation "autosize: the trait default accepts a fit" \
   '        Err(crate::colfit::NO_TABLE)' \
   '        Ok(())' \
   geode-shell autosize_on_a_tile_without_a_table_shows_the_refusal
+
+# ---- geode-tile: notice and popover doors ------------------------------
+#
+# A tone is one color in every tile. Mutated, a warning paints as danger.
+run_mutation "tile notice: warning paints the danger token" \
+  crates/geode-tile/src/notice.rs \
+  '        Tone::Warning => chip_paint(theme, chip::Tone::WarningText).text,' \
+  '        Tone::Warning => chip_paint(theme, chip::Tone::DangerText).text,' \
+  geode-tile each_tone_paints_its_own_token
+
+# A popup hangs by the corner its caller names.
+run_mutation "tile popover: a popup ignores its corner" \
+  crates/geode-tile/src/popover.rs \
+  '            .anchor(corner)' \
+  '            .anchor(Anchor::TopLeft)' \
+  geode-tile a_popup_hangs_from_its_anchor_corner
+
+# A popup near the window edge keeps the snap margin.
+run_mutation "tile popover: a popup snaps to the window edge itself" \
+  crates/geode-tile/src/popover.rs \
+  '            .snap_to_window_with_margin(px(SNAP_MARGIN))' \
+  '            .snap_to_window_with_margin(px(0.))' \
+  geode-tile a_popup_near_the_edge_snaps_inside_the_margin
+
+# ---- geode-tile: menu door ---------------------------------------------
+#
+# Stepping lands on actions only: a highlight on structure makes `enter`
+# pick nothing.
+run_mutation "tile menu: stepping lands on separators" \
+  crates/geode-tile/src/menu/mod.rs \
+  '            (at + 1..rows.len()).find(|&i| rows[i].lands())' \
+  '            (at + 1..rows.len()).next()' \
+  geode-tile stepping_skips_separators_and_sections_and_clamps
+
+# Nor on a disabled action: `j` lands on a greyed row that only refuses.
+run_mutation "tile menu: stepping lands on disabled rows" \
+  crates/geode-tile/src/menu/mod.rs \
+  '            (at + 1..rows.len()).find(|&i| rows[i].lands())' \
+  '            (at + 1..rows.len()).find(|&i| rows[i].is_action())' \
+  geode-tile stepping_skips_disabled_actions
+
+# From a separator, a section or no cursor, a step lands on the first
+# enabled action.
+run_mutation "tile menu: a step from structure searches from it" \
+  crates/geode-tile/src/menu/mod.rs \
+  '    let Some(from) = from.filter(|&i| rows.get(i).is_some_and(Row::is_action)) else {' \
+  '    let Some(from) = from else {' \
+  geode-tile stepping_from_a_non_action_row_lands_on_the_first_enabled_action
+
+# An all-disabled menu has no cursor.
+run_mutation "tile menu: an all-disabled menu gets a cursor" \
+  crates/geode-tile/src/menu/mod.rs \
+  '    rows.iter().position(Row::lands)' \
+  '    rows.iter().position(Row::is_action)' \
+  geode-tile an_all_disabled_menu_has_no_cursor
+
+# A rebuilt menu's highlight looks back before it looks forward.
+run_mutation "tile menu: snap only looks forward" \
+  crates/geode-tile/src/menu/mod.rs \
+  '        .find(|&i| rows.get(i).is_some_and(Row::is_action))
+        .or_else(|| (at..rows.len()).find(|&i| rows[i].is_action()))' \
+  '        .find(|_| false)
+        .or_else(|| (at..rows.len()).find(|&i| rows[i].is_action()))' \
+  geode-tile snap_keeps_or_finds_the_nearest_action
+
+# A hint is the live chord: mutated, every chord row falls to its unbound form.
+run_mutation "tile menu: a hint ignores the live keymap" \
+  crates/geode-tile/src/menu/mod.rs \
+  '        Hint::Chord { action, unbound } => match chord_for(bindings, action) {' \
+  '        Hint::Chord { action: _, unbound } => match None::<Vec<Keystroke>> {' \
+  geode-tile a_hint_resolves_to_the_live_chord_or_its_unbound_form
+
+run_mutation "tile menu: a rebind does not reach the hint" \
+  crates/geode-tile/src/menu/mod.rs \
+  '        Hint::Chord { action, unbound } => match chord_for(bindings, action) {' \
+  '        Hint::Chord { action: _, unbound } => match None::<Vec<Keystroke>> {' \
+  geode-tile a_hint_follows_a_user_rebind_through_the_live_keymap
+
+# An unbound verb row names its `:` verb.
+run_mutation "tile menu: an unbound verb paints nothing" \
+  crates/geode-tile/src/menu/mod.rs \
+  '                Unbound::Verb(verb) => Lane::Text(verb.clone()),' \
+  '                Unbound::Verb(_) => Lane::Empty,' \
+  geode-tile a_hint_resolves_to_the_live_chord_or_its_unbound_form
+
+# A label is text in the lane; routed to the key lane it would paint nothing.
+run_mutation "tile menu: a label paints nothing" \
+  crates/geode-tile/src/menu/mod.rs \
+  '        Hint::Label(text) => Lane::Text(text.clone()),' \
+  '        Hint::Label(_) => Lane::Empty,' \
+  geode-tile a_hint_resolves_to_the_live_chord_or_its_unbound_form
+
+# A capped row keeps the lane narrow with its short reason.
+run_mutation "tile menu: a short reason is ignored" \
+  crates/geode-tile/src/menu/mod.rs \
+  '            (Err(reason), _) => Trailing::Text(self.short_reason.as_ref().unwrap_or(reason)),' \
+  '            (Err(reason), _) => Trailing::Text(reason),' \
+  geode-tile a_disabled_row_trails_its_short_reason_else_its_reason
+
+# A disabled row's pick is its reason, never the verb it refuses.
+run_mutation "tile menu: a disabled pick dispatches" \
+  crates/geode-tile/src/menu/mod.rs \
+  '            Err(reason) => Err(reason.clone()),' \
+  '            Err(_) => Ok(action.pick.clone()),' \
+  geode-tile a_pick_of_a_disabled_row_is_its_reason
+
+# Hover lands on action rows only.
+run_mutation "tile menu: hover lights structure" \
+  crates/geode-tile/src/menu/mod.rs \
+  '        if self.highlighted == Some(index) || !self.rows.get(index).is_some_and(Row::is_action) {' \
+  '        if self.highlighted == Some(index) {' \
+  geode-tile highlight_moves_only_onto_action_rows_and_reports_a_change
+
+# A rebuild snaps the highlight.
+run_mutation "tile menu: a rebuild keeps an out-of-range highlight" \
+  crates/geode-tile/src/menu/mod.rs \
+  '        self.highlighted = snap(&self.rows, self.highlighted);' \
+  '' \
+  geode-tile replace_rows_resolves_hints_and_snaps_the_highlight
+
+# A disabled row takes no fill.
+run_mutation "tile menu: a disabled row takes the fill" \
+  crates/geode-tile/src/menu/paint.rs \
+  '        (_, false) => RowPaint {
+            fill: None,' \
+  '        (_, false) => RowPaint {
+            fill: Some(p.active_fill),' \
+  geode-tile only_an_enabled_lit_row_takes_the_fill
+
+# The floor moves toward the pole with more contrast.
+run_mutation "tile menu: the floor moves toward the weaker pole" \
+  crates/geode-tile/src/menu/paint.rs \
+  '    if contrast_ratio(BLACK, ground) >= contrast_ratio(WHITE, ground) {' \
+  '    if contrast_ratio(BLACK, ground) < contrast_ratio(WHITE, ground) {' \
+  geode-tile a_color_equal_to_its_ground_floors_to_the_readable_ratio
+
+# The menu occludes what it covers.
+run_mutation "tile menu: the menu does not occlude" \
+  crates/geode-tile/src/menu/render.rs \
+  '        // Occlude what the menu covers so its hover and presses do not also reach it.
+        .occlude()' \
+  '        // Occlude what the menu covers so its hover and presses do not also reach it.' \
+  geode-tile a_hover_lights_its_row_and_the_menu_occludes_what_it_covers
+
+# ---- geode-tile: confirm door ------------------------------------------
+#
+# Only a bare `y` confirms.
+run_mutation "tile confirm: any key confirms" \
+  crates/geode-tile/src/confirm.rs \
+  '    if ks.key == "y" && !ks.modifiers.modified() {
+        host.confirmed(payload, window, cx);' \
+  '    if true {
+        host.confirmed(payload, window, cx);' \
+  geode-tile any_other_key_cancels_and_is_consumed
+
+run_mutation "tile confirm: a modified y confirms" \
+  crates/geode-tile/src/confirm.rs \
+  '    if ks.key == "y" && !ks.modifiers.modified() {
+        host.confirmed(payload, window, cx);' \
+  '    if ks.key == "y" {
+        host.confirmed(payload, window, cx);' \
+  geode-tile any_other_key_cancels_and_is_consumed
+
+# Focus leaving the prompt answers no.
+run_mutation "tile confirm: a blur leaves the question standing" \
+  crates/geode-tile/src/confirm.rs \
+  '    let blur = cx.on_blur(&focus, window, |host: &mut T, window, cx| {
+        cancel(host, window, cx);
+    });' \
+  '    let blur = cx.on_blur(&focus, window, |_: &mut T, _, _| {});' \
+  geode-tile a_blur_cancels
+
+# A pointer press in the tile answers no.
+run_mutation "tile confirm: a press leaves the question standing" \
+  crates/geode-tile/src/confirm.rs \
+  '            tile.update(cx, |t, cx| cancel(t, window, cx));' \
+  '            let _ = (&tile, window, cx);' \
+  geode-tile a_pointer_press_cancels
+
+# A press on the prompt itself does not hand the keyboard back to it.
+run_mutation "tile confirm: a press on the prompt refocuses it" \
+  crates/geode-tile/src/confirm.rs \
+  '        .on_any_mouse_down(|_, window, _| window.prevent_default())' \
+  '        .on_any_mouse_down(|_, _, _| {})' \
+  geode-tile a_pointer_press_cancels
+
+# Blur, then drop.
+run_mutation "tile confirm: the prompt drops still focused" \
+  crates/geode-tile/src/confirm.rs \
+  '        if self.focus.is_focused(window) {
+            window.blur(cx);
+        }' \
+  '        let _ = (&self.focus, &window, &cx);' \
+  geode-tile y_confirms_once_and_gives_the_keyboard_back
+
+# Every key under the question is the question's alone.
+run_mutation "tile confirm: an answering key reaches the tile too" \
+  crates/geode-tile/src/confirm.rs \
+  '            if tile.update(cx, |t, cx| key(t, event, window, cx)) {
+                cx.stop_propagation();' \
+  '            if tile.update(cx, |t, cx| key(t, event, window, cx)) {' \
+  geode-tile any_other_key_cancels_and_is_consumed
+
+# A withdrawal is not an answer: its blur answer is gone before the next
+# draw dispatches blur. gpui dispatches blur at draw, after deferrals run,
+# so only a subscription that outlives the deferral can be heard; the test
+# arms a second question in the withdrawal's update, whose focus move
+# reaches a surviving blur answer.
+run_mutation "tile confirm: a withdrawal is heard as a no" \
+  crates/geode-tile/src/confirm.rs \
+  '    drop(_blur);' \
+  '    std::mem::forget(_blur);' \
+  geode-tile a_question_armed_behind_a_withdrawal_stands
+
+# The market-data action list's hints are the live keymap's. Mutated to
+# drop the republished keymap, an open menu keeps the hints it opened with.
+run_mutation "mdmenu: a rebind does not reach the menu" \
+  crates/geode-marketdata/src/tile.rs \
+  '            this.chords = geode_tile::menu::live_bindings(cx);' \
+  '            let _ = geode_tile::menu::live_bindings(cx);' \
+  geode-marketdata an_open_menu_follows_a_keymap_reload
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

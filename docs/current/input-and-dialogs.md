@@ -62,6 +62,21 @@ still lower in the stack. The backdrop occludes what it covers, so a click
 outside the panel only closes the dialog; it never also reaches a scope-bar
 chip or tile beneath.
 
+Object dialogs are the exception to one-per-kind: they stack per domain.
+Over a Views dialog, Colors, Scopes, or any other domain pushes, so a trader
+editing a column can open Colors from the palette, add the color the column
+needs, and Escape back. The covered dialog's whole state and scroll offset are
+parked in its own stack entry (`ShellModal::parked_object`) and restored when
+the cover pops: the same stage, row, open field, and caret. The same domain
+never nests, because two drafts of one file would race each other's writes:
+requesting it from the top does nothing, and from lower in the stack posts
+"views is already open underneath" (the notice names the domain). A covered
+object dialog still receives its values replies and reload refreshes, and its
+column `color` choices follow named colors created above it, with the current
+selection kept by name and the draft left clean. A failed configuration write
+rebuilds only the drafts that contributed edits to the failed batch; a covered
+dialog with nothing in it keeps its unsaved draft.
+
 Revealing the covered entry restores the shared input's text and caret to
 what they were when it was covered, and gives back its focus: mode dialogs
 (Settings, Keybindings, the Object dialog, As-of) resolve focus from their own
@@ -79,10 +94,11 @@ themselves because they do not pass through the keyboard handler's tail.
 Writing an input value does not emit `InputEvent::Change`; model mutations
 cannot depend on such an event to keep text synchronized.
 
-Known limitation: the stack holds one instance per `DialogKind`, so a second
-request for a live kind cannot open beside the first even from a different
-call site. The three `choicedialog` pickers (grouping, tile kind, log level)
-share one kind and so count as one instance for this purpose.
+Known limitation: apart from object dialogs, the stack holds one instance per
+`DialogKind`, so a second request for a live kind cannot open beside the first
+even from a different call site. The three `choicedialog` pickers (grouping,
+tile kind, log level) share one kind and one state field, so none of them can
+open while another is anywhere in the stack.
 
 A multi-screen dialog registers its back step with `dialog::set_back`: a
 predicate over its current state and the transition Escape's final back step
@@ -215,9 +231,12 @@ so `g` reads `G` and `shift+g` reads `⇧G`.
 - A hint line that names keys inside prose writes them between backticks
   (``"double-click or `ctrl+k` → Add a tile"``); `kbd::marked` paints each
   backticked run as chips and the rest as text.
-- A module menu hint stored as a keymap spec goes through `kbd::menu_spec`.
-  A `:` command-line verb stays text because it is not a key, and so does a
-  spec naming `mod`, because the alias is the user's.
+- A module action-menu hint is an action identity that `geode_tile::menu`
+  resolves against the live keymap when the menu opens, when its rows
+  rebuild, and when the keymap is republished; the keys paint through
+  `kbd::menu_binding`. A `:` command-line verb (an unbound action's
+  fallback) or a label such as a range preset's `1w` stays text because it
+  is not a key.
 - A menu's trailing lane paints keys the way gpui-component's `PopupMenu`
   does: the label without the chip's fill or padding, in the lane's color,
   so a highlighted row's keys follow the highlight.
@@ -226,8 +245,8 @@ so `g` reads `G` and `shift+g` reads `⇧G`.
   is what a user types into a keymap file.
 
 Hardcoded hints name the shipped key. A user rebinding does not change the
-empty-state hint's `ctrl+k` or a module menu's hint; the palette, keybinding
-rows, tooltips and the timeseries footer and menu read the live keymap.
+empty-state hint's `ctrl+k`; the palette, keybinding rows, tooltips, the
+timeseries footer, and every module's action menu read the live keymap.
 
 ## Per-tile command and find lines
 

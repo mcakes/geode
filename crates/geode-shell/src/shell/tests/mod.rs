@@ -599,6 +599,7 @@ mod grouping;
 mod input;
 mod keybindings_dialog;
 mod launch;
+mod object_stack;
 mod objectdialog;
 mod occupants;
 mod palette;

@@ -38,8 +38,8 @@ The tile:
 | `grid` | The prepared `GridModel`, rebuilt on change. |
 | `paint` | The per-theme paint memo, floored to a readable ratio. |
 | `delegate` | The table delegate: cells, the tree column (indent, chevron, template tag), editor, expiry date field. |
-| `header` | The prepared header row and footer. |
-| `popup` | The typeahead, the entry bar's completion list, and the `.` action menu. |
+| `header` | The prepared header row (notices as `geode_tile::notice::Notice`) and footer. |
+| `popup` | The typeahead, the entry bar's completion list, and `PricerPick` (what a menu row does). The menu, popup geometry, the `:rm` confirm and the header notices paint through `geode-tile`. |
 | `session` | The tile's session record, including `:autosize`'s fitted widths (`column_widths`, read leniently). |
 | `content` | The factory, keymap fragment, actions, settings, and the read-only `UnderlyingSource` seam. |
 | `tile` | `PricerTile`: modes, verbs, repricing, write-behind, load. |
@@ -225,10 +225,12 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   `save_blocked` sheet, which it reloads. `:name` forgets the old name only after a save under
   the new one is confirmed, and is refused on a sheet whose load failed (its
   fallback would replace the real document). `:rm` refuses every open name.
-- The `:rm` confirmation uses a focused prompt in the
-  header whose `on_key_down` consumes every key (bare `y` confirms), the
-  tile in `insert` mode while armed, cancelled by focus leaving or a pointer
-  press, blurred before it drops.
+- The `:rm` confirmation is `geode_tile::confirm`'s: a focused prompt in
+  the header that consumes every key (bare `y` confirms), the tile in
+  `insert` mode while armed, cancelled by focus leaving or a pointer press,
+  blurred before it drops. A `:` command arriving under it withdraws it
+  unanswered. After an answer the shell's focus restoration path returns the
+  keyboard to the tile.
 - Known names are the store's (`set_known` from the diagnostics catalog,
   which only adds and never re-adds a name confirmed forgotten until a
   save of it is confirmed; confirmed saves; less confirmed forgets) plus
@@ -265,17 +267,21 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   before every `refresh`, keyed by row count, relative cursor row and
   mode. Gutter text uses the row's floored muted paint (the row's
   own text paint on the cursor row).
-- `paint` prepares grid-row and action-menu text colors and tests their
-  contrast across every bundled theme. Row text is checked against its base,
-  hover, and selection backgrounds; menu text against popover and enabled
-  highlight backgrounds. This sweep does not cover every header or typeahead
+- `paint` prepares grid-row text colors and tests their contrast across
+  every bundled theme. Row text is checked against its base, hover, and
+  selection backgrounds; menu colors are `geode_tile::menu::MenuPaint`'s.
+  This sweep does not cover every header or typeahead
   token, and the bounded adjustment is not a guarantee for arbitrary themes.
 - A disabled action can hold the menu highlight but paints no highlight
   fill. Picking it reports its reason and keeps the menu open.
-- A menu command's title is its palette title (`content::action_title`); the
-  menu's keyboard navigation skips separators, section headers, and disabled
-  rows. Disabled actions can still hold the highlight after a pointer move,
-  opening the menu, or rebuilding its rows.
+- A menu command's title is its palette title (`content::action_title`) and
+  its key hint the action's live chord (`:price` when the keymap binds none,
+  an empty lane for the other actions), resolved when the menu opens or its
+  rows rebuild and again on every keymap publish while it is open. The menu
+  opens on its first enabled action; keyboard navigation skips separators,
+  section headers, and disabled rows, and from a row that is not an action
+  lands on the first enabled one. Disabled actions can still hold the
+  highlight after a pointer move or a rebuild of the rows under it.
 - Default column widths are checked against labels and representative large
   values at the largest font size, including padding and cursor borders.
   These samples are not numeric limits: an overflowing right-aligned value
@@ -340,9 +346,6 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 
 ## Known limitations
 
-- The action menu's key hints are the default bindings, written into the
-  menu; a user rebind is not reflected there. The market-data action list has
-  the same limitation.
 - Column widths are fixed pixels and do not follow font size. The defaults
   fit the tested samples at the largest font step and leave more space at
   smaller steps. `:autosize` (or the palette's "Autosize columns") fits

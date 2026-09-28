@@ -23,7 +23,7 @@ use crate::commands::{self, BumpAxis, Command, KEY_DISPLAY_SEPARATOR};
 use crate::core::cursor::{self, Cursor, Grid, Motion};
 use crate::core::draft::{RowDelete, RowEdit, local_hhmm};
 use crate::core::matrix::{RowState, base_of};
-use crate::core::menu::{self, MenuInputs, MenuRow};
+use crate::core::menu::{self, MenuInputs};
 use crate::core::spec::RowIdentity;
 use crate::core::{
     CellKind, Columns, DateTimeField, DocumentBase, Draft, DraftBadge, DraftState, FieldKey,
@@ -34,9 +34,7 @@ use crate::delegate::{
     CellPointer, DelegateChoice, DelegateEditor, DelegateEditorPaint, MatrixDelegate,
 };
 use crate::header::{self, HeaderInputs, HeaderModel, Tone};
-use crate::popup::{
-    ChoicePopup, MenuState, PickerRows, PickerState, Popup, render_menu, render_picker,
-};
+use crate::popup::{ChoicePopup, PickerRows, PickerState, Popup, render_picker};
 use geode_core::colour::{Rgb, contrast_ratio, readable_on};
 use geode_core::document::{DocumentRows, Value, split_key};
 use geode_core::grid::selection::{Resolved, SelectKind, Selection};
@@ -50,7 +48,7 @@ use geode_shell::colfit::{
 };
 use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::{Frame, FrameVersions, PublicationWatch};
-use geode_shell::keymap::KeyContext;
+use geode_shell::keymap::{Binding, KeyContext};
 use geode_shell::linenumbers::{LineNumbers, UiSettings};
 use geode_shell::module::{FindEvent, StackHandle, UploadDelivery};
 use geode_shell::shell::aggregates;
@@ -59,6 +57,8 @@ use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::vimfind::{FindDirection, find_match};
 use geode_shell::vimnav::NavCommand;
+use geode_tile::confirm::{self, Confirm, ConfirmHost};
+use geode_tile::menu::{Menu, MenuHost, MenuIds};
 use gpui::prelude::*;
 use gpui::{
     App, ClipboardItem, Context, Entity, FocusHandle, Focusable as _, Hsla, IntoElement,
@@ -100,18 +100,17 @@ pub struct FindState {
     committed: Option<String>,
 }
 
-/// Cached contrast-adjusted header tones. Warning and danger text are adjusted against
-/// the window background toward the theme foreground. The date field's active-segment
+/// Cached contrast-adjusted header tones. Warning text is adjusted against the window
+/// background toward the theme foreground (danger text is the notice door's). The date field's active-segment
 /// text is adjusted against primary toward whichever of black or white contrasts more,
 /// allowing even a matching text/background pair to separate.
 ///
-/// The six-input theme signature covers every colour read by derive. Refresh runs the
+/// The five-input theme signature covers every colour read by derive. Refresh runs the
 /// contrast calculation only when that signature changes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct FlooredTones {
-    key: [Hsla; 6],
+    key: [Hsla; 5],
     pub(crate) warn: Hsla,
-    pub(crate) error: Hsla,
     pub(crate) primary_text: Hsla,
 }
 
@@ -138,7 +137,6 @@ impl FlooredTones {
         Self {
             key: Self::key(theme),
             warn: floor(theme.warning),
-            error: floor(theme.danger),
             primary_text: to_hsla(readable_on(
                 to_rgb(theme.primary_foreground),
                 primary,
@@ -147,12 +145,11 @@ impl FlooredTones {
         }
     }
 
-    fn key(theme: &Theme) -> [Hsla; 6] {
+    fn key(theme: &Theme) -> [Hsla; 5] {
         [
             theme.background,
             theme.foreground,
             theme.warning,
-            theme.danger,
             theme.primary,
             theme.primary_foreground,
         ]
@@ -200,16 +197,14 @@ const UPLOAD_CANCELLED: &str = "upload cancelled";
 /// painted until the next key.
 const UPLOAD_CANCELLED_ARRIVED: &str = "upload cancelled: a new document arrived";
 
-/// Upload confirmation holding the rows assembled when it was armed. The prompt's
-/// counts and the submitted payload therefore describe the same document.
-///
-/// Its focus handle receives keys before the shell listener. Losing focus cancels
-/// confirmation. Dropping the confirmation also drops its blur subscription, preventing
-/// a key answer from triggering a second cancellation.
-struct PendingUpload {
+/// What an armed upload confirm asks to send: the rows assembled when it
+/// was armed, so the prompt's counts and the payload describe one document.
+/// The prompt, its focus and its blur answer are the confirm door's.
+/// Public (its fields are not) because it is the payload of the public
+/// tile's `ConfirmHost` impl, which cannot name a crate-private type.
+pub struct PendingUpload {
     target: String,
     rows: DocumentRows,
-    prompt: SharedString,
     /// The draft as it was when the confirm was armed. A delivery can
     /// land between the prompt and the answer (`Behind`, or a `replace`
     /// policy dropping the edits); `y` against a draft that no longer
@@ -219,11 +214,6 @@ struct PendingUpload {
     /// attrs, rows and state equal while the rows were assembled from
     /// the superseded base.
     draft: Draft,
-    focus: FocusHandle,
-    /// The window the prompt's `focus` lives in, so a delivery (which has
-    /// no `Window`) can still blur it before the confirm is dropped.
-    window: gpui::AnyWindowHandle,
-    _blur: gpui::Subscription,
 }
 
 /// The upload submitted and not yet answered: which underlying it sent
@@ -594,6 +584,10 @@ pub struct MarketDataTile {
     /// The `Behind` state run's tooltip selector (`"tip-marketdata-
     /// state-{id}"`), built once alongside `menu_tip_selector`.
     state_tip_selector: SharedString,
+    /// The action menu's element names, prepared once from the tile id.
+    menu_ids: MenuIds,
+    /// The keymap as last published, for the menu's key hints.
+    chords: Arc<Vec<Binding>>,
     /// Stack membership rendered in the header; None outside a stack.
     stack: Option<StackHandle>,
     /// Prepared title from the panel title and key. Updated by set_key so title()
@@ -603,7 +597,7 @@ pub struct MarketDataTile {
     /// Prepared header and menu formatting receive it as an explicit input.
     pub(crate) clock: geode_core::clock::Clock,
     /// Armed upload confirmation, if any.
-    pending_upload: Option<PendingUpload>,
+    pending_upload: Option<Confirm<PendingUpload>>,
     /// Rows of the latest submitted upload, retained while submitted or Sent. Rebuild
     /// drops them once neither state applies, ending comparison after refusal, failure,
     /// draft changes, revert, rebase, or a matching echo. Only Sent compares new
@@ -850,6 +844,15 @@ impl MarketDataTile {
             cx.notify();
         })
         .detach();
+        // A keymap reload re-resolves an open menu's hints at once.
+        cx.observe_global::<geode_shell::tips::Chords>(|this, cx| {
+            this.chords = geode_tile::menu::live_bindings(cx);
+            if let Some(Popup::Menu(m)) = &mut this.popup {
+                m.rehint(&this.chords);
+                cx.notify();
+            }
+        })
+        .detach();
 
         let mut this = MarketDataTile {
             id,
@@ -904,6 +907,11 @@ impl MarketDataTile {
             popup: None,
             menu_tip_selector: format!("tip-marketdata-menu-button-{}", id.0).into(),
             state_tip_selector: format!("tip-marketdata-state-{}", id.0).into(),
+            menu_ids: MenuIds::new(
+                format!("marketdata-menu-{}", id.0),
+                format!("marketdata-menu-row-{}", id.0),
+            ),
+            chords: geode_tile::menu::live_bindings(cx),
             stack: None,
             clock: cx
                 .try_global::<geode_shell::clock::AppClock>()
@@ -973,7 +981,7 @@ impl MarketDataTile {
         let confirm = self
             .pending_upload
             .as_ref()
-            .is_some_and(|p| p.focus.is_focused(window));
+            .is_some_and(|c| c.holds_focus(window));
         editor || popup || confirm
     }
 
@@ -1277,8 +1285,6 @@ impl MarketDataTile {
             return Err("no document to upload".into());
         };
         let rows = crate::core::upload::assemble(&snapshot, self.spec, &self.model, &self.draft)?;
-        // A confirm already armed is replaced, never stacked.
-        self.disarm_upload(window, cx);
         let cells = match self.draft.cell_count() {
             1 => "1 cell".to_string(),
             n => format!("{n} cells"),
@@ -1297,79 +1303,21 @@ impl MarketDataTile {
             "upload {cells}, {attrs}{added}, {} removed of {key} to {target}? (y/n)",
             self.draft.rows_removed()
         );
-        let focus = cx.focus_handle();
-        focus.focus(window, cx);
-        let blur = cx.on_blur(&focus, window, |this, window, cx| {
-            if this.pending_upload.is_some() {
-                this.cancel_upload(window, cx);
-            }
-        });
-        self.pending_upload = Some(PendingUpload {
-            target,
-            rows,
-            prompt: prompt.into(),
-            draft: self.draft.clone(),
-            focus,
-            window: window.window_handle(),
-            _blur: blur,
-        });
+        // A confirm already armed is replaced, never stacked.
+        confirm::arm(
+            self,
+            PendingUpload {
+                target,
+                rows,
+                draft: self.draft.clone(),
+            },
+            prompt,
+            window,
+            cx,
+        );
         self.notice = None;
         self.changed(cx);
         Ok(())
-    }
-
-    /// The confirm's own key handler, run from the prompt's `on_key_down`
-    /// in `header::render` — which sits on the focused element and so runs
-    /// before the shell root's listener. While a confirm is armed EVERY
-    /// key is consumed (answers `true`): bare `y` sends, anything else —
-    /// `n`, `escape`, a motion, a chord — cancels. A keystroke that
-    /// answers the question must not also act on the panel or the shell.
-    pub(crate) fn confirm_key(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        if self.pending_upload.is_none() {
-            return false;
-        }
-        let ks = &event.keystroke;
-        if ks.key == "y" && !ks.modifiers.modified() {
-            self.submit_upload(window, cx);
-        } else {
-            self.cancel_upload(window, cx);
-        }
-        true
-    }
-
-    /// A pointer press anywhere on the tile while a confirm is armed
-    /// cancels it (the tile root's capture-phase mouse-down): a press on
-    /// the header or the menu button moves no focus, so the blur half
-    /// alone would leave the question standing behind the click.
-    pub(crate) fn cancel_upload_on_pointer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.pending_upload.is_some() {
-            self.cancel_upload(window, cx);
-        }
-    }
-
-    /// Drop the armed confirm, giving up the keyboard first when its
-    /// prompt holds it (a surface dropping a focused handle blurs it).
-    fn disarm_upload(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<PendingUpload> {
-        let pending = self.pending_upload.take()?;
-        if pending.focus.is_focused(window) {
-            window.blur(cx);
-        }
-        Some(pending)
-    }
-
-    fn cancel_upload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let _ = self.disarm_upload(window, cx);
-        self.notice = Some(UPLOAD_CANCELLED.into());
-        self.changed(cx);
     }
 
     /// Why an upload cannot be sent now, if it cannot: the frame asks
@@ -1400,10 +1348,7 @@ impl MarketDataTile {
 
     /// `y`: submit the document assembled at arm time. Refused by the data
     /// tier's bounded queue → a notice and nothing kept as `sent`.
-    fn submit_upload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(pending) = self.disarm_upload(window, cx) else {
-            return;
-        };
+    fn submit_upload(&mut self, pending: PendingUpload, cx: &mut Context<Self>) {
         // Re-checked at `y`: nothing that makes the panel historical
         // between arming and answering may slip through.
         if let Some(refusal) = self.not_live(cx) {
@@ -1463,11 +1408,10 @@ impl MarketDataTile {
     /// A confirm armed over one document must not stand over another: if
     /// this delivery changed the painted generation or the draft (a
     /// `rebase` or `replace` policy, or `Behind` under `hold`), the
-    /// question is withdrawn at once. `apply` has no `Window`, so the
-    /// prompt's focus is blurred through its recorded window handle,
-    /// deferred to the end of this update; the handle travels into the
-    /// deferral, so it is never dropped while still focused. `y`'s own
-    /// re-check in [`Self::submit_upload`] stays as the second line.
+    /// question is withdrawn at once. The confirm door withdraws the prompt:
+    /// it drops the blur answer first and blurs through the recorded window
+    /// handle, deferred. `y`'s own re-check in [`Self::submit_upload`]
+    /// stays as the second line.
     ///
     /// The painted-base comparison is whole-pair equality rather than
     /// [`DocumentBase::differs_from`]: withdrawing a question that did not
@@ -1475,29 +1419,13 @@ impl MarketDataTile {
     /// document it was never asked about sends the wrong rows.
     fn withdraw_upload_if_moved(&mut self, painted: Option<DocumentBase>, cx: &mut Context<Self>) {
         let now = self.painted_snapshot().and_then(|s| base_of(&s));
-        let moved = |p: &PendingUpload| p.draft != self.draft || now != painted;
+        let moved = |c: &Confirm<PendingUpload>| c.payload().draft != self.draft || now != painted;
         if !self.pending_upload.as_ref().is_some_and(moved) {
             return;
         }
-        let Some(pending) = self.pending_upload.take() else {
+        if confirm::withdraw(self, cx).is_none() {
             return;
-        };
-        let PendingUpload {
-            focus,
-            window,
-            _blur,
-            ..
-        } = pending;
-        // The blur subscription goes first, so the deferred blur below is
-        // not heard as a second cancel.
-        drop(_blur);
-        cx.defer(move |cx| {
-            let _ = window.update(cx, |_, window, cx| {
-                if focus.is_focused(window) {
-                    window.blur(cx);
-                }
-            });
-        });
+        }
         // The policy's own disclosure (`replace`'s count, `rebase`'s
         // dropped edits) is kept behind the cancellation, never lost to it.
         self.notice = Some(match self.notice.take() {
@@ -2225,7 +2153,7 @@ impl MarketDataTile {
                 Echo::Confirmed(text) => (text, Tone::Time),
                 Echo::Differs { text, .. } => (text, Tone::Warn),
             }),
-            prompt: self.pending_upload.as_ref().map(|p| &p.prompt),
+            prompt: self.pending_upload.as_ref().map(|c| c.prompt_text()),
             source_at: self.source_at,
             incomplete: self.draft.incomplete_rows(self.spec, &self.model.columns),
             clock: self.clock,
@@ -2431,9 +2359,7 @@ impl MarketDataTile {
             "menu_down" | "menu_up" => {
                 let delta = if verb == "menu_down" { n } else { -n };
                 match &mut self.popup {
-                    Some(Popup::Menu(m)) => {
-                        m.highlighted = menu::step(&m.rows, m.highlighted, delta);
-                    }
+                    Some(Popup::Menu(m)) => m.step(delta),
                     Some(Popup::Picker(p)) => p.rows.step_highlighted(delta),
                     // Reachable from the palette alone (`mode == menu` is
                     // never reported with a choice popup open), and it
@@ -2468,8 +2394,10 @@ impl MarketDataTile {
                 }
             }
             "menu_pick" => {
-                if let Some(Popup::Menu(m)) = &self.popup {
-                    let index = m.highlighted;
+                if let Some(index) = match &self.popup {
+                    Some(Popup::Menu(m)) => m.highlighted(),
+                    _ => None,
+                } {
                     self.menu_pick(index, window, cx);
                 }
                 false
@@ -3460,8 +3388,7 @@ impl MarketDataTile {
             },
             self.clock,
         );
-        let highlighted = menu::first_enabled(&rows);
-        self.popup = Some(Popup::Menu(MenuState { rows, highlighted }));
+        self.popup = Some(Popup::Menu(Menu::new(rows, &self.chords)));
         cx.notify();
     }
 
@@ -3486,23 +3413,8 @@ impl MarketDataTile {
         cx.notify();
     }
 
-    /// A hover over menu row `index` — the mouse form of `j`/`k`. Cheap
-    /// on purpose: gpui fires `on_mouse_move` on every pointer move over
-    /// the row, so only a CHANGE notifies; a pointer resting on the
-    /// highlighted row costs a compare.
-    pub(crate) fn menu_hover(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(Popup::Menu(m)) = &mut self.popup else {
-            return;
-        };
-        if m.highlighted == index || index >= m.rows.len() {
-            return;
-        }
-        m.highlighted = index;
-        cx.notify();
-    }
-
     /// A hover over painted picker row `row` — the mouse form of
-    /// `up`/`down`; the same change-only rule as [`Self::menu_hover`].
+    /// `up`/`down`; change-only, as the menu's hover is.
     pub(crate) fn picker_hover(&mut self, row: usize, cx: &mut Context<Self>) {
         let Some(Popup::Picker(p)) = &mut self.popup else {
             return;
@@ -3511,32 +3423,6 @@ impl MarketDataTile {
             return;
         }
         cx.notify();
-    }
-
-    /// Pick a menu row by pointer or Enter. Disabled rows report their reason and
-    /// remain open; enabled rows close and invoke the same dispatch route as keys.
-    pub(crate) fn menu_pick(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(Popup::Menu(m)) = &self.popup else {
-            return;
-        };
-        let Some(row) = m.rows.get(index) else {
-            return;
-        };
-        let MenuRow::Action { id, enabled, .. } = row else {
-            return;
-        };
-        match enabled {
-            Err(reason) => {
-                self.notice = Some((*reason).into());
-                self.rebuild_chrome();
-                cx.notify();
-            }
-            Ok(()) => {
-                let id = id.clone();
-                self.close_popup_with_window(window, cx);
-                self.dispatch(&id, None, window, cx);
-            }
-        }
     }
 
     // ---- the underlying picker -----------------------------------
@@ -4354,8 +4240,8 @@ impl MarketDataTile {
         // selection must never carry over to another document.
         self.clear_selection();
         // A question about the outgoing document must not stand over the
-        // incoming one.
-        let _ = self.disarm_upload(window, cx);
+        // incoming one: withdrawn unanswered, as a delivery withdraws it.
+        let _ = confirm::withdraw(self, cx);
         // A parked draft restores as Editing and stops comparing the outgoing upload's
         // echo. Clear its submitted payload and error state; retain an in-flight
         // request so its eventual outcome can be reported by key.
@@ -4664,7 +4550,7 @@ impl MarketDataTile {
     #[cfg(test)]
     pub(crate) fn menu_highlighted(&self) -> Option<usize> {
         match &self.popup {
-            Some(Popup::Menu(m)) => Some(m.highlighted),
+            Some(Popup::Menu(m)) => m.highlighted(),
             _ => None,
         }
     }
@@ -4675,12 +4561,9 @@ impl MarketDataTile {
     pub(crate) fn menu_checks(&self) -> Vec<(String, Option<bool>)> {
         match &self.popup {
             Some(Popup::Menu(m)) => m
-                .rows
+                .rows()
                 .iter()
-                .filter_map(|r| match r {
-                    MenuRow::Action { title, checked, .. } => Some((title.to_string(), *checked)),
-                    _ => None,
-                })
+                .filter_map(|r| r.action().map(|a| (a.title().to_string(), a.tick())))
                 .collect(),
             _ => Vec::new(),
         }
@@ -4718,7 +4601,9 @@ impl MarketDataTile {
 
     #[cfg(test)]
     pub(crate) fn upload_prompt(&self) -> Option<&str> {
-        self.pending_upload.as_ref().map(|p| p.prompt.as_ref())
+        self.pending_upload
+            .as_ref()
+            .map(|c| c.prompt_text().as_ref())
     }
 
     #[cfg(test)]
@@ -4832,6 +4717,54 @@ fn declared_type(spec: &PanelSpec, model: &MatrixModel, col: usize) -> Option<Co
     }
 }
 
+impl MenuHost for MarketDataTile {
+    /// A disabled row's reason becomes the notice and the menu stays; an
+    /// enabled row closes the menu and dispatches through the key's route.
+    fn menu_pick(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Popup::Menu(m)) = &self.popup else {
+            return;
+        };
+        match m.pick(index) {
+            Some(Err(reason)) => {
+                self.notice = Some(reason);
+                self.rebuild_chrome();
+                cx.notify();
+            }
+            Some(Ok(id)) => {
+                self.close_popup_with_window(window, cx);
+                self.dispatch(&id, None, window, cx);
+            }
+            None => {}
+        }
+    }
+
+    /// Change-only: gpui fires this on every pointer move over a row.
+    fn menu_hover(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(Popup::Menu(m)) = &mut self.popup
+            && m.highlight(index)
+        {
+            cx.notify();
+        }
+    }
+}
+
+impl ConfirmHost for MarketDataTile {
+    type Payload = PendingUpload;
+
+    fn confirm_slot(&mut self) -> &mut Option<Confirm<PendingUpload>> {
+        &mut self.pending_upload
+    }
+
+    fn confirmed(&mut self, pending: PendingUpload, _: &mut Window, cx: &mut Context<Self>) {
+        self.submit_upload(pending, cx);
+    }
+
+    fn cancelled(&mut self, _: PendingUpload, _: &mut Window, cx: &mut Context<Self>) {
+        self.notice = Some(UPLOAD_CANCELLED.into());
+        self.changed(cx);
+    }
+}
+
 impl gpui::Render for MarketDataTile {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
@@ -4861,7 +4794,7 @@ impl gpui::Render for MarketDataTile {
             &self.header,
             cursor_attr,
             editor,
-            self.pending_upload.as_ref().map(|p| &p.focus),
+            self.pending_upload.as_ref(),
             menu_open,
             theme,
             &tones,
@@ -4880,7 +4813,17 @@ impl gpui::Render for MarketDataTile {
                 .child(header)
                 .when_some(self.popup.as_ref(), |el, p| {
                     let popup_el = match p {
-                        Popup::Menu(m) => render_menu(m, &tile, self.id.0, cx).into_any_element(),
+                        Popup::Menu(m) => geode_tile::menu::render_menu(
+                            m,
+                            &self.menu_ids,
+                            gpui::Anchor::TopRight,
+                            &tile,
+                            |t: &mut MarketDataTile, window, cx| {
+                                t.close_popup_with_window(window, cx)
+                            },
+                            cx,
+                        )
+                        .into_any_element(),
                         Popup::Picker(p) => {
                             render_picker(p, &tile, self.id.0, cx).into_any_element()
                         }
@@ -4910,18 +4853,12 @@ impl gpui::Render for MarketDataTile {
         );
 
         // A pointer press anywhere on the tile cancels an armed `:upload`
-        // confirm — capture phase, so it runs before the press reaches
-        // whatever it was aimed at, and it never stops propagation (the
-        // press still does what it would have done).
-        let cancel_tile = tile.clone();
-        v_flex()
+        // confirm (the door's capture-phase press; the press still does
+        // what it would have done).
+        let root = v_flex()
             .size_full()
-            .debug_selector(|| format!("tile-content-{}", self.id.0))
-            .when(self.pending_upload.is_some(), |el| {
-                el.capture_any_mouse_down(move |_, window, cx| {
-                    cancel_tile.update(cx, |t, cx| t.cancel_upload_on_pointer(window, cx));
-                })
-            })
+            .debug_selector(|| format!("tile-content-{}", self.id.0));
+        confirm::cancel_on_press(root, self.pending_upload.is_some(), &tile)
             .child(header)
             .child(body)
             // The extent readout, only while a selection is live — the
@@ -4989,12 +4926,7 @@ mod tests {
                 let theme = cx.theme();
                 let floored = FlooredTones::derive(theme);
                 let bg = ground(theme);
-                for (tone, stale) in [
-                    (Tone::Key, false),
-                    (Tone::Time, true),
-                    (Tone::Warn, false),
-                    (Tone::Error, false),
-                ] {
+                for (tone, stale) in [(Tone::Key, false), (Tone::Time, true), (Tone::Warn, false)] {
                     let colour = tone_colour(tone, stale, theme, &floored);
                     let ratio = contrast_ratio(to_rgb(colour), bg);
                     if ratio < READABLE_RATIO {
@@ -5020,9 +4952,8 @@ mod tests {
         );
     }
 
-    /// The memo re-derives only when one of its four inputs moves: a
-    /// theme with the same background, foreground, warning and danger
-    /// leaves it untouched, a different warning replaces it.
+    /// The memo re-derives only when one of its inputs moves: the same
+    /// theme leaves it untouched, a theme switch replaces it.
     #[gpui::test]
     fn floored_tones_refresh_only_when_an_input_changes(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
@@ -10577,9 +10508,9 @@ edits = [["2099-01-01", "-1", 1.0]]
         assert_eq!(h.mode(&vcx), "normal");
     }
 
-    /// Install Chords from ACTIONS, fragment_doc, and build_keymap so tooltip chord
-    /// lookup uses the module's effective keymap.
-    fn install_fragment_chords(vcx: &mut gpui::VisualTestContext) {
+    /// Install Chords from ACTIONS, the fragment, and `user` as the user
+    /// layer, so chord lookups use the keymap the shell would publish.
+    fn install_chords(vcx: &mut gpui::VisualTestContext, user: Option<&str>) {
         let mut registry = geode_shell::actions::ActionRegistry::default();
         for (id, title) in crate::content::ACTIONS {
             registry
@@ -10590,11 +10521,31 @@ edits = [["2099-01-01", "-1", 1.0]]
                 })
                 .expect("no duplicate ids");
         }
-        let doc =
+        // Kind actions register beside ACTIONS, as the content's registration
+        // does, so a user layer may bind them.
+        for a in CVI.actions {
+            registry
+                .register(geode_shell::actions::ActionDef {
+                    id: ActionId(a.id.to_string()),
+                    title: a.title.to_string(),
+                    category: "Market data".to_string(),
+                })
+                .expect("no duplicate ids");
+        }
+        let mut docs = vec![
             geode_shell::keymap::fragments::fragment_doc(CVI.kind, crate::content::DEFAULT_KEYMAP)
-                .expect("the fragment parses");
+                .expect("the fragment parses"),
+        ];
+        if let Some(text) = user {
+            docs.push(geode_core::config::LayerDoc {
+                layer: geode_core::config::Layer::User,
+                name: "keymap".into(),
+                file: "user/keymap.toml".into(),
+                table: text.parse().unwrap(),
+            });
+        }
         let (keymap, diags) = geode_shell::keymap::build_keymap(
-            &[doc],
+            &docs,
             geode_shell::defaults::default_mod(),
             &registry,
         );
@@ -10604,6 +10555,114 @@ edits = [["2099-01-01", "-1", 1.0]]
                 keymap.bindings().to_vec(),
             )));
         });
+        vcx.run_until_parked();
+    }
+
+    fn install_fragment_chords(vcx: &mut gpui::VisualTestContext) {
+        install_chords(vcx, None);
+    }
+
+    const LOAD_REBOUND: &str = "[[bindings]]\ncontext = \"marketdata && mode == normal\"\n[bindings.keys]\n\"u\" = \"none\"\n\"shift+u\" = \"marketdata::load_underlying\"\n";
+
+    const LOAD_UNBOUND: &str = "[[bindings]]\ncontext = \"marketdata && mode == normal\"\n[bindings.keys]\n\"u\" = \"none\"\n";
+
+    /// The open menu's trailing lane for the row titled `title`: its keys
+    /// in keymap spelling, or its text.
+    fn menu_lane(h: &Harness, vcx: &gpui::VisualTestContext, title: &str) -> String {
+        use geode_tile::menu::{Row, Trailing};
+        h.tile.read_with(vcx, |t, _| match &t.popup {
+            Some(Popup::Menu(m)) => m
+                .rows()
+                .iter()
+                .find_map(|r| match r {
+                    Row::Action(a) if a.title().as_ref() == title => Some(match a.trailing() {
+                        Trailing::Keys(k) => geode_shell::palette::render_binding(k),
+                        Trailing::Text(t) => t.to_string(),
+                        Trailing::None => String::new(),
+                    }),
+                    _ => None,
+                })
+                .expect("the row"),
+            _ => panic!("the menu is open"),
+        })
+    }
+
+    /// The menu's hints are the live keymap's: a user rebind shows, and a
+    /// disabled row still shows its reason.
+    #[gpui::test]
+    fn a_menu_hint_follows_a_user_rebind(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        install_chords(&mut vcx, Some(LOAD_REBOUND));
+        h.dispatch(&mut vcx, "menu", None);
+        assert_eq!(menu_lane(&h, &vcx, "Load underlying…"), "shift+u");
+        assert_eq!(
+            menu_lane(&h, &vcx, "Revert edits"),
+            "nothing to revert",
+            "a disabled row still shows its reason"
+        );
+    }
+
+    /// An action the user unbinds entirely never shows its shipped key: a
+    /// key-only row's lane is empty; a verb row (`Upload`, bound nowhere by
+    /// default) shows its `:` verb.
+    #[gpui::test]
+    fn an_unbound_action_shows_no_stale_key(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        install_chords(&mut vcx, Some(LOAD_UNBOUND));
+        h.dispatch(&mut vcx, "menu", None);
+        assert_eq!(menu_lane(&h, &vcx, "Load underlying…"), "");
+        assert_eq!(menu_lane(&h, &vcx, "Upload"), ":upload");
+        assert_eq!(menu_lane(&h, &vcx, "Revert edits"), ":revert");
+    }
+
+    const POLICY_AND_KIND_BOUND: &str = "[[bindings]]\ncontext = \"marketdata && mode == normal\"\n[bindings.keys]\n\"z\" = \"marketdata::auto_rebase\"\n\"shift+z\" = \"marketdata::cvi_reanchor\"\n";
+
+    /// A user binding on an update-policy action and on a kind action reaches
+    /// the open menu: the policy row trails the chord instead of its `:auto`
+    /// verb, and the kind row's lane resolves to the chord (painted once the
+    /// action is built; an unbuilt row trails its reason over it). The other
+    /// policy rows keep their verbs.
+    #[gpui::test]
+    fn a_menu_hint_follows_a_policy_and_kind_rebind(cx: &mut gpui::TestAppContext) {
+        use geode_tile::menu::{Lane, Row};
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        install_chords(&mut vcx, Some(POLICY_AND_KIND_BOUND));
+        h.dispatch(&mut vcx, "menu", None);
+        assert_eq!(menu_lane(&h, &vcx, "rebase edits"), "z");
+        assert_eq!(menu_lane(&h, &vcx, "hold edits"), ":auto hold");
+        assert_eq!(menu_lane(&h, &vcx, "replace edits"), ":auto replace");
+        let reanchor = h.tile.read_with(&vcx, |t, _| match &t.popup {
+            Some(Popup::Menu(m)) => m
+                .rows()
+                .iter()
+                .find_map(|r| match r {
+                    Row::Action(a) if a.title().as_ref() == "Reanchor" => Some(a.lane().clone()),
+                    _ => None,
+                })
+                .expect("the row"),
+            _ => panic!("the menu is open"),
+        });
+        match reanchor {
+            Lane::Keys(k) => assert_eq!(geode_shell::palette::render_binding(&k), "shift+z"),
+            other => panic!("the kind row resolves its binding, got {other:?}"),
+        }
+    }
+
+    /// A keymap republished while the menu is open re-resolves its hints
+    /// at once, not at the next open.
+    #[gpui::test]
+    fn an_open_menu_follows_a_keymap_reload(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        install_chords(&mut vcx, None);
+        h.dispatch(&mut vcx, "menu", None);
+        assert_eq!(menu_lane(&h, &vcx, "Load underlying…"), "u");
+        install_chords(&mut vcx, Some(LOAD_REBOUND));
+        assert_eq!(menu_lane(&h, &vcx, "Load underlying…"), "shift+u");
     }
 
     #[gpui::test]
@@ -13818,7 +13877,11 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         draw(&mut vcx);
         assert!(h.upload_prompt(&vcx).is_some(), "armed");
         let prompt_focus = h.tile.read_with(&vcx, |t, _| {
-            t.pending_upload.as_ref().expect("armed").focus.clone()
+            t.pending_upload
+                .as_ref()
+                .expect("armed")
+                .focus_handle()
+                .clone()
         });
         assert!(vcx.update(|window, _| prompt_focus.is_focused(window)));
         let before = h.tile.read_with(&vcx, |t, _| t.draft().clone());
@@ -14645,6 +14708,71 @@ edits = [["2026-11-20", "-1", 9.5]]
                 "{answer}: j reached the tile with no click after the confirm"
             );
         }
+    }
+
+    /// A press on the upload prompt itself answers "no" and takes no focus
+    /// (its own press-to-focus would hand the keyboard back to a question
+    /// that is gone). The keyboard returns to the tile through the shell's
+    /// restoration path: the very next `j` moves the cursor.
+    #[gpui::test]
+    fn the_tile_answers_keys_after_a_press_on_the_upload_prompt(cx: &mut gpui::TestAppContext) {
+        let (mut vcx, shell, tile, rx) = open_in_shell(cx);
+        let mut asked = None;
+        while let Ok(request) = rx.try_recv() {
+            if let Request::Document(params) = request {
+                asked = Some(params.tag);
+            }
+        }
+        let tag = asked.expect("the visible panel asked for its document");
+        let outcome = QueryOutcome {
+            key: QueryKey(1),
+            tag,
+            snapshot: Ok(Arc::new(cvi(BASE))),
+            submitted: Instant::now(),
+        };
+        vcx.update(|window, cx| {
+            shell.update(cx, |s, cx| s.deliver(Delivery::Query(outcome), window, cx))
+        });
+        draw(&mut vcx);
+        type_keys(&mut vcx, ":");
+        vcx.simulate_input("upload");
+        type_keys(&mut vcx, "enter");
+        draw(&mut vcx);
+        assert!(
+            tile.read_with(&vcx, |t, _| t.upload_prompt().is_some()),
+            "fixture: :upload armed the confirm"
+        );
+
+        let at = vcx
+            .debug_bounds("marketdata-upload-confirm-1")
+            .expect("the prompt is painted")
+            .center();
+        vcx.simulate_click(at, gpui::Modifiers::default());
+        vcx.run_until_parked();
+        draw(&mut vcx);
+        assert!(
+            tile.read_with(&vcx, |t, _| t.upload_prompt().is_none()),
+            "the press cancelled the confirm"
+        );
+        assert_eq!(
+            tile.read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some(UPLOAD_CANCELLED.into()),
+            "a press is a no, not a y"
+        );
+
+        let row = |vcx: &gpui::VisualTestContext| {
+            tile.read_with(vcx, |t, _| match t.cursor() {
+                Cursor::Cell { row, .. } => row,
+                Cursor::Attr(_) => usize::MAX,
+            })
+        };
+        let before = row(&vcx);
+        type_keys(&mut vcx, "j");
+        assert_eq!(
+            row(&vcx),
+            before + 1,
+            "j reached the tile with no other click after the prompt press"
+        );
     }
 
     mod selection;

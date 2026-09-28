@@ -9,7 +9,7 @@ use crate::core::columns::{SHIFT, signed};
 use crate::core::complete::Completion;
 use crate::core::sheet::{LineState, Sheet};
 use crate::popup;
-use crate::tile::{LOADING, PricerTile};
+use crate::tile::{LOADING, PendingRemove, PricerTile};
 use chrono::{DateTime, Utc};
 use geode_core::clock::Clock;
 use geode_shell::actions::ActionId;
@@ -21,10 +21,10 @@ use geode_shell::shell::control::{self, PointerStates as _};
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::tips;
+use geode_tile::confirm::{self, Confirm};
+use geode_tile::notice::{self, Notice};
 use gpui::prelude::*;
-use gpui::{
-    App, ElementId, Entity, FocusHandle, FontWeight, Hsla, IntoElement, SharedString, div, relative,
-};
+use gpui::{App, ElementId, Entity, FontWeight, Hsla, IntoElement, SharedString, div, relative};
 use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme as _, Theme, h_flex, v_flex};
 
@@ -36,16 +36,6 @@ pub(crate) const FOOTER_HEIGHT: f32 = 20.0;
 /// Labels preceding the active view and pricer names in the header.
 pub(crate) const VIEW_LABEL: &str = "view";
 pub(crate) const PRICER_LABEL: &str = "pricer";
-
-/// How the header paints its notice: `loading…` is a status (muted), a
-/// missing pricer a failure (danger text), everything else a warning.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum NoticeTone {
-    Status,
-    #[default]
-    Warning,
-    Danger,
-}
 
 pub(crate) struct HeaderInputs<'a> {
     pub sheet: &'a Sheet,
@@ -79,12 +69,13 @@ pub(crate) struct HeaderModel {
     pub last_priced: Option<DateTime<Utc>>,
     pub time: Option<SharedString>,
     pub time_stale: Option<SharedString>,
-    pub notice: Option<SharedString>,
-    pub notice_tone: NoticeTone,
+    /// `loading…` is a status (muted), a missing pricer a failure (danger
+    /// text), everything else a warning.
+    pub notice: Option<Notice>,
     /// The armed `:rm` confirm's question (see `HeaderInputs::prompt`).
     pub prompt: Option<SharedString>,
-    /// The save state (see `HeaderInputs::save`).
-    pub save: Option<SharedString>,
+    /// The save state (see `HeaderInputs::save`), always a warning.
+    pub save: Option<Notice>,
 }
 
 pub(crate) fn prepare(i: HeaderInputs) -> HeaderModel {
@@ -106,25 +97,15 @@ pub(crate) fn prepare(i: HeaderInputs) -> HeaderModel {
         .filter_map(|r| s.priced_at(r))
         .max();
     let time = last_priced.map(|t| i.clock.hms(t));
-    let (notice, notice_tone) = match i.notice {
-        Some(n) => {
-            let tone = if n.as_ref() == LOADING {
-                NoticeTone::Status
-            } else {
-                NoticeTone::Warning
-            };
-            (Some(n), tone)
-        }
-        None => (
-            i.settings.pricer_missing.then(|| {
-                format!(
-                    "pricer '{}' is not built into this binary; set [pricing] adapter and restart",
-                    i.settings.pricer
-                )
-                .into()
-            }),
-            NoticeTone::Danger,
-        ),
+    let notice = match i.notice {
+        Some(n) if n.as_ref() == LOADING => Some(Notice::status(n)),
+        Some(n) => Some(Notice::warning(n)),
+        None => i.settings.pricer_missing.then(|| {
+            Notice::danger(format!(
+                "pricer '{}' is not built into this binary; set [pricing] adapter and restart",
+                i.settings.pricer
+            ))
+        }),
     };
     HeaderModel {
         name: s.name.clone().into(),
@@ -137,9 +118,8 @@ pub(crate) fn prepare(i: HeaderInputs) -> HeaderModel {
         time_stale: time.as_ref().map(|t| format!("{t} stale").into()),
         time: time.map(Into::into),
         notice,
-        notice_tone,
         prompt: i.prompt,
-        save: i.save,
+        save: i.save.map(Notice::warning),
     }
 }
 
@@ -154,8 +134,8 @@ impl HeaderModel {
             self.view.to_string(),
         ];
         out.extend(self.shifts.iter().map(|s| s.to_string()));
-        out.extend(self.save.iter().map(|s| s.to_string()));
-        out.extend(self.notice.iter().map(|s| s.to_string()));
+        out.extend(self.save.iter().map(|s| s.text().to_string()));
+        out.extend(self.notice.iter().map(|s| s.text().to_string()));
         out.extend(self.prompt.iter().map(|s| s.to_string()));
         out.extend(self.pricing.iter().map(|s| s.to_string()));
         out.extend(self.failed.iter().map(|s| s.to_string()));
@@ -187,8 +167,8 @@ pub(crate) struct HeaderChrome<'a> {
     pub menu_open: bool,
     /// The `⋯` tooltip's selector, built once with the tile.
     pub menu_tip: SharedString,
-    /// The armed `:rm` confirm's focus handle: the prompt tracks it.
-    pub confirm: Option<&'a FocusHandle>,
+    /// The armed `:rm` confirm: its prompt is painted through the confirm door.
+    pub confirm: Option<&'a Confirm<PendingRemove>>,
 }
 
 pub(crate) fn render(h: &HeaderModel, c: HeaderChrome, theme: &Theme) -> impl IntoElement {
@@ -196,11 +176,6 @@ pub(crate) fn render(h: &HeaderModel, c: HeaderChrome, theme: &Theme) -> impl In
     let warn = chip_paint(theme, Tone::WarningText).text;
     let danger = chip_paint(theme, Tone::DangerText).text;
     let chip = chip_paint(theme, Tone::Neutral);
-    let notice_colour = match h.notice_tone {
-        NoticeTone::Status => muted,
-        NoticeTone::Warning => warn,
-        NoticeTone::Danger => danger,
-    };
     let stale = c.stale;
     let tile_id = c.tile_id.0;
     h_flex()
@@ -236,40 +211,21 @@ pub(crate) fn render(h: &HeaderModel, c: HeaderChrome, theme: &Theme) -> impl In
                 .child(s.clone())
         }))
         .child(div().flex_1())
-        .when_some(h.save.clone(), |el, n| {
-            el.child(
-                div()
-                    .text_color(warn)
-                    .debug_selector(|| "pricer-save-notice".into())
-                    .child(n),
-            )
+        .when_some(h.save.as_ref(), |el, n| {
+            el.child(notice::render(n, theme).debug_selector(|| "pricer-save-notice".into()))
         })
-        .when_some(h.notice.clone(), |el, n| {
-            el.child(
-                div()
-                    .text_color(notice_colour)
-                    .debug_selector(|| "pricer-notice".into())
-                    .child(n),
-            )
+        .when_some(h.notice.as_ref(), |el, n| {
+            el.child(notice::render(n, theme).debug_selector(|| "pricer-notice".into()))
         })
-        // The removal prompt owns keyboard focus. Its key listener runs before
-        // the shell root: bare `y` submits removal and every other key cancels.
-        // Stop propagation while the confirmation is armed so that key cannot
-        // also invoke a shell or tile action.
-        .when_some(h.prompt.clone().zip(c.confirm), |el, (p, focus)| {
-            let tile = c.tile.clone();
-            el.child(
-                div()
-                    .track_focus(focus)
-                    .debug_selector(move || format!("pricer-remove-confirm-{tile_id}"))
-                    .text_color(theme.foreground)
-                    .child(p)
-                    .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
-                        if tile.update(cx, |t, cx| t.confirm_key(event, window, cx)) {
-                            cx.stop_propagation();
-                        }
-                    }),
-            )
+        // The removal prompt owns the keyboard; the confirm door answers
+        // every key on it before the shell root sees one.
+        .when_some(h.prompt.as_ref().and(c.confirm), |el, pending| {
+            el.child(confirm::prompt(
+                pending,
+                c.tile,
+                move || format!("pricer-remove-confirm-{tile_id}"),
+                theme,
+            ))
         })
         .when_some(h.pricing.clone(), |el, p| el.child(p))
         .when_some(h.failed.clone(), |el, f| {
@@ -551,14 +507,14 @@ mod tests {
             clock: Clock::utc(),
         });
         assert_eq!(
-            h.notice.as_deref(),
+            h.notice.as_ref().map(|n| n.text().as_ref()),
             Some(
                 "pricer 'vendor' is not built into this binary; set [pricing] adapter and restart"
             )
         );
         assert_eq!(
-            h.notice_tone,
-            NoticeTone::Danger,
+            h.notice.as_ref().map(Notice::tone),
+            Some(notice::Tone::Danger),
             "a failure, not a warning"
         );
         let h = prepare(HeaderInputs {
@@ -569,8 +525,15 @@ mod tests {
             settings: &settings(true),
             clock: Clock::utc(),
         });
-        assert_eq!(h.notice.as_deref(), Some("loading…"));
-        assert_eq!(h.notice_tone, NoticeTone::Status, "loading is a status");
+        assert_eq!(
+            h.notice.as_ref().map(|n| n.text().as_ref()),
+            Some("loading…")
+        );
+        assert_eq!(
+            h.notice.as_ref().map(Notice::tone),
+            Some(notice::Tone::Status),
+            "loading is a status"
+        );
         let h = prepare(HeaderInputs {
             sheet: &s,
             notice: Some("sheet 'book' was not found; opened empty".into()),
@@ -579,6 +542,9 @@ mod tests {
             settings: &settings(true),
             clock: Clock::utc(),
         });
-        assert_eq!(h.notice_tone, NoticeTone::Warning);
+        assert_eq!(
+            h.notice.as_ref().map(Notice::tone),
+            Some(notice::Tone::Warning)
+        );
     }
 }

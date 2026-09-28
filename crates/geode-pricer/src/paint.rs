@@ -1,11 +1,10 @@
-//! Prepared grid-row and action-menu text colours, recomputed on theme changes.
+//! Prepared grid-row text colours, recomputed on theme changes.
 //! CellState selects own, muted stale/inherited, or failure text; package rows have a
 //! separate palette. GridModel remains independent of the theme.
 //!
 //! Row text is adjusted against its base background and the table's hover and selection
-//! backgrounds, which replace that base. Menu text is adjusted against the popover or
-//! enabled-row highlight. The bundled-theme test checks these prepared colours on each
-//! background.
+//! backgrounds, which replace that base. The bundled-theme test checks these prepared
+//! colours on each background. Menu colors are `geode_tile::menu::MenuPaint`'s.
 //!
 //! Adjust toward whichever of black or white has greater contrast with the background.
 //! Using the original text colour as the adjustment endpoint would fail when that
@@ -81,13 +80,6 @@ pub struct Paints {
     pub package_own: Hsla,
     pub package_muted: Hsla,
     pub package_danger: Hsla,
-    /// Action-menu text for the popover and enabled-row accent background. The muted
-    /// variants serve disabled reasons, section headings, and default-key hints.
-    /// Disabled actions never receive the accent fill.
-    pub menu_text: Hsla,
-    pub menu_muted: Hsla,
-    pub menu_active_text: Hsla,
-    pub menu_active_muted: Hsla,
     /// The expiry date field's active segment text on its `primary` fill,
     /// and a mid-typing segment's on its `accent` fill. The field paints
     /// on the cursor row, whose ground may be the line's own, hover or
@@ -102,7 +94,6 @@ impl Paints {
         let ground: Rgb = over(theme.table, to_rgb(theme.background));
         let package: Rgb = over(theme.secondary, ground);
         let danger = chip_paint(theme, Tone::DangerText).text;
-        let (popover, active) = Self::menu_grounds(theme);
         // A row's text reads on its own ground and on the two the table
         // paints over it (hover, selected), which replace it.
         let [hover, selected] = Self::row_grounds(theme);
@@ -117,10 +108,6 @@ impl Paints {
             package_own: floor_on_all(theme.foreground, &pkg),
             package_muted: floor_on_all(theme.muted_foreground, &pkg),
             package_danger: floor_on_all(danger, &pkg),
-            menu_text: floor_toward_pole(theme.popover_foreground, popover),
-            menu_muted: floor_toward_pole(theme.muted_foreground, popover),
-            menu_active_text: floor_toward_pole(theme.accent_foreground, active),
-            menu_active_muted: floor_toward_pole(theme.muted_foreground, active),
             date_active_text: floor_on_all(
                 theme.primary_foreground,
                 &line.map(|g| over(theme.primary, g)),
@@ -148,13 +135,6 @@ impl Paints {
         ]
     }
 
-    /// The popover over the window background, and the highlighted row's
-    /// `accent` over that: the two grounds the menu's text paints on.
-    fn menu_grounds(theme: &Theme) -> (Rgb, Rgb) {
-        let popover = over(theme.popover, to_rgb(theme.background));
-        (popover, over(theme.accent, popover))
-    }
-
     pub fn text(&self, state: CellState, package: bool) -> Hsla {
         match (state, package) {
             (CellState::Stale | CellState::Inherited, false) => self.muted,
@@ -179,7 +159,7 @@ mod tests {
     }
 
     /// Check each prepared text colour against its painted backgrounds for every
-    /// bundled theme. Include row hover and selection, menu highlights, and date
+    /// bundled theme. Include row hover and selection, and date
     /// segment fills composited over the possible row backgrounds.
     #[gpui::test]
     fn every_pricer_paint_is_readable_on_every_bundled_theme(cx: &mut gpui::TestAppContext) {
@@ -195,7 +175,6 @@ mod tests {
                 let p = Paints::derive(theme);
                 let ground = over(theme.table, to_rgb(theme.background));
                 let package = to_rgb(p.package_ground);
-                let (popover, active) = Paints::menu_grounds(theme);
                 for (label, text, bg) in [
                     ("own", p.own, ground),
                     ("muted", p.muted, ground),
@@ -203,13 +182,8 @@ mod tests {
                     ("package own", p.package_own, package),
                     ("package muted", p.package_muted, package),
                     ("package danger", p.package_danger, package),
-                    // Menu text uses its corresponding popover or accent background.
                     // The row palette is also checked on hover and selection
                     // backgrounds below.
-                    ("menu text", p.menu_text, popover),
-                    ("menu muted", p.menu_muted, popover),
-                    ("menu active text", p.menu_active_text, active),
-                    ("menu active muted", p.menu_active_muted, active),
                     // The date field's segment fills composited over the
                     // row's own ground; hover and selected below.
                     (
@@ -262,7 +236,7 @@ mod tests {
             });
         }
         assert!(
-            checked >= 22 * 40,
+            checked >= 18 * 40,
             "every bundled theme was swept ({checked})"
         );
         assert!(

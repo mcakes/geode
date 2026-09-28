@@ -1,7 +1,9 @@
 //! Prepared menu rows derived from the model: the action list (`.`/`⋯`), the
-//! range menu (`r`) and the frequency menu (`f`). Each row names what a pick
-//! does, its enablement reason, and toggle or choice state. The tile adds
-//! binding hints and routes every pick through `TimeseriesTile::menu_pick`:
+//! range menu (`r`) and the frequency menu (`f`), as `geode_tile::menu` rows
+//! over [`Pick`]. Each row names what a pick does, its hint (an action's live
+//! chord, resolved by the door, or a non-key label), its enablement reason,
+//! and toggle or choice state. The tile routes every pick through its
+//! `MenuHost::menu_pick`:
 //! action rows dispatch their action id, range and frequency rows write through
 //! the model's own setters (the ones `:range` and `:freq` use). The action list
 //! includes selected slot operations and common tile controls; it is not the
@@ -9,7 +11,7 @@
 
 use geode_core::series::{Frequency, SlotKind};
 use geode_shell::actions::ActionId;
-use geode_shell::keymap::{Keystroke, Modifiers};
+use geode_tile::menu::{ActionRow, Hint, MenuPick, Row, first_enabled};
 use gpui::SharedString;
 
 use super::model::Model;
@@ -52,65 +54,13 @@ pub enum Pick {
     Frequency(Frequency),
 }
 
-/// One row of a menu.
-#[derive(Clone, Debug, PartialEq)]
-pub enum MenuRow {
-    Action {
-        pick: Pick,
-        title: SharedString,
-        /// Keys for the trailing lane, painted as `Kbd`: an action's binding
-        /// filled by the tile when rows are prepared (empty if absent), or
-        /// `Custom dates…`'s `c`.
-        hint: Vec<Keystroke>,
-        /// Trailing text that is NOT a key — a preset's or a frequency's
-        /// short label (`1w`, `1d`). Painted as text in place of `hint`.
-        label: Option<SharedString>,
-        /// `Err` names why the row cannot be picked; a pick makes it the
-        /// notice, and the trailing lane shows it unless `short_reason`
-        /// stands in for it there.
-        enabled: Result<(), SharedString>,
-        /// A disabled row's trailing text when its full reason is a sentence
-        /// too long for the lane (the point cap's): the row stays narrow and
-        /// a pick still gives the whole reason.
-        short_reason: Option<SharedString>,
-        /// `None` for a verb; `Some(on)` for a toggle or a choice, which
-        /// paints a tick (or a same-width blank) ahead of its title.
-        checked: Option<bool>,
-    },
-    Separator,
-    /// A muted heading over the rows that follow.
-    Section(SharedString),
-}
-
-/// What a row's trailing lane paints.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Trailing<'a> {
-    /// Keys, painted as `Kbd` (empty when the action has no binding).
-    Keys(&'a [Keystroke]),
-    /// Text that is not a key: a short label or a disabled row's reason.
-    Text(SharedString),
-}
-
-impl MenuRow {
-    /// A disabled row's short reason (or its reason, when that is short
-    /// already); else its non-key label; else its keys. `None` for a
-    /// separator or a heading.
-    pub fn trailing(&self) -> Option<Trailing<'_>> {
+impl MenuPick for Pick {
+    fn element_name(&self) -> SharedString {
         match self {
-            MenuRow::Action {
-                enabled,
-                hint,
-                label,
-                short_reason,
-                ..
-            } => Some(match (enabled, label) {
-                (Err(reason), _) => {
-                    Trailing::Text(short_reason.clone().unwrap_or_else(|| reason.clone()))
-                }
-                (Ok(()), Some(label)) => Trailing::Text(label.clone()),
-                (Ok(()), None) => Trailing::Keys(hint),
-            }),
-            _ => None,
+            Pick::Action(id) => SharedString::from(id.0.clone()),
+            Pick::Range(p) => format!("range-{}", p.as_str()).into(),
+            Pick::CustomRange => SharedString::new_static("range-custom"),
+            Pick::Frequency(f) => format!("freq-{}", f.as_str()).into(),
         }
     }
 }
@@ -124,28 +74,20 @@ fn action(
     id: &'static str,
     title: impl Into<SharedString>,
     enabled: Result<(), &'static str>,
-) -> MenuRow {
-    MenuRow::Action {
-        pick: Pick::Action(ActionId(id.to_string())),
-        title: title.into(),
-        hint: Vec::new(),
-        label: None,
-        enabled: enabled.map_err(SharedString::new_static),
-        short_reason: None,
-        checked: None,
-    }
+) -> Row<Pick> {
+    Row::Action(
+        ActionRow::new(Pick::Action(ActionId(id.to_string())), title)
+            .hint(Hint::chord(id))
+            .enabled(enabled.map_err(SharedString::new_static)),
+    )
 }
 
-fn toggle(id: &'static str, title: &'static str, on: bool) -> MenuRow {
-    MenuRow::Action {
-        pick: Pick::Action(ActionId(id.to_string())),
-        title: SharedString::new_static(title),
-        hint: Vec::new(),
-        label: None,
-        enabled: Ok(()),
-        short_reason: None,
-        checked: Some(on),
-    }
+fn toggle(id: &'static str, title: &'static str, on: bool) -> Row<Pick> {
+    Row::Action(
+        ActionRow::new(Pick::Action(ActionId(id.to_string())), title)
+            .hint(Hint::chord(id))
+            .checked(on),
+    )
 }
 
 /// Build openers, cursor-slot operations, `Frequency…` (the frequency menu's
@@ -153,14 +95,14 @@ fn toggle(id: &'static str, title: &'static str, on: bool) -> MenuRow {
 /// their slot section disabled. Bucket rules require a source and expression
 /// editing requires an expression; Color opens a picker while Cycle color
 /// advances through the palette.
-pub fn rows(i: &MenuInputs, default_source: Option<&str>) -> Vec<MenuRow> {
+pub fn rows(i: &MenuInputs, default_source: Option<&str>) -> Vec<Row<Pick>> {
     let m = i.model;
     let mut out = vec![
         action("timeseries::add", "Add series…", Ok(())),
         action("timeseries::expr", "Compose expression…", Ok(())),
         action("timeseries::list", "Series…", Ok(())),
         action("timeseries::range", "Range…", Ok(())),
-        MenuRow::Separator,
+        Row::Separator,
     ];
     let cursor = m.cursor();
     let slot = m.cursor_slot();
@@ -168,7 +110,7 @@ pub fn rows(i: &MenuInputs, default_source: Option<&str>) -> Vec<MenuRow> {
         Some(index) => m.label(index, default_source).into(),
         None => SharedString::new_static("no series"),
     };
-    out.push(MenuRow::Section(heading));
+    out.push(Row::Section(heading));
     let none: Result<(), &'static str> = match slot {
         Some(_) => Ok(()),
         None => Err("add a series first"),
@@ -202,7 +144,7 @@ pub fn rows(i: &MenuInputs, default_source: Option<&str>) -> Vec<MenuRow> {
         },
     ));
     out.push(action("timeseries::remove", "Remove", none));
-    out.push(MenuRow::Separator);
+    out.push(Row::Separator);
     out.push(action("timeseries::freq", "Frequency…", Ok(())));
     out.push(toggle(
         "timeseries::density",
@@ -218,40 +160,33 @@ pub fn rows(i: &MenuInputs, default_source: Option<&str>) -> Vec<MenuRow> {
     out
 }
 
-/// The action id `Custom dates…` shares with its `c` key. The pure row
-/// carries the shipped key; the tile swaps in the live chord.
+/// The action id `Custom dates…` shares with its `c` key. The row's hint is
+/// that action's live chord, empty when the keymap binds it nowhere: `c` is
+/// a keymap binding, not a key the tile reads itself, so a user who unbinds
+/// it must not see a stale `c` there.
 pub const CUSTOM_RANGE_ACTION: &str = "timeseries::range_custom";
 
 /// The range menu: the seven presets written out, each with its short
 /// label (the `:range` spelling) trailing, then a separator and
 /// `Custom dates…`. Exactly one row is ticked — the preset in force, or
 /// `Custom dates…` while the range is two dates.
-pub fn range_rows(current: &Range) -> Vec<MenuRow> {
-    let mut out: Vec<MenuRow> = Preset::ALL
+pub fn range_rows(current: &Range) -> Vec<Row<Pick>> {
+    let mut out: Vec<Row<Pick>> = Preset::ALL
         .into_iter()
-        .map(|p| MenuRow::Action {
-            pick: Pick::Range(p),
-            title: SharedString::new_static(p.title()),
-            hint: Vec::new(),
-            label: Some(SharedString::new_static(p.as_str())),
-            enabled: Ok(()),
-            short_reason: None,
-            checked: Some(*current == Range::Relative(p)),
+        .map(|p| {
+            Row::Action(
+                ActionRow::new(Pick::Range(p), SharedString::new_static(p.title()))
+                    .hint(Hint::label(p.as_str()))
+                    .checked(*current == Range::Relative(p)),
+            )
         })
         .collect();
-    out.push(MenuRow::Separator);
-    out.push(MenuRow::Action {
-        pick: Pick::CustomRange,
-        title: SharedString::new_static("Custom dates…"),
-        hint: vec![Keystroke {
-            mods: Modifiers::NONE,
-            key: "c".to_string(),
-        }],
-        label: None,
-        enabled: Ok(()),
-        short_reason: None,
-        checked: Some(matches!(current, Range::Absolute { .. })),
-    });
+    out.push(Row::Separator);
+    out.push(Row::Action(
+        ActionRow::new(Pick::CustomRange, SharedString::new_static("Custom dates…"))
+            .hint(Hint::chord(CUSTOM_RANGE_ACTION))
+            .checked(matches!(current, Range::Absolute { .. })),
+    ));
     out
 }
 
@@ -259,21 +194,25 @@ pub fn range_rows(current: &Range) -> Vec<MenuRow> {
 /// short label trailing and the one in force ticked. `refusal` is the
 /// model's own point-cap check over the range in force, asked once per
 /// row when the menu is built. Frequencies rejected by that check are
-/// disabled and carry its refusal as their reason.
+/// disabled and carry its refusal as their reason; the lane shows
+/// [`OVER_CAP`] in its place.
 pub fn frequency_rows(
     current: Frequency,
     refusal: impl Fn(Frequency) -> Result<(), String>,
-) -> Vec<MenuRow> {
+) -> Vec<Row<Pick>> {
     Frequency::ALL
         .into_iter()
-        .map(|f| MenuRow::Action {
-            pick: Pick::Frequency(f),
-            title: SharedString::new_static(frequency_title(f)),
-            hint: Vec::new(),
-            label: Some(SharedString::new_static(f.as_str())),
-            enabled: refusal(f).map_err(SharedString::from),
-            short_reason: Some(SharedString::new_static(OVER_CAP)),
-            checked: Some(f == current),
+        .map(|f| {
+            Row::Action(
+                ActionRow::new(
+                    Pick::Frequency(f),
+                    SharedString::new_static(frequency_title(f)),
+                )
+                .hint(Hint::label(f.as_str()))
+                .enabled(refusal(f).map_err(SharedString::from))
+                .short_reason(OVER_CAP)
+                .checked(f == current),
+            )
         })
         .collect()
 }
@@ -297,102 +236,58 @@ fn frequency_title(f: Frequency) -> &'static str {
 /// Where a menu's highlight starts: on the ticked CHOICE when it can be
 /// picked (the value in force — `Custom dates…` while the range is two
 /// dates), else on the first enabled row. The action list ticks only
-/// toggles, which are not choices, so it starts on its first enabled
-/// row.
-pub fn start(rows: &[MenuRow]) -> usize {
+/// toggles, which are not choices, so it starts on its first enabled row.
+pub fn start(rows: &[Row<Pick>]) -> Option<usize> {
     rows.iter()
         .position(|r| {
-            matches!(
-                r,
-                MenuRow::Action {
-                    checked: Some(true),
-                    pick: Pick::Range(_) | Pick::CustomRange | Pick::Frequency(_),
-                    enabled: Ok(()),
-                    ..
-                }
-            )
+            r.action().is_some_and(|a| {
+                a.tick() == Some(true)
+                    && a.is_enabled()
+                    && matches!(
+                        a.pick(),
+                        Pick::Range(_) | Pick::CustomRange | Pick::Frequency(_)
+                    )
+            })
         })
-        .unwrap_or_else(|| first_enabled(rows))
+        .or_else(|| first_enabled(rows))
 }
 
-/// The `Custom dates…` row's index — where `escape` out of the date
-/// editor puts the highlight back.
-pub fn custom_row(rows: &[MenuRow]) -> Option<usize> {
+/// The `Custom dates…` row's index — where `escape` out of the date editor
+/// puts the highlight back.
+pub fn custom_row(rows: &[Row<Pick>]) -> Option<usize> {
     rows.iter().position(|r| {
-        matches!(
-            r,
-            MenuRow::Action {
-                pick: Pick::CustomRange,
-                ..
-            }
-        )
+        r.action()
+            .is_some_and(|a| matches!(a.pick(), Pick::CustomRange))
     })
-}
-
-/// The first row worth landing the highlight on — the first enabled
-/// `Action`, or `0` if none is.
-pub fn first_enabled(rows: &[MenuRow]) -> usize {
-    rows.iter().position(lands).unwrap_or(0)
-}
-
-fn lands(r: &MenuRow) -> bool {
-    matches!(
-        r,
-        MenuRow::Action {
-            enabled: Ok(()),
-            ..
-        }
-    )
-}
-
-/// Move delta enabled actions, skipping disabled rows, headings, and separators.
-/// Clamp at either end. Zero retains any Action row, including a disabled row
-/// selected by the pointer. From a non-action, return first_enabled. From a
-/// disabled action with no enabled row in the requested direction, stay put.
-pub fn step(rows: &[MenuRow], from: usize, delta: isize) -> usize {
-    if !matches!(rows.get(from), Some(MenuRow::Action { .. })) {
-        return first_enabled(rows);
-    }
-    let mut at = from;
-    for _ in 0..delta.unsigned_abs() {
-        let next = if delta > 0 {
-            (at + 1..rows.len()).find(|&i| lands(&rows[i]))
-        } else {
-            (0..at).rev().find(|&i| lands(&rows[i]))
-        };
-        match next {
-            Some(i) => at = i,
-            None => break,
-        }
-    }
-    at
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use geode_core::series::expr::Expr;
+    use geode_tile::menu::{Menu, Trailing, step};
 
-    fn titles(rows: &[MenuRow]) -> Vec<String> {
+    fn titles(rows: &[Row<Pick>]) -> Vec<String> {
         rows.iter()
             .map(|r| match r {
-                MenuRow::Action { title, .. } => title.to_string(),
-                MenuRow::Separator => "---".into(),
-                MenuRow::Section(s) => format!("[{s}]"),
+                Row::Action(a) => a.title().to_string(),
+                Row::Separator => "---".into(),
+                Row::Section(s) => format!("[{s}]"),
             })
             .collect()
     }
 
-    fn row<'a>(rows: &'a [MenuRow], id: &str) -> &'a MenuRow {
+    fn row<'a>(rows: &'a [Row<Pick>], id: &str) -> &'a ActionRow<Pick> {
         rows.iter()
-            .find(|r| matches!(r, MenuRow::Action { pick: Pick::Action(i), .. } if i.0 == id))
+            .filter_map(Row::action)
+            .find(|a| matches!(a.pick(), Pick::Action(i) if i.0 == id))
             .unwrap_or_else(|| panic!("{id} is a row"))
     }
 
-    fn enabled(rows: &[MenuRow], id: &str) -> Result<(), String> {
-        match row(rows, id) {
-            MenuRow::Action { enabled, .. } => enabled.clone().map_err(|e| e.to_string()),
-            _ => unreachable!(),
+    fn enabled(rows: &[Row<Pick>], id: &str) -> Result<(), String> {
+        match row(rows, id).reason() {
+            Some(reason) => Err(reason.to_string()),
+            None => Ok(()),
         }
     }
 
@@ -435,7 +330,7 @@ mod tests {
             assert_eq!(enabled(&rows, id), Err("add a series first".into()), "{id}");
         }
         assert_eq!(enabled(&rows, "timeseries::add"), Ok(()));
-        assert_eq!(first_enabled(&rows), 0);
+        assert_eq!(first_enabled(&rows), Some(0));
     }
 
     #[test]
@@ -467,10 +362,7 @@ mod tests {
     #[test]
     fn the_toggles_carry_their_state_as_a_tick() {
         let mut m = Model::new();
-        let checked = |rows: &[MenuRow], id: &str| match row(rows, id) {
-            MenuRow::Action { checked, .. } => *checked,
-            _ => unreachable!(),
-        };
+        let checked = |rows: &[Row<Pick>], id: &str| row(rows, id).tick();
         let rows = rows(&MenuInputs { model: &m }, None);
         let density = m.density().is_some();
         let percentiles = !m.percentiles().is_empty();
@@ -484,10 +376,7 @@ mod tests {
             checked(&rows, "timeseries::percentiles"),
             Some(!percentiles)
         );
-        assert!(matches!(
-            row(&rows, "timeseries::add"),
-            MenuRow::Action { checked: None, .. }
-        ));
+        assert_eq!(row(&rows, "timeseries::add").tick(), None);
     }
 
     #[test]
@@ -497,15 +386,23 @@ mod tests {
         let rows = rows(&MenuInputs { model: &m }, None);
         // Row 4 is the separator, 5 the section: from `Range…` (3) one
         // step down lands on `Hide` (6).
-        assert_eq!(step(&rows, 3, 1), 6);
-        assert_eq!(step(&rows, 6, -1), 3);
+        assert_eq!(step(&rows, Some(3), 1), Some(6));
+        assert_eq!(step(&rows, Some(6), -1), Some(3));
         // On a source `Edit expression…` (11) is greyed: stepped over.
-        assert_eq!(step(&rows, 10, 1), 12);
-        assert_eq!(step(&rows, 12, -1), 10);
-        assert_eq!(step(&rows, 0, -1), 0, "clamped at the top");
+        assert_eq!(step(&rows, Some(10), 1), Some(12));
+        assert_eq!(step(&rows, Some(12), -1), Some(10));
+        assert_eq!(step(&rows, Some(0), -1), Some(0), "clamped at the top");
         let last = rows.len() - 1;
-        assert_eq!(step(&rows, last, 1), last, "clamped at the bottom");
-        assert_eq!(step(&rows, 4, 1), 0, "from a non-row: the first enabled");
+        assert_eq!(
+            step(&rows, Some(last), 1),
+            Some(last),
+            "clamped at the bottom"
+        );
+        assert_eq!(
+            step(&rows, Some(4), 1),
+            Some(0),
+            "from a non-row: the first enabled"
+        );
     }
 
     /// Disabled slot actions are skipped, so an empty tile moves directly from
@@ -514,47 +411,60 @@ mod tests {
     fn stepping_skips_disabled_rows() {
         let m = Model::new();
         let rows = rows(&MenuInputs { model: &m }, None);
-        assert_eq!(step(&rows, 3, 1), 14, "over the greyed slot section");
-        assert_eq!(step(&rows, 14, -1), 3);
         assert_eq!(
-            step(&rows, 8, 1),
-            14,
+            step(&rows, Some(3), 1),
+            Some(14),
+            "over the greyed slot section"
+        );
+        assert_eq!(step(&rows, Some(14), -1), Some(3));
+        assert_eq!(
+            step(&rows, Some(8), 1),
+            Some(14),
             "a highlight the pointer left on a greyed row steps from it"
         );
-        assert_eq!(step(&rows, 8, 0), 8, "a refresh keeps it there");
+        assert_eq!(
+            step(&rows, Some(8), 0),
+            Some(8),
+            "a zero step keeps it there"
+        );
     }
 
-    fn pick_of(rows: &[MenuRow], i: usize) -> &Pick {
+    fn pick_of(rows: &[Row<Pick>], i: usize) -> &Pick {
         match &rows[i] {
-            MenuRow::Action { pick, .. } => pick,
+            Row::Action(a) => a.pick(),
             other => panic!("row {i} is not a row: {other:?}"),
         }
     }
 
-    fn checked_of(rows: &[MenuRow], i: usize) -> Option<bool> {
-        match &rows[i] {
-            MenuRow::Action { checked, .. } => *checked,
-            _ => None,
-        }
+    fn checked_of(rows: &[Row<Pick>], i: usize) -> Option<bool> {
+        rows[i].action().and_then(|a| a.tick())
+    }
+
+    /// Rows as an open menu holds them: hints resolved against the keymap
+    /// this module ships.
+    fn resolved(rows: Vec<Row<Pick>>) -> Vec<Row<Pick>> {
+        Menu::new(rows, &crate::content::test_bindings(None))
+            .rows()
+            .to_vec()
     }
 
     /// The trailing lane as a test reads it: text as itself, keys by their
     /// keymap spelling (`[c]`).
-    fn trail(row: &MenuRow) -> String {
-        match row.trailing() {
+    fn trail(row: &Row<Pick>) -> String {
+        match row.action().map(|a| a.trailing()) {
             Some(Trailing::Text(t)) => t.to_string(),
             Some(Trailing::Keys(keys)) => keys.iter().map(|k| format!("[{}]", k.key)).collect(),
-            None => String::new(),
+            Some(Trailing::None) | None => String::new(),
         }
     }
 
-    fn hint_of(rows: &[MenuRow], i: usize) -> String {
+    fn hint_of(rows: &[Row<Pick>], i: usize) -> String {
         trail(&rows[i])
     }
 
     #[test]
     fn the_range_menu_writes_the_presets_out_ticks_the_current_and_ends_on_custom() {
-        let rows = range_rows(&Range::Relative(Preset::M3));
+        let rows = resolved(range_rows(&Range::Relative(Preset::M3)));
         assert_eq!(
             titles(&rows),
             vec![
@@ -592,7 +502,11 @@ mod tests {
                 Some(false),
             ]
         );
-        assert_eq!(start(&rows), 2, "the highlight starts on the current range");
+        assert_eq!(
+            start(&rows),
+            Some(2),
+            "the highlight starts on the current range"
+        );
     }
 
     #[test]
@@ -605,16 +519,16 @@ mod tests {
         let custom = rows.len() - 1;
         assert_eq!(checked_of(&rows, custom), Some(true));
         assert!((0..7).all(|i| checked_of(&rows, i) == Some(false)));
-        assert_eq!(start(&rows), custom);
+        assert_eq!(start(&rows), Some(custom));
         assert_eq!(custom_row(&rows), Some(custom));
     }
 
     #[test]
     fn the_frequency_menu_ticks_the_current_and_disables_what_the_cap_refuses() {
-        let rows = frequency_rows(Frequency::H1, |f| match f {
+        let rows = resolved(frequency_rows(Frequency::H1, |f| match f {
             Frequency::M1 => Err("1m over 1y is 525,600 points; the cap is 500,000".into()),
             _ => Ok(()),
-        });
+        }));
         assert_eq!(
             titles(&rows),
             vec![
@@ -630,11 +544,8 @@ mod tests {
         assert_eq!(hints, vec!["over cap", "5m", "15m", "1h", "1d", "1w"]);
         assert_eq!(pick_of(&rows, 0), &Pick::Frequency(Frequency::M1));
         assert_eq!(
-            match &rows[0] {
-                MenuRow::Action { enabled, .. } => enabled.clone(),
-                _ => unreachable!(),
-            },
-            Err(SharedString::from(
+            rows[0].action().unwrap().reason().cloned(),
+            Some(SharedString::from(
                 "1m over 1y is 525,600 points; the cap is 500,000"
             )),
             "a capped frequency is disabled with the cap's own reason"
@@ -649,9 +560,13 @@ mod tests {
         assert_eq!(checked_of(&rows, 4), Some(false));
         assert_eq!(
             start(&rows),
-            3,
+            Some(3),
             "the highlight starts on the current frequency"
         );
-        assert_eq!(step(&rows, 1, -1), 1, "the capped row is stepped over");
+        assert_eq!(
+            step(&rows, Some(1), -1),
+            Some(1),
+            "the capped row is stepped over"
+        );
     }
 }
