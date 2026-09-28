@@ -18,6 +18,7 @@ use geode_shell::frame::{FrameRef, FrameVersions};
 use geode_shell::keymap::KeyContext;
 use geode_shell::module::ShellActions;
 use geode_shell::shell::{chip, scale};
+use geode_tile::motion::{self, Motion};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, AnyWindowHandle, App, Context, Entity, FocusHandle, Focusable as _, SharedString,
@@ -732,10 +733,27 @@ impl DiagnosticsPage {
         cx.notify();
     }
 
-    fn move_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let cur = self.cursor() as isize;
-        let target = (cur + delta).max(0) as usize;
-        self.set_cursor(target, cx);
+    /// One shared motion over the section's rows. Only a bare `G` in the
+    /// Log section follows the tail; every other motion stops following,
+    /// even one that lands on the row the cursor is on, so a reader is not
+    /// dragged away by new records. The page has no column cursor, so
+    /// column motions are not handled. An empty section is left alone: a
+    /// following empty log keeps following through `g g`.
+    fn apply_motion(&mut self, m: Motion, cx: &mut Context<Self>) -> bool {
+        if !m.moves_rows() {
+            return false;
+        }
+        let follow = self.section == Section::Log && m == Motion::Bottom(None);
+        let len = self.prepared.rows.len();
+        if len == 0 && !follow {
+            return true;
+        }
+        self.set_cursor(motion::row(self.cursor(), len, m, false), cx);
+        if self.section == Section::Log {
+            self.follow = follow;
+        }
+        cx.notify();
+        true
     }
 
     fn toggle_expansion_at_cursor(&mut self, expand: Option<bool>, cx: &mut Context<Self>) {
@@ -780,7 +798,11 @@ impl DiagnosticsPage {
     /// with its editor flag). The shell's insert branch confirms with
     /// `holds_focus`.
     pub fn key_context(&self) -> KeyContext {
+        // `grid` is the flag the shell's shared motion bindings are written
+        // under: without it no motion key reaches the page. Their context
+        // also wants `mode == normal`, so the filter keeps its keys.
         KeyContext::new("diagnostics")
+            .grid()
             .pair("section", self.section.name())
             .pair("mode", if self.insert_mode { "insert" } else { "normal" })
             .counts()
@@ -811,19 +833,13 @@ impl DiagnosticsPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if let Some(m) = motion::parse(action, count) {
+            return self.apply_motion(m, cx);
+        }
         let Some(name) = action.0.strip_prefix("diagnostics::") else {
             return false;
         };
-        let n = count.unwrap_or(1).max(1) as isize;
         match name {
-            "down" => self.move_cursor(n, cx),
-            "up" => self.move_cursor(-n, cx),
-            "top" => self.set_cursor(0, cx),
-            "bottom" => self.jump_to_bottom(cx),
-            "page_down" => self.move_cursor(5 * n, cx),
-            "page_up" => self.move_cursor(-5 * n, cx),
-            "page_down_full" => self.move_cursor(10 * n, cx),
-            "page_up_full" => self.move_cursor(-10 * n, cx),
             "next_section" => self.set_section(self.section.next(), window, cx),
             "prev_section" => self.set_section(self.section.prev(), window, cx),
             "expand" => self.toggle_expansion_at_cursor(Some(true), cx),
@@ -1569,7 +1585,7 @@ mod tests {
         // cursor moves and nothing collapses.
         vcx.update(|window, cx| {
             h.page.update(cx, |p, cx| {
-                let _ = p.dispatch(&ActionId("diagnostics::bottom".into()), None, window, cx);
+                let _ = p.dispatch(&ActionId("motion::bottom".into()), None, window, cx);
             });
         });
         assert_eq!(h.page.read_with(&vcx, |p, _| p.cursor()), 2);
@@ -1647,7 +1663,7 @@ mod tests {
         });
         open_data_section(&h, &mut vcx);
         focus_page(&h, &mut vcx);
-        dispatch(&h, &mut vcx, "bottom");
+        dispatch(&h, &mut vcx, "motion::bottom");
         assert_eq!(h.page.read_with(&vcx, |p, _| p.cursor()), 2);
         let row = vcx
             .debug_bounds("diagnostics-row-0")
@@ -1795,7 +1811,7 @@ mod tests {
         focus_page(&h, &mut vcx);
         vcx.update(|window, cx| {
             h.page.update(cx, |p, cx| {
-                let _ = p.dispatch(&ActionId("diagnostics::down".into()), None, window, cx);
+                let _ = p.dispatch(&ActionId("motion::down".into()), None, window, cx);
             });
         });
         let before = h.page.read_with(&vcx, |p, _| p.cursor());
@@ -1882,8 +1898,9 @@ mod tests {
         });
     }
 
-    fn dispatch(h: &Harness, vcx: &mut gpui::VisualTestContext, name: &str) {
-        let id = ActionId(format!("diagnostics::{name}"));
+    /// Dispatch one action by its full id, uncounted; it must be consumed.
+    fn dispatch(h: &Harness, vcx: &mut gpui::VisualTestContext, id: &str) {
+        let id = ActionId(id.into());
         vcx.update(|window, cx| {
             h.page.update(cx, |p, cx| {
                 assert!(p.dispatch(&id, None, window, cx));
@@ -1918,7 +1935,7 @@ mod tests {
         }
         notify(&h, &mut vcx);
         assert_eq!(h.page.read_with(&vcx, |p, _| p.cursor()), 4);
-        dispatch(&h, &mut vcx, "up");
+        dispatch(&h, &mut vcx, "motion::up");
         push(&h.ring, Level::INFO, "geode::shell", "m5");
         notify(&h, &mut vcx);
         assert_eq!(
@@ -1926,7 +1943,7 @@ mod tests {
             3,
             "not following"
         );
-        dispatch(&h, &mut vcx, "bottom");
+        dispatch(&h, &mut vcx, "motion::bottom");
         push(&h.ring, Level::INFO, "geode::shell", "m6");
         notify(&h, &mut vcx);
         assert_eq!(
@@ -1935,7 +1952,7 @@ mod tests {
             "following again"
         );
         // The Follow switch is the pointer route to the same state.
-        dispatch(&h, &mut vcx, "top");
+        dispatch(&h, &mut vcx, "motion::top");
         assert_eq!(
             h.page.read_with(&vcx, |p, _| (p.cursor(), p.follow)),
             (0, false)
@@ -1945,6 +1962,145 @@ mod tests {
             h.page.read_with(&vcx, |p, _| (p.cursor(), p.follow)),
             (6, true),
             "turning follow on jumps to the last row"
+        );
+        // A row click seats the cursor through the table and stops
+        // following like a motion does.
+        click(&mut vcx, "diagnostics-row-0");
+        vcx.run_until_parked();
+        assert_eq!(
+            h.page.read_with(&vcx, |p, _| (p.cursor(), p.follow)),
+            (0, false),
+            "a click stops following"
+        );
+    }
+
+    /// Dispatch one action by its full id with a count; it must be consumed.
+    fn dispatch_counted(h: &Harness, vcx: &mut gpui::VisualTestContext, id: &str, count: u32) {
+        let id = ActionId(id.into());
+        vcx.update(|window, cx| {
+            h.page.update(cx, |p, cx| {
+                assert!(p.dispatch(&id, Some(count), window, cx));
+            });
+        });
+    }
+
+    /// The page publishes `grid` beside its mode: the shell's shared motion
+    /// bindings are written under `grid && (mode == normal || …)`, so they
+    /// reach the cursor in normal mode and stay out while the filter holds
+    /// focus, where the context reads `mode == insert`.
+    #[gpui::test]
+    fn the_key_context_publishes_grid_and_normal_mode(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        open_log_section(&h, &mut vcx);
+        let ctx = h.page.read_with(&vcx, |p, _| p.key_context());
+        assert!(ctx.has_flag(geode_shell::keymap::GRID));
+        assert_eq!(ctx.get("mode"), Some("normal"));
+        dispatch(&h, &mut vcx, "diagnostics::filter");
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let ctx = h.page.read_with(&vcx, |p, _| p.key_context());
+        assert!(
+            ctx.has_flag(geode_shell::keymap::GRID),
+            "the mode is the gate, not the flag"
+        );
+        assert_eq!(ctx.get("mode"), Some("insert"));
+    }
+
+    /// A bare `G` follows the log; a counted `G` jumps to that row without
+    /// following, even onto the row the cursor is on; a bare `j` at the
+    /// last row wraps and stops following; on an empty log a motion changes
+    /// nothing, so following survives a `g g` there.
+    #[gpui::test]
+    fn bare_g_follows_the_log_and_a_counted_g_only_jumps(cx: &mut gpui::TestAppContext) {
+        use geode_core::log::Level;
+        let (h, mut vcx) = open(cx);
+        open_log_section(&h, &mut vcx);
+        let state =
+            |vcx: &gpui::VisualTestContext| h.page.read_with(vcx, |p, _| (p.cursor(), p.follow));
+        assert_eq!(state(&vcx), (0, true), "fixture: an empty log follows");
+        dispatch(&h, &mut vcx, "motion::top");
+        assert_eq!(
+            state(&vcx),
+            (0, true),
+            "an empty section keeps following through g g"
+        );
+        for i in 0..6 {
+            push(&h.ring, Level::INFO, "geode::shell", &format!("m{i}"));
+        }
+        notify(&h, &mut vcx);
+        assert_eq!(state(&vcx), (5, true), "fixture: the tail is followed");
+        dispatch_counted(&h, &mut vcx, "motion::bottom", 3);
+        assert_eq!(
+            state(&vcx),
+            (2, false),
+            "3G: row 3, 1-based, and a counted G does not follow"
+        );
+        dispatch(&h, &mut vcx, "motion::bottom");
+        assert_eq!(state(&vcx), (5, true), "a bare G follows");
+        dispatch_counted(&h, &mut vcx, "motion::bottom", 6);
+        assert_eq!(
+            state(&vcx),
+            (5, false),
+            "6G onto the cursor row still stops following"
+        );
+        dispatch(&h, &mut vcx, "motion::bottom");
+        assert_eq!(state(&vcx), (5, true));
+        dispatch(&h, &mut vcx, "motion::down");
+        assert_eq!(
+            state(&vcx),
+            (0, false),
+            "a bare j at the last row wraps and stops following"
+        );
+        push(&h.ring, Level::INFO, "geode::shell", "m6");
+        notify(&h, &mut vcx);
+        assert_eq!(state(&vcx), (0, false), "not following");
+    }
+
+    /// `3 ctrl+d` moves fifteen rows: the count reaches the shared
+    /// half-page step through the page's dispatch.
+    #[gpui::test]
+    fn a_count_prefix_multiplies_page_down(cx: &mut gpui::TestAppContext) {
+        use geode_core::log::Level;
+        let (h, mut vcx) = open(cx);
+        open_log_section(&h, &mut vcx);
+        for i in 0..40 {
+            push(&h.ring, Level::INFO, "geode::shell", &format!("m{i}"));
+        }
+        notify(&h, &mut vcx);
+        dispatch(&h, &mut vcx, "motion::top");
+        dispatch_counted(&h, &mut vcx, "motion::half_page_down", 3);
+        assert_eq!(
+            h.page.read_with(&vcx, |p, _| p.cursor()),
+            15,
+            "3 ctrl+d must move 5 * 3 = 15 rows"
+        );
+    }
+
+    /// `ctrl+f`/`ctrl+b` (`motion::page_down`/`page_up`) are the ten-row
+    /// step, counted the same way `ctrl+d` is: `2 ctrl+f` moves 20 and
+    /// `ctrl+b` brings back 10.
+    #[gpui::test]
+    fn ctrl_f_and_ctrl_b_page_by_ten(cx: &mut gpui::TestAppContext) {
+        use geode_core::log::Level;
+        let (h, mut vcx) = open(cx);
+        open_log_section(&h, &mut vcx);
+        for i in 0..40 {
+            push(&h.ring, Level::INFO, "geode::shell", &format!("m{i}"));
+        }
+        notify(&h, &mut vcx);
+        dispatch(&h, &mut vcx, "motion::top");
+        dispatch_counted(&h, &mut vcx, "motion::page_down", 2);
+        assert_eq!(
+            h.page.read_with(&vcx, |p, _| p.cursor()),
+            20,
+            "2 ctrl+f must move 10 * 2 = 20 rows"
+        );
+        dispatch(&h, &mut vcx, "motion::page_up");
+        assert_eq!(
+            h.page.read_with(&vcx, |p, _| p.cursor()),
+            10,
+            "ctrl+b must move back 10 rows"
         );
     }
 
@@ -2084,7 +2240,7 @@ mod tests {
     fn switching_to_a_section_without_the_input_blurs_it_first(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         open_log_section(&h, &mut vcx);
-        dispatch(&h, &mut vcx, "filter");
+        dispatch(&h, &mut vcx, "diagnostics::filter");
         // The input's focus event, which sets insert mode, is delivered
         // with the next frame.
         let draw = |vcx: &mut gpui::VisualTestContext| {

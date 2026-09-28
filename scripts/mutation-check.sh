@@ -6964,6 +6964,113 @@ run_mutation "diagnostics log: follow never stops" \
   geode-diagnostics \
   the_log_section_follows_until_the_cursor_moves_and_bottom_resumes
 
+# ---- the diagnostics page: the shared motion vocabulary
+
+# The shell binds the shared motions under `grid`; a page that stops
+# publishing the flag takes no motion key at all.
+run_mutation "diagnostics motion: the key context publishes grid" \
+  crates/geode-diagnostics/src/page.rs \
+  '        KeyContext::new("diagnostics")
+            .grid()' \
+  '        KeyContext::new("diagnostics")' \
+  geode-diagnostics \
+  the_key_context_publishes_grid_and_normal_mode
+
+run_mutation "motion e2e: a shared override reaches the diagnostics page" \
+  crates/geode-diagnostics/src/page.rs \
+  '        KeyContext::new("diagnostics")
+            .grid()' \
+  '        KeyContext::new("diagnostics")' \
+  geode-app \
+  a_shared_motion_override_reaches_the_diagnostics_page
+
+# The count typed before a motion must reach the shared step through the
+# page's own dispatch.
+run_mutation "diagnostics motion: the page drops the count" \
+  crates/geode-diagnostics/src/page.rs \
+  '        if let Some(m) = motion::parse(action, count) {' \
+  '        if let Some(m) = motion::parse(action, None) {' \
+  geode-diagnostics \
+  a_count_prefix_multiplies_page_down
+
+# The page pages through the shared rules: `3 ctrl+d` moves fifteen rows
+# only while the count multiplies the step, and `ctrl+f` moves ten.
+run_mutation "diagnostics motion: a count multiplies ctrl+d" \
+  crates/geode-tile/src/motion.rs \
+  '    let n = i64::from(count.unwrap_or(1).max(1));' \
+  '    let n = 1i64;' \
+  geode-diagnostics \
+  a_count_prefix_multiplies_page_down
+
+run_mutation "diagnostics motion: ctrl+f and ctrl+b page by ten" \
+  crates/geode-tile/src/motion.rs \
+  'pub const FULL_PAGE: i64 = 10;' \
+  'pub const FULL_PAGE: i64 = 5;' \
+  geode-diagnostics \
+  ctrl_f_and_ctrl_b_page_by_ten
+
+# `G` means "tail the log" only bare; `5G` means "look at row 5".
+run_mutation "diagnostics motion: only a bare G follows the log" \
+  crates/geode-diagnostics/src/page.rs \
+  '        let follow = self.section == Section::Log && m == Motion::Bottom(None);' \
+  '        let follow = self.section == Section::Log && matches!(m, Motion::Bottom(_));' \
+  geode-diagnostics \
+  bare_g_follows_the_log_and_a_counted_g_only_jumps
+
+# A motion that lands on the cursor row still stops following; the seat
+# alone does not, because it did not move.
+run_mutation "diagnostics motion: a motion stops following" \
+  crates/geode-diagnostics/src/page.rs \
+  '        if self.section == Section::Log {
+            self.follow = follow;
+        }' \
+  '        if self.section == Section::Log {
+            self.follow = self.follow || follow;
+        }' \
+  geode-diagnostics \
+  bare_g_follows_the_log_and_a_counted_g_only_jumps
+
+# A bare `j` on the last row wraps to the first, in the Log section too.
+run_mutation "diagnostics motion: a bare j wraps at the end" \
+  crates/geode-diagnostics/src/page.rs \
+  '        self.set_cursor(motion::row(self.cursor(), len, m, false), cx);' \
+  '        self.set_cursor(motion::row(self.cursor(), len, m, true), cx);' \
+  geode-diagnostics \
+  bare_g_follows_the_log_and_a_counted_g_only_jumps
+
+# An empty section is left alone: a following empty log keeps following.
+run_mutation "diagnostics motion: an empty section stops following" \
+  crates/geode-diagnostics/src/page.rs \
+  '        if len == 0 && !follow {
+            return true;
+        }' \
+  '        if len == 0 && !follow {
+            self.follow = false;
+            return true;
+        }' \
+  geode-diagnostics \
+  bare_g_follows_the_log_and_a_counted_g_only_jumps
+
+# An old user binding on a retired id must bind its shared successor, not
+# some other motion.
+run_mutation "diagnostics motion: retired ids rename to the shared ones" \
+  crates/geode-diagnostics/src/lib.rs \
+  'pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
+    ("diagnostics::down", "motion::down"),' \
+  'pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
+    ("diagnostics::down", "motion::up"),' \
+  geode-diagnostics \
+  every_retired_motion_id_renames_to_its_shared_id
+
+run_mutation "motion e2e: an old diagnostics override reaches the page" \
+  crates/geode-diagnostics/src/lib.rs \
+  'pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
+    ("diagnostics::down", "motion::down"),' \
+  'pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
+    ("diagnostics::down", "motion::up"),' \
+  geode-app \
+  an_old_diagnostics_down_override_still_moves_the_page_only_and_warns
+
 run_mutation "diagnostics log: a programmatic target is not reselected" \
   crates/geode-diagnostics/src/page.rs \
   '        if !changed && !self.select_stale {

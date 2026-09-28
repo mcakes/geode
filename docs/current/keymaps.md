@@ -300,8 +300,10 @@ them, beside the shell's `g g`: a first `g` waits for the second key), its
 `mode == insert` field keys and its `mode == menu` pick and close keys.
 The timeseries fragment binds its popups' `enter`, `escape` and `.`; their
 row steps are the shared ones under `tilelist`.
-The diagnostics fragment binds only `[`/`]` and `z o`/`z c`; the tile publishes
-`grid` and `mode == normal` so the shared motions reach its cursor.
+The diagnostics page's fragment binds only its verbs (`[`/`]`, `z o`/`z c`,
+`enter`, `/`) under `mode == normal` and `escape` under `mode == insert`; the
+page publishes `grid` beside its mode, so the shared motions reach its cursor
+in normal mode and stay out of the focused filter.
 
 A fragment may name any action, not only ones its own module registers, so
 long as its context is the module's own: both the blotter's and the pricer's

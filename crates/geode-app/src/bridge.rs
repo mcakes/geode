@@ -1217,7 +1217,9 @@ mod tests {
     use geode_diagnostics::DiagnosticsPageFactory;
     use geode_pricer::store::MemorySheetStore;
     use geode_shell::actions::ActionRegistry;
-    use geode_shell::defaults::{BUILTIN_KEYMAP, default_mod, register_builtin_actions};
+    use geode_shell::defaults::{
+        BUILTIN_KEYMAP, default_mod, register_builtin_actions, register_page_actions,
+    };
     use geode_shell::keymap::build_keymap;
     use geode_shell::module::recording::{Recorded, RecordingFactory};
     use geode_shell::module::{ModuleFactory, ModuleRoster, PageFactory};
@@ -5681,8 +5683,9 @@ role = "key"
         );
     }
 
-    /// The grid tile kinds the shared motion keys must reach.
-    const GRID_KINDS: &[&str] = &["blotter", "cvi", "pricer", "diagnostics"];
+    /// The grid tile kinds the shared motion keys must reach. The
+    /// diagnostics page is the fourth grid; `page_dispatch_counts` opens it.
+    const GRID_KINDS: &[&str] = &["blotter", "cvi", "pricer"];
 
     /// DataTable key suppression for every grid module, once per test app.
     fn init_grid_modules(cx: &mut gpui::TestAppContext) {
@@ -5692,10 +5695,11 @@ role = "key"
         cx.update(geode_pricer::init);
     }
 
-    /// A shell whose roster holds every grid factory, wired as `main` wires
-    /// it (actions, renames, fragments, builtin keymap, `user` as the user
-    /// layer), with one restored tile of `kind` focused. Returns the keymap
-    /// build's diagnostics beside the services.
+    /// A shell whose roster holds every grid factory and whose page roster
+    /// holds the diagnostics page, wired as `main` wires them (actions,
+    /// renames, fragments, the page toggle, builtin keymap, `user` as the
+    /// user layer), with one restored tile of `kind` focused. Returns the
+    /// keymap build's diagnostics beside the services.
     fn shell_with_one_grid_tile(
         kind: &str,
         user: Option<&str>,
@@ -5724,13 +5728,20 @@ role = "key"
             TemplateSet::builtin(),
             PricerSettings::default(),
         )));
-        roster.add(Box::new(DiagnosticsFactory::new(
+        let mut pages = geode_shell::module::PageRoster::new();
+        pages.add(Box::new(DiagnosticsPageFactory::new(
             Arc::new(Ring::new(16)),
             services.config.clone(),
         )));
         roster.register_actions(&mut services.registry);
-        let (fragments, diags) = roster.keymap_fragments();
+        let page_titles: Vec<(&str, &str)> = pages.entries().map(|e| (e.kind, e.title)).collect();
+        register_page_actions(&mut services.registry, &page_titles);
+        pages.register_actions(&mut services.registry);
+        let (mut fragments, diags) = roster.keymap_fragments();
         assert!(diags.is_empty(), "{diags:?}");
+        let (page_fragments, page_diags) = pages.keymap_fragments();
+        assert!(page_diags.is_empty(), "{page_diags:?}");
+        fragments.extend(page_fragments);
         let mut docs = vec![LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap()];
         if let Some(text) = user {
             docs.push(LayerDoc {
@@ -5744,12 +5755,14 @@ role = "key"
         let (keymap, keymap_diags) = build_keymap(&layered, services.mod_alias, &services.registry);
         services.keymap = keymap;
         services.roster = roster;
+        services.pages = pages;
         let mut table = geode_shell::session::to_toml(
             &Workspaces::new(),
             &TileRecords::new(),
             None,
             &geode_shell::session::PinnedRecords::new(),
             &geode_shell::palette_usage::PaletteUsage::new(),
+            &geode_shell::session::PageRecords::new(),
         );
         let ws1: toml::Table = format!(
             "focused = 1\n[node]\nkind = \"leaf\"\nid = 1\n[tiles.1]\nmodule = \"{kind}\"\n"
@@ -6022,15 +6035,52 @@ role = "key"
         assert_reaches_no_other_grid_tile(cx, "pricer", user);
     }
 
-    /// An override written against the retired `diagnostics::down` keeps
-    /// working in the diagnostics tile, only there, and warns naming both.
+    /// `keys` typed with the diagnostics page open over a blotter tile:
+    /// `mod+d` first, then `keys`. The tile beneath is out of the context
+    /// stack, so only the page can take them.
+    fn page_dispatch_counts(
+        cx: &mut gpui::TestAppContext,
+        user: Option<&str>,
+        keys: &[&str],
+        ids: &[&str],
+    ) -> Vec<usize> {
+        let mut all = vec!["alt-d"];
+        all.extend_from_slice(keys);
+        dispatch_counts(cx, "blotter", user, &all, ids)
+    }
+
+    /// One user override of a shared motion, under the shipped context,
+    /// reaches the diagnostics page: it publishes `grid` like the tiles.
     #[gpui::test]
-    fn an_old_diagnostics_down_override_still_moves_diagnostics_only_and_warns(
+    fn a_shared_motion_override_reaches_the_diagnostics_page(cx: &mut gpui::TestAppContext) {
+        use geode_shell::defaults::GRID_MOTION_CONTEXT;
+        init_grid_modules(cx);
+        let user = format!(
+            "[[bindings]]\ncontext = \"{GRID_MOTION_CONTEXT}\"\n[bindings.keys]\n\"q\" = \"motion::down\"\n"
+        );
+        let (_, diags) = shell_with_one_grid_tile("blotter", Some(&user));
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(
+            page_dispatch_counts(
+                cx,
+                Some(&user),
+                &["q", "j"],
+                &["page::toggle_diagnostics", "motion::down"]
+            ),
+            vec![1, 2],
+            "the page opened, and the override and the shipped j both reach it"
+        );
+    }
+
+    /// An override written against the retired `diagnostics::down` keeps
+    /// working on the diagnostics page, only there, and warns naming both.
+    #[gpui::test]
+    fn an_old_diagnostics_down_override_still_moves_the_page_only_and_warns(
         cx: &mut gpui::TestAppContext,
     ) {
         init_grid_modules(cx);
         let user = "[[bindings]]\ncontext = \"diagnostics\"\n[bindings.keys]\n\"q\" = \"diagnostics::down\"\n";
-        let (_, diags) = shell_with_one_grid_tile("diagnostics", Some(user));
+        let (_, diags) = shell_with_one_grid_tile("blotter", Some(user));
         assert_eq!(diags.len(), 1, "{diags:?}");
         assert_eq!(diags[0].severity, Severity::Warning);
         assert!(
@@ -6040,8 +6090,13 @@ role = "key"
             diags[0].message
         );
         assert_eq!(
-            dispatch_counts(cx, "diagnostics", Some(user), &["q"], &["motion::down"]),
-            vec![1]
+            page_dispatch_counts(
+                cx,
+                Some(user),
+                &["q"],
+                &["page::toggle_diagnostics", "motion::down"]
+            ),
+            vec![1, 1]
         );
         assert_reaches_no_other_grid_tile(cx, "diagnostics", user);
     }

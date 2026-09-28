@@ -25,9 +25,8 @@ Used by the pricer (all four doors, `motion` for its grid cursor, and
 `motion` for its grid cursor, and `following` for its document request),
 timeseries (popover, menu, notice, and `following` for its series query),
 the blotter (notice, `motion` for its grid cursor, and `following` for its
-view query) and diagnostics. Diagnostics has no popover, menu, confirm or
-notice line; it uses `motion` for its row cursor and
-`following::arrive_immediately`, since it submits no frame query.
+view query) and the diagnostics page (`motion` for its row cursor only: it
+has no popover, menu, confirm or notice line, and submits no frame query).
 
 The crate takes a submission's outcome as `submitted: bool` rather than
 depending on `geode-data`: every refusal path uses the data service's
