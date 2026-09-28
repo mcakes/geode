@@ -25,14 +25,15 @@ pub struct LevelRow {
     pub explicit: bool,
 }
 
-/// The popover's transient state: whether it is open and what the
-/// new-target field holds (mirrored from the input on every change so
-/// paint reads no entity).
+/// The popover's transient state.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct LevelsState {
     pub open: bool,
-    pub new_target: String,
 }
+
+/// The read-only row: `request_level` files a target, and a `default`
+/// target is not the default.
+pub const DEFAULT_ROW: &str = "default";
 
 pub fn level_word(level: Level) -> &'static str {
     LEVEL_WORDS[LogFilter::level_index(level)]
@@ -41,15 +42,6 @@ pub fn level_word(level: Level) -> &'static str {
 /// A target in the store's spelling: the `geode::` prefix dropped.
 fn suffix(target: &str) -> &str {
     target.strip_prefix(GEODE_PREFIX).unwrap_or(target)
-}
-
-/// The target a new-target field's text requests, or `None` when it
-/// names nothing: trimmed, in the store's spelling, and not the default
-/// row, which `request_level` cannot set (it would file a `default`
-/// target rather than move the default).
-pub fn new_target(text: &str) -> Option<&str> {
-    let t = suffix(text.trim());
-    (!t.is_empty() && t != "default").then_some(t)
 }
 
 /// The level a target logs at: its explicit entry, else the longest
@@ -69,10 +61,12 @@ pub fn effective_level(levels: &LogLevels, target: &str) -> Level {
 }
 
 /// `"default"` first, then the known targets in [`TARGETS`] order, then
-/// any configured target outside that list.
+/// any configured target outside that list. Only [`TARGETS`] survive a
+/// reload (`from_doc` drops other keys), so the popover offers no way to
+/// add one; an extra row only shows what a hand-edited config set.
 pub fn level_rows(levels: &LogLevels) -> Vec<LevelRow> {
     let mut rows = vec![LevelRow {
-        target: "default".into(),
+        target: DEFAULT_ROW.into(),
         effective: levels.default,
         explicit: true,
     }];
@@ -154,14 +148,5 @@ mod tests {
             assert_eq!(level_word(*level), LEVEL_WORDS[ix]);
             assert_eq!(level_word(*level), level.to_string().to_ascii_lowercase());
         }
-    }
-
-    #[test]
-    fn a_new_target_is_trimmed_stripped_and_never_the_default() {
-        assert_eq!(new_target("  geode::custom "), Some("custom"));
-        assert_eq!(new_target("custom"), Some("custom"));
-        assert_eq!(new_target("   "), None);
-        assert_eq!(new_target("default"), None);
-        assert_eq!(new_target("geode::"), None);
     }
 }

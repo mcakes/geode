@@ -104,9 +104,10 @@ pub struct DiagnosticsPage {
     pub(crate) target_select: Entity<TargetSelect>,
     /// The select's current items, so an unchanged tail replaces nothing.
     target_items: Vec<SharedString>,
-    /// The Levels popover's new-target field.
-    new_target_input: Entity<InputState>,
     pub(crate) levels: LevelsState,
+    /// A programmatic `set_log_target` must show in the select even when
+    /// the item set is unchanged; the next sync reselects.
+    select_stale: bool,
     /// The popover's rows, prepared with the Log section.
     level_rows: Rc<Vec<LevelRow>>,
     badges: Badges,
@@ -164,20 +165,6 @@ impl DiagnosticsPage {
                         this.filters[ix] = text.to_string();
                         this.rebuild(cx);
                     }
-                }
-                InputEvent::Focus | InputEvent::Blur => this.sync_insert_mode(window, cx),
-                InputEvent::PressEnter { .. } => {}
-            },
-        )
-        .detach();
-        let new_target_input = cx.new(|cx| InputState::new(window, cx).placeholder("new target"));
-        cx.subscribe_in(
-            &new_target_input,
-            window,
-            |this, input, event: &InputEvent, window, cx| match event {
-                InputEvent::Change => {
-                    this.levels.new_target = input.read(cx).value().to_string();
-                    cx.notify();
                 }
                 InputEvent::Focus | InputEvent::Blur => this.sync_insert_mode(window, cx),
                 InputEvent::PressEnter { .. } => {}
@@ -337,8 +324,8 @@ impl DiagnosticsPage {
             window: window.window_handle(),
             target_select,
             target_items,
-            new_target_input,
             levels: LevelsState::default(),
+            select_stale: false,
             level_rows: Rc::new(Vec::new()),
             badges: Badges {
                 sources: (None, 0),
@@ -513,9 +500,10 @@ impl DiagnosticsPage {
 
     /// Offer `all` and every target in the tail, plus the selected target
     /// when the tail no longer holds it, so the select never shows a
-    /// filter it cannot name. Replacing the items needs the window, which
-    /// the observers that rebuild do not carry, so the replacement is
-    /// deferred to the window this page lives in.
+    /// filter it cannot name; reselect the filter's target whenever the
+    /// items or the target changed. Both need the window, which the
+    /// observers that rebuild do not carry, so the work is deferred to the
+    /// window this page lives in.
     fn sync_target_items(&mut self, cx: &mut Context<Self>) {
         let mut items = vec![SharedString::from(ALL_TARGETS)];
         items.extend(
@@ -528,10 +516,15 @@ impl DiagnosticsPage {
         {
             items.push(SharedString::from(t.clone()));
         }
-        if items == self.target_items {
+        let changed = items != self.target_items;
+        if !changed && !self.select_stale {
             return;
         }
-        self.target_items = items.clone();
+        self.select_stale = false;
+        let items = changed.then(|| {
+            self.target_items = items.clone();
+            items
+        });
         let selected = self
             .log_filter
             .target
@@ -542,7 +535,9 @@ impl DiagnosticsPage {
         cx.defer(move |cx| {
             let _ = cx.update_window(handle, |_, window, cx| {
                 select.update(cx, |s, cx| {
-                    s.set_items(SearchableVec::new(items), window, cx);
+                    if let Some(items) = items {
+                        s.set_items(SearchableVec::new(items), window, cx);
+                    }
                     s.set_selected_value(&selected, window, cx);
                 });
             });
@@ -597,12 +592,14 @@ impl DiagnosticsPage {
     }
 
     /// Filter the tail to one target (`None` for all). The select's
-    /// confirm lands here; the select itself already shows the pick.
+    /// confirm lands here, and a programmatic call is shown by the select
+    /// on the rebuild's sync.
     pub fn set_log_target(&mut self, target: Option<String>, cx: &mut Context<Self>) {
         if self.log_filter.target == target {
             return;
         }
         self.log_filter.target = target;
+        self.select_stale = true;
         self.rebuild(cx);
     }
 
@@ -657,24 +654,6 @@ impl DiagnosticsPage {
         });
     }
 
-    /// The new-target row's pick: the field's text as a target, then the
-    /// field is emptied (`set_value` emits no `Change`, so the mirror is
-    /// cleared here too).
-    pub(crate) fn pick_new_target_level(
-        &mut self,
-        level: Level,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(target) = levels::new_target(&self.levels.new_target).map(str::to_string) else {
-            return;
-        };
-        self.pick_level(&target, level, cx);
-        self.levels.new_target.clear();
-        self.new_target_input
-            .update(cx, |i, cx| i.set_value("", window, cx));
-    }
-
     /// Select a section: rebuild it and show its filter text in the one
     /// input. The input's `set_value` needs the window, so every caller
     /// brings one; nothing syncs the input from render.
@@ -682,6 +661,14 @@ impl DiagnosticsPage {
         if self.section == section {
             return;
         }
+        // The new section may not paint the input (Perf) or the popover
+        // (every other section): a surface dropping a focused input blurs
+        // it first, so focus never rests on an unrendered handle with the
+        // page still in insert mode.
+        if self.holds_focus(window, cx) {
+            self.focus_handle.focus(window, cx);
+        }
+        self.levels.open = false;
         self.section = section;
         self.title = title_for(section);
         // Setting the value emits no `Change`, so the section is not
@@ -770,12 +757,10 @@ impl DiagnosticsPage {
 
     pub fn holds_focus(&self, window: &Window, cx: &App) -> bool {
         self.filter_input.focus_handle(cx).is_focused(window)
-            || self.new_target_input.focus_handle(cx).is_focused(window)
     }
 
-    /// Focus moving between the two inputs delivers one's blur and the
-    /// other's focus in either order, so the flag follows what the window
-    /// says rather than the last event.
+    /// The flag follows what the window says rather than the last event,
+    /// so a blur delivered after the handle was refocused cannot clear it.
     fn sync_insert_mode(&mut self, window: &Window, cx: &mut Context<Self>) {
         let insert = self.holds_focus(window, cx);
         if self.insert_mode != insert {
@@ -887,8 +872,6 @@ impl DiagnosticsPage {
                     follow: self.follow,
                     popover_open: self.levels.open,
                     level_rows: self.level_rows.clone(),
-                    new_target_input: &self.new_target_input,
-                    new_target_ok: levels::new_target(&self.levels.new_target).is_some(),
                 },
                 weak,
             ),
@@ -1141,6 +1124,11 @@ mod tests {
             .read_with(&vcx, |h, _| h.page.clone());
         let (frame, diagnostics) =
             page.read_with(&vcx, |p, _| (p.frame.clone(), p.diagnostics.clone()));
+        // Focus-in and focus-out reach their listeners only in an active
+        // window, as a shown window is; the test platform activates on
+        // its executor, so it is parked before the first draw.
+        vcx.update(|window, _cx| window.activate_window());
+        vcx.run_until_parked();
         vcx.update(|window, cx| {
             let _ = window.draw(cx);
         });
@@ -1722,6 +1710,17 @@ mod tests {
             p.set_log_target(Some("geode::query".into()), cx)
         });
         assert_eq!(rows(&vcx), 0, "DEBUG off and only query");
+        let shown = |vcx: &gpui::VisualTestContext| {
+            h.page.read_with(vcx, |p, cx| {
+                p.target_select.read(cx).selected_value().cloned()
+            })
+        };
+        vcx.run_until_parked();
+        assert_eq!(
+            shown(&vcx).as_deref(),
+            Some("geode::query"),
+            "a programmatic target shows in the select although the items did not change"
+        );
         click(&mut vcx, "diagnostics-level-DEBUG");
         assert_eq!(rows(&vcx), 1, "DEBUG back on, still only query");
         // A target outside the tail is still offered, and selected, by the
@@ -1742,6 +1741,8 @@ mod tests {
         );
         h.page.update(&mut vcx, |p, cx| p.set_log_target(None, cx));
         assert_eq!(rows(&vcx), 2);
+        vcx.run_until_parked();
+        assert_eq!(shown(&vcx).as_deref(), Some("all"));
     }
 
     #[gpui::test]
@@ -1802,13 +1803,79 @@ mod tests {
                 )),
             Level::DEBUG
         );
-        // The popover stays open for the next pick and paints the new level.
+        // The popover stays open for the next pick, and the rebuilt rows
+        // show the pick.
+        vcx.run_until_parked();
+        assert!(h.page.read_with(&vcx, |p, _| p.levels.open));
+        let ingest = h.page.read_with(&vcx, |p, _| {
+            p.level_rows
+                .iter()
+                .find(|r| r.target == "ingest")
+                .map(|r| (r.effective, r.explicit))
+        });
+        assert_eq!(ingest, Some((Level::DEBUG, true)));
         vcx.update(|window, cx| {
             let _ = window.draw(cx);
         });
         assert!(
             vcx.debug_bounds("diagnostics-level-pick-ingest-trace")
                 .is_some()
+        );
+    }
+
+    /// Perf paints no input: leaving Log with the filter focused would
+    /// park focus on an unrendered handle and keep the page in insert mode.
+    #[gpui::test]
+    fn switching_to_a_section_without_the_input_blurs_it_first(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        open_log_section(&h, &mut vcx);
+        dispatch(&h, &mut vcx, "filter");
+        // The input's focus event, which sets insert mode, is delivered
+        // with the next frame.
+        let draw = |vcx: &mut gpui::VisualTestContext| {
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        };
+        draw(&mut vcx);
+        vcx.update(|window, cx| {
+            assert!(h.page.read(cx).holds_focus(window, cx));
+            assert_eq!(h.page.read(cx).key_context().get("mode"), Some("insert"));
+            h.page
+                .update(cx, |p, cx| p.set_section(Section::Perf, window, cx));
+        });
+        draw(&mut vcx);
+        vcx.update(|window, cx| {
+            let page = h.page.read(cx);
+            assert!(!page.holds_focus(window, cx));
+            assert!(
+                page.focus_handle.is_focused(window),
+                "the page handle took focus"
+            );
+            assert_eq!(page.key_context().get("mode"), Some("normal"));
+        });
+    }
+
+    /// The popover belongs to the Log toolbar; a section that does not
+    /// paint it cannot leave it open for the return trip.
+    #[gpui::test]
+    fn leaving_the_log_section_closes_the_levels_popover(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        open_log_section(&h, &mut vcx);
+        click(&mut vcx, "diagnostics-levels-open");
+        assert!(h.page.read_with(&vcx, |p, _| p.levels.open));
+        vcx.update(|window, cx| {
+            h.page.update(cx, |p, cx| {
+                p.set_section(Section::Sources, window, cx);
+                p.set_section(Section::Log, window, cx);
+            });
+            let _ = window.draw(cx);
+        });
+        assert!(!h.page.read_with(&vcx, |p, _| p.levels.open));
+        assert!(
+            vcx.debug_bounds("diagnostics-level-pick-ingest-debug")
+                .is_none(),
+            "no popover content is painted"
         );
     }
 

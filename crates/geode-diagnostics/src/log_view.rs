@@ -1,6 +1,8 @@
 //! The Log section's toolbar: level toggles, the target select, the
 //! message filter, the Follow switch, Clear, and the Levels popover that
 //! requests per-target log levels through the `Diagnostics` entity. The
+//! popover lists the default (read-only) and the known targets only: a
+//! target added at runtime would not survive a reload. The
 //! page keeps every piece of state; this module only paints it and routes
 //! pointer actions back through the page's methods, which the keyboard
 //! routes share.
@@ -11,23 +13,20 @@ use geode_shell::shell::scale;
 use gpui::prelude::*;
 use gpui::{AnyElement, Entity, SharedString, WeakEntity, div};
 use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::input::{Input, InputState};
+use gpui_component::input::Input;
 use gpui_component::popover::Popover;
 use gpui_component::select::{SearchableVec, Select, SelectState};
 use gpui_component::switch::Switch;
-use gpui_component::{
-    ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, h_flex, v_flex,
-};
+use gpui_component::{ActiveTheme as _, Selectable as _, Sizable as _, h_flex, v_flex};
 
-use crate::levels::{LevelRow, level_word};
+use crate::levels::{DEFAULT_ROW, LevelRow, level_word};
 use crate::log::LEVELS;
 use crate::page::DiagnosticsPage;
 use crate::page_chrome::probed;
 
 /// The target select's width, in pixels at the design rem.
 const TARGET_WIDTH: f32 = 160.0;
-/// The popover's target-name column and the new-target field, in pixels
-/// at the design rem.
+/// The popover's target-name column, in pixels at the design rem.
 const POPOVER_NAME_WIDTH: f32 = 96.0;
 /// Each popover row's level buttons take one id slot per level, with
 /// room to spare so a row index never collides with the next row's.
@@ -48,9 +47,6 @@ pub(crate) struct LogView<'a> {
     /// Prepared at rebuild; the popover paints them without reading the
     /// entity.
     pub level_rows: Rc<Vec<LevelRow>>,
-    pub new_target_input: &'a Entity<InputState>,
-    /// Whether the new-target field names a target its buttons can set.
-    pub new_target_ok: bool,
 }
 
 pub(crate) fn toolbar(view: LogView<'_>, weak: WeakEntity<DiagnosticsPage>) -> AnyElement {
@@ -123,9 +119,7 @@ pub(crate) fn toolbar(view: LogView<'_>, weak: WeakEntity<DiagnosticsPage>) -> A
                 })
                 .content({
                     let rows = view.level_rows;
-                    let input = view.new_target_input.clone();
-                    let new_target_ok = view.new_target_ok;
-                    move |_, _, cx| levels_popover(&rows, &input, new_target_ok, &popover, cx)
+                    move |_, _, cx| levels_popover(&rows, &popover, cx)
                 }),
         ))
         .into_any_element()
@@ -133,12 +127,9 @@ pub(crate) fn toolbar(view: LogView<'_>, weak: WeakEntity<DiagnosticsPage>) -> A
 
 /// One row per target with its five level buttons, the effective level
 /// selected; the default row only reads, because `request_level` files a
-/// target, and a `default` target is not the default. The last row sets
-/// a level for a target the list does not know yet.
+/// target, and a `default` target is not the default.
 fn levels_popover(
     rows: &Rc<Vec<LevelRow>>,
-    new_target_input: &Entity<InputState>,
-    new_target_ok: bool,
     weak: &WeakEntity<DiagnosticsPage>,
     cx: &mut gpui::App,
 ) -> AnyElement {
@@ -155,7 +146,7 @@ fn levels_popover(
             .gap_1()
             .items_center()
             .child(name(SharedString::from(row.target.clone())));
-        if row_ix == 0 {
+        if row.target == DEFAULT_ROW {
             return line.child(
                 div()
                     .text_xs()
@@ -172,7 +163,6 @@ fn levels_popover(
                 word,
                 move || format!("diagnostics-level-pick-{target}-{word}"),
                 row.effective == level,
-                false,
                 move |_, _window, cx| {
                     let _ = weak.update(cx, |p, cx| {
                         p.pick_level(&rows[row_ix].target, level, cx);
@@ -181,34 +171,7 @@ fn levels_popover(
             )
         }))
     });
-    let new_row_ix = rows.len();
-    let fresh = h_flex()
-        .gap_1()
-        .items_center()
-        .child(
-            Input::new(new_target_input)
-                .xsmall()
-                .w(scale::design(POPOVER_NAME_WIDTH)),
-        )
-        .children(LEVELS.iter().enumerate().map(|(level_ix, level)| {
-            let (weak, level) = (weak.clone(), *level);
-            let word = level_word(level);
-            pick_button(
-                new_row_ix * PICK_STRIDE + level_ix,
-                word,
-                move || format!("diagnostics-level-pick-new-{word}"),
-                false,
-                !new_target_ok,
-                move |_, window, cx| {
-                    let _ = weak.update(cx, |p, cx| p.pick_new_target_level(level, window, cx));
-                },
-            )
-        }));
-    v_flex()
-        .gap_1()
-        .children(known)
-        .child(fresh)
-        .into_any_element()
+    v_flex().gap_1().children(known).into_any_element()
 }
 
 fn pick_button(
@@ -216,7 +179,6 @@ fn pick_button(
     word: &'static str,
     selector: impl FnOnce() -> String,
     selected: bool,
-    disabled: bool,
     on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {
     div()
@@ -228,7 +190,6 @@ fn pick_button(
                 .ghost()
                 .label(word)
                 .selected(selected)
-                .disabled(disabled)
                 .on_click(on_click),
         )
 }
