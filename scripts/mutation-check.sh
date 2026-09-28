@@ -24286,6 +24286,14 @@ run_mutation "chip: active text is floored against its fill" \
   '                text: theme.primary_foreground,' \
   geode-shell every_chip_tone_is_readable_on_every_bundled_theme
 
+# One id, one verb. Accepting a second registration of an id would let a
+# panel's menu row dispatch whichever verb the lookup found first.
+run_mutation "panels: a second kind-action registration is refused" \
+  crates/geode-core/src/panel/mod.rs \
+  '        if self.get(action.id).is_some() {' \
+  '        if false && self.get(action.id).is_some() {' \
+  geode-core a_registered_kind_action_is_found_by_id_and_a_second_registration_is_refused
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
