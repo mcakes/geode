@@ -696,17 +696,13 @@ impl PricerTile {
         inverse.append(&mut bulk.undo.inverse);
         bulk.undo.inverse = inverse;
         bulk.steps += steps;
+        // A line's first mark is kept (what `i` found); its after-mark is
+        // replaced by each press. Keyed, so a long press over a large
+        // selection stays linear.
         for (id, mark) in before {
-            if !bulk.before.iter().any(|(m, _)| *m == id) {
-                bulk.before.push((id, mark));
-            }
+            bulk.before.entry(id).or_insert(mark);
         }
-        for (id, mark) in after {
-            match bulk.after.iter_mut().find(|(m, _)| *m == id) {
-                Some(slot) => slot.1 = mark,
-                None => bulk.after.push((id, mark)),
-            }
-        }
+        bulk.after.extend(after);
         let total = bulk.steps;
         self.after_edit(cx);
         // The field follows its own cell: the step moved it too.

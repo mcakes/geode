@@ -1009,8 +1009,9 @@ selection and says why in the footer; a success notice goes to the header.
   shorthand already carries them), one per line, and remembers their rows, so
   a following `p` or `shift+p` puts them all back at once, as one undo entry
   with the cursor on the first landed row. When any of them is a package,
-  the whole run lands at a root boundary, since packages cannot nest. Under `v` it copies the block as TSV under its column
-  labels and leaves the remembered row as it was: a block is not rows.
+  the whole run lands at a root boundary, since packages cannot nest. Under
+  `v` it copies the block as TSV under its column labels and leaves the
+  remembered row as it was: a block is not rows.
 - `d` under `V` deletes the top-most selected rows as one undo entry,
   remembers them for `p`, ends the selection, and notices `deleted N rows`. A
   leg selected without its package is deleted as a leg.
@@ -1032,15 +1033,16 @@ selection and says why in the footer; a success notice goes to the header.
   rows — use V`): a block's cells are not a set of rows, and acting on its
   rows would edit rows never picked as rows.
 
-A count on `d`, `shift+j`/`shift+k`, `g p` or `g u` is ignored while a selection is
-live: the selection names the rows. Motions still take a count.
+A count on `d`, `shift+j`/`shift+k`, `g p` or `g u` is ignored while a
+selection is live: the selection names the rows. Motions still take a count.
 Every row verb refuses while the sheet is loading.
 
-**Edits act on lines.** `i`, `enter` or a double-click opens the editor on the
-cursor cell, which must itself be editable: a read-only cursor cell refuses
-with its own reason. An edit then reaches each selected line; a selected
-package stands for its legs whether it is open or not, and a package selected
-with one of its own legs writes that leg once.
+**Edits act on lines.** `i` or `enter` opens the editor on the cursor cell,
+which must itself be editable: a read-only cursor cell refuses with its own
+reason. An edit then reaches each selected line; a selected package stands for
+its legs whether it is open or not, and a package selected with one of its
+own legs writes that leg once. A double-click is not a bulk edit: its first
+press clears the selection, so it opens a single-cell editor.
 
 **One typed value.** Committing typed text, a choice picked from a list, or a
 date writes it to the cursor's column on every selected line — under `v`
@@ -1052,8 +1054,9 @@ does, so a `-5/+5` spread typed `3` becomes `3/-3` rather than `3/3`; a
 package whose legs no longer fit its template (the list form) is refused and
 none of its legs written. The writes are one undo entry and one reprice; a
 cell already holding the value counts as set with no edit, and a commit that
-changes nothing records no entry. The header notices `set 5 cells, skipped 3 (2 read-only, 1 n/a)`, counting
-read-only cells, barrier cells on a vanilla line (`n/a`), and refused values.
+changes nothing records no entry. The header notices `set 5 cells, skipped 3
+(2 read-only, 1 n/a)`, counting read-only cells, barrier cells on a vanilla
+line (`n/a`), and refused values.
 When no selected cell accepts the value, nothing is written and the editor
 stays open with `no selected cell accepts '<text>'` in the footer. The
 selection stays after a commit. Because the cursor's column is what a commit
@@ -1065,8 +1068,12 @@ moved; edit refused`.
 cell with its text untouched, the editor's `up`/`down` (`shift`: ten) step
 every target cell in the sheet at once: the cursor's column under `V`, every
 block column under `v`. Each cell steps by the precision its own text
-carries, and a selected package's quantity steps as the package quantity
-through the template weights. Each press reprices through the ordinary path,
+carries. A shift cell that inherits the sheet's shift steps from the value it
+paints, so under `:shift spot 2` an `up` makes its own `+3.0`; a line with its
+own shift steps from that. A selected package's quantity steps as the package
+quantity through the template weights, even when the cursor sits on one of
+its legs: that leg moves by its template weight, so a leg weighted negative
+goes down on `up`. Each press reprices through the ordinary path,
 so the grid shows the block and its prices as they move; the editor follows
 its own cell and the header reads `stepped N cells +S` with the running
 total. Cells that cannot step (read-only, not a number, a barrier on a
@@ -1080,8 +1087,10 @@ to zero), the press writes nothing and the footer says why.
   last change: no other recorded edit since and every stepped line as the
   last step left it. Otherwise the steps are kept as one undo entry, since
   replaying their inverses would undo the other write. A click elsewhere, a
-  verb, the menu, `:` and `/` cancel the same way. The rollback re-arms the
-  save, replacing any save taken mid-step.
+  verb, the menu, `:` and `/` cancel the same way. The palette's `undo` is
+  such a verb: mid-step it takes the steps back, then undoes the entry
+  before them. The rollback re-arms the save, replacing any save taken
+  mid-step.
 - Closing the tile or quitting mid-step takes the steps back by `escape`'s
   rule before the final save and closes the editor, so the save never stores
   steps that were not kept. When the steps are no longer the sheet's last
@@ -1090,11 +1099,15 @@ to zero), the press writes nothing and the footer says why.
   `escape`'s rule, and the typed value replaces them as one entry. From then
   on the arrows nudge the editor's text alone.
 
-A cursor cell that does not step has no live step, and an untouched `enter`
-there commits the shown value across the selection as a typed one would: the
-date field's date, a type or barrier-type list's highlighted current value, or
-a package's expiry or type cell (which opens as text). An underlying list with
-nothing typed keeps every cell as it is.
+A cursor cell that does not step has no live step. An untouched `enter` there
+writes nothing either: the editor closes with no notice and no undo entry,
+since the cursor cell's own value filled across the selection would be a
+plausible wrong block from a no-op gesture. Untouched means a choice list
+whose highlight never moved and whose query is empty or the option it opened
+on, a date field on the date it opened on (a tenor's today) with no digit
+typed, or a text field (a package's expiry or type cell) on its opening text.
+A moved or clicked option, a typed option, a changed date, a typed segment,
+or edited text commits to the cursor's column as above.
 
 **Footer totals.** While a selection is live the footer leads with its extent
 (`3 rows × 12 cols`), then one position total for each risk column the view

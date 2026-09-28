@@ -126,12 +126,20 @@ an open entry bar, cell editor (the date field included) or `:rm` question is
 keep their insert-mode meaning. Over a selection the arrows step every
 selected cell only while the editor sits on an untouched qty, strike,
 barrier or shift cell; otherwise they nudge the editor's text or the date
-field's segment (see [features](features.md#selection-2)). Its `pricer && mode == visual` block repeats the
-normal motions and binds `y` (`pricer::yank`), `d` (`pricer::delete`),
-`shift+j`/`shift+k`, `g p`, `g u`, `i` and `enter` (`pricer::edit`), `v`, `V`
-and `escape` as the selection's verbs. Normal-mode keys it does not list —
-the doubled `y y`, `y c` and `d d`, `p`, `shift+p`, `u`, `ctrl+r`, `o`, `n`,
-`shift+n`, `space`, the `z` folds, `g m` and `.` — are unbound while a selection is live; the palette still reaches them.
+field's segment (see [features](features.md#selection-2)). An inherited shift
+steps from the value it paints, in the live step and the single-cell nudge
+alike. Over a selection, an `enter` that leaves the cursor cell as it opened
+(an unmoved choice, an untyped date on its opening day, unedited text) writes
+nothing and closes the editor. The pricer's `pricer && mode == visual` block
+repeats the normal motions and binds `y` (`pricer::yank`), `d`
+(`pricer::delete`), `shift+j`/`shift+k`, `g p`, `g u`, `i` and `enter`
+(`pricer::edit`), `v`, `V` and `escape` as the selection's verbs.
+Normal-mode keys it does not list — the doubled `y y`, `y c` and `d d`, `p`,
+`shift+p`, `u`, `ctrl+r`, `o`, `n`, `shift+n`, `space`, the `z` folds, `g m`
+and `.` — are unbound while a selection is live; the palette still reaches
+them. A palette verb closes an open editor first, as a cancel, so the
+palette's `undo` mid-step takes the steps back and then undoes the entry
+before them.
 
 A flag matches when any stack frame carries it. A comparison uses the innermost
 frame defining its key. Both `==` and `!=` are false when the key is absent;

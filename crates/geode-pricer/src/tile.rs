@@ -266,10 +266,10 @@ pub(crate) struct Bulk {
     /// Each stepped line's values right after the last step. A write that
     /// bypassed the counter still shows here, and rolling back over it
     /// would put the steps' inverses on cells something else wrote.
-    pub(crate) after: Vec<(LineId, StepMark)>,
+    pub(crate) after: HashMap<LineId, StepMark>,
     /// Each stepped line's values before its first step, so a keep of
     /// steps that net to nothing records no entry.
-    pub(crate) before: Vec<(LineId, StepMark)>,
+    pub(crate) before: HashMap<LineId, StepMark>,
     /// The step notice last shown, withdrawn by a rollback: the count
     /// would describe steps that are no longer in the sheet.
     pub(crate) notice: Option<SharedString>,
@@ -1374,8 +1374,8 @@ impl PricerTile {
                     steps: 0,
                     undo: Undo { inverse: vec![] },
                     seq: self.edit_seq,
-                    after: Vec::new(),
-                    before: Vec::new(),
+                    after: HashMap::new(),
+                    before: HashMap::new(),
                     notice: None,
                 });
                 let input = cx.new(|cx| InputState::new(window, cx));

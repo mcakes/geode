@@ -24375,6 +24375,14 @@ run_mutation "pricer select: a typed digit is not recorded" \
   $'                if matches!(other, FieldKey::Digit(_)) {\n                    *typed = false;' \
   geode-pricer an_unchanged_untyped_date_over_a_selection_writes_nothing
 
+# A failed line keeps its old result: the totals check the state, or the
+# retained value would read as a complete total.
+run_mutation "pricer select: a failed line's retained result counts in the totals" \
+  crates/geode-pricer/src/core/select.rs \
+  '            (LineState::Failed(_), _) | (_, None) => None,' \
+  '            (_, None) => None,' \
+  geode-pricer risk_totals_refuse_a_failed_line_even_with_a_retained_result
+
 # The fit is the widest content, not whichever cell comes first.
 run_mutation "autosize: the fit measures the first text, not the widest" \
   crates/geode-shell/src/colfit.rs \
