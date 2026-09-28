@@ -1267,6 +1267,7 @@ pub(crate) mod tests {
             documents: Default::default(),
             egress: Vec::new(),
             pricer: PricerConfig::missing("none"),
+            vol: geode_data::VolConfig::default(),
         })
         .unwrap();
         let until = |pick: &mut dyn FnMut(DataEvent) -> Option<Arc<Snapshot>>| loop {

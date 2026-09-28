@@ -175,6 +175,7 @@ pub fn data_setup(
                 documents
             },
             pricer,
+            vol: geode_data::VolConfig::default(),
             egress,
         },
         views,
@@ -1181,6 +1182,10 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             s.deliver(Delivery::Price(outcome), window, cx)
                         });
                     }
+                    // Vol outcomes have no shell delivery yet: `Delivery::VolSlices`
+                    // lands with the occupants, and the bridge then routes this
+                    // exactly as `Price` above. Until then nothing submits one.
+                    DataEvent::VolSlices(_) => {}
                     // A data thread died despite containment, or the request
                     // loop never opened. Its segment and the diagnostics row
                     // stay until restart. Logging is not repeated here: the

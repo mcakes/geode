@@ -27,6 +27,7 @@ enum Key {
     Distinct(QueryKey),
     Catalog(QueryKey),
     Price(QueryKey),
+    VolSlices(QueryKey),
     /// Keyed on `(tile, tag)`, not on the tile alone: uploads are separate
     /// user actions whose outcomes must remain distinct. Keying on the tile would
     /// let `Sender::try_send`'s highest-tag-wins coalescing drop an earlier
@@ -58,6 +59,7 @@ fn key(event: &DataEvent, seq: u64) -> Key {
         DataEvent::Distinct(o) => Key::Distinct(o.key),
         DataEvent::Catalog(o) => Key::Catalog(o.key),
         DataEvent::Price(o) => Key::Price(o.key),
+        DataEvent::VolSlices(o) => Key::VolSlices(o.key),
         DataEvent::Upload(o) => Key::Upload(o.key, o.tag),
         DataEvent::Published { dataset, batch, .. } => {
             Key::Published(dataset.clone(), batch.clone())
@@ -86,6 +88,7 @@ fn tag(event: &DataEvent) -> Option<u64> {
         DataEvent::Distinct(o) => Some(o.tag),
         DataEvent::Catalog(o) => Some(o.tag),
         DataEvent::Price(o) => Some(o.tag),
+        DataEvent::VolSlices(o) => Some(o.tag),
         DataEvent::Upload(o) => Some(o.tag),
         _ => None,
     }
