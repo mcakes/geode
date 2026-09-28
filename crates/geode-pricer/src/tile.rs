@@ -1843,7 +1843,9 @@ impl PricerTile {
                 None
             }
             Some(Editor::Text { kind, input, .. }) => {
-                let text = input.read(cx).value().to_string();
+                // An empty shift field inherits: it steps from the value
+                // its cell paints, as the live step does.
+                let text = cell::step_from(&self.sheet, *kind, &input.read(cx).value());
                 match cell::nudge(*kind, &text, steps) {
                     Ok(next) => {
                         input.update(cx, |s, cx| s.set_value(next, window, cx));
@@ -6215,6 +6217,23 @@ pub(crate) mod tests {
             Some("4994"),
             "a count multiplies"
         );
+    }
+
+    /// An inherited shift paints the sheet's value; the empty field it
+    /// opens on means "inherit", not zero. A step starting from zero
+    /// would move a painted +2.0 down to +1.0 on `up`.
+    #[gpui::test]
+    fn a_nudge_on_an_inherited_shift_steps_from_the_painted_value(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.command(&mut vcx, "shift spot 2").unwrap();
+        goto_column(&h, &mut vcx, "spot_shift");
+        assert_eq!(h.cell(&vcx, 0, "spot_shift"), "+2.0", "fixture: inherited");
+        h.dispatch(&mut vcx, "edit", None);
+        assert_eq!(editor_text(&h, &vcx).as_deref(), Some(""), "opens empty");
+        h.dispatch(&mut vcx, "insert_up", None);
+        assert_eq!(editor_text(&h, &vcx).as_deref(), Some("3"));
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.cell(&vcx, 0, "spot_shift"), "+3.0");
     }
 
     #[gpui::test]

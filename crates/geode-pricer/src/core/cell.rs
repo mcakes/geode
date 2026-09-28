@@ -319,6 +319,26 @@ pub fn commit_date(sheet: &Sheet, row: usize, date: NaiveDate) -> Result<Option<
     Ok(changed(sheet, row, edit))
 }
 
+/// The text an arrow step starts from: the editor's own text, except an
+/// empty shift field. That field is an inherited shift, whose cell paints
+/// the sheet's value; a step from zero would move a painted `+2.0` down to
+/// `+1.0` on `up`. It steps from the sheet's value instead, so the cell
+/// becomes its own shift one step from what it showed. With no sheet
+/// shift the text stays empty and [`nudge`] starts at zero, which is what
+/// the cell stands for. A package's shift field is empty only while every
+/// leg inherits, so the same value holds for it.
+pub fn step_from(sheet: &Sheet, kind: ColumnKind, text: &str) -> String {
+    let inherited = match kind {
+        ColumnKind::SpotShift => sheet.sheet_shift().spot_pct,
+        ColumnKind::VolShift => sheet.sheet_shift().vol_pts,
+        _ => None,
+    };
+    match inherited {
+        Some(v) if text.trim().is_empty() => plain(v),
+        _ => text.to_string(),
+    }
+}
+
 /// Nudge numeric editor text by `steps` units of its written precision. Preserve a
 /// strike's trailing `%` and start empty shifts at zero. Barrier levels must be
 /// absolute, so both nudging and committing refuse a percent suffix.
@@ -595,6 +615,29 @@ mod tests {
             "empty nudges from 0"
         );
         assert!(nudge(ColumnKind::Expiry, "Z26", 1).is_err());
+    }
+
+    #[test]
+    fn an_empty_shift_steps_from_the_inherited_sheet_value() {
+        let mut s = one_line();
+        assert_eq!(
+            step_from(&s, ColumnKind::SpotShift, ""),
+            "",
+            "no sheet shift: the step starts at zero"
+        );
+        s.apply(Edit::SetSheetShift(OwnShifts {
+            spot_pct: Some(2.0),
+            vol_pts: Some(-1.5),
+        }))
+        .unwrap();
+        assert_eq!(step_from(&s, ColumnKind::SpotShift, " "), "2");
+        assert_eq!(step_from(&s, ColumnKind::VolShift, ""), "-1.5");
+        assert_eq!(
+            step_from(&s, ColumnKind::SpotShift, "5"),
+            "5",
+            "own text steps from itself"
+        );
+        assert_eq!(step_from(&s, ColumnKind::Strike, ""), "", "not a shift");
     }
 
     /// A barrier level is absolute. `commit` refuses

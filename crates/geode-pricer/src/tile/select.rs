@@ -584,8 +584,9 @@ impl PricerTile {
                     skips.add(Skip::ReadOnly);
                     continue;
                 }
+                // An inheriting shift steps from the value it paints.
                 let text = match cell::editor_for(&self.sheet, l, ckind, &format) {
-                    Ok(CellEditor::Text(t)) => t,
+                    Ok(CellEditor::Text(t)) => cell::step_from(&self.sheet, ckind, &t),
                     Ok(_) => {
                         skips.add(Skip::NotNumeric);
                         continue;

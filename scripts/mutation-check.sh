@@ -24310,6 +24310,21 @@ run_mutation "pricer select: g u dissolves top-down" \
   '        packages.sort_unstable();' \
   geode-pricer g_u_ungroups_every_selected_package_in_one_undo_entry
 
+# An inheriting shift opens empty; the live step moves it from the value
+# it paints. Stepped from zero, a painted +2.0 went to +1.0 on `up`.
+run_mutation "pricer select: a step moves an inherited shift from zero" \
+  crates/geode-pricer/src/tile/select.rs \
+  '                    Ok(CellEditor::Text(t)) => cell::step_from(&self.sheet, ckind, &t),' \
+  '                    Ok(CellEditor::Text(t)) => t,' \
+  geode-pricer a_shift_step_moves_inherited_and_own_cells_up_from_what_they_paint
+
+# The single-cell nudge agrees with the live step on an inherited shift.
+run_mutation "pricer select: a single-cell nudge moves an inherited shift from zero" \
+  crates/geode-pricer/src/tile.rs \
+  '                let text = cell::step_from(&self.sheet, *kind, &input.read(cx).value());' \
+  '                let text = input.read(cx).value().to_string();' \
+  geode-pricer a_nudge_on_an_inherited_shift_steps_from_the_painted_value
+
 # The fit is the widest content, not whichever cell comes first.
 run_mutation "autosize: the fit measures the first text, not the widest" \
   crates/geode-shell/src/colfit.rs \

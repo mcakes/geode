@@ -1035,6 +1035,43 @@ fn a_block_step_over_both_shifts_moves_both(cx: &mut gpui::TestAppContext) {
     assert_eq!(shift(&h, &vcx), (None, None), "escape takes both back");
 }
 
+/// A step moves each cell from the value it paints. An inheriting line
+/// paints the sheet's shift and opens empty; stepped from zero it would
+/// go from +2.0 to +1.0 on `up`, while a line with its own shift steps
+/// from that.
+#[gpui::test]
+fn a_shift_step_moves_inherited_and_own_cells_up_from_what_they_paint(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "SPX Z26 4000 P"]);
+    h.command(&mut vcx, "shift spot 2").unwrap();
+    goto_column(&h, &mut vcx, "spot_shift");
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "5");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.cell(&vcx, 0, "spot_shift"), "+5.0", "fixture: own");
+    assert_eq!(h.cell(&vcx, 1, "spot_shift"), "+2.0", "fixture: inherited");
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "down", None); // the inheriting line opens the field
+    h.dispatch(&mut vcx, "edit", None);
+    assert_eq!(editor_text(&h, &vcx).as_deref(), Some(""), "opens empty");
+    h.dispatch(&mut vcx, "insert_up", None);
+    assert_eq!(h.cell(&vcx, 0, "spot_shift"), "+6.0", "own steps from own");
+    assert_eq!(
+        h.cell(&vcx, 1, "spot_shift"),
+        "+3.0",
+        "inherited steps from the painted value"
+    );
+    assert_eq!(editor_text(&h, &vcx).as_deref(), Some("3"));
+    h.dispatch(&mut vcx, "cancel", None);
+    assert_eq!(h.cell(&vcx, 0, "spot_shift"), "+5.0");
+    assert_eq!(
+        h.cell(&vcx, 1, "spot_shift"),
+        "+2.0",
+        "escape inherits again"
+    );
+}
+
 /// Strike and barrier level live in one `SetInstrument` record: a block
 /// from strike to barrier on a barrier line must move both.
 #[gpui::test]
