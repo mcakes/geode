@@ -606,9 +606,8 @@ feed-published documents; the API is called only by tests for those. Feed
 archives therefore grow with every publish: each republish archives the
 outgoing generation, for the demo's `opra_sim` option chains (twelve
 documents per underlying, one per expiry) as for its CVI documents (one per
-underlying). Local
-documents (`local = true`) are the exception: they keep 200 archived
-generations per document (`LOCAL_KEEP_GENERATIONS`; with the live one, at most
+underlying). Local documents (`local = true`) are the exception: they keep
+200 archived generations per document (`LOCAL_KEEP_GENERATIONS`; with the live one, at most
 201), with no age limit. After each successful local publish the ingest writer
 counts the saved document's generation summary rows; only when that document
 has crossed the bound does it sweep the whole dataset, then delete, in a
@@ -731,8 +730,8 @@ Seeds use publication's batch key so a corrected load can clear them.
 
 Non-local publication events advance matching dataset/document watches; a
 document watch on a key prefix advances for every document under it, at the
-same key-part boundary a prefix read uses. Local
-publications update diagnostics without advancing frame revisions. Query
+same key-part boundary a prefix read uses. Local publications update
+diagnostics without advancing frame revisions. Query
 results are addressed to the requesting key. Series fetch completion is
 broadcast to visible occupants by `(identity, source)` so modules watching
 that pair can react, including when a fetch appended zero rows. See
