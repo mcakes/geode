@@ -112,6 +112,12 @@ desk and user configuration. Its files declare:
 `$TMPDIR/geode-demo/<rows>-42/`. Schema changes require clearing that directory;
 existing payload tables are not migrated automatically.
 
+Chain documents for an expiry that has passed stay in the live table until the
+demo store is cleared: nothing retires them. After a month boundary a warm demo
+store therefore serves one extra, expired expiry per underlying, and a live
+`["SPX"]` prefix read reports that expiry's last source time as its freshness.
+Clear `$TMPDIR/geode-demo/<rows>-42/` to reset.
+
 ## Commands
 
 ```sh

@@ -492,7 +492,8 @@ dataset declares reads **every document under it**: `["SPX"]` on
 `option_chain` (keyed `underlying, expiry`) returns every SPX expiry in one
 snapshot, ordered by the key parts left open and then the axes, so each
 document's rows stay together. A key with more parts than declared, or with
-none, is refused. Matching is by key part, never by string prefix, so `SPX`
+none, is refused, as is a key part containing the key separator (it would
+join to another key's partition). Matching is by key part, never by string prefix, so `SPX`
 never reads `SPXW`'s documents (`geode_core::document::is_key_prefix`). An
 as-of prefix read resolves each matched document's generation independently
 and pins that set, so a document first published after the instant is
@@ -676,7 +677,9 @@ batch is the key or lies under it. `Catalog::live_source_time_under` takes
 each matched document's newest live source time, then the oldest of those:
 like a view labelled by its oldest book, a set of documents is as fresh as
 its stalest member, so one freshly republished expiry cannot hide a stale
-one. A historical prefix read reports the oldest matched source time for the
+one. It follows that a document nothing republishes (for example an option
+expiry that has passed) holds a live prefix read's freshness back until the
+document is removed. A historical prefix read reports the oldest matched source time for the
 same reason. `live_generation_under` reports the greatest generation ID
 instead, because it is a change marker: generation IDs come from one store
 sequence, so it changes whenever any matched document republishes. The SQL
