@@ -1489,6 +1489,72 @@ sql = "delta01 / nullif(peak, 0)"
         assert!(err.to_string().contains("computed by a module"), "{err}");
     }
 
+    /// An optional join to an unknown dataset is skipped; an optional join
+    /// to a computed one is not, because the dataset is known and has no
+    /// relation the compiler could ever join. `required` does not soften it.
+    #[test]
+    fn a_join_to_a_computed_dataset_is_refused_even_when_optional() {
+        let (_d, store) = fixture();
+        let doc = merge_docs(
+            "datasets",
+            &[LayerDoc::builtin(
+                "datasets",
+                r#"
+[instrument_ref]
+computed = true
+[instrument_ref.columns.book]
+type = "utf8"
+role = "dimension"
+[instrument_ref.columns.lhu]
+type = "utf8"
+role = "dimension"
+[instrument_ref.columns.position_ref]
+type = "utf8"
+role = "key"
+[instrument_ref.columns.counterparty]
+type = "utf8"
+role = "dimension"
+[instrument_ref.columns.instrument_ref]
+type = "utf8"
+role = "key"
+[instrument_ref.columns.strike]
+type = "f64"
+role = "attribute"
+grain = "instrument"
+"#,
+            )
+            .unwrap()],
+        );
+        let (computed, diags) = SchemaSpec::from_doc(&doc);
+        assert!(
+            diags
+                .iter()
+                .all(|d| d.severity != geode_core::config::Severity::Error),
+            "the computed fixture must parse cleanly: {diags:?}"
+        );
+        let mut schema = schema();
+        schema.datasets.extend(computed.datasets);
+
+        let mut optional = joined_view();
+        optional.joins[0].required = false;
+
+        let err = compile_view(
+            store.writer(),
+            &optional,
+            &schema,
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("join names computed dataset 'instrument_ref'"),
+            "an optional join to a computed dataset is refused, not skipped: {message}"
+        );
+    }
+
     /// The other half of the same refusal, and the arm the unknown-dataset case
     /// above cannot reach: the joined dataset exists, its keys are on the
     /// materialized spine, and still no grain of it is keyed by them. There is
