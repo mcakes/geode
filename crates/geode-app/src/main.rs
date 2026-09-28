@@ -130,67 +130,16 @@ fn main() {
             );
 
             // Start document producers after the service installs its subscriptions.
-            // Three producers share the risk generator's underlyings; the chain
-            // producer prices off the CVI producer's latest document for its
-            // underlying. Keep the chain producer after the CVI producer, or its
-            // startup burst finds no curve and skips (the cadence recovers, but
-            // slowly). Keep the bus alive until the quit hook stops its thread.
+            // The three producers (`demo_bus::demo_producers`: CVI, dividend, chain)
+            // share the risk generator's underlyings. Keep the bus alive until the
+            // quit hook stops its thread.
             let mut demo_bus = demo_feed.map(|feed| {
                 // Seed synthetic document dates from the configured application clock.
                 let today = geode_core::clock::Clock::from_config(&services.config)
                     .0
                     .today(chrono::Utc::now());
-                let underlyings = geode_demo_data::demo_underlyings();
-                let mut cvi_generator = geode_demo_data::documents::cvi::CviGenerator::new(
-                    42,
-                    underlyings.clone(),
-                    today,
-                );
-                let mut dividend_generator =
-                    geode_demo_data::documents::dividend::DividendGenerator::new(
-                        42,
-                        underlyings.clone(),
-                        today,
-                    );
-                // One anchor (`today`) for both CVI and chain: the chain clamps its
-                // curve date to the CVI's terms, and a shared anchor keeps its
-                // expiries inside them.
-                let mut chain_generator = geode_demo_data::documents::chain::ChainGenerator::new(
-                    42,
-                    underlyings.clone(),
-                    today,
-                );
-                let latest_cvi: Arc<
-                    Mutex<std::collections::HashMap<String, geode_core::document::DocumentRows>>,
-                > = Arc::default();
-                let producers = vec![
-                    demo_bus::Producer {
-                        kind: Arc::new(geode_documents::CviKind),
-                        topic_prefix: "marketdata/cvi/",
-                        keys: underlyings.clone(),
-                        startup_repeats: 1,
-                        next: Box::new({
-                            let latest_cvi = Arc::clone(&latest_cvi);
-                            move |key| demo_bus::cvi_next(&mut cvi_generator, &latest_cvi, key)
-                        }),
-                    },
-                    demo_bus::Producer {
-                        kind: Arc::new(geode_documents::DividendKind),
-                        topic_prefix: "marketdata/dividend/",
-                        keys: underlyings.clone(),
-                        startup_repeats: 1,
-                        next: Box::new(move |key| Some(dividend_generator.next_document(key))),
-                    },
-                    demo_bus::Producer {
-                        kind: Arc::new(geode_documents::OptionChainKind),
-                        topic_prefix: "marketdata/chain/",
-                        keys: underlyings,
-                        startup_repeats: geode_demo_data::documents::chain::EXPIRIES,
-                        next: Box::new(move |key| {
-                            demo_bus::chain_next(&latest_cvi, &mut chain_generator, key)
-                        }),
-                    },
-                ];
+                let producers =
+                    demo_bus::demo_producers(geode_demo_data::demo_underlyings(), today);
                 demo_bus::spawn(
                     feed,
                     producers,

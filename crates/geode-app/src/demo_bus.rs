@@ -5,10 +5,12 @@
 //! receive and parse those bytes through the normal ingestion path.
 //! The application starts this bus only in demo mode.
 
+use chrono::NaiveDate;
 use geode_core::document::{DocumentKind, DocumentRows};
 use geode_data::adapter::ChannelFeed;
 use geode_demo_data::documents::chain::ChainGenerator;
 use geode_demo_data::documents::cvi::CviGenerator;
+use geode_demo_data::documents::dividend::DividendGenerator;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
@@ -196,6 +198,49 @@ pub fn chain_next(
     Some(chain.next_document(key, &cvi, chrono::Utc::now()))
 }
 
+/// The `--demo` producers, in publish order: CVI, dividend, then option
+/// chain, each over `underlyings` and seeded with 42.
+///
+/// The chain producer prices off the CVI producer's latest document for
+/// its underlying (the shared store [`cvi_next`] fills and [`chain_next`]
+/// reads). The startup burst runs producers in list order, so the chain
+/// must stay after the CVI or its burst finds no curve and skips (the
+/// cadence recovers, but slowly). One anchor (`today`) serves both CVI
+/// and chain: the chain clamps its curve date to the CVI's terms, and a
+/// shared anchor keeps its expiries inside them.
+pub fn demo_producers(underlyings: Vec<String>, today: NaiveDate) -> Vec<Producer> {
+    let mut cvi_generator = CviGenerator::new(42, underlyings.clone(), today);
+    let mut dividend_generator = DividendGenerator::new(42, underlyings.clone(), today);
+    let mut chain_generator = ChainGenerator::new(42, underlyings.clone(), today);
+    let latest_cvi: Arc<Mutex<HashMap<String, DocumentRows>>> = Arc::default();
+    vec![
+        Producer {
+            kind: Arc::new(geode_documents::CviKind),
+            topic_prefix: "marketdata/cvi/",
+            keys: underlyings.clone(),
+            startup_repeats: 1,
+            next: Box::new({
+                let latest_cvi = Arc::clone(&latest_cvi);
+                move |key| cvi_next(&mut cvi_generator, &latest_cvi, key)
+            }),
+        },
+        Producer {
+            kind: Arc::new(geode_documents::DividendKind),
+            topic_prefix: "marketdata/dividend/",
+            keys: underlyings.clone(),
+            startup_repeats: 1,
+            next: Box::new(move |key| Some(dividend_generator.next_document(key))),
+        },
+        Producer {
+            kind: Arc::new(geode_documents::OptionChainKind),
+            topic_prefix: "marketdata/chain/",
+            keys: underlyings,
+            startup_repeats: geode_demo_data::documents::chain::EXPIRIES,
+            next: Box::new(move |key| chain_next(&latest_cvi, &mut chain_generator, key)),
+        },
+    ]
+}
+
 /// The one flat schedule the cadence loop replays forever: every
 /// producer's key list read at the same row in lock step, producer
 /// order within a row (a "zip-longest") — `[(p0,k0), (p1,k0), (p0,k1),
@@ -294,9 +339,7 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::NaiveDate;
     use geode_data::adapter::{Adapter, ChannelAdapter, MessageSink};
-    use geode_demo_data::documents::dividend::DividendGenerator;
     use geode_documents::{CviKind, DividendKind};
     use std::collections::HashSet;
     use std::time::Instant;
@@ -323,32 +366,32 @@ mod tests {
         }
     }
 
-    fn cvi_and_chain_producers(underlyings: Vec<String>, anchor: NaiveDate) -> Vec<Producer> {
-        use geode_demo_data::documents::chain::{ChainGenerator, EXPIRIES};
-        use std::collections::HashMap;
-        use std::sync::Mutex;
-        let latest: Arc<Mutex<HashMap<String, DocumentRows>>> = Arc::default();
-        let mut cvi = CviGenerator::new(42, underlyings.clone(), anchor);
-        let mut chain = ChainGenerator::new(42, underlyings.clone(), anchor);
-        vec![
-            Producer {
-                kind: Arc::new(CviKind),
-                topic_prefix: "marketdata/cvi/",
-                keys: underlyings.clone(),
-                startup_repeats: 1,
-                next: Box::new({
-                    let latest = Arc::clone(&latest);
-                    move |key| cvi_next(&mut cvi, &latest, key)
-                }),
-            },
-            Producer {
-                kind: Arc::new(geode_documents::OptionChainKind),
-                topic_prefix: "marketdata/chain/",
-                keys: underlyings,
-                startup_repeats: EXPIRIES,
-                next: Box::new(move |key| chain_next(&latest, &mut chain, key)),
-            },
-        ]
+    /// The production list must keep CVI ahead of chain: the chain prices
+    /// off the latest CVI its producer stored, and the startup burst runs
+    /// producers in list order, so a chain placed first finds no curve and
+    /// skips its whole burst.
+    #[test]
+    fn the_demo_producers_run_cvi_then_dividend_then_chain() {
+        use geode_demo_data::documents::chain::EXPIRIES;
+        let underlyings = vec!["SPX".to_string(), "NDX".to_string()];
+        let today = NaiveDate::from_ymd_opt(2026, 9, 12).unwrap();
+        let producers = demo_producers(underlyings.clone(), today);
+        assert_eq!(
+            producers.iter().map(|p| p.topic_prefix).collect::<Vec<_>>(),
+            vec![
+                "marketdata/cvi/",
+                "marketdata/dividend/",
+                "marketdata/chain/"
+            ]
+        );
+        assert_eq!(
+            producers
+                .iter()
+                .map(|p| p.startup_repeats)
+                .collect::<Vec<_>>(),
+            vec![1, 1, EXPIRIES]
+        );
+        assert!(producers.iter().all(|p| p.keys == underlyings));
     }
 
     #[test]
@@ -363,7 +406,7 @@ mod tests {
         let anchor = NaiveDate::from_ymd_opt(2026, 9, 12).unwrap();
         let _bus = spawn(
             feed,
-            cvi_and_chain_producers(underlyings, anchor),
+            demo_producers(underlyings, anchor),
             Duration::from_secs(3600),
             Duration::ZERO,
             42,
