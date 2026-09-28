@@ -6755,6 +6755,480 @@ run_mutation "diagnostics: NEW-1 — summary omits the data error count" \
   '' \
   geode-shell a_config_reload_does_not_clobber_a_standing_data_diagnostic
 
+# --- The diagnostics page over the shell page seam (2026-09-27) ---------
+#
+# The tile's entries (dropped at 6d18af3d) are re-anchored here where the
+# contract survived the move: sources worst-first, the resolved marker and
+# its as-of gate, the log filter, array recursion in the config explainer,
+# the tail seeded from the ring's sequence, the observer's version compare,
+# and the source shapes. The rest are the page's own.
+
+# ---- the shell's side of the seam
+
+run_mutation "shell page: a toggle under a modal opens the page beneath the dialog" \
+  crates/geode-shell/src/shell/input.rs \
+  '            if self.modal_open() {
+                self.notice = Some(CLOSE_DIALOG_FIRST);
+                return;
+            }
+            let kind = kind.to_string();' \
+  '            let kind = kind.to_string();' \
+  geode-shell \
+  toggle_under_a_modal_is_refused
+
+run_mutation "shell page: a workspace switch leaves the page open" \
+  crates/geode-shell/src/shell/input.rs \
+  '        if self.page_open() && action.0.starts_with("workspace::switch_") {' \
+  '        if false {' \
+  geode-shell \
+  a_workspace_switch_closes_the_page
+
+run_mutation "shell page: tile::add is not refused over a page" \
+  crates/geode-shell/src/shell/input.rs \
+  '        if self.page_open()
+            && (matches!(' \
+  '        if false
+            && (matches!(' \
+  geode-shell \
+  tile_add_is_refused_while_a_page_is_open
+
+run_mutation "shell page: the context stack keeps workspace under a page" \
+  crates/geode-shell/src/shell/input.rs \
+  '            let mut stack = vec![
+                KeyContext::new("page"),
+                page.occupant.content.key_context(cx),
+            ];' \
+  '            let mut stack = vec![
+                KeyContext::new("workspace"),
+                KeyContext::new("page"),
+                page.occupant.content.key_context(cx),
+            ];' \
+  geode-shell \
+  the_context_stack_is_page_then_kind_while_open
+
+run_mutation "shell page: a consumed close still closes the page" \
+  crates/geode-shell/src/shell/input.rs \
+  '                if !consumed {' \
+  '                if true {' \
+  geode-shell \
+  a_page_that_consumes_close_stays_open
+
+run_mutation "shell page: a focused page input does not take the insert route" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '            if !page.occupant.content.holds_focus(window, cx) {
+                return None;
+            }
+            return Some(self.context_stack(cx));' \
+  '            return None;' \
+  geode-shell \
+  a_workspace_switch_chord_from_a_focused_page_input_closes_the_page
+
+run_mutation "shell page: open never focuses the page" \
+  crates/geode-shell/src/shell/page.rs \
+  '        page.open = true;
+        page.occupant.content.set_visible(true, cx);
+        page.occupant.content.focus_handle(cx).focus(window, cx);' \
+  '        page.open = true;
+        page.occupant.content.set_visible(true, cx);' \
+  geode-shell \
+  toggle_opens_then_closes_the_page_and_announces_visibility
+
+run_mutation "shell page: close leaves focus on the hidden page" \
+  crates/geode-shell/src/shell/page.rs \
+  '        page.occupant.content.set_visible(false, cx);
+        self.focus_handle.focus(window, cx);
+        self.session_dirty = true;' \
+  '        page.occupant.content.set_visible(false, cx);
+        self.session_dirty = true;' \
+  geode-shell \
+  toggle_opens_then_closes_the_page_and_announces_visibility
+
+run_mutation "shell page: a mouse open lets the press bubble to the root" \
+  crates/geode-shell/src/shell/page.rs \
+  '        window.prevent_default();
+        self.session_dirty = true;' \
+  '        self.session_dirty = true;' \
+  geode-shell \
+  the_sidebar_button_toggles_the_page_and_shows_it_active
+
+run_mutation "shell page: focus_home is the shell root even over a page" \
+  crates/geode-shell/src/shell/page.rs \
+  '        match self.page.as_ref().filter(|p| p.open) {
+            Some(page) => page.occupant.content.focus_handle(cx).focus(window, cx),
+            None => self.focus_handle.focus(window, cx),
+        }' \
+  '        self.focus_handle.focus(window, cx);' \
+  geode-shell \
+  escape_under_a_modal_closes_the_modal_not_the_page
+
+run_mutation "shell page: a restored table never reaches create" \
+  crates/geode-shell/src/shell/page.rs \
+  '            let restored = self.services.restored_pages.remove(kind);' \
+  '            let restored: Option<toml::Table> = None;' \
+  geode-shell \
+  a_restored_pages_table_reaches_the_factory_create
+
+run_mutation "shell page: a replaced page loses its state" \
+  crates/geode-shell/src/shell/page.rs \
+  '            self.services.restored_pages.insert(
+                page.occupant.kind.to_string(),
+                page.occupant.content.serialize(cx),
+            );' \
+  '' \
+  geode-shell \
+  a_replaced_page_kind_keeps_its_state_through_the_next_flush
+
+run_mutation "shell page: the toolbar still paints over a page" \
+  crates/geode-shell/src/shell/render.rs \
+  '        let page_open = self.page_open();' \
+  '        let page_open = false;' \
+  geode-shell \
+  the_page_paints_where_the_workspace_was_and_the_toolbar_is_gone
+
+run_mutation "shell page: session omits pages" \
+  crates/geode-shell/src/session.rs \
+  '    if !pages.is_empty() {' \
+  '    if false {' \
+  geode-shell \
+  pages_round_trip_and_an_unknown_kind_is_kept
+
+run_mutation "shell: the overlay mirror never updates" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            if d.set_overlay_visible(visible) {' \
+  '            if false {' \
+  geode-shell \
+  the_overlay_mirror_follows_a_keyboard_toggle
+
+run_mutation "sidebar: the page tooltip names no chord" \
+  crates/geode-shell/src/shell/sidebar.rs \
+  '                    entry.title,
+                    Some(entry.toggle_action),
+                    None,' \
+  '                    entry.title,
+                    None,
+                    None,' \
+  geode-shell \
+  hovering_the_sidebar_page_button_names_the_page_and_its_chord
+
+run_mutation "page roster: the toggle binding is never emitted" \
+  crates/geode-shell/src/module.rs \
+  '            if let Some(key) = factory.toggle_binding() {' \
+  '            if let Some(key) = None::<&str> {' \
+  geode-shell \
+  page_roster_emits_checked_fragments_and_an_unchecked_toggle_doc
+
+run_mutation "defaults: escape in the page context closes nothing" \
+  crates/geode-shell/src/defaults.rs \
+  '"escape" = "page::close"' \
+  '"escape" = "none"' \
+  geode-shell \
+  escape_closes_the_page_through_page_close
+
+run_mutation "defaults: workspace switches are contextual again, unreachable from a page" \
+  crates/geode-shell/src/defaults.rs \
+  '[[bindings]]
+[bindings.keys]
+"mod+1" = "workspace::switch_1"' \
+  '[[bindings]]
+context = "workspace"
+[bindings.keys]
+"mod+1" = "workspace::switch_1"' \
+  geode-shell \
+  a_workspace_switch_closes_the_page
+
+# ---- the diagnostics page: observers, visibility, and the ages timer
+
+run_mutation "diagnostics page: open never watches" \
+  crates/geode-diagnostics/src/page.rs \
+  '            if visible {
+                d.watch();
+            } else {
+                d.unwatch();
+            }' \
+  '            if visible {
+                d.unwatch();
+            } else {
+                d.unwatch();
+            }' \
+  geode-diagnostics \
+  visibility_watches_and_requests_a_catalog
+
+run_mutation "diagnostics page: the observer rebuilds on every notify" \
+  crates/geode-diagnostics/src/page.rs \
+  '            if relevant {
+                this.rebuild(cx);
+            } else if any {
+                this.refresh_badges(cx);
+            }' \
+  '            this.rebuild(cx);' \
+  geode-diagnostics \
+  an_unchanged_entity_does_not_rebuild
+
+run_mutation "diagnostics page: the frame observer rebuilds Sources on a config change" \
+  crates/geode-diagnostics/src/page.rs \
+  '                Section::Sources | Section::Log | Section::Perf => false,' \
+  '                Section::Sources | Section::Log | Section::Perf => as_of_changed || config_changed,' \
+  geode-diagnostics \
+  a_config_version_change_rebuilds_only_the_config_section
+
+run_mutation "diagnostics page: an as-of change while visible never requests a fresh catalog" \
+  crates/geode-diagnostics/src/page.rs \
+  '            if as_of_changed && this.visible {' \
+  '            if false {' \
+  geode-diagnostics \
+  resolved_markers_wait_for_a_matching_catalog
+
+run_mutation "diagnostics page: an as-of change while visible never requests a fresh catalog (bridge drain, end to end)" \
+  crates/geode-diagnostics/src/page.rs \
+  '            if as_of_changed && this.visible {' \
+  '            if false {' \
+  geode-app \
+  an_as_of_change_on_the_visible_diagnostics_page_requests_a_second_catalog_with_the_new_as_of
+
+run_mutation "diagnostics page: the Data chip ignores the catalog as-of" \
+  crates/geode-diagnostics/src/page.rs \
+  '                    self.catalog_matches = model::catalog_matches_frame(d, frame.as_of());' \
+  '                    self.catalog_matches = true;' \
+  geode-diagnostics \
+  resolved_markers_wait_for_a_matching_catalog
+
+run_mutation "diagnostics page: the ages timer runs on every section" \
+  crates/geode-diagnostics/src/page.rs \
+  '        let wanted = self.visible && self.section == Section::Sources;' \
+  '        let wanted = self.visible;' \
+  geode-diagnostics \
+  the_ages_timer_runs_only_while_visible_on_sources
+
+run_mutation "diagnostics page: a tick rebuilds the section instead of rewriting ages" \
+  crates/geode-diagnostics/src/page.rs \
+  '        if self.section != Section::Sources {
+            return;
+        }
+        let fresh: Vec<(usize, SharedString)> = self' \
+  '        if self.section != Section::Sources {
+            return;
+        }
+        self.rebuild(cx);
+        let fresh: Vec<(usize, SharedString)> = self' \
+  geode-diagnostics \
+  a_tick_refreshes_ages_without_rebuilding_rows
+
+run_mutation "diagnostics page: a section change leaves the filter focused" \
+  crates/geode-diagnostics/src/page.rs \
+  '        if self.holds_focus(window, cx) {
+            self.focus_handle.focus(window, cx);
+        }
+        self.levels.open = false;' \
+  '        self.levels.open = false;' \
+  geode-diagnostics \
+  switching_to_a_section_without_the_input_blurs_it_first
+
+run_mutation "diagnostics page: leaving Log keeps the Levels popover open" \
+  crates/geode-diagnostics/src/page.rs \
+  '        self.levels.open = false;
+        self.section = section;' \
+  '        self.section = section;' \
+  geode-diagnostics \
+  leaving_the_log_section_closes_the_levels_popover
+
+run_mutation "diagnostics page: the rail and content column do not stretch" \
+  crates/geode-diagnostics/src/page.rs \
+  '                    .items_stretch()
+                    .child(rail)' \
+  '                    .child(rail)' \
+  geode-diagnostics \
+  clicking_a_dataset_row_then_enter_collapses_it
+
+run_mutation "diagnostics page: the Config panels do not stretch" \
+  crates/geode-diagnostics/src/config_view.rs \
+  '        .items_stretch()
+        .child(left)' \
+  '        .child(left)' \
+  geode-diagnostics \
+  clicking_a_diagnostics_panel_row_moves_only_its_own_detail
+
+run_mutation "diagnostics page: the History label never pluralizes" \
+  crates/geode-diagnostics/src/page.rs \
+  '        self.history_label = SharedString::from(if prior == 1 {' \
+  '        self.history_label = SharedString::from(if false {' \
+  geode-diagnostics \
+  the_config_section_paints_current_diagnostics_and_switches_to_history
+
+# ---- the diagnostics page: data rows and badges
+
+run_mutation "diagnostics data: sources sorted best-first instead of worst-first" \
+  crates/geode-diagnostics/src/model.rs \
+  '    reported.sort_by(|a, b| rank(b.1).cmp(&rank(a.1)).then_with(|| a.0.cmp(b.0)));' \
+  '    reported.sort_by(|a, b| rank(a.1).cmp(&rank(b.1)).then_with(|| a.0.cmp(b.0)));' \
+  geode-diagnostics \
+  sources_order_worst_first_then_name_and_unreported_last
+
+run_mutation "diagnostics data: an ingest-only source gets no row" \
+  crates/geode-diagnostics/src/model.rs \
+  '        unreported.push((a.source.as_str(), &unknown));' \
+  '        let _ = (a.source.as_str(), &unknown);' \
+  geode-diagnostics \
+  a_loading_row_shows_for_an_unreported_source_too
+
+run_mutation "diagnostics data: a subscribed source is described as a directory one" \
+  crates/geode-diagnostics/src/model.rs \
+  '        Some(spec) => match spec.shape {' \
+  '        Some(spec) => match SourceShape::Directory {' \
+  geode-diagnostics \
+  a_source_row_describes_its_shape_from_the_summary
+
+run_mutation "diagnostics data: a fetch source is described as a subscribed one (empty topics)" \
+  crates/geode-diagnostics/src/model.rs \
+  '                vec![format!("adapter: {}", spec.adapter), "fetch".to_string()],' \
+  '                vec![format!("adapter: {}", spec.adapter), format!("topics: {}", spec.topics.join(", "))],' \
+  geode-diagnostics \
+  a_source_row_describes_its_shape_from_the_summary
+
+run_mutation "diagnostics data: markers ignore the catalog as-of" \
+  crates/geode-diagnostics/src/model.rs \
+  '    let matches = catalog_matches_frame(d, as_of);' \
+  '    let matches = true;' \
+  geode-diagnostics \
+  resolved_markers_need_a_matching_catalog_and_a_historical_frame
+
+run_mutation "diagnostics data: the resolved marker points at the wrong generation" \
+  crates/geode-diagnostics/src/model.rs \
+  '                    let marked = !as_of.is_live() && matches && part.resolved_gen == Some(g.gen_id);' \
+  '                    let marked = !as_of.is_live() && matches && part.resolved_gen == Some(g.gen_id + 1);' \
+  geode-diagnostics \
+  resolved_markers_need_a_matching_catalog_and_a_historical_frame
+
+run_mutation "diagnostics config: the explainer stops recursing into arrays" \
+  crates/geode-diagnostics/src/model.rs \
+  '        toml::Value::Array(items) => {
+            for (i, v) in items.iter().enumerate() {
+                walk_value(v, &format!("{path}.{i}"), out);
+            }
+        }
+        other => out.push((path.to_string(), other.to_string())),' \
+  '        other => out.push((path.to_string(), other.to_string())),' \
+  geode-diagnostics \
+  config_docs_carry_provenance_recurse_into_arrays_and_filter
+
+run_mutation "diagnostics data: badges ignore warnings" \
+  crates/geode-diagnostics/src/model.rs \
+  '        .filter(|r| r.severity == Severity::Warning)
+        .count();' \
+  '        .count() * 0;' \
+  geode-diagnostics \
+  badges_count_errors_and_warnings_and_worst_health
+
+run_mutation "diagnostics data: the health chip counts by full value, not by label" \
+  crates/geode-diagnostics/src/model.rs \
+  '            .filter(|s| s.health.as_ref().map(Health::label) == Some(worst.label()))' \
+  '            .filter(|s| s.health.as_ref() == Some(worst))' \
+  geode-diagnostics \
+  the_health_chip_counts_by_label_not_by_reason
+
+run_mutation "diagnostics perf: the overflow bucket is dropped" \
+  crates/geode-diagnostics/src/model.rs \
+  '    buckets.push((u64::MAX, h.overflow()));' \
+  '' \
+  geode-diagnostics \
+  perf_model_carries_buckets_overflow_and_the_overlay_mirror
+
+run_mutation "diagnostics perf: the overlay mirror is never read" \
+  crates/geode-diagnostics/src/model.rs \
+  '        overlay: d.overlay_visible(),' \
+  '        overlay: false,' \
+  geode-diagnostics \
+  perf_model_carries_buckets_overflow_and_the_overlay_mirror
+
+run_mutation "diagnostics perf: bars past the budget are not tinted" \
+  crates/geode-diagnostics/src/perf_view.rs \
+  '            (h, *bound > FRAME_BUDGET_MICROS)' \
+  '            (h, false)' \
+  geode-diagnostics \
+  bar_heights_scale_to_the_tallest_bucket_and_tint_past_the_budget
+
+# ---- the diagnostics page: the log tail, its filters, and the Levels popover
+
+run_mutation "diagnostics log: since is seeded from 0, not the ring's latest_seq" \
+  crates/geode-diagnostics/src/log.rs \
+  '        let since = ring.latest_seq();' \
+  '        let since = 0;' \
+  geode-diagnostics \
+  a_tail_starts_at_the_current_sequence_and_caps_at_log_cap
+
+run_mutation "diagnostics log: loss gap is never measured" \
+  crates/geode-diagnostics/src/log.rs \
+  '            .map(|oldest| oldest.saturating_sub(self.since + 1))' \
+  '            .map(|_| 0)' \
+  geode-diagnostics \
+  a_wrap_between_drains_reports_the_gap_measured_at_that_drain
+
+run_mutation "diagnostics log: the filter ignores level and target" \
+  crates/geode-diagnostics/src/log.rs \
+  '        self.levels[Self::level_index(r.level)]
+            && self.target.as_deref().is_none_or(|t| t == r.target)' \
+  '        true' \
+  geode-diagnostics \
+  the_filter_gates_on_level_target_and_text
+
+run_mutation "diagnostics log: a notice row paints in the first column" \
+  crates/geode-diagnostics/src/prepared.rs \
+  '            RowKind::Notice if col_ix == widest_column(&self.columns) => row.cells.first(),' \
+  '            RowKind::Notice if col_ix == 0 => row.cells.first(),' \
+  geode-diagnostics \
+  a_notice_row_paints_its_cell_in_the_widest_column_only
+
+run_mutation "diagnostics log: the tail is drained only for the Log table, not the badge" \
+  crates/geode-diagnostics/src/page.rs \
+  '        self.drain_tail();
+        let clock = Self::clock(cx);' \
+  '        let clock = Self::clock(cx);' \
+  geode-diagnostics \
+  the_log_rail_badge_counts_errors_while_another_section_is_selected
+
+run_mutation "diagnostics log: follow never stops" \
+  crates/geode-diagnostics/src/page.rs \
+  '        if self.section == Section::Log {
+            self.follow = false;
+        }' \
+  '' \
+  geode-diagnostics \
+  the_log_section_follows_until_the_cursor_moves_and_bottom_resumes
+
+run_mutation "diagnostics log: a programmatic target is not reselected" \
+  crates/geode-diagnostics/src/page.rs \
+  '        if !changed && !self.select_stale {
+            return;
+        }' \
+  '        if !changed {
+            return;
+        }' \
+  geode-diagnostics \
+  level_toggles_and_the_target_select_filter_the_tail
+
+run_mutation "diagnostics data: a double-click only selects" \
+  crates/geode-diagnostics/src/page.rs \
+  '                TableEvent::DoubleClickedRow(ix) => {
+                    this.set_cursor(*ix, cx);
+                    this.toggle_expansion_at_cursor(None, cx);
+                }' \
+  '                TableEvent::DoubleClickedRow(_) => {}' \
+  geode-diagnostics \
+  clicking_a_dataset_row_then_enter_collapses_it
+
+run_mutation "diagnostics log: a levels pick requests nothing" \
+  crates/geode-diagnostics/src/page.rs \
+  '            d.request_level(target, level);' \
+  '            let _ = (target, level);' \
+  geode-diagnostics \
+  a_levels_pick_requests_the_level_through_the_entity
+
+run_mutation "diagnostics levels: a longer name inherits from a shorter prefix" \
+  crates/geode-diagnostics/src/levels.rs \
+  '            short == *t || (short.starts_with(t) && short[t.len()..].starts_with("::"))' \
+  '            short == *t || short.starts_with(t)' \
+  geode-diagnostics \
+  rows_list_default_then_known_targets_then_extras_with_inheritance
+
 # --- Task 5: the geode-diagnostics module ---------------------------
 
 # Re-homed 2026-09-08 (add-tile): `open_module` moved from `shell/mod.rs`
