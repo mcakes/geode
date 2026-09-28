@@ -24429,6 +24429,21 @@ run_mutation "panels: composition diagnostics are seeded at startup" \
   '' \
   geode-shell a_composition_diagnostic_stays_in_the_config_section_across_a_reload
 
+# Only the first panel factory ships the marketdata fragment; mutated, every
+# panel splices its own identical layer.
+run_mutation "panels: the marketdata fragment ships once" \
+  crates/geode-app/src/bridge.rs \
+  '            let ships_keymap = i == 0;' \
+  '            let ships_keymap = true;' \
+  geode-app the_second_panel_ships_no_second_fragment_but_still_gets_an_add_tile_row
+
+# A panel named after another module would shadow its kind.
+run_mutation "panels: a panel may not take another module's kind" \
+  crates/geode-app/src/bridge.rs \
+  '        .partition(|p| !MODULE_KINDS.contains(&p.kind.as_str()));' \
+  '        .partition(|_| true);' \
+  geode-app a_panel_named_after_another_module_is_refused
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
