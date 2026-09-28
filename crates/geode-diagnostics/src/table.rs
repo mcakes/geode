@@ -118,7 +118,12 @@ impl TableDelegate for SectionDelegate {
         } else {
             SharedString::from(format!("{expander}{}", cell.text))
         };
+        // The first cell names its row for pointer tests; a no-op outside
+        // test builds.
         div()
+            .when(col_ix == 0, |el| {
+                el.debug_selector(|| format!("diagnostics-row-{row_ix}"))
+            })
             .w_full()
             .pl(scale::design(f32::from(cell.indent) * INDENT_STEP))
             .font_family(fonts::MONO)

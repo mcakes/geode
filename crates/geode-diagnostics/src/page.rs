@@ -161,14 +161,19 @@ impl DiagnosticsPage {
                 .loop_selection(false)
         });
         // `set_selected_row` echoes `SelectRow`; `set_cursor` returns early
-        // when the row is already the cursor, so the echo is inert.
+        // when the row is already the cursor, so the echo is inert. A
+        // single click only selects, so a click never surprises with a
+        // layout change; the double-click toggles the row like `activate`.
         cx.subscribe_in(
             &table,
             window,
-            |this, _table, event: &TableEvent, _window, cx| {
-                if let TableEvent::SelectRow(ix) = event {
+            |this, _table, event: &TableEvent, _window, cx| match event {
+                TableEvent::SelectRow(ix) => this.set_cursor(*ix, cx),
+                TableEvent::DoubleClickedRow(ix) => {
                     this.set_cursor(*ix, cx);
+                    this.toggle_expansion_at_cursor(None, cx);
                 }
+                _ => {}
             },
         )
         .detach();
@@ -625,36 +630,53 @@ impl DiagnosticsPage {
                             .child(text),
                     )
                     .child(
-                        Button::new("diagnostics-refresh-catalog")
-                            .outline()
-                            .xsmall()
-                            .label("Refresh catalog")
-                            .on_click(move |_, _window, cx| {
-                                diagnostics.update(cx, |d, cx| {
-                                    d.request_catalog();
-                                    cx.notify();
-                                });
-                            }),
+                        div()
+                            .id("diagnostics-refresh-catalog")
+                            .debug_selector(|| "diagnostics-refresh-catalog".to_string())
+                            .child(
+                                Button::new("diagnostics-refresh-catalog")
+                                    .outline()
+                                    .xsmall()
+                                    .label("Refresh catalog")
+                                    .on_click(move |_, _window, cx| {
+                                        diagnostics.update(cx, |d, cx| {
+                                            d.request_catalog();
+                                            cx.notify();
+                                        });
+                                    }),
+                            ),
                     )
                     .child(
-                        Button::new("diagnostics-expand-all")
-                            .outline()
-                            .xsmall()
-                            .label("Expand all")
-                            .on_click(move |_, _window, cx| {
-                                let _ = expand
-                                    .update(cx, |p, cx| p.set_all_datasets_collapsed(false, cx));
-                            }),
+                        div()
+                            .id("diagnostics-expand-all")
+                            .debug_selector(|| "diagnostics-expand-all".to_string())
+                            .child(
+                                Button::new("diagnostics-expand-all")
+                                    .outline()
+                                    .xsmall()
+                                    .label("Expand all")
+                                    .on_click(move |_, _window, cx| {
+                                        let _ = expand.update(cx, |p, cx| {
+                                            p.set_all_datasets_collapsed(false, cx)
+                                        });
+                                    }),
+                            ),
                     )
                     .child(
-                        Button::new("diagnostics-collapse-all")
-                            .outline()
-                            .xsmall()
-                            .label("Collapse all")
-                            .on_click(move |_, _window, cx| {
-                                let _ = collapse
-                                    .update(cx, |p, cx| p.set_all_datasets_collapsed(true, cx));
-                            }),
+                        div()
+                            .id("diagnostics-collapse-all")
+                            .debug_selector(|| "diagnostics-collapse-all".to_string())
+                            .child(
+                                Button::new("diagnostics-collapse-all")
+                                    .outline()
+                                    .xsmall()
+                                    .label("Collapse all")
+                                    .on_click(move |_, _window, cx| {
+                                        let _ = collapse.update(cx, |p, cx| {
+                                            p.set_all_datasets_collapsed(true, cx)
+                                        });
+                                    }),
+                            ),
                     )
                     .into_any_element()
             }
@@ -774,12 +796,23 @@ impl gpui::Render for DiagnosticsPage {
             .track_focus(&self.focus_handle)
             .debug_selector(|| "diagnostics-page".to_string())
             .child(header)
+            // `h_flex` centers its items; the rail and the content column
+            // must stretch to the row's height or the table, whose list
+            // has no intrinsic height, paints no rows.
             .child(
                 h_flex()
                     .flex_1()
                     .min_h_0()
+                    .items_stretch()
                     .child(rail)
-                    .child(v_flex().flex_1().min_w_0().child(toolbar).child(body)),
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .child(toolbar)
+                            .child(body),
+                    ),
             )
     }
 }
@@ -983,6 +1016,221 @@ mod tests {
         assert_eq!(
             *h.actions.borrow(),
             vec!["config::open_directory".to_string()]
+        );
+    }
+
+    /// A catalog answer for `as_of` holding `datasets`, with the resource
+    /// figures zero: the data tests read only the as-of and the datasets.
+    fn snapshot_with(
+        as_of: geode_core::query::AsOf,
+        datasets: Vec<geode_core::query::DatasetCatalog>,
+    ) -> geode_core::query::CatalogSnapshot {
+        geode_core::query::CatalogSnapshot {
+            as_of,
+            datasets,
+            database_bytes: 0,
+            used_blocks: 0,
+            block_size: 0,
+            memory_bytes: 0,
+            threads: 1,
+            identities: Vec::new(),
+        }
+    }
+
+    /// A platform-shaped double-click: down/up at `click_count` 1, then
+    /// down/up at `click_count` 2, with a draw between them as the OS
+    /// delivers them across frames. The second click is the one the
+    /// table's row handler reads as a double-click.
+    fn double_click(cx: &mut gpui::VisualTestContext, at: gpui::Point<gpui::Pixels>) {
+        for count in 1..=2 {
+            cx.update(|window, cx| {
+                window.dispatch_event(
+                    gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                        button: gpui::MouseButton::Left,
+                        position: at,
+                        modifiers: gpui::Modifiers::default(),
+                        click_count: count,
+                        first_mouse: false,
+                    }),
+                    cx,
+                );
+                window.dispatch_event(
+                    gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                        button: gpui::MouseButton::Left,
+                        position: at,
+                        modifiers: gpui::Modifiers::default(),
+                        click_count: count,
+                    }),
+                    cx,
+                );
+            });
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+    }
+
+    fn open_data_section(h: &Harness, vcx: &mut gpui::VisualTestContext) {
+        vcx.update(|window, cx| {
+            h.page
+                .update(cx, |p, cx| p.set_section(Section::Data, window, cx));
+            let _ = window.draw(cx);
+        });
+    }
+
+    /// An as-of change requests a watched catalog; until the answer for
+    /// that as-of arrives no generation is marked resolved, because a
+    /// catalog under another as-of would mark the wrong one.
+    #[gpui::test]
+    fn resolved_markers_wait_for_a_matching_catalog(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.page.update(&mut vcx, |p, cx| p.set_visible(true, cx));
+        open_data_section(&h, &mut vcx);
+        // Drain the watch's initial request so the next one is the as-of's.
+        assert!(
+            h.diagnostics
+                .update(&mut vcx, |d, _| d.take_pending_catalog_request())
+        );
+        let at = geode_core::query::AsOf::At(chrono::Utc::now());
+        h.frame.update(&mut vcx, |f, cx| {
+            let _ = f.set_as_of(at.clone());
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        // A watched refresh was requested for the new as-of.
+        assert!(
+            h.diagnostics
+                .update(&mut vcx, |d, _| d.take_pending_catalog_request())
+        );
+        // Catalog for another as-of: no markers.
+        let other = geode_core::query::AsOf::At(chrono::Utc::now() + chrono::Duration::hours(2));
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.set_catalog(
+                snapshot_with(other, vec![crate::model::tests::dataset_catalog()]),
+                SystemTime::now(),
+            );
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            h.page.read_with(&vcx, |p, _| p.prepared().rows.len()),
+            3,
+            "the mismatched catalog still lists the dataset and its generations"
+        );
+        assert!(h.page.read_with(&vcx, |p, _| {
+            p.prepared().rows.iter().all(|r| r.tone != Tone::Marked)
+        }));
+        assert!(!h.page.read_with(&vcx, |p, _| p.catalog_matches));
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.set_catalog(
+                snapshot_with(at, vec![crate::model::tests::dataset_catalog()]),
+                SystemTime::now(),
+            );
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            h.page.read_with(&vcx, |p, _| p
+                .prepared()
+                .rows
+                .iter()
+                .filter(|r| r.tone == Tone::Marked)
+                .count()),
+            1
+        );
+        assert!(h.page.read_with(&vcx, |p, _| p.catalog_matches));
+    }
+
+    /// A single click on a dataset row only selects it; `activate` and a
+    /// double-click toggle its generations; the toolbar buttons expand or
+    /// collapse every dataset at once.
+    #[gpui::test]
+    fn clicking_a_dataset_row_then_enter_collapses_it(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.set_catalog(
+                snapshot_with(
+                    geode_core::query::AsOf::Live,
+                    vec![crate::model::tests::dataset_catalog()],
+                ),
+                SystemTime::now(),
+            );
+            cx.notify();
+        });
+        open_data_section(&h, &mut vcx);
+        let rows =
+            |vcx: &gpui::VisualTestContext| h.page.read_with(vcx, |p, _| p.prepared().rows.len());
+        assert_eq!(rows(&vcx), 3, "parent + 2 generations");
+        // Park the cursor on a child, then single-click the parent: the
+        // cursor moves and nothing collapses.
+        vcx.update(|window, cx| {
+            h.page.update(cx, |p, cx| {
+                let _ = p.dispatch(&ActionId("diagnostics::bottom".into()), None, window, cx);
+            });
+        });
+        assert_eq!(h.page.read_with(&vcx, |p, _| p.cursor()), 2);
+        let row = vcx
+            .debug_bounds("diagnostics-row-0")
+            .expect("the dataset row is painted");
+        let at = gpui::point(row.origin.x + gpui::px(4.0), row.center().y);
+        vcx.simulate_click(at, gpui::Modifiers::default());
+        vcx.run_until_parked();
+        assert_eq!(
+            h.page.read_with(&vcx, |p, _| p.cursor()),
+            0,
+            "a click selects"
+        );
+        assert_eq!(rows(&vcx), 3, "and collapses nothing");
+        vcx.update(|window, cx| {
+            h.page.update(cx, |p, cx| {
+                let _ = p.dispatch(&ActionId("diagnostics::activate".into()), None, window, cx);
+            });
+        });
+        assert_eq!(rows(&vcx), 1, "enter collapses the parent under the cursor");
+        // Collapse-all / expand-all buttons.
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let b = vcx.debug_bounds("diagnostics-expand-all").unwrap();
+        vcx.simulate_click(b.center(), gpui::Modifiers::default());
+        assert_eq!(rows(&vcx), 3);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let b = vcx.debug_bounds("diagnostics-collapse-all").unwrap();
+        vcx.simulate_click(b.center(), gpui::Modifiers::default());
+        assert_eq!(rows(&vcx), 1);
+        // A double-click on the parent row expands it again, and a second
+        // one collapses it.
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let row = vcx.debug_bounds("diagnostics-row-0").unwrap();
+        let at = gpui::point(row.origin.x + gpui::px(4.0), row.center().y);
+        double_click(&mut vcx, at);
+        vcx.run_until_parked();
+        assert_eq!(rows(&vcx), 3, "a double-click expands");
+        double_click(&mut vcx, at);
+        vcx.run_until_parked();
+        assert_eq!(rows(&vcx), 1, "and the next collapses");
+    }
+
+    #[gpui::test]
+    fn the_refresh_button_records_an_explicit_catalog_request(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        open_data_section(&h, &mut vcx);
+        assert_eq!(
+            h.diagnostics
+                .update(&mut vcx, |d, _| d.take_catalog_request()),
+            None,
+            "a hidden page has requested nothing"
+        );
+        let b = vcx.debug_bounds("diagnostics-refresh-catalog").unwrap();
+        vcx.simulate_click(b.center(), gpui::Modifiers::default());
+        assert_eq!(
+            h.diagnostics
+                .update(&mut vcx, |d, _| d.take_catalog_request()),
+            Some(geode_shell::diagnostics::CatalogRequest::Explicit)
         );
     }
 }
