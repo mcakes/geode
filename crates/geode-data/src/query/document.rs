@@ -9,7 +9,7 @@ use crate::store::ddl::TablePair;
 use duckdb::Connection;
 use duckdb::types::Value;
 use geode_core::attribution::{Attribution, ScopeSemantics};
-use geode_core::document::{is_key_prefix, join_key};
+use geode_core::document::{KEY_SEPARATOR, is_key_prefix, join_key};
 use geode_core::query::{AsOf, DocumentParams};
 use geode_core::schema::{ColumnRole, SchemaSpec};
 use std::collections::BTreeMap;
@@ -55,6 +55,18 @@ pub fn compile_document(
         return Err(invalid(format!(
             "key has {given} parts, dataset '{}' declares {arity}",
             ds.name
+        )));
+    }
+    // A part holding the separator would join to another key's batch, so
+    // freshness and the as-of match would describe a document the column
+    // predicate does not select.
+    if let Some(part) = params
+        .document_key
+        .iter()
+        .find(|p| p.contains(KEY_SEPARATOR))
+    {
+        return Err(invalid(format!(
+            "key part {part:?} contains the reserved separator"
         )));
     }
 
@@ -724,5 +736,29 @@ mod tests {
             err.contains("a document key needs at least one part"),
             "{err}"
         );
+    }
+
+    /// A part holding the separator would join to another key's batch:
+    /// `["SPX␟2026-10-16"]` matches no rows by column yet names SPX
+    /// October's partition for freshness and the as-of prefix match.
+    #[test]
+    fn a_key_part_holding_the_separator_is_refused() {
+        let (_d, store, schema) = chain_fixture();
+        let joined = format!("SPX{KEY_SEPARATOR}2026-10-16");
+        for key in [vec![joined.as_str()], vec!["SPX", joined.as_str()]] {
+            let err = compile_document(
+                store.writer(),
+                &schema,
+                &params("option_chain", &key, AsOf::Live),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                err.contains(&format!(
+                    "key part {joined:?} contains the reserved separator"
+                )),
+                "{err}"
+            );
+        }
     }
 }

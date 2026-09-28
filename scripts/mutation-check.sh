@@ -16311,6 +16311,12 @@ run_mutation "vol chain prefix: the service reports prefix freshness" \
   '                            .live_source_time(&params.dataset, &join_key(&params.document_key), None)?' \
   geode-data the_service_reports_a_live_prefix_requests_freshness
 
+run_mutation "vol chain prefix: a key part holding the separator is refused" \
+  crates/geode-data/src/query/document.rs \
+  '        .find(|p| p.contains(KEY_SEPARATOR))' \
+  '        .find(|_| false)' \
+  geode-data a_key_part_holding_the_separator_is_refused
+
 run_mutation "vol chain prefix: an as-of read pins each matched generation" \
   crates/geode-data/src/query/document.rs \
   '                        format!(" and gen_id in ({ids})")' \
