@@ -35,6 +35,9 @@ fn atomic_depth(doc_name: &str) -> Option<u32> {
         "pricer_templates" => Some(1),
         // One complete override entry per name.
         "overrides" => Some(1),
+        // One complete definition per market-data panel name: a partial
+        // override must not inherit a lower layer's columns and formats.
+        "panels" => Some(1),
         _ => None,
     }
 }

@@ -5153,7 +5153,10 @@ pub(crate) mod tests {
         h.dispatch(&mut vcx, "group", Some(2));
         h.motion(&mut vcx, "top", None);
         let top = &h.tree(&vcx)[0];
-        assert!(top.starts_with("CUSTOM SPX/NDX"), "the package, on top: {top}");
+        assert!(
+            top.starts_with("CUSTOM SPX/NDX"),
+            "the package, on top: {top}"
+        );
         let ctx = vcx
             .update(|_, cx| h.content.dimension_context(cx))
             .expect("a cursor row has a context");

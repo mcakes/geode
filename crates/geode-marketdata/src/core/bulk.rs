@@ -161,7 +161,7 @@ mod tests {
             accept(&CellKind::Text, None, true, "  "),
             Err(Skip::Required)
         );
-        let c = CellKind::Choice(&["declared", "estimated"]);
+        let c = CellKind::Choice(vec!["declared".to_string(), "estimated".to_string()].into());
         assert_eq!(
             accept(&c, None, false, "declared"),
             Ok(Value::Utf8("declared".into()))

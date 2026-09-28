@@ -493,6 +493,7 @@ fn a_level_persist_and_reload_leaves_the_config_error_count_unchanged(
         keymap_diagnostics: Vec::new(),
         keymap_fragments: Vec::new(),
         keymap_fragment_diagnostics: Vec::new(),
+        composition_diagnostics: Vec::new(),
         pages: crate::module::PageRoster::new(),
         restored_pages: std::collections::BTreeMap::new(),
     };

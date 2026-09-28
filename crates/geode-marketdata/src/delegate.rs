@@ -196,14 +196,14 @@ pub struct MatrixDelegate {
 
 impl MatrixDelegate {
     pub(crate) fn new(
-        spec: &'static PanelSpec,
+        spec: &PanelSpec,
         tile: WeakEntity<MarketDataTile>,
         tile_id: u64,
         tones: FlooredTones,
     ) -> MatrixDelegate {
         MatrixDelegate {
             model: Rc::new(MatrixModel::default()),
-            row_axis: SharedString::from(spec.rows.column),
+            row_axis: SharedString::from(spec.rows.column.clone()),
             label_column: spec.rows.shown(),
             cursor: Some((0, 0)),
             selected: None,
@@ -837,7 +837,7 @@ pub(crate) fn cell_paint(theme: &Theme, sent: bool, edited: bool, state: RowStat
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::core::{CVI, DIVIDEND};
+    use crate::core::test_fixtures::{CVI, DIVIDEND};
     use geode_core::colour::{READABLE_RATIO, Rgb, contrast_ratio};
     use geode_shell::shell::colours::to_rgb;
 

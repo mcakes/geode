@@ -5120,8 +5120,8 @@ run_mutation "publication routing: blotter promotion uses its own dependencies" 
 
 run_mutation "publication routing: panels watch an exact document" \
   crates/geode-marketdata/src/tile.rs \
-  'frame.watch_publications(self.spec.dataset, Some(&batch))' \
-  'frame.watch_publications(self.spec.dataset, None)' \
+  'frame.watch_publications(&self.spec.dataset, Some(&batch))' \
+  'frame.watch_publications(&self.spec.dataset, None)' \
   geode-marketdata publications_only_requery_the_selected_document
 
 # The rule now lives in `geode_tile::following`; this module's route stays
@@ -7922,8 +7922,8 @@ run_mutation "add-tile: the _vertical suffix means stacked" \
 
 run_mutation "add-tile: register_add_actions registers the suffixed pair too" \
   crates/geode-shell/src/defaults.rs \
-  '            &format!("tile::add_{kind}_vertical"),' \
-  '            &format!("tile::add_{kind}_vertical_"),' \
+  '    ("_vertical", "Split Vertical"),' \
+  '    ("_vertical_", "Split Vertical"),' \
   geode-shell register_add_actions_registers_four_rows_per_kind_in_the_tiles_category
 
 # ---- Refused events do not stop producers -----------------------------
@@ -13004,8 +13004,8 @@ run_mutation "mdupload: an open editor closes before the draft is read" \
   '        if self.editor.is_some() {
             self.close_editor(window, cx);
         }
-        let document = self.spec.document;' \
-  '        let document = self.spec.document;' \
+        let document = &self.spec.document;' \
+  '        let document = &self.spec.document;' \
   geode-marketdata \
   an_upload_armed_mid_step_sends_the_draft_as_it_was_before_i
 
@@ -13904,7 +13904,7 @@ run_mutation "mddraft: rebase keeps a declared attribute and names an undeclared
 # a new spot and the panel keeps showing the old one.
 run_mutation "mddraft: an edited attribute paints the draft's value" \
   crates/geode-marketdata/src/core/matrix.rs \
-  '            let (text, edited) = match draft.attrs.get(attr.column) {' \
+  '            let (text, edited) = match draft.attrs.get(&attr.column) {' \
   '            let (text, edited) = match None::<&geode_core::document::Value> {' \
   geode-marketdata \
   an_edited_attribute_paints_the_drafts_value_marked_edited
@@ -15229,13 +15229,13 @@ run_mutation "matrix: slice values are the first grid columns" \
   crates/geode-marketdata/src/core/matrix.rs \
   '        slices
             .iter()
-            .map(|(sv, _)| SharedString::from(sv.label))
+            .map(|(sv, _)| SharedString::from(sv.label.clone()))
             .chain(grid.columns.into_iter().map(SharedString::from))
             .collect(),' \
   '        grid.columns
             .into_iter()
             .map(SharedString::from)
-            .chain(slices.iter().map(|(sv, _)| SharedString::from(sv.label)))
+            .chain(slices.iter().map(|(sv, _)| SharedString::from(sv.label.clone())))
             .collect(),' \
   geode-marketdata a_pivot_puts_the_row_axis_down_the_side_and_the_column_axis_across
 
@@ -15263,8 +15263,8 @@ run_mutation "matrix: a NULL beside a value in a slice is a disagreement" \
 # collisions because Draft indexes columns by label.
 run_mutation "matrix: a slice label colliding with an axis label is refused" \
   crates/geode-marketdata/src/core/matrix.rs \
-  '        if grid.columns.iter().any(|c| c == sv.label) {' \
-  '        if false && grid.columns.iter().any(|c| c == sv.label) {' \
+  '        if grid.columns.contains(&sv.label) {' \
+  '        if false && grid.columns.contains(&sv.label) {' \
   geode-marketdata a_slice_label_colliding_with_an_axis_label_is_refused
 
 # A row bump walks the ladder and skips the term's own forward/atm/skew.
@@ -15468,7 +15468,7 @@ run_mutation "tile: declared_type answers None off a non-numeric kind" \
 # (differently worded) refusal instead of never reaching it.
 run_mutation "tile: a nudge on a non-numeric cell is refused" \
   crates/geode-marketdata/src/tile.rs \
-  '                let Some(ty) = declared_type(self.spec, &self.model, *col) else {' \
+  '                let Some(ty) = declared_type(&self.spec, &self.model, *col) else {' \
   '                let Some(ty) = Some(ColumnType::F64) else {' \
   geode-marketdata a_flat_panels_nudge_on_a_non_numeric_cell_is_refused
 
@@ -15621,11 +15621,11 @@ run_mutation "tile: closing the choice popup re-mirrors the delegate" \
 run_mutation "tile: i on a choice cell opens the popup" \
   crates/geode-marketdata/src/tile.rs \
   '                if let Some(CellKind::Choice(options)) = self.model.kind_of(col) {
-                    self.open_choice(cell, labels, &text, options, window, cx);
+                    self.open_choice(cell, labels, &text, Arc::clone(options), window, cx);
                     return;
                 }' \
   '                if let Some(CellKind::Choice(options)) = None::<&CellKind> {
-                    self.open_choice(cell, labels, &text, options, window, cx);
+                    self.open_choice(cell, labels, &text, Arc::clone(options), window, cx);
                     return;
                 }' \
   geode-marketdata i_on_a_choice_cell_opens_a_typeahead_and_enter_picks
@@ -19720,7 +19720,7 @@ run_mutation "marketdata: targets_for narrows to targets that accept the documen
 # `egress.toml` actually resolved.
 run_mutation "marketdata: create narrows the factory's egress list to this panel's own document" \
   crates/geode-marketdata/src/content.rs \
-  '        let egress_targets = targets_for(&self.egress, self.spec.document);' \
+  '        let egress_targets = targets_for(&self.egress, &self.spec.document);' \
   '        let egress_targets: Vec<SharedString> = Vec::new();' \
   geode-marketdata \
   the_tile_stores_the_targets_its_factory_resolves_for_its_document
@@ -19988,7 +19988,7 @@ run_mutation "panel: a sent draft is refused already sent" \
 # message instead.
 run_mutation "panel: incomplete rows refuse the upload" \
   crates/geode-marketdata/src/tile.rs \
-  '        match self.draft.incomplete_rows(self.spec, &self.model.columns) {
+  '        match self.draft.incomplete_rows(&self.spec, &self.model.columns) {
             0 => {}' \
   '        match 0 {
             0 => {}' \
@@ -20022,36 +20022,28 @@ run_mutation "draft: bump refuses a fractional delta on an I64 column" \
 # kind. Marking them optional lets incomplete rows pass local checks and
 # fail during document assembly.
 run_mutation "spec: DIVIDEND requires the announced date" \
-  crates/geode-marketdata/src/core/spec.rs \
-  '            column: "announced_date",
-            label: "announced",
-            ty: ColumnType::Date,
-            format: ColumnFormat::TEXT,
-            choices: None,
-            required: true,' \
-  '            column: "announced_date",
-            label: "announced",
-            ty: ColumnType::Date,
-            format: ColumnFormat::TEXT,
-            choices: None,
-            required: false,' \
+  crates/geode-marketdata/src/core/builtin_panels.toml \
+  'column = "announced_date"
+label = "announced"
+type = "date"
+required = true' \
+  'column = "announced_date"
+label = "announced"
+type = "date"
+required = false' \
   geode-marketdata \
   dividend_dates_are_required
 
 run_mutation "spec: DIVIDEND requires the pay date" \
-  crates/geode-marketdata/src/core/spec.rs \
-  '            column: "pay_date",
-            label: "pay",
-            ty: ColumnType::Date,
-            format: ColumnFormat::TEXT,
-            choices: None,
-            required: true,' \
-  '            column: "pay_date",
-            label: "pay",
-            ty: ColumnType::Date,
-            format: ColumnFormat::TEXT,
-            choices: None,
-            required: false,' \
+  crates/geode-marketdata/src/core/builtin_panels.toml \
+  'column = "pay_date"
+label = "pay"
+type = "date"
+required = true' \
+  'column = "pay_date"
+label = "pay"
+type = "date"
+required = false' \
   geode-marketdata \
   dividend_dates_are_required
 
@@ -25479,6 +25471,212 @@ run_mutation "chip: active text is floored against its fill" \
   '                text: to_hsla(readable_on(to_rgb(theme.primary_foreground), fill, pole)),' \
   '                text: theme.primary_foreground,' \
   geode-shell every_chip_tone_is_readable_on_every_bundled_theme
+
+# One id, one verb. Accepting a second registration of an id would let a
+# panel's menu row dispatch whichever verb the lookup found first.
+run_mutation "panels: a second kind-action registration is refused" \
+  crates/geode-core/src/panel/mod.rs \
+  '        if self.get(action.id).is_some() {' \
+  '        if false && self.get(action.id).is_some() {' \
+  geode-core a_registered_kind_action_is_found_by_id_and_a_second_registration_is_refused
+
+# An unknown key (a misspelt `format`) is refused; mutated to accept any
+# key, the misspelling paints the text default's zero places.
+run_mutation "panels: an unknown key refuses the panel" \
+  crates/geode-core/src/panel/read.rs \
+  '    match t.keys().find(|k| !keys.contains(&k.as_str())) {' \
+  '    match None::<&String> {' \
+  geode-core a_misspelt_format_key_is_refused_not_ignored
+
+# A typed row identity with a hidden label leaves no column to name a new row in.
+run_mutation "panels: a hidden typed row label refuses" \
+  crates/geode-core/src/panel/read.rs \
+  '    if label == RowLabel::Hidden && matches!(identity, RowIdentity::Typed(_)) {' \
+  '    if false {' \
+  geode-core a_hidden_label_on_a_typed_row_identity_is_refused
+
+# An f64 with no precision would paint at the text default's zero places.
+run_mutation "panels: an f64 without a precision refuses" \
+  crates/geode-core/src/panel/read.rs \
+  '    if needs_precision && !f.contains_key("precision") {' \
+  '    if false {' \
+  geode-core an_f64_value_without_a_precision_is_refused
+
+# Two columns one label would send an edit to the wrong column.
+run_mutation "panels: two columns sharing a label refuse" \
+  crates/geode-core/src/panel/read.rs \
+  '        if labels[..i].iter().any(|(_, l)| l == label) {' \
+  '        if false {' \
+  geode-core two_value_columns_sharing_a_label_are_refused
+
+# A column named twice would be edited in two places and uploaded once.
+run_mutation "panels: a column named twice refuses" \
+  crates/geode-core/src/panel/read.rs \
+  '        if named[..i].iter().any(|(_, c)| c == column) {' \
+  '        if false {' \
+  geode-core a_column_named_twice_is_refused
+
+# Mutated to merge per field, a partial user `[cvi]` inherits the builtin's
+# columns instead of being the whole panel.
+run_mutation "panels: a named panel replaces whole across layers" \
+  crates/geode-core/src/config/merge.rs \
+  '        "panels" => Some(1),' \
+  '        "panels" => None,' \
+  geode-core a_user_panel_replaces_the_builtin_one_whole
+
+# A kind whose columns disagree with the dataset writes documents the store
+# refuses, or parses ones the grid misreads.
+run_mutation "panels: a kind that does not fit the dataset refuses" \
+  crates/geode-core/src/panel/check.rs \
+  '    let fits = check_kind_against(kind.as_ref(), ds);' \
+  '    let fits: Result<(), String> = Ok(());' \
+  geode-core a_document_kind_that_does_not_fit_the_dataset_is_refused
+
+# The key is read from the columns before the row axis; a row axis that is
+# not the first axis folds an axis into the key.
+run_mutation "panels: the row axis must be the dataset's first axis" \
+  crates/geode-core/src/panel/check.rs \
+  '    if ds.axes.first().map(String::as_str) != Some(spec.rows.column.as_str()) {' \
+  '    if false {' \
+  geode-core a_row_axis_that_is_not_the_first_axis_is_refused
+
+run_mutation "panels: a declared type the dataset contradicts refuses" \
+  crates/geode-core/src/panel/check.rs \
+  '    if col.ty != ty {' \
+  '    if false {' \
+  geode-core a_header_type_the_dataset_contradicts_is_refused
+
+# A dropped slice leaves two unnamed values: the model refuses every delivery.
+run_mutation "panels: a pivot must leave exactly one ladder value" \
+  crates/geode-core/src/panel/check.rs \
+  '    let [value] = ladder.as_slice() else {' \
+  '    let [value, ..] = ladder.as_slice() else {' \
+  geode-core a_pivot_that_leaves_two_value_columns_is_refused
+
+# Slice editors parse by the panel's value type: an i64 panel over an f64
+# slice would refuse a fractional forward.
+run_mutation "panels: a slice must be the panel's value type" \
+  crates/geode-core/src/panel/check.rs \
+  '        if col.ty != spec.value_type {' \
+  '        if false {' \
+  geode-core a_slice_whose_type_differs_from_the_value_type_is_refused
+
+run_mutation "panels: a numeric axis could produce a numeric slice label" \
+  crates/geode-core/src/panel/check.rs \
+  '            ColumnType::F64 | ColumnType::I64 => s.label.trim().parse::<f64>().is_ok(),' \
+  '            ColumnType::F64 | ColumnType::I64 => false,' \
+  geode-core a_slice_label_a_numeric_axis_could_produce_is_refused
+
+# A text axis paints labels from the data; a slice label could collide with
+# one and send an edit to the wrong column.
+run_mutation "panels: a slice over a text axis refuses" \
+  crates/geode-core/src/panel/check.rs \
+  '            _ => return Err(data_labelled_axis(i, axis, axis_ty, &s.label)),' \
+  '            _ => false,' \
+  geode-core a_slice_over_a_text_axis_is_refused
+
+# A panel that leaves a written column unnamed could never upload a whole
+# document.
+run_mutation "panels: a panel must name every column its kind writes" \
+  crates/geode-core/src/panel/check.rs \
+  '    if missing.is_empty() {' \
+  '    if true {' \
+  geode-core a_flat_panel_missing_a_value_column_is_refused
+
+# A panel named with a placement suffix claims another kind's add-tile id;
+# mutated to accept it, `[cvi_stacked]` loads and the shell refuses its rows.
+run_mutation "panels: a placement-suffix name refuses" \
+  crates/geode-core/src/panel/read.rs \
+  '    if let Some(suffix) = PLACEMENT_SUFFIXES.iter().find(|s| name.ends_with(*s)) {' \
+  '    if let Some(suffix) = None::<&&str> {' \
+  geode-core a_panel_name_ending_in_a_placement_suffix_is_refused
+
+# The kind's writer is order-exact; mutated to accept any order, a reordered
+# panel loads and every upload is refused.
+run_mutation "panels: columns must follow the kind's order" \
+  crates/geode-core/src/panel/check.rs \
+  '    if expected == laid {' \
+  '    if true {' \
+  geode-core slices_out_of_the_kinds_order_are_refused
+
+# Kinds come from config: a colliding kind must be an Error, not a registry
+# panic at startup.
+run_mutation "add actions: a colliding kind is refused, not registered" \
+  crates/geode-shell/src/defaults.rs \
+  '        if let Some(why) = refusal {' \
+  '        if let Some(why) = None::<String> {' \
+  geode-shell register_add_actions_refuses_a_colliding_kind_without_panicking
+
+# The forward is a price at two places; mutated, the builtin CVI paints it
+# at four and no longer matches the spec it replaced.
+run_mutation "panels: the builtin CVI forward paints at two places" \
+  crates/geode-marketdata/src/core/builtin_panels.toml \
+  'label = "fwd"
+format = { precision = 2 }' \
+  'label = "fwd"
+format = { precision = 4 }' \
+  geode-marketdata the_builtin_cvi_panel_is_the_spec_the_const_described
+
+# The builtin dividend panel's status vocabulary is the document kind's; a
+# dropped status would refuse a document the kind accepts.
+run_mutation "panels: the builtin dividend statuses match the kind" \
+  crates/geode-marketdata/src/core/builtin_panels.toml \
+  'choices = ["estimated", "declared", "paid", "cancelled"]' \
+  'choices = ["estimated", "declared", "paid"]' \
+  geode-app the_dividend_panel_specs_status_vocabulary_matches_the_dividend_kind
+
+# Panels become tile kinds once at startup; mutated out of the restart set,
+# an edited panels.toml says nothing and the trader waits for a change.
+run_mutation "panels: a panels edit asks for a restart" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                ("panels", &self.panels_baseline),' \
+  '                ("nonesuch", &self.panels_baseline),' \
+  geode-shell a_panels_change_asks_for_a_restart
+
+# A refused panel's error must stay counted after a reload that cannot
+# re-derive it.
+run_mutation "panels: composition diagnostics survive a reload" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '        config_section.extend(self.services.composition_diagnostics.iter().cloned());' \
+  '' \
+  geode-shell a_composition_diagnostic_stays_in_the_config_section_across_a_reload
+
+run_mutation "panels: composition diagnostics are seeded at startup" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            diags.extend(services.composition_diagnostics.iter().cloned());' \
+  '' \
+  geode-shell a_composition_diagnostic_stays_in_the_config_section_across_a_reload
+
+# Only the first panel factory ships the marketdata fragment; mutated, every
+# panel splices its own identical layer.
+run_mutation "panels: the marketdata fragment ships once" \
+  crates/geode-app/src/bridge.rs \
+  '            let ships_keymap = i == 0;' \
+  '            let ships_keymap = true;' \
+  geode-app the_second_panel_ships_no_second_fragment_but_still_gets_an_add_tile_row
+
+# A panel named after another module would shadow its kind.
+run_mutation "panels: a panel may not take another module's kind" \
+  crates/geode-app/src/bridge.rs \
+  '        .partition(|p| !MODULE_KINDS.contains(&p.kind.as_str()));' \
+  '        .partition(|_| true);' \
+  geode-app a_panel_named_after_another_module_is_refused
+
+# Startup carries refused panels into the shell's config section; mutated,
+# a refused panel vanishes from the tile picker with no error counted.
+run_mutation "panels: startup carries refused panels into the config section" \
+  crates/geode-app/src/main.rs \
+  '        composition_diagnostics = setup.panel_diagnostics.clone();' \
+  '' \
+  geode-app a_refused_panel_is_absent_from_the_picker_and_named_in_diagnostics
+
+# A configured panel paints its ladder in its own format; pinned to the
+# builtin CVI's four places, a user panel's six-place vols round silently.
+run_mutation "panels: a configured panel paints its own ladder format" \
+  crates/geode-marketdata/src/core/matrix.rs \
+  '        std::iter::repeat_with(|| CellKind::Number(spec.format.clone())).take(grid.columns.len()),' \
+  '        std::iter::repeat_with(|| CellKind::Number(geode_core::view::ColumnFormat { precision: 4, ..spec.format.clone() })).take(grid.columns.len()),' \
+  geode-marketdata a_user_layer_panel_paints_its_own_title_and_formats
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

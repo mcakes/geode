@@ -121,6 +121,7 @@ fn main() {
 
             let (mut services, desk, user, bridge, diagnostics_factory) = build_shell_services(
                 demo_root.as_deref(),
+                config_dirs(),
                 log_ring,
                 log_control,
                 adapters,
@@ -175,22 +176,10 @@ fn main() {
                 tracing::warn!(target: "geode::theme", "{warning}");
             }
 
-            // Load layout, module records, frame state, palette usage, and page
-            // state before constructing the shell. Themes are restored from
-            // layered config. Report session recovery warnings without aborting
-            // startup.
-            if let Some(path) = &services.session_path {
-                let restored = session::load(path);
-                for warning in &restored.warnings {
-                    tracing::warn!(target: "geode::session", "{warning}");
-                }
-                services.workspaces = restored.workspaces;
-                services.restored_tiles = restored.tiles;
-                services.restored_frame = restored.frame;
-                services.restored_pinned = restored.pinned;
-                services.restored_palette_usage = restored.palette_usage;
-                services.restored_pages = restored.pages;
-            }
+            // Themes are restored from layered config; the session supplies
+            // layout, module records, frame state, palette usage and page
+            // state.
+            restore_session(&mut services);
 
             // Save current session state synchronously at quit, including changes
             // since the last periodic snapshot. This is best-effort and does not
@@ -369,10 +358,11 @@ fn usage(reason: &str) -> String {
 /// query carries them.
 fn add_bridge_modules(roster: &mut ModuleRoster, bridge: &bridge::Bridge) {
     roster.add(Box::new(bridge.factory.clone()));
-    roster.add(Box::new(bridge.marketdata.clone()));
-    // Dividend shares the marketdata key context. Its factory disables its
-    // keymap fragment to avoid installing the same bindings twice.
-    roster.add(Box::new(bridge.dividend.clone()));
+    // One tile kind per accepted panel, in `panels` order; only the first
+    // ships the shared marketdata keymap fragment.
+    for panel in &bridge.panels {
+        roster.add(Box::new(panel.clone()));
+    }
     roster.add(Box::new(bridge.timeseries.clone()));
     roster.add(Box::new(bridge.pricer.clone()));
     // Last, once every factory (and, from Part 2, every dimension action)
@@ -383,8 +373,8 @@ fn add_bridge_modules(roster: &mut ModuleRoster, bridge: &bridge::Bridge) {
 /// Every builtin config doc: the shell's keymap, the pricer's two bundled
 /// views and seven package templates (a desk or user layer overrides a
 /// view or a template by name), the pricer's two datasets (`pricer_sheets`,
-/// its local documents, and `pricer`, its computed vocabulary), and the
-/// `--demo` layer.
+/// its local documents, and `pricer`, its computed vocabulary), the builtin
+/// market-data panels, and the `--demo` layer.
 fn builtin_layer(demo_root: Option<&Path>) -> Vec<LayerDoc> {
     let mut builtin = vec![
         LayerDoc::builtin("keymap", BUILTIN_KEYMAP).expect("builtin keymap TOML is well-formed"),
@@ -403,6 +393,14 @@ fn builtin_layer(demo_root: Option<&Path>) -> Vec<LayerDoc> {
         // user `datasets` doc adds its own datasets beside these two.
         LayerDoc::builtin("datasets", geode_pricer::core::PRICER_SHEETS_DECLARATION)
             .expect("PRICER_SHEETS_DECLARATION is well-formed TOML"),
+        // The builtin market-data panels. `panels` replaces per panel name,
+        // so a desk or user panels doc adds panels beside these or replaces
+        // one whole.
+        LayerDoc::builtin(
+            geode_core::panel::PANELS_DOC,
+            geode_marketdata::core::BUILTIN_PANELS,
+        )
+        .expect("BUILTIN_PANELS is well-formed TOML"),
         // The pricer's vocabulary as a computed dataset: views, scopes and
         // groupings see its columns; nothing stores or queries it.
         LayerDoc::builtin("datasets", geode_pricer::core::PRICER_DATASET_DECLARATION)
@@ -419,8 +417,10 @@ fn builtin_layer(demo_root: Option<&Path>) -> Vec<LayerDoc> {
 /// empty; session restoration happens before the shell is constructed. Config
 /// and keymap diagnostics are logged with their declared severity.
 ///
-/// Return the same desk/user directories used for loading so the shell watches
-/// the correct sources. Return the data bridge for attachment after window
+/// `dirs` are the desk and user config directories (`config_dirs()` in
+/// production; temporary directories in tests, which must never read the
+/// real user layer). Return the same directories so the shell watches the
+/// sources it loaded. Return the data bridge for attachment after window
 /// creation; data setup requires datasets and views documents. The builtin
 /// pricer declarations supply these even outside demo mode.
 ///
@@ -428,8 +428,12 @@ fn builtin_layer(demo_root: Option<&Path>) -> Vec<LayerDoc> {
 /// part of the builtin layer, below desk and user overrides. Provider registries
 /// are passed to data setup; logging uses the existing subscriber and applies
 /// configured levels through its reload control.
+// The composition root's inputs: config directories, logging and the three
+// provider registries, each consumed once here.
+#[allow(clippy::too_many_arguments)]
 fn build_shell_services(
     demo_root: Option<&Path>,
+    dirs: (Option<PathBuf>, Option<PathBuf>),
     log_ring: Arc<Ring>,
     log_control: Arc<dyn LevelControl>,
     adapters: geode_data::adapter::AdapterRegistry,
@@ -443,7 +447,7 @@ fn build_shell_services(
     Option<bridge::Bridge>,
     Rc<DiagnosticsPageFactory>,
 ) {
-    let (desk, user) = config_dirs();
+    let (desk, user) = dirs;
     let builtin = builtin_layer(demo_root);
     // Load configuration and retain its builtin documents from one source set.
     // Configuration writes and reloads must keep the same demo and pricer defaults.
@@ -498,16 +502,29 @@ fn build_shell_services(
         std::env::var("LOCALAPPDATA").ok(),
         std::env::var("HOME").ok(),
     );
+    // Refused panels: printed here and carried into the shell's config
+    // section, where they stay until a restart can change which panels exist.
+    let mut composition_diagnostics = Vec::new();
     let bridge = bridge::data_setup(&config, db, adapters, pricers, vol_models).map(|setup| {
+        composition_diagnostics = setup.panel_diagnostics.clone();
         let find_style = FindStyle::from_config(&config);
         let stale_after = bridge::stale_after_from_config(&config);
         let bridge = bridge::start(setup, find_style, stale_after, cx);
         add_bridge_modules(&mut roster, &bridge);
         bridge
     });
+    for diag in &composition_diagnostics {
+        print_diagnostic(diag);
+    }
 
     // Register split actions for the complete roster before keymap compilation.
-    register_add_actions(&mut registry, &roster.kinds());
+    // A kind whose add-tile ids would collide is refused rather than panicking;
+    // its Error joins the refused panels in the config section.
+    let add_diags = register_add_actions(&mut registry, &roster.kinds());
+    for diag in &add_diags {
+        print_diagnostic(diag);
+    }
+    composition_diagnostics.extend(add_diags);
     // Register module actions before resolving their keybindings.
     roster.register_actions(&mut registry);
     // Page toggles and each page's own actions, likewise before the keymap.
@@ -589,10 +606,30 @@ fn build_shell_services(
         // doc comment for why they are carried rather than recomputed.
         keymap_fragments: fragments,
         keymap_fragment_diagnostics: frag_diags,
+        composition_diagnostics,
         pages,
         restored_pages: std::collections::BTreeMap::new(),
     };
     (services, desk, user, bridge, diagnostics_factory)
+}
+
+/// Load layout, module records, frame state, palette usage and page state
+/// from the session file before the shell is constructed. Recovery warnings are
+/// logged; a missing or unreadable session starts fresh.
+fn restore_session(services: &mut ShellServices) {
+    let Some(path) = &services.session_path else {
+        return;
+    };
+    let restored = session::load(path);
+    for warning in &restored.warnings {
+        tracing::warn!(target: "geode::session", "{warning}");
+    }
+    services.workspaces = restored.workspaces;
+    services.restored_tiles = restored.tiles;
+    services.restored_frame = restored.frame;
+    services.restored_pinned = restored.pinned;
+    services.restored_palette_usage = restored.palette_usage;
+    services.restored_pages = restored.pages;
 }
 
 /// Log a configuration or keymap diagnostic at `geode::config`, using its
@@ -628,7 +665,54 @@ fn user_config_dir(appdata: Option<String>, home: Option<String>) -> Option<Path
 mod tests {
     use super::*;
     use geode_core::config::Config;
-    use geode_marketdata::MarketDataFactory;
+    use geode_shell::module::ModuleFactory as _;
+
+    /// A second CVI panel over the same dataset: another title and forward
+    /// format, one action. It names every column the CVI document writes,
+    /// header included, or it would be refused.
+    const WIDE_CVI_PANEL: &str = r#"config_version = 1
+
+[cvi_wide]
+title = "CVI (wide)"
+dataset = "cvi_params"
+document = "cvi_params"
+actions = ["marketdata::cvi_reanchor"]
+
+[cvi_wide.value]
+type = "f64"
+format = { precision = 6 }
+
+[cvi_wide.rows]
+column = "term"
+identity = "date"
+label = "shown"
+
+[cvi_wide.columns]
+axis = "node"
+
+[[cvi_wide.header]]
+column = "anchor_date"
+label = "anchor"
+type = "date"
+
+[[cvi_wide.header]]
+column = "spot_ref"
+label = "spot"
+type = "f64"
+
+[[cvi_wide.slice]]
+column = "forward"
+label = "fwd"
+format = { precision = 3 }
+
+[[cvi_wide.slice]]
+column = "atm"
+label = "atm"
+
+[[cvi_wide.slice]]
+column = "skew"
+label = "skew"
+"#;
 
     #[test]
     fn appdata_wins_when_set() {
@@ -828,47 +912,96 @@ mod tests {
         assert_eq!(docs.len(), 1);
     }
 
-    /// Both document kinds have add-tile actions, while only the CVI factory
-    /// contributes the shared marketdata keymap. Dividend disables its fragment
-    /// to avoid duplicate bindings without losing its roster entry.
-    #[test]
-    fn the_second_panel_ships_no_second_fragment_but_still_gets_an_add_tile_row() {
-        use geode_data::DataHandle;
-        use geode_marketdata::core::{CVI, DIVIDEND};
+    /// Every panel keeps its own add-tile rows; the shared `marketdata`
+    /// fragment ships once however many panels there are.
+    #[gpui::test]
+    fn the_second_panel_ships_no_second_fragment_but_still_gets_an_add_tile_row(
+        cx: &mut gpui::TestAppContext,
+    ) {
         use geode_shell::actions::ActionId;
-
+        let dir = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(user.path().join("panels.toml"), WIDE_CVI_PANEL).unwrap();
+        let (config, _) = ShellServices::config_and_builtin(ConfigSources {
+            builtin: builtin_layer(Some(dir.path())),
+            desk: None,
+            user: Some(user.path().to_path_buf()),
+        });
+        let setup = bridge::data_setup(
+            &config,
+            dir.path().join("geode.duckdb"),
+            geode_data::adapter::AdapterRegistry::default(),
+            geode_data::PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
+        )
+        .unwrap();
+        assert!(
+            setup.panel_diagnostics.is_empty(),
+            "{:?}",
+            setup.panel_diagnostics
+        );
+        let bridge =
+            cx.update(|cx| bridge::start(setup, FindStyle::default(), Duration::from_secs(60), cx));
         let mut roster = ModuleRoster::new();
-        let (data, _rx) = DataHandle::for_tests();
-        roster.add(Box::new(Rc::new(MarketDataFactory::new(
-            data.clone(),
-            &CVI,
-            Duration::from_secs(60),
-        ))));
-        roster.add(Box::new(Rc::new(
-            MarketDataFactory::new(data, &DIVIDEND, Duration::from_secs(60)).without_keymap(),
-        )));
-
+        add_bridge_modules(&mut roster, &bridge);
         let (docs, diags) = roster.keymap_fragments();
         assert!(diags.is_empty(), "{diags:?}");
+        let marketdata: Vec<String> = docs
+            .iter()
+            .map(|d| d.file.to_string_lossy().into_owned())
+            .filter(|f| {
+                ["<module:cvi>", "<module:dividend>", "<module:cvi_wide>"].contains(&f.as_str())
+            })
+            .collect();
         assert_eq!(
-            docs.len(),
-            1,
-            "the second factory must not splice its own fragment doc"
+            marketdata,
+            ["<module:cvi>"],
+            "one fragment for three panels"
         );
-        assert_eq!(docs[0].file.to_string_lossy(), "<module:cvi>");
-
         let mut registry = ActionRegistry::default();
         register_add_actions(&mut registry, &roster.kinds());
-        let dividend_split = registry
-            .get(&ActionId("tile::add_dividend".to_string()))
-            .expect("the dividend kind still gets an add-tile row");
-        assert_eq!(dividend_split.title, "Dividend: Split");
-        assert!(
-            registry
-                .get(&ActionId("tile::add_cvi".to_string()))
-                .is_some(),
-            "the cvi kind keeps its own row"
-        );
+        for (kind, title) in [
+            ("cvi", "Cvi"),
+            ("dividend", "Dividend"),
+            ("cvi_wide", "Cvi_wide"),
+        ] {
+            assert_eq!(
+                registry
+                    .get(&ActionId(format!("tile::add_{kind}")))
+                    .unwrap_or_else(|| panic!("{kind} has an add-tile row"))
+                    .title,
+                format!("{title}: Split")
+            );
+        }
+        bridge.handle.shutdown();
+    }
+
+    /// `MODULE_KINDS` names every non-panel kind the production roster holds,
+    /// so a panel can never shadow one.
+    #[gpui::test]
+    fn module_kinds_name_every_other_production_module(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, _) = ShellServices::config_and_builtin(ConfigSources {
+            builtin: builtin_layer(Some(dir.path())),
+            ..ConfigSources::default()
+        });
+        let setup = bridge::data_setup(
+            &config,
+            dir.path().join("geode.duckdb"),
+            geode_data::adapter::AdapterRegistry::default(),
+            geode_data::PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
+        )
+        .unwrap();
+        let bridge =
+            cx.update(|cx| bridge::start(setup, FindStyle::default(), Duration::from_secs(60), cx));
+        let mut roster = ModuleRoster::new();
+        add_bridge_modules(&mut roster, &bridge);
+        let panels: Vec<&str> = bridge.panels.iter().map(|f| f.kind()).collect();
+        for kind in roster.kinds().into_iter().filter(|k| !panels.contains(k)) {
+            assert!(bridge::MODULE_KINDS.contains(&kind), "{kind}");
+        }
+        bridge.handle.shutdown();
     }
 
     /// The timeseries forwarder must expose the factory's kind, registered
@@ -974,10 +1107,10 @@ mod tests {
     }
 
     /// The production roster exposes `underlying_ref`-based launch state for
-    /// CVI and dividend, names that column in `context_columns`, and startup
-    /// hands that list to the data handle. Exercising startup's registration
-    /// path checks that shared factory forwarding preserves `accepts` and
-    /// `launch_state`.
+    /// every accepted panel (the builtin CVI and dividend here), names that
+    /// column in `context_columns`, and startup hands that list to the data
+    /// handle. Exercising startup's registration path checks that shared
+    /// factory forwarding preserves `accepts` and `launch_state`.
     #[gpui::test]
     fn the_production_roster_opens_market_data_on_an_underlying(cx: &mut gpui::TestAppContext) {
         use geode_core::context::DimensionContext;
@@ -1022,6 +1155,375 @@ mod tests {
             vec!["underlying_ref".to_string()],
             "startup hands the roster's context columns to the data service"
         );
+    }
+
+    struct NoLevels;
+    impl LevelControl for NoLevels {
+        fn set(&self, _: &LogLevels) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// The real startup composition over a temporary demo root with `user`
+    /// as the user layer and no desk layer, the session restored as `main`
+    /// restores it. Never the real config directories.
+    fn compose(
+        cx: &mut gpui::TestAppContext,
+        demo: &Path,
+        user: &Path,
+    ) -> (ShellServices, bridge::Bridge) {
+        let mut pricers = geode_data::PricerRegistry::default();
+        pricers.register(Arc::new(geode_pricing::MockPricer::new()));
+        let (mut services, _desk, _user, bridge, _diagnostics) = cx.update(|cx| {
+            build_shell_services(
+                Some(demo),
+                (None, Some(user.to_path_buf())),
+                Arc::new(Ring::new(16)),
+                Arc::new(NoLevels),
+                geode_data::adapter::AdapterRegistry::default(),
+                pricers,
+                geode_data::VolModelRegistry::default(),
+                cx,
+            )
+        });
+        restore_session(&mut services);
+        (
+            services,
+            bridge.expect("the demo layer declares datasets and views"),
+        )
+    }
+
+    /// A session whose workspace 1 holds one focused tile of `kind`.
+    fn write_session(user: &Path, kind: &str) {
+        let mut table = session::to_toml(
+            &Workspaces::new(),
+            &session::TileRecords::new(),
+            None,
+            &session::PinnedRecords::new(),
+            &geode_shell::palette_usage::PaletteUsage::new(),
+            &session::PageRecords::new(),
+        );
+        let ws1: toml::Table = format!(
+            "focused = 1\n[node]\nkind = \"leaf\"\nid = 1\n[tiles.1]\nmodule = \"{kind}\"\n"
+        )
+        .parse()
+        .unwrap();
+        let Some(toml::Value::Table(ws)) = table.get_mut("workspaces") else {
+            panic!("to_toml writes a workspaces table");
+        };
+        ws.insert("1".to_string(), toml::Value::Table(ws1));
+        std::fs::write(user.join("session.toml"), toml::to_string(&table).unwrap()).unwrap();
+    }
+
+    /// Open the shell window as `main` does, market-data key overrides
+    /// after component init, and paint one frame. The bridge is not
+    /// attached: its event drain would be woken from the real data thread,
+    /// which gpui's test scheduler refuses as nondeterministic.
+    fn open(
+        cx: &mut gpui::TestAppContext,
+        services: ShellServices,
+    ) -> (gpui::WindowHandle<Root>, gpui::VisualTestContext) {
+        cx.update(gpui_component::init);
+        cx.update(geode_marketdata::init);
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(services, None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        vcx.run_until_parked();
+        (window, vcx)
+    }
+
+    fn shell_of(
+        window: &gpui::WindowHandle<Root>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> gpui::Entity<ShellView> {
+        window
+            .read_with(cx, |root, _| root.view().clone())
+            .unwrap()
+            .downcast::<ShellView>()
+            .unwrap()
+    }
+
+    /// A user panel over `cvi_params` becomes a tile kind: it restores from
+    /// a session, its factory carries the configured spec, `g m` offers it,
+    /// and the shared marketdata keys reach it. That it paints its own
+    /// title and formats is `geode-marketdata`'s
+    /// `a_user_layer_panel_paints_its_own_title_and_formats`.
+    #[gpui::test]
+    fn a_user_panel_over_cvi_params_becomes_a_working_tile_kind(cx: &mut gpui::TestAppContext) {
+        use geode_shell::diagnostics::fnv1a;
+        use geode_shell::tiling::TileId;
+        let demo = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(user.path().join("panels.toml"), WIDE_CVI_PANEL).unwrap();
+        write_session(user.path(), "cvi_wide");
+        let (services, bridge) = compose(cx, demo.path(), user.path());
+        assert!(
+            services.composition_diagnostics.is_empty(),
+            "{:?}",
+            services.composition_diagnostics
+        );
+        assert!(services.roster.kinds().contains(&"cvi_wide"));
+        let wide = bridge
+            .panels
+            .iter()
+            .find(|f| f.kind() == "cvi_wide")
+            .expect("the user panel has a factory");
+        assert_eq!(wide.spec().title, "CVI (wide)");
+        assert_eq!(wide.spec().format.precision, 6);
+        assert_eq!(
+            wide.spec().slice_value("forward").unwrap().format.precision,
+            3
+        );
+        assert_eq!(
+            wide.accepts(),
+            &["underlying_ref"],
+            "`g m` offers every panel"
+        );
+        let tail = services.action_tail.clone();
+        let (window, mut vcx) = open(cx, services);
+        let shell = shell_of(&window, &mut vcx);
+        assert_eq!(
+            shell.read_with(&vcx, |s, _| s.occupant_kind(TileId(1))),
+            Some("cvi_wide")
+        );
+        vcx.simulate_keystrokes(".");
+        vcx.run_until_parked();
+        let menu = fnv1a("marketdata::menu");
+        assert_eq!(
+            tail.lock().unwrap().recent().filter(|h| *h == menu).count(),
+            1,
+            "the shared marketdata keys reach the configured panel"
+        );
+        bridge.handle.shutdown();
+    }
+
+    /// Existing sessions keep working: a saved `cvi` tile restores as the
+    /// config-built CVI panel, not a placeholder.
+    #[gpui::test]
+    fn a_saved_cvi_tile_restores_as_the_config_built_cvi_panel(cx: &mut gpui::TestAppContext) {
+        use geode_shell::tiling::TileId;
+        let demo = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        write_session(user.path(), "cvi");
+        let (services, bridge) = compose(cx, demo.path(), user.path());
+        let (window, mut vcx) = open(cx, services);
+        let shell = shell_of(&window, &mut vcx);
+        assert_eq!(
+            shell.read_with(&vcx, |s, _| s.occupant_kind(TileId(1))),
+            Some("cvi")
+        );
+        bridge.handle.shutdown();
+    }
+
+    /// A panel named `cvi_stacked` would register `tile::add_cvi_stacked`,
+    /// the builtin CVI panel's stack id: once a registry panic at startup.
+    /// It is refused by name, and CVI keeps its own stack row.
+    #[gpui::test]
+    fn a_panel_named_like_another_kinds_placement_is_refused_without_panicking(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use geode_shell::actions::ActionId;
+        let demo = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(
+            user.path().join("panels.toml"),
+            WIDE_CVI_PANEL.replace("cvi_wide", "cvi_stacked"),
+        )
+        .unwrap();
+        let (services, bridge) = compose(cx, demo.path(), user.path());
+        assert_eq!(
+            services
+                .composition_diagnostics
+                .iter()
+                .map(|d| d.path.as_deref().unwrap_or("-"))
+                .collect::<Vec<_>>(),
+            ["panels.cvi_stacked"]
+        );
+        assert!(!services.roster.kinds().contains(&"cvi_stacked"));
+        assert_eq!(
+            services
+                .registry
+                .get(&ActionId("tile::add_cvi_stacked".into()))
+                .expect("the CVI panel's stack row")
+                .title,
+            "Cvi: Stack"
+        );
+        bridge.handle.shutdown();
+    }
+
+    /// A refused panel is absent from the tile picker, and its Error reaches
+    /// the status bar's config count and the diagnostics tile through the
+    /// real startup composition.
+    #[gpui::test]
+    fn a_refused_panel_is_absent_from_the_picker_and_named_in_diagnostics(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use geode_shell::actions::ActionId;
+        let demo = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        let bad = WIDE_CVI_PANEL.replace("cvi_wide", "vol_bad").replacen(
+            "dataset = \"cvi_params\"",
+            "dataset = \"nonesuch\"",
+            1,
+        );
+        std::fs::write(user.path().join("panels.toml"), bad).unwrap();
+        let (services, bridge) = compose(cx, demo.path(), user.path());
+        assert!(!services.roster.kinds().contains(&"vol_bad"));
+        assert!(
+            services
+                .registry
+                .get(&ActionId("tile::add_vol_bad".into()))
+                .is_none(),
+            "no add-tile row, so no picker entry"
+        );
+        let (window, mut vcx) = open(cx, services);
+        let shell = shell_of(&window, &mut vcx);
+        let (summary, named) = shell.read_with(&vcx, |s, cx| {
+            let d = s.diagnostics().read(cx);
+            (
+                d.summary().to_string(),
+                d.config
+                    .iter()
+                    .any(|d| d.path.as_deref() == Some("panels.vol_bad.dataset")),
+            )
+        });
+        assert!(summary.contains("config 1 error"), "{summary}");
+        assert!(named, "the diagnostics tile names the refused panel");
+        bridge.handle.shutdown();
+    }
+
+    /// The likeliest real refusal: a user `[cvi]` holding only a title
+    /// replaces the builtin whole and is refused. A saved `cvi` tile
+    /// restores as the placeholder and its record is kept, so a fix and a
+    /// restart bring it back.
+    #[gpui::test]
+    fn a_partial_cvi_override_is_refused_and_saved_cvi_tiles_keep_their_records(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use geode_shell::tiling::TileId;
+        let demo = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(
+            user.path().join("panels.toml"),
+            "config_version = 1\n[cvi]\ntitle = \"Mine\"\n",
+        )
+        .unwrap();
+        write_session(user.path(), "cvi");
+        let (services, bridge) = compose(cx, demo.path(), user.path());
+        assert_eq!(
+            services
+                .composition_diagnostics
+                .iter()
+                .map(|d| d.path.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ["panels.cvi.dataset"]
+        );
+        let path = services.session_path.clone().unwrap();
+        let (window, mut vcx) = open(cx, services);
+        let shell = shell_of(&window, &mut vcx);
+        assert_eq!(
+            shell.read_with(&vcx, |s, _| s.occupant_kind(TileId(1))),
+            Some(geode_shell::module::placeholder::PLACEHOLDER_KIND)
+        );
+        shell.read_with(&vcx, |s, cx| s.save_session(cx));
+        assert_eq!(
+            session::load(&path).tiles.get(&1).map(|r| r.kind.as_str()),
+            Some("cvi"),
+            "the record is kept for a later restart"
+        );
+        bridge.handle.shutdown();
+    }
+
+    /// Editing `panels` paints `restart required` and changes nothing in
+    /// the running shell: the open panel keeps its kind and its title, and
+    /// a panel the edit adds gets no roster kind and no add-tile action.
+    #[gpui::test]
+    fn editing_panels_asks_for_a_restart_and_changes_no_open_panel(cx: &mut gpui::TestAppContext) {
+        use geode_shell::actions::ActionId;
+        use geode_shell::tiling::TileId;
+        let demo = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(user.path().join("panels.toml"), WIDE_CVI_PANEL).unwrap();
+        write_session(user.path(), "cvi_wide");
+        let (services, bridge) = compose(cx, demo.path(), user.path());
+        let builtin = services.builtin.clone();
+        let (window, mut vcx) = open(cx, services);
+        let shell = shell_of(&window, &mut vcx);
+        let title = |vcx: &gpui::VisualTestContext| {
+            shell.read_with(vcx, |s, cx| {
+                s.occupant_title(TileId(1), cx).map(|t| t.to_string())
+            })
+        };
+        assert_eq!(title(&vcx).as_deref(), Some("CVI (wide)"));
+        assert_eq!(
+            shell.read_with(&vcx, |s, cx| s
+                .diagnostics()
+                .read(cx)
+                .restart_required
+                .clone()),
+            None,
+            "a clean start asks for nothing"
+        );
+        std::fs::write(
+            user.path().join("panels.toml"),
+            format!(
+                "{}\n{}",
+                WIDE_CVI_PANEL.replace("CVI (wide)", "CVI (renamed)"),
+                WIDE_CVI_PANEL
+                    .replace("config_version = 1\n", "")
+                    .replace("cvi_wide", "cvi_new")
+            ),
+        )
+        .unwrap();
+        let candidate = Config::load(&ConfigSources {
+            builtin,
+            desk: None,
+            user: Some(user.path().to_path_buf()),
+        });
+        shell.update(&mut vcx, |s, cx| s.apply_reload_for_test(candidate, cx));
+        vcx.run_until_parked();
+        let restart = shell.read_with(&vcx, |s, cx| {
+            s.diagnostics().read(cx).restart_required.clone()
+        });
+        assert!(
+            restart.as_deref().is_some_and(|m| m.contains("panels")),
+            "{restart:?}"
+        );
+        assert_eq!(
+            shell.read_with(&vcx, |s, _| s.occupant_kind(TileId(1))),
+            Some("cvi_wide")
+        );
+        assert_eq!(
+            title(&vcx).as_deref(),
+            Some("CVI (wide)"),
+            "the open panel keeps its title, not the edited one"
+        );
+        let (kinds, add_row, startup_row) = shell.read_with(&vcx, |s, _| {
+            let registry = &s.services().registry;
+            (
+                s.services().roster.kinds(),
+                registry
+                    .get(&ActionId("tile::add_cvi_new".into()))
+                    .is_some(),
+                registry
+                    .get(&ActionId("tile::add_cvi_wide".into()))
+                    .is_some(),
+            )
+        });
+        assert!(startup_row, "the startup panel's add-tile action is there");
+        assert!(kinds.contains(&"cvi_wide"), "{kinds:?}");
+        assert!(!kinds.contains(&"cvi_new"), "{kinds:?}");
+        assert!(!add_row, "no add-tile action for a panel added mid-session");
+        bridge.handle.shutdown();
     }
 
     /// Production workspace source uses tracing so level filters and the

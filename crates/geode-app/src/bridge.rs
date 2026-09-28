@@ -7,7 +7,9 @@ use geode_blotter::BlotterFactory;
 use geode_core::colour::NamedColours;
 use geode_core::config::{Config, Diagnostic, Layer, LayerDoc, Severity, load_views, merge_docs};
 use geode_core::dimensions::DerivedDimensions;
+use geode_core::document::DocumentKind;
 use geode_core::egress_config;
+use geode_core::panel::{KindActionRegistry, PANELS_DOC, PanelSpec, load_panels, refusal};
 use geode_core::query::{CatalogParams, DistinctOutcome};
 use geode_core::schema::SchemaSpec;
 use geode_core::source_config::{SourceShape, parse_duration};
@@ -20,7 +22,6 @@ use geode_data::{
     Refusal, VolConfig, VolModelRegistry,
 };
 use geode_marketdata::MarketDataFactory;
-use geode_marketdata::core::{CVI, DIVIDEND};
 use geode_pricer::content::{PricerFactory, PricerSettings, UnderlyingList};
 use geode_pricer::core::{
     PRICER_DATASET, PRICER_DATASET_DECLARATION, PRICER_SHEETS_DATASET, PRICER_SHEETS_DECLARATION,
@@ -28,6 +29,7 @@ use geode_pricer::core::{
 };
 use geode_pricer::store::DuckSheetStore;
 use geode_shell::diagnostics::{CatalogRequest, Diagnostics, SourceSummary};
+use geode_shell::module::placeholder::PLACEHOLDER_KIND;
 use geode_shell::module::{Delivery, UploadDelivery};
 use geode_shell::shell::{DIAGNOSTICS_KEY, ShellEvent, ShellView};
 use geode_shell::vimfind::FindStyle;
@@ -64,6 +66,53 @@ pub struct DataSetup {
     /// What the pricer read out of this config (`pricer_config_key`), so
     /// the reload observer can tell a reload that changed none of it.
     pub pricer_key: PricerConfigKey,
+    /// The accepted market-data panels in `panels` document order, and an
+    /// Error per refused panel for the shell's config section.
+    pub panels: Vec<PanelSpec>,
+    pub panel_diagnostics: Vec<Diagnostic>,
+}
+
+/// Tile and page kinds other modules own. A panel of one of these names
+/// would put two factories behind one kind, and a saved blotter could
+/// restore as a panel. `diagnostics` is a page kind; it also names the
+/// page's keymap context and session table, so a panel may not take it.
+pub(crate) const MODULE_KINDS: &[&str] = &[
+    "blotter",
+    "timeseries",
+    "pricer",
+    "diagnostics",
+    PLACEHOLDER_KIND,
+];
+
+/// Every kind action this build registers. Adding a verb is code: its
+/// handler lives in the module that dispatches it.
+fn kind_actions() -> KindActionRegistry {
+    geode_marketdata::core::builtin_kind_actions()
+}
+
+/// The accepted panels, in `panels` document order, and an Error per refused
+/// one. `panels` is restart-required, so this runs once per launch.
+fn load_panels_from_config(
+    config: &Config,
+    schema: &SchemaSpec,
+    documents: &[Arc<dyn DocumentKind>],
+) -> (Vec<PanelSpec>, Vec<Diagnostic>) {
+    let Some(doc) = config.doc(PANELS_DOC) else {
+        return (Vec::new(), Vec::new());
+    };
+    let (panels, mut diags) = load_panels(doc, &kind_actions(), schema, documents);
+    let (panels, taken): (Vec<PanelSpec>, Vec<PanelSpec>) = panels
+        .into_iter()
+        .partition(|p| !MODULE_KINDS.contains(&p.kind.as_str()));
+    diags.extend(taken.iter().map(|p| {
+        refusal(
+            doc,
+            &p.kind,
+            "",
+            &format!("'{}' is another module's tile kind", p.kind),
+        )
+    }));
+    (panels, diags)
 }
 
 /// Build setup when both datasets and views documents are present. Empty
@@ -178,6 +227,10 @@ pub fn data_setup(
         refresh,
         stale_after: Duration::default(),
     };
+    // One set of document kinds: the panels are checked against exactly
+    // the kinds the service registers.
+    let document_kinds = geode_documents::builtin_kinds();
+    let (panels, panel_diagnostics) = load_panels_from_config(config, &schema, &document_kinds);
     let local_datasets: HashSet<String> = schema
         .datasets
         .iter()
@@ -195,7 +248,7 @@ pub fn data_setup(
             adapters,
             documents: {
                 let mut documents = DocumentRegistry::default();
-                for kind in geode_documents::builtin_kinds() {
+                for kind in document_kinds {
                     documents.register(kind);
                 }
                 documents
@@ -214,6 +267,8 @@ pub fn data_setup(
         pricer_settings,
         pricer_underlyings,
         pricer_key: pricer_config_key(config),
+        panels,
+        panel_diagnostics,
     })
 }
 
@@ -505,12 +560,9 @@ fn make_sink(tx: crate::events::Sender, dropped: Arc<AtomicU64>) -> EventSink {
 pub struct Bridge {
     pub handle: DataHandle,
     pub factory: Rc<BlotterFactory>,
-    /// CVI factory sharing this bridge's handle. Retained for reload updates to
-    /// the stale threshold.
-    pub marketdata: Rc<MarketDataFactory>,
-    /// Dividend factory sharing the marketdata context. Suppress its duplicate
-    /// keymap fragment while retaining its own actions and stale threshold.
-    pub dividend: Rc<MarketDataFactory>,
+    /// One factory per accepted panel, in `panels` document order. Retained
+    /// for reload updates to the shared stale threshold.
+    pub panels: Vec<Rc<MarketDataFactory>>,
     /// Timeseries factory sharing the data handle and named colors. Retained
     /// so reload can update the chart palette.
     pub timeseries: Rc<geode_timeseries::content::TimeseriesFactory>,
@@ -533,6 +585,32 @@ pub struct Bridge {
     /// skipped from the first one. `None` when the factory's config is
     /// unknown: the first reload then always applies.
     pub pricer_key: Option<PricerConfigKey>,
+}
+
+/// One factory per accepted panel. Only the first ships the shared
+/// `marketdata` keymap fragment: every panel declares the same context and
+/// bindings, and a second copy would splice a duplicate layer. Each factory
+/// narrows the shared egress targets to its own document.
+fn panel_factories(
+    handle: &DataHandle,
+    panels: Vec<PanelSpec>,
+    stale_after: Duration,
+    egress: &Arc<Vec<(String, Vec<String>)>>,
+) -> Vec<Rc<MarketDataFactory>> {
+    panels
+        .into_iter()
+        .enumerate()
+        .map(|(i, spec)| {
+            let ships_keymap = i == 0;
+            let factory = MarketDataFactory::new(handle.clone(), Arc::new(spec), stale_after)
+                .with_egress(egress.clone());
+            Rc::new(if ships_keymap {
+                factory
+            } else {
+                factory.without_keymap()
+            })
+        })
+        .collect()
 }
 
 /// Pair sources with their pipeline using the service's startup schema.
@@ -562,8 +640,9 @@ pub fn start(
     let dimensions = setup.dimensions.clone();
     let sources = source_shapes(&setup.config.sources, &schema);
     let local_datasets = Rc::new(setup.local_datasets);
-    // Target names and accepted documents in `egress.toml` order. Both document
-    // factories share the resolved list; each narrows it to its document kind
+    let panels = setup.panels;
+    // Target names and accepted documents in `egress.toml` order. Every panel
+    // factory shares the resolved list; each narrows it to its document kind
     // when creating a tile.
     let egress_targets: Arc<Vec<(String, Vec<String>)>> = Arc::new(
         setup
@@ -615,24 +694,10 @@ pub fn start(
         // pricer view column resolves against them.
         .with_colours(setup.colours),
     );
+    // Panels and blotters use the same configured stale threshold.
+    let panels = panel_factories(&handle, panels, stale_after, &egress_targets);
     Bridge {
-        marketdata: Rc::new(
-            MarketDataFactory::new(
-                handle.clone(),
-                &CVI,
-                // Document panels and blotters use the same configured stale threshold.
-                stale_after,
-            )
-            .with_egress(egress_targets.clone()),
-        ),
-        // Both document kinds share the marketdata keymap context. Register its
-        // fragment once, while each factory keeps its own actions and filters the
-        // shared egress targets to its document kind.
-        dividend: Rc::new(
-            MarketDataFactory::new(handle.clone(), &DIVIDEND, stale_after)
-                .without_keymap()
-                .with_egress(egress_targets),
-        ),
+        panels,
         timeseries,
         pricer,
         underlyings,
@@ -730,8 +795,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
     let dropped = bridge.dropped.clone();
     let handle = bridge.handle.clone();
     let factory = bridge.factory.clone();
-    let marketdata = bridge.marketdata.clone();
-    let dividend = bridge.dividend.clone();
+    let panels = bridge.panels.clone();
     let timeseries = bridge.timeseries.clone();
 
     let shell = window
@@ -808,8 +872,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
     cx.subscribe(&shell, {
         let handle = handle.clone();
         let factory = factory.clone();
-        let marketdata = marketdata.clone();
-        let dividend = dividend.clone();
+        let panels = panels.clone();
         let timeseries = timeseries.clone();
         let diagnostics = diagnostics.clone();
         move |shell, event: &ShellEvent, cx| match event {
@@ -849,10 +912,10 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 factory.set_find_style(FindStyle::from_config(config));
                 let stale_after = stale_after_from_config(config);
                 factory.set_stale_after(stale_after);
-                // Document panels share the same stale threshold and reload trigger.
-                marketdata.set_stale_after(stale_after);
-                // Apply the shared threshold to the dividend factory as well.
-                dividend.set_stale_after(stale_after);
+                // Every panel shares the one stale threshold and reload trigger.
+                for panel in &panels {
+                    panel.set_stale_after(stale_after);
+                }
                 // Refresh the factory's validation schema from current config. Dataset-only
                 // edits require restart and do not emit ConfigReloaded; a later eligible
                 // reload can update this factory before the service's schema is rebuilt.
@@ -1317,6 +1380,7 @@ mod tests {
     use geode_core::query::{AsOf, CatalogOutcome, CatalogSnapshot, QueryKey};
     use geode_data::source::SourceSpec;
     use geode_diagnostics::DiagnosticsPageFactory;
+    use geode_marketdata::core::builtin_panel;
     use geode_pricer::store::MemorySheetStore;
     use geode_shell::actions::ActionRegistry;
     use geode_shell::defaults::{
@@ -1535,6 +1599,7 @@ role = "key"
             keymap_diagnostics: Vec::new(),
             keymap_fragments: Vec::new(),
             keymap_fragment_diagnostics: Vec::new(),
+            composition_diagnostics: Vec::new(),
             pages: geode_shell::module::PageRoster::new(),
             restored_pages: std::collections::BTreeMap::new(),
         }
@@ -1578,6 +1643,7 @@ role = "key"
             keymap_diagnostics: Vec::new(),
             keymap_fragments: Vec::new(),
             keymap_fragment_diagnostics: Vec::new(),
+            composition_diagnostics: Vec::new(),
             pages: geode_shell::module::PageRoster::new(),
             restored_pages: std::collections::BTreeMap::new(),
         };
@@ -1656,15 +1722,7 @@ role = "key"
                 FindStyle::default(),
                 Duration::from_secs(900),
             )),
-            marketdata: Rc::new(MarketDataFactory::new(
-                handle.clone(),
-                &CVI,
-                Duration::from_secs(900),
-            )),
-            dividend: Rc::new(
-                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
-                    .without_keymap(),
-            ),
+            panels: Vec::new(),
             timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
                 handle.clone(),
                 NamedColours::default(),
@@ -3920,15 +3978,7 @@ role = "key"
         let (tx, rx) = crate::events::channel();
         let dropped = Arc::new(AtomicU64::new(0));
         let bridge = Bridge {
-            marketdata: Rc::new(MarketDataFactory::new(
-                handle.clone(),
-                &CVI,
-                Duration::from_secs(900),
-            )),
-            dividend: Rc::new(
-                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
-                    .without_keymap(),
-            ),
+            panels: Vec::new(),
             timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
                 handle.clone(),
                 NamedColours::default(),
@@ -4033,15 +4083,7 @@ role = "key"
         ));
         let (tx, events) = crate::events::channel();
         let bridge = Bridge {
-            marketdata: Rc::new(MarketDataFactory::new(
-                handle.clone(),
-                &CVI,
-                Duration::from_secs(900),
-            )),
-            dividend: Rc::new(
-                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
-                    .without_keymap(),
-            ),
+            panels: Vec::new(),
             timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
                 handle.clone(),
                 NamedColours::default(),
@@ -4138,15 +4180,7 @@ role = "key"
         let (tx, rx) = crate::events::channel();
         let dropped = Arc::new(AtomicU64::new(0));
         let bridge = Bridge {
-            marketdata: Rc::new(MarketDataFactory::new(
-                handle.clone(),
-                &CVI,
-                Duration::from_secs(900),
-            )),
-            dividend: Rc::new(
-                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
-                    .without_keymap(),
-            ),
+            panels: Vec::new(),
             timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
                 handle.clone(),
                 NamedColours::default(),
@@ -4262,15 +4296,7 @@ role = "key"
         ));
         let (tx, rx) = crate::events::channel();
         let bridge = Bridge {
-            marketdata: Rc::new(MarketDataFactory::new(
-                handle.clone(),
-                &CVI,
-                Duration::from_secs(900),
-            )),
-            dividend: Rc::new(
-                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
-                    .without_keymap(),
-            ),
+            panels: Vec::new(),
             timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
                 handle.clone(),
                 NamedColours::default(),
@@ -4328,15 +4354,7 @@ role = "key"
         ));
         let (tx, rx) = crate::events::channel();
         let bridge = Bridge {
-            marketdata: Rc::new(MarketDataFactory::new(
-                handle.clone(),
-                &CVI,
-                Duration::from_secs(900),
-            )),
-            dividend: Rc::new(
-                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
-                    .without_keymap(),
-            ),
+            panels: Vec::new(),
             timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
                 handle.clone(),
                 NamedColours::default(),
@@ -4400,15 +4418,7 @@ role = "key"
         ));
         let (tx, rx) = crate::events::channel();
         let bridge = Bridge {
-            marketdata: Rc::new(MarketDataFactory::new(
-                handle.clone(),
-                &CVI,
-                Duration::from_secs(900),
-            )),
-            dividend: Rc::new(
-                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
-                    .without_keymap(),
-            ),
+            panels: Vec::new(),
             timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
                 handle.clone(),
                 NamedColours::default(),
@@ -4465,15 +4475,7 @@ role = "key"
         let (tx, rx) = crate::events::channel();
         let dropped = Arc::new(AtomicU64::new(0));
         let bridge = Bridge {
-            marketdata: Rc::new(MarketDataFactory::new(
-                handle.clone(),
-                &CVI,
-                Duration::from_secs(900),
-            )),
-            dividend: Rc::new(
-                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
-                    .without_keymap(),
-            ),
+            panels: Vec::new(),
             timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
                 handle.clone(),
                 NamedColours::default(),
@@ -4563,15 +4565,7 @@ role = "key"
         ));
         let (_tx, rx) = crate::events::channel();
         let bridge = Bridge {
-            marketdata: Rc::new(MarketDataFactory::new(
-                handle.clone(),
-                &CVI,
-                Duration::from_secs(900),
-            )),
-            dividend: Rc::new(
-                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
-                    .without_keymap(),
-            ),
+            panels: Vec::new(),
             timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
                 handle.clone(),
                 NamedColours::default(),
@@ -4640,15 +4634,7 @@ role = "key"
         ));
         let (_tx, rx) = crate::events::channel();
         let bridge = Bridge {
-            marketdata: Rc::new(MarketDataFactory::new(
-                handle.clone(),
-                &CVI,
-                Duration::from_secs(900),
-            )),
-            dividend: Rc::new(
-                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
-                    .without_keymap(),
-            ),
+            panels: Vec::new(),
             timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
                 handle.clone(),
                 NamedColours::default(),
@@ -4712,15 +4698,7 @@ role = "key"
         ));
         let (_tx, rx) = crate::events::channel();
         let bridge = Bridge {
-            marketdata: Rc::new(MarketDataFactory::new(
-                handle.clone(),
-                &CVI,
-                Duration::from_secs(900),
-            )),
-            dividend: Rc::new(
-                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
-                    .without_keymap(),
-            ),
+            panels: Vec::new(),
             timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
                 handle.clone(),
                 NamedColours::default(),
@@ -4817,15 +4795,7 @@ role = "key"
         ));
         let (tx, rx) = crate::events::channel();
         let bridge = Bridge {
-            marketdata: Rc::new(MarketDataFactory::new(
-                handle.clone(),
-                &CVI,
-                Duration::from_secs(900),
-            )),
-            dividend: Rc::new(
-                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
-                    .without_keymap(),
-            ),
+            panels: Vec::new(),
             timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
                 handle.clone(),
                 NamedColours::default(),
@@ -4918,15 +4888,7 @@ role = "key"
         ));
         let (_tx, rx) = crate::events::channel();
         let bridge = Bridge {
-            marketdata: Rc::new(MarketDataFactory::new(
-                handle.clone(),
-                &CVI,
-                Duration::from_secs(900),
-            )),
-            dividend: Rc::new(
-                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
-                    .without_keymap(),
-            ),
+            panels: Vec::new(),
             timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
                 handle.clone(),
                 NamedColours::default(),
@@ -4986,15 +4948,7 @@ role = "key"
         ));
         let (tx, rx) = crate::events::channel();
         let bridge = Bridge {
-            marketdata: Rc::new(MarketDataFactory::new(
-                handle.clone(),
-                &CVI,
-                Duration::from_secs(900),
-            )),
-            dividend: Rc::new(
-                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
-                    .without_keymap(),
-            ),
+            panels: Vec::new(),
             timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
                 handle.clone(),
                 NamedColours::default(),
@@ -5133,15 +5087,7 @@ role = "key"
         ));
         let (_tx, rx) = crate::events::channel();
         let bridge = Bridge {
-            marketdata: Rc::new(MarketDataFactory::new(
-                handle.clone(),
-                &CVI,
-                Duration::from_secs(900),
-            )),
-            dividend: Rc::new(
-                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
-                    .without_keymap(),
-            ),
+            panels: Vec::new(),
             timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
                 handle.clone(),
                 NamedColours::default(),
@@ -5618,7 +5564,7 @@ role = "key"
     fn start_builds_a_timeseries_factory_beside_the_blotters(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let config = Config::load(&ConfigSources {
-            builtin: crate::demo::layer(&dir.path().join("src")),
+            builtin: crate::builtin_layer(Some(dir.path())),
             ..ConfigSources::default()
         });
         let mut pricers = geode_data::PricerRegistry::default();
@@ -5636,12 +5582,121 @@ role = "key"
         assert_eq!(bridge.timeseries.kind(), "timeseries");
         // Each factory must retain the kind used for roster and session lookup.
         assert_eq!(bridge.factory.kind(), "blotter");
-        assert_eq!(bridge.marketdata.kind(), "cvi");
-        assert_eq!(bridge.dividend.kind(), "dividend");
+        assert_eq!(
+            bridge.panels.iter().map(|f| f.kind()).collect::<Vec<_>>(),
+            ["cvi", "dividend"]
+        );
         assert_eq!(
             bridge.pricer_key,
             Some(pricer_config_key(&config)),
             "the reload observer is seeded with the key the factory was built from"
+        );
+    }
+
+    /// The demo composition over the builtin layer `main` assembles.
+    fn demo_setup(dir: &std::path::Path, user: Option<&std::path::Path>) -> DataSetup {
+        let config = Config::load(&ConfigSources {
+            builtin: crate::builtin_layer(Some(dir)),
+            desk: None,
+            user: user.map(std::path::Path::to_path_buf),
+        });
+        data_setup(
+            &config,
+            dir.join("geode.duckdb"),
+            AdapterRegistry::default(),
+            geode_data::PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
+        )
+        .expect("the demo layer declares datasets and views")
+    }
+
+    #[test]
+    fn the_builtin_panels_load_clean_over_the_demo_datasets() {
+        let dir = tempfile::tempdir().unwrap();
+        let setup = demo_setup(dir.path(), None);
+        assert!(
+            setup.panel_diagnostics.is_empty(),
+            "{:?}",
+            setup.panel_diagnostics
+        );
+        assert_eq!(
+            setup
+                .panels
+                .iter()
+                .map(|p| p.kind.as_str())
+                .collect::<Vec<_>>(),
+            ["cvi", "dividend"]
+        );
+        assert_eq!(setup.panels[0], *builtin_panel("cvi"));
+    }
+
+    /// A saved blotter must never restore as a panel: a panel named after
+    /// another module's kind is refused by name and the rest load.
+    #[test]
+    fn a_panel_named_after_another_module_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        let blotter = geode_marketdata::core::BUILTIN_PANELS
+            .split("\n[dividend]")
+            .next()
+            .unwrap()
+            .replace("[cvi]", "[blotter]")
+            .replace("cvi.", "blotter.");
+        std::fs::write(
+            user.path().join("panels.toml"),
+            format!("config_version = 1\n{blotter}"),
+        )
+        .unwrap();
+        let setup = demo_setup(dir.path(), Some(user.path()));
+        assert_eq!(
+            setup
+                .panels
+                .iter()
+                .map(|p| p.kind.as_str())
+                .collect::<Vec<_>>(),
+            ["cvi", "dividend"]
+        );
+        assert_eq!(
+            setup.panel_diagnostics.len(),
+            1,
+            "{:?}",
+            setup.panel_diagnostics
+        );
+        assert_eq!(
+            setup.panel_diagnostics[0].path.as_deref(),
+            Some("panels.blotter")
+        );
+    }
+
+    /// A desk config with views but without the market-data datasets (they
+    /// are declared only by `--demo`): the builtin panels are refused by
+    /// name and no market-data kind exists. With no `views` doc at all,
+    /// `data_setup` is `None` and no data module starts, panels included.
+    #[test]
+    fn without_market_data_datasets_the_builtin_panels_are_refused_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut builtin = crate::builtin_layer(None);
+        builtin.push(LayerDoc::builtin("views", "").unwrap());
+        let config = Config::load(&ConfigSources {
+            builtin,
+            ..ConfigSources::default()
+        });
+        let setup = data_setup(
+            &config,
+            dir.path().join("geode.duckdb"),
+            AdapterRegistry::default(),
+            geode_data::PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
+        )
+        .expect("the pricer's builtin datasets and an empty views doc");
+        assert!(setup.panels.is_empty());
+        assert_eq!(
+            setup
+                .panel_diagnostics
+                .iter()
+                .map(|d| d.path.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ["panels.cvi.dataset", "panels.dividend.dataset"]
         );
     }
 
@@ -5679,15 +5734,7 @@ role = "key"
         ));
         let (tx, rx) = crate::events::channel();
         let bridge = Bridge {
-            marketdata: Rc::new(MarketDataFactory::new(
-                handle.clone(),
-                &CVI,
-                Duration::from_secs(900),
-            )),
-            dividend: Rc::new(
-                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
-                    .without_keymap(),
-            ),
+            panels: Vec::new(),
             timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
                 handle.clone(),
                 NamedColours::default(),
@@ -6220,7 +6267,7 @@ role = "key"
         )));
         roster.add(Box::new(MarketDataFactory::new(
             handle.clone(),
-            &CVI,
+            builtin_panel("cvi"),
             Duration::from_secs(900),
         )));
         roster.add(Box::new(PricerFactory::new(

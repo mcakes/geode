@@ -579,14 +579,36 @@ mod tests {
         );
     }
 
-    /// The panel and document parser must use the same dividend statuses.
-    /// The composition root verifies agreement without a feature-to-parser dependency.
+    /// The dividend panel the composition root loads declares its status
+    /// choices once, in its TOML; the parser and the demo generator must
+    /// offer exactly those. Only the composition root sees the loaded panel
+    /// and the parser together, without a feature-to-parser dependency.
     #[test]
     fn the_dividend_panel_specs_status_vocabulary_matches_the_dividend_kind() {
-        assert_eq!(
-            geode_marketdata::core::STATUSES,
-            geode_documents::dividend::STATUSES
-        );
+        let dir = tempfile::tempdir().unwrap();
+        let config = geode_core::config::Config::load(&geode_core::config::ConfigSources {
+            builtin: crate::builtin_layer(Some(dir.path())),
+            ..Default::default()
+        });
+        let setup = crate::bridge::data_setup(
+            &config,
+            dir.path().join("geode.duckdb"),
+            geode_data::adapter::AdapterRegistry::default(),
+            geode_data::PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
+        )
+        .expect("the demo layer declares datasets and views");
+        let dividend = setup
+            .panels
+            .iter()
+            .find(|p| p.kind == "dividend")
+            .expect("the builtin dividend panel is accepted");
+        let choices = dividend
+            .value_column("status")
+            .and_then(|c| c.choices.as_deref())
+            .expect("status declares its choices");
+        assert_eq!(choices, geode_documents::dividend::STATUSES);
+        assert_eq!(choices, geode_demo_data::documents::dividend::STATUSES);
     }
 
     /// Upload bytes must reach the subscribed source and return through an
@@ -760,9 +782,10 @@ mod tests {
         use geode_data::query::as_of::AsOf;
         use geode_data::{DataEvent, DataService, PricerRegistry, VolModelRegistry};
         use geode_marketdata::core::upload::{assemble, echo_differs};
-        use geode_marketdata::core::{DIVIDEND, Draft, MatrixModel};
+        use geode_marketdata::core::{Draft, MatrixModel, builtin_panel};
         use std::sync::mpsc::Receiver;
 
+        let dividend = builtin_panel("dividend");
         let src_dir = tempfile::tempdir().unwrap();
         let config = Config::load(&ConfigSources {
             builtin: crate::demo::layer(src_dir.path()),
@@ -861,7 +884,7 @@ mod tests {
         // The panel's own route: a clean model of the base, an inserted
         // row under the FIRST document row carrying the LATEST ex date,
         // then the painted model and the assembled upload.
-        let clean = MatrixModel::build(&base, &DIVIDEND, &Draft::default()).unwrap();
+        let clean = MatrixModel::build(&base, &dividend, &Draft::default()).unwrap();
         let first_label = clean.rows[0].label.to_string();
         let mut draft = Draft::default();
         let label = draft.mint_label(|l| clean.rows.iter().any(|r| r.label.as_ref() == l));
@@ -879,8 +902,8 @@ mod tests {
         ] {
             assert!(draft.set_row_cell(&label, column, value), "{column}");
         }
-        let painted = MatrixModel::build(&base, &DIVIDEND, &draft).unwrap();
-        let sent = assemble(&base, &DIVIDEND, &painted, &draft).expect("assembles");
+        let painted = MatrixModel::build(&base, &dividend, &draft).unwrap();
+        let sent = assemble(&base, &dividend, &painted, &draft).expect("assembles");
         let Column::Date(sent_ex) = &sent.values[0].1 else {
             panic!("ex_date is a date column");
         };
@@ -890,9 +913,9 @@ mod tests {
         );
 
         let echoed = round_trip(&service, &rx, 2, sent.clone());
-        let clean = MatrixModel::build(&echoed, &DIVIDEND, &Draft::default()).unwrap();
+        let clean = MatrixModel::build(&echoed, &dividend, &Draft::default()).unwrap();
         let delivered =
-            assemble(&echoed, &DIVIDEND, &clean, &Draft::default()).expect("the echo assembles");
+            assemble(&echoed, &dividend, &clean, &Draft::default()).expect("the echo assembles");
         let Column::Date(echo_ex) = &delivered.values[0].1 else {
             panic!("ex_date is a date column");
         };
@@ -900,7 +923,7 @@ mod tests {
             sent_ex, echo_ex,
             "the store reorders the rows — otherwise this test proves nothing"
         );
-        assert_eq!(echo_differs(&DIVIDEND, &sent, &delivered), 0);
+        assert_eq!(echo_differs(&dividend, &sent, &delivered), 0);
 
         service.shutdown();
     }

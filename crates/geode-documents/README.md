@@ -50,6 +50,10 @@ cargo bench -p geode-documents     # document parse and write
   `YYYY-MM-DD`, a blank or padded underlying, a non-RFC 3339 quote time, no
   rows), so it emits only what the parser could have produced. `TAGS` in `src/chain.rs` pairs the quote's wire
   tags with column names; they are unverified against any desk XSD.
+- `dividend::STATUSES` is the closed status vocabulary the dividend kind
+  parses and writes. The builtin dividend panel's `status` `choices`
+  (`geode-marketdata`'s `core/builtin_panels.toml`) must list the same
+  values; a `geode-app` composition test (`demo_bus`) holds them equal.
 - Parse and write failures return typed errors; the data service owns source
   health and diagnostic routing.
 - The same kind writes demo and uploaded documents and parses subscribed

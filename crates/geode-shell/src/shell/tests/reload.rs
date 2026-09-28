@@ -6,6 +6,7 @@ use super::*;
 // shadows the glob-imported `crate::reload`, so the bare `reload::` paths
 // below need this to resolve to the real module rather than to `self`.
 use crate::reload;
+use geode_core::config::Severity;
 
 /// A `views` doc the app compiled in — the shape `--demo` supplies a
 /// whole generated desk in (`app`, `datasets`, `groupings`, `sources`,
@@ -1725,4 +1726,76 @@ fn a_time_zone_reload_republishes_the_clock_without_a_requery(cx: &mut gpui::Tes
     let versions_after = shell.read_with(&vcx, |s, cx| s.frame().read(cx).shared().versions());
     assert_eq!(versions_before.data, versions_after.data);
     assert_eq!(versions_before.as_of, versions_after.as_of);
+}
+
+/// Panels are built into tile kinds at startup. A changed `panels.toml`
+/// requires restart while it differs from the startup baseline.
+#[gpui::test]
+fn a_panels_change_asks_for_a_restart(cx: &mut gpui::TestAppContext) {
+    let (services, _log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    let mut with_panels = Config::load(&ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            LayerDoc::builtin("panels", "[cvi]\ntitle = \"CVI\"\n").unwrap(),
+        ],
+        ..ConfigSources::default()
+    });
+    shell.update(&mut cx, |s, cx| {
+        s.apply_reload(std::mem::take(&mut with_panels), cx)
+    });
+    let message = shell.read_with(&cx, |s, _| s.restart_required.clone());
+    assert!(
+        message.as_deref().is_some_and(|m| m.contains("panels")),
+        "{message:?}"
+    );
+}
+
+/// A diagnostic from startup composition (a refused panel) counts in the
+/// status bar's config errors from the first frame and survives a reload,
+/// which cannot re-derive it: only a restart changes which panels exist.
+#[gpui::test]
+fn a_composition_diagnostic_stays_in_the_config_section_across_a_reload(
+    cx: &mut gpui::TestAppContext,
+) {
+    let mut services = test_services();
+    let refused = Diagnostic {
+        severity: Severity::Error,
+        layer: Some(Layer::User),
+        file: None,
+        message: "panel 'vol': dataset 'nonesuch' is not declared; the panel is refused".into(),
+        path: Some("panels.vol.dataset".into()),
+    };
+    services.composition_diagnostics = vec![refused.clone()];
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    let summary = |cx: &mut gpui::VisualTestContext| {
+        shell.read_with(cx, |s, cx| s.diagnostics().read(cx).summary().to_string())
+    };
+    assert!(
+        summary(&mut cx).contains("config 1 error"),
+        "{}",
+        summary(&mut cx)
+    );
+    shell.update(&mut cx, |s, cx| {
+        let again = Config::load(&ConfigSources {
+            builtin: vec![LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap()],
+            ..ConfigSources::default()
+        });
+        s.apply_reload(again, cx)
+    });
+    assert!(
+        summary(&mut cx).contains("config 1 error"),
+        "{}",
+        summary(&mut cx)
+    );
+    assert!(
+        shell.read_with(&cx, |s, cx| s
+            .diagnostics()
+            .read(cx)
+            .config
+            .contains(&refused)),
+        "the diagnostics tile still names the refused panel"
+    );
 }

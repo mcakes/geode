@@ -58,8 +58,11 @@ Feature crates such as `geode-blotter`, `geode-marketdata`,
 `geode-timeseries`, `geode-diagnostics`, and `geode-pricer` implement the
 shell's module contract and may ask the data service through `DataHandle`.
 They do not depend on sibling features. `geode-app` constructs shared
-services, registers module factories, adapters, document kinds, and pricers,
-and opens the window.
+services, registers module factories (one market-data factory per accepted
+`panels` entry), adapters, document kinds, kind actions, and pricers, and
+opens the window. Market-data panels are configuration checked there against
+the registered document kinds and kind actions; a kind action's behavior is
+code in the module that dispatches it.
 
 Reusable presentation is kept below features. `geode-widgets` holds shared
 stateful controls; `geode-chart` holds chart preparation and painting. Wire

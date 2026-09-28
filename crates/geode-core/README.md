@@ -35,6 +35,7 @@ Reader defaults, partial validation, and presentation rules are described in
 | `snapshot` | Immutable, `Arc`-shared columnar results, attribution and freshness metadata, and typed cell access. Feature modules can read cells without an Arrow dependency; construction and raw array access also expose Arrow types. |
 | `tree` | The parent/child index of a rollup result, built once on the query worker. |
 | `document` | Columnar document rows, keys, attributes, parser/writer traits, and schema validation for feed and application-authored documents. |
+| `panel` | Market-data panel vocabulary (`PanelSpec`, `KindActionRegistry`) and the pure `panels` reader: `read_panels` judges each panel alone, `load_panels` also checks it against the schema and document kinds. Every problem refuses the panel with one Error; nothing is guessed. |
 | `series` | Timeseries requests, bucket frequencies and rules, aligned results, and fetch provenance. `series::expr` parses arithmetic over source names and resolves references to slot IDs. |
 | `pricing` | Instrument, request, `Measure` (14 bumped measures) and `PriceResult` (local and USD), the `Pricer` trait, shifts, market overrides, and local document publications. Implementations live in `geode-pricing`; the pricing library resolves tenors and percent strikes. |
 | `clock` | Configured display zone, local-time resolution, and business-day presets. Rejects ambiguous or nonexistent local times; storage timestamps remain UTC. |

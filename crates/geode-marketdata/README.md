@@ -1,11 +1,12 @@
 # geode-marketdata
 
-The market-data panel module: one tile per `PanelSpec`, painting one
-document of a document dataset as a grid (pivoted on two axes, or a row
-per document row with the value columns laid flat) with a draft of unsent
-edits over the top. CVI and DIVIDEND are the panel specs built; each
-panel's roster kind is its own (`cvi`, `dividend`) while every panel
-shares the `marketdata` key context. `:upload [target]` assembles the entire
+The market-data panel module: one tile kind per configured panel
+(`panels.toml`), painting one document of a document dataset as a grid
+(pivoted on two axes, or a row per document row with the value columns laid
+flat) with a draft of unsent edits over the top. CVI and dividend ship as
+builtin panel configuration (`core/builtin_panels.toml`). Each panel's
+roster kind is its own name (`cvi`, `dividend`), while every panel shares
+the `marketdata` key context. `:upload [target]` assembles the entire
 painted document with its draft and asks for confirmation. Bare `y` submits;
 any other key cancels and is consumed. The frame and painted generation must
 both be live, and the tile allows only one outstanding upload.
@@ -24,7 +25,7 @@ Current behavior and rationale:
 
 | Module | Holds |
 |---|---|
-| `core::spec`, `core::matrix` | Panel vocabulary and prepared grids built from a snapshot plus draft. |
+| `core::spec`, `core::matrix` | Panel vocabulary (re-exported from `geode_core::panel`), `BUILTIN_KIND_ACTIONS`, and the builtin panels (`BUILTIN_PANELS`, `builtin_panel`); prepared grids built from a snapshot plus draft. |
 | `core::draft` | Typed edits, label-based rebase, same-date group guards, and `DocumentBase` identity (source time plus optional store generation). |
 | `core::upload` | Typed whole-document assembly and row-order-independent echo comparison; minted labels are ignored and floats allow one ULP. |
 | `core::cursor`, `core::menu` | Grid navigation over `geode_tile::motion` (the shared rules; `step_clamped` for a live selection), with the attribute strip outside the wrap cycle, and the action list's rows (`geode_tile::menu` rows over action ids, hints as live chords). Numeric nudging and date fields are re-exported from `geode-core` and `geode-widgets`. |
@@ -35,7 +36,7 @@ Current behavior and rationale:
 | `tile::select` | The `V`/`v` grid selection: its state doors, label-anchored resolution, and every verb that takes it as operand (`y`, `d`, `:bump`, the bulk commit, the live step and its undo). |
 | `delegate` | `MatrixDelegate`, the `TableDelegate` over gpui-component's table. Holds `:autosize`'s fitted widths by column label (`__row_axis` for the row labels), which `column()` prefers over the fixed defaults. |
 | `popup` | Underlying picker and cell-choice state and rendering over `geode_tile::popover`; the action menu is `geode_tile::menu`'s. Menu/picker anchor at the header; choices anchor beneath their target cell. |
-| `content` | The `TileContent` wrapper and `MarketDataFactory`, one per `PanelSpec`, plus the module's `ACTIONS`, `DEFAULT_KEYMAP` fragment (no grid motions and no menu steps: both are the shell's shared `motion::*` bindings) and the retired ids' renames (`RENAMED_ACTIONS`). |
+| `content` | The `TileContent` wrapper and `MarketDataFactory`, one per accepted panel (only the first ships `DEFAULT_KEYMAP`; the rest are built `without_keymap`), plus the module's `ACTIONS`, `DEFAULT_KEYMAP` fragment (no grid motions and no menu steps: both are the shell's shared `motion::*` bindings) and the retired ids' renames (`RENAMED_ACTIONS`). |
 
 ## Commands
 
@@ -94,6 +95,15 @@ cargo bench -p geode-marketdata    # matrix model and draft
   bundled-theme contrast tests.
 - `cvi_reanchor` and `cvi_recalc_forward` remain unimplemented and refuse.
   Ordinary document upload uses the adapter path without local recalculation.
+- `BUILTIN_KIND_ACTIONS` is every kind action this tile dispatches; a panel
+  offers them by id, and `geode-app` registers them. `builtin_panel` reads
+  `core/builtin_panels.toml` structurally, for tests and benches only; the
+  check against datasets and document kinds is `geode-app`'s, where a desk or
+  user layer may replace or refuse these panels.
+- `MarketDataFactory::new` leaks the panel's kind name once, because the
+  shell keys kinds by `&'static str`. `panels` is restart-required, so
+  factories are built once per launch and the leak is one short string per
+  accepted panel per launch.
 - The line-number gutter (`[ui] line_numbers`) sits beside the pinned cell,
   outside its cursor border, state fill, and deletion strike. Changing the
   setting refreshes the table's cached column widths.

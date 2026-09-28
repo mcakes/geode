@@ -2010,6 +2010,53 @@ budget with both columns even under this load. The added cost is the two
 two boolean columns across the Arrow boundary. An unloaded re-measure is still
 owed before these become reference values.
 
+## Market-data panels as owned specs
+
+`cargo bench -p geode-marketdata --bench matrix`, before and after the
+panel family became owned (`String`/`Vec`, choices behind an `Arc`) and
+tiles began holding `Arc<PanelSpec>`. A build clones each slice and flat
+label once per column, never per row; choices are an `Arc` clone. Nothing
+on the per-row paths changed: row labels, cells and key extraction borrow
+the spec's strings.
+
+Conditions: Apple M5 Pro (18 cores), rustc 1.96.0, bench profile. **The
+machine was saturated** by concurrent builds in other checkouts (load
+average 36 during the baseline, 97–185 during the comparison), so absolute
+values are inflated and swing several-fold between identical runs. To
+compare like with like, the pre-change bench binary was kept and run
+alternately with the post-change one, three rounds; each cell is a
+Criterion median.
+
+| bench | before r1 | after r1 | before r2 | after r2 | before r3 | after r3 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| model_build_pivot_20x30 | 8.66 ms | 4.47 ms | 1.94 ms | 1.42 ms | 5.24 ms | 5.54 ms |
+| model_build_values_10000x5 | 226 ms | 55.5 ms | 108 ms | 26.0 ms | 190 ms | 111 ms |
+| patch_cell_values_10000x5 | 2.98 µs | 389 ns | 2.10 µs | 2.26 µs | 2.64 µs | 667 ns |
+
+The first baseline (`--save-baseline panels-before`, load 36) read
+791 µs / 21.8 ms / 474 ns for the same three benches. No pair shows the
+post-change binary slower beyond the run-to-run swing; the load rules out a
+10 % bound either way.
+
+Re-measured with the same two binaries in alternation once the machine was
+quieter (one-minute load average 2–7 for the first two rounds; the later
+rounds rose to 35 again and are left out). Criterion medians:
+
+| bench | before r1 | after r1 | before r2 | after r2 |
+| --- | ---: | ---: | ---: | ---: |
+| model_build_pivot_20x30 | 312 µs | 316 µs | 317 µs | 314 µs |
+| model_build_values_10000x5 | 8.15 ms | 8.17 ms | 8.45 ms | 8.06 ms |
+| patch_cell_values_10000x5 | 171 ns | 161 ns | 170 ns | 165 ns |
+| draft_rebase_1000_edits | 3.23 ms | 3.26 ms | 3.08 ms | 3.33 ms |
+
+Builds and patches are unchanged within run-to-run noise. The draft rebase
+reads 1–8 % slower after in every round, loaded or not; at 3.3 ms for a
+thousand edits it stays well inside the 8 ms budget. The flat 10,000-row
+build sits at the budget boundary before and after alike, as
+`docs/current/performance.md` already records. Both binaries read above that
+guide's reference values on this day, so the reference values are left
+as they are.
+
 ## Diagnostics page: the Log rebuild over a full tail (headless)
 
 The page rebuilds the selected section when that section's inputs change

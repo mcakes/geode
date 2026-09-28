@@ -16,9 +16,10 @@ use geode_core::view::ColumnFormat;
 use geode_marketdata::core::draft::{DocumentBase, Draft};
 use geode_marketdata::core::matrix::MatrixModel;
 use geode_marketdata::core::spec::{
-    CVI, Columns, HeaderAttr, PanelSpec, RowAxis, RowIdentity, RowLabel, ValueColumn,
+    Columns, HeaderAttr, PanelSpec, RowAxis, RowIdentity, RowLabel, ValueColumn, builtin_panel,
 };
 use std::hint::black_box;
+use std::sync::{Arc, LazyLock};
 
 const BASE: &str = "2026-09-12T14:00:00Z";
 
@@ -122,62 +123,41 @@ fn cvi(terms: usize, nodes: usize) -> Snapshot {
     )
 }
 
-const SCHEDULE_VALUE_COLUMN: ValueColumn = ValueColumn {
-    column: "v0",
-    label: "v0",
-    ty: ColumnType::F64,
-    format: ColumnFormat::MEASURE,
-    choices: None,
-    required: true,
-};
+/// One of the schedule's five identical `f64` value columns.
+fn value_column(name: &str) -> ValueColumn {
+    ValueColumn {
+        column: name.into(),
+        label: name.into(),
+        ty: ColumnType::F64,
+        format: ColumnFormat::MEASURE,
+        choices: None,
+        required: true,
+    }
+}
 
-const SCHEDULE: PanelSpec = PanelSpec {
-    kind: "sched",
-    title: "Dividends",
-    dataset: "div_schedule",
-    document: "div_schedule",
-    rows: RowAxis {
-        column: "ex_date",
-        identity: RowIdentity::Typed(ColumnType::Date),
-        label: RowLabel::Shown,
-    },
-    columns: Columns::Values(&[
-        ValueColumn {
-            column: "v0",
-            label: "v0",
-            ..SCHEDULE_VALUE_COLUMN
+static SCHEDULE: LazyLock<Arc<PanelSpec>> = LazyLock::new(|| {
+    Arc::new(PanelSpec {
+        kind: "sched".into(),
+        title: "Dividends".into(),
+        dataset: "div_schedule".into(),
+        document: "div_schedule".into(),
+        rows: RowAxis {
+            column: "ex_date".into(),
+            identity: RowIdentity::Typed(ColumnType::Date),
+            label: RowLabel::Shown,
         },
-        ValueColumn {
-            column: "v1",
-            label: "v1",
-            ..SCHEDULE_VALUE_COLUMN
-        },
-        ValueColumn {
-            column: "v2",
-            label: "v2",
-            ..SCHEDULE_VALUE_COLUMN
-        },
-        ValueColumn {
-            column: "v3",
-            label: "v3",
-            ..SCHEDULE_VALUE_COLUMN
-        },
-        ValueColumn {
-            column: "v4",
-            label: "v4",
-            ..SCHEDULE_VALUE_COLUMN
-        },
-    ]),
-    header: &[HeaderAttr {
-        column: "currency",
-        label: "currency",
-        ty: ColumnType::Utf8,
-    }],
-    slice_values: &[],
-    value_type: ColumnType::F64,
-    format: ColumnFormat::MEASURE,
-    actions: &[],
-};
+        columns: Columns::Values(["v0", "v1", "v2", "v3", "v4"].map(value_column).to_vec()),
+        header: vec![HeaderAttr {
+            column: "currency".into(),
+            label: "currency".into(),
+            ty: ColumnType::Utf8,
+        }],
+        slice_values: Vec::new(),
+        value_type: ColumnType::F64,
+        format: ColumnFormat::MEASURE,
+        actions: Vec::new(),
+    })
+});
 
 /// A schedule with five value columns and distinct dated row labels.
 /// The synthetic 28-day-month calendar keeps labels unique so these benches
@@ -217,12 +197,13 @@ fn schedule(rows: usize) -> Snapshot {
 }
 
 fn bench(c: &mut Criterion) {
+    let cvi_panel = builtin_panel("cvi");
     let mut g = c.benchmark_group("marketdata_core");
 
     let sketch = cvi(20, 30);
     let clean = Draft::default();
     g.bench_function("model_build_pivot_20x30", |b| {
-        b.iter(|| black_box(MatrixModel::build(&sketch, &CVI, &clean).expect("a full grid")))
+        b.iter(|| black_box(MatrixModel::build(&sketch, &cvi_panel, &clean).expect("a full grid")))
     });
 
     let flat = schedule(10_000);
@@ -256,7 +237,7 @@ fn bench(c: &mut Criterion) {
     // Measure re-preparing one edited cell on each model shape. Reuse
     // the same cell and draft edit to isolate steady-state patch cost.
     let pivot_cell = (1, 5);
-    let pivot_labels = MatrixModel::build(&sketch, &CVI, &Draft::default())
+    let pivot_labels = MatrixModel::build(&sketch, &cvi_panel, &Draft::default())
         .unwrap()
         .label_of(pivot_cell);
     let mut pivot_draft = Draft::default();
@@ -267,14 +248,14 @@ fn bench(c: &mut Criterion) {
         &base(),
     );
     let mut pivot_patched =
-        MatrixModel::build(&sketch, &CVI, &pivot_draft).expect("a full grid, edit painted");
+        MatrixModel::build(&sketch, &cvi_panel, &pivot_draft).expect("a full grid, edit painted");
     g.bench_function("patch_cell_pivot_20x30", |b| {
         b.iter(|| {
             black_box(pivot_patched.patch_cell(
                 pivot_cell.0,
                 pivot_cell.1,
                 &sketch,
-                &CVI,
+                &cvi_panel,
                 &pivot_draft,
             ))
         })
