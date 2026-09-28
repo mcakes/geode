@@ -5167,11 +5167,9 @@ run_mutation "publication routing: panel promotion uses its own dependencies" \
   geode-marketdata unrelated_documents_cannot_release_a_barrier_or_discard_a_valid_stage
 
 run_mutation "publication routing: a series query must really arrive" \
-  crates/geode-timeseries/src/tile/data.rs \
-  'if self.query_in_flight
-            && self' \
-  'if false
-            && self' \
+  crates/geode-tile/src/following.rs \
+  '        if answering_now || !barrier.wants(key, now) {' \
+  '        if !barrier.wants(key, now) {' \
   geode-timeseries a_delivery_becomes_the_chart_model_and_a_stale_tag_is_dropped
 
 run_mutation "flip: a non-following tile still arrives on its own" \
@@ -19473,8 +19471,8 @@ run_mutation "timeseries: an add fetches before it queries" \
 # barrier waits for). Applied, it paints the old question's points under
 # the new question's header.
 run_mutation "timeseries: a stale tag is dropped" \
-  crates/geode-timeseries/src/tile/data.rs \
-  '        if outcome.tag != self.tag {' \
+  crates/geode-tile/src/following.rs \
+  '        if tag != self.tag {' \
   '        if false {' \
   geode-timeseries \
   a_delivery_becomes_the_chart_model_and_a_stale_tag_is_dropped
@@ -19822,7 +19820,8 @@ run_mutation "timeseries: an as-of change drops the in-flight set" \
 run_mutation "timeseries: the as-of refetch is gated on a real as-of move" \
   crates/geode-timeseries/src/tile/mod.rs \
   '                if this
-                    .acted
+                    .following
+                    .acted()
                     .is_some_and(|acted| Self::differs_on_followed(acted, now))
                 {' \
   '                if true
@@ -22917,7 +22916,7 @@ run_mutation "timeseries completion: nothing loaded says so" \
 # the density strip and percentiles until the pan stops.
 run_mutation "timeseries: a view move waits for the query in flight" \
   crates/geode-timeseries/src/tile/mod.rs \
-  '            if self.query_in_flight {' \
+  '            if self.following.in_flight() {' \
   '            if false {' \
   geode-timeseries a_view_move_while_a_query_is_out_waits_for_its_answer
 
@@ -22925,9 +22924,32 @@ run_mutation "timeseries: a view move waits for the query in flight" \
 # stay on the window the pan started from.
 run_mutation "timeseries: an answer releases the waiting view" \
   crates/geode-timeseries/src/tile/data.rs \
-  '        if !self.view_waiting || self.query_in_flight || self.staged.is_some() {' \
+  '        if !self.view_waiting || self.following.in_flight() || self.following.is_staged() {' \
   '        if true {' \
   geode-timeseries a_view_move_while_a_query_is_out_waits_for_its_answer
+
+# The post-step after a delivery: `release_view` runs after every answered
+# query, so a pan that waited behind it asks for its own window.
+run_mutation "timeseries: a delivery releases the waiting view" \
+  crates/geode-timeseries/src/tile/data.rs \
+  '        self.release_view(cx);
+        cx.notify();
+    }' \
+  '        cx.notify();
+    }' \
+  geode-timeseries a_view_move_while_a_query_is_out_waits_for_its_answer
+
+# A series request that never went out has no outcome to arrive with; the
+# helper arrives for it, or every other tile waits out the deadline.
+run_mutation "timeseries: a refused submit answers the barrier" \
+  crates/geode-tile/src/following.rs \
+  '            barrier.arrive(key, asked);
+        }
+        self.in_flight = None;' \
+  '            let _ = (key, asked);
+        }
+        self.in_flight = None;' \
+  geode-timeseries a_refused_submit_notices_and_still_answers_the_barrier
 
 # ---- Scope expression suggestions: the caret reader.
 # After an operator the caret wants a value; reading it as a finished term

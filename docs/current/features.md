@@ -502,7 +502,7 @@ Runtime responsibilities are split by module:
 | Module | Responsibility |
 |---|---|
 | [`tile`](../../crates/geode-timeseries/src/tile/mod.rs) | Entity state, frame observation, actions and local commands, header preparation, chart cache, and rendering |
-| [`tile::data`](../../crates/geode-timeseries/src/tile/data.rs) | Fetch and query submission, delivery freshness, last-good results, and flip-barrier staging and promotion |
+| [`tile::data`](../../crates/geode-timeseries/src/tile/data.rs) | Fetch and query submission, delivery freshness, and last-good results over `geode_tile::following` (the barrier staging and promotion rules), with the post-step `release_view` after each promotion and delivery |
 | [`tile::pointer`](../../crates/geode-timeseries/src/tile/pointer.rs) | Chart hit testing, wheel navigation, pan and split drags |
 | [`tile::popups`](../../crates/geode-timeseries/src/tile/popups.rs) | Popup transitions, keyboard handling, commits, cancellation, and focus |
 | [`popup`](../../crates/geode-timeseries/src/popup.rs) | Popup state types and rendering over `geode-tile`'s row shell, anchoring, menus and notice |

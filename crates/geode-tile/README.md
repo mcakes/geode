@@ -20,7 +20,8 @@ Current architecture:
 | `popover` | Popup geometry (`ROW_HEIGHT`, `ROW_INSET`, `MIN_WIDTH`, `SNAP_MARGIN`), the popover `surface`, `anchor_popup` (deferred, anchored, snapped, priority 1), and the `row_shell`/`empty_row` row frames. |
 
 Used by the pricer (all four doors), market-data (all four, and `following`
-for its document request), timeseries (popover, menu, notice) and the blotter
+for its document request), timeseries (popover, menu, notice, and `following`
+for its series query) and the blotter
 (notice). Diagnostics has no popover, menu, confirm or notice line and does
 not depend on this crate.
 
