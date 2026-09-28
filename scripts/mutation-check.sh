@@ -21551,7 +21551,7 @@ run_mutation "named expr: the compiler refuses unresolved names" \
 run_mutation "named expr: the blotter submits an unresolved scope" \
   crates/geode-blotter/src/tile.rs \
   '                frame.effective_scope(&self.tile_scope)' \
-  '                Ok(frame.scope().and_then(&self.tile_scope))' \
+  '                Ok::<_, String>(frame.scope().and_then(&self.tile_scope))' \
   geode-blotter \
   an_unresolved_named_expression_errors_without_querying_and_a_definition_requeries
 
