@@ -55,6 +55,10 @@ mod tests {
         t.active = None;
         assert_eq!(t.active_column(), None);
         t.active = Some(9);
-        assert_eq!(t.active_column(), None, "an out-of-range index names nothing");
+        assert_eq!(
+            t.active_column(),
+            None,
+            "an out-of-range index names nothing"
+        );
     }
 }
