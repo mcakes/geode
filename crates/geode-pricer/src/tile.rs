@@ -8881,7 +8881,7 @@ pub(crate) mod tests {
     }
 
     /// A removed sheet stays removed when the catalog the diagnostics
-    /// entity holds is stale: with the diagnostics tile closed, nothing
+    /// entity holds is stale: with the diagnostics page closed, nothing
     /// refreshes it after the forget, and any later publish (another
     /// sheet's autosave, a feed) re-reads it. Only a confirmed save of the
     /// name makes it known again.

@@ -968,7 +968,7 @@ without one), plus this session's confirmed saves, less its confirmed
 removals. A later catalog adds names and never drops one, and never brings
 back a name this session removed, until a save under that name is
 confirmed: the catalog the diagnostics entity holds is refreshed only while
-a diagnostics tile is visible, so it can predate the removal. A name whose save is
+the diagnostics page is visible, so it can predate the removal. A name whose save is
 queued but not yet confirmed counts as taken: a new tile's `untitled-N` and
 `:name` skip it.
 

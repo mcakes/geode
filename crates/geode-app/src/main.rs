@@ -586,7 +586,7 @@ fn build_shell_services(
         action_tail: Arc::new(Mutex::new(ActionTail::new())),
         // What `build_keymap` reported above. Printed already; carried
         // here because `ShellView::new` cannot recompute it (it needs
-        // this registry, not just the config) and the diagnostics tile's
+        // this registry, not just the config) and the diagnostics page's
         // config section would otherwise miss it until a hot reload.
         keymap_diagnostics: keymap_diags,
         // The checked fragments themselves, so `apply_reload` can splice

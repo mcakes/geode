@@ -786,7 +786,7 @@ mod tests {
     #[test]
     fn register_add_actions_registers_four_rows_per_kind_in_the_tiles_category() {
         let mut reg = ActionRegistry::default();
-        register_add_actions(&mut reg, &["blotter", "diagnostics"]);
+        register_add_actions(&mut reg, &["blotter", "pricer"]);
         let expect = |id: &str, title: &str| {
             let def = reg
                 .iter()
@@ -799,7 +799,7 @@ mod tests {
         expect("tile::add_blotter_horizontal", "Blotter: Split Horizontal");
         expect("tile::add_blotter_vertical", "Blotter: Split Vertical");
         expect("tile::add_blotter_stacked", "Blotter: Stack");
-        expect("tile::add_diagnostics", "Diagnostics: Split");
+        expect("tile::add_pricer", "Pricer: Split");
         assert_eq!(reg.iter().count(), 8);
         let mut empty = ActionRegistry::default();
         register_add_actions(&mut empty, &[]);

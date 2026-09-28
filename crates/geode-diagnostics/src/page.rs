@@ -134,9 +134,6 @@ pub struct DiagnosticsPage {
     /// The Sources ages tick; held only while visible on Sources, so
     /// dropping it is what stops the loop.
     ages_timer: Option<Task<()>>,
-    /// The instant the Since ages were last computed at.
-    #[allow(dead_code)]
-    ages_now: SystemTime,
     last_diag_versions: DiagVersions,
     last_frame_versions: FrameVersions,
     #[cfg(test)]
@@ -352,7 +349,6 @@ impl DiagnosticsPage {
             visible: false,
             insert_mode: false,
             ages_timer: None,
-            ages_now: SystemTime::now(),
             last_diag_versions,
             last_frame_versions,
             #[cfg(test)]
@@ -409,7 +405,6 @@ impl DiagnosticsPage {
         }
         let clock = Self::clock(cx);
         let now = SystemTime::now();
-        self.ages_now = now;
         if self.section == Section::Log {
             self.drain_tail();
         }
@@ -586,10 +581,12 @@ impl DiagnosticsPage {
             .collect();
         self.rail_texts = crate::page_chrome::rail_texts(&self.badges);
         // The front batch is the current one; history is the rest.
-        self.history_label = SharedString::from(format!(
-            "History ({} batches)",
-            d.config_history.len().saturating_sub(1)
-        ));
+        let prior = d.config_history.len().saturating_sub(1);
+        self.history_label = SharedString::from(if prior == 1 {
+            "History (1 batch)".to_string()
+        } else {
+            format!("History ({prior} batches)")
+        });
         cx.notify();
     }
 
@@ -882,15 +879,20 @@ impl DiagnosticsPage {
         }));
     }
 
-    /// Rewrite the Since cells from the retained `since` times. The
-    /// prepared table is cloned only when an age text changed, and the
-    /// rebuild counter never moves: a tick is not a rebuild.
+    /// The timer's tick: [`Self::tick_ages_at`] against the machine clock.
     pub(crate) fn tick_ages(&mut self, cx: &mut Context<Self>) {
+        self.tick_ages_at(SystemTime::now(), cx);
+    }
+
+    /// Rewrite the Since cells from the retained `since` times as of `now`.
+    /// The prepared table is cloned only when an age text changed, and the
+    /// rebuild counter never moves: a tick is not a rebuild. The delegate
+    /// takes the new table without a `refresh`: the columns are unchanged,
+    /// and the notify repaints the rows.
+    pub(crate) fn tick_ages_at(&mut self, now: SystemTime, cx: &mut Context<Self>) {
         if self.section != Section::Sources {
             return;
         }
-        let now = SystemTime::now();
-        self.ages_now = now;
         let fresh: Vec<(usize, SharedString)> = self
             .prepared
             .rows
@@ -921,7 +923,7 @@ impl DiagnosticsPage {
         self.prepared = shared.clone();
         self.table.update(cx, |t, cx| {
             t.delegate_mut().set(shared);
-            t.refresh(cx);
+            cx.notify();
         });
         cx.notify();
     }
@@ -1157,8 +1159,18 @@ mod tests {
         cx: &mut gpui::TestAppContext,
         restored: Option<&toml::Table>,
     ) -> (Harness, gpui::VisualTestContext) {
+        open_with_ring(cx, restored, 64)
+    }
+
+    /// `ring_capacity` is small by default so a wrap is cheap to provoke;
+    /// the timing test asks for a ring wider than the retained tail.
+    fn open_with_ring(
+        cx: &mut gpui::TestAppContext,
+        restored: Option<&toml::Table>,
+        ring_capacity: usize,
+    ) -> (Harness, gpui::VisualTestContext) {
         cx.update(gpui_component::init);
-        let ring = Arc::new(Ring::new(64));
+        let ring = Arc::new(Ring::new(ring_capacity));
         let config = Rc::new(RefCell::new(Config::default()));
         let dispatched: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
         let recorder = dispatched.clone();
@@ -1572,22 +1584,38 @@ mod tests {
         });
         assert_eq!(current.rows.len(), 1);
         assert_eq!(current.rows[0].cells[3].text.as_ref(), "second");
-        assert_eq!(
+        let label = |vcx: &gpui::VisualTestContext| {
             h.page
-                .read_with(&vcx, |p, _| p.history_label.clone())
-                .as_ref(),
-            "History (1 batches)",
+                .read_with(vcx, |p, _| p.history_label.clone())
+                .to_string()
+        };
+        assert_eq!(
+            label(&vcx),
+            "History (1 batch)",
             "the current batch is not history"
         );
+        // A third batch: two prior ones, plural.
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.note_config(Vec::new(), SystemTime::now() + Duration::from_secs(10));
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        assert_eq!(label(&vcx), "History (2 batches)");
+        let current = h.page.read_with(&vcx, |p, cx| {
+            p.diag_table.read(cx).delegate().table().clone()
+        });
+        assert!(current.rows.is_empty(), "a clean load is the current batch");
         let b = vcx.debug_bounds("diagnostics-diag-history").unwrap();
         vcx.simulate_click(b.center(), gpui::Modifiers::default());
         let history = h.page.read_with(&vcx, |p, cx| {
             p.diag_table.read(cx).delegate().table().clone()
         });
         assert_eq!(history.columns.len(), 5, "batch column first");
-        assert_eq!(history.rows[0].cells[4].text.as_ref(), "first");
+        // Newest prior batch first: "second", then "first".
+        assert_eq!(history.rows[0].cells[4].text.as_ref(), "second");
+        assert_eq!(history.rows[1].cells[4].text.as_ref(), "first");
         assert_eq!(
-            history.rows[0].cells[3].text.as_ref(),
+            history.rows[1].cells[3].text.as_ref(),
             "views.toml › blotter.columns.4"
         );
         // Current again through its own button.
@@ -1600,7 +1628,7 @@ mod tests {
             p.diag_table.read(cx).delegate().table().clone()
         });
         assert_eq!(current.columns.len(), 4);
-        assert_eq!(current.rows[0].cells[3].text.as_ref(), "second");
+        assert!(current.rows.is_empty());
     }
 
     /// A click on a left-panel row drives that panel's detail strip and
@@ -2040,32 +2068,46 @@ mod tests {
         });
         assert!(h.page.read_with(&vcx, |p, _| p.ages_timer.is_some()));
         // The loop reaches `tick_ages`: a retained `since` moved back is
-        // repainted after one tick of the executor's clock.
+        // repainted after one tick of the executor's clock. The loop reads
+        // the machine clock, so the assertion is that the cell changed, not
+        // what it changed to (`a_tick_refreshes_ages_without_rebuilding_rows`
+        // pins the text against an explicit `now`).
         h.diagnostics.update(&mut vcx, |d, cx| {
             d.note_health("s", Health::Ok, String::new(), SystemTime::now());
             cx.notify();
         });
         vcx.run_until_parked();
+        let since_cell = |vcx: &gpui::VisualTestContext| {
+            h.page.read_with(vcx, |p, _| {
+                (
+                    Rc::as_ptr(p.prepared()),
+                    p.prepared().rows[0].cells[SINCE_COLUMN].text.clone(),
+                )
+            })
+        };
+        let (table_before, text_before) = since_cell(&vcx);
         h.page.update(&mut vcx, |p, _| {
-            p.source_since[0] = Some(SystemTime::now() - Duration::from_secs(30));
+            p.source_since[0] = Some(SystemTime::now() - Duration::from_secs(3_600));
         });
         let before = h.page.read_with(&vcx, |p, _| p.rebuild_count);
         vcx.executor().advance_clock(AGES_TICK);
         vcx.run_until_parked();
-        let since = h.page.read_with(&vcx, |p, _| {
-            p.prepared().rows[0].cells[SINCE_COLUMN].text.clone()
-        });
-        assert!(since.ends_with(" · 30 s"), "{since}");
+        let (table_after, text_after) = since_cell(&vcx);
+        assert_ne!(table_after, table_before, "the tick published a table");
+        assert_ne!(text_after, text_before, "{text_after}");
         assert_eq!(h.page.read_with(&vcx, |p, _| p.rebuild_count), before);
         h.page.update(&mut vcx, |p, cx| p.set_visible(false, cx));
         assert!(h.page.read_with(&vcx, |p, _| p.ages_timer.is_none()));
     }
 
+    /// Ticks against an explicit `now`, so the reading does not depend on
+    /// how long the test took between the health note and the tick.
     #[gpui::test]
     fn a_tick_refreshes_ages_without_rebuilding_rows(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
+        let reported_at = SystemTime::now();
         h.diagnostics.update(&mut vcx, |d, cx| {
-            d.note_health("s", Health::Ok, String::new(), SystemTime::now());
+            d.note_health("s", Health::Ok, String::new(), reported_at);
             cx.notify();
         });
         h.page.update(&mut vcx, |p, cx| p.set_visible(true, cx));
@@ -2078,24 +2120,30 @@ mod tests {
         let hms = since_cell(&vcx);
         let hms = hms.split_once(SINCE_SEPARATOR).map(|(h, _)| h.to_string());
         assert!(hms.is_some(), "clock text then age");
-        // An unchanged age publishes nothing: the same table stays shared.
+        // Thirty seconds on: only the age is rewritten; the clock text stays.
+        let now = reported_at + Duration::from_secs(30);
+        h.page.update(&mut vcx, |p, cx| p.tick_ages_at(now, cx));
+        assert_eq!(h.page.read_with(&vcx, |p, _| p.rebuild_count), before);
+        assert_eq!(
+            since_cell(&vcx).as_ref(),
+            format!("{}{SINCE_SEPARATOR}30 s", hms.as_ref().unwrap())
+        );
+        // The same instant again: an unchanged age publishes nothing, so
+        // the same table stays shared.
         let table_before = h.page.read_with(&vcx, |p, _| Rc::as_ptr(p.prepared()));
-        h.page.update(&mut vcx, |p, cx| p.tick_ages(cx));
+        h.page.update(&mut vcx, |p, cx| p.tick_ages_at(now, cx));
         assert_eq!(h.page.read_with(&vcx, |p, _| p.rebuild_count), before);
         assert_eq!(
             h.page.read_with(&vcx, |p, _| Rc::as_ptr(p.prepared())),
             table_before
         );
-        assert!(since_cell(&vcx).ends_with(" s"));
-        // A moved-back `since` rewrites only the age, keeping the clock text.
-        h.page.update(&mut vcx, |p, _| {
-            p.source_since[0] = Some(SystemTime::now() - Duration::from_secs(30));
+        // Four minutes on: the age scales without touching the clock text.
+        h.page.update(&mut vcx, |p, cx| {
+            p.tick_ages_at(reported_at + Duration::from_secs(240), cx)
         });
-        h.page.update(&mut vcx, |p, cx| p.tick_ages(cx));
-        assert_eq!(h.page.read_with(&vcx, |p, _| p.rebuild_count), before);
         assert_eq!(
             since_cell(&vcx).as_ref(),
-            format!("{}{SINCE_SEPARATOR}30 s", hms.unwrap())
+            format!("{}{SINCE_SEPARATOR}4 m", hms.unwrap())
         );
         // The table entity paints the rewritten cell, not the stale one.
         let painted = h.page.read_with(&vcx, |p, cx| {
@@ -2103,6 +2151,58 @@ mod tests {
                 .text
                 .clone()
         });
-        assert!(painted.ends_with(" · 30 s"), "{painted}");
+        assert!(painted.ends_with(" · 4 m"), "{painted}");
+    }
+
+    /// The headless measurement recorded in `docs/perf.md`: the Log
+    /// section's `rebuild` over a full 4,096-record tail. Not a painted
+    /// frame. Run with
+    /// `cargo test -p geode-diagnostics --release -- --ignored log_rebuild_timing --nocapture`.
+    #[gpui::test]
+    #[ignore]
+    fn log_rebuild_timing_over_a_full_tail(cx: &mut gpui::TestAppContext) {
+        use geode_core::log::Level;
+        let (h, mut vcx) = open_with_ring(cx, None, 8_192);
+        open_log_section(&h, &mut vcx);
+        for i in 0..crate::log::LOG_CAP {
+            let level = match i % 5 {
+                0 => Level::ERROR,
+                1 => Level::WARN,
+                2 => Level::DEBUG,
+                _ => Level::INFO,
+            };
+            push(
+                &h.ring,
+                level,
+                "geode::ingest",
+                &format!("record {i}: partition 2026-09-27 · EU_TECH loaded"),
+            );
+        }
+        notify(&h, &mut vcx);
+        assert_eq!(
+            h.page.read_with(&vcx, |p, _| p.prepared().rows.len()),
+            crate::log::LOG_CAP
+        );
+        const RUNS: u32 = 20;
+        let mut samples = Vec::with_capacity(RUNS as usize);
+        for _ in 0..RUNS {
+            let started = std::time::Instant::now();
+            h.page.update(&mut vcx, |p, cx| p.rebuild(cx));
+            samples.push(started.elapsed());
+        }
+        samples.sort();
+        let median = samples[samples.len() / 2];
+        let max = *samples.last().unwrap();
+        eprintln!(
+            "log rebuild over {} records: median {:?}, max {:?} over {RUNS} runs (headless; {} build)",
+            crate::log::LOG_CAP,
+            median,
+            max,
+            if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            }
+        );
     }
 }

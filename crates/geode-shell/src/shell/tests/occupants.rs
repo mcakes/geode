@@ -844,16 +844,16 @@ fn open_module_twice_yields_one_tile_of_that_kind_focused(cx: &mut gpui::TestApp
     services
         .roster
         .add(Box::new(crate::module::recording::RecordingFactory::new(
-            "diagnostics",
+            "probe",
         )));
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
 
-    // Call `open_module` directly; the diagnostics-summary click exercises its
-    // production entry point in a separate test.
+    // Call `open_module` directly: nothing in the shipped shell calls it for
+    // this kind, so the door itself is what is under test.
     cx.update(|window, cx| {
         shell.update(cx, |s, cx| {
-            s.open_module("diagnostics", window, cx);
+            s.open_module("probe", window, cx);
         });
     });
     cx.update(|window, cx| {
@@ -864,10 +864,10 @@ fn open_module_twice_yields_one_tile_of_that_kind_focused(cx: &mut gpui::TestApp
     });
     assert_eq!(
         shell.read_with(&cx, |s, _| s.occupant_kind(first_tile)),
-        Some("diagnostics")
+        Some("probe")
     );
 
-    // Focus something else, then ask for diagnostics again — it must
+    // Focus something else, then ask for the probe again — it must
     // focus the tile that already exists rather than splitting a second
     // one.
     cx.simulate_keystrokes("ctrl-v");
@@ -881,7 +881,7 @@ fn open_module_twice_yields_one_tile_of_that_kind_focused(cx: &mut gpui::TestApp
 
     cx.update(|window, cx| {
         shell.update(cx, |s, cx| {
-            s.open_module("diagnostics", window, cx);
+            s.open_module("probe", window, cx);
         });
     });
     cx.update(|window, cx| {
@@ -892,18 +892,18 @@ fn open_module_twice_yields_one_tile_of_that_kind_focused(cx: &mut gpui::TestApp
     });
     assert_eq!(
         refocused, first_tile,
-        "the second open_module call must focus the existing diagnostics \
+        "the second open_module call must focus the existing probe \
          tile, not create another"
     );
-    let diagnostics_tiles: Vec<TileId> = shell
+    let probe_tiles: Vec<TileId> = shell
         .read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles())
         .into_iter()
-        .filter(|id| shell.read_with(&cx, |s, _| s.occupant_kind(*id)) == Some("diagnostics"))
+        .filter(|id| shell.read_with(&cx, |s, _| s.occupant_kind(*id)) == Some("probe"))
         .collect();
     assert_eq!(
-        diagnostics_tiles.len(),
+        probe_tiles.len(),
         1,
-        "exactly one diagnostics tile ever exists: {:?}",
+        "exactly one probe tile ever exists: {:?}",
         log.borrow()
     );
 }
@@ -919,7 +919,7 @@ fn two_open_module_calls_for_the_same_kind_before_any_render_add_only_once(
     services
         .roster
         .add(Box::new(crate::module::recording::RecordingFactory::new(
-            "diagnostics",
+            "probe",
         )));
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
@@ -931,8 +931,8 @@ fn two_open_module_calls_for_the_same_kind_before_any_render_add_only_once(
     // pending.
     cx.update(|window, cx| {
         shell.update(cx, |s, cx| {
-            s.open_module("diagnostics", window, cx);
-            s.open_module("diagnostics", window, cx);
+            s.open_module("probe", window, cx);
+            s.open_module("probe", window, cx);
         });
     });
     cx.update(|window, cx| {
@@ -948,7 +948,7 @@ fn two_open_module_calls_for_the_same_kind_before_any_render_add_only_once(
     );
     assert_eq!(
         shell.read_with(&cx, |s, _| s.occupant_kind(tiles[0])),
-        Some("diagnostics")
+        Some("probe")
     );
 }
 
@@ -974,7 +974,7 @@ fn open_module_with_no_matching_factory_paints_a_placeholder_and_warns(
     tracing::subscriber::with_default(sub, || {
         cx.update(|window, cx| {
             shell.update(cx, |s, cx| {
-                s.open_module("diagnostics", window, cx);
+                s.open_module("nonesuch", window, cx);
             });
         });
         cx.update(|window, cx| {
@@ -996,7 +996,7 @@ fn open_module_with_no_matching_factory_paints_a_placeholder_and_warns(
     assert!(
         records
             .iter()
-            .any(|r| r.level == tracing::Level::WARN && r.message.contains("diagnostics")),
+            .any(|r| r.level == tracing::Level::WARN && r.message.contains("nonesuch")),
         "expected a warning naming the unmatched kind: {records:?}"
     );
 }
@@ -1302,7 +1302,7 @@ fn a_pending_request_lands_on_exactly_the_tile_that_asked(cx: &mut gpui::TestApp
     services
         .roster
         .add(Box::new(crate::module::recording::RecordingFactory::new(
-            "diagnostics",
+            "probe",
         )));
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
@@ -1312,7 +1312,7 @@ fn a_pending_request_lands_on_exactly_the_tile_that_asked(cx: &mut gpui::TestApp
             // `open_module` that splits again: two tiles go
             // occupant-less in one render pass.
             s.services.workspaces.split_active(Orientation::Horizontal);
-            s.open_module("diagnostics", window, cx);
+            s.open_module("probe", window, cx);
         });
     });
     let asked = shell.read_with(&cx, |s, _| {
@@ -1325,7 +1325,7 @@ fn a_pending_request_lands_on_exactly_the_tile_that_asked(cx: &mut gpui::TestApp
     assert_eq!(tiles.len(), 2);
     assert_eq!(
         shell.read_with(&cx, |s, _| s.occupant_kind(asked)),
-        Some("diagnostics")
+        Some("probe")
     );
     let other = tiles.into_iter().find(|t| *t != asked).unwrap();
     assert_eq!(
@@ -1346,7 +1346,7 @@ fn a_pending_request_for_a_closed_tile_is_dropped_and_does_not_latch_open_module
     services
         .roster
         .add(Box::new(crate::module::recording::RecordingFactory::new(
-            "diagnostics",
+            "probe",
         )));
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
@@ -1361,7 +1361,7 @@ fn a_pending_request_for_a_closed_tile_is_dropped_and_does_not_latch_open_module
     // `ensure_occupants` ever sees it.
     cx.update(|window, cx| {
         shell.update(cx, |s, cx| {
-            s.open_module("diagnostics", window, cx);
+            s.open_module("probe", window, cx);
             s.services.workspaces.active_mut().close_tile();
         });
     });
@@ -1384,21 +1384,21 @@ fn a_pending_request_for_a_closed_tile_is_dropped_and_does_not_latch_open_module
     // …and the guard did not latch: asking again really does open one.
     cx.update(|window, cx| {
         shell.update(cx, |s, cx| {
-            s.open_module("diagnostics", window, cx);
+            s.open_module("probe", window, cx);
         });
     });
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    let diagnostics: Vec<TileId> = shell
+    let probes: Vec<TileId> = shell
         .read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles())
         .into_iter()
-        .filter(|id| shell.read_with(&cx, |s, _| s.occupant_kind(*id)) == Some("diagnostics"))
+        .filter(|id| shell.read_with(&cx, |s, _| s.occupant_kind(*id)) == Some("probe"))
         .collect();
     assert_eq!(
-        diagnostics.len(),
+        probes.len(),
         1,
-        "a dropped request leaves the kind openable: {diagnostics:?}"
+        "a dropped request leaves the kind openable: {probes:?}"
     );
 }
 

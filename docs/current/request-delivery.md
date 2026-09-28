@@ -151,7 +151,7 @@ delivers a matching synthetic error rather than leaving it loading: `the data
 service is busy — try again` or `the data service has stopped`.
 
 `ThreadStopped` records the thread in `Diagnostics` for the status bar and the
-diagnostics tile. On every drained event the bridge also reads the handle's
+diagnostics page. On every drained event the bridge also reads the handle's
 `Busy` refusal total into `Diagnostics`, so the status summary's `N refused`
 changes only when some event arrives: a refusal made while no events flow
 appears at the next event. The catalog refresh retries a `Busy` refusal after
@@ -187,7 +187,7 @@ and retries after one second, with at most one retry timer. A successful
 snapshot must match the current frame as-of; an old-era response schedules a
 fresh request. Publication during a read allows its consistent snapshot to
 display while retaining follow-up demand. Watched demand disappears when the
-last diagnostics tile hides; explicit demand survives hiding. See
+diagnostics page hides; explicit demand survives hiding. See
 [diagnostics demand](shell.md#diagnostics-state-and-demand).
 
 Health and progress update the diagnostics model. Service diagnostics append

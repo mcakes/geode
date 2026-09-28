@@ -1059,7 +1059,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                                         d.set_catalog(snapshot, SystemTime::now());
                                     } else {
                                         // Explicit consumers need a current answer even when
-                                        // no diagnostics tile observes the frame's as-of.
+                                        // no diagnostics page observes the frame's as-of.
                                         match request {
                                             CatalogRequest::Watched => d.request_catalog_refresh(),
                                             CatalogRequest::Explicit => d.request_catalog(),
@@ -5125,7 +5125,7 @@ role = "key"
 
     /// A forget changes what the database holds without any `Published`,
     /// so the bridge must re-read a watched catalog on `Forgotten` or the
-    /// diagnostics tile keeps listing the deleted document.
+    /// diagnostics page keeps listing the deleted document.
     #[gpui::test]
     fn a_forgotten_document_rereads_a_watched_catalog(cx: &mut gpui::TestAppContext) {
         let f = catalog_fixture(cx);
@@ -5375,7 +5375,7 @@ role = "key"
         });
         let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
         let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
-        // This is the identity picker's request door: no diagnostics tile exists.
+        // This is the identity picker's request door: no diagnostics page exists.
         diagnostics.update(&mut vcx, |d, cx| {
             d.request_catalog();
             cx.notify();

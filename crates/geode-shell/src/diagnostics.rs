@@ -1,4 +1,4 @@
-//! Operational state shared by the status bar and diagnostics tiles. The app
+//! Operational state shared by the status bar and the diagnostics page. The app
 //! bridge supplies source and catalog events; config load/reload supplies its
 //! own diagnostic batches. [`Diagnostics::summary`] caches the status text.
 //!
@@ -35,7 +35,7 @@ const REQUEST_LOOP: &str = "geode-data";
 pub struct StoppedThread {
     /// The spawn name the data layer reported.
     pub thread: String,
-    /// What the status bar and the diagnostics tile call it.
+    /// What the status bar and the diagnostics page call it.
     pub label: String,
     pub reason: String,
     pub at: SystemTime,
@@ -116,7 +116,7 @@ fn stopped_segment(stopped: &[StoppedThread]) -> Option<StoppedSegment> {
 pub const DIAGNOSTICS_PAGE_KIND: &str = "diagnostics";
 
 /// Why the bridge should read the catalog. Explicit requests (for example an
-/// identity picker) remain valid without a visible diagnostics tile.
+/// identity picker) remain valid without a visible diagnostics page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CatalogRequest {
     Watched,
@@ -278,7 +278,7 @@ pub struct Diagnostics {
     /// supplied it. `None` until the first snapshot.
     pub catalog_at: Option<SystemTime>,
     pub levels: LogLevels,
-    /// Visible diagnostics tile count, maintained by `watch`/`unwatch`.
+    /// Visible diagnostics page count, maintained by `watch`/`unwatch`.
     /// Watched catalog refreshes and histogram copies require at least one
     /// watcher; explicit catalog consumers are independent.
     watchers: u32,
@@ -584,7 +584,7 @@ impl Diagnostics {
         true
     }
 
-    /// Remove a visible tile's watch, saturating at zero. The last watcher
+    /// Remove a visible page's watch, saturating at zero. The last watcher
     /// clears pending watched demand, while explicit consumers retain their
     /// requests. The caller must notify observers after the visibility change.
     pub fn unwatch(&mut self) {

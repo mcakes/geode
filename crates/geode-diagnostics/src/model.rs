@@ -780,6 +780,40 @@ pub(crate) mod tests {
         );
     }
 
+    /// The shape column and the detail lines follow `SourceSummary::shape`,
+    /// never the adapter name or an empty topic list: a fetch source is its
+    /// adapter plus `fetch`, and a subscribed source names its topics.
+    #[test]
+    fn a_source_row_describes_its_shape_from_the_summary() {
+        use geode_shell::diagnostics::SourceSummary;
+        let mut d = Diagnostics::new(LogLevels::default());
+        let summary = |shape: SourceShape, topics: Vec<String>| SourceSummary {
+            paths: vec!["/x".into()],
+            priority: "1".into(),
+            readiness: "ready".into(),
+            adapter: "ADAPTER".into(),
+            topics,
+            shape,
+        };
+        d.describe_source("dir", summary(SourceShape::Directory, Vec::new()));
+        d.describe_source("fetch", summary(SourceShape::Fetch, Vec::new()));
+        d.describe_source(
+            "sub",
+            summary(SourceShape::Subscribed, vec!["a/>".into(), "b".into()]),
+        );
+        let rows = source_rows(&d, clock());
+        let row = |name: &str| rows.iter().find(|r| r.name == name).unwrap();
+        assert_eq!(row("dir").shape, "directory");
+        assert_eq!(row("dir").detail[0], "path: /x");
+        assert_eq!(row("fetch").shape, "fetch");
+        assert_eq!(
+            row("fetch").detail,
+            vec!["adapter: ADAPTER".to_string(), "fetch".to_string()]
+        );
+        assert_eq!(row("sub").shape, "subscribed · 2 topics");
+        assert_eq!(row("sub").detail[1], "topics: a/>, b");
+    }
+
     #[test]
     fn age_text_scales() {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000);

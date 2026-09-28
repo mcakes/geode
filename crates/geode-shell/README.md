@@ -121,7 +121,7 @@ change most often hits:
 - Diagnostics request methods cannot notify observers themselves. Visibility
   and catalog-demand changes require a caller notification even though they
   leave diagnostic data versions unchanged. Explicit catalog demand survives
-  the last diagnostics tile hiding.
+  the diagnostics page hiding.
 - A stopped data thread is recorded once and never cleared: nothing restarts
   it, so its status segment stays until Geode restarts. The segment's text and
   tooltip are built in `note_thread_stopped`, not at paint. See

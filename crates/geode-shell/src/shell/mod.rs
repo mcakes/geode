@@ -207,7 +207,7 @@ impl EventEmitter<ShellEvent> for ShellView {}
 /// method with its own stale-tag/stale-column guard.
 pub const PICKER_KEY: QueryKey = QueryKey(u64::MAX - 1);
 
-/// The coalescing key the diagnostics tile's `Request::Catalog` submits
+/// The coalescing key the diagnostics page's `Request::Catalog` submits
 /// under — same reservation reasoning as [`PICKER_KEY`]
 /// just above, one lower so the two can never collide with each other or
 /// with a real tile's `TileId`-derived key.
