@@ -17154,22 +17154,41 @@ run_mutation "bridge: a SeriesFetched event reaches the shell" \
 # anywhere saying so.
 run_mutation "series query: live is the oldest version, not the newest" \
   crates/geode-data/src/query/series.rs \
-  'select ts, arg_max(value, received_at) as v\n    from {table}' \
-  'select ts, arg_min(value, received_at) as v\n    from {table}' \
+  '        AsOf::Live => ("arg_max(value, received_at)", ""),' \
+  '        AsOf::Live => ("arg_min(value, received_at)", ""),' \
   geode-data \
   an_as_of_before_a_correction_sees_the_original_value
 
 # An as-of is two predicates, not one: `received_at <= t` is what hides a
 # later correction, `ts <= t` what hides a later bar. Dropping the first
-# (spelled here as a second copy of the second, so the bound parameter
+# (spelled here as a filter every row passes, so the bound parameter
 # count is unchanged and the plan still runs) makes every as-of read
 # report today's corrected value under yesterday's date.
 run_mutation "series query: as-of drops the received_at filter" \
   crates/geode-data/src/query/series.rs \
-  '" and received_at <= make_timestamp(?) and ts <= make_timestamp(?)".to_string()' \
-  '" and ts <= make_timestamp(?) and ts <= make_timestamp(?)".to_string()' \
+  '"coalesce(arg_max(value, received_at) filter (where received_at <= make_timestamp(?))' \
+  '"coalesce(arg_max(value, received_at) filter (where make_timestamp(?) is not null)' \
   geode-data \
   an_as_of_before_a_correction_sees_the_original_value
+
+# A fetch stamps its rows with the FETCH time, so a bar backfilled today
+# has no version known by yesterday. Without the fallback to its first
+# version, every historical as-of paints an empty chart.
+run_mutation "series query: as-of hides a bar fetched after the instant" \
+  crates/geode-data/src/query/series.rs \
+  '"coalesce(arg_max(value, received_at) filter (where received_at <= make_timestamp(?)), arg_min(value, received_at))' \
+  '"coalesce(arg_max(value, received_at) filter (where received_at <= make_timestamp(?)), null)' \
+  geode-data \
+  an_as_of_before_a_bar_was_fetched_still_sees_its_first_version
+
+# The fallback is the FIRST version, not the latest: taking the newest
+# would leak a correction received after the as-of into it.
+run_mutation "series query: the as-of fallback is the newest version" \
+  crates/geode-data/src/query/series.rs \
+  '"coalesce(arg_max(value, received_at) filter (where received_at <= make_timestamp(?)), arg_min(value, received_at))' \
+  '"coalesce(arg_max(value, received_at) filter (where received_at <= make_timestamp(?)), arg_max(value, received_at))' \
+  geode-data \
+  an_as_of_before_a_bar_was_fetched_still_sees_its_first_version
 
 # Expression CTEs inner-join their operands, retaining only buckets shared
 # by every operand. This entry requires the SQL-text assertion: a left join
