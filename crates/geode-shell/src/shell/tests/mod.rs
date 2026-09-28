@@ -611,6 +611,7 @@ mod pin;
 mod reload;
 mod scope_expr;
 mod scopebar;
+mod scopepicker;
 mod session;
 mod stacks;
 mod tilepicker;

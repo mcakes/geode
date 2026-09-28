@@ -1581,6 +1581,25 @@ impl ShellView {
         self.frame_at(ws)
     }
 
+    /// Load saved scope `name` into [`Self::target_frame`]'s lane through
+    /// `load_scope` (so it is one undoable `set_scope` step and honours a
+    /// workspace pin), notifying on a change. The one path both the
+    /// `scope::<name>` actions and the scope picker take. `Err` when no
+    /// saved scope has that name; `Ok(false)` when it is already current.
+    pub(crate) fn load_saved_scope(
+        &mut self,
+        name: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<bool, String> {
+        self.target_frame().update(cx, |f, cx| {
+            let loaded = f.load_scope(name);
+            if let Ok(true) = loaded {
+                cx.notify();
+            }
+            loaded
+        })
+    }
+
     /// The active workspace's frame, for the app's catalog as-of.
     pub fn active_frame(&self) -> FrameRef {
         self.frame_at(self.active_ix())

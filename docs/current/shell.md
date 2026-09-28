@@ -358,6 +358,14 @@ and Enter applies the rest (see
 only content is a name is not empty: the chips row and the save glyph paint
 for it.
 
+The load glyph (a folder-open icon, `scope-load-chip`) follows the `+` and
+paints whatever the scope holds, empty included; a click opens the scope
+picker (`frame::scope`, `mod+o`; see
+[input and dialogs](input-and-dialogs.md#grouping-scope-tile-log-and-column-choices)),
+and the glyph holds its pressed fill while the picker is open. The save
+glyph, when the scope is savable, comes after it, so its appearance never
+moves the load glyph.
+
 The `+` verb opens the "Add a filter" menu under itself: "Dimension…"
 dispatches `frame::pick`, "Expression…" dispatches `frame::add_expression` (whose dialog offers the
 named expressions beside typed text), and each row shows its action's live

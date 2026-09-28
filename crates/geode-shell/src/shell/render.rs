@@ -881,6 +881,15 @@ impl Render for ShellView {
                 objectdialog::render::open_save_scope(view, window, cx);
             });
         };
+        // The scope bar's load glyph — the mouse form of
+        // `frame::scope`/`mod+o`, through the same door `input.rs`'s
+        // dispatch arm uses.
+        let load_chip_entity = cx.entity();
+        let on_load = move |window: &mut Window, cx: &mut App| {
+            load_chip_entity.update(cx, |view, cx| {
+                choicedialog::open_scopes(view, window, cx);
+            });
+        };
         // The grouping readout's click — the mouse form of
         // `frame::grouping`/`mod+g`, through the same door `input.rs`'s
         // dispatch arm uses.
@@ -951,6 +960,11 @@ impl Render for ShellView {
             self.choice_dialog.as_ref().map(|d| &d.target),
             Some(choicedialog::Target::Grouping { .. })
         );
+        // The load glyph holds its pressed fill while the scope picker is up.
+        let scope_open = matches!(
+            self.choice_dialog.as_ref().map(|d| &d.target),
+            Some(choicedialog::Target::Scope { .. })
+        );
         // The pin glyph names the active workspace, whose tiles are the
         // ones on screen, not a dialog's target.
         let ws = self.active_ix();
@@ -968,11 +982,13 @@ impl Render for ShellView {
             &self.filter_input,
             &bar_model,
             grouping_open,
+            scope_open,
             add_menu,
             on_chip_close,
             on_chip_open,
             on_add,
             on_save,
+            on_load,
             on_grouping,
             on_as_of,
             on_term_open,

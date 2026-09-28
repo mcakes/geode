@@ -96,16 +96,16 @@ cannot depend on such an event to keep text synchronized.
 
 Each entry records the workspace active when it was pushed
 (`ShellModal::workspace`). Frame dialogs — the dimension picker, as-of,
-grouping, the frame expression dialog, and the Scopes dialog's frame
-actions — read and commit the lane of the workspace recorded on the stack's
+grouping, the scope picker, the frame expression dialog, and the Scopes
+dialog's frame actions — read and commit the lane of the workspace recorded on the stack's
 base entry, through `ShellView::target_frame`, so a dialog opened in a pinned
 workspace changes only that workspace's lane (see
 [workspace lanes](shell.md#workspace-lanes)).
 
 Known limitation: apart from object dialogs, the stack holds one instance per
 `DialogKind`, so a second request for a live kind cannot open beside the first
-even from a different call site. The three `choicedialog` pickers (grouping,
-tile kind, log level) share one kind and one state field, so none of them can
+even from a different call site. The `choicedialog` pickers (grouping, scope,
+tile kind, column, log level) share one kind and one state field, so none of them can
 open while another is anywhere in the stack.
 
 A multi-screen dialog registers its back step with `dialog::set_back`: a
@@ -388,7 +388,7 @@ needed to adopt a changed clock configuration. Commits update the frame's as-of
 and close the dialog. As-of undo swaps with the previous value rather than
 walking a history stack.
 
-## Grouping, tile, log, and column choices
+## Grouping, scope, tile, log, and column choices
 
 [`shell/choicedialog.rs`](../../crates/geode-shell/src/shell/choicedialog.rs)
 uses a filter-only `ChoiceList` with a target-specific commit. Tab completes,
@@ -398,6 +398,7 @@ level stage.
 | Target | Rows and commit |
 |---|---|
 | Grouping | View default, then filled slots 1–9; opens on the active choice. Empty-query digits commit directly, with zero choosing the default. Unfilled digits are consumed. Commit rechecks slot existence, reports removal if needed, then closes. |
+| Scope (`frame::scope`, `mod+o`, and the toolbar's load glyph) | One row per saved scope, named, in the saved set's name order, read from the target frame's live saved scopes at open, so a scope saved or reloaded since startup is listed (the palette's `scope::<name>` rows are registered once at startup). Opens on the first saved scope equal to the frame's current scope, else the first row, so Enter on an untouched picker changes nothing. Commit loads through `ShellView::load_saved_scope`, the `scope::<name>` actions' own path: one undoable `set_scope` step in the target lane. A name removed by a reload while the picker was open loads nothing, closes, and reports "that saved scope no longer exists". With no saved scope the list is replaced by a hint naming the save glyph and `scope::save_current` (its chord when bound, else its palette title); Enter there does nothing. |
 | Tile kind | Roster order excluding the placeholder. Closes before adding to the tile focused at commit time: fills a placeholder or splits a real tile using the configured placement. |
 | Tile kind with context (`tile::open_with`) | The same rows, pre-filtered to kinds whose factory accepts the focused tile's captured launch context, titled `Open {underlying} in…`. Commit always splits, passing the factory's translated `launch_state` as the new tile's restored record. |
 | Column (`config::view_column`, `config::schema_column`) | The focused tile's presented columns from `TileContent::tile_columns`, captured at open; a row reads the header label, then ` · name` when they differ. Schema omits columns no dataset of the view declares in current configuration (derived view columns, and derived dimensions a view lists as plain dimension columns). Opens on the cursor's column, else the first row. Before the list opens, a tile with no columns refuses with "this tile has no dataset columns", a Schema list with nothing left with "no schema columns in this tile's view", and a target dialog already in the stack with the stack's own refusal. Commit closes the list, then opens the dialog on that column's Column stage (see [configuration dialogs](configuration-dialogs.md#stages-and-ownership)). Palette-only, no default binding. |

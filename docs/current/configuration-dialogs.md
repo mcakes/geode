@@ -91,7 +91,7 @@ its read-only summaries from configuration with pending edits included.
 A Column stage can also be entered directly from a tile. "Edit column in
 view…" (`config::view_column`) and "Edit column in schema…"
 (`config::schema_column`) list the focused tile's presented columns; see
-[input and dialogs](input-and-dialogs.md#grouping-tile-log-and-column-choices).
+[input and dialogs](input-and-dialogs.md#grouping-scope-tile-log-and-column-choices).
 A pick opens Views on the tile's view, or Schema on the dataset that owns the
 column (the view's primary dataset, then its joins in declaration order), and
 enters that column's stage. Both are resolved against configuration with
