@@ -406,8 +406,8 @@ impl TileContent for PricerContent {
         self.tile.read(cx).holds_focus(window, cx)
     }
 
-    fn launch_context(&self, cx: &App) -> geode_core::launch::LaunchContext {
-        self.tile.read(cx).launch_context()
+    fn dimension_context(&self, cx: &App) -> Option<geode_core::context::DimensionContext> {
+        self.tile.read(cx).dimension_context()
     }
 
     fn tile_columns(&self, cx: &App) -> Option<geode_core::tile_columns::TileColumns> {

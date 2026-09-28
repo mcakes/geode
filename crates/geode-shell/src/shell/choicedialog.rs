@@ -20,9 +20,10 @@
 //! Escape elsewhere closes; no other step paints a Back button.
 //! Each open starts fresh; stage transitions clear and refocus the Input.
 //!
-//! `tile::open_with` uses the same tile rows, filtered to kinds accepting
-//! the focused tile's launch context, titled `Open {underlying} in…`; a
-//! pick always splits.
+//! `tile::open_with` uses the same tile rows, filtered to kinds accepting a
+//! column of the focused tile's dimension context, titled `Open {subject}
+//! in…` (the first context value of an accepted column); a pick always
+//! splits.
 //!
 //! `config::view_column` / `config::schema_column` list the focused tile's
 //! presented columns (Schema without derived ones), the cursor's column
@@ -34,8 +35,8 @@ use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, Focusable as _, SharedString, Window, div};
 use gpui_component::{ActiveTheme as _, v_flex};
 
+use geode_core::context::DimensionContext;
 use geode_core::groupings::GroupingSlots;
-use geode_core::launch::LaunchContext;
 use geode_core::log::{Level, LogLevels, TARGETS};
 use geode_core::scope::Scope;
 use geode_core::scopes::SavedScopes;
@@ -62,7 +63,7 @@ use super::scale;
 pub const VIEW_DEFAULT: &str = "view default";
 
 /// What the rows stand for and what a pick does.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Target {
     /// The slot each DECLARED option (an index into `list.options()`)
     /// activates: `None` for the view default.
@@ -71,10 +72,13 @@ pub enum Target {
     TileKind { kinds: Vec<String> },
     /// `tile::open_with`: the kinds accepting `context`, which was captured
     /// from the focused tile when the dialog opened (moving that tile's
-    /// cursor afterwards does not change what a pick opens).
+    /// cursor afterwards does not change what a pick opens). `subject` is
+    /// the value the dialog is titled by: the first context value of a
+    /// column one of `kinds` accepts.
     TileKindWith {
         kinds: Vec<String>,
-        context: LaunchContext,
+        context: DimensionContext,
+        subject: Option<String>,
     },
     /// The focused tile's columns for `config::view_column` (Views) or
     /// `config::schema_column` (Schema), captured at open: `names[i]` is the
@@ -123,7 +127,7 @@ fn effective_level(levels: &LogLevels, target: &str) -> Level {
 }
 
 /// Persistent state for one open choice-dialog session.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ChoiceDialogState {
     /// The ranked rows, spelled as the surface a pick lands on spells
     /// them: a grouping row is `"{n} · {label}"`, the toolbar readout's
@@ -167,10 +171,12 @@ impl ChoiceDialogState {
     }
 
     /// The rows for `tile::open_with`: `kinds` (already filtered to those
-    /// accepting `context`), in roster order, the highlight on the first.
+    /// accepting `context`), in roster order, the highlight on the first,
+    /// titled by `subject`.
     pub fn tile_kinds_with<'a>(
         kinds: impl IntoIterator<Item = &'a str>,
-        context: LaunchContext,
+        context: DimensionContext,
+        subject: Option<String>,
     ) -> Self {
         let Self { list, target } = Self::tile_kinds(kinds);
         let Target::TileKind { kinds } = target else {
@@ -178,7 +184,11 @@ impl ChoiceDialogState {
         };
         Self {
             list,
-            target: Target::TileKindWith { kinds, context },
+            target: Target::TileKindWith {
+                kinds,
+                context,
+                subject,
+            },
         }
     }
 
@@ -235,11 +245,11 @@ impl ChoiceDialogState {
         }
     }
 
-    /// The modal's title: the chrome's fixed words, or `Open {underlying}…`
-    /// for a context launch.
+    /// The modal's title: the chrome's fixed words, or `Open {subject}…`
+    /// for a context launch with a subject.
     pub fn title(&self) -> SharedString {
         match &self.target {
-            Target::TileKindWith { context, .. } => match &context.underlying {
+            Target::TileKindWith { subject, .. } => match subject {
                 Some(u) => format!("Open {u} in\u{2026}").into(),
                 None => chrome(&self.target).0.into(),
             },
@@ -304,7 +314,7 @@ impl ChoiceDialogState {
         match &self.target {
             Target::Grouping { slots } => Pick::Slot(slots[declared]),
             Target::TileKind { kinds } => Pick::Kind(kinds[declared].clone()),
-            Target::TileKindWith { kinds, context } => {
+            Target::TileKindWith { kinds, context, .. } => {
                 Pick::KindWith(kinds[declared].clone(), context.clone())
             }
             Target::Column {
@@ -354,7 +364,7 @@ impl ChoiceDialogState {
 
 /// What one row commits. Owned (a `String` kind), not borrowed from the
 /// dialog state: a pick is a one-off event whose commit drops that state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Pick {
     /// `FrameViewMut::set_active_slot`; `None` is the view default.
     Slot(Option<u8>),
@@ -362,7 +372,7 @@ pub enum Pick {
     Kind(String),
     /// `ShellView::add_tile` of this kind, with the factory's
     /// `launch_state` of this context.
-    KindWith(String, LaunchContext),
+    KindWith(String, DimensionContext),
     /// `objectdialog::render::open_column` for this column of `view`.
     Column {
         domain: Domain,
@@ -481,8 +491,9 @@ fn chrome(target: &Target) -> (&'static str, &'static str, &'static str, &'stati
         Target::Grouping { .. } => ("Grouping", "grouping", "grouping-hints", GROUPING_HINTS),
         Target::TileKind { .. } => ("Add a tile", "tile", "tile-hints", TILE_HINTS),
         // This fallback title shows only if the target is built with no
-        // underlying; `tile::open_with` never builds it that way. `title()`
-        // supplies `Open {underlying} in…` instead.
+        // subject; `tile::open_with` never builds it that way (a listed kind
+        // accepts a present column). `title()` supplies `Open {subject} in…`
+        // instead.
         Target::TileKindWith { .. } => ("Open in\u{2026}", "tile", "tile-hints", TILE_HINTS),
         // Fallback only: `title()` names the view and the dialog.
         Target::Column { .. } => ("Edit column", "column", "column-hints", COLUMN_HINTS),
@@ -523,15 +534,17 @@ pub fn open_tile_kinds(view: &mut ShellView, window: &mut Window, cx: &mut Conte
 }
 
 /// Open on the roster kinds accepting `context` — `tile::open_with` with a
-/// non-empty context. The caller has checked at least one kind accepts it.
+/// non-empty context — titled by `subject`. The caller has checked at least
+/// one kind accepts it.
 pub fn open_tile_kinds_with(
     view: &mut ShellView,
     kinds: Vec<&'static str>,
-    context: LaunchContext,
+    context: DimensionContext,
+    subject: Option<String>,
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    let state = ChoiceDialogState::tile_kinds_with(kinds, context);
+    let state = ChoiceDialogState::tile_kinds_with(kinds, context, subject);
     open(view, state, window, cx);
 }
 
@@ -1084,15 +1097,17 @@ mod tests {
         );
     }
 
-    /// A context launch titles the dialog by the underlying and lists only
+    /// A context launch titles the dialog by its subject and lists only
     /// the pre-filtered kinds; a plain `tile_kinds` dialog keeps its fixed
     /// title.
     #[test]
     fn kinds_with_a_context_title_the_dialog_by_it_and_pick_with_it() {
-        let ctx = geode_core::launch::LaunchContext {
-            underlying: Some("SPX".into()),
-        };
-        let state = ChoiceDialogState::tile_kinds_with(["cvi", "dividend"], ctx.clone());
+        let ctx = DimensionContext::of(&[("underlying_ref", "SPX")]);
+        let state = ChoiceDialogState::tile_kinds_with(
+            ["cvi", "dividend"],
+            ctx.clone(),
+            Some("SPX".into()),
+        );
         assert_eq!(state.title().as_ref(), "Open SPX in\u{2026}");
         assert_eq!(
             state.list.options(),

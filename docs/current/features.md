@@ -227,9 +227,11 @@ columns](data-path.md#ungrouped-dimension-columns). A numeric dimension such as
 `strike` sorts by number and paints its exact value, never rounded by the text
 format.
 
-`g m` opens a panel on the cursor row's `underlying_ref` (the column name is
-fixed); a row above that level, a grouping without it, or a NULL value opens
-the plain tile picker.
+`g m` opens a panel on the cursor row's `underlying_ref`, the column every
+panel kind accepts. The blotter reads it from the grouping path, a shown
+column, or the hidden context column the data service adds; a row above the
+column's grouping level, a mixed value, or a NULL value leaves it absent, and
+a row with no accepted column opens the plain tile picker.
 
 "Edit column in view…" and "Edit column in schema…" list the blotter's
 planned non-tree columns with the cursor's column highlighted
@@ -374,7 +376,8 @@ reason becomes the notice.
 
 A panel opened through an add (palette, tile picker, `open_with`, duplicate)
 with no underlying opens the underlying picker at once; a restored panel does
-not. Every panel kind accepts an underlying launch context.
+not. Every panel kind accepts `underlying_ref` from the cursor's dimension
+context.
 
 The panel moves on the [shared motions](#motion). The header attribute
 strip sits outside the wrap cycle: `k` (or `up`) on row 0, bare or counted,

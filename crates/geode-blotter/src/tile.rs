@@ -453,12 +453,12 @@ impl BlotterTile {
         &self.table
     }
 
-    /// The launch context at the cursor: its underlying, when it has one.
-    /// In visual mode this is the cursor row, not the selection.
-    pub fn launch_context(&self, cx: &App) -> geode_core::launch::LaunchContext {
-        geode_core::launch::LaunchContext {
-            underlying: self.table.read(cx).delegate().cursor_underlying(),
-        }
+    /// The dimension context at the cursor row (see
+    /// [`BlotterDelegate::dimension_context`]): its single-valued columns,
+    /// plus the selection's rows while the cursor is inside it. `None`
+    /// before the first snapshot.
+    pub fn dimension_context(&self, cx: &App) -> Option<geode_core::context::DimensionContext> {
+        self.table.read(cx).delegate().dimension_context()
     }
 
     /// The presented columns and the cursor's column, for the shell's

@@ -488,7 +488,7 @@ impl ShellView {
                 .active()
                 .focused_tile()
                 .and_then(|t| self.occupants.get(&t))
-                .map(|o| o.content.launch_context(cx))
+                .and_then(|o| o.content.dimension_context(cx))
                 .unwrap_or_default();
             if context.is_empty() {
                 choicedialog::open_tile_kinds(self, window, cx);
@@ -502,14 +502,20 @@ impl ShellView {
                         self.services
                             .roster
                             .factory(k)
-                            .is_some_and(|f| context.covered_by(f.accepts()))
+                            .is_some_and(|f| context.offers(f.accepts()))
                     })
                     .collect();
                 if kinds.is_empty() {
                     self.notice = Some(NO_MODULE_OPENS);
                     cx.notify();
                 } else {
-                    choicedialog::open_tile_kinds_with(self, kinds, context, window, cx);
+                    let accepted: Vec<&str> = kinds
+                        .iter()
+                        .filter_map(|k| self.services.roster.factory(k))
+                        .flat_map(|f| f.accepts().iter().copied())
+                        .collect();
+                    let subject = context.subject(&accepted).map(str::to_string);
+                    choicedialog::open_tile_kinds_with(self, kinds, context, subject, window, cx);
                 }
             }
         } else if action.0 == "tile::autosize_columns" {

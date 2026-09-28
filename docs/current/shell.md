@@ -74,16 +74,24 @@ occupant (closing its tile, or filling a placeholder in place) calls
 Hiding never calls `closed`: a workspace switch, a dock toggle or a stack
 cycle only hides.
 
-### Launch context
+### Dimension context
 
-A tile reports `TileContent::launch_context` on demand: what a module knows
-at its cursor that another module may open on, such as an underlying. A
-field is empty whenever the cursor names no single value, never a guessed
-key, because a panel opened on a made-up value is a plausible wrong answer.
+A tile reports `TileContent::dimension_context` on demand: every dimension or
+key with one value at its cursor row (`geode_core::context::DimensionContext`,
+column name to value; the blotter reads its grouping path, shown columns and
+hidden context columns, the pricer the cursor line's sole underlying as
+`underlying_ref`). A column is absent whenever the row names no single value
+(NULL, mixed, or above the column's grouping level), never a guessed key,
+because a panel opened on a made-up value is a plausible wrong answer. A
+tile with no rows answers `None`, the default.
 
 `tile::open_with` pulls the focused tile's context and lists, in the shared
-choice dialog, every roster kind whose `ModuleFactory::accepts` covers it,
-titled `Open {underlying} in…`. A pick always splits: the factory's
+choice dialog, every roster kind whose `ModuleFactory::accepts` (column
+names, such as `underlying_ref`) names at least one column present in it; the
+other columns a row carries do not block a kind. The dialog is titled
+`Open {subject} in…`, the subject being the first context value, in context
+order, of a column a listed kind accepts. `ModuleRoster::context_columns` is
+the union of every factory's `accepts`. A pick always splits: the factory's
 `launch_state` translates the context into that kind's own restored-state
 table, so a source and a target agree without depending on each other. An
 empty context falls back to the plain tile picker; no accepting kind

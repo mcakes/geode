@@ -483,13 +483,6 @@ impl BlotterDelegate {
         self.shown.get(self.cursor.row).map(|r| *r as usize)
     }
 
-    /// The cursor row's underlying under the applied grouping, or `None`
-    /// (see [`crate::core::launch::underlying_at`]).
-    pub fn cursor_underlying(&self) -> Option<String> {
-        let plan = self.plan.as_ref()?;
-        crate::core::launch::underlying_at(&self.cursor_path()?, &plan.grouping)
-    }
-
     /// The cursor row's dimension context: its single-valued columns and,
     /// when the cursor row is inside the live selection, each selected
     /// top-most row's. `None` before the first snapshot.
@@ -1597,32 +1590,6 @@ mod tests {
             "open: BLACK DOWN-POINTING SMALL TRIANGLE"
         );
         assert_eq!(DETERMINED_MARK, "\u{2020}", "the determined mark is DAGGER");
-    }
-
-    /// The root is always in `shown` (`flatten` pushes every root before
-    /// descending), so the grand-total row is reachable by the cursor too.
-    #[test]
-    fn the_cursor_underlying_follows_the_cursor_row() {
-        let mut d = BlotterDelegate::new();
-        d.apply_snapshot(snapshot(), &view(), &grouping());
-        d.expansion
-            .toggle(path_of(&snapshot(), d.plan.as_ref().unwrap(), 1));
-        d.reflatten();
-        let at = |d: &BlotterDelegate, snap_row: u32| {
-            d.shown.iter().position(|r| *r == snap_row).unwrap()
-        };
-        d.cursor.row = at(&d, 1);
-        assert_eq!(
-            d.cursor_underlying(),
-            None,
-            "L1 is above the underlying level"
-        );
-        d.cursor.row = at(&d, 3);
-        assert_eq!(d.cursor_underlying(), Some("SPX".into()));
-        d.cursor.row = at(&d, 4);
-        assert_eq!(d.cursor_underlying(), Some("NDX".into()));
-        d.cursor.row = at(&d, 0);
-        assert_eq!(d.cursor_underlying(), None, "the grand total");
     }
 
     /// The context follows the cursor row, and carries the selection's

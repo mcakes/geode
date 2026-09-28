@@ -16,7 +16,7 @@ use crate::keymap::fragments;
 use crate::shell::control::{self, PointerStates as _};
 use crate::tiling::TileId;
 use geode_core::config::{Diagnostic, LayerDoc};
-use geode_core::launch::{ContextField, LaunchContext};
+use geode_core::context::DimensionContext;
 use geode_core::pricing::PriceOutcome;
 use geode_core::query::{QueryKey, QueryOutcome};
 use geode_core::series::SeriesOutcome;
@@ -253,12 +253,12 @@ pub trait TileContent {
     fn holds_focus(&self, _window: &Window, _cx: &App) -> bool {
         false
     }
-    /// The context at this tile's cursor, for `tile::open_with`. Pulled by
-    /// the shell when the action runs, so a module needs no handle into the
-    /// shell. Empty (the default) whenever the cursor names no single
-    /// value; the shell then opens the plain tile-kind picker.
-    fn launch_context(&self, _cx: &App) -> LaunchContext {
-        LaunchContext::default()
+    /// The context at this tile's cursor row, for `tile::open_with` (and
+    /// the row menu, Part 2). Pulled by the shell when the action runs, so
+    /// a module needs no handle into the shell. `None` (the default) for a
+    /// tile with no rows; an empty context opens the plain tile picker.
+    fn dimension_context(&self, _cx: &App) -> Option<DimensionContext> {
+        None
     }
     /// The view columns this tile presents and the one at its cursor, pulled
     /// by the shell when `config::view_column` / `config::schema_column`
@@ -336,16 +336,18 @@ pub trait ModuleFactory {
     fn default_keymap(&self) -> Option<&'static str> {
         None
     }
-    /// Context fields this kind can open on. Empty (the default) keeps the
-    /// kind out of `tile::open_with`'s list.
-    fn accepts(&self) -> &'static [ContextField] {
+    /// The context columns this kind can open on (`"underlying_ref"`).
+    /// Empty (the default) keeps the kind out of `tile::open_with`'s list.
+    /// Every name here also becomes a context column the data service
+    /// computes for each row (`ModuleRoster::context_columns`).
+    fn accepts(&self) -> &'static [&'static str] {
         &[]
     }
-    /// Translate a launch context into the table [`Self::create`] reads as
-    /// its restored record. The factory owns the translation so the shell
-    /// never learns a module's state format. `None` (the default) creates
-    /// the tile as a plain add would.
-    fn launch_state(&self, _ctx: &LaunchContext) -> Option<toml::Table> {
+    /// Translate a context into the table [`Self::create`] reads as its
+    /// restored record. The factory owns the translation so the shell never
+    /// learns a module's state format. `None` (the default) creates the tile
+    /// as a plain add would.
+    fn launch_state(&self, _ctx: &DimensionContext) -> Option<toml::Table> {
         None
     }
     /// Build an occupant for `tile`, optionally restoring its opaque state.
@@ -384,10 +386,10 @@ impl<F: ModuleFactory + ?Sized> ModuleFactory for Rc<F> {
     fn default_keymap(&self) -> Option<&'static str> {
         (**self).default_keymap()
     }
-    fn accepts(&self) -> &'static [ContextField] {
+    fn accepts(&self) -> &'static [&'static str] {
         (**self).accepts()
     }
-    fn launch_state(&self, ctx: &LaunchContext) -> Option<toml::Table> {
+    fn launch_state(&self, ctx: &DimensionContext) -> Option<toml::Table> {
         (**self).launch_state(ctx)
     }
     fn create(
@@ -435,6 +437,20 @@ impl ModuleRoster {
 
     pub fn kinds(&self) -> Vec<&'static str> {
         self.factories.iter().map(|f| f.kind()).collect()
+    }
+
+    /// Every column some factory accepts, first mention first. `geode-app`
+    /// hands this to the data service so each row carries these values.
+    pub fn context_columns(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for f in &self.factories {
+            for c in f.accepts() {
+                if !out.iter().any(|o| o == c) {
+                    out.push(c.to_string());
+                }
+            }
+        }
+        out
     }
 
     /// Every module's default bindings as keymap docs, in roster order,
@@ -892,15 +908,15 @@ pub mod recording {
         /// enough on its own.
         pub input: Rc<RefCell<Option<Entity<InputState>>>>,
         /// What every occupant this factory creates answers from
-        /// `launch_context`. Shared and mutable so a test can change the
+        /// `dimension_context`. Shared and mutable so a test can change the
         /// source's context AFTER `tile::open_with` has opened its dialog,
         /// and so prove the shell captured it at open.
-        pub launch_context: Rc<RefCell<LaunchContext>>,
+        pub dimension_context: Rc<RefCell<Option<DimensionContext>>>,
         /// What `accepts` answers. Empty by default, so every existing
         /// fixture stays out of `tile::open_with`'s list.
-        pub accepts: &'static [ContextField],
+        pub accepts: &'static [&'static str],
         /// What every occupant this factory creates answers from
-        /// `tile_columns`; shared and mutable like `launch_context`.
+        /// `tile_columns`; shared and mutable like `dimension_context`.
         pub tile_columns: Rc<RefCell<Option<TileColumns>>>,
         /// When set, `launched` opens the insert-mode input exactly as
         /// `<kind>::edit` does — the stand-in for a panel that opens its own
@@ -924,7 +940,7 @@ pub mod recording {
                 fragment: None,
                 contexts: &[],
                 input: Rc::new(RefCell::new(None)),
-                launch_context: Rc::new(RefCell::new(LaunchContext::default())),
+                dimension_context: Rc::new(RefCell::new(None)),
                 accepts: &[],
                 tile_columns: Rc::new(RefCell::new(None)),
                 edit_on_launch: false,
@@ -985,9 +1001,9 @@ pub mod recording {
         /// — a test's window into `set_stack`, since the field itself is
         /// only ever written by the trait method.
         pub stack: RefCell<Option<StackHandle>>,
-        /// Shared with [`RecordingFactory::launch_context`]; see it for why
-        /// it is mutable after creation.
-        launch_context: Rc<RefCell<LaunchContext>>,
+        /// Shared with [`RecordingFactory::dimension_context`]; see it for
+        /// why it is mutable after creation.
+        dimension_context: Rc<RefCell<Option<DimensionContext>>>,
         /// Shared with [`RecordingFactory::tile_columns`].
         tile_columns: Rc<RefCell<Option<TileColumns>>>,
         /// Shared with [`RecordingFactory::edit_on_launch`]; see it for what
@@ -1158,8 +1174,8 @@ pub mod recording {
         fn stack_handle_for_test(&self) -> Option<StackHandle> {
             self.stack.borrow().clone()
         }
-        fn launch_context(&self, _cx: &App) -> LaunchContext {
-            self.launch_context.borrow().clone()
+        fn dimension_context(&self, _cx: &App) -> Option<DimensionContext> {
+            self.dimension_context.borrow().clone()
         }
         fn tile_columns(&self, _cx: &App) -> Option<TileColumns> {
             self.tile_columns.borrow().clone()
@@ -1201,16 +1217,16 @@ pub mod recording {
         fn default_keymap(&self) -> Option<&'static str> {
             self.fragment
         }
-        fn accepts(&self) -> &'static [ContextField] {
+        fn accepts(&self) -> &'static [&'static str] {
             self.accepts
         }
         /// `{ underlying = ["<u>"] }`, the market-data panel's own shape,
-        /// when this fixture accepts the underlying field.
-        fn launch_state(&self, ctx: &LaunchContext) -> Option<toml::Table> {
-            if !self.accepts.contains(&ContextField::Underlying) {
+        /// when this fixture accepts `underlying_ref` and the context has it.
+        fn launch_state(&self, ctx: &DimensionContext) -> Option<toml::Table> {
+            if !self.accepts.contains(&"underlying_ref") {
                 return None;
             }
-            let u = ctx.underlying.clone()?;
+            let u = ctx.get("underlying_ref")?.to_string();
             let mut t = toml::Table::new();
             t.insert(
                 "underlying".into(),
@@ -1275,7 +1291,7 @@ pub mod recording {
                     insert: Cell::new(false),
                     input: self.input.clone(),
                     stack: RefCell::new(None),
-                    launch_context: self.launch_context.clone(),
+                    dimension_context: self.dimension_context.clone(),
                     tile_columns: self.tile_columns.clone(),
                     edit_on_launch: self.edit_on_launch,
                     grid: self.grid,
@@ -1549,6 +1565,21 @@ mod tests {
         assert_eq!(roster.kinds(), vec!["rec", "placeholder"]);
         assert_eq!(roster.factory("rec").map(|f| f.kind()), Some("rec"));
         assert!(roster.factory("nonesuch").is_none());
+    }
+
+    #[test]
+    fn context_columns_are_the_union_of_accepts_in_roster_order() {
+        let mut roster = ModuleRoster::new();
+        let mut a = recording::RecordingFactory::new("a");
+        a.accepts = &["underlying_ref"];
+        let mut b = recording::RecordingFactory::new("b");
+        b.accepts = &["position_ref", "underlying_ref"];
+        roster.add(Box::new(a));
+        roster.add(Box::new(b));
+        assert_eq!(
+            roster.context_columns(),
+            vec!["underlying_ref".to_string(), "position_ref".into()]
+        );
     }
 
     #[test]

@@ -982,12 +982,13 @@ mod tests {
         );
     }
 
-    /// The production roster exposes underlying-based launch state for CVI and
-    /// dividend. Exercising startup's registration path checks that shared
-    /// factory forwarding preserves `accepts` and `launch_state`.
+    /// The production roster exposes `underlying_ref`-based launch state for
+    /// CVI and dividend, and names that column in `context_columns`.
+    /// Exercising startup's registration path checks that shared factory
+    /// forwarding preserves `accepts` and `launch_state`.
     #[gpui::test]
     fn the_production_roster_opens_market_data_on_an_underlying(cx: &mut gpui::TestAppContext) {
-        use geode_core::launch::{ContextField, LaunchContext};
+        use geode_core::context::DimensionContext;
         let dir = tempfile::tempdir().unwrap();
         let (config, _) = ShellServices::config_and_builtin(ConfigSources {
             builtin: builtin_layer(Some(dir.path())),
@@ -1005,22 +1006,17 @@ mod tests {
         let mut roster = ModuleRoster::new();
         add_bridge_modules(&mut roster, &bridge);
 
-        let spx = LaunchContext {
-            underlying: Some("SPX".into()),
-        };
+        let spx = DimensionContext::of(&[("underlying_ref", "SPX")]);
         let accepting: Vec<&str> = roster
             .kinds()
             .into_iter()
-            .filter(|k| {
-                roster
-                    .factory(k)
-                    .is_some_and(|f| spx.covered_by(f.accepts()))
-            })
+            .filter(|k| roster.factory(k).is_some_and(|f| spx.offers(f.accepts())))
             .collect();
         assert_eq!(accepting, vec!["cvi", "dividend"]);
+        assert_eq!(roster.context_columns(), vec!["underlying_ref".to_string()]);
         for kind in ["cvi", "dividend"] {
             let f = roster.factory(kind).unwrap();
-            assert_eq!(f.accepts(), &[ContextField::Underlying], "{kind}");
+            assert_eq!(f.accepts(), &["underlying_ref"], "{kind}");
             let state = f.launch_state(&spx).expect("a state for an underlying");
             assert_eq!(
                 state.get("underlying"),

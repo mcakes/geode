@@ -22636,14 +22636,14 @@ run_mutation "launch: an unfocused add is launched" \
 
 run_mutation "launch: open_with lists kinds that do not accept the context" \
   crates/geode-shell/src/shell/input.rs \
-  '                            .is_some_and(|f| context.covered_by(f.accepts()))' \
+  '                            .is_some_and(|f| context.offers(f.accepts()))' \
   '                            .is_some()' \
   geode-shell g_m_lists_the_accepting_kinds_and_a_pick_creates_with_the_context
 
 run_mutation "launch: a pick reads the context at commit" \
   crates/geode-shell/src/shell/choicedialog.rs \
   '                .and_then(|f| f.launch_state(&context));' \
-  '                .and_then(|f| f.launch_state(&geode_core::launch::LaunchContext { underlying: Some("NDX".into()) }));' \
+  '                .and_then(|f| f.launch_state(&geode_core::context::DimensionContext::of(&[("underlying_ref", "NDX")])));' \
   geode-shell the_context_is_captured_when_the_dialog_opens
 
 run_mutation "launch: a panel with a key is prompted anyway" \
@@ -22651,20 +22651,6 @@ run_mutation "launch: a panel with a key is prompted anyway" \
   '        if self.key.is_none() && self.popup.is_none() {' \
   '        if self.popup.is_none() {' \
   geode-marketdata a_launched_panel_on_an_underlying_opens_no_picker
-
-# The two entries below share an anchor on purpose: their replacements
-# mutate different behaviours of the same line.
-run_mutation "launch: blotter reads a subtotal as its first child's underlying" \
-  crates/geode-blotter/src/core/launch.rs \
-  '    path.get(level)?.clone()' \
-  '    path.get(level).or(path.last())?.clone()' \
-  geode-blotter rows_above_the_level_and_groupings_without_it_are_empty
-
-run_mutation "launch: blotter turns a NULL underlying into text" \
-  crates/geode-blotter/src/core/launch.rs \
-  '    path.get(level)?.clone()' \
-  '    Some(path.get(level)?.clone().unwrap_or_else(|| "NULL".into()))' \
-  geode-blotter a_null_underlying_is_empty_not_a_made_up_key
 
 run_mutation "launch: a mixed package names its first leg's underlying" \
   crates/geode-pricer/src/core/sheet.rs \
@@ -22677,6 +22663,12 @@ run_mutation "launch: a shared factory stops forwarding accepts" \
   '        (**self).accepts()' \
   '        &[]' \
   geode-app the_production_roster_opens_market_data_on_an_underlying
+
+run_mutation "context: open_with needs every column accepted" \
+  crates/geode-core/src/context.rs \
+  '        accepts.iter().any(|c| self.get(c).is_some())' \
+  '        self.values.iter().all(|(c, _)| accepts.contains(&c.as_str())) && !self.values.is_empty()' \
+  geode-shell g_m_offers_a_kind_accepting_one_of_several_columns
 
 # A context column the view shows must not be emitted a second time.
 run_mutation "context: a shown context column is emitted twice" \

@@ -407,8 +407,9 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     // The tile picker lists roster kinds. Its id is outside the `tile::add_`
     // prefix so parse_add_action cannot mistake it for a specific module kind.
     action(reg, "tile::add", "Add a tile…", "Tiles");
-    // Pulls the focused tile's launch context and lists the kinds that
-    // accept it. Outside the `tile::add_` prefix, like `tile::add`.
+    // Pulls the focused tile's dimension context and lists the kinds that
+    // accept one of its columns. Outside the `tile::add_` prefix, like
+    // `tile::add`.
     action(reg, "tile::open_with", "Open with context…", "Tiles");
     // Fits the focused tile's table columns to their content
     // (`TileContent::autosize_columns`). Palette-only: no default key.
