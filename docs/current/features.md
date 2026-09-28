@@ -1076,7 +1076,8 @@ Normal-mode keys:
 | `.` | Open the action menu |
 | `shift+v` / `v` | Select rows / a block of cells from the cursor (see [Selection](#selection-2)) |
 
-`g m` opens a panel on the cursor row's underlying: a line's or leg's own, a
+`g m` opens a panel on the cursor row's underlying, as the `underlying_ref`
+context column the market-data panels accept: a line's or leg's own, a
 package's when its legs share one; otherwise the plain tile picker.
 
 The action menu offers repricing, grouping, ungrouping, undo, redo, deletion,

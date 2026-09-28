@@ -224,8 +224,8 @@ impl Sheet {
 
     /// The one underlying `row` is on: its own instrument's for a line or a
     /// leg, the legs' shared one for a package. `None` for a package across
-    /// several underlyings (or none), or a row with no instrument; a launch
-    /// context names one underlying or nothing.
+    /// several underlyings (or none), or a row with no instrument; the
+    /// tile's dimension context names one `underlying_ref` or nothing.
     pub fn sole_underlying(&self, row: usize) -> Option<String> {
         if !self.is_package(row) {
             return self.instrument(row).map(|i| i.underlying().to_string());

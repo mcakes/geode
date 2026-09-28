@@ -193,9 +193,11 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   column disappears, the field closes with `MOVED`; deferred window access
   blurs its retained input only if it still owns focus. Chrome rebuilds
   refresh open-menu rows and keep the highlight on an action or view.
-- `g m` opens the module picker with the cursor row's underlying as launch
-  context. A package contributes an underlying only when all its legs share
-  one; an empty sheet or mixed-underlying package contributes none.
+- `g m` opens the module picker on a `DimensionContext` holding the cursor
+  row's underlying as `underlying_ref`. A package contributes an underlying
+  only when all its legs share one; a mixed-underlying package gives an empty
+  context and an empty sheet (no cursor row) gives none, so both open the
+  plain tile picker.
 - The tile arrives at flip barriers itself; it submits no view query
   (`geode_tile::following::arrive_immediately`).
 - An empty sheet is never saved. A sheet whose load failed is never saved

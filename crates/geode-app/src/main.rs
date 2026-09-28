@@ -381,8 +381,9 @@ fn usage(reason: &str) -> String {
 }
 
 /// Register modules backed by the bridge's shared factories and data handle.
-/// The roster's `Rc` forwarding exposes every factory method, including launch
-/// context acceptance, while the bridge retains the factories for live reloads.
+/// The roster's `Rc` forwarding exposes every factory method, including
+/// `accepts` and `launch_state`, while the bridge retains the factories for
+/// live reloads.
 /// Finally hands the roster's context columns to the data handle, so every
 /// query carries them.
 fn add_bridge_modules(roster: &mut ModuleRoster, bridge: &bridge::Bridge) {

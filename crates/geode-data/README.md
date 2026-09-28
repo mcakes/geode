@@ -27,6 +27,12 @@ refused rather than admitted to a queue nothing will read. Results and health co
 `DataEvent`s through an `EventSink`; a sink returning `false` means "not
 delivered" and no producer stops on it.
 
+`DataHandle::set_context_columns` replaces the context columns every later
+view query carries as `ViewSpec::context` (hidden unanimity columns the shell
+reads a row's dimension context from; see
+[data path](../../docs/current/data-path.md)); `context_columns` reads them
+back. `geode-app` sets them from the module roster at startup.
+
 View replacements retain the latest configuration even under request-channel
 pressure. Shutdown and final-handle drop join workers and must run off the UI
 thread. Admission, cancellation, and completion have distinct guarantees; see
