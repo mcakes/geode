@@ -4021,11 +4021,14 @@ impl PricerTile {
     }
 
     /// The context at the cursor: the cursor row's sole underlying, as
-    /// `underlying_ref`. A package across underlyings names none.
+    /// `underlying_ref`. A package across underlyings names none (an empty
+    /// context); with no cursor row (an empty sheet) there is no context.
     pub(crate) fn dimension_context(&self) -> Option<geode_core::context::DimensionContext> {
+        let g = self.cursor_row()?;
         let u = self
-            .cursor_row()
-            .and_then(|g| self.model.rows.get(g))
+            .model
+            .rows
+            .get(g)
             .and_then(|r| r.row)
             .and_then(|row| self.sheet.sole_underlying(row));
         Some(match u {
@@ -5118,7 +5121,7 @@ pub(crate) mod tests {
     }
 
     /// The cursor line's underlying is the tile's dimension context, as
-    /// `underlying_ref`; an empty sheet's context is empty.
+    /// `underlying_ref`.
     #[gpui::test]
     fn the_dimension_context_is_the_cursor_lines_underlying(cx: &mut gpui::TestAppContext) {
         let (store, mut record) = seeded(&["SPX Z26 5000 C", "NDX Z26 20000 C"]);
@@ -5131,13 +5134,29 @@ pub(crate) mod tests {
         assert_eq!(ctx.get("underlying_ref"), Some("NDX"));
     }
 
+    /// With no cursor row there is no context, so `g m` opens the plain
+    /// picker.
     #[gpui::test]
-    fn an_empty_sheet_has_an_empty_dimension_context(cx: &mut gpui::TestAppContext) {
+    fn an_empty_sheet_has_no_dimension_context(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
-        let empty = vcx
+        let ctx = vcx.update(|_, cx| h.content.dimension_context(cx));
+        assert_eq!(ctx, None);
+    }
+
+    /// A package across two underlyings has a cursor row but names no
+    /// underlying: an empty context, not none.
+    #[gpui::test]
+    fn a_package_across_two_underlyings_has_an_empty_dimension_context(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "NDX Z26 20000 C"]);
+        h.dispatch(&mut vcx, "group", Some(2));
+        h.motion(&mut vcx, "top", None);
+        assert_eq!(h.tree(&vcx)[0], "CUSTOM SPX/NDX Z26", "the package, on top");
+        let ctx = vcx
             .update(|_, cx| h.content.dimension_context(cx))
-            .expect("a pricer always has a context");
-        assert!(empty.is_empty());
+            .expect("a cursor row has a context");
+        assert!(ctx.is_empty(), "{ctx:?}");
     }
 
     #[gpui::test]
