@@ -46,8 +46,9 @@ the header's back control through the shell-actions handle. The retired
 
 Sources filters by name and health; Data by dataset name; Config by
 `document.key` and value; Log by message and target text, plus the level
-toggles and the target select. The Log section follows new records until
-the cursor moves; `G` or the Follow switch resumes following. Clear forgets
+toggles and the target select. The Log section follows new records until a
+row motion; only a bare `G` or the Follow switch resumes following, and a
+counted `G` jumps to that row without following. Clear forgets
 the retained records without moving the drain point.
 
 Three controls change application state, each through a channel the shell
