@@ -265,7 +265,7 @@ impl HeaderModel {
             n => Some((format!("{n} rows incomplete").into(), Tone::Warn)),
         };
         HeaderModel {
-            title: i.spec.title.into(),
+            title: i.spec.title.clone().into(),
             underlying,
             dirty,
             attrs: i.model.header.clone(),

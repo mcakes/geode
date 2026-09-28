@@ -70,17 +70,17 @@ type Laid = (Vec<(String, Column)>, Vec<(String, Column)>);
 /// The flat shape: one document row per painted row, one value column per
 /// [`ValueColumn`] in spec order (the model's cells are in that order).
 fn flat(spec: &PanelSpec, cols: &[ValueColumn], rows: &[&RowModel]) -> Result<Laid, String> {
-    let mut axis = empty_column(spec.rows.column, row_axis_type(spec))?;
+    let mut axis = empty_column(&spec.rows.column, row_axis_type(spec))?;
     let mut values = cols
         .iter()
-        .map(|vc| empty_column(vc.column, vc.ty).map(|c| (vc.column.to_string(), c)))
+        .map(|vc| empty_column(&vc.column, vc.ty).map(|c| (vc.column.to_string(), c)))
         .collect::<Result<Vec<_>, _>>()?;
     for row in rows {
         let label = row.label.as_ref();
         put(
             &mut axis,
             label,
-            spec.rows.column,
+            &spec.rows.column,
             Some(&row_axis(spec, label)?),
         )?;
         for (ci, (name, column)) in values.iter_mut().enumerate() {
@@ -128,7 +128,7 @@ fn long(
         .map(|m| m.name.clone())
         .ok_or_else(|| "the model was not built as a pivot".to_string())?;
 
-    let mut row_axis_col = empty_column(spec.rows.column, row_axis_type(spec))?;
+    let mut row_axis_col = empty_column(&spec.rows.column, row_axis_type(spec))?;
     let axis_type = model
         .column_values
         .first()
@@ -138,7 +138,7 @@ fn long(
     let mut slices = spec
         .slice_values
         .iter()
-        .map(|sv| empty_column(sv.column, ColumnType::F64))
+        .map(|sv| empty_column(&sv.column, ColumnType::F64))
         .collect::<Result<Vec<_>, _>>()?;
     for row in rows {
         let label = row.label.as_ref();
@@ -146,7 +146,12 @@ fn long(
         for (ci, (column_label, column_value)) in
             ladder.iter().zip(&model.column_values).enumerate()
         {
-            put(&mut row_axis_col, label, spec.rows.column, Some(&row_value))?;
+            put(
+                &mut row_axis_col,
+                label,
+                &spec.rows.column,
+                Some(&row_value),
+            )?;
             put(&mut column_axis, label, axis, Some(column_value))?;
             put(
                 &mut value,
@@ -155,7 +160,7 @@ fn long(
                 cell(row, model.slice_columns + ci),
             )?;
             for (si, (sv, column)) in spec.slice_values.iter().zip(&mut slices).enumerate() {
-                put(column, label, sv.column, cell(row, si))?;
+                put(column, label, &sv.column, cell(row, si))?;
             }
         }
     }
@@ -182,10 +187,10 @@ fn attribute(
     attr: &HeaderAttr,
     draft: &Draft,
 ) -> Result<(String, Value), String> {
-    let value = match draft.attrs.get(attr.column) {
+    let value = match draft.attrs.get(&attr.column) {
         Some(value) => value.clone(),
         None => snapshot
-            .column_index(attr.column)
+            .column_index(&attr.column)
             .and_then(|idx| read_flat_value(snapshot, idx, 0, attr.ty))
             .ok_or_else(|| format!("the document has no '{}' attribute", attr.column))?,
     };
@@ -292,7 +297,7 @@ fn tag(ty: ColumnType) -> &'static str {
 /// attributes changed. Zero confirms the compared payload.
 pub fn echo_differs(spec: &PanelSpec, sent: &DocumentRows, delivered: &DocumentRows) -> usize {
     let minted = spec.rows.identity == RowIdentity::Minted;
-    let skipped = minted.then_some(spec.rows.column);
+    let skipped = minted.then_some(spec.rows.column.as_str());
     let (ours, all_theirs) = (compared(sent, skipped), compared(delivered, skipped));
     // `theirs` in `ours`' column order, so one index names one column on
     // both sides; `None` when the two carry different columns.
@@ -534,7 +539,7 @@ role = "attribute"
         );
         let (schema, diags) = SchemaSpec::from_doc(&merged);
         assert!(diags.is_empty(), "{diags:?}");
-        let ds = schema.dataset(spec.dataset).expect("declared above");
+        let ds = schema.dataset(&spec.dataset).expect("declared above");
         assert_eq!(doc.validate(ds), Ok(()), "{}", spec.kind);
     }
 

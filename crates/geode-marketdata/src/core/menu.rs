@@ -137,7 +137,7 @@ mod tests {
             upload_built: false,
             policy: UpdatePolicy::Hold,
             kind_title: "CVI",
-            kind_actions: CVI.actions,
+            kind_actions: &CVI.actions,
         }
     }
     fn checked(rows: &[Row<ActionId>]) -> Vec<(String, Option<bool>)> {

@@ -24,7 +24,7 @@ Current behavior and rationale:
 
 | Module | Holds |
 |---|---|
-| `core::spec`, `core::matrix` | Panel vocabulary and prepared grids built from a snapshot plus draft. |
+| `core::spec`, `core::matrix` | Panel vocabulary (the owned types live in `geode_core::panel`; `spec` re-exports them beside the compiled-in CVI and dividend panels) and prepared grids built from a snapshot plus draft. |
 | `core::draft` | Typed edits, label-based rebase, same-date group guards, and `DocumentBase` identity (source time plus optional store generation). |
 | `core::upload` | Typed whole-document assembly and row-order-independent echo comparison; minted labels are ignored and floats allow one ULP. |
 | `core::cursor`, `core::menu` | Grid navigation over `geode_tile::motion` (the shared rules; `step_clamped` for a live selection), with the attribute strip outside the wrap cycle, and the action list's rows (`geode_tile::menu` rows over action ids, hints as live chords). Numeric nudging and date fields are re-exported from `geode-core` and `geode-widgets`. |

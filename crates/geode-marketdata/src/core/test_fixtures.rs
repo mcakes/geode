@@ -13,6 +13,7 @@ use geode_core::attribution::{Attribution, ScopeSemantics};
 use geode_core::schema::ColumnType;
 use geode_core::snapshot::{ColumnMeta, Freshness, Provenance, Snapshot, TestColumn};
 use geode_core::view::{Colour, ColumnFormat, Negative, Scale};
+use std::sync::{Arc, LazyLock};
 
 pub(crate) const BASE: &str = "2026-09-12T14:00:00Z";
 
@@ -68,58 +69,66 @@ const SCHEDULE_AMOUNT_FORMAT: ColumnFormat = ColumnFormat {
 
 /// [`SCHEDULE`] with minted row identities hidden. This exercises table
 /// columns, search, row copying, and insertion without a row-label column.
-pub(crate) const HIDDEN_SCHEDULE: PanelSpec = PanelSpec {
-    kind: "sched_hidden",
-    rows: RowAxis {
-        column: "dividend_id",
-        identity: RowIdentity::Minted,
-        label: RowLabel::Hidden,
-    },
-    ..SCHEDULE
-};
+pub(crate) static HIDDEN_SCHEDULE: LazyLock<Arc<PanelSpec>> = LazyLock::new(|| {
+    Arc::new(PanelSpec {
+        kind: "sched_hidden".into(),
+        rows: RowAxis {
+            column: "dividend_id".into(),
+            identity: RowIdentity::Minted,
+            label: RowLabel::Hidden,
+        },
+        ..(**SCHEDULE).clone()
+    })
+});
 
-pub(crate) const SCHEDULE: PanelSpec = PanelSpec {
-    kind: "sched",
-    title: "Dividends",
-    dataset: "div_schedule",
-    document: "div_schedule",
-    rows: RowAxis {
-        column: "dividend_id",
-        identity: RowIdentity::Minted,
-        label: RowLabel::Shown,
-    },
-    columns: Columns::Values(&[
-        ValueColumn {
-            column: "ex_date",
-            label: "ex",
-            ty: ColumnType::Date,
-            format: ColumnFormat::MEASURE,
-            choices: None,
-            required: true,
+pub(crate) static SCHEDULE: LazyLock<Arc<PanelSpec>> = LazyLock::new(|| {
+    Arc::new(PanelSpec {
+        kind: "sched".into(),
+        title: "Dividends".into(),
+        dataset: "div_schedule".into(),
+        document: "div_schedule".into(),
+        rows: RowAxis {
+            column: "dividend_id".into(),
+            identity: RowIdentity::Minted,
+            label: RowLabel::Shown,
         },
-        ValueColumn {
-            column: "amount",
-            label: "amount",
-            ty: ColumnType::F64,
-            format: SCHEDULE_AMOUNT_FORMAT,
-            choices: None,
-            required: true,
-        },
-        ValueColumn {
-            column: "status",
-            label: "status",
-            ty: ColumnType::Utf8,
-            format: ColumnFormat::MEASURE,
-            choices: Some(&["estimated", "declared", "paid", "cancelled"]),
-            required: true,
-        },
-    ]),
-    header: &[],
-    slice_values: &[],
-    value_type: ColumnType::F64,
-    format: ColumnFormat::MEASURE,
-    actions: &[],
-};
+        columns: Columns::Values(vec![
+            ValueColumn {
+                column: "ex_date".into(),
+                label: "ex".into(),
+                ty: ColumnType::Date,
+                format: ColumnFormat::MEASURE,
+                choices: None,
+                required: true,
+            },
+            ValueColumn {
+                column: "amount".into(),
+                label: "amount".into(),
+                ty: ColumnType::F64,
+                format: SCHEDULE_AMOUNT_FORMAT,
+                choices: None,
+                required: true,
+            },
+            ValueColumn {
+                column: "status".into(),
+                label: "status".into(),
+                ty: ColumnType::Utf8,
+                format: ColumnFormat::MEASURE,
+                choices: Some(
+                    ["estimated", "declared", "paid", "cancelled"]
+                        .map(String::from)
+                        .into(),
+                ),
+                required: true,
+            },
+        ]),
+        header: Vec::new(),
+        slice_values: Vec::new(),
+        value_type: ColumnType::F64,
+        format: ColumnFormat::MEASURE,
+        actions: Vec::new(),
+    })
+});
 
 /// A [`SCHEDULE`] document: `(dividend_id, ex_date, amount, status)` per
 /// row. `ex_date` is a real `Date32` column (`TestColumn::Date`) — a flat
@@ -281,30 +290,32 @@ pub(crate) fn schedule_snapshot_with_null_status() -> Snapshot {
 /// A strike ladder with integer row identities and one `F64` value column.
 /// It exercises the text row-label editor and its nudge/commit paths;
 /// the shipped specs use minted identities or typed dates.
-pub(crate) const LADDER: PanelSpec = PanelSpec {
-    kind: "ladder",
-    title: "Strike ladder",
-    dataset: "strike_ladder",
-    document: "strike_ladder",
-    rows: RowAxis {
-        column: "strike",
-        identity: RowIdentity::Typed(ColumnType::I64),
-        label: RowLabel::Shown,
-    },
-    columns: Columns::Values(&[ValueColumn {
-        column: "vol",
-        label: "vol",
-        ty: ColumnType::F64,
-        format: SCHEDULE_AMOUNT_FORMAT,
-        choices: None,
-        required: true,
-    }]),
-    header: &[],
-    slice_values: &[],
-    value_type: ColumnType::F64,
-    format: ColumnFormat::MEASURE,
-    actions: &[],
-};
+pub(crate) static LADDER: LazyLock<Arc<PanelSpec>> = LazyLock::new(|| {
+    Arc::new(PanelSpec {
+        kind: "ladder".into(),
+        title: "Strike ladder".into(),
+        dataset: "strike_ladder".into(),
+        document: "strike_ladder".into(),
+        rows: RowAxis {
+            column: "strike".into(),
+            identity: RowIdentity::Typed(ColumnType::I64),
+            label: RowLabel::Shown,
+        },
+        columns: Columns::Values(vec![ValueColumn {
+            column: "vol".into(),
+            label: "vol".into(),
+            ty: ColumnType::F64,
+            format: SCHEDULE_AMOUNT_FORMAT,
+            choices: None,
+            required: true,
+        }]),
+        header: Vec::new(),
+        slice_values: Vec::new(),
+        value_type: ColumnType::F64,
+        format: ColumnFormat::MEASURE,
+        actions: Vec::new(),
+    })
+});
 
 /// A [`LADDER`] document: `(strike, vol)` per row, the strike a real
 /// `Int64` column so the row label is read through the integer path
@@ -418,40 +429,42 @@ pub(crate) fn flat_model(labels: &[&str]) -> MatrixModel {
 /// AXIS, never a value cell `:bump` can reach) offers: a row whose cells
 /// `:bump` must land at TWO different declared types, the fixture the
 /// tile-level atomicity test for `bumped`'s refusal needs.
-pub(crate) const MIXED: PanelSpec = PanelSpec {
-    kind: "mixed",
-    title: "Mixed",
-    dataset: "mixed",
-    document: "mixed",
-    rows: RowAxis {
-        column: "mixed_id",
-        identity: RowIdentity::Minted,
-        label: RowLabel::Shown,
-    },
-    columns: Columns::Values(&[
-        ValueColumn {
-            column: "amt",
-            label: "amt",
-            ty: ColumnType::F64,
-            format: SCHEDULE_AMOUNT_FORMAT,
-            choices: None,
-            required: false,
+pub(crate) static MIXED: LazyLock<Arc<PanelSpec>> = LazyLock::new(|| {
+    Arc::new(PanelSpec {
+        kind: "mixed".into(),
+        title: "Mixed".into(),
+        dataset: "mixed".into(),
+        document: "mixed".into(),
+        rows: RowAxis {
+            column: "mixed_id".into(),
+            identity: RowIdentity::Minted,
+            label: RowLabel::Shown,
         },
-        ValueColumn {
-            column: "n",
-            label: "n",
-            ty: ColumnType::I64,
-            format: ColumnFormat::MEASURE,
-            choices: None,
-            required: false,
-        },
-    ]),
-    header: &[],
-    slice_values: &[],
-    value_type: ColumnType::F64,
-    format: ColumnFormat::MEASURE,
-    actions: &[],
-};
+        columns: Columns::Values(vec![
+            ValueColumn {
+                column: "amt".into(),
+                label: "amt".into(),
+                ty: ColumnType::F64,
+                format: SCHEDULE_AMOUNT_FORMAT,
+                choices: None,
+                required: false,
+            },
+            ValueColumn {
+                column: "n".into(),
+                label: "n".into(),
+                ty: ColumnType::I64,
+                format: ColumnFormat::MEASURE,
+                choices: None,
+                required: false,
+            },
+        ]),
+        header: Vec::new(),
+        slice_values: Vec::new(),
+        value_type: ColumnType::F64,
+        format: ColumnFormat::MEASURE,
+        actions: Vec::new(),
+    })
+});
 
 /// A [`MIXED`] document: `(mixed_id, amt, n)` per row.
 pub(crate) fn mixed_snapshot(rows: &[(&str, f64, i64)]) -> Snapshot {
@@ -536,7 +549,7 @@ pub(crate) fn snapshot_of_at(
         0,
         Provenance {
             datasets: vec![Freshness {
-                dataset: spec.dataset.into(),
+                dataset: spec.dataset.clone(),
                 as_of: Some(as_of.into()),
                 generation: Some(7),
             }],

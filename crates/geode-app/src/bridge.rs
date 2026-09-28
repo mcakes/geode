@@ -532,7 +532,7 @@ pub fn start(
         marketdata: Rc::new(
             MarketDataFactory::new(
                 handle.clone(),
-                &CVI,
+                Arc::clone(&CVI),
                 // Document panels and blotters use the same configured stale threshold.
                 stale_after,
             )
@@ -542,7 +542,7 @@ pub fn start(
         // fragment once, while each factory keeps its own actions and filters the
         // shared egress targets to its document kind.
         dividend: Rc::new(
-            MarketDataFactory::new(handle.clone(), &DIVIDEND, stale_after)
+            MarketDataFactory::new(handle.clone(), Arc::clone(&DIVIDEND), stale_after)
                 .without_keymap()
                 .with_egress(egress_targets),
         ),
@@ -1550,12 +1550,16 @@ role = "key"
             )),
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
-                &CVI,
+                Arc::clone(&CVI),
                 Duration::from_secs(900),
             )),
             dividend: Rc::new(
-                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
-                    .without_keymap(),
+                MarketDataFactory::new(
+                    handle.clone(),
+                    Arc::clone(&DIVIDEND),
+                    Duration::from_secs(900),
+                )
+                .without_keymap(),
             ),
             timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
                 handle.clone(),
@@ -3575,12 +3579,16 @@ role = "key"
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
-                &CVI,
+                Arc::clone(&CVI),
                 Duration::from_secs(900),
             )),
             dividend: Rc::new(
-                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
-                    .without_keymap(),
+                MarketDataFactory::new(
+                    handle.clone(),
+                    Arc::clone(&DIVIDEND),
+                    Duration::from_secs(900),
+                )
+                .without_keymap(),
             ),
             timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
                 handle.clone(),
@@ -3678,12 +3686,16 @@ role = "key"
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
-                &CVI,
+                Arc::clone(&CVI),
                 Duration::from_secs(900),
             )),
             dividend: Rc::new(
-                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
-                    .without_keymap(),
+                MarketDataFactory::new(
+                    handle.clone(),
+                    Arc::clone(&DIVIDEND),
+                    Duration::from_secs(900),
+                )
+                .without_keymap(),
             ),
             timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
                 handle.clone(),
@@ -3739,12 +3751,16 @@ role = "key"
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
-                &CVI,
+                Arc::clone(&CVI),
                 Duration::from_secs(900),
             )),
             dividend: Rc::new(
-                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
-                    .without_keymap(),
+                MarketDataFactory::new(
+                    handle.clone(),
+                    Arc::clone(&DIVIDEND),
+                    Duration::from_secs(900),
+                )
+                .without_keymap(),
             ),
             timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
                 handle.clone(),
@@ -3862,12 +3878,16 @@ role = "key"
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
-                &CVI,
+                Arc::clone(&CVI),
                 Duration::from_secs(900),
             )),
             dividend: Rc::new(
-                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
-                    .without_keymap(),
+                MarketDataFactory::new(
+                    handle.clone(),
+                    Arc::clone(&DIVIDEND),
+                    Duration::from_secs(900),
+                )
+                .without_keymap(),
             ),
             timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
                 handle.clone(),
@@ -3928,12 +3948,16 @@ role = "key"
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
-                &CVI,
+                Arc::clone(&CVI),
                 Duration::from_secs(900),
             )),
             dividend: Rc::new(
-                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
-                    .without_keymap(),
+                MarketDataFactory::new(
+                    handle.clone(),
+                    Arc::clone(&DIVIDEND),
+                    Duration::from_secs(900),
+                )
+                .without_keymap(),
             ),
             timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
                 handle.clone(),
@@ -4000,12 +4024,16 @@ role = "key"
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
-                &CVI,
+                Arc::clone(&CVI),
                 Duration::from_secs(900),
             )),
             dividend: Rc::new(
-                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
-                    .without_keymap(),
+                MarketDataFactory::new(
+                    handle.clone(),
+                    Arc::clone(&DIVIDEND),
+                    Duration::from_secs(900),
+                )
+                .without_keymap(),
             ),
             timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
                 handle.clone(),
@@ -4065,12 +4093,16 @@ role = "key"
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
-                &CVI,
+                Arc::clone(&CVI),
                 Duration::from_secs(900),
             )),
             dividend: Rc::new(
-                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
-                    .without_keymap(),
+                MarketDataFactory::new(
+                    handle.clone(),
+                    Arc::clone(&DIVIDEND),
+                    Duration::from_secs(900),
+                )
+                .without_keymap(),
             ),
             timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
                 handle.clone(),
@@ -4163,12 +4195,16 @@ role = "key"
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
-                &CVI,
+                Arc::clone(&CVI),
                 Duration::from_secs(900),
             )),
             dividend: Rc::new(
-                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
-                    .without_keymap(),
+                MarketDataFactory::new(
+                    handle.clone(),
+                    Arc::clone(&DIVIDEND),
+                    Duration::from_secs(900),
+                )
+                .without_keymap(),
             ),
             timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
                 handle.clone(),
@@ -4240,12 +4276,16 @@ role = "key"
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
-                &CVI,
+                Arc::clone(&CVI),
                 Duration::from_secs(900),
             )),
             dividend: Rc::new(
-                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
-                    .without_keymap(),
+                MarketDataFactory::new(
+                    handle.clone(),
+                    Arc::clone(&DIVIDEND),
+                    Duration::from_secs(900),
+                )
+                .without_keymap(),
             ),
             timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
                 handle.clone(),
@@ -4312,12 +4352,16 @@ role = "key"
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
-                &CVI,
+                Arc::clone(&CVI),
                 Duration::from_secs(900),
             )),
             dividend: Rc::new(
-                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
-                    .without_keymap(),
+                MarketDataFactory::new(
+                    handle.clone(),
+                    Arc::clone(&DIVIDEND),
+                    Duration::from_secs(900),
+                )
+                .without_keymap(),
             ),
             timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
                 handle.clone(),
@@ -4375,12 +4419,16 @@ role = "key"
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
-                &CVI,
+                Arc::clone(&CVI),
                 Duration::from_secs(900),
             )),
             dividend: Rc::new(
-                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
-                    .without_keymap(),
+                MarketDataFactory::new(
+                    handle.clone(),
+                    Arc::clone(&DIVIDEND),
+                    Duration::from_secs(900),
+                )
+                .without_keymap(),
             ),
             timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
                 handle.clone(),
@@ -4476,12 +4524,16 @@ role = "key"
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
-                &CVI,
+                Arc::clone(&CVI),
                 Duration::from_secs(900),
             )),
             dividend: Rc::new(
-                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
-                    .without_keymap(),
+                MarketDataFactory::new(
+                    handle.clone(),
+                    Arc::clone(&DIVIDEND),
+                    Duration::from_secs(900),
+                )
+                .without_keymap(),
             ),
             timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
                 handle.clone(),
@@ -4544,12 +4596,16 @@ role = "key"
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
-                &CVI,
+                Arc::clone(&CVI),
                 Duration::from_secs(900),
             )),
             dividend: Rc::new(
-                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
-                    .without_keymap(),
+                MarketDataFactory::new(
+                    handle.clone(),
+                    Arc::clone(&DIVIDEND),
+                    Duration::from_secs(900),
+                )
+                .without_keymap(),
             ),
             timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
                 handle.clone(),
@@ -4691,12 +4747,16 @@ role = "key"
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
-                &CVI,
+                Arc::clone(&CVI),
                 Duration::from_secs(900),
             )),
             dividend: Rc::new(
-                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
-                    .without_keymap(),
+                MarketDataFactory::new(
+                    handle.clone(),
+                    Arc::clone(&DIVIDEND),
+                    Duration::from_secs(900),
+                )
+                .without_keymap(),
             ),
             timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
                 handle.clone(),
@@ -5169,12 +5229,16 @@ role = "key"
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
-                &CVI,
+                Arc::clone(&CVI),
                 Duration::from_secs(900),
             )),
             dividend: Rc::new(
-                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
-                    .without_keymap(),
+                MarketDataFactory::new(
+                    handle.clone(),
+                    Arc::clone(&DIVIDEND),
+                    Duration::from_secs(900),
+                )
+                .without_keymap(),
             ),
             timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
                 handle.clone(),
@@ -5706,7 +5770,7 @@ role = "key"
         )));
         roster.add(Box::new(MarketDataFactory::new(
             handle.clone(),
-            &CVI,
+            Arc::clone(&CVI),
             Duration::from_secs(900),
         )));
         roster.add(Box::new(PricerFactory::new(

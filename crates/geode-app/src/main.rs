@@ -811,11 +811,12 @@ mod tests {
         let (data, _rx) = DataHandle::for_tests();
         roster.add(Box::new(Rc::new(MarketDataFactory::new(
             data.clone(),
-            &CVI,
+            Arc::clone(&CVI),
             Duration::from_secs(60),
         ))));
         roster.add(Box::new(Rc::new(
-            MarketDataFactory::new(data, &DIVIDEND, Duration::from_secs(60)).without_keymap(),
+            MarketDataFactory::new(data, Arc::clone(&DIVIDEND), Duration::from_secs(60))
+                .without_keymap(),
         )));
 
         let (docs, diags) = roster.keymap_fragments();

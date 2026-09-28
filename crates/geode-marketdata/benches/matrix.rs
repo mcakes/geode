@@ -19,6 +19,7 @@ use geode_marketdata::core::spec::{
     CVI, Columns, HeaderAttr, PanelSpec, RowAxis, RowIdentity, RowLabel, ValueColumn,
 };
 use std::hint::black_box;
+use std::sync::{Arc, LazyLock};
 
 const BASE: &str = "2026-09-12T14:00:00Z";
 
@@ -122,62 +123,41 @@ fn cvi(terms: usize, nodes: usize) -> Snapshot {
     )
 }
 
-const SCHEDULE_VALUE_COLUMN: ValueColumn = ValueColumn {
-    column: "v0",
-    label: "v0",
-    ty: ColumnType::F64,
-    format: ColumnFormat::MEASURE,
-    choices: None,
-    required: true,
-};
+/// One of the schedule's five identical `f64` value columns.
+fn value_column(name: &str) -> ValueColumn {
+    ValueColumn {
+        column: name.into(),
+        label: name.into(),
+        ty: ColumnType::F64,
+        format: ColumnFormat::MEASURE,
+        choices: None,
+        required: true,
+    }
+}
 
-const SCHEDULE: PanelSpec = PanelSpec {
-    kind: "sched",
-    title: "Dividends",
-    dataset: "div_schedule",
-    document: "div_schedule",
-    rows: RowAxis {
-        column: "ex_date",
-        identity: RowIdentity::Typed(ColumnType::Date),
-        label: RowLabel::Shown,
-    },
-    columns: Columns::Values(&[
-        ValueColumn {
-            column: "v0",
-            label: "v0",
-            ..SCHEDULE_VALUE_COLUMN
+static SCHEDULE: LazyLock<Arc<PanelSpec>> = LazyLock::new(|| {
+    Arc::new(PanelSpec {
+        kind: "sched".into(),
+        title: "Dividends".into(),
+        dataset: "div_schedule".into(),
+        document: "div_schedule".into(),
+        rows: RowAxis {
+            column: "ex_date".into(),
+            identity: RowIdentity::Typed(ColumnType::Date),
+            label: RowLabel::Shown,
         },
-        ValueColumn {
-            column: "v1",
-            label: "v1",
-            ..SCHEDULE_VALUE_COLUMN
-        },
-        ValueColumn {
-            column: "v2",
-            label: "v2",
-            ..SCHEDULE_VALUE_COLUMN
-        },
-        ValueColumn {
-            column: "v3",
-            label: "v3",
-            ..SCHEDULE_VALUE_COLUMN
-        },
-        ValueColumn {
-            column: "v4",
-            label: "v4",
-            ..SCHEDULE_VALUE_COLUMN
-        },
-    ]),
-    header: &[HeaderAttr {
-        column: "currency",
-        label: "currency",
-        ty: ColumnType::Utf8,
-    }],
-    slice_values: &[],
-    value_type: ColumnType::F64,
-    format: ColumnFormat::MEASURE,
-    actions: &[],
-};
+        columns: Columns::Values(["v0", "v1", "v2", "v3", "v4"].map(value_column).to_vec()),
+        header: vec![HeaderAttr {
+            column: "currency".into(),
+            label: "currency".into(),
+            ty: ColumnType::Utf8,
+        }],
+        slice_values: Vec::new(),
+        value_type: ColumnType::F64,
+        format: ColumnFormat::MEASURE,
+        actions: Vec::new(),
+    })
+});
 
 /// A schedule with five value columns and distinct dated row labels.
 /// The synthetic 28-day-month calendar keeps labels unique so these benches
