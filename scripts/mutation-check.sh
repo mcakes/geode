@@ -3339,12 +3339,13 @@ run_mutation "find: fzf narrows and vim does not" \
   geode-blotter \
   vim_style_jumps_as_typed_commits_and_repeats
 
-run_mutation "cursor: a counted G is a row number" \
-  crates/geode-blotter/src/core/cursor.rs \
-  '                self.row = (c.max(1) as usize - 1).min(len.saturating_sub(1));' \
-  '                self.row = len.saturating_sub(1); let _ = c;' \
+run_mutation "blotter motion: a counted G is a row number" \
+  crates/geode-tile/src/motion.rs \
+  '        Motion::Top(Some(n)) | Motion::Bottom(Some(n)) => (n.max(1) as usize - 1).min(last),' \
+  '        Motion::Top(Some(_)) => 0,
+        Motion::Bottom(Some(_)) => last,' \
   geode-blotter \
-  row_motion_is_counted_and_clamped
+  row_and_column_motions_go_through_the_shared_rules
 
 run_mutation "cache: a NULL measure is None, never a number" \
   crates/geode-blotter/src/core/cache.rs \
@@ -6332,12 +6333,10 @@ run_mutation "diagnostics module: ctrl+f/ctrl+b page by ten, not by five" \
             "page_up_full" => self.move_cursor(-5 * n, cx),' \
   geode-diagnostics ctrl_f_and_ctrl_b_page_by_ten
 
-run_mutation "blotter: ctrl+b moves back ten, not forward" \
-  crates/geode-blotter/src/tile.rs \
-  '                    "page_down_full" => NavCommand::Move(10),
-                    _ => NavCommand::Move(-10),' \
-  '                    "page_down_full" => NavCommand::Move(10),
-                    _ => NavCommand::Move(10),' \
+run_mutation "blotter motion: ctrl+b moves back ten, not forward" \
+  crates/geode-tile/src/motion.rs \
+  '        PAGE_UP => rows(-FULL_PAGE),' \
+  '        PAGE_UP => rows(FULL_PAGE),' \
   geode-blotter motions_expansion_and_yank
 
 run_mutation "line numbers: the relative cursor row shows its absolute number, not 0" \
@@ -13898,10 +13897,10 @@ run_mutation "vimnav: a bare ±1 wraps (spec §20.5)" \
   geode-shell \
   apply_wraps_a_single_step_at_both_ends
 
-run_mutation "blotter cursor: visual mode clamps a bare step (spec §20.5)" \
+run_mutation "blotter motion: visual mode clamps a bare step" \
   crates/geode-blotter/src/core/cursor.rs \
-  '        self.row = if wrap {' \
-  '        self.row = if true {' \
+  '        self.row = motion::row(self.row, len, m, selecting);' \
+  '        self.row = motion::row(self.row, len, m, false);' \
   geode-blotter \
   visual_mode_clamps_a_bare_step
 
@@ -14382,12 +14381,44 @@ run_mutation "dialog: the object-dialog frozen-row click is dropped while a conf
 # The tile enables row wrapping only when no selection is active.
 # Forcing wrap on makes a bare j jump from the last row to the first
 # and reverses the selected range across its anchor.
-run_mutation "tile: a bare step wraps in normal mode only (spec §20.5)" \
+run_mutation "blotter motion: a bare step wraps in normal mode only" \
   crates/geode-blotter/src/tile.rs \
-  '                    let wrap = d.selection.is_none();' \
-  '                    let wrap = true;' \
+  '                let selecting = d.selection.is_some();' \
+  '                let selecting = false;' \
   geode-blotter \
   a_bare_j_wraps_in_normal_mode_and_clamps_in_visual
+
+# The blotter hands every shared motion id to the shared rules; dropping
+# the route leaves every motion key dispatching to nothing.
+run_mutation "blotter motion: the tile routes the shared motions" \
+  crates/geode-blotter/src/tile.rs \
+  '        if let Some(m) = geode_tile::motion::parse(action, count) {' \
+  '        if let Some(m) = geode_tile::motion::parse(action, count).filter(|_| false) {' \
+  geode-blotter motions_expansion_and_yank
+
+# The shell binds the shared motions under `grid`; a blotter that stops
+# publishing the flag takes no motion key at all.
+run_mutation "blotter motion: the key context publishes grid" \
+  crates/geode-blotter/src/tile.rs \
+  'KeyContext::new("blotter").grid()' \
+  'KeyContext::new("blotter")' \
+  geode-blotter the_key_context_publishes_the_grid_flag
+
+run_mutation "motion e2e: a shared override reaches the blotter" \
+  crates/geode-blotter/src/tile.rs \
+  'KeyContext::new("blotter").grid()' \
+  'KeyContext::new("blotter")' \
+  geode-app a_shared_motion_override_reaches_each_grid_tile
+
+# An old user binding on a retired id must bind its shared successor, not
+# some other motion.
+run_mutation "blotter motion: retired ids rename to the shared ones" \
+  crates/geode-blotter/src/content.rs \
+  '    ("blotter::visual", "blotter::visual_rows"),
+    ("blotter::down", "motion::down"),' \
+  '    ("blotter::visual", "blotter::visual_rows"),
+    ("blotter::down", "motion::up"),' \
+  geode-blotter every_retired_motion_id_renames_to_its_shared_id
 
 # ---- Popup hover and occlusion ---------------------------------------
 #
@@ -23365,6 +23396,14 @@ run_mutation "shared motion: a counted top or bottom is a 1-based row" \
   '        Motion::Top(Some(_)) => 0,
         Motion::Bottom(Some(_)) => last,' \
   geode-tile a_counted_top_or_bottom_jumps_to_that_row
+
+# A cursor left past the end after the rows shrank steps from the last
+# row; from its stale index a bare wrap would land somewhere unrelated.
+run_mutation "shared motion: a stale row past the end steps from the last row" \
+  crates/geode-tile/src/motion.rs \
+  '            let from = at.min(last);' \
+  '            let from = at;' \
+  geode-tile a_stale_position_past_the_end_moves_from_the_last_row
 
 run_mutation "shared motion: half a page is five rows" \
   crates/geode-tile/src/motion.rs \

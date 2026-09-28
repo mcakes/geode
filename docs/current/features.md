@@ -40,6 +40,14 @@ has the surface. The pricer and market-data use all four, timeseries the
 popups, menus and notice line, and the blotter the notice line. Diagnostics
 has none of them.
 
+- Grid motions are the shell's shared `motion::*` actions, bound once under
+  `grid` and applied by `geode_tile::motion`: a bare `j`/`k` wraps at the
+  ends except while a selection is live, where it clamps; every counted
+  move clamps, `1j` included; a counted `g g` or `G` goes to that 1-based
+  row; `ctrl+d`/`ctrl+u` move 5 rows and `ctrl+f`/`ctrl+b` (and
+  `pagedown`/`pageup`) 10, times the count; columns clamp; a grid with no
+  rows or columns does not move. The blotter moves on them. See [shared
+  motions](keymaps.md#shared-motions).
 - A popup is deferred above the tile's clip and snaps inside the window with
   an 8-pixel margin. An action menu occludes what it covers, so its hover and
   presses do not reach the tile beneath.
@@ -177,6 +185,10 @@ the plain tile picker.
 planned non-tree columns with the cursor's column highlighted
 (`TileContent::tile_columns`). Hidden columns and dimensions folded into the
 tree are not in the plan and are not offered; reach them through the dialogs.
+
+Motions follow the shared rules (see [Shared tile
+interaction](#shared-tile-interaction)); the column motions (`h`/`l`, the
+arrows, `^`/`$`, `home`/`end`) move the blotter's column cursor.
 
 ### Selection
 

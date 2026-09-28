@@ -35,7 +35,6 @@ use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::tips;
 use geode_shell::vimfind::{FindDirection, FindStyle};
-use geode_shell::vimnav::NavCommand;
 use geode_tile::following::{Delivered, FollowingQuery, FrameDoor, Promotion, Unanswered};
 use geode_tile::notice::{self, Notice};
 use gpui::prelude::*;
@@ -62,18 +61,6 @@ const FOOTER_HEIGHT: f32 = 20.0;
 pub const DEFAULT_STALE_AFTER: Duration = Duration::from_secs(15 * 60);
 
 pub const ACTIONS: &[(&str, &str)] = &[
-    ("blotter::down", "Cursor down"),
-    ("blotter::up", "Cursor up"),
-    ("blotter::left", "Cursor left"),
-    ("blotter::right", "Cursor right"),
-    ("blotter::top", "Cursor to top"),
-    ("blotter::bottom", "Cursor to bottom"),
-    ("blotter::page_down", "Half page down"),
-    ("blotter::page_up", "Half page up"),
-    ("blotter::page_down_full", "Page down"),
-    ("blotter::page_up_full", "Page up"),
-    ("blotter::first_col", "First column"),
-    ("blotter::last_col", "Last column"),
     ("blotter::expand", "Expand node"),
     ("blotter::collapse", "Collapse node"),
     ("blotter::toggle", "Toggle node"),
@@ -865,7 +852,9 @@ impl BlotterTile {
 
     pub fn key_context(&self, cx: &App) -> KeyContext {
         let d = self.table.read(cx).delegate();
-        let mut ctx = KeyContext::new("blotter").pair(
+        // `grid` is the flag the shell's shared motion bindings are written
+        // under: without it no motion key reaches the blotter.
+        let mut ctx = KeyContext::new("blotter").grid().pair(
             "mode",
             if d.selection.is_some() {
                 "visual"
@@ -1014,48 +1003,22 @@ impl BlotterTile {
         count: Option<u32>,
         cx: &mut Context<Self>,
     ) -> bool {
+        if let Some(m) = geode_tile::motion::parse(action, count) {
+            self.with_delegate(cx, |d| {
+                let len = d.shown.len();
+                let cols = d.plan.as_ref().map_or(0, |p| p.columns.len());
+                // A bare j/k wraps outside a selection only: wrapping past
+                // the anchor would silently invert it.
+                let selecting = d.selection.is_some();
+                d.cursor.apply(m, len, cols, selecting);
+            });
+            self.sync_cursor(cx);
+            return true;
+        }
         let Some(name) = action.0.strip_prefix("blotter::") else {
             return false;
         };
         match name {
-            // The step sizes are `vimnav`'s own convention, shared with
-            // every dialog list: `ctrl+d`/`ctrl+u` ±5, `ctrl+f`/`ctrl+b`
-            // (and `pagedown`/`pageup`) ±10 — fixed offsets, not vim's
-            // viewport-relative scroll, since the count prefix already
-            // multiplies them.
-            "down" | "up" | "top" | "bottom" | "page_down" | "page_up" | "page_down_full"
-            | "page_up_full" => {
-                let cmd = match name {
-                    "down" => NavCommand::Move(1),
-                    "up" => NavCommand::Move(-1),
-                    "top" => NavCommand::Top,
-                    "bottom" => NavCommand::Bottom,
-                    "page_down" => NavCommand::Move(5),
-                    "page_up" => NavCommand::Move(-5),
-                    "page_down_full" => NavCommand::Move(10),
-                    _ => NavCommand::Move(-10),
-                };
-                self.with_delegate(cx, |d| {
-                    let len = d.shown.len();
-                    // A bare j/k wraps outside a selection only —
-                    // wrapping past the anchor would silently invert it.
-                    let wrap = d.selection.is_none();
-                    d.cursor.move_rows(len, cmd, count, wrap);
-                });
-                self.sync_cursor(cx);
-            }
-            "left" | "right" | "first_col" | "last_col" => {
-                self.with_delegate(cx, |d| {
-                    let cols = d.plan.as_ref().map_or(0, |p| p.columns.len());
-                    match name {
-                        "left" => d.cursor.move_cols(cols, -1, count),
-                        "right" => d.cursor.move_cols(cols, 1, count),
-                        "first_col" => d.cursor.col = 0,
-                        _ => d.cursor.col = cols.saturating_sub(1),
-                    }
-                });
-                self.sync_cursor(cx);
-            }
             "expand" | "collapse" | "toggle" => {
                 let open = match name {
                     "expand" => Some(true),
@@ -2805,7 +2768,7 @@ mod tests {
     #[gpui::test]
     fn shift_click_extends_a_block_from_the_cursor(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = delivered(cx);
-        act(&h, &mut cx, "blotter::right"); // cursor (0, 1)
+        act(&h, &mut cx, "motion::right"); // cursor (0, 1)
         let at = centre(&mut cx, "blotter-cell-2-2");
         cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::shift());
         cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::shift());
@@ -2815,7 +2778,7 @@ mod tests {
             .unwrap();
         assert_eq!((r.kind, r.rows, r.cols), (SelectKind::Block, 0..3, 1..3));
         // The keyboard keeps extending what the mouse started.
-        act(&h, &mut cx, "blotter::up");
+        act(&h, &mut cx, "motion::up");
         let r = h
             .tile
             .read_with(&cx, |t, cx| t.table().read(cx).delegate().resolved.clone())
@@ -2854,7 +2817,7 @@ mod tests {
             })
         };
         act(&h, &mut cx, "blotter::visual_rows");
-        act(&h, &mut cx, "blotter::down"); // rows 0..=1, cursor on 1
+        act(&h, &mut cx, "motion::down"); // rows 0..=1, cursor on 1
         assert_eq!(state(&mut cx), (true, 1), "fixture");
 
         let at = beside(&mut cx, 1);
@@ -2879,7 +2842,7 @@ mod tests {
     fn painting_the_tile_resolves_the_footer_colors(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = delivered(cx);
         act(&h, &mut cx, "blotter::visual_rows");
-        act(&h, &mut cx, "blotter::down");
+        act(&h, &mut cx, "motion::down");
         cx.run_until_parked();
         let (groups, paints) = h.tile.read_with(&cx, |t, cx| {
             let d = t.table().read(cx).delegate();
@@ -2896,7 +2859,7 @@ mod tests {
     fn a_selection_prepares_its_extent(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = delivered(cx);
         act(&h, &mut cx, "blotter::visual_block"); // the tree column only
-        act(&h, &mut cx, "blotter::down");
+        act(&h, &mut cx, "motion::down");
         let extent = |cx: &mut gpui::VisualTestContext| {
             h.tile.read_with(cx, |t, cx| {
                 let d = t.table().read(cx).delegate();
@@ -2904,7 +2867,7 @@ mod tests {
             })
         };
         assert_eq!(extent(&mut cx), (true, Some("2 rows × 1 col".into())));
-        act(&h, &mut cx, "blotter::right"); // into delta01: now summarised
+        act(&h, &mut cx, "motion::right"); // into delta01: now summarised
         assert_eq!(extent(&mut cx), (false, Some("2 rows × 2 cols".into())));
         act(&h, &mut cx, "blotter::escape");
         assert_eq!(extent(&mut cx), (true, None));
@@ -2917,8 +2880,8 @@ mod tests {
     fn the_cursor_echo_never_clears_a_keyboard_selection(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = delivered(cx);
         act(&h, &mut cx, "blotter::visual_rows");
-        act(&h, &mut cx, "blotter::down");
-        act(&h, &mut cx, "blotter::down");
+        act(&h, &mut cx, "motion::down");
+        act(&h, &mut cx, "motion::down");
         cx.run_until_parked();
         let r = h
             .tile
@@ -3031,7 +2994,7 @@ mod tests {
     fn shift_v_selects_rows_and_y_copies_them_with_every_column(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = delivered(cx);
         act(&h, &mut cx, "blotter::visual_rows");
-        act(&h, &mut cx, "blotter::down");
+        act(&h, &mut cx, "motion::down");
         act(&h, &mut cx, "blotter::yank");
         assert_eq!(
             clip(&mut cx).as_deref(),
@@ -3051,10 +3014,10 @@ mod tests {
     #[gpui::test]
     fn v_selects_a_block_and_y_copies_only_the_block(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = delivered(cx);
-        act(&h, &mut cx, "blotter::right"); // cursor (0, delta01)
+        act(&h, &mut cx, "motion::right"); // cursor (0, delta01)
         act(&h, &mut cx, "blotter::visual_block");
-        act(&h, &mut cx, "blotter::down");
-        act(&h, &mut cx, "blotter::right"); // block rows 0..2 × cols 1..3
+        act(&h, &mut cx, "motion::down");
+        act(&h, &mut cx, "motion::right"); // block rows 0..2 × cols 1..3
         act(&h, &mut cx, "blotter::yank");
         assert_eq!(
             clip(&mut cx).as_deref(),
@@ -3076,7 +3039,7 @@ mod tests {
             })
         };
         act(&h, &mut cx, "blotter::visual_rows");
-        act(&h, &mut cx, "blotter::down");
+        act(&h, &mut cx, "motion::down");
         act(&h, &mut cx, "blotter::visual_block");
         assert_eq!(kind(&mut cx), Some(SelectKind::Block));
         let rows = h.tile.read_with(&cx, |t, cx| {
@@ -3114,10 +3077,10 @@ mod tests {
     #[gpui::test]
     fn the_footer_sums_a_group_and_its_child_once(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = delivered(cx);
-        act(&h, &mut cx, "blotter::down"); // L1
+        act(&h, &mut cx, "motion::down"); // L1
         act(&h, &mut cx, "blotter::expand"); // shown: root, L1, SPX, L2
         act(&h, &mut cx, "blotter::visual_rows");
-        act(&h, &mut cx, "blotter::down"); // L1 + SPX
+        act(&h, &mut cx, "motion::down"); // L1 + SPX
         let summary = h
             .tile
             .read_with(&cx, |t, cx| t.table().read(cx).delegate().summary.clone());
@@ -3131,9 +3094,9 @@ mod tests {
     #[gpui::test]
     fn a_redelivery_keeps_the_selection_on_the_same_rows(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = delivered(cx);
-        act(&h, &mut cx, "blotter::down"); // L1
+        act(&h, &mut cx, "motion::down"); // L1
         act(&h, &mut cx, "blotter::visual_rows");
-        act(&h, &mut cx, "blotter::down"); // L1..L2 = rows 1..3
+        act(&h, &mut cx, "motion::down"); // L1..L2 = rows 1..3
         // expand_all reflattens at once (SPX is materialised, so it lands
         // between L1 and L2) and always requeries.
         act(&h, &mut cx, "blotter::expand_all");
@@ -3159,13 +3122,13 @@ mod tests {
     #[gpui::test]
     fn a_selection_whose_anchor_row_vanishes_clears_with_a_notice(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = delivered(cx);
-        act(&h, &mut cx, "blotter::bottom"); // L2
+        act(&h, &mut cx, "motion::bottom"); // L2
         act(&h, &mut cx, "blotter::visual_rows");
         // Narrow to rows that exclude L2.
         h.tile.update(&mut cx, |t, cx| {
             t.table()
                 .update(cx, |t, _| t.delegate_mut().set_narrowed(Some(vec![0, 1])));
-            t.dispatch(&ActionId("blotter::up".into()), None, cx);
+            t.dispatch(&ActionId("motion::up".into()), None, cx);
         });
         let (sel, err) = h.tile.read_with(&cx, |t, cx| {
             (
@@ -3236,7 +3199,7 @@ mod tests {
             t.with_delegate(cx, |d| d.cursor.col = model_ix);
         });
         act(&h, &mut cx, "blotter::visual_block");
-        act(&h, &mut cx, "blotter::right");
+        act(&h, &mut cx, "motion::right");
 
         h.tile.update(&mut cx, |t, _| {
             t.views
@@ -3277,13 +3240,13 @@ mod tests {
             h.tile
                 .update(cx, |t, cx| t.dispatch(&ActionId(id.into()), count, cx))
         };
-        assert!(act(&mut cx, "blotter::down", Some(2)));
+        assert!(act(&mut cx, "motion::down", Some(2)));
         assert_eq!(
             h.tile
                 .read_with(&cx, |t, cx| t.table().read(cx).delegate().cursor.row),
             2
         );
-        act(&mut cx, "blotter::up", None);
+        act(&mut cx, "motion::up", None);
         // `ctrl+f`/`ctrl+b`: the ±10 step every dialog list has. Ten
         // outruns this snapshot, so it clamps to the last row, and
         // `ctrl+b` from there lands on row 0 — not on row -8.
@@ -3291,11 +3254,11 @@ mod tests {
             h.tile
                 .read_with(cx, |t, cx| t.table().read(cx).delegate().cursor.row)
         };
-        assert!(act(&mut cx, "blotter::page_down_full", None));
+        assert!(act(&mut cx, "motion::page_down", None));
         assert_eq!(row(&mut cx), 2, "ctrl+f clamps to the last row");
-        assert!(act(&mut cx, "blotter::page_up_full", None));
+        assert!(act(&mut cx, "motion::page_up", None));
         assert_eq!(row(&mut cx), 0, "ctrl+b clamps to the first row");
-        act(&mut cx, "blotter::down", Some(1));
+        act(&mut cx, "motion::down", Some(1));
         act(&mut cx, "blotter::expand", None);
         let rows = h
             .tile
@@ -3313,7 +3276,7 @@ mod tests {
         // DFS order puts SPX (L1's already-materialised child) right
         // after L1 in `shown`; the row that genuinely lacks a fetched
         // child at this point is L2, two rows down from L1.
-        act(&mut cx, "blotter::down", Some(2));
+        act(&mut cx, "motion::down", Some(2));
         act(&mut cx, "blotter::expand", None);
         let p = next_query(&h.requests);
         assert_eq!(
@@ -3321,9 +3284,9 @@ mod tests {
             "opening at the bound requeries one level deeper"
         );
 
-        act(&mut cx, "blotter::top", None);
+        act(&mut cx, "motion::top", None);
         act(&mut cx, "blotter::visual_rows", None);
-        act(&mut cx, "blotter::down", Some(1));
+        act(&mut cx, "motion::down", Some(1));
         act(&mut cx, "blotter::yank", None);
         let clip = cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
         assert_eq!(
@@ -3357,14 +3320,14 @@ mod tests {
         };
         assert_eq!(shown_rows(&h, &cx), vec![0, 1, 2]);
 
-        assert!(act(&mut cx, "blotter::bottom"));
+        assert!(act(&mut cx, "motion::bottom"));
         assert_eq!(cursor_row(&h, &cx), 2);
-        assert!(act(&mut cx, "blotter::down"));
+        assert!(act(&mut cx, "motion::down"));
         assert_eq!(cursor_row(&h, &cx), 0, "a bare j wraps in normal mode");
 
-        assert!(act(&mut cx, "blotter::bottom"));
+        assert!(act(&mut cx, "motion::bottom"));
         assert!(act(&mut cx, "blotter::visual_rows"));
-        assert!(act(&mut cx, "blotter::down"));
+        assert!(act(&mut cx, "motion::down"));
         assert_eq!(
             cursor_row(&h, &cx),
             2,
@@ -3381,6 +3344,39 @@ mod tests {
             Some(2..3),
             "and the selection anchor is intact"
         );
+    }
+
+    /// The blotter publishes `grid`, the flag the shell's shared motion
+    /// bindings are written under; without it no motion key reaches it.
+    #[gpui::test]
+    fn the_key_context_publishes_the_grid_flag(cx: &mut gpui::TestAppContext) {
+        let (h, cx) = open(cx);
+        let ctx = h.tile.read_with(&cx, |t, cx| t.key_context(cx));
+        assert!(ctx.has_flag(geode_shell::keymap::GRID));
+        assert_eq!(ctx.get("mode"), Some("normal"));
+    }
+
+    /// Motions over a blotter with no rows yet change nothing.
+    #[gpui::test]
+    fn motions_on_an_empty_blotter_change_nothing(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        for (id, count) in [
+            ("motion::down", None),
+            ("motion::bottom", None),
+            ("motion::bottom", Some(5)),
+            ("motion::line_end", None),
+            ("motion::up", Some(3)),
+        ] {
+            assert!(
+                h.tile
+                    .update(&mut cx, |t, cx| t.dispatch(&ActionId(id.into()), count, cx))
+            );
+            let (row, col) = h.tile.read_with(&cx, |t, cx| {
+                let d = t.table().read(cx).delegate();
+                (d.cursor.row, d.cursor.col)
+            });
+            assert_eq!((row, col), (0, 0), "{id} {count:?}");
+        }
     }
 
     #[gpui::test]
@@ -3518,7 +3514,7 @@ mod tests {
         assert!(act(&mut cx, "blotter::sort_cycle_abs"));
         assert_eq!(sort(&mut cx), None);
 
-        act(&mut cx, "blotter::right");
+        act(&mut cx, "motion::right");
         act(&mut cx, "blotter::sort_cycle");
         assert_eq!(sort(&mut cx), Some(("delta01".to_string(), SortOrder::Asc)));
         assert_eq!(header(&mut cx), "delta01");
@@ -3784,10 +3780,10 @@ mod tests {
 
         // Rows: root 9, L1 5, L2 4, L1/SPX 5. Open L1 and put the cursor
         // on L2, so that an ascending sort moves L2 above L1's subtree.
-        act(&mut cx, "blotter::down");
+        act(&mut cx, "motion::down");
         act(&mut cx, "blotter::expand");
-        act(&mut cx, "blotter::down");
-        act(&mut cx, "blotter::down");
+        act(&mut cx, "motion::down");
+        act(&mut cx, "motion::down");
         assert_eq!(
             row_of(&mut cx),
             (3, 2),
@@ -4541,7 +4537,7 @@ mod tests {
         let p = next_query(&h.requests);
         deliver(&h, &mut cx, p.tag, Ok(snapshot()));
         h.tile.update(&mut cx, |t, cx| {
-            t.dispatch(&ActionId("blotter::down".into()), None, cx);
+            t.dispatch(&ActionId("motion::down".into()), None, cx);
             t.dispatch(&ActionId("blotter::expand".into()), None, cx);
         });
         assert_eq!(shown_rows(&h, &cx), vec![0, 1, 3, 2]);
@@ -4746,7 +4742,7 @@ mod tests {
         // already materialised — no requery needed, per
         // `motions_expansion_and_yank`).
         h.tile.update(&mut cx, |t, cx| {
-            t.dispatch(&ActionId("blotter::down".into()), None, cx)
+            t.dispatch(&ActionId("motion::down".into()), None, cx)
         });
         h.tile.update(&mut cx, |t, cx| {
             t.dispatch(&ActionId("blotter::expand".into()), None, cx)
@@ -4808,7 +4804,7 @@ mod tests {
         deliver(&h, &mut cx, p.tag, Ok(attributed_snapshot()));
 
         h.tile.update(&mut cx, |t, cx| {
-            t.dispatch(&ActionId("blotter::down".into()), None, cx)
+            t.dispatch(&ActionId("motion::down".into()), None, cx)
         });
         h.tile.update(&mut cx, |t, cx| {
             t.dispatch(&ActionId("blotter::expand".into()), None, cx)
@@ -4876,7 +4872,7 @@ mod tests {
         );
 
         h.tile.update(&mut cx, |t, cx| {
-            t.dispatch(&ActionId("blotter::last_col".into()), None, cx)
+            t.dispatch(&ActionId("motion::line_end".into()), None, cx)
         });
         cx.update(|window, cx| {
             let _ = window.draw(cx);
@@ -4974,7 +4970,7 @@ mod tests {
         );
 
         h.tile.update(&mut cx, |t, cx| {
-            t.dispatch(&ActionId("blotter::down".into()), Some(2), cx)
+            t.dispatch(&ActionId("motion::down".into()), Some(2), cx)
         });
         cx.update(|window, cx| {
             let _ = window.draw(cx);

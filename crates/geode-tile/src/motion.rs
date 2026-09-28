@@ -104,10 +104,14 @@ pub fn row(at: usize, len: usize, motion: Motion, selecting: bool) -> usize {
     let last = len - 1;
     match motion {
         Motion::Rows { by, counted } => {
+            // A cursor left past the end after the rows shrank steps from
+            // the last row: otherwise a bare wrapping step would land modulo
+            // `len` somewhere unrelated to where the cursor is drawn.
+            let from = at.min(last);
             if !counted && !selecting && by.abs() == 1 {
-                (at as i64 + by).rem_euclid(len as i64) as usize
+                (from as i64 + by).rem_euclid(len as i64) as usize
             } else {
-                (at as i64).saturating_add(by).clamp(0, last as i64) as usize
+                (from as i64).saturating_add(by).clamp(0, last as i64) as usize
             }
         }
         Motion::Top(None) => 0,
@@ -125,7 +129,11 @@ pub fn col(at: usize, cols: usize, motion: Motion) -> usize {
     }
     let last = cols - 1;
     match motion {
-        Motion::Cols(by) => (at as i64).saturating_add(by).clamp(0, last as i64) as usize,
+        // A column left past the end after the columns shrank steps from
+        // the last one, where the cursor is drawn.
+        Motion::Cols(by) => (at.min(last) as i64)
+            .saturating_add(by)
+            .clamp(0, last as i64) as usize,
         Motion::LineStart => 0,
         Motion::LineEnd => last,
         Motion::Rows { .. } | Motion::Top(_) | Motion::Bottom(_) => at,
@@ -235,6 +243,23 @@ mod tests {
         for id in ["left", "right", "line_start", "line_end"] {
             assert_eq!(col(2, 0, m(id, None)), 2, "{id}");
         }
+    }
+
+    /// A cursor left past the end after the rows shrank moves from the last
+    /// row, not from its stale index: a bare `j` wraps to the top and a
+    /// bare `k` steps to the row above the last, rather than landing at
+    /// `stale ± 1` modulo the length.
+    #[test]
+    fn a_stale_position_past_the_end_moves_from_the_last_row() {
+        assert_eq!(row(7, 5, m("down", None), false), 0);
+        assert_eq!(row(7, 5, m("up", None), false), 3);
+        assert_eq!(row(9, 5, m("down", None), true), 4);
+        assert_eq!(col(9, 4, m("left", None)), 2);
+        assert_eq!(
+            row(9, 5, m("right", None), false),
+            9,
+            "a column motion leaves the row"
+        );
     }
 
     #[test]

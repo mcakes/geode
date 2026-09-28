@@ -23,7 +23,7 @@ Current architecture:
 Used by the pricer (all four doors, and `following::arrive_immediately` at
 flip barriers), market-data (all four, and `following` for its document
 request), timeseries (popover, menu, notice, and `following` for its series
-query), the blotter (notice, and `following` for its view query) and
+query), the blotter (notice, `motion` for its grid cursor, and `following` for its view query) and
 diagnostics. Diagnostics has no popover, menu, confirm or notice line; it
 uses only `following::arrive_immediately`, since it submits no frame query.
 

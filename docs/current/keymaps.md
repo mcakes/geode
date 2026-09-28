@@ -63,6 +63,14 @@ last-good acceptance gate; see [reload](configuration.md#hot-reload).
 cell rectangle. The compatibility name `blotter::visual` resolves to row
 selection.
 
+The blotter's retired motion ids rename as `blotter::down`/`up`/`left`/
+`right`/`top`/`bottom` → the same `motion::*` name, `blotter::page_down`/
+`page_up` → `motion::half_page_down`/`half_page_up`,
+`blotter::page_down_full`/`page_up_full` → `motion::page_down`/`page_up`, and
+`blotter::first_col`/`last_col` → `motion::line_start`/`line_end`. A user
+binding on one of them keeps its own context (for example
+`blotter && mode == normal`), so it still moves only the blotter.
+
 ## Key spelling and primary modifier
 
 A binding is a whitespace-separated sequence of keystrokes, such as `"g g"` or
@@ -243,6 +251,10 @@ or filtered entries produce diagnostics without preventing the rest of the
 module roster from loading. Retained fragment-filter diagnostics are shown on
 reload but do not themselves reject a user edit; errors from the ordinary
 compiler still participate in the reload gate.
+
+A grid module's fragment binds no motions: they come from the shared
+`motion::*` bindings under `grid`. The blotter's fragment binds only its
+verbs (expansion, selection, yank, find, sort, `g m`, escape).
 
 A fragment may name any action, not only ones its own module registers, so
 long as its context is the module's own: both the blotter's and the pricer's
