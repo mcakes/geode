@@ -7394,8 +7394,8 @@ run_mutation "add-tile: the _vertical suffix means stacked" \
 
 run_mutation "add-tile: register_add_actions registers the suffixed pair too" \
   crates/geode-shell/src/defaults.rs \
-  '            &format!("tile::add_{kind}_vertical"),' \
-  '            &format!("tile::add_{kind}_vertical_"),' \
+  '    ("_vertical", "Split Vertical"),' \
+  '    ("_vertical_", "Split Vertical"),' \
   geode-shell register_add_actions_registers_four_rows_per_kind_in_the_tiles_category
 
 # ---- Refused events do not stop producers -----------------------------
@@ -24388,6 +24388,30 @@ run_mutation "panels: a panel must name every column its kind writes" \
   '    if missing.is_empty() {' \
   '    if true {' \
   geode-core a_flat_panel_missing_a_value_column_is_refused
+
+# A panel named with a placement suffix claims another kind's add-tile id;
+# mutated to accept it, `[cvi_stacked]` loads and the shell refuses its rows.
+run_mutation "panels: a placement-suffix name refuses" \
+  crates/geode-core/src/panel/read.rs \
+  '    if let Some(suffix) = PLACEMENT_SUFFIXES.iter().find(|s| name.ends_with(*s)) {' \
+  '    if let Some(suffix) = None::<&&str> {' \
+  geode-core a_panel_name_ending_in_a_placement_suffix_is_refused
+
+# The kind's writer is order-exact; mutated to accept any order, a reordered
+# panel loads and every upload is refused.
+run_mutation "panels: columns must follow the kind's order" \
+  crates/geode-core/src/panel/check.rs \
+  '    if expected == laid {' \
+  '    if true {' \
+  geode-core slices_out_of_the_kinds_order_are_refused
+
+# Kinds come from config: a colliding kind must be an Error, not a registry
+# panic at startup.
+run_mutation "add actions: a colliding kind is refused, not registered" \
+  crates/geode-shell/src/defaults.rs \
+  '        if let Some(why) = refusal {' \
+  '        if let Some(why) = None::<String> {' \
+  geode-shell register_add_actions_refuses_a_colliding_kind_without_panicking
 
 # The forward is a price at two places; mutated, the builtin CVI paints it
 # at four and no longer matches the spec it replaced.
