@@ -382,13 +382,29 @@ mod tests {
         );
     }
 
-    /// The builtin dividend panel declares its status choices once, in its
-    /// TOML; the parser and the demo generator must offer exactly those. The
-    /// composition root verifies agreement without a feature-to-parser
-    /// dependency.
+    /// The dividend panel the composition root loads declares its status
+    /// choices once, in its TOML; the parser and the demo generator must
+    /// offer exactly those. Only the composition root sees the loaded panel
+    /// and the parser together, without a feature-to-parser dependency.
     #[test]
     fn the_dividend_panel_specs_status_vocabulary_matches_the_dividend_kind() {
-        let dividend = geode_marketdata::core::builtin_panel("dividend");
+        let dir = tempfile::tempdir().unwrap();
+        let config = geode_core::config::Config::load(&geode_core::config::ConfigSources {
+            builtin: crate::builtin_layer(Some(dir.path())),
+            ..Default::default()
+        });
+        let setup = crate::bridge::data_setup(
+            &config,
+            dir.path().join("geode.duckdb"),
+            geode_data::adapter::AdapterRegistry::default(),
+            geode_data::PricerRegistry::default(),
+        )
+        .expect("the demo layer declares datasets and views");
+        let dividend = setup
+            .panels
+            .iter()
+            .find(|p| p.kind == "dividend")
+            .expect("the builtin dividend panel is accepted");
         let choices = dividend
             .value_column("status")
             .and_then(|c| c.choices.as_deref())

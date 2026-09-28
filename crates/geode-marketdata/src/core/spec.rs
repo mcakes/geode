@@ -46,7 +46,9 @@ pub const BUILTIN_PANELS: &str = include_str!("builtin_panels.toml");
 /// the schema or the document kinds, so the dataset checks are `geode-app`'s;
 /// its tests load these same panels through the real composition. Panics on
 /// a name the builtin document does not define — a programmer error. For
-/// tests and benches; the application reads panels from its config.
+/// tests and benches only: production code never calls it, because the
+/// application loads panels from its layered config (where a desk or user
+/// layer may replace or refuse these) through `geode_core::panel::load_panels`.
 pub fn builtin_panel(name: &str) -> Arc<PanelSpec> {
     static PANELS: LazyLock<Vec<Arc<PanelSpec>>> = LazyLock::new(|| {
         let doc = LayerDoc::builtin(PANELS_DOC, BUILTIN_PANELS)

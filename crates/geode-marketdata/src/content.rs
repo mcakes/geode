@@ -236,9 +236,9 @@ impl TileContent for MarketDataContent {
     }
 }
 
-/// Builds one panel's tiles. One factory per [`PanelSpec`] — the roster
-/// keys on the kind, and a second document kind is a second factory over
-/// the same tile and the same context.
+/// Builds one panel's tiles. One factory per accepted [`PanelSpec`] — the
+/// roster keys on the kind, and every panel is a factory over the same tile
+/// and the same context.
 pub struct MarketDataFactory {
     data: DataHandle,
     /// The spec's kind, leaked once in [`Self::new`]: the shell keys tiles,
@@ -256,8 +256,8 @@ pub struct MarketDataFactory {
     /// Every resolved egress target, as name → accepted document names in
     /// `egress.toml` order — empty until `geode-app` calls
     /// [`Self::with_egress`]. `Arc`, not `Rc`: `geode-app` builds one list
-    /// from `egress.toml` and shares it, unmodified, between the CVI and
-    /// dividend factories built over the same resolved targets. `create`
+    /// from `egress.toml` and shares it, unmodified, between every panel
+    /// factory built over the same resolved targets. `create`
     /// narrows it to this spec's own document with [`targets_for`];
     /// `:upload` resolves and completes its target from the narrowed list.
     egress: Arc<Vec<(String, Vec<String>)>>,
@@ -288,9 +288,10 @@ impl MarketDataFactory {
         self
     }
 
-    /// Suppress the shared fragment for additional panel factories. They still
-    /// declare the marketdata context and register shared and kind-specific actions;
-    /// only one factory needs to contribute identical default bindings.
+    /// Suppress the shared fragment. `geode-app` calls this for every panel
+    /// factory after the first: they still declare the marketdata context and
+    /// register shared and kind-specific actions; only one factory needs to
+    /// contribute identical default bindings.
     pub fn without_keymap(mut self) -> MarketDataFactory {
         self.ships_keymap = false;
         self

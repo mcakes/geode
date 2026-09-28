@@ -383,18 +383,19 @@ fn usage(reason: &str) -> String {
 /// context acceptance, while the bridge retains the factories for live reloads.
 fn add_bridge_modules(roster: &mut ModuleRoster, bridge: &bridge::Bridge) {
     roster.add(Box::new(bridge.factory.clone()));
-    roster.add(Box::new(bridge.marketdata.clone()));
-    // Dividend shares the marketdata key context. Its factory disables its
-    // keymap fragment to avoid installing the same bindings twice.
-    roster.add(Box::new(bridge.dividend.clone()));
+    // One tile kind per accepted panel, in `panels` order; only the first
+    // ships the shared marketdata keymap fragment.
+    for panel in &bridge.panels {
+        roster.add(Box::new(panel.clone()));
+    }
     roster.add(Box::new(bridge.timeseries.clone()));
     roster.add(Box::new(bridge.pricer.clone()));
 }
 
 /// Every builtin config doc: the shell's keymap, the pricer's two bundled
 /// views and seven package templates (a desk or user layer overrides a
-/// view or a template by name), the pricer's `pricer_sheets` dataset, and
-/// the `--demo` layer.
+/// view or a template by name), the pricer's `pricer_sheets` dataset, the
+/// builtin market-data panels, and the `--demo` layer.
 fn builtin_layer(demo_root: Option<&Path>) -> Vec<LayerDoc> {
     let mut builtin = vec![
         LayerDoc::builtin("keymap", BUILTIN_KEYMAP).expect("builtin keymap TOML is well-formed"),
@@ -413,6 +414,14 @@ fn builtin_layer(demo_root: Option<&Path>) -> Vec<LayerDoc> {
         // user `datasets` doc adds its own datasets beside this one.
         LayerDoc::builtin("datasets", geode_pricer::core::PRICER_SHEETS_DECLARATION)
             .expect("PRICER_SHEETS_DECLARATION is well-formed TOML"),
+        // The builtin market-data panels. `panels` replaces per panel name,
+        // so a desk or user panels doc adds panels beside these or replaces
+        // one whole.
+        LayerDoc::builtin(
+            geode_core::panel::PANELS_DOC,
+            geode_marketdata::core::BUILTIN_PANELS,
+        )
+        .expect("BUILTIN_PANELS is well-formed TOML"),
     ];
     if let Some(root) = demo_root {
         builtin.extend(demo::layer(&root.join("src")));
@@ -499,13 +508,20 @@ fn build_shell_services(
         std::env::var("LOCALAPPDATA").ok(),
         std::env::var("HOME").ok(),
     );
+    // Refused panels: printed here and carried into the shell's config
+    // section, where they stay until a restart can change which panels exist.
+    let mut composition_diagnostics = Vec::new();
     let bridge = bridge::data_setup(&config, db, adapters, pricers).map(|setup| {
+        composition_diagnostics = setup.panel_diagnostics.clone();
         let find_style = FindStyle::from_config(&config);
         let stale_after = bridge::stale_after_from_config(&config);
         let bridge = bridge::start(setup, find_style, stale_after, cx);
         add_bridge_modules(&mut roster, &bridge);
         bridge
     });
+    for diag in &composition_diagnostics {
+        print_diagnostic(diag);
+    }
 
     // Register split actions for the complete roster before keymap compilation.
     register_add_actions(&mut registry, &roster.kinds());
@@ -581,7 +597,7 @@ fn build_shell_services(
         // doc comment for why they are carried rather than recomputed.
         keymap_fragments: fragments,
         keymap_fragment_diagnostics: frag_diags,
-        composition_diagnostics: Vec::new(),
+        composition_diagnostics,
     };
     (services, desk, user, bridge, diagnostics_factory)
 }
@@ -619,7 +635,54 @@ fn user_config_dir(appdata: Option<String>, home: Option<String>) -> Option<Path
 mod tests {
     use super::*;
     use geode_core::config::Config;
-    use geode_marketdata::MarketDataFactory;
+    use geode_shell::module::ModuleFactory as _;
+
+    /// A second CVI panel over the same dataset: another title and forward
+    /// format, one action. It names every column the CVI document writes,
+    /// header included, or it would be refused.
+    const WIDE_CVI_PANEL: &str = r#"config_version = 1
+
+[cvi_wide]
+title = "CVI (wide)"
+dataset = "cvi_params"
+document = "cvi_params"
+actions = ["marketdata::cvi_reanchor"]
+
+[cvi_wide.value]
+type = "f64"
+format = { precision = 6 }
+
+[cvi_wide.rows]
+column = "term"
+identity = "date"
+label = "shown"
+
+[cvi_wide.columns]
+axis = "node"
+
+[[cvi_wide.header]]
+column = "anchor_date"
+label = "anchor"
+type = "date"
+
+[[cvi_wide.header]]
+column = "spot_ref"
+label = "spot"
+type = "f64"
+
+[[cvi_wide.slice]]
+column = "forward"
+label = "fwd"
+format = { precision = 3 }
+
+[[cvi_wide.slice]]
+column = "atm"
+label = "atm"
+
+[[cvi_wide.slice]]
+column = "skew"
+label = "skew"
+"#;
 
     #[test]
     fn appdata_wins_when_set() {
@@ -799,48 +862,98 @@ mod tests {
         assert_eq!(docs.len(), 1);
     }
 
-    /// Both document kinds have add-tile actions, while only the CVI factory
-    /// contributes the shared marketdata keymap. Dividend disables its fragment
-    /// to avoid duplicate bindings without losing its roster entry.
-    #[test]
-    fn the_second_panel_ships_no_second_fragment_but_still_gets_an_add_tile_row() {
-        use geode_data::DataHandle;
-        use geode_marketdata::core::builtin_panel;
+    /// Every panel keeps its own add-tile rows; the shared `marketdata`
+    /// fragment ships once however many panels there are.
+    #[gpui::test]
+    fn the_second_panel_ships_no_second_fragment_but_still_gets_an_add_tile_row(
+        cx: &mut gpui::TestAppContext,
+    ) {
         use geode_shell::actions::ActionId;
-
+        let dir = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(user.path().join("panels.toml"), WIDE_CVI_PANEL).unwrap();
+        let (config, _) = ShellServices::config_and_builtin(ConfigSources {
+            builtin: builtin_layer(Some(dir.path())),
+            desk: None,
+            user: Some(user.path().to_path_buf()),
+        });
+        let setup = bridge::data_setup(
+            &config,
+            dir.path().join("geode.duckdb"),
+            geode_data::adapter::AdapterRegistry::default(),
+            geode_data::PricerRegistry::default(),
+        )
+        .unwrap();
+        assert!(
+            setup.panel_diagnostics.is_empty(),
+            "{:?}",
+            setup.panel_diagnostics
+        );
+        let bridge =
+            cx.update(|cx| bridge::start(setup, FindStyle::default(), Duration::from_secs(60), cx));
         let mut roster = ModuleRoster::new();
-        let (data, _rx) = DataHandle::for_tests();
-        roster.add(Box::new(Rc::new(MarketDataFactory::new(
-            data.clone(),
-            builtin_panel("cvi"),
-            Duration::from_secs(60),
-        ))));
-        roster.add(Box::new(Rc::new(
-            MarketDataFactory::new(data, builtin_panel("dividend"), Duration::from_secs(60))
-                .without_keymap(),
-        )));
-
+        add_bridge_modules(&mut roster, &bridge);
         let (docs, diags) = roster.keymap_fragments();
         assert!(diags.is_empty(), "{diags:?}");
+        let marketdata: Vec<String> = docs
+            .iter()
+            .map(|d| d.file.to_string_lossy().into_owned())
+            .filter(|f| {
+                ["<module:cvi>", "<module:dividend>", "<module:cvi_wide>"].contains(&f.as_str())
+            })
+            .collect();
         assert_eq!(
-            docs.len(),
-            1,
-            "the second factory must not splice its own fragment doc"
+            marketdata,
+            ["<module:cvi>"],
+            "one fragment for three panels"
         );
-        assert_eq!(docs[0].file.to_string_lossy(), "<module:cvi>");
-
         let mut registry = ActionRegistry::default();
         register_add_actions(&mut registry, &roster.kinds());
-        let dividend_split = registry
-            .get(&ActionId("tile::add_dividend".to_string()))
-            .expect("the dividend kind still gets an add-tile row");
-        assert_eq!(dividend_split.title, "Dividend: Split");
-        assert!(
-            registry
-                .get(&ActionId("tile::add_cvi".to_string()))
-                .is_some(),
-            "the cvi kind keeps its own row"
-        );
+        for (kind, title) in [
+            ("cvi", "Cvi"),
+            ("dividend", "Dividend"),
+            ("cvi_wide", "Cvi_wide"),
+        ] {
+            assert_eq!(
+                registry
+                    .get(&ActionId(format!("tile::add_{kind}")))
+                    .unwrap_or_else(|| panic!("{kind} has an add-tile row"))
+                    .title,
+                format!("{title}: Split")
+            );
+        }
+        bridge.handle.shutdown();
+    }
+
+    /// `MODULE_KINDS` names every non-panel kind the production roster holds,
+    /// so a panel can never shadow one.
+    #[gpui::test]
+    fn module_kinds_name_every_other_production_module(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, _) = ShellServices::config_and_builtin(ConfigSources {
+            builtin: builtin_layer(Some(dir.path())),
+            ..ConfigSources::default()
+        });
+        let setup = bridge::data_setup(
+            &config,
+            dir.path().join("geode.duckdb"),
+            geode_data::adapter::AdapterRegistry::default(),
+            geode_data::PricerRegistry::default(),
+        )
+        .unwrap();
+        let bridge =
+            cx.update(|cx| bridge::start(setup, FindStyle::default(), Duration::from_secs(60), cx));
+        let mut roster = ModuleRoster::new();
+        roster.add(Box::new(Rc::new(DiagnosticsFactory::new(
+            Arc::new(Ring::new(16)),
+            config.clone(),
+        ))));
+        add_bridge_modules(&mut roster, &bridge);
+        let panels: Vec<&str> = bridge.panels.iter().map(|f| f.kind()).collect();
+        for kind in roster.kinds().into_iter().filter(|k| !panels.contains(k)) {
+            assert!(bridge::MODULE_KINDS.contains(&kind), "{kind}");
+        }
+        bridge.handle.shutdown();
     }
 
     /// The timeseries forwarder must expose the factory's kind, registered
@@ -935,9 +1048,10 @@ mod tests {
         );
     }
 
-    /// The production roster exposes underlying-based launch state for CVI and
-    /// dividend. Exercising startup's registration path checks that shared
-    /// factory forwarding preserves `accepts` and `launch_state`.
+    /// The production roster exposes underlying-based launch state for every
+    /// accepted panel (the builtin CVI and dividend here). Exercising
+    /// startup's registration path checks that shared factory forwarding
+    /// preserves `accepts` and `launch_state`.
     #[gpui::test]
     fn the_production_roster_opens_market_data_on_an_underlying(cx: &mut gpui::TestAppContext) {
         use geode_core::launch::{ContextField, LaunchContext};
