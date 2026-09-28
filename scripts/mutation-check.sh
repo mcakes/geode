@@ -2795,6 +2795,76 @@ run_mutation "edit column: the blotter reports the tree column as active" \
   geode-blotter \
   the_tree_column_is_no_active_column
 
+run_mutation "column inherit: the overlay's keys are not read as set" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '            keys.set(key, sets(p, key));' \
+  '            keys.set(key, false);' \
+  geode-shell \
+  presentation_keys_read_presence_not_value
+
+run_mutation "column inherit: the writer writes an inherited key" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '    if set.has("scale")' \
+  '    if true' \
+  geode-shell \
+  an_inherited_field_equal_or_not_writes_nothing
+
+run_mutation "column inherit: choosing the inherited option does not pin" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        set.set(&key, true);' \
+  '        set.set(&key, was);' \
+  geode-shell \
+  choosing_the_inherited_option_pins_it
+
+run_mutation "column inherit: r does not unset the key" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        set.set(key, false);
+        Ok(Fold { key, to })' \
+  '        Ok(Fold { key, to })' \
+  geode-shell \
+  r_inherits_a_set_view_color_and_the_key_leaves_the_overlay
+
+run_mutation "column inherit: a set-only change is not a write" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            || self.presentation_set != self.baseline_presentation_set' \
+  '            || false' \
+  geode-shell \
+  r_on_a_pinned_equal_value_removes_the_key
+
+run_mutation "column inherit: the ↺ click reaches nothing" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                                                on_inherit_clicked(shell, position, window, cx);' \
+  '                                                let _ = (shell, position, window);' \
+  geode-shell \
+  the_inherit_control_does_what_r_does
+
+run_mutation "column inherit: shift+r is not routed in the column stage" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  "        NormalCommand::Verb('R') if in_column_stage(shell) => inherit_all_rows(shell, cx)," \
+  "" \
+  geode-shell \
+  shift_r_inherits_every_field
+
+run_mutation "column inherit: a Schema column opens with nothing set" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '            draft
+                .presentation_set
+                .entry(column.to_string())
+                .or_insert(keys);' \
+  '            draft
+                .presentation_set
+                .entry(column.to_string())
+                .or_default();' \
+  geode-shell \
+  a_schema_column_keeps_its_overlay_keys_through_an_edit
+
+run_mutation "column inherit: a stale overlay entry seeds a pin" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '                .filter(|(name, _)| members.iter().any(|c| c.name() == name.as_str()))' \
+  '                .filter(|_| true)' \
+  geode-shell \
+  an_overlay_entry_for_a_column_the_view_lacks_seeds_nothing
+
 run_mutation "dialog stack: every chord reaches through a dialog" \
   crates/geode-shell/src/shell/input.rs \
   '                        && dialog::opens_dialog(&action)' \
@@ -5455,14 +5525,13 @@ run_mutation "views: a presentation save pins the desk's column order" \
   geode-shell \
   a_presentation_save_writes_only_what_the_trader_changed
 
-# Write a width override only when it differs from the desk baseline.
-# The fixture declares a desk width and edits another setting so copying
-# the unchanged width becomes observable. The width-specific anchor
-# isolates this check from the precision-based shared overlay entry.
+# Write a width only when the view overlay sets it. The fixture declares a
+# desk width and edits another setting, so writing the inherited width
+# becomes observable.
 run_mutation "views: a presentation save copies the desk's widths into the user's file" \
   crates/geode-shell/src/shell/objectdialog/views.rs \
-  '        if item.presentation.width != below.width {' \
-  '        if true {' \
+  '    if set.has("width")' \
+  '    if true' \
   geode-shell \
   a_presentation_save_writes_only_what_the_trader_changed
 
@@ -7602,12 +7671,9 @@ run_mutation "objectdialog: o asks before forking a desk-owned scope" \
 
 run_mutation "objectdialog: is_dirty ignores a source-only change" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '    pub fn is_dirty(&self) -> bool {
-        self.fields != self.baseline || self.source != self.baseline_source
-    }' \
-  '    pub fn is_dirty(&self) -> bool {
-        self.fields != self.baseline
-    }' \
+  '        self.fields != self.baseline
+            || self.source != self.baseline_source' \
+  '        self.fields != self.baseline' \
   geode-shell overwrite_with_is_seen_even_when_the_painted_summary_collides
 
 run_mutation "objectdialog: writes_by_destination ignores a source-only change" \
@@ -10885,26 +10951,6 @@ run_mutation "objectdialog: a wrapping number wraps" \
   geode-shell \
   a_number_steps_by_its_step_and_wraps_only_when_asked
 
-# The presentation writer omits a key equal to the desk baseline. Both
-# sides resolve through the column kind's default before comparison.
-run_mutation "views: the overlay writer omits keys equal to the desk" \
-  crates/geode-shell/src/shell/objectdialog/views.rs \
-  '        if effective.precision != below_format.precision {' \
-  '        if effective.precision != below_format.precision || true {' \
-  geode-shell \
-  the_writer_emits_only_keys_that_differ_from_the_desk
-
-# The baseline is the kind default WITH THE DESK'S OWN KEYS over
-# it — drop the desk half and every key the desk declares reads as a
-# personalisation and is copied into the trader's overlay, which is the
-# freeze the whole comparison exists to prevent.
-run_mutation "views: the writer's baseline carries the desk's own format keys" \
-  crates/geode-shell/src/shell/objectdialog/views.rs \
-  '        let below_format = kind.clone().with(&below);' \
-  '        let below_format = kind.clone();' \
-  geode-shell \
-  the_writer_emits_only_keys_that_differ_from_the_desk
-
 # A demoted column writes `hidden = true` in its `[columns.<name>]`
 # table. Making the guard unconditional hides every column with a
 # presentation entry, regardless of membership.
@@ -10944,8 +10990,8 @@ run_mutation "objectdialog: the list verbs name the column stage" \
 # back on the next rebuild with the trader's clear gone.
 run_mutation "views: clearing a desk-set key restores the desk's value" \
   crates/geode-shell/src/shell/objectdialog/views.rs \
-  '                    below.label.clone()' \
-  '                    None' \
+  '                "label" => p.label = below.label.clone(),' \
+  '                "label" => p.label = None,' \
   geode-shell \
   clearing_a_desk_label_falls_back_to_the_desk
 
@@ -11199,18 +11245,12 @@ run_mutation "blotter: the colour cache resolves the sign variants" \
   geode-blotter \
   a_tinted_definition_resolves_three_variants_and_an_untinted_one_three_of_the_base
 
-run_mutation "objectdialog: d and r are refused in the column stage" \
+run_mutation "objectdialog: r inherits in the column stage" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    if in_column_stage(shell) {
-        not_a_column_verb(shell, "r");
-        return;
-    }' \
-  '    if false {
-        not_a_column_verb(shell, "r");
-        return;
-    }' \
+  "        NormalCommand::Verb('r') if in_column_stage(shell) => inherit_row(shell, cx)," \
+  "" \
   geode-shell \
-  delete_and_revert_are_refused_in_the_column_stage
+  delete_is_refused_and_r_inherits_in_the_column_stage
 
 run_mutation "objectdialog: enter_column refuses re-entry" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
@@ -11317,25 +11357,23 @@ run_mutation "objectdialog: Schema's column stage is its one writable surface" \
   geode-shell \
   schema_is_writable_in_the_column_stage_alone
 
-# Stepping a view field immediately reports the view layer, including during
-# the write debounce.
-run_mutation "objectdialog: a diverged field's provenance is the view level" \
+# A field set at the view level reads the view layer, even when its value
+# equals the layer below.
+run_mutation "objectdialog: a set field's provenance is the view level" \
   crates/geode-shell/src/shell/objectdialog/dataset_columns.rs \
-  '            if differs_from(below) {' \
-  '            if false {' \
+  '        ColumnDoor::View if inputs.set.has(key) => Some(Provenance::View),' \
+  '' \
   geode-shell \
-  a_stepped_field_reads_view_before_its_write_lands
+  a_set_field_reads_view_even_when_equal_to_its_parent
 
 # Clearing a view key reports the layer it falls back to: dataset before
 # desk.
 run_mutation "objectdialog: a cleared view key falls to the dataset level before the desk" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '                if set(&layers.dataset) {
-                    Some(FellTo::Dataset)
-                } else if set(&layers.desk) {' \
-  '                if set(&layers.desk) {
-                    Some(FellTo::Desk)
-                } else if set(&layers.dataset) {' \
+  '            ColumnDoor::View if views::sets(&ctx.layers.dataset, key) => FellTo::Dataset,
+            ColumnDoor::View if views::sets(&ctx.layers.desk, key) => FellTo::Desk,' \
+  '            ColumnDoor::View if views::sets(&ctx.layers.desk, key) => FellTo::Desk,
+            ColumnDoor::View if views::sets(&ctx.layers.dataset, key) => FellTo::Dataset,' \
   geode-shell \
   a_cleared_view_key_falls_to_the_dataset_level_before_the_desk
 
@@ -11345,7 +11383,7 @@ run_mutation "dataset_columns: the writer keeps the other columns' tables" \
   '            if name != open' \
   '            if false' \
   geode-shell \
-  the_writer_keeps_other_columns_verbatim_and_emits_only_keys_off_the_kind_default
+  schema_writer_keeps_other_columns_and_writes_only_set_keys
 
 # Remove an empty overlay object instead of writing a bare dataset table.
 run_mutation "objectdialog: an empty dataset-overlay object is removed" \
@@ -11421,16 +11459,6 @@ run_mutation "dataset_columns: a key column's kind falls back on its type" \
   geode-shell \
   a_key_column_takes_the_text_kind_from_its_type
 
-# View writes compare against desk plus dataset settings. Comparing only
-# against the desk copies dataset values into view overrides and prevents
-# later dataset edits from taking effect.
-run_mutation "views: the overlay writer's baseline includes the dataset level" \
-  crates/geode-shell/src/shell/objectdialog/views.rs \
-  '    let baseline = baseline_below(draft);' \
-  '    let baseline = desk_baseline(draft);' \
-  geode-shell \
-  a_view_field_equal_to_the_dataset_level_writes_nothing
-
 # Look up dataset presentation by the column's owner, including a joined
 # dataset. Using only the view's primary dataset loses joined-column
 # settings.
@@ -11441,13 +11469,12 @@ run_mutation "views: the dataset layer follows the column's owning dataset" \
   geode-shell \
   a_joined_columns_dataset_layer_comes_from_the_join
 
-# A cleared-key notice compares against the item's own pre-fold value.
-# Without that guard, untouched empty fields can overwrite the notice for
-# the key that actually changed.
+# A released-key notice fires only for a key that was set. Without that
+# guard, an already-inherited empty label reports a release it never made.
 run_mutation "views: a clear is what this keystroke emptied" \
   crates/geode-shell/src/shell/objectdialog/views.rs \
-  '                    if item.presentation.label.is_some() {' \
-  '                    if true {' \
+  '        if set.has(key) {' \
+  '        if true {' \
   geode-shell \
   clearing_a_desk_label_falls_back_to_the_desk
 
@@ -12188,6 +12215,29 @@ run_mutation "mdbulk: a refusing member is counted" \
   geode-marketdata \
   a_flat_block_commit_skips_cells_that_refuse_and_counts_them
 
+# An untouched `enter` over a selection writes nothing: without the guard
+# a no-op gesture copies the cursor cell's text across the selection.
+run_mutation "mdbulk: an untouched text commit over a selection writes nothing" \
+  crates/geode-marketdata/src/tile.rs \
+  '                if self.selection.is_some() && text == editing.opened {' \
+  '                if false && text == editing.opened {' \
+  geode-marketdata \
+  an_untouched_commit_on_a_text_cell_writes_nothing
+
+run_mutation "mdbulk: an untouched date commit over a selection writes nothing" \
+  crates/geode-marketdata/src/tile.rs \
+  '                    if !editing.typed && text == editing.opened {' \
+  '                    if false && text == editing.opened {' \
+  geode-marketdata \
+  an_untouched_date_commit_over_a_selection_writes_nothing
+
+run_mutation "mdbulk: enter on the choice the cell holds writes nothing over a selection" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.selection.is_some() && option == c.opened {' \
+  '        if false && option == c.opened {' \
+  geode-marketdata \
+  an_untouched_choice_commit_over_a_selection_writes_nothing
+
 # A block covers columns only partly, so `d` there refuses rather than
 # deleting every row it touches. Mutated so the guard fires on `Rows`
 # instead, `d` over a block deletes whole rows the trader never selected.
@@ -12269,21 +12319,6 @@ run_mutation "mdstep: a restore needs the steps to be the last draft change" \
   '        if !bulk.stepped {' \
   geode-marketdata \
   escape_after_a_revert_mid_step_leaves_the_draft_reverted
-
-# Only a number cursor cell opens a stepping editor; a text or date cursor
-# cell commits absolutely. Mutated so any text-editor cell carries a
-# `bulk`, an untouched `enter` on a text cell reads as "keep the steps"
-# and writes nothing.
-run_mutation "mdstep: only a number cursor cell steps live" \
-  crates/geode-marketdata/src/tile.rs \
-  '            && matches!(
-                target,
-                EditTarget::Cell { cell: (_, col), .. }
-                    if matches!(self.model.kind_of(col), Some(CellKind::Number(_)))
-            ))' \
-  '            && matches!(target, EditTarget::Cell { .. }))' \
-  geode-marketdata \
-  an_untouched_commit_on_a_text_cell_writes_the_seed_to_every_accepting_cell
 
 # A selection edit opens only on a member cell. Mutated away, `i` on a
 # slice value inside a row selection opens an editor whose typed value and
@@ -19200,11 +19235,11 @@ run_mutation "pricer entry bar: a chevron press that closes the bar hands off no
 # leg is hidden and the cursor names a row the model does not paint.
 run_mutation "pricer entry bar: o on a closed package leaves it closed" \
   crates/geode-pricer/src/tile.rs \
-  '        let place = place_for(&self.sheet, self.cursor_sheet_row(), true);
+  '        let place = place_for(&self.sheet, self.cursor_sheet_row(), below);
         if let Place::Leg { package, .. } = place {
             self.expansion.set(self.sheet.id(package), true);
         }' \
-  '        let place = place_for(&self.sheet, self.cursor_sheet_row(), true);' \
+  '        let place = place_for(&self.sheet, self.cursor_sheet_row(), below);' \
   geode-pricer o_on_a_closed_package_opens_it_and_lands_on_its_first_leg
 
 # The palette's commit focuses the shell root before it dispatches
@@ -21818,6 +21853,21 @@ run_mutation "pricer entry bar: a history step leaves the list stale" \
   $'        // `set_value` emits no Change: the recalled line re-ranks here.\n        self.refresh_entry_completion(cx);' \
   '' \
   geode-pricer up_walks_history_with_the_list_open_and_the_list_follows
+
+# `shift+o` opens the bar on the place ABOVE the cursor row. Mutated to
+# always pass below, `O` lands its first line under the row instead.
+run_mutation "pricer entry bar: shift+o lands below the cursor row" \
+  crates/geode-pricer/src/tile.rs \
+  '        let place = place_for(&self.sheet, self.cursor_sheet_row(), below);' \
+  '        let place = place_for(&self.sheet, self.cursor_sheet_row(), true);' \
+  geode-pricer shift_o_lands_above_the_cursor_row_and_continues_below_what_landed
+
+# Above the first row is the top of the sheet, not its end.
+run_mutation "pricer entry bar: above the first row reads at end" \
+  crates/geode-pricer/src/core/entry.rs \
+  '        Place::Root { at: 0 } => "at top".to_string(),' \
+  '        Place::Root { at: 0 } => "at end".to_string(),' \
+  geode-pricer shift_o_on_the_first_row_lands_at_the_top
 
 # ---- containment and liveness
 

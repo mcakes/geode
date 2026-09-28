@@ -280,6 +280,14 @@ struct Editing {
     /// Set only on a text editor opened on a number cursor cell over a
     /// live selection.
     bulk: Option<Bulk>,
+    /// The text the editor opened on: its seed, or a date field's painted
+    /// date. Over a selection, a commit that still holds it (and a date
+    /// field no digit was typed into) writes nothing — a no-op `enter`
+    /// must never copy one cell's value across the selection.
+    opened: String,
+    /// A digit or backspace reached the date field since it opened, so a
+    /// retyped same date is a deliberate write, not a no-op.
+    typed: bool,
 }
 
 /// A text editor opened on a number cursor cell over a live selection
@@ -2497,7 +2505,7 @@ impl MarketDataTile {
                 )
             }
         };
-        let state = if wants_date {
+        let (state, opened) = if wants_date {
             // Seed a date field from painted text, falling back to today's date on the
             // configured clock when the text is empty or invalid.
             let date = chrono::NaiveDate::parse_from_str(text.as_ref(), "%Y-%m-%d")
@@ -2510,20 +2518,23 @@ impl MarketDataTile {
             let focus = cx.focus_handle();
             focus.focus(window, cx);
             let paint = DateFieldPaint::of(&field, self.id.0);
-            EditorState::Date {
-                field,
-                focus,
-                paint,
-            }
+            (
+                EditorState::Date {
+                    field,
+                    focus,
+                    paint,
+                },
+                date.format("%Y-%m-%d").to_string(),
+            )
         } else {
             let state = cx.new(|cx| InputState::new(window, cx));
             state.update(cx, |s, cx| s.set_value(text.clone(), window, cx));
             state.read(cx).focus_handle(cx).focus(window, cx);
-            EditorState::Text(state)
+            (EditorState::Text(state), text.to_string())
         };
         // Only a number cursor cell steps the selection live. A text or
-        // date cursor cell commits absolutely: its untouched `enter` writes
-        // the seeded value to every accepting member.
+        // date cursor cell commits absolutely once it has changed; an
+        // untouched `enter` writes nothing (`Editing::opened`).
         let bulk = (self.selection.is_some()
             && matches!(state, EditorState::Text(_))
             && matches!(
@@ -2548,6 +2559,8 @@ impl MarketDataTile {
             state,
             target,
             bulk,
+            opened,
+            typed: false,
         });
         self.notice = None;
     }
@@ -2570,11 +2583,15 @@ impl MarketDataTile {
         };
         let Some(Editing {
             state: EditorState::Date { field, paint, .. },
+            typed,
             ..
         }) = self.editor.as_mut()
         else {
             return false;
         };
+        if matches!(key, FieldKey::Digit(_) | FieldKey::Backspace) {
+            *typed = true;
+        }
         match key {
             FieldKey::Commit => {
                 self.commit_edit(window, cx);
@@ -2651,6 +2668,11 @@ impl MarketDataTile {
                     self.close_editor(window, cx);
                     return true;
                 }
+                if self.selection.is_some() && text == editing.opened {
+                    // Untouched over a selection: nothing to write.
+                    self.close_editor(window, cx);
+                    return true;
+                }
                 self.commit_cell_edit(cell, labels, &text, window, cx)
             }
             (EditorState::Text(state), EditTarget::Attr { index, column }) => {
@@ -2683,6 +2705,11 @@ impl MarketDataTile {
                 *paint = DateFieldPaint::of(field, self.id.0);
                 if self.selection.is_some() {
                     let text = field.date().format("%Y-%m-%d").to_string();
+                    if !editing.typed && text == editing.opened {
+                        // Untouched over a selection: nothing to write.
+                        self.close_editor(window, cx);
+                        return true;
+                    }
                     return self.commit_bulk(&text, window, cx);
                 }
                 let value = Value::Date(field.date());
@@ -3242,6 +3269,8 @@ impl MarketDataTile {
             state,
             target: EditTarget::RowLabel { row, label },
             bulk: None,
+            opened: String::new(),
+            typed: false,
         });
     }
 
@@ -3483,6 +3512,12 @@ impl MarketDataTile {
             return true;
         };
         let option = c.list.options()[i].clone();
+        if self.selection.is_some() && option == c.opened {
+            // `enter` on the value the cell already holds, over a
+            // selection: nothing to write. A row click stays a pick.
+            self.close_popup_with_window(window, cx);
+            return true;
+        }
         self.pick_option(option, window, cx)
     }
 

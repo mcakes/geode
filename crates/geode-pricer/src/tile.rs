@@ -1134,12 +1134,14 @@ impl PricerTile {
         }))
     }
 
-    /// `o` opens the entry bar under the header and focuses its input.
-    /// Lines land below the cursor row; a leg place opens
-    /// its package so what lands is visible. With the bar already open
-    /// (a palette dispatch) the typed text and place stay and the field
-    /// takes focus back.
-    fn open_entry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// `o` / `shift+o` open the entry bar under the header and focus its
+    /// input. The first line lands below (`o`) or above (`shift+o`) the
+    /// cursor row; each commit then moves the place past what landed, so
+    /// a typed run reads top to bottom either way. A leg place opens its
+    /// package so what lands is visible. With the bar already open (a
+    /// palette dispatch) the typed text and place stay and the field takes
+    /// focus back.
+    fn open_entry(&mut self, below: bool, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(entry) = &self.entry {
             // The palette's commit focuses the shell root before it
             // dispatches: without this the bar reads `insert` while
@@ -1151,7 +1153,7 @@ impl PricerTile {
             self.footer = Some("the sheet is still loading".into());
             return;
         }
-        let place = place_for(&self.sheet, self.cursor_sheet_row(), true);
+        let place = place_for(&self.sheet, self.cursor_sheet_row(), below);
         if let Place::Leg { package, .. } = place {
             self.expansion.set(self.sheet.id(package), true);
         }
@@ -2590,14 +2592,14 @@ impl PricerTile {
         // never gets here, the prompt consumes it) answers "no" first.
         confirm::cancel(self, window, cx);
         // Any verb but the fields' own closes an open field first (a
-        // palette dispatch can arrive while one is open). `add_below`
-        // keeps an open bar: it is the bar's own opener.
+        // palette dispatch can arrive while one is open). `add_below` and
+        // `add_above` keep an open bar: they are the bar's own openers.
         let field_verb = matches!(
             verb,
             "commit" | "cancel" | "insert_up" | "insert_down" | "insert_up_big" | "insert_down_big"
         );
         if !field_verb {
-            if verb != "add_below" {
+            if !matches!(verb, "add_below" | "add_above") {
                 self.close_entry(window, cx);
             }
             self.close_editor(window, cx);
@@ -2690,8 +2692,8 @@ impl PricerTile {
                 self.reprice_all(cx);
                 return true;
             }
-            "add_below" => {
-                self.open_entry(window, cx);
+            "add_below" | "add_above" => {
+                self.open_entry(verb == "add_below", window, cx);
                 return true;
             }
             "edit" => {
@@ -5967,6 +5969,81 @@ pub(crate) mod tests {
         let second = h.tile.read_with(&vcx, |t, _| t.sheet.shorthand(1));
         assert_eq!(second, "SPX Z26 3000 P", "below row 0, above the package");
         assert_eq!(h.entry_label(&vcx).as_deref(), Some("after SPX Z26 3000 P"));
+    }
+
+    /// `O` lands the first line ABOVE the cursor row; later lines follow
+    /// the one just landed, so a typed run reads top to bottom.
+    #[gpui::test]
+    fn shift_o_lands_above_the_cursor_row_and_continues_below_what_landed(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "bottom", None); // the 4000 P root
+        h.dispatch(&mut vcx, "add_above", None);
+        assert_eq!(
+            h.entry_label(&vcx).as_deref(),
+            Some("after -5 SPX Z26 4800/5200 CS"),
+            "above the 4000 P is after the package"
+        );
+        typed(&h, &mut vcx, "SPX Z26 3000 P");
+        h.dispatch(&mut vcx, "commit", None);
+        typed(&h, &mut vcx, "SPX Z26 2000 P");
+        h.dispatch(&mut vcx, "commit", None);
+        let roots = h.tile.read_with(&vcx, |t, _| {
+            t.sheet
+                .roots()
+                .map(|r| t.sheet.shorthand(r))
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            roots,
+            vec![
+                "SPX Z26 5000 C",
+                "-5 SPX Z26 4800/5200 CS",
+                "SPX Z26 3000 P",
+                "SPX Z26 2000 P",
+                "SPX Z26 4000 P",
+            ]
+        );
+    }
+
+    #[gpui::test]
+    fn shift_o_on_the_first_row_lands_at_the_top(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "add_above", None);
+        assert_eq!(h.entry_label(&vcx).as_deref(), Some("at top"));
+        typed(&h, &mut vcx, "SPX Z26 3000 P");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.sheet.shorthand(0)),
+            "SPX Z26 3000 P"
+        );
+    }
+
+    #[gpui::test]
+    fn shift_o_on_a_leg_lands_inside_its_package_before_that_leg(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "down", None);
+        h.dispatch(&mut vcx, "expand", None);
+        h.dispatch(&mut vcx, "down", Some(2)); // the package's second leg
+        let (package, legs_before) = h.tile.read_with(&vcx, |t, _| {
+            let p = (0..t.sheet.len()).find(|&r| t.sheet.is_package(r)).unwrap();
+            (p, t.sheet.children(p).len())
+        });
+        h.dispatch(&mut vcx, "add_above", None);
+        typed(&h, &mut vcx, "SPX Z26 5000 C");
+        h.dispatch(&mut vcx, "commit", None);
+        h.tile.read_with(&vcx, |t, _| {
+            assert_eq!(t.sheet.children(package).len(), legs_before + 1);
+            let legs: Vec<_> = t.sheet.children(package).collect();
+            assert!(
+                t.sheet.shorthand(legs[1]).contains("5000 C"),
+                "landed before the second leg: {:?}",
+                legs.iter()
+                    .map(|&r| t.sheet.shorthand(r))
+                    .collect::<Vec<_>>()
+            );
+        });
     }
 
     #[gpui::test]

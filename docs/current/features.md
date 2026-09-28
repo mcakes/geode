@@ -416,8 +416,12 @@ option exactly: a bulk write has no popup to rank a near miss. Deleted rows
 and cells that refuse are skipped and counted, `set 5 cells, skipped 3 (2
 deleted, 1 wrong type)`. Every member is judged before any write, so when
 nothing accepts, the commit is refused with the editor still open and the
-draft untouched. On a text or date cursor cell an untouched `enter` writes
-the seeded value across the selection. The selection stays after a
+draft untouched. An untouched `enter` writes nothing and closes the editor,
+so a no-op gesture never copies one cell's value across the selection:
+text still equal to what the editor opened on, a date field no digit was
+typed into whose date is unchanged, or `enter` on the option the cell
+already holds. Stepping a date or moving the choice highlight is a change;
+a click on a choice row is always a pick. The selection stays after a
 commit.
 
 **Live steps.** On a number cursor cell with its text untouched, the editor's
@@ -819,10 +823,11 @@ floored to the readable ratio on the row's own ground and on the table's
 hover and selected-row grounds.
 
 The entry bar sits between the header and the column headers. A muted label
-names where `enter` lands (`after <row>`, `into <TEMPLATE>`, `at end`). A
-parse error or a refused insert keeps the text and shows the reason under
-the field in danger text; any edit clears it. "Add lines…" from the palette
-while the bar is open keeps its text and place and focuses its field again.
+names where `enter` lands (`after <row>`, `into <TEMPLATE>`, `at top`,
+`at end`). A parse error or a refused insert keeps the text and shows the
+reason under the field in danger text; any edit clears it. "Add lines
+below…" or "Add lines above…" from the palette while the bar is open keeps
+its text and place and focuses its field again.
 
 As you type, the bar suggests the part of the line under the caret and a
 hint line names what goes there: underlyings from `[pricing] underlyings`,
@@ -897,6 +902,7 @@ Normal-mode keys:
 | Keys | Effect |
 |---|---|
 | `o` | Open the entry bar under the header; `enter` adds the line below the cursor row (on a leg, the next leg; on a package, its first leg; with no cursor row, at the end; a package typed inside a package lands just after that package) and keeps the bar open for the next; `up`/`down` walk the sheet's own lines as history; `tab`/`shift+tab` complete the token at the caret; `escape` closes it |
+| `shift+o` | The same bar, but the first line lands above the cursor row (on a leg, before that leg in its package; on a package or a top-level line, before it; on the first row, `at top`); each further line lands after the one just added, so a typed run reads top to bottom |
 | `i`, `enter`, double-click | Edit the cell in place; `up`/`down` (`shift`: ten) step a number by the precision its text carries, or the expiry date field's active segment |
 | `d d` | Delete the row (a package with its legs) |
 | `u` / `ctrl+r` | Undo / redo; 100 entries, strictly last-in first-out. A step that brings rows back puts the cursor on the first of them, and a package that was open comes back open |
@@ -1126,8 +1132,8 @@ column as each row's handle.
 
 **Verbs.** In visual mode the verbs are single keys; the doubled normal-mode
 forms (`y y`, `y c`, `d d`) are not bound there, nor are `p`, `shift+p`,
-`u`, `ctrl+r`, `o`, `n`, `shift+n`, `space`, the `z` folds, `g m` and `.`
-(the palette still reaches them). A verb that refuses keeps the
+`u`, `ctrl+r`, `o`, `shift+o`, `n`, `shift+n`, `space`, the `z` folds, `g m`
+and `.` (the palette still reaches them). A verb that refuses keeps the
 selection and says why in the footer; a success notice goes to the header.
 
 - `y` ends the selection. Under `V` it copies the shorthand of the top-most

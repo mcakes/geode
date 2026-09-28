@@ -22,7 +22,7 @@ The pure core (`core`, no element, entity, window, or data service):
 | `columns`, `views` | Column vocabulary, prepared column plans, and cell text. |
 | `package` | A package row's aggregated cells: its legs' distinct values in leg order joined with `/`, and the package quantity while the legs fit its template; how an edit to one of those cells maps onto its legs. |
 | `cell` | Cell commit validation, the typeahead vocabularies, the expiry date commit, and nudging. |
-| `entry` | Where `o` lands, lifting a typed package out of a leg position, the entry bar's label, and entry history. |
+| `entry` | Where `o` and `shift+o` land, lifting a typed package out of a leg position, the entry bar's label, and entry history. |
 | `complete` | Entry-bar completion: the slot at the caret, suggestions, hint, and the Tab cycle. |
 | `clip` | The yank register and where `p`/`shift+p` land. |
 | `tree` | Package expansion and the visible-row walk. |
