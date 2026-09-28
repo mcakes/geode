@@ -271,13 +271,23 @@ fn a_workspace_switch_chord_from_a_focused_page_input_closes_the_page(
     });
 }
 
+/// Every layout edit is refused over a page, not only the adds: the
+/// palette reaches `workspace::close_tile` over a page, and a tile closed
+/// unseen has no undo. A workspace switch stays the route home.
 #[gpui::test]
-fn tile_add_is_refused_while_a_page_is_open(cx: &mut gpui::TestAppContext) {
+fn layout_edits_are_refused_while_a_page_is_open(cx: &mut gpui::TestAppContext) {
     let (window, mut cx) = open_shell(
         cx,
         services_with_page(RecordingPageFactory::new("diagnostics")),
     );
     let shell = shell_of(&window, &mut cx);
+    dispatch_action(&shell, "tile::add_rec", &mut cx);
+    let tiles = |shell: &gpui::Entity<ShellView>, cx: &gpui::VisualTestContext| {
+        shell.read_with(cx, |s, _| {
+            s.services.workspaces.active().tree().tiles().len()
+        })
+    };
+    assert_eq!(tiles(&shell, &cx), 1);
     dispatch_action(&shell, "page::toggle_diagnostics", &mut cx);
     cx.simulate_keystrokes("alt-n");
     shell.read_with(&cx, |s, _| {
@@ -288,6 +298,104 @@ fn tile_add_is_refused_while_a_page_is_open(cx: &mut gpui::TestAppContext) {
         assert!(s.page_open());
         assert_eq!(s.notice, Some(CLOSE_PAGE_FIRST));
     });
+    dispatch_action(&shell, "workspace::close_tile", &mut cx);
+    shell.read_with(&cx, |s, _| {
+        assert!(s.page_open());
+        assert_eq!(s.notice, Some(CLOSE_PAGE_FIRST));
+    });
+    assert_eq!(tiles(&shell, &cx), 1, "the unseen tile still exists");
+    dispatch_action(&shell, "dock::toggle_left", &mut cx);
+    shell.read_with(&cx, |s, _| {
+        assert!(s.page_open());
+        assert_eq!(s.notice, Some(CLOSE_PAGE_FIRST));
+        assert!(
+            !s.services
+                .workspaces
+                .active()
+                .docks()
+                .get(crate::tiling::DockSide::Left)
+                .visible(),
+            "the dock did not open behind the page"
+        );
+    });
+    // Refused, not routed to the page either.
+    dispatch_action(&shell, "stack::next", &mut cx);
+    shell.read_with(&cx, |s, _| assert_eq!(s.notice, Some(CLOSE_PAGE_FIRST)));
+    // The switch is exempt: it closes the page and switches.
+    dispatch_action(&shell, "workspace::switch_2", &mut cx);
+    shell.read_with(&cx, |s, _| {
+        assert!(!s.page_open());
+        assert_eq!(s.services.workspaces.active_index(), 2);
+    });
+}
+
+/// A page's context carries `mode == insert` while its input holds focus,
+/// so a `mode == normal` binding stays out of the insert route's bare-key
+/// resolution: `j` types. Blurred back to the page handle, the same `j`
+/// dispatches.
+#[gpui::test]
+fn a_mode_normal_page_binding_types_in_the_input_and_fires_after_blur(
+    cx: &mut gpui::TestAppContext,
+) {
+    let factory = RecordingPageFactory::new("diagnostics");
+    let input = factory.input();
+    let log = factory.log();
+    let (window, mut cx) = open_shell(cx, services_with_page(factory));
+    let shell = shell_of(&window, &mut cx);
+    dispatch_action(&shell, "page::toggle_diagnostics", &mut cx);
+    let input = input.borrow().clone().expect("created");
+    // Focus-in and focus-out reach their listeners only in an active
+    // window, with the next frame; the test platform activates on its
+    // executor, so it is parked before the first focus move.
+    cx.update(|window, _cx| window.activate_window());
+    cx.run_until_parked();
+    let draw = |cx: &mut gpui::VisualTestContext| {
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+    };
+    cx.update(|window, cx| input.update(cx, |i, cx| i.focus(window, cx)));
+    draw(&mut cx);
+    shell.read_with(&cx, |s, cx| {
+        let stack = s.context_stack(cx);
+        assert_eq!(stack[1].get("mode"), Some("insert"), "{stack:?}");
+    });
+    cx.simulate_keystrokes("j");
+    assert_eq!(cx.update(|_, cx| input.read(cx).value().to_string()), "j");
+    assert!(
+        !log.borrow()
+            .contains(&PageRecorded::Action("diagnostics::noop".into())),
+        "a mode == normal binding does not fire in insert mode: {:?}",
+        log.borrow()
+    );
+    cx.update(|window, cx| {
+        shell
+            .read(cx)
+            .page
+            .as_ref()
+            .unwrap()
+            .occupant
+            .content
+            .focus_handle(cx)
+            .focus(window, cx);
+    });
+    draw(&mut cx);
+    shell.read_with(&cx, |s, cx| {
+        let stack = s.context_stack(cx);
+        assert_eq!(stack[1].get("mode"), Some("normal"), "{stack:?}");
+    });
+    cx.simulate_keystrokes("j");
+    assert!(
+        log.borrow()
+            .contains(&PageRecorded::Action("diagnostics::noop".into())),
+        "blurred: the binding fires: {:?}",
+        log.borrow()
+    );
+    assert_eq!(
+        cx.update(|_, cx| input.read(cx).value().to_string()),
+        "j",
+        "and nothing typed"
+    );
 }
 
 /// The page takes the whole tile surface plus the toolbar's and stripe's

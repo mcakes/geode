@@ -54,6 +54,30 @@ pub(super) const CLOSE_PAGE_FIRST: &str = "close the page first (esc)";
 /// The notice when no registered kind accepts the focused tile's context.
 pub(crate) const NO_MODULE_OPENS: &str = "no module opens on the context at the cursor";
 
+/// The action ids refused with [`CLOSE_PAGE_FIRST`] while a page is open:
+/// the transient tile chrome (the `:` line, find, the stack list) and every
+/// layout edit — add, open-with, autosize, and the whole `workspace::`,
+/// `dock::`, and `stack::` families, which close, fullscreen, move, resize,
+/// refocus, dock, or restack tiles nobody can see (`Close tile` would
+/// destroy an unseen tile with no undo). `workspace::switch_*` is the one
+/// exception: a switch closes the page first and is the route home.
+fn refused_over_a_page(id: &str) -> bool {
+    if id.starts_with("workspace::") {
+        return !id.starts_with("workspace::switch_");
+    }
+    id.starts_with("dock::")
+        || id.starts_with("stack::")
+        || matches!(
+            id,
+            "tile::command_line"
+                | "tile::find"
+                | "tile::add"
+                | "tile::open_with"
+                | "tile::autosize_columns"
+        )
+        || crate::defaults::parse_add_action(id).is_some()
+}
+
 impl ShellView {
     /// Active contexts, outermost first: workspace, then tile and occupant when
     /// an occupant is focused, then palette while open. While a page is open
@@ -159,22 +183,10 @@ impl ShellView {
             return;
         }
         // A page covers the tile surface: it cannot host a `:` line, find,
-        // or stack list, and nothing may add, duplicate, or resize a tile
-        // the trader cannot see. The palette reaches these ids over a page
-        // as the keymap does, so the refusal lives here, not in a context.
-        if self.page_open()
-            && (matches!(
-                action.0.as_str(),
-                "tile::command_line"
-                    | "tile::find"
-                    | "stack::pick"
-                    | "tile::add"
-                    | "tile::open_with"
-                    | "tile::autosize_columns"
-                    | "workspace::duplicate_horizontal"
-                    | "workspace::duplicate_vertical"
-            ) || crate::defaults::parse_add_action(&action.0).is_some())
-        {
+        // or stack list, and no layout edit may reach a tile the trader
+        // cannot see. The palette reaches these ids over a page as the
+        // keymap does, so the refusal lives here, not in a context.
+        if self.page_open() && refused_over_a_page(&action.0) {
             self.notice = Some(CLOSE_PAGE_FIRST);
             return;
         }

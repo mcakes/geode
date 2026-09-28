@@ -26,8 +26,8 @@ use gpui::{
 use gpui_component::button::Button;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::select::{SearchableVec, SelectEvent, SelectState};
-use gpui_component::table::{DataTable, TableEvent, TableState};
-use gpui_component::{ActiveTheme as _, IndexPath, Sizable as _, Size, h_flex, v_flex};
+use gpui_component::table::{TableEvent, TableState};
+use gpui_component::{ActiveTheme as _, IndexPath, Sizable as _, h_flex, v_flex};
 
 use crate::config_view::{self, ConfigView};
 use crate::levels::{self, LevelRow, LevelsState};
@@ -36,7 +36,7 @@ use crate::log_view::{self, LogView};
 use crate::model::{self, Badges, Tone};
 use crate::prepared::{self, PreparedTable, SINCE_COLUMN, SINCE_SEPARATOR};
 use crate::section::Section;
-use crate::table::SectionDelegate;
+use crate::table::{SectionDelegate, table_el};
 
 /// Width of the filter input, in pixels at the design rem.
 const FILTER_WIDTH: f32 = 240.0;
@@ -243,11 +243,18 @@ impl DiagnosticsPage {
 
         cx.observe(&diagnostics, |this, diagnostics, cx| {
             let now = diagnostics.read(cx).versions();
-            // New records are a visible page's business: a hidden page
-            // drains nothing, so a wrap while it is closed is reported by
-            // the drain that shows it again rather than overwritten by a
-            // later idle drain.
-            let has_new = this.visible && this.log.has_new();
+            // A hidden page is retained for the window's lifetime: every
+            // poll, publication, and config batch would otherwise run a
+            // section builder and format badges for a surface nobody sees.
+            // The baseline moves so nothing is stale; `set_visible(true)`
+            // rebuilds once, and that rebuild drains the ring, so a wrap
+            // while closed is reported then rather than overwritten by an
+            // idle drain.
+            if !this.visible {
+                this.last_diag_versions = now;
+                return;
+            }
+            let has_new = this.log.has_new();
             let relevant = if this.section == Section::Log {
                 has_new || now.log_levels != this.last_diag_versions.log_levels
             } else {
@@ -267,14 +274,25 @@ impl DiagnosticsPage {
         })
         .detach();
         // Timestamps are formatted at rebuild, so a clock-setting change
-        // rebuilds the selected section.
-        cx.observe_global::<geode_shell::clock::AppClock>(|this, cx| this.rebuild(cx))
-            .detach();
+        // rebuilds the selected section; a hidden page waits for its show.
+        cx.observe_global::<geode_shell::clock::AppClock>(|this, cx| {
+            if this.visible {
+                this.rebuild(cx);
+            }
+        })
+        .detach();
         // The app registers its config-refresh frame observer before pages
         // are created; it must update the shared `Config` before this
         // observer rebuilds config rows on the same version change.
         cx.observe(&frame, |this, frame, cx| {
             let now = frame.read(cx).versions();
+            // Hidden: move the baseline only, as the diagnostics observer
+            // does. The catalog refresh below is a visible page's too; the
+            // show requests its own.
+            if !this.visible {
+                this.last_frame_versions = now;
+                return;
+            }
             let as_of_changed = now.as_of != this.last_frame_versions.as_of;
             let config_changed = now.config != this.last_frame_versions.config;
             // Only data rows read the frame's as-of; only config rows read
@@ -822,11 +840,16 @@ impl DiagnosticsPage {
 
     /// Visibility drives watched demand: a watch queues the initial
     /// catalog, and the shell's unwatch cancels it when the page closes.
+    /// Hiding also closes the Levels popover, so the next `mod+d` cannot
+    /// reopen the page with the popover armed.
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         if self.visible == visible {
             return;
         }
         self.visible = visible;
+        if !visible {
+            self.set_levels_open(false, cx);
+        }
         self.diagnostics.update(cx, |d, cx| {
             if visible {
                 d.watch();
@@ -1080,14 +1103,7 @@ impl gpui::Render for DiagnosticsPage {
                 let copy = self.copy_text.clone();
                 v_flex()
                     .size_full()
-                    .child(
-                        div().flex_1().min_h_0().w_full().child(
-                            DataTable::new(&self.table)
-                                .with_size(Size::XSmall)
-                                .bordered(false)
-                                .stripe(false),
-                        ),
-                    )
+                    .child(table_el(&self.table))
                     .child(crate::page_chrome::detail_strip(
                         "diagnostics-detail",
                         row,
@@ -1274,6 +1290,7 @@ mod tests {
     #[gpui::test]
     fn an_unchanged_entity_does_not_rebuild(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
+        h.page.update(&mut vcx, |p, cx| p.set_visible(true, cx));
         let before = h.page.read_with(&vcx, |p, _| p.rebuild_count);
         h.diagnostics.update(&mut vcx, |_, cx| cx.notify());
         vcx.run_until_parked();
@@ -1291,6 +1308,69 @@ mod tests {
             d.refresh_frame_hist(&hist);
             cx.notify();
         });
+        vcx.run_until_parked();
+        assert_eq!(h.page.read_with(&vcx, |p, _| p.rebuild_count), before + 1);
+    }
+
+    /// A closed page lives on for the window: its observers move their
+    /// baselines and build nothing until it is shown, and the show rebuilds
+    /// exactly once with everything that arrived meanwhile.
+    #[gpui::test]
+    fn a_hidden_page_neither_rebuilds_nor_refreshes_badges_until_shown(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.page.update(&mut vcx, |p, cx| p.set_visible(true, cx));
+        h.page.update(&mut vcx, |p, cx| p.set_visible(false, cx));
+        let (before, texts) = h
+            .page
+            .read_with(&vcx, |p, _| (p.rebuild_count, p.rail_texts.clone()));
+        assert_eq!(h.page.read_with(&vcx, |p, _| p.prepared().rows.len()), 0);
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.note_health("risk", Health::Ok, String::new(), SystemTime::now());
+            cx.notify();
+        });
+        h.frame.update(&mut vcx, |f, cx| {
+            f.note_config_reloaded();
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        h.page.read_with(&vcx, |p, _| {
+            assert_eq!(p.rebuild_count, before, "hidden: no section builder ran");
+            assert_eq!(p.rail_texts, texts, "hidden: no badge refresh");
+            assert_eq!(p.prepared().rows.len(), 0);
+        });
+        h.page.update(&mut vcx, |p, cx| p.set_visible(true, cx));
+        h.page.read_with(&vcx, |p, _| {
+            assert_eq!(p.rebuild_count, before + 1, "shown: rebuilt once");
+            assert!(
+                p.prepared()
+                    .rows
+                    .iter()
+                    .any(|r| r.cells[0].text.as_ref() == "risk"),
+                "the source noted while hidden is in the shown table"
+            );
+            assert_ne!(p.rail_texts, texts, "the badges caught up on the show");
+        });
+        // The baselines moved while hidden: a notify with nothing new
+        // after the show rebuilds nothing.
+        h.diagnostics.update(&mut vcx, |_, cx| cx.notify());
+        vcx.run_until_parked();
+        assert_eq!(h.page.read_with(&vcx, |p, _| p.rebuild_count), before + 1);
+        // The frame observer the same way: a config bump is relevant to
+        // the Config section, and still builds nothing while hidden.
+        open_config_section(&h, &mut vcx);
+        h.page.update(&mut vcx, |p, cx| p.set_visible(false, cx));
+        let before = h.page.read_with(&vcx, |p, _| p.rebuild_count);
+        h.frame.update(&mut vcx, |f, cx| {
+            f.note_config_reloaded();
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        assert_eq!(h.page.read_with(&vcx, |p, _| p.rebuild_count), before);
+        h.page.update(&mut vcx, |p, cx| p.set_visible(true, cx));
+        assert_eq!(h.page.read_with(&vcx, |p, _| p.rebuild_count), before + 1);
+        h.frame.update(&mut vcx, |_, cx| cx.notify());
         vcx.run_until_parked();
         assert_eq!(h.page.read_with(&vcx, |p, _| p.rebuild_count), before + 1);
     }
@@ -1531,6 +1611,60 @@ mod tests {
         assert_eq!(rows(&vcx), 1, "and the next collapses");
     }
 
+    /// Focus the page's own handle and deliver the focus events, as the
+    /// shell does on open.
+    fn focus_page(h: &Harness, vcx: &mut gpui::VisualTestContext) {
+        vcx.update(|window, cx| {
+            h.page.read(cx).focus_handle().focus(window, cx);
+            let _ = window.draw(cx);
+        });
+    }
+
+    /// A row click selects through the table without moving window focus
+    /// into it: the table's own `escape` would otherwise take the first
+    /// Escape after a click to clear its selection, and only the second
+    /// would close the page.
+    #[gpui::test]
+    fn a_row_click_selects_without_taking_focus_from_the_page(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.set_catalog(
+                snapshot_with(
+                    geode_core::query::AsOf::Live,
+                    vec![crate::model::tests::dataset_catalog()],
+                ),
+                SystemTime::now(),
+            );
+            cx.notify();
+        });
+        open_data_section(&h, &mut vcx);
+        focus_page(&h, &mut vcx);
+        dispatch(&h, &mut vcx, "bottom");
+        assert_eq!(h.page.read_with(&vcx, |p, _| p.cursor()), 2);
+        let row = vcx
+            .debug_bounds("diagnostics-row-0")
+            .expect("the dataset row is painted");
+        let at = gpui::point(row.origin.x + gpui::px(4.0), row.center().y);
+        vcx.simulate_click(at, gpui::Modifiers::default());
+        vcx.run_until_parked();
+        assert_eq!(
+            h.page.read_with(&vcx, |p, _| p.cursor()),
+            0,
+            "the table's SelectRow still moved the cursor"
+        );
+        vcx.update(|window, cx| {
+            let page = h.page.read(cx);
+            assert!(
+                !page.table.read(cx).focus_handle(cx).is_focused(window),
+                "the table did not take focus"
+            );
+            assert!(
+                page.focus_handle.is_focused(window),
+                "the page handle kept it"
+            );
+        });
+    }
+
     fn open_config_section(h: &Harness, vcx: &mut gpui::VisualTestContext) {
         vcx.update(|window, cx| {
             h.page
@@ -1577,6 +1711,7 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let (h, mut vcx) = open(cx);
+        h.page.update(&mut vcx, |p, cx| p.set_visible(true, cx));
         note_two_config_batches(&h, &mut vcx);
         open_config_section(&h, &mut vcx);
         let current = h.page.read_with(&vcx, |p, cx| {
@@ -1649,6 +1784,7 @@ mod tests {
             cx.notify();
         });
         open_config_section(&h, &mut vcx);
+        focus_page(&h, &mut vcx);
         vcx.update(|window, cx| {
             h.page.update(cx, |p, cx| {
                 let _ = p.dispatch(&ActionId("diagnostics::down".into()), None, window, cx);
@@ -1663,6 +1799,14 @@ mod tests {
         vcx.simulate_click(at, gpui::Modifiers::default());
         vcx.run_until_parked();
         assert_eq!(h.page.read_with(&vcx, |p, _| p.diag_cursor), 1);
+        vcx.update(|window, cx| {
+            let page = h.page.read(cx);
+            assert!(
+                !page.diag_table.read(cx).focus_handle(cx).is_focused(window),
+                "the left table did not take focus"
+            );
+            assert!(page.focus_handle.is_focused(window));
+        });
         assert_eq!(
             h.page.read_with(&vcx, |p, _| p.cursor()),
             before,
@@ -1682,6 +1826,7 @@ mod tests {
     #[gpui::test]
     fn a_config_version_change_rebuilds_only_the_config_section(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
+        h.page.update(&mut vcx, |p, cx| p.set_visible(true, cx));
         open_config_section(&h, &mut vcx);
         let before = h.page.read_with(&vcx, |p, _| p.rebuild_count);
         h.frame.update(&mut vcx, |f, cx| {
@@ -1978,6 +2123,15 @@ mod tests {
             vcx.debug_bounds("diagnostics-level-pick-ingest-debug")
                 .is_none(),
             "no popover content is painted"
+        );
+        // Closing the page (mod+d) with the popover open must not reopen
+        // the page with it armed.
+        click(&mut vcx, "diagnostics-levels-open");
+        assert!(h.page.read_with(&vcx, |p, _| p.levels.open));
+        h.page.update(&mut vcx, |p, cx| p.set_visible(false, cx));
+        assert!(
+            !h.page.read_with(&vcx, |p, _| p.levels.open),
+            "hiding closes the popover"
         );
     }
 

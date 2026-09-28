@@ -8,15 +8,41 @@ use std::rc::Rc;
 use geode_shell::fonts;
 use geode_shell::shell::{chip, scale};
 use gpui::prelude::*;
-use gpui::{App, Context, SharedString, TextAlign, Window, div, px};
-use gpui_component::ActiveTheme as _;
-use gpui_component::table::{Column, TableDelegate, TableState};
+use gpui::{App, Context, Div, Entity, SharedString, TextAlign, Window, div, px};
+use gpui_component::table::{Column, DataTable, TableDelegate, TableState};
+use gpui_component::{ActiveTheme as _, Sizable as _, Size};
 
 use crate::model::Tone;
 use crate::prepared::{PreparedTable, RowKind};
 
 /// Design pixels of left padding per nesting level of a child cell.
 const INDENT_STEP: f32 = 12.0;
+
+/// A page table inside the wrapper that keeps the page handle as the
+/// focus owner. `DataTable`'s root tracks the table's own handle, so a row
+/// click would move window focus into the table, whose `escape` clears its
+/// selection and stops there whenever a row is selected, which is always:
+/// the page keeps `set_selected_row` in step with its cursor. The first
+/// Escape after a click would then clear the highlight instead of closing
+/// the page. The capture-phase `prevent_default` runs before the
+/// bubble-phase focus transfer and suppresses it; the row's own click still
+/// fires, because gpui records the pending mouse-down independently of the
+/// default action. The wrapper fills what its panel leaves; without
+/// `min_h_0` the virtualised list would take its intrinsic height and paint
+/// no rows.
+pub(crate) fn table_el(state: &Entity<TableState<SectionDelegate>>) -> Div {
+    div()
+        .flex_1()
+        .min_h_0()
+        .w_full()
+        .capture_any_mouse_down(|_event, window, _cx| window.prevent_default())
+        .child(
+            DataTable::new(state)
+                .with_size(Size::XSmall)
+                .bordered(false)
+                .stripe(false),
+        )
+}
 
 pub struct SectionDelegate {
     table: Rc<PreparedTable>,

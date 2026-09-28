@@ -7,16 +7,16 @@
 use geode_shell::actions::ActionId;
 use geode_shell::module::ShellActions;
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, Div, Entity, SharedString, WeakEntity, div};
+use gpui::{AnyElement, Context, Entity, SharedString, WeakEntity};
 use gpui_component::button::Button;
 use gpui_component::input::Input;
-use gpui_component::table::{DataTable, TableState};
-use gpui_component::{ActiveTheme as _, Selectable as _, Sizable as _, Size, h_flex, v_flex};
+use gpui_component::table::TableState;
+use gpui_component::{ActiveTheme as _, Selectable as _, Sizable as _, h_flex, v_flex};
 
 use crate::page::DiagnosticsPage;
 use crate::page_chrome::{detail_strip, probed};
 use crate::prepared::PreparedRow;
-use crate::table::SectionDelegate;
+use crate::table::{SectionDelegate, table_el};
 
 /// What the page hands the Config body to paint; the page keeps the state.
 pub(crate) struct ConfigView<'a> {
@@ -30,18 +30,6 @@ pub(crate) struct ConfigView<'a> {
     pub row: Option<&'a PreparedRow>,
     pub filter: Input,
     pub actions: ShellActions,
-}
-
-/// The table fills what its panel leaves after the toolbar and detail
-/// strip; without `min_h_0` the virtualised list would take its intrinsic
-/// height and paint no rows.
-fn table_el(state: &Entity<TableState<SectionDelegate>>) -> Div {
-    div().flex_1().min_h_0().w_full().child(
-        DataTable::new(state)
-            .with_size(Size::XSmall)
-            .bordered(false)
-            .stripe(false),
-    )
 }
 
 pub(crate) fn render(

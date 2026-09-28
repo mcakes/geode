@@ -805,7 +805,7 @@ pub mod recording {
     use super::*;
     use gpui::prelude::*;
     use gpui::{Context, FocusHandle, Focusable as _, Render, div};
-    use gpui_component::input::{Input, InputState};
+    use gpui_component::input::{Input, InputEvent, InputState};
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
@@ -1255,6 +1255,10 @@ pub mod recording {
         focus_handle: FocusHandle,
         kind: &'static str,
         input: Entity<InputState>,
+        /// The input holds focus, tracked from its `Focus`/`Blur` events
+        /// as the diagnostics page tracks its own: `key_context` is asked
+        /// without a `Window`, so the flag is what carries `mode`.
+        insert: bool,
     }
 
     impl Render for RecordingPageView {
@@ -1276,9 +1280,14 @@ pub mod recording {
     }
 
     impl PageContent for RecordingPageContent {
+        /// `mode = insert` while the page's input holds focus, as a real
+        /// page reports it: the shell's insert route keeps every context
+        /// carrying `mode == insert` for bare keys, so a page fragment
+        /// without a `mode == normal` clause would fire inside the input.
         fn key_context(&self, cx: &App) -> KeyContext {
-            let kind = self.view.read(cx).kind;
-            KeyContext::new(kind)
+            let view = self.view.read(cx);
+            let mode = if view.insert { "insert" } else { "normal" };
+            KeyContext::new(view.kind).pair("mode", mode)
         }
         fn dispatch(
             &self,
@@ -1408,10 +1417,13 @@ pub mod recording {
         }
         fn default_keymap(&self) -> Option<&'static str> {
             // Leaked once per factory: the fragment text must be 'static.
+            // `n` on the bare context and `j` on `mode == normal`, so a
+            // test can tell a binding that ignores the mode from one that
+            // honours it.
             Some(Box::leak(
                 format!(
-                    "[[bindings]]\ncontext = {:?}\n[bindings.keys]\n\"n\" = \"{}::noop\"\n",
-                    self.kind, self.kind
+                    "[[bindings]]\ncontext = {:?}\n[bindings.keys]\n\"n\" = \"{}::noop\"\n\n[[bindings]]\ncontext = \"{} && mode == normal\"\n[bindings.keys]\n\"j\" = \"{}::noop\"\n",
+                    self.kind, self.kind, self.kind, self.kind
                 )
                 .into_boxed_str(),
             ))
@@ -1434,10 +1446,26 @@ pub mod recording {
             let kind = self.kind;
             let input = cx.new(|cx| InputState::new(window, cx));
             *self.created_input.borrow_mut() = Some(input.clone());
-            let view = cx.new(|cx| RecordingPageView {
-                focus_handle: cx.focus_handle(),
-                kind,
-                input,
+            let view = cx.new(|cx| {
+                // The flag follows what the window says, not the last
+                // event, so a blur delivered after a refocus cannot clear it.
+                cx.subscribe_in(
+                    &input,
+                    window,
+                    |this: &mut RecordingPageView, input, event: &InputEvent, window, cx| {
+                        if matches!(event, InputEvent::Focus | InputEvent::Blur) {
+                            this.insert = input.read(cx).focus_handle(cx).is_focused(window);
+                            cx.notify();
+                        }
+                    },
+                )
+                .detach();
+                RecordingPageView {
+                    focus_handle: cx.focus_handle(),
+                    kind,
+                    input,
+                    insert: false,
+                }
             });
             *self.created_view.borrow_mut() = Some(view.clone());
             PageOccupant {

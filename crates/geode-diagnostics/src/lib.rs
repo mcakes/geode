@@ -58,9 +58,15 @@ pub const ACTIONS: &[(&str, &str)] = &[
 /// One context with two modes: `[`/`]` cycle sections and `/` focuses the
 /// filter; in insert mode `escape` leaves it. The page's toggle binding is
 /// the factory's `toggle_binding`, emitted by the roster.
+///
+/// The bare keys carry `mode == normal` for the reason a module's do: with
+/// the filter focused the shell's insert route resolves bare keys against
+/// every context that carries `mode == insert`, and the page's context does
+/// then, so a table without the mode clause would fire `j`, `G`, or `enter`
+/// instead of typing them.
 pub const DEFAULT_KEYMAP: &str = r#"
 [[bindings]]
-context = "diagnostics"
+context = "diagnostics && mode == normal"
 [bindings.keys]
 "j" = "diagnostics::down"
 "k" = "diagnostics::up"
@@ -241,6 +247,31 @@ mod tests {
             assert!(
                 bound.contains(id),
                 "{id} is registered but the default keymap binds nothing to it"
+            );
+        }
+    }
+
+    /// Every table in the fragment names a mode. A table on the bare
+    /// `diagnostics` context passes the fragment check and binds every
+    /// action, yet its bare keys fire inside the focused filter: the insert
+    /// route keeps every context carrying `mode == insert`, which the page's
+    /// does while an input holds focus.
+    #[test]
+    fn every_default_keymap_table_names_a_mode() {
+        let doc: toml::Table = toml::from_str(DEFAULT_KEYMAP).expect("the fragment parses");
+        let tables = doc
+            .get("bindings")
+            .and_then(|b| b.as_array())
+            .expect("[[bindings]] tables");
+        assert!(!tables.is_empty());
+        for table in tables {
+            let context = table.get("context").and_then(|c| c.as_str());
+            assert!(
+                matches!(
+                    context,
+                    Some("diagnostics && mode == normal") | Some("diagnostics && mode == insert")
+                ),
+                "a bindings table without a mode clause fires its bare keys inside the filter: {context:?}"
             );
         }
     }
