@@ -517,7 +517,13 @@ fn build_shell_services(
     }
 
     // Register split actions for the complete roster before keymap compilation.
-    register_add_actions(&mut registry, &roster.kinds());
+    // A kind whose add-tile ids would collide is refused rather than panicking;
+    // its Error joins the refused panels in the config section.
+    let add_diags = register_add_actions(&mut registry, &roster.kinds());
+    for diag in &add_diags {
+        print_diagnostic(diag);
+    }
+    composition_diagnostics.extend(add_diags);
     // Register module actions before resolving their keybindings.
     roster.register_actions(&mut registry);
 
@@ -1269,6 +1275,42 @@ label = "skew"
         assert_eq!(
             shell.read_with(&vcx, |s, _| s.occupant_kind(TileId(1))),
             Some("cvi")
+        );
+        bridge.handle.shutdown();
+    }
+
+    /// A panel named `cvi_stacked` would register `tile::add_cvi_stacked`,
+    /// the builtin CVI panel's stack id: once a registry panic at startup.
+    /// It is refused by name, and CVI keeps its own stack row.
+    #[gpui::test]
+    fn a_panel_named_like_another_kinds_placement_is_refused_without_panicking(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use geode_shell::actions::ActionId;
+        let demo = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(
+            user.path().join("panels.toml"),
+            WIDE_CVI_PANEL.replace("cvi_wide", "cvi_stacked"),
+        )
+        .unwrap();
+        let (services, bridge) = compose(cx, demo.path(), user.path());
+        assert_eq!(
+            services
+                .composition_diagnostics
+                .iter()
+                .map(|d| d.path.as_deref().unwrap_or("-"))
+                .collect::<Vec<_>>(),
+            ["panels.cvi_stacked"]
+        );
+        assert!(!services.roster.kinds().contains(&"cvi_stacked"));
+        assert_eq!(
+            services
+                .registry
+                .get(&ActionId("tile::add_cvi_stacked".into()))
+                .expect("the CVI panel's stack row")
+                .title,
+            "Cvi: Stack"
         );
         bridge.handle.shutdown();
     }

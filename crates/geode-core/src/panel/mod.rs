@@ -21,6 +21,13 @@ pub use read::read_panels;
 /// The layered document panels are read from.
 pub const PANELS_DOC: &str = "panels";
 
+/// The placement suffixes the shell appends to a tile kind's
+/// `tile::add_<kind>` action id (split horizontal, split vertical, stack).
+/// A kind ending in one is refused: its ids would collide with another
+/// kind's placement variants, and its default-direction id would decode as
+/// that other kind.
+pub const PLACEMENT_SUFFIXES: [&str; 3] = ["_horizontal", "_vertical", "_stacked"];
+
 /// A header attribute's source column, display label, and edit type. The
 /// declared type belongs here because snapshot metadata does not carry the
 /// dataset's schema type.

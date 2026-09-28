@@ -43,12 +43,6 @@ fn check_panel(
             format!("dataset '{}' is not declared", spec.dataset),
         ));
     };
-    if !ds.is_document() {
-        return Err((
-            "dataset".into(),
-            format!("dataset '{}' is not a document dataset", ds.name),
-        ));
-    }
     let Some(kind) = documents.iter().find(|k| k.name() == spec.document) else {
         let names: Vec<&str> = documents.iter().map(|k| k.name()).collect();
         return Err((
@@ -60,6 +54,7 @@ fn check_panel(
             ),
         ));
     };
+    // Also refuses a dataset that is not a document dataset, at `.document`.
     let fits = check_kind_against(kind.as_ref(), ds);
     if let Err(e) = fits {
         return Err((
@@ -97,7 +92,8 @@ fn check_panel(
         }
         Columns::Axis(axis) => Some(check_pivot(spec, ds, axis)?),
     };
-    check_coverage(spec, ds, kind.as_ref(), ladder)
+    check_coverage(spec, ds, kind.as_ref(), ladder)?;
+    check_order(spec, kind.as_ref(), ladder)
 }
 
 /// The model reads its document key from the columns before the row axis,
@@ -184,7 +180,8 @@ fn check_pivot<'a>(spec: &PanelSpec, ds: &'a DatasetSpec, axis: &str) -> Result<
         ));
     };
     same_type(value, spec.value_type, "value.type")?;
-    // A slice editor parses by the panel's value type: an i64 panel would
+    // With the f64 check above, this forces value.type == f64 whenever a
+    // slice exists. A slice editor parses by the panel's value type: an i64 panel would
     // refuse a fractional forward, and its format would round one.
     for (i, s) in spec.slice_values.iter().enumerate() {
         let col = column(ds, &s.column, &format!("slice.{i}.column"))?;
@@ -272,6 +269,57 @@ fn check_coverage(
             "document kind '{}' writes [{}], which the panel does not name; a panel must name every column it uploads",
             kind.name(),
             missing.join(", ")
+        ),
+    ))
+}
+
+/// Upload emits attributes in header order and values in flat-column order
+/// (a pivot: the ladder, then each slice), and each kind's writer refuses
+/// any order but its own. A panel laid out in another order would load and
+/// paint, yet every upload would be refused; so each sequence must follow
+/// `kind.columns()`' relative order.
+fn check_order(
+    spec: &PanelSpec,
+    kind: &dyn DocumentKind,
+    ladder: Option<&str>,
+) -> Result<(), Refusal> {
+    let header: Vec<&str> = spec.header.iter().map(|h| h.column.as_str()).collect();
+    in_kind_order(kind, &header, "header")?;
+    match ladder {
+        None => {
+            let flat: Vec<&str> = spec
+                .flat_columns()
+                .iter()
+                .map(|c| c.column.as_str())
+                .collect();
+            in_kind_order(kind, &flat, "columns.values")
+        }
+        Some(ladder) => {
+            let values: Vec<&str> = std::iter::once(ladder)
+                .chain(spec.slice_values.iter().map(|s| s.column.as_str()))
+                .collect();
+            in_kind_order(kind, &values, "slice")
+        }
+    }
+}
+
+fn in_kind_order(kind: &dyn DocumentKind, laid: &[&str], at: &str) -> Result<(), Refusal> {
+    let expected: Vec<&str> = kind
+        .columns()
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| laid.contains(name))
+        .collect();
+    if expected == laid {
+        return Ok(());
+    }
+    Err((
+        at.into(),
+        format!(
+            "document kind '{}' uploads these columns in the order [{}], but the panel lays them out as [{}]; the kind's writer refuses any other order",
+            kind.name(),
+            expected.join(", "),
+            laid.join(", ")
         ),
     ))
 }

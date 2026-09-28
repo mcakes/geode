@@ -550,38 +550,63 @@ pub fn register_scope_actions(reg: &mut ActionRegistry, saved: &geode_core::scop
     }
 }
 
-/// Register four Tiles actions per module kind: default-direction split,
-/// explicit horizontal/right split, explicit vertical/below split, and stack.
-/// Ids are `tile::add_<kind>` with optional `_horizontal`, `_vertical`, or
-/// `_stacked` suffixes. Registration precedes keymap compilation.
-pub fn register_add_actions(reg: &mut ActionRegistry, kinds: &[&str]) {
+/// A kind's add-tile id suffixes and palette titles: default-direction
+/// split, explicit horizontal/right split, explicit vertical/below split,
+/// and stack. The non-empty suffixes are `PLACEMENT_SUFFIXES`, which the
+/// panel reader refuses at the end of a panel name.
+const ADD_PLACEMENTS: [(&str, &str); 4] = [
+    ("", "Split"),
+    ("_horizontal", "Split Horizontal"),
+    ("_vertical", "Split Vertical"),
+    ("_stacked", "Stack"),
+];
+
+/// Register four Tiles actions per module kind, ids `tile::add_<kind>`
+/// with optional `_horizontal`, `_vertical`, or `_stacked` suffixes.
+/// Registration precedes keymap compilation.
+///
+/// Kinds come from configuration (market-data panels) as well as code, so
+/// uniqueness is not by construction. A kind ending in a placement suffix
+/// (its default id would decode as another kind), or one whose ids another
+/// registration already holds, gets no add-tile actions and an Error
+/// naming it, returned for the caller's diagnostics; the startup does not
+/// panic. The kind's rows are refused whole, so its palette never offers
+/// some placements and not others.
+pub fn register_add_actions(reg: &mut ActionRegistry, kinds: &[&str]) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
     for kind in kinds {
+        let ids: Vec<String> = ADD_PLACEMENTS
+            .iter()
+            .map(|(suffix, _)| format!("tile::add_{kind}{suffix}"))
+            .collect();
+        let refusal = if let Some(suffix) = geode_core::panel::PLACEMENT_SUFFIXES
+            .iter()
+            .find(|s| kind.ends_with(*s))
+        {
+            Some(format!(
+                "ends in the reserved placement suffix '{suffix}', so 'tile::add_{kind}' would decode as another kind"
+            ))
+        } else {
+            ids.iter()
+                .find(|id| reg.contains(&ActionId((*id).clone())))
+                .map(|id| format!("'{id}' is already registered"))
+        };
+        if let Some(why) = refusal {
+            diags.push(Diagnostic {
+                severity: Severity::Error,
+                layer: None,
+                file: None,
+                message: format!("tile kind '{kind}' {why}; it has no add-tile actions"),
+                path: None,
+            });
+            continue;
+        }
         let title = capitalize(kind);
-        action(
-            reg,
-            &format!("tile::add_{kind}"),
-            &format!("{title}: Split"),
-            "Tiles",
-        );
-        action(
-            reg,
-            &format!("tile::add_{kind}_horizontal"),
-            &format!("{title}: Split Horizontal"),
-            "Tiles",
-        );
-        action(
-            reg,
-            &format!("tile::add_{kind}_vertical"),
-            &format!("{title}: Split Vertical"),
-            "Tiles",
-        );
-        action(
-            reg,
-            &format!("tile::add_{kind}_stacked"),
-            &format!("{title}: Stack"),
-            "Tiles",
-        );
+        for (id, (_, placement)) in ids.iter().zip(ADD_PLACEMENTS) {
+            action(reg, id, &format!("{title}: {placement}"), "Tiles");
+        }
     }
+    diags
 }
 
 /// A kind's palette title (`blotter` → `Blotter`) — also the tile
@@ -899,6 +924,75 @@ mod tests {
         let mut empty = ActionRegistry::default();
         register_add_actions(&mut empty, &[]);
         assert_eq!(empty.iter().count(), 0);
+    }
+
+    /// The panel reader refuses a name ending in `PLACEMENT_SUFFIXES`; the
+    /// shell's own suffixes must be exactly that list, and each must decode
+    /// back to its kind.
+    #[test]
+    fn the_add_placement_suffixes_are_the_ones_the_panel_reader_reserves() {
+        let suffixes: Vec<&str> = ADD_PLACEMENTS
+            .iter()
+            .map(|(s, _)| *s)
+            .filter(|s| !s.is_empty())
+            .collect();
+        assert_eq!(suffixes, geode_core::panel::PLACEMENT_SUFFIXES);
+        for suffix in suffixes {
+            let id = format!("tile::add_k{suffix}");
+            let (kind, placement) = parse_add_action(&id).unwrap();
+            assert_eq!(kind, "k", "{suffix}");
+            assert_ne!(placement, AddPlacement::Split(None), "{suffix}");
+        }
+    }
+
+    /// Kinds come from configuration too: a kind whose ids collide with
+    /// another kind's placement ids, or that ends in a placement suffix, is
+    /// refused with an Error instead of panicking the startup.
+    #[test]
+    fn register_add_actions_refuses_a_colliding_kind_without_panicking() {
+        let mut reg = ActionRegistry::default();
+        let diags = register_add_actions(&mut reg, &["cvi", "cvi_stacked", "vol_vertical", "ok"]);
+        assert_eq!(diags.len(), 2, "{diags:?}");
+        assert!(diags.iter().all(|d| d.severity == Severity::Error));
+        assert!(
+            diags[0].message.contains("'cvi_stacked'"),
+            "{}",
+            diags[0].message
+        );
+        assert!(
+            diags[1].message.contains("'vol_vertical'"),
+            "{}",
+            diags[1].message
+        );
+        assert_eq!(
+            reg.get(&ActionId("tile::add_cvi_stacked".into()))
+                .unwrap()
+                .title,
+            "Cvi: Stack",
+            "the first kind keeps its stack row"
+        );
+        assert!(!reg.contains(&ActionId("tile::add_cvi_stacked_vertical".into())));
+        assert!(reg.contains(&ActionId("tile::add_ok_stacked".into())));
+        // Four rows each for `cvi` and `ok`.
+        assert_eq!(reg.iter().count(), 8);
+        // An id held by an earlier registration refuses the kind whole.
+        let mut reg = ActionRegistry::default();
+        reg.register(ActionDef {
+            id: ActionId("tile::add_rec_vertical".into()),
+            title: "Taken".into(),
+            category: "Test".into(),
+        })
+        .unwrap();
+        let diags = register_add_actions(&mut reg, &["rec"]);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert!(
+            diags[0]
+                .message
+                .contains("'tile::add_rec_vertical' is already registered"),
+            "{}",
+            diags[0].message
+        );
+        assert!(!reg.contains(&ActionId("tile::add_rec".into())));
     }
 
     #[test]

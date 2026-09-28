@@ -1135,3 +1135,116 @@ fn a_panel_missing_a_header_attribute_is_refused() {
         diags[0].message
     );
 }
+
+/// `tile::add_<kind>` ids gain these suffixes per placement: a panel named
+/// with one would collide with another kind's placement ids (a startup
+/// panic in the action registry) or decode as that kind.
+#[test]
+fn a_panel_name_ending_in_a_placement_suffix_is_refused() {
+    for suffix in PLACEMENT_SUFFIXES {
+        let name = format!("cvi{suffix}");
+        let text = CVI_PANEL
+            .replace("[cvi]", &format!("[{name}]"))
+            .replace("cvi.", &format!("{name}."));
+        assert_eq!(refused(&text), format!("panels.{name}"), "{suffix}");
+        let (_, diags) = load(&text);
+        assert!(
+            diags[0].message.contains(&format!("'{suffix}'")),
+            "{}",
+            diags[0].message
+        );
+    }
+}
+
+#[test]
+fn a_name_merely_containing_a_placement_word_is_a_usable_kind() {
+    let text = CVI_PANEL
+        .replace("[cvi]", "[stacked_cvi]")
+        .replace("cvi.", "stacked_cvi.");
+    let (panels, diags) = load(&text);
+    assert!(diags.is_empty(), "{diags:?}");
+    assert_eq!(panels[0].kind, "stacked_cvi");
+}
+
+/// The kind's writer emits attributes in its own order; a swapped header
+/// would load and paint, then every upload would be refused.
+#[test]
+fn a_header_out_of_the_kinds_order_is_refused() {
+    let anchor = "[[cvi.header]]\ncolumn = \"anchor_date\"\nlabel = \"anchor\"\ntype = \"date\"\n";
+    let spot = "[[cvi.header]]\ncolumn = \"spot_ref\"\nlabel = \"spot\"\ntype = \"f64\"\n";
+    let text = with(
+        CVI_PANEL,
+        &format!("{anchor}\n{spot}"),
+        &format!("{spot}\n{anchor}"),
+    );
+    assert_eq!(refused(&text), "panels.cvi.header");
+    let (_, diags) = load(&text);
+    assert!(
+        diags[0].message.contains("[anchor_date, spot_ref]"),
+        "{}",
+        diags[0].message
+    );
+}
+
+#[test]
+fn flat_values_out_of_the_kinds_order_are_refused() {
+    let amount = "[[dividend.columns.values]]\ncolumn = \"amount\"\nlabel = \"amount\"\ntype = \"f64\"\nformat = { precision = 4 }\nrequired = true\n";
+    let status = "[[dividend.columns.values]]\ncolumn = \"status\"\nlabel = \"status\"\ntype = \"utf8\"\nchoices = [\"estimated\", \"declared\", \"paid\", \"cancelled\"]\nrequired = true\n";
+    let text = with(
+        DIVIDEND_PANEL,
+        &format!("{amount}\n{status}"),
+        &format!("{status}\n{amount}"),
+    );
+    assert_eq!(refused(&text), "panels.dividend.columns.values");
+    let (_, diags) = load(&text);
+    assert!(
+        diags[0]
+            .message
+            .contains("[ex_date, announced_date, pay_date, amount, status]"),
+        "{}",
+        diags[0].message
+    );
+}
+
+/// A pivot uploads the ladder then each slice; the kind's order is
+/// `param, forward, atm, skew`.
+#[test]
+fn slices_out_of_the_kinds_order_are_refused() {
+    let atm = "[[cvi.slice]]\ncolumn = \"atm\"\nlabel = \"atm\"\n";
+    let skew = "[[cvi.slice]]\ncolumn = \"skew\"\nlabel = \"skew\"\n";
+    let text = with(
+        CVI_PANEL,
+        &format!("{atm}\n{skew}"),
+        &format!("{skew}\n{atm}"),
+    );
+    assert_eq!(refused(&text), "panels.cvi.slice");
+    let (_, diags) = load(&text);
+    assert!(
+        diags[0].message.contains("[param, forward, atm, skew]"),
+        "{}",
+        diags[0].message
+    );
+}
+
+/// A panel over a measures dataset is refused where the document kind is
+/// matched against it.
+#[test]
+fn a_dataset_that_is_not_a_document_dataset_is_refused_at_the_document() {
+    let text = format!(
+        "{DATASETS}\n[risk]\n[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\ngrain = \"book\"\n[risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\n"
+    );
+    let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", &text).unwrap()]);
+    // Grain warnings are irrelevant here: the dataset is kept, as measures.
+    let (s, _) = SchemaSpec::from_doc(&doc);
+    assert!(!s.dataset("risk").expect("risk is declared").is_document());
+    let panel = with(CVI_PANEL, "dataset = \"cvi_params\"", "dataset = \"risk\"");
+    let (panels, diags) = load_panels(&builtin_doc(&panel), &actions(), &s, &kinds());
+    assert!(panels.is_empty(), "{panels:?}");
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].path.as_deref(), Some("panels.cvi.document"));
+    assert!(
+        diags[0].message.contains("not a document dataset"),
+        "{}",
+        diags[0].message
+    );
+}

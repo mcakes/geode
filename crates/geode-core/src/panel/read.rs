@@ -4,8 +4,8 @@
 //! plausible wrong grid.
 
 use super::{
-    Columns, HeaderAttr, KindAction, KindActionRegistry, PanelSpec, RowAxis, RowIdentity, RowLabel,
-    SliceValue, ValueColumn, refusal,
+    Columns, HeaderAttr, KindAction, KindActionRegistry, PLACEMENT_SUFFIXES, PanelSpec, RowAxis,
+    RowIdentity, RowLabel, SliceValue, ValueColumn, refusal,
 };
 use crate::config::{Diagnostic, MergedDoc};
 use crate::schema::ColumnType;
@@ -60,6 +60,14 @@ fn read_panel(
             String::new(),
             format!(
                 "'{name}' is not a usable tile kind: use lower-case letters, digits and '_', starting with a letter"
+            ),
+        ));
+    }
+    if let Some(suffix) = PLACEMENT_SUFFIXES.iter().find(|s| name.ends_with(*s)) {
+        return Err((
+            String::new(),
+            format!(
+                "'{name}' ends in '{suffix}', a suffix reserved for add-tile placement ids: 'tile::add_{name}' would name another kind's placement"
             ),
         ));
     }
