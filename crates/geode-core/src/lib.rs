@@ -6,6 +6,7 @@ pub mod attribution;
 pub mod clock;
 pub mod colour;
 pub mod config;
+pub mod context;
 pub mod dimensions;
 pub mod document;
 pub mod egress_config;
