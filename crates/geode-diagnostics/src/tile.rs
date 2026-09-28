@@ -370,20 +370,30 @@ impl DiagnosticsTile {
 
     pub fn key_context(&self) -> KeyContext {
         KeyContext::new("diagnostics")
+            .grid()
+            .pair("mode", "normal")
             .pair("section", self.section.name())
             .counts()
     }
 
-    fn move_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
-        if self.rows.is_empty() {
-            return;
+    /// One shared motion over the section's rows. Only a bare `G` in the Log
+    /// section follows the tail; every other motion stops following, so a
+    /// trader reading a row is not dragged away by new records. The tile has
+    /// no columns, so column motions are not handled.
+    fn apply_motion(&mut self, m: geode_tile::motion::Motion, cx: &mut Context<Self>) -> bool {
+        use geode_tile::motion::{self, Motion};
+        if !m.moves_rows() {
+            return false;
         }
-        let len = self.rows.len() as isize;
-        let target = (self.cursor as isize + delta).clamp(0, len - 1);
-        self.cursor = target as usize;
-        self.follow = false;
+        let follow = self.section == Section::Log && m == Motion::Bottom(None);
+        if self.rows.is_empty() && !follow {
+            return true;
+        }
+        self.cursor = motion::row(self.cursor, self.rows.len(), m, false);
+        self.follow = follow;
         self.sync_scroll();
         cx.notify();
+        true
     }
 
     /// Keep the cursor visible: `uniform_list` does not follow it automatically.
@@ -458,32 +468,13 @@ impl DiagnosticsTile {
         count: Option<u32>,
         cx: &mut Context<Self>,
     ) -> bool {
+        if let Some(m) = geode_tile::motion::parse(action, count) {
+            return self.apply_motion(m, cx);
+        }
         let Some(name) = action.0.strip_prefix("diagnostics::") else {
             return false;
         };
-        let n = count.unwrap_or(1).max(1) as isize;
         match name {
-            "down" => self.move_cursor(n, cx),
-            "up" => self.move_cursor(-n, cx),
-            "top" => {
-                self.cursor = 0;
-                self.follow = false;
-                self.sync_scroll();
-                cx.notify();
-            }
-            "bottom" => {
-                self.cursor = self.rows.len().saturating_sub(1);
-                self.follow = self.section == Section::Log;
-                self.sync_scroll();
-                cx.notify();
-            }
-            // Apply count prefixes to page movement too: `3 ctrl+d` moves 15 rows.
-            "page_down" => self.move_cursor(5 * n, cx),
-            "page_up" => self.move_cursor(-5 * n, cx),
-            // `ctrl+f`/`ctrl+b`: `vimnav`'s ±10 step, the same fixed
-            // offset every dialog list uses, counted like `ctrl+d`.
-            "page_down_full" => self.move_cursor(10 * n, cx),
-            "page_up_full" => self.move_cursor(-10 * n, cx),
             "next_section" => self.cycle_section(true, cx),
             "prev_section" => self.cycle_section(false, cx),
             "expand" => self.set_collapsed_at_cursor(false, cx),
@@ -1070,7 +1061,7 @@ mod tests {
         assert!(h.tile.read_with(&vcx, |t, _| t.follow()));
 
         h.tile.update(&mut vcx, |t, cx| {
-            t.dispatch(&ActionId("diagnostics::up".into()), None, cx);
+            t.dispatch(&ActionId("motion::up".into()), None, cx);
         });
         let cursor_after_up = h.tile.read_with(&vcx, |t, _| t.cursor());
         assert_eq!(cursor_after_up, cursor - 1);
@@ -1365,7 +1356,7 @@ mod tests {
         // about, which is that `scroll_to_item` was queued for the right
         // row at all.
         let target = h.tile.update(&mut vcx, |t, cx| {
-            t.dispatch(&ActionId("diagnostics::bottom".into()), None, cx);
+            t.dispatch(&ActionId("motion::bottom".into()), None, cx);
             t.scroll_target()
         });
         assert_eq!(target, row_count - 1, "G must scroll to the last row");
@@ -1651,16 +1642,15 @@ mod tests {
             let _ = window.draw(cx);
         });
         h.tile.update(&mut vcx, |t, cx| {
-            t.dispatch(&ActionId("diagnostics::page_down".into()), Some(3), cx);
+            t.dispatch(&ActionId("motion::half_page_down".into()), Some(3), cx);
         });
         let cursor = h.tile.read_with(&vcx, |t, _| t.cursor());
         assert_eq!(cursor, 15, "3 ctrl+d must move 5 * 3 = 15 rows");
     }
 
-    /// `ctrl+f`/`ctrl+b` (`page_down_full`/`page_up_full`) are the
-    /// ±10 step every dialog list already has (`vimnav`'s convention),
-    /// counted the same way `ctrl+d` is: `2 ctrl+f` moves 20, `ctrl+b`
-    /// brings back 10.
+    /// `ctrl+f`/`ctrl+b` (`motion::page_down`/`page_up`) are the ±10 step
+    /// every dialog list already has (`vimnav`'s convention), counted the
+    /// same way `ctrl+d` is: `2 ctrl+f` moves 20, `ctrl+b` brings back 10.
     #[gpui::test]
     fn ctrl_f_and_ctrl_b_page_by_ten(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -1679,15 +1669,82 @@ mod tests {
             let _ = window.draw(cx);
         });
         h.tile.update(&mut vcx, |t, cx| {
-            t.dispatch(&ActionId("diagnostics::page_down_full".into()), Some(2), cx);
+            t.dispatch(&ActionId("motion::page_down".into()), Some(2), cx);
         });
         let cursor = h.tile.read_with(&vcx, |t, _| t.cursor());
         assert_eq!(cursor, 20, "2 ctrl+f must move 10 * 2 = 20 rows");
         h.tile.update(&mut vcx, |t, cx| {
-            t.dispatch(&ActionId("diagnostics::page_up_full".into()), None, cx);
+            t.dispatch(&ActionId("motion::page_up".into()), None, cx);
         });
         let cursor = h.tile.read_with(&vcx, |t, _| t.cursor());
         assert_eq!(cursor, 10, "ctrl+b must move back 10 rows");
+    }
+
+    /// The tile publishes `grid` and `mode == normal`, so the shared grid
+    /// bindings reach it like any other grid.
+    #[gpui::test]
+    fn the_key_context_publishes_grid_and_normal_mode(cx: &mut gpui::TestAppContext) {
+        let (h, vcx) = open(cx);
+        let ctx = h.tile.read_with(&vcx, |t, _| t.key_context());
+        assert!(ctx.has_flag(geode_shell::keymap::GRID));
+        assert_eq!(ctx.get("mode"), Some("normal"));
+    }
+
+    /// Bare j at the last row wraps (and stops following); a bare G follows
+    /// the log; a counted G jumps to that row without following.
+    #[gpui::test]
+    fn bare_g_follows_the_log_and_a_counted_g_only_jumps(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.tile
+            .update(&mut vcx, |t, cx| t.command("section log", cx).unwrap());
+        for i in 0..6 {
+            h.ring.push(Record {
+                at: SystemTime::UNIX_EPOCH,
+                level: Level::INFO,
+                target: "geode::shell",
+                message: format!("m{i}"),
+                seq: 0,
+            });
+        }
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.note_dropped(1);
+            cx.notify();
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let act = |vcx: &mut gpui::VisualTestContext, id: &str, count: Option<u32>| {
+            h.tile
+                .update(vcx, |t, cx| t.dispatch(&ActionId(id.into()), count, cx))
+        };
+        let len = h.tile.read_with(&vcx, |t, _| t.rows().len());
+        assert!(len >= 6, "fixture: the log has rows");
+        act(&mut vcx, "motion::bottom", Some(3));
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            2,
+            "3G: row 3, 1-based"
+        );
+        assert!(
+            !h.tile.read_with(&vcx, |t, _| t.follow()),
+            "a counted G does not follow"
+        );
+        act(&mut vcx, "motion::bottom", None);
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor()), len - 1);
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.follow()),
+            "a bare G follows"
+        );
+        act(&mut vcx, "motion::down", None);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            0,
+            "a bare j at the last row wraps"
+        );
+        assert!(
+            !h.tile.read_with(&vcx, |t, _| t.follow()),
+            "and stops following"
+        );
     }
 
     /// A tile with a saved filter must show the filtered indicator after

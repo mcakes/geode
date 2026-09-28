@@ -18,10 +18,15 @@ Current behavior and rationale:
 
 ## Interaction and persistence
 
-`[`/`]` cycle sections; `:section <name>` selects one directly. `j`/`k`,
-`gg`/`G`, and page bindings move the cursor, with count prefixes for row and
-page movement. `zo`/`zc` expand or collapse datasets in the data section.
-The log follows new records until the cursor moves; `G` resumes following.
+`[`/`]` cycle sections; `:section <name>` selects one directly. The tile
+publishes `grid` and `mode == normal`, so the cursor takes the shell's shared
+`motion::*` bindings (`j`/`k` and arrows, `gg`/`G`, page keys, counts), applied
+to rows by `geode_tile::motion`; column motions are ignored. The fragment
+binds only the module's own keys: `[`/`]`, and `zo`/`zc` to expand or collapse
+datasets in the data section. The log follows new records until a motion
+moves the cursor; only a bare `G` resumes following (a counted `G` jumps to
+that row). The retired `diagnostics::` motion ids are registered as renames
+(`RENAMED_ACTIONS`).
 
 `/` supplies a substring filter used by the config and log sections. The
 header shows when a filter is set. Only the selected section and filter are

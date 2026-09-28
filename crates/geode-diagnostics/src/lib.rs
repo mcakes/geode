@@ -29,40 +29,38 @@ pub use tile::DiagnosticsTile;
 pub fn init(_cx: &mut App) {}
 
 pub const ACTIONS: &[(&str, &str)] = &[
-    ("diagnostics::down", "Cursor down"),
-    ("diagnostics::up", "Cursor up"),
-    ("diagnostics::top", "Cursor to top"),
-    ("diagnostics::bottom", "Cursor to bottom"),
-    ("diagnostics::page_down", "Half page down"),
-    ("diagnostics::page_up", "Half page up"),
-    ("diagnostics::page_down_full", "Page down"),
-    ("diagnostics::page_up_full", "Page up"),
     ("diagnostics::next_section", "Next section"),
     ("diagnostics::prev_section", "Previous section"),
     ("diagnostics::expand", "Expand"),
     ("diagnostics::collapse", "Collapse"),
 ];
 
+/// Retired action ids and their successors: a user keymap that still names
+/// an old id binds the new one, with a warning (`ActionRegistry::renamed`).
+pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
+    ("diagnostics::down", "motion::down"),
+    ("diagnostics::up", "motion::up"),
+    ("diagnostics::top", "motion::top"),
+    ("diagnostics::bottom", "motion::bottom"),
+    ("diagnostics::page_down", "motion::half_page_down"),
+    ("diagnostics::page_up", "motion::half_page_up"),
+    ("diagnostics::page_down_full", "motion::page_down"),
+    ("diagnostics::page_up_full", "motion::page_up"),
+];
+
 /// Default bindings supplied through [`ModuleFactory::default_keymap`].
 /// Binding IDs and their registrations in [`ACTIONS`] live together here,
 /// keeping the shell independent of this feature crate.
 ///
-/// The tile has one context and no modes: `[`/`]` cycle sections, and `/`
-/// uses the shell's shared tile find binding.
+/// The tile has one context and one mode: it publishes `grid` and
+/// `mode == normal`, so its cursor takes the shell's shared `motion::*`
+/// bindings, which this fragment therefore does not repeat. `[`/`]` cycle
+/// sections, `z o`/`z c` fold, and `/` uses the shell's shared tile find
+/// binding.
 pub const DEFAULT_KEYMAP: &str = r#"
 [[bindings]]
 context = "diagnostics"
 [bindings.keys]
-"j" = "diagnostics::down"
-"k" = "diagnostics::up"
-"g g" = "diagnostics::top"
-"shift+g" = "diagnostics::bottom"
-"ctrl+d" = "diagnostics::page_down"
-"ctrl+u" = "diagnostics::page_up"
-"ctrl+f" = "diagnostics::page_down_full"
-"ctrl+b" = "diagnostics::page_up_full"
-"pagedown" = "diagnostics::page_down_full"
-"pageup" = "diagnostics::page_up_full"
 "[" = "diagnostics::prev_section"
 "]" = "diagnostics::next_section"
 "z o" = "diagnostics::expand"
@@ -169,6 +167,11 @@ impl ModuleFactory for DiagnosticsFactory {
                 category: "Diagnostics".to_string(),
             });
         }
+        // A second diagnostics factory's repeat answers "renamed twice",
+        // which is the correct outcome, like the ids above.
+        for (old, new) in RENAMED_ACTIONS {
+            let _ = registry.register_rename(old, new);
+        }
     }
 
     fn create(
@@ -258,5 +261,34 @@ mod tests {
         );
         assert_eq!(factory.default_keymap(), Some(DEFAULT_KEYMAP));
         assert_eq!(factory.contexts(), vec!["diagnostics"]);
+    }
+
+    /// A user keymap written against a retired motion id keeps binding the
+    /// shared id it became.
+    #[test]
+    fn every_retired_motion_id_renames_to_its_shared_id() {
+        let factory = DiagnosticsFactory::new(
+            Arc::new(Ring::new(4)),
+            geode_core::config::Config::load(&geode_core::config::ConfigSources::default()),
+        );
+        let mut registry = ActionRegistry::default();
+        geode_shell::defaults::register_builtin_actions(&mut registry);
+        factory.register_actions(&mut registry);
+        for (old, new) in [
+            ("diagnostics::down", "motion::down"),
+            ("diagnostics::up", "motion::up"),
+            ("diagnostics::top", "motion::top"),
+            ("diagnostics::bottom", "motion::bottom"),
+            ("diagnostics::page_down", "motion::half_page_down"),
+            ("diagnostics::page_up", "motion::half_page_up"),
+            ("diagnostics::page_down_full", "motion::page_down"),
+            ("diagnostics::page_up_full", "motion::page_up"),
+        ] {
+            assert_eq!(
+                registry.renamed(&ActionId(old.into())),
+                Some(&ActionId(new.into())),
+                "{old}"
+            );
+        }
     }
 }

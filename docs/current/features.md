@@ -47,7 +47,8 @@ has none of them.
   row; `ctrl+d`/`ctrl+u` move 5 rows and `ctrl+f`/`ctrl+b` (and
   `pagedown`/`pageup`) 10, times the count; columns clamp; a grid with no
   rows or columns does not move. The blotter, the market-data panel and the
-  line pricer move on them. See [shared
+  line pricer move on them, and so does the diagnostics cursor (rows only).
+  See [shared
   motions](keymaps.md#shared-motions).
 - A popup is deferred above the tile's clip and snaps inside the window with
   an 8-pixel margin. An action menu occludes what it covers, so its hover and
@@ -782,7 +783,13 @@ catalog's as-of matches the frame, resolved-generation markers are hidden.
 Each tile retains at most 4,096 log records and reuses its drain buffer. It
 starts at the ring's current sequence when opened. If the ring overwrites
 unread records, the next drain reports that gap; this is not a cumulative
-loss counter. Moving the cursor stops following, and `G` resumes it.
+loss counter.
+
+The cursor moves on the [shared grid motions](#shared-tile-interaction) (the
+tile publishes `grid` and `mode == normal`), so the arrow keys move it, a bare
+`j` on the last row wraps to the top, and a counted `g g` or `G` goes to that
+row. Any motion stops following; a bare `G` resumes it, and a counted `G`
+jumps to that row without following.
 
 Source ages reflect the last row rebuild rather than a ticking timer; the
 absolute timestamp remains visible. Config output is capped at 2,000 leaves

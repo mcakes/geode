@@ -77,7 +77,12 @@ on), and a binding on one keeps its `marketdata && …` context. The line
 pricer's retired ids rename the same way from the `pricer::` prefix
 (`pricer::down` → `motion::down`, `pricer::page_down` →
 `motion::half_page_down`, `pricer::last_col` → `motion::line_end`, and so on),
-and a binding on one keeps its `pricer && …` context.
+and a binding on one keeps its `pricer && …` context. The diagnostics tile's
+eight retired ids rename the same way from the `diagnostics::` prefix
+(`diagnostics::down`/`up`/`top`/`bottom` → the same `motion::*` name,
+`diagnostics::page_down`/`page_up` → `motion::half_page_down`/`half_page_up`,
+`diagnostics::page_down_full`/`page_up_full` → `motion::page_down`/`page_up`),
+and a binding on one keeps its `diagnostics` context.
 
 ## Key spelling and primary modifier
 
@@ -272,6 +277,8 @@ keys; `k` on row 0 still enters the attribute strip around the shared result.
 The line pricer's fragment binds its verbs (`g p`, `g u` and `g m` among
 them, beside the shell's `g g`: a first `g` waits for the second key), its
 `mode == insert` field keys and its `mode == menu` keys.
+The diagnostics fragment binds only `[`/`]` and `z o`/`z c`; the tile publishes
+`grid` and `mode == normal` so the shared motions reach its cursor.
 
 A fragment may name any action, not only ones its own module registers, so
 long as its context is the module's own: both the blotter's and the pricer's

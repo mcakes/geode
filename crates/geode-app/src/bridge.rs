@@ -5501,7 +5501,7 @@ role = "key"
     }
 
     /// The grid tile kinds the shared motion keys must reach.
-    const GRID_KINDS: &[&str] = &["blotter", "cvi", "pricer"];
+    const GRID_KINDS: &[&str] = &["blotter", "cvi", "pricer", "diagnostics"];
 
     /// DataTable key suppression for every grid module, once per test app.
     fn init_grid_modules(cx: &mut gpui::TestAppContext) {
@@ -5745,6 +5745,36 @@ role = "key"
                 dispatch_counts(cx, kind, Some(user), &["q"], &["motion::down"]),
                 vec![0],
                 "{kind}: the override stays in the pricer's own context"
+            );
+        }
+    }
+
+    /// An override written against the retired `diagnostics::down` keeps
+    /// working in the diagnostics tile, only there, and warns naming both.
+    #[gpui::test]
+    fn an_old_diagnostics_down_override_still_moves_diagnostics_only_and_warns(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_grid_modules(cx);
+        let user = "[[bindings]]\ncontext = \"diagnostics\"\n[bindings.keys]\n\"q\" = \"diagnostics::down\"\n";
+        let (_, diags) = shell_with_one_grid_tile("diagnostics", Some(user));
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].severity, Severity::Warning);
+        assert!(
+            diags[0].message.contains("diagnostics::down")
+                && diags[0].message.contains("motion::down"),
+            "{}",
+            diags[0].message
+        );
+        assert_eq!(
+            dispatch_counts(cx, "diagnostics", Some(user), &["q"], &["motion::down"]),
+            vec![1]
+        );
+        for kind in ["blotter", "cvi", "pricer"] {
+            assert_eq!(
+                dispatch_counts(cx, kind, Some(user), &["q"], &["motion::down"]),
+                vec![0],
+                "{kind}: the override stays in the diagnostics tile's own context"
             );
         }
     }

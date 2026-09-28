@@ -6181,12 +6181,51 @@ run_mutation "diagnostics module: the log filter matches every row regardless of
         .collect()' \
   geode-diagnostics log_rows_filter_by_target_or_level_text
 
-run_mutation "diagnostics module: move_cursor never clears follow" \
+run_mutation "diagnostics motion: a motion stops following" \
   crates/geode-diagnostics/src/tile.rs \
-  '        self.cursor = target as usize;
-        self.follow = false;' \
-  '        self.cursor = target as usize;' \
+  '        self.follow = follow;' \
+  '        self.follow = self.follow || follow;' \
   geode-diagnostics the_log_section_follows_the_tail_until_the_cursor_moves
+
+# `G` means "tail the log" only bare; `5G` means "look at row 5".
+run_mutation "diagnostics motion: only a bare G follows the log" \
+  crates/geode-diagnostics/src/tile.rs \
+  '        let follow = self.section == Section::Log && m == Motion::Bottom(None);' \
+  '        let follow = self.section == Section::Log && matches!(m, Motion::Bottom(_));' \
+  geode-diagnostics bare_g_follows_the_log_and_a_counted_g_only_jumps
+
+# A bare `j` on the last row wraps to the first, in the Log section too.
+run_mutation "diagnostics motion: a bare j wraps at the end" \
+  crates/geode-diagnostics/src/tile.rs \
+  '        self.cursor = motion::row(self.cursor, self.rows.len(), m, false);' \
+  '        self.cursor = motion::row(self.cursor, self.rows.len(), m, true);' \
+  geode-diagnostics bare_g_follows_the_log_and_a_counted_g_only_jumps
+
+# The shell binds the shared motions under `grid`; a diagnostics tile that
+# stops publishing the flag takes no motion key at all.
+run_mutation "diagnostics motion: the key context publishes grid" \
+  crates/geode-diagnostics/src/tile.rs \
+  '        KeyContext::new("diagnostics")
+            .grid()' \
+  '        KeyContext::new("diagnostics")' \
+  geode-diagnostics the_key_context_publishes_grid_and_normal_mode
+
+run_mutation "motion e2e: a shared override reaches diagnostics" \
+  crates/geode-diagnostics/src/tile.rs \
+  '        KeyContext::new("diagnostics")
+            .grid()' \
+  '        KeyContext::new("diagnostics")' \
+  geode-app a_shared_motion_override_reaches_each_grid_tile
+
+# An old user binding on a retired id must bind its shared successor, not
+# some other motion.
+run_mutation "diagnostics motion: retired ids rename to the shared ones" \
+  crates/geode-diagnostics/src/lib.rs \
+  'pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
+    ("diagnostics::down", "motion::down"),' \
+  'pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
+    ("diagnostics::down", "motion::up"),' \
+  geode-diagnostics every_retired_motion_id_renames_to_its_shared_id
 
 run_mutation "diagnostics module: the diagnostics observer rebuilds on every notify, not just a real version change" \
   crates/geode-diagnostics/src/tile.rs \
@@ -6317,20 +6356,18 @@ run_mutation "diagnostics module: MAJ-8 — the config explainer stops recursing
   '        other => out.push((path.to_string(), other.to_string())),' \
   geode-diagnostics config_rows_recurses_into_arrays_with_indexed_paths
 
-run_mutation "diagnostics module: MIN-4 — page_down/page_up drop the count multiplier" \
-  crates/geode-diagnostics/src/tile.rs \
-  '            "page_down" => self.move_cursor(5 * n, cx),
-            "page_up" => self.move_cursor(-5 * n, cx),' \
-  '            "page_down" => self.move_cursor(5, cx),
-            "page_up" => self.move_cursor(-5, cx),' \
+# The diagnostics cursor pages through the shared motion rules; `3 ctrl+d`
+# there moves fifteen rows only while the count multiplies the step.
+run_mutation "diagnostics motion: a count multiplies ctrl+d" \
+  crates/geode-tile/src/motion.rs \
+  '    let n = i64::from(count.unwrap_or(1).max(1));' \
+  '    let n = 1i64;' \
   geode-diagnostics a_count_prefix_multiplies_page_down
 
-run_mutation "diagnostics module: ctrl+f/ctrl+b page by ten, not by five" \
-  crates/geode-diagnostics/src/tile.rs \
-  '            "page_down_full" => self.move_cursor(10 * n, cx),
-            "page_up_full" => self.move_cursor(-10 * n, cx),' \
-  '            "page_down_full" => self.move_cursor(5 * n, cx),
-            "page_up_full" => self.move_cursor(-5 * n, cx),' \
+run_mutation "diagnostics motion: ctrl+f and ctrl+b page by ten" \
+  crates/geode-tile/src/motion.rs \
+  'pub const FULL_PAGE: i64 = 10;' \
+  'pub const FULL_PAGE: i64 = 5;' \
   geode-diagnostics ctrl_f_and_ctrl_b_page_by_ten
 
 run_mutation "blotter motion: ctrl+b moves back ten, not forward" \
