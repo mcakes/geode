@@ -13,13 +13,14 @@ use crate::core::{MatrixModel, PanelSpec};
 use crate::header;
 use crate::popup::{ChoicePaint, render_choice};
 use crate::tile::{DateFieldPaint, FlooredTones, MarketDataTile};
+use geode_core::grid::selection::{Resolved, SelectKind};
 use geode_shell::colfit::{FitMetrics, FittedWidths};
 use geode_shell::fonts;
 use geode_shell::linenumbers::{GUTTER_GAP_PX, LineNumbers, gutter_number, gutter_px};
 use gpui::prelude::*;
 use gpui::{
-    App, Context, Div, Entity, FocusHandle, Hsla, SharedString, TextAlign, WeakEntity, Window, div,
-    px,
+    App, Context, Div, Entity, EventEmitter, FocusHandle, Hsla, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, SharedString, Stateful, TextAlign, WeakEntity, Window, div, px,
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::table::{Column, ColumnFixed, TableDelegate, TableState};
@@ -81,6 +82,29 @@ pub(crate) struct DelegateChoice {
     pub paint: Rc<ChoicePaint>,
 }
 
+/// Every mouse selection gesture a cell, a row label or the line-number
+/// gutter recognises, carried to the tile's `pointer`, the one door a
+/// shift+click and a drag go through to `start_selection` and
+/// `clear_selection`, so the mouse never reaches a selection state the
+/// keys could not. `col` is a MODEL column; `None` is the row-label
+/// column (or the gutter), which is never a selection member. A `Drag`'s
+/// `label` is where its press landed, not where the pointer is now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CellPointer {
+    Press {
+        row: usize,
+        col: Option<usize>,
+        shift: bool,
+    },
+    Drag {
+        row: usize,
+        col: Option<usize>,
+        label: bool,
+    },
+}
+
+impl EventEmitter<CellPointer> for TableState<MatrixDelegate> {}
+
 /// Crate-private state keeps external callers from replacing the model
 /// without the paired TableState::refresh. Structural model installs go through
 /// MarketDataTile::install_model so cached columns and headers stay synchronized.
@@ -102,6 +126,9 @@ pub struct MatrixDelegate {
     /// paints no cursor cell here at all (`MarketDataTile::sync_cursor`
     /// clears the table's own selection for that case).
     pub(crate) cursor: Option<(usize, usize)>,
+    /// The tile's resolved selection, mirrored by `sync_cursor`;
+    /// `render_cell` only looks it up.
+    pub(crate) selected: Option<Resolved>,
     /// The open cell editor, mirrored from the tile: the cell it was
     /// opened on (again in model coordinates) and what to paint there.
     /// Painted IN that cell, which is what makes it typeable at all
@@ -138,6 +165,27 @@ pub struct MatrixDelegate {
     /// Cache key: row count, mode, and cursor row for relative numbering.
     /// Absolute numbering ignores cursor movement.
     numbers_stamp: Option<(usize, usize, LineNumbers)>,
+    /// The `(row, col)` a mouse move last emitted a `CellPointer::Drag`
+    /// for. gpui fires a move per pixel, not per cell; without this a held
+    /// drag would re-run the tile's `pointer` on every frame. Stale after
+    /// a drag no cell saw released, which costs one extra emission at most.
+    drag_last: Option<(usize, Option<usize>)>,
+    /// `Some` while the primary button is down because of a press a cell,
+    /// label or gutter of this table caught — `true` when it was a label
+    /// or the gutter. `None` while another element owns the drag (a
+    /// scrollbar, the header, a tile divider, another tile's text
+    /// selection), so a button held over the cells from elsewhere never
+    /// starts or extends a selection. Cleared by any release: gpui runs
+    /// every registered mouse listener for every event and each one's own
+    /// hit test decides, so a cell's `on_mouse_up`/`on_mouse_up_out` pair
+    /// sees every release exactly once wherever it lands.
+    drag_origin: Option<bool>,
+    /// Set by a press the open editor's own cell swallowed (see
+    /// `wire_pointer`), and taken by the row's press handler, which
+    /// bubbles after the cell's: without it the row would report that
+    /// press at the cursor column, which is the editor's cell, and so
+    /// cancel the edit the press was aimed into.
+    editor_press: bool,
     /// Widths `:autosize` fitted, keyed by column key ([`ROW_AXIS_KEY`] for
     /// the row labels, the column's label for a value column), in pixels
     /// without the gutter. `column()` prefers an entry over the default, so
@@ -158,6 +206,7 @@ impl MatrixDelegate {
             row_axis: SharedString::from(spec.rows.column),
             label_column: spec.rows.shown(),
             cursor: Some((0, 0)),
+            selected: None,
             editor: None,
             choice: None,
             tile,
@@ -166,6 +215,9 @@ impl MatrixDelegate {
             line_numbers: LineNumbers::Off,
             numbers: Vec::new(),
             numbers_stamp: None,
+            drag_last: None,
+            drag_origin: None,
+            editor_press: false,
             fitted: FittedWidths::new(),
         }
     }
@@ -324,6 +376,96 @@ impl MatrixDelegate {
     pub fn table_col(&self, model_col: usize) -> usize {
         model_col + self.offset()
     }
+
+    /// Wire a cell's, a row label's or the gutter's selection gestures
+    /// onto `el`: a press (plain or shift) and, only while the button has
+    /// stayed down since a press this table caught, a drag. `col` is the
+    /// model column (`None` for a label or the gutter); a drag carries the
+    /// `label` flag of the element its PRESS landed on, so the selection's
+    /// kind is decided by where it started, not by what is under the
+    /// pointer now.
+    ///
+    /// A press in the cell holding the open editor (`holds_editor`: a
+    /// value cell or row label, never the gutter) belongs to the editor —
+    /// caret placement, text selection, a date separator — so it reports
+    /// nothing and arms no drag: it must never cancel the edit or start a
+    /// selection.
+    ///
+    /// None of the four listeners stops propagation: the table's own
+    /// `SelectCell` click and the shell's tile-focus press must still
+    /// arrive, and a fast double-click still reaches gpui's click-count
+    /// tracking and so `DoubleClickedCell`.
+    fn wire_pointer(
+        el: Div,
+        cx: &Context<TableState<Self>>,
+        row_ix: usize,
+        col: Option<usize>,
+        holds_editor: bool,
+    ) -> Div {
+        let label = col.is_none();
+        el.on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                let d = this.delegate_mut();
+                if holds_editor
+                    && d.editor
+                        .as_ref()
+                        .is_some_and(|ed| ed.row == row_ix && ed.col == col)
+                {
+                    d.editor_press = true;
+                    return;
+                }
+                d.drag_last = Some((row_ix, col));
+                // `get_or_insert` so a wired element nested in another
+                // wired one keeps the innermost press's kind; siblings
+                // (the gutter beside its cell) never both see one press.
+                d.drag_origin.get_or_insert(label);
+                cx.emit(CellPointer::Press {
+                    row: row_ix,
+                    col,
+                    shift: e.modifiers.shift,
+                });
+            }),
+        )
+        .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, _, cx| {
+            if e.pressed_button != Some(MouseButton::Left) {
+                return;
+            }
+            let d = this.delegate_mut();
+            // No press recorded: the button came down on something else
+            // and is only passing over this cell.
+            let Some(started_on_label) = d.drag_origin else {
+                return;
+            };
+            if d.drag_last == Some((row_ix, col)) {
+                return;
+            }
+            d.drag_last = Some((row_ix, col));
+            cx.emit(CellPointer::Drag {
+                row: row_ix,
+                col,
+                label: started_on_label,
+            });
+        }))
+        // A release anywhere ends the drag: `on_mouse_up` when it lands
+        // here, `on_mouse_up_out` everywhere else.
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseUpEvent, _, _| {
+                let d = this.delegate_mut();
+                d.drag_origin = None;
+                d.editor_press = false;
+            }),
+        )
+        .on_mouse_up_out(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseUpEvent, _, _| {
+                let d = this.delegate_mut();
+                d.drag_origin = None;
+                d.editor_press = false;
+            }),
+        )
+    }
 }
 
 impl TableDelegate for MatrixDelegate {
@@ -414,6 +556,45 @@ impl TableDelegate for MatrixDelegate {
             .child(column.name)
     }
 
+    /// A press on the row outside every cell (the table's trailing filler)
+    /// is still a click on that row: it reports a press at the cursor's
+    /// column so the tile's one pointer door clears or extends exactly as
+    /// a cell press would. The row bubbles after its cells, so a press a
+    /// cell already caught has set `drag_origin` (or, for the open
+    /// editor's cell, `editor_press`) and is not reported twice; this
+    /// press arms no drag. The filler rows past the model and
+    /// a cursor in the header strip report nothing.
+    fn render_tr(
+        &mut self,
+        row_ix: usize,
+        _window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> Stateful<Div> {
+        let row = div().id(("row", row_ix));
+        if row_ix >= self.model.rows.len() {
+            return row;
+        }
+        row.on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                let d = this.delegate_mut();
+                // `|` not `||`: the editor's flag is taken on every row
+                // press, so it never outlives the press that set it.
+                if std::mem::take(&mut d.editor_press) | d.drag_origin.is_some() {
+                    return;
+                }
+                let Some((_, col)) = d.cursor else {
+                    return;
+                };
+                cx.emit(CellPointer::Press {
+                    row: row_ix,
+                    col: Some(col),
+                    shift: e.modifiers.shift,
+                });
+            }),
+        )
+    }
+
     /// Paint a data cell with an optional gutter beside the pinned column.
     /// The gutter is outside the cell element so cursor borders, draft fills,
     /// and deletion strikes apply only to data.
@@ -432,11 +613,16 @@ impl TableDelegate for MatrixDelegate {
         let text = self.numbers.get(row_ix).cloned().unwrap_or_default();
         let theme = cx.theme();
         let on_cursor_row = self.cursor.is_some_and(|(row, _)| row == row_ix);
+        // The gutter is the row's handle whatever column it rides in: a
+        // press there means "rows", like a row label's (under a hidden
+        // label it sits beside the first VALUE cell, whose own press
+        // still means "block").
+        let gutter = Self::wire_pointer(div(), cx, row_ix, None, false);
         div()
             .size_full()
             .flex()
             .child(
-                div()
+                gutter
                     .flex()
                     .flex_shrink_0()
                     .items_center()
@@ -454,6 +640,13 @@ impl TableDelegate for MatrixDelegate {
             )
             .child(cell.flex_1().min_w_0())
     }
+}
+
+/// The selection tint: an absolute overlay painted as a cell's first
+/// child, so it sits under the text and never replaces an edited or sent
+/// cell's own fill, and the cursor's border still paints over it.
+fn selection_tint(theme: &Theme) -> Div {
+    div().absolute().inset_0().bg(theme.selection.opacity(0.35))
 }
 
 impl MatrixDelegate {
@@ -491,6 +684,12 @@ impl MatrixDelegate {
                 .cloned()
                 .and_then(|e| self.render_editor(&e, TextAlign::Left, theme));
             let CellPaint { fill, text, strike } = cell_paint(theme, sent, false, state);
+            // A `Rows` selection tints its labels too; a `Block` never
+            // includes the label column.
+            let in_selection = self
+                .selected
+                .as_ref()
+                .is_some_and(|r| r.kind == SelectKind::Rows && r.contains_row(row_ix));
             let el = div()
                 .size_full()
                 .flex()
@@ -502,7 +701,10 @@ impl MatrixDelegate {
                 .whitespace_nowrap()
                 .overflow_hidden()
                 .text_ellipsis()
-                .debug_selector(|| format!("marketdata-cell-{row_ix}-{col_ix}"));
+                .debug_selector(|| format!("marketdata-cell-{row_ix}-{col_ix}"))
+                .relative()
+                .when(in_selection, |el| el.child(selection_tint(theme)));
+            let el = Self::wire_pointer(el, cx, row_ix, None, true);
             return match editor {
                 Some(editor) => el.child(
                     div()
@@ -514,6 +716,10 @@ impl MatrixDelegate {
             };
         };
         let at_cursor = self.cursor == Some((row_ix, model_col));
+        let in_selection = self
+            .selected
+            .as_ref()
+            .is_some_and(|r| r.contains(row_ix, model_col));
         let row = self.model.rows.get(row_ix);
         let state = row.map_or(RowState::Document, |r| r.state);
         let cell = row.and_then(|r| r.cells.get(model_col));
@@ -547,7 +753,9 @@ impl MatrixDelegate {
         el = el
             .when_some(fill, |el, fill| el.bg(fill))
             .text_color(text)
-            .when(strike, |el| el.line_through());
+            .when(strike, |el| el.line_through())
+            .relative()
+            .when(in_selection, |el| el.child(selection_tint(theme)));
         // The editor is cloned out (three refcounts at most) because
         // `render_editor` needs `&mut self` for the tones refresh while
         // `editor_at` borrows `self.editor`; the cell's own text is what
@@ -569,6 +777,7 @@ impl MatrixDelegate {
                 let tile = self.tile.upgrade()?;
                 Some(render_choice(&paint, &tile, self.tile_id, cx).into_any_element())
             });
+        let el = Self::wire_pointer(el, cx, row_ix, Some(model_col), true);
         let el = match editor {
             Some(editor) => el.child(
                 div()

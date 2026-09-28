@@ -1,24 +1,14 @@
-# `risk_snapshot` (Phase 3 spec §3, §9.1): the blotter's `--demo` layer
-# uses this file as-is, and it doubles as the reference `datasets.toml`
-# for the desk's own config — every measure `geode-demo-data` emits is
-# declared here, at the grain the generator produces it (spec §3.2/§3.3),
-# so `SUM` never double-counts a coarser-grain measure repeated across
-# finer rows.
+# Demo risk, document, and series datasets. Risk measures declare the grain
+# at which the generator assigns them, so repeated coarse values are
+# deduplicated before aggregation.
 #
-# `source_name` is the CSV header spelling; the bare key is the canonical
-# name everything else (views, dimensions, groupings) uses. The `_usd`
-# twins are the FX-converted columns the generator emits alongside their
-# base measure (`crates/geode-demo-data/src/emit.rs`'s `USD_TWINS`) —
-# read that file if this list and the generator's output ever disagree.
+# `source_name` maps CSV headers to canonical names used by views, scopes,
+# and groupings. USD twins match `geode-demo-data/src/emit.rs::USD_TWINS`;
+# the generator applies a fixed factor of 1.08 to their base measures.
 #
-# **If you change the columns below, delete the demo/probe database
-# first.** `apply_schema` is CREATE TABLE IF NOT EXISTS, so an existing
-# table is never migrated; a schema that has grown a column then fails
-# every publish with "table ... has N columns but N+1 values were
-# supplied". `--demo`'s database lives at
-# `$TMPDIR/geode-demo/<rows>-<seed>/geode.duckdb` (`geode-app::demo::demo_dir`,
-# seed fixed at 42) — delete that whole `<rows>-<seed>` directory, since
-# the generated source CSVs under its `src/` are keyed to the same schema.
+# Stored payload tables are not automatically migrated. After changing this
+# schema, clear `$TMPDIR/geode-demo/<rows>-42/` before restarting `--demo`.
+# This removes both the database and the source CSVs tied to its schema.
 
 [risk_snapshot.columns.business_date]
 type = "utf8"
@@ -78,7 +68,7 @@ role = "dimension"
 grain = "instrument"
 source_name = "Strike"
 
-# Carried dimensions (spec §3.3): one value per instrument, carried by the
+# Carried dimensions: one value per instrument, carried by the
 # instrument grain and every finer one, groupable and scopeable like a key
 # dimension rather than a lookup-only attribute.
 [risk_snapshot.columns.expiry]
@@ -102,7 +92,7 @@ grain = "instrument"
 textual = true
 source_name = "ModelCode"
 
-# ---- Underlying grain: one row per (position, underlying). ----
+# ---- Underlying grain: one row per instrument and underlying within a position. ----
 
 [risk_snapshot.columns.delta01]
 type = "f64"
@@ -200,9 +190,8 @@ role = "measure"
 grain = "underlying"
 source_name = "NormalizedVega01_USD"
 
-# Omitted from some files (spec §3.6's tolerance case) — declared like
-# every other column; a missing one is a health degradation, not an
-# absent schema entry.
+# Some CSVs omit this column and its USD twin. They remain declared so
+# ingestion reports missing-column health degradation and supplies NULLs.
 [risk_snapshot.columns.skew01]
 type = "f64"
 role = "measure"
@@ -251,9 +240,9 @@ role = "measure"
 grain = "underlying"
 source_name = "RhoOIS010_USD"
 
-# ---- Pair grain. Cross gamma belongs to a *pair* of underlyings, so at
-# an underlying-level grouping it is NonAttributable (spec §6.3) and the
-# compiler blanks it — that blank must render empty, not 0.00. ----
+# ---- Pair grain. Cross gamma belongs to a pair of underlyings. ----
+# Grouping by an individual underlying makes it NonAttributable: the query
+# returns NULL, displayed as blank.
 
 [risk_snapshot.columns.cross_gamma02]
 type = "f64"
@@ -343,11 +332,9 @@ role = "measure"
 grain = "position"
 source_name = "SC"
 
-# ---- Market-data documents (2026-09-12 design). ----
-# Declared in Part 1; Part 2's demo bus (`geode-app::demo_bus`, fed
-# through the `[cvi]` source `demo.rs::layer` generates over the
-# `demo_bus` `ChannelAdapter`) feeds it now, so `--demo` publishes CVI
-# documents into this table rather than leaving it empty.
+# ---- CVI parameter documents. ----
+# geode-app::demo_bus publishes through the generated `[cvi]` source and
+# the demo_bus channel adapter. Each key replaces one complete document.
 
 [cvi_params]
 family = "document"
@@ -383,10 +370,9 @@ role = "attribute"                # document-level: constant within one document
 type = "f64"
 role = "attribute"
 
-# ---- Dividend schedules (dividend-schedule plan, design spec §6.1). ----
-# `--demo`'s bus (`geode-app::demo_bus`) feeds this through the
-# `[dividend]` source `demo.rs::layer` declares, round-robinning
-# publishes with `[cvi]` above.
+# ---- Dividend schedules. ----
+# The demo bus publishes through the generated `[dividend]` source,
+# alternating CVI and dividend updates.
 
 [dividend_schedule]
 family = "document"
@@ -421,8 +407,8 @@ role = "attribute"                # document-level: constant within one document
 [dividend_schedule.columns.schedule_date]
 type = "date"
 role = "attribute"
-# The timeseries viewer's cache (timeseries spec §4.2): every fetch source
-# in `sources` fills this one table. The family implies its columns.
+# Series fetch sources share this cache, keyed by identity and source.
+# The series family defines the columns.
 [series]
 family = "series"
 retention = "7d"

@@ -170,6 +170,31 @@ impl Domain {
         }
     }
 
+    /// Every domain, for recognising [`Domain::already_open_notice`] strings.
+    pub const ALL: [Domain; 7] = [
+        Domain::Views,
+        Domain::Groupings,
+        Domain::Scopes,
+        Domain::Schema,
+        Domain::Sources,
+        Domain::Colors,
+        Domain::Expressions,
+    ];
+
+    /// The status notice for a request refused because this domain's dialog is
+    /// already open lower in the stack.
+    pub fn already_open_notice(self) -> &'static str {
+        match self {
+            Domain::Views => "views is already open underneath",
+            Domain::Groupings => "groupings is already open underneath",
+            Domain::Scopes => "scopes is already open underneath",
+            Domain::Schema => "schema is already open underneath",
+            Domain::Sources => "sources is already open underneath",
+            Domain::Colors => "colors is already open underneath",
+            Domain::Expressions => "expressions is already open underneath",
+        }
+    }
+
     /// The dialog's title, and the word the footer uses for one object.
     pub fn title(self) -> &'static str {
         match self {
@@ -1460,6 +1485,43 @@ impl Draft {
         // into the parent fields after the column projection is installed.
         self.choice = None;
         true
+    }
+
+    /// Rebuild every `color` choice's options from `colors`, keeping each selection by
+    /// name. The baseline moves with the fields, so a refresh never reads as an edit.
+    /// An open color typeahead is rebuilt over the new options with its query and
+    /// highlighted option kept.
+    pub fn refresh_color_options(&mut self, colors: &[String]) {
+        for fields in [&mut self.fields, &mut self.baseline] {
+            for field in fields.iter_mut().filter(|field| field.key == "color") {
+                if let FieldKind::Choice { options, selected } = &mut field.kind {
+                    let current = options.get(*selected).cloned().unwrap_or_default();
+                    *options = views::color_options(colors, &current);
+                    *selected = options
+                        .iter()
+                        .position(|option| *option == current)
+                        .unwrap_or(0);
+                }
+            }
+        }
+        let open_color_row = match self.text_entry {
+            Some(TextEntry {
+                row: EditRow::Field(i),
+                completions: Completions::Choice,
+            }) => self.fields.get(i).filter(|field| field.key == "color"),
+            _ => None,
+        };
+        if let (Some(field), Some(list)) = (open_color_row, self.choice.as_mut())
+            && let FieldKind::Choice { options, .. } = &field.kind
+        {
+            let keep = list.highlighted_text().map(str::to_string);
+            let query = list.query().to_string();
+            let mut rebuilt =
+                crate::choice::ChoiceList::new(options.clone(), crate::choice::DEFAULT_CAP);
+            rebuilt.set_query(&query);
+            rebuilt.place(keep.as_deref());
+            *list = rebuilt;
+        }
     }
 
     /// Fold installed column fields before validation or rendering a write. Views
@@ -6140,6 +6202,87 @@ mod tests {
             "cursor back on the column"
         );
         assert!(!draft.enter_column("ghost", Vec::new()), "not a member");
+    }
+
+    /// A column draft on `npv` with the named colors `colors`, as the column door
+    /// builds it, with the cursor on its `color` row.
+    fn npv_column_draft(colors: &[String]) -> Draft {
+        let config = config_with_view_and_datasets();
+        let mut draft = Domain::Views.draft(&config, "tree");
+        let npv = draft
+            .list_items("columns")
+            .unwrap()
+            .iter()
+            .find(|i| i.name == "npv")
+            .unwrap()
+            .clone();
+        draft.column_ctx = Some(views::column_context(&draft, "npv", npv.clone()));
+        assert!(draft.enter_column(
+            "npv",
+            views::column_fields(&npv, colors, Destination::Presentation)
+        ));
+        draft.selected = draft.fields.iter().position(|f| f.key == "color").unwrap();
+        draft
+    }
+
+    /// The `color` field's options and selected option.
+    fn color_field(draft: &Draft) -> (Vec<String>, String) {
+        let field = draft.fields.iter().find(|f| f.key == "color").unwrap();
+        let FieldKind::Choice { options, selected } = &field.kind else {
+            panic!("color is a choice");
+        };
+        (options.clone(), options[*selected].clone())
+    }
+
+    /// Step the selected `color` row until it names `name`.
+    fn select_color(draft: &mut Draft, name: &str) {
+        for _ in 0..64 {
+            if color_field(draft).1 == name {
+                return;
+            }
+            assert_eq!(draft.toggle_selected(), Step::Changed);
+        }
+        panic!("{name} is not a color option");
+    }
+
+    /// A color created elsewhere joins the options; the selection stays by name; and
+    /// the draft stays clean, because the baseline moved with the fields.
+    #[test]
+    fn refreshing_color_options_keeps_the_draft_clean() {
+        let mut draft = npv_column_draft(&["delta".to_string()]);
+        select_color(&mut draft, "delta");
+        draft.mark_saved();
+
+        draft.refresh_color_options(&["delta".to_string(), "ember".to_string()]);
+        let (options, selected) = color_field(&draft);
+        assert!(options.contains(&"ember".to_string()), "{options:?}");
+        assert_eq!(selected, "delta");
+        assert!(!draft.is_dirty(), "a refresh is not an edit");
+    }
+
+    /// The selected color was deleted: it stays listed as an extra option, as an
+    /// unknown configured color does, so the value remains visible and repairable.
+    #[test]
+    fn refreshing_keeps_a_removed_selected_color_as_an_extra_option() {
+        let mut draft = npv_column_draft(&["delta".to_string()]);
+        select_color(&mut draft, "delta");
+        draft.refresh_color_options(&[]);
+        let (options, selected) = color_field(&draft);
+        assert_eq!(selected, "delta");
+        assert_eq!(options.last().map(String::as_str), Some("delta"));
+    }
+
+    /// An open color typeahead lists the new option and keeps its typed query.
+    #[test]
+    fn refreshing_rebuilds_an_open_color_typeahead() {
+        let mut draft = npv_column_draft(&["delta".to_string()]);
+        assert_eq!(draft.begin_choice_entry(), Step::Changed);
+        draft.set_query("emb".to_string());
+        draft.refresh_color_options(&["delta".to_string(), "ember".to_string()]);
+        let list = draft.choice.as_ref().unwrap();
+        assert!(list.options().contains(&"ember".to_string()));
+        assert_eq!(list.query(), "emb");
+        assert_eq!(list.highlighted_text(), Some("ember"));
     }
 
     /// A second column entry must not overwrite the stashed parent fields with the

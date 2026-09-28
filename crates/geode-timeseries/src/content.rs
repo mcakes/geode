@@ -303,6 +303,39 @@ impl ModuleFactory for TimeseriesFactory {
     }
 }
 
+/// The keymap a running app resolves this module's menu hints through: the
+/// builtin actions and this module's, this fragment, and an optional user
+/// layer over it. Tests read menu lanes against it rather than against no
+/// keymap, where every chord hint is (correctly) empty.
+#[cfg(test)]
+pub(crate) fn test_bindings(user: Option<&str>) -> Vec<geode_shell::keymap::Binding> {
+    let mut registry = ActionRegistry::default();
+    geode_shell::defaults::register_builtin_actions(&mut registry);
+    for (id, title) in ACTIONS {
+        registry
+            .register(ActionDef {
+                id: ActionId(id.to_string()),
+                title: title.to_string(),
+                category: "Timeseries".into(),
+            })
+            .unwrap();
+    }
+    let mut docs =
+        vec![geode_shell::keymap::fragments::fragment_doc("timeseries", DEFAULT_KEYMAP).unwrap()];
+    if let Some(text) = user {
+        docs.push(geode_core::config::LayerDoc {
+            layer: geode_core::config::Layer::User,
+            name: "keymap".into(),
+            file: "user/keymap.toml".into(),
+            table: text.parse().unwrap(),
+        });
+    }
+    let (keymap, diags) =
+        geode_shell::keymap::build_keymap(&docs, geode_shell::defaults::default_mod(), &registry);
+    assert!(diags.is_empty(), "{diags:?}");
+    keymap.bindings().to_vec()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,6 +1,7 @@
 //! Stacked dialogs through production routes. A dialog opened over another
 //! pushes; Enter or Escape pops one level, and the revealed dialog has its
-//! query, caret, mode and focus back. One instance per kind.
+//! query, caret, mode and focus back. One instance per kind, and per domain for
+//! object dialogs.
 
 use super::*;
 use crate::dialogmode::DialogMode;
@@ -122,6 +123,7 @@ fn a_commit_pops_one_level(cx: &mut gpui::TestAppContext) {
 
 /// A request for the kind already on top does nothing. A request for a kind lower
 /// in the stack posts a notice and changes nothing: no push, no state overwrite.
+/// Object dialogs count per domain, so the refused request names Views itself.
 #[gpui::test]
 fn a_kind_already_in_the_stack_is_refused(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = dialog_test_shell(cx, "config::views");
@@ -135,14 +137,14 @@ fn a_kind_already_in_the_stack_is_refused(cx: &mut gpui::TestAppContext) {
     );
     assert_eq!(shell.read_with(&vcx, |s, _| s.notice), None);
 
-    dispatch_action(&shell, "config::scopes", &mut vcx);
+    dispatch_action(&shell, "config::views", &mut vcx);
     assert_eq!(
         kinds(&shell, &mut vcx),
         vec![DialogKind::Object, DialogKind::Settings]
     );
     assert_eq!(
         shell.read_with(&vcx, |s, _| s.notice),
-        Some(DialogKind::Object.already_open_notice())
+        Some(crate::shell::objectdialog::Domain::Views.already_open_notice())
     );
     assert_eq!(
         shell.read_with(&vcx, |s, _| s
@@ -316,7 +318,11 @@ fn a_non_dialog_chord_is_inert_behind_a_dialog(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn opens_dialog_matches_what_dispatch_pushes(cx: &mut gpui::TestAppContext) {
     // Flagged actions that legitimately refuse in this fixture, each with the reason.
-    const REFUSES_IN_FIXTURE: &[&str] = &[];
+    const REFUSES_IN_FIXTURE: &[&str] = &[
+        // No focused tile answers `tile_columns` here: a status notice, no list.
+        "config::view_column",
+        "config::schema_column",
+    ];
     let (window, mut vcx) = open_shell(cx, super::picker::services_with_pickable());
     let shell = shell_of(&window, &mut vcx);
     let ids: Vec<crate::actions::ActionId> = shell.read_with(&vcx, |s, _| {

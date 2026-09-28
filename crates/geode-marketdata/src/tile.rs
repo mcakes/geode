@@ -21,22 +21,23 @@
 
 use crate::commands::{self, BumpAxis, Command, KEY_DISPLAY_SEPARATOR};
 use crate::core::cursor::{self, Cursor, Grid, Motion};
-use crate::core::draft::{RowDelete, RowEdit, bumped, local_hhmm};
+use crate::core::draft::{RowDelete, RowEdit, local_hhmm};
 use crate::core::matrix::{RowState, base_of};
-use crate::core::menu::{self, MenuInputs, MenuRow};
+use crate::core::menu::{self, MenuInputs};
 use crate::core::spec::RowIdentity;
 use crate::core::{
-    Cell, CellKind, Columns, DateTimeField, DocumentBase, Draft, DraftBadge, DraftState, FieldKey,
+    CellKind, Columns, DateTimeField, DocumentBase, Draft, DraftBadge, DraftState, FieldKey,
     MatrixModel, PanelSpec, Precision, Segment, SegmentText, UpdatePolicy, attr_text, parse_attr,
     parse_cell, route,
 };
-use crate::delegate::{DelegateChoice, DelegateEditor, DelegateEditorPaint, MatrixDelegate};
-use crate::header::{self, HeaderInputs, HeaderModel, Tone};
-use crate::popup::{
-    ChoicePopup, MenuState, PickerRows, PickerState, Popup, render_menu, render_picker,
+use crate::delegate::{
+    CellPointer, DelegateChoice, DelegateEditor, DelegateEditorPaint, MatrixDelegate,
 };
+use crate::header::{self, HeaderInputs, HeaderModel, Tone};
+use crate::popup::{ChoicePopup, PickerRows, PickerState, Popup, render_picker};
 use geode_core::colour::{Rgb, contrast_ratio, readable_on};
 use geode_core::document::{DocumentRows, Value, split_key};
+use geode_core::grid::selection::{Resolved, SelectKind, Selection};
 use geode_core::query::{DocumentParams, QueryKey, QueryOutcome};
 use geode_core::schema::ColumnType;
 use geode_core::snapshot::Snapshot;
@@ -47,14 +48,17 @@ use geode_shell::colfit::{
 };
 use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::{FrameRef, FrameVersions, PublicationWatch};
-use geode_shell::keymap::KeyContext;
+use geode_shell::keymap::{Binding, KeyContext};
 use geode_shell::linenumbers::{LineNumbers, UiSettings};
 use geode_shell::module::{FindEvent, StackHandle, UploadDelivery};
+use geode_shell::shell::aggregates;
 use geode_shell::shell::colours::{to_hsla, to_rgb};
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::vimfind::{FindDirection, find_match};
 use geode_shell::vimnav::NavCommand;
+use geode_tile::confirm::{self, Confirm, ConfirmHost};
+use geode_tile::menu::{Menu, MenuHost, MenuIds};
 use gpui::prelude::*;
 use gpui::{
     App, ClipboardItem, Context, Entity, FocusHandle, Focusable as _, Hsla, IntoElement,
@@ -62,17 +66,24 @@ use gpui::{
 };
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::table::{DataTable, TableEvent, TableState};
-use gpui_component::{ActiveTheme as _, Sizable as _, Size, Theme, v_flex};
+use gpui_component::{ActiveTheme as _, Sizable as _, Size, Theme, h_flex, v_flex};
 use std::cell::Cell as StdCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+mod select;
+use select::{FINISH_EDIT_FIRST, StepsUndo};
+
 /// How many rows `ctrl+d`/`ctrl+u` step — `vimnav`'s own ±5, the same
 /// fixed offset every list in this codebase uses, multiplied by the count
 /// prefix rather than being viewport-relative.
 const HALF_PAGE: isize = 5;
+
+/// The selection footer's height in design px — the blotter's, pricer's
+/// and timeseries' footer value, so every grid's strip reads alike.
+const FOOTER_HEIGHT: f32 = 20.0;
 
 /// How many rows `ctrl+f`/`ctrl+b`/`pagedown`/`pageup` step — `vimnav`'s
 /// own ±10, the blotter's `page_down_full`.
@@ -89,18 +100,17 @@ pub struct FindState {
     committed: Option<String>,
 }
 
-/// Cached contrast-adjusted header tones. Warning and danger text are adjusted against
-/// the window background toward the theme foreground. The date field's active-segment
+/// Cached contrast-adjusted header tones. Warning text is adjusted against the window
+/// background toward the theme foreground (danger text is the notice door's). The date field's active-segment
 /// text is adjusted against primary toward whichever of black or white contrasts more,
 /// allowing even a matching text/background pair to separate.
 ///
-/// The six-input theme signature covers every colour read by derive. Refresh runs the
+/// The five-input theme signature covers every colour read by derive. Refresh runs the
 /// contrast calculation only when that signature changes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct FlooredTones {
-    key: [Hsla; 6],
+    key: [Hsla; 5],
     pub(crate) warn: Hsla,
-    pub(crate) error: Hsla,
     pub(crate) primary_text: Hsla,
 }
 
@@ -127,7 +137,6 @@ impl FlooredTones {
         Self {
             key: Self::key(theme),
             warn: floor(theme.warning),
-            error: floor(theme.danger),
             primary_text: to_hsla(readable_on(
                 to_rgb(theme.primary_foreground),
                 primary,
@@ -136,12 +145,11 @@ impl FlooredTones {
         }
     }
 
-    fn key(theme: &Theme) -> [Hsla; 6] {
+    fn key(theme: &Theme) -> [Hsla; 5] {
         [
             theme.background,
             theme.foreground,
             theme.warning,
-            theme.danger,
             theme.primary,
             theme.primary_foreground,
         ]
@@ -189,16 +197,14 @@ const UPLOAD_CANCELLED: &str = "upload cancelled";
 /// painted until the next key.
 const UPLOAD_CANCELLED_ARRIVED: &str = "upload cancelled: a new document arrived";
 
-/// Upload confirmation holding the rows assembled when it was armed. The prompt's
-/// counts and the submitted payload therefore describe the same document.
-///
-/// Its focus handle receives keys before the shell listener. Losing focus cancels
-/// confirmation. Dropping the confirmation also drops its blur subscription, preventing
-/// a key answer from triggering a second cancellation.
-struct PendingUpload {
+/// What an armed upload confirm asks to send: the rows assembled when it
+/// was armed, so the prompt's counts and the payload describe one document.
+/// The prompt, its focus and its blur answer are the confirm door's.
+/// Public (its fields are not) because it is the payload of the public
+/// tile's `ConfirmHost` impl, which cannot name a crate-private type.
+pub struct PendingUpload {
     target: String,
     rows: DocumentRows,
-    prompt: SharedString,
     /// The draft as it was when the confirm was armed. A delivery can
     /// land between the prompt and the answer (`Behind`, or a `replace`
     /// policy dropping the edits); `y` against a draft that no longer
@@ -208,11 +214,6 @@ struct PendingUpload {
     /// attrs, rows and state equal while the rows were assembled from
     /// the superseded base.
     draft: Draft,
-    focus: FocusHandle,
-    /// The window the prompt's `focus` lives in, so a delivery (which has
-    /// no `Window`) can still blur it before the confirm is dropped.
-    window: gpui::AnyWindowHandle,
-    _blur: gpui::Subscription,
 }
 
 /// The upload submitted and not yet answered: which underlying it sent
@@ -271,15 +272,61 @@ const NOT_A_ROW: &str = "not a row";
 /// Refusal for deleting an already-Deleted row; revert is the recovery route.
 const ALREADY_DELETED: &str = "row is already deleted — :revert restores it";
 
-/// One cell a `:bump` writes: where it is, the labels that make the edit
-/// portable across generations, and the value being added to — the shape
-/// [`Draft::bump`] consumes.
-type BumpCell = ((usize, usize), (String, String), Value, ColumnType);
-
 /// Open cell or attribute editor, including its input and original target.
 struct Editing {
     state: EditorState,
     target: EditTarget,
+    /// Set only on a text editor opened on a number cursor cell over a
+    /// live selection.
+    bulk: Option<Bulk>,
+}
+
+/// A text editor opened on a number cursor cell over a live selection
+/// (any other cursor cell commits absolutely). While its text is
+/// untouched, arrows step every selected number in the draft at once,
+/// so the grid shows the steps as they are made; closing the editor any
+/// way but a commit puts `before` back (while the steps are still the
+/// draft's last change and the painted base has not moved; see
+/// `undo_steps`), so a trader who escapes never leaves half a block
+/// stepped.
+struct Bulk {
+    /// The draft when `i` opened the editor.
+    before: Draft,
+    /// The draft right after the last step landed (`before` until one
+    /// does). A draft whose work no longer matches it was written by
+    /// something else while the editor was open (a palette revert, a
+    /// `:set`, a replace policy, a single-cell commit once the selection
+    /// cleared), and restoring `before` over that would silently undo it.
+    after: Draft,
+    /// The generation painted then. An automatic rebase or replace while
+    /// the editor is open moves it, and `before` is then keyed to a grid
+    /// that is no longer painted: restoring it would put edits on the
+    /// wrong cells, so the steps are kept instead.
+    painted: Option<DocumentBase>,
+    /// The text the tile last put in the editor. Any other value means
+    /// the trader typed, which turns the edit absolute.
+    seeded: String,
+    /// Signed steps since `i`, for the notice.
+    steps: i64,
+    /// Whether any step reached the draft, so a close must undo it.
+    stepped: bool,
+    /// The upload state `i` found beside `before`; see [`UploadMarks`].
+    upload: UploadMarks,
+}
+
+/// What the upload and echo machinery holds about the draft, which
+/// `rebuild_chrome` lets go of once a step makes the draft `Editing`: the
+/// rows a `Sent` draft's echo is compared with, the echo line, and a
+/// failed upload's error. Restoring `before` without them would bring
+/// back `Sent` with nothing to compare, so a matching echo would land as
+/// `Behind` instead of confirming. `submitted` is not here: a step never
+/// drops it (only the outcome, a refused submit or a key switch does),
+/// and bringing back one the outcome consumed would resurrect a question
+/// already answered.
+struct UploadMarks {
+    sent: Option<DocumentRows>,
+    echo: Option<Echo>,
+    upload_error: Option<(SharedString, Draft)>,
 }
 
 /// Text and segmented-date editor states, chosen by cell kind or attribute type.
@@ -481,6 +528,18 @@ pub struct MarketDataTile {
     /// owns the cursor across motions (`j` reads it back to return to the
     /// same column; `0` before the strip has ever been entered).
     last_grid_col: usize,
+    /// A live `V`/`v` selection, anchored by row label and column label so
+    /// it survives a redelivery, an inserted row or a rebase. `None` in
+    /// the ordinary cursor-only state.
+    selection: Option<Selection<SharedString, SharedString>>,
+    /// `selection` re-resolved against the current model and cursor by
+    /// `refresh_selection` — what the delegate's tint and every
+    /// selection-wide verb read, so painting never resolves anything.
+    resolved: Option<Resolved>,
+    /// The footer's `"{rows} rows × {cols} cols"` readout while a
+    /// selection is live; `None` otherwise. Prepared with `resolved` so
+    /// render formats nothing.
+    selection_extent: Option<SharedString>,
     /// The body: gpui-component's table over [`MatrixDelegate`]. Never
     /// focused (see `geode_marketdata::init`, which binds its context's
     /// keys to `NoAction` for the one frame a click gives it gpui focus).
@@ -525,6 +584,10 @@ pub struct MarketDataTile {
     /// The `Behind` state run's tooltip selector (`"tip-marketdata-
     /// state-{id}"`), built once alongside `menu_tip_selector`.
     state_tip_selector: SharedString,
+    /// The action menu's element names, prepared once from the tile id.
+    menu_ids: MenuIds,
+    /// The keymap as last published, for the menu's key hints.
+    chords: Arc<Vec<Binding>>,
     /// Stack membership rendered in the header; None outside a stack.
     stack: Option<StackHandle>,
     /// Prepared title from the panel title and key. Updated by set_key so title()
@@ -534,7 +597,7 @@ pub struct MarketDataTile {
     /// Prepared header and menu formatting receive it as an explicit input.
     pub(crate) clock: geode_core::clock::Clock,
     /// Armed upload confirmation, if any.
-    pending_upload: Option<PendingUpload>,
+    pending_upload: Option<Confirm<PendingUpload>>,
     /// Rows of the latest submitted upload, retained while submitted or Sent. Rebuild
     /// drops them once neither state applies, ending comparison after refusal, failure,
     /// draft changes, revert, rebase, or a matching echo. Only Sent compares new
@@ -676,6 +739,13 @@ impl MarketDataTile {
         cx.subscribe_in(&table, window, |this, _, event: &TableEvent, window, cx| {
             match event {
                 TableEvent::SelectCell(row, col) => {
+                    let col = this.table.read(cx).delegate().model_col(*col);
+                    // A click inside the open editor's own cell is the
+                    // editor's (caret, text selection, a date separator):
+                    // never a cancel, and the cursor is already there.
+                    if this.editor_cell() == Some((*row, col)) {
+                        return;
+                    }
                     // Cancel and blur an open editor before moving the cursor. Clicking
                     // another cell does not commit partially typed text.
                     if this.editor.is_some() {
@@ -685,10 +755,11 @@ impl MarketDataTile {
                         // thread.
                         this.changed(cx);
                     }
-                    let col = this.table.read(cx).delegate().model_col(*col);
                     this.cursor_to(*row, col, cx)
                 }
                 TableEvent::DoubleClickedCell(row, col) => {
+                    // A double-click inside the open editor reopens
+                    // nothing: `begin_edit` refuses while one is open.
                     if let Some(col) = this.table.read(cx).delegate().model_col(*col) {
                         this.cursor_to(*row, Some(col), cx);
                         this.begin_edit(window, cx);
@@ -703,6 +774,15 @@ impl MarketDataTile {
                 _ => {}
             }
         })
+        .detach();
+        // Shift+click and drag: the delegate's own pointer events, which
+        // reach `pointer` ahead of the table's `SelectCell` (that one is
+        // emitted on the release). Window access for the editor's blur.
+        cx.subscribe_in(
+            &table,
+            window,
+            |this, _, event: &CellPointer, window, cx| this.pointer(*event, window, cx),
+        )
         .detach();
         cx.observe(frame.entity(), |this, _frame, cx| {
             // Promote staged results on flip even if the tile became hidden after
@@ -764,6 +844,15 @@ impl MarketDataTile {
             cx.notify();
         })
         .detach();
+        // A keymap reload re-resolves an open menu's hints at once.
+        cx.observe_global::<geode_shell::tips::Chords>(|this, cx| {
+            this.chords = geode_tile::menu::live_bindings(cx);
+            if let Some(Popup::Menu(m)) = &mut this.popup {
+                m.rehint(&this.chords);
+                cx.notify();
+            }
+        })
+        .detach();
 
         let mut this = MarketDataTile {
             id,
@@ -788,6 +877,9 @@ impl MarketDataTile {
             policy,
             cursor: Cursor::Cell { row: 0, col: 0 },
             last_grid_col: 0,
+            selection: None,
+            resolved: None,
+            selection_extent: None,
             table,
             editor: None,
             find: None,
@@ -815,6 +907,11 @@ impl MarketDataTile {
             popup: None,
             menu_tip_selector: format!("tip-marketdata-menu-button-{}", id.0).into(),
             state_tip_selector: format!("tip-marketdata-state-{}", id.0).into(),
+            menu_ids: MenuIds::new(
+                format!("marketdata-menu-{}", id.0),
+                format!("marketdata-menu-row-{}", id.0),
+            ),
+            chords: geode_tile::menu::live_bindings(cx),
             stack: None,
             clock: cx
                 .try_global::<geode_shell::clock::AppClock>()
@@ -850,10 +947,22 @@ impl MarketDataTile {
             "insert"
         } else if matches!(self.popup, Some(Popup::Menu(_))) {
             "menu"
+        } else if self.selection.is_some() {
+            "visual"
         } else {
             "normal"
         };
-        KeyContext::new("marketdata").pair("mode", mode).counts()
+        let mut ctx = KeyContext::new("marketdata").pair("mode", mode);
+        if let Some(s) = &self.selection {
+            ctx = ctx.pair(
+                "select",
+                match s.kind {
+                    SelectKind::Rows => "rows",
+                    SelectKind::Block => "block",
+                },
+            );
+        }
+        ctx.counts()
     }
 
     /// Whether this tile's editor, picker, choice field, or upload confirmation
@@ -872,7 +981,7 @@ impl MarketDataTile {
         let confirm = self
             .pending_upload
             .as_ref()
-            .is_some_and(|p| p.focus.is_focused(window));
+            .is_some_and(|c| c.holds_focus(window));
         editor || popup || confirm
     }
 
@@ -1125,6 +1234,15 @@ impl MarketDataTile {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        // An editor left open (orphaned by a focus move) is cancelled, as
+        // every other verb that is not its commit does: blur, then drop.
+        // First, before anything reads the draft: a selection editor's
+        // close takes its live steps back out, so a document assembled
+        // before it would send steps the draft no longer holds, and the
+        // `y` check (armed draft against current) could not tell.
+        if self.editor.is_some() {
+            self.close_editor(window, cx);
+        }
         let document = self.spec.document;
         let target = match target {
             Some(t) => {
@@ -1167,13 +1285,6 @@ impl MarketDataTile {
             return Err("no document to upload".into());
         };
         let rows = crate::core::upload::assemble(&snapshot, self.spec, &self.model, &self.draft)?;
-        // An editor left open (orphaned by a focus move) is cancelled, as
-        // every other verb that is not its commit does: blur, then drop.
-        if self.editor.is_some() {
-            self.close_editor(window, cx);
-        }
-        // A confirm already armed is replaced, never stacked.
-        self.disarm_upload(window, cx);
         let cells = match self.draft.cell_count() {
             1 => "1 cell".to_string(),
             n => format!("{n} cells"),
@@ -1192,79 +1303,21 @@ impl MarketDataTile {
             "upload {cells}, {attrs}{added}, {} removed of {key} to {target}? (y/n)",
             self.draft.rows_removed()
         );
-        let focus = cx.focus_handle();
-        focus.focus(window, cx);
-        let blur = cx.on_blur(&focus, window, |this, window, cx| {
-            if this.pending_upload.is_some() {
-                this.cancel_upload(window, cx);
-            }
-        });
-        self.pending_upload = Some(PendingUpload {
-            target,
-            rows,
-            prompt: prompt.into(),
-            draft: self.draft.clone(),
-            focus,
-            window: window.window_handle(),
-            _blur: blur,
-        });
+        // A confirm already armed is replaced, never stacked.
+        confirm::arm(
+            self,
+            PendingUpload {
+                target,
+                rows,
+                draft: self.draft.clone(),
+            },
+            prompt,
+            window,
+            cx,
+        );
         self.notice = None;
         self.changed(cx);
         Ok(())
-    }
-
-    /// The confirm's own key handler, run from the prompt's `on_key_down`
-    /// in `header::render` — which sits on the focused element and so runs
-    /// before the shell root's listener. While a confirm is armed EVERY
-    /// key is consumed (answers `true`): bare `y` sends, anything else —
-    /// `n`, `escape`, a motion, a chord — cancels. A keystroke that
-    /// answers the question must not also act on the panel or the shell.
-    pub(crate) fn confirm_key(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        if self.pending_upload.is_none() {
-            return false;
-        }
-        let ks = &event.keystroke;
-        if ks.key == "y" && !ks.modifiers.modified() {
-            self.submit_upload(window, cx);
-        } else {
-            self.cancel_upload(window, cx);
-        }
-        true
-    }
-
-    /// A pointer press anywhere on the tile while a confirm is armed
-    /// cancels it (the tile root's capture-phase mouse-down): a press on
-    /// the header or the menu button moves no focus, so the blur half
-    /// alone would leave the question standing behind the click.
-    pub(crate) fn cancel_upload_on_pointer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.pending_upload.is_some() {
-            self.cancel_upload(window, cx);
-        }
-    }
-
-    /// Drop the armed confirm, giving up the keyboard first when its
-    /// prompt holds it (a surface dropping a focused handle blurs it).
-    fn disarm_upload(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<PendingUpload> {
-        let pending = self.pending_upload.take()?;
-        if pending.focus.is_focused(window) {
-            window.blur(cx);
-        }
-        Some(pending)
-    }
-
-    fn cancel_upload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let _ = self.disarm_upload(window, cx);
-        self.notice = Some(UPLOAD_CANCELLED.into());
-        self.changed(cx);
     }
 
     /// Why an upload cannot be sent now, if it cannot: the frame asks
@@ -1295,10 +1348,7 @@ impl MarketDataTile {
 
     /// `y`: submit the document assembled at arm time. Refused by the data
     /// tier's bounded queue → a notice and nothing kept as `sent`.
-    fn submit_upload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(pending) = self.disarm_upload(window, cx) else {
-            return;
-        };
+    fn submit_upload(&mut self, pending: PendingUpload, cx: &mut Context<Self>) {
         // Re-checked at `y`: nothing that makes the panel historical
         // between arming and answering may slip through.
         if let Some(refusal) = self.not_live(cx) {
@@ -1358,11 +1408,10 @@ impl MarketDataTile {
     /// A confirm armed over one document must not stand over another: if
     /// this delivery changed the painted generation or the draft (a
     /// `rebase` or `replace` policy, or `Behind` under `hold`), the
-    /// question is withdrawn at once. `apply` has no `Window`, so the
-    /// prompt's focus is blurred through its recorded window handle,
-    /// deferred to the end of this update; the handle travels into the
-    /// deferral, so it is never dropped while still focused. `y`'s own
-    /// re-check in [`Self::submit_upload`] stays as the second line.
+    /// question is withdrawn at once. The confirm door withdraws the prompt:
+    /// it drops the blur answer first and blurs through the recorded window
+    /// handle, deferred. `y`'s own re-check in [`Self::submit_upload`]
+    /// stays as the second line.
     ///
     /// The painted-base comparison is whole-pair equality rather than
     /// [`DocumentBase::differs_from`]: withdrawing a question that did not
@@ -1370,29 +1419,13 @@ impl MarketDataTile {
     /// document it was never asked about sends the wrong rows.
     fn withdraw_upload_if_moved(&mut self, painted: Option<DocumentBase>, cx: &mut Context<Self>) {
         let now = self.painted_snapshot().and_then(|s| base_of(&s));
-        let moved = |p: &PendingUpload| p.draft != self.draft || now != painted;
+        let moved = |c: &Confirm<PendingUpload>| c.payload().draft != self.draft || now != painted;
         if !self.pending_upload.as_ref().is_some_and(moved) {
             return;
         }
-        let Some(pending) = self.pending_upload.take() else {
+        if confirm::withdraw(self, cx).is_none() {
             return;
-        };
-        let PendingUpload {
-            focus,
-            window,
-            _blur,
-            ..
-        } = pending;
-        // The blur subscription goes first, so the deferred blur below is
-        // not heard as a second cancel.
-        drop(_blur);
-        cx.defer(move |cx| {
-            let _ = window.update(cx, |_, window, cx| {
-                if focus.is_focused(window) {
-                    window.blur(cx);
-                }
-            });
-        });
+        }
         // The policy's own disclosure (`replace`'s count, `rebase`'s
         // dropped edits) is kept behind the cancellation, never lost to it.
         self.notice = Some(match self.notice.take() {
@@ -1817,17 +1850,27 @@ impl MarketDataTile {
         });
     }
 
-    /// Mirror cursor, editor, and choice state into the delegate and table.
-    /// Translate model columns through the optional row-label offset. Set the
-    /// column before the row so the table finishes in row-selection mode while
-    /// keeping the cell in view. An attribute cursor clears grid selection.
-    fn sync_cursor(&self, cx: &mut Context<Self>) {
+    /// Mirror cursor, selection, editor, and choice state into the delegate
+    /// and table. Translate model columns through the optional row-label
+    /// offset. Set the column before the row so the table finishes in
+    /// row-selection mode while keeping the cell in view. An attribute cursor
+    /// clears grid selection.
+    ///
+    /// Re-resolves the grid selection first, so every cursor or model change
+    /// hands the delegate a current `Resolved`; a lost anchor re-prepares the
+    /// header for its notice here, since not every caller rebuilds chrome.
+    fn sync_cursor(&mut self, cx: &mut Context<Self>) {
+        if self.refresh_selection() {
+            self.rebuild_chrome();
+        }
         let editor = self.delegate_editor();
         let choice = self.delegate_choice();
+        let selected = self.resolved.clone();
         match self.cursor {
             Cursor::Cell { row, col } => self.table.update(cx, |t, cx| {
                 let d = t.delegate_mut();
                 d.cursor = Some((row, col));
+                d.selected = selected;
                 d.editor = editor;
                 d.choice = choice;
                 let table_col = d.table_col(col);
@@ -1838,6 +1881,7 @@ impl MarketDataTile {
             Cursor::Attr(_) => self.table.update(cx, |t, cx| {
                 let d = t.delegate_mut();
                 d.cursor = None;
+                d.selected = None;
                 d.editor = editor;
                 d.choice = choice;
                 t.clear_selection(cx);
@@ -1851,14 +1895,7 @@ impl MarketDataTile {
     /// paints itself (`render`), and `None` with nothing open.
     fn delegate_editor(&self) -> Option<DelegateEditor> {
         let e = self.editor.as_ref()?;
-        // A row-label editor sits in the row-label column (`col: None`),
-        // which `render_td`'s label arm paints through the same
-        // `render_editor` a cell's uses.
-        let (row, col) = match &e.target {
-            EditTarget::Cell { cell, .. } => (cell.0, Some(cell.1)),
-            EditTarget::RowLabel { row, .. } => (*row, None),
-            EditTarget::Attr { .. } => return None,
-        };
+        let (row, col) = self.editor_cell()?;
         let paint = match &e.state {
             EditorState::Text(state) => DelegateEditorPaint::Text(state.clone()),
             EditorState::Date { paint, focus, .. } => DelegateEditorPaint::Date {
@@ -1867,6 +1904,19 @@ impl MarketDataTile {
             },
         };
         Some(DelegateEditor { row, col, paint })
+    }
+
+    /// The grid cell the open editor is painted in, as `(model row, model
+    /// column)`. A row-label editor sits in the row-label column (`col:
+    /// None`), which `render_td`'s label arm paints through the same
+    /// `render_editor` a cell's uses. `None` for an attribute editor (the
+    /// header paints it) and with nothing open.
+    fn editor_cell(&self) -> Option<(usize, Option<usize>)> {
+        match &self.editor.as_ref()?.target {
+            EditTarget::Cell { cell, .. } => Some((cell.0, Some(cell.1))),
+            EditTarget::RowLabel { row, .. } => Some((*row, None)),
+            EditTarget::Attr { .. } => None,
+        }
     }
 
     /// Prepared choice popup and its cell anchor, mirrored into the delegate by Rc.
@@ -1926,6 +1976,94 @@ impl MarketDataTile {
         cx.notify();
     }
 
+    /// Every mouse selection gesture lands here and goes through the same
+    /// `start_selection`/`clear_selection` doors the keys use, so the mouse
+    /// never reaches a selection the keys could not. A plain press clears
+    /// and moves the cursor (the table's `SelectCell` on the release moves
+    /// it again, to the same cell); a shift press or a drag starts a
+    /// selection only when none is live — `Rows` from a row label or the
+    /// gutter, `Block` from a value cell — then moves the cursor, which
+    /// extends it.
+    ///
+    /// Ordering: the delegate emits the press on mouse-down and the table
+    /// emits `SelectCell` only on the click (the release), so a shift
+    /// press starts the selection at the PRE-press cursor with no capture
+    /// of it needed. A drag anchors at its press cell because the plain
+    /// press already moved the cursor there.
+    ///
+    /// Any gesture that gets here closes an open editor first: a click is
+    /// a cancel (`close_editor`'s rule), and a drag never gets the
+    /// `SelectCell` that would otherwise close it.
+    fn pointer(&mut self, event: CellPointer, window: &mut Window, cx: &mut Context<Self>) {
+        // What the header shows (mode, notice, footer extent) can only
+        // move with one of these; a plain press that changes none of them
+        // (the cursor cell, nothing selected) skips the rebuild.
+        let before = (
+            self.selection.is_some(),
+            self.cursor,
+            self.editor.is_some(),
+            self.notice.clone(),
+        );
+        let kind_for = |label: bool| {
+            if label {
+                SelectKind::Rows
+            } else {
+                SelectKind::Block
+            }
+        };
+        let (row, col, start) = match event {
+            CellPointer::Press {
+                row,
+                col,
+                shift: false,
+            } => {
+                self.clear_selection();
+                (row, col, None)
+            }
+            CellPointer::Press {
+                row,
+                col,
+                shift: true,
+            } => (row, col, Some(kind_for(col.is_none()))),
+            CellPointer::Drag { row, col, label } => {
+                // Still inside the cell the cursor is on (a label or the
+                // gutter keeps the column): nothing to start or extend.
+                let here = matches!(
+                    self.cursor,
+                    Cursor::Cell { row: r, col: c } if r == row && col.is_none_or(|x| x == c)
+                );
+                if here {
+                    return;
+                }
+                (row, col, Some(kind_for(label)))
+            }
+        };
+        if self.editor.is_some() {
+            self.close_editor(window, cx);
+        }
+        if let Some(kind) = start
+            && self.selection.is_none()
+        {
+            // From the header strip there is no grid cursor to anchor at
+            // (`start_selection` would refuse): the press cell is the anchor.
+            if matches!(self.cursor, Cursor::Attr(_)) {
+                self.cursor_to(row, col, cx);
+            }
+            self.start_selection(kind);
+        }
+        // Ends in `sync_cursor`, which re-resolves the selection.
+        self.cursor_to(row, col, cx);
+        let after = (
+            self.selection.is_some(),
+            self.cursor,
+            self.editor.is_some(),
+            self.notice.clone(),
+        );
+        if after != before {
+            self.changed(cx);
+        }
+    }
+
     /// Select an attribute without opening it. Cancel an existing editor first,
     /// blurring only its own focused input; clicking is not a commit.
     pub(crate) fn cursor_to_attr(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -1936,6 +2074,10 @@ impl MarketDataTile {
         if self.editor.is_some() {
             self.close_editor(window, cx);
         }
+        // The strip is never a selection member: leaving the grid ends the
+        // selection here, before `sync_cursor` would read the strip cursor
+        // as a lost anchor and say so.
+        self.clear_selection();
         self.cursor = Cursor::Attr(i.min(attrs - 1));
         self.sync_cursor(cx);
         self.rebuild_chrome();
@@ -2011,7 +2153,7 @@ impl MarketDataTile {
                 Echo::Confirmed(text) => (text, Tone::Time),
                 Echo::Differs { text, .. } => (text, Tone::Warn),
             }),
-            prompt: self.pending_upload.as_ref().map(|p| &p.prompt),
+            prompt: self.pending_upload.as_ref().map(|c| c.prompt_text()),
             source_at: self.source_at,
             incomplete: self.draft.incomplete_rows(self.spec, &self.model.columns),
             clock: self.clock,
@@ -2039,6 +2181,16 @@ impl MarketDataTile {
         let Some(verb) = action.0.strip_prefix("marketdata::") else {
             return false;
         };
+        // An open selection editor's members are its operand. The palette
+        // reaches these verbs in insert mode, and each would move or end
+        // the selection under the editor, so the commit or the steps would
+        // land on cells the trader did not open it over.
+        if self.selection_editor_open() && self.changes_selection(verb) {
+            self.notice = Some(FINISH_EDIT_FIRST.into());
+            self.rebuild_chrome();
+            cx.notify();
+            return true;
+        }
         // Close popups before unrelated actions. Menu commands, commit/cancel, and
         // insert navigation retain their active popup so they can act on it. Use the
         // window-aware close to blur a focused picker or choice field before dropping
@@ -2084,8 +2236,23 @@ impl MarketDataTile {
                 };
                 let was_attr = matches!(self.cursor, Cursor::Attr(_));
                 let grid = self.grid();
-                self.cursor = cursor::step(self.cursor, &mut self.last_grid_col, motion, grid);
+                // A live selection's motions clamp at the grid's edges and
+                // never enter the strip, which is never a member.
+                self.cursor = if self.selection.is_some() {
+                    cursor::step_clamped(self.cursor, motion, grid)
+                } else {
+                    cursor::step(self.cursor, &mut self.last_grid_col, motion, grid)
+                };
                 was_attr != matches!(self.cursor, Cursor::Attr(_))
+            }
+            // With a selection live, `y` copies the selection rather than
+            // the cursor cell, and consumes it.
+            "yank" if self.selection.is_some() => {
+                if let Some(text) = self.selection_tsv() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
+                self.clear_selection();
+                false
             }
             "yank" | "yank_row" | "yank_col" => {
                 let what = match verb {
@@ -2147,11 +2314,29 @@ impl MarketDataTile {
                 self.repeat_find(dir, count);
                 false
             }
+            "visual_rows" | "visual_block" => {
+                let kind = if verb == "visual_rows" {
+                    SelectKind::Rows
+                } else {
+                    SelectKind::Block
+                };
+                // `true`: a refusal in the strip leaves a notice.
+                self.start_selection(kind);
+                true
+            }
             "escape" => {
-                self.find = None;
-                // Only when there WAS one: `escape` on a clean header
-                // changes nothing the chips show.
-                self.notice.take().is_some()
+                if self.selection.is_some() {
+                    // The first escape ends only the selection; find and
+                    // the notice wait for the next one. The tail's
+                    // `sync_cursor` hands the delegate the cleared tint.
+                    self.clear_selection();
+                    false
+                } else {
+                    self.find = None;
+                    // Only when there WAS one: `escape` on a clean header
+                    // changes nothing the chips show.
+                    self.notice.take().is_some()
+                }
             }
             "menu" => {
                 self.toggle_menu(window, cx);
@@ -2174,9 +2359,7 @@ impl MarketDataTile {
             "menu_down" | "menu_up" => {
                 let delta = if verb == "menu_down" { n } else { -n };
                 match &mut self.popup {
-                    Some(Popup::Menu(m)) => {
-                        m.highlighted = menu::step(&m.rows, m.highlighted, delta);
-                    }
+                    Some(Popup::Menu(m)) => m.step(delta),
                     Some(Popup::Picker(p)) => p.rows.step_highlighted(delta),
                     // Reachable from the palette alone (`mode == menu` is
                     // never reported with a choice popup open), and it
@@ -2211,8 +2394,10 @@ impl MarketDataTile {
                 }
             }
             "menu_pick" => {
-                if let Some(Popup::Menu(m)) = &self.popup {
-                    let index = m.highlighted;
+                if let Some(index) = match &self.popup {
+                    Some(Popup::Menu(m)) => m.highlighted(),
+                    _ => None,
+                } {
                     self.menu_pick(index, window, cx);
                 }
                 false
@@ -2250,7 +2435,12 @@ impl MarketDataTile {
                 true
             }
             "delete_row" => {
-                if let Err(e) = self.delete_row(window, cx) {
+                let deleted = if self.selection.is_some() {
+                    self.delete_selected_rows(window, cx)
+                } else {
+                    self.delete_row(window, cx)
+                };
+                if let Err(e) = deleted {
                     self.notice = Some(e.into());
                 }
                 true
@@ -2356,6 +2546,14 @@ impl MarketDataTile {
                     self.notice = Some(e.into());
                     return;
                 }
+                // With a selection live every commit and step goes to its
+                // members; opened on a cell that is not one, the typed
+                // value would land in the members while this cell stayed
+                // as it was.
+                if self.selection.is_some() && !self.selection_holds((row, col)) {
+                    self.notice = Some(select::NOT_A_MEMBER.into());
+                    return;
+                }
                 // Reject Deleted rows before creating either an editor or choice popup.
                 if self.model.rows[row].state == RowState::Deleted {
                     self.notice = Some(DELETED_REFUSED.into());
@@ -2416,11 +2614,38 @@ impl MarketDataTile {
             }
         } else {
             let state = cx.new(|cx| InputState::new(window, cx));
-            state.update(cx, |s, cx| s.set_value(text, window, cx));
+            state.update(cx, |s, cx| s.set_value(text.clone(), window, cx));
             state.read(cx).focus_handle(cx).focus(window, cx);
             EditorState::Text(state)
         };
-        self.editor = Some(Editing { state, target });
+        // Only a number cursor cell steps the selection live. A text or
+        // date cursor cell commits absolutely: its untouched `enter` writes
+        // the seeded value to every accepting member.
+        let bulk = (self.selection.is_some()
+            && matches!(state, EditorState::Text(_))
+            && matches!(
+                target,
+                EditTarget::Cell { cell: (_, col), .. }
+                    if matches!(self.model.kind_of(col), Some(CellKind::Number(_)))
+            ))
+        .then(|| Bulk {
+            before: self.draft.clone(),
+            after: self.draft.clone(),
+            painted: self.model.base.clone(),
+            seeded: text.to_string(),
+            steps: 0,
+            stepped: false,
+            upload: UploadMarks {
+                sent: self.sent.clone(),
+                echo: self.echo.clone(),
+                upload_error: self.upload_error.clone(),
+            },
+        });
+        self.editor = Some(Editing {
+            state,
+            target,
+            bulk,
+        });
         self.notice = None;
     }
 
@@ -2516,6 +2741,13 @@ impl MarketDataTile {
         match (&mut editing.state, target) {
             (EditorState::Text(state), EditTarget::Cell { cell, labels }) => {
                 let text = state.read(cx).value().to_string();
+                if editing.bulk.as_ref().is_some_and(|b| text == b.seeded) {
+                    // Untouched text: the live steps are the edit. Taken
+                    // before the close, which would otherwise undo them.
+                    editing.bulk = None;
+                    self.close_editor(window, cx);
+                    return true;
+                }
                 self.commit_cell_edit(cell, labels, &text, window, cx)
             }
             (EditorState::Text(state), EditTarget::Attr { index, column }) => {
@@ -2546,6 +2778,10 @@ impl MarketDataTile {
                     return true;
                 }
                 *paint = DateFieldPaint::of(field, self.id.0);
+                if self.selection.is_some() {
+                    let text = field.date().format("%Y-%m-%d").to_string();
+                    return self.commit_bulk(&text, window, cx);
+                }
                 let value = Value::Date(field.date());
                 self.commit_cell_value(cell, labels, value, window, cx)
             }
@@ -2631,6 +2867,9 @@ impl MarketDataTile {
     /// their own segment stepping. Invalid text remains unchanged with a notice. Return
     /// whether the header needs rebuilding.
     fn nudge(&mut self, steps: i64, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if let Some(chrome) = self.bulk_step(steps, window, cx) {
+            return chrome;
+        }
         let Some(editing) = self.editor.as_mut() else {
             return false;
         };
@@ -2714,6 +2953,9 @@ impl MarketDataTile {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.selection.is_some() {
+            return self.commit_bulk(text, window, cx);
+        }
         let value = match self.model.kind_of(cell.1) {
             Some(CellKind::Number(_)) => {
                 // `declared_type` answers `Some` for every `Number` column
@@ -2835,6 +3077,14 @@ impl MarketDataTile {
                 );
             }
         }
+        // A written value is kept: the close below must never restore the
+        // pre-`i` draft over it, even when the write left the draft equal
+        // to what the steps had made it. A stepping editor reaches this
+        // single-cell commit only after a delivery cleared its selection,
+        // which also moves the painted generation, so `undo_steps` would
+        // keep the steps anyway; the take states the rule rather than
+        // relying on that.
+        drop(self.editor.as_mut().and_then(|e| e.bulk.take()));
         self.close_editor(window, cx);
         self.notice = None;
         let snapshot = match self.painted_snapshot() {
@@ -2926,17 +3176,28 @@ impl MarketDataTile {
     /// Closing an unfinished typed row-label editor removes its provisional row.
     /// Successful commit renames that row first, so the minted target is no longer
     /// present for cancellation to remove.
+    ///
+    /// Closing a selection editor that stepped undoes its steps: every
+    /// commit that keeps them takes the `bulk` out first, so a close here
+    /// is a cancel (`escape`, a click elsewhere, the menu, a row verb, a
+    /// key switch before the draft is parked).
     fn close_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(e) = &self.editor
             && e.state.is_focused(window, cx)
         {
             window.blur(cx);
         }
-        let Some(Editing {
-            target: EditTarget::RowLabel { label, .. },
-            ..
-        }) = self.editor.take()
-        else {
+        let Some(editing) = self.editor.take() else {
+            return;
+        };
+        // After the take, so the rebuild's mirror no longer paints the
+        // closed editor in its cell.
+        if let Some(bulk) = editing.bulk
+            && self.undo_steps(bulk) == StepsUndo::Restored
+        {
+            self.rebuild_model(cx);
+        }
+        let EditTarget::RowLabel { label, .. } = editing.target else {
             return;
         };
         let provisional = matches!(
@@ -3077,6 +3338,7 @@ impl MarketDataTile {
         self.editor = Some(Editing {
             state,
             target: EditTarget::RowLabel { row, label },
+            bulk: None,
         });
     }
 
@@ -3126,8 +3388,7 @@ impl MarketDataTile {
             },
             self.clock,
         );
-        let highlighted = menu::first_enabled(&rows);
-        self.popup = Some(Popup::Menu(MenuState { rows, highlighted }));
+        self.popup = Some(Popup::Menu(Menu::new(rows, &self.chords)));
         cx.notify();
     }
 
@@ -3152,23 +3413,8 @@ impl MarketDataTile {
         cx.notify();
     }
 
-    /// A hover over menu row `index` — the mouse form of `j`/`k`. Cheap
-    /// on purpose: gpui fires `on_mouse_move` on every pointer move over
-    /// the row, so only a CHANGE notifies; a pointer resting on the
-    /// highlighted row costs a compare.
-    pub(crate) fn menu_hover(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(Popup::Menu(m)) = &mut self.popup else {
-            return;
-        };
-        if m.highlighted == index || index >= m.rows.len() {
-            return;
-        }
-        m.highlighted = index;
-        cx.notify();
-    }
-
     /// A hover over painted picker row `row` — the mouse form of
-    /// `up`/`down`; the same change-only rule as [`Self::menu_hover`].
+    /// `up`/`down`; change-only, as the menu's hover is.
     pub(crate) fn picker_hover(&mut self, row: usize, cx: &mut Context<Self>) {
         let Some(Popup::Picker(p)) = &mut self.popup else {
             return;
@@ -3177,32 +3423,6 @@ impl MarketDataTile {
             return;
         }
         cx.notify();
-    }
-
-    /// Pick a menu row by pointer or Enter. Disabled rows report their reason and
-    /// remain open; enabled rows close and invoke the same dispatch route as keys.
-    pub(crate) fn menu_pick(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(Popup::Menu(m)) = &self.popup else {
-            return;
-        };
-        let Some(row) = m.rows.get(index) else {
-            return;
-        };
-        let MenuRow::Action { id, enabled, .. } = row else {
-            return;
-        };
-        match enabled {
-            Err(reason) => {
-                self.notice = Some((*reason).into());
-                self.rebuild_chrome();
-                cx.notify();
-            }
-            Ok(()) => {
-                let id = id.clone();
-                self.close_popup_with_window(window, cx);
-                self.dispatch(&id, None, window, cx);
-            }
-        }
     }
 
     // ---- the underlying picker -----------------------------------
@@ -3384,7 +3604,10 @@ impl MarketDataTile {
         cx.notify();
     }
 
-    /// The pick itself: close the popup FIRST (blur, then drop — its
+    /// The pick itself. Under a live selection the option goes to
+    /// [`Self::commit_bulk`], which writes it to every accepting member
+    /// and closes the popup itself, or leaves it open when nothing
+    /// accepts. Otherwise close the popup FIRST (blur, then drop — its
     /// field is done being useful the moment an option is chosen, as
     /// `picker_pick` closes before `set_key`), then write through
     /// [`Self::commit_cell_value`], the one door every cell value lands
@@ -3394,6 +3617,9 @@ impl MarketDataTile {
             return false;
         };
         let (cell, labels) = c.target();
+        if self.selection.is_some() {
+            return self.commit_bulk(&option, window, cx);
+        }
         self.close_popup_with_window(window, cx);
         self.commit_cell_value(cell, labels, Value::Utf8(option), window, cx)
     }
@@ -3502,22 +3728,33 @@ impl MarketDataTile {
 
     /// `:bump <delta> [row|col]` — add `delta` to every NUMBER cell along
     /// the cursor's ROW by default (a term's whole node ladder is the
-    /// shape a trader nudges) or down its column on request.
+    /// shape a trader nudges) or down its column on request. With no axis
+    /// word and a selection live, every selected number instead
+    /// (`bump_selection`); a typed `row` or `col` keeps its own meaning.
     ///
     /// Each cell's CURRENT painted value is what is added to, which is the
     /// draft's own value wherever one exists, so two bumps compose instead
     /// of the second reading through to the document underneath
-    /// (`Draft::bump`'s own contract). A NULL cell is skipped: there is no
-    /// number to add to, and inventing one would put a value on screen the
-    /// document never carried. A cell whose column is not `CellKind::Number`
-    /// (a flat panel's date or status column) is skipped the same way —
+    /// (`current_numeric`). A NULL cell is skipped: there is no number to
+    /// add to, and inventing one would put a value on screen the document
+    /// never carried. A cell whose column is not `CellKind::Number` (a
+    /// flat panel's date or status column) is skipped the same way —
     /// `:bump` is arithmetic, and a schedule's non-numeric columns have
     /// nothing to add to either.
-    fn bump(&mut self, delta: f64, axis: BumpAxis, cx: &mut Context<Self>) -> Result<(), String> {
+    fn bump(
+        &mut self,
+        delta: f64,
+        axis: Option<BumpAxis>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if axis.is_none() && self.selection.is_some() {
+            return self.bump_selection(delta, cx);
+        }
+        let axis = axis.unwrap_or_default();
         if let Some(refusal) = self.held_refusal() {
             return Err(refusal.to_string());
         }
-        let base = self.edit_base()?;
+        self.edit_base()?;
         let Cursor::Cell { row, col } = self.cursor else {
             // Bump requires grid cells; the attribute strip has no row or column
             // target.
@@ -3527,39 +3764,6 @@ impl MarketDataTile {
         if matches!(axis, BumpAxis::Row) && self.model.rows[row].state == RowState::Deleted {
             return Err(DELETED_REFUSED.to_string());
         }
-        // The draft's own edit for this cell, through `Draft::numeric_edit`
-        // — `:bump`'s own door onto it — falling back to the model's own
-        // painted value (the document's, or NULL) when there is no edit
-        // yet to read. An INSERTED row's cell_ref is a model position, not
-        // a document one, so `Draft::edits` is never asked about it: its
-        // painted value IS the draft's own (`RowEdit.cells`, which is all
-        // the model ever paints there).
-        let numeric_value = |state: RowState, cell: &Cell| -> Option<Value> {
-            let edit = match state {
-                RowState::Inserted => None,
-                RowState::Document | RowState::Deleted => {
-                    self.draft.numeric_edit(cell.cell_ref).cloned()
-                }
-            };
-            edit.or(match &cell.value {
-                Some(value @ (Value::F64(_) | Value::I64(_))) => Some(value.clone()),
-                Some(Value::Utf8(_) | Value::Date(_)) | None => None,
-            })
-        };
-        // Use each column's declared numeric type. Flat panels follow flat_columns
-        // order; pivot values use value_type, while a leading slice-value cell is F64.
-        let ty_of = |ci: usize| -> ColumnType {
-            match self.spec.columns {
-                Columns::Values(_) => self
-                    .spec
-                    .flat_columns()
-                    .get(ci)
-                    .map(|vc| vc.ty)
-                    .unwrap_or(self.spec.value_type),
-                Columns::Axis(_) if ci < self.model.slice_columns => ColumnType::F64,
-                Columns::Axis(_) => self.spec.value_type,
-            }
-        };
         let mut skipped = 0usize;
         // Each cell to bump as (model cell, its current value, its declared type).
         let values: Vec<((usize, usize), Value, ColumnType)> = match axis {
@@ -3568,37 +3772,27 @@ impl MarketDataTile {
             // term's vols must not move its forward with them. A column
             // bump on a slice column still bumps that column down every
             // term, which is what a bump on `fwd` means.
-            BumpAxis::Row => {
-                let r = &self.model.rows[row];
-                r.cells
-                    .iter()
-                    .enumerate()
-                    .skip(self.model.slice_columns)
-                    .filter_map(|(ci, cell)| {
-                        if !matches!(self.model.kind_of(ci), Some(CellKind::Number(_))) {
-                            skipped += 1;
-                            return None;
-                        }
-                        numeric_value(r.state, cell).map(|v| ((row, ci), v, ty_of(ci)))
-                    })
-                    .collect()
-            }
+            BumpAxis::Row => (self.model.slice_columns..self.model.rows[row].cells.len())
+                .filter_map(|ci| {
+                    if !matches!(self.model.kind_of(ci), Some(CellKind::Number(_))) {
+                        skipped += 1;
+                        return None;
+                    }
+                    self.current_numeric(row, ci)
+                        .map(|v| ((row, ci), v, self.column_type(ci)))
+                })
+                .collect(),
             BumpAxis::Col => {
                 if !matches!(self.model.kind_of(col), Some(CellKind::Number(_))) {
                     return Err("not a numeric column".to_string());
                 }
-                let ty = ty_of(col);
+                let ty = self.column_type(col);
                 self.model
                     .rows
                     .iter()
                     .enumerate()
                     .filter(|(_, r)| r.state != RowState::Deleted)
-                    .filter_map(|(ri, r)| {
-                        r.cells
-                            .get(col)
-                            .and_then(|cell| numeric_value(r.state, cell))
-                            .map(|v| ((ri, col), v, ty))
-                    })
+                    .filter_map(|(ri, _)| self.current_numeric(ri, col).map(|v| ((ri, col), v, ty)))
                     .collect()
             }
         };
@@ -3609,44 +3803,54 @@ impl MarketDataTile {
                 "no values to bump".to_string()
             });
         }
-        // Collected rather than handed to `Draft::bump` as a lazy iterator:
-        // the labels come off `self.model` while the draft is borrowed
-        // mutably, which the borrow checker refuses — and one `Vec` per
-        // `:bump` line is a keystroke's worth of work, not a per-frame one.
-        // A document row's cell is keyed for `Draft::edits` by its own
-        // `cell_ref` (the document position — `commit_cell_value`'s rule);
-        // an inserted row's goes to its `RowEdit.cells` by label instead,
-        // with the same arithmetic.
-        let mut document: Vec<BumpCell> = Vec::with_capacity(values.len());
-        let mut inserted: Vec<((String, String), Value, ColumnType)> = Vec::new();
-        for (cell, value, ty) in values {
-            let labels = self.model.label_of(cell);
-            let labels = (labels.0.to_string(), labels.1.to_string());
-            let r = &self.model.rows[cell.0];
-            match r.state {
-                RowState::Inserted => inserted.push((labels, value, ty)),
-                RowState::Document | RowState::Deleted => {
-                    document.push((r.cells[cell.1].cell_ref, labels, value, ty));
-                }
-            }
-        }
-        // Validate every document and inserted cell's bump before either write path. A
-        // fractional delta rejected by an I64 cell must not leave earlier F64 changes
-        // applied. The write pass recomputes the same pure bumped results.
-        for (_, labels, value, ty) in &document {
-            bumped(value, delta, *ty, &labels.1)?;
-        }
-        for (labels, value, ty) in &inserted {
-            bumped(value, delta, *ty, &labels.1)?;
-        }
-        self.draft.bump(document.into_iter(), delta, &base)?;
-        for ((row_label, col_label), value, ty) in inserted {
-            let value = bumped(&value, delta, ty, &col_label)?;
-            self.draft.set_row_cell(&row_label, &col_label, value);
-        }
+        self.write_steps(
+            values
+                .into_iter()
+                .map(|(cell, v, ty)| (cell, v, ty, delta))
+                .collect(),
+        )?;
         self.rebuild_model(cx);
         self.changed(cx);
         Ok(())
+    }
+
+    /// A model cell's current number: the draft's own edit through
+    /// `Draft::numeric_edit` — `:bump`'s door onto it — falling back to
+    /// the model's painted value (the document's, or NULL) when there is
+    /// no edit yet. An INSERTED row's `cell_ref` is a model position, not
+    /// a document one, so `Draft::edits` is never asked about it: its
+    /// painted value IS the draft's own (`RowEdit.cells`, which is all the
+    /// model ever paints there). `None` for NULL, text, a date, or a cell
+    /// out of range — nothing to add to.
+    pub(super) fn current_numeric(&self, row: usize, col: usize) -> Option<Value> {
+        let r = self.model.rows.get(row)?;
+        let cell = r.cells.get(col)?;
+        let edit = match r.state {
+            RowState::Inserted => None,
+            RowState::Document | RowState::Deleted => {
+                self.draft.numeric_edit(cell.cell_ref).cloned()
+            }
+        };
+        edit.or(match &cell.value {
+            Some(value @ (Value::F64(_) | Value::I64(_))) => Some(value.clone()),
+            Some(Value::Utf8(_) | Value::Date(_)) | None => None,
+        })
+    }
+
+    /// A model column's declared type, which picks a step's arithmetic.
+    /// Flat panels follow `flat_columns` order; pivot values use
+    /// `value_type`, while a leading slice-value cell (fwd/atm/skew) is F64.
+    pub(super) fn column_type(&self, col: usize) -> ColumnType {
+        match self.spec.columns {
+            Columns::Values(_) => self
+                .spec
+                .flat_columns()
+                .get(col)
+                .map(|vc| vc.ty)
+                .unwrap_or(self.spec.value_type),
+            Columns::Axis(_) if col < self.model.slice_columns => ColumnType::F64,
+            Columns::Axis(_) => self.spec.value_type,
+        }
     }
 
     /// Rebase edits by labels onto the newest document and begin painting it. Build the
@@ -4032,9 +4236,12 @@ impl MarketDataTile {
         if self.editor.is_some() {
             self.close_editor(window, cx);
         }
+        // The next underlying's rows can carry the same labels; a
+        // selection must never carry over to another document.
+        self.clear_selection();
         // A question about the outgoing document must not stand over the
-        // incoming one.
-        let _ = self.disarm_upload(window, cx);
+        // incoming one: withdrawn unanswered, as a delivery withdraws it.
+        let _ = confirm::withdraw(self, cx);
         // A parked draft restores as Editing and stops comparing the outgoing upload's
         // echo. Clear its submitted payload and error state; retain an in-flight
         // request so its eventual outcome can be reported by key.
@@ -4343,7 +4550,7 @@ impl MarketDataTile {
     #[cfg(test)]
     pub(crate) fn menu_highlighted(&self) -> Option<usize> {
         match &self.popup {
-            Some(Popup::Menu(m)) => Some(m.highlighted),
+            Some(Popup::Menu(m)) => m.highlighted(),
             _ => None,
         }
     }
@@ -4354,12 +4561,9 @@ impl MarketDataTile {
     pub(crate) fn menu_checks(&self) -> Vec<(String, Option<bool>)> {
         match &self.popup {
             Some(Popup::Menu(m)) => m
-                .rows
+                .rows()
                 .iter()
-                .filter_map(|r| match r {
-                    MenuRow::Action { title, checked, .. } => Some((title.to_string(), *checked)),
-                    _ => None,
-                })
+                .filter_map(|r| r.action().map(|a| (a.title().to_string(), a.tick())))
                 .collect(),
             _ => Vec::new(),
         }
@@ -4397,7 +4601,9 @@ impl MarketDataTile {
 
     #[cfg(test)]
     pub(crate) fn upload_prompt(&self) -> Option<&str> {
-        self.pending_upload.as_ref().map(|p| p.prompt.as_ref())
+        self.pending_upload
+            .as_ref()
+            .map(|c| c.prompt_text().as_ref())
     }
 
     #[cfg(test)]
@@ -4511,6 +4717,54 @@ fn declared_type(spec: &PanelSpec, model: &MatrixModel, col: usize) -> Option<Co
     }
 }
 
+impl MenuHost for MarketDataTile {
+    /// A disabled row's reason becomes the notice and the menu stays; an
+    /// enabled row closes the menu and dispatches through the key's route.
+    fn menu_pick(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Popup::Menu(m)) = &self.popup else {
+            return;
+        };
+        match m.pick(index) {
+            Some(Err(reason)) => {
+                self.notice = Some(reason);
+                self.rebuild_chrome();
+                cx.notify();
+            }
+            Some(Ok(id)) => {
+                self.close_popup_with_window(window, cx);
+                self.dispatch(&id, None, window, cx);
+            }
+            None => {}
+        }
+    }
+
+    /// Change-only: gpui fires this on every pointer move over a row.
+    fn menu_hover(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(Popup::Menu(m)) = &mut self.popup
+            && m.highlight(index)
+        {
+            cx.notify();
+        }
+    }
+}
+
+impl ConfirmHost for MarketDataTile {
+    type Payload = PendingUpload;
+
+    fn confirm_slot(&mut self) -> &mut Option<Confirm<PendingUpload>> {
+        &mut self.pending_upload
+    }
+
+    fn confirmed(&mut self, pending: PendingUpload, _: &mut Window, cx: &mut Context<Self>) {
+        self.submit_upload(pending, cx);
+    }
+
+    fn cancelled(&mut self, _: PendingUpload, _: &mut Window, cx: &mut Context<Self>) {
+        self.notice = Some(UPLOAD_CANCELLED.into());
+        self.changed(cx);
+    }
+}
+
 impl gpui::Render for MarketDataTile {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
@@ -4540,7 +4794,7 @@ impl gpui::Render for MarketDataTile {
             &self.header,
             cursor_attr,
             editor,
-            self.pending_upload.as_ref().map(|p| &p.focus),
+            self.pending_upload.as_ref(),
             menu_open,
             theme,
             &tones,
@@ -4559,7 +4813,17 @@ impl gpui::Render for MarketDataTile {
                 .child(header)
                 .when_some(self.popup.as_ref(), |el, p| {
                     let popup_el = match p {
-                        Popup::Menu(m) => render_menu(m, &tile, self.id.0, cx).into_any_element(),
+                        Popup::Menu(m) => geode_tile::menu::render_menu(
+                            m,
+                            &self.menu_ids,
+                            gpui::Anchor::TopRight,
+                            &tile,
+                            |t: &mut MarketDataTile, window, cx| {
+                                t.close_popup_with_window(window, cx)
+                            },
+                            cx,
+                        )
+                        .into_any_element(),
                         Popup::Picker(p) => {
                             render_picker(p, &tile, self.id.0, cx).into_any_element()
                         }
@@ -4589,20 +4853,30 @@ impl gpui::Render for MarketDataTile {
         );
 
         // A pointer press anywhere on the tile cancels an armed `:upload`
-        // confirm — capture phase, so it runs before the press reaches
-        // whatever it was aimed at, and it never stops propagation (the
-        // press still does what it would have done).
-        let cancel_tile = tile.clone();
-        v_flex()
+        // confirm (the door's capture-phase press; the press still does
+        // what it would have done).
+        let root = v_flex()
             .size_full()
-            .debug_selector(|| format!("tile-content-{}", self.id.0))
-            .when(self.pending_upload.is_some(), |el| {
-                el.capture_any_mouse_down(move |_, window, cx| {
-                    cancel_tile.update(cx, |t, cx| t.cancel_upload_on_pointer(window, cx));
-                })
-            })
+            .debug_selector(|| format!("tile-content-{}", self.id.0));
+        confirm::cancel_on_press(root, self.pending_upload.is_some(), &tile)
             .child(header)
             .child(body)
+            // The extent readout, only while a selection is live — the
+            // strip's own `aggregate-extent` element, with no totals: a
+            // vol or forward ladder does not add up.
+            .when_some(self.selection_extent.as_ref(), |el, extent| {
+                el.child(
+                    h_flex()
+                        .w_full()
+                        .h(scale::design(FOOTER_HEIGHT))
+                        .items_center()
+                        .px_2()
+                        .text_xs()
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .child(aggregates::strip(Some(extent), &[], &[], theme)),
+                )
+            })
     }
 }
 
@@ -4653,12 +4927,7 @@ mod tests {
                 let theme = cx.theme();
                 let floored = FlooredTones::derive(theme);
                 let bg = ground(theme);
-                for (tone, stale) in [
-                    (Tone::Key, false),
-                    (Tone::Time, true),
-                    (Tone::Warn, false),
-                    (Tone::Error, false),
-                ] {
+                for (tone, stale) in [(Tone::Key, false), (Tone::Time, true), (Tone::Warn, false)] {
                     let colour = tone_colour(tone, stale, theme, &floored);
                     let ratio = contrast_ratio(to_rgb(colour), bg);
                     if ratio < READABLE_RATIO {
@@ -4684,9 +4953,8 @@ mod tests {
         );
     }
 
-    /// The memo re-derives only when one of its four inputs moves: a
-    /// theme with the same background, foreground, warning and danger
-    /// leaves it untouched, a different warning replaces it.
+    /// The memo re-derives only when one of its inputs moves: the same
+    /// theme leaves it untouched, a theme switch replaces it.
     #[gpui::test]
     fn floored_tones_refresh_only_when_an_input_changes(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
@@ -8458,7 +8726,7 @@ deleted = true
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.choice_highlighted()),
             Some("estimated".into()),
-            "a bare step wraps (§20.5)"
+            "a bare step wraps"
         );
         h.dispatch(&mut vcx, "cancel", None);
         assert!(!h.tile.read_with(&vcx, |t, _| t.choice_popup_open()));
@@ -10253,9 +10521,9 @@ edits = [["2099-01-01", "-1", 1.0]]
         assert_eq!(h.mode(&vcx), "normal");
     }
 
-    /// Install Chords from ACTIONS, fragment_doc, and build_keymap so tooltip chord
-    /// lookup uses the module's effective keymap.
-    fn install_fragment_chords(vcx: &mut gpui::VisualTestContext) {
+    /// Install Chords from ACTIONS, the fragment, and `user` as the user
+    /// layer, so chord lookups use the keymap the shell would publish.
+    fn install_chords(vcx: &mut gpui::VisualTestContext, user: Option<&str>) {
         let mut registry = geode_shell::actions::ActionRegistry::default();
         for (id, title) in crate::content::ACTIONS {
             registry
@@ -10266,11 +10534,31 @@ edits = [["2099-01-01", "-1", 1.0]]
                 })
                 .expect("no duplicate ids");
         }
-        let doc =
+        // Kind actions register beside ACTIONS, as the content's registration
+        // does, so a user layer may bind them.
+        for a in CVI.actions {
+            registry
+                .register(geode_shell::actions::ActionDef {
+                    id: ActionId(a.id.to_string()),
+                    title: a.title.to_string(),
+                    category: "Market data".to_string(),
+                })
+                .expect("no duplicate ids");
+        }
+        let mut docs = vec![
             geode_shell::keymap::fragments::fragment_doc(CVI.kind, crate::content::DEFAULT_KEYMAP)
-                .expect("the fragment parses");
+                .expect("the fragment parses"),
+        ];
+        if let Some(text) = user {
+            docs.push(geode_core::config::LayerDoc {
+                layer: geode_core::config::Layer::User,
+                name: "keymap".into(),
+                file: "user/keymap.toml".into(),
+                table: text.parse().unwrap(),
+            });
+        }
         let (keymap, diags) = geode_shell::keymap::build_keymap(
-            &[doc],
+            &docs,
             geode_shell::defaults::default_mod(),
             &registry,
         );
@@ -10280,6 +10568,114 @@ edits = [["2099-01-01", "-1", 1.0]]
                 keymap.bindings().to_vec(),
             )));
         });
+        vcx.run_until_parked();
+    }
+
+    fn install_fragment_chords(vcx: &mut gpui::VisualTestContext) {
+        install_chords(vcx, None);
+    }
+
+    const LOAD_REBOUND: &str = "[[bindings]]\ncontext = \"marketdata && mode == normal\"\n[bindings.keys]\n\"u\" = \"none\"\n\"shift+u\" = \"marketdata::load_underlying\"\n";
+
+    const LOAD_UNBOUND: &str = "[[bindings]]\ncontext = \"marketdata && mode == normal\"\n[bindings.keys]\n\"u\" = \"none\"\n";
+
+    /// The open menu's trailing lane for the row titled `title`: its keys
+    /// in keymap spelling, or its text.
+    fn menu_lane(h: &Harness, vcx: &gpui::VisualTestContext, title: &str) -> String {
+        use geode_tile::menu::{Row, Trailing};
+        h.tile.read_with(vcx, |t, _| match &t.popup {
+            Some(Popup::Menu(m)) => m
+                .rows()
+                .iter()
+                .find_map(|r| match r {
+                    Row::Action(a) if a.title().as_ref() == title => Some(match a.trailing() {
+                        Trailing::Keys(k) => geode_shell::palette::render_binding(k),
+                        Trailing::Text(t) => t.to_string(),
+                        Trailing::None => String::new(),
+                    }),
+                    _ => None,
+                })
+                .expect("the row"),
+            _ => panic!("the menu is open"),
+        })
+    }
+
+    /// The menu's hints are the live keymap's: a user rebind shows, and a
+    /// disabled row still shows its reason.
+    #[gpui::test]
+    fn a_menu_hint_follows_a_user_rebind(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        install_chords(&mut vcx, Some(LOAD_REBOUND));
+        h.dispatch(&mut vcx, "menu", None);
+        assert_eq!(menu_lane(&h, &vcx, "Load underlying…"), "shift+u");
+        assert_eq!(
+            menu_lane(&h, &vcx, "Revert edits"),
+            "nothing to revert",
+            "a disabled row still shows its reason"
+        );
+    }
+
+    /// An action the user unbinds entirely never shows its shipped key: a
+    /// key-only row's lane is empty; a verb row (`Upload`, bound nowhere by
+    /// default) shows its `:` verb.
+    #[gpui::test]
+    fn an_unbound_action_shows_no_stale_key(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        install_chords(&mut vcx, Some(LOAD_UNBOUND));
+        h.dispatch(&mut vcx, "menu", None);
+        assert_eq!(menu_lane(&h, &vcx, "Load underlying…"), "");
+        assert_eq!(menu_lane(&h, &vcx, "Upload"), ":upload");
+        assert_eq!(menu_lane(&h, &vcx, "Revert edits"), ":revert");
+    }
+
+    const POLICY_AND_KIND_BOUND: &str = "[[bindings]]\ncontext = \"marketdata && mode == normal\"\n[bindings.keys]\n\"z\" = \"marketdata::auto_rebase\"\n\"shift+z\" = \"marketdata::cvi_reanchor\"\n";
+
+    /// A user binding on an update-policy action and on a kind action reaches
+    /// the open menu: the policy row trails the chord instead of its `:auto`
+    /// verb, and the kind row's lane resolves to the chord (painted once the
+    /// action is built; an unbuilt row trails its reason over it). The other
+    /// policy rows keep their verbs.
+    #[gpui::test]
+    fn a_menu_hint_follows_a_policy_and_kind_rebind(cx: &mut gpui::TestAppContext) {
+        use geode_tile::menu::{Lane, Row};
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        install_chords(&mut vcx, Some(POLICY_AND_KIND_BOUND));
+        h.dispatch(&mut vcx, "menu", None);
+        assert_eq!(menu_lane(&h, &vcx, "rebase edits"), "z");
+        assert_eq!(menu_lane(&h, &vcx, "hold edits"), ":auto hold");
+        assert_eq!(menu_lane(&h, &vcx, "replace edits"), ":auto replace");
+        let reanchor = h.tile.read_with(&vcx, |t, _| match &t.popup {
+            Some(Popup::Menu(m)) => m
+                .rows()
+                .iter()
+                .find_map(|r| match r {
+                    Row::Action(a) if a.title().as_ref() == "Reanchor" => Some(a.lane().clone()),
+                    _ => None,
+                })
+                .expect("the row"),
+            _ => panic!("the menu is open"),
+        });
+        match reanchor {
+            Lane::Keys(k) => assert_eq!(geode_shell::palette::render_binding(&k), "shift+z"),
+            other => panic!("the kind row resolves its binding, got {other:?}"),
+        }
+    }
+
+    /// A keymap republished while the menu is open re-resolves its hints
+    /// at once, not at the next open.
+    #[gpui::test]
+    fn an_open_menu_follows_a_keymap_reload(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        install_chords(&mut vcx, None);
+        h.dispatch(&mut vcx, "menu", None);
+        assert_eq!(menu_lane(&h, &vcx, "Load underlying…"), "u");
+        install_chords(&mut vcx, Some(LOAD_REBOUND));
+        assert_eq!(menu_lane(&h, &vcx, "Load underlying…"), "shift+u");
     }
 
     #[gpui::test]
@@ -13494,7 +13890,11 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         draw(&mut vcx);
         assert!(h.upload_prompt(&vcx).is_some(), "armed");
         let prompt_focus = h.tile.read_with(&vcx, |t, _| {
-            t.pending_upload.as_ref().expect("armed").focus.clone()
+            t.pending_upload
+                .as_ref()
+                .expect("armed")
+                .focus_handle()
+                .clone()
         });
         assert!(vcx.update(|window, _| prompt_focus.is_focused(window)));
         let before = h.tile.read_with(&vcx, |t, _| t.draft().clone());
@@ -14324,4 +14724,71 @@ edits = [["2026-11-20", "-1", 9.5]]
             );
         }
     }
+
+    /// A press on the upload prompt itself answers "no" and takes no focus
+    /// (its own press-to-focus would hand the keyboard back to a question
+    /// that is gone). The keyboard returns to the tile through the shell's
+    /// restoration path: the very next `j` moves the cursor.
+    #[gpui::test]
+    fn the_tile_answers_keys_after_a_press_on_the_upload_prompt(cx: &mut gpui::TestAppContext) {
+        let (mut vcx, shell, tile, rx) = open_in_shell(cx);
+        let mut asked = None;
+        while let Ok(request) = rx.try_recv() {
+            if let Request::Document(params) = request {
+                asked = Some(params.tag);
+            }
+        }
+        let tag = asked.expect("the visible panel asked for its document");
+        let outcome = QueryOutcome {
+            key: QueryKey(1),
+            tag,
+            snapshot: Ok(Arc::new(cvi(BASE))),
+            submitted: Instant::now(),
+        };
+        vcx.update(|window, cx| {
+            shell.update(cx, |s, cx| s.deliver(Delivery::Query(outcome), window, cx))
+        });
+        draw(&mut vcx);
+        type_keys(&mut vcx, ":");
+        vcx.simulate_input("upload");
+        type_keys(&mut vcx, "enter");
+        draw(&mut vcx);
+        assert!(
+            tile.read_with(&vcx, |t, _| t.upload_prompt().is_some()),
+            "fixture: :upload armed the confirm"
+        );
+
+        let at = vcx
+            .debug_bounds("marketdata-upload-confirm-1")
+            .expect("the prompt is painted")
+            .center();
+        vcx.simulate_click(at, gpui::Modifiers::default());
+        vcx.run_until_parked();
+        draw(&mut vcx);
+        assert!(
+            tile.read_with(&vcx, |t, _| t.upload_prompt().is_none()),
+            "the press cancelled the confirm"
+        );
+        assert_eq!(
+            tile.read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some(UPLOAD_CANCELLED.into()),
+            "a press is a no, not a y"
+        );
+
+        let row = |vcx: &gpui::VisualTestContext| {
+            tile.read_with(vcx, |t, _| match t.cursor() {
+                Cursor::Cell { row, .. } => row,
+                Cursor::Attr(_) => usize::MAX,
+            })
+        };
+        let before = row(&vcx);
+        type_keys(&mut vcx, "j");
+        assert_eq!(
+            row(&vcx),
+            before + 1,
+            "j reached the tile with no other click after the prompt press"
+        );
+    }
+
+    mod selection;
 }

@@ -27,6 +27,43 @@ Every module follows these interaction rules:
 - Stack state is visible through the shared marker in the module header.
 - Delivery matches are exhaustive so a new outcome cannot be ignored silently.
 
+## Shared tile interaction
+
+Modules build their popups, `.` action menus, in-tile y/n confirms and
+notice lines from `geode-tile`, so each rule below holds in every tile that
+has the surface. The pricer and market-data use all four, timeseries the
+popups, menus and notice line, and the blotter the notice line. Diagnostics
+has none of them.
+
+- A popup is deferred above the tile's clip and snaps inside the window with
+  an 8-pixel margin. An action menu occludes what it covers, so its hover and
+  presses do not reach the tile beneath.
+- A menu opens on its first enabled action (timeseries' range and frequency
+  menus on the enabled value in force). Key hints resolve from the live
+  keymap when the menu opens, when its rows rebuild, and when the keymap is
+  republished, so an open menu follows a reload. An action the keymap binds
+  nowhere shows an empty lane, or its `:` verb on a row that has one
+  (`:price`, `:upload`, `:rebase`, `:revert`, `:auto hold`).
+- Keyboard stepping lands only on enabled actions, clamped at either end
+  without wrapping; from a row that is not an action it lands on the first
+  enabled action. A pointer can light a disabled row, which takes no
+  highlight fill. Enter or a click on a disabled row shows its reason and
+  keeps the menu open; an enabled pick closes the menu before it dispatches.
+  Rows rebuilt under an open menu keep the highlight on its row, or snap it
+  to the nearest action.
+- A confirm holds the keyboard: bare `y` confirms; any other key, chords
+  included, cancels and is consumed; a pointer press on the tile or focus
+  leaving also cancels. A change that moves what the question is about
+  withdraws it unanswered: neither the confirm nor the cancel action runs,
+  and the prompt's blur is not heard as an `n`. Market-data withdraws on a
+  delivery that moves the painted document or the draft and says so in its
+  notice (`upload cancelled: a new document arrived`); the pricer withdraws
+  on a `:` command with no notice of its own. Each answer blurs the prompt before it
+  drops, and the shell's focus restoration path returns the keyboard to the
+  tile.
+- A notice is a status (muted), warning or danger line in the theme's text
+  tones; which of a tile's notices shows is the tile's own precedence.
+
 ### Autosized columns
 
 The blotter, market-data, and pricer tiles fit their columns to their content
@@ -123,6 +160,11 @@ format.
 `g m` opens a panel on the cursor row's `underlying_ref` (the column name is
 fixed); a row above that level, a grouping without it, or a NULL value opens
 the plain tile picker.
+
+"Edit column in view…" and "Edit column in schema…" list the blotter's
+planned non-tree columns with the cursor's column highlighted
+(`TileContent::tile_columns`). Hidden columns and dimensions folded into the
+tree are not in the plan and are not offered; reach them through the dialogs.
 
 ### Selection
 
@@ -240,7 +282,13 @@ refuse fractional deltas or integer overflow; all candidate results are
 validated before any edit is written. Bump deltas themselves are parsed as
 `f64`, so their precision is limited by that representation. See the
 [crate guide](../../crates/geode-marketdata/README.md) for grid, popup, and
-command-parser contracts.
+command-parser contracts. The `.` action list follows the
+[shared menu rules](#shared-tile-interaction): its key hints are the live
+keymap's and follow a keymap reload while it is open, the update-policy and
+kind-action rows included; `Upload`, `Rebase`, `Revert edits` and the three
+policy rows (`:auto hold`, `:auto rebase`, `:auto replace`) fall back to their
+`:` verbs when unbound, and the other rows to an empty lane. A disabled row's
+reason becomes the notice.
 
 A panel opened through an add (palette, tile picker, `open_with`, duplicate)
 with no underlying opens the underlying picker at once; a restored panel does
@@ -272,6 +320,127 @@ same encoding, preserving identity across underlying switches. A missing
 fallback. Attribute serialization has a separate type ambiguity: a text
 attribute that looks like an ISO date restores as a Date.
 
+### Selection
+
+The panel's grid selection follows the [blotter's](#selection): `V`
+(`marketdata::visual_rows`) selects whole rows and `v`
+(`marketdata::visual_block`) a rectangle of cells; the other key switches
+kind at the same anchor and the same key again clears. While a selection is
+live the tile reports `mode == visual` (see [context
+predicates](keymaps.md#context-predicates)); motions extend it and clamp at the
+grid's edges, never wrapping and never entering the header attribute strip.
+The strip and the row-label column are never members. The first `escape`
+clears the selection alone.
+
+The anchor is the row's label and the column's name, so a redelivery, an
+inserted row, or a rebase keeps the same cells selected. An anchor no longer
+painted clears the selection with "selection cleared: anchor row no longer
+shown" (or "anchor column", for a block); no neighbour is guessed. Switching
+underlying clears the selection, because the next document's terms can carry
+the same labels and a selection must never carry over to another document. A
+click on a header attribute leaves the grid and clears it without a notice.
+
+The selection tint, the theme's selection color, overlays each cell's own
+edited, sent, or deleted fill (it never replaces it) and sits under the text;
+the cursor keeps its border inside the tint. A row selection tints its labels
+and every column. The footer shows the extent alone (`2 rows × 3 cols`), with
+no totals: a vol or forward ladder does not add up.
+
+In visual mode the verbs are single keys; the doubled normal-mode forms
+(`y y`, `y c`, `d d`) are not bound there.
+
+- `y` copies the selection as TSV and ends it. A row selection copies a
+  header line (the row-axis name where labels are shown, then every column)
+  and each row as `y y` would; a block copies its own columns' header and
+  cells, with no label.
+- `d` deletes every row of a row selection and ends the selection. When
+  every selected row is already deleted it refuses and keeps the selection.
+  Over a block it refuses with `d deletes rows — use V` and keeps
+  the selection, rather than deleting whole rows the block only partly covers.
+- `:bump <delta>` with no axis moves every selected number by `delta` and
+  keeps the selection; `:bump <delta> row|col` keeps its cursor-relative
+  meaning and ignores the selection. It notices `bumped N cells`. Like a live
+  step it is all-or-nothing: a fractional delta over a selection that
+  includes an integer column writes nothing.
+- `i` or `enter` opens the editor on the cursor cell, and refuses exactly when
+  that cell refuses (a deleted row, a document with nothing to edit) or is
+  not a member of the selection (below); it does not look for another member.
+
+On a pivot panel, a row selection's edits skip each term's leading slice
+values (forward, atm, skew), which is `:bump row`'s rule: a term's ladder
+moves without its forward. A flat panel has no slice values, and a block is
+exactly its rectangle. The copy and the tint still cover the slice values.
+Because they are not members, `i` on a slice value inside a row selection
+opens no editor and says `slice values are not in a row selection — use v`:
+the typed value or the steps would otherwise land in the ladder while the
+cell the editor showed stayed as it was. A block over the slice columns
+edits them.
+
+While the selection editor is open, its members are the edit's operand. The
+verbs that would move or end the selection under it — a motion, `V`/`v`, the
+`escape` action and `y`, each reachable from the palette in insert mode —
+refuse with `finish the edit first — enter or escape`. A delivery that no
+longer paints the anchor still clears the selection; the editor then acts on
+its own cell, and its arrows nudge the text.
+
+**One typed value.** With a selection live, committing the editor — typed
+text, a date field, or a choice picked from the popup — writes the value to
+every selected cell that accepts it. A number cell parses it by its column's
+declared type, a date cell as a date, a text cell as trimmed text (blank is
+refused where the column is required), and a choice cell only when it names an
+option exactly: a bulk write has no popup to rank a near miss. Deleted rows
+and cells that refuse are skipped and counted, `set 5 cells, skipped 3 (2
+deleted, 1 wrong type)`. Every member is judged before any write, so when
+nothing accepts, the commit is refused with the editor still open and the
+draft untouched. On a text or date cursor cell an untouched `enter` writes
+the seeded value across the selection. The selection stays after a
+commit.
+
+**Live steps.** On a number cursor cell with its text untouched, the editor's
+arrows (`up`/`down`, `shift+` for ten) step every selected number in the
+draft at once, so the grid shows the block as it moves; the header reads
+`stepped N cells +S` with the running total. Each cell moves from its exact
+current value by one unit of its column's displayed places, or by 1 on an
+integer column, and is never rounded to the painted grid: snapping would
+silently rewrite each cell's unpainted decimals. Empty, deleted, and
+non-number cells are skipped and counted. Each press is all-or-nothing: if
+any cell refuses (an overflow), nothing is written. A step refuses while the
+draft is Behind or its upload echo differs, as every edit does.
+
+- `enter` on the untouched text keeps the steps and the selection.
+- `escape` restores the draft exactly as `i` found it, provided the steps are
+  still its last change and the painted document has not moved; a delivery
+  held Behind meanwhile stays reported, and a draft that was Sent comes back
+  Sent with its echo check. A click elsewhere, a row verb, or a
+  switch of underlying closes the editor the same way. If an automatic rebase
+  moved the painted document, the steps are kept and the header says `steps
+  kept: the document moved`, because the pre-edit draft is keyed to a grid
+  no longer shown. If anything else changed the draft meanwhile (a revert, an
+  automatic replace, `:set`), the editor closes silently and leaves the draft
+  as it is.
+- Typing makes the edit absolute. The typed value replaces the steps; a cell
+  that refuses it returns to its pre-`i` value rather than keeping a
+  half-step. The exception is a painted document that moved while the editor
+  was open: then the steps stay, the typed value is written over them, and
+  the notice reads `set N cells; steps kept: the document moved`. From then
+  on the arrows nudge the editor's text alone.
+
+**Mouse.** A shift+click makes a block from the cursor as it was before the
+press to the clicked cell, or a row selection when it lands on a row label
+or the line-number gutter. A drag selects
+continuously from the cell it started on; where the press landed decides the
+kind, and a drag that did not start on a cell, label, or gutter selects
+nothing. With a selection live, shift+click extends it. A plain click anywhere
+on a row, including beside its cells, clears the selection and moves the
+cursor, so a double-click with a selection live opens a single-cell editor. A
+press inside the open editor's own cell belongs to the editor (caret
+placement, text selection, a date segment or separator): it neither cancels
+the edit nor starts a selection; `escape` cancels.
+
+Limitations: a selection is one contiguous row range or rectangle; there is
+no paste; `space` is not bound in visual mode, and the choice step reached
+from the palette acts on the cursor cell alone; the footer shows no totals.
+
 ### Uploads
 
 `:upload [target]` and the action list's `Upload` row send the edited document
@@ -286,8 +455,9 @@ shows the target and counts of changed cells, attributes, added rows, and
 removed rows. Bare unmodified `y` submits that snapshot after rechecking the
 live frame, live painted generation, and full draft equality. Every other key
 cancels and is consumed, including chords. A pointer press on the tile or loss
-of focus also cancels. A delivery that changes the draft or painted generation
-withdraws the prompt.
+of focus also cancels. A delivery that changes the draft or painted generation,
+or a switch of underlying, withdraws the prompt unanswered. The prompt is the
+shared `geode_tile::confirm` door.
 
 Transport success marks the draft `sent HH:MM` only if the current draft is
 still Editing and equals the submitted draft, including its base. Failure
@@ -340,7 +510,7 @@ Runtime responsibilities are split by module:
 | [`tile::data`](../../crates/geode-timeseries/src/tile/data.rs) | Fetch and query submission, delivery freshness, last-good results, and flip-barrier staging and promotion |
 | [`tile::pointer`](../../crates/geode-timeseries/src/tile/pointer.rs) | Chart hit testing, wheel navigation, pan and split drags |
 | [`tile::popups`](../../crates/geode-timeseries/src/tile/popups.rs) | Popup transitions, keyboard handling, commits, cancellation, and focus |
-| [`popup`](../../crates/geode-timeseries/src/popup.rs) | Popup state types and rendering, including shared list-row layout and hit testing |
+| [`popup`](../../crates/geode-timeseries/src/popup.rs) | Popup state types and rendering over `geode-tile`'s row shell, anchoring, menus and notice |
 
 Settings and tiles obtain configured fetch sources from the shell-published
 `SeriesSettings` global. A configured source is not proof that its adapter
@@ -431,11 +601,13 @@ affect them; cursor movement does not rebuild the data model.
 
 The header's `⋯` button, a chip's right-click, and `.` open the action menu.
 It offers popup openers, actions for the selected slot, `Frequency…`, toggles,
-and view reset. Keyboard stepping skips disabled rows, separators, and
-headings. Pointer selection can rest on a disabled row, which has no highlight
-fill; choosing it shows its reason and leaves the menu open. Enabled actions
-close the menu before dispatch. Key hints refresh when the menu opens or its
-chrome rebuilds, so an open menu can retain old hints after a keymap reload.
+and view reset. It opens on its first enabled action, and keyboard stepping
+skips disabled rows, separators, and headings. A pointer can rest on a
+disabled row, which has no highlight fill; choosing it shows its reason and
+leaves the menu open. Enabled actions close the menu before dispatch. Key
+hints are the live keymap's and are re-resolved when the menu opens, when its
+chrome rebuilds, and when the keymap is republished; an action the keymap
+binds nowhere shows an empty lane.
 
 The header shows the range and the frequency as two triggers, `1y ▾` and
 `1d ▾`; an absolute range shows its dates, `2025-09-26 – 2026-09-26 ▾`. Each
@@ -695,21 +867,25 @@ Normal-mode keys:
 | `d d` | Delete the row (a package with its legs) |
 | `u` / `ctrl+r` | Undo / redo; 100 entries, strictly last-in first-out. A step that brings rows back puts the cursor on the first of them, and a package that was open comes back open |
 | `y y` / `y c` | Copy the row's shorthand (and remember it for `p`) / the column's cells |
-| `p` / `shift+p` | Put the remembered row below / above; a package always lands at a root boundary |
+| `p` / `shift+p` | Put the remembered rows below / above as one undo entry, the cursor on the first landed row; when any of them is a package the whole run lands at a root boundary |
 | `shift+j` / `shift+k` | Move the row within its parent |
 | `g p` / `g u` | Group the cursor row and the next `count − 1` roots into a custom package / ungroup |
 | `g m` | Open a panel on the cursor row's underlying |
 | `.` | Open the action menu |
+| `shift+v` / `v` | Select rows / a block of cells from the cursor (see [Selection](#selection-2)) |
 
 `g m` opens a panel on the cursor row's underlying: a line's or leg's own, a
 package's when its legs share one; otherwise the plain tile picker.
 
 The action menu offers repricing, grouping, ungrouping, undo, redo, deletion,
-and view selection. Key hints show default bindings and do not reflect
-rebindings. Keyboard stepping skips disabled rows, separators, and headings.
-Pointer selection, the initial highlight, or a rebuilt menu can still leave a
-disabled row selected. It has no highlight fill; choosing it shows its reason
-and leaves the menu open.
+and view selection. Key hints are the actions' live chords (`:price` when the
+keymap binds none; an empty lane for the other actions) and follow a keymap
+reload while the menu is open. The menu opens on its first enabled action,
+and keyboard stepping skips disabled rows, separators, and headings. A
+pointer, or rows rebuilt under the highlight, can still leave a disabled row
+selected. It has no highlight fill; choosing it shows its reason in the
+footer and leaves the menu open. The shared rules are in
+[Shared tile interaction](#shared-tile-interaction).
 
 `y` alone is unbound: the key matcher dispatches an exact match at once, so a
 binding on `y` would make `y y` and `y c` unreachable. `g` alone is unbound for
@@ -792,7 +968,11 @@ tile holds:
   unless its load failed (`did not load`): then `:e` of it asks again,
   which is the way to retry a refused or failed load in place. Retrying
   discards edits made in the unsaved fallback sheet.
-- `:new` does the same into the next free `untitled-N`, empty, with no load.
+- `:new [sheet]` does the same into an empty sheet with no load: under the
+  given name, else the next free `untitled-N`. A name that already exists
+  (open in any tile, this one included, a known document, a queued save, or
+  a sheet being removed) is refused with `sheet 'x' already exists; :e x
+  opens it`, and the tile stays where it is.
 - `:name <sheet>` is refused if the name is open, is a known document, or has
   a save still queued (`sheet 'x' already exists`), and while the sheet is
   loading or after its load failed. Otherwise the tile takes the new name at
@@ -846,6 +1026,176 @@ confirmed: the catalog the diagnostics entity holds is refreshed only while
 a diagnostics tile is visible, so it can predate the removal. A name whose save is
 queued but not yet confirmed counts as taken: a new tile's `untitled-N` and
 `:name` skip it.
+
+### Selection
+
+The sheet's grid selection follows the [blotter's](#selection): `V`
+(`pricer::visual_rows`) selects whole rows and `v` (`pricer::visual_block`) a
+rectangle of cells; the other key switches kind at the same anchor and the
+same key again clears. With no row under the cursor (an empty sheet) both
+refuse with `select from a line or package row`. While a selection is live
+the tile reports `mode == visual` with a `select == rows|block` pair (see
+[context predicates](keymaps.md#context-predicates)); motions extend it and
+the first `escape` clears it alone.
+
+The anchor is the row's line id and the column's name, so a repricing, an
+edit elsewhere, a move or a view reload keeps the same cells selected. An
+anchor no longer painted — its package collapsed, its column dropped from the
+view — clears the selection with `selection cleared: anchor row no longer
+shown` (or `anchor column`); no neighbour is guessed. `:e` and `:new` clear
+it without a notice, because line ids restart per sheet and the anchor would
+name an unrelated line of the next one. `:name` keeps it: a rename changes no
+line id.
+
+The tint, the theme's selection color, overlays each cell under its text, so
+a package row's ground and a stale or failed cell's text color still show;
+the cursor keeps its border over it. A row selection also tints the tree
+column as each row's handle.
+
+**Verbs.** In visual mode the verbs are single keys; the doubled normal-mode
+forms (`y y`, `y c`, `d d`) are not bound there, nor are `p`, `shift+p`,
+`u`, `ctrl+r`, `o`, `n`, `shift+n`, `space`, the `z` folds, `g m` and `.`
+(the palette still reaches them). A verb that refuses keeps the
+selection and says why in the footer; a success notice goes to the header.
+
+- `y` ends the selection. Under `V` it copies the shorthand of the top-most
+  selected rows (a package, not also its selected legs, since the package's
+  shorthand already carries them), one per line, and remembers their rows, so
+  a following `p` or `shift+p` puts them all back at once, as one undo entry
+  with the cursor on the first landed row. When any of them is a package,
+  the whole run lands at a root boundary, since packages cannot nest. Under
+  `v` it copies the block as TSV under its column labels and leaves the
+  remembered row as it was: a block is not rows.
+- `d` under `V` deletes the top-most selected rows as one undo entry,
+  remembers them for `p`, ends the selection, and notices `deleted N rows`. A
+  leg selected without its package is deleted as a leg.
+- `shift+j`/`shift+k` under `V` slide the selected rows one sibling step as a
+  unit — one move of the neighbouring row across the block — and keep the
+  selection on the moved lines. Rows under different parents refuse (`can't
+  move: selection spans packages`), as does the end of the parent (`cannot
+  move past the end`).
+- `g p` under `V` groups the selected root lines into one custom package,
+  opens it and puts the cursor on it, ending the selection. It refuses a
+  selection that includes a package, lines inside a package, or lines that
+  are not contiguous — `Group` takes a run, so a gap would sweep an unselected
+  line into the package.
+- `g u` under `V` dissolves every top-most selected package as one undo
+  entry and ends the selection; with no package selected it refuses with `no
+  package selected`.
+- Under `v` the row verbs refuse and name `V` (`d deletes rows — use V`,
+  `shift+j/k move rows — use V`, `g p groups rows — use V`, `g u ungroups
+  rows — use V`): a block's cells are not a set of rows, and acting on its
+  rows would edit rows never picked as rows.
+
+A count on `d`, `shift+j`/`shift+k`, `g p` or `g u` is ignored while a
+selection is live: the selection names the rows. Motions still take a count.
+Every row verb refuses while the sheet is loading.
+
+**Edits act on lines.** `i` or `enter` opens the editor on the cursor cell,
+which must itself be editable: a read-only cursor cell refuses with its own
+reason. An edit then reaches each selected line; a selected package stands for
+its legs whether it is open or not, and a package selected with one of its
+own legs writes that leg once. A double-click is not a bulk edit: its first
+press clears the selection, so it opens a single-cell editor.
+
+**One typed value.** Committing typed text, a choice picked from a list, or a
+date writes it to the cursor's column on every selected line — under `v`
+too, however many columns the block spans: one text parsed into several
+column grammars (qty `5` and strike `5`, a type in the underlying) would be a
+plausible wrong value. Each line is judged on its own instrument. A package
+quantity goes through the package's template weights, as its own cell's edit
+does, so a `-5/+5` spread typed `3` becomes `3/-3` rather than `3/3`; a
+package whose legs no longer fit its template (the list form) is refused and
+none of its legs written. The writes are one undo entry and one reprice; a
+cell already holding the value counts as set with no edit, and a commit that
+changes nothing records no entry. The header notices `set 5 cells, skipped 3
+(2 read-only, 1 n/a)`, counting read-only cells, barrier cells on a vanilla
+line (`n/a`), and refused values.
+When no selected cell accepts the value, nothing is written and the editor
+stays open with `no selected cell accepts '<text>'` in the footer. The
+selection stays after a commit. Because the cursor's column is what a commit
+writes, `enter` re-checks that the cursor still sits on the editor's cell;
+if it does not, nothing is written and the editor closes with `the cell
+moved; edit refused`.
+
+**Live steps.** On a qty, strike, barrier, spot shift or vol shift cursor
+cell with its text untouched, the editor's `up`/`down` (`shift`: ten) step
+every target cell in the sheet at once: the cursor's column under `V`, every
+block column under `v`. Each cell steps by the precision its own text
+carries. A shift cell that inherits the sheet's shift steps from the value it
+paints, so under `:shift spot 2` an `up` makes its own `+3.0`; a line with its
+own shift steps from that. A selected package's quantity steps as the package
+quantity through the template weights, even when the cursor sits on one of
+its legs: that leg moves by its template weight, so a leg weighted negative
+goes down on `up`. Each press reprices through the ordinary path,
+so the grid shows the block and its prices as they move; the editor follows
+its own cell and the header reads `stepped N cells +S` with the running
+total. Cells that cannot step (read-only, not a number, a barrier on a
+vanilla, a list-form package quantity) are skipped and counted. A press is
+all-or-nothing: if the sheet refuses any stepped value (a quantity stepping
+to zero), the press writes nothing and the footer says why.
+
+- `enter` on the untouched text keeps the steps as one undo entry; steps that
+  net to nothing leave no entry. With no step taken, it writes nothing.
+- `escape` takes the steps back out of the sheet, provided they are still its
+  last change: no other recorded edit since and every stepped line as the
+  last step left it. Otherwise the steps are kept as one undo entry, since
+  replaying their inverses would undo the other write. A click elsewhere, a
+  verb, the menu, `:` and `/` cancel the same way. The palette's `undo` is
+  such a verb: mid-step it takes the steps back, then undoes the entry
+  before them. The rollback re-arms the save, replacing any save taken
+  mid-step.
+- Closing the tile or quitting mid-step takes the steps back by `escape`'s
+  rule before the final save and closes the editor, so the save never stores
+  steps that were not kept. When the steps are no longer the sheet's last
+  change they are recorded as one undo entry instead, and saved with it.
+- Typing makes the edit absolute: on `enter` the steps come out, by
+  `escape`'s rule, and the typed value replaces them as one entry. From then
+  on the arrows nudge the editor's text alone.
+
+A cursor cell that does not step has no live step. An untouched `enter` there
+writes nothing either: the editor closes with no notice and no undo entry,
+since the cursor cell's own value filled across the selection would be a
+plausible wrong block from a no-op gesture. Untouched means a choice list
+whose highlight never moved and whose query is empty or the option it opened
+on, a date field on the date it opened on (a tenor's today) with no digit
+typed, or a text field (a package's expiry or type cell) on its opening text.
+A moved or clicked option, a typed option, a changed date, a typed segment,
+or edited text commits to the cursor's column as above.
+
+**Footer totals.** While a selection is live the footer shows its extent
+(`3 rows × 12 cols`) at the left and, at the right under the risk columns,
+one position total for each risk column the view shows (price, delta, gamma,
+vega, theta, rho), painted as that column paints its numbers. A line counts
+`qty × value`; a package counts its own folded sum, which is already weighted
+by its legs' quantities. Totals are over the
+top-most selected rows, so an open package selected with its legs is not
+counted twice. A column with any selected row unpriced or failed shows a muted
+`—` rather than a partial sum — a failed line keeps its old result, so the
+state is checked, not only the value. A stale line still showing a result
+counts. A footer refusal or a line failure takes the footer while it stands.
+
+**Mouse.** A plain press anywhere on a row, including beside its cells,
+clears the selection and moves the cursor. A shift press starts a selection
+at the cursor as it was before the press — a block from a value cell, rows
+from the tree cell or the line-number gutter — and extends it to the pressed
+cell; with a selection live, shift+press extends it. A drag selects
+continuously from the cell it started on, its kind decided where the press
+landed; a drag whose press no cell caught (the header, a scrollbar, a
+divider) selects nothing. A chevron press is a plain press: it toggles its
+package and clears a live selection, and never starts one, even with shift.
+A press inside the open editor's own cell (caret, text selection, a date
+segment or separator) belongs to the editor: it neither cancels the edit nor
+takes a live step back. Any other gesture closes an open editor first, as a
+cancel. A shift press with the entry bar open closes the bar on the click and
+leaves the selection live, the keyboard back with the tile.
+
+Limitations: a selection is one contiguous row range or rectangle; `p` puts
+only rows a `V` yank remembered, so a copied TSV block cannot be pasted; a
+count is ignored on `d`, `shift+j`/`shift+k`, `g p` and `g u` while selecting; a
+package quantity in list form cannot be bulk-set or stepped, and its skip
+reads only `refused`; a typed value under `v` fills one column, not the
+block.
 
 ### Repricing
 
@@ -981,8 +1331,11 @@ delivery; it does not call a pricing implementation directly.
 ## Demo and application composition
 
 `geode-demo-data` generates deterministic risk batches and market-data
-documents. `geode-app --demo` writes risk files under a seed-specific temporary
-directory and streams serialized documents through its in-process adapter.
+documents. The [generator guide](../../crates/geode-demo-data/README.md)
+describes risk grains, deliberate ingestion edge cases, document sequences,
+and the demo configuration files. `geode-app --demo` writes risk files under
+a seed-specific temporary directory and streams serialized documents through
+its in-process adapter.
 Both use the same ingestion, parsing, query, and delivery paths as configured
 sources. Demo configuration remains below desk and user overrides. Cached
 sources and database contents are reused, so schema or generator changes may

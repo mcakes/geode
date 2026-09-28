@@ -52,7 +52,7 @@ fn open_views_dialog(
     dialog_test_shell_with(cx, services_with_views(), "config::views")
 }
 
-fn dialog_state<T>(
+pub(super) fn dialog_state<T>(
     shell: &Entity<ShellView>,
     cx: &gpui::VisualTestContext,
     f: impl FnOnce(&objectdialog::ObjectDialogState) -> T,
@@ -337,7 +337,7 @@ fn services_with_a_desk_view() -> ShellServices {
 /// The desk fixture plus user-layer documents keyed by document name. Adding only
 /// `view_presentation` models a hidden column whose view definition still belongs to
 /// the desk.
-fn desk_view_services(extra: &[(&str, &str)]) -> ShellServices {
+pub(super) fn desk_view_services(extra: &[(&str, &str)]) -> ShellServices {
     let mut services = test_services();
     let mut layered = desk_view_docs();
     for (name, text) in extra {
@@ -407,7 +407,7 @@ fn open_tree_edit_stage(
 /// and small: the watcher's own poll is 500 ms, so one flush never
 /// advances the clock far enough to make the reload fire by accident —
 /// the tests that want the reload run it explicitly.
-fn flush_config_write(cx: &mut gpui::VisualTestContext) {
+pub(super) fn flush_config_write(cx: &mut gpui::VisualTestContext) {
     cx.executor()
         .advance_clock(objectdialog::apply::WRITE_DEBOUNCE + std::time::Duration::from_millis(10));
     cx.run_until_parked();
@@ -1356,8 +1356,7 @@ fn unhiding_the_last_column_removes_the_object_rather_than_writing_an_empty_tabl
     let text = std::fs::read_to_string(dir.path().join("view_presentation.toml")).unwrap();
     assert!(
         !text.contains("[tree]"),
-        "and an absence on disk too — a bare `[tree]` is the artefact this \
-         ruling exists to make unwritable:\n{text}"
+        "an empty presentation must leave no bare `[tree]` table on disk:\n{text}"
     );
 }
 
@@ -2002,10 +2001,8 @@ fn reordering_slot_3_and_pressing_ctrl_3_regroups_off_the_new_order(cx: &mut gpu
     );
 }
 
-/// The confirm-and-fork step above is not incidental: `d`/`r` on a
-/// Groupings slot must not panic looking for a presentation file that
-/// does not exist (`Domain::presentation_doc` is `None` for Groupings) —
-/// this is the regression the removal path's own generalisation guards.
+/// Deleting or reverting a forked Groupings slot must not request a
+/// presentation document: `Domain::presentation_doc` is `None` for Groupings.
 #[gpui::test]
 fn deleting_a_forked_slot_does_not_look_for_a_presentation_doc_that_does_not_exist(
     cx: &mut gpui::TestAppContext,
@@ -3312,7 +3309,7 @@ fn c_refuses_when_the_source_vanished_before_enter(cx: &mut gpui::TestAppContext
     assert!(dialog_state(&shell, &cx, |s| s.draft.is_none()));
 }
 
-/// `c` is Scopes-only for now: elsewhere it is an unbound letter.
+/// `c` is Scopes-only: elsewhere it is an unbound letter.
 #[gpui::test]
 fn c_is_not_a_verb_on_views(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -3501,11 +3498,12 @@ fn escape_from_save_current_naming_writes_nothing(cx: &mut gpui::TestAppContext)
     assert!(!dir.path().join("scopes.toml").exists());
 }
 
-/// Saving the current scope while another modal is open leaves that modal and its
-/// object state untouched. A refused open must not continue by mutating the existing
-/// Views dialog's naming state.
+/// Saving the current scope over an open Views dialog stacks a Scopes dialog in
+/// naming, and leaves the covered Views state untouched: the naming lands on the
+/// Scopes state `open` just installed, never on the parked Views one. With Scopes
+/// already open underneath, the request is refused and touches nothing.
 #[gpui::test]
-fn scope_save_current_does_not_touch_an_already_open_dialog(cx: &mut gpui::TestAppContext) {
+fn scope_save_current_stacks_over_views_without_touching_it(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, mut cx) =
         dialog_test_shell_in_dir(cx, services_with_a_desk_view(), dir.path(), "config::views");
@@ -3516,17 +3514,44 @@ fn scope_save_current_does_not_touch_an_already_open_dialog(cx: &mut gpui::TestA
 
     assert_eq!(
         dialog_state(&shell, &cx, |s| s.domain),
-        objectdialog::Domain::Views,
-        "the open dialog must still be Views, not Scopes"
+        objectdialog::Domain::Scopes
     );
     assert_eq!(
         dialog_state(&shell, &cx, |s| s.stage.clone()),
-        objectdialog::Stage::Browse,
-        "still browsing — scope::save_current must not have entered naming"
+        objectdialog::Stage::Naming
     );
+    let views = |shell: &Entity<ShellView>, cx: &gpui::VisualTestContext| {
+        shell.read_with(cx, |s, _| {
+            let parked = &s.modals[0].parked_object.as_ref().unwrap().state;
+            (
+                parked.domain,
+                parked.stage.clone(),
+                parked.naming_seed.clone(),
+            )
+        })
+    };
     assert_eq!(
-        dialog_state(&shell, &cx, |s| s.naming_seed.clone()),
-        objectdialog::NameSeed::Empty
+        views(&shell, &cx),
+        (
+            objectdialog::Domain::Views,
+            objectdialog::Stage::Browse,
+            objectdialog::NameSeed::Empty
+        ),
+        "the covered Views dialog must not have entered naming"
+    );
+
+    // Settings over Scopes over Views: a second save is refused and touches neither.
+    dispatch_action(&shell, "settings::open", &mut cx);
+    dispatch_action(&shell, "scope::save_current", &mut cx);
+    cx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.notice),
+        Some(objectdialog::Domain::Scopes.already_open_notice())
+    );
+    assert_eq!(shell.read_with(&cx, |s, _| s.modals.len()), 3);
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Naming
     );
 }
 
@@ -3543,7 +3568,7 @@ fn deliver_values_routes_by_key_and_drops_stale_outcomes(cx: &mut gpui::TestAppC
     );
     cx.simulate_keystrokes("enter"); // open `mine`
     // The stage opens on book, skipping the inert Dimensions header.
-    cx.simulate_keystrokes("enter"); // Values stage (Task 4's door)
+    cx.simulate_keystrokes("enter"); // Values stage
     cx.run_until_parked();
     let tag = dialog_state(&shell, &cx, |s| s.values_tag);
     let deliver =
@@ -8355,7 +8380,7 @@ fn i_and_n_have_buttons_that_do_what_their_keys_do(cx: &mut gpui::TestAppContext
     cx.run_until_parked();
     assert!(
         cx.debug_bounds("objectdialog-action-i").is_some(),
-        "a multi-option Choice both steps and types now (spec 2026-09-19 §3.2)"
+        "a multi-option Choice supports stepping and typing"
     );
 }
 

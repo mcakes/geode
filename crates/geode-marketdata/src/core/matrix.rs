@@ -1626,7 +1626,7 @@ mod tests {
         assert_eq!(model.rows[0].cells[3].text.to_string(), "");
         assert_eq!(
             model.rows[0].cells[3].value, None,
-            "NULL and 0.0 are different answers (§6.3)"
+            "NULL and 0.0 are different answers"
         );
     }
 

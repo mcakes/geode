@@ -3,6 +3,7 @@
 //! display cells; `draft` stores edits with the labels needed for rebase;
 //! `upload` assembles typed rows and compares delivered echoes.
 
+pub mod bulk;
 pub mod cursor;
 pub mod draft;
 pub mod matrix;

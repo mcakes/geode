@@ -1,12 +1,10 @@
 config_version = 1
-# No `[modules] default`: the key was retired with the split verbs (spec
-# 2026-09-08 add-tile §7.1) — tiles are added by kind (ctrl+k → Add …),
-# and `--demo` boots to an empty workspace showing that hint. Leaving it
-# here would make Geode's own demo layer warn about itself on every boot.
+# Demo startup opens an empty workspace; tiles are added by kind from
+# the palette or tile picker.
 [blotter]
 stale_after = "15m"
 
-# The timeseries viewer's default fetch source (timeseries spec §10):
+# The default fetch source for series entered without an explicit source:
 # `:add SPX.close` reads `SPX.close@demo_kdb`.
 [timeseries]
 default_source = "demo_kdb"

@@ -900,7 +900,7 @@ pub(crate) mod tests {
     #[test]
     fn the_declaration_parses_and_a_full_sheet_validates_against_it() {
         let ds = dataset();
-        assert!(ds.local, "a local dataset (spec §7.2)");
+        assert!(ds.local, "a local dataset");
         assert!(ds.is_document());
         assert_eq!(ds.key, vec![SHEET_KEY.to_string()]);
         assert_eq!(ds.axes, vec![LINE_AXIS.to_string()]);

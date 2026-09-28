@@ -30,6 +30,7 @@ use gpui_component::{
 
 use super::ShellView;
 use super::control::{ControlPaint, PointerStates as _};
+use super::objectdialog::{Domain, ObjectDialogState};
 use super::scale;
 use crate::dialogmode::{self, DialogMode, FocusTarget};
 use crate::footer::{self, Hint};
@@ -52,7 +53,9 @@ pub type ModalKeyHandler =
 
 /// Which dialog a stack entry is. Each kind but `Plain` owns one `ShellView`
 /// state field, so a kind appears at most once in the stack (see [`can_open`]);
-/// a second instance would overwrite the live one's state.
+/// a second instance would overwrite the live one's state. `Object` is the
+/// exception: it appears once per domain (see [`can_open_object`]), and each
+/// covered one's state is parked in its own entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DialogKind {
     Settings,
@@ -64,7 +67,9 @@ pub enum DialogKind {
     /// Every `choicedialog` target (tile kinds, grouping, log level): they share
     /// the one `choice_dialog` field.
     Choice,
-    /// Every object-dialog domain: they share the one `object_dialog` field.
+    /// Every object-dialog domain. `ShellView::object_dialog` holds the topmost
+    /// one's state; covered ones are parked in their own entries
+    /// ([`ShellModal::parked_object`]).
     Object,
     /// A modal with no state field of its own.
     Plain,
@@ -99,14 +104,18 @@ impl DialogKind {
     ];
 }
 
-/// Whether `notice` is one of [`DialogKind::already_open_notice`]'s strings.
-/// `close_modal` uses this to drop a refusal notice once the stack it named
-/// is empty: the kind it referred to no longer exists, so the notice would
-/// otherwise sit in the status bar describing a dialog nothing points to.
+/// Whether `notice` is one of [`DialogKind::already_open_notice`]'s or
+/// [`Domain::already_open_notice`]'s strings. `close_modal` uses this to drop a
+/// refusal notice once the stack it named is empty: the dialog it referred to no
+/// longer exists, so the notice would otherwise sit in the status bar describing
+/// a dialog nothing points to.
 pub(crate) fn is_already_open_notice(notice: &str) -> bool {
     DialogKind::ALL
         .iter()
         .any(|kind| kind.already_open_notice() == notice)
+        || Domain::ALL
+            .iter()
+            .any(|domain| domain.already_open_notice() == notice)
 }
 
 /// Whether a dialog of `kind` may be pushed now. Openers call this before
@@ -121,6 +130,77 @@ pub(crate) fn can_open(view: &mut ShellView, kind: DialogKind) -> bool {
         view.notice = Some(kind.already_open_notice());
     }
     false
+}
+
+/// Whether an object dialog on `domain` may be pushed now. Object dialogs stack
+/// across domains; the same domain never nests, because two drafts of one file
+/// would race each other's writes. The domain already on top is a silent no-op;
+/// one lower in the stack says so in the status bar.
+pub(crate) fn can_open_object(view: &mut ShellView, domain: Domain) -> bool {
+    let live = view.object_dialog.as_ref().map(|state| state.domain);
+    if live == Some(domain) && view.top_kind() == Some(DialogKind::Object) {
+        return false;
+    }
+    let covered = live == Some(domain)
+        || view
+            .modals
+            .iter()
+            .filter_map(|m| m.parked_object.as_ref())
+            .any(|parked| parked.state.domain == domain);
+    if covered {
+        view.notice = Some(domain.already_open_notice());
+        return false;
+    }
+    true
+}
+
+/// Park the live object dialog in the entry that owns it (the topmost `Object`
+/// entry) before another object dialog is installed, and reset the shared scroll
+/// handle for the newcomer. A no-op when no object dialog is live.
+pub(crate) fn park_object_dialog(view: &mut ShellView) {
+    let Some(state) = view.object_dialog.take() else {
+        return;
+    };
+    let scroll = view.object_dialog_scroll.offset();
+    view.object_dialog_scroll.set_offset(gpui::Point::default());
+    let owner = view
+        .modals
+        .iter_mut()
+        .rev()
+        .find(|m| m.kind == DialogKind::Object);
+    debug_assert!(owner.is_some(), "a live object dialog has a stack entry");
+    if let Some(owner) = owner {
+        debug_assert!(owner.parked_object.is_none(), "the live entry parks once");
+        owner.parked_object = Some(ParkedObject { state, scroll });
+    }
+}
+
+/// Restore the topmost remaining `Object` entry's parked state after its cover
+/// popped. Runs before `refocus_top`, so `sync_dialog_text` reads the revealed
+/// state.
+pub(crate) fn unpark_object_dialog(view: &mut ShellView) {
+    let Some(parked) = view
+        .modals
+        .iter_mut()
+        .rev()
+        .find(|m| m.kind == DialogKind::Object)
+        .and_then(|m| m.parked_object.take())
+    else {
+        return;
+    };
+    view.object_dialog = Some(parked.state);
+    view.object_dialog_scroll.set_offset(parked.scroll);
+}
+
+/// Every parked object dialog, top first. Takes `&mut view.modals` rather than
+/// the view so callers can hold other `ShellView` fields (the config) meanwhile.
+pub(crate) fn parked_objects_mut(
+    modals: &mut [ShellModal],
+) -> impl Iterator<Item = &mut ObjectDialogState> {
+    modals
+        .iter_mut()
+        .rev()
+        .filter_map(|m| m.parked_object.as_mut().map(|parked| &mut parked.state))
 }
 
 /// Whether dispatching `action` opens a shell dialog. With a dialog open, an
@@ -140,6 +220,8 @@ pub(crate) fn opens_dialog(action: &crate::actions::ActionId) -> bool {
             | "config::sources"
             | "config::colors"
             | "config::expressions"
+            | "config::view_column"
+            | "config::schema_column"
             | "frame::pick"
             | "scope::save_current"
             | "frame::as_of"
@@ -158,6 +240,13 @@ pub(crate) fn opens_dialog(action: &crate::actions::ActionId) -> bool {
 pub struct SavedInput {
     pub text: String,
     pub cursor: usize,
+}
+
+/// An object dialog covered by an object dialog of another domain: its whole state
+/// and the shared scroll handle's offset, restored when the cover pops.
+pub struct ParkedObject {
+    pub state: ObjectDialogState,
+    pub scroll: gpui::Point<Pixels>,
 }
 
 /// One open modal, owned and rendered by `ShellView`. Its `Rc` closures can be cloned
@@ -184,6 +273,9 @@ pub struct ShellModal {
     /// The workspace active when this entry was pushed. The stack's base
     /// entry decides which lane every frame dialog reads and commits to.
     pub workspace: WorkspaceIx,
+    /// Set while an object dialog of another domain covers this `Object` entry;
+    /// restored by [`unpark_object_dialog`].
+    pub parked_object: Option<ParkedObject>,
 }
 
 /// A multi-screen dialog's back step for the title row's Back button. `available`
@@ -342,8 +434,10 @@ pub fn open_shell_dialog_with_key<F>(
 {
     // Backstop for an opener that skipped its own `can_open` check. By then that
     // opener may already have overwritten the live state, which is why each
-    // opener checks first.
-    if !can_open(view, kind) {
+    // opener checks first. Object dialogs stack per domain: their opener checks
+    // `can_open_object` and parks the covered state before installing its own,
+    // so the per-kind check would wrongly refuse them here.
+    if kind != DialogKind::Object && !can_open(view, kind) {
         return;
     }
     // Do not let a pending shell key sequence survive into or across the modal.
@@ -385,6 +479,7 @@ pub fn open_shell_dialog_with_key<F>(
         back: None,
         saved_input: None,
         workspace: view.services.workspaces.active_ix(),
+        parked_object: None,
     });
 
     // Reuse the retained input, clearing text left by the previous dialog even if this

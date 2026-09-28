@@ -11,17 +11,27 @@ Dependencies point toward smaller and more stable crates:
 ```text
                          geode-app
                  composition and process setup
-                    /         |          \
-             feature modules  |       geode-data
-               /      \       |           |
-        geode-shell   shared widgets   geode-core
-               \        |                 /
-                └──── geode-core ─────────┘
+                  /           |             \
+          feature modules     |          geode-data
+            |       \         |              |
+            |    geode-tile   |              |
+            |       /         |              |
+            └──► geode-shell ◄┘              |
+                     |                       |
+               geode-widgets                 |
+                     |                       |
+                     └─────► geode-core ◄────┘
 
 calculation leaf: geode-pricing ─────────────────► geode-core
 pure presentation: geode-chart, geode-widgets ───► geode-core
 wire formats: geode-documents ───────────────────► geode-core
 ```
+
+A feature module depends on `geode-shell` directly (the `TileContent`
+contract, key chips, the rem scale) as well as through `geode-tile`, and may
+also name `geode-widgets`, `geode-chart` and `geode-core` directly.
+`geode-diagnostics` has no popover, menu, confirm or notice line and does not
+depend on `geode-tile`.
 
 `geode-core` is shared vocabulary without window, database, or network
 ownership. Typed interpretation and merging are I/O-free; its configuration
@@ -33,6 +43,13 @@ and pricing requests.
 `geode-shell` owns the window and interaction model. It does not depend on the
 data service or on feature modules. `geode-data` owns sources, DuckDB, and
 background data work. It does not depend on the shell or feature modules.
+
+`geode-tile` is the kit tiles are built from: the popover, the `.` action
+menu, the in-tile y/n confirm and the notice line, as models with one
+painter each. It depends on `geode-shell` for its paint doors and the live
+keymap, never on `geode-data` or a feature module, and the shell never
+depends on it. A tile mechanism two modules would otherwise each write lives
+there.
 
 Feature crates such as `geode-blotter`, `geode-marketdata`,
 `geode-timeseries`, `geode-diagnostics`, and `geode-pricer` implement the

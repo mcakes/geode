@@ -207,6 +207,21 @@ pub(crate) fn edit_for(
     text: &str,
 ) -> Result<Edit, String> {
     let i = instrument(sheet, row).map_err(String::from)?;
+    edit_on(i, sheet.shift(row), row, kind, text)
+}
+
+/// [`edit_for`] against a given instrument and own shifts rather than the
+/// sheet's. An `Edit` rewrites the whole record (`SetInstrument` the whole
+/// instrument, `SetShift` both shifts), so several cells of one line that
+/// change in one batch must each build on the previous cell's result, or
+/// the last would silently put back what the earlier ones wrote.
+pub(crate) fn edit_on(
+    i: &Instrument,
+    own: OwnShifts,
+    row: usize,
+    kind: ColumnKind,
+    text: &str,
+) -> Result<Edit, String> {
     let t = text.trim();
     match kind {
         ColumnKind::Qty => {
@@ -269,26 +284,20 @@ pub(crate) fn edit_for(
             }
             Ok(set(row, out))
         }
-        ColumnKind::SpotShift => {
-            let own = sheet.shift(row);
-            Ok(Edit::SetShift {
-                row,
-                shift: OwnShifts {
-                    spot_pct: shift(t, "spot shift")?,
-                    ..own
-                },
-            })
-        }
-        ColumnKind::VolShift => {
-            let own = sheet.shift(row);
-            Ok(Edit::SetShift {
-                row,
-                shift: OwnShifts {
-                    vol_pts: shift(t, "vol shift")?,
-                    ..own
-                },
-            })
-        }
+        ColumnKind::SpotShift => Ok(Edit::SetShift {
+            row,
+            shift: OwnShifts {
+                spot_pct: shift(t, "spot shift")?,
+                ..own
+            },
+        }),
+        ColumnKind::VolShift => Ok(Edit::SetShift {
+            row,
+            shift: OwnShifts {
+                vol_pts: shift(t, "vol shift")?,
+                ..own
+            },
+        }),
         ColumnKind::Price
         | ColumnKind::Delta
         | ColumnKind::Gamma
@@ -308,6 +317,26 @@ pub fn commit_date(sheet: &Sheet, row: usize, date: NaiveDate) -> Result<Option<
     let i = instrument(sheet, row).map_err(String::from)?;
     let edit = set(row, with_vanilla(i, |v| v.expiry = Expiry::Date(date)));
     Ok(changed(sheet, row, edit))
+}
+
+/// The text an arrow step starts from: the editor's own text, except an
+/// empty shift field. That field is an inherited shift, whose cell paints
+/// the sheet's value; a step from zero would move a painted `+2.0` down to
+/// `+1.0` on `up`. It steps from the sheet's value instead, so the cell
+/// becomes its own shift one step from what it showed. With no sheet
+/// shift the text stays empty and [`nudge`] starts at zero, which is what
+/// the cell stands for. A package's shift field is empty only while every
+/// leg inherits, so the same value holds for it.
+pub fn step_from(sheet: &Sheet, kind: ColumnKind, text: &str) -> String {
+    let inherited = match kind {
+        ColumnKind::SpotShift => sheet.sheet_shift().spot_pct,
+        ColumnKind::VolShift => sheet.sheet_shift().vol_pts,
+        _ => None,
+    };
+    match inherited {
+        Some(v) if text.trim().is_empty() => plain(v),
+        _ => text.to_string(),
+    }
 }
 
 /// Nudge numeric editor text by `steps` units of its written precision. Preserve a
@@ -586,6 +615,29 @@ mod tests {
             "empty nudges from 0"
         );
         assert!(nudge(ColumnKind::Expiry, "Z26", 1).is_err());
+    }
+
+    #[test]
+    fn an_empty_shift_steps_from_the_inherited_sheet_value() {
+        let mut s = one_line();
+        assert_eq!(
+            step_from(&s, ColumnKind::SpotShift, ""),
+            "",
+            "no sheet shift: the step starts at zero"
+        );
+        s.apply(Edit::SetSheetShift(OwnShifts {
+            spot_pct: Some(2.0),
+            vol_pts: Some(-1.5),
+        }))
+        .unwrap();
+        assert_eq!(step_from(&s, ColumnKind::SpotShift, " "), "2");
+        assert_eq!(step_from(&s, ColumnKind::VolShift, ""), "-1.5");
+        assert_eq!(
+            step_from(&s, ColumnKind::SpotShift, "5"),
+            "5",
+            "own text steps from itself"
+        );
+        assert_eq!(step_from(&s, ColumnKind::Strike, ""), "", "not a shift");
     }
 
     /// A barrier level is absolute. `commit` refuses

@@ -436,7 +436,7 @@ mod tests {
         assert!(
             available.is_none(),
             "ticking IS membership here, so there is no catalogue to \
-             promote out of (§18.7.1), got {available:?}"
+             promote out of, got {available:?}"
         );
         assert_eq!(
             items

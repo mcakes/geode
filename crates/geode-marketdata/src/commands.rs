@@ -18,11 +18,11 @@ use geode_core::document::KEY_SEPARATOR;
 /// `catalog_keys`).
 pub const KEY_DISPLAY_SEPARATOR: char = '/';
 
-/// Which way `:bump` walks from the cursor.
+/// Which way `:bump` walks from the cursor when an axis word is typed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BumpAxis {
-    /// Every cell in the cursor's row — the default, because a term's
-    /// whole node ladder is the shape a trader nudges.
+    /// Every cell in the cursor's row — the default without a selection,
+    /// because a term's whole node ladder is the shape a trader nudges.
     #[default]
     Row,
     Col,
@@ -35,9 +35,12 @@ pub enum Command {
     /// checked by the document-query path rather than this parser.
     Key(Vec<String>),
     Revert,
+    /// Add `delta` to numbers. With no axis: the selection when one is
+    /// live, else the cursor's row. An axis word keeps its own meaning
+    /// even with a selection live.
     Bump {
         delta: f64,
-        axis: BumpAxis,
+        axis: Option<BumpAxis>,
     },
     Rebase,
     /// Optional upload-target name. The tile resolves eligibility and requires
@@ -130,8 +133,9 @@ pub fn parse(line: &str) -> Result<Command, String> {
                 return Err(format!("'{delta}' is not a finite number"));
             }
             let axis = match words.next() {
-                None | Some("row") => BumpAxis::Row,
-                Some("col") => BumpAxis::Col,
+                None => None,
+                Some("row") => Some(BumpAxis::Row),
+                Some("col") => Some(BumpAxis::Col),
                 Some(other) => return Err(format!("unknown axis '{other}' (row, col)")),
             };
             Ok(Command::Bump { delta, axis })
@@ -261,15 +265,29 @@ mod tests {
             parse("bump 0.25"),
             Ok(Command::Bump {
                 delta: 0.25,
-                axis: BumpAxis::Row
+                axis: None
             }),
-            "row is the default"
+            "no word is no axis: the tile decides"
+        );
+        assert_eq!(
+            parse("bump 0.25 row"),
+            Ok(Command::Bump {
+                delta: 0.25,
+                axis: Some(BumpAxis::Row)
+            })
+        );
+        assert_eq!(
+            parse("bump 1 col"),
+            Ok(Command::Bump {
+                delta: 1.0,
+                axis: Some(BumpAxis::Col)
+            })
         );
         assert_eq!(
             parse("bump -1 col"),
             Ok(Command::Bump {
                 delta: -1.0,
-                axis: BumpAxis::Col
+                axis: Some(BumpAxis::Col)
             })
         );
         assert!(parse("bump").is_err());

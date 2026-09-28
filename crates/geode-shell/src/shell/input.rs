@@ -256,6 +256,11 @@ impl ShellView {
             objectdialog::render::open(self, objectdialog::Domain::Colors, window, cx);
         } else if action.0 == "config::expressions" {
             objectdialog::render::open(self, objectdialog::Domain::Expressions, window, cx);
+        } else if action.0 == "config::view_column" {
+            // Pull the focused tile's columns now; the list keeps this copy.
+            choicedialog::open_columns(self, objectdialog::Domain::Views, window, cx);
+        } else if action.0 == "config::schema_column" {
+            choicedialog::open_columns(self, objectdialog::Domain::Schema, window, cx);
         } else if action.0 == "fontsize::increase" {
             // Clamped steps (ctrl+= / ctrl+-); render applies the rem size
             // on the notify, persistence mirrors the settings control's

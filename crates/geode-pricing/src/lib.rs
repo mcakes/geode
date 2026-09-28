@@ -1,12 +1,10 @@
 //! Implementations of `geode_core::pricing::Pricer`.
 //!
-//! This crate is a leaf under PHILOSOPHY §1's "In-process calculation":
-//! it depends on `geode-core` alone, nothing in the shell, a module or
-//! the data crate depends on it except by the `Pricer` door, and the real
-//! vendor library lands beside [`MockPricer`] behind a feature gate CI
-//! never builds. `geode-app` registers what this build has in a
-//! `PricerRegistry`; a `[pricing] adapter` naming anything else fails
-//! every line with that reason, never startup.
+//! This calculation leaf depends on `geode-core` and exposes implementations
+//! through its `Pricer` trait. [`MockPricer`] supplies deterministic demo and
+//! test results. `geode-app` registers available implementations in its
+//! `PricerRegistry`; an unknown `[pricing] adapter` produces per-line errors
+//! without preventing startup.
 
 use geode_core::pricing::{
     Instrument, MarketOverrides, OptionKind, PriceRequest, PriceResult, Pricer, PricingError,

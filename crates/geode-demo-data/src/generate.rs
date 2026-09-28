@@ -8,10 +8,13 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
 pub struct GeneratorConfig {
-    /// Target row count. Structure is generated until this is reached.
+    /// Positive target row count. Generation stops at this limit, possibly
+    /// partway through an instrument's pair rows. Zero still emits one row.
     pub rows: usize,
     pub seed: u64,
-    /// How many consecutive business dates to spread generations over.
+    /// Date slots starting at 2026-08-24; zero uses one slot. Dates are
+    /// formatted by incrementing the day field, without calendar validation.
+    /// Reaching the row limit can leave later slots unused.
     pub business_dates: usize,
 }
 
@@ -29,11 +32,7 @@ const UNDERLYINGS: &[&str] = &[
     "SPX", "SX5E", "NKY", "UKX", "NDX", "RTY", "DAX", "SMI", "HSI", "KOSPI2",
 ];
 
-/// The generator's own underlying vocabulary (Task 10, the demo bus):
-/// `demo_bus::spawn` needs one key per underlying it publishes a CVI
-/// document for, and this is the one place that vocabulary is declared
-/// — the risk generator's `UNDERLYINGS` above, not a second list the
-/// demo bus would have to keep in step with it by hand.
+/// Shared underlying vocabulary for risk generation and demo document keys.
 pub fn demo_underlyings() -> Vec<String> {
     UNDERLYINGS.iter().map(|s| s.to_string()).collect()
 }
@@ -60,10 +59,8 @@ pub fn generate(config: &GeneratorConfig) -> RiskBatch {
     let mut b = RiskBatch::default();
     let mut position_seq: u64 = 0;
 
-    // Book and LHU cardinality is a property of the desk and stays fixed;
-    // position count is what scales with the requested row count. Without
-    // this the generator caps out around 3k rows per business date and the
-    // §7.4 million-row benchmarks silently measure the wrong thing.
+    // Scale the position budget with the requested rows while keeping book
+    // and LHU cardinalities fixed, so large benchmarks receive full batches.
     let dates = config.business_dates.max(1);
     let slots = dates * BOOK_COUNT * LHUS_PER_BOOK;
     let positions_per_lhu = config.rows.div_ceil(slots * AVG_ROWS_PER_POSITION).max(1);
@@ -105,8 +102,8 @@ pub fn generate(config: &GeneratorConfig) -> RiskBatch {
                         let clean_theta = rng.random_range(-30_000.0..0.0);
                         let realized_theta = clean_theta * 0.9;
 
-                        // 2 or 3 underlyings: mono-underlying products still
-                        // carry currency risk, so 2 is the floor (spec §3.1).
+                        // Each instrument has two distinct underlyings, or
+                        // three in one tenth of draws, to exercise pair grains.
                         let n_underlying = if rng.random_range(0..10) == 0 { 3 } else { 2 };
                         let mut unders: Vec<&str> = Vec::with_capacity(n_underlying);
                         while unders.len() < n_underlying {
@@ -139,7 +136,7 @@ pub fn generate(config: &GeneratorConfig) -> RiskBatch {
                             .collect();
 
                         // Pair-grain measures: keyed by the *canonical* pair so
-                        // both orderings carry the same value (spec §3.3).
+                        // both orderings carry the same value.
                         let mut pair_values: Vec<((usize, usize), [f64; 2])> = Vec::new();
                         for i in 0..unders.len() {
                             for j in (i + 1)..unders.len() {

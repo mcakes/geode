@@ -56,10 +56,10 @@ use crate::core::{
 use crate::header::{self, HeaderModel};
 use crate::popup::{
     ColorPick, DateFieldPaint, ExprField, MenuState, PickContext, PickerStage, PickerState, Popup,
-    PopupKind, RangePopup, SeriesPopup, Which, render_menu, render_picker, render_range,
-    render_series_popup,
+    PopupKind, RangePopup, SeriesPopup, Which, render_picker, render_range, render_series_popup,
 };
 use crate::tile::pointer::{ChartBounds, Drag};
+use geode_tile::menu::{Menu, MenuHost, MenuIds, Row};
 
 mod data;
 mod pointer;
@@ -210,10 +210,13 @@ impl TimeseriesTile {
             cx.notify();
         })
         .detach();
-        // The footer names live chords, so a keymap reload re-resolves
-        // it — once, here, never per frame.
+        // The footer and an open menu name live chords, so a keymap reload
+        // re-resolves both — once, here, never per frame.
         cx.observe_global::<geode_shell::tips::Chords>(|this, cx| {
             this.footer = header::footer_hints(cx);
+            if let Some(Popup::Menu(m)) = &mut this.popup {
+                m.menu.rehint(&geode_tile::menu::live_bindings(cx));
+            }
             cx.notify();
         })
         .detach();
@@ -779,19 +782,17 @@ impl TimeseriesTile {
 
     /// Rebuild an open menu's rows over the model and the frame as they are
     /// now, keeping the highlight on its row where that row is still an action,
-    /// else landing on the first enabled one. Answers whether the rows moved.
+    /// else snapping it to the nearest action. Answers whether the rows moved.
     fn refresh_menu_rows(&mut self, cx: &App) -> bool {
         let Some(Popup::Menu(m)) = &self.popup else {
             return false;
         };
         let rows = self.menu_rows(m.kind, cx);
+        let bindings = geode_tile::menu::live_bindings(cx);
         let Some(Popup::Menu(m)) = &mut self.popup else {
             return false;
         };
-        m.highlighted = menu::step(&rows, m.highlighted, 0);
-        let moved = m.rows != rows;
-        m.rows = rows;
-        moved
+        m.menu.replace_rows(rows, &bindings)
     }
 
     /// Prepare header, title, open series-list rows and an open menu's rows.
@@ -823,7 +824,7 @@ impl TimeseriesTile {
         // the frequency and the cap over the range — and a `:` line runs
         // under an open menu (the menu context leaves `:` to the tile).
         // The highlight stays on its row where that row is still an
-        // action, else lands on the first enabled one.
+        // action, else snaps to the nearest action.
         self.refresh_menu_rows(cx);
         let offset_secs = local_offset_secs(cx);
         let key = chart_key(
@@ -1057,13 +1058,13 @@ impl Render for TimeseriesTile {
         let under_range = match self.popup.as_ref() {
             Some(Popup::Range(r)) => Some(render_range(r, &tile, tile_id, cx).into_any_element()),
             Some(Popup::Menu(m)) if m.kind == MenuKind::Range => {
-                Some(render_menu(m, &tile, tile_id, cx).into_any_element())
+                Some(paint_menu(m, &tile, cx).into_any_element())
             }
             _ => None,
         };
         let under_freq = match self.popup.as_ref() {
             Some(Popup::Menu(m)) if m.kind == MenuKind::Frequency => {
-                Some(render_menu(m, &tile, tile_id, cx).into_any_element())
+                Some(paint_menu(m, &tile, cx).into_any_element())
             }
             _ => None,
         };
@@ -1079,9 +1080,7 @@ impl Render for TimeseriesTile {
                 cx,
             )),
             Some(Popup::Picker(p)) => Some(render_picker(p, &tile, tile_id, cx)),
-            Some(Popup::Menu(m)) if m.kind == MenuKind::Actions => {
-                Some(render_menu(m, &tile, tile_id, cx))
-            }
+            Some(Popup::Menu(m)) if m.kind == MenuKind::Actions => Some(paint_menu(m, &tile, cx)),
             // The expression field is not an overlay: it is a strip in
             // the body, below; the color picker is drawn in its target
             // chip, and the range and frequency popups under their
@@ -1156,6 +1155,28 @@ impl Render for TimeseriesTile {
             .child(body)
             .child(header::render_footer(&self.footer, theme))
     }
+}
+
+/// Paint an open menu through the door: the action list hangs from the
+/// header's right edge, the range and frequency menus under their triggers.
+/// A press outside closes it only while THIS menu is still up: a press on
+/// another menu's trigger runs first (capture phase) and has already swapped
+/// its own menu in, which this press must not close.
+fn paint_menu(m: &MenuState, tile: &Entity<TimeseriesTile>, cx: &App) -> gpui::Deferred {
+    let kind = m.kind;
+    geode_tile::menu::render_menu(
+        &m.menu,
+        &m.ids,
+        match kind {
+            MenuKind::Actions => gpui::Anchor::TopRight,
+            MenuKind::Range | MenuKind::Frequency => gpui::Anchor::TopLeft,
+        },
+        tile,
+        move |t: &mut TimeseriesTile, window, cx| {
+            t.outside_press(PopupKind::Menu(kind), window, cx)
+        },
+        cx,
+    )
 }
 
 /// What one `enter` in the picker turns out to mean, decided while the

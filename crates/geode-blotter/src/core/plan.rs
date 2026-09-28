@@ -6,6 +6,7 @@
 use geode_core::attribution::{Attribution, ScopeSemantics};
 use geode_core::groupings::GroupingSlots;
 use geode_core::snapshot::Snapshot;
+use geode_core::tile_columns::{TileColumn, TileColumns};
 use geode_core::view::{ColumnFormat, ViewColumn, ViewSpec};
 
 pub const TREE_WIDTH: f32 = 260.0;
@@ -51,6 +52,32 @@ pub struct ColumnPlan {
 }
 
 impl ColumnPlan {
+    /// The presented columns as the shell's column list names them: every
+    /// non-tree column in display order, `derived` from the view definition,
+    /// and `active` the plan column at `cursor_col` unless that is the tree
+    /// column (index 0, which `build` always pushes first) or out of range.
+    pub fn tile_columns(&self, view: &ViewSpec, cursor_col: usize) -> TileColumns {
+        let columns = self
+            .columns
+            .iter()
+            .filter(|c| c.kind != ColumnKind::Tree)
+            .map(|c| TileColumn {
+                name: c.name.clone(),
+                label: c.label.clone(),
+                derived: view
+                    .columns
+                    .iter()
+                    .any(|v| v.name() == c.name && matches!(v, ViewColumn::Derived { .. })),
+            })
+            .collect();
+        let active = (cursor_col > 0 && cursor_col < self.columns.len()).then(|| cursor_col - 1);
+        TileColumns {
+            view: view.name.clone(),
+            columns,
+            active,
+        }
+    }
+
     pub fn build(view: &ViewSpec, grouping: &[String], snapshot: &Snapshot) -> ColumnPlan {
         let grouping_indices: Vec<Option<usize>> =
             grouping.iter().map(|g| snapshot.column_index(g)).collect();
@@ -451,5 +478,61 @@ name = "missing_in_snapshot"
         );
         plan.move_column(2, 0);
         assert_eq!(plan.columns[0].kind, ColumnKind::Tree);
+    }
+
+    #[test]
+    fn tile_columns_lists_the_non_tree_columns_in_display_order() {
+        let snap = snapshot();
+        let plan = ColumnPlan::build(&view(), snap.grouping(), &snap);
+        let t = plan.tile_columns(&view(), 2);
+        assert_eq!(t.view, "tree");
+        let names: Vec<&str> = t.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "model_code",
+                "delta01",
+                "daily_trading_pnl",
+                "missing_in_snapshot"
+            ]
+        );
+        assert_eq!(t.columns[1].label, "Δ (k)", "the label as painted");
+        // Plan index 2 is `delta01`; the context drops the tree column, so 1.
+        assert_eq!(t.active, Some(1));
+        assert!(t.columns.iter().all(|c| !c.derived));
+    }
+
+    #[test]
+    fn the_tree_column_is_no_active_column() {
+        let snap = snapshot();
+        let plan = ColumnPlan::build(&view(), snap.grouping(), &snap);
+        assert_eq!(plan.tile_columns(&view(), 0).active, None);
+        assert_eq!(plan.tile_columns(&view(), 99).active, None);
+    }
+
+    #[test]
+    fn a_derived_view_column_is_flagged() {
+        let text = r#"
+[tree]
+dataset = "risk_snapshot"
+grouping = ["lhu"]
+[[tree.columns]]
+name = "delta01"
+[[tree.columns]]
+name = "delta_x2"
+kind = "derived"
+sql = "delta01 * 2"
+"#;
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
+        let v = ViewSpec::from_doc(&doc).0.remove(0);
+        let snap = snapshot();
+        let plan = ColumnPlan::build(&v, &["lhu".to_string()], &snap);
+        let t = plan.tile_columns(&v, 1);
+        let flags: Vec<(&str, bool)> = t
+            .columns
+            .iter()
+            .map(|c| (c.name.as_str(), c.derived))
+            .collect();
+        assert_eq!(flags, [("delta01", false), ("delta_x2", true)]);
     }
 }

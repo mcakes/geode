@@ -51,8 +51,8 @@ GPUI globals or provide rendering helpers.
 | `shell/dialog` | Modal stack ownership, opening, shared-input synchronization, and focus restoration. Only the top dialog renders and receives keys. A kind cannot open twice; pop restores the covered dialog's text and caret. See [modal lifetime](../../docs/current/input-and-dialogs.md#modal-lifetime-and-focus). |
 | `shell/scope_expr_view` | Frame expression editing in Whole, Term, and Add modes. Whole/Add stage named-expression chips; `mod+s` saves typed text as a named definition. Term mode can replace one guarded term with a named reference. |
 | `shell/expr_suggest` | Shared expression-completion controller and renderer for frame, Scopes, and Expressions fields. Observes text and caret changes, requests values under reserved `EXPR_KEY`, and accepts rows through undoable range replacement. Tab accepts; Shift-Tab, Up/Down, and Ctrl-P/Ctrl-N move the highlight. Named rows stage references only in frame Whole/Add mode. Named-definition fields request unscoped values; unresolved scope references report an error before requesting. |
-| `module` | The module-hosting contract: `TileContent` (including `launch_context`, `launched`, and `autosize_columns`, whose default refuses with `colfit::NO_TABLE`; `tile::autosize_columns` calls it on the focused occupant only and shows a refusal as a notice), `ModuleFactory` (including `accepts` and `launch_state`), `ModuleRoster`, `Delivery`, `StackHandle`. `module::recording` is the test double a downstream crate hosts a neighbour with. |
-| `shell/objectdialog` | Domain drafts, staged editing, validation, overrides, and debounced persistence. `render::open_object` opens a named object's edit stage or reports that it is undefined. `apply::queue_object` queues a whole user-layer definition with pending edits. The Expressions adapter validates named definitions and identifies referring scopes before deletion. See [configuration dialogs](../../docs/current/configuration-dialogs.md) for ownership and failure boundaries. |
+| `module` | The module-hosting contract: `TileContent` (including `launch_context`, `tile_columns`, `launched`, and `autosize_columns`, whose default refuses with `colfit::NO_TABLE`; `tile::autosize_columns` calls it on the focused occupant only and shows a refusal as a notice), `ModuleFactory` (including `accepts` and `launch_state`), `ModuleRoster`, `Delivery`, `StackHandle`. `module::recording` is the test double a downstream crate hosts a neighbour with. |
+| `shell/objectdialog` | Domain drafts, staged editing, validation, overrides, and debounced persistence. `render::open_object` opens a named object's edit stage or reports that it is undefined; `render::open_column` opens a tile's view (or the column's owning dataset) on one column's Column stage, reporting each failure in the footer. `apply::queue_object` queues a whole user-layer definition with pending edits. The Expressions adapter validates named definitions and identifies referring scopes before deletion. See [configuration dialogs](../../docs/current/configuration-dialogs.md) for ownership and failure boundaries. |
 
 ## Globals
 
@@ -94,7 +94,11 @@ change most often hits:
   `window.open_dialog`. A mouse-opened dialog relies on the
   `prevent_default` inside that door. Openers check `dialog::can_open` before
   installing state: a duplicate kind would overwrite the covered dialog's draft.
-  Unclaimed dialog-opening chords and the palette can open above a dialog;
+  Object dialogs check `dialog::can_open_object` instead: they stack per domain,
+  and `objectdialog::render::open` parks the covered state in its stack entry
+  (`ShellModal::parked_object`) before installing its own. Code that must reach
+  a covered object dialog (deliveries, reload refreshes, write reverts) iterates
+  `object_dialog` plus `dialog::parked_objects_mut`. Unclaimed dialog-opening chords and the palette can open above a dialog;
   tile command lines, find prompts, and stack lists are refused while it is open.
 - The pure state of a dialog is the truth; `dialog::sync_dialog_text`
   reconciles the shared input's text and focus after state transitions.

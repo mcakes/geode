@@ -7,7 +7,9 @@ use crate::core::draft::{DraftBadge, local_hhmm};
 use crate::core::matrix::{HeaderCell, MatrixModel, RowState};
 use crate::core::spec::PanelSpec;
 use crate::delegate::{CellPaint, cell_paint};
-use crate::tile::{DateFieldPaint, EditorPaint, FlooredTones, MarketDataTile, display_key};
+use crate::tile::{
+    DateFieldPaint, EditorPaint, FlooredTones, MarketDataTile, PendingUpload, display_key,
+};
 use chrono::{DateTime, Utc};
 use geode_core::clock::Clock;
 use geode_shell::fonts;
@@ -16,6 +18,8 @@ use geode_shell::shell::control::{self, PointerStates as _};
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::tips;
+use geode_tile::confirm::{self, Confirm};
+use geode_tile::notice::{self, Notice};
 use gpui::prelude::*;
 use gpui::{ElementId, Entity, FocusHandle, Hsla, SharedString, div, rems};
 use gpui_component::input::Input;
@@ -38,12 +42,11 @@ pub(crate) enum Tone {
     Key,
     Time,
     Warn,
-    Error,
 }
 
 /// One run's text colour: the theme's own secondary/primary text for the
 /// quiet tones, the floored `warning` for `Warn` (and for `Time` once the
-/// document is stale), the floored `danger` for `Error`. Never
+/// document is stale). Notices are the notice door's. Never
 /// `warning_foreground` — that is the token for text on a SOLID warning
 /// fill, and a run has no fill.
 pub(crate) fn tone_colour(
@@ -58,7 +61,6 @@ pub(crate) fn tone_colour(
         Tone::Time if stale => floored.warn,
         Tone::Time => theme.muted_foreground,
         Tone::Warn => floored.warn,
-        Tone::Error => floored.error,
     }
 }
 
@@ -207,10 +209,11 @@ pub(crate) struct HeaderModel {
     /// Nonzero incomplete-row count and warning tone, painted after state and
     /// before upload/notice feedback.
     pub incomplete: Option<(SharedString, Tone)>,
-    pub notice: Option<SharedString>,
-    /// `upload failed: <e>`, painted in the error tone ahead of the
+    /// Painted through `geode_tile::notice` in the danger tone.
+    pub notice: Option<Notice>,
+    /// `upload failed: <e>`, painted in the danger tone ahead of the
     /// notice.
-    pub upload_error: Option<SharedString>,
+    pub upload_error: Option<Notice>,
     /// The echo's line, painted after the state and the incomplete-rows
     /// chip, ahead of the upload error and the notice.
     pub echo: Option<(SharedString, Tone)>,
@@ -269,8 +272,8 @@ impl HeaderModel {
             badge: i.badge,
             state,
             incomplete,
-            notice: i.notice.cloned(),
-            upload_error: i.upload_error.cloned(),
+            notice: i.notice.cloned().map(Notice::danger),
+            upload_error: i.upload_error.cloned().map(Notice::danger),
             echo: i.echo.map(|(text, tone)| (text.clone(), tone)),
             prompt: i.prompt.cloned(),
             time: i.source_at.map(|t| i.clock.hms(t).into()),
@@ -302,10 +305,10 @@ impl HeaderModel {
             out.push(text.to_string());
         }
         if let Some(e) = &self.upload_error {
-            out.push(e.to_string());
+            out.push(e.text().to_string());
         }
         if let Some(n) = &self.notice {
-            out.push(n.to_string());
+            out.push(n.text().to_string());
         }
         if let Some(p) = &self.prompt {
             out.push(p.to_string());
@@ -324,13 +327,13 @@ impl HeaderModel {
 /// Render prepared identity, attribute, status, upload, and time runs.
 /// The attribute cursor and editor are passed separately from prepared values;
 /// menu_open controls the action button's selected appearance. A pending upload
-/// prompt carries its own focus handle and consumes its confirmation keys.
+/// prompt is the confirm door's: it holds the keyboard and answers its keys.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render(
     h: &HeaderModel,
     cursor_attr: Option<usize>,
     editor: Option<(usize, EditorPaint<'_>)>,
-    confirm: Option<&FocusHandle>,
+    confirm: Option<&Confirm<PendingUpload>>,
     menu_open: bool,
     theme: &Theme,
     tones: &FlooredTones,
@@ -492,35 +495,22 @@ pub(crate) fn render(
     }
     if let Some(e) = &h.upload_error {
         row = row.child(
-            div()
-                .debug_selector(move || format!("marketdata-upload-error-{tile_id}"))
-                .text_color(tone_colour(Tone::Error, false, theme, tones))
-                .child(e.clone()),
+            notice::render(e, theme)
+                .debug_selector(move || format!("marketdata-upload-error-{tile_id}")),
         );
     }
     if let Some(n) = &h.notice {
-        row = row.child(
-            div()
-                .text_color(tone_colour(Tone::Error, false, theme, tones))
-                .child(n.clone()),
-        );
+        row = row.child(notice::render(n, theme));
     }
-    // The focused upload prompt consumes its keys before shell routing. Bare y
-    // submits; any other key cancels. Its text uses the ordinary foreground tone.
-    if let (Some(p), Some(focus)) = (&h.prompt, confirm) {
-        let tile = tile.clone();
-        row = row.child(
-            div()
-                .track_focus(focus)
-                .debug_selector(move || format!("marketdata-upload-confirm-{tile_id}"))
-                .text_color(tone_colour(Tone::Key, false, theme, tones))
-                .child(p.clone())
-                .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
-                    if tile.update(cx, |t, cx| t.confirm_key(event, window, cx)) {
-                        cx.stop_propagation();
-                    }
-                }),
-        );
+    // The upload prompt holds the keyboard and answers its keys before shell
+    // routing (bare y submits; any other key cancels), in the foreground tone.
+    if let (Some(_), Some(pending)) = (&h.prompt, confirm) {
+        row = row.child(confirm::prompt(
+            pending,
+            tile,
+            move || format!("marketdata-upload-confirm-{tile_id}"),
+            theme,
+        ));
     }
 
     // 6. Time, with the stale marker — `tone_colour` decides the colour,

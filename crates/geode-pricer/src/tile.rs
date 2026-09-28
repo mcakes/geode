@@ -22,15 +22,18 @@ use crate::core::tree::Expansion;
 use crate::core::undo::UndoStack;
 use crate::core::views::ColumnPlan;
 use crate::core::{Place, RowSpec};
-use crate::delegate::{ChevronClicked, DateFieldPaint, EditorField, EditorPaint, SheetDelegate};
+use crate::delegate::{
+    CellPointer, ChevronClicked, DateFieldPaint, EditorField, EditorPaint, SheetDelegate,
+};
 use crate::grid::GridModel;
 use crate::header::{self, HeaderInputs, HeaderModel};
-use crate::popup::{Menu, MenuItem, choice_paint, render_menu};
+use crate::popup::{PricerPick, choice_paint};
 use crate::session::Record;
 use crate::store::Loaded;
 use chrono::Utc;
 use geode_core::clock::Clock;
 use geode_core::document::DocumentRows;
+use geode_core::grid::selection::{Resolved, SelectKind, Selection};
 use geode_core::pricing::{PriceLine, PriceOutcome, PriceParams};
 use geode_core::query::{QueryKey, QueryOutcome};
 use geode_data::{DataHandle, Refusal};
@@ -38,25 +41,31 @@ use geode_shell::actions::ActionId;
 use geode_shell::choice::{ChoiceList, DEFAULT_CAP};
 use geode_shell::colfit::{FitMetrics, FittedWidths, NOTHING_TO_FIT};
 use geode_shell::frame::FrameRef;
-use geode_shell::keymap::KeyContext;
+use geode_shell::keymap::{Binding, KeyContext};
 use geode_shell::linenumbers::{LineNumbers, UiSettings};
 use geode_shell::module::{FindEvent, StackHandle};
+use geode_shell::shell::aggregates::AggregateCell;
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::vimfind::{FindDirection, find_match};
 use geode_shell::vimnav::NavCommand;
+use geode_tile::confirm::{self, Confirm, ConfirmHost};
+use geode_tile::menu::{self, ActionRow, Hint, Menu, MenuHost, MenuIds, Row};
 use geode_widgets::datefield::{DateTimeField, FieldKey, Precision, Segment, route};
 use gpui::prelude::*;
 use gpui::{
     AnyWindowHandle, App, Context, Entity, FocusHandle, Focusable as _, KeyDownEvent, SharedString,
-    Subscription, Task, Window, div,
+    Task, Window, div,
 };
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::table::{DataTable, TableEvent, TableState};
 use gpui_component::{ActiveTheme as _, Sizable as _, Size, v_flex};
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+mod select;
 
 pub(crate) const LOADING: &str = "loading…";
 
@@ -103,17 +112,11 @@ fn blocked_notice(name: &str, why: &str) -> SharedString {
 /// The footer after an `:rm` confirm answered anything but `y`.
 pub(crate) const NOT_REMOVED: &str = "sheet not removed";
 
-/// An armed `:rm` confirmation. It holds the keyboard on its own `focus`
-/// handle, tracked by the prompt the header paints, whose `on_key_down`
-/// runs before the shell root's listener (`PricerTile::confirm_key`).
-/// `_blur` is the focus-leaving half: any move of window focus off the
-/// prompt cancels. Dropping this drops the subscription, so a confirm
-/// answered by a key never also hears its own blur.
-pub(crate) struct PendingRemove {
+/// What an armed `:rm` asks to remove. The prompt, its focus and its blur
+/// answer are the `geode_tile::confirm` door's. Public only because it is
+/// the public `PricerTile`'s `ConfirmHost` payload; its field stays private.
+pub struct PendingRemove {
     sheet: String,
-    prompt: SharedString,
-    focus: FocusHandle,
-    _blur: Subscription,
 }
 
 /// Fixed row steps for `ctrl+d`/`ctrl+u` and `ctrl+f`/`ctrl+b`, multiplied
@@ -185,6 +188,14 @@ pub(crate) enum Editor {
         /// template weight only while the legs fit), so a commit whose
         /// cell would now open on other text refuses with `MOVED`.
         opened: Option<String>,
+        /// The live step's state, while a selection is live and the cell
+        /// steps; `None` otherwise.
+        bulk: Option<Bulk>,
+        /// The text the field opened on. Over a selection with no live
+        /// step, `enter` on this text unchanged writes nothing: the cursor
+        /// cell's own value filled across every target would be a wrong
+        /// block from a no-op gesture.
+        initial: String,
     },
     Choice {
         line: LineId,
@@ -200,6 +211,11 @@ pub(crate) enum Editor {
         /// option (case-insensitively): ranking is a subsequence match, so
         /// an untouched highlight is a guess — `HSI` would commit `HSCEI`.
         moved: bool,
+        /// The option the list opened on. Over a selection, `enter` with
+        /// the highlight never moved and the query empty or this option
+        /// writes nothing: the cursor cell's own option filled across the
+        /// targets would turn a put into a call from a no-op gesture.
+        initial: String,
     },
     /// An expiry's segmented date field (every expiry, a tenor included):
     /// a pure field the tile routes keys into (`date_field_key`), its own
@@ -218,8 +234,50 @@ pub(crate) enum Editor {
         /// and dropped only when the field commits or cancels, so the
         /// trader still sees that `enter` replaces the tenor.
         note: Option<SharedString>,
+        /// The date the field opened on (a tenor's is today) and whether
+        /// a digit was typed since. Over a selection, `enter` on that date
+        /// with nothing typed writes nothing: the opening date filled
+        /// across the targets would replace their expiries, a tenor's with
+        /// today, from a no-op gesture.
+        initial: chrono::NaiveDate,
+        typed: bool,
     },
 }
+
+/// A text editor opened on a steppable cursor cell over a live selection.
+/// While its text is untouched, arrows step every target cell in the
+/// sheet at once, each press repricing; `enter` keeps the steps as one
+/// undo entry and any other close takes them back — but only while they
+/// are still the sheet's last change, so a rollback never undoes another
+/// writer's edit.
+pub(crate) struct Bulk {
+    /// The text the tile last put in the editor. Any other value means
+    /// the trader typed, which turns the edit absolute.
+    pub(crate) seeded: String,
+    /// Signed steps since `i`, for the notice.
+    pub(crate) steps: i64,
+    /// The inverses of every step since `i`, the last step's first.
+    pub(crate) undo: Undo,
+    /// `edit_seq` right after the last step landed.
+    pub(crate) seq: u64,
+    /// Each stepped line's values right after the last step. A write that
+    /// bypassed the counter still shows here, and rolling back over it
+    /// would put the steps' inverses on cells something else wrote.
+    pub(crate) after: HashMap<LineId, StepMark>,
+    /// Each stepped line's values before its first step, so a keep of
+    /// steps that net to nothing records no entry.
+    pub(crate) before: HashMap<LineId, StepMark>,
+    /// The step notice last shown, withdrawn by a rollback: the count
+    /// would describe steps that are no longer in the sheet.
+    pub(crate) notice: Option<SharedString>,
+}
+
+/// What a step may change on a line: its quantity, instrument and shifts.
+pub(crate) type StepMark = (
+    i64,
+    Option<geode_core::pricing::Instrument>,
+    crate::core::sheet::OwnShifts,
+);
 
 /// What an `enter` in the cell editor means before the cell parses it.
 enum Choice {
@@ -346,7 +404,7 @@ pub struct PricerTile {
     /// here, where it was asked for.
     forgetting: Vec<String>,
     /// The armed `:rm` confirm: `None` outside it.
-    pub(crate) confirm: Option<PendingRemove>,
+    pub(crate) confirm: Option<Confirm<PendingRemove>>,
     /// Loading, but the load is not submitted: this sheet's name has a
     /// save queued and unanswered (`Shared::pending_saves`), and a read
     /// now could return the generation before it. The factory's
@@ -362,8 +420,9 @@ pub struct PricerTile {
     menu_tip: SharedString,
     stack: Option<StackHandle>,
     pub(crate) clock: Clock,
-    /// What `p`/`shift+p` put: the last `y y` or `d d`.
-    pub(crate) register: Option<crate::core::RowSpec>,
+    /// What `p`/`shift+p` put: the last `y y`, `d d`, or `y`/`d` over a
+    /// `V` selection, in sheet order.
+    pub(crate) register: Option<Vec<crate::core::RowSpec>>,
     find: Option<FindState>,
     /// Latest pricing submission tag. An outcome with any other tag is dropped whole.
     pub(crate) tag: u64,
@@ -391,7 +450,11 @@ pub struct PricerTile {
     /// has no `Window` of its own to blur through (`drop_orphaned_editor`).
     editor_window: Option<AnyWindowHandle>,
     /// The `.` action menu: `None` outside menu mode.
-    pub(crate) menu: Option<Menu>,
+    pub(crate) menu: Option<Menu<PricerPick>>,
+    /// The keymap as last published, for the menu's key hints: read at
+    /// construction and on every `Chords` publish, so a chrome rebuild (which
+    /// has no `App`) resolves hints against the live keymap.
+    chords: Arc<Vec<Binding>>,
     /// The line a press that closed the entry bar resolved. Closing the
     /// bar moves the table up on screen, so the second press of the same
     /// double-click lands on a different painted row; this carries the
@@ -407,6 +470,19 @@ pub struct PricerTile {
     /// read). Re-read only when the revision moves.
     underlyings: Rc<[SharedString]>,
     underlyings_rev: Option<u64>,
+    /// The live `V`/`v` selection, anchored by line and plan column name
+    /// so a rebuild re-finds the same cells. `None` outside visual mode.
+    pub(crate) selection: Option<Selection<LineId, &'static str>>,
+    /// `selection` resolved against the model and cursor at the last
+    /// change point; render and the delegate only read it.
+    pub(crate) resolved: Option<Resolved>,
+    /// The footer's `R rows × C cols`, prepared with `resolved`.
+    pub(crate) selection_extent: Option<SharedString>,
+    /// The footer's position totals, prepared with `resolved`.
+    pub(crate) totals: Vec<AggregateCell>,
+    /// Counts recorded sheet changes, so an open step editor can tell
+    /// whether its steps are still the sheet's last change.
+    pub(crate) edit_seq: u64,
 }
 
 fn app_clock(cx: &App) -> Clock {
@@ -560,6 +636,15 @@ impl PricerTile {
             |this, _, event: &ChevronClicked, window, cx| this.chevron_clicked(event.0, window, cx),
         )
         .detach();
+        // Shift+click and drag: the delegate's own pointer events, which
+        // reach `pointer` on mouse-down, ahead of the table's `SelectCell`
+        // (emitted on the release). Window access for the editor's blur.
+        cx.subscribe_in(
+            &table,
+            window,
+            |this, _, event: &CellPointer, window, cx| this.pointer(*event, window, cx),
+        )
+        .detach();
         // Pricing does not follow frame queries, so there is no result to wait for.
         // Arrive immediately to avoid holding other tiles behind the flip barrier.
         cx.observe(frame.entity(), |this, _, cx| {
@@ -596,13 +681,22 @@ impl PricerTile {
             this.rebuild(cx);
         })
         .detach();
+        // A keymap reload re-resolves an open menu's hints at once.
+        cx.observe_global::<geode_shell::tips::Chords>(|this, cx| {
+            this.chords = menu::live_bindings(cx);
+            if let Some(m) = this.menu.as_mut() {
+                m.rehint(&this.chords);
+                cx.notify();
+            }
+        })
+        .detach();
         // Release flushes a dirty sheet once, cancels pricing, and releases its name
         // for another tile to open.
-        cx.on_release(|this: &mut PricerTile, _cx| {
+        cx.on_release(|this: &mut PricerTile, cx| {
             // Flush edits still waiting on the timer and retry failed or refused
             // saves. Queued, unanswered saves already belong to the writer.
             // `save_now` leaves a blocked fallback unpublished.
-            this.flush_save();
+            this.flush_save(cx);
             this.data.cancel(QueryKey(this.id.0));
             this.shared.open.borrow_mut().remove(&this.sheet.name);
             // A rename not yet confirmed keeps its old document.
@@ -672,10 +766,16 @@ impl PricerTile {
             editor: None,
             editor_window: None,
             menu: None,
+            chords: menu::live_bindings(cx),
             click_anchor: None,
             pressed: None,
             underlyings: Rc::from([]),
             underlyings_rev: None,
+            selection: None,
+            resolved: None,
+            selection_extent: None,
+            totals: Vec::new(),
+            edit_seq: 0,
         };
         this.adopt_templates();
         this.resolve_plan();
@@ -694,9 +794,15 @@ impl PricerTile {
 
     // ---- what the shell reads ----------------------------------------
 
-    /// `normal`, `insert` or `menu`.
+    /// `normal`, `insert`, `menu` or `visual`, with `select = rows|block`
+    /// while a selection is live.
     pub fn key_context(&self) -> KeyContext {
-        KeyContext::new("pricer").pair("mode", self.mode()).counts()
+        let cx = KeyContext::new("pricer").pair("mode", self.mode()).counts();
+        match self.selection.as_ref().map(|s| s.kind) {
+            Some(SelectKind::Rows) => cx.pair("select", "rows"),
+            Some(SelectKind::Block) => cx.pair("select", "block"),
+            None => cx,
+        }
     }
 
     /// `insert` while EITHER field is open — the entry field or the cell
@@ -709,11 +815,16 @@ impl PricerTile {
     ///
     /// An armed `:rm` confirm is `insert` too: its prompt holds the
     /// keyboard exactly as a field does.
+    ///
+    /// `visual` while a selection is live and neither a field nor the
+    /// menu holds the keys: the selection's own single-key verbs apply.
     pub(crate) fn mode(&self) -> &'static str {
         if self.confirm.is_some() || self.entry.is_some() || self.editor.is_some() {
             "insert"
         } else if self.menu.is_some() {
             "menu"
+        } else if self.selection.is_some() {
+            "visual"
         } else {
             "normal"
         }
@@ -730,10 +841,7 @@ impl PricerTile {
             .editor
             .as_ref()
             .is_some_and(|e| e.focus_handle(cx).is_focused(window));
-        let confirm = self
-            .confirm
-            .as_ref()
-            .is_some_and(|c| c.focus.is_focused(window));
+        let confirm = self.confirm.as_ref().is_some_and(|c| c.holds_focus(window));
         entry || editor || confirm
     }
 
@@ -886,14 +994,38 @@ impl PricerTile {
         Ok(())
     }
 
-    /// Apply several edits as one undo entry. On refusal, replay prior inverses in
-    /// reverse order without recording the batch. A refused rollback clears history and
-    /// leaves the partially rolled-back sheet for after_edit to rebuild.
+    /// Apply several edits as one undo entry through [`Self::apply_batch`];
+    /// a refused batch records nothing but still rebuilds, since a refused
+    /// rollback leaves a partly rolled-back sheet.
     pub(crate) fn apply_edits(
         &mut self,
         edits: Vec<Edit>,
         cx: &mut Context<Self>,
     ) -> Result<(), EditError> {
+        match self.apply_batch(edits) {
+            Err(e) => {
+                self.after_edit(cx);
+                Err(e)
+            }
+            Ok(undo) => {
+                if let Some(undo) = undo {
+                    self.undo.record(undo);
+                    self.after_edit(cx);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Apply several edits all or nothing, answering their combined
+    /// inverse (the last edit's first), or `None` for no edits. Records
+    /// nothing and rebuilds nothing: the caller decides whether the batch
+    /// is an undo entry of its own (a live step's is not until `enter`).
+    /// A refusal replays the landed inverses in reverse; a refused
+    /// replay clears history, since its remaining inverses address the
+    /// previous row layout, and leaves the partly rolled-back sheet for
+    /// the caller's rebuild.
+    pub(crate) fn apply_batch(&mut self, edits: Vec<Edit>) -> Result<Option<Undo>, EditError> {
         let mut undos: Vec<Undo> = Vec::new();
         for e in edits {
             match self.sheet.apply(e) {
@@ -916,20 +1048,17 @@ impl PricerTile {
                             break;
                         }
                     }
-                    self.after_edit(cx);
                     return Err(err);
                 }
             }
         }
         if undos.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         // Take back the LAST edit first.
-        self.undo.record(Undo {
+        Ok(Some(Undo {
             inverse: undos.into_iter().rev().flat_map(|u| u.inverse).collect(),
-        });
-        self.after_edit(cx);
-        Ok(())
+        }))
     }
 
     /// `o` opens the entry bar under the header and focuses its input.
@@ -1192,6 +1321,11 @@ impl PricerTile {
     /// `i`/`enter`/double-click: a text field on the cell's grammar
     /// spelling, or a typeahead over its vocabulary; a cell that does not
     /// edit says why in the footer.
+    ///
+    /// Under a live selection the editor opens on the cursor cell exactly
+    /// as without one, and that cell must itself be editable: a read-only
+    /// cursor cell refuses with its own reason, rather than opening a
+    /// field whose grammar belongs to some other selected cell.
     fn begin_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.loading {
             self.footer = Some("the sheet is still loading".into());
@@ -1239,18 +1373,31 @@ impl PricerTile {
                     focus: cx.focus_handle(),
                     paint,
                     note,
+                    initial: date,
+                    typed: false,
                 }
             }
             Ok(CellEditor::Text(text)) => {
                 let opened = self.sheet.is_package(row).then(|| text.clone());
+                let bulk = (self.selection.is_some() && select::steppable(kind)).then(|| Bulk {
+                    seeded: text.clone(),
+                    steps: 0,
+                    undo: Undo { inverse: vec![] },
+                    seq: self.edit_seq,
+                    after: HashMap::new(),
+                    before: HashMap::new(),
+                    notice: None,
+                });
                 let input = cx.new(|cx| InputState::new(window, cx));
-                input.update(cx, |s, cx| s.set_value(text, window, cx));
+                input.update(cx, |s, cx| s.set_value(text.clone(), window, cx));
                 Editor::Text {
                     line,
                     col,
                     kind,
                     input,
                     opened,
+                    bulk,
+                    initial: text,
                 }
             }
             Ok(CellEditor::Choice {
@@ -1300,6 +1447,7 @@ impl PricerTile {
                     list,
                     free,
                     moved: false,
+                    initial: current,
                 }
             }
         };
@@ -1321,8 +1469,37 @@ impl PricerTile {
             self.commit_date(window, cx);
             return;
         }
+        // A live step's editor. Untouched text keeps the steps as one undo
+        // entry and writes nothing more — with no step taken, nothing at
+        // all: the shown value written to every target would be a
+        // plausible wrong block from a no-op gesture. Typed text is
+        // absolute, so any steps come out first and the typed value
+        // replaces them rather than landing on top.
+        let untouched = match &self.editor {
+            Some(Editor::Text {
+                input,
+                bulk: Some(b),
+                ..
+            }) => Some(input.read(cx).value().as_ref() == b.seeded),
+            _ => None,
+        };
+        if let Some(untouched) = untouched {
+            if untouched {
+                if let Some(bulk) = self.take_bulk() {
+                    self.settle_bulk(bulk, true, cx);
+                }
+                self.close_editor(window, cx);
+                self.rebuild_chrome();
+                cx.notify();
+                return;
+            }
+            if let Some(bulk) = self.take_bulk() {
+                self.settle_bulk(bulk, false, cx);
+            }
+        }
         // The editor's borrow ends inside this block, before any `self` call.
-        let (value, (line, col, kind), opened) = {
+        let stepped = untouched.is_some();
+        let (value, (line, col, kind), opened, unchanged) = {
             let Some(editor) = self.editor.as_mut() else {
                 return;
             };
@@ -1334,6 +1511,17 @@ impl PricerTile {
             let opened = match editor {
                 Editor::Text { opened, .. } => opened.clone(),
                 _ => None,
+            };
+            // Whether `enter` leaves the cell as it opened. A live step's
+            // editor answered that above: its typed text is absolute even
+            // when it spells the opening value, since the steps came out.
+            let unchanged = match editor {
+                Editor::Text { initial, .. } => !stepped && text == *initial,
+                Editor::Choice { moved, initial, .. } => {
+                    let typed = text.trim();
+                    !*moved && (typed.is_empty() || typed.eq_ignore_ascii_case(initial))
+                }
+                Editor::Date { .. } => false,
             };
             let value = if let Editor::Choice {
                 list, free, moved, ..
@@ -1360,8 +1548,17 @@ impl PricerTile {
             } else {
                 Choice::Value(text)
             };
-            (value, target, opened)
+            (value, target, opened, unchanged)
         };
+        // Over a selection an unchanged cell writes nothing: its own value
+        // filled across every target would be a plausible wrong block
+        // from a no-op gesture. No edit, no notice, no undo entry.
+        if unchanged && self.selection.is_some() {
+            self.close_editor(window, cx);
+            self.rebuild_chrome();
+            cx.notify();
+            return;
+        }
         let value = match value {
             Choice::Value(v) => Some(v),
             // An untouched free list with nothing typed: the cell keeps
@@ -1381,6 +1578,16 @@ impl PricerTile {
             cx.notify();
             return;
         };
+        // A live selection takes the value to every target line, each
+        // judged on its own; the cursor cell is only where it was typed.
+        if self.selection.is_some() {
+            if !self.cursor_on_editor(line, kind) {
+                self.refuse_moved(window, cx);
+            } else if self.commit_selection(&value, None, cx) {
+                self.close_editor(window, cx);
+            }
+            return;
+        }
         let Some(row) = self.editor_row(line, col, kind, window, cx) else {
             return;
         };
@@ -1460,6 +1667,16 @@ impl PricerTile {
         row
     }
 
+    /// Whether the cursor still sits on the cell the editor opened on. A
+    /// `V` selection writes the cursor's column, so a commit after the
+    /// cursor left the editor's column would write the typed text into
+    /// a column it was never typed for.
+    fn cursor_on_editor(&self, line: LineId, kind: ColumnKind) -> bool {
+        let row_line = self.cursor_sheet_row().map(|r| self.sheet.id(r));
+        let col_kind = self.plan.columns.get(self.cursor.col).map(|c| c.def.kind);
+        row_line == Some(line) && col_kind == Some(kind)
+    }
+
     /// Close the editor with `MOVED`: its commit no longer means what the
     /// trader saw when it opened.
     fn refuse_moved(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1482,12 +1699,15 @@ impl PricerTile {
             kind,
             field,
             paint,
+            initial,
+            typed,
             ..
         }) = self.editor.as_mut()
         else {
             return;
         };
         let (line, col, kind) = (*line, *col, *kind);
+        let (initial, typed) = (*initial, *typed);
         let finished = field.complete_pending();
         *paint = DateFieldPaint::of(field, id);
         let date = field.date();
@@ -1496,6 +1716,25 @@ impl PricerTile {
             self.sync_editor(cx);
             self.rebuild_chrome();
             cx.notify();
+            return;
+        }
+        // A live selection takes a changed or typed date to every target
+        // line. The opening date untyped writes nothing: filled across the
+        // targets it would replace their expiries (a tenor's with today)
+        // from a no-op gesture.
+        if self.selection.is_some() {
+            if date == initial && !typed {
+                self.close_editor(window, cx);
+                self.rebuild_chrome();
+                cx.notify();
+                return;
+            }
+            let text = date.format("%Y-%m-%d").to_string();
+            if !self.cursor_on_editor(line, kind) {
+                self.refuse_moved(window, cx);
+            } else if self.commit_selection(&text, Some(date), cx) {
+                self.close_editor(window, cx);
+            }
             return;
         }
         let Some(row) = self.editor_row(line, col, kind, window, cx) else {
@@ -1524,7 +1763,11 @@ impl PricerTile {
         };
         let id = self.id.0;
         let Some(Editor::Date {
-            field, paint, note, ..
+            field,
+            paint,
+            note,
+            typed,
+            ..
         }) = self.editor.as_mut()
         else {
             return false;
@@ -1541,6 +1784,10 @@ impl PricerTile {
                 cx.notify();
             }
             other => {
+                // A typed digit is a deliberate date, even the opening one.
+                if matches!(other, FieldKey::Digit(_)) {
+                    *typed = true;
+                }
                 if field.apply(other) {
                     *paint = DateFieldPaint::of(field, id);
                 }
@@ -1624,7 +1871,14 @@ impl PricerTile {
 
     /// Blur an editor that owns window focus before releasing its focus handle.
     /// Otherwise the shell cannot restore focus after the editor disappears.
+    ///
+    /// A live step's editor closed any way but a commit takes its steps
+    /// back (`settle_bulk`), after the field is gone so the rebuild never
+    /// paints a dead one. Every cancel comes here: `cancel`, a click
+    /// elsewhere, any verb (`dispatch` closes the editor first), the
+    /// menu, `:` and `/`.
     pub(crate) fn close_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let bulk = self.take_bulk();
         let Some(editor) = self.editor.take() else {
             return;
         };
@@ -1632,6 +1886,9 @@ impl PricerTile {
             window.blur(cx);
         }
         self.sync_editor(cx);
+        if let Some(bulk) = bulk {
+            self.settle_bulk(bulk, false, cx);
+        }
         cx.notify();
     }
 
@@ -1639,6 +1896,11 @@ impl PricerTile {
     /// precision; in a typeahead they move the
     /// highlight.
     fn nudge(&mut self, steps: i64, window: &mut Window, cx: &mut Context<Self>) {
+        // Over a live selection with the text untouched, the step goes to
+        // every target cell instead of the text alone.
+        if self.bulk_step(steps, window, cx).is_some() {
+            return;
+        }
         let id = self.id.0;
         let refused = match &mut self.editor {
             // The date field steps its active segment — the same step its
@@ -1653,7 +1915,9 @@ impl PricerTile {
                 None
             }
             Some(Editor::Text { kind, input, .. }) => {
-                let text = input.read(cx).value().to_string();
+                // An empty shift field inherits: it steps from the value
+                // its cell paints, as the live step does.
+                let text = cell::step_from(&self.sheet, *kind, &input.read(cx).value());
                 match cell::nudge(*kind, &text, steps) {
                     Ok(next) => {
                         input.update(cx, |s, cx| s.set_value(next, window, cx));
@@ -1714,6 +1978,7 @@ impl PricerTile {
     /// write-behind saving. Keep expansion IDs so undo can restore an open package.
     /// Periodic refresh keeps its own timer and skips empty sheets.
     pub(crate) fn after_edit(&mut self, cx: &mut Context<Self>) {
+        self.edit_seq += 1;
         self.rebuild(cx);
         self.submit(cx);
         self.arm_save(cx);
@@ -1742,11 +2007,34 @@ impl PricerTile {
     /// save left unsaved, and drop the timer. A close and the app's quit
     /// both come here: neither may leave edits behind a timer that will
     /// never fire.
-    pub(crate) fn flush_save(&mut self) {
+    ///
+    /// An open live step is abandoned first, as `escape` would: a close
+    /// or quit has no `escape` after it, and saving then would persist
+    /// steps the trader never kept. Its editor closes with it: the field
+    /// still shows stepped text, and a later `enter` would commit that
+    /// text absolutely. Answers whether it closed an editor, so a caller
+    /// holding a `Context` rebuilds the grid off the rolled-back sheet.
+    pub(crate) fn flush_save(&mut self, cx: &mut App) -> bool {
+        let mut closed = false;
+        // Tested before it is taken: an unstepped bulk stays with its
+        // open editor. Dropping it would leave the editor open without
+        // one, and a later untouched `enter` would write the cursor's
+        // value across the whole selection.
+        let stepped = matches!(
+            &self.editor,
+            Some(Editor::Text { bulk: Some(b), .. }) if !b.undo.inverse.is_empty()
+        );
+        if stepped && let Some(bulk) = self.take_bulk() {
+            if self.take_back_steps(bulk) {
+                self.dirty = true;
+            }
+            closed = self.release_editor(cx);
+        }
         self.save_task = None;
         if self.dirty || self.save_failed {
             let _ = self.save_now();
         }
+        closed
     }
 
     /// The whole sheet, once. An empty sheet publishes nothing (the last
@@ -2149,6 +2437,9 @@ impl PricerTile {
             Ok(Some(rows)) => match from_rows(&name, &rows) {
                 Ok(mut s) => {
                     s.mark_all_stale();
+                    // The anchor's line id names a line of the old sheet.
+                    self.clear_selection();
+                    self.forget_steps();
                     self.sheet = s;
                     self.adopt_templates();
                     // Fallback edits have inverses against different rows. Replaying
@@ -2224,9 +2515,7 @@ impl PricerTile {
         self.footer = None;
         // A verb arriving under an armed `:rm` (a palette dispatch; a key
         // never gets here, the prompt consumes it) answers "no" first.
-        if self.confirm.is_some() {
-            self.cancel_remove(window, cx);
-        }
+        confirm::cancel(self, window, cx);
         // Any verb but the fields' own closes an open field first (a
         // palette dispatch can arrive while one is open). `add_below`
         // keeps an open bar: it is the bar's own opener.
@@ -2284,7 +2573,7 @@ impl PricerTile {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(
                         self.sheet.shorthand(row),
                     ));
-                    self.register = Some(crate::core::clip::spec_of(&self.sheet, row));
+                    self.register = Some(vec![spec_of(&self.sheet, row)]);
                 }
             }
             "yank_col" => {
@@ -2305,12 +2594,22 @@ impl PricerTile {
             }
             "find_next" => self.repeat_find(FindDirection::Forward, n),
             "find_prev" => self.repeat_find(FindDirection::Backward, n),
+            // A live selection takes the first `escape` alone, so leaving
+            // visual mode never also drops the find or a notice.
+            "escape" if self.selection.is_some() => self.clear_selection(),
             "escape" => {
                 self.find = None;
                 // "loading…" is the only sign a load is pending; `loaded`
                 // clears it when the rows (or the refusal) arrive.
                 if !self.loading {
                     self.notice = None;
+                }
+            }
+            "visual_rows" => self.start_selection(SelectKind::Rows),
+            "visual_block" => self.start_selection(SelectKind::Block),
+            "yank" => {
+                if let Err(why) = self.yank_selection(cx) {
+                    self.footer = Some(why.into());
                 }
             }
             "price" => {
@@ -2358,8 +2657,18 @@ impl PricerTile {
             | "group" | "ungroup" => {
                 if self.loading {
                     self.footer = Some("the sheet is still loading".into());
+                } else if let Some(why) = self.row_verb_refusal(verb) {
+                    self.footer = Some(why.into());
                 } else {
+                    // A live selection names the rows itself, so a count
+                    // is ignored rather than stretching past what was picked.
+                    let selected = self.selection.is_some();
                     let result = match verb {
+                        "delete" if selected => self.delete_selection(cx),
+                        "move_down" if selected => self.move_selection(true, cx),
+                        "move_up" if selected => self.move_selection(false, cx),
+                        "group" if selected => self.group_selection(cx),
+                        "ungroup" if selected => self.ungroup_selection(cx),
                         "delete" => self.delete_row(cx),
                         "undo" => self.history_step(false, cx),
                         "redo" => self.history_step(true, cx),
@@ -2386,11 +2695,11 @@ impl PricerTile {
                     } else {
                         -(n as isize)
                     };
-                    m.highlighted = crate::popup::step(&m.items, m.highlighted, delta);
+                    m.step(delta);
                 }
             }
             "menu_pick" => {
-                let at = self.menu.as_ref().map(|m| m.highlighted);
+                let at = self.menu.as_ref().and_then(|m| m.highlighted());
                 if let Some(at) = at {
                     self.menu_pick(at, window, cx);
                 }
@@ -2420,7 +2729,7 @@ impl PricerTile {
         let spec = spec_of(&self.sheet, row);
         self.apply_edit(Edit::Remove { at: row }, cx)
             .map_err(|e| e.to_string())?;
-        self.register = Some(spec);
+        self.register = Some(vec![spec]);
         Ok(())
     }
 
@@ -2469,11 +2778,22 @@ impl PricerTile {
         }
     }
 
-    /// `p` / `shift+p` insert register contents with fresh IDs and requests at
-    /// `put_place`'s position, then select the first inserted row.
+    /// `p` / `shift+p` insert every register row together, with fresh IDs
+    /// and requests, as one edit (one undo entry), then select the first
+    /// landed row. Any package among them takes the place: packages cannot
+    /// nest, so the whole run lands at a root boundary rather than being
+    /// refused at a leg place.
     fn put(&mut self, below: bool, cx: &mut Context<Self>) -> Result<(), String> {
-        let spec = self.register.clone().ok_or("nothing to put")?;
-        let place = put_place(&self.sheet, self.cursor_sheet_row(), below, &spec);
+        let specs = self
+            .register
+            .clone()
+            .filter(|v| !v.is_empty())
+            .ok_or("nothing to put")?;
+        let lead = specs
+            .iter()
+            .find(|s| matches!(s, RowSpec::Package { .. }))
+            .unwrap_or(&specs[0]);
+        let place = put_place(&self.sheet, self.cursor_sheet_row(), below, lead);
         // Open the parent before inserting a leg so the new row is visible and
         // cursor reconciliation can select it.
         if let Place::Leg { package, .. } = place {
@@ -2482,16 +2802,22 @@ impl PricerTile {
         self.apply_edit(
             Edit::Insert {
                 place,
-                rows: vec![spec.clone()],
+                rows: specs.clone(),
             },
             cx,
         )
         .map_err(|e| e.to_string())?;
-        let id = self.sheet.id(landed_row(place));
-        if matches!(spec, RowSpec::Package { .. }) {
-            self.expansion.set(id, true);
+        // Landed rows are contiguous: a package occupies itself and its legs.
+        let first = landed_row(place);
+        let mut at = first;
+        for spec in &specs {
+            if let RowSpec::Package { legs, .. } = spec {
+                self.expansion.set(self.sheet.id(at), true);
+                at += legs.len();
+            }
+            at += 1;
         }
-        self.cursor.line = Some(id);
+        self.cursor.line = Some(self.sheet.id(first));
         self.rebuild(cx);
         Ok(())
     }
@@ -2588,27 +2914,32 @@ impl PricerTile {
         }
     }
 
-    /// Prepare action groups followed by the available Views. Command titles come from
-    /// content::ACTIONS. Enabled actions show default keys in the trailing lane;
-    /// disabled actions show their refusal reason there.
-    fn menu_items(&self) -> Vec<MenuItem> {
+    /// Action groups, then the available views. Titles are the palette's
+    /// (`content::action_title`); hints are the actions' live chords (a
+    /// `:price` verb when unbound); a disabled action carries its reason.
+    fn menu_items(&self) -> Vec<Row<PricerPick>> {
         let row = self.cursor_sheet_row();
         let root_line =
             row.is_some_and(|r| self.sheet.is_line(r) && self.sheet.parent(r).is_none());
         let packaged =
             row.is_some_and(|r| self.sheet.is_package(r) || self.sheet.parent(r).is_some());
-        let action = |id: &'static str, hint, enabled| MenuItem::Action {
-            id,
-            title: crate::content::action_title(id),
-            hint,
-            enabled,
+        let action = |id: &'static str, hint: Hint, enabled: Result<(), &'static str>| {
+            Row::Action(
+                ActionRow::new(PricerPick::Action(id), crate::content::action_title(id))
+                    .hint(hint)
+                    .enabled(enabled.map_err(SharedString::new_static)),
+            )
         };
         let mut items = vec![
-            action("pricer::price", ":price", Ok(())),
-            MenuItem::Separator,
+            action(
+                "pricer::price",
+                Hint::chord_or_verb("pricer::price", ":price"),
+                Ok(()),
+            ),
+            Row::Separator,
             action(
                 "pricer::group",
-                "g p",
+                Hint::chord("pricer::group"),
                 if root_line {
                     Ok(())
                 } else {
@@ -2617,17 +2948,17 @@ impl PricerTile {
             ),
             action(
                 "pricer::ungroup",
-                "g u",
+                Hint::chord("pricer::ungroup"),
                 if packaged {
                     Ok(())
                 } else {
                     Err("not in a package")
                 },
             ),
-            MenuItem::Separator,
+            Row::Separator,
             action(
                 "pricer::undo",
-                "u",
+                Hint::chord("pricer::undo"),
                 if self.undo.can_undo() {
                     Ok(())
                 } else {
@@ -2636,27 +2967,30 @@ impl PricerTile {
             ),
             action(
                 "pricer::redo",
-                "ctrl+r",
+                Hint::chord("pricer::redo"),
                 if self.undo.can_redo() {
                     Ok(())
                 } else {
                     Err("nothing to redo")
                 },
             ),
-            MenuItem::Separator,
+            Row::Separator,
             action(
                 "pricer::delete",
-                "d d",
+                Hint::chord("pricer::delete"),
                 if row.is_some() { Ok(()) } else { Err("no row") },
             ),
         ];
         let views = self.shared.views.borrow();
         if !views.is_empty() {
-            items.push(MenuItem::Separator);
-            items.push(MenuItem::Section("View"));
-            items.extend(views.names().map(|name| MenuItem::View {
-                name: name.to_string().into(),
-                current: name == self.sheet.view,
+            items.push(Row::Separator);
+            items.push(Row::Section(SharedString::new_static("View")));
+            items.extend(views.names().map(|name| {
+                let label: SharedString = name.to_string().into();
+                Row::Action(
+                    ActionRow::new(PricerPick::View(label.clone()), label)
+                        .checked(name == self.sheet.view),
+                )
             }));
         }
         items
@@ -2665,61 +2999,14 @@ impl PricerTile {
     fn toggle_menu(&mut self, cx: &mut Context<Self>) {
         self.menu = match self.menu {
             Some(_) => None,
-            None => Some(Menu {
-                items: self.menu_items(),
-                highlighted: 0,
-            }),
+            None => Some(Menu::new(self.menu_items(), &self.chords)),
         };
-        cx.notify();
-    }
-
-    /// Move the menu highlight on pointer hover, notifying only on change. Action and
-    /// View rows qualify, including disabled actions; separators and headings do not.
-    pub(crate) fn menu_hover(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(m) = self.menu.as_mut() else {
-            return;
-        };
-        if m.highlighted == index || !m.items.get(index).is_some_and(MenuItem::pickable) {
-            return;
-        }
-        m.highlighted = index;
         cx.notify();
     }
 
     pub(crate) fn close_menu(&mut self, cx: &mut Context<Self>) {
         if self.menu.take().is_some() {
             cx.notify();
-        }
-    }
-
-    /// A disabled row says why and keeps the menu open; an enabled one
-    /// closes it and dispatches through the same door a key would.
-    pub(crate) fn menu_pick(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(item) = self.menu.as_ref().and_then(|m| m.items.get(index)).cloned() else {
-            return;
-        };
-        match item {
-            MenuItem::Action {
-                enabled: Err(why), ..
-            } => {
-                self.footer = Some(why.into());
-                self.rebuild_chrome();
-                cx.notify();
-            }
-            MenuItem::Action { id, .. } => {
-                self.menu = None;
-                self.dispatch(&ActionId(id.to_string()), None, window, cx);
-            }
-            // Structure, not a row: nothing to pick.
-            MenuItem::Separator | MenuItem::Section(_) => {}
-            MenuItem::View { name, .. } => {
-                self.menu = None;
-                if let Err(why) = self.set_view(&name, cx) {
-                    self.footer = Some(why.into());
-                }
-                self.rebuild_chrome();
-                cx.notify();
-            }
         }
     }
 
@@ -2816,7 +3103,7 @@ impl PricerTile {
         self.close_entry(window, cx);
         self.close_editor(window, cx);
         // A question standing over another verb is withdrawn, not answered.
-        let _ = self.disarm_remove(window, cx);
+        let _ = confirm::withdraw(self, cx);
         match commands::parse(line)? {
             Command::View(name) => self.set_view(&name, cx),
             Command::Price => {
@@ -2854,10 +3141,20 @@ impl PricerTile {
                 self.ungroup(cx)
             }
             Command::Edit(name) => self.edit_sheet(name, cx),
-            Command::New => {
+            Command::New(None) => {
                 // Chosen while this tile still holds its name, so `:new`
                 // never lands back on the sheet it leaves.
                 let name = untitled(&self.shared);
+                self.switch_sheet(name, false, cx)
+            }
+            // A named `:new` never opens an existing sheet: a typo would
+            // otherwise show it empty and later save over it. This tile's
+            // own sheet is in `open`, so it counts too.
+            Command::New(Some(name)) => {
+                self.shared.refuse_retiring(&name)?;
+                if self.shared.exists(&name) {
+                    return Err(format!("sheet '{name}' already exists; :e {name} opens it"));
+                }
                 self.switch_sheet(name, false, cx)
             }
             Command::Name(name) => self.rename(name, cx),
@@ -2958,6 +3255,9 @@ impl PricerTile {
         self.data.cancel(QueryKey(self.id.0));
         self.tag += 1;
         self.in_flight.clear();
+        // Line ids restart per sheet: the anchor would name a new line.
+        self.clear_selection();
+        self.forget_steps();
         self.sheet = Sheet::new(&name);
         self.adopt_templates();
         self.undo.clear();
@@ -3020,7 +3320,7 @@ impl PricerTile {
             return Err("the last rename is not saved yet".into());
         }
         self.shared.refuse_retiring(&name)?;
-        if self.shared.open.borrow().contains(&name) || self.shared.taken(&name) {
+        if self.shared.exists(&name) {
             return Err(format!("sheet '{name}' already exists"));
         }
         let old = std::mem::replace(&mut self.sheet.name, name.clone());
@@ -3067,84 +3367,16 @@ impl PricerTile {
         if !self.shared.taken(&name) {
             return Err(format!("no sheet '{name}'"));
         }
-        let focus = cx.focus_handle();
-        focus.focus(window, cx);
-        let blur = cx.on_blur(&focus, window, |this, window, cx| {
-            if this.confirm.is_some() {
-                this.cancel_remove(window, cx);
-            }
-        });
-        self.confirm = Some(PendingRemove {
-            prompt: format!("remove sheet '{name}' and all its history? (y/n)").into(),
-            sheet: name,
-            focus,
-            _blur: blur,
-        });
+        let prompt = format!("remove sheet '{name}' and all its history? (y/n)");
+        confirm::arm(self, PendingRemove { sheet: name }, prompt, window, cx);
         self.rebuild_chrome();
         cx.notify();
         Ok(())
     }
 
-    /// The confirm's own key handler, run from the prompt's `on_key_down`
-    /// in `header::render` — on the focused element, so before the shell
-    /// root's listener. While armed EVERY key is consumed (`true`): bare
-    /// `y` forgets, anything else cancels. A keystroke that answers the
-    /// question must not also act on the tile or the shell.
-    pub(crate) fn confirm_key(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        if self.confirm.is_none() {
-            return false;
-        }
-        let ks = &event.keystroke;
-        if ks.key == "y" && !ks.modifiers.modified() {
-            self.submit_remove(window, cx);
-        } else {
-            self.cancel_remove(window, cx);
-        }
-        true
-    }
-
-    /// A pointer press anywhere on the tile while armed cancels (the tile
-    /// root's capture-phase mouse-down): a press on the header or the
-    /// menu button moves no focus, so the blur half alone would leave the
-    /// question standing behind the click.
-    pub(crate) fn cancel_remove_on_pointer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.confirm.is_some() {
-            self.cancel_remove(window, cx);
-        }
-    }
-
-    /// Drop the armed confirm, giving up the keyboard first when its
-    /// prompt holds it (a surface dropping a focused handle blurs it).
-    fn disarm_remove(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<PendingRemove> {
-        let pending = self.confirm.take()?;
-        if pending.focus.is_focused(window) {
-            window.blur(cx);
-        }
-        Some(pending)
-    }
-
-    fn cancel_remove(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let _ = self.disarm_remove(window, cx);
-        self.footer = Some(NOT_REMOVED.into());
-        self.rebuild_chrome();
-        cx.notify();
-    }
-
     /// `y`: forget the sheet. Whether it went reaches the store through
     /// `PricerFactory::forget_answered`, and a failure is painted here.
-    fn submit_remove(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(pending) = self.disarm_remove(window, cx) else {
-            return;
-        };
+    fn submit_remove(&mut self, pending: PendingRemove, cx: &mut Context<Self>) {
         // The name was checked when the question was armed; a tile may
         // have opened it, or a `:name` begun retiring it, since. Forgetting
         // then would delete a sheet in use or race that rename's forget.
@@ -3298,10 +3530,26 @@ impl PricerTile {
     /// Retain its focus handle until deferred access to the opening window can blur it.
     /// Check that it still owns focus so a newer field is not blurred.
     fn drop_orphaned_editor(&mut self, cx: &mut Context<Self>) {
+        // Mid-rebuild a rollback would rebuild inside the rebuild: steps
+        // still in the sheet are recorded instead, so they stay undoable
+        // rather than landing with no history.
+        if let Some(bulk) = self.take_bulk()
+            && !bulk.undo.inverse.is_empty()
+        {
+            self.undo.record(bulk.undo);
+        }
+        if self.release_editor(cx) {
+            self.footer = Some(MOVED.into());
+        }
+    }
+
+    /// Drop the editor where no `Window` is at hand, blurring it later
+    /// through the window it opened in if it still owns focus (a newer
+    /// field is never blurred). Answers whether there was one.
+    fn release_editor(&mut self, cx: &mut App) -> bool {
         let Some(editor) = self.editor.take() else {
-            return;
+            return false;
         };
-        self.footer = Some(MOVED.into());
         let focus = editor.focus_handle(cx);
         drop(editor);
         if let Some(handle) = self.editor_window {
@@ -3313,6 +3561,7 @@ impl PricerTile {
                 });
             });
         }
+        true
     }
 
     pub(crate) fn rebuild_chrome(&mut self) {
@@ -3327,7 +3576,7 @@ impl PricerTile {
         self.header = header::prepare(HeaderInputs {
             sheet: &self.sheet,
             notice,
-            prompt: self.confirm.as_ref().map(|c| c.prompt.clone()),
+            prompt: self.confirm.as_ref().map(|c| c.prompt_text().clone()),
             save: self.save_notice.clone(),
             settings: &settings,
             clock: self.clock,
@@ -3340,14 +3589,12 @@ impl PricerTile {
                 _ => None,
             }
         });
-        // Recompute an open menu after load, reload, or delivery changes its contents.
-        // Preserve its index when possible, otherwise clamp and snap to an Action or
-        // View row; snapping includes disabled actions.
+        // Recompute an open menu after load, reload, or delivery changes its
+        // contents; the door snaps its highlight onto an action row.
         if self.menu.is_some() {
             let items = self.menu_items();
             if let Some(m) = self.menu.as_mut() {
-                m.highlighted = crate::popup::snap(&items, m.highlighted);
-                m.items = items;
+                m.replace_rows(items, &self.chords);
             }
         }
     }
@@ -3401,12 +3648,20 @@ impl PricerTile {
 
     /// Mirror the cursor into the table: column before row, so the component ends
     /// in row mode. The delegate paints the cell cursor separately.
+    ///
+    /// The selection re-resolves here first: the cursor is its moving
+    /// corner, so every cursor change is a selection change point.
     pub(crate) fn sync_cursor(&mut self, cx: &mut Context<Self>) {
         self.reconcile_cursor();
+        if self.refresh_selection() {
+            self.rebuild_chrome();
+        }
         let row = self.cursor_row();
         let col = self.cursor.col;
+        let selected = self.resolved.clone();
         self.table.update(cx, |t, cx| {
             t.delegate_mut().cursor = row.map(|r| (r, col));
+            t.delegate_mut().selected = selected;
             t.delegate_mut().refresh_numbers();
             match row {
                 Some(r) => {
@@ -3459,6 +3714,103 @@ impl PricerTile {
         }
     }
 
+    /// The `(grid row, plan column)` the open editor sits on.
+    fn editor_cell(&self) -> Option<(usize, usize)> {
+        let (line, col, _) = self.editor.as_ref()?.target();
+        Some((self.model.grid_row_of(line)?, col))
+    }
+
+    /// Every mouse selection gesture lands here and goes through the same
+    /// `start_selection`/`clear_selection` doors the keys use, so the mouse
+    /// never reaches a selection the keys could not. A plain press clears
+    /// and moves the cursor (the table's `SelectCell` on the release moves
+    /// it again, to the same cell); a shift press or a drag starts a
+    /// selection only when none is live — `Rows` from the tree cell or the
+    /// gutter, `Block` from a value cell — then moves the cursor, which
+    /// extends it. The tree cell keeps the cursor's column: the cursor
+    /// never enters the tree column.
+    ///
+    /// Ordering: the delegate emits the press on mouse-down and the table
+    /// emits `SelectCell` only on the click (the release), so a shift
+    /// press starts the selection at the PRE-press cursor with no capture
+    /// of it needed. A drag anchors at its press cell because the plain
+    /// press already moved the cursor there.
+    ///
+    /// Any gesture that gets here closes an open editor first: a click is
+    /// a cancel (`close_editor`'s rule, which takes live steps back), and
+    /// a drag never gets the `SelectCell` that would otherwise close it.
+    /// A press inside the editor's own cell never gets here. A press
+    /// leaves the entry bar to `SelectCell`, whose click hand-off needs
+    /// the table where the press found it; a drag has no such click, so
+    /// it closes the bar itself.
+    fn pointer(&mut self, event: CellPointer, window: &mut Window, cx: &mut Context<Self>) {
+        // What the chrome shows (mode, footer extent, notice) moves only
+        // with one of these; a plain press that changes none of them (the
+        // cursor cell, nothing selected) skips the rebuild.
+        let snapshot = |t: &Self| {
+            (
+                t.selection.is_some(),
+                t.cursor_row(),
+                t.cursor.col,
+                t.editor.is_some(),
+                t.entry.is_some(),
+                t.footer.clone(),
+            )
+        };
+        let before = snapshot(self);
+        let kind_for = |tree: bool| {
+            if tree {
+                SelectKind::Rows
+            } else {
+                SelectKind::Block
+            }
+        };
+        let (row, col, start) = match event {
+            CellPointer::Press {
+                row,
+                col,
+                shift: false,
+            } => {
+                self.clear_selection();
+                (row, col, None)
+            }
+            CellPointer::Press {
+                row,
+                col,
+                shift: true,
+            } => (row, col, Some(kind_for(col.is_none()))),
+            CellPointer::Drag { row, col, tree } => {
+                // Still inside the cell the cursor is on (the tree cell or
+                // the gutter keeps the column): nothing to start or extend.
+                if self.cursor_row() == Some(row) && col.is_none_or(|c| c == self.cursor.col) {
+                    return;
+                }
+                self.close_entry(window, cx);
+                (row, col, Some(kind_for(tree)))
+            }
+        };
+        if self.editor.is_some() {
+            self.close_editor(window, cx);
+        }
+        if let Some(kind) = start
+            && self.selection.is_none()
+        {
+            self.start_selection(kind);
+        }
+        if let Some(id) = self.line_at(row) {
+            self.cursor.line = Some(id);
+            if let Some(c) = col {
+                self.cursor.col = c;
+            }
+        }
+        // Re-resolves the selection against the moved cursor.
+        self.sync_cursor(cx);
+        if snapshot(self) != before {
+            self.rebuild_chrome();
+            cx.notify();
+        }
+    }
+
     fn on_table_event(&mut self, event: &TableEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             TableEvent::SelectCell(row, col) => {
@@ -3475,6 +3827,16 @@ impl PricerTile {
                 self.pressed = self.click_anchor.take();
                 if self.entry.is_some() {
                     self.click_anchor = Some(line);
+                }
+                // A click inside the open editor's own cell is the
+                // editor's (caret, text selection): never a cancel, which
+                // would also take a live step's steps back, and the cursor
+                // is already there. After the hand-off, which every press
+                // takes part in.
+                if SheetDelegate::plan_col(*col)
+                    .is_some_and(|c| self.editor_cell() == Some((*row, c)))
+                {
+                    return;
                 }
                 self.close_entry(window, cx);
                 self.close_editor(window, cx);
@@ -3497,6 +3859,14 @@ impl PricerTile {
                     Some(line) => line,
                     None => self.line_at(*row),
                 };
+                // A double-click inside the open editor (a word selection
+                // there) reopens nothing: reopening would reseed the typed
+                // text and take a live step's steps back.
+                if SheetDelegate::plan_col(*col)
+                    .is_some_and(|c| self.editor_cell() == Some((*row, c)))
+                {
+                    return;
+                }
                 self.close_entry(window, cx);
                 let Some(id) = line else {
                     return;
@@ -3546,11 +3916,10 @@ impl gpui::Render for PricerTile {
                 tile: &tile,
                 menu_open: self.menu.is_some(),
                 menu_tip: self.menu_tip.clone(),
-                confirm: self.confirm.as_ref().map(|c| &c.focus),
+                confirm: self.confirm.as_ref(),
             },
             theme,
         );
-        let paints = self.table.read(cx).delegate().paints;
         // Anchor the menu at the header's right edge. The relative wrapper
         // makes absolute positioning resolve against the header, not the window.
         let header =
@@ -3564,7 +3933,14 @@ impl gpui::Render for PricerTile {
                             .absolute()
                             .right_0()
                             .top(scale::design(header::HEADER_HEIGHT))
-                            .child(render_menu(m, &paints, &tile, cx)),
+                            .child(menu::render_menu(
+                                m,
+                                &MenuIds::new("pricer-menu", "pricer-menu-row"),
+                                gpui::Anchor::TopRight,
+                                &tile,
+                                |t: &mut PricerTile, _, cx| t.close_menu(cx),
+                                cx,
+                            )),
                     )
                 });
         let body = div().flex_1().min_h_0().w_full().child(
@@ -3583,23 +3959,81 @@ impl gpui::Render for PricerTile {
                 cx,
             )
         });
-        let footer = header::render_footer(self.footer_text.as_ref(), theme);
+        // A refusal or a line failure takes the footer while it stands.
+        let strip = self.footer_text.is_none();
+        let footer = header::render_footer(
+            self.footer_text.as_ref(),
+            self.selection_extent.as_ref().filter(|_| strip),
+            &self.totals,
+            theme,
+        );
         // A pointer press anywhere on the tile cancels an armed `:rm`
-        // confirm — capture phase, so it runs before the press reaches
-        // whatever it was aimed at, and it never stops propagation.
-        let cancel_tile = tile.clone();
-        v_flex()
-            .size_full()
-            .debug_selector(|| format!("tile-content-{}", self.id.0))
-            .when(self.confirm.is_some(), |el| {
-                el.capture_any_mouse_down(move |_, window, cx| {
-                    cancel_tile.update(cx, |t, cx| t.cancel_remove_on_pointer(window, cx));
-                })
-            })
-            .child(header)
-            .children(bar)
-            .child(body)
-            .child(footer)
+        // confirm (the confirm door's capture-phase press).
+        confirm::cancel_on_press(
+            v_flex()
+                .size_full()
+                .debug_selector(|| format!("tile-content-{}", self.id.0))
+                .child(header)
+                .children(bar)
+                .child(body)
+                .child(footer),
+            self.confirm.is_some(),
+            &tile,
+        )
+    }
+}
+
+impl MenuHost for PricerTile {
+    /// A disabled row says why and keeps the menu open; an enabled one
+    /// closes it and dispatches through the same door a key would.
+    fn menu_pick(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(picked) = self.menu.as_ref().and_then(|m| m.pick(index)) else {
+            return;
+        };
+        match picked {
+            Err(why) => {
+                self.footer = Some(why);
+                self.rebuild_chrome();
+                cx.notify();
+            }
+            Ok(PricerPick::Action(id)) => {
+                self.menu = None;
+                self.dispatch(&ActionId(id.to_string()), None, window, cx);
+            }
+            Ok(PricerPick::View(name)) => {
+                self.menu = None;
+                if let Err(why) = self.set_view(&name, cx) {
+                    self.footer = Some(why.into());
+                }
+                self.rebuild_chrome();
+                cx.notify();
+            }
+        }
+    }
+
+    /// Change-only: gpui fires this on every pointer move over a row.
+    fn menu_hover(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.menu.as_mut().is_some_and(|m| m.highlight(index)) {
+            cx.notify();
+        }
+    }
+}
+
+impl ConfirmHost for PricerTile {
+    type Payload = PendingRemove;
+
+    fn confirm_slot(&mut self) -> &mut Option<Confirm<PendingRemove>> {
+        &mut self.confirm
+    }
+
+    fn confirmed(&mut self, pending: PendingRemove, _: &mut Window, cx: &mut Context<Self>) {
+        self.submit_remove(pending, cx);
+    }
+
+    fn cancelled(&mut self, _: PendingRemove, _: &mut Window, cx: &mut Context<Self>) {
+        self.footer = Some(NOT_REMOVED.into());
+        self.rebuild_chrome();
+        cx.notify();
     }
 }
 
@@ -3638,6 +4072,27 @@ pub(crate) mod tests {
         diagnostics: Entity<Diagnostics>,
     }
 
+    /// The window's view between `Root` and the tile. Its bubble-phase
+    /// press counter stands in for the shell's tile-level press, which
+    /// puts the keyboard back on the tile: a tile listener that stopped
+    /// a press's propagation would leave the shell deaf to it.
+    struct Host {
+        tile: Entity<PricerTile>,
+        presses: Rc<std::cell::Cell<u32>>,
+    }
+
+    impl gpui::Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            let presses = self.presses.clone();
+            div()
+                .size_full()
+                .on_mouse_down(gpui::MouseButton::Left, move |_, _, _| {
+                    presses.set(presses.get() + 1);
+                })
+                .child(self.tile.clone())
+        }
+    }
+
     // Not every field and method has a reader in every build.
     #[allow(dead_code)]
     pub(crate) struct Harness {
@@ -3649,6 +4104,8 @@ pub(crate) mod tests {
         pub store: MemorySheetStore,
         pub data: DataHandle,
         rx: RefCell<Option<Receiver<Request>>>,
+        /// Left presses that bubbled out of the tile to the host.
+        pub host_presses: Rc<std::cell::Cell<u32>>,
     }
 
     /// A sheet named `book` in a fresh store, built from shorthand lines,
@@ -3750,9 +4207,11 @@ pub(crate) mod tests {
         }
         let factory = Rc::new(factory);
         let slot: Rc<RefCell<Option<Built>>> = Rc::new(RefCell::new(None));
+        let host_presses = Rc::new(std::cell::Cell::new(0));
         let window = cx
             .update(|cx| {
                 let slot = slot.clone();
+                let presses = host_presses.clone();
                 let factory = factory.clone();
                 cx.open_window(gpui::WindowOptions::default(), |window, cx| {
                     // The tile sits in unpinned workspace 1, so the shared lane
@@ -3777,9 +4236,10 @@ pub(crate) mod tests {
                         frame,
                         diagnostics,
                     });
+                    let host = cx.new(|_| Host { tile, presses });
                     // `Root` is load-bearing: gpui-component registers the
                     // focused `InputState` on it (the entry field and editor).
-                    cx.new(|cx| gpui_component::Root::new(tile, window, cx))
+                    cx.new(|cx| gpui_component::Root::new(host, window, cx))
                 })
             })
             .unwrap();
@@ -3798,6 +4258,7 @@ pub(crate) mod tests {
                 store,
                 data,
                 rx: RefCell::new(Some(rx)),
+                host_presses,
             },
             vcx,
         )
@@ -3923,13 +4384,15 @@ pub(crate) mod tests {
             self.tile.read_with(vcx, |t, _| t.header.texts())
         }
         pub fn notice(&self, vcx: &VisualTestContext) -> Option<String> {
-            self.tile
-                .read_with(vcx, |t, _| t.header.notice.as_ref().map(|n| n.to_string()))
+            self.tile.read_with(vcx, |t, _| {
+                t.header.notice.as_ref().map(|n| n.text().to_string())
+            })
         }
         /// The save state's own header slot.
         pub fn save_notice(&self, vcx: &VisualTestContext) -> Option<String> {
-            self.tile
-                .read_with(vcx, |t, _| t.header.save.as_ref().map(|n| n.to_string()))
+            self.tile.read_with(vcx, |t, _| {
+                t.header.save.as_ref().map(|n| n.text().to_string())
+            })
         }
         pub fn entry_text(&self, vcx: &VisualTestContext) -> Option<String> {
             self.tile.read_with(vcx, |t, cx| {
@@ -4653,7 +5116,7 @@ pub(crate) mod tests {
         let b = h.prices().remove(0);
         h.answer(&mut vcx, &b, 12.5);
         edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 7 });
-        assert!(h.prices().is_empty(), "qty changes no request (spec §9.3)");
+        assert!(h.prices().is_empty(), "qty changes no request");
         let e = new_strike(&h, &vcx, 0, 5100.0);
         edit(&h, &mut vcx, e);
         let again = h.prices();
@@ -5660,7 +6123,7 @@ pub(crate) mod tests {
         typed(h, vcx, text);
     }
 
-    /// Spec §3–§5: a package strike's `/` list moves each leg's strike,
+    /// A package strike's `/` list moves each leg's strike,
     /// and the whole commit is one reprice and one undo step.
     #[gpui::test]
     fn editing_a_package_strike_moves_both_legs_in_one_undo_step(cx: &mut gpui::TestAppContext) {
@@ -5739,7 +6202,7 @@ pub(crate) mod tests {
         assert_eq!(legs(&h, &vcx), [-5, 5], "no leg moved");
     }
 
-    /// Spec §3, §6: a package expiry opens a plain text editor, not the
+    /// A package expiry opens a plain text editor, not the
     /// date field; a list with the wrong part count keeps the editor open
     /// and names the count and the current cell.
     #[gpui::test]
@@ -5780,6 +6243,23 @@ pub(crate) mod tests {
             Some("4994"),
             "a count multiplies"
         );
+    }
+
+    /// An inherited shift paints the sheet's value; the empty field it
+    /// opens on means "inherit", not zero. A step starting from zero
+    /// would move a painted +2.0 down to +1.0 on `up`.
+    #[gpui::test]
+    fn a_nudge_on_an_inherited_shift_steps_from_the_painted_value(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.command(&mut vcx, "shift spot 2").unwrap();
+        goto_column(&h, &mut vcx, "spot_shift");
+        assert_eq!(h.cell(&vcx, 0, "spot_shift"), "+2.0", "fixture: inherited");
+        h.dispatch(&mut vcx, "edit", None);
+        assert_eq!(editor_text(&h, &vcx).as_deref(), Some(""), "opens empty");
+        h.dispatch(&mut vcx, "insert_up", None);
+        assert_eq!(editor_text(&h, &vcx).as_deref(), Some("3"));
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.cell(&vcx, 0, "spot_shift"), "+3.0");
     }
 
     #[gpui::test]
@@ -6425,7 +6905,7 @@ pub(crate) mod tests {
         assert_eq!(
             h.prices().len(),
             1,
-            "an instrument change is a request change (spec §9.3)"
+            "an instrument change is a request change"
         );
     }
 
@@ -6546,7 +7026,7 @@ pub(crate) mod tests {
         h.command(&mut vcx, "spot spx 5100").unwrap();
         let b = h.prices().remove(0);
         assert_eq!(b.overrides.spot.get("SPX"), Some(&5100.0));
-        assert_eq!(b.lines.len(), 4, "every SPX line is restaled (spec §9.3)");
+        assert_eq!(b.lines.len(), 4, "every SPX line is restaled");
         h.command(&mut vcx, "spot ndx 18000").unwrap();
         answer_all(&h, &mut vcx, 12.5);
         h.command(&mut vcx, "spot clear").unwrap();
@@ -6577,7 +7057,7 @@ pub(crate) mod tests {
         h.dispatch(&mut vcx, "menu_down", Some(2));
         assert_eq!(
             h.tile
-                .read_with(&vcx, |t, _| t.menu.as_ref().map(|m| m.highlighted)),
+                .read_with(&vcx, |t, _| t.menu.as_ref().and_then(|m| m.highlighted())),
             Some(8),
             "over the three greyed rows onto Delete row"
         );
@@ -6616,7 +7096,7 @@ pub(crate) mod tests {
         assert_eq!(h.mode(&mut vcx), "menu", "the answer leaves the menu open");
         assert_eq!(
             h.tile
-                .read_with(&vcx, |t, _| t.menu.as_ref().map(|m| m.highlighted)),
+                .read_with(&vcx, |t, _| t.menu.as_ref().and_then(|m| m.highlighted())),
             Some(8),
             "the highlight stays where it was"
         );
@@ -6644,17 +7124,19 @@ pub(crate) mod tests {
         let (views, highlighted) = h.tile.read_with(&vcx, |t, _| {
             let m = t.menu.as_ref().expect("the menu stays open");
             let views: Vec<String> = m
-                .items
+                .rows()
                 .iter()
-                .filter_map(|i| match i {
-                    MenuItem::View { name, current } => Some(format!("{name} {current}")),
+                .filter_map(|r| match r {
+                    Row::Action(a) if matches!(a.pick(), PricerPick::View(_)) => {
+                        Some(format!("{} {}", a.title(), a.tick() == Some(true)))
+                    }
                     _ => None,
                 })
                 .collect();
-            (views, m.highlighted)
+            (views, m.highlighted())
         });
         assert_eq!(views, vec!["slim false"]);
-        assert_eq!(highlighted, 11, "clamped to the last row");
+        assert_eq!(highlighted, Some(11), "clamped to the last row");
     }
 
     #[gpui::test]
@@ -7001,7 +7483,7 @@ pub(crate) mod tests {
         assert_eq!(
             h.store.save_count(),
             base,
-            "a zero-row document is never published (spec §7.2)"
+            "a zero-row document is never published"
         );
         assert_eq!(stored(&h).len(), 1);
     }
@@ -7730,33 +8212,109 @@ pub(crate) mod tests {
     }
 
     fn menu_rows(h: &Harness, vcx: &VisualTestContext) -> Vec<String> {
+        use geode_tile::menu::Trailing;
         h.tile.read_with(vcx, |t, _| {
             t.menu
                 .as_ref()
                 .expect("the menu is open")
-                .items
+                .rows()
                 .iter()
-                .map(|i| match i {
-                    MenuItem::Action {
-                        title,
-                        hint,
-                        enabled,
-                        ..
-                    } => match enabled {
-                        Ok(()) => format!("{title} | {hint}"),
-                        Err(why) => format!("{title} | ({why})"),
+                .map(|r| match r {
+                    Row::Action(a) => match a.pick() {
+                        PricerPick::View(name) => {
+                            format!("{} {name}", if a.tick() == Some(true) { "✓" } else { " " })
+                        }
+                        PricerPick::Action(_) => match (a.reason(), a.trailing()) {
+                            (Some(why), _) => format!("{} | ({why})", a.title()),
+                            (None, Trailing::Keys(k)) => format!(
+                                "{} | {}",
+                                a.title(),
+                                geode_shell::palette::render_binding(k)
+                            ),
+                            (None, Trailing::Text(t)) => format!("{} | {t}", a.title()),
+                            (None, Trailing::None) => format!("{} | ", a.title()),
+                        },
                     },
-                    MenuItem::View { name, current } => {
-                        format!("{} {name}", if *current { "✓" } else { " " })
-                    }
-                    MenuItem::Separator => "—".into(),
-                    MenuItem::Section(s) => format!("[{s}]"),
+                    Row::Separator => "—".into(),
+                    Row::Section(s) => format!("[{s}]"),
                 })
                 .collect()
         })
     }
 
-    /// Menu actions share palette titles, with default keys or disabled reasons in the
+    /// The keymap the shell would publish: the pricer fragment over the
+    /// builtin actions, plus `user` as the user layer.
+    fn install_chords(vcx: &mut VisualTestContext, user: Option<&str>) {
+        use geode_core::config::{Layer, LayerDoc};
+        use geode_shell::actions::{ActionDef, ActionRegistry};
+        let mut registry = ActionRegistry::default();
+        geode_shell::defaults::register_builtin_actions(&mut registry);
+        for (id, title) in crate::content::ACTIONS {
+            registry
+                .register(ActionDef {
+                    id: ActionId(id.to_string()),
+                    title: title.to_string(),
+                    category: "Pricer".into(),
+                })
+                .unwrap();
+        }
+        let mut docs = vec![
+            geode_shell::keymap::fragments::fragment_doc("pricer", crate::content::DEFAULT_KEYMAP)
+                .unwrap(),
+        ];
+        if let Some(text) = user {
+            docs.push(LayerDoc {
+                layer: Layer::User,
+                name: "keymap".into(),
+                file: "user/keymap.toml".into(),
+                table: text.parse().unwrap(),
+            });
+        }
+        let (keymap, diags) = geode_shell::keymap::build_keymap(
+            &docs,
+            geode_shell::defaults::default_mod(),
+            &registry,
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        vcx.update(|_, cx| {
+            cx.set_global(geode_shell::tips::Chords(std::sync::Arc::new(
+                keymap.bindings().to_vec(),
+            )))
+        });
+        vcx.run_until_parked();
+    }
+
+    const GROUP_REBOUND: &str = "[[bindings]]\ncontext = \"pricer && mode == normal\"\n[bindings.keys]\n\"g p\" = \"none\"\n\"g shift+p\" = \"pricer::group\"\n";
+
+    fn group_lane(h: &Harness, vcx: &VisualTestContext) -> String {
+        menu_rows(h, vcx)
+            .into_iter()
+            .find(|r| r.starts_with("Group into package |"))
+            .expect("the group row")
+    }
+
+    /// The menu's hints are the live keymap's: a user rebind shows.
+    #[gpui::test]
+    fn a_menu_hint_follows_a_user_rebind(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        install_chords(&mut vcx, Some(GROUP_REBOUND));
+        h.dispatch(&mut vcx, "menu", None);
+        assert_eq!(group_lane(&h, &vcx), "Group into package | g shift+p");
+    }
+
+    /// A keymap republished while the menu is open re-resolves its hints
+    /// at once, not at the next open.
+    #[gpui::test]
+    fn an_open_menu_follows_a_keymap_reload(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        install_chords(&mut vcx, None);
+        h.dispatch(&mut vcx, "menu", None);
+        assert_eq!(group_lane(&h, &vcx), "Group into package | g p");
+        install_chords(&mut vcx, Some(GROUP_REBOUND));
+        assert_eq!(group_lane(&h, &vcx), "Group into package | g shift+p");
+    }
+
+    /// Menu actions share palette titles, with their live keys or disabled reasons in the
     /// trailing lane. Separators and the View heading are skipped by selection; current
     /// views show a leading tick.
     #[gpui::test]
@@ -7764,6 +8322,7 @@ pub(crate) mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
+        install_chords(&mut vcx, None);
         h.dispatch(&mut vcx, "menu", None);
         assert_eq!(
             menu_rows(&h, &vcx),
@@ -7796,17 +8355,17 @@ pub(crate) mod tests {
         h.dispatch(&mut vcx, "menu_down", Some(1));
         let at = h
             .tile
-            .read_with(&vcx, |t, _| t.menu.as_ref().map(|m| m.highlighted));
+            .read_with(&vcx, |t, _| t.menu.as_ref().and_then(|m| m.highlighted()));
         assert_eq!(at, Some(2), "over the separator onto Group");
         h.dispatch(&mut vcx, "menu_down", Some(1));
         let at = h
             .tile
-            .read_with(&vcx, |t, _| t.menu.as_ref().map(|m| m.highlighted));
+            .read_with(&vcx, |t, _| t.menu.as_ref().and_then(|m| m.highlighted()));
         assert_eq!(at, Some(8), "over the greyed Ungroup, Undo and Redo");
         h.dispatch(&mut vcx, "menu_down", Some(1));
         let at = h
             .tile
-            .read_with(&vcx, |t, _| t.menu.as_ref().map(|m| m.highlighted));
+            .read_with(&vcx, |t, _| t.menu.as_ref().and_then(|m| m.highlighted()));
         assert_eq!(at, Some(11), "over the section header onto a view");
     }
 
@@ -7821,7 +8380,7 @@ pub(crate) mod tests {
         vcx.simulate_mouse_move(at, None, gpui::Modifiers::default());
         let highlighted = h
             .tile
-            .read_with(&vcx, |t, _| t.menu.as_ref().map(|m| m.highlighted));
+            .read_with(&vcx, |t, _| t.menu.as_ref().and_then(|m| m.highlighted()));
         assert_eq!(highlighted, Some(12));
         h.dispatch(&mut vcx, "menu_pick", None);
         assert!(h.columns(&vcx).contains(&"barrier".to_string()));
@@ -7879,23 +8438,18 @@ pub(crate) mod tests {
         h.dispatch(&mut vcx, "menu", None);
         let at = centre_of(&mut vcx, "pricer-menu-row-3"); // Ungroup: A is a root line
         vcx.simulate_mouse_move(at, None, gpui::Modifiers::default());
-        let (highlighted, enabled, paint, paints) = h.tile.read_with(&vcx, |t, cx| {
+        let (highlighted, enabled, paint, p) = h.tile.read_with(&vcx, |t, cx| {
             let m = t.menu.as_ref().expect("the menu is open");
-            let enabled = matches!(
-                m.items[m.highlighted],
-                MenuItem::Action {
-                    enabled: Ok(()),
-                    ..
-                }
-            );
-            let paints = t.table.read(cx).delegate().paints;
-            let paint = crate::popup::menu_row_paint(true, enabled, &paints, cx.theme().accent);
-            (m.highlighted, enabled, paint, paints)
+            let at = m.highlighted().expect("a highlight");
+            let enabled = m.rows()[at].action().expect("an action row").is_enabled();
+            let p = geode_tile::menu::MenuPaint::derive(cx.theme());
+            let paint = geode_tile::menu::row_paint(&p, true, enabled);
+            (at, enabled, paint, p)
         });
         assert_eq!(highlighted, 3, "the pointer's row takes the highlight");
         assert!(!enabled, "fixture: Ungroup is disabled here");
         assert_eq!(paint.fill, None, "no fill on a disabled row");
-        assert_eq!(paint.text, paints.menu_muted);
+        assert_eq!(paint.text, p.muted);
         let at = centre_of(&mut vcx, "pricer-menu-row-3");
         click_at(&mut vcx, at, 1);
         h.draw(&mut vcx);
@@ -8679,6 +9233,39 @@ pub(crate) mod tests {
         assert_eq!(h.title(&mut vcx), "Pricer · untitled-2");
     }
 
+    /// `:new <sheet>` opens an empty sheet under that name; a name that
+    /// already exists is refused and the tile stays where it is, so a typo
+    /// never opens (and later saves over) a real sheet.
+    #[gpui::test]
+    fn colon_new_with_a_name_opens_it_empty_and_refuses_an_existing_one(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        answer_all(&h, &mut vcx, 1.0);
+        assert!(
+            h.store
+                .save("taken", sheet_rows("taken", &["NKY Z26 30000 C"]))
+                .is_ok()
+        );
+        edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 7 });
+        assert_eq!(
+            h.command(&mut vcx, "new taken"),
+            Err("sheet 'taken' already exists; :e taken opens it".into())
+        );
+        assert_eq!(
+            h.command(&mut vcx, "new book"),
+            Err("sheet 'book' already exists; :e book opens it".into()),
+            "this tile's own sheet counts"
+        );
+        assert_eq!(h.title(&mut vcx), "Pricer · book", "the tile did not move");
+        let loads = h.store.loads().len();
+        assert_eq!(h.command(&mut vcx, "new fresh"), Ok(()));
+        assert_eq!(h.title(&mut vcx), "Pricer · fresh");
+        assert_eq!(h.sheet_len(&vcx), 0);
+        assert_eq!(h.store.loads().len(), loads, "nothing to load");
+        assert_eq!(stored(&h).qty(0), 7, "the sheet left behind was saved");
+    }
+
     #[gpui::test]
     fn colon_name_renames_and_forgets_the_old_name_only_once_saved(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
@@ -8754,8 +9341,9 @@ pub(crate) mod tests {
     }
 
     fn prompt(h: &Harness, vcx: &VisualTestContext) -> Option<String> {
-        h.tile
-            .read_with(vcx, |t, _| t.confirm.as_ref().map(|c| c.prompt.to_string()))
+        h.tile.read_with(vcx, |t, _| {
+            t.confirm.as_ref().map(|c| c.prompt_text().to_string())
+        })
     }
 
     /// `old` in the store, `book` open here, `untitled-1` in another tile.
@@ -8962,7 +9550,7 @@ pub(crate) mod tests {
             h.draw(&mut vcx);
             // Held here so a handle dropped still focused stays visible.
             let focus = h.tile.read_with(&vcx, |t, _| {
-                t.confirm.as_ref().expect("armed").focus.clone()
+                t.confirm.as_ref().expect("armed").focus_handle().clone()
             });
             assert!(vcx.update(|window, _| focus.is_focused(window)));
             vcx.simulate_keystrokes(key);
@@ -9045,7 +9633,7 @@ pub(crate) mod tests {
         assert_eq!(priced, None, "the old batch's answer is not this sheet's");
     }
 
-    // ---- fix round 1: retiring names, deferred loads, save origins ----
+    // ---- retiring names, deferred loads, save origins ----
 
     /// A tile restoring `sheet` in a window of its own, from the harness's
     /// factory — the production route a session restore takes.
@@ -9354,4 +9942,6 @@ pub(crate) mod tests {
         save_answered(&h, &mut vcx, "other", Ok(()));
         assert!(h.notice(&vcx).is_none());
     }
+
+    mod selection;
 }
