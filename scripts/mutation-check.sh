@@ -23336,6 +23336,118 @@ run_mutation "following: a releasing reply asked before a followed change is sup
   '                    Promotion::Superseded => Delivered::Held,' \
   geode-tile a_releasing_delivery_asked_before_a_followed_change_is_superseded
 
+# A bare j/k wraps at the ends of a grid; without it a trader at the last
+# row has to page back to the top.
+run_mutation "shared motion: a bare single step wraps" \
+  crates/geode-tile/src/motion.rs \
+  '            if !counted && !selecting && by.abs() == 1 {' \
+  '            if false {' \
+  geode-tile a_bare_single_step_wraps_at_both_ends
+
+# A live selection clamps a bare step; a wrap would put the cursor across
+# the anchor and invert the selection.
+run_mutation "shared motion: a selection clamps a bare step" \
+  crates/geode-tile/src/motion.rs \
+  '            if !counted && !selecting && by.abs() == 1 {' \
+  '            if !counted && by.abs() == 1 {' \
+  geode-tile a_live_selection_clamps_a_bare_step
+
+# A counted step clamps, a count of one included.
+run_mutation "shared motion: a counted step clamps" \
+  crates/geode-tile/src/motion.rs \
+  '            if !counted && !selecting && by.abs() == 1 {' \
+  '            if !selecting && by.abs() == 1 {' \
+  geode-tile a_counted_step_clamps_even_a_count_of_one
+
+run_mutation "shared motion: a counted top or bottom is a 1-based row" \
+  crates/geode-tile/src/motion.rs \
+  '        Motion::Top(Some(n)) | Motion::Bottom(Some(n)) => (n.max(1) as usize - 1).min(last),' \
+  '        Motion::Top(Some(_)) => 0,
+        Motion::Bottom(Some(_)) => last,' \
+  geode-tile a_counted_top_or_bottom_jumps_to_that_row
+
+run_mutation "shared motion: half a page is five rows" \
+  crates/geode-tile/src/motion.rs \
+  'pub const HALF_PAGE: i64 = 5;' \
+  'pub const HALF_PAGE: i64 = 10;' \
+  geode-tile the_page_motions_move_five_and_ten_times_the_count
+
+run_mutation "shared motion: a page is ten rows" \
+  crates/geode-tile/src/motion.rs \
+  'pub const FULL_PAGE: i64 = 10;' \
+  'pub const FULL_PAGE: i64 = 5;' \
+  geode-tile the_page_motions_move_five_and_ten_times_the_count
+
+run_mutation "shared motion: the count multiplies a page" \
+  crates/geode-tile/src/motion.rs \
+  '    let n = i64::from(count.unwrap_or(1).max(1));' \
+  '    let n = 1i64;' \
+  geode-tile the_page_motions_move_five_and_ten_times_the_count
+
+run_mutation "shared motion: line end is the last column" \
+  crates/geode-tile/src/motion.rs \
+  '        Motion::LineEnd => last,' \
+  '        Motion::LineEnd => at,' \
+  geode-tile columns_clamp_and_line_start_and_end_reach_the_extremes
+
+run_mutation "shared motion: an empty axis leaves the row alone" \
+  crates/geode-tile/src/motion.rs \
+  '    if len == 0 {
+        return at;
+    }' \
+  '    if len == 0 {
+        return 0;
+    }' \
+  geode-tile an_empty_axis_is_a_no_op
+
+# One shipped context covers both grid modes, so one override remaps both.
+run_mutation "motion keys: the grid context covers visual mode" \
+  crates/geode-shell/src/defaults.rs \
+  'context = "grid && (mode == normal || mode == visual)"
+[bindings.keys]
+"j" = "motion::down"' \
+  'context = "grid && mode == normal"
+[bindings.keys]
+"j" = "motion::down"' \
+  geode-shell grid_motions_resolve_in_normal_and_visual_grid_contexts_only
+
+run_mutation "motion keys: j is the shipped down" \
+  crates/geode-shell/src/defaults.rs \
+  '"j" = "motion::down"' \
+  '"j" = "motion::up"' \
+  geode-shell grid_motions_resolve_in_normal_and_visual_grid_contexts_only
+
+run_mutation "motion keys: an open tile list takes j" \
+  crates/geode-shell/src/defaults.rs \
+  'context = "tilelist"
+[bindings.keys]
+"j" = "motion::menu_down"' \
+  'context = "tilelist && mode == normal"
+[bindings.keys]
+"j" = "motion::menu_down"' \
+  geode-shell an_open_tile_list_takes_j_and_k_as_menu_steps_not_grid_motions
+
+run_mutation "motion keys: the motions register under Motion" \
+  crates/geode-shell/src/defaults.rs \
+  '        action(reg, id, title, "Motion");' \
+  '        action(reg, id, title, "Workspace");' \
+  geode-shell each_motion_is_listed_once_under_motion_with_its_vim_key
+
+run_mutation "motion keys: several retired ids rename to one" \
+  crates/geode-shell/src/actions.rs \
+  '        self.renames.insert(old, ActionId(new.to_string()));' \
+  '        if self.renames.values().any(|n| n.0 == new) {
+            return Err(format!("{new} already has a retired id"));
+        }
+        self.renames.insert(old, ActionId(new.to_string()));' \
+  geode-shell several_retired_ids_may_rename_to_one_current_id
+
+run_mutation "motion keys: a grid occupant receives the shared motions" \
+  crates/geode-shell/src/module.rs \
+  '            if self.grid { ctx.grid() } else { ctx }' \
+  '            ctx' \
+  geode-shell a_shared_motion_key_reaches_a_grid_occupant_with_its_count
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

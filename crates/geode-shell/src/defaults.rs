@@ -17,8 +17,9 @@ use geode_core::config::{Config, Diagnostic, Severity};
 /// backends deliver shifted punctuation as the shifted character with Shift
 /// cleared. Letters and arrows retain an explicit Shift modifier instead.
 ///
-/// The builtin document has no multi-key sequences; the engine supports them in
-/// other layers. Exact ties use the last matching entry. Frame-slot bindings
+/// The builtin document's only multi-key sequence is the grid motion `g g`;
+/// module fragments add their own `g` sequences beside it (a pending `g` waits
+/// for either). Exact ties use the last matching entry. Frame-slot bindings
 /// precede workspace bindings, although the configured `mod` alias cannot be
 /// Control and therefore cannot collide with the literal Control digit bindings.
 pub const BUILTIN_KEYMAP: &str = r#"
@@ -101,7 +102,77 @@ context = "tile"
 ":" = "tile::command_line"
 "/" = "tile::find"
 
+# Grid motions, shipped once for every tile that publishes `grid`. Named
+# keys come first and vim keys last in the same context, so a hint and the
+# keybindings dialog name the vim key (the last live binding wins display).
+[[bindings]]
+context = "grid && (mode == normal || mode == visual)"
+[bindings.keys]
+"down" = "motion::down"
+"up" = "motion::up"
+"left" = "motion::left"
+"right" = "motion::right"
+"pagedown" = "motion::page_down"
+"pageup" = "motion::page_up"
+"home" = "motion::line_start"
+"end" = "motion::line_end"
+
+[[bindings]]
+context = "grid && (mode == normal || mode == visual)"
+[bindings.keys]
+"j" = "motion::down"
+"k" = "motion::up"
+"h" = "motion::left"
+"l" = "motion::right"
+"g g" = "motion::top"
+"shift+g" = "motion::bottom"
+"ctrl+d" = "motion::half_page_down"
+"ctrl+u" = "motion::half_page_up"
+"ctrl+f" = "motion::page_down"
+"ctrl+b" = "motion::page_up"
+"^" = "motion::line_start"
+"$" = "motion::line_end"
+
+# Menu and popup-list steps, for a tile publishing `tilelist` while one is
+# open; a grid under the menu reports `mode == menu`, so its motions stay out.
+[[bindings]]
+context = "tilelist"
+[bindings.keys]
+"down" = "motion::menu_down"
+"up" = "motion::menu_up"
+
+[[bindings]]
+context = "tilelist"
+[bindings.keys]
+"j" = "motion::menu_down"
+"k" = "motion::menu_up"
 "#;
+
+/// The one context every grid motion is bound under. One string for both
+/// modes, because the keybindings dialog rebinds inside the displayed
+/// binding's context: two contexts would leave the other mode on the old key.
+pub const GRID_MOTION_CONTEXT: &str = "grid && (mode == normal || mode == visual)";
+
+/// The shared motion vocabulary, registered here so one binding reaches every
+/// tile that publishes `grid` or `tilelist`. The shell handles none of them:
+/// dispatch falls through to the focused tile, which interprets them through
+/// `geode_tile::motion`.
+pub const MOTION_ACTIONS: &[(&str, &str)] = &[
+    ("motion::down", "Cursor down"),
+    ("motion::up", "Cursor up"),
+    ("motion::left", "Cursor left"),
+    ("motion::right", "Cursor right"),
+    ("motion::top", "Cursor to top"),
+    ("motion::bottom", "Cursor to bottom"),
+    ("motion::half_page_down", "Half page down"),
+    ("motion::half_page_up", "Half page up"),
+    ("motion::page_down", "Page down"),
+    ("motion::page_up", "Page up"),
+    ("motion::line_start", "First column"),
+    ("motion::line_end", "Last column"),
+    ("motion::menu_down", "Menu: next"),
+    ("motion::menu_up", "Menu: previous"),
+];
 
 fn action(reg: &mut ActionRegistry, id: &str, title: &str, category: &str) {
     reg.register(ActionDef {
@@ -409,6 +480,12 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
             "Dump frame-time stats to stderr",
             "Diagnostics",
         );
+    }
+
+    // The shared motions: one registration, one "Motion" group in the
+    // palette and the keybindings dialog, whichever tile takes them.
+    for (id, title) in MOTION_ACTIONS {
+        action(reg, id, title, "Motion");
     }
 }
 
@@ -841,5 +918,211 @@ mod tests {
             .collect();
         assert!(bound.iter().any(|a| a == "workspace::duplicate_horizontal"));
         assert!(bound.iter().any(|a| a == "workspace::duplicate_vertical"));
+    }
+
+    /// `BUILTIN_KEYMAP` plus an optional user `keymap.toml`, over the builtin
+    /// registry, as startup compiles them.
+    fn motion_keymap(user: Option<&str>) -> (crate::keymap::Keymap, Vec<Diagnostic>) {
+        let mut reg = ActionRegistry::default();
+        register_builtin_actions(&mut reg);
+        let mut docs = vec![LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap()];
+        if let Some(text) = user {
+            docs.push(LayerDoc {
+                layer: geode_core::config::Layer::User,
+                name: "keymap".into(),
+                file: "user/keymap.toml".into(),
+                table: text.parse().unwrap(),
+            });
+        }
+        build_keymap(&docs, default_mod(), &reg)
+    }
+
+    /// Feed a space-separated key sequence to one matcher; the last answer.
+    fn press_all(keymap: &crate::keymap::Keymap, keys: &str, stack: &[KeyContext]) -> MatchResult {
+        let mut matcher = Matcher::default();
+        let mut last = MatchResult::NoMatch;
+        for key in keys.split(' ') {
+            last = matcher.press(keymap, parse_keystroke(key, default_mod()).unwrap(), stack);
+        }
+        last
+    }
+
+    fn grid_stack(mode: &str) -> Vec<KeyContext> {
+        vec![
+            KeyContext::new("workspace"),
+            KeyContext::new("tile"),
+            KeyContext::new("rec").grid().pair("mode", mode).counts(),
+        ]
+    }
+
+    fn matched(action: &str, count: Option<u32>) -> MatchResult {
+        MatchResult::Matched {
+            action: ActionId(action.to_string()),
+            count,
+        }
+    }
+
+    #[test]
+    fn the_grid_motion_context_constant_is_the_shipped_one() {
+        assert!(BUILTIN_KEYMAP.contains(&format!("context = \"{GRID_MOTION_CONTEXT}\"")));
+    }
+
+    #[test]
+    fn grid_motions_resolve_in_normal_and_visual_grid_contexts_only() {
+        let (keymap, diags) = motion_keymap(None);
+        assert!(diags.is_empty(), "{diags:?}");
+        for mode in ["normal", "visual"] {
+            let stack = grid_stack(mode);
+            for (keys, action, count) in [
+                ("j", "motion::down", None),
+                ("down", "motion::down", None),
+                ("3 j", "motion::down", Some(3)),
+                ("k", "motion::up", None),
+                ("up", "motion::up", None),
+                ("h", "motion::left", None),
+                ("left", "motion::left", None),
+                ("l", "motion::right", None),
+                ("right", "motion::right", None),
+                ("g g", "motion::top", None),
+                ("5 shift+g", "motion::bottom", Some(5)),
+                ("ctrl+d", "motion::half_page_down", None),
+                ("ctrl+u", "motion::half_page_up", None),
+                ("ctrl+f", "motion::page_down", None),
+                ("pagedown", "motion::page_down", None),
+                ("ctrl+b", "motion::page_up", None),
+                ("pageup", "motion::page_up", None),
+                ("^", "motion::line_start", None),
+                ("home", "motion::line_start", None),
+                ("$", "motion::line_end", None),
+                ("end", "motion::line_end", None),
+            ] {
+                assert_eq!(
+                    press_all(&keymap, keys, &stack),
+                    matched(action, count),
+                    "{mode}: {keys}"
+                );
+            }
+        }
+        // Insert keeps typing; a tile without the flag is untouched.
+        let timeseries = vec![
+            KeyContext::new("workspace"),
+            KeyContext::new("tile"),
+            KeyContext::new("timeseries")
+                .pair("mode", "normal")
+                .counts(),
+        ];
+        for stack in [grid_stack("insert"), grid_stack("menu"), timeseries] {
+            assert_eq!(
+                press_all(&keymap, "j", &stack),
+                MatchResult::NoMatch,
+                "{stack:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_open_tile_list_takes_j_and_k_as_menu_steps_not_grid_motions() {
+        let (keymap, diags) = motion_keymap(None);
+        assert!(diags.is_empty(), "{diags:?}");
+        let menu_over_grid = vec![
+            KeyContext::new("workspace"),
+            KeyContext::new("tile"),
+            KeyContext::new("rec")
+                .grid()
+                .tilelist()
+                .pair("mode", "menu")
+                .counts(),
+        ];
+        let list_without_grid = vec![
+            KeyContext::new("workspace"),
+            KeyContext::new("tile"),
+            KeyContext::new("timeseries")
+                .tilelist()
+                .pair("mode", "normal")
+                .counts(),
+        ];
+        for stack in [menu_over_grid, list_without_grid] {
+            for (key, action) in [
+                ("j", "motion::menu_down"),
+                ("down", "motion::menu_down"),
+                ("k", "motion::menu_up"),
+                ("up", "motion::menu_up"),
+            ] {
+                assert_eq!(
+                    press_all(&keymap, key, &stack),
+                    matched(action, None),
+                    "{key}"
+                );
+            }
+        }
+    }
+
+    /// One user entry under the shipped context rebinds both modes, and a
+    /// `"none"` there unbinds the shipped key in every grid tile.
+    #[test]
+    fn one_user_override_under_the_shipped_context_rebinds_both_modes() {
+        let user = format!(
+            "[[bindings]]\ncontext = \"{GRID_MOTION_CONTEXT}\"\n[bindings.keys]\n\
+             \"n\" = \"motion::down\"\n\"j\" = \"none\"\n"
+        );
+        let (keymap, diags) = motion_keymap(Some(&user));
+        assert!(diags.is_empty(), "{diags:?}");
+        for mode in ["normal", "visual"] {
+            let stack = grid_stack(mode);
+            assert_eq!(
+                press_all(&keymap, "n", &stack),
+                matched("motion::down", None),
+                "{mode}"
+            );
+            assert_eq!(
+                press_all(&keymap, "j", &stack),
+                MatchResult::NoMatch,
+                "{mode}"
+            );
+            assert_eq!(
+                press_all(&keymap, "down", &stack),
+                matched("motion::down", None),
+                "{mode}"
+            );
+        }
+    }
+
+    /// A user entry naming a retired module id binds the shared id, only in
+    /// the context it was written for, with a warning naming both ids.
+    #[test]
+    fn a_retired_module_motion_binds_the_shared_id_in_its_own_context() {
+        let mut reg = ActionRegistry::default();
+        register_builtin_actions(&mut reg);
+        reg.register_rename("rec::down", "motion::down").unwrap();
+        let user = LayerDoc {
+            layer: geode_core::config::Layer::User,
+            name: "keymap".into(),
+            file: "user/keymap.toml".into(),
+            table: "[[bindings]]\ncontext = \"rec && mode == normal\"\n[bindings.keys]\n\"q\" = \"rec::down\"\n"
+                .parse()
+                .unwrap(),
+        };
+        let builtin = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
+        let (keymap, diags) = build_keymap(&[builtin, user], default_mod(), &reg);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].severity, Severity::Warning);
+        assert!(
+            diags[0].message.contains("rec::down") && diags[0].message.contains("motion::down"),
+            "{}",
+            diags[0].message
+        );
+        assert_eq!(
+            press_all(&keymap, "q", &grid_stack("normal")),
+            matched("motion::down", None)
+        );
+        let other = vec![
+            KeyContext::new("workspace"),
+            KeyContext::new("tile"),
+            KeyContext::new("other")
+                .grid()
+                .pair("mode", "normal")
+                .counts(),
+        ];
+        assert_eq!(press_all(&keymap, "q", &other), MatchResult::NoMatch);
     }
 }

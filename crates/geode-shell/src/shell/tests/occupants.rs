@@ -1774,3 +1774,38 @@ fn palette_is_focused(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContex
             .is_focused(window)
     })
 }
+
+/// A shared motion key reaches the focused grid occupant through the shell's
+/// fall-through, with its count; the shell claims none of `motion::*`.
+#[gpui::test]
+fn a_shared_motion_key_reaches_a_grid_occupant_with_its_count(cx: &mut gpui::TestAppContext) {
+    let mut recorder = crate::module::recording::RecordingFactory::new("rec");
+    recorder.grid = true;
+    let log = recorder.log.clone();
+    let services = services_with_recorders(vec![recorder]);
+    let (window, mut cx) = open_shell(cx, services);
+    cx.simulate_keystrokes("ctrl-v");
+    cx.simulate_keystrokes("5 j");
+    cx.simulate_keystrokes("down");
+    let shell = shell_of(&window, &mut cx);
+    let tile = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    let got: Vec<(String, Option<u32>)> = log
+        .borrow()
+        .iter()
+        .filter_map(|r| match r {
+            crate::module::recording::Recorded::Dispatch(t, a, n) if *t == tile => {
+                Some((a.0.clone(), *n))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            ("motion::down".to_string(), Some(5)),
+            ("motion::down".to_string(), None),
+        ]
+    );
+}

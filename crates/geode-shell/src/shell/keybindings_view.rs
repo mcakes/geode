@@ -1686,4 +1686,46 @@ mod tests {
         state.set_query("foc".to_string());
         assert!(state.listening.is_none());
     }
+
+    /// The dialog lists each shared motion once, in one "Motion" run, showing
+    /// the vim key under the one shipped context a rebind writes into.
+    #[test]
+    fn each_motion_is_listed_once_under_motion_with_its_vim_key() {
+        let mut reg = ActionRegistry::default();
+        crate::defaults::register_builtin_actions(&mut reg);
+        let doc = LayerDoc::builtin("keymap", crate::defaults::BUILTIN_KEYMAP).unwrap();
+        let (keymap, diags) = build_keymap(&[doc], crate::defaults::default_mod(), &reg);
+        assert!(diags.is_empty(), "{diags:?}");
+        let rows = derive_rows(&reg, &keymap);
+        let motion: Vec<&KeybindingRow> = rows
+            .iter()
+            .filter(|r| r.action.0.starts_with("motion::"))
+            .collect();
+        assert_eq!(motion.len(), crate::defaults::MOTION_ACTIONS.len());
+        assert!(motion.iter().all(|r| r.category == "Motion"), "{motion:?}");
+        let first = rows.iter().position(|r| r.category == "Motion").unwrap();
+        assert!(
+            rows[first..first + motion.len()]
+                .iter()
+                .all(|r| r.category == "Motion"),
+            "the Motion rows form one run"
+        );
+        let shown = |id: &str| {
+            let row = motion.iter().find(|r| r.action.0 == id).unwrap();
+            let b = row.current.as_ref().expect("bound");
+            (b.key_source.clone(), b.context_source.clone().unwrap())
+        };
+        let grid = crate::defaults::GRID_MOTION_CONTEXT.to_string();
+        assert_eq!(shown("motion::down"), ("j".to_string(), grid.clone()));
+        assert_eq!(shown("motion::left"), ("h".to_string(), grid.clone()));
+        assert_eq!(
+            shown("motion::page_down"),
+            ("ctrl+f".to_string(), grid.clone())
+        );
+        assert_eq!(shown("motion::line_start"), ("^".to_string(), grid));
+        assert_eq!(
+            shown("motion::menu_down"),
+            ("j".to_string(), "tilelist".to_string())
+        );
+    }
 }

@@ -48,7 +48,10 @@ skipped; `"none"` is accepted without registration. An action's owner may
 register a retired ID with `ActionRegistry::register_rename` (`config::colours`
 → `config::colors`, `timeseries::colour` → `timeseries::color`,
 `timeseries::pick_colour` → `timeseries::pick_color`, `blotter::visual` →
-`blotter::visual_rows`). A binding naming a
+`blotter::visual_rows`, and each module's retired motion and menu-step ids →
+`motion::*`, listed in the module's `RENAMED_ACTIONS`). Several retired IDs may
+rename to one current ID; each retired ID is still registered once. A binding
+naming a
 retired ID binds the current action and warns with both IDs, so an existing
 user keymap keeps working until the file is edited; the dialogs write only the
 current ID. `register` refuses a retired ID, so a later registration
@@ -173,6 +176,51 @@ a sequence starts, bare digits accumulate to a maximum of 9999. A leading zero
 remains an ordinary key; zero extends an existing count. Modified digits and
 digits after a sequence starts are ordinary binding keys. The next matched
 action receives the optional count; action handlers decide how to use it.
+
+## Shared motions
+
+The shell registers fourteen `motion::*` actions under the "Motion" category
+and ships their keys once in the builtin keymap. It handles none of them:
+`ShellView::dispatch` offers each to the focused tile's `dispatch` with its
+count, and the tile interprets it through `geode_tile::motion`.
+
+| Action | Keys |
+|---|---|
+| `motion::down` / `motion::up` | `j`, `down` / `k`, `up` |
+| `motion::left` / `motion::right` | `h`, `left` / `l`, `right` |
+| `motion::top` / `motion::bottom` | `g g` / `shift+g` |
+| `motion::half_page_down` / `motion::half_page_up` | `ctrl+d` / `ctrl+u` |
+| `motion::page_down` / `motion::page_up` | `ctrl+f`, `pagedown` / `ctrl+b`, `pageup` |
+| `motion::line_start` / `motion::line_end` | `^`, `home` / `$`, `end` |
+| `motion::menu_down` / `motion::menu_up` | `j`, `down` / `k`, `up` |
+
+A tile publishes the `grid` flag (`KeyContext::grid`) when its grid cursor
+takes motions, and the `tilelist` flag (`KeyContext::tilelist`) while one of
+its menus or popup lists is open. Grid motions are bound under the single
+context `grid && (mode == normal || mode == visual)`
+(`defaults::GRID_MOTION_CONTEXT`), so one user override under that context, or
+one rebind from the keybindings dialog (which writes into the displayed
+binding's context), reaches every grid tile in both modes. A grid under an open
+menu reports `mode == menu`, so its motions stay out while the menu steps take
+`j`/`k`/arrows under `tilelist`. Within each context the named keys are bound
+first and the vim keys last, so hints and the dialog show the vim key. `g g` is
+the builtin keymap's one multi-key sequence; module fragments add their own `g`
+sequences beside it.
+
+The grid rules in `geode_tile::motion`:
+
+- A bare single `down`/`up` wraps at the ends, except while a selection is
+  live, where it clamps: wrapping past the anchor would invert the selection.
+- Any counted move clamps, a count of one included.
+- A counted `top`/`bottom` jumps to row N (1-based), clamped to the last row.
+- `half_page_*` moves 5 rows and `page_*` 10 rows, times the count.
+- `left`/`right` clamp; `line_start`/`line_end` reach the first and last
+  column.
+- On an empty axis every motion leaves the position unchanged.
+
+What a menu step means (skipping disabled rows, wrapping a series list) stays
+the list's rule; what a tile does around a grid result (entering a header
+strip, closing a field, following a log) stays the tile's.
 
 ## Module defaults
 

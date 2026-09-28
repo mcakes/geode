@@ -676,6 +676,9 @@ pub mod recording {
         /// holds the keyboard after the modal's focus return and the next
         /// frame's focus restore.
         pub edit_on_launch: bool,
+        /// When set, every occupant publishes `grid`, standing in for a grid
+        /// tile so a shell test can prove the shared motions reach it.
+        pub grid: bool,
     }
 
     impl RecordingFactory {
@@ -693,6 +696,7 @@ pub mod recording {
                 accepts: &[],
                 tile_columns: Rc::new(RefCell::new(None)),
                 edit_on_launch: false,
+                grid: false,
             }
         }
     }
@@ -757,6 +761,8 @@ pub mod recording {
         /// Shared with [`RecordingFactory::edit_on_launch`]; see it for what
         /// `launched` does with it.
         edit_on_launch: bool,
+        /// Shared with [`RecordingFactory::grid`].
+        grid: bool,
     }
 
     impl TileContent for RecordingContent {
@@ -771,7 +777,8 @@ pub mod recording {
             // `3` from becoming a count prefix, and a fixture
             // that quietly dropped the flag would let a shell with no
             // branch at all pass that test.
-            KeyContext::new("rec").pair("mode", mode).counts()
+            let ctx = KeyContext::new("rec").pair("mode", mode).counts();
+            if self.grid { ctx.grid() } else { ctx }
         }
         fn dispatch(
             &self,
@@ -1036,6 +1043,7 @@ pub mod recording {
                     launch_context: self.launch_context.clone(),
                     tile_columns: self.tile_columns.clone(),
                     edit_on_launch: self.edit_on_launch,
+                    grid: self.grid,
                 }),
             }
         }
