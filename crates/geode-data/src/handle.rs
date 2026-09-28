@@ -1329,6 +1329,67 @@ mod tests {
     }
 
     #[test]
+    fn a_handle_set_list_reaches_the_running_service() {
+        // Production reaches the service only through the handle, so the
+        // list the handle holds must be the one `serve` hands the service.
+        let (db, _src, store, ds, emitted) = crate::ingest::load::tests_support::fixture();
+        for file in emitted.files.iter().filter(|f| f.sentinel_path.is_some()) {
+            let text = std::fs::read_to_string(file.sentinel_path.as_ref().unwrap()).unwrap();
+            let sentinel = crate::source::parse_sentinel(&text).unwrap();
+            let batch = crate::ingest::load::tests_support::batch_of(&file.csv_path);
+            let _ = crate::ingest::load_file(
+                &store,
+                &crate::ingest::LoadRequest {
+                    dataset: &ds,
+                    dataset_name: "risk_snapshot",
+                    csv_path: &file.csv_path,
+                    sentinel: &sentinel,
+                    batch: &batch,
+                },
+            );
+        }
+        drop(store);
+        let mut schema = geode_core::schema::SchemaSpec::default();
+        schema.datasets.push(ds);
+
+        let (tx, rx) = channel();
+        let sink: EventSink = Arc::new(move |e| tx.send(e).is_ok());
+        let h = DataService::spawn(
+            DataServiceConfig {
+                db_path: db.path().join("geode.duckdb"),
+                schema,
+                views: vec![crate::ingest::load::tests_support::tree_view()],
+                dimensions: geode_core::dimensions::DerivedDimensions::default(),
+                query_workers: 1,
+                sources: Vec::new(),
+                adapters: crate::adapter::AdapterRegistry::default(),
+                documents: crate::documents::DocumentRegistry::default(),
+                egress: Vec::new(),
+                pricer: crate::pricing::PricerConfig::default(),
+            },
+            sink,
+        );
+        h.set_context_columns(vec!["position_ref".into()]);
+        assert_eq!(h.context_columns(), vec!["position_ref".to_string()]);
+        let mut p = params(1, "tree");
+        p.grouping = Some(vec!["lhu".into()]);
+        assert!(h.query(p).is_ok());
+        let snap = loop {
+            if let DataEvent::Query(o) = rx.recv_timeout(Duration::from_secs(60)).unwrap() {
+                break o.snapshot.unwrap();
+            }
+        };
+        let ix = snap
+            .column_index("position_ref")
+            .expect("a hidden context column");
+        assert!(
+            snap.meta_at(ix).unwrap().mixed_flag.is_some(),
+            "linked to its flag"
+        );
+        h.shutdown();
+    }
+
+    #[test]
     fn a_document_compile_error_is_that_keys_outcome_on_the_real_service() {
         // Mirrors `the_real_service_answers_through_the_sink_and_reports_
         // open_failures`'s shape for `Request::Query`, for `Request::

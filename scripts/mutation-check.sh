@@ -22707,6 +22707,12 @@ run_mutation "context: queries stop carrying the context columns" \
   '            context: Vec::new(),' \
   geode-data context_columns_reach_the_query
 
+run_mutation "context: serve never shares the handle's context columns" \
+  crates/geode-data/src/handle.rs \
+  '    service.share_context_columns(context_columns);' \
+  '    let _ = context_columns;' \
+  geode-data a_handle_set_list_reaches_the_running_service
+
 # A reload must reach the underlying list, or a desk edit to it waits for
 # a restart.
 run_mutation "pricer app: a reload leaves the underlying list stale" \
