@@ -101,7 +101,9 @@ impl Paints {
         let [hover, selected] = Self::row_grounds(theme);
         let line = [ground, hover, selected];
         let chip = chip_paint(theme, Tone::Neutral);
-        let chip_fill = chip.fill.expect("a neutral chip has a fill");
+        // `Tone::Neutral` fills with `secondary`; fall back to it rather
+        // than panic on a theme change.
+        let chip_fill = chip.fill.unwrap_or(theme.secondary);
         let chip_grounds = line.map(|g| over(chip_fill, g));
         Paints {
             own: floor_on_all(theme.foreground, &line),

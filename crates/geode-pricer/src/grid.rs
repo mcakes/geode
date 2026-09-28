@@ -100,19 +100,20 @@ fn right_aligned(kind: ColumnKind) -> bool {
     )
 }
 
-/// A package's search key: its template form while the legs still match
-/// the table (the grammar round-trips it), else its template token with
-/// its legs' distinct underlyings and expiries.
-fn package_search(sheet: &Sheet, row: usize) -> String {
-    let text = sheet.shorthand(row);
-    if !text.is_empty() && !text.contains('\n') {
-        return text;
-    }
-    let RowKind::Package { template } = sheet.kind(row) else {
-        return text;
-    };
+/// A package's legs' distinct underlyings, rendered expiries and rendered
+/// strikes, each in leg order. The one collection both the painted
+/// summary and the fallback find key read, so `/` finds what column 0
+/// paints.
+struct LegParts {
+    unds: Vec<String>,
+    exps: Vec<String>,
+    strikes: Vec<String>,
+}
+
+fn leg_parts(sheet: &Sheet, row: usize) -> LegParts {
     let mut unds: Vec<String> = Vec::new();
     let mut exps: Vec<String> = Vec::new();
+    let mut strikes: Vec<String> = Vec::new();
     for leg in sheet.children(row) {
         if let Some(i) = sheet.instrument(leg) {
             let u = i.underlying().to_string();
@@ -123,16 +124,48 @@ fn package_search(sheet: &Sheet, row: usize) -> String {
             if !exps.contains(&e) {
                 exps.push(e);
             }
+            let k = render_strike(i.strike());
+            if !strikes.contains(&k) {
+                strikes.push(k);
+            }
         }
     }
-    let mut parts = vec![template.token().to_string()];
-    if !unds.is_empty() {
-        parts.push(unds.join("/"));
+    LegParts {
+        unds,
+        exps,
+        strikes,
     }
-    if !exps.is_empty() {
-        parts.push(exps.join("/"));
+}
+
+/// `parts` joined with spaces, empty parts dropped.
+fn join_parts(parts: &[String]) -> String {
+    parts
+        .iter()
+        .filter(|p| !p.is_empty())
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A package's search key: its template form while the legs still match
+/// the table (the grammar round-trips it), else its template token with
+/// its legs' distinct underlyings, then the painted summary (expiries,
+/// then strikes), so a custom package's painted text is findable.
+fn package_search(sheet: &Sheet, row: usize) -> String {
+    let text = sheet.shorthand(row);
+    if !text.is_empty() && !text.contains('\n') {
+        return text;
     }
-    parts.join(" ")
+    let RowKind::Package { template } = sheet.kind(row) else {
+        return text;
+    };
+    let p = leg_parts(sheet, row);
+    join_parts(&[
+        template.token().to_string(),
+        p.unds.join("/"),
+        p.exps.join("/"),
+        p.strikes.join("/"),
+    ])
 }
 
 /// A package's tree-column summary: its legs' distinct expiries, then
@@ -140,25 +173,8 @@ fn package_search(sheet: &Sheet, row: usize) -> String {
 /// (`Z26 4800/5200`). One line whatever form the package's own
 /// shorthand takes; empty when no leg carries an instrument.
 pub(crate) fn package_summary(sheet: &Sheet, row: usize) -> String {
-    let mut exps: Vec<String> = Vec::new();
-    let mut strikes: Vec<String> = Vec::new();
-    for leg in sheet.children(row) {
-        if let Some(i) = sheet.instrument(leg) {
-            let e = render_expiry(i.expiry());
-            if !exps.contains(&e) {
-                exps.push(e);
-            }
-            let k = render_strike(i.strike());
-            if !strikes.contains(&k) {
-                strikes.push(k);
-            }
-        }
-    }
-    [exps.join("/"), strikes.join("/")]
-        .into_iter()
-        .filter(|p| !p.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
+    let p = leg_parts(sheet, row);
+    join_parts(&[p.exps.join("/"), p.strikes.join("/")])
 }
 
 fn leg_note(n: usize) -> String {
@@ -391,6 +407,30 @@ mod tests {
     }
 
     #[test]
+    fn a_list_form_package_finds_its_painted_summary() {
+        // A custom package's find key falls back from its list-form
+        // shorthand; `/` must still match the summary column 0 paints.
+        let mut s = Sheet::new("t");
+        push(&mut s, vec![line(spx(5000.0, OptionKind::Call), 1)]);
+        push(&mut s, vec![line(spx(4000.0, OptionKind::Put), 1)]);
+        s.apply(crate::core::Edit::Group {
+            first: 0,
+            count: 2,
+            template: crate::core::Template::CUSTOM,
+            id: None,
+        })
+        .unwrap();
+        let m = build(&s, &Expansion::default());
+        assert_eq!(m.rows[0].text.as_ref(), "Z26 5000/4000");
+        assert!(
+            m.rows[0].search.contains(m.rows[0].text.as_ref()),
+            "{:?} does not find {:?}",
+            m.rows[0].search,
+            m.rows[0].text
+        );
+    }
+
+    #[test]
     fn a_package_summary_names_a_repeated_strike_once() {
         // A straddle shape: a call and a put at one strike and expiry.
         let mut s = Sheet::new("t");
@@ -489,6 +529,6 @@ mod tests {
         .unwrap();
         let m = build(&s, &Expansion::default());
         assert_eq!(m.rows[0].tag.as_ref(), "CUSTOM");
-        assert_eq!(m.rows[0].search.as_ref(), "CUSTOM SPX Z26");
+        assert_eq!(m.rows[0].search.as_ref(), "CUSTOM SPX Z26 5000/4000");
     }
 }

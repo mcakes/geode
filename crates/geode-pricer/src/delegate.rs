@@ -37,10 +37,11 @@ use gpui_component::{ActiveTheme as _, Theme, h_flex};
 use std::rc::Rc;
 use std::sync::Arc;
 
-/// The tree column: fits a two-leg package row (`▾ CS Z26 100/105 · 2
-/// legs`) at the largest font (checked below), in pixels like every width
-/// here; not resizable. Longer summaries ellipsize; the leg count stays.
-const TREE_WIDTH: f32 = 210.0;
+/// The tree column: fits a two-leg call spread's package row
+/// (`▾ CS Z26 4800/5200 · 2 legs`, a real 13-character summary) at the
+/// largest font (checked below), in pixels like every width here; not
+/// resizable. Longer summaries ellipsize; the leg count stays.
+const TREE_WIDTH: f32 = 230.0;
 /// One depth step, and the slot every row reserves at its lane, both on
 /// the rem scale. The slot holds a package's chevron or a leg's connector
 /// and is empty on a bare line, so roots share one leading edge whether or
@@ -1206,8 +1207,8 @@ mod width_tests {
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
-    /// Column 0 holds a two-leg package row, `▾ CS Z26 100/105 · 2 legs`,
-    /// at the largest font size: the chevron slot, the chip's padding,
+    /// Column 0 holds a two-leg package row, `▾ CS Z26 4800/5200 · 2
+    /// legs` (a call spread's real summary), at the largest font size: the chevron slot, the chip's padding,
     /// the gaps between the four parts and the three texts. Slot, padding
     /// and gaps are on the rem scale; the column is fixed pixels. `·`
     /// is one glyph.
@@ -1219,7 +1220,7 @@ mod width_tests {
         let pad = Size::XSmall.table_cell_padding();
         let padding = f32::from(pad.left) + f32::from(pad.right);
         let design = |x: f32| x * rem / geode_shell::shell::scale::DESIGN_REM;
-        let (tag, text, note) = ("CS", "Z26 100/105", "· 2 legs");
+        let (tag, text, note) = ("CS", "Z26 4800/5200", "· 2 legs");
         let gaps = tree_gaps(true, true);
         assert_eq!(gaps, 3, "slot, chip, summary and note: three gaps");
         let need = design(CHEVRON_SLOT + 2.0 * CHIP_PAD_X + gaps as f32 * TREE_GAP)

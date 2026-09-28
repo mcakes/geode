@@ -8159,7 +8159,7 @@ pub(crate) mod tests {
         h.dispatch(&mut vcx, "group", Some(2));
         assert_eq!(
             h.tree(&vcx)[0],
-            "CUSTOM SPX Z26",
+            "CUSTOM SPX Z26 5000/4000",
             "a custom package, opened"
         );
         assert_eq!(h.tree(&vcx).len(), 4);
@@ -8597,7 +8597,7 @@ pub(crate) mod tests {
             h.tree(&vcx),
             vec![
                 "SPX Z26 5000 C".to_string(),
-                "CS SPX Z26".to_string(),
+                "CS SPX Z26 5000/4800/5200".to_string(),
                 "SPX Z26 5000 C".to_string(),
                 "-5 SPX Z26 4800 C".to_string(),
                 "5 SPX Z26 5200 C".to_string(),

@@ -980,11 +980,13 @@ shows its full shorthand. Every row reserves the slot, so roots share one
 leading edge, and a leg's text starts where its package's chip starts. No
 row carries a ground of its own: the table's hover and selected-row fills
 are the only row grounds. Column 0 is fixed at a width that fits a two-leg
-package at the largest font; a longer summary ends in `…` and the leg count
-stays whole. Find (`/`, `n`, `N`) matches the shorthand column 0 paints on a
-line or leg; a package's find key is still its template form
-(`SPX Z26 4800/5200 CS`). A long text cell ends in `…`; a number never
-truncates. Cell text is floored to the readable ratio on the table's base,
+call spread's package row (`▾ CS Z26 4800/5200 · 2 legs`) at the largest
+font; a longer summary ends in `…` and the leg count stays whole. Find (`/`,
+`n`, `N`) matches the shorthand column 0 paints on a line or leg; a
+package's find key is still its template form (`SPX Z26 4800/5200 CS`), and
+a custom package's is its template token, underlyings and the summary it
+paints (`CUSTOM SPX Z26 5000/4000`). A long text cell ends in `…`; a number
+never truncates. Cell text is floored to the readable ratio on the table's base,
 hover and selected-row grounds.
 
 The entry bar sits between the header and the column headers. A muted label
@@ -1014,8 +1016,8 @@ closes the bar has to land on a row the list does not cover.
 `[ui] line_numbers` adds a gutter beside the tree column, before the depth
 indent, so numbers share one lane; the tree column widens by the gutter.
 Numbers are muted on every row kind, a package's included, and take the
-own text paint on the cursor row. Lines, packages, and an open package's legs are numbered in painted order —
-the index `NG` jumps to. Relative mode shows distance
+normal text color on the cursor row. Lines, packages, and an open package's
+legs are numbered in painted order — the index `NG` jumps to. Relative mode shows distance
 from the cursor row, with its absolute number on that row, and numbers
 absolutely when there is no cursor row.
 

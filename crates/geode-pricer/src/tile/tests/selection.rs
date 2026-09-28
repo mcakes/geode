@@ -471,7 +471,7 @@ fn g_p_over_root_lines_groups_them_and_u_restores(cx: &mut gpui::TestAppContext)
     h.dispatch(&mut vcx, "visual_rows", None);
     h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "group", None);
-    assert_eq!(h.tree(&vcx)[0], "CUSTOM SPX Z26");
+    assert_eq!(h.tree(&vcx)[0], "CUSTOM SPX Z26 5000/4000");
     assert_eq!(h.mode(&mut vcx), "normal", "g p ends the selection");
     assert_eq!(h.tree(&vcx).len(), 4, "the new package is open on its legs");
     assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(0), "the cursor is on it");

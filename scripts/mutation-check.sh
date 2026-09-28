@@ -24845,6 +24845,14 @@ run_mutation "pricer grid: summary strikes are distinct" \
   '            if true {' \
   geode-pricer a_package_summary_names_a_repeated_strike_once
 
+# A custom package's fallback find key carries its strikes, so `/` finds
+# the summary column 0 paints (`Z26 5000/4000`).
+run_mutation "pricer grid: a custom package's key has its strikes" \
+  crates/geode-pricer/src/grid.rs \
+  $'        p.exps.join("/"),\n        p.strikes.join("/"),' \
+  $'        p.exps.join("/"),' \
+  geode-pricer a_list_form_package_finds_its_painted_summary
+
 # A leg's and a bare line's tree text is its full shorthand (the find key
 # shares the same string, so this anchor leaves search intact).
 run_mutation "pricer grid: a leg's text is its shorthand" \

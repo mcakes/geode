@@ -117,9 +117,10 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 - Shorthand rendering uses a template only while the legs still match its
   current table (an overflowing quantity never matches); otherwise it prints
   the legs one per line. The grid keeps a line's or leg's shorthand as both
-  its painted tree text and its find key; a package paints a one-line
-  summary of its legs' expiries and strikes, and its find key is its
-  template form. Loading accepts unresolved
+  its painted tree text and its find key; a package paints a template
+  chip, a one-line summary of its legs' expiries and strikes, and a leg
+  count, and its find key is its template form (a custom package's is its
+  template token, underlyings and that summary). Loading accepts unresolved
   template names because stored instruments remain sufficient for repricing.
 - `TemplateSet::from_doc_over` keeps the last valid definition per name.
   An entry dropped with an error keeps the previous set's definition of
@@ -291,7 +292,7 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   where the package's chip starts, the edge a bare line's text shares. The
   tree cell lays out slot, chip, text and note with one `TREE_GAP` between
   each (`delegate::tree_gaps`); `fit_columns` and the `TREE_WIDTH` test
-  measure the same parts. `TREE_WIDTH` fits `▾ CS Z26 100/105 · 2 legs` at
+  measure the same parts. `TREE_WIDTH` fits `▾ CS Z26 4800/5200 · 2 legs` at
   the Large font; a longer summary ellipsizes and the leg count stays whole.
 - The line-number gutter (`[ui] line_numbers`, read from the `UiSettings`
   global and observed) sits beside the tree cell, outside its depth indent,
