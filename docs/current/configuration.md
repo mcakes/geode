@@ -494,11 +494,11 @@ removed or redefined.
 
 ## Vol
 
-`[vol]` in `app.toml` selects the vol-surface evaluator behind the slice
-viewer. `model` names a model the binary registers; the default and the only
-one in every build is `demo`, a smooth stand-in that is not a financial model.
-A name the binary lacks warns at startup and every vol slice answers with that
-reason. Changing `model` marks restart required, as `[pricing] adapter` does.
+`[vol]` in `app.toml` selects the vol-surface evaluator the data service's
+vol slice requests use. `model` names a model the binary registers; the
+default and the only one in every build is `demo`, a smooth stand-in that is
+not a financial model. A name the binary lacks warns at startup and every vol
+slice answers with that reason. Changing `model` marks restart required, as `[pricing] adapter` does.
 
 ## Maintaining configuration
 

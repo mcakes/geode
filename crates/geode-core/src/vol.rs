@@ -88,7 +88,10 @@ pub struct SliceResult {
     pub forward: f64,
     /// In the grid's order: ascending strike for `Dense`, as given for `At`.
     pub points: Vec<SlicePoint>,
-    /// `(x, pdf)` at the grid's interior points, when asked for.
+    /// `(x, pdf)` at the grid's interior points, when asked for. The pdf
+    /// is per unit STRIKE while `x` is in the requested coordinate, so
+    /// its area over a non-strike `x` is not one (over moneyness it is
+    /// off by a factor of the forward).
     pub density: Option<Vec<(f64, f64)>>,
 }
 

@@ -1,7 +1,7 @@
 //! The demo vol model. Deterministic, smooth and NOT a model: it exists
-//! so the slice viewer has a curve that moves when a CVI cell is edited
-//! before the desk's evaluator arrives as a vendor crate behind the same
-//! `VolModel` trait.
+//! so a vol slice has a curve that moves when a CVI cell is edited, and
+//! it stands in for the desk's evaluator behind the same `VolModel`
+//! trait.
 //!
 //! How it reads `cvi_params`: a `node` is a percent moneyness offset
 //! (`k = node/100`, strike `F(1+k)`); a term's knot vol is
