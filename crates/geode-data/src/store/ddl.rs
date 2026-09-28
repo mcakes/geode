@@ -629,6 +629,44 @@ role = "value"
         }
     }
 
+    /// A two-part-key document dataset shaped like `option_chain`, cut to
+    /// one value: key `(underlying_ref, expiry)`, axis `strike`.
+    pub(crate) fn chain_dataset() -> DatasetSpec {
+        let text = r#"
+[option_chain]
+family = "document"
+key = ["underlying_ref", "expiry"]
+axes = ["strike"]
+[option_chain.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+textual = true
+[option_chain.columns.expiry]
+type = "utf8"
+role = "dimension"
+[option_chain.columns.strike]
+type = "f64"
+role = "axis"
+[option_chain.columns.mid_vol]
+type = "f64"
+role = "value"
+"#;
+        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
+        let (schema, diags) = SchemaSpec::from_doc(&doc);
+        assert!(diags.is_empty(), "{diags:?}");
+        schema.dataset("option_chain").unwrap().clone()
+    }
+
+    /// Two strikes (90, 110) with caller-supplied mid vols.
+    pub(crate) fn chain_doc(underlying: &str, expiry: &str, mids: [f64; 2]) -> DocumentRows {
+        DocumentRows {
+            key: vec![underlying.into(), expiry.into()],
+            attributes: Vec::new(),
+            axes: vec![("strike".into(), Column::F64(vec![90.0, 110.0]))],
+            values: vec![("mid_vol".into(), Column::F64(mids.to_vec()))],
+        }
+    }
+
     /// A test [`DocumentKind`] with the same six columns as `cvi_dataset`, using
     /// a compact byte format:
     ///

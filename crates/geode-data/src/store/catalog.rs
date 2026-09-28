@@ -370,6 +370,57 @@ impl<'a> Catalog<'a> {
             })
     }
 
+    /// [`Self::live_source_time`] over every bookless partition whose batch
+    /// is `prefix` or lies under it ([`geode_core::document::is_key_prefix`]):
+    /// the newest source time among them. A full key answers exactly as
+    /// `live_source_time(dataset, key, None)` does.
+    pub fn live_source_time_under(
+        &self,
+        dataset: &str,
+        prefix: &str,
+    ) -> Result<Option<DateTime<Utc>>, StoreError> {
+        let sql = "select max(fg.source_time) from file_generations fg
+                 join file_books fb on fb.file_id = fg.file_id
+                 where fg.dataset = ? and (fg.batch = ? or starts_with(fg.batch, ?))
+                   and fb.book is null
+                   and coalesce(fg.archived_only, false) = false";
+        self.under(sql, dataset, prefix)
+    }
+
+    /// [`Self::live_generation`] under a key prefix: the greatest generation
+    /// ID among the matched partitions. Generation IDs come from one store
+    /// sequence, so this changes whenever any matched document republishes.
+    pub fn live_generation_under(
+        &self,
+        dataset: &str,
+        prefix: &str,
+    ) -> Result<Option<i64>, StoreError> {
+        let sql = "select max(fg.gen_id) from file_generations fg
+                 join file_books fb on fb.file_id = fg.file_id
+                 where fg.dataset = ? and (fg.batch = ? or starts_with(fg.batch, ?))
+                   and fb.book is null
+                   and coalesce(fg.archived_only, false) = false";
+        self.under(sql, dataset, prefix)
+    }
+
+    /// Run a one-value `_under` query. `starts_with` against `prefix` plus the
+    /// separator is the SQL form of `is_key_prefix`; it takes no wildcard, so
+    /// an `_` or `%` in a key cannot widen the match as `LIKE` would.
+    fn under<T: duckdb::types::FromSql>(
+        &self,
+        sql: &str,
+        dataset: &str,
+        prefix: &str,
+    ) -> Result<Option<T>, StoreError> {
+        let under = format!("{prefix}{}", geode_core::document::KEY_SEPARATOR);
+        self.conn
+            .query_row(sql, duckdb::params![dataset, prefix, under], |r| r.get(0))
+            .map_err(|source| StoreError::Sql {
+                statement: sql.into(),
+                source,
+            })
+    }
+
     /// Greatest live-published generation ID across a dataset's partitions,
     /// excluding archive-only arrivals. `None` means no matching record.
     ///

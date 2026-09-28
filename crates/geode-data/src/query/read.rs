@@ -117,16 +117,14 @@ impl ReadQuery {
                     AsOf::Live => Freshness {
                         dataset: params.dataset.clone(),
                         as_of: catalog
-                            .live_source_time(
+                            .live_source_time_under(
                                 &params.dataset,
                                 &join_key(&params.document_key),
-                                None,
                             )?
                             .map(|t| t.to_rfc3339()),
-                        generation: catalog.live_generation(
+                        generation: catalog.live_generation_under(
                             &params.dataset,
                             &join_key(&params.document_key),
-                            None,
                         )?,
                     },
                     AsOf::At(_) => Freshness {
@@ -135,8 +133,8 @@ impl ReadQuery {
                             .resolved_as_of
                             .get(&params.dataset)
                             .map(|t| t.to_rfc3339()),
-                        // The document compiler pinned exactly one
-                        // generation; report the one it read.
+                        // The document compiler reports a generation only
+                        // when exactly one document matched.
                         generation: compiled.resolved_generation,
                     },
                 };

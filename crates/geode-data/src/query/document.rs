@@ -9,7 +9,7 @@ use crate::store::ddl::TablePair;
 use duckdb::Connection;
 use duckdb::types::Value;
 use geode_core::attribution::{Attribution, ScopeSemantics};
-use geode_core::document::join_key;
+use geode_core::document::{is_key_prefix, join_key};
 use geode_core::query::{AsOf, DocumentParams};
 use geode_core::schema::{ColumnRole, SchemaSpec};
 use std::collections::BTreeMap;
@@ -20,14 +20,16 @@ fn invalid(msg: String) -> StoreError {
 
 /// Compile a document request against its dataset's document tables.
 ///
-/// Live reads select by key from the live table. Historical reads resolve the
-/// generation summary, select the partition named by [`join_key`], and pin
-/// its generation with `gen_id = N` across the live/archive union. An instant
-/// before that document's first retained generation produces an empty result.
+/// Reads the document named by `document_key`, or every document under it
+/// when the key is a shorter prefix, ordered by the open key parts then
+/// axes. Historical reads resolve each matched document's generation and pin
+/// that set (`gen_id = N` for one, `gen_id in (…)` for several) across the
+/// live/archive union. An instant before any matched document's first
+/// retained generation produces an empty result.
 ///
-/// For historical reads, the selected source time and generation ID travel
-/// with the compiled query for provenance. Other documents in the dataset do
-/// not affect either value.
+/// For historical reads, the oldest matched source time travels with the
+/// compiled query for provenance, and a generation ID only when exactly one
+/// document matched. Documents outside the key do not affect either value.
 pub fn compile_document(
     conn: &Connection,
     schema: &SchemaSpec,
@@ -42,12 +44,17 @@ pub fn compile_document(
             ds.name
         )));
     }
-    if params.document_key.len() != ds.key.len() {
+    let arity = ds.key.len();
+    let given = params.document_key.len();
+    if given == 0 {
+        return Err(invalid(
+            "a document key needs at least one part".to_string(),
+        ));
+    }
+    if given > arity {
         return Err(invalid(format!(
-            "key has {} parts, dataset '{}' declares {}",
-            params.document_key.len(),
-            ds.name,
-            ds.key.len()
+            "key has {given} parts, dataset '{}' declares {arity}",
+            ds.name
         )));
     }
 
@@ -57,14 +64,16 @@ pub fn compile_document(
         .map(|c| format!("\"{}\"", c.name))
         .collect::<Vec<_>>()
         .join(", ");
-    let order = ds
-        .axes
+    // Order by the key parts the request leaves open, then the axes, so a
+    // multi-document result is grouped per document. The given parts are
+    // constant across the result, so a full key orders by the axes alone.
+    let order = ds.key[given..]
         .iter()
-        .map(|a| format!("\"{a}\""))
+        .chain(ds.axes.iter())
+        .map(|c| format!("\"{c}\""))
         .collect::<Vec<_>>()
         .join(", ");
-    let key_predicate = ds
-        .key
+    let key_predicate = ds.key[..given]
         .iter()
         .map(|k| format!("\"{k}\" = ?"))
         .collect::<Vec<_>>()
@@ -81,9 +90,11 @@ pub fn compile_document(
     let (table, era) = match &params.as_of {
         AsOf::Live => (tables.live.clone(), String::new()),
         AsOf::At(t) => {
-            let batch = join_key(&params.document_key);
-            let gens = resolve_generations(conn, &ds.name, *t)?;
-            let resolved = gens.into_iter().find(|g| g.batch == batch);
+            let prefix = join_key(&params.document_key);
+            let matched: Vec<_> = resolve_generations(conn, &ds.name, *t)?
+                .into_iter()
+                .filter(|g| is_key_prefix(&prefix, &g.batch))
+                .collect();
             // The selected generation may still be live: publication archives only
             // the outgoing generation. Read both tables so historical requests can
             // select the latest retained document too.
@@ -91,20 +102,39 @@ pub fn compile_document(
                 "(select * from {} union all select * from {})",
                 tables.live, tables.archive
             );
-            match resolved {
-                Some(g) => {
-                    resolved_as_of.insert(ds.name.clone(), g.source_time);
-                    resolved_generation = Some(g.gen_id);
-                    // Document publication allocates each generation from the
-                    // store sequence and writes one key per publish. Together
-                    // with the key predicate, this pins the selected document.
-                    (relation, format!(" and gen_id = {}", g.gen_id))
+            if matched.is_empty() {
+                // No document under this key existed by `t`: a request that
+                // compiles and returns nothing, not an error — the same shape a
+                // live query answers an unknown key with.
+                (relation, " and false".to_string())
+            } else {
+                // A multi-document result reports its oldest source time, as a
+                // historical view does; a generation ID only when one document
+                // matched, since no single ID identifies several.
+                let oldest = matched
+                    .iter()
+                    .map(|g| g.source_time)
+                    .min()
+                    .expect("matched is not empty");
+                resolved_as_of.insert(ds.name.clone(), oldest);
+                if let [only] = matched.as_slice() {
+                    resolved_generation = Some(only.gen_id);
                 }
-                // No generation of this document existed by `t`: a
-                // request that compiles and returns nothing, not an
-                // error — the same "unknown key" shape a live query
-                // answers with an empty result rather than a refusal.
-                None => (relation, " and false".to_string()),
+                // Document publication allocates each generation from the store
+                // sequence and writes one key per publish, so the ID set together
+                // with the key predicate pins exactly the resolved documents.
+                let pin = match matched.as_slice() {
+                    [only] => format!(" and gen_id = {}", only.gen_id),
+                    _ => {
+                        let ids = matched
+                            .iter()
+                            .map(|g| g.gen_id.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!(" and gen_id in ({ids})")
+                    }
+                };
+                (relation, pin)
             }
         }
     };
@@ -450,6 +480,221 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("not a document dataset")
+        );
+    }
+
+    /// SPX has two expiries published at 14:00 and 14:05; SPXW (a string
+    /// extension of SPX) has one at 14:02; SPX's October expiry is
+    /// republished at 14:10.
+    fn chain_fixture() -> (tempfile::TempDir, Store, SchemaSpec) {
+        use crate::store::ddl::tests_support::{chain_dataset, chain_doc};
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
+        let ds = chain_dataset();
+        store.apply_schema(&ds).unwrap();
+        Catalog::new(store.writer()).ensure_tables().unwrap();
+        for (u, e, mids, at) in [
+            ("SPX", "2026-10-16", [0.20, 0.18], "2026-09-12T14:00:00Z"),
+            ("SPXW", "2026-10-16", [0.50, 0.50], "2026-09-12T14:02:00Z"),
+            ("SPX", "2026-11-20", [0.22, 0.19], "2026-09-12T14:05:00Z"),
+            ("SPX", "2026-10-16", [0.21, 0.17], "2026-09-12T14:10:00Z"),
+        ] {
+            publish_document(
+                &store,
+                &DocumentPublishRequest {
+                    dataset: &ds,
+                    source: "opra_sim",
+                    rows: &chain_doc(u, e, mids),
+                    source_time: ts(at),
+                    received_at: ts(at),
+                    bytes: 0,
+                },
+            )
+            .unwrap();
+        }
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(ds);
+        (dir, store, schema)
+    }
+
+    /// `(expiry, strike, mid_vol)` in result order.
+    fn run_chain(store: &Store, compiled: &CompiledQuery) -> Vec<(String, f64, f64)> {
+        let mut stmt = store.writer().prepare(&compiled.sql).unwrap();
+        stmt.query_map(duckdb::params_from_iter(compiled.params.iter()), |r| {
+            Ok((
+                r.get::<_, String>("expiry")?,
+                r.get::<_, f64>("strike")?,
+                r.get::<_, f64>("mid_vol")?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+    }
+
+    #[test]
+    fn a_prefix_query_returns_every_document_under_it_in_key_then_axis_order() {
+        let (_d, store, schema) = chain_fixture();
+        let compiled = compile_document(
+            store.writer(),
+            &schema,
+            &params("option_chain", &["SPX"], AsOf::Live),
+        )
+        .unwrap();
+        assert_eq!(
+            run_chain(&store, &compiled),
+            vec![
+                ("2026-10-16".into(), 90.0, 0.21),
+                ("2026-10-16".into(), 110.0, 0.17),
+                ("2026-11-20".into(), 90.0, 0.22),
+                ("2026-11-20".into(), 110.0, 0.19),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_full_key_on_a_two_part_dataset_still_reads_one_document() {
+        let (_d, store, schema) = chain_fixture();
+        let compiled = compile_document(
+            store.writer(),
+            &schema,
+            &params("option_chain", &["SPX", "2026-11-20"], AsOf::Live),
+        )
+        .unwrap();
+        assert_eq!(
+            run_chain(&store, &compiled),
+            vec![
+                ("2026-11-20".into(), 90.0, 0.22),
+                ("2026-11-20".into(), 110.0, 0.19)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_prefix_never_matches_a_longer_underlying() {
+        let (_d, store, schema) = chain_fixture();
+        for as_of in [AsOf::Live, AsOf::At(ts("2026-09-12T14:30:00Z"))] {
+            let compiled = compile_document(
+                store.writer(),
+                &schema,
+                &params("option_chain", &["SPX"], as_of),
+            )
+            .unwrap();
+            assert!(
+                run_chain(&store, &compiled)
+                    .iter()
+                    .all(|(_, _, mid)| *mid < 0.5),
+                "SPXW's 0.5 rows leaked into an SPX read"
+            );
+        }
+        let cat = Catalog::new(store.writer());
+        let spx = join_key(&["SPX".to_string()]);
+        assert_eq!(
+            cat.live_source_time_under("option_chain", &spx).unwrap(),
+            Some(ts("2026-09-12T14:10:00Z"))
+        );
+        let spxw = join_key(&["SPXW".to_string()]);
+        assert_eq!(
+            cat.live_source_time_under("option_chain", &spxw).unwrap(),
+            Some(ts("2026-09-12T14:02:00Z"))
+        );
+    }
+
+    #[test]
+    fn an_as_of_prefix_read_returns_each_document_that_existed_then() {
+        let (_d, store, schema) = chain_fixture();
+        // 14:03: SPX October's first generation exists; November does not yet.
+        let compiled = compile_document(
+            store.writer(),
+            &schema,
+            &params(
+                "option_chain",
+                &["SPX"],
+                AsOf::At(ts("2026-09-12T14:03:00Z")),
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            run_chain(&store, &compiled),
+            vec![
+                ("2026-10-16".into(), 90.0, 0.20),
+                ("2026-10-16".into(), 110.0, 0.18)
+            ]
+        );
+        assert!(
+            compiled.resolved_generation.is_some(),
+            "exactly one document matched"
+        );
+        // 14:07: both exist, October still at its first generation.
+        let compiled = compile_document(
+            store.writer(),
+            &schema,
+            &params(
+                "option_chain",
+                &["SPX"],
+                AsOf::At(ts("2026-09-12T14:07:00Z")),
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            run_chain(&store, &compiled),
+            vec![
+                ("2026-10-16".into(), 90.0, 0.20),
+                ("2026-10-16".into(), 110.0, 0.18),
+                ("2026-11-20".into(), 90.0, 0.22),
+                ("2026-11-20".into(), 110.0, 0.19),
+            ]
+        );
+        assert_eq!(
+            compiled.resolved_generation, None,
+            "two documents: no single generation"
+        );
+        assert_eq!(
+            compiled.resolved_as_of.get("option_chain"),
+            Some(&ts("2026-09-12T14:00:00Z")),
+            "the oldest resolved source time"
+        );
+    }
+
+    #[test]
+    fn prefix_freshness_is_the_newest_source_time_and_greatest_generation_under_it() {
+        let (_d, store, _schema) = chain_fixture();
+        let cat = Catalog::new(store.writer());
+        let spx = join_key(&["SPX".to_string()]);
+        let oct = join_key(&["SPX".to_string(), "2026-10-16".to_string()]);
+        let nov = join_key(&["SPX".to_string(), "2026-11-20".to_string()]);
+        let greatest = [&oct, &nov]
+            .iter()
+            .filter_map(|b| cat.live_generation("option_chain", b, None).unwrap())
+            .max();
+        assert_eq!(
+            cat.live_generation_under("option_chain", &spx).unwrap(),
+            greatest
+        );
+        // A full key's `_under` answer equals the exact-batch answer.
+        assert_eq!(
+            cat.live_generation_under("option_chain", &nov).unwrap(),
+            cat.live_generation("option_chain", &nov, None).unwrap()
+        );
+        assert_eq!(
+            cat.live_source_time_under("option_chain", &oct).unwrap(),
+            cat.live_source_time("option_chain", &oct, None).unwrap()
+        );
+    }
+
+    #[test]
+    fn an_empty_key_is_refused() {
+        let (_d, store, schema) = chain_fixture();
+        let err = compile_document(
+            store.writer(),
+            &schema,
+            &params("option_chain", &[], AsOf::Live),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("a document key needs at least one part"),
+            "{err}"
         );
     }
 }
