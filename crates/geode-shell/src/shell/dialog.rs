@@ -228,6 +228,7 @@ pub(crate) fn opens_dialog(action: &crate::actions::ActionId) -> bool {
             | "frame::scope_expression"
             | "frame::add_expression"
             | "frame::grouping"
+            | "frame::scope"
             | "tile::add"
             | "tile::open_with"
             | "log::level"

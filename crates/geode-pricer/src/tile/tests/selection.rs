@@ -20,11 +20,41 @@ fn v_starts_a_block_and_motions_extend_it(cx: &mut gpui::TestAppContext) {
     let strike = h.cursor(&vcx).unwrap().1;
     h.dispatch(&mut vcx, "visual_block", None);
     assert_eq!(h.mode(&mut vcx), "visual");
-    h.dispatch(&mut vcx, "down", Some(9)); // clamps
-    h.dispatch(&mut vcx, "right", None);
+    h.motion(&mut vcx, "down", Some(9)); // clamps
+    h.motion(&mut vcx, "right", None);
     assert_eq!(
         resolved(&h, &vcx),
         Some((SelectKind::Block, 0..3, strike..strike + 2))
+    );
+}
+
+/// A bare `j`/`k` at the sheet's ends clamps while a selection is live: a
+/// wrap would carry the moving corner across the anchor and invert the
+/// selection. The motions arrive by the id the shell's keys send.
+#[gpui::test]
+fn a_bare_step_at_either_end_clamps_under_a_selection(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    let cols = h.columns(&vcx).len();
+    h.motion(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.motion(&mut vcx, "bottom", None);
+    assert_eq!(h.cursor(&vcx), Some((2, 0)), "fixture: on the last row");
+    assert_eq!(resolved(&h, &vcx), Some((SelectKind::Rows, 1..3, 0..cols)));
+    h.motion(&mut vcx, "down", None);
+    assert_eq!(h.cursor(&vcx), Some((2, 0)), "a bare j at the end stays");
+    assert_eq!(
+        resolved(&h, &vcx),
+        Some((SelectKind::Rows, 1..3, 0..cols)),
+        "and the extent is unchanged"
+    );
+    h.motion(&mut vcx, "top", None);
+    assert_eq!(resolved(&h, &vcx), Some((SelectKind::Rows, 0..2, 0..cols)));
+    h.motion(&mut vcx, "up", None);
+    assert_eq!(h.cursor(&vcx), Some((0, 0)), "a bare k at the top stays");
+    assert_eq!(
+        resolved(&h, &vcx),
+        Some((SelectKind::Rows, 0..2, 0..cols)),
+        "and the extent is unchanged"
     );
 }
 
@@ -32,7 +62,7 @@ fn v_starts_a_block_and_motions_extend_it(cx: &mut gpui::TestAppContext) {
 fn shift_v_switches_kind_keeping_the_anchor_and_the_same_key_clears(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &BOOK);
     h.dispatch(&mut vcx, "visual_block", None);
-    h.dispatch(&mut vcx, "down", None);
+    h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "visual_rows", None);
     let cols = h.columns(&vcx).len();
     assert_eq!(resolved(&h, &vcx), Some((SelectKind::Rows, 0..2, 0..cols)));
@@ -53,11 +83,11 @@ fn escape_clears_only_the_selection_first(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn collapsing_the_anchors_package_clears_the_selection(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &BOOK);
-    h.dispatch(&mut vcx, "down", None);
+    h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "expand", None); // open the CS package
-    h.dispatch(&mut vcx, "down", None); // its first leg
+    h.motion(&mut vcx, "down", None); // its first leg
     h.dispatch(&mut vcx, "visual_rows", None);
-    h.dispatch(&mut vcx, "up", None);
+    h.motion(&mut vcx, "up", None);
     // collapse through the palette-reachable verb: the leg anchor is hidden
     h.dispatch(&mut vcx, "collapse", None);
     assert_eq!(resolved(&h, &vcx), None);
@@ -72,7 +102,7 @@ fn the_footer_totals_position_risk_over_top_most_rows(cx: &mut gpui::TestAppCont
     let (h, mut vcx) = open_seeded(cx, &BOOK);
     answer_all(&h, &mut vcx, 1.0);
     h.dispatch(&mut vcx, "visual_rows", None);
-    h.dispatch(&mut vcx, "bottom", None);
+    h.motion(&mut vcx, "bottom", None);
     let totals = h.tile.read_with(&vcx, |t, _| t.totals.clone());
     let price = totals
         .iter()
@@ -147,15 +177,15 @@ fn the_footer_totals_count_an_open_packages_legs_once(cx: &mut gpui::TestAppCont
             },
         );
     }
-    h.dispatch(&mut vcx, "down", None);
+    h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "expand", None);
     assert_eq!(h.tree(&vcx).len(), 5, "fixture: the package is open");
     let cell = |row| -> f64 { h.cell(&vcx, row, "npv").parse().unwrap() };
     let (a, package, b) = (cell(0), cell(1), cell(4));
     assert!(package.abs() > 0.5, "fixture: the legs do not cancel");
-    h.dispatch(&mut vcx, "top", None);
+    h.motion(&mut vcx, "top", None);
     h.dispatch(&mut vcx, "visual_rows", None);
-    h.dispatch(&mut vcx, "bottom", None);
+    h.motion(&mut vcx, "bottom", None);
     let price = h.tile.read_with(&vcx, |t, _| {
         t.totals
             .iter()
@@ -236,7 +266,7 @@ fn a_footer_refusal_takes_the_footer_from_the_selection_strip(cx: &mut gpui::Tes
 fn y_over_rows_copies_top_most_shorthand_and_p_puts_them_all(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &BOOK);
     h.dispatch(&mut vcx, "visual_rows", None);
-    h.dispatch(&mut vcx, "down", None);
+    h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "yank", None);
     let clip = vcx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
     assert_eq!(
@@ -244,7 +274,7 @@ fn y_over_rows_copies_top_most_shorthand_and_p_puts_them_all(cx: &mut gpui::Test
         Some("SPX Z26 5000 C\n-5 SPX Z26 4800/5200 CS")
     );
     assert_eq!(h.mode(&mut vcx), "normal", "y ends the selection");
-    h.dispatch(&mut vcx, "bottom", None);
+    h.motion(&mut vcx, "bottom", None);
     h.dispatch(&mut vcx, "put_below", None);
     assert_eq!(
         h.tile.read_with(&vcx, |t, _| t.sheet.roots().count()),
@@ -268,7 +298,7 @@ fn y_over_a_block_copies_its_columns_as_tsv_and_keeps_the_register(cx: &mut gpui
     let (h, mut vcx) = open_seeded(cx, &BOOK);
     goto_column(&h, &mut vcx, "strike");
     h.dispatch(&mut vcx, "visual_block", None);
-    h.dispatch(&mut vcx, "down", None);
+    h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "yank", None);
     let clip = vcx
         .update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
@@ -292,7 +322,7 @@ fn y_over_a_block_copies_its_columns_as_tsv_and_keeps_the_register(cx: &mut gpui
 fn d_over_rows_deletes_them_in_one_undo_entry(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &BOOK);
     h.dispatch(&mut vcx, "visual_rows", None);
-    h.dispatch(&mut vcx, "down", None);
+    h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "delete", None);
     assert_eq!(h.tree(&vcx), vec!["SPX Z26 4000 P".to_string()]);
     assert_eq!(h.mode(&mut vcx), "normal");
@@ -341,10 +371,10 @@ fn a_put_of_a_line_and_a_package_from_an_open_leg_lands_at_a_root_boundary(
 ) {
     let (h, mut vcx) = open_seeded(cx, &BOOK);
     h.dispatch(&mut vcx, "visual_rows", None);
-    h.dispatch(&mut vcx, "down", None); // the line and the CS package
+    h.motion(&mut vcx, "down", None); // the line and the CS package
     h.dispatch(&mut vcx, "yank", None);
     h.dispatch(&mut vcx, "expand", None); // open the CS package
-    h.dispatch(&mut vcx, "down", None); // its first leg
+    h.motion(&mut vcx, "down", None); // its first leg
     assert!(
         h.tile.read_with(&vcx, |t, _| t
             .cursor_sheet_row()
@@ -369,9 +399,9 @@ fn a_put_of_a_line_and_a_package_from_an_open_leg_lands_at_a_root_boundary(
 #[gpui::test]
 fn a_leg_selected_without_its_package_is_deleted_as_a_leg(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &BOOK);
-    h.dispatch(&mut vcx, "down", None);
+    h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "expand", None); // open the CS package
-    h.dispatch(&mut vcx, "down", None); // its first leg
+    h.motion(&mut vcx, "down", None); // its first leg
     h.dispatch(&mut vcx, "visual_rows", None);
     h.dispatch(&mut vcx, "delete", None);
     let legs = |h: &Harness, vcx: &VisualTestContext| {
@@ -394,7 +424,7 @@ fn shift_j_moves_the_selected_block_as_a_unit_and_keeps_the_selection(
 ) {
     let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "SPX Z26 4000 P", "SPX Z26 3000 P"]);
     h.dispatch(&mut vcx, "visual_rows", None);
-    h.dispatch(&mut vcx, "down", None);
+    h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "move_down", None);
     assert_eq!(
         h.tree(&vcx),
@@ -415,9 +445,9 @@ fn shift_j_moves_the_selected_block_as_a_unit_and_keeps_the_selection(
 fn shift_j_moves_selected_legs_inside_an_open_package(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &["SPX Z26 4800/5000/5200 FLY"]);
     h.dispatch(&mut vcx, "expand", None);
-    h.dispatch(&mut vcx, "down", None); // the first leg
+    h.motion(&mut vcx, "down", None); // the first leg
     h.dispatch(&mut vcx, "visual_rows", None);
-    h.dispatch(&mut vcx, "down", None); // the first two legs
+    h.motion(&mut vcx, "down", None); // the first two legs
     assert_eq!(
         h.tree(&vcx)[1..],
         ["SPX Z26 4800 C", "-2 SPX Z26 5000 C", "SPX Z26 5200 C"]
@@ -439,7 +469,7 @@ fn shift_j_moves_selected_legs_inside_an_open_package(cx: &mut gpui::TestAppCont
 fn g_p_over_root_lines_groups_them_and_u_restores(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "SPX Z26 4000 P", "SPX Z26 3000 P"]);
     h.dispatch(&mut vcx, "visual_rows", None);
-    h.dispatch(&mut vcx, "down", None);
+    h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "group", None);
     assert_eq!(h.tree(&vcx)[0], "CUSTOM SPX Z26");
     assert_eq!(h.mode(&mut vcx), "normal", "g p ends the selection");
@@ -453,7 +483,7 @@ fn g_p_over_root_lines_groups_them_and_u_restores(cx: &mut gpui::TestAppContext)
 fn g_p_names_why_it_refuses(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &BOOK);
     h.dispatch(&mut vcx, "visual_rows", None);
-    h.dispatch(&mut vcx, "down", None); // includes the CS package
+    h.motion(&mut vcx, "down", None); // includes the CS package
     h.dispatch(&mut vcx, "group", None);
     assert_eq!(
         h.footer(&vcx).as_deref(),
@@ -472,7 +502,7 @@ fn g_u_ungroups_every_selected_package_in_one_undo_entry(cx: &mut gpui::TestAppC
         ],
     );
     h.dispatch(&mut vcx, "visual_rows", None);
-    h.dispatch(&mut vcx, "bottom", None);
+    h.motion(&mut vcx, "bottom", None);
     h.dispatch(&mut vcx, "ungroup", None);
     assert!(h.tile.read_with(&vcx, |t, _| {
         (0..t.sheet.len()).all(|r| !t.sheet.is_package(r))
@@ -526,7 +556,7 @@ fn a_count_is_ignored_while_a_selection_is_live(cx: &mut gpui::TestAppContext) {
         ],
         "one step, not two"
     );
-    h.dispatch(&mut vcx, "down", None);
+    h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "group", Some(3));
     assert_eq!(
         h.tile.read_with(&vcx, |t, _| t.sheet.roots().count()),
@@ -557,7 +587,7 @@ fn i_over_rows_writes_the_cursor_column_on_every_target_line_in_one_undo(
     let (h, mut vcx) = open_seeded(cx, &BOOK);
     goto_column(&h, &mut vcx, "strike");
     h.dispatch(&mut vcx, "visual_rows", None);
-    h.dispatch(&mut vcx, "bottom", None);
+    h.motion(&mut vcx, "bottom", None);
     h.dispatch(&mut vcx, "edit", None);
     set_editor(&h, &mut vcx, "4500");
     h.dispatch(&mut vcx, "commit", None);
@@ -580,11 +610,11 @@ fn i_over_rows_writes_the_cursor_column_on_every_target_line_in_one_undo(
 #[gpui::test]
 fn a_typed_strike_over_a_package_and_its_leg_writes_each_leg_once(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &BOOK);
-    h.dispatch(&mut vcx, "down", None);
+    h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "expand", None);
     goto_column(&h, &mut vcx, "strike");
     h.dispatch(&mut vcx, "visual_rows", None);
-    h.dispatch(&mut vcx, "down", None); // the package + its first leg
+    h.motion(&mut vcx, "down", None); // the package + its first leg
     h.dispatch(&mut vcx, "edit", None);
     set_editor(&h, &mut vcx, "4900");
     h.dispatch(&mut vcx, "commit", None);
@@ -612,10 +642,10 @@ fn a_block_commit_writes_the_cursor_column_and_counts_an_inapplicable_line(
     // A block strike … barrier over both lines, the cursor on the barrier
     // line's barrier cell.
     goto_column(&h, &mut vcx, "strike");
-    h.dispatch(&mut vcx, "down", None);
+    h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "visual_block", None);
-    h.dispatch(&mut vcx, "up", None);
-    h.dispatch(
+    h.motion(&mut vcx, "up", None);
+    h.motion(
         &mut vcx,
         "right",
         Some((at("barrier") - at("strike")) as u32),
@@ -647,13 +677,13 @@ fn a_typed_commit_in_a_block_leaves_its_other_columns_untouched(cx: &mut gpui::T
     // A block qty … strike, the cursor on strike: "5" parses as a qty too.
     goto_column(&h, &mut vcx, "qty");
     h.dispatch(&mut vcx, "visual_block", None);
-    h.dispatch(&mut vcx, "down", None);
+    h.motion(&mut vcx, "down", None);
     let (qty, strike) = {
         let c = h.columns(&vcx);
         let at = |n: &str| c.iter().position(|x| x == n).unwrap();
         (at("qty"), at("strike"))
     };
-    h.dispatch(&mut vcx, "right", Some((strike - qty) as u32));
+    h.motion(&mut vcx, "right", Some((strike - qty) as u32));
     h.dispatch(&mut vcx, "edit", None);
     set_editor(&h, &mut vcx, "5");
     h.dispatch(&mut vcx, "commit", None);
@@ -670,9 +700,9 @@ fn a_barrier_column_over_a_vanilla_line_is_counted_not_applicable(cx: &mut gpui:
     let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C DO 4000", "SPX Z26 4000 P"]);
     h.command(&mut vcx, "view barrier").unwrap();
     goto_column(&h, &mut vcx, "barrier");
-    h.dispatch(&mut vcx, "down", None);
+    h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "visual_rows", None);
-    h.dispatch(&mut vcx, "up", None); // the cursor on the barrier line
+    h.motion(&mut vcx, "up", None); // the cursor on the barrier line
     h.dispatch(&mut vcx, "edit", None);
     set_editor(&h, &mut vcx, "3900");
     h.dispatch(&mut vcx, "commit", None);
@@ -705,7 +735,7 @@ fn a_zero_qty_over_a_selection_writes_nothing(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &BOOK);
     goto_column(&h, &mut vcx, "qty");
     h.dispatch(&mut vcx, "visual_rows", None);
-    h.dispatch(&mut vcx, "bottom", None);
+    h.motion(&mut vcx, "bottom", None);
     let before = line_texts(&h, &vcx);
     h.dispatch(&mut vcx, "edit", None);
     set_editor(&h, &mut vcx, "0");
@@ -726,7 +756,7 @@ fn an_unchanged_value_over_a_selection_is_no_undo_entry(cx: &mut gpui::TestAppCo
     let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "SPX Z26 4000 P"]);
     goto_column(&h, &mut vcx, "qty");
     h.dispatch(&mut vcx, "visual_rows", None);
-    h.dispatch(&mut vcx, "down", None);
+    h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "edit", None);
     // Typed, not the untouched `1` the field opened on (which writes
     // nothing): the same value in another spelling.
@@ -757,9 +787,9 @@ fn a_picked_type_commits_to_every_selected_line(cx: &mut gpui::TestAppContext) {
 fn a_date_commits_to_every_selected_line(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "NDX 3m 100% C"]);
     goto_column(&h, &mut vcx, "expiry");
-    h.dispatch(&mut vcx, "down", None);
+    h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "visual_rows", None);
-    h.dispatch(&mut vcx, "up", None); // the dated line opens the field
+    h.motion(&mut vcx, "up", None); // the dated line opens the field
     h.dispatch(&mut vcx, "edit", None);
     h.draw(&mut vcx);
     keys(&h, &mut vcx, "up");
@@ -780,9 +810,9 @@ fn a_date_commits_to_every_selected_line(cx: &mut gpui::TestAppContext) {
 /// 5000 C's `column`.
 fn select_up_to_the_c_line(h: &Harness, vcx: &mut VisualTestContext, column: &str) {
     goto_column(h, vcx, column);
-    h.dispatch(vcx, "bottom", None);
+    h.motion(vcx, "bottom", None);
     h.dispatch(vcx, "visual_rows", None);
-    h.dispatch(vcx, "top", None);
+    h.motion(vcx, "top", None);
 }
 
 /// A choice opened and closed with `enter` and no pick: the option it
@@ -844,9 +874,9 @@ fn a_moved_choice_over_a_selection_writes_every_line_in_one_undo(cx: &mut gpui::
 fn an_unchanged_untyped_date_over_a_selection_writes_nothing(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "NDX 3m 100% C"]);
     goto_column(&h, &mut vcx, "expiry");
-    h.dispatch(&mut vcx, "down", None);
+    h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "visual_rows", None);
-    h.dispatch(&mut vcx, "up", None); // the dated line opens the field
+    h.motion(&mut vcx, "up", None); // the dated line opens the field
     let tenor = expiry_of(&h, &vcx, 1);
     h.dispatch(&mut vcx, "edit", None);
     h.draw(&mut vcx);
@@ -880,9 +910,9 @@ fn an_unchanged_untyped_date_over_a_selection_writes_nothing(cx: &mut gpui::Test
 fn an_untouched_package_text_cell_over_a_selection_writes_nothing(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &BOOK);
     goto_column(&h, &mut vcx, "option_type");
-    h.dispatch(&mut vcx, "bottom", None);
+    h.motion(&mut vcx, "bottom", None);
     h.dispatch(&mut vcx, "visual_rows", None);
-    h.dispatch(&mut vcx, "up", None); // the package row
+    h.motion(&mut vcx, "up", None); // the package row
     h.dispatch(&mut vcx, "edit", None);
     assert_eq!(editor_text(&h, &vcx).as_deref(), Some("C"), "fixture: text");
     h.dispatch(&mut vcx, "commit", None);
@@ -895,7 +925,7 @@ fn an_untouched_package_text_cell_over_a_selection_writes_nothing(cx: &mut gpui:
 #[gpui::test]
 fn a_read_only_cursor_cell_refuses_to_open_under_a_selection(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &BOOK);
-    h.dispatch(&mut vcx, "last_col", None);
+    h.motion(&mut vcx, "line_end", None);
     h.dispatch(&mut vcx, "visual_rows", None);
     h.dispatch(&mut vcx, "edit", None);
     assert_eq!(h.mode(&mut vcx), "visual", "no editor opened");
@@ -917,7 +947,7 @@ fn an_unchanged_package_qty_over_a_selection_keeps_its_legs_weighted(
     cx: &mut gpui::TestAppContext,
 ) {
     let (h, mut vcx) = open_seeded(cx, &BOOK);
-    h.dispatch(&mut vcx, "down", None); // the CS package
+    h.motion(&mut vcx, "down", None); // the CS package
     goto_column(&h, &mut vcx, "qty");
     h.dispatch(&mut vcx, "visual_rows", None);
     assert_eq!(leg_qtys(&h, &vcx, 1), [-5, 5]);
@@ -943,9 +973,9 @@ fn a_typed_package_qty_over_a_selection_scales_its_legs_by_the_weights(
         crate::core::package::package_qty(&t.sheet, 1).unwrap().1
     });
     goto_column(&h, &mut vcx, "qty");
-    h.dispatch(&mut vcx, "bottom", None); // the 4000 P
+    h.motion(&mut vcx, "bottom", None); // the 4000 P
     h.dispatch(&mut vcx, "visual_rows", None);
-    h.dispatch(&mut vcx, "up", None); // the cursor on the CS package
+    h.motion(&mut vcx, "up", None); // the cursor on the CS package
     h.dispatch(&mut vcx, "edit", None);
     set_editor(&h, &mut vcx, "3");
     h.dispatch(&mut vcx, "commit", None);
@@ -967,19 +997,19 @@ fn a_typed_package_qty_over_a_selection_scales_its_legs_by_the_weights(
 fn a_package_in_list_form_is_refused_a_selection_qty(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &BOOK);
     // Put the CS in list form: its second leg's qty no longer fits.
-    h.dispatch(&mut vcx, "down", None);
+    h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "expand", None);
-    h.dispatch(&mut vcx, "down", Some(2));
+    h.motion(&mut vcx, "down", Some(2));
     goto_column(&h, &mut vcx, "qty");
     h.dispatch(&mut vcx, "edit", None);
     set_editor(&h, &mut vcx, "3");
     h.dispatch(&mut vcx, "commit", None);
     assert_eq!(leg_qtys(&h, &vcx, 1), [-5, 3]);
     // The package, then the 5000 C above it.
-    h.dispatch(&mut vcx, "top", None);
-    h.dispatch(&mut vcx, "down", None);
+    h.motion(&mut vcx, "top", None);
+    h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "visual_rows", None);
-    h.dispatch(&mut vcx, "up", None);
+    h.motion(&mut vcx, "up", None);
     h.dispatch(&mut vcx, "edit", None);
     set_editor(&h, &mut vcx, "4");
     h.dispatch(&mut vcx, "commit", None);
@@ -998,7 +1028,7 @@ fn a_package_in_list_form_is_refused_a_selection_qty(cx: &mut gpui::TestAppConte
 fn step_setup(h: &Harness, vcx: &mut VisualTestContext) {
     goto_column(h, vcx, "strike");
     h.dispatch(vcx, "visual_rows", None);
-    h.dispatch(vcx, "bottom", None);
+    h.motion(vcx, "bottom", None);
     h.dispatch(vcx, "edit", None);
 }
 
@@ -1078,7 +1108,7 @@ fn a_step_that_zeroes_a_qty_writes_nothing(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "2 SPX Z26 4000 P"]);
     goto_column(&h, &mut vcx, "qty");
     h.dispatch(&mut vcx, "visual_rows", None);
-    h.dispatch(&mut vcx, "down", None);
+    h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "edit", None);
     h.prices(); // drains the opening requests
     h.dispatch(&mut vcx, "insert_down", None); // 1 → 0 refuses; 2 → 1 must not land either
@@ -1135,7 +1165,7 @@ fn a_block_step_steps_each_block_column_and_counts_what_does_not_step(
     let (h, mut vcx) = open_seeded(cx, &BOOK);
     goto_column(&h, &mut vcx, "strike");
     h.dispatch(&mut vcx, "visual_block", None);
-    h.dispatch(&mut vcx, "right", Some(3)); // strike, type, currency, spot_shift
+    h.motion(&mut vcx, "right", Some(3)); // strike, type, currency, spot_shift
     h.dispatch(&mut vcx, "edit", None);
     assert_eq!(
         editor_text(&h, &vcx).as_deref(),
@@ -1168,7 +1198,7 @@ fn a_block_step_over_both_shifts_moves_both(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &BOOK);
     goto_column(&h, &mut vcx, "spot_shift");
     h.dispatch(&mut vcx, "visual_block", None);
-    h.dispatch(&mut vcx, "right", None); // spot_shift, vol_shift
+    h.motion(&mut vcx, "right", None); // spot_shift, vol_shift
     h.dispatch(&mut vcx, "edit", None);
     h.dispatch(&mut vcx, "insert_up", None);
     let shift = |h: &Harness, vcx: &VisualTestContext| {
@@ -1200,7 +1230,7 @@ fn a_shift_step_moves_inherited_and_own_cells_up_from_what_they_paint(
     assert_eq!(h.cell(&vcx, 0, "spot_shift"), "+5.0", "fixture: own");
     assert_eq!(h.cell(&vcx, 1, "spot_shift"), "+2.0", "fixture: inherited");
     h.dispatch(&mut vcx, "visual_rows", None);
-    h.dispatch(&mut vcx, "down", None); // the inheriting line opens the field
+    h.motion(&mut vcx, "down", None); // the inheriting line opens the field
     h.dispatch(&mut vcx, "edit", None);
     assert_eq!(editor_text(&h, &vcx).as_deref(), Some(""), "opens empty");
     h.dispatch(&mut vcx, "insert_up", None);
@@ -1228,7 +1258,7 @@ fn a_block_step_over_strike_and_barrier_moves_both(cx: &mut gpui::TestAppContext
     h.command(&mut vcx, "view barrier").unwrap();
     goto_column(&h, &mut vcx, "strike");
     h.dispatch(&mut vcx, "visual_block", None);
-    h.dispatch(&mut vcx, "right", Some(2)); // strike, type, barrier
+    h.motion(&mut vcx, "right", Some(2)); // strike, type, barrier
     h.dispatch(&mut vcx, "edit", None);
     assert_eq!(editor_text(&h, &vcx).as_deref(), Some("4000"));
     h.dispatch(&mut vcx, "insert_up", None);
@@ -1277,7 +1307,7 @@ fn a_package_qty_step_moves_its_legs_by_the_template_weights(cx: &mut gpui::Test
     });
     goto_column(&h, &mut vcx, "qty");
     h.dispatch(&mut vcx, "visual_rows", None);
-    h.dispatch(&mut vcx, "down", None); // the 5000 C and the CS package
+    h.motion(&mut vcx, "down", None); // the 5000 C and the CS package
     h.dispatch(&mut vcx, "edit", None);
     assert_eq!(editor_text(&h, &vcx).as_deref(), Some("-5"));
     h.dispatch(&mut vcx, "insert_up", None);
@@ -1303,19 +1333,19 @@ fn a_package_qty_step_moves_its_legs_by_the_template_weights(cx: &mut gpui::Test
 fn a_package_in_list_form_is_skipped_by_a_qty_step(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &BOOK);
     // Put the CS in list form: its second leg's qty no longer fits.
-    h.dispatch(&mut vcx, "down", None);
+    h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "expand", None);
-    h.dispatch(&mut vcx, "down", Some(2));
+    h.motion(&mut vcx, "down", Some(2));
     goto_column(&h, &mut vcx, "qty");
     h.dispatch(&mut vcx, "edit", None);
     set_editor(&h, &mut vcx, "3");
     h.dispatch(&mut vcx, "commit", None);
     assert_eq!(leg_qtys(&h, &vcx, 1), [-5, 3]);
     // The package, then the 5000 C above it, the cursor on the line.
-    h.dispatch(&mut vcx, "top", None);
-    h.dispatch(&mut vcx, "down", None);
+    h.motion(&mut vcx, "top", None);
+    h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "visual_rows", None);
-    h.dispatch(&mut vcx, "up", None);
+    h.motion(&mut vcx, "up", None);
     h.dispatch(&mut vcx, "edit", None);
     h.dispatch(&mut vcx, "insert_up", None);
     assert_eq!(leg_qtys(&h, &vcx, 1), [-5, 3], "no leg stepped");
@@ -1412,7 +1442,7 @@ fn a_package_qty_stepping_to_zero_refuses_the_whole_press(cx: &mut gpui::TestApp
     let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "-1 SPX Z26 4800/5200 CS"]);
     goto_column(&h, &mut vcx, "qty");
     h.dispatch(&mut vcx, "visual_rows", None);
-    h.dispatch(&mut vcx, "down", None); // the line and the package
+    h.motion(&mut vcx, "down", None); // the line and the package
     h.dispatch(&mut vcx, "edit", None);
     assert_eq!(editor_text(&h, &vcx).as_deref(), Some("-1"));
     let legs = leg_qtys(&h, &vcx, 1);

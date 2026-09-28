@@ -49,6 +49,27 @@ impl KeyContext {
     }
 }
 
+/// Published by a tile whose grid cursor takes the shared `motion::*` keys.
+/// The shell's builtin keymap binds those keys once under this flag, so one
+/// user override reaches every grid tile.
+pub const GRID: &str = "grid";
+
+/// Published by a tile while one of its menus or popup lists holds the keys,
+/// so `motion::menu_down`/`menu_up` step the list instead of the grid.
+pub const TILELIST: &str = "tilelist";
+
+impl KeyContext {
+    /// Mark this frame as a grid that takes the shared motions.
+    pub fn grid(self) -> Self {
+        self.flag(GRID)
+    }
+
+    /// Mark this frame as holding an open tile menu or popup list.
+    pub fn tilelist(self) -> Self {
+        self.flag(TILELIST)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Predicate {
     Flag(String),

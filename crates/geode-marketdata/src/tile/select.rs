@@ -164,15 +164,13 @@ impl MarketDataTile {
             .is_some_and(|e| e.bulk.is_some() || self.selection.is_some())
     }
 
-    /// The verbs that move or end the selection: every motion (the cursor
-    /// is its moving corner), `V`/`v`, the `escape` verb, and `y` over a
+    /// The verbs that move or end the selection: every shared motion (the
+    /// cursor is its moving corner), `V`/`v`, the `escape` verb, and `y` over a
     /// selection, which consumes it. `cancel` (insert mode's `escape`)
     /// closes the editor and is not among them.
     pub(super) fn changes_selection(&self, verb: &str) -> bool {
         match verb {
-            "down" | "up" | "left" | "right" | "page_down" | "page_up" | "page_down_full"
-            | "page_up_full" | "top" | "bottom" | "first_col" | "last_col" | "visual_rows"
-            | "visual_block" | "escape" => true,
+            "motion" | "visual_rows" | "visual_block" | "escape" => true,
             "yank" => self.selection.is_some(),
             _ => false,
         }

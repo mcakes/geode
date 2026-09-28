@@ -1125,10 +1125,10 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                                     // does not starve presentation of consistent snapshots.
                                     // An old as-of, however, must never replace the current one.
                                     if snapshot.as_of == current_as_of {
-                                        d.set_catalog(snapshot);
+                                        d.set_catalog(snapshot, SystemTime::now());
                                     } else {
                                         // Explicit consumers need a current answer even when
-                                        // no diagnostics tile observes the frame's as-of.
+                                        // no diagnostics page observes the frame's as-of.
                                         match request {
                                             CatalogRequest::Watched => d.request_catalog_refresh(),
                                             CatalogRequest::Explicit => d.request_catalog(),
@@ -1283,13 +1283,15 @@ mod tests {
     use geode_core::log::Ring;
     use geode_core::query::{AsOf, CatalogOutcome, CatalogSnapshot, QueryKey};
     use geode_data::source::SourceSpec;
-    use geode_diagnostics::DiagnosticsFactory;
+    use geode_diagnostics::DiagnosticsPageFactory;
     use geode_pricer::store::MemorySheetStore;
     use geode_shell::actions::ActionRegistry;
-    use geode_shell::defaults::{BUILTIN_KEYMAP, default_mod, register_builtin_actions};
+    use geode_shell::defaults::{
+        BUILTIN_KEYMAP, default_mod, register_builtin_actions, register_page_actions,
+    };
     use geode_shell::keymap::build_keymap;
     use geode_shell::module::recording::{Recorded, RecordingFactory};
-    use geode_shell::module::{ModuleFactory, ModuleRoster};
+    use geode_shell::module::{ModuleFactory, ModuleRoster, PageFactory};
     use geode_shell::session::TileRecords;
     use geode_shell::shell::ShellServices;
     use geode_shell::tiling::{TileId, Workspaces};
@@ -1500,6 +1502,8 @@ role = "key"
             keymap_diagnostics: Vec::new(),
             keymap_fragments: Vec::new(),
             keymap_fragment_diagnostics: Vec::new(),
+            pages: geode_shell::module::PageRoster::new(),
+            restored_pages: std::collections::BTreeMap::new(),
         }
     }
 
@@ -1541,6 +1545,8 @@ role = "key"
             keymap_diagnostics: Vec::new(),
             keymap_fragments: Vec::new(),
             keymap_fragment_diagnostics: Vec::new(),
+            pages: geode_shell::module::PageRoster::new(),
+            restored_pages: std::collections::BTreeMap::new(),
         };
         (services, log)
     }
@@ -2332,6 +2338,7 @@ role = "key"
             None,
             &geode_shell::session::PinnedRecords::new(),
             &geode_shell::palette_usage::PaletteUsage::new(),
+            &geode_shell::session::PageRecords::new(),
         );
         let ws1: toml::Table = r#"
             focused = 1
@@ -2974,6 +2981,7 @@ role = "key"
             None,
             &geode_shell::session::PinnedRecords::new(),
             &geode_shell::palette_usage::PaletteUsage::new(),
+            &geode_shell::session::PageRecords::new(),
         );
         let ws1: toml::Table = format!(
             r#"
@@ -3093,6 +3101,7 @@ role = "key"
             None,
             &geode_shell::session::PinnedRecords::new(),
             &geode_shell::palette_usage::PaletteUsage::new(),
+            &geode_shell::session::PageRecords::new(),
         );
         let ws1: toml::Table = r#"
             focused = 1
@@ -4034,6 +4043,7 @@ role = "key"
             None,
             &geode_shell::session::PinnedRecords::new(),
             &geode_shell::palette_usage::PaletteUsage::new(),
+            &geode_shell::session::PageRecords::new(),
         );
         let ws1: toml::Table = r#"
             focused = 1
@@ -4776,12 +4786,12 @@ role = "key"
         }
     }
 
-    /// Open a real diagnostics tile through its factory and bridge. After the
-    /// initial catalog request completes, changing frame as-of must produce a
-    /// second request carrying the new value. A pending-bit assertion alone would
+    /// Open the real diagnostics page through its factory and bridge. After
+    /// the initial catalog request completes, changing frame as-of must
+    /// produce a second request carrying the new value. A pending-bit assertion alone would
     /// not prove that the observer submits the request.
     #[gpui::test]
-    fn an_as_of_change_on_a_visible_diagnostics_tile_requests_a_second_catalog_with_the_new_as_of(
+    fn an_as_of_change_on_the_visible_diagnostics_page_requests_a_second_catalog_with_the_new_as_of(
         cx: &mut gpui::TestAppContext,
     ) {
         let window = open_test_window(cx, test_shell_services());
@@ -4833,19 +4843,19 @@ role = "key"
         let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
         let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
 
-        // A real diagnostics tile, created through the real factory, the
-        // same door `main.rs`'s roster and `ensure_occupants` use.
+        // The real diagnostics page, created through the real factory, the
+        // same door `main.rs`'s page roster and `open_page` use.
         let diagnostics_factory =
-            DiagnosticsFactory::new(Arc::new(Ring::new(64)), Config::default());
+            DiagnosticsPageFactory::new(Arc::new(Ring::new(64)), Config::default());
         let occupant = vcx.update(|window, cx| {
             diagnostics_factory.create(
-                TileId(999),
                 None,
                 geode_shell::frame::FrameRef::new(
                     frame.clone(),
                     geode_shell::tiling::WorkspaceIx::FIRST,
                 ),
                 diagnostics.clone(),
+                Rc::new(|_, _, _| {}),
                 window,
                 cx,
             )
@@ -5676,7 +5686,7 @@ role = "key"
 
     /// A forget changes what the database holds without any `Published`,
     /// so the bridge must re-read a watched catalog on `Forgotten` or the
-    /// diagnostics tile keeps listing the deleted document.
+    /// diagnostics page keeps listing the deleted document.
     #[gpui::test]
     fn a_forgotten_document_rereads_a_watched_catalog(cx: &mut gpui::TestAppContext) {
         let f = catalog_fixture(cx);
@@ -5926,7 +5936,7 @@ role = "key"
         });
         let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
         let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
-        // This is the identity picker's request door: no diagnostics tile exists.
+        // This is the identity picker's request door: no diagnostics page exists.
         diagnostics.update(&mut vcx, |d, cx| {
             d.request_catalog();
             cx.notify();
@@ -5990,5 +6000,423 @@ role = "key"
             f.requests.try_recv().is_err(),
             "an explicit read does not subscribe to publications"
         );
+    }
+
+    /// The grid tile kinds the shared motion keys must reach. The
+    /// diagnostics page is the fourth grid; `page_dispatch_counts` opens it.
+    const GRID_KINDS: &[&str] = &["blotter", "cvi", "pricer"];
+
+    /// DataTable key suppression for every grid module, once per test app.
+    fn init_grid_modules(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        cx.update(geode_blotter::init);
+        cx.update(geode_marketdata::init);
+        cx.update(geode_pricer::init);
+    }
+
+    /// A shell whose roster holds every grid factory and whose page roster
+    /// holds the diagnostics page, wired as `main` wires them (actions,
+    /// renames, fragments, the page toggle, builtin keymap, `user` as the
+    /// user layer), with one restored tile of `kind` focused. Returns the
+    /// keymap build's diagnostics beside the services.
+    fn shell_with_one_grid_tile(
+        kind: &str,
+        user: Option<&str>,
+    ) -> (ShellServices, Vec<Diagnostic>) {
+        let mut services = test_shell_services();
+        let (handle, _rx) = DataHandle::for_tests();
+        let mut roster = ModuleRoster::new();
+        roster.add(Box::new(BlotterFactory::new(
+            handle.clone(),
+            Vec::new(),
+            NamedColours::default(),
+            SchemaSpec::default(),
+            DerivedDimensions::default(),
+            FindStyle::default(),
+            Duration::from_secs(900),
+        )));
+        roster.add(Box::new(MarketDataFactory::new(
+            handle.clone(),
+            &CVI,
+            Duration::from_secs(900),
+        )));
+        roster.add(Box::new(PricerFactory::new(
+            handle,
+            Rc::new(MemorySheetStore::default()),
+            Views::builtin(),
+            TemplateSet::builtin(),
+            PricerSettings::default(),
+        )));
+        let mut pages = geode_shell::module::PageRoster::new();
+        pages.add(Box::new(DiagnosticsPageFactory::new(
+            Arc::new(Ring::new(16)),
+            services.config.clone(),
+        )));
+        roster.register_actions(&mut services.registry);
+        let page_titles: Vec<(&str, &str)> = pages.entries().map(|e| (e.kind, e.title)).collect();
+        register_page_actions(&mut services.registry, &page_titles);
+        pages.register_actions(&mut services.registry);
+        let (mut fragments, diags) = roster.keymap_fragments();
+        assert!(diags.is_empty(), "{diags:?}");
+        let (page_fragments, page_diags) = pages.keymap_fragments();
+        assert!(page_diags.is_empty(), "{page_diags:?}");
+        fragments.extend(page_fragments);
+        let mut docs = vec![LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap()];
+        if let Some(text) = user {
+            docs.push(LayerDoc {
+                layer: Layer::User,
+                name: "keymap".into(),
+                file: "user/keymap.toml".into(),
+                table: text.parse().unwrap(),
+            });
+        }
+        let layered = geode_shell::keymap::fragments::splice(&docs, &fragments);
+        let (keymap, keymap_diags) = build_keymap(&layered, services.mod_alias, &services.registry);
+        services.keymap = keymap;
+        services.roster = roster;
+        services.pages = pages;
+        let mut table = geode_shell::session::to_toml(
+            &Workspaces::new(),
+            &TileRecords::new(),
+            None,
+            &geode_shell::session::PinnedRecords::new(),
+            &geode_shell::palette_usage::PaletteUsage::new(),
+            &geode_shell::session::PageRecords::new(),
+        );
+        let ws1: toml::Table = format!(
+            "focused = 1\n[node]\nkind = \"leaf\"\nid = 1\n[tiles.1]\nmodule = \"{kind}\"\n"
+        )
+        .parse()
+        .unwrap();
+        if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
+            ws_table.insert("1".to_string(), toml::Value::Table(ws1));
+        }
+        let restored = geode_shell::session::from_toml(&table).unwrap();
+        assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+        services.workspaces = restored.workspaces;
+        services.restored_tiles = restored.tiles;
+        (services, keymap_diags)
+    }
+
+    /// Type `keys` (gpui spelling, one entry per press) into a fresh shell
+    /// hosting one `kind` tile; how many times each of `ids` was dispatched.
+    fn dispatch_counts(
+        cx: &mut gpui::TestAppContext,
+        kind: &str,
+        user: Option<&str>,
+        keys: &[&str],
+        ids: &[&str],
+    ) -> Vec<usize> {
+        use geode_shell::diagnostics::fnv1a;
+        let (services, _) = shell_with_one_grid_tile(kind, user);
+        let tail = services.action_tail.clone();
+        let window = open_shell_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        vcx.run_until_parked();
+        for key in keys {
+            vcx.simulate_keystrokes(key);
+        }
+        vcx.run_until_parked();
+        let tail = tail.lock().unwrap();
+        ids.iter()
+            .map(|id| {
+                let h = fnv1a(id);
+                tail.recent().filter(|x| *x == h).count()
+            })
+            .collect()
+    }
+
+    /// With a grid tile's action menu open, `j` and `down` send the shared
+    /// menu step and never the grid's motion: the tile publishes `tilelist`
+    /// over `mode == menu`, which the grid bindings' context excludes.
+    #[gpui::test]
+    fn a_menu_motion_steps_the_open_pricer_menu_not_its_grid(cx: &mut gpui::TestAppContext) {
+        init_grid_modules(cx);
+        for kind in ["pricer", "cvi"] {
+            assert_eq!(
+                dispatch_counts(
+                    cx,
+                    kind,
+                    None,
+                    &[".", "j", "down"],
+                    &[
+                        &format!("{}::menu", module_context(kind)),
+                        "motion::menu_down",
+                        "motion::down",
+                    ],
+                ),
+                vec![1, 2, 0],
+                "{kind}: the open menu takes j and down"
+            );
+        }
+    }
+
+    /// The module context (and action prefix) a grid kind's tile publishes.
+    fn module_context(kind: &str) -> &'static str {
+        match kind {
+            "cvi" => "marketdata",
+            "pricer" => "pricer",
+            other => panic!("no menu fixture for {other}"),
+        }
+    }
+
+    /// One user override of a shared motion, under the shipped context,
+    /// reaches every grid tile through the real shell and keymap.
+    #[gpui::test]
+    fn a_shared_motion_override_reaches_each_grid_tile(cx: &mut gpui::TestAppContext) {
+        use geode_shell::defaults::GRID_MOTION_CONTEXT;
+        init_grid_modules(cx);
+        let user = format!(
+            "[[bindings]]\ncontext = \"{GRID_MOTION_CONTEXT}\"\n[bindings.keys]\n\"q\" = \"motion::down\"\n"
+        );
+        for kind in GRID_KINDS {
+            let (_, diags) = shell_with_one_grid_tile(kind, Some(&user));
+            assert!(diags.is_empty(), "{kind}: {diags:?}");
+            assert_eq!(
+                dispatch_counts(cx, kind, Some(&user), &["q"], &["motion::down"]),
+                vec![1],
+                "{kind}: the one override reaches this tile"
+            );
+        }
+    }
+
+    /// `"none"` on `j` under the shipped context unbinds it in every grid
+    /// tile; the arrow keeps working, so the tile still takes motions.
+    #[gpui::test]
+    fn none_on_j_under_the_shared_context_unbinds_it_in_every_grid_tile(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use geode_shell::defaults::GRID_MOTION_CONTEXT;
+        init_grid_modules(cx);
+        let user = format!(
+            "[[bindings]]\ncontext = \"{GRID_MOTION_CONTEXT}\"\n[bindings.keys]\n\"j\" = \"none\"\n"
+        );
+        for kind in GRID_KINDS {
+            assert_eq!(
+                dispatch_counts(cx, kind, None, &["j", "down"], &["motion::down"]),
+                vec![2],
+                "{kind}: fixture: j and down both move without the override"
+            );
+            assert_eq!(
+                dispatch_counts(cx, kind, Some(&user), &["j", "down"], &["motion::down"]),
+                vec![1],
+                "{kind}: j silenced, down still moves"
+            );
+        }
+    }
+
+    /// An override written against the retired `blotter::down` keeps working
+    /// in the blotter, only there, and the build warns naming both ids.
+    #[gpui::test]
+    fn an_old_blotter_down_override_still_moves_the_blotter_only_and_warns(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_grid_modules(cx);
+        let user = "[[bindings]]\ncontext = \"blotter && mode == normal\"\n[bindings.keys]\n\"q\" = \"blotter::down\"\n";
+        let (_, diags) = shell_with_one_grid_tile("blotter", Some(user));
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].severity, Severity::Warning);
+        assert!(
+            diags[0].message.contains("blotter::down") && diags[0].message.contains("motion::down"),
+            "{}",
+            diags[0].message
+        );
+        assert_eq!(
+            dispatch_counts(cx, "blotter", Some(user), &["q"], &["motion::down"]),
+            vec![1]
+        );
+        assert_reaches_no_other_grid_tile(cx, "blotter", user);
+    }
+
+    /// An old-id override under `own`'s context moves no other grid tile.
+    fn assert_reaches_no_other_grid_tile(cx: &mut gpui::TestAppContext, own: &str, user: &str) {
+        for kind in GRID_KINDS.iter().filter(|k| **k != own) {
+            assert_eq!(
+                dispatch_counts(cx, kind, Some(user), &["q"], &["motion::down"]),
+                vec![0],
+                "{kind}: the {own} override stays in its own context"
+            );
+        }
+    }
+
+    /// Rebinding Motion: down from the keybindings dialog while an old
+    /// `blotter::down` rebind (its key plus a `"none"` over the `j` the
+    /// blotter shipped) is displayed. The dialog's plan clears both and
+    /// writes the shared grid context, so the new key moves every grid tile,
+    /// the arrow still does, and `j` is silenced everywhere rather than in
+    /// the blotter alone.
+    #[gpui::test]
+    fn a_motion_row_rebind_over_an_old_blotter_override_moves_every_grid_tile(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use geode_shell::keymap::parse_keystroke;
+        use geode_shell::shell::keybindings_view::{derive_rows, rebind_plan};
+        init_grid_modules(cx);
+        let old = "config_version = 1\n\n[[bindings]]\ncontext = \"blotter && mode == normal\"\n\
+                   [bindings.keys]\n\"n\" = \"blotter::down\"\n\"j\" = \"none\"\n";
+        assert_eq!(
+            dispatch_counts(cx, "blotter", Some(old), &["j", "n"], &["motion::down"]),
+            vec![1],
+            "fixture: j is dead in the blotter and the old n moves it"
+        );
+        let (services, _) = shell_with_one_grid_tile("blotter", Some(old));
+        let rows = derive_rows(&services.registry, &services.keymap);
+        let row = rows
+            .iter()
+            .find(|r| r.action.0 == "motion::down")
+            .expect("a Motion: down row");
+        let n = parse_keystroke("n", services.mod_alias).unwrap();
+        let plan = rebind_plan(row, &[n]);
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("keymap.toml"), old).unwrap();
+        geode_shell::keymap_edit::apply_rebind_clearing(
+            dir.path(),
+            &plan.clear,
+            plan.write.as_ref().expect("a new key is a write"),
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(dir.path().join("keymap.toml")).unwrap();
+        // The emptied blotter entry stays (its comments would); its keys go.
+        assert!(!text.contains("blotter::down"), "{text}");
+        assert_eq!(
+            text.matches("\"none\"").count(),
+            1,
+            "one shared shadow: {text}"
+        );
+
+        for kind in GRID_KINDS {
+            let (_, diags) = shell_with_one_grid_tile(kind, Some(&text));
+            assert!(diags.is_empty(), "{kind}: {diags:?}");
+            assert_eq!(
+                dispatch_counts(
+                    cx,
+                    kind,
+                    Some(&text),
+                    &["n", "n", "j", "down"],
+                    &["motion::down"]
+                ),
+                // Two presses of n, so a tile where n is dead but j lives
+                // cannot score the same total.
+                vec![3],
+                "{kind}: n twice and down move, j is silenced\n{text}"
+            );
+        }
+    }
+
+    /// An override written against the retired `marketdata::down` keeps
+    /// working in the market-data panel, only there, and warns naming both.
+    #[gpui::test]
+    fn an_old_marketdata_down_override_still_moves_the_panel_only_and_warns(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_grid_modules(cx);
+        let user = "[[bindings]]\ncontext = \"marketdata && mode == normal\"\n[bindings.keys]\n\"q\" = \"marketdata::down\"\n";
+        let (_, diags) = shell_with_one_grid_tile("cvi", Some(user));
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].severity, Severity::Warning);
+        assert!(
+            diags[0].message.contains("marketdata::down")
+                && diags[0].message.contains("motion::down"),
+            "{}",
+            diags[0].message
+        );
+        assert_eq!(
+            dispatch_counts(cx, "cvi", Some(user), &["q"], &["motion::down"]),
+            vec![1]
+        );
+        assert_reaches_no_other_grid_tile(cx, "cvi", user);
+    }
+
+    /// An override written against the retired `pricer::down` keeps working
+    /// in the pricer, only there, and warns naming both.
+    #[gpui::test]
+    fn an_old_pricer_down_override_still_moves_the_pricer_only_and_warns(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_grid_modules(cx);
+        let user = "[[bindings]]\ncontext = \"pricer && mode == normal\"\n[bindings.keys]\n\"q\" = \"pricer::down\"\n";
+        let (_, diags) = shell_with_one_grid_tile("pricer", Some(user));
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].severity, Severity::Warning);
+        assert!(
+            diags[0].message.contains("pricer::down") && diags[0].message.contains("motion::down"),
+            "{}",
+            diags[0].message
+        );
+        assert_eq!(
+            dispatch_counts(cx, "pricer", Some(user), &["q"], &["motion::down"]),
+            vec![1]
+        );
+        assert_reaches_no_other_grid_tile(cx, "pricer", user);
+    }
+
+    /// `keys` typed with the diagnostics page open over a blotter tile:
+    /// `mod+d` first, then `keys`. The tile beneath is out of the context
+    /// stack, so only the page can take them.
+    fn page_dispatch_counts(
+        cx: &mut gpui::TestAppContext,
+        user: Option<&str>,
+        keys: &[&str],
+        ids: &[&str],
+    ) -> Vec<usize> {
+        let mut all = vec!["alt-d"];
+        all.extend_from_slice(keys);
+        dispatch_counts(cx, "blotter", user, &all, ids)
+    }
+
+    /// One user override of a shared motion, under the shipped context,
+    /// reaches the diagnostics page: it publishes `grid` like the tiles.
+    #[gpui::test]
+    fn a_shared_motion_override_reaches_the_diagnostics_page(cx: &mut gpui::TestAppContext) {
+        use geode_shell::defaults::GRID_MOTION_CONTEXT;
+        init_grid_modules(cx);
+        let user = format!(
+            "[[bindings]]\ncontext = \"{GRID_MOTION_CONTEXT}\"\n[bindings.keys]\n\"q\" = \"motion::down\"\n"
+        );
+        let (_, diags) = shell_with_one_grid_tile("blotter", Some(&user));
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(
+            page_dispatch_counts(
+                cx,
+                Some(&user),
+                &["q", "j"],
+                &["page::toggle_diagnostics", "motion::down"]
+            ),
+            vec![1, 2],
+            "the page opened, and the override and the shipped j both reach it"
+        );
+    }
+
+    /// An override written against the retired `diagnostics::down` keeps
+    /// working on the diagnostics page, only there, and warns naming both.
+    #[gpui::test]
+    fn an_old_diagnostics_down_override_still_moves_the_page_only_and_warns(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_grid_modules(cx);
+        let user = "[[bindings]]\ncontext = \"diagnostics\"\n[bindings.keys]\n\"q\" = \"diagnostics::down\"\n";
+        let (_, diags) = shell_with_one_grid_tile("blotter", Some(user));
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].severity, Severity::Warning);
+        assert!(
+            diags[0].message.contains("diagnostics::down")
+                && diags[0].message.contains("motion::down"),
+            "{}",
+            diags[0].message
+        );
+        assert_eq!(
+            page_dispatch_counts(
+                cx,
+                Some(user),
+                &["q"],
+                &["page::toggle_diagnostics", "motion::down"]
+            ),
+            vec![1, 1]
+        );
+        assert_reaches_no_other_grid_tile(cx, "diagnostics", user);
     }
 }

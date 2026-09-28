@@ -48,8 +48,11 @@ skipped; `"none"` is accepted without registration. An action's owner may
 register a retired ID with `ActionRegistry::register_rename` (`config::colours`
 → `config::colors`, `timeseries::colour` → `timeseries::color`,
 `timeseries::pick_colour` → `timeseries::pick_color`, `blotter::visual` →
-`blotter::visual_rows`). A binding naming a
-retired ID binds the current action and warns with both IDs, so an existing
+`blotter::visual_rows`, and each module's retired motion and menu-step ids →
+`motion::*`, listed [below](#retired-motion-ids) and in the module's
+`RENAMED_ACTIONS`). Several retired IDs may rename to one current ID; each
+retired ID is still registered once. A binding naming a retired ID binds the
+current action and warns with both IDs, so an existing
 user keymap keeps working until the file is edited; the dialogs write only the
 current ID. `register` refuses a retired ID, so a later registration
 cannot be silently redirected. Startup can use the remaining
@@ -59,6 +62,26 @@ last-good acceptance gate; see [reload](configuration.md#hot-reload).
 `blotter::visual_rows` selects whole rows; `blotter::visual_block` selects a
 cell rectangle. The compatibility name `blotter::visual` resolves to row
 selection.
+
+### Retired motion ids
+
+Every module-local motion and menu-step id is retired and registered as a
+rename of a `motion::*` id. The suffix decides the target, the same in every
+module that had it:
+
+| Retired id | Current id | Modules |
+|---|---|---|
+| `…::down`, `up`, `top`, `bottom` | the same `motion::*` name | blotter, marketdata, pricer, diagnostics |
+| `…::left`, `right` | the same `motion::*` name | blotter, marketdata, pricer |
+| `…::page_down`, `page_up` | `motion::half_page_down`, `half_page_up` | blotter, marketdata, pricer, diagnostics |
+| `…::page_down_full`, `page_up_full` | `motion::page_down`, `page_up` | blotter, marketdata, pricer, diagnostics |
+| `…::first_col`, `last_col` | `motion::line_start`, `line_end` | blotter, marketdata, pricer |
+| `…::menu_down`, `menu_up` | `motion::menu_down`, `menu_up` | marketdata, pricer |
+| `timeseries::list_down`, `list_up` | `motion::menu_down`, `menu_up` | timeseries |
+
+A user binding on a retired id keeps its own context (for example
+`blotter && mode == normal`), so it still reaches only that module's tile,
+and loading it warns with both ids.
 
 ## Key spelling and primary modifier
 
@@ -89,8 +112,17 @@ the explicit modifier, such as `mod+shift+p` or `shift+left`.
 
 ## Context predicates
 
-The shell supplies a stack from outermost to innermost context. Predicates
-support flags, comparisons, boolean operators, and parentheses:
+The shell supplies a stack from outermost to innermost context. On the tile
+surface it is `workspace`, then `tile` and the focused occupant's own
+context when one is focused, then `palette` while it is open. While a
+[page](shell.md#pages) replaces the workspace it is `page`, then the page's
+own context, then `palette`; `workspace` and `tile` are absent, so the
+bindings in those tables stay inert until the page closes. The builtin
+keymap binds `escape` to `page::close` in the `page` context and binds the
+workspace switches `mod+1` to `mod+9` context-free, beside the palette
+toggle and the other application-wide chords, because a switch is
+navigation that must reach from a page as well as from the tile surface.
+Predicates support flags, comparisons, boolean operators, and parentheses:
 
 ```text
 workspace
@@ -112,7 +144,9 @@ The market-data panel reports one of `normal`, `visual`, `menu`, or `insert`.
 An open editor, picker, choice field, or upload confirmation is `insert` even
 while a selection is live, so the editor's `enter`, `escape`, and arrows keep
 their insert-mode meaning over a selection; the action menu is `menu`. Its
-`marketdata && mode == visual` block repeats the normal motions and binds the
+motions are the shared grid motions (the panel publishes `grid` in every
+mode, and the shared bindings match only `mode == normal` or
+`mode == visual`); its `marketdata && mode == visual` block binds the
 selection verbs as single keys — `y` (`marketdata::yank`), `d`
 (`marketdata::delete_row`), `i` and `enter` (`marketdata::edit`), `v`, `V`,
 and `escape` — because a doubled normal-mode form (`y y`, `y c`, `d d`) would
@@ -130,8 +164,11 @@ field's segment (see [features](features.md#selection-2)). An inherited shift
 steps from the value it paints, in the live step and the single-cell nudge
 alike. Over a selection, an `enter` that leaves the cursor cell as it opened
 (an unmoved choice, an untyped date on its opening day, unedited text) writes
-nothing and closes the editor. The pricer's `pricer && mode == visual` block
-repeats the normal motions and binds `y` (`pricer::yank`), `d`
+nothing and closes the editor. Its motions, arrows, `^`/`$` and `home`/`end`
+included, are the shared grid motions (the pricer publishes `grid`); a motion
+dispatched from the palette while the entry bar, the cell editor or the action
+menu is open closes it first, then moves. The pricer's
+`pricer && mode == visual` block binds `y` (`pricer::yank`), `d`
 (`pricer::delete`), `shift+j`/`shift+k`, `g p`, `g u`, `i` and `enter`
 (`pricer::edit`), `v`, `V` and `escape` as the selection's verbs.
 Normal-mode keys it does not list — the doubled `y y`, `y c` and `d d`, `p`,
@@ -174,6 +211,61 @@ remains an ordinary key; zero extends an existing count. Modified digits and
 digits after a sequence starts are ordinary binding keys. The next matched
 action receives the optional count; action handlers decide how to use it.
 
+## Shared motions
+
+The shell registers fourteen `motion::*` actions under the "Motion" category
+and ships their keys once in the builtin keymap. It handles none of them:
+`ShellView::dispatch` offers each to the focused tile's `dispatch` with its
+count, and the tile interprets it through `geode_tile::motion`.
+
+| Action | Keys |
+|---|---|
+| `motion::down` / `motion::up` | `j`, `down` / `k`, `up` |
+| `motion::left` / `motion::right` | `h`, `left` / `l`, `right` |
+| `motion::top` / `motion::bottom` | `g g` / `shift+g` |
+| `motion::half_page_down` / `motion::half_page_up` | `ctrl+d` / `ctrl+u` |
+| `motion::page_down` / `motion::page_up` | `ctrl+f`, `pagedown` / `ctrl+b`, `pageup` |
+| `motion::line_start` / `motion::line_end` | `^`, `home` / `$`, `end` |
+| `motion::menu_down` / `motion::menu_up` | `j`, `down` / `k`, `up` |
+
+A tile publishes the `grid` flag (`KeyContext::grid`) when its grid cursor
+takes motions, and the `tilelist` flag (`KeyContext::tilelist`) while one of
+its menus or popup lists is open. Grid motions are bound under the single
+context `grid && (mode == normal || mode == visual)`
+(`defaults::GRID_MOTION_CONTEXT`), so one user override under that context, or
+one rebind of a Motion row from the keybindings dialog, reaches every grid tile
+in both modes; see [editing a Motion row](#editing-a-motion-row). A grid under
+an open menu reports `mode == menu`, so its motions stay out while the menu
+steps take `j`/`k`/arrows under `tilelist`. Within each context the named keys
+are bound first and the vim keys last, so hints and the dialog show the vim
+key. `g g` is the builtin keymap's one multi-key sequence; module fragments add
+their own `g` sequences beside it.
+
+The grid rules in `geode_tile::motion`:
+
+- A bare single `down`/`up` wraps at the ends, except while a selection is
+  live, where it clamps: wrapping past the anchor would invert the selection.
+- Any counted move clamps, a count of one included.
+- A counted `top`/`bottom` jumps to row N (1-based), clamped to the last row.
+- `half_page_*` moves 5 rows and `page_*` 10 rows, times the count.
+- `left`/`right` clamp; `line_start`/`line_end` reach the first and last
+  column.
+- On an empty axis every motion leaves the position unchanged.
+
+Three tiles publish `tilelist`: the market-data panel and the line pricer while
+their `.` action menu is open (beside `mode == menu`), and the timeseries tile
+while its series list or one of its menus (action, range, frequency) is open
+(beside `popup == series|menu`). The timeseries tile never publishes `grid`,
+so its own `h`/`l` pan and `g`/`shift+g` jump are never shadowed. With no list
+open the flag is absent and `j`/`k` fall through to the grid (or to nothing).
+The retired menu and list step ids are renames of
+`motion::menu_down`/`menu_up` (see [retired motion ids](#retired-motion-ids)).
+
+What a menu step means (skipping disabled rows, wrapping a series list) stays
+the list's rule; what a tile does around a grid result (entering a header
+strip, closing a field, following a log) stays the tile's; see
+[features](features.md#motion).
+
 ## Module defaults
 
 A factory's `default_keymap` contributes a builtin-layer keymap with a synthetic
@@ -196,10 +288,45 @@ module roster from loading. Retained fragment-filter diagnostics are shown on
 reload but do not themselves reject a user edit; errors from the ordinary
 compiler still participate in the reload gate.
 
+A grid module's fragment binds no motions: they come from the shared
+`motion::*` bindings under `grid`. The blotter's fragment binds only its
+verbs (expansion, selection, yank, find, sort, `g m`, escape).
+The market-data panel's fragment binds its verbs and its `mode == menu`
+pick and close keys (`enter`, `escape`, `.`); the menu's steps are the shared
+ones under `tilelist`. `k` on row 0 still enters the attribute strip around
+the shared result.
+The line pricer's fragment binds its verbs (`g p`, `g u` and `g m` among
+them, beside the shell's `g g`: a first `g` waits for the second key), its
+`mode == insert` field keys and its `mode == menu` pick and close keys.
+The timeseries fragment binds its popups' `enter`, `escape` and `.`; their
+row steps are the shared ones under `tilelist`.
+The diagnostics page's fragment binds only its verbs (`[`/`]`, `z o`/`z c`,
+`enter`, `/`) under `mode == normal` and `escape` under `mode == insert`; the
+page publishes `grid` beside its mode, so the shared motions reach its cursor
+in normal mode and stay out of the focused filter.
+
 A fragment may name any action, not only ones its own module registers, so
 long as its context is the module's own: both the blotter's and the pricer's
 default fragments bind `g m` to the shell's `tile::open_with` inside their own
 `mode == normal` context.
+
+A `PageFactory` contributes its `default_keymap` the same way, checked
+against the contexts it declares (its kind by default). Its toggle is
+different: a page's `toggle_binding` (`mod+d` for diagnostics) must be
+context-free to reach from the workspace, and a module fragment cannot carry
+a context-free binding, so the `PageRoster` emits it as a separate
+shell-generated document named `page:<kind>` that binds
+`page::toggle_<kind>`. That document is not put through the fragment filter,
+because the shell wrote it; it still compiles with the rest and a user
+keymap can rebind or unbind it like any builtin.
+
+A page's bare-key bindings carry `mode == normal`, for the reason a
+module's do. While one of the page's inputs holds focus its context carries
+`mode == insert`, and the insert route resolves bare keys against every
+context carrying that pair, so a table on the bare `diagnostics` context
+would fire `j`, `G`, or `enter` inside the filter instead of typing them.
+The `mode == insert` table holds only the keys the input surrenders
+(`escape`, which blurs it).
 
 See [input and dialogs](input-and-dialogs.md#keyboard-ownership) for surfaces
 that bypass sequences and counts while handling text, and for the limits of
@@ -226,7 +353,8 @@ a different TOML key or context string.
 | Rebind to the same spelling | Write the new value and skip displacement |
 | Unbind a user key | Remove it, exposing any lower-layer binding |
 | Unbind a builtin/desk key | Write a user `"none"` shadow |
-| Reset one action | Remove its user bindings and shadows covering its live lower-layer bindings |
+| Reset one action | Remove its user bindings, shadows covering its live lower-layer bindings, and orphan shadows on their keys |
+| Rebind or unbind a Motion row | Reset the action, then write the shared context ([below](#editing-a-motion-row)) |
 | Reset all | Remove every user `bindings` entry, including hand-written entries; retain other fields |
 
 Rebind and unbind use the **first** matching raw context string, creating an
@@ -255,6 +383,32 @@ through normal reload. The temporary `.tmp` file is outside the reload scanner's
 TOML filter. Parse and shape errors leave the original file untouched; shared
 [write semantics](configuration.md#runtime-edits) define I/O failure and
 durability limits.
+
+### Editing a Motion row
+
+An edit of a `motion::*` row is global. An old-id override (say
+`n = "blotter::down"` under `blotter && mode == normal`) keeps working with a
+load warning and is what the row displays, but a rebind or unbind does not
+write into that module context. In one transaction it first removes every user
+override of the action, the same set `r` removes, then writes the shared
+context: `GRID_MOTION_CONTEXT` for the grid motions, `tilelist` for
+`motion::menu_down`/`menu_up` (`defaults::shared_motion_context`). A rebind
+writes the new key there and a `"none"` over the shipped fallback key; an
+unbind writes only the `"none"`, which `r` lifts. Capturing the fallback key
+itself only clears. Re-capturing the displayed key is a no-op only when every
+override already sits in the shared context.
+
+`r` on a Motion row removes the old-id overrides in every module context and
+their `"none"` shadows. A dialog rebind made before the rename wrote the old
+module key and a `"none"` over the `j` the module then shipped, both under the
+module's context. `j` now ships under the grid context, so the shadow covers no
+lower binding by raw context string, yet it still silences `j` in that module.
+Reset therefore also collects an orphan shadow: a user `"none"` that shadows no
+lower-layer binding at all and sits on the keys of one of the action's live
+lower-layer bindings. An orphan on keys several actions share is collected for
+each of them; removing it only exposes lower layers. After the reset the Motion
+row's shipped binding applies in every tile. `shift+r` removes every user
+binding, old ids included.
 
 ## Display resolution and action registration limits
 

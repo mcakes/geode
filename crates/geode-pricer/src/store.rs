@@ -256,7 +256,7 @@ pub struct DuckSheetStore {
     data: DataHandle,
     known: Rc<RefCell<BTreeSet<String>>>,
     /// Names confirmed forgotten and not saved since. The catalog the
-    /// diagnostics entity holds is refreshed only while a diagnostics tile
+    /// diagnostics entity holds is refreshed only while the diagnostics page
     /// watches it, so a catalog read before a forget can be re-read long
     /// after it: without this, it would make the forgotten name known
     /// again.

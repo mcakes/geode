@@ -83,6 +83,13 @@ impl Render for ShellView {
             // must not leave it on the orphaned palette input either.
             if self.modal_open() {
                 super::dialog::refocus_top(self, window, cx);
+            } else if let Some(page) = self.page.as_ref().filter(|p| p.open) {
+                // Over a page the tiles are hidden, so the page is the only
+                // occupant that can hold a caret; otherwise its handle, never
+                // the shell root, where the page's bindings are unreachable.
+                if !page.occupant.content.holds_focus(window, cx) {
+                    page.occupant.content.focus_handle(cx).focus(window, cx);
+                }
             } else if !self.occupant_holds_insert_focus(window, cx) {
                 self.focus_handle.focus(window, cx);
             }
@@ -93,7 +100,7 @@ impl Render for ShellView {
         // handles and need `ensure_occupants`'s visibility check instead.
         // Do not reclaim focus from live inputs that legitimately own a caret.
         if window.focused(cx).is_none() {
-            self.focus_handle.focus(window, cx);
+            self.focus_home(window, cx);
         }
 
         // Close a member list when its tile loses workspace focus or leaves
@@ -111,13 +118,28 @@ impl Render for ShellView {
         }
 
         // Reconcile occupants and visibility for every path that changes tiles.
+        // This runs under an open page too: it is what hides the tiles beneath
+        // (`fill_active_tiles` yields nothing then).
         self.ensure_occupants(window, cx);
 
-        // Stop divider tracking when an overlay, fullscreen, or workspace switch
-        // hides its boundary. Keep and persist resizes already applied.
+        // An open page replaces the workspace: toolbar, stripe, tile surface,
+        // divider strips, and drag catchers are neither built nor painted; the
+        // sidebar and status bar stay. The page must be in the element tree
+        // while it holds focus: gpui dispatches keys for an unrendered focus
+        // handle from the window root, above this view's key listener.
+        let page_open = self.page_open();
+        let page_view = self
+            .page
+            .as_ref()
+            .filter(|p| p.open)
+            .map(|p| p.occupant.view.clone());
+
+        // Stop divider tracking when an overlay, page, fullscreen, or workspace
+        // switch hides its boundary. Keep and persist resizes already applied.
         if self.divider_drag.as_ref().is_some_and(|drag| {
             self.palette.is_some()
                 || self.modal_open()
+                || page_open
                 // Epoch, not index — see `DividerDrag::epoch`.
                 || drag.epoch != self.services.workspaces.switch_epoch()
                 || self
@@ -131,12 +153,14 @@ impl Render for ShellView {
             self.cancel_divider_drag();
         }
 
-        // Cancel tile tracking when overlays obscure its targets, the workspace
-        // changes, fullscreen begins, or the grabbed tile disappears. No layout
-        // change has been applied, so cancellation needs no persistence update.
+        // Cancel tile tracking when overlays or a page obscure its targets, the
+        // workspace changes, fullscreen begins, or the grabbed tile disappears.
+        // No layout change has been applied, so cancellation needs no
+        // persistence update.
         if self.tile_drag.as_ref().is_some_and(|drag| {
             self.palette.is_some()
                 || self.modal_open()
+                || page_open
                 || !self.matcher.pending().is_empty()
                 // Epoch, not index — see `DividerDrag::epoch`.
                 || drag.epoch != self.services.workspaces.switch_epoch()
@@ -210,6 +234,757 @@ impl Render for ShellView {
         let status_height = status::height(window);
         let rem_size = window.rem_size();
 
+        // The body's content beside the sidebar, its height, and the focused
+        // tile's window-space rect (for the command line and stack list;
+        // `None` under a page, where neither can be armed). A page takes the
+        // toolbar's and stripe's rows too and none of the workspace layout
+        // below is computed for it.
+        let (content, body_height, focused_rect): (gpui::AnyElement, f32, Option<Rect>) =
+            match page_view {
+                Some(view) => {
+                    let height = content_height + toolbar_height + stripe_height;
+                    (
+                        div()
+                            .id("shell-page")
+                            .debug_selector(|| "shell-page".to_string())
+                            .w(px(tile_width))
+                            .h(px(height))
+                            .flex_none()
+                            .overflow_hidden()
+                            .bg(cx.theme().background)
+                            .child(view)
+                            .into_any_element(),
+                        height,
+                        None,
+                    )
+                }
+                None => {
+                    let (surface, focused_rect) = self.workspace_content(
+                        tile_width,
+                        content_height,
+                        sidebar_width,
+                        toolbar_height,
+                        cx,
+                    );
+                    (surface, content_height, focused_rect)
+                }
+            };
+
+        let active_index = self.services.workspaces.active_index();
+        let non_empty = self.services.workspaces.non_empty_indices();
+        let reload_message = self.last_reload.status_message();
+        // Share the cached scope bar model between toolbar and status bar.
+        // Use the poll-updated date and configured clock, avoiding a fresh
+        // clock read during rendering.
+        let bar_model = self
+            .target_frame()
+            .read(cx)
+            .bar_model(self.clock(cx), self.today);
+        // Read the cached diagnostics summary. Cloning its shared string
+        // increments a reference count without copying its buffer.
+        let diagnostics_read = self.diagnostics.read(cx);
+        let diagnostics_summary = diagnostics_read.summary();
+        // Prepared when a thread stops; borrowed, never formatted here.
+        let stopped = diagnostics_read.stopped_segment();
+        // Borrow ingest activity through the status-bar call without cloning.
+        // Nothing before that call needs a mutable context.
+        let ingest = diagnostics_read.ingest.as_ref();
+        // Clicking the summary (or the stopped segment, which shares this
+        // closure) opens the diagnostics page through its toggle action, the
+        // same route as `mod+d` and the sidebar button. Formatted on the
+        // click, not per render.
+        let diagnostics_click_entity = cx.entity();
+        let on_diagnostics_click = move |window: &mut Window, cx: &mut App| {
+            diagnostics_click_entity.update(cx, |view, cx| {
+                view.dispatch(
+                    &crate::actions::ActionId(format!(
+                        "page::toggle_{}",
+                        crate::diagnostics::DIAGNOSTICS_PAGE_KIND
+                    )),
+                    None,
+                    window,
+                    cx,
+                );
+                cx.notify();
+            });
+        };
+        // Clicking the fullscreen segment restores the layout through the
+        // same action `mod+f` and a tile double-click dispatch.
+        let fullscreen_hidden = self.services.workspaces.active().fullscreen_hidden();
+        let fullscreen_click_entity = cx.entity();
+        let on_fullscreen_click = move |window: &mut Window, cx: &mut App| {
+            fullscreen_click_entity.update(cx, |view, cx| {
+                view.dispatch(
+                    &crate::actions::ActionId("workspace::fullscreen_tile".into()),
+                    None,
+                    window,
+                    cx,
+                );
+                cx.notify();
+            });
+        };
+        let status_bar = status::status_bar(
+            self.matcher.pending(),
+            self.matcher.count(),
+            reload_message.as_deref(),
+            self.config_write_error.as_deref(),
+            self.restart_required.as_deref(),
+            self.notice,
+            stopped,
+            (!diagnostics_summary.is_empty()).then_some(diagnostics_summary.as_ref()),
+            on_diagnostics_click,
+            ingest,
+            fullscreen_hidden,
+            on_fullscreen_click,
+            bar_model.as_of.as_deref(),
+            bar_model.as_of_full.as_ref(),
+            self.services.theme.active_name(),
+            cx,
+        );
+        let sidebar = sidebar::sidebar(
+            active_index,
+            &non_empty,
+            &self.page_entries,
+            self.open_page_kind(),
+            cx,
+        );
+        // A chip's close glyph drops that dimension from the scope
+        // — an undoable edit, same door as every other scope
+        // mutation. Built here, not `cx.listener` (whose signature takes
+        // `&Evt`, not `&str`): capture `cx.entity()` and update through
+        // it, matching `on_chip_close`'s plain-`Fn(&str, ..)` shape.
+        let chip_close_entity = cx.entity();
+        let on_chip_close = move |column: &str, _window: &mut Window, cx: &mut App| {
+            chip_close_entity.update(cx, |view, cx| {
+                view.target_frame().update(cx, |f, cx| {
+                    if f.drop_dimension(column) {
+                        cx.notify();
+                    }
+                });
+            });
+        };
+        // Open the dimension picker through an entity handle so the callback
+        // can update `ShellView`.
+        let chip_open_entity = cx.entity();
+        let on_chip_open = move |column: &str, window: &mut Window, cx: &mut App| {
+            let column = column.to_string();
+            chip_open_entity.update(cx, |view, cx| {
+                picker::open(view, Some(column), window, cx);
+            });
+        };
+        // The scope bar's `+` opens the add-a-filter menu, whose rows
+        // dispatch `frame::pick` and `frame::add_expression`. Same
+        // `cx.entity()`-captured shape as `on_chip_open` just above.
+        let add_entity = cx.entity();
+        let on_add = move |window: &mut Window, cx: &mut App| {
+            add_entity.update(cx, |view, cx| {
+                view.open_add_filter_menu(window, cx);
+            });
+        };
+        // The open menu's panel, painted from its prepared rows. A row
+        // click commits through `commit_add_filter` (a dispatch); hovering
+        // a row highlights it.
+        let add_menu = self.add_filter_menu.as_ref().map(|menu| {
+            let pick_entity = cx.entity().downgrade();
+            let hover_entity = pick_entity.clone();
+            addfilter::render(
+                menu,
+                move |entry, window: &mut Window, cx: &mut App| {
+                    let _ = pick_entity
+                        .update(cx, |view, cx| view.commit_add_filter(entry, window, cx));
+                },
+                move |i, _window: &mut Window, cx: &mut App| {
+                    let _ = hover_entity.update(cx, |view, cx| view.hover_add_filter(i, cx));
+                },
+                cx,
+            )
+            .into_any_element()
+        });
+        // The scope bar's save glyph — the mouse form of
+        // `scope::save_current`, through the same door `input.rs`'s
+        // dispatch arm uses.
+        let save_chip_entity = cx.entity();
+        let on_save = move |window: &mut Window, cx: &mut App| {
+            save_chip_entity.update(cx, |view, cx| {
+                objectdialog::render::open_save_scope(view, window, cx);
+            });
+        };
+        // The scope bar's load glyph — the mouse form of
+        // `frame::scope`/`mod+o`, through the same door `input.rs`'s
+        // dispatch arm uses.
+        let load_chip_entity = cx.entity();
+        let on_load = move |window: &mut Window, cx: &mut App| {
+            load_chip_entity.update(cx, |view, cx| {
+                choicedialog::open_scopes(view, window, cx);
+            });
+        };
+        // The grouping readout's click — the mouse form of
+        // `frame::grouping`/`mod+g`, through the same door `input.rs`'s
+        // dispatch arm uses.
+        let grouping_entity = cx.entity();
+        let on_grouping = move |window: &mut Window, cx: &mut App| {
+            grouping_entity.update(cx, |view, cx| {
+                choicedialog::open_grouping(view, window, cx);
+            });
+        };
+        // The AS OF chip's click — the mouse
+        // form of `frame::as_of`/`mod+t`, through the same door `input.rs`'s
+        // dispatch arm uses.
+        let as_of_entity = cx.entity();
+        let on_as_of = move |window: &mut Window, cx: &mut App| {
+            as_of_entity.update(cx, |view, cx| {
+                asof_view::open(view, window, cx);
+            });
+        };
+        // An expression term chip's click opens the dialog on that term
+        // alone; its `×` drops that term alone (an undoable edit, like a
+        // dimension chip's `×`).
+        let term_open_entity = cx.entity();
+        let on_term_open = move |i: usize, window: &mut Window, cx: &mut App| {
+            term_open_entity.update(cx, |view, cx| {
+                scope_expr_view::open_term(view, i, window, cx);
+            });
+        };
+        let term_close_entity = cx.entity();
+        let on_term_close = move |i: usize, _window: &mut Window, cx: &mut App| {
+            term_close_entity.update(cx, |view, cx| {
+                view.target_frame().update(cx, |f, cx| {
+                    if f.drop_expression_term(i) {
+                        cx.notify();
+                    }
+                });
+            });
+        };
+        // A named-expression chip's body opens the Expressions dialog on
+        // that name; its `×` drops that name alone, an undoable edit like
+        // the other chips' `×`.
+        let named_open_entity = cx.entity();
+        let on_named_open = move |name: &str, window: &mut Window, cx: &mut App| {
+            named_open_entity.update(cx, |view, cx| {
+                objectdialog::render::open_object(
+                    view,
+                    objectdialog::Domain::Expressions,
+                    name,
+                    window,
+                    cx,
+                );
+            });
+        };
+        let named_close_entity = cx.entity();
+        let on_named_close = move |name: &str, _window: &mut Window, cx: &mut App| {
+            named_close_entity.update(cx, |view, cx| {
+                view.target_frame().update(cx, |f, cx| {
+                    if f.drop_named(name) {
+                        cx.notify();
+                    }
+                });
+            });
+        };
+        // Whether the grouping picker is up: the readout holds its pressed
+        // fill for exactly as long as it is (design guide: a control that
+        // owns a popup stays visibly pressed until the popup closes). The
+        // tile picker shares the choice dialog and must not light it.
+        let grouping_open = matches!(
+            self.choice_dialog.as_ref().map(|d| &d.target),
+            Some(choicedialog::Target::Grouping { .. })
+        );
+        // The load glyph holds its pressed fill while the scope picker is up.
+        let scope_open = matches!(
+            self.choice_dialog.as_ref().map(|d| &d.target),
+            Some(choicedialog::Target::Scope { .. })
+        );
+        // The pin glyph names the active workspace, whose tiles are the
+        // ones on screen, not a dialog's target.
+        let ws = self.active_ix();
+        let pin = toolbar::PinState {
+            ws,
+            pinned: self.frame.read(cx).is_pinned(ws),
+        };
+        let on_pin = {
+            let entity = cx.entity();
+            move |window: &mut Window, cx: &mut App| {
+                entity.update(cx, |view, cx| view.toggle_workspace_pin(window, cx));
+            }
+        };
+        // No toolbar work at all while a page is open (see `page_open` above).
+        let toolbar = if page_open {
+            None
+        } else {
+            Some(toolbar::toolbar(
+                &self.filter_input,
+                &bar_model,
+                grouping_open,
+                scope_open,
+                add_menu,
+                on_chip_close,
+                on_chip_open,
+                on_add,
+                on_save,
+                on_load,
+                on_grouping,
+                on_as_of,
+                on_term_open,
+                on_term_close,
+                on_named_open,
+                on_named_close,
+                pin,
+                on_pin,
+                cx,
+            ))
+        };
+
+        let body = h_flex()
+            .w_full()
+            .h(px(body_height))
+            .flex_none()
+            .child(sidebar)
+            .child(content);
+
+        let width = f32::from(viewport.width);
+        let viewport_height = f32::from(viewport.height);
+
+        // Build which-key only for a pending key sequence. A bare count leaves
+        // `pending` empty and appears in the status bar instead. Reading matcher
+        // state here must not change how the next keystroke resolves.
+        let pending = self.matcher.pending();
+        let which_key_continuations = (!pending.is_empty()).then(|| {
+            whichkey::continuations(&self.services.keymap, pending, &self.context_stack(cx))
+        });
+        let registry = &self.services.registry;
+
+        // Clone the modal's shared title and callbacks before building the
+        // element tree, releasing the borrow of `self.modals` before closures
+        // need access to the rest of the view.
+        let modal = self.modals.last().map(|modal| {
+            (
+                modal.title.clone(),
+                modal.title_extra.clone(),
+                modal.build.clone(),
+            )
+        });
+
+        // Extracted ahead of the render chain like `modal` above: all the
+        // drag catcher below needs from the active drag is which resize
+        // cursor to show — the drag itself is applied through
+        // `apply_divider_drag`, which re-reads `self.divider_drag` per
+        // event.
+        let drag_axis = self.divider_drag.as_ref().map(|drag| drag.axis);
+
+        // Extracted the same way for the tile-drag catcher and ghost: the
+        // catcher exists from arm (so it can see the threshold-crossing
+        // moves), the ghost only once the drag is active.
+        let tile_drag_armed = self.tile_drag.is_some();
+        let tile_drag_ghost = self
+            .tile_drag
+            .as_ref()
+            .filter(|drag| drag.active)
+            .map(|drag| drag.cursor);
+
+        v_flex()
+            .size_full()
+            .relative()
+            .track_focus(&self.focus_handle)
+            // `GeodeShell` reclaims tab/shift-tab from Root's window-wide focus
+            // cycling so they reach the shell matcher, including module bindings.
+            // `GeodeModalOpen` additionally reclaims modal commands while focus is
+            // on the shell root; the panel's context is absent in Normal mode.
+            .key_context(if self.modal_open() {
+                "GeodeShell GeodeModalOpen"
+            } else {
+                "GeodeShell"
+            })
+            .on_key_down(cx.listener(Self::handle_key_down))
+            // Cover releases between drag arming and the first catcher paint.
+            // Hovered and non-hovered listeners together cover mouse and keyboard
+            // modality; `heal_drags_on_root_release` preserves active tile drops.
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|view, _event, _window, cx| {
+                    view.heal_drags_on_root_release(cx);
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|view, _event, _window, cx| {
+                    view.heal_drags_on_root_release(cx);
+                }),
+            )
+            .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
+            .when_some(toolbar, |el, toolbar| el.child(toolbar))
+            // Paint the warning stripe only for `AsOf::At` and no page. Its
+            // height was already subtracted from the tile surface.
+            .when(is_historical && !page_open, |el| {
+                el.child(
+                    div()
+                        .w_full()
+                        .h(px(AS_OF_STRIPE_HEIGHT))
+                        .bg(cx.theme().warning)
+                        .debug_selector(|| "as-of-stripe".to_string()),
+                )
+            })
+            .child(body)
+            .child(status_bar)
+            // Capture divider moves and release with a full-window occluding
+            // layer. Fast drags leave the narrow strip, so the catcher maintains
+            // hit coverage and resize cursor shape. A release through either
+            // mouse-up route, or a later buttonless move, ends tracking while
+            // preserving resizes already applied.
+            .when_some(drag_axis, |el, axis| {
+                el.child(
+                    div()
+                        .id("divider-drag-catcher")
+                        .absolute()
+                        .left(px(0.))
+                        .top(px(0.))
+                        .w(px(width))
+                        .h(px(viewport_height))
+                        .occlude()
+                        .map(|el| match axis {
+                            Orientation::Horizontal => el.cursor_col_resize(),
+                            Orientation::Vertical => el.cursor_row_resize(),
+                        })
+                        .debug_selector(|| "divider-drag-catcher".to_string())
+                        .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, _window, cx| {
+                            // Only a buttonless move means the release was lost. Ignore
+                            // moves attributed to a second button during a chorded press.
+                            match event.pressed_button {
+                                None => {
+                                    // The release happened where we
+                                    // couldn't see it — treat the first
+                                    // buttonless move as the mouse-up.
+                                    view.finish_divider_drag(cx);
+                                }
+                                Some(MouseButton::Left) => {
+                                    if view.apply_divider_drag(
+                                        f32::from(event.position.x),
+                                        f32::from(event.position.y),
+                                    ) {
+                                        cx.notify();
+                                    }
+                                }
+                                Some(_) => {}
+                            }
+                        }))
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|view, _event, _window, cx| {
+                                view.finish_divider_drag(cx);
+                            }),
+                        )
+                        .on_mouse_up_out(
+                            MouseButton::Left,
+                            cx.listener(|view, _event, _window, cx| {
+                                view.finish_divider_drag(cx);
+                            }),
+                        ),
+                )
+            })
+            // Capture tile moves and release across the whole window, occluding
+            // tile and divider hitboxes. Only one drag kind can be active.
+            // A buttonless move cancels without applying a drop. Both mouse-up
+            // routes attempt the drop: keyboard modality suppresses hover and
+            // can send an in-window release through `on_mouse_up_out`. A release
+            // outside the layout has no target and changes nothing.
+            .when(tile_drag_armed, |el| {
+                el.child(
+                    div()
+                        .id("tile-drag-catcher")
+                        .absolute()
+                        .left(px(0.))
+                        .top(px(0.))
+                        .w(px(width))
+                        .h(px(viewport_height))
+                        .occlude()
+                        .cursor_grabbing()
+                        .debug_selector(|| "tile-drag-catcher".to_string())
+                        .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, _window, cx| {
+                            // Ignore moves attributed to non-left buttons: platforms may
+                            // report a second held button differently. Only `None` proves
+                            // all buttons were released and cancels the tile drag.
+                            match event.pressed_button {
+                                None => {
+                                    view.cancel_tile_drag();
+                                    cx.notify();
+                                }
+                                Some(MouseButton::Left) => {
+                                    view.update_tile_drag(
+                                        f32::from(event.position.x),
+                                        f32::from(event.position.y),
+                                        cx,
+                                    );
+                                }
+                                Some(_) => {}
+                            }
+                        }))
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|view, event: &MouseUpEvent, window, cx| {
+                                view.finish_tile_drag(
+                                    f32::from(event.position.x),
+                                    f32::from(event.position.y),
+                                    window,
+                                    cx,
+                                );
+                            }),
+                        )
+                        .on_mouse_up_out(
+                            MouseButton::Left,
+                            cx.listener(|view, event: &MouseUpEvent, window, cx| {
+                                view.finish_tile_drag(
+                                    f32::from(event.position.x),
+                                    f32::from(event.position.y),
+                                    window,
+                                    cx,
+                                );
+                            }),
+                        ),
+                )
+            })
+            // Paint the fixed-size drag outline above its catcher. With no
+            // handlers or occlusion, it cannot intercept the catcher's events.
+            .when_some(tile_drag_ghost, |el, (gx, gy)| {
+                el.child(
+                    div()
+                        .absolute()
+                        .left(px(gx + TILE_DRAG_GHOST_OFFSET))
+                        .top(px(gy + TILE_DRAG_GHOST_OFFSET))
+                        .w(px(TILE_DRAG_GHOST_SIZE.0))
+                        .h(px(TILE_DRAG_GHOST_SIZE.1))
+                        .border_2()
+                        .border_color(cx.theme().primary)
+                        .debug_selector(|| "tile-drag-ghost".to_string()),
+                )
+            })
+            // Paint the command line at the focused tile's bottom edge, with
+            // completions above. The render-time check guarantees that an open
+            // line still belongs to that tile and owns input focus. A missing
+            // rect suppresses painting if the tile disappeared.
+            .when_some(
+                self.command_line.as_ref().zip(focused_rect),
+                |el, (line, rect)| {
+                    el.child(commandline_view::render(
+                        line,
+                        &self.command_input,
+                        rect,
+                        rem_size,
+                        cx,
+                    ))
+                },
+            )
+            // Paint the member list above its focused tile and below overlays.
+            // Build row titles only while it is open; occupant titles are shared
+            // strings, so each row clones a handle rather than formatting text.
+            .when_some(
+                self.stack_list.as_ref().zip(focused_rect),
+                |el, (list, rect)| {
+                    let rows: Vec<stacklist::Row> = list
+                        .members
+                        .iter()
+                        .map(|id| match self.occupants.get(id) {
+                            Some(o) => stacklist::Row {
+                                title: o.content.title(cx),
+                                kind: o.kind,
+                            },
+                            None => stacklist::Row {
+                                title: "empty".into(),
+                                kind: "placeholder",
+                            },
+                        })
+                        .collect();
+                    let weak = cx.entity().downgrade();
+                    let members = list.members.clone();
+                    let on_row_click = move |i: usize, window: &mut Window, cx: &mut App| {
+                        let Some(id) = members.get(i).copied() else {
+                            return;
+                        };
+                        let _ =
+                            weak.update(cx, |view, cx| view.activate_stack_member(id, window, cx));
+                    };
+                    let panel = stacklist::render(list, &rows, rect, rem_size, on_row_click, cx);
+                    el.child(
+                        div()
+                            .id("stack-list-click-catcher")
+                            .absolute()
+                            .left(px(0.))
+                            .top(px(0.))
+                            .w(px(width))
+                            .h(px(viewport_height))
+                            .debug_selector(|| "stack-list-click-catcher".to_string())
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|view, _event, _window, cx| view.close_stack_list(cx)),
+                            )
+                            .child(panel),
+                    )
+                },
+            )
+            // The add-a-filter menu's click catcher: a press anywhere but
+            // the menu closes it and goes no further. The menu panel itself
+            // is deferred (painted above this) from inside the toolbar, so
+            // its rows are hit first. `occlude` is what keeps the press
+            // from also reaching the element beneath, the `+` included —
+            // otherwise a click on the `+` would close and reopen the menu.
+            // It also blocks the wheel for the tiles beneath while the menu
+            // is open, which is accepted for a two-row transient menu.
+            .when(self.add_filter_menu.is_some(), |el| {
+                el.child(
+                    div()
+                        .id("scope-add-menu-click-catcher")
+                        .absolute()
+                        .left(px(0.))
+                        .top(px(0.))
+                        .w(px(width))
+                        .h(px(viewport_height))
+                        .debug_selector(|| "scope-add-menu-click-catcher".to_string())
+                        .occlude()
+                        // Every button: the catcher swallows every press, so a
+                        // right or middle press must close the menu too.
+                        .on_any_mouse_down(cx.listener(|view, _event, window, cx| {
+                            view.dismiss_add_filter_menu(window, cx)
+                        })),
+                )
+            })
+            // Paint the modal below the palette: a palette opened over the stack
+            // must be visible and take clicks above the dialog it covers.
+            .when_some(modal, |el, (title, title_extra, build)| {
+                let extra = title_extra.map(|f| f(self, cx));
+                let show_back = dialog::back_available(self);
+                let content = build(self, window, cx);
+                el.child(dialog::render_modal(
+                    title,
+                    extra,
+                    show_back,
+                    content,
+                    width,
+                    viewport_height,
+                    cx,
+                ))
+            })
+            // The palette overlay paints above the tiles/status bar (later
+            // children paint above earlier siblings) but below gpui-
+            // component's own dialog/notification layers below.
+            .when_some(self.palette.as_ref(), |el, state| {
+                // Select the clicked row before calling the same commit path as
+                // Enter. A clonable weak-entity callback can be shared by rows
+                // without a separate heap allocation for each row on each render.
+                let weak = cx.entity().downgrade();
+                let on_row_click = move |idx: usize, window: &mut Window, cx: &mut App| {
+                    let _ = weak.update(cx, |view, cx| {
+                        if let Some(palette) = view.palette.as_mut() {
+                            palette.set_selected(idx);
+                        }
+                        view.commit_selected(window, cx);
+                        cx.notify();
+                    });
+                };
+                let panel = palette::render(
+                    state,
+                    &self.palette_scroll,
+                    &self.palette_input,
+                    on_row_click,
+                    palette::Viewport {
+                        width,
+                        height: viewport_height,
+                        rem_size,
+                    },
+                    cx,
+                );
+                // Click-outside dismiss: a transparent (no dimming — the
+                // palette is an overlay, not a modal) full-window click-
+                // catcher behind the panel. Precedent: `dialog::
+                // render_modal`'s own backdrop, minus the `.bg(overlay)`
+                // dimming a real modal wants and this doesn't. The panel
+                // itself stops propagation on its own `on_mouse_down` (see
+                // `palette::render`'s doc comment), so a click landing
+                // anywhere inside it — a row, the query input, empty space
+                // — never also reaches this catcher's handler below.
+                //
+                // gpui fires `on_mouse_down` for every hovered hitbox, not
+                // only the topmost, so without `occlude()` a click over an
+                // open dialog stack would also reach whatever the catcher
+                // covers: `shell-modal-backdrop` (popping the dialog) or a
+                // dialog row (committing or opening it). `occlude()` is
+                // conditioned on a dialog being open because with none the
+                // catcher covers only tiles, which have no click handler this
+                // would wrongly swallow.
+                el.child(
+                    div()
+                        .id("palette-click-catcher")
+                        .absolute()
+                        .left(px(0.))
+                        .top(px(0.))
+                        .w(px(width))
+                        .h(px(viewport_height))
+                        .debug_selector(|| "palette-click-catcher".to_string())
+                        .when(self.modal_open(), |d| d.occlude())
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|view, _event, window, cx| {
+                                view.close_palette(window, cx);
+                            }),
+                        )
+                        .child(panel),
+                )
+            })
+            // Painted after (so above) the modal and the palette. Never
+            // `Some` in the same frame as a modal: while the modal is open,
+            // `self.matcher` can never go pending at all — `open_shell_dialog`
+            // cancels it on open, and `handle_key_down`'s modal branch
+            // returns before ever reaching `self.matcher.press` for as long
+            // as `self.modals` stays non-empty, so `which_key_continuations`
+            // (computed from `self.matcher.pending()`, just above) is always
+            // `None` whenever `modal` is `Some`. Opening the palette cancels
+            // the matcher too.
+            .when_some(which_key_continuations, |el, continuations| {
+                el.child(whichkey::render(
+                    &continuations,
+                    self.matcher.count(),
+                    registry,
+                    width,
+                    status_height,
+                    rem_size,
+                    cx,
+                ))
+            })
+            // The frame-time readout (`perf::toggle_overlay`),
+            // painted above every other shell layer — a diagnostic that
+            // must stay visible while the palette/modal/which-key it might
+            // be measuring are up. Top-right, clear of the which-key panel
+            // (bottom-right) and the status bar. No handlers, no timer:
+            // it repaints only when something else invalidates the window,
+            // showing values as-of the last invalidation (see
+            // `perf_overlay`'s module doc for why that's deliberate).
+            .when(self.perf_overlay, |el| {
+                el.child(perf_overlay::render(
+                    &self.perf,
+                    &self.frame.read(cx).requery,
+                    toolbar_height,
+                    rem_size,
+                    cx,
+                ))
+            })
+            // Root delegates overlay painting to its child view. Paint the
+            // component dialog and notification layers after shell content.
+            .children(Root::render_dialog_layer(window, cx))
+            .children(Root::render_notification_layer(window, cx))
+    }
+}
+
+impl ShellView {
+    /// The tile surface beside the sidebar and the focused tile's window-space
+    /// rect (for the command line and stack list): the whole workspace layout
+    /// this frame — dock geometry, tiles, empty hints, divider strips, and the
+    /// drop highlight. Not called while a page is open; none of this work
+    /// happens then.
+    fn workspace_content(
+        &self,
+        tile_width: f32,
+        content_height: f32,
+        sidebar_width: f32,
+        toolbar_height: f32,
+        cx: &Context<Self>,
+    ) -> (gpui::AnyElement, Option<Rect>) {
         // Lay out each region once. Dock geometry carves space from the surface;
         // the main tree fills the remainder and each visible dock lays out its
         // own tree. Fullscreen uses the whole surface and hides dock rendering
@@ -759,665 +1534,6 @@ impl Render for ShellView {
                     .debug_selector(|| "tile-drop-highlight".to_string()),
             );
         }
-
-        let active_index = self.services.workspaces.active_index();
-        let non_empty = self.services.workspaces.non_empty_indices();
-        let reload_message = self.last_reload.status_message();
-        // Share the cached scope bar model between toolbar and status bar.
-        // Use the poll-updated date and configured clock, avoiding a fresh
-        // clock read during rendering.
-        let bar_model = self
-            .target_frame()
-            .read(cx)
-            .bar_model(self.clock(cx), self.today);
-        // Read the cached diagnostics summary. Cloning its shared string
-        // increments a reference count without copying its buffer.
-        let diagnostics_read = self.diagnostics.read(cx);
-        let diagnostics_summary = diagnostics_read.summary();
-        // Prepared when a thread stops; borrowed, never formatted here.
-        let stopped = diagnostics_read.stopped_segment();
-        // Borrow ingest activity through the status-bar call without cloning.
-        // Nothing before that call needs a mutable context.
-        let ingest = diagnostics_read.ingest.as_ref();
-        // Clicking the summary opens the diagnostics tile.
-        let diagnostics_click_entity = cx.entity();
-        let on_diagnostics_click = move |window: &mut Window, cx: &mut App| {
-            diagnostics_click_entity.update(cx, |view, cx| {
-                view.open_module("diagnostics", window, cx);
-            });
-        };
-        // Clicking the fullscreen segment restores the layout through the
-        // same action `mod+f` and a tile double-click dispatch.
-        let fullscreen_hidden = self.services.workspaces.active().fullscreen_hidden();
-        let fullscreen_click_entity = cx.entity();
-        let on_fullscreen_click = move |window: &mut Window, cx: &mut App| {
-            fullscreen_click_entity.update(cx, |view, cx| {
-                view.dispatch(
-                    &crate::actions::ActionId("workspace::fullscreen_tile".into()),
-                    None,
-                    window,
-                    cx,
-                );
-                cx.notify();
-            });
-        };
-        let status_bar = status::status_bar(
-            self.matcher.pending(),
-            self.matcher.count(),
-            reload_message.as_deref(),
-            self.config_write_error.as_deref(),
-            self.restart_required.as_deref(),
-            self.notice,
-            stopped,
-            (!diagnostics_summary.is_empty()).then_some(diagnostics_summary.as_ref()),
-            on_diagnostics_click,
-            ingest,
-            fullscreen_hidden,
-            on_fullscreen_click,
-            bar_model.as_of.as_deref(),
-            bar_model.as_of_full.as_ref(),
-            self.services.theme.active_name(),
-            cx,
-        );
-        let sidebar = sidebar::sidebar(active_index, &non_empty, cx);
-        // A chip's close glyph drops that dimension from the scope
-        // — an undoable edit, same door as every other scope
-        // mutation. Built here, not `cx.listener` (whose signature takes
-        // `&Evt`, not `&str`): capture `cx.entity()` and update through
-        // it, matching `on_chip_close`'s plain-`Fn(&str, ..)` shape.
-        let chip_close_entity = cx.entity();
-        let on_chip_close = move |column: &str, _window: &mut Window, cx: &mut App| {
-            chip_close_entity.update(cx, |view, cx| {
-                view.target_frame().update(cx, |f, cx| {
-                    if f.drop_dimension(column) {
-                        cx.notify();
-                    }
-                });
-            });
-        };
-        // Open the dimension picker through an entity handle so the callback
-        // can update `ShellView`.
-        let chip_open_entity = cx.entity();
-        let on_chip_open = move |column: &str, window: &mut Window, cx: &mut App| {
-            let column = column.to_string();
-            chip_open_entity.update(cx, |view, cx| {
-                picker::open(view, Some(column), window, cx);
-            });
-        };
-        // The scope bar's `+` opens the add-a-filter menu, whose rows
-        // dispatch `frame::pick` and `frame::add_expression`. Same
-        // `cx.entity()`-captured shape as `on_chip_open` just above.
-        let add_entity = cx.entity();
-        let on_add = move |window: &mut Window, cx: &mut App| {
-            add_entity.update(cx, |view, cx| {
-                view.open_add_filter_menu(window, cx);
-            });
-        };
-        // The open menu's panel, painted from its prepared rows. A row
-        // click commits through `commit_add_filter` (a dispatch); hovering
-        // a row highlights it.
-        let add_menu = self.add_filter_menu.as_ref().map(|menu| {
-            let pick_entity = cx.entity().downgrade();
-            let hover_entity = pick_entity.clone();
-            addfilter::render(
-                menu,
-                move |entry, window: &mut Window, cx: &mut App| {
-                    let _ = pick_entity
-                        .update(cx, |view, cx| view.commit_add_filter(entry, window, cx));
-                },
-                move |i, _window: &mut Window, cx: &mut App| {
-                    let _ = hover_entity.update(cx, |view, cx| view.hover_add_filter(i, cx));
-                },
-                cx,
-            )
-            .into_any_element()
-        });
-        // The scope bar's save glyph — the mouse form of
-        // `scope::save_current`, through the same door `input.rs`'s
-        // dispatch arm uses.
-        let save_chip_entity = cx.entity();
-        let on_save = move |window: &mut Window, cx: &mut App| {
-            save_chip_entity.update(cx, |view, cx| {
-                objectdialog::render::open_save_scope(view, window, cx);
-            });
-        };
-        // The grouping readout's click — the mouse form of
-        // `frame::grouping`/`mod+g`, through the same door `input.rs`'s
-        // dispatch arm uses.
-        let grouping_entity = cx.entity();
-        let on_grouping = move |window: &mut Window, cx: &mut App| {
-            grouping_entity.update(cx, |view, cx| {
-                choicedialog::open_grouping(view, window, cx);
-            });
-        };
-        // The AS OF chip's click — the mouse
-        // form of `frame::as_of`/`mod+t`, through the same door `input.rs`'s
-        // dispatch arm uses.
-        let as_of_entity = cx.entity();
-        let on_as_of = move |window: &mut Window, cx: &mut App| {
-            as_of_entity.update(cx, |view, cx| {
-                asof_view::open(view, window, cx);
-            });
-        };
-        // An expression term chip's click opens the dialog on that term
-        // alone; its `×` drops that term alone (an undoable edit, like a
-        // dimension chip's `×`).
-        let term_open_entity = cx.entity();
-        let on_term_open = move |i: usize, window: &mut Window, cx: &mut App| {
-            term_open_entity.update(cx, |view, cx| {
-                scope_expr_view::open_term(view, i, window, cx);
-            });
-        };
-        let term_close_entity = cx.entity();
-        let on_term_close = move |i: usize, _window: &mut Window, cx: &mut App| {
-            term_close_entity.update(cx, |view, cx| {
-                view.target_frame().update(cx, |f, cx| {
-                    if f.drop_expression_term(i) {
-                        cx.notify();
-                    }
-                });
-            });
-        };
-        // A named-expression chip's body opens the Expressions dialog on
-        // that name; its `×` drops that name alone, an undoable edit like
-        // the other chips' `×`.
-        let named_open_entity = cx.entity();
-        let on_named_open = move |name: &str, window: &mut Window, cx: &mut App| {
-            named_open_entity.update(cx, |view, cx| {
-                objectdialog::render::open_object(
-                    view,
-                    objectdialog::Domain::Expressions,
-                    name,
-                    window,
-                    cx,
-                );
-            });
-        };
-        let named_close_entity = cx.entity();
-        let on_named_close = move |name: &str, _window: &mut Window, cx: &mut App| {
-            named_close_entity.update(cx, |view, cx| {
-                view.target_frame().update(cx, |f, cx| {
-                    if f.drop_named(name) {
-                        cx.notify();
-                    }
-                });
-            });
-        };
-        // Whether the grouping picker is up: the readout holds its pressed
-        // fill for exactly as long as it is (design guide: a control that
-        // owns a popup stays visibly pressed until the popup closes). The
-        // tile picker shares the choice dialog and must not light it.
-        let grouping_open = matches!(
-            self.choice_dialog.as_ref().map(|d| &d.target),
-            Some(choicedialog::Target::Grouping { .. })
-        );
-        // The pin glyph names the active workspace, whose tiles are the
-        // ones on screen, not a dialog's target.
-        let ws = self.active_ix();
-        let pin = toolbar::PinState {
-            ws,
-            pinned: self.frame.read(cx).is_pinned(ws),
-        };
-        let on_pin = {
-            let entity = cx.entity();
-            move |window: &mut Window, cx: &mut App| {
-                entity.update(cx, |view, cx| view.toggle_workspace_pin(window, cx));
-            }
-        };
-        let toolbar = toolbar::toolbar(
-            &self.filter_input,
-            &bar_model,
-            grouping_open,
-            add_menu,
-            on_chip_close,
-            on_chip_open,
-            on_add,
-            on_save,
-            on_grouping,
-            on_as_of,
-            on_term_open,
-            on_term_close,
-            on_named_open,
-            on_named_close,
-            pin,
-            on_pin,
-            cx,
-        );
-
-        let body = h_flex()
-            .w_full()
-            .h(px(content_height))
-            .flex_none()
-            .child(sidebar)
-            .child(surface);
-
-        let width = f32::from(viewport.width);
-        let viewport_height = f32::from(viewport.height);
-
-        // Build which-key only for a pending key sequence. A bare count leaves
-        // `pending` empty and appears in the status bar instead. Reading matcher
-        // state here must not change how the next keystroke resolves.
-        let pending = self.matcher.pending();
-        let which_key_continuations = (!pending.is_empty()).then(|| {
-            whichkey::continuations(&self.services.keymap, pending, &self.context_stack(cx))
-        });
-        let registry = &self.services.registry;
-
-        // Clone the modal's shared title and callbacks before building the
-        // element tree, releasing the borrow of `self.modals` before closures
-        // need access to the rest of the view.
-        let modal = self.modals.last().map(|modal| {
-            (
-                modal.title.clone(),
-                modal.title_extra.clone(),
-                modal.build.clone(),
-            )
-        });
-
-        // Extracted ahead of the render chain like `modal` above: all the
-        // drag catcher below needs from the active drag is which resize
-        // cursor to show — the drag itself is applied through
-        // `apply_divider_drag`, which re-reads `self.divider_drag` per
-        // event.
-        let drag_axis = self.divider_drag.as_ref().map(|drag| drag.axis);
-
-        // Extracted the same way for the tile-drag catcher and ghost: the
-        // catcher exists from arm (so it can see the threshold-crossing
-        // moves), the ghost only once the drag is active.
-        let tile_drag_armed = self.tile_drag.is_some();
-        let tile_drag_ghost = self
-            .tile_drag
-            .as_ref()
-            .filter(|drag| drag.active)
-            .map(|drag| drag.cursor);
-
-        v_flex()
-            .size_full()
-            .relative()
-            .track_focus(&self.focus_handle)
-            // `GeodeShell` reclaims tab/shift-tab from Root's window-wide focus
-            // cycling so they reach the shell matcher, including module bindings.
-            // `GeodeModalOpen` additionally reclaims modal commands while focus is
-            // on the shell root; the panel's context is absent in Normal mode.
-            .key_context(if self.modal_open() {
-                "GeodeShell GeodeModalOpen"
-            } else {
-                "GeodeShell"
-            })
-            .on_key_down(cx.listener(Self::handle_key_down))
-            // Cover releases between drag arming and the first catcher paint.
-            // Hovered and non-hovered listeners together cover mouse and keyboard
-            // modality; `heal_drags_on_root_release` preserves active tile drops.
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|view, _event, _window, cx| {
-                    view.heal_drags_on_root_release(cx);
-                }),
-            )
-            .on_mouse_up_out(
-                MouseButton::Left,
-                cx.listener(|view, _event, _window, cx| {
-                    view.heal_drags_on_root_release(cx);
-                }),
-            )
-            .bg(cx.theme().background)
-            .text_color(cx.theme().foreground)
-            .child(toolbar)
-            // Paint the warning stripe only for `AsOf::At`. Its height was
-            // already subtracted from the tile surface.
-            .when(is_historical, |el| {
-                el.child(
-                    div()
-                        .w_full()
-                        .h(px(AS_OF_STRIPE_HEIGHT))
-                        .bg(cx.theme().warning)
-                        .debug_selector(|| "as-of-stripe".to_string()),
-                )
-            })
-            .child(body)
-            .child(status_bar)
-            // Capture divider moves and release with a full-window occluding
-            // layer. Fast drags leave the narrow strip, so the catcher maintains
-            // hit coverage and resize cursor shape. A release through either
-            // mouse-up route, or a later buttonless move, ends tracking while
-            // preserving resizes already applied.
-            .when_some(drag_axis, |el, axis| {
-                el.child(
-                    div()
-                        .id("divider-drag-catcher")
-                        .absolute()
-                        .left(px(0.))
-                        .top(px(0.))
-                        .w(px(width))
-                        .h(px(viewport_height))
-                        .occlude()
-                        .map(|el| match axis {
-                            Orientation::Horizontal => el.cursor_col_resize(),
-                            Orientation::Vertical => el.cursor_row_resize(),
-                        })
-                        .debug_selector(|| "divider-drag-catcher".to_string())
-                        .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, _window, cx| {
-                            // Only a buttonless move means the release was lost. Ignore
-                            // moves attributed to a second button during a chorded press.
-                            match event.pressed_button {
-                                None => {
-                                    // The release happened where we
-                                    // couldn't see it — treat the first
-                                    // buttonless move as the mouse-up.
-                                    view.finish_divider_drag(cx);
-                                }
-                                Some(MouseButton::Left) => {
-                                    if view.apply_divider_drag(
-                                        f32::from(event.position.x),
-                                        f32::from(event.position.y),
-                                    ) {
-                                        cx.notify();
-                                    }
-                                }
-                                Some(_) => {}
-                            }
-                        }))
-                        .on_mouse_up(
-                            MouseButton::Left,
-                            cx.listener(|view, _event, _window, cx| {
-                                view.finish_divider_drag(cx);
-                            }),
-                        )
-                        .on_mouse_up_out(
-                            MouseButton::Left,
-                            cx.listener(|view, _event, _window, cx| {
-                                view.finish_divider_drag(cx);
-                            }),
-                        ),
-                )
-            })
-            // Capture tile moves and release across the whole window, occluding
-            // tile and divider hitboxes. Only one drag kind can be active.
-            // A buttonless move cancels without applying a drop. Both mouse-up
-            // routes attempt the drop: keyboard modality suppresses hover and
-            // can send an in-window release through `on_mouse_up_out`. A release
-            // outside the layout has no target and changes nothing.
-            .when(tile_drag_armed, |el| {
-                el.child(
-                    div()
-                        .id("tile-drag-catcher")
-                        .absolute()
-                        .left(px(0.))
-                        .top(px(0.))
-                        .w(px(width))
-                        .h(px(viewport_height))
-                        .occlude()
-                        .cursor_grabbing()
-                        .debug_selector(|| "tile-drag-catcher".to_string())
-                        .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, _window, cx| {
-                            // Ignore moves attributed to non-left buttons: platforms may
-                            // report a second held button differently. Only `None` proves
-                            // all buttons were released and cancels the tile drag.
-                            match event.pressed_button {
-                                None => {
-                                    view.cancel_tile_drag();
-                                    cx.notify();
-                                }
-                                Some(MouseButton::Left) => {
-                                    view.update_tile_drag(
-                                        f32::from(event.position.x),
-                                        f32::from(event.position.y),
-                                        cx,
-                                    );
-                                }
-                                Some(_) => {}
-                            }
-                        }))
-                        .on_mouse_up(
-                            MouseButton::Left,
-                            cx.listener(|view, event: &MouseUpEvent, window, cx| {
-                                view.finish_tile_drag(
-                                    f32::from(event.position.x),
-                                    f32::from(event.position.y),
-                                    window,
-                                    cx,
-                                );
-                            }),
-                        )
-                        .on_mouse_up_out(
-                            MouseButton::Left,
-                            cx.listener(|view, event: &MouseUpEvent, window, cx| {
-                                view.finish_tile_drag(
-                                    f32::from(event.position.x),
-                                    f32::from(event.position.y),
-                                    window,
-                                    cx,
-                                );
-                            }),
-                        ),
-                )
-            })
-            // Paint the fixed-size drag outline above its catcher. With no
-            // handlers or occlusion, it cannot intercept the catcher's events.
-            .when_some(tile_drag_ghost, |el, (gx, gy)| {
-                el.child(
-                    div()
-                        .absolute()
-                        .left(px(gx + TILE_DRAG_GHOST_OFFSET))
-                        .top(px(gy + TILE_DRAG_GHOST_OFFSET))
-                        .w(px(TILE_DRAG_GHOST_SIZE.0))
-                        .h(px(TILE_DRAG_GHOST_SIZE.1))
-                        .border_2()
-                        .border_color(cx.theme().primary)
-                        .debug_selector(|| "tile-drag-ghost".to_string()),
-                )
-            })
-            // Paint the command line at the focused tile's bottom edge, with
-            // completions above. The render-time check guarantees that an open
-            // line still belongs to that tile and owns input focus. A missing
-            // rect suppresses painting if the tile disappeared.
-            .when_some(
-                self.command_line.as_ref().zip(focused_rect),
-                |el, (line, rect)| {
-                    el.child(commandline_view::render(
-                        line,
-                        &self.command_input,
-                        rect,
-                        rem_size,
-                        cx,
-                    ))
-                },
-            )
-            // Paint the member list above its focused tile and below overlays.
-            // Build row titles only while it is open; occupant titles are shared
-            // strings, so each row clones a handle rather than formatting text.
-            .when_some(
-                self.stack_list.as_ref().zip(focused_rect),
-                |el, (list, rect)| {
-                    let rows: Vec<stacklist::Row> = list
-                        .members
-                        .iter()
-                        .map(|id| match self.occupants.get(id) {
-                            Some(o) => stacklist::Row {
-                                title: o.content.title(cx),
-                                kind: o.kind,
-                            },
-                            None => stacklist::Row {
-                                title: "empty".into(),
-                                kind: "placeholder",
-                            },
-                        })
-                        .collect();
-                    let weak = cx.entity().downgrade();
-                    let members = list.members.clone();
-                    let on_row_click = move |i: usize, window: &mut Window, cx: &mut App| {
-                        let Some(id) = members.get(i).copied() else {
-                            return;
-                        };
-                        let _ =
-                            weak.update(cx, |view, cx| view.activate_stack_member(id, window, cx));
-                    };
-                    let panel = stacklist::render(list, &rows, rect, rem_size, on_row_click, cx);
-                    el.child(
-                        div()
-                            .id("stack-list-click-catcher")
-                            .absolute()
-                            .left(px(0.))
-                            .top(px(0.))
-                            .w(px(width))
-                            .h(px(viewport_height))
-                            .debug_selector(|| "stack-list-click-catcher".to_string())
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|view, _event, _window, cx| view.close_stack_list(cx)),
-                            )
-                            .child(panel),
-                    )
-                },
-            )
-            // The add-a-filter menu's click catcher: a press anywhere but
-            // the menu closes it and goes no further. The menu panel itself
-            // is deferred (painted above this) from inside the toolbar, so
-            // its rows are hit first. `occlude` is what keeps the press
-            // from also reaching the element beneath, the `+` included —
-            // otherwise a click on the `+` would close and reopen the menu.
-            // It also blocks the wheel for the tiles beneath while the menu
-            // is open, which is accepted for a two-row transient menu.
-            .when(self.add_filter_menu.is_some(), |el| {
-                el.child(
-                    div()
-                        .id("scope-add-menu-click-catcher")
-                        .absolute()
-                        .left(px(0.))
-                        .top(px(0.))
-                        .w(px(width))
-                        .h(px(viewport_height))
-                        .debug_selector(|| "scope-add-menu-click-catcher".to_string())
-                        .occlude()
-                        // Every button: the catcher swallows every press, so a
-                        // right or middle press must close the menu too.
-                        .on_any_mouse_down(cx.listener(|view, _event, window, cx| {
-                            view.dismiss_add_filter_menu(window, cx)
-                        })),
-                )
-            })
-            // Paint the modal below the palette: a palette opened over the stack
-            // must be visible and take clicks above the dialog it covers.
-            .when_some(modal, |el, (title, title_extra, build)| {
-                let extra = title_extra.map(|f| f(self, cx));
-                let show_back = dialog::back_available(self);
-                let content = build(self, window, cx);
-                el.child(dialog::render_modal(
-                    title,
-                    extra,
-                    show_back,
-                    content,
-                    width,
-                    viewport_height,
-                    cx,
-                ))
-            })
-            // The palette overlay paints above the tiles/status bar (later
-            // children paint above earlier siblings) but below gpui-
-            // component's own dialog/notification layers below.
-            .when_some(self.palette.as_ref(), |el, state| {
-                // Select the clicked row before calling the same commit path as
-                // Enter. A clonable weak-entity callback can be shared by rows
-                // without a separate heap allocation for each row on each render.
-                let weak = cx.entity().downgrade();
-                let on_row_click = move |idx: usize, window: &mut Window, cx: &mut App| {
-                    let _ = weak.update(cx, |view, cx| {
-                        if let Some(palette) = view.palette.as_mut() {
-                            palette.set_selected(idx);
-                        }
-                        view.commit_selected(window, cx);
-                        cx.notify();
-                    });
-                };
-                let panel = palette::render(
-                    state,
-                    &self.palette_scroll,
-                    &self.palette_input,
-                    on_row_click,
-                    palette::Viewport {
-                        width,
-                        height: viewport_height,
-                        rem_size,
-                    },
-                    cx,
-                );
-                // Click-outside dismiss: a transparent (no dimming — the
-                // palette is an overlay, not a modal) full-window click-
-                // catcher behind the panel. Precedent: `dialog::
-                // render_modal`'s own backdrop, minus the `.bg(overlay)`
-                // dimming a real modal wants and this doesn't. The panel
-                // itself stops propagation on its own `on_mouse_down` (see
-                // `palette::render`'s doc comment), so a click landing
-                // anywhere inside it — a row, the query input, empty space
-                // — never also reaches this catcher's handler below.
-                //
-                // gpui fires `on_mouse_down` for every hovered hitbox, not
-                // only the topmost, so without `occlude()` a click over an
-                // open dialog stack would also reach whatever the catcher
-                // covers: `shell-modal-backdrop` (popping the dialog) or a
-                // dialog row (committing or opening it). `occlude()` is
-                // conditioned on a dialog being open because with none the
-                // catcher covers only tiles, which have no click handler this
-                // would wrongly swallow.
-                el.child(
-                    div()
-                        .id("palette-click-catcher")
-                        .absolute()
-                        .left(px(0.))
-                        .top(px(0.))
-                        .w(px(width))
-                        .h(px(viewport_height))
-                        .debug_selector(|| "palette-click-catcher".to_string())
-                        .when(self.modal_open(), |d| d.occlude())
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|view, _event, window, cx| {
-                                view.close_palette(window, cx);
-                            }),
-                        )
-                        .child(panel),
-                )
-            })
-            // Painted after (so above) the modal and the palette. Never
-            // `Some` in the same frame as a modal: while the modal is open,
-            // `self.matcher` can never go pending at all — `open_shell_dialog`
-            // cancels it on open, and `handle_key_down`'s modal branch
-            // returns before ever reaching `self.matcher.press` for as long
-            // as `self.modals` stays non-empty, so `which_key_continuations`
-            // (computed from `self.matcher.pending()`, just above) is always
-            // `None` whenever `modal` is `Some`. Opening the palette cancels
-            // the matcher too.
-            .when_some(which_key_continuations, |el, continuations| {
-                el.child(whichkey::render(
-                    &continuations,
-                    self.matcher.count(),
-                    registry,
-                    width,
-                    status_height,
-                    rem_size,
-                    cx,
-                ))
-            })
-            // The frame-time readout (`perf::toggle_overlay`),
-            // painted above every other shell layer — a diagnostic that
-            // must stay visible while the palette/modal/which-key it might
-            // be measuring are up. Top-right, clear of the which-key panel
-            // (bottom-right) and the status bar. No handlers, no timer:
-            // it repaints only when something else invalidates the window,
-            // showing values as-of the last invalidation (see
-            // `perf_overlay`'s module doc for why that's deliberate).
-            .when(self.perf_overlay, |el| {
-                el.child(perf_overlay::render(
-                    &self.perf,
-                    &self.frame.read(cx).requery,
-                    toolbar_height,
-                    rem_size,
-                    cx,
-                ))
-            })
-            // Root delegates overlay painting to its child view. Paint the
-            // component dialog and notification layers after shell content.
-            .children(Root::render_dialog_layer(window, cx))
-            .children(Root::render_notification_layer(window, cx))
+        (surface.into_any_element(), focused_rect)
     }
 }

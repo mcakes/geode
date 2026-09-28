@@ -1326,7 +1326,7 @@ impl DataService {
                     // because nothing has been lost yet and a trader
                     // should read "waiting", not "broken"; `Lost` carries
                     // the adapter's reason through verbatim, since that
-                    // string is the whole of what the diagnostics tile
+                    // string is the whole of what the diagnostics page
                     // can say about a vendor library's failure.
                     let (worst, detail) = match state {
                         ConnectionState::Connected => (Health::Ok, String::new()),

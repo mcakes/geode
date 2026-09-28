@@ -7,5 +7,6 @@ pub mod colour;
 pub mod confirm;
 pub mod following;
 pub mod menu;
+pub mod motion;
 pub mod notice;
 pub mod popover;

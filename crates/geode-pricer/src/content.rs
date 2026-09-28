@@ -30,18 +30,6 @@ use std::time::Duration;
 /// Registered actions and their palette titles. [`DEFAULT_KEYMAP`] binds
 /// the keyboard subset; commands and menus also expose actions.
 pub const ACTIONS: &[(&str, &str)] = &[
-    ("pricer::down", "Cursor down"),
-    ("pricer::up", "Cursor up"),
-    ("pricer::left", "Cursor left"),
-    ("pricer::right", "Cursor right"),
-    ("pricer::top", "Cursor to top"),
-    ("pricer::bottom", "Cursor to bottom"),
-    ("pricer::first_col", "First column"),
-    ("pricer::last_col", "Last column"),
-    ("pricer::page_down", "Half page down"),
-    ("pricer::page_up", "Half page up"),
-    ("pricer::page_down_full", "Full page down"),
-    ("pricer::page_up_full", "Full page up"),
     ("pricer::yank_row", "Yank row"),
     ("pricer::yank_col", "Yank column"),
     ("pricer::yank", "Yank selection"),
@@ -79,8 +67,6 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("pricer::insert_down", "Insert: down"),
     ("pricer::insert_up_big", "Insert: up (big)"),
     ("pricer::insert_down_big", "Insert: down (big)"),
-    ("pricer::menu_down", "Menu: next"),
-    ("pricer::menu_up", "Menu: previous"),
     ("pricer::menu_pick", "Menu: pick"),
     ("pricer::menu_close", "Menu: close"),
 ];
@@ -93,6 +79,25 @@ pub(crate) fn action_title(id: &'static str) -> &'static str {
         .find(|(a, _)| *a == id)
         .map_or(id, |(_, title)| title)
 }
+
+/// Retired action ids and their successors: a user keymap that still names
+/// an old id binds the new one, with a warning (`ActionRegistry::renamed`).
+pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
+    ("pricer::down", "motion::down"),
+    ("pricer::up", "motion::up"),
+    ("pricer::left", "motion::left"),
+    ("pricer::right", "motion::right"),
+    ("pricer::top", "motion::top"),
+    ("pricer::bottom", "motion::bottom"),
+    ("pricer::page_down", "motion::half_page_down"),
+    ("pricer::page_up", "motion::half_page_up"),
+    ("pricer::page_down_full", "motion::page_down"),
+    ("pricer::page_up_full", "motion::page_up"),
+    ("pricer::first_col", "motion::line_start"),
+    ("pricer::last_col", "motion::line_end"),
+    ("pricer::menu_down", "motion::menu_down"),
+    ("pricer::menu_up", "motion::menu_up"),
+];
 
 /// Registered but deliberately unbound: `:price` and the menu reach
 /// repricing; the sheet verbs are the `:e`/`:name`/`:new`/`:rm` commands'
@@ -115,12 +120,18 @@ pub const NO_DEFAULT_KEY: &[&str] = &[
 /// chord is bound there, so `ctrl+k` keeps opening the palette from inside
 /// a field. `y` alone is unbound: an
 /// exact match dispatches at once, so it would make `y y` and `y c`
-/// unreachable. `g` alone is not bound for the same reason (`g g`, `g p`,
-/// `g u`, `g m`).
+/// unreachable. `g` alone is not bound for the same reason (`g p`, `g u`,
+/// `g m` here, and the shell's shared `g g`).
+///
+/// The grid motions are not here: the tile publishes `grid`, and the
+/// shell's builtin keymap binds the shared `motion::*` ids once for every
+/// grid tile in normal and visual modes. The menu's steps are not here
+/// either: the tile publishes `tilelist` while its action menu is open, and
+/// the builtin keymap binds the shared `motion::menu_down`/`menu_up` there.
 ///
 /// `v` and `shift+v` start a selection, and the tile then reports
-/// `mode == visual`, whose block repeats the motions (the cursor is the
-/// selection's moving corner). There the verbs are single keys: `y`,
+/// `mode == visual`, where the shared motions move the selection's moving
+/// corner. There the verbs are single keys: `y`,
 /// `d`, `shift+j`/`shift+k`, `g p`, `g u`, `i` and `enter` act on the
 /// whole selection, so no doubled `y y` or `d d` has to stay reachable.
 /// `escape` there clears only the selection.
@@ -133,26 +144,6 @@ pub const DEFAULT_KEYMAP: &str = r#"
 [[bindings]]
 context = "pricer && mode == visual"
 [bindings.keys]
-"j" = "pricer::down"
-"k" = "pricer::up"
-"h" = "pricer::left"
-"l" = "pricer::right"
-"down" = "pricer::down"
-"up" = "pricer::up"
-"left" = "pricer::left"
-"right" = "pricer::right"
-"g g" = "pricer::top"
-"shift+g" = "pricer::bottom"
-"^" = "pricer::first_col"
-"$" = "pricer::last_col"
-"home" = "pricer::first_col"
-"end" = "pricer::last_col"
-"ctrl+d" = "pricer::page_down"
-"ctrl+u" = "pricer::page_up"
-"ctrl+f" = "pricer::page_down_full"
-"ctrl+b" = "pricer::page_up_full"
-"pagedown" = "pricer::page_down_full"
-"pageup" = "pricer::page_up_full"
 "y" = "pricer::yank"
 "d" = "pricer::delete"
 "shift+j" = "pricer::move_down"
@@ -168,26 +159,6 @@ context = "pricer && mode == visual"
 [[bindings]]
 context = "pricer && mode == normal"
 [bindings.keys]
-"j" = "pricer::down"
-"k" = "pricer::up"
-"h" = "pricer::left"
-"l" = "pricer::right"
-"down" = "pricer::down"
-"up" = "pricer::up"
-"left" = "pricer::left"
-"right" = "pricer::right"
-"g g" = "pricer::top"
-"shift+g" = "pricer::bottom"
-"^" = "pricer::first_col"
-"$" = "pricer::last_col"
-"home" = "pricer::first_col"
-"end" = "pricer::last_col"
-"ctrl+d" = "pricer::page_down"
-"ctrl+u" = "pricer::page_up"
-"ctrl+f" = "pricer::page_down_full"
-"ctrl+b" = "pricer::page_up_full"
-"pagedown" = "pricer::page_down_full"
-"pageup" = "pricer::page_up_full"
 "y y" = "pricer::yank_row"
 "y c" = "pricer::yank_col"
 "n" = "pricer::find_next"
@@ -230,10 +201,6 @@ context = "pricer && mode == insert"
 [[bindings]]
 context = "pricer && mode == menu"
 [bindings.keys]
-"j" = "pricer::menu_down"
-"k" = "pricer::menu_up"
-"down" = "pricer::menu_down"
-"up" = "pricer::menu_up"
 "enter" = "pricer::menu_pick"
 "escape" = "pricer::menu_close"
 "." = "pricer::menu_close"
@@ -805,6 +772,11 @@ impl ModuleFactory for PricerFactory {
                 category: "Pricer".to_string(),
             });
         }
+        // A second pricer factory's repeat answers "renamed twice", which is
+        // the correct outcome, like the ids above.
+        for (old, new) in RENAMED_ACTIONS {
+            let _ = registry.register_rename(old, new);
+        }
     }
 
     fn default_keymap(&self) -> Option<&'static str> {
@@ -879,11 +851,17 @@ mod tests {
         r
     }
 
+    /// The shell's builtin keymap spliced under this fragment, over the
+    /// builtin and module actions: the grid motions live only in the former.
     fn keymap() -> geode_shell::keymap::Keymap {
         let doc = fragment_doc("pricer", DEFAULT_KEYMAP).unwrap();
         let (doc, diags) = check_fragment(doc, &["pricer"]);
         assert!(diags.is_empty(), "{diags:?}");
-        let (keymap, diags) = build_keymap(&[doc], default_mod(), &registry());
+        let builtin =
+            geode_core::config::LayerDoc::builtin("keymap", geode_shell::defaults::BUILTIN_KEYMAP)
+                .unwrap();
+        let docs = geode_shell::keymap::fragments::splice(&[builtin], &[doc]);
+        let (keymap, diags) = build_keymap(&docs, default_mod(), &registry());
         assert!(
             diags.is_empty(),
             "every key spells and every action is registered: {diags:?}"
@@ -891,13 +869,18 @@ mod tests {
         keymap
     }
 
-    fn resolve(spec: &str, mode: &str) -> Option<String> {
-        let keymap = keymap();
-        let stack = [
+    /// The stack the shell publishes over a focused pricer in `mode`.
+    fn pricer_stack(mode: &str) -> [KeyContext; 3] {
+        [
             KeyContext::new("workspace"),
             KeyContext::new("tile"),
-            KeyContext::new("pricer").pair("mode", mode).counts(),
-        ];
+            KeyContext::new("pricer").grid().pair("mode", mode).counts(),
+        ]
+    }
+
+    fn resolve(spec: &str, mode: &str) -> Option<String> {
+        let keymap = keymap();
+        let stack = pricer_stack(mode);
         let mut m = Matcher::default();
         let mut out = None;
         for part in spec.split(' ') {
@@ -938,7 +921,7 @@ mod tests {
             Some("pricer::yank_col")
         );
         assert_eq!(resolve("g p", "normal").as_deref(), Some("pricer::group"));
-        assert_eq!(resolve("g g", "normal").as_deref(), Some("pricer::top"));
+        assert_eq!(resolve("g g", "normal").as_deref(), Some("motion::top"));
         assert_eq!(resolve("d d", "normal").as_deref(), Some("pricer::delete"));
         assert_eq!(
             resolve("z shift+r", "normal").as_deref(),
@@ -959,6 +942,38 @@ mod tests {
         assert_eq!(resolve(".", "menu").as_deref(), Some("pricer::menu_close"));
     }
 
+    /// With the menu open the builtin keymap's shared menu steps take j/k
+    /// and the arrows (the grid's motions stay out under `mode == menu`),
+    /// and the fragment keeps Enter, Escape, and dot.
+    #[test]
+    fn the_menu_steps_are_the_shared_keys_under_tilelist() {
+        let keymap = keymap();
+        let stack = [
+            KeyContext::new("workspace"),
+            KeyContext::new("tile"),
+            KeyContext::new("pricer")
+                .grid()
+                .tilelist()
+                .pair("mode", "menu")
+                .counts(),
+        ];
+        for (key, expected) in [
+            ("j", "motion::menu_down"),
+            ("k", "motion::menu_up"),
+            ("down", "motion::menu_down"),
+            ("up", "motion::menu_up"),
+            ("enter", "pricer::menu_pick"),
+            ("escape", "pricer::menu_close"),
+            (".", "pricer::menu_close"),
+        ] {
+            let ks = parse_keystroke(key, default_mod()).unwrap();
+            match Matcher::default().press(&keymap, ks, &stack) {
+                MatchResult::Matched { action, .. } => assert_eq!(action.0, expected, "{key}"),
+                other => panic!("{key}: expected a match, got {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn v_and_shift_v_start_selections_in_normal_mode() {
         assert_eq!(
@@ -971,24 +986,103 @@ mod tests {
         );
     }
 
+    /// Visual mode binds the module's single-key verbs; the motions come
+    /// from the shell's shared grid bindings over a live row selection.
     #[test]
     fn visual_mode_binds_single_key_verbs_and_the_motions() {
+        let keymap = keymap();
+        let stack = [
+            KeyContext::new("workspace"),
+            KeyContext::new("tile"),
+            KeyContext::new("pricer")
+                .grid()
+                .pair("mode", "visual")
+                .pair("select", "rows")
+                .counts(),
+        ];
         for (key, action) in [
-            ("j", "pricer::down"),
+            ("j", "motion::down"),
+            ("down", "motion::down"),
+            ("^", "motion::line_start"),
             ("y", "pricer::yank"),
             ("d", "pricer::delete"),
             ("shift+j", "pricer::move_down"),
             ("shift+k", "pricer::move_up"),
             ("g p", "pricer::group"),
             ("g u", "pricer::ungroup"),
-            ("g g", "pricer::top"),
+            ("g g", "motion::top"),
             ("i", "pricer::edit"),
             ("enter", "pricer::edit"),
             ("v", "pricer::visual_block"),
             ("shift+v", "pricer::visual_rows"),
             ("escape", "pricer::escape"),
         ] {
-            assert_eq!(resolve(key, "visual").as_deref(), Some(action), "{key}");
+            let mut m = Matcher::default();
+            let mut out = None;
+            for part in key.split(' ') {
+                let ks = parse_keystroke(part, default_mod()).unwrap();
+                if let MatchResult::Matched { action, .. } = m.press(&keymap, ks, &stack) {
+                    out = Some(action.0);
+                }
+            }
+            assert_eq!(out.as_deref(), Some(action), "{key}");
+        }
+    }
+
+    /// The shell's `g g` and the fragment's `g m` share the `g` prefix: a
+    /// first `g` waits, and the second key picks between them.
+    #[test]
+    fn g_waits_then_g_is_top_and_m_opens_with_context() {
+        let keymap = keymap();
+        let stack = pricer_stack("normal");
+        for (second, expected) in [("g", "motion::top"), ("m", "tile::open_with")] {
+            let mut m = Matcher::default();
+            let g = parse_keystroke("g", default_mod()).unwrap();
+            assert_eq!(m.press(&keymap, g, &stack), MatchResult::Pending);
+            let ks = parse_keystroke(second, default_mod()).unwrap();
+            match m.press(&keymap, ks, &stack) {
+                MatchResult::Matched { action, .. } => assert_eq!(action.0, expected),
+                other => panic!("g {second}: {other:?}"),
+            }
+        }
+    }
+
+    /// A user keymap written against a retired motion id keeps binding the
+    /// shared id it became.
+    #[test]
+    fn every_retired_motion_id_renames_to_its_shared_id() {
+        let (data, _rx) = DataHandle::for_tests();
+        let factory = PricerFactory::new(
+            data,
+            Rc::new(crate::store::MemorySheetStore::default()),
+            Views::builtin(),
+            TemplateSet::builtin(),
+            PricerSettings::default(),
+        );
+        let mut registry = ActionRegistry::default();
+        geode_shell::defaults::register_builtin_actions(&mut registry);
+        factory.register_actions(&mut registry);
+        for (old, new) in [
+            ("pricer::down", "motion::down"),
+            ("pricer::up", "motion::up"),
+            ("pricer::left", "motion::left"),
+            ("pricer::right", "motion::right"),
+            ("pricer::top", "motion::top"),
+            ("pricer::bottom", "motion::bottom"),
+            ("pricer::page_down", "motion::half_page_down"),
+            ("pricer::page_up", "motion::half_page_up"),
+            ("pricer::page_down_full", "motion::page_down"),
+            ("pricer::page_up_full", "motion::page_up"),
+            ("pricer::first_col", "motion::line_start"),
+            ("pricer::last_col", "motion::line_end"),
+            ("pricer::menu_down", "motion::menu_down"),
+            ("pricer::menu_up", "motion::menu_up"),
+        ] {
+            assert_eq!(
+                registry.renamed(&ActionId(old.into())),
+                Some(&ActionId(new.into())),
+                "{old}"
+            );
         }
     }
 

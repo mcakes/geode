@@ -42,8 +42,9 @@ impl ShellView {
             .collect()
     }
 
-    /// Extract a snapshot when layout dirt, serialized tile state, frame
-    /// versions, or palette usage differ from the last extracted snapshot.
+    /// Extract a snapshot when layout dirt, serialized tile or page state,
+    /// the frame generation, or palette usage differ from the last extracted
+    /// snapshot.
     /// Called by the watcher's periodic tick; this method performs no file I/O.
     ///
     /// The layout flag is cleared before checking the path or serializing.
@@ -54,12 +55,19 @@ impl ShellView {
     /// No configured path or no detected change returns `None` silently.
     pub(super) fn take_dirty_session_write(&mut self, cx: &App) -> Option<(PathBuf, String)> {
         let tiles = self.current_tiles(cx);
+        let pages = self.current_pages(cx);
         let frame_generation = self.frame.read(cx).generation();
         let frame_dirty = frame_generation != self.last_frame_generation_written;
         let usage_dirty = self.palette_usage_version != self.last_palette_usage_written;
-        // Module state changes do not set the layout flag. Compare serialized
-        // records and frame/usage versions to catch independent changes.
-        if !self.session_dirty && !frame_dirty && !usage_dirty && tiles == self.last_tiles_written {
+        // Module and page state changes do not set the layout flag. Compare
+        // serialized records and frame/usage versions to catch independent
+        // changes.
+        if !self.session_dirty
+            && !frame_dirty
+            && !usage_dirty
+            && tiles == self.last_tiles_written
+            && pages == self.last_pages_written
+        {
             return None;
         }
         self.session_dirty = false;
@@ -71,9 +79,11 @@ impl ShellView {
             Some(&record),
             &self.pinned_records(cx),
             &self.palette_usage,
+            &pages,
         ) {
             Ok(text) => {
                 self.last_tiles_written = tiles;
+                self.last_pages_written = pages;
                 self.last_frame_generation_written = frame_generation;
                 self.last_palette_usage_written = self.palette_usage_version;
                 Some((path, text))
@@ -101,6 +111,7 @@ impl ShellView {
             Some(&record),
             &self.pinned_records(cx),
             &self.palette_usage,
+            &self.current_pages(cx),
         ) {
             tracing::warn!(target: "geode::session", "failed to save session: {e}");
         }

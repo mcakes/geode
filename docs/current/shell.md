@@ -358,6 +358,14 @@ and Enter applies the rest (see
 only content is a name is not empty: the chips row and the save glyph paint
 for it.
 
+The load glyph (a folder-open icon, `scope-load-chip`) follows the `+` and
+paints whatever the scope holds, empty included; a click opens the scope
+picker (`frame::scope`, `mod+o`; see
+[input and dialogs](input-and-dialogs.md#grouping-scope-tile-log-and-column-choices)),
+and the glyph holds its pressed fill while the picker is open. The save
+glyph, when the scope is savable, comes after it, so its appearance never
+moves the load glyph.
+
 The `+` verb opens the "Add a filter" menu under itself: "Dimension…"
 dispatches `frame::pick`, "Expression…" dispatches `frame::add_expression` (whose dialog offers the
 named expressions beside typed text), and each row shows its action's live
@@ -383,17 +391,100 @@ The app bridge supplies these deliveries from a coalescing mailbox. See
 [requests and UI delivery](request-delivery.md) for admission/refusal,
 stale-result handling, publication routing, and window lifetime.
 
+### Pages
+
+`PageContent` and `PageFactory`, beside the tile seam in
+[`module.rs`](../../crates/geode-shell/src/module.rs), host a surface that
+replaces the workspace instead of living in a tile. While a page is open the
+toolbar, the historical as-of stripe, the tile surface, divider strips, drag
+catchers, and the command line are neither built nor painted; the sidebar
+and status bar stay, and modals, the palette, which-key, the performance
+overlay, and notifications paint above the page as they do above the
+workspace. A page owns its own inputs, has no `:` line, and receives no
+deliveries. `geode-app` registers factories in a `PageRoster`; the shell
+stays ignorant of any page's content, and a page changes application state
+only through the `Diagnostics` request channels or the `ShellActions`
+handle it was created with, never by holding `ShellView`.
+
+The shell holds one page at a time, created by its factory on the first
+open and retained for the window's lifetime so a round trip keeps its
+state; only the open flag changes between toggles. Toggling a different
+kind replaces the retained page after stashing its `serialize()` table, so
+the replaced kind's state still reaches the next save and its next open.
+A page opens through its registered `page::toggle_<kind>` action, from the
+keymap, the palette, the sidebar button, or the status bar's diagnostics
+summary, and closes through `page::close`, the same toggle, or any
+`workspace::switch_N`, which closes the page and then switches. A toggle
+naming a kind no factory registered logs a warning and opens nothing.
+
+While a page is open the key context stack is `page`, then the page's own
+context, then `palette` when it is open. `workspace` and `tile` are absent,
+so tile movement, dock, stack, `:`, and `/` bindings cannot fire into a
+page; workspace switches are bound context-free for this reason. Action ids
+the shell does not recognise go to the open page's `dispatch` instead of
+the focused occupant. The palette still reaches every action id over a
+page, so `ShellView::dispatch` refuses with a notice the ones that would
+open chrome or change a layout the trader cannot see: the tile command
+line, find, `tile::add` and every per-kind add action, `tile::open_with`,
+`tile::autosize_columns`, and every `workspace::`, `dock::`, and `stack::`
+action other than the workspace switches, which close the page first. The
+refusal is one predicate in `input.rs`; `Close tile` over a page would
+otherwise destroy an unseen tile with no undo.
+
+`page::toggle_*` and `page::close` are refused with the close-the-dialog
+notice while a modal is open: the dialog was opened over the page and
+would otherwise be left over a workspace it did not come from. The modal
+and palette routes take Escape first, so Escape reaches `page::close` only
+with nothing above the page; see
+[keyboard ownership](input-and-dialogs.md#keyboard-ownership). The page
+sees `page::close` before the shell acts and may consume it by returning
+`true` when it has something of its own to dismiss; otherwise the shell
+closes it.
+
+Opening focuses the page's handle; closing returns focus to the shell
+root. A page reports `holds_focus` while one of its inputs owns the
+keyboard, and its context then carries `mode == insert`: the insert route
+consults the open page before any tile, so bare keys type into the input
+and only chords resolve against the stack. A page's bare-key bindings
+therefore live in a `mode == normal` table
+([keymaps](keymaps.md#context-predicates)). Focus restoration after an
+overlay closes goes to the open page's handle, never the shell root, where
+the page's own bindings are unreachable. A mouse open calls
+`prevent_default` so the press cannot bubble to the shell root and take
+the focus back.
+
+Tiles beneath a page are hidden: the occupant reconciliation announces
+`set_visible(false)` to every occupant, which releases their watched
+demand, and `visible_tile_keys` is empty, so no flip barrier waits on a
+tile nobody can see. Closing shows them again. A divider or tile drag in
+flight is cancelled when a page opens.
+
+The sidebar paints one button per registered page between the workspace
+discs and the settings avatar, in roster order, with the factory's icon
+and a tooltip naming the page and its toggle binding. The open page's
+button takes the active workspace disc's treatment and no pointer states,
+because selected must stay distinct from hovered.
+
+A page persists as `[pages.<kind>]` in the session file, written from
+`serialize()` on the coalesced flush; a page-state change with no shell
+action behind it still flushes, because the flush compares the snapshot.
+Whether a page was open at quit is not saved; Geode starts in the
+workspace. A table for a kind that never opens, or that no factory knows,
+is kept as read and written back unchanged; a `pages` entry that is not a
+table warns and is dropped.
+
 ## Diagnostics state and demand
 
 [`Diagnostics`](../../crates/geode-shell/src/diagnostics.rs) holds operational
 state beside the frame. The app bridge supplies data events; the shell
 supplies config-load diagnostics. The model does no I/O or clock reads and
 has no GPUI context. Callers supply timestamps and notify after mutation.
-The [diagnostics tile](features.md#diagnostics) prepares its own visible rows
+The [diagnostics page](features.md#diagnostics) prepares its own tables
 from this state.
 
 The combined `version` invalidates the cached status summary. `DiagVersions`
-provides narrower counters so each tile can ignore unrelated updates:
+provides narrower counters so the page can ignore updates its selected
+section does not read:
 
 | Counter | Changes |
 |---|---|
@@ -401,13 +492,19 @@ provides narrower counters so each tile can ignore unrelated updates:
 | `data` | Publication events and catalog snapshots |
 | `config` | Current config-load batch, batch history, retained data conditions |
 | `log_levels` | Target-level settings |
-| `perf` | Copied frame histogram and dropped-event count |
+| `perf` | Copied frame histogram, dropped-event count, and the mirrored overlay value |
 
 Equal snapshots leave their counters unchanged; loading and publication events
 always advance theirs. Frame as-of/config versions and log ring sequences are
-separate inputs observed by the tile. Catalog resource metrics and frame
+separate inputs observed by the page. Catalog resource metrics and frame
 requery statistics have no dedicated perf invalidation, so they appear on the
 next perf-section rebuild.
+
+`set_catalog` stores the snapshot together with the arrival time its caller
+supplies, `catalog_at`. An equal snapshot changes neither the counters nor
+`catalog_at`: the page's header shows when the stored answer arrived, not
+when the database was last asked, so a repeat answer that changes nothing
+does not move it.
 
 Source health remains absent until the first report, even if description or
 poll events created the source entry. Unreported sources do not contribute to
@@ -422,12 +519,23 @@ not clear them, and they have no per-condition resolution operation. The
 summary counts current config errors and retained data errors independently;
 history is excluded. Cache hits share an `Rc<str>` without copying text.
 
-Catalog demand has two lifetimes. `watch` registers a visible tile and queues
+Catalog demand has two lifetimes. `watch` registers a visible page and queues
 its initial refresh; publications and visible as-of changes queue watched
 refreshes. The last `unwatch` clears that pending demand. `request_catalog`
 records an explicit consumer's request, which survives diagnostics hiding.
 When both are pending, `take_catalog_request` consumes them together as
 explicit demand, preserving its retry policy.
+
+Two request channels let the page change application state without
+holding `ShellView`. `request_level` queues a target and level; the shell
+drains it, applies the new `[log]` levels to the log control, and persists
+them to the user layer. `request_overlay_toggle` queues a flip of the
+performance overlay. The shell sets the overlay through one door for both
+the keyboard action and the drained toggle and mirrors the value back with
+`set_overlay_visible`, which advances the `perf` counter so the page's
+switch repaints; the switch and the overlay cannot disagree. Request
+methods do not notify observers themselves; the caller notifies in the
+same entity update.
 
 Demand changes do not advance data versions. Callers must still notify in the
 same entity update so the bridge observes them. The bridge allows one catalog
@@ -466,19 +574,21 @@ the count prefix, in the danger tone. Its text is one of:
 The tooltip carries the reason: the one thread's reason; `label: reason`
 pairs joined by `; ` for several; or the loop's reason followed by `; also
 stopped: …` naming the others. Its detail line reads `click to open
-diagnostics`. A click takes the diagnostics summary's route: it focuses an
-existing diagnostics tile or adds one, which opens on its Sources section.
-An existing tile keeps whatever section it is showing; the stopped block
-leads Sources. That section's first rows, ahead of every source, read `stopped threads —
-restart Geode to recover them` and then one error row per thread, `<label>:
-<reason> (at HH:MM:SS)`, timed through the display clock.
+diagnostics`. A click takes the diagnostics summary's route: it dispatches
+`page::toggle_diagnostics`, the same action as `mod+d` and the sidebar's
+diagnostics button, so the diagnostics page opens over the workspace (or,
+already open, closes). The page keeps whatever section it was showing.
+
+**Known limitation:** the page's Sources section does not list stopped
+threads; the segment's tooltip is where the reason is read, and the
+segment stays on the status bar whatever the page shows.
 
 `Diagnostics::refused` holds the data handle's cumulative count of `Busy`
 refusals since launch (submissions turned away by a full request queue);
 `Stopped` refusals are not counted: they describe a service that is gone,
 not one that is behind, and the stopped segment already says so. The status summary shows it as `N refused` after `N dropped`
 (dropped app-bridge events), omitted at zero. `note_refused` advances only the
-combined version; no diagnostics-tile section shows the count.
+combined version; no page section shows the count.
 
 **Known limitation:** the bridge reads the refusal total only when it drains
 an event, so a refusal made while no events flow appears at the next event.
@@ -503,12 +613,14 @@ The writer emits `config_version = 1` and these records:
 | `frame` | Dimension selections, named-expression references, text/expression scope, grouping slot, and as-of |
 | `workspaces.N.frame` | Pinned lane for workspace N (same fields as `frame`); present iff workspace N is pinned |
 | `palette.usage` | Per-row usage count and last-used timestamp |
+| `pages.<kind>` | One opaque table per page kind from `PageContent::serialize`, kept for kinds that never opened this session; the diagnostics page writes its `section` |
 
 Trees use recursive `leaf`, `split`, and `stack` nodes. Splits store orientation,
 children, and ratios; stacks store tile IDs and the active member index. All
 materialized workspaces are saved, including empty ones. Default docks, empty
-module state, and empty usage history are omitted. Only tile records whose IDs
-belong to the workspace's main or dock trees are written.
+module state, empty usage history, and an empty pages table are omitted. Only
+tile records whose IDs belong to the workspace's main or dock trees are
+written. Whether a page was open is not recorded.
 
 The legacy dock `tile = N` encoding loads silently as a single-leaf tree. If
 both `tile` and `node` appear, `node` wins with a warning. Unknown keys are

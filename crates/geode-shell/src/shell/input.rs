@@ -47,14 +47,56 @@ fn pull_direction(id: &str) -> Option<Direction> {
 /// (the command line, find, or the stack list) while a dialog is open.
 pub(super) const CLOSE_DIALOG_FIRST: &str = "close the dialog first";
 
+/// The notice when an action wants transient tile chrome, or would add,
+/// duplicate, or resize a tile, while a page covers the tile surface.
+pub(super) const CLOSE_PAGE_FIRST: &str = "close the page first (esc)";
+
 /// The notice when no registered kind accepts the focused tile's context.
 pub(crate) const NO_MODULE_OPENS: &str = "no module opens on the context at the cursor";
 
+/// The action ids refused with [`CLOSE_PAGE_FIRST`] while a page is open:
+/// the transient tile chrome (the `:` line, find, the stack list) and every
+/// layout edit — add, open-with, autosize, and the whole `workspace::`,
+/// `dock::`, and `stack::` families, which close, fullscreen, move, resize,
+/// refocus, dock, or restack tiles nobody can see (`Close tile` would
+/// destroy an unseen tile with no undo). `workspace::switch_*` is the one
+/// exception: a switch closes the page first and is the route home.
+fn refused_over_a_page(id: &str) -> bool {
+    if id.starts_with("workspace::") {
+        return !id.starts_with("workspace::switch_");
+    }
+    id.starts_with("dock::")
+        || id.starts_with("stack::")
+        || matches!(
+            id,
+            "tile::command_line"
+                | "tile::find"
+                | "tile::add"
+                | "tile::open_with"
+                | "tile::autosize_columns"
+        )
+        || crate::defaults::parse_add_action(id).is_some()
+}
+
 impl ShellView {
     /// Active contexts, outermost first: workspace, then tile and occupant when
-    /// an occupant is focused, then palette while open. Used for ordinary matching
-    /// and the palette toggle; exclusive input owners bypass ordinary matching.
+    /// an occupant is focused, then palette while open. While a page is open
+    /// it is `page`, then the page's own context, then palette: no workspace,
+    /// no tile. Used for ordinary matching and the palette toggle; exclusive
+    /// input owners bypass ordinary matching.
     pub(super) fn context_stack(&self, cx: &App) -> Vec<KeyContext> {
+        if let Some(page) = self.page.as_ref().filter(|p| p.open) {
+            // A page replaces the workspace: no `workspace`, no `tile`, so
+            // tile and workspace bindings stay inert until it closes.
+            let mut stack = vec![
+                KeyContext::new("page"),
+                page.occupant.content.key_context(cx),
+            ];
+            if self.palette.is_some() {
+                stack.push(KeyContext::new("palette"));
+            }
+            return stack;
+        }
         let mut stack = vec![KeyContext::new("workspace")];
         if let Some(tile) = self.services.workspaces.active().focused_tile()
             && let Some(o) = self.occupants.get(&tile)
@@ -142,6 +184,50 @@ impl ShellView {
         {
             self.notice = Some(CLOSE_DIALOG_FIRST);
             return;
+        }
+        // A page covers the tile surface: it cannot host a `:` line, find,
+        // or stack list, and no layout edit may reach a tile the trader
+        // cannot see. The palette reaches these ids over a page as the
+        // keymap does, so the refusal lives here, not in a context.
+        if self.page_open() && refused_over_a_page(&action.0) {
+            self.notice = Some(CLOSE_PAGE_FIRST);
+            return;
+        }
+        if let Some(kind) = action.0.strip_prefix("page::toggle_") {
+            if self.modal_open() {
+                self.notice = Some(CLOSE_DIALOG_FIRST);
+                return;
+            }
+            let kind = kind.to_string();
+            self.toggle_page(&kind, window, cx);
+            return;
+        }
+        if action.0 == "page::close" {
+            // Refused under a modal as the toggle is: the dialog was opened
+            // over this page and would otherwise be left over a workspace it
+            // did not come from. The modal route consumes Escape first, so
+            // only the palette reaches this id over a dialog.
+            if self.modal_open() {
+                self.notice = Some(CLOSE_DIALOG_FIRST);
+                return;
+            }
+            if self.page_open() {
+                // The page sees the close first: `true` means it dismissed
+                // something of its own and stays open.
+                let consumed = self
+                    .page
+                    .as_ref()
+                    .map(|p| p.occupant.content.dispatch(action, count, window, cx))
+                    .unwrap_or(false);
+                if !consumed {
+                    self.close_page(window, cx);
+                }
+            }
+            return;
+        }
+        // A workspace switch is a route home from any page.
+        if self.page_open() && action.0.starts_with("workspace::switch_") {
+            self.close_page(window, cx);
         }
 
         if action.0 == "stack::next" || action.0 == "stack::prev" {
@@ -277,7 +363,8 @@ impl ShellView {
             self.set_line_numbers(self.line_numbers.next(), cx);
         } else if action.0 == "perf::toggle_overlay" {
             // Toggle the readout only; frame-time recording continues while hidden.
-            self.perf_overlay = !self.perf_overlay;
+            let next = !self.perf_overlay;
+            self.set_perf_overlay(next, cx);
             cx.notify();
         } else if action.0 == "tile::command_line" {
             self.open_command_line(Prompt::Command, window, cx);
@@ -364,11 +451,12 @@ impl ShellView {
         } else if let Some(name) = action.0.strip_prefix("scope::") {
             // Load a saved scope through `FrameViewMut::set_scope`, making the change undoable.
             // These per-scope actions are palette-reachable and bindable by user keymaps.
-            self.target_frame().update(cx, |f, cx| {
-                if let Ok(true) = f.load_scope(name) {
-                    cx.notify();
-                }
-            });
+            // An unknown name (hand-bound, or removed since startup) is a no-op.
+            let _ = self.load_saved_scope(name, cx);
+        } else if action.0 == "frame::scope" {
+            // Open the scope picker over the frame's live saved scopes; its
+            // pick loads through the same `load_saved_scope` as above.
+            choicedialog::open_scopes(self, window, cx);
         } else if action.0 == "frame::as_of" {
             // Open the as-of selector.
             asof_view::open(self, window, cx);
@@ -479,8 +567,11 @@ impl ShellView {
             if profiling_hook::dispatch(self, action, window, cx) {
                 return;
             }
-            // Offer remaining ids to the focused occupant. Unhandled ids have no effect.
-            if let Some(tile) = self.services.workspaces.active().focused_tile()
+            // Offer remaining ids to the open page, else the focused
+            // occupant. Unhandled ids have no effect.
+            if let Some(page) = self.page.as_ref().filter(|p| p.open) {
+                page.occupant.content.dispatch(action, count, window, cx);
+            } else if let Some(tile) = self.services.workspaces.active().focused_tile()
                 && let Some(o) = self.occupants.get(&tile)
             {
                 o.content.dispatch(action, count, window, cx);

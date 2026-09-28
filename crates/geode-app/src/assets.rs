@@ -19,6 +19,9 @@ gpui_kit_assets::icon_assets!(
         // The scope bar's save chip and the frame readout's workspace pin
         // glyph (`shell::toolbar`).
         Save, Pin,
+        // The diagnostics page's sidebar button (`Activity`) and its log
+        // detail copy button (`Copy`, `geode_diagnostics::page_chrome`).
+        Activity, Copy,
     ]
 );
 
@@ -46,13 +49,16 @@ impl AssetSource for AppAssets {
 mod tests {
     use super::*;
 
-    /// The extra icons the scope bar paints (save, pin) must resolve to
-    /// nonempty bytes; an unserved icon paints as an empty box.
+    /// Every icon selected outside the default bundle must resolve to
+    /// nonempty bytes: a missing one paints nothing and reports nothing.
     #[test]
     fn the_extra_icons_the_shell_paints_are_served() {
+        use gpui_kit_assets::IconName;
         for icon in [
-            gpui_kit_assets::IconName::Save,
-            gpui_kit_assets::IconName::Pin,
+            IconName::Save,
+            IconName::Pin,
+            IconName::Activity,
+            IconName::Copy,
         ] {
             let path = icon.path();
             let bytes = AppAssets.load(&path).unwrap();

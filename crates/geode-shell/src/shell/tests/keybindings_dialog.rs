@@ -2434,3 +2434,244 @@ fn the_unbind_button_arms_and_the_yes_button_writes(cx: &mut gpui::TestAppContex
         "and the question is gone"
     );
 }
+
+// Shared motions: an edit of a Motion row is global.
+
+/// Old dialog rebinds of the retired `blotter::down` and `pricer::down`,
+/// each written into its module's context with a `"none"` over the `j`
+/// the module shipped then. `j` now ships once under the grid context, so
+/// both shadows are orphans, and both old keys bind `motion::down`.
+const OLD_DOWN_OVERRIDES: &str = "config_version = 1\n\n\
+     [[bindings]]\ncontext = \"blotter && mode == visual\"\n[bindings.keys]\n\
+     \"n\" = \"blotter::down\"\n\"j\" = \"none\"\n\n\
+     [[bindings]]\ncontext = \"pricer && mode == normal\"\n[bindings.keys]\n\
+     \"m\" = \"pricer::down\"\n\"j\" = \"none\"\n";
+
+/// The renames the blotter and pricer factories register for `down`.
+fn register_down_renames(reg: &mut ActionRegistry) {
+    reg.register_rename("blotter::down", "motion::down")
+        .unwrap();
+    reg.register_rename("pricer::down", "motion::down").unwrap();
+}
+
+/// The shipped keymap under the user `text`, with the down renames, as the
+/// app builds it. Returns the build diagnostics beside the keymap.
+fn motion_keymap_under(text: &str) -> (crate::keymap::Keymap, Vec<geode_core::config::Diagnostic>) {
+    let mut reg = ActionRegistry::default();
+    register_builtin_actions(&mut reg);
+    register_down_renames(&mut reg);
+    let builtin = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
+    let user = LayerDoc {
+        layer: Layer::User,
+        name: "keymap".to_string(),
+        file: "<test:user>".into(),
+        table: text.parse().unwrap(),
+    };
+    build_keymap(&[builtin, user], default_mod(), &reg)
+}
+
+fn services_with_old_down_overrides() -> ShellServices {
+    let mut services = test_services();
+    register_down_renames(&mut services.registry);
+    let builtin = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
+    let user = LayerDoc {
+        layer: Layer::User,
+        name: "keymap".to_string(),
+        file: "<test:user>".into(),
+        table: OLD_DOWN_OVERRIDES.parse().unwrap(),
+    };
+    let (keymap, diags) = build_keymap(&[builtin, user], default_mod(), &services.registry);
+    assert_eq!(diags.len(), 2, "one rename warning per old id: {diags:?}");
+    services.keymap = keymap;
+    services
+}
+
+/// Filter to the Motion: down row ("Cursor down") and keep the query.
+fn select_motion_down(shell: &Entity<ShellView>, vcx: &mut gpui::VisualTestContext) {
+    vcx.simulate_keystrokes("/ c u r s o r space d o w n");
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("enter");
+    let (action, _) = selected_row(shell, vcx);
+    assert_eq!(action.0, "motion::down", "fixture: the Motion: down row");
+}
+
+/// What `key` does in a grid tile of `module` in `mode` under `keymap`.
+fn press_in_grid(
+    keymap: &crate::keymap::Keymap,
+    module: &str,
+    mode: &str,
+    key: &str,
+) -> crate::keymap::MatchResult {
+    use crate::keymap::{KeyContext, Matcher, parse_keystroke};
+    let stack = vec![
+        KeyContext::new("workspace"),
+        KeyContext::new("tile"),
+        KeyContext::new(module).grid().pair("mode", mode),
+    ];
+    let ks = parse_keystroke(key, default_mod()).unwrap();
+    Matcher::default().press(keymap, ks, &stack)
+}
+
+fn moves_down() -> crate::keymap::MatchResult {
+    crate::keymap::MatchResult::Matched {
+        action: ActionId("motion::down".to_string()),
+        count: None,
+    }
+}
+
+/// One `r` on the Motion row reaches old overrides in every module context
+/// they were written under, orphan `"none"` shadows included, and `j`
+/// moves both grids again afterwards.
+#[gpui::test]
+fn r_on_a_motion_row_removes_old_overrides_from_every_module_context(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("keymap.toml"), OLD_DOWN_OVERRIDES).unwrap();
+    let (window, mut vcx) =
+        open_shell_with_user_dir(cx, services_with_old_down_overrides(), dir.path());
+    let shell = shell_of(&window, &mut vcx);
+    open_keybindings(&shell, &mut vcx);
+    select_motion_down(&shell, &mut vcx);
+
+    vcx.simulate_keystrokes("r y");
+    let notice = shell
+        .read_with(&vcx, |s, _| s.keybindings.as_ref().unwrap().notice.clone())
+        .expect("r acknowledges");
+    assert!(notice.contains("4 overrides"), "{notice}");
+    vcx.run_until_parked();
+
+    let text = std::fs::read_to_string(dir.path().join("keymap.toml")).expect("r must write");
+    for gone in ["blotter::down", "pricer::down", "none"] {
+        assert!(!text.contains(gone), "{gone} survived the reset: {text}");
+    }
+    let (keymap, diags) = motion_keymap_under(&text);
+    assert!(diags.is_empty(), "{diags:?}");
+    assert_eq!(
+        press_in_grid(&keymap, "blotter", "visual", "j"),
+        moves_down()
+    );
+    assert_eq!(
+        press_in_grid(&keymap, "pricer", "normal", "j"),
+        moves_down()
+    );
+}
+
+/// Rebinding the Motion row while old module overrides are displayed
+/// writes the shared grid context, not the displayed module one, and
+/// clears the old overrides in the same write: the new key moves every
+/// grid, and the old ids' keys and shadows are gone.
+#[gpui::test]
+fn rebinding_a_motion_row_writes_the_shared_context_and_clears_old_overrides(
+    cx: &mut gpui::TestAppContext,
+) {
+    use crate::defaults::GRID_MOTION_CONTEXT;
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("keymap.toml"), OLD_DOWN_OVERRIDES).unwrap();
+    let (window, mut vcx) =
+        open_shell_with_user_dir(cx, services_with_old_down_overrides(), dir.path());
+    let shell = shell_of(&window, &mut vcx);
+    open_keybindings(&shell, &mut vcx);
+    select_motion_down(&shell, &mut vcx);
+    let (_, shown) = selected_row(&shell, &vcx);
+    assert_eq!(
+        shown.map(|(_, layer)| layer),
+        Some(Layer::User),
+        "fixture: an old module override is what the row displays"
+    );
+
+    vcx.simulate_keystrokes("enter n enter");
+    vcx.run_until_parked();
+
+    let text = std::fs::read_to_string(dir.path().join("keymap.toml")).expect("must write");
+    let table: toml::Table = text.parse().unwrap();
+    let entries = table["bindings"].as_array().unwrap();
+    let keys_under = |ctx: &str| -> Vec<(String, String)> {
+        entries
+            .iter()
+            .filter(|e| e.get("context").and_then(|c| c.as_str()) == Some(ctx))
+            .flat_map(|e| e["keys"].as_table().unwrap().clone())
+            .map(|(k, v)| (k, v.as_str().unwrap().to_string()))
+            .collect()
+    };
+    let mut grid = keys_under(GRID_MOTION_CONTEXT);
+    grid.sort();
+    assert_eq!(
+        grid,
+        vec![
+            ("j".to_string(), "none".to_string()),
+            ("n".to_string(), "motion::down".to_string()),
+        ],
+        "{text}"
+    );
+    for module in ["blotter && mode == visual", "pricer && mode == normal"] {
+        assert!(keys_under(module).is_empty(), "{module} kept: {text}");
+    }
+
+    let (keymap, diags) = motion_keymap_under(&text);
+    assert!(diags.is_empty(), "no old id left to warn about: {diags:?}");
+    for (module, mode) in [
+        ("blotter", "visual"),
+        ("blotter", "normal"),
+        ("pricer", "normal"),
+        ("marketdata", "normal"),
+        ("diagnostics", "normal"),
+    ] {
+        assert_eq!(
+            press_in_grid(&keymap, module, mode, "n"),
+            moves_down(),
+            "{module} {mode}"
+        );
+    }
+}
+
+/// `d` on the Motion row is global too: the old module overrides go, and
+/// the shipped key is silenced under the shared context, where `r` can
+/// lift it.
+#[gpui::test]
+fn d_on_a_motion_row_clears_old_overrides_and_silences_the_shared_key(
+    cx: &mut gpui::TestAppContext,
+) {
+    use crate::defaults::GRID_MOTION_CONTEXT;
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("keymap.toml"), OLD_DOWN_OVERRIDES).unwrap();
+    let (window, mut vcx) =
+        open_shell_with_user_dir(cx, services_with_old_down_overrides(), dir.path());
+    let shell = shell_of(&window, &mut vcx);
+    open_keybindings(&shell, &mut vcx);
+    select_motion_down(&shell, &mut vcx);
+
+    vcx.simulate_keystrokes("d y");
+    let notice = shell
+        .read_with(&vcx, |s, _| s.keybindings.as_ref().unwrap().notice.clone())
+        .expect("d acknowledges");
+    assert!(
+        notice.contains("silencing j") && notice.contains("press r"),
+        "{notice}"
+    );
+    vcx.run_until_parked();
+
+    let text = std::fs::read_to_string(dir.path().join("keymap.toml")).expect("d must write");
+    assert!(
+        !text.contains("blotter::down") && !text.contains("pricer::down"),
+        "{text}"
+    );
+    let (keymap, diags) = motion_keymap_under(&text);
+    assert!(diags.is_empty(), "{diags:?}");
+    for (module, mode) in [("blotter", "visual"), ("pricer", "normal")] {
+        assert_eq!(
+            press_in_grid(&keymap, module, mode, "j"),
+            crate::keymap::MatchResult::NoMatch,
+            "{module}: {text}"
+        );
+    }
+    let down = ActionId("motion::down".to_string());
+    assert_eq!(
+        crate::keymap::user_overrides_for(keymap.bindings(), &down),
+        vec![crate::keymap::UserOverride {
+            context_source: Some(GRID_MOTION_CONTEXT.to_string()),
+            key: "j".to_string(),
+        }],
+        "only the shared shadow is left for r to lift"
+    );
+}

@@ -8,7 +8,9 @@
 //! the new key, then removes a displaced user key or shadows a lower-layer key
 //! with `"none"`. A same-key rebind skips displacement. A missing old user key is
 //! reported in the successful outcome, so callers can warn about stale state.
-//! Removing a user key exposes any lower-layer binding on that key.
+//! Removing a user key exposes any lower-layer binding on that key. The
+//! `_clearing` variants first remove a reset's override set in the same
+//! transaction; a shared motion's dialog edit uses them to be global.
 //!
 //! Reset removes the named overrides from every matching context entry. Reset all
 //! removes the entire user `bindings` array, including hand-written entries.
@@ -84,11 +86,25 @@ pub struct RebindOutcome {
 /// A missing old user key is reported through [`RebindOutcome`] after the new
 /// key is written. Effective resolution is determined on the next load.
 pub fn apply_rebind(user_dir: &Path, rebind: &Rebind) -> Result<RebindOutcome, String> {
+    apply_rebind_clearing(user_dir, &[], rebind)
+}
+
+/// [`apply_rebind`] after removing `clear` as [`apply_reset`] does, in one
+/// transaction. A shared motion's edit clears the action's old per-module
+/// overrides before writing into the shared context, so the edit reaches
+/// every tile rather than sitting beside a module override that still wins
+/// there.
+pub fn apply_rebind_clearing(
+    user_dir: &Path,
+    clear: &[UserOverride],
+    rebind: &Rebind,
+) -> Result<RebindOutcome, String> {
     crate::config_write::try_edit(user_dir, Layer::User, KEYMAP_DOC, |doc| {
         ensure_bindings(user_dir, doc)?;
         let bindings = doc["bindings"]
             .as_array_of_tables_mut()
             .expect("ensure_bindings just ensured this");
+        remove_overrides(bindings, clear);
 
         let keys = keys_table_for(bindings, rebind.context.as_deref());
 
@@ -142,11 +158,23 @@ pub struct UnbindOutcome {
 /// entry. Removal exposes lower layers. A removal miss still succeeds with
 /// `removed = false`; read, parse, shape, or write failures return `Err`.
 pub fn apply_unbind(user_dir: &Path, unbind: &Unbind) -> Result<UnbindOutcome, String> {
+    apply_unbind_clearing(user_dir, &[], unbind)
+}
+
+/// [`apply_unbind`] after removing `clear` as [`apply_reset`] does, in one
+/// transaction: a shared motion's unbind, for the reason given at
+/// [`apply_rebind_clearing`].
+pub fn apply_unbind_clearing(
+    user_dir: &Path,
+    clear: &[UserOverride],
+    unbind: &Unbind,
+) -> Result<UnbindOutcome, String> {
     crate::config_write::try_edit(user_dir, Layer::User, KEYMAP_DOC, |doc| {
         ensure_bindings(user_dir, doc)?;
         let bindings = doc["bindings"]
             .as_array_of_tables_mut()
             .expect("ensure_bindings just ensured this");
+        remove_overrides(bindings, clear);
 
         let keys = keys_table_for(bindings, unbind.context.as_deref());
 
@@ -186,22 +214,28 @@ pub fn apply_reset(user_dir: &Path, overrides: &[UserOverride]) -> Result<ResetO
             .as_array_of_tables_mut()
             .expect("ensure_bindings just ensured this");
 
-        let mut removed = 0;
-        for o in overrides {
-            for entry in bindings.iter_mut().filter(|entry| {
-                entry.get("context").and_then(Item::as_str) == o.context_source.as_deref()
-            }) {
-                let Some(keys) = entry.get_mut("keys").and_then(Item::as_table_like_mut) else {
-                    continue;
-                };
-                if keys.remove(&o.key).is_some() {
-                    removed += 1;
-                }
-            }
-        }
-
+        let removed = remove_overrides(bindings, overrides);
         Ok(ResetOutcome { removed })
     })
+}
+
+/// Remove each override from every entry with its raw context string; return
+/// the number of keys removed. Missing keys are skipped; emptied entries stay.
+fn remove_overrides(bindings: &mut ArrayOfTables, overrides: &[UserOverride]) -> usize {
+    let mut removed = 0;
+    for o in overrides {
+        for entry in bindings.iter_mut().filter(|entry| {
+            entry.get("context").and_then(Item::as_str) == o.context_source.as_deref()
+        }) {
+            let Some(keys) = entry.get_mut("keys").and_then(Item::as_table_like_mut) else {
+                continue;
+            };
+            if keys.remove(&o.key).is_some() {
+                removed += 1;
+            }
+        }
+    }
+    removed
 }
 
 /// Remove the entire user `bindings` array, including hand-written entries.
@@ -1138,6 +1172,72 @@ context = \"workspace\"
         assert!(
             text.contains("workspace::focus_right"),
             "the value must still be updated: {text}"
+        );
+    }
+
+    /// The shipped keymap with the renames the grid modules register, plus
+    /// the user file in `dir`, built as the app builds it.
+    fn motion_keymap(dir: &Path) -> crate::keymap::Keymap {
+        let mut reg = ActionRegistry::default();
+        crate::defaults::register_builtin_actions(&mut reg);
+        reg.register_rename("blotter::down", "motion::down")
+            .unwrap();
+        reg.register_rename("pricer::down", "motion::down").unwrap();
+        let builtin = LayerDoc::builtin("keymap", crate::defaults::BUILTIN_KEYMAP).unwrap();
+        let user = LayerDoc {
+            layer: Layer::User,
+            name: "keymap".to_string(),
+            file: dir.join("keymap.toml"),
+            table: read(dir).parse().unwrap(),
+        };
+        build_keymap(&[builtin, user], KeymapModifiers::ALT, &reg).0
+    }
+
+    /// What `j` does in a blotter grid in visual mode under `keymap`.
+    fn j_in_blotter_visual(keymap: &crate::keymap::Keymap) -> crate::keymap::MatchResult {
+        use crate::keymap::{KeyContext, Matcher, parse_keystroke};
+        let stack = vec![
+            KeyContext::new("workspace"),
+            KeyContext::new("tile"),
+            KeyContext::new("blotter").grid().pair("mode", "visual"),
+        ];
+        let j = parse_keystroke("j", KeymapModifiers::ALT).unwrap();
+        Matcher::default().press(keymap, j, &stack)
+    }
+
+    /// An old dialog rebind of `blotter::down` left `j = "none"` under the
+    /// blotter's visual context. `r` on Motion: down resets through the
+    /// override set, and `j` moves the blotter again afterwards: the orphan
+    /// shadow went with the renamed key.
+    #[test]
+    fn resetting_a_motion_lifts_an_old_module_rebinds_orphan_shadow() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("keymap.toml"),
+            "config_version = 1\n\n[[bindings]]\ncontext = \"blotter && mode == visual\"\n\
+             [bindings.keys]\n\"n\" = \"blotter::down\"\n\"j\" = \"none\"\n",
+        )
+        .unwrap();
+        let before = motion_keymap(dir.path());
+        assert_eq!(
+            j_in_blotter_visual(&before),
+            crate::keymap::MatchResult::NoMatch,
+            "fixture: the old shadow silences j"
+        );
+        let down = ActionId("motion::down".to_string());
+        let overrides = crate::keymap::user_overrides_for(before.bindings(), &down);
+        assert_eq!(overrides.len(), 2, "{overrides:?}");
+
+        apply_reset(dir.path(), &overrides).unwrap();
+
+        assert_eq!(
+            j_in_blotter_visual(&motion_keymap(dir.path())),
+            crate::keymap::MatchResult::Matched {
+                action: down,
+                count: None
+            },
+            "{}",
+            read(dir.path())
         );
     }
 }
