@@ -4998,8 +4998,8 @@ run_mutation "publication routing: blotter promotion uses its own dependencies" 
 
 run_mutation "publication routing: panels watch an exact document" \
   crates/geode-marketdata/src/tile.rs \
-  'frame.watch_publications(self.spec.dataset, Some(&batch))' \
-  'frame.watch_publications(self.spec.dataset, None)' \
+  'frame.watch_publications(&self.spec.dataset, Some(&batch))' \
+  'frame.watch_publications(&self.spec.dataset, None)' \
   geode-marketdata publications_only_requery_the_selected_document
 
 # The rule now lives in `geode_tile::following`; this module's route stays
@@ -12497,8 +12497,8 @@ run_mutation "mdupload: an open editor closes before the draft is read" \
   '        if self.editor.is_some() {
             self.close_editor(window, cx);
         }
-        let document = self.spec.document;' \
-  '        let document = self.spec.document;' \
+        let document = &self.spec.document;' \
+  '        let document = &self.spec.document;' \
   geode-marketdata \
   an_upload_armed_mid_step_sends_the_draft_as_it_was_before_i
 
@@ -13397,7 +13397,7 @@ run_mutation "mddraft: rebase keeps a declared attribute and names an undeclared
 # a new spot and the panel keeps showing the old one.
 run_mutation "mddraft: an edited attribute paints the draft's value" \
   crates/geode-marketdata/src/core/matrix.rs \
-  '            let (text, edited) = match draft.attrs.get(attr.column) {' \
+  '            let (text, edited) = match draft.attrs.get(&attr.column) {' \
   '            let (text, edited) = match None::<&geode_core::document::Value> {' \
   geode-marketdata \
   an_edited_attribute_paints_the_drafts_value_marked_edited
@@ -14722,13 +14722,13 @@ run_mutation "matrix: slice values are the first grid columns" \
   crates/geode-marketdata/src/core/matrix.rs \
   '        slices
             .iter()
-            .map(|(sv, _)| SharedString::from(sv.label))
+            .map(|(sv, _)| SharedString::from(sv.label.clone()))
             .chain(grid.columns.into_iter().map(SharedString::from))
             .collect(),' \
   '        grid.columns
             .into_iter()
             .map(SharedString::from)
-            .chain(slices.iter().map(|(sv, _)| SharedString::from(sv.label)))
+            .chain(slices.iter().map(|(sv, _)| SharedString::from(sv.label.clone())))
             .collect(),' \
   geode-marketdata a_pivot_puts_the_row_axis_down_the_side_and_the_column_axis_across
 
@@ -14756,8 +14756,8 @@ run_mutation "matrix: a NULL beside a value in a slice is a disagreement" \
 # collisions because Draft indexes columns by label.
 run_mutation "matrix: a slice label colliding with an axis label is refused" \
   crates/geode-marketdata/src/core/matrix.rs \
-  '        if grid.columns.iter().any(|c| c == sv.label) {' \
-  '        if false && grid.columns.iter().any(|c| c == sv.label) {' \
+  '        if grid.columns.contains(&sv.label) {' \
+  '        if false && grid.columns.contains(&sv.label) {' \
   geode-marketdata a_slice_label_colliding_with_an_axis_label_is_refused
 
 # A row bump walks the ladder and skips the term's own forward/atm/skew.
@@ -14961,7 +14961,7 @@ run_mutation "tile: declared_type answers None off a non-numeric kind" \
 # (differently worded) refusal instead of never reaching it.
 run_mutation "tile: a nudge on a non-numeric cell is refused" \
   crates/geode-marketdata/src/tile.rs \
-  '                let Some(ty) = declared_type(self.spec, &self.model, *col) else {' \
+  '                let Some(ty) = declared_type(&self.spec, &self.model, *col) else {' \
   '                let Some(ty) = Some(ColumnType::F64) else {' \
   geode-marketdata a_flat_panels_nudge_on_a_non_numeric_cell_is_refused
 
@@ -15114,11 +15114,11 @@ run_mutation "tile: closing the choice popup re-mirrors the delegate" \
 run_mutation "tile: i on a choice cell opens the popup" \
   crates/geode-marketdata/src/tile.rs \
   '                if let Some(CellKind::Choice(options)) = self.model.kind_of(col) {
-                    self.open_choice(cell, labels, &text, options, window, cx);
+                    self.open_choice(cell, labels, &text, Arc::clone(options), window, cx);
                     return;
                 }' \
   '                if let Some(CellKind::Choice(options)) = None::<&CellKind> {
-                    self.open_choice(cell, labels, &text, options, window, cx);
+                    self.open_choice(cell, labels, &text, Arc::clone(options), window, cx);
                     return;
                 }' \
   geode-marketdata i_on_a_choice_cell_opens_a_typeahead_and_enter_picks
@@ -18921,7 +18921,7 @@ run_mutation "marketdata: targets_for narrows to targets that accept the documen
 # `egress.toml` actually resolved.
 run_mutation "marketdata: create narrows the factory's egress list to this panel's own document" \
   crates/geode-marketdata/src/content.rs \
-  '        let egress_targets = targets_for(&self.egress, self.spec.document);' \
+  '        let egress_targets = targets_for(&self.egress, &self.spec.document);' \
   '        let egress_targets: Vec<SharedString> = Vec::new();' \
   geode-marketdata \
   the_tile_stores_the_targets_its_factory_resolves_for_its_document
@@ -19189,7 +19189,7 @@ run_mutation "panel: a sent draft is refused already sent" \
 # message instead.
 run_mutation "panel: incomplete rows refuse the upload" \
   crates/geode-marketdata/src/tile.rs \
-  '        match self.draft.incomplete_rows(self.spec, &self.model.columns) {
+  '        match self.draft.incomplete_rows(&self.spec, &self.model.columns) {
             0 => {}' \
   '        match 0 {
             0 => {}' \
@@ -19224,35 +19224,35 @@ run_mutation "draft: bump refuses a fractional delta on an I64 column" \
 # fail during document assembly.
 run_mutation "spec: DIVIDEND requires the announced date" \
   crates/geode-marketdata/src/core/spec.rs \
-  '            column: "announced_date",
-            label: "announced",
-            ty: ColumnType::Date,
-            format: ColumnFormat::TEXT,
-            choices: None,
-            required: true,' \
-  '            column: "announced_date",
-            label: "announced",
-            ty: ColumnType::Date,
-            format: ColumnFormat::TEXT,
-            choices: None,
-            required: false,' \
+  '                column: "announced_date".into(),
+                label: "announced".into(),
+                ty: ColumnType::Date,
+                format: ColumnFormat::TEXT,
+                choices: None,
+                required: true,' \
+  '                column: "announced_date".into(),
+                label: "announced".into(),
+                ty: ColumnType::Date,
+                format: ColumnFormat::TEXT,
+                choices: None,
+                required: false,' \
   geode-marketdata \
   dividend_dates_are_required
 
 run_mutation "spec: DIVIDEND requires the pay date" \
   crates/geode-marketdata/src/core/spec.rs \
-  '            column: "pay_date",
-            label: "pay",
-            ty: ColumnType::Date,
-            format: ColumnFormat::TEXT,
-            choices: None,
-            required: true,' \
-  '            column: "pay_date",
-            label: "pay",
-            ty: ColumnType::Date,
-            format: ColumnFormat::TEXT,
-            choices: None,
-            required: false,' \
+  '                column: "pay_date".into(),
+                label: "pay".into(),
+                ty: ColumnType::Date,
+                format: ColumnFormat::TEXT,
+                choices: None,
+                required: true,' \
+  '                column: "pay_date".into(),
+                label: "pay".into(),
+                ty: ColumnType::Date,
+                format: ColumnFormat::TEXT,
+                choices: None,
+                required: false,' \
   geode-marketdata \
   dividend_dates_are_required
 
