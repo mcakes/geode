@@ -1700,8 +1700,10 @@ before).
 28-array fold cost about 4 µs across 900 results, inside run-to-run noise.
 `grid_build_1000` reads 1.09 ms against the previous 1.42 ms; the earlier
 run was taken under a heavier load (20–25), so the difference is not
-attributed to the change. Both stay well inside the 8 ms budget, and the
-worst keystroke (a sheet-wide `:shift` plus the rebuild) under 3 ms.
+attributed to the change. Both stay well inside the 8 ms budget; the
+worst keystroke (a sheet-wide `:shift` plus the rebuild) reads under 3 ms
+from the earlier six-measure `apply_undo_sheet_shift_1000` figure, which
+was not re-run here.
 
 ## Timeseries chart (spec §8, Part 3)
 

@@ -24021,7 +24021,7 @@ run_mutation "pricer colour: new colours invalidate the cache" \
   crates/geode-pricer/src/delegate.rs \
   '            self.colour_cache.invalidate();' \
   '            let _ = ();' \
-  geode-app a_reload_hands_the_pricer_the_new_colours
+  geode-pricer a_second_colour_reload_repaints_a_named_column
 
 # `tile_columns` marks the cursor's column active so `Edit column in
 # view…` opens the Views dialog on that column, not the first.

@@ -5537,6 +5537,54 @@ pub(crate) mod tests {
         assert_eq!(header_colour(&h, &mut vcx, "delta01"), None);
     }
 
+    /// A second reload that redefines a name repaints the column: the
+    /// delegate's resolve cache is invalidated when the factory hands it
+    /// new definitions, or the cell would keep the first resolved value
+    /// (the cache clears itself only on a changed theme input).
+    #[gpui::test]
+    fn a_second_colour_reload_repaints_a_named_column(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C"]);
+        let rose = |doc: &str| {
+            let (colours, diags) = NamedColours::from_doc(&geode_core::config::merge_docs(
+                "colors",
+                &[geode_core::config::LayerDoc::builtin("colors", doc).unwrap()],
+            ));
+            assert!(diags.is_empty(), "{diags:?}");
+            colours
+        };
+        let view = "[vanilla]\ndataset = \"pricer\"\n\
+             [[vanilla.columns]]\nname = \"npv\"\nformat = { color = \"rose\" }\n";
+        let resolved = |vcx: &mut VisualTestContext, colours: &NamedColours| {
+            vcx.update(|_, cx| {
+                let theme = cx.theme();
+                geode_tile::colour::ColourCache::new()
+                    .get(
+                        colours,
+                        "rose",
+                        &geode_shell::shell::colours::anchors_from_theme(theme),
+                        &geode_shell::shell::colours::tokens_from_theme(theme),
+                    )
+                    .expect("rose is defined")
+                    .base
+            })
+        };
+        let first = rose("[rose]\nhue = 10\n");
+        reload_views(&h, &mut vcx, view, first.clone());
+        answer_deltas(&h, &mut vcx, &[0.5]);
+        let first_base = resolved(&mut vcx, &first);
+        assert_eq!(text_colour(&h, &mut vcx, 0, "npv"), first_base);
+
+        let second = rose("[rose]\nhue = 200\n");
+        let second_base = resolved(&mut vcx, &second);
+        assert_ne!(first_base, second_base, "fixture: the two hues read apart");
+        reload_views(&h, &mut vcx, view, second);
+        assert_eq!(
+            text_colour(&h, &mut vcx, 0, "npv"),
+            second_base,
+            "the redefined name repaints; the first resolve is not kept"
+        );
+    }
+
     /// The shell's `Edit column in view…` reads the tile's columns: the
     /// plan in order under the sheet's view name, the cursor's column
     /// active, none derived (a pricer view declares only dataset columns).

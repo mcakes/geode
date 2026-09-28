@@ -1423,7 +1423,7 @@ generations remain available only within the retention limit.
   stopped — restart Geode`.
 
 Other known gaps: the underlying typeahead does not yet offer catalogue
-underlyings; result cells are not sign-colored. Columns can be dragged to
+underlyings. Columns can be dragged to
 reorder and resized with the pointer; both act on the open tile only. A view
 change or reload restores the view's order; a dragged width is kept the way
 an `:autosize` fit is (by vocabulary name in the session record, over the
