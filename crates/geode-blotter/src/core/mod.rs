@@ -4,6 +4,7 @@
 
 pub mod cache;
 pub mod commands;
+pub mod context;
 pub mod cursor;
 pub mod expansion;
 pub mod find;

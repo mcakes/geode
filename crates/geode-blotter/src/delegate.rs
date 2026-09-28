@@ -490,6 +490,26 @@ impl BlotterDelegate {
         crate::core::launch::underlying_at(&self.cursor_path()?, &plan.grouping)
     }
 
+    /// The cursor row's dimension context: its single-valued columns and,
+    /// when the cursor row is inside the live selection, each selected
+    /// top-most row's. `None` before the first snapshot.
+    pub fn dimension_context(&self) -> Option<geode_core::context::DimensionContext> {
+        let snapshot = self.snapshot.as_ref()?;
+        let plan = self.plan.as_ref()?;
+        let row = *self.shown.get(self.cursor.row)? as usize;
+        let selection = match &self.resolved {
+            Some(r) if r.rows.contains(&self.cursor.row) => {
+                crate::core::context::selection_values(snapshot, plan, &self.shown, r)
+            }
+            _ => Vec::new(),
+        };
+        Some(geode_core::context::DimensionContext {
+            values: crate::core::context::values_at(snapshot, plan, row),
+            selection,
+            ..Default::default()
+        })
+    }
+
     /// Start a selection of `kind` at the cursor. With a live selection,
     /// switch kind while keeping the anchor, or clear when the kind matches.
     pub fn start_selection(&mut self, kind: SelectKind) {
@@ -1603,6 +1623,40 @@ mod tests {
         assert_eq!(d.cursor_underlying(), Some("NDX".into()));
         d.cursor.row = at(&d, 0);
         assert_eq!(d.cursor_underlying(), None, "the grand total");
+    }
+
+    /// The context follows the cursor row, and carries the selection's
+    /// rows only while the cursor is inside the selection.
+    #[test]
+    fn the_dimension_context_follows_the_cursor_row_and_selection() {
+        let mut d = BlotterDelegate::new();
+        d.apply_snapshot(snapshot(), &view(), &grouping());
+        d.expansion
+            .toggle(path_of(&snapshot(), d.plan.as_ref().unwrap(), 1));
+        d.reflatten();
+        let at = |d: &BlotterDelegate, snap_row: u32| {
+            d.shown.iter().position(|r| *r == snap_row).unwrap()
+        };
+        d.cursor.row = at(&d, 3);
+        let context = d.dimension_context().expect("a snapshot is applied");
+        assert_eq!(context.get("underlying_ref"), Some("SPX"));
+        d.cursor.row = at(&d, 1);
+        let context = d.dimension_context().expect("a snapshot is applied");
+        assert_eq!(
+            context.get("underlying_ref"),
+            None,
+            "L1 is above the underlying level"
+        );
+
+        d.cursor.row = at(&d, 3);
+        d.start_selection(SelectKind::Rows);
+        d.cursor.row = at(&d, 4);
+        d.refresh_selection();
+        let context = d.dimension_context().unwrap();
+        assert_eq!(context.selection.len(), 2, "SPX and NDX, cursor inside");
+        d.cursor.row = at(&d, 1);
+        let context = d.dimension_context().unwrap();
+        assert_eq!(context.selection.len(), 0, "the cursor left the selection");
     }
 
     /// The pinned table does not record visible ranges of length zero or

@@ -22713,6 +22713,38 @@ run_mutation "context: serve never shares the handle's context columns" \
   '    let _ = context_columns;' \
   geode-data a_handle_set_list_reaches_the_running_service
 
+# The blotter's context reader: NULL, empty, mixed and repeated values are
+# absent, and a selection counts only its top-most rows.
+run_mutation "context: blotter reads a mixed column as a value" \
+  crates/geode-blotter/src/core/context.rs \
+  '    if snapshot.is_mixed_at(idx, row) {' \
+  '    if false {' \
+  geode-blotter a_mixed_context_column_is_absent
+
+run_mutation "context: blotter reads an empty column as a value" \
+  crates/geode-blotter/src/core/context.rs \
+  '    snapshot.display_at(idx, row).filter(|v| !v.is_empty())' \
+  '    Some(snapshot.display_at(idx, row).unwrap_or_default())' \
+  geode-blotter a_null_context_column_is_absent
+
+run_mutation "context: blotter turns a NULL grouping value into text" \
+  crates/geode-blotter/src/core/context.rs \
+  '        if let Some(v) = value {' \
+  '        if let Some(v) = value.or(Some("NULL".into())) {' \
+  geode-blotter a_null_grouping_value_is_absent
+
+run_mutation "context: blotter lists a column twice" \
+  crates/geode-blotter/src/core/context.rs \
+  '    if !out.iter().any(|(n, _)| n == name) {' \
+  '    if true {' \
+  geode-blotter a_column_is_listed_once
+
+run_mutation "context: a selection counts children of a selected group" \
+  crates/geode-blotter/src/core/context.rs \
+  '    top_most(&rows, snapshot.rows(), |r| tree.parent(r))' \
+  '    top_most(&rows, snapshot.rows(), |_| None)' \
+  geode-blotter a_selection_lists_its_top_most_rows_only
+
 # A reload must reach the underlying list, or a desk edit to it waits for
 # a restart.
 run_mutation "pricer app: a reload leaves the underlying list stale" \
