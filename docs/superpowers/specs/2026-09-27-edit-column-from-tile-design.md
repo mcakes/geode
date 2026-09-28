@@ -23,22 +23,22 @@ Rulings (user, 2026-09-27):
 4. Every column the tile shows qualifies, not only measures: measures,
    derived measures and dimensions. The tree column does not.
 
-## 2. Vocabulary: `ColumnContext`
+## 2. Vocabulary: `TileColumns`
 
-`geode-core` gains a module `column_context` beside `launch`:
+`geode-core` gains a module `tile_columns` beside `launch`:
 
 ```rust
 /// The columns a tile presents from a named view, and the one at its cursor.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ColumnContext {
+pub struct TileColumns {
     pub view: String,
-    pub columns: Vec<ContextColumn>,
+    pub columns: Vec<TileColumn>,
     /// Index into `columns`; `None` when the cursor is on no listed column.
     pub active: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ContextColumn {
+pub struct TileColumn {
     /// Dataset/view column name; the identity every lookup uses.
     pub name: String,
     /// Header label as painted, for the list row.
@@ -51,12 +51,12 @@ pub struct ContextColumn {
 The tile reports names only. It never resolves which dataset owns a
 column; the shell does that against current configuration (§5).
 
-## 3. `TileContent::column_context`
+## 3. `TileContent::tile_columns`
 
 `TileContent` gains a pull method, defaulting to `None`:
 
 ```rust
-fn column_context(&self, cx: &App) -> Option<ColumnContext> { None }
+fn tile_columns(&self, cx: &App) -> Option<TileColumns> { None }
 ```
 
 The blotter implements it from its current plan: the non-tree
@@ -77,10 +77,10 @@ Two built-in actions, no default binding:
 | `config::view_column` | Edit column in view… |
 | `config::schema_column` | Edit column in schema… |
 
-On dispatch the shell pulls the focused occupant's `column_context`.
+On dispatch the shell pulls the focused occupant's `tile_columns`.
 
-- No focused tile, or `None`: notice "This tile has no dataset columns";
-  nothing opens.
+- No focused tile, or `None`: status notice "this tile has no dataset
+  columns"; nothing opens.
 - The target domain's object dialog is already open anywhere in the dialog
   stack: the existing stack refusal and its notice apply, before the list
   opens.
@@ -91,7 +91,7 @@ On dispatch the shell pulls the focused occupant's `column_context`.
   edit. If the cursor is on one, nothing is preselected and the list
   opens at its first row.
 - An empty list (a Schema list over a view of only derived columns) does
-  not open; notice "No schema columns in view 'x'".
+  not open; status notice "no schema columns in this tile's view".
 
 Escape closes the list and nothing else. Enter or a click on a row
 commits it.
@@ -110,14 +110,16 @@ dialog edit may have changed the view since the tile last planned.
   `enter_column_stage(column)`.
 
 One new function in `objectdialog/render.rs`, beside `open_object`, runs
-the chain. `enter_column_stage` fails silently today; the new route
-reports each failure and leaves the dialog at the stage it reached:
+the chain. `enter_column_stage` fails silently today; it gains a `bool`
+result and the new route reports each failure in the opened dialog's own
+footer notice (which carries formatted names; the shell status notice is
+fixed text), leaving the dialog at the stage it reached:
 
 | Failure | Result |
 |---|---|
-| view no longer defined | Views: Browse with the existing "'x' is not defined" notice; Schema: notice, nothing opens |
-| column no longer in the view (Views) | Edit stage of the view, notice "'col' is not a column of view 'x'" |
-| no owning dataset declares the column (Schema) | notice "'col' is not declared by any dataset of view 'x'", nothing opens |
+| view no longer defined | Browse, notice "view 'x' is not defined" |
+| no dataset of the view declares the column (Schema) | Browse, notice "'col' is not declared by any dataset of view 'x'" |
+| column no longer in the view / dataset | the object's Edit stage, notice "'col' is not a column of 'x'" |
 
 Escape and Back are unchanged: Column → the object's Edit stage → Browse →
 close. Closing returns focus to the tile through the existing dialog-close
@@ -127,13 +129,13 @@ restoration.
 
 Lowest layer first:
 
-- Pure: blotter `column_context` from a plan (tree column excluded,
+- Pure: blotter `tile_columns` from a plan (tree column excluded,
   `active` from the cursor, `None` on the tree column, `derived` flag);
   the list model for Schema drops derived columns and clears a derived
   preselect.
 - Pure: owner resolution picks the joined dataset for a joined column.
-- GPUI, through the palette route (type the title, Enter), with a
-  blotter focused:
+- GPUI, through the palette route (type the title, Enter), with the
+  shell's recording occupant focused and answering a fixed context:
   - cursor on a measure → Enter → Views Column stage for that column;
   - typed filter picks a different column;
   - joined measure → Schema opens the owning dataset's Column stage;
@@ -149,7 +151,7 @@ Lowest layer first:
 Same change: `docs/current/configuration-dialogs.md` (a direct Column
 stage entry), `docs/current/input-and-dialogs.md` (the two actions and the
 column list), `docs/current/features.md` Blotter, the blotter and shell
-READMEs, and the `TileContent` doc for `column_context`. Remove the TODO
+READMEs, and the `TileContent` doc for `tile_columns`. Remove the TODO
 line "Blotter shortcut to edit column in either view or schema".
 
 ## 8. Out of scope
