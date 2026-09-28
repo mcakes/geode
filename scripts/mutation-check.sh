@@ -8175,7 +8175,7 @@ run_mutation "objectdialog: o writes the frame instead of the saved scope" \
         draft.is_dirty()
     });' \
   '    let changed = true;
-    shell.frame.update(cx, |f, _| {
+    shell.target_frame().update(cx, |f, _| {
         f.set_scope(scope.clone());
     });' \
   geode-shell o_overwrites_the_saved_scope_with_the_frames_current_one
@@ -8672,7 +8672,7 @@ run_mutation "objectdialog: a create ignores a name the presentation overlay hol
 run_mutation "scopes dialog: n creates an empty scope, never the frame's" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '    let mut draft = domain.new_draft(&shell.services.config, &name);' \
-  '    let mut draft = domain.new_draft(&shell.services.config, &name); if domain == Domain::Scopes { let scope = shell.frame.read(cx).scope().clone(); scopes::overwrite_with(&mut draft, &scope, &shell.services.config); }' \
+  '    let mut draft = domain.new_draft(&shell.services.config, &name); if domain == Domain::Scopes { let scope = shell.target_frame().read(cx).scope().clone(); scopes::overwrite_with(&mut draft, &scope, &shell.services.config); }' \
   geode-shell \
   n_on_scopes_creates_an_empty_scope
 
