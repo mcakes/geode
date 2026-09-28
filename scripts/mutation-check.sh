@@ -6810,14 +6810,17 @@ run_mutation "shell page: the dock and stack families reach the router over a pa
   geode-shell \
   layout_edits_are_refused_while_a_page_is_open
 
-# With the filter gone every context resolves bare keys in insert mode, so a
-# page's `mode == normal` binding fires inside its focused input.
-run_mutation "shell page: bare keys in insert mode resolve against every context" \
+# The insert branch is entered on `holds_focus`, the window's truth; a page
+# whose `mode` flag has not caught up with the focused input still reports
+# `normal`, and only this filter keeps its `mode == normal` binding from
+# firing on the typed key. The named test types into a page input before
+# any focus event is delivered.
+run_mutation "shell page: bare keys in insert mode resolve against every context with a mode" \
   crates/geode-shell/src/shell/input.rs \
   '                .filter(|c| c.get("mode") == Some("insert"))' \
   '                .filter(|c| c.get("mode").is_some())' \
   geode-shell \
-  a_mode_normal_page_binding_types_in_the_input_and_fires_after_blur
+  a_workspace_switch_chord_from_a_focused_page_input_closes_the_page
 
 run_mutation "shell page: the context stack keeps workspace under a page" \
   crates/geode-shell/src/shell/input.rs \
