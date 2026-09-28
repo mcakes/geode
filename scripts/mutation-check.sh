@@ -25531,8 +25531,8 @@ run_mutation "pricer scope: g u on a leg targets the leg" \
 # A counted `g p` reaches every root it would take as a member.
 run_mutation "pricer scope: a counted g p checks the cursor row alone" \
   crates/geode-pricer/src/tile/select.rs \
-  '                    .take(count.max(1))' \
-  '                    .take(1)' \
+  '                    let taken = row..(row + count.max(1)).min(self.sheet.len());' \
+  '                    let taken = row..(row + 1).min(self.sheet.len());' \
   geode-pricer a_counted_group_reaching_a_partly_hidden_package_is_refused
 
 # The command door asks the same question as the keys.
@@ -25541,6 +25541,30 @@ run_mutation "pricer scope: :ungroup skips the door" \
   $'                if let Some(why) = self.partly_hidden_refusal("ungroup", 1, false) {\n                    return Err(why.into());\n                }' \
   $'                if let Some(_why) = None::<&str> {\n                    return Err(_why.into());\n                }' \
   geode-pricer row_verbs_on_a_partly_hidden_package_are_refused
+
+# A counted `g p` takes the next sheet rows, hidden ones included: it
+# refuses rather than package a line the trader never saw.
+run_mutation "pricer scope: a counted g p absorbs a hidden line" \
+  crates/geode-pricer/src/tile/select.rs \
+  '                    if taken.clone().any(|r| !self.visibility.is_shown(r)) {' \
+  '                    if false {' \
+  geode-pricer a_counted_group_over_a_hidden_line_is_refused
+
+# Cursor recovery walks sheet order, so a restored cursor (no previous
+# model holds its line) recovers too; the old model's rows would not.
+run_mutation "pricer scope: a restored hidden cursor falls to row 0" \
+  crates/geode-pricer/src/tile.rs \
+  $'        let Some(at) = self.sheet.index_of(id) else {\n            return;\n        };\n        let shown' \
+  $'        let Some(at) = self.model.grid_row_of(id) else {\n            return;\n        };\n        let shown' \
+  geode-pricer a_restored_cursor_on_a_hidden_line_lands_above_it
+
+# The tile arrives at the barrier on every path, a refused scope and a
+# frame change while unscoped included.
+run_mutation "pricer scope: arrival only when a scope applied" \
+  crates/geode-pricer/src/tile.rs \
+  '            following::arrive_immediately(&mut FrameDoor::new(&frame, cx), QueryKey(this.id.0));' \
+  '            if this.scope_refusal.is_none() && !this.unscoped { following::arrive_immediately(&mut FrameDoor::new(&frame, cx), QueryKey(this.id.0)); }' \
+  geode-pricer the_tile_arrives_on_a_refused_scope_and_while_unscoped
 
 # A `dimensions` edit alone reloads the pricer, and the reload hands the
 # factory the new dimensions.

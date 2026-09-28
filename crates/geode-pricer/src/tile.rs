@@ -207,10 +207,16 @@ const ENTRY_HINT: &str = "-5 SPX DEC26 95%/105% CS";
 pub(crate) const MOVED: &str = "the cell moved; edit refused";
 
 /// A package row whose legs the frame's scope partly hides paints only
-/// its shown legs, so an edit through it would write legs the trader
-/// cannot see: every cell edit onto it (the editor, a selection's commit
-/// or live step) refuses with this.
+/// its shown legs, so anything acting through it would reach legs the
+/// trader cannot see: every cell edit onto it (the editor, a selection's
+/// commit or live step) and every structural verb whose target includes
+/// it (delete, move, `g p`, `g u`; `partly_hidden_refusal`) refuses with
+/// this.
 pub(crate) const PARTLY_HIDDEN: &str = "package partly hidden by the scope: edit its legs";
+
+/// A counted `g p` whose run of rows includes one the scope hides: it
+/// would package a line the trader never saw.
+pub(crate) const HIDDEN_IN_RANGE: &str = "a line in that range is hidden by the scope";
 
 /// Cell editor attached to a line identity and column kind. Rebuilds follow the
 /// target across movement and close the editor if it disappears; commit checks
@@ -4016,11 +4022,12 @@ impl PricerTile {
         }
     }
 
-    /// A cursor whose line the scope now hides goes to the nearest row
-    /// above it that `model` still shows, else the nearest below — not to
-    /// whatever row slid into its old index (`reconcile_cursor`'s fallback
-    /// for a deleted line). Read against the model being replaced, so no
-    /// index into it outlives this call.
+    /// A cursor whose line the scope now hides goes to the nearest line
+    /// above it in sheet order that `model` shows, else the nearest below —
+    /// not to whatever row slid into its old index (`reconcile_cursor`'s
+    /// fallback for a deleted line). Sheet order, not the replaced model's
+    /// rows, so a cursor restored from a session onto a hidden line (no
+    /// previous model holds it) recovers the same way.
     fn recover_hidden_cursor(&mut self, model: &GridModel) {
         if self.loading {
             return;
@@ -4035,17 +4042,16 @@ impl PricerTile {
         if !hidden || model.grid_row_of(id).is_some() {
             return;
         }
-        let Some(at) = self.model.grid_row_of(id) else {
+        let Some(at) = self.sheet.index_of(id) else {
             return;
         };
         let shown: std::collections::HashSet<LineId> =
             model.rows.iter().filter_map(|r| r.id).collect();
-        let old = &self.model.rows;
-        if let Some(to) = old[..at]
-            .iter()
+        if let Some(to) = (0..at)
             .rev()
-            .chain(old[at + 1..].iter())
-            .find_map(|r| r.id.filter(|i| shown.contains(i)))
+            .chain(at + 1..self.sheet.len())
+            .map(|r| self.sheet.id(r))
+            .find(|i| shown.contains(i))
         {
             self.cursor.line = Some(to);
         }

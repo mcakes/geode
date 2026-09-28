@@ -73,6 +73,34 @@ fn a_frame_scope_hides_lines_and_the_header_counts_them(cx: &mut gpui::TestAppCo
     assert_eq!(hidden(&h, &vcx), 3);
 }
 
+/// Open a flip for this tile's key, set `expr` and notify, as the scope
+/// bar does; answers whether the tile arrived (the barrier closed).
+fn flip_to(h: &Harness, vcx: &mut VisualTestContext, expr: &str) -> bool {
+    let scope = Scope {
+        expression: Some(parse_expr(expr).unwrap()),
+        ..Default::default()
+    };
+    h.frame.update(vcx, |f, cx| {
+        f.shared_mut().set_scope(scope);
+        f.shared_mut()
+            .open_flip([QueryKey(TILE)], std::time::Instant::now());
+        cx.notify();
+    });
+    !h.frame.read_with(vcx, |f, _| f.barrier_open())
+}
+
+/// The tile arrives on the paths that apply nothing: a refused scope, and
+/// a frame change while `:unscoped`.
+#[gpui::test]
+fn the_tile_arrives_on_a_refused_scope_and_while_unscoped(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    assert!(flip_to(&h, &mut vcx, "book = 'X'"), "refused: arrived");
+    assert_eq!(hidden(&h, &vcx), 0);
+    h.command(&mut vcx, "unscoped").unwrap();
+    assert!(flip_to(&h, &mut vcx, "strike > 5000"), "unscoped: arrived");
+    assert_eq!(hidden(&h, &vcx), 0);
+}
+
 #[gpui::test]
 fn unscoped_shows_every_line_and_restores_from_the_session(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &BOOK);
@@ -93,7 +121,11 @@ fn unscoped_shows_every_line_and_restores_from_the_session(cx: &mut gpui::TestAp
     // Toggling back re-applies the frame's CURRENT scope at once.
     h.command(&mut vcx, "unscoped").unwrap();
     h.draw(&mut vcx);
-    assert_eq!(hidden(&h, &vcx), 3, "A, P's 5200 leg, ... hidden");
+    assert_eq!(
+        hidden(&h, &vcx),
+        3,
+        "A, the 4800 leg and the 5200 leg hidden"
+    );
     assert!(!painted(&mut vcx, "pricer-unscoped"));
     let record = h.serialize(&mut vcx);
     assert_ne!(record.get("unscoped").and_then(|v| v.as_bool()), Some(true));
@@ -359,4 +391,63 @@ fn selection_verbs_over_a_partly_hidden_package_refuse_whole(cx: &mut gpui::Test
     // Non-mutating verbs stay: a yank over the same selection works.
     h.dispatch(&mut vcx, "yank", None);
     assert!(h.tile.read_with(&vcx, |t, _| t.register.is_some()));
+}
+
+/// `2 g p` on A takes the next sheet row too; B is hidden by the scope,
+/// so the package would hold a line the trader never saw: refused, by the
+/// key and by `:group 2`.
+#[gpui::test]
+fn a_counted_group_over_a_hidden_line_is_refused(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "SPX Z26 4000 P", "SPX Z26 3000 P"]);
+    set_expr(&h, &mut vcx, "strike != 4000");
+    assert_eq!(h.tree(&vcx).len(), 2, "fixture: A and C shown");
+    let before = rows(&h, &vcx);
+    h.dispatch(&mut vcx, "group", Some(2));
+    assert_eq!(
+        h.footer(&vcx).as_deref(),
+        Some("a line in that range is hidden by the scope")
+    );
+    assert_eq!(rows(&h, &vcx), before);
+    assert_eq!(
+        h.command(&mut vcx, "group 2"),
+        Err("a line in that range is hidden by the scope".to_string())
+    );
+    assert_eq!(rows(&h, &vcx), before);
+    assert!(!h.tile.read_with(&vcx, |t, _| t.undo.can_undo()));
+}
+
+/// A tile restored with its cursor on a line the frame's scope hides
+/// lands on the nearest shown line above it, not on row 0.
+#[gpui::test]
+fn a_restored_cursor_on_a_hidden_line_lands_above_it(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    let (leg, package) = h
+        .tile
+        .read_with(&vcx, |t, _| (t.sheet.id(3), t.sheet.id(1)));
+    set_expr(&h, &mut vcx, "strike != 5200");
+    // Hand `book` back so a second tile may open it.
+    h.command(&mut vcx, "new").unwrap();
+    let mut record = toml::Table::new();
+    record.insert("sheet".into(), "book".into());
+    record.insert("cursor".into(), toml::Value::Integer(leg.0 as i64));
+    record.insert(
+        "expanded".into(),
+        toml::Value::Array(vec![toml::Value::Integer(package.0 as i64)]),
+    );
+    let second = vcx.update(|window, cx| {
+        h.factory.create(
+            TileId(TILE + 1),
+            Some(&record),
+            FrameRef::new(h.frame.clone(), WorkspaceIx::FIRST),
+            h.diagnostics.clone(),
+            window,
+            cx,
+        )
+    });
+    let tile = second.view.downcast::<PricerTile>().unwrap();
+    let at = tile.read_with(&vcx, |t, _| {
+        assert_eq!(t.sheet.name, "book", "fixture: the restored sheet");
+        t.cursor_sheet_row()
+    });
+    assert_eq!(at, Some(2), "the 4800 leg, above the hidden 5200 leg");
 }

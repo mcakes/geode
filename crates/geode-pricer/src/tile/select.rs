@@ -165,11 +165,6 @@ impl PricerTile {
             .collect()
     }
 
-    /// What a bulk edit reaches: the selected rows' leaf lines (a package
-    /// stands for its legs) and the plan columns — the cursor's alone
-    /// under `V`, whose columns span every column including read-only
-    /// ones, and the block's under `v`. A typed commit writes the
-    /// cursor's column alone under both; see [`Self::commit_selection`].
     /// Whether the selection holds a package row the scope partly hides.
     /// A selected package stands for every leg (`lines_of`), hidden ones
     /// too, so a bulk write through it would reach legs no row paints:
@@ -180,6 +175,11 @@ impl PricerTile {
             .any(|r| self.partly_hidden(r))
     }
 
+    /// What a bulk edit reaches: the selected rows' leaf lines (a package
+    /// stands for its legs) and the plan columns — the cursor's alone
+    /// under `V`, whose columns span every column including read-only
+    /// ones, and the block's under `v`. A typed commit writes the
+    /// cursor's column alone under both; see [`Self::commit_selection`].
     pub(crate) fn selection_targets(&self) -> (Vec<usize>, Vec<usize>) {
         let Some(r) = &self.resolved else {
             return (Vec::new(), Vec::new());
@@ -343,9 +343,13 @@ impl PricerTile {
     /// its hidden legs too. `selected`: the verb acts on the live
     /// selection, which then refuses as a whole — no part of it is acted
     /// on. Otherwise the target is the cursor row; for `g u` its package
-    /// (a leg's parent), for `g p` the `count` roots from the cursor. A
-    /// shown leg on its own is not a package and stays editable. Verbs that
-    /// mutate nothing (yank, fold, find, motions) never ask.
+    /// (a leg's parent). A counted `g p` takes the `count` sheet rows from
+    /// the cursor (`Edit::Group`), so it also refuses with
+    /// [`HIDDEN_IN_RANGE`] when any of them is hidden: it would package a
+    /// line the trader never saw. (A selection's `g p` holds only shown
+    /// rows, and `group_plan` refuses a gap.) A shown leg on its own is
+    /// not a package and stays editable. Verbs that mutate nothing (yank,
+    /// fold, find, motions) never ask.
     pub(crate) fn partly_hidden_refusal(
         &self,
         verb: &str,
@@ -364,12 +368,13 @@ impl PricerTile {
             let row = self.cursor_sheet_row()?;
             match verb {
                 "ungroup" => vec![self.sheet.parent(row).unwrap_or(row)],
-                "group" => self
-                    .sheet
-                    .roots()
-                    .filter(|&r| r >= row)
-                    .take(count.max(1))
-                    .collect(),
+                "group" => {
+                    let taken = row..(row + count.max(1)).min(self.sheet.len());
+                    if taken.clone().any(|r| !self.visibility.is_shown(r)) {
+                        return Some(HIDDEN_IN_RANGE);
+                    }
+                    taken.collect()
+                }
                 _ => vec![row],
             }
         };
