@@ -485,7 +485,8 @@ mod tests {
 
     /// SPX has two expiries published at 14:00 and 14:05; SPXW (a string
     /// extension of SPX) has one at 14:02; SPX's October expiry is
-    /// republished at 14:10.
+    /// republished at 14:10; SPXW's is republished at 14:12, so SPXW holds
+    /// both the newest source time and the greatest generation.
     fn chain_fixture() -> (tempfile::TempDir, Store, SchemaSpec) {
         use crate::store::ddl::tests_support::{chain_dataset, chain_doc};
         let dir = tempfile::tempdir().unwrap();
@@ -498,6 +499,7 @@ mod tests {
             ("SPXW", "2026-10-16", [0.50, 0.50], "2026-09-12T14:02:00Z"),
             ("SPX", "2026-11-20", [0.22, 0.19], "2026-09-12T14:05:00Z"),
             ("SPX", "2026-10-16", [0.21, 0.17], "2026-09-12T14:10:00Z"),
+            ("SPXW", "2026-10-16", [0.51, 0.51], "2026-09-12T14:12:00Z"),
         ] {
             publish_document(
                 &store,
@@ -574,6 +576,7 @@ mod tests {
     fn a_prefix_never_matches_a_longer_underlying() {
         let (_d, store, schema) = chain_fixture();
         for as_of in [AsOf::Live, AsOf::At(ts("2026-09-12T14:30:00Z"))] {
+            let is_at = matches!(as_of, AsOf::At(_));
             let compiled = compile_document(
                 store.writer(),
                 &schema,
@@ -586,17 +589,31 @@ mod tests {
                     .all(|(_, _, mid)| *mid < 0.5),
                 "SPXW's 0.5 rows leaked into an SPX read"
             );
+            if is_at {
+                // SPX October at 14:10 and November at 14:05: the oldest.
+                assert_eq!(
+                    compiled.resolved_as_of.get("option_chain"),
+                    Some(&ts("2026-09-12T14:05:00Z"))
+                );
+            }
         }
         let cat = Catalog::new(store.writer());
         let spx = join_key(&["SPX".to_string()]);
         assert_eq!(
             cat.live_source_time_under("option_chain", &spx).unwrap(),
-            Some(ts("2026-09-12T14:10:00Z"))
+            Some(ts("2026-09-12T14:10:00Z")),
+            "SPXW's newer 14:12 republish leaked into SPX's freshness"
         );
         let spxw = join_key(&["SPXW".to_string()]);
         assert_eq!(
             cat.live_source_time_under("option_chain", &spxw).unwrap(),
-            Some(ts("2026-09-12T14:02:00Z"))
+            Some(ts("2026-09-12T14:12:00Z"))
+        );
+        let spx_gen = cat.live_generation_under("option_chain", &spx).unwrap();
+        let spxw_gen = cat.live_generation_under("option_chain", &spxw).unwrap();
+        assert!(
+            spx_gen < spxw_gen,
+            "SPXW's greater generation leaked into SPX's: {spx_gen:?} vs {spxw_gen:?}"
         );
     }
 

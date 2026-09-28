@@ -22,8 +22,10 @@ pub fn split_key(batch: &str) -> Vec<String> {
 /// Whether the joined key `batch` is `prefix` or lies under it: equal, or
 /// `prefix` followed by [`KEY_SEPARATOR`]. Matching at a part boundary is
 /// the point: `SPX` lies under itself and under `SPX␟2026-10-16`, never
-/// under `SPXW␟…`. The prefix document query, its freshness and the
-/// publication watch all use this one test.
+/// under `SPXW␟…`. The prefix document query and the publication watch
+/// call this; `Catalog::under`'s SQL in `geode-data`
+/// (`fg.batch = ? or starts_with(fg.batch, prefix‖separator)`) mirrors it
+/// for prefix freshness and must be kept in agreement with it.
 pub fn is_key_prefix(prefix: &str, batch: &str) -> bool {
     match batch.strip_prefix(prefix) {
         Some("") => true,
