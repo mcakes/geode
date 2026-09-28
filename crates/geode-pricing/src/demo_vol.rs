@@ -24,8 +24,9 @@ pub const DEMO_VOL_MODEL: &str = "demo";
 pub const KIND: &str = "cvi_params";
 /// No vol below this, whatever the extrapolated smile says.
 pub const VOL_FLOOR: f64 = 0.01;
-/// Time to expiry never below one day, so a term on the anchor evaluates.
-const MIN_DAYS: f64 = 1.0;
+/// Time to expiry never below half a day, so a term on the anchor
+/// evaluates and still sits before a term the day after it.
+const MIN_DAYS: f64 = 0.5;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DemoVolModel;
@@ -74,8 +75,14 @@ fn positive(x: f64) -> bool {
     x.is_finite() && x > 0.0
 }
 
+/// Days over 365, with every date on or before the anchor at
+/// `MIN_DAYS`: order-preserving from the anchor onwards (0 days is half
+/// a day, 1 day is one day), while terms before the anchor collapse and
+/// are refused by `Surface::read` as coincident.
 fn year_fraction(anchor: NaiveDate, date: NaiveDate) -> f64 {
-    ((date - anchor).num_days() as f64).max(MIN_DAYS) / 365.0
+    let days = (date - anchor).num_days();
+    let days = if days <= 0 { MIN_DAYS } else { days as f64 };
+    days / 365.0
 }
 
 impl Surface {
@@ -129,6 +136,12 @@ impl Surface {
         let mut out = Vec::with_capacity(dates.len());
         for date in dates {
             let rows: Vec<usize> = (0..n).filter(|i| terms[*i] == date).collect();
+            // Strike F(1+k) is non-positive at k <= -1.
+            if rows.iter().any(|&i| nodes[i] <= -100.0) {
+                return Err(VolError(format!(
+                    "{KIND} document term {date} has a node at or below -100%"
+                )));
+            }
             let first = rows[0];
             let (forward, atm, skew) = (forwards[first], atms[first], skews[first]);
             let mut knots: Vec<(f64, f64)> = rows
@@ -163,9 +176,9 @@ impl Surface {
                 k_max: ks[ks.len() - 1],
             });
         }
-        // Distinct dates can floor to the same year fraction (a term on
-        // the anchor and the day after); interpolating between them would
-        // divide by zero, so refuse the document up front.
+        // Distinct dates can floor to the same year fraction (two terms
+        // before the anchor); interpolating between them would divide by
+        // zero, so refuse the document up front.
         if let Some(pair) = out.windows(2).find(|w| w[1].t <= w[0].t) {
             return Err(VolError(format!(
                 "{KIND} document terms {} and {} are not distinct in time",
@@ -273,6 +286,13 @@ impl VolModel for DemoVolModel {
     fn slice(&self, doc: &DocumentRows, req: &SliceRequest) -> Result<SliceResult, VolError> {
         let curve = Surface::read(doc)?.curve_at(req.expiry)?;
         let strikes = curve.strikes(&req.grid)?;
+        // The second difference below assumes a strike step that is
+        // positive between neighbours; a dense grid always ascends.
+        if req.density && strikes.windows(2).any(|w| w[1] <= w[0]) {
+            return Err(VolError(
+                "density needs strictly ascending strikes".to_string(),
+            ));
+        }
         let points: Vec<SlicePoint> = strikes
             .iter()
             .map(|&strike| {
@@ -747,23 +767,94 @@ pub(crate) mod tests {
 
     #[test]
     fn terms_that_share_a_year_fraction_are_refused() {
-        // Both terms floor to one day, so interpolating between them would
-        // divide by zero; the document is refused naming the pair.
+        // Both terms fall before the anchor and floor to half a day, so
+        // interpolating between them would divide by zero; the document
+        // is refused naming the pair.
+        let doc = cvi_doc(
+            "2026-09-01",
+            &[
+                ("2026-08-30", 100.0, 0.2, 0.0),
+                ("2026-08-31", 100.0, 0.2, 0.0),
+            ],
+            |_, _| 0.0,
+        );
+        let err = DemoVolModel
+            .slice(&doc, &at("2026-08-30", &[100.0]))
+            .unwrap_err();
+        assert_eq!(
+            err.0,
+            "cvi_params document terms 2026-08-30 and 2026-08-31 are not distinct in time"
+        );
+    }
+
+    #[test]
+    fn an_anchor_day_and_next_day_term_still_slice_the_far_term() {
+        // Daily expiries (0DTE, 1DTE) are ordinary desk data: a term on
+        // the anchor and the day after keep distinct times, so the
+        // document reads and every term still slices.
         let doc = cvi_doc(
             "2026-09-01",
             &[
                 ("2026-09-01", 100.0, 0.2, 0.0),
                 ("2026-09-02", 100.0, 0.2, 0.0),
+                ("2026-10-01", 100.0, 0.2, 0.0),
             ],
             |_, _| 0.0,
         );
-        let err = DemoVolModel
+        let r = DemoVolModel
+            .slice(&doc, &at("2026-10-01", &[100.0]))
+            .unwrap();
+        assert!((r.points[0].vol - 0.2).abs() < 1e-12, "{}", r.points[0].vol);
+        let r = DemoVolModel
+            .slice(&doc, &at("2026-09-15", &[100.0]))
+            .unwrap();
+        assert!((r.points[0].vol - 0.2).abs() < 1e-12, "{}", r.points[0].vol);
+        let r = DemoVolModel
             .slice(&doc, &at("2026-09-01", &[100.0]))
-            .unwrap_err();
-        assert_eq!(
-            err.0,
-            "cvi_params document terms 2026-09-01 and 2026-09-02 are not distinct in time"
-        );
+            .unwrap();
+        assert!((r.points[0].vol - 0.2).abs() < 1e-12, "{}", r.points[0].vol);
+    }
+
+    #[test]
+    fn a_node_at_or_below_minus_one_hundred_is_refused() {
+        // Strike F(1+k) is non-positive at k <= -1, so the term is refused.
+        for bad in [-100.0, -150.0] {
+            let mut doc = flat(0.2);
+            if let Some((_, Column::F64(nodes))) = doc.axes.iter_mut().find(|(n, _)| n == "node") {
+                nodes[NODES.len()] = bad; // the second term's first node
+            }
+            let err = DemoVolModel
+                .slice(&doc, &at("2026-10-16", &[100.0]))
+                .unwrap_err();
+            assert_eq!(
+                err.0,
+                "cvi_params document term 2027-04-16 has a node at or below -100%"
+            );
+        }
+    }
+
+    #[test]
+    fn density_on_strikes_not_strictly_ascending_is_refused() {
+        let doc = flat(0.2);
+        for strikes in [vec![90.0, 110.0, 100.0], vec![90.0, 100.0, 100.0, 110.0]] {
+            let err = DemoVolModel
+                .slice(
+                    &doc,
+                    &SliceRequest {
+                        expiry: date("2026-10-16"),
+                        coordinate: Coordinate::Strike,
+                        grid: Grid::At(strikes.clone()),
+                        density: true,
+                    },
+                )
+                .unwrap_err();
+            assert_eq!(err.0, "density needs strictly ascending strikes");
+            // Without density the same grid evaluates.
+            let r = DemoVolModel
+                .slice(&doc, &at("2026-10-16", &strikes))
+                .unwrap();
+            assert_eq!(r.points.len(), strikes.len());
+        }
     }
 
     #[test]
