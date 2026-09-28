@@ -253,12 +253,16 @@ impl BlotterTile {
             .or_else(|| {
                 // Without a valid restored view, use the explicit default, then the
                 // first configured view. `ViewSpec::from_doc` orders that fallback
-                // by name when no default is set.
+                // by name when no default is set. Both arms skip a computed
+                // view: the merged list holds the pricer's views beside the
+                // blotter's, and one of those sorting first must not become
+                // the view a fresh tile opens on and refuses.
                 let views = views.borrow();
+                let schema = schema.borrow();
                 views
                     .iter()
-                    .find(|v| v.is_default)
-                    .or_else(|| views.first())
+                    .find(|v| v.is_default && showable_in(&schema, v))
+                    .or_else(|| views.iter().find(|v| showable_in(&schema, v)))
                     .map(|v| v.name.clone())
             })
             .unwrap_or_default();
@@ -706,6 +710,10 @@ impl BlotterTile {
                 "view '{}' is not configured",
                 self.view_name
             )));
+            // No query goes out, so no delivery will ever consume a
+            // refusal pending from the record; the unconfigured view is
+            // the tile's whole story now.
+            self.restored_view_refusal = None;
             let versions = self.versions(cx);
             self.following.begin(versions, Instant::now());
             let key = QueryKey(self.tile.0);
@@ -1311,6 +1319,10 @@ impl BlotterTile {
                         return Err(computed_view_refusal(view));
                     }
                 }
+                // A refusal still pending from the session record is about
+                // the record's view, not this one: the new view's first
+                // snapshot must not raise it.
+                self.restored_view_refusal = None;
                 self.view_name = name;
                 // Another view is another column set: its fitted widths
                 // would name columns that may mean something else there.
@@ -2335,16 +2347,104 @@ mod tests {
         assert_eq!(state["view"].as_str(), Some("wide"));
     }
 
-    /// One blotter view over `d` beside one over the computed `pricer`
-    /// dataset, as `views.toml` holds them side by side in the real app.
-    fn tree_and_vanilla() -> Vec<ViewSpec> {
-        let text = "[tree]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n[[tree.columns]]\nname = \"delta01\"\n\
-                    [vanilla]\ndataset = \"pricer\"\n[[vanilla.columns]]\nname = \"npv\"\n";
+    /// Views parsed from one builtin `views` layer, for the fixtures that
+    /// mix the blotter's views with ones over the computed `pricer`.
+    fn views_from(text: &str) -> Vec<ViewSpec> {
         ViewSpec::from_doc(&merge_docs(
             "views",
             &[LayerDoc::builtin("views", text).unwrap()],
         ))
         .0
+    }
+
+    /// One blotter view over `d` beside one over the computed `pricer`
+    /// dataset, as `views.toml` holds them side by side in the real app.
+    fn tree_and_vanilla() -> Vec<ViewSpec> {
+        views_from(
+            "[tree]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n[[tree.columns]]\nname = \"delta01\"\n\
+             [vanilla]\ndataset = \"pricer\"\n[[vanilla.columns]]\nname = \"npv\"\n",
+        )
+    }
+
+    /// A computed view that sorts before every blotter view, with no
+    /// `default`: the shape the shipped configuration has, where the
+    /// pricer's `barrier` sorts before the demo's `tree`.
+    fn apricot_and_tree() -> Vec<ViewSpec> {
+        views_from(
+            "[apricot]\ndataset = \"pricer\"\n[[apricot.columns]]\nname = \"npv\"\n\
+             [tree]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n[[tree.columns]]\nname = \"delta01\"\n",
+        )
+    }
+
+    /// The first-configured fallback skips a computed view, or a fresh
+    /// tile would open on a view the blotter itself refuses.
+    #[gpui::test]
+    fn a_fresh_tile_skips_a_computed_view_that_sorts_first(cx: &mut gpui::TestAppContext) {
+        let (h, vcx) = open_with_views(cx, None, apricot_and_tree());
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.view_name.clone()), "tree");
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.error_text()), None);
+    }
+
+    /// A record naming the computed view that sorts first falls back past
+    /// it to the first blotter view, with the refusal as its notice.
+    #[gpui::test]
+    fn restoring_a_computed_view_that_sorts_first_falls_back_past_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let restored: toml::Table = "view = \"apricot\"".parse().unwrap();
+        let (h, vcx) = open_with_views(cx, Some(&restored), apricot_and_tree());
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.view_name.clone()), "tree");
+        let notice = h
+            .tile
+            .read_with(&vcx, |t, _| t.error_text())
+            .expect("the fallback carries a notice");
+        assert!(notice.contains("computed dataset 'pricer'"), "{notice}");
+    }
+
+    /// Switching views while the fallback's first query is still out
+    /// drops the pending refusal: it was about the record, and the new
+    /// view's first snapshot answers the trader, not the record.
+    #[gpui::test]
+    fn a_view_switch_drops_the_pending_restore_refusal(cx: &mut gpui::TestAppContext) {
+        let restored: toml::Table = "view = \"vanilla\"".parse().unwrap();
+        let views = views_from(
+            "[tree]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n[[tree.columns]]\nname = \"delta01\"\n\
+             [vanilla]\ndataset = \"pricer\"\n[[vanilla.columns]]\nname = \"npv\"\n\
+             [wide]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n[[wide.columns]]\nname = \"delta01\"\n",
+        );
+        let (h, mut vcx) = open_with_views(cx, Some(&restored), views);
+        h.tile.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        let _first = next_query(&h.requests);
+        h.tile.update_in(&mut vcx, |t, window, cx| {
+            t.command("view wide", window, cx).unwrap()
+        });
+        let p = next_query(&h.requests);
+        deliver(&h, &mut vcx, p.tag, Ok(snapshot()));
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.error_text()),
+            None,
+            "the new view's first snapshot carries no refusal about the record"
+        );
+    }
+
+    /// With every configured view computed there is no fallback: the tile
+    /// reports the unconfigured view and nothing stays pending for a
+    /// delivery that can never come.
+    #[gpui::test]
+    fn an_all_computed_configuration_leaves_no_pending_refusal(cx: &mut gpui::TestAppContext) {
+        let restored: toml::Table = "view = \"vanilla\"".parse().unwrap();
+        let views =
+            views_from("[vanilla]\ndataset = \"pricer\"\n[[vanilla.columns]]\nname = \"npv\"\n");
+        let (h, mut vcx) = open_with_views(cx, Some(&restored), views);
+        h.tile.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.error_text()),
+            Some("view '' is not configured".into())
+        );
+        assert!(
+            h.tile
+                .read_with(&vcx, |t, _| t.restored_view_refusal.is_none())
+        );
     }
 
     /// A view over a computed dataset is a module's to answer: the blotter

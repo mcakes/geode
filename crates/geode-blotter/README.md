@@ -36,7 +36,8 @@ cargo bench -p geode-blotter   # the pure core
   is gone starts without them. A view over a computed dataset is never the
   blotter's: `:view` neither completes nor opens it, and a record naming one
   opens the fallback view with the refusal as its notice, held through the
-  fallback's first snapshot. `apply_snapshot` drops only the tree column's
+  fallback's first snapshot. The fallback (default, else first) skips
+  computed views as well. `apply_snapshot` drops only the tree column's
   width (key `""`) when the grouping differs from the plan's. That method is
   the one place every grouping change reaches the delegate. The session
   record keeps the widths under `column_widths`.

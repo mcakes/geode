@@ -117,7 +117,9 @@ default widths. Each tile runs one method for both doors.
   with `view '<name>' is over computed dataset '<dataset>', which a module
   answers for; the blotter cannot show it`; a record naming one opens the
   fallback view with that refusal as its notice, which outlives the fallback
-  view's first snapshot. A grouping change drops the tree column's fitted
+  view's first snapshot. The fallback (the explicit default, else the first
+  configured view) skips computed views too, so a fresh tile never opens on
+  one that sorts first. A grouping change drops the tree column's fitted
   width, because its labels and depths belong to the grouping, and keeps the
   other columns' widths.
 - **Fitted beats configured.** A fitted width overrides the configured one,
