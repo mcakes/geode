@@ -2837,6 +2837,76 @@ run_mutation "edit column: the blotter reports the tree column as active" \
   geode-blotter \
   the_tree_column_is_no_active_column
 
+run_mutation "column inherit: the overlay's keys are not read as set" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '            keys.set(key, sets(p, key));' \
+  '            keys.set(key, false);' \
+  geode-shell \
+  presentation_keys_read_presence_not_value
+
+run_mutation "column inherit: the writer writes an inherited key" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '    if set.has("scale")' \
+  '    if true' \
+  geode-shell \
+  an_inherited_field_equal_or_not_writes_nothing
+
+run_mutation "column inherit: choosing the inherited option does not pin" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        set.set(&key, true);' \
+  '        set.set(&key, was);' \
+  geode-shell \
+  choosing_the_inherited_option_pins_it
+
+run_mutation "column inherit: r does not unset the key" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        set.set(key, false);
+        Ok(Fold { key, to })' \
+  '        Ok(Fold { key, to })' \
+  geode-shell \
+  r_inherits_a_set_view_color_and_the_key_leaves_the_overlay
+
+run_mutation "column inherit: a set-only change is not a write" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            || self.presentation_set != self.baseline_presentation_set' \
+  '            || false' \
+  geode-shell \
+  r_on_a_pinned_equal_value_removes_the_key
+
+run_mutation "column inherit: the ↺ click reaches nothing" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                                                on_inherit_clicked(shell, position, window, cx);' \
+  '                                                let _ = (shell, position, window);' \
+  geode-shell \
+  the_inherit_control_does_what_r_does
+
+run_mutation "column inherit: shift+r is not routed in the column stage" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  "        NormalCommand::Verb('R') if in_column_stage(shell) => inherit_all_rows(shell, cx)," \
+  "" \
+  geode-shell \
+  shift_r_inherits_every_field
+
+run_mutation "column inherit: a Schema column opens with nothing set" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '            draft
+                .presentation_set
+                .entry(column.to_string())
+                .or_insert(keys);' \
+  '            draft
+                .presentation_set
+                .entry(column.to_string())
+                .or_default();' \
+  geode-shell \
+  a_schema_column_keeps_its_overlay_keys_through_an_edit
+
+run_mutation "column inherit: a stale overlay entry seeds a pin" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '                .filter(|(name, _)| members.iter().any(|c| c.name() == name.as_str()))' \
+  '                .filter(|_| true)' \
+  geode-shell \
+  an_overlay_entry_for_a_column_the_view_lacks_seeds_nothing
+
 run_mutation "dialog stack: every chord reaches through a dialog" \
   crates/geode-shell/src/shell/input.rs \
   '                        && dialog::opens_dialog(&action)' \
@@ -5507,14 +5577,13 @@ run_mutation "views: a presentation save pins the desk's column order" \
   geode-shell \
   a_presentation_save_writes_only_what_the_trader_changed
 
-# Write a width override only when it differs from the desk baseline.
-# The fixture declares a desk width and edits another setting so copying
-# the unchanged width becomes observable. The width-specific anchor
-# isolates this check from the precision-based shared overlay entry.
+# Write a width only when the view overlay sets it. The fixture declares a
+# desk width and edits another setting, so writing the inherited width
+# becomes observable.
 run_mutation "views: a presentation save copies the desk's widths into the user's file" \
   crates/geode-shell/src/shell/objectdialog/views.rs \
-  '        if item.presentation.width != below.width {' \
-  '        if true {' \
+  '    if set.has("width")' \
+  '    if true' \
   geode-shell \
   a_presentation_save_writes_only_what_the_trader_changed
 
@@ -7655,12 +7724,9 @@ run_mutation "objectdialog: o asks before forking a desk-owned scope" \
 
 run_mutation "objectdialog: is_dirty ignores a source-only change" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '    pub fn is_dirty(&self) -> bool {
-        self.fields != self.baseline || self.source != self.baseline_source
-    }' \
-  '    pub fn is_dirty(&self) -> bool {
-        self.fields != self.baseline
-    }' \
+  '        self.fields != self.baseline
+            || self.source != self.baseline_source' \
+  '        self.fields != self.baseline' \
   geode-shell overwrite_with_is_seen_even_when_the_painted_summary_collides
 
 run_mutation "objectdialog: writes_by_destination ignores a source-only change" \
@@ -10938,26 +11004,6 @@ run_mutation "objectdialog: a wrapping number wraps" \
   geode-shell \
   a_number_steps_by_its_step_and_wraps_only_when_asked
 
-# The presentation writer omits a key equal to the desk baseline. Both
-# sides resolve through the column kind's default before comparison.
-run_mutation "views: the overlay writer omits keys equal to the desk" \
-  crates/geode-shell/src/shell/objectdialog/views.rs \
-  '        if effective.precision != below_format.precision {' \
-  '        if effective.precision != below_format.precision || true {' \
-  geode-shell \
-  the_writer_emits_only_keys_that_differ_from_the_desk
-
-# The baseline is the kind default WITH THE DESK'S OWN KEYS over
-# it — drop the desk half and every key the desk declares reads as a
-# personalisation and is copied into the trader's overlay, which is the
-# freeze the whole comparison exists to prevent.
-run_mutation "views: the writer's baseline carries the desk's own format keys" \
-  crates/geode-shell/src/shell/objectdialog/views.rs \
-  '        let below_format = kind.clone().with(&below);' \
-  '        let below_format = kind.clone();' \
-  geode-shell \
-  the_writer_emits_only_keys_that_differ_from_the_desk
-
 # A demoted column writes `hidden = true` in its `[columns.<name>]`
 # table. Making the guard unconditional hides every column with a
 # presentation entry, regardless of membership.
@@ -10997,8 +11043,8 @@ run_mutation "objectdialog: the list verbs name the column stage" \
 # back on the next rebuild with the trader's clear gone.
 run_mutation "views: clearing a desk-set key restores the desk's value" \
   crates/geode-shell/src/shell/objectdialog/views.rs \
-  '                    below.label.clone()' \
-  '                    None' \
+  '                "label" => p.label = below.label.clone(),' \
+  '                "label" => p.label = None,' \
   geode-shell \
   clearing_a_desk_label_falls_back_to_the_desk
 
@@ -11252,18 +11298,12 @@ run_mutation "blotter: the colour cache resolves the sign variants" \
   geode-blotter \
   a_tinted_definition_resolves_three_variants_and_an_untinted_one_three_of_the_base
 
-run_mutation "objectdialog: d and r are refused in the column stage" \
+run_mutation "objectdialog: r inherits in the column stage" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    if in_column_stage(shell) {
-        not_a_column_verb(shell, "r");
-        return;
-    }' \
-  '    if false {
-        not_a_column_verb(shell, "r");
-        return;
-    }' \
+  "        NormalCommand::Verb('r') if in_column_stage(shell) => inherit_row(shell, cx)," \
+  "" \
   geode-shell \
-  delete_and_revert_are_refused_in_the_column_stage
+  delete_is_refused_and_r_inherits_in_the_column_stage
 
 run_mutation "objectdialog: enter_column refuses re-entry" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
@@ -11370,25 +11410,23 @@ run_mutation "objectdialog: Schema's column stage is its one writable surface" \
   geode-shell \
   schema_is_writable_in_the_column_stage_alone
 
-# Stepping a view field immediately reports the view layer, including during
-# the write debounce.
-run_mutation "objectdialog: a diverged field's provenance is the view level" \
+# A field set at the view level reads the view layer, even when its value
+# equals the layer below.
+run_mutation "objectdialog: a set field's provenance is the view level" \
   crates/geode-shell/src/shell/objectdialog/dataset_columns.rs \
-  '            if differs_from(below) {' \
-  '            if false {' \
+  '        ColumnDoor::View if inputs.set.has(key) => Some(Provenance::View),' \
+  '' \
   geode-shell \
-  a_stepped_field_reads_view_before_its_write_lands
+  a_set_field_reads_view_even_when_equal_to_its_parent
 
 # Clearing a view key reports the layer it falls back to: dataset before
 # desk.
 run_mutation "objectdialog: a cleared view key falls to the dataset level before the desk" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '                if set(&layers.dataset) {
-                    Some(FellTo::Dataset)
-                } else if set(&layers.desk) {' \
-  '                if set(&layers.desk) {
-                    Some(FellTo::Desk)
-                } else if set(&layers.dataset) {' \
+  '            ColumnDoor::View if views::sets(&ctx.layers.dataset, key) => FellTo::Dataset,
+            ColumnDoor::View if views::sets(&ctx.layers.desk, key) => FellTo::Desk,' \
+  '            ColumnDoor::View if views::sets(&ctx.layers.desk, key) => FellTo::Desk,
+            ColumnDoor::View if views::sets(&ctx.layers.dataset, key) => FellTo::Dataset,' \
   geode-shell \
   a_cleared_view_key_falls_to_the_dataset_level_before_the_desk
 
@@ -11398,7 +11436,7 @@ run_mutation "dataset_columns: the writer keeps the other columns' tables" \
   '            if name != open' \
   '            if false' \
   geode-shell \
-  the_writer_keeps_other_columns_verbatim_and_emits_only_keys_off_the_kind_default
+  schema_writer_keeps_other_columns_and_writes_only_set_keys
 
 # Remove an empty overlay object instead of writing a bare dataset table.
 run_mutation "objectdialog: an empty dataset-overlay object is removed" \
@@ -11474,16 +11512,6 @@ run_mutation "dataset_columns: a key column's kind falls back on its type" \
   geode-shell \
   a_key_column_takes_the_text_kind_from_its_type
 
-# View writes compare against desk plus dataset settings. Comparing only
-# against the desk copies dataset values into view overrides and prevents
-# later dataset edits from taking effect.
-run_mutation "views: the overlay writer's baseline includes the dataset level" \
-  crates/geode-shell/src/shell/objectdialog/views.rs \
-  '    let baseline = baseline_below(draft);' \
-  '    let baseline = desk_baseline(draft);' \
-  geode-shell \
-  a_view_field_equal_to_the_dataset_level_writes_nothing
-
 # Look up dataset presentation by the column's owner, including a joined
 # dataset. Using only the view's primary dataset loses joined-column
 # settings.
@@ -11494,13 +11522,12 @@ run_mutation "views: the dataset layer follows the column's owning dataset" \
   geode-shell \
   a_joined_columns_dataset_layer_comes_from_the_join
 
-# A cleared-key notice compares against the item's own pre-fold value.
-# Without that guard, untouched empty fields can overwrite the notice for
-# the key that actually changed.
+# A released-key notice fires only for a key that was set. Without that
+# guard, an already-inherited empty label reports a release it never made.
 run_mutation "views: a clear is what this keystroke emptied" \
   crates/geode-shell/src/shell/objectdialog/views.rs \
-  '                    if item.presentation.label.is_some() {' \
-  '                    if true {' \
+  '        if set.has(key) {' \
+  '        if true {' \
   geode-shell \
   clearing_a_desk_label_falls_back_to_the_desk
 
@@ -12241,6 +12268,29 @@ run_mutation "mdbulk: a refusing member is counted" \
   geode-marketdata \
   a_flat_block_commit_skips_cells_that_refuse_and_counts_them
 
+# An untouched `enter` over a selection writes nothing: without the guard
+# a no-op gesture copies the cursor cell's text across the selection.
+run_mutation "mdbulk: an untouched text commit over a selection writes nothing" \
+  crates/geode-marketdata/src/tile.rs \
+  '                if self.selection.is_some() && text == editing.opened {' \
+  '                if false && text == editing.opened {' \
+  geode-marketdata \
+  an_untouched_commit_on_a_text_cell_writes_nothing
+
+run_mutation "mdbulk: an untouched date commit over a selection writes nothing" \
+  crates/geode-marketdata/src/tile.rs \
+  '                    if !editing.typed && text == editing.opened {' \
+  '                    if false && text == editing.opened {' \
+  geode-marketdata \
+  an_untouched_date_commit_over_a_selection_writes_nothing
+
+run_mutation "mdbulk: enter on the choice the cell holds writes nothing over a selection" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.selection.is_some() && option == c.opened {' \
+  '        if false && option == c.opened {' \
+  geode-marketdata \
+  an_untouched_choice_commit_over_a_selection_writes_nothing
+
 # A block covers columns only partly, so `d` there refuses rather than
 # deleting every row it touches. Mutated so the guard fires on `Rows`
 # instead, `d` over a block deletes whole rows the trader never selected.
@@ -12322,21 +12372,6 @@ run_mutation "mdstep: a restore needs the steps to be the last draft change" \
   '        if !bulk.stepped {' \
   geode-marketdata \
   escape_after_a_revert_mid_step_leaves_the_draft_reverted
-
-# Only a number cursor cell opens a stepping editor; a text or date cursor
-# cell commits absolutely. Mutated so any text-editor cell carries a
-# `bulk`, an untouched `enter` on a text cell reads as "keep the steps"
-# and writes nothing.
-run_mutation "mdstep: only a number cursor cell steps live" \
-  crates/geode-marketdata/src/tile.rs \
-  '            && matches!(
-                target,
-                EditTarget::Cell { cell: (_, col), .. }
-                    if matches!(self.model.kind_of(col), Some(CellKind::Number(_)))
-            ))' \
-  '            && matches!(target, EditTarget::Cell { .. }))' \
-  geode-marketdata \
-  an_untouched_commit_on_a_text_cell_writes_the_seed_to_every_accepting_cell
 
 # A selection edit opens only on a member cell. Mutated away, `i` on a
 # slice value inside a row selection opens an editor whose typed value and
@@ -16776,10 +16811,10 @@ run_mutation "pricer sheets: a failed save after :name forgets the old document"
 
 run_mutation "pricer sheets: :name renames a sheet whose load failed" \
   crates/geode-pricer/src/tile.rs \
-  '        if self.save_blocked {
-            // The sheet shown is the fallback' \
-  '        if false {
-            // The sheet shown is the fallback' \
+  '        } else if self.save_blocked {
+            Some(RenameBlock::NotLoaded)' \
+  '        } else if false {
+            Some(RenameBlock::NotLoaded)' \
   geode-pricer colon_name_refuses_a_sheet_that_did_not_load
 
 run_mutation "pricer sheets: :name takes a known name" \
@@ -16814,18 +16849,14 @@ run_mutation "pricer rm: an unknown name arms the confirm" \
 
 run_mutation "pricer rm: any key confirms" \
   crates/geode-tile/src/confirm.rs \
-  '    if ks.key == "y" && !ks.modifiers.modified() {
-        host.confirmed(payload, window, cx);' \
-  '    if true {
-        host.confirmed(payload, window, cx);' \
+  '    answer(host, ks.key == "y" && !ks.modifiers.modified(), window, cx)' \
+  '    answer(host, true, window, cx)' \
   geode-pricer any_other_key_cancels_the_rm_confirm_and_is_consumed
 
 run_mutation "pricer rm: a modified y confirms" \
   crates/geode-tile/src/confirm.rs \
-  '    if ks.key == "y" && !ks.modifiers.modified() {
-        host.confirmed(payload, window, cx);' \
-  '    if ks.key == "y" {
-        host.confirmed(payload, window, cx);' \
+  '    answer(host, ks.key == "y" && !ks.modifiers.modified(), window, cx)' \
+  '    answer(host, ks.key == "y", window, cx)' \
   geode-pricer any_other_key_cancels_the_rm_confirm_and_is_consumed
 
 run_mutation "pricer rm: y forgets nothing" \
@@ -16836,8 +16867,10 @@ run_mutation "pricer rm: y forgets nothing" \
 
 run_mutation "pricer rm: the confirm is not insert mode" \
   crates/geode-pricer/src/tile.rs \
-  '        if self.confirm.is_some() || self.entry.is_some() || self.editor.is_some() {' \
-  '        if self.entry.is_some() || self.editor.is_some() {' \
+  '        if self.confirm.is_some()
+            || self.entry.is_some()' \
+  '        if false
+            || self.entry.is_some()' \
   geode-pricer colon_rm_asks_and_y_forgets
 
 run_mutation "pricer rm: focus leaving leaves the question standing" \
@@ -16850,8 +16883,10 @@ run_mutation "pricer rm: focus leaving leaves the question standing" \
 
 run_mutation "pricer rm: a pointer press leaves the question standing" \
   crates/geode-tile/src/confirm.rs \
-  '            tile.update(cx, |t, cx| cancel(t, window, cx));' \
-  '            let _ = (&tile, window, cx);' \
+  '                if !on_a_button {
+                    cancel(t, window, cx);
+                }' \
+  '                let _ = (on_a_button, window);' \
   geode-pricer focus_leaving_or_a_pointer_press_cancels_the_rm_confirm
 
 run_mutation "pricer rm: the confirm drops still focused" \
@@ -16883,10 +16918,10 @@ run_mutation "pricer retiring: :e opens a sheet being removed" \
 
 run_mutation "pricer retiring: :name takes a name being removed" \
   crates/geode-pricer/src/tile.rs \
-  '            return Err("the last rename is not saved yet".into());
+  '            return Err(why);
         }
         self.shared.refuse_retiring(&name)?;' \
-  '            return Err("the last rename is not saved yet".into());
+  '            return Err(why);
         }' \
   geode-pricer a_retiring_name_is_reserved_until_its_forget_is_answered
 
@@ -18609,9 +18644,9 @@ run_mutation "panel: upload refused while Behind" \
 # keymap.
 run_mutation "panel: the confirm consumes a non-y key" \
   crates/geode-tile/src/confirm.rs \
-  '            if tile.update(cx, |t, cx| key(t, event, window, cx)) {
-                cx.stop_propagation();' \
-  '            if tile.update(cx, |t, cx| key(t, event, window, cx)) {' \
+  '                    if key_tile.update(cx, |t, cx| key(t, event, window, cx)) {
+                        cx.stop_propagation();' \
+  '                    if key_tile.update(cx, |t, cx| key(t, event, window, cx)) {' \
   geode-marketdata \
   any_other_key_cancels_the_confirm_and_is_consumed
 
@@ -19265,11 +19300,11 @@ run_mutation "pricer entry bar: a chevron press that closes the bar hands off no
 # leg is hidden and the cursor names a row the model does not paint.
 run_mutation "pricer entry bar: o on a closed package leaves it closed" \
   crates/geode-pricer/src/tile.rs \
-  '        let place = place_for(&self.sheet, self.cursor_sheet_row(), true);
+  '        let place = place_for(&self.sheet, self.cursor_sheet_row(), below);
         if let Place::Leg { package, .. } = place {
             self.expansion.set(self.sheet.id(package), true);
         }' \
-  '        let place = place_for(&self.sheet, self.cursor_sheet_row(), true);' \
+  '        let place = place_for(&self.sheet, self.cursor_sheet_row(), below);' \
   geode-pricer o_on_a_closed_package_opens_it_and_lands_on_its_first_leg
 
 # The palette's commit focuses the shell root before it dispatches
@@ -19411,8 +19446,8 @@ run_mutation "objectdialog: a click lands on a row the keyboard cannot reach" \
 # text input rather than invoking shell bindings such as tile duplication.
 run_mutation "pricer tile: the entry field is not insert mode" \
   crates/geode-pricer/src/tile.rs \
-  '        if self.confirm.is_some() || self.entry.is_some() || self.editor.is_some() {' \
-  '        if self.confirm.is_some() || self.editor.is_some() {' \
+  '            || self.entry.is_some()' \
+  '            || false' \
   geode-app \
   typing_into_the_pricer_entry_field_fires_no_shell_binding
 
@@ -20281,9 +20316,9 @@ run_mutation "pricer rm: a sheet open in another tile arms the confirm" \
 # Every key under the armed confirm is the confirm's alone.
 run_mutation "pricer rm: a key under the confirm reaches the tile too" \
   crates/geode-tile/src/confirm.rs \
-  '            if tile.update(cx, |t, cx| key(t, event, window, cx)) {
-                cx.stop_propagation();' \
-  '            if tile.update(cx, |t, cx| key(t, event, window, cx)) {' \
+  '                    if key_tile.update(cx, |t, cx| key(t, event, window, cx)) {
+                        cx.stop_propagation();' \
+  '                    if key_tile.update(cx, |t, cx| key(t, event, window, cx)) {' \
   geode-app a_key_answering_the_rm_confirm_reaches_nothing_else
 
 # Override the table's Escape action so it reaches the tile and cancels an
@@ -20300,11 +20335,26 @@ run_mutation "pricer init: DataTable keeps its own escape" \
 # field instead of completing.
 run_mutation "pricer init: the entry bar does not reclaim tab" \
   crates/geode-pricer/src/lib.rs \
-  '        ["tab", "shift-tab"]
-            .map(|key| gpui::KeyBinding::new(key, gpui::NoAction, Some(header::ENTRY_CONTEXT))),' \
-  '        ["f24"]
-            .map(|key| gpui::KeyBinding::new(key, gpui::NoAction, Some(header::ENTRY_CONTEXT))),' \
+  '        header::ENTRY_CONTEXT,
+        popup::SHEET_PICKER_CONTEXT,' \
+  '        popup::SHEET_PICKER_CONTEXT,' \
   geode-pricer tab_writes_the_lit_underlying_and_cycles
+
+run_mutation "pricer init: the sheet picker does not reclaim tab" \
+  crates/geode-pricer/src/lib.rs \
+  '        popup::SHEET_PICKER_CONTEXT,
+        header::RENAME_CONTEXT,' \
+  '        header::RENAME_CONTEXT,' \
+  geode-pricer the_picker_steps_completes_commits_and_escape_closes
+
+# Unreclaimed, `tab` in the rename field is gpui-component's focus cycling:
+# the keyboard leaves the field while it stays open in insert mode.
+run_mutation "pricer init: the rename field does not reclaim tab" \
+  crates/geode-pricer/src/lib.rs \
+  '        header::RENAME_CONTEXT,
+    ] {' \
+  '    ] {' \
+  geode-pricer tab_in_the_rename_field_keeps_the_keyboard_in_it
 
 # An empty hint must keep its row, or the table jumps as the caret enters
 # the last slot.
@@ -20710,8 +20760,8 @@ run_mutation "pricer date field: escape leaves the tenor" \
 # shell's bindings.
 run_mutation "pricer date field: insert mode while it is open" \
   crates/geode-pricer/src/tile.rs \
-  '        if self.confirm.is_some() || self.entry.is_some() || self.editor.is_some() {' \
-  '        if self.confirm.is_some() || self.entry.is_some() || self.editor.as_ref().is_some_and(|e| e.input().is_some()) {' \
+  '            || self.editor.is_some()' \
+  '            || self.editor.as_ref().is_some_and(|e| e.input().is_some())' \
   geode-app typing_into_the_pricer_date_field_fires_no_shell_binding
 
 # The date field's own focus handle counts as the tile holding focus
@@ -21875,6 +21925,21 @@ run_mutation "pricer entry bar: a history step leaves the list stale" \
   $'        // `set_value` emits no Change: the recalled line re-ranks here.\n        self.refresh_entry_completion(cx);' \
   '' \
   geode-pricer up_walks_history_with_the_list_open_and_the_list_follows
+
+# `shift+o` opens the bar on the place ABOVE the cursor row. Mutated to
+# always pass below, `O` lands its first line under the row instead.
+run_mutation "pricer entry bar: shift+o lands below the cursor row" \
+  crates/geode-pricer/src/tile.rs \
+  '        let place = place_for(&self.sheet, self.cursor_sheet_row(), below);' \
+  '        let place = place_for(&self.sheet, self.cursor_sheet_row(), true);' \
+  geode-pricer shift_o_lands_above_the_cursor_row_and_continues_below_what_landed
+
+# Above the first row is the top of the sheet, not its end.
+run_mutation "pricer entry bar: above the first row reads at end" \
+  crates/geode-pricer/src/core/entry.rs \
+  '        Place::Root { at: 0 } => "at top".to_string(),' \
+  '        Place::Root { at: 0 } => "at end".to_string(),' \
+  geode-pricer shift_o_on_the_first_row_lands_at_the_top
 
 # ---- containment and liveness
 
@@ -23147,6 +23212,193 @@ run_mutation "session_io: the quit save carries pinned lanes" \
             &session::PinnedRecords::new(),' \
   geode-shell a_pinned_lane_reaches_both_session_writes_and_an_unpin_drops_it
 
+# ---- Pricer sheets by pointer (2026-09-27) ----
+
+# The sheet picker's filter and the rename field put the tile in
+# `mode == insert`, and their focus counts as the tile holding focus: the
+# shell's two insert conditions. Mutated, a capital typed into either runs
+# a shell binding (shift+d duplicates the tile).
+run_mutation "pricer sheets: the picker is not insert mode" \
+  crates/geode-pricer/src/tile.rs \
+  '            || self.sheet_picker.is_some()' \
+  '            || false' \
+  geode-app typing_into_the_pricer_sheet_picker_and_rename_field_fires_no_shell_binding
+
+run_mutation "pricer sheets: the rename field is not insert mode" \
+  crates/geode-pricer/src/tile.rs \
+  '            || self.rename_field.is_some()' \
+  '            || false' \
+  geode-app typing_into_the_pricer_sheet_picker_and_rename_field_fires_no_shell_binding
+
+run_mutation "pricer sheets: a sheet field's focus is not the tile's" \
+  crates/geode-pricer/src/tile.rs \
+  '            .any(|i| i.read(cx).focus_handle(cx).is_focused(window));' \
+  '            .any(|_| false);' \
+  geode-app typing_into_the_pricer_sheet_picker_and_rename_field_fires_no_shell_binding
+
+# A press on the name must keep a focus-tracking ancestor from taking the
+# keyboard from the field it just focused (mouse-opened fields were deaf).
+run_mutation "pricer sheets: the name press lets an ancestor take focus" \
+  crates/geode-pricer/src/tile.rs \
+  '        window.prevent_default();' \
+  '        let _ = &window;' \
+  geode-app typing_into_the_pricer_sheet_picker_and_rename_field_fires_no_shell_binding
+
+# A double-click renames only when both its presses reached the name.
+run_mutation "pricer sheets: a double-click renames whatever its first press hit" \
+  crates/geode-pricer/src/tile.rs \
+  '        let verb = if event.click_count >= 2 && follows_name {' \
+  '        let verb = if event.click_count >= 2 {' \
+  geode-pricer a_double_click_whose_first_press_missed_the_name_opens_the_picker
+
+run_mutation "pricer sheets: no press is remembered as the name's" \
+  crates/geode-pricer/src/tile.rs \
+  '        let follows_name = std::mem::replace(&mut self.last_press_on_name, true);' \
+  '        let follows_name = std::mem::replace(&mut self.last_press_on_name, false);' \
+  geode-pricer a_double_click_on_the_sheet_name_renames_in_place
+
+# A press on a surface painted over the tile (here its own picker) never
+# reaches a hover-gated listener; the name's outside-press listener still
+# hears it, so the next press on the name follows no press of it.
+run_mutation "pricer sheets: a press off the name is not heard" \
+  crates/geode-pricer/src/header.rs \
+  '                move |_, _, cx| tile.update(cx, |t, _| t.name_press_elsewhere())' \
+  '                move |_, _, _| {
+                    let _ = &tile;
+                }' \
+  geode-pricer a_double_click_whose_first_press_hit_the_picker_does_not_rename
+
+# A modified press on the name is the shell's (mod+drag, mod+double-click
+# fullscreen). Mutated, the pricer opens its picker and rename field too.
+run_mutation "pricer sheets: a modified press opens the picker" \
+  crates/geode-pricer/src/tile.rs \
+  '        if event.modifiers.modified() {' \
+  '        if false {' \
+  geode-app a_mod_double_click_on_the_pricer_sheet_name_fullscreens_and_opens_no_field
+
+# A click on the name with the picker open closes it; mutated, it reopens.
+run_mutation "pricer sheets: the name click does not toggle the picker" \
+  crates/geode-pricer/src/tile.rs \
+  '        } else if self.sheet_picker.is_some() {' \
+  '        } else if false {' \
+  geode-pricer the_sheet_name_toggles_the_picker_and_a_press_elsewhere_closes_it
+
+# A pick takes `:e`'s route, refusals included.
+run_mutation "pricer sheets: an open pick skips :e's refusals" \
+  crates/geode-pricer/src/tile.rs \
+  '            PickerPurpose::Open => self.edit_sheet(name, cx),' \
+  '            PickerPurpose::Open => self.switch_sheet(name, true, cx),' \
+  geode-pricer picking_a_sheet_open_elsewhere_refuses_like_colon_e
+
+run_mutation "pricer sheets: a remove pick opens the sheet" \
+  crates/geode-pricer/src/tile.rs \
+  '            PickerPurpose::Remove => self.arm_remove(name, window, cx),' \
+  '            PickerPurpose::Remove => self.edit_sheet(name, cx),' \
+  geode-pricer the_remove_picker_arms_colon_rms_confirm
+
+run_mutation "pricer sheets: tab does not complete the picker" \
+  crates/geode-pricer/src/tile.rs \
+  '        if p.list.complete() {' \
+  '        if false {' \
+  geode-pricer the_picker_steps_completes_commits_and_escape_closes
+
+run_mutation "pricer sheets: up and down do not step the picker" \
+  crates/geode-pricer/src/tile.rs \
+  '                    p.list.nav(NavCommand::Move(steps));' \
+  '                    let _ = steps;' \
+  geode-pricer the_picker_steps_completes_commits_and_escape_closes
+
+# The picker opens on the current sheet, so an `enter` straight away keeps it.
+run_mutation "pricer sheets: the picker opens on the first name" \
+  crates/geode-pricer/src/popup.rs \
+  '        list.place(current.as_deref());' \
+  '        let _ = current;' \
+  geode-pricer the_sheet_actions_dispatch_from_the_palette_and_close_other_fields
+
+run_mutation "pricer sheets: the current sheet is marked open elsewhere" \
+  crates/geode-pricer/src/popup.rs \
+  '            open_elsewhere: n != current && open.contains(n),' \
+  '            open_elsewhere: open.contains(n),' \
+  geode-pricer sheet_rows_list_known_and_held_names_once_sorted_with_their_marks
+
+# The rename field takes `:name`'s route and keeps itself open on a refusal.
+run_mutation "pricer sheets: the rename field skips :name's refusals" \
+  crates/geode-pricer/src/tile.rs \
+  '            Ok(Command::Name(name)) => self.rename(name, cx),' \
+  '            Ok(Command::Name(name)) => {
+                self.sheet.name = name;
+                Ok(())
+            }' \
+  geode-pricer a_refused_rename_keeps_the_field_and_escape_or_a_press_outside_cancels
+
+run_mutation "pricer sheets: a refused rename closes the field" \
+  crates/geode-pricer/src/tile.rs \
+  '            Ok(()) => self.close_rename_field(window, cx),' \
+  '            _ => self.close_rename_field(window, cx),' \
+  geode-pricer a_refused_rename_keeps_the_field_and_escape_or_a_press_outside_cancels
+
+run_mutation "pricer sheets: the menu's rename row is never greyed" \
+  crates/geode-pricer/src/tile.rs \
+  '                self.rename_block().map_or(Ok(()), |b| Err(b.reason())),' \
+  '                Ok(()),' \
+  geode-pricer a_blocked_rename_says_why_and_greys_its_menu_row
+
+run_mutation "pricer sheets: Remove sheet opens the open picker" \
+  crates/geode-pricer/src/tile.rs \
+  '            "remove_sheet" => self.open_sheet_picker(PickerPurpose::Remove, window, cx),' \
+  '            "remove_sheet" => self.open_sheet_picker(PickerPurpose::Open, window, cx),' \
+  geode-pricer the_menus_sheet_rows_open_rename_create_and_remove
+
+# The prompt's buttons: Yes is `y`, No any other key, and a press on
+# either does not cancel the question before the click lands.
+run_mutation "pricer sheets: the Yes button cancels" \
+  crates/geode-tile/src/confirm.rs \
+  '            tile.update(cx, |t, cx| answer(t, yes, window, cx));' \
+  '            tile.update(cx, |t, cx| answer(t, !yes, window, cx));' \
+  geode-pricer the_prompts_yes_button_removes_and_no_cancels
+
+run_mutation "tile confirm: the Yes button cancels" \
+  crates/geode-tile/src/confirm.rs \
+  '            tile.update(cx, |t, cx| answer(t, yes, window, cx));' \
+  '            tile.update(cx, |t, cx| answer(t, !yes, window, cx));' \
+  geode-tile the_yes_button_confirms_and_the_no_button_cancels
+
+run_mutation "panel: the upload Yes button cancels" \
+  crates/geode-tile/src/confirm.rs \
+  '            tile.update(cx, |t, cx| answer(t, yes, window, cx));' \
+  '            tile.update(cx, |t, cx| answer(t, !yes, window, cx));' \
+  geode-marketdata the_upload_confirms_yes_and_no_buttons_answer_it
+
+# A press on a button is the button's answer, not a cancel. Mutated, the
+# tile root's capture listener cancels the question before the click lands.
+run_mutation "tile confirm: a press on a button cancels the prompt first" \
+  crates/geode-tile/src/confirm.rs \
+  '                    .is_some_and(|c| c.on_a_button(event.position));' \
+  '                    .is_some_and(|_| false);' \
+  geode-tile the_yes_button_confirms_and_the_no_button_cancels
+
+run_mutation "pricer sheets: a press on a Yes/No button cancels the prompt first" \
+  crates/geode-tile/src/confirm.rs \
+  '                    .is_some_and(|c| c.on_a_button(event.position));' \
+  '                    .is_some_and(|_| false);' \
+  geode-pricer the_prompts_yes_button_removes_and_no_cancels
+
+# The gap between the buttons is not a button. Mutated, a button's bounds
+# are taken as the whole row's, and a press in the gap leaves it standing.
+run_mutation "tile confirm: a press between Yes and No leaves the prompt standing" \
+  crates/geode-tile/src/confirm.rs \
+  '        self.buttons.borrow().iter().any(|b| b.contains(&at))' \
+  '        let b = self.buttons.borrow();
+        b.first().zip(b.last()).is_some_and(|(y, n)| y.union(n).contains(&at))' \
+  geode-tile a_press_between_the_buttons_cancels
+
+run_mutation "pricer sheets: a press between Yes and No leaves the prompt standing" \
+  crates/geode-tile/src/confirm.rs \
+  '        self.buttons.borrow().iter().any(|b| b.contains(&at))' \
+  '        let b = self.buttons.borrow();
+        b.first().zip(b.last()).is_some_and(|(y, n)| y.union(n).contains(&at))' \
+  geode-pricer a_press_between_the_prompts_buttons_cancels_it
+
 # ---- geode-tile: notice and popover doors ------------------------------
 #
 # A tone is one color in every tile. Mutated, a warning paints as danger.
@@ -23295,18 +23547,14 @@ run_mutation "tile menu: the menu does not occlude" \
 # Only a bare `y` confirms.
 run_mutation "tile confirm: any key confirms" \
   crates/geode-tile/src/confirm.rs \
-  '    if ks.key == "y" && !ks.modifiers.modified() {
-        host.confirmed(payload, window, cx);' \
-  '    if true {
-        host.confirmed(payload, window, cx);' \
+  '    answer(host, ks.key == "y" && !ks.modifiers.modified(), window, cx)' \
+  '    answer(host, true, window, cx)' \
   geode-tile any_other_key_cancels_and_is_consumed
 
 run_mutation "tile confirm: a modified y confirms" \
   crates/geode-tile/src/confirm.rs \
-  '    if ks.key == "y" && !ks.modifiers.modified() {
-        host.confirmed(payload, window, cx);' \
-  '    if ks.key == "y" {
-        host.confirmed(payload, window, cx);' \
+  '    answer(host, ks.key == "y" && !ks.modifiers.modified(), window, cx)' \
+  '    answer(host, ks.key == "y", window, cx)' \
   geode-tile any_other_key_cancels_and_is_consumed
 
 # Focus leaving the prompt answers no.
@@ -23321,8 +23569,10 @@ run_mutation "tile confirm: a blur leaves the question standing" \
 # A pointer press in the tile answers no.
 run_mutation "tile confirm: a press leaves the question standing" \
   crates/geode-tile/src/confirm.rs \
-  '            tile.update(cx, |t, cx| cancel(t, window, cx));' \
-  '            let _ = (&tile, window, cx);' \
+  '                if !on_a_button {
+                    cancel(t, window, cx);
+                }' \
+  '                let _ = (on_a_button, window);' \
   geode-tile a_pointer_press_cancels
 
 # A press on the prompt itself does not hand the keyboard back to it.
@@ -23344,9 +23594,9 @@ run_mutation "tile confirm: the prompt drops still focused" \
 # Every key under the question is the question's alone.
 run_mutation "tile confirm: an answering key reaches the tile too" \
   crates/geode-tile/src/confirm.rs \
-  '            if tile.update(cx, |t, cx| key(t, event, window, cx)) {
-                cx.stop_propagation();' \
-  '            if tile.update(cx, |t, cx| key(t, event, window, cx)) {' \
+  '                    if key_tile.update(cx, |t, cx| key(t, event, window, cx)) {
+                        cx.stop_propagation();' \
+  '                    if key_tile.update(cx, |t, cx| key(t, event, window, cx)) {' \
   geode-tile any_other_key_cancels_and_is_consumed
 
 # A withdrawal is not an answer: its blur answer is gone before the next

@@ -825,9 +825,19 @@ pub enum ColumnDoor {
     Dataset,
 }
 
-/// Definition and dataset presentation keys kept separately for provenance and clear
-/// notices. View provenance compares current fields with their merged baseline rather
-/// than consulting a possibly stale saved overlay key.
+impl ColumnDoor {
+    /// The overlay this door's fields write.
+    pub fn destination(self) -> Destination {
+        match self {
+            ColumnDoor::View => Destination::Presentation,
+            ColumnDoor::Dataset => Destination::DatasetPresentation,
+        }
+    }
+}
+
+/// Definition and dataset presentation keys kept separately: an inherited Views field
+/// resolves from them (dataset over desk), and its badge and release notice name the
+/// layer that sets the key.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ColumnLayers {
     pub desk: ColumnPresentation,
@@ -1061,12 +1071,17 @@ pub struct Draft {
     /// Column-stage destination, baseline layers, and fold target. Views edits its
     /// parent list item; Schema edits a scratch dataset item and overlay object.
     pub column_ctx: Option<ColumnContext>,
-    /// Dataset presentation by column for a Views draft. The writer has no Config
-    /// parameter, so this captured layer is needed to avoid copying inherited dataset
-    /// values into a view overlay as new overrides. Stage entry refreshes it from the
-    /// pending-aware config. Other domains leave this map empty; Schema carries its
+    /// Dataset presentation by column for a Views draft: the layer an inherited view
+    /// key resolves from over the desk definition, captured because the fold has no
+    /// Config. Stage entry refreshes it from the pending-aware config. Other domains leave this map empty; Schema carries its
     /// editable overlay on `ColumnContext`.
     pub dataset_layer: BTreeMap<String, ColumnPresentation>,
+    /// Which column-stage keys each column sets at this draft's presentation layer
+    /// (Views: every column of the view overlay, read at draft build; Schema: each
+    /// column as it is entered). Compared with its baseline, so an inherit that changes
+    /// no displayed value is still a write.
+    pub presentation_set: BTreeMap<String, views::PresentationKeys>,
+    pub baseline_presentation_set: BTreeMap<String, views::PresentationKeys>,
 }
 
 /// Which way `Draft::step_selected` moves the value under the cursor.
@@ -1106,21 +1121,34 @@ impl Step {
     }
 }
 
-/// What a cleared column-stage key fell to: the desk view's own key, the dataset level,
-/// or — from the Schema door — whatever each view says. `None` means nothing below sets
-/// the key, so there is nothing to tell the trader.
+/// What an inherited column-stage key follows: the desk view's own key, the dataset
+/// level, the kind default when neither sets it, or — from the Schema door — whatever
+/// each view says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FellTo {
     Desk,
     Dataset,
+    Default,
     EachView,
 }
 
-/// One fold's outcome: the key the trader cleared, and what it fell to.
+impl FellTo {
+    /// How a notice names it: "color follows {phrase} again".
+    pub const fn phrase(self) -> &'static str {
+        match self {
+            FellTo::Desk => "the desk",
+            FellTo::Dataset => "the dataset",
+            FellTo::Default => "the default",
+            FellTo::EachView => "each view",
+        }
+    }
+}
+
+/// A key the trader released, and what it now follows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Fold {
     pub key: &'static str,
-    pub to: Option<FellTo>,
+    pub to: FellTo,
 }
 
 impl Draft {
@@ -1427,7 +1455,9 @@ impl Draft {
     /// comparison is not enough once a verb (Scopes' `o`) can replace
     /// `source` out from under a painted summary.
     pub fn is_dirty(&self) -> bool {
-        self.fields != self.baseline || self.source != self.baseline_source
+        self.fields != self.baseline
+            || self.source != self.baseline_source
+            || self.presentation_set != self.baseline_presentation_set
     }
 
     /// The column whose presentation is open, if [`Stage::Column`] is. The one question
@@ -1525,12 +1555,13 @@ impl Draft {
     }
 
     /// Fold installed column fields before validation or rendering a write. Views
-    /// updates the parent list item against definition plus dataset values; Schema
-    /// updates its scratch item against kind defaults. No context means no fold.
+    /// updates the parent list item, Schema its scratch item, through the column's set:
+    /// set keys take their field's value, inherited keys the layer below (Views: the
+    /// definition with the dataset level over it; Schema: the kind default). Inherited
+    /// fields are then reseeded, so the screen shows the value that will read back.
     ///
-    /// Cleared label and width fields inherit the baseline. Reseed them immediately so
-    /// the draft shows the value that persistence will read back. Return the cleared
-    /// key and its inherited layer for the caller's notice.
+    /// Returns the key an empty Label or `auto` Width just released, and what it now
+    /// follows, for the caller's notice.
     pub fn fold_column(&mut self) -> Option<Fold> {
         let name = self.column.clone()?;
         // Both doors install one; a stage without it folds nothing, which
@@ -1541,19 +1572,20 @@ impl Draft {
             self.column_ctx.is_some(),
             "a column stage always carries its door's context"
         );
-        // The `door` is `Copy` and the `layers` are what the baseline and
-        // the fell-to decision below read — cloning the whole context
-        // would clone the overlay table and the scratch item on every
-        // keystroke, for two fields neither arm touches.
-        let (door, layers) = {
+        let (door, baseline) = {
             let ctx = self.column_ctx.as_ref()?;
-            (ctx.door, ctx.layers.clone())
+            let baseline = match ctx.door {
+                ColumnDoor::View => ctx.layers.below_view(),
+                ColumnDoor::Dataset => ColumnPresentation::default(),
+            };
+            (ctx.door, baseline)
         };
-        let baseline = match door {
-            ColumnDoor::View => layers.below_view(),
-            ColumnDoor::Dataset => ColumnPresentation::default(),
-        };
-        let cleared = match door {
+        let mut set = self
+            .presentation_set
+            .get(&name)
+            .copied()
+            .unwrap_or_default();
+        let (released, folded) = match door {
             ColumnDoor::View => {
                 let parent = self.parent_fields.as_mut()?;
                 let field = parent.iter_mut().find(|f| f.key == "columns")?;
@@ -1561,60 +1593,76 @@ impl Draft {
                     return None;
                 };
                 let item = items.iter_mut().find(|i| i.name == name)?;
-                let cleared = views::fold_into(item, &self.fields, &baseline);
-                // Copied out so the parent's borrow ends before the
-                // installed fields are written.
-                let (label, width) = (item.presentation.label.clone(), item.presentation.width);
-                self.reseed_cleared_texts(label, width);
-                cleared
+                let released = views::fold_into(item, &self.fields, &baseline, &mut set);
+                (released, item.clone())
             }
             ColumnDoor::Dataset => {
-                let ctx_mut = self.column_ctx.as_mut()?;
-                let item = ctx_mut.item.as_mut()?;
-                let cleared = views::fold_into(item, &self.fields, &baseline);
-                let (label, width) = (item.presentation.label.clone(), item.presentation.width);
-                self.reseed_cleared_texts(label, width);
-                cleared
+                let item = self.column_ctx.as_mut()?.item.as_mut()?;
+                let released = views::fold_into(item, &self.fields, &baseline, &mut set);
+                (released, item.clone())
             }
         };
-        let key = cleared?;
-        let to = match door {
-            // below the dataset level is the desk view's own key, which varies per view
-            // — so the honest answer is "each view", not one layer's name.
-            ColumnDoor::Dataset => Some(FellTo::EachView),
-            ColumnDoor::View => {
-                let set = |p: &ColumnPresentation| match key {
-                    "label" => p.label.is_some(),
-                    "width" => p.width.is_some(),
-                    _ => false,
-                };
-                // the dataset level sits ABOVE the desk view, so a cleared view key
-                // meets it first.
-                if set(&layers.dataset) {
-                    Some(FellTo::Dataset)
-                } else if set(&layers.desk) {
-                    Some(FellTo::Desk)
-                } else {
-                    None
-                }
+        for field in &mut self.fields {
+            if !set.has(&field.key) {
+                views::reseed_field(field, &folded);
             }
-        };
-        Some(Fold { key, to })
+        }
+        self.presentation_set.insert(name, set);
+        released.map(|key| Fold {
+            key,
+            to: self.fell_to(key),
+        })
     }
 
-    /// After a fold, the label and width `Text` fields show what the
-    /// column now has (the baseline's value once cleared), so the desk's
-    /// or dataset's value reappears on the keystroke that cleared it.
-    fn reseed_cleared_texts(&mut self, label: Option<String>, width: Option<f32>) {
-        for field in &mut self.fields {
-            let FieldKind::Text(text) = &mut field.kind else {
-                continue;
-            };
-            match field.key.as_str() {
-                "label" => *text = label.clone().unwrap_or_default(),
-                "width" => *text = views::width_text(width),
-                _ => {}
-            }
+    /// `r` in a column stage: the selected field stops being set at the stage's layer.
+    /// The fold that follows reseeds it with the value it now inherits. `Err` is the
+    /// notice for a field that already inherits, or a row with nothing to inherit.
+    pub fn inherit_selected(&mut self) -> Result<Fold, String> {
+        let Some(column) = self.column.clone() else {
+            return Err(String::new());
+        };
+        let Some(EditRow::Field(index)) = self.selected_row() else {
+            return Err("nothing to inherit on this row".to_string());
+        };
+        let Some(key) = views::COLUMN_KEYS
+            .iter()
+            .copied()
+            .find(|k| *k == self.fields[index].key)
+        else {
+            return Err("nothing to inherit on this row".to_string());
+        };
+        let to = self.fell_to(key);
+        let set = self.presentation_set.entry(column).or_default();
+        if !set.has(key) {
+            return Err(format!("{key} already follows {}", to.phrase()));
+        }
+        set.set(key, false);
+        Ok(Fold { key, to })
+    }
+
+    /// `shift+r` in a column stage: every field stops being set at the stage's layer.
+    pub fn inherit_all(&mut self) -> Result<(), String> {
+        let Some(column) = self.column.clone() else {
+            return Err(String::new());
+        };
+        let set = self.presentation_set.entry(column).or_default();
+        if !set.any() {
+            return Err("nothing is set on this column".to_string());
+        }
+        *set = views::PresentationKeys::default();
+        Ok(())
+    }
+
+    /// What `key` inherits from in the open column stage.
+    pub fn fell_to(&self, key: &str) -> FellTo {
+        let Some(ctx) = self.column_ctx.as_ref() else {
+            return FellTo::Default;
+        };
+        match ctx.door {
+            ColumnDoor::Dataset => FellTo::EachView,
+            ColumnDoor::View if views::sets(&ctx.layers.dataset, key) => FellTo::Dataset,
+            ColumnDoor::View if views::sets(&ctx.layers.desk, key) => FellTo::Desk,
+            ColumnDoor::View => FellTo::Default,
         }
     }
 
@@ -1860,7 +1908,7 @@ impl Draft {
     /// inert is the defect class this interaction model exists to
     /// remove.
     pub fn toggle_selected(&mut self) -> Step {
-        self.step_selected(StepDirection::Forward)
+        self.step_pinning(StepDirection::Forward)
     }
 
     /// `shift+space`: change the value under the cursor backward — the
@@ -1869,7 +1917,48 @@ impl Draft {
     /// copies of the same match, which is the failure this codebase keeps
     /// hitting (a fix applied to one copy and not the other).
     pub fn toggle_selected_back(&mut self) -> Step {
-        self.step_selected(StepDirection::Backward)
+        self.step_pinning(StepDirection::Backward)
+    }
+
+    /// A step of the selected row that, in a column stage, also sets its key.
+    fn step_pinning(&mut self, direction: StepDirection) -> Step {
+        let row = self.selected_row();
+        let outcome = self.step_selected(direction);
+        if outcome.changed()
+            && let Some(EditRow::Field(index)) = row
+        {
+            self.pin_field(index);
+        }
+        outcome
+    }
+
+    /// Mark the column-stage field at `index` set at the stage's layer. `true` when it
+    /// was inherited until now. Outside a column stage there is nothing to pin.
+    fn pin_field(&mut self, index: usize) -> bool {
+        let Some(column) = self.column.clone() else {
+            return false;
+        };
+        let Some(key) = self.fields.get(index).map(|f| f.key.clone()) else {
+            return false;
+        };
+        let set = self.presentation_set.entry(column).or_default();
+        let was = set.has(&key);
+        set.set(&key, true);
+        !was
+    }
+
+    /// An applied value in a column stage pins its key, and a value typed or chosen
+    /// equal to the one shown still pins an inherited key: repeating the inherited
+    /// value is how a trader keeps it when the parent changes, so it is a change.
+    fn pin_applied(&mut self, index: usize, outcome: Step) -> Step {
+        match outcome {
+            Step::Changed => {
+                self.pin_field(index);
+                Step::Changed
+            }
+            Step::Inert if self.pin_field(index) => Step::Changed,
+            other => other,
+        }
     }
 
     /// Is the open text field the chain field — the one with a completion
@@ -2027,6 +2116,7 @@ impl Draft {
             }
             _ => Step::Inert,
         };
+        let outcome = self.pin_applied(index, outcome);
         self.text_entry = None;
         self.choice = None;
         self.query.clear();
@@ -2110,6 +2200,16 @@ impl Draft {
                 }
             },
             _ => Step::Inert,
+        };
+        // An empty Label or `auto` Width is the inherit gesture: the fold releases the
+        // key, so it must not be pinned here first.
+        let key = self.fields[index].key.as_str();
+        let inherits =
+            (key == "label" && typed.is_empty()) || (key == "width" && typed == views::AUTO);
+        let outcome = if inherits {
+            outcome
+        } else {
+            self.pin_applied(index, outcome)
         };
         self.text_entry = None;
         self.query.clear();
@@ -2509,6 +2609,13 @@ impl Draft {
         if self.source != self.baseline_source {
             out.entry(Destination::Doc).or_default();
         }
+        // A column-stage inherit or pin may change no field value at all; the set
+        // change alone still has to reach the batch, at the open door's overlay.
+        if self.presentation_set != self.baseline_presentation_set
+            && let Some(ctx) = self.column_ctx.as_ref()
+        {
+            out.entry(ctx.door.destination()).or_default();
+        }
         out
     }
 
@@ -2526,6 +2633,7 @@ impl Draft {
     pub fn mark_saved(&mut self) {
         self.baseline = self.fields.clone();
         self.baseline_source = self.source.clone();
+        self.baseline_presentation_set = self.presentation_set.clone();
     }
 
     /// A draft for an object nothing defines yet. Both baselines are
@@ -2554,6 +2662,8 @@ impl Draft {
             // An object nothing defines yet has no columns for a dataset
             // to speak for; `Domain::draft` is where the layer arrives.
             dataset_layer: BTreeMap::new(),
+            presentation_set: BTreeMap::new(),
+            baseline_presentation_set: BTreeMap::new(),
         }
     }
 
@@ -2787,6 +2897,10 @@ impl Domain {
     /// opens showing whatever is already wrong with it.
     pub fn draft(self, config: &Config, object: &str) -> Draft {
         let fields = self.fields(config, Some(object));
+        let presentation_set = match self {
+            Domain::Views => views::presentation_set_for(config, object),
+            _ => BTreeMap::new(),
+        };
         let source = config
             .doc(self.doc())
             .and_then(|doc| doc.value.get(object))
@@ -2819,6 +2933,8 @@ impl Domain {
                 Domain::Views => views::dataset_layer_for(config, object),
                 _ => BTreeMap::new(),
             },
+            baseline_presentation_set: presentation_set.clone(),
+            presentation_set,
         };
         draft.diagnostics = self.validate(&draft, config);
         draft
@@ -3450,6 +3566,12 @@ mod tests {
                 "npv",
                 views::column_fields(&item, &[], Destination::Presentation)
             ));
+            // The label is set at the view level, so emptying it releases it.
+            draft
+                .presentation_set
+                .entry("npv".into())
+                .or_default()
+                .set("label", true);
             for field in &mut draft.fields {
                 if field.key == "label" {
                     field.kind = FieldKind::Text(String::new());
@@ -3470,7 +3592,7 @@ mod tests {
             both.fold_column(),
             Some(Fold {
                 key: "label",
-                to: Some(FellTo::Dataset)
+                to: FellTo::Dataset
             }),
             "the dataset level sits above the desk view, so it is what \
              the cleared key lands on first"
@@ -3484,7 +3606,7 @@ mod tests {
             desk_only.fold_column(),
             Some(Fold {
                 key: "label",
-                to: Some(FellTo::Desk)
+                to: FellTo::Desk
             })
         );
 
@@ -3493,10 +3615,10 @@ mod tests {
             neither.fold_column(),
             Some(Fold {
                 key: "label",
-                to: None
+                to: FellTo::Default
             }),
-            "the key really was cleared, but nothing below sets it — so \
-             the caller has no layer to name and says nothing"
+            "nothing below sets the key: it falls to the kind default, and the \
+             notice says so"
         );
     }
 
@@ -4183,6 +4305,8 @@ mod tests {
             values: None,
             column_ctx: None,
             dataset_layer: BTreeMap::new(),
+            presentation_set: BTreeMap::new(),
+            baseline_presentation_set: BTreeMap::new(),
         }
     }
 
@@ -4582,6 +4706,12 @@ mod tests {
         {
             items[1].presentation.width = Some(120.0);
         }
+        // A width the view overlay sets: the writer writes set keys only.
+        draft
+            .presentation_set
+            .entry("npv".into())
+            .or_default()
+            .set("width", true);
         draft.toggle_selected(); // hide `book`
         draft.move_item(1); // and move it below `npv`
         let text = object_text(
@@ -6137,6 +6267,147 @@ mod tests {
             empty.selected_vocabulary(Domain::Sources),
             RowVocabulary::Inert
         );
+    }
+
+    /// `tree`'s `npv` column stage, opened the way `render::enter_column_stage`
+    /// opens it (the door's own context builder), cursor on `key`.
+    fn npv_stage_on(key: &str) -> Draft {
+        let config = config_with_view_and_datasets();
+        let mut draft = Domain::Views.draft(&config, "tree");
+        let npv = draft
+            .list_items("columns")
+            .unwrap()
+            .iter()
+            .find(|i| i.name == "npv")
+            .unwrap()
+            .clone();
+        draft.column_ctx = Some(views::column_context(&draft, "npv", npv.clone()));
+        assert!(draft.enter_column(
+            "npv",
+            views::column_fields(&npv, &[], Destination::Presentation)
+        ));
+        draft.selected = draft.fields.iter().position(|f| f.key == key).unwrap();
+        draft
+    }
+
+    fn npv_sets(draft: &Draft, key: &str) -> bool {
+        draft
+            .presentation_set
+            .get("npv")
+            .is_some_and(|set| set.has(key))
+    }
+
+    /// Any edit in a column stage sets its key at the stage's layer.
+    #[test]
+    fn stepping_a_column_field_pins_it() {
+        let mut draft = npv_stage_on("precision");
+        assert!(!npv_sets(&draft, "precision"));
+        assert_eq!(draft.toggle_selected(), Step::Changed);
+        assert!(npv_sets(&draft, "precision"));
+    }
+
+    /// Enter on the option already lit — the inherited value — pins it: that is the
+    /// way to keep a value that happens to equal its parent.
+    #[test]
+    fn choosing_the_inherited_option_pins_it() {
+        let mut draft = npv_stage_on("negative");
+        assert_eq!(draft.begin_choice_entry(), Step::Changed);
+        assert_eq!(draft.apply_choice(), Step::Changed);
+        assert!(npv_sets(&draft, "negative"));
+        // Once set, the same choice again changes nothing.
+        assert_eq!(draft.begin_choice_entry(), Step::Changed);
+        assert_eq!(draft.apply_choice(), Step::Inert);
+    }
+
+    #[test]
+    fn typing_the_same_number_pins_it() {
+        let mut draft = npv_stage_on("precision");
+        let FieldKind::Number { value, .. } = draft.fields[draft.selected].kind else {
+            panic!("precision is a number");
+        };
+        assert_eq!(draft.begin_text_entry(), Step::Changed);
+        draft.set_query(value.to_string());
+        assert_eq!(
+            draft.apply_text_entry(&|_, text| Ok(text.to_string())),
+            Step::Changed
+        );
+        assert!(npv_sets(&draft, "precision"));
+    }
+
+    /// An empty Label is the inherit gesture, never a pin.
+    #[test]
+    fn an_empty_label_commit_does_not_pin() {
+        let mut draft = npv_stage_on("label");
+        assert_eq!(draft.begin_text_entry(), Step::Changed);
+        draft.set_query(String::new());
+        draft.apply_text_entry(&|_, text| Ok(text.to_string()));
+        assert!(!npv_sets(&draft, "label"));
+    }
+
+    /// `r`: a set field stops being set; the fold that follows shows what it inherits.
+    #[test]
+    fn inherit_selected_unsets_the_key_and_reseeds_it() {
+        let mut draft = npv_stage_on("precision");
+        let FieldKind::Number { value: shown, .. } = draft.fields[draft.selected].kind else {
+            panic!("precision is a number");
+        };
+        assert_eq!(draft.toggle_selected(), Step::Changed);
+        draft.fold_column();
+        assert!(npv_sets(&draft, "precision"));
+        let to = draft.fell_to("precision");
+        assert_eq!(
+            draft.inherit_selected(),
+            Ok(Fold {
+                key: "precision",
+                to
+            })
+        );
+        assert!(!npv_sets(&draft, "precision"));
+        draft.fold_column();
+        assert!(
+            matches!(draft.fields[draft.selected].kind, FieldKind::Number { value, .. } if value == shown),
+            "back to the inherited value"
+        );
+    }
+
+    #[test]
+    fn inherit_selected_on_an_inherited_key_says_it_already_follows() {
+        let mut draft = npv_stage_on("precision");
+        let to = draft.fell_to("precision");
+        assert_eq!(
+            draft.inherit_selected(),
+            Err(format!("precision already follows {}", to.phrase()))
+        );
+    }
+
+    #[test]
+    fn inherit_all_clears_every_key_or_says_nothing_is_set() {
+        let mut draft = npv_stage_on("precision");
+        assert_eq!(
+            draft.inherit_all(),
+            Err("nothing is set on this column".to_string())
+        );
+        draft.toggle_selected();
+        draft.selected = draft
+            .fields
+            .iter()
+            .position(|f| f.key == "thousands")
+            .unwrap();
+        draft.toggle_selected();
+        assert!(npv_sets(&draft, "precision") && npv_sets(&draft, "thousands"));
+        assert_eq!(draft.inherit_all(), Ok(()));
+        assert!(!draft.presentation_set["npv"].any());
+    }
+
+    /// Outside a column stage there is no column to pin for.
+    #[test]
+    fn outside_a_column_stage_nothing_pins() {
+        let config = config_with_view_and_datasets();
+        let mut draft = Domain::Views.draft(&config, "tree");
+        let before = draft.presentation_set.clone();
+        draft.selected = 0;
+        draft.toggle_selected();
+        assert_eq!(draft.presentation_set, before);
     }
 
     /// the column stage is a PROJECTION over the same draft — the view's fields are

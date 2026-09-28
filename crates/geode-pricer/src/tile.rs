@@ -27,7 +27,9 @@ use crate::delegate::{
 };
 use crate::grid::GridModel;
 use crate::header::{self, HeaderInputs, HeaderModel};
-use crate::popup::{PricerPick, choice_paint};
+use crate::popup::{
+    PickerPurpose, PricerPick, SheetPicker, choice_paint, render_sheet_picker, sheet_rows,
+};
 use crate::session::Record;
 use crate::store::Loaded;
 use chrono::Utc;
@@ -119,6 +121,36 @@ pub(crate) const NOT_REMOVED: &str = "sheet not removed";
 pub struct PendingRemove {
     sheet: String,
 }
+
+/// Why this tile's sheet cannot be renamed now, whatever the new name:
+/// known before a rename is tried, so the menu's "Rename sheet…" row is
+/// greyed with [`RenameBlock::reason`] and the rename field never opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RenameBlock {
+    /// A pending load would replace the renamed fallback sheet.
+    Loading,
+    /// The sheet shown is the fallback of a failed load: saved under a
+    /// new name and the old one forgotten, the real document would be lost.
+    NotLoaded,
+    /// The previous rename's save is not confirmed yet.
+    Unsaved,
+}
+
+impl RenameBlock {
+    /// The short reason: the menu lane's text, and `:name`'s own words
+    /// except for `NotLoaded`, which `rename_refusal` spells with the
+    /// sheet's name.
+    pub(crate) fn reason(self) -> &'static str {
+        match self {
+            RenameBlock::Loading => "the sheet is still loading",
+            RenameBlock::NotLoaded => "the sheet did not load",
+            RenameBlock::Unsaved => "the last rename is not saved yet",
+        }
+    }
+}
+
+/// The footer after an `enter` in the sheet picker with nothing matching.
+pub(crate) const NO_SHEET_MATCHES: &str = "no sheet matches";
 
 /// Fixed row steps for `ctrl+d`/`ctrl+u` and `ctrl+f`/`ctrl+b`, multiplied
 /// by the command count.
@@ -456,6 +488,23 @@ pub struct PricerTile {
     /// construction and on every `Chords` publish, so a chrome rebuild (which
     /// has no `App`) resolves hints against the live keymap.
     chords: Arc<Vec<Binding>>,
+    /// The sheet picker hung under the header's sheet name: a click on
+    /// the name, "Open sheet…"/"Remove sheet…" or their palette actions
+    /// open it; a pick takes `:e`'s or `:rm`'s route. `None` when closed.
+    pub(crate) sheet_picker: Option<SheetPicker>,
+    /// The inline rename field painted in the sheet name's place: a
+    /// double-click on the name, "Rename sheet…" or its palette action
+    /// open it; `enter` takes `:name`'s route. `None` when closed.
+    pub(crate) rename_field: Option<Entity<InputState>>,
+    /// The tooltip selector of the header's sheet name, built once.
+    name_tip: SharedString,
+    /// Whether the latest pointer press in the window landed on the sheet
+    /// name (unmodified). The name's own listener sets it; its
+    /// outside-press listener clears it for every other press, including
+    /// one on a surface painted over the tile. A double-click renames only
+    /// when BOTH its presses reached the name: a first press that hit
+    /// anything else leaves the second an ordinary single click.
+    last_press_on_name: bool,
     /// The line a press that closed the entry bar resolved. Closing the
     /// bar moves the table up on screen, so the second press of the same
     /// double-click lands on a different painted row; this carries the
@@ -760,6 +809,10 @@ impl PricerTile {
             editor_window: None,
             menu: None,
             chords: menu::live_bindings(cx),
+            sheet_picker: None,
+            rename_field: None,
+            name_tip: format!("tip-pricer-sheet-name-{}", id.0).into(),
+            last_press_on_name: false,
             click_anchor: None,
             pressed: None,
             underlyings: Rc::from([]),
@@ -807,12 +860,18 @@ impl PricerTile {
     /// which one is open.
     ///
     /// An armed `:rm` confirm is `insert` too: its prompt holds the
-    /// keyboard exactly as a field does.
+    /// keyboard exactly as a field does. So are the sheet picker's filter
+    /// and the rename field: text fields like the entry field.
     ///
     /// `visual` while a selection is live and neither a field nor the
     /// menu holds the keys: the selection's own single-key verbs apply.
     pub(crate) fn mode(&self) -> &'static str {
-        if self.confirm.is_some() || self.entry.is_some() || self.editor.is_some() {
+        if self.confirm.is_some()
+            || self.entry.is_some()
+            || self.editor.is_some()
+            || self.sheet_picker.is_some()
+            || self.rename_field.is_some()
+        {
             "insert"
         } else if self.menu.is_some() {
             "menu"
@@ -823,9 +882,20 @@ impl PricerTile {
         }
     }
 
-    /// Whether an entry field, cell editor, or removal prompt owns window focus.
-    /// The focus handles determine this independently of the key context.
+    /// Whether an entry field, cell editor, sheet picker, rename field, or
+    /// removal prompt owns window focus. The focus handles determine this
+    /// independently of the key context.
     pub fn holds_focus(&self, window: &Window, cx: &App) -> bool {
+        let sheet_field = self
+            .sheet_picker
+            .as_ref()
+            .map(|p| &p.input)
+            .into_iter()
+            .chain(self.rename_field.as_ref())
+            .any(|i| i.read(cx).focus_handle(cx).is_focused(window));
+        if sheet_field {
+            return true;
+        }
         let entry = self
             .entry
             .as_ref()
@@ -871,6 +941,17 @@ impl PricerTile {
         self.entry
             .as_ref()
             .map(|e| e.input.read(cx).value().to_string())
+    }
+
+    /// The sheet picker's filter text, else the rename field's; `None`
+    /// with neither open.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn sheet_field_text(&self, cx: &App) -> Option<String> {
+        self.sheet_picker
+            .as_ref()
+            .map(|p| &p.input)
+            .or(self.rename_field.as_ref())
+            .map(|i| i.read(cx).value().to_string())
     }
 
     pub fn serialize(&self, cx: &App) -> toml::Table {
@@ -930,6 +1011,7 @@ impl PricerTile {
         self.close_menu(cx);
         self.close_entry(window, cx);
         self.close_editor(window, cx);
+        self.close_sheet_fields(window, cx);
         match event {
             FindEvent::Changed(query) => {
                 let origin = match &self.find {
@@ -1054,12 +1136,14 @@ impl PricerTile {
         }))
     }
 
-    /// `o` opens the entry bar under the header and focuses its input.
-    /// Lines land below the cursor row; a leg place opens
-    /// its package so what lands is visible. With the bar already open
-    /// (a palette dispatch) the typed text and place stay and the field
-    /// takes focus back.
-    fn open_entry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// `o` / `shift+o` open the entry bar under the header and focus its
+    /// input. The first line lands below (`o`) or above (`shift+o`) the
+    /// cursor row; each commit then moves the place past what landed, so
+    /// a typed run reads top to bottom either way. A leg place opens its
+    /// package so what lands is visible. With the bar already open (a
+    /// palette dispatch) the typed text and place stay and the field takes
+    /// focus back.
+    fn open_entry(&mut self, below: bool, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(entry) = &self.entry {
             // The palette's commit focuses the shell root before it
             // dispatches: without this the bar reads `insert` while
@@ -1071,7 +1155,7 @@ impl PricerTile {
             self.footer = Some("the sheet is still loading".into());
             return;
         }
-        let place = place_for(&self.sheet, self.cursor_sheet_row(), true);
+        let place = place_for(&self.sheet, self.cursor_sheet_row(), below);
         if let Place::Leg { package, .. } = place {
             self.expansion.set(self.sheet.id(package), true);
         }
@@ -2510,17 +2594,18 @@ impl PricerTile {
         // never gets here, the prompt consumes it) answers "no" first.
         confirm::cancel(self, window, cx);
         // Any verb but the fields' own closes an open field first (a
-        // palette dispatch can arrive while one is open). `add_below`
-        // keeps an open bar: it is the bar's own opener.
+        // palette dispatch can arrive while one is open). `add_below` and
+        // `add_above` keep an open bar: they are the bar's own openers.
         let field_verb = matches!(
             verb,
             "commit" | "cancel" | "insert_up" | "insert_down" | "insert_up_big" | "insert_down_big"
         );
         if !field_verb {
-            if verb != "add_below" {
+            if !matches!(verb, "add_below" | "add_above") {
                 self.close_entry(window, cx);
             }
             self.close_editor(window, cx);
+            self.close_sheet_fields(window, cx);
         }
         // Any verb but the menu's own closes an open menu (a palette
         // dispatch, or a verb picked from the menu itself, can arrive
@@ -2609,8 +2694,8 @@ impl PricerTile {
                 self.reprice_all(cx);
                 return true;
             }
-            "add_below" => {
-                self.open_entry(window, cx);
+            "add_below" | "add_above" => {
+                self.open_entry(verb == "add_below", window, cx);
                 return true;
             }
             "edit" => {
@@ -2620,7 +2705,11 @@ impl PricerTile {
                 return true;
             }
             "commit" => {
-                if self.entry.is_some() {
+                if self.sheet_picker.is_some() {
+                    self.commit_sheet_picker(window, cx);
+                } else if self.rename_field.is_some() {
+                    self.commit_rename(window, cx);
+                } else if self.entry.is_some() {
                     self.commit_entry(window, cx);
                 } else {
                     self.commit_edit(window, cx);
@@ -2630,12 +2719,21 @@ impl PricerTile {
             "cancel" => {
                 self.close_entry(window, cx);
                 self.close_editor(window, cx);
+                self.close_sheet_fields(window, cx);
                 self.rebuild_chrome();
                 return true;
             }
             "insert_up" | "insert_down" | "insert_up_big" | "insert_down_big" => {
                 let up = verb.starts_with("insert_up");
-                if self.entry.is_some() {
+                if let Some(p) = self.sheet_picker.as_mut() {
+                    // `up` moves the highlight up the list; ±1 wraps.
+                    let magnitude: i64 = if verb.ends_with("_big") { 10 } else { 1 };
+                    let steps = (if up { -magnitude } else { magnitude }) * n as i64;
+                    p.list.nav(NavCommand::Move(steps));
+                    cx.notify();
+                } else if self.rename_field.is_some() {
+                    // A one-line name has no lines to step through.
+                } else if self.entry.is_some() {
                     self.step_history(if up { 1 } else { -1 }, window, cx);
                 } else {
                     let magnitude: i64 = if verb.ends_with("_big") { 10 } else { 1 };
@@ -2680,6 +2778,14 @@ impl PricerTile {
             "menu" => {
                 self.toggle_menu(cx);
                 return true;
+            }
+            "open_sheet" => self.open_sheet_picker(PickerPurpose::Open, window, cx),
+            "remove_sheet" => self.open_sheet_picker(PickerPurpose::Remove, window, cx),
+            "rename_sheet" => self.open_rename_field(window, cx),
+            "new_sheet" => {
+                if let Err(why) = self.new_sheet(cx) {
+                    self.footer = Some(why.into());
+                }
             }
             "menu_down" | "menu_up" => {
                 if let Some(m) = self.menu.as_mut() {
@@ -2973,6 +3079,32 @@ impl PricerTile {
                 Hint::chord("pricer::delete"),
                 if row.is_some() { Ok(()) } else { Err("no row") },
             ),
+            // The sheet commands' pointer forms, unbound by default: the
+            // lane shows a user's binding, else the `:` verb. Only a rename
+            // can be refused before it is tried; the others refuse (if at
+            // all) per name or on the attempt, into the footer.
+            Row::Separator,
+            Row::Section(SharedString::new_static("Sheet")),
+            action(
+                "pricer::open_sheet",
+                Hint::chord_or_verb("pricer::open_sheet", ":e"),
+                Ok(()),
+            ),
+            action(
+                "pricer::rename_sheet",
+                Hint::chord_or_verb("pricer::rename_sheet", ":name"),
+                self.rename_block().map_or(Ok(()), |b| Err(b.reason())),
+            ),
+            action(
+                "pricer::new_sheet",
+                Hint::chord_or_verb("pricer::new_sheet", ":new"),
+                Ok(()),
+            ),
+            action(
+                "pricer::remove_sheet",
+                Hint::chord_or_verb("pricer::remove_sheet", ":rm"),
+                Ok(()),
+            ),
         ];
         let views = self.shared.views.borrow();
         if !views.is_empty() {
@@ -3095,6 +3227,7 @@ impl PricerTile {
         self.close_menu(cx);
         self.close_entry(window, cx);
         self.close_editor(window, cx);
+        self.close_sheet_fields(window, cx);
         // A question standing over another verb is withdrawn, not answered.
         let _ = confirm::withdraw(self, cx);
         match commands::parse(line)? {
@@ -3134,12 +3267,7 @@ impl PricerTile {
                 self.ungroup(cx)
             }
             Command::Edit(name) => self.edit_sheet(name, cx),
-            Command::New(None) => {
-                // Chosen while this tile still holds its name, so `:new`
-                // never lands back on the sheet it leaves.
-                let name = untitled(&self.shared);
-                self.switch_sheet(name, false, cx)
-            }
+            Command::New(None) => self.new_sheet(cx),
             // A named `:new` never opens an existing sheet: a typo would
             // otherwise show it empty and later save over it. This tile's
             // own sheet is in `open`, so it counts too.
@@ -3300,17 +3428,8 @@ impl PricerTile {
         if name == self.sheet.name {
             return Ok(());
         }
-        self.refuse_while_loading()?;
-        if self.save_blocked {
-            // The sheet shown is the fallback: saved under a new name and
-            // the old one forgotten, the real document would be lost.
-            return Err(format!(
-                "sheet '{}' did not load; it cannot be renamed",
-                self.sheet.name
-            ));
-        }
-        if self.rename_from.is_some() {
-            return Err("the last rename is not saved yet".into());
+        if let Some(why) = self.rename_refusal() {
+            return Err(why);
         }
         self.shared.refuse_retiring(&name)?;
         if self.shared.exists(&name) {
@@ -3400,6 +3519,281 @@ impl PricerTile {
         }
         self.rebuild_chrome();
         cx.notify();
+    }
+
+    // ---- sheets by pointer: the picker and the rename field ---------
+
+    /// `:new` without a name, and "New sheet": the next `untitled-N`,
+    /// chosen while this tile still holds its name, so a new sheet never
+    /// lands back on the sheet it leaves.
+    fn new_sheet(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        let name = untitled(&self.shared);
+        self.switch_sheet(name, false, cx)
+    }
+
+    pub(crate) fn rename_block(&self) -> Option<RenameBlock> {
+        if self.loading {
+            Some(RenameBlock::Loading)
+        } else if self.save_blocked {
+            Some(RenameBlock::NotLoaded)
+        } else if self.rename_from.is_some() {
+            Some(RenameBlock::Unsaved)
+        } else {
+            None
+        }
+    }
+
+    /// [`Self::rename_block`] in `:name`'s words.
+    fn rename_refusal(&self) -> Option<String> {
+        self.rename_block().map(|b| match b {
+            RenameBlock::NotLoaded => format!(
+                "sheet '{}' did not load; it cannot be renamed",
+                self.sheet.name
+            ),
+            b => b.reason().to_string(),
+        })
+    }
+
+    /// Close the sheet picker and the rename field.
+    pub(crate) fn close_sheet_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_sheet_picker(window, cx);
+        self.close_rename_field(window, cx);
+    }
+
+    /// Open the sheet picker on every name the trader could mean, the
+    /// current sheet highlighted, its filter field focused. The rows are
+    /// prepared here, once; a pick re-decides through the command route,
+    /// so a name that changed state since is still refused correctly.
+    fn open_sheet_picker(
+        &mut self,
+        purpose: PickerPurpose,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let rows = sheet_rows(
+            &self.shared.sheet_names(),
+            &self.shared.open.borrow(),
+            &self.sheet.name,
+        );
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(purpose.placeholder()));
+        cx.subscribe_in(&input, window, |this, input, event, _window, cx| {
+            // The live path, for typing. `set_value` emits no `Change`
+            // (the `tab` completion writes that way and re-ranks itself),
+            // which is why `commit_sheet_picker` re-reads the field too.
+            if let InputEvent::Change = event {
+                let query = input.read(cx).value().to_string();
+                if let Some(p) = this.sheet_picker.as_mut()
+                    && p.list.set_query(&query)
+                {
+                    cx.notify();
+                }
+            }
+        })
+        .detach();
+        input.read(cx).focus_handle(cx).focus(window, cx);
+        self.sheet_picker = Some(SheetPicker::new(purpose, input, rows));
+    }
+
+    /// Blur the picker's field if it owns window focus, then drop it, so
+    /// the shell can restore focus after the picker disappears.
+    pub(crate) fn close_sheet_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(p) = self.sheet_picker.take() else {
+            return;
+        };
+        if p.input.read(cx).focus_handle(cx).is_focused(window) {
+            window.blur(cx);
+        }
+        cx.notify();
+    }
+
+    /// The picker's own key, ahead of the shell: `tab`, whatever the
+    /// modifiers (`choice::ChoiceKey::Complete`), writes the highlighted
+    /// name into the field. Consumed even with nothing highlighted, so it
+    /// never moves focus out of the field.
+    pub(crate) fn sheet_picker_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if event.keystroke.key != "tab" {
+            return false;
+        }
+        let Some(p) = self.sheet_picker.as_mut() else {
+            return false;
+        };
+        if p.list.complete() {
+            let text = p.list.query().to_string();
+            p.input.update(cx, |s, cx| s.set_value(text, window, cx));
+            cx.notify();
+        }
+        true
+    }
+
+    /// A hover over painted picker row `row`: the mouse form of
+    /// `up`/`down`, notifying only on a change.
+    pub(crate) fn sheet_picker_hover(&mut self, row: usize, cx: &mut Context<Self>) {
+        let changed = self
+            .sheet_picker
+            .as_mut()
+            .is_some_and(|p| p.list.highlighted() != row && p.list.set_highlighted(row));
+        if changed {
+            cx.notify();
+        }
+    }
+
+    /// A press on painted picker row `row`: highlight it and pick it.
+    pub(crate) fn sheet_picker_pick(
+        &mut self,
+        row: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = self
+            .sheet_picker
+            .as_mut()
+            .and_then(|p| p.list.set_highlighted(row).then(|| p.picked()).flatten());
+        if let Some(name) = name {
+            self.footer = None;
+            self.pick_sheet(name, window, cx);
+        }
+    }
+
+    /// `enter` in the picker: re-rank from the field's current text
+    /// (`set_value` emits no `Change`, so a pick must be decided by a
+    /// ranking actually run), then pick the highlighted name.
+    fn commit_sheet_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(p) = self.sheet_picker.as_mut() else {
+            return;
+        };
+        let query = p.input.read(cx).value().to_string();
+        p.list.set_query(&query);
+        match p.picked() {
+            Some(name) => self.pick_sheet(name, window, cx),
+            None => {
+                self.footer = Some(NO_SHEET_MATCHES.into());
+                self.rebuild_chrome();
+                cx.notify();
+            }
+        }
+    }
+
+    /// The pick itself, through the command's own route (`:e`'s for
+    /// Open, `:rm`'s for Remove), so every refusal the command makes
+    /// applies. A refusal goes to the footer and keeps the picker open
+    /// for another pick; success closes it. `arm_remove` moves focus to
+    /// its prompt first, so that close blurs nothing.
+    fn pick_sheet(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(purpose) = self.sheet_picker.as_ref().map(|p| p.purpose) else {
+            return;
+        };
+        let result = match purpose {
+            PickerPurpose::Open => self.edit_sheet(name, cx),
+            PickerPurpose::Remove => self.arm_remove(name, window, cx),
+        };
+        match result {
+            Ok(()) => self.close_sheet_picker(window, cx),
+            Err(why) => self.footer = Some(why.into()),
+        }
+        self.rebuild_chrome();
+        cx.notify();
+    }
+
+    /// Open the rename field in the sheet name's place, seeded with the
+    /// name and all of it selected, so typing replaces it. A rename that
+    /// would be refused whatever the name ([`Self::rename_block`]) says
+    /// why in the footer instead.
+    fn open_rename_field(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(why) = self.rename_refusal() {
+            self.footer = Some(why.into());
+            return;
+        }
+        // The name is not painted while the field is: no press is recorded
+        // against it until it is back.
+        self.last_press_on_name = false;
+        let name = self.sheet.name.clone();
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(name));
+        input.update(cx, |s, cx| {
+            s.focus(window, cx);
+            s.select_all(window, cx);
+        });
+        self.rename_field = Some(input);
+    }
+
+    /// Blur the rename field if it owns window focus, then drop it.
+    pub(crate) fn close_rename_field(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(input) = self.rename_field.take() else {
+            return;
+        };
+        if input.read(cx).focus_handle(cx).is_focused(window) {
+            window.blur(cx);
+        }
+        cx.notify();
+    }
+
+    /// `enter` in the rename field: the text through `:name`'s own parse
+    /// and route, so every name the command refuses (two words, a control
+    /// character, an open or existing sheet) is refused the same way. A
+    /// refusal goes to the footer and keeps the field open; success
+    /// closes it.
+    fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(input) = &self.rename_field else {
+            return;
+        };
+        let text = input.read(cx).value().to_string();
+        let result = match commands::parse(&format!("name {text}")) {
+            Ok(Command::Name(name)) => self.rename(name, cx),
+            Ok(_) => Err("usage: name <sheet>".into()),
+            Err(why) => Err(why),
+        };
+        match result {
+            Ok(()) => self.close_rename_field(window, cx),
+            Err(why) => self.footer = Some(why.into()),
+        }
+        self.rebuild_chrome();
+        cx.notify();
+    }
+
+    /// A press anywhere off the sheet name (the name's outside-press
+    /// listener, which sees presses on surfaces painted over the tile too).
+    pub(crate) fn name_press_elsewhere(&mut self) {
+        self.last_press_on_name = false;
+    }
+
+    /// A left press on the header's sheet name, in the capture phase so
+    /// it runs ahead of the picker's own outside-press close (a
+    /// bubble-phase toggle would find the picker already closed and
+    /// reopen it). A single press toggles the picker. The second press of
+    /// a double-click whose first press also reached the name opens the
+    /// rename field instead; `dispatch` closes the picker that first
+    /// press opened. Default is prevented so no focus-tracking ancestor
+    /// takes the keyboard from the field just focused; propagation
+    /// continues so the shell's click-to-focus still runs.
+    ///
+    /// A press with any modifier is the shell's gesture (a mod+drag, a
+    /// mod+double-click fullscreen): it opens nothing here and leaves
+    /// default alone.
+    pub(crate) fn name_pressed(
+        &mut self,
+        event: &gpui::MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let follows_name = std::mem::replace(&mut self.last_press_on_name, true);
+        if event.modifiers.modified() {
+            self.last_press_on_name = false;
+            return;
+        }
+        window.prevent_default();
+        let verb = if event.click_count >= 2 && follows_name {
+            "pricer::rename_sheet"
+        } else if self.sheet_picker.is_some() {
+            self.close_sheet_picker(window, cx);
+            return;
+        } else {
+            "pricer::open_sheet"
+        };
+        self.dispatch(&ActionId(verb.to_string()), None, window, cx);
     }
 
     pub fn completions(&self, line: &str, cursor: usize) -> Vec<String> {
@@ -3898,8 +4292,12 @@ impl gpui::Render for PricerTile {
                 .unwrap_or_default()
                 > stale_after
         });
-        let theme = cx.theme();
         let tile = cx.entity();
+        let picker = self
+            .sheet_picker
+            .as_ref()
+            .map(|p| render_sheet_picker(p, &tile, cx).into_any_element());
+        let theme = cx.theme();
         let header = header::render(
             &self.header,
             header::HeaderChrome {
@@ -3910,6 +4308,9 @@ impl gpui::Render for PricerTile {
                 menu_open: self.menu.is_some(),
                 menu_tip: self.menu_tip.clone(),
                 confirm: self.confirm.as_ref(),
+                name_tip: self.name_tip.clone(),
+                rename: self.rename_field.as_ref(),
+                picker,
             },
             theme,
         );
@@ -5578,6 +5979,81 @@ pub(crate) mod tests {
         assert_eq!(h.entry_label(&vcx).as_deref(), Some("after SPX Z26 3000 P"));
     }
 
+    /// `O` lands the first line ABOVE the cursor row; later lines follow
+    /// the one just landed, so a typed run reads top to bottom.
+    #[gpui::test]
+    fn shift_o_lands_above_the_cursor_row_and_continues_below_what_landed(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "bottom", None); // the 4000 P root
+        h.dispatch(&mut vcx, "add_above", None);
+        assert_eq!(
+            h.entry_label(&vcx).as_deref(),
+            Some("after -5 SPX Z26 4800/5200 CS"),
+            "above the 4000 P is after the package"
+        );
+        typed(&h, &mut vcx, "SPX Z26 3000 P");
+        h.dispatch(&mut vcx, "commit", None);
+        typed(&h, &mut vcx, "SPX Z26 2000 P");
+        h.dispatch(&mut vcx, "commit", None);
+        let roots = h.tile.read_with(&vcx, |t, _| {
+            t.sheet
+                .roots()
+                .map(|r| t.sheet.shorthand(r))
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            roots,
+            vec![
+                "SPX Z26 5000 C",
+                "-5 SPX Z26 4800/5200 CS",
+                "SPX Z26 3000 P",
+                "SPX Z26 2000 P",
+                "SPX Z26 4000 P",
+            ]
+        );
+    }
+
+    #[gpui::test]
+    fn shift_o_on_the_first_row_lands_at_the_top(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "add_above", None);
+        assert_eq!(h.entry_label(&vcx).as_deref(), Some("at top"));
+        typed(&h, &mut vcx, "SPX Z26 3000 P");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.sheet.shorthand(0)),
+            "SPX Z26 3000 P"
+        );
+    }
+
+    #[gpui::test]
+    fn shift_o_on_a_leg_lands_inside_its_package_before_that_leg(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "down", None);
+        h.dispatch(&mut vcx, "expand", None);
+        h.dispatch(&mut vcx, "down", Some(2)); // the package's second leg
+        let (package, legs_before) = h.tile.read_with(&vcx, |t, _| {
+            let p = (0..t.sheet.len()).find(|&r| t.sheet.is_package(r)).unwrap();
+            (p, t.sheet.children(p).len())
+        });
+        h.dispatch(&mut vcx, "add_above", None);
+        typed(&h, &mut vcx, "SPX Z26 5000 C");
+        h.dispatch(&mut vcx, "commit", None);
+        h.tile.read_with(&vcx, |t, _| {
+            assert_eq!(t.sheet.children(package).len(), legs_before + 1);
+            let legs: Vec<_> = t.sheet.children(package).collect();
+            assert!(
+                t.sheet.shorthand(legs[1]).contains("5000 C"),
+                "landed before the second leg: {:?}",
+                legs.iter()
+                    .map(|&r| t.sheet.shorthand(r))
+                    .collect::<Vec<_>>()
+            );
+        });
+    }
+
     #[gpui::test]
     fn a_parse_error_shows_under_the_field_keeps_the_text_and_typing_clears_it(
         cx: &mut gpui::TestAppContext,
@@ -7060,7 +7536,7 @@ pub(crate) mod tests {
         assert_eq!(h.mode(&mut vcx), "normal");
         assert_eq!(h.prices()[0].lines.len(), 4);
         h.dispatch(&mut vcx, "menu", None);
-        h.dispatch(&mut vcx, "menu_down", Some(4)); // the second view: barrier
+        h.dispatch(&mut vcx, "menu_down", Some(8)); // past the sheet rows to the second view: barrier
         h.dispatch(&mut vcx, "menu_pick", None);
         assert!(h.columns(&vcx).contains(&"barrier".to_string()));
     }
@@ -7104,7 +7580,7 @@ pub(crate) mod tests {
     fn a_reload_under_an_open_menu_relists_its_views(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
         h.dispatch(&mut vcx, "menu", None);
-        h.dispatch(&mut vcx, "menu_down", Some(7)); // view: barrier, the last row
+        h.dispatch(&mut vcx, "menu_down", Some(20)); // view: barrier, the last row
         vcx.update(|_, cx| {
             h.factory.reload(
                 slim_views("\"qty\", \"price\""),
@@ -7129,7 +7605,7 @@ pub(crate) mod tests {
             (views, m.highlighted())
         });
         assert_eq!(views, vec!["slim false"]);
-        assert_eq!(highlighted, Some(11), "clamped to the last row");
+        assert_eq!(highlighted, Some(17), "clamped to the last row");
     }
 
     #[gpui::test]
@@ -8330,13 +8806,29 @@ pub(crate) mod tests {
                 "—",
                 "Delete row | d d",
                 "—",
+                "[Sheet]",
+                "Open sheet… | :e",
+                "Rename sheet… | :name",
+                "New sheet | :new",
+                "Remove sheet… | :rm",
+                "—",
                 "[View]",
                 "✓ vanilla",
                 "  barrier",
             ]
         );
         for (id, title) in crate::content::ACTIONS {
-            if ["pricer::price", "pricer::group", "pricer::ungroup"].contains(id) {
+            if [
+                "pricer::price",
+                "pricer::group",
+                "pricer::ungroup",
+                "pricer::open_sheet",
+                "pricer::rename_sheet",
+                "pricer::new_sheet",
+                "pricer::remove_sheet",
+            ]
+            .contains(id)
+            {
                 assert!(
                     menu_rows(&h, &vcx)
                         .iter()
@@ -8359,7 +8851,12 @@ pub(crate) mod tests {
         let at = h
             .tile
             .read_with(&vcx, |t, _| t.menu.as_ref().and_then(|m| m.highlighted()));
-        assert_eq!(at, Some(11), "over the section header onto a view");
+        assert_eq!(at, Some(11), "over the Sheet section header onto Open");
+        h.dispatch(&mut vcx, "menu_down", Some(4));
+        let at = h
+            .tile
+            .read_with(&vcx, |t, _| t.menu.as_ref().and_then(|m| m.highlighted()));
+        assert_eq!(at, Some(17), "over the View section header onto a view");
     }
 
     /// A real pointer move over a menu row moves the highlight there (the
@@ -8369,12 +8866,12 @@ pub(crate) mod tests {
     fn a_pointer_move_over_a_menu_row_moves_the_highlight(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
         h.dispatch(&mut vcx, "menu", None);
-        let at = centre_of(&mut vcx, "pricer-menu-row-12"); // barrier
+        let at = centre_of(&mut vcx, "pricer-menu-row-18"); // barrier
         vcx.simulate_mouse_move(at, None, gpui::Modifiers::default());
         let highlighted = h
             .tile
             .read_with(&vcx, |t, _| t.menu.as_ref().and_then(|m| m.highlighted()));
-        assert_eq!(highlighted, Some(12));
+        assert_eq!(highlighted, Some(18));
         h.dispatch(&mut vcx, "menu_pick", None);
         assert!(h.columns(&vcx).contains(&"barrier".to_string()));
     }
@@ -9934,6 +10431,535 @@ pub(crate) mod tests {
         assert_eq!(h.command(&mut vcx, "new"), Ok(()));
         save_answered(&h, &mut vcx, "other", Ok(()));
         assert!(h.notice(&vcx).is_none());
+    }
+
+    // ---- sheets by pointer: the picker, the rename field, Yes/No ----
+
+    /// The open picker's painted rows, marks spelled out: `✓` for the
+    /// current sheet, `(open)` for one another tile holds, `>` on the
+    /// highlighted row. `None` with the picker closed.
+    fn picker_rows(h: &Harness, vcx: &VisualTestContext) -> Option<Vec<String>> {
+        h.tile.read_with(vcx, |t, _| {
+            let p = t.sheet_picker.as_ref()?;
+            Some(
+                p.list
+                    .painted()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| {
+                        let row = &p.rows[r.row];
+                        let mut s = format!(
+                            "{}{}{}",
+                            if i == p.list.highlighted() { ">" } else { " " },
+                            if row.current { "✓ " } else { "" },
+                            row.name
+                        );
+                        if row.open_elsewhere {
+                            s.push_str(" (open)");
+                        }
+                        s
+                    })
+                    .collect(),
+            )
+        })
+    }
+
+    fn picker_purpose(h: &Harness, vcx: &VisualTestContext) -> Option<PickerPurpose> {
+        h.tile
+            .read_with(vcx, |t, _| t.sheet_picker.as_ref().map(|p| p.purpose))
+    }
+
+    fn picker_text(h: &Harness, vcx: &VisualTestContext) -> Option<String> {
+        h.tile.read_with(vcx, |t, cx| {
+            t.sheet_picker
+                .as_ref()
+                .map(|p| p.input.read(cx).value().to_string())
+        })
+    }
+
+    fn rename_text(h: &Harness, vcx: &VisualTestContext) -> Option<String> {
+        h.tile.read_with(vcx, |t, cx| {
+            t.rename_field
+                .as_ref()
+                .map(|i| i.read(cx).value().to_string())
+        })
+    }
+
+    fn click(vcx: &mut VisualTestContext, selector: &str, click_count: usize) {
+        let at = centre_of(vcx, selector);
+        click_at(vcx, at, click_count);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+    }
+
+    /// `book` open here, `old` stored, `untitled-1` held by another tile.
+    fn sheets_fixture(
+        cx: &mut gpui::TestAppContext,
+    ) -> (Harness, VisualTestContext, Box<dyn TileContent>) {
+        rm_fixture(cx)
+    }
+
+    #[test]
+    fn a_rename_block_names_its_reason() {
+        assert_eq!(RenameBlock::Loading.reason(), "the sheet is still loading");
+        assert_eq!(RenameBlock::NotLoaded.reason(), "the sheet did not load");
+        assert_eq!(
+            RenameBlock::Unsaved.reason(),
+            "the last rename is not saved yet"
+        );
+    }
+
+    /// A click on the header's sheet name opens the picker on every name,
+    /// the current one ticked and highlighted, one another tile holds
+    /// marked; typed text (after the click) filters it, and a row click
+    /// opens that sheet through `:e`'s route.
+    #[gpui::test]
+    fn a_click_on_the_sheet_name_opens_the_picker_and_a_row_click_loads_that_sheet(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx, _second) = sheets_fixture(cx);
+        click(&mut vcx, "pricer-sheet-name", 1);
+        assert_eq!(h.mode(&mut vcx), "insert", "the filter holds the keyboard");
+        assert!(painted(&mut vcx, "pricer-sheet-picker"));
+        assert!(vcx.update(|window, cx| h.content.holds_focus(window, cx)));
+        assert_eq!(picker_purpose(&h, &vcx), Some(PickerPurpose::Open));
+        assert_eq!(
+            picker_rows(&h, &vcx),
+            Some(vec![
+                ">✓ book".to_string(),
+                " old".to_string(),
+                " untitled-1 (open)".to_string(),
+            ])
+        );
+        typed(&h, &mut vcx, "ol");
+        assert_eq!(picker_rows(&h, &vcx), Some(vec![">old".to_string()]));
+        click(&mut vcx, "pricer-sheet-row-0", 1);
+        assert_eq!(h.title(&mut vcx), "Pricer · old");
+        assert_eq!(picker_rows(&h, &vcx), None, "a pick closes the picker");
+        assert_eq!(h.mode(&mut vcx), "normal");
+        assert!(!focused(&mut vcx), "the field blurred before it dropped");
+    }
+
+    /// A second click on the name closes the picker the first opened
+    /// (the capture-phase toggle runs before the picker's own outside
+    /// press closer), and a press elsewhere closes it too.
+    #[gpui::test]
+    fn the_sheet_name_toggles_the_picker_and_a_press_elsewhere_closes_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx, _second) = sheets_fixture(cx);
+        click(&mut vcx, "pricer-sheet-name", 1);
+        assert!(picker_rows(&h, &vcx).is_some());
+        click(&mut vcx, "pricer-footer", 1);
+        assert!(
+            picker_rows(&h, &vcx).is_none(),
+            "an outside press closes it"
+        );
+        click(&mut vcx, "pricer-sheet-name", 1);
+        assert!(picker_rows(&h, &vcx).is_some());
+        // A single click after a press elsewhere, then the name again: two
+        // single clicks, not a double-click, so it toggles closed.
+        click(&mut vcx, "pricer-footer", 1);
+        click(&mut vcx, "pricer-sheet-name", 1);
+        click(&mut vcx, "pricer-sheet-name", 1);
+        assert!(picker_rows(&h, &vcx).is_none(), "a second click closes it");
+        assert_eq!(h.mode(&mut vcx), "normal");
+    }
+
+    /// Picking a sheet another tile holds refuses with `:e`'s words, in
+    /// the footer, and the picker stays open for another pick; `enter`
+    /// with nothing matching says so.
+    #[gpui::test]
+    fn picking_a_sheet_open_elsewhere_refuses_like_colon_e(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx, _second) = sheets_fixture(cx);
+        h.dispatch(&mut vcx, "open_sheet", None);
+        h.draw(&mut vcx);
+        typed(&h, &mut vcx, "untitled");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(
+            h.footer(&vcx).as_deref(),
+            Some("sheet 'untitled-1' is open in another tile")
+        );
+        assert_eq!(h.title(&mut vcx), "Pricer · book");
+        assert!(picker_rows(&h, &vcx).is_some(), "the picker stays open");
+        typed(&h, &mut vcx, "zzz");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.footer(&vcx).as_deref(), Some(NO_SHEET_MATCHES));
+        assert!(picker_rows(&h, &vcx).is_some());
+    }
+
+    /// `enter` picks the highlighted name; `up`/`down` step it (wrapping
+    /// by one), `tab` completes the field to it, a hover moves it, and
+    /// escape closes the picker with nothing opened.
+    #[gpui::test]
+    fn the_picker_steps_completes_commits_and_escape_closes(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx, _second) = sheets_fixture(cx);
+        h.dispatch(&mut vcx, "open_sheet", None);
+        h.draw(&mut vcx);
+        h.dispatch(&mut vcx, "insert_down", None);
+        assert_eq!(
+            picker_rows(&h, &vcx).unwrap()[1],
+            ">old",
+            "down steps the highlight"
+        );
+        h.dispatch(&mut vcx, "insert_up", None);
+        h.dispatch(&mut vcx, "insert_up", None);
+        assert_eq!(
+            picker_rows(&h, &vcx).unwrap()[2],
+            ">untitled-1 (open)",
+            "up past the first row wraps"
+        );
+        let at = centre_of(&mut vcx, "pricer-sheet-row-1");
+        vcx.simulate_mouse_move(at, None, gpui::Modifiers::default());
+        assert_eq!(
+            picker_rows(&h, &vcx).unwrap()[1],
+            ">old",
+            "a hover moves it"
+        );
+        vcx.simulate_keystrokes("tab");
+        assert_eq!(picker_text(&h, &vcx).as_deref(), Some("old"));
+        assert!(picker_rows(&h, &vcx).is_some(), "tab keeps the picker open");
+        h.dispatch(&mut vcx, "cancel", None);
+        assert!(picker_rows(&h, &vcx).is_none());
+        assert!(
+            !focused(&mut vcx),
+            "escape blurred the field before it dropped"
+        );
+        assert_eq!(h.title(&mut vcx), "Pricer · book", "nothing opened");
+        h.dispatch(&mut vcx, "open_sheet", None);
+        typed(&h, &mut vcx, "old");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.title(&mut vcx), "Pricer · old");
+        assert!(picker_rows(&h, &vcx).is_none());
+    }
+
+    /// A double-click on the name swaps it for the rename field, seeded
+    /// with the name all selected; the picker the first press opened is
+    /// gone. Typing replaces the name and `enter` renames through
+    /// `:name`'s route.
+    #[gpui::test]
+    fn a_double_click_on_the_sheet_name_renames_in_place(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx, _second) = sheets_fixture(cx);
+        let at = centre_of(&mut vcx, "pricer-sheet-name");
+        click_at(&mut vcx, at, 1);
+        h.draw(&mut vcx);
+        assert!(picker_rows(&h, &vcx).is_some(), "the first press opened it");
+        click_at(&mut vcx, at, 2);
+        h.draw(&mut vcx);
+        assert!(
+            picker_rows(&h, &vcx).is_none(),
+            "the second press closed it"
+        );
+        assert_eq!(rename_text(&h, &vcx).as_deref(), Some("book"));
+        assert!(painted(&mut vcx, "pricer-rename-field"));
+        assert_eq!(h.mode(&mut vcx), "insert");
+        assert!(vcx.update(|window, cx| h.content.holds_focus(window, cx)));
+        typed(&h, &mut vcx, "fresh");
+        assert_eq!(
+            rename_text(&h, &vcx).as_deref(),
+            Some("fresh"),
+            "the selected name was replaced"
+        );
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.title(&mut vcx), "Pricer · fresh");
+        assert_eq!(rename_text(&h, &vcx), None);
+        assert_eq!(h.mode(&mut vcx), "normal");
+        assert!(!focused(&mut vcx), "the field blurred before it dropped");
+    }
+
+    /// A double-click's second press renames only when its first press
+    /// reached the name too: a first press that landed elsewhere (here
+    /// the footer, standing in for a surface painted over the name) makes
+    /// the second an ordinary single click.
+    #[gpui::test]
+    fn a_double_click_whose_first_press_missed_the_name_opens_the_picker(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx, _second) = sheets_fixture(cx);
+        click(&mut vcx, "pricer-footer", 1);
+        click(&mut vcx, "pricer-sheet-name", 2);
+        assert_eq!(rename_text(&h, &vcx), None);
+        assert!(picker_rows(&h, &vcx).is_some(), "a single click's picker");
+    }
+
+    /// A refused rename says why in the footer and keeps the field and
+    /// its text; escape cancels, and so does a press outside the field.
+    #[gpui::test]
+    fn a_refused_rename_keeps_the_field_and_escape_or_a_press_outside_cancels(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx, _second) = sheets_fixture(cx);
+        h.dispatch(&mut vcx, "rename_sheet", None);
+        h.draw(&mut vcx);
+        typed(&h, &mut vcx, "old");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(
+            h.footer(&vcx).as_deref(),
+            Some("sheet 'old' already exists")
+        );
+        assert_eq!(rename_text(&h, &vcx).as_deref(), Some("old"), "kept open");
+        typed(&h, &mut vcx, " two");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.footer(&vcx).as_deref(), Some("usage: name <sheet>"));
+        h.dispatch(&mut vcx, "cancel", None);
+        assert_eq!(rename_text(&h, &vcx), None);
+        assert!(!focused(&mut vcx));
+        assert_eq!(h.title(&mut vcx), "Pricer · book");
+
+        h.dispatch(&mut vcx, "rename_sheet", None);
+        h.draw(&mut vcx);
+        typed(&h, &mut vcx, "fresh");
+        click(&mut vcx, "pricer-footer", 1);
+        assert_eq!(rename_text(&h, &vcx), None, "a press outside cancels");
+        assert_eq!(h.title(&mut vcx), "Pricer · book", "and never commits");
+    }
+
+    /// A rename refused whatever the name never opens the field: the
+    /// footer says why, as the menu's greyed row does.
+    #[gpui::test]
+    fn a_blocked_rename_says_why_and_greys_its_menu_row(cx: &mut gpui::TestAppContext) {
+        let (store, record) = seeded(&["SPX Z26 5000 C"]);
+        store.set_pending(true);
+        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        h.dispatch(&mut vcx, "rename_sheet", None);
+        assert_eq!(rename_text(&h, &vcx), None);
+        assert_eq!(
+            h.footer(&vcx).as_deref(),
+            Some("the sheet is still loading")
+        );
+        h.dispatch(&mut vcx, "menu", None);
+        assert!(
+            menu_rows(&h, &vcx).contains(&"Rename sheet… | (the sheet is still loading)".into())
+        );
+    }
+
+    fn menu_index(h: &Harness, vcx: &VisualTestContext, id: &str) -> usize {
+        h.tile.read_with(vcx, |t, _| {
+            t.menu
+                .as_ref()
+                .expect("the menu is open")
+                .rows()
+                .iter()
+                .position(|r| {
+                    r.action()
+                        .is_some_and(|a| matches!(a.pick(), PricerPick::Action(x) if *x == id))
+                })
+                .expect("the menu has the row")
+        })
+    }
+
+    /// Each of the menu's Sheet rows, clicked, does what its command
+    /// does: Open and Remove open the picker for that purpose, Rename
+    /// the field, New the next untitled sheet.
+    #[gpui::test]
+    fn the_menus_sheet_rows_open_rename_create_and_remove(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx, _second) = sheets_fixture(cx);
+        let pick = |h: &Harness, vcx: &mut VisualTestContext, id: &str| {
+            h.dispatch(vcx, "menu", None);
+            let i = menu_index(h, vcx, id);
+            click(vcx, &format!("pricer-menu-row-{i}"), 1);
+            assert!(h.tile.read_with(vcx, |t, _| t.menu.is_none()), "{id}");
+        };
+        pick(&h, &mut vcx, "pricer::open_sheet");
+        assert_eq!(picker_purpose(&h, &vcx), Some(PickerPurpose::Open));
+        pick(&h, &mut vcx, "pricer::rename_sheet");
+        assert_eq!(picker_purpose(&h, &vcx), None, "the menu closed it");
+        assert_eq!(rename_text(&h, &vcx).as_deref(), Some("book"));
+        pick(&h, &mut vcx, "pricer::remove_sheet");
+        assert_eq!(rename_text(&h, &vcx), None, "the menu closed it");
+        assert_eq!(picker_purpose(&h, &vcx), Some(PickerPurpose::Remove));
+        pick(&h, &mut vcx, "pricer::new_sheet");
+        assert_eq!(picker_purpose(&h, &vcx), None);
+        assert_eq!(h.title(&mut vcx), "Pricer · untitled-2");
+    }
+
+    /// The Remove picker takes `:rm`'s route: the current sheet refuses
+    /// with its words, another arms the same y/n prompt `:rm` arms.
+    #[gpui::test]
+    fn the_remove_picker_arms_colon_rms_confirm(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx, _second) = sheets_fixture(cx);
+        h.dispatch(&mut vcx, "remove_sheet", None);
+        h.draw(&mut vcx);
+        h.dispatch(&mut vcx, "commit", None); // the highlighted current sheet
+        assert_eq!(
+            h.footer(&vcx).as_deref(),
+            Some("sheet 'book' is open here: close it or `:e` another sheet first")
+        );
+        assert!(picker_rows(&h, &vcx).is_some(), "kept open");
+        typed(&h, &mut vcx, "old");
+        h.dispatch(&mut vcx, "commit", None);
+        assert!(picker_rows(&h, &vcx).is_none());
+        assert_eq!(
+            prompt(&h, &vcx).as_deref(),
+            Some("remove sheet 'old' and all its history? (y/n)")
+        );
+        let focus = h.tile.read_with(&vcx, |t, _| {
+            t.confirm.as_ref().unwrap().focus_handle().clone()
+        });
+        assert!(
+            vcx.update(|window, _| focus.is_focused(window)),
+            "the prompt holds the keyboard"
+        );
+        vcx.simulate_keystrokes("y");
+        assert_eq!(h.store.forgets(), vec!["old".to_string()]);
+    }
+
+    /// Each sheet action dispatched from the palette: the same four
+    /// routes, each closing whatever field was open first.
+    #[gpui::test]
+    fn the_sheet_actions_dispatch_from_the_palette_and_close_other_fields(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "add_below", None);
+        assert!(h.entry_text(&vcx).is_some());
+        h.dispatch(&mut vcx, "open_sheet", None);
+        assert!(h.entry_text(&vcx).is_none(), "the entry bar closed");
+        assert_eq!(picker_purpose(&h, &vcx), Some(PickerPurpose::Open));
+        h.dispatch(&mut vcx, "remove_sheet", None);
+        assert_eq!(picker_purpose(&h, &vcx), Some(PickerPurpose::Remove));
+        h.dispatch(&mut vcx, "rename_sheet", None);
+        assert_eq!(picker_purpose(&h, &vcx), None);
+        assert!(rename_text(&h, &vcx).is_some());
+        h.dispatch(&mut vcx, "add_below", None);
+        assert!(rename_text(&h, &vcx).is_none(), "another verb closes it");
+        h.dispatch(&mut vcx, "new_sheet", None);
+        assert_eq!(h.title(&mut vcx), "Pricer · untitled-1");
+        assert!(h.entry_text(&vcx).is_none());
+        h.dispatch(&mut vcx, "open_sheet", None);
+        assert_eq!(
+            picker_rows(&h, &vcx),
+            Some(vec![" book".to_string(), ">✓ untitled-1".to_string()]),
+            "the picker opens on the current sheet, wherever it sorts"
+        );
+    }
+
+    /// `:` and `/` go straight to the tile, past `dispatch`: they close
+    /// the picker and the rename field as they close the other fields.
+    #[gpui::test]
+    fn colon_and_find_close_the_sheet_picker_and_rename_field(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "open_sheet", None);
+        h.draw(&mut vcx);
+        assert_eq!(h.command(&mut vcx, "price"), Ok(()));
+        assert!(picker_rows(&h, &vcx).is_none());
+        assert!(!focused(&mut vcx));
+        h.dispatch(&mut vcx, "rename_sheet", None);
+        h.draw(&mut vcx);
+        vcx.update(|window, cx| h.content.find(FindEvent::Changed("SPX".into()), window, cx));
+        assert!(rename_text(&h, &vcx).is_none());
+        assert!(!focused(&mut vcx));
+        assert_eq!(h.mode(&mut vcx), "normal");
+    }
+
+    /// The removal prompt's Yes button is `y`, its No button any other
+    /// key: a press on either does not first cancel the question.
+    #[gpui::test]
+    fn the_prompts_yes_button_removes_and_no_cancels(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx, _second) = sheets_fixture(cx);
+        assert!(
+            h.store
+                .save("older", sheet_rows("older", &["NKY Z26 30000 C"]))
+                .is_ok()
+        );
+        h.command(&mut vcx, "rm older").unwrap();
+        h.draw(&mut vcx);
+        click(&mut vcx, "pricer-remove-confirm-5-no", 1);
+        assert_eq!(prompt(&h, &vcx), None);
+        assert_eq!(h.footer(&vcx).as_deref(), Some(NOT_REMOVED));
+        assert!(h.store.forgets().is_empty());
+        assert!(!focused(&mut vcx), "the prompt blurred before it dropped");
+
+        h.command(&mut vcx, "rm old").unwrap();
+        h.draw(&mut vcx);
+        click(&mut vcx, "pricer-remove-confirm-5-yes", 1);
+        assert_eq!(prompt(&h, &vcx), None);
+        assert_eq!(h.store.forgets(), vec!["old".to_string()]);
+        assert_eq!(h.mode(&mut vcx), "normal");
+    }
+
+    /// A press in the gap between Yes and No answers no, like a press
+    /// anywhere else but on the two buttons.
+    #[gpui::test]
+    fn a_press_between_the_prompts_buttons_cancels_it(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx, _second) = sheets_fixture(cx);
+        h.command(&mut vcx, "rm old").unwrap();
+        h.draw(&mut vcx);
+        let yes = vcx
+            .debug_bounds("pricer-remove-confirm-5-yes")
+            .expect("Yes painted");
+        let no = vcx
+            .debug_bounds("pricer-remove-confirm-5-no")
+            .expect("No painted");
+        assert!(
+            yes.right() < no.left(),
+            "fixture: a gap between the buttons"
+        );
+        let gap = gpui::point((yes.right() + no.left()) / 2.0, yes.center().y);
+        click_at(&mut vcx, gap, 1);
+        assert_eq!(prompt(&h, &vcx), None);
+        assert_eq!(h.footer(&vcx).as_deref(), Some(NOT_REMOVED));
+        assert!(h.store.forgets().is_empty());
+    }
+
+    /// `tab` in the rename field stays in it: gpui-component's focus
+    /// cycling would otherwise take the keyboard while the field stays
+    /// open, and later typing would reach nothing.
+    #[gpui::test]
+    fn tab_in_the_rename_field_keeps_the_keyboard_in_it(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx, _second) = sheets_fixture(cx);
+        h.dispatch(&mut vcx, "rename_sheet", None);
+        h.draw(&mut vcx);
+        vcx.simulate_keystrokes("tab");
+        h.draw(&mut vcx);
+        assert!(vcx.update(|window, cx| h.content.holds_focus(window, cx)));
+        typed(&h, &mut vcx, "zz");
+        assert_eq!(rename_text(&h, &vcx).as_deref(), Some("zz"));
+    }
+
+    /// A double-click's first press on this tile's own picker (a surface
+    /// painted over the tile, so the tile root never hears the press)
+    /// still counts as a press off the name: the second press toggles the
+    /// picker closed and renames nothing.
+    #[gpui::test]
+    fn a_double_click_whose_first_press_hit_the_picker_does_not_rename(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx, _second) = sheets_fixture(cx);
+        click(&mut vcx, "pricer-sheet-name", 1);
+        click(&mut vcx, "pricer-sheet-picker-field", 1);
+        assert!(picker_rows(&h, &vcx).is_some(), "fixture: still open");
+        click(&mut vcx, "pricer-sheet-name", 2);
+        assert_eq!(rename_text(&h, &vcx), None);
+        assert!(picker_rows(&h, &vcx).is_none(), "a single click's toggle");
+    }
+
+    /// A modified press on the name is the shell's gesture (a drag, a
+    /// fullscreen double-click), never the pricer's.
+    #[gpui::test]
+    fn a_modified_press_on_the_sheet_name_opens_nothing(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx, _second) = sheets_fixture(cx);
+        let at = centre_of(&mut vcx, "pricer-sheet-name");
+        for click_count in [1, 2] {
+            vcx.simulate_event(gpui::MouseDownEvent {
+                position: at,
+                modifiers: gpui::Modifiers::alt(),
+                button: gpui::MouseButton::Left,
+                click_count,
+                first_mouse: false,
+            });
+            vcx.simulate_event(gpui::MouseUpEvent {
+                position: at,
+                modifiers: gpui::Modifiers::alt(),
+                button: gpui::MouseButton::Left,
+                click_count,
+            });
+            h.draw(&mut vcx);
+        }
+        assert!(picker_rows(&h, &vcx).is_none());
+        assert_eq!(rename_text(&h, &vcx), None);
+        assert_eq!(h.mode(&mut vcx), "normal");
     }
 
     mod selection;

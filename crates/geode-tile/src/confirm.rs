@@ -1,6 +1,8 @@
 //! The in-tile y/n confirm. While armed the prompt holds the keyboard: a
-//! bare `y` confirms and runs the module's action; any other key, a pointer
-//! press anywhere in the tile, or focus leaving the prompt cancels. Every
+//! bare `y` or its Yes button confirms and runs the module's action; any
+//! other key, its No button, a pointer press anywhere else in the tile (the
+//! gap between the buttons included), or focus leaving the prompt cancels.
+//! Every
 //! answer blurs the prompt before its handle drops, so the keyboard goes
 //! back to the shell root and the shell's restoration path returns it to
 //! the tile surface. The module supplies the question and what `y` does;
@@ -8,10 +10,13 @@
 
 use gpui::prelude::*;
 use gpui::{
-    AnyWindowHandle, App, Context, Div, Entity, FocusHandle, KeyDownEvent, SharedString,
-    Subscription, Window, div,
+    AnyWindowHandle, App, Bounds, ClickEvent, Context, Div, ElementId, Entity, FocusHandle,
+    KeyDownEvent, Pixels, Point, SharedString, Subscription, Window, div,
 };
-use gpui_component::Theme;
+use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::{Sizable as _, Theme, h_flex};
+use std::cell::RefCell;
+use std::rc::Rc;
 
 /// An armed confirm: the module's payload, the question, and the handle
 /// the prompt holds the keyboard on. `_blur` is the focus-leaving answer;
@@ -24,6 +29,11 @@ pub struct Confirm<P> {
     /// The window the prompt's handle lives in, for [`withdraw`], which runs
     /// where no `Window` is at hand.
     window: AnyWindowHandle,
+    /// The Yes and No buttons' bounds as last painted, written by the
+    /// button row's prepaint and read by [`cancel_on_press`]: a press on a
+    /// button is the button's answer, not a cancel. Empty until painted,
+    /// so a press before the first paint cancels.
+    buttons: Rc<RefCell<Vec<Bounds<Pixels>>>>,
     _blur: Subscription,
 }
 
@@ -42,6 +52,12 @@ impl<P> Confirm<P> {
 
     pub fn holds_focus(&self, window: &Window) -> bool {
         self.focus.is_focused(window)
+    }
+
+    /// Whether `at` is on the Yes or No button as last painted (not in the
+    /// gap between them).
+    fn on_a_button(&self, at: Point<Pixels>) -> bool {
+        self.buttons.borrow().iter().any(|b| b.contains(&at))
     }
 
     /// Blur, then drop: a focused handle dropped unblurred leaves window
@@ -89,6 +105,7 @@ pub fn arm<T: ConfirmHost>(
         prompt: prompt.into(),
         focus,
         window: window.window_handle(),
+        buttons: Rc::default(),
         _blur: blur,
     });
 }
@@ -103,12 +120,24 @@ pub fn key<T: ConfirmHost>(
     window: &mut Window,
     cx: &mut Context<T>,
 ) -> bool {
+    let ks = &event.keystroke;
+    answer(host, ks.key == "y" && !ks.modifiers.modified(), window, cx)
+}
+
+/// Answer the question: `yes` confirms, anything else cancels. The one
+/// answer behind the keys and the Yes/No buttons. Answers whether a
+/// confirm was armed.
+pub fn answer<T: ConfirmHost>(
+    host: &mut T,
+    yes: bool,
+    window: &mut Window,
+    cx: &mut Context<T>,
+) -> bool {
     let Some(armed) = host.confirm_slot().take() else {
         return false;
     };
     let payload = armed.disarm(window, cx);
-    let ks = &event.keystroke;
-    if ks.key == "y" && !ks.modifiers.modified() {
+    if yes {
         host.confirmed(payload, window, cx);
     } else {
         host.cancelled(payload, window, cx);
@@ -152,40 +181,94 @@ pub fn withdraw<T: ConfirmHost>(host: &mut T, cx: &mut Context<T>) -> Option<T::
     Some(payload)
 }
 
-/// The prompt: the question on the element that holds the keyboard. Its key
-/// listener runs on the focused element, before the shell root's, and stops
-/// every key it answers. A press on it takes no focus (and none passes to a
-/// focusable ancestor): the press has answered, and the shell's restoration
-/// path returns the keyboard to the tile, as for a press anywhere else.
+/// The prompt: the question on the element that holds the keyboard, and
+/// its Yes and No buttons. The question's key listener runs on the focused
+/// element, before the shell root's, and stops every key it answers. A
+/// press on the question takes no focus (and none passes to a focusable
+/// ancestor): the press has answered, and the shell's restoration path
+/// returns the keyboard to the tile, as for a press anywhere else.
+///
+/// Yes is `y` and No any other key ([`answer`]). A left press on a button
+/// moves no focus (gpui-component's `Button` prevents the default focus
+/// move) and [`cancel_on_press`] lets it through, so the question stands,
+/// keyboard and all, until the click lands. The press still bubbles to the
+/// shell's tile listener, whose focus restore keeps the prompt because the
+/// prompt holds focus. The buttons are selected as `{selector}-yes` and
+/// `{selector}-no`.
 pub fn prompt<T: ConfirmHost>(
     confirm: &Confirm<T::Payload>,
     tile: &Entity<T>,
-    selector: impl FnOnce() -> String + 'static,
+    selector: impl Fn() -> String + 'static,
     theme: &Theme,
 ) -> Div {
-    let tile = tile.clone();
-    div()
-        .track_focus(&confirm.focus)
-        .debug_selector(selector)
-        .text_color(theme.foreground)
-        .child(confirm.prompt.clone())
-        // A press on the question itself: `cancel_on_press` has already
-        // answered no and blurred the handle, but this frame's element
-        // still tracks it, and gpui's press-to-focus would hand the
-        // keyboard back to a prompt that is gone. Bubble listeners run
-        // before the element's own focus transfer, which honours this.
-        .on_any_mouse_down(|_, window, _| window.prevent_default())
-        .on_key_down(move |event: &KeyDownEvent, window, cx| {
-            if tile.update(cx, |t, cx| key(t, event, window, cx)) {
-                cx.stop_propagation();
-            }
-        })
+    let selector = Rc::new(selector);
+    let key_tile = tile.clone();
+    let tile_key = tile.entity_id().as_u64();
+    let button = |yes: bool| {
+        let tile = tile.clone();
+        let selector = selector.clone();
+        let (name, label) = if yes {
+            ("confirm-yes", "Yes")
+        } else {
+            ("confirm-no", "No")
+        };
+        let button = Button::new(ElementId::NamedInteger(
+            SharedString::new_static(name),
+            tile_key,
+        ))
+        .xsmall()
+        .label(label)
+        .on_click(move |_: &ClickEvent, window, cx| {
+            tile.update(cx, |t, cx| answer(t, yes, window, cx));
+        });
+        div()
+            .debug_selector(move || format!("{}-{}", selector(), if yes { "yes" } else { "no" }))
+            .child(if yes { button.danger() } else { button.ghost() })
+    };
+    let question_selector = selector.clone();
+    let buttons = confirm.buttons.clone();
+    h_flex()
+        .gap_2()
+        .items_center()
+        .child(
+            div()
+                .track_focus(&confirm.focus)
+                .debug_selector(move || question_selector())
+                .text_color(theme.foreground)
+                .child(confirm.prompt.clone())
+                // A press on the question itself: `cancel_on_press` has
+                // already answered no and blurred the handle, but this
+                // frame's element still tracks it, and gpui's press-to-focus
+                // would hand the keyboard back to a prompt that is gone.
+                // Bubble listeners run before the element's own focus
+                // transfer, which honours this.
+                .on_any_mouse_down(|_, window, _| window.prevent_default())
+                .on_key_down(move |event: &KeyDownEvent, window, cx| {
+                    if key_tile.update(cx, |t, cx| key(t, event, window, cx)) {
+                        cx.stop_propagation();
+                    }
+                }),
+        )
+        .child(
+            h_flex()
+                .gap_1()
+                // Where the buttons are, for `cancel_on_press`: geometry
+                // from this frame's layout, not state.
+                .on_children_prepainted(move |bounds, _, _| {
+                    let mut buttons = buttons.borrow_mut();
+                    buttons.clear();
+                    buttons.extend(bounds);
+                })
+                .child(button(true))
+                .child(button(false)),
+        )
 }
 
-/// Cancel on any pointer press in the tile while armed. Capture phase, so it
-/// runs before the press reaches what it was aimed at, and it never stops
-/// the press. A press on a header or a button moves no focus, so the blur
-/// answer alone would leave the question standing behind the click.
+/// Cancel on any pointer press in the tile while armed, except one on the
+/// prompt's Yes or No button (the gap between them cancels). Capture phase,
+/// so it runs before the press reaches what it was aimed at, and it never
+/// stops the press. A press on a header or a button moves no focus, so the
+/// blur answer alone would leave the question standing behind the click.
 pub fn cancel_on_press<E, T>(root: E, armed: bool, tile: &Entity<T>) -> E
 where
     E: InteractiveElement + FluentBuilder,
@@ -193,8 +276,16 @@ where
 {
     let tile = tile.clone();
     root.when(armed, move |el| {
-        el.capture_any_mouse_down(move |_, window, cx| {
-            tile.update(cx, |t, cx| cancel(t, window, cx));
+        el.capture_any_mouse_down(move |event, window, cx| {
+            tile.update(cx, |t, cx| {
+                let on_a_button = t
+                    .confirm_slot()
+                    .as_ref()
+                    .is_some_and(|c| c.on_a_button(event.position));
+                if !on_a_button {
+                    cancel(t, window, cx);
+                }
+            });
         })
     })
 }
@@ -358,6 +449,70 @@ mod tests {
             gave_the_keyboard_back(&focus, vcx);
         }
         probe.read_with(vcx, |p, _| assert_eq!(p.cancelled, vec!["x", "x"]));
+    }
+
+    /// Yes is `y`, No any other key: each answers once, and the press on
+    /// the button did not cancel the question before the click landed.
+    #[gpui::test]
+    fn the_yes_button_confirms_and_the_no_button_cancels(cx: &mut TestAppContext) {
+        let (probe, vcx) = open(cx);
+        let focus = arm_probe(&probe, "x", vcx);
+        let at = vcx.debug_bounds("probe-prompt-yes").expect("Yes").center();
+        vcx.simulate_click(at, Modifiers::default());
+        draw(vcx);
+        probe.read_with(vcx, |p, _| {
+            assert_eq!(p.confirmed, vec!["x"]);
+            assert!(p.cancelled.is_empty(), "the press did not cancel first");
+            assert!(p.confirm.is_none());
+        });
+        gave_the_keyboard_back(&focus, vcx);
+
+        let focus = arm_probe(&probe, "z", vcx);
+        let at = vcx.debug_bounds("probe-prompt-no").expect("No").center();
+        vcx.simulate_click(at, Modifiers::default());
+        draw(vcx);
+        probe.read_with(vcx, |p, _| {
+            assert_eq!(p.confirmed, vec!["x"]);
+            assert_eq!(p.cancelled, vec!["z"], "No answered once");
+        });
+        gave_the_keyboard_back(&focus, vcx);
+    }
+
+    /// Between a button's press and its click the question stands and the
+    /// prompt keeps the keyboard: the press moved no focus.
+    #[gpui::test]
+    fn a_press_on_a_button_keeps_the_question_and_the_keyboard(cx: &mut TestAppContext) {
+        let (probe, vcx) = open(cx);
+        let focus = arm_probe(&probe, "x", vcx);
+        let at = vcx.debug_bounds("probe-prompt-yes").expect("Yes").center();
+        vcx.simulate_mouse_down(at, gpui::MouseButton::Left, Modifiers::default());
+        draw(vcx);
+        probe.read_with(vcx, |p, _| {
+            assert!(p.confirm.is_some(), "still armed");
+            assert!(p.cancelled.is_empty());
+        });
+        assert!(vcx.update(|window, _| focus.is_focused(window)));
+        vcx.simulate_mouse_up(at, gpui::MouseButton::Left, Modifiers::default());
+        draw(vcx);
+        probe.read_with(vcx, |p, _| assert_eq!(p.confirmed, vec!["x"]));
+    }
+
+    /// The gap between Yes and No is not a button: a press there cancels.
+    #[gpui::test]
+    fn a_press_between_the_buttons_cancels(cx: &mut TestAppContext) {
+        let (probe, vcx) = open(cx);
+        let focus = arm_probe(&probe, "x", vcx);
+        let yes = vcx.debug_bounds("probe-prompt-yes").expect("Yes");
+        let no = vcx.debug_bounds("probe-prompt-no").expect("No");
+        assert!(yes.right() < no.left(), "fixture: a gap between them");
+        let gap = gpui::point((yes.right() + no.left()) / 2.0, yes.center().y);
+        vcx.simulate_click(gap, Modifiers::default());
+        draw(vcx);
+        probe.read_with(vcx, |p, _| {
+            assert_eq!(p.cancelled, vec!["x"]);
+            assert!(p.confirmed.is_empty());
+        });
+        gave_the_keyboard_back(&focus, vcx);
     }
 
     #[gpui::test]
