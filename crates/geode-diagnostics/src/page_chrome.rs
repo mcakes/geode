@@ -8,7 +8,8 @@ use geode_shell::module::ShellActions;
 use geode_shell::shell::{chip, listrow, scale};
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, ClipboardItem, Context, FontWeight, MouseButton, SharedString, WeakEntity, div,
+    AnyElement, ClipboardItem, Context, Div, FontWeight, MouseButton, SharedString, Stateful,
+    WeakEntity, div,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
@@ -37,6 +38,14 @@ fn chip_tone(tone: Tone) -> chip::Tone {
         Tone::Error => chip::Tone::Danger,
         Tone::Normal | Tone::Muted | Tone::Marked => chip::Tone::Neutral,
     }
+}
+
+/// A toolbar control wrapped so a pointer test can find it by `id`.
+pub(crate) fn probed(id: &'static str, control: impl IntoElement) -> Stateful<Div> {
+    div()
+        .id(id)
+        .debug_selector(move || id.to_string())
+        .child(control)
 }
 
 /// Stable ids for the rail rows; a static string per section, so paint

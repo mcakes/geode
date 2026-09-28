@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use geode_core::config::Config;
-use geode_core::log::Ring;
+use geode_core::log::{Level, Ring};
 use geode_shell::actions::ActionId;
 use geode_shell::diagnostics::{DiagVersions, Diagnostics};
 use geode_shell::frame::{Frame, FrameVersions};
@@ -20,16 +20,19 @@ use geode_shell::module::ShellActions;
 use geode_shell::shell::{chip, scale};
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Entity, FocusHandle, Focusable as _, SharedString, Task, WeakEntity,
-    Window, div,
+    AnyElement, AnyWindowHandle, App, Context, Entity, FocusHandle, Focusable as _, SharedString,
+    Task, WeakEntity, Window, div,
 };
 use gpui_component::button::Button;
 use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::select::{SearchableVec, SelectEvent, SelectState};
 use gpui_component::table::{DataTable, TableEvent, TableState};
-use gpui_component::{ActiveTheme as _, Sizable as _, Size, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, IndexPath, Sizable as _, Size, h_flex, v_flex};
 
 use crate::config_view::{self, ConfigView};
+use crate::levels::{self, LevelRow, LevelsState};
 use crate::log::{LogFilter, LogTail};
+use crate::log_view::{self, LogView};
 use crate::model::{self, Badges, Tone};
 use crate::prepared::{self, PreparedTable};
 use crate::section::Section;
@@ -37,6 +40,12 @@ use crate::table::SectionDelegate;
 
 /// Width of the filter input, in pixels at the design rem.
 const FILTER_WIDTH: f32 = 240.0;
+
+/// The target select's first item: no target filter.
+const ALL_TARGETS: &str = "all";
+
+/// The target select's delegate: `all`, then every target in the tail.
+type TargetSelect = SelectState<SearchableVec<SharedString>>;
 
 /// The diagnostics counter each section's builder reads. Comparing only
 /// this counter keeps an unrelated change, such as a perf tick, from
@@ -89,6 +98,17 @@ pub struct DiagnosticsPage {
     log: LogTail,
     log_filter: LogFilter,
     follow: bool,
+    /// The window this page was created in: the target select's items
+    /// can only be replaced with a window, and observers bring none.
+    window: AnyWindowHandle,
+    pub(crate) target_select: Entity<TargetSelect>,
+    /// The select's current items, so an unchanged tail replaces nothing.
+    target_items: Vec<SharedString>,
+    /// The Levels popover's new-target field.
+    new_target_input: Entity<InputState>,
+    pub(crate) levels: LevelsState,
+    /// The popover's rows, prepared with the Log section.
+    level_rows: Rc<Vec<LevelRow>>,
     badges: Badges,
     /// Rail badge text per section, formatted with the badges.
     rail_texts: [SharedString; 5],
@@ -136,7 +156,7 @@ impl DiagnosticsPage {
         cx.subscribe_in(
             &filter_input,
             window,
-            |this, input, event: &InputEvent, _window, cx| match event {
+            |this, input, event: &InputEvent, window, cx| match event {
                 InputEvent::Change => {
                     let text = input.read(cx).value();
                     let ix = this.section as usize;
@@ -145,15 +165,44 @@ impl DiagnosticsPage {
                         this.rebuild(cx);
                     }
                 }
-                InputEvent::Focus => {
-                    this.insert_mode = true;
-                    cx.notify();
-                }
-                InputEvent::Blur => {
-                    this.insert_mode = false;
-                    cx.notify();
-                }
+                InputEvent::Focus | InputEvent::Blur => this.sync_insert_mode(window, cx),
                 InputEvent::PressEnter { .. } => {}
+            },
+        )
+        .detach();
+        let new_target_input = cx.new(|cx| InputState::new(window, cx).placeholder("new target"));
+        cx.subscribe_in(
+            &new_target_input,
+            window,
+            |this, input, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => {
+                    this.levels.new_target = input.read(cx).value().to_string();
+                    cx.notify();
+                }
+                InputEvent::Focus | InputEvent::Blur => this.sync_insert_mode(window, cx),
+                InputEvent::PressEnter { .. } => {}
+            },
+        )
+        .detach();
+        let target_items = vec![SharedString::from(ALL_TARGETS)];
+        let target_select = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::new(target_items.clone()),
+                Some(IndexPath::default()),
+                window,
+                cx,
+            )
+        });
+        cx.subscribe_in(
+            &target_select,
+            window,
+            |this, _select, event: &SelectEvent<SearchableVec<SharedString>>, _window, cx| {
+                let SelectEvent::Confirm(value) = event;
+                let target = value
+                    .as_ref()
+                    .filter(|v| v.as_ref() != ALL_TARGETS)
+                    .map(|v| v.to_string());
+                this.set_log_target(target, cx);
             },
         )
         .detach();
@@ -202,7 +251,11 @@ impl DiagnosticsPage {
 
         cx.observe(&diagnostics, |this, diagnostics, cx| {
             let now = diagnostics.read(cx).versions();
-            let has_new = this.log.has_new();
+            // New records are a visible page's business: a hidden page
+            // drains nothing, so a wrap while it is closed is reported by
+            // the drain that shows it again rather than overwritten by a
+            // later idle drain.
+            let has_new = this.visible && this.log.has_new();
             let relevant = if this.section == Section::Log {
                 has_new || now.log_levels != this.last_diag_versions.log_levels
             } else {
@@ -281,6 +334,12 @@ impl DiagnosticsPage {
             log,
             log_filter: LogFilter::all(),
             follow: true,
+            window: window.window_handle(),
+            target_select,
+            target_items,
+            new_target_input,
+            levels: LevelsState::default(),
+            level_rows: Rc::new(Vec::new()),
             badges: Badges {
                 sources: (None, 0),
                 datasets: 0,
@@ -356,7 +415,7 @@ impl DiagnosticsPage {
         let now = SystemTime::now();
         self.ages_now = now;
         if self.section == Section::Log {
-            self.log.drain();
+            self.drain_tail();
         }
         let filter = self.filters[self.section as usize].clone();
         // The Config section's left panel is built alongside its cursor
@@ -392,6 +451,7 @@ impl DiagnosticsPage {
                 Section::Log => {
                     // The one input is the log's message filter.
                     self.log_filter.text = filter;
+                    self.level_rows = Rc::new(levels::level_rows(&d.levels));
                     prepared::log_table(
                         &model::log_rows(self.log.records(), &self.log_filter, clock),
                         self.log.lost(),
@@ -435,9 +495,58 @@ impl DiagnosticsPage {
                 }
             });
         }
+        if self.section == Section::Log {
+            self.sync_target_items(cx);
+        }
         self.refresh_copy_text();
         self.refresh_badges(cx);
         cx.notify();
+    }
+
+    /// Pull the ring into the tail, when the page is shown. A hidden
+    /// page's drain would report a wrap nobody sees and then clear it.
+    fn drain_tail(&mut self) {
+        if self.visible {
+            self.log.drain();
+        }
+    }
+
+    /// Offer `all` and every target in the tail, plus the selected target
+    /// when the tail no longer holds it, so the select never shows a
+    /// filter it cannot name. Replacing the items needs the window, which
+    /// the observers that rebuild do not carry, so the replacement is
+    /// deferred to the window this page lives in.
+    fn sync_target_items(&mut self, cx: &mut Context<Self>) {
+        let mut items = vec![SharedString::from(ALL_TARGETS)];
+        items.extend(
+            model::log_targets(self.log.records())
+                .into_iter()
+                .map(SharedString::from),
+        );
+        if let Some(t) = &self.log_filter.target
+            && !items.iter().any(|i| i.as_ref() == t)
+        {
+            items.push(SharedString::from(t.clone()));
+        }
+        if items == self.target_items {
+            return;
+        }
+        self.target_items = items.clone();
+        let selected = self
+            .log_filter
+            .target
+            .clone()
+            .map(SharedString::from)
+            .unwrap_or_else(|| SharedString::from(ALL_TARGETS));
+        let (select, handle) = (self.target_select.clone(), self.window);
+        cx.defer(move |cx| {
+            let _ = cx.update_window(handle, |_, window, cx| {
+                select.update(cx, |s, cx| {
+                    s.set_items(SearchableVec::new(items), window, cx);
+                    s.set_selected_value(&selected, window, cx);
+                });
+            });
+        });
     }
 
     /// Only the log offers a copy of the cursor row's detail.
@@ -453,7 +562,7 @@ impl DiagnosticsPage {
         // for every section, not only when the Log table rebuilds. A second
         // drain after the Log rebuild's own returns false and changes
         // nothing; the loss gap is still measured at the last drain.
-        self.log.drain();
+        self.drain_tail();
         let clock = Self::clock(cx);
         let d = self.diagnostics.read(cx);
         let log_errors = self
@@ -485,6 +594,85 @@ impl DiagnosticsPage {
         self.config_history = history;
         self.diag_cursor = 0;
         self.rebuild(cx);
+    }
+
+    /// Filter the tail to one target (`None` for all). The select's
+    /// confirm lands here; the select itself already shows the pick.
+    pub fn set_log_target(&mut self, target: Option<String>, cx: &mut Context<Self>) {
+        if self.log_filter.target == target {
+            return;
+        }
+        self.log_filter.target = target;
+        self.rebuild(cx);
+    }
+
+    /// Flip one level toggle, indexed as [`LogFilter::levels`].
+    pub(crate) fn toggle_level(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if let Some(on) = self.log_filter.levels.get_mut(ix) {
+            *on = !*on;
+            self.rebuild(cx);
+        }
+    }
+
+    /// Follow on jumps to the last row, as `bottom` does; off leaves the
+    /// cursor where it is.
+    pub(crate) fn set_follow(&mut self, follow: bool, cx: &mut Context<Self>) {
+        if follow {
+            self.jump_to_bottom(cx);
+        } else {
+            self.follow = false;
+            cx.notify();
+        }
+    }
+
+    fn jump_to_bottom(&mut self, cx: &mut Context<Self>) {
+        let last = self.prepared.rows.len().saturating_sub(1);
+        self.set_cursor(last, cx);
+        if self.section == Section::Log {
+            self.follow = true;
+            cx.notify();
+        }
+    }
+
+    /// Forget the retained tail; the next drain continues from where the
+    /// tail was, so nothing already retained comes back.
+    pub(crate) fn clear_log(&mut self, cx: &mut Context<Self>) {
+        self.log.clear();
+        self.rebuild(cx);
+    }
+
+    pub(crate) fn set_levels_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.levels.open != open {
+            self.levels.open = open;
+            cx.notify();
+        }
+    }
+
+    /// Request `level` for `target` (the store's bare-suffix spelling)
+    /// through the entity; the shell's drain applies and persists it.
+    pub(crate) fn pick_level(&mut self, target: &str, level: Level, cx: &mut Context<Self>) {
+        self.diagnostics.update(cx, |d, cx| {
+            d.request_level(target, level);
+            cx.notify();
+        });
+    }
+
+    /// The new-target row's pick: the field's text as a target, then the
+    /// field is emptied (`set_value` emits no `Change`, so the mirror is
+    /// cleared here too).
+    pub(crate) fn pick_new_target_level(
+        &mut self,
+        level: Level,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(target) = levels::new_target(&self.levels.new_target).map(str::to_string) else {
+            return;
+        };
+        self.pick_level(&target, level, cx);
+        self.levels.new_target.clear();
+        self.new_target_input
+            .update(cx, |i, cx| i.set_value("", window, cx));
     }
 
     /// Select a section: rebuild it and show its filter text in the one
@@ -582,6 +770,18 @@ impl DiagnosticsPage {
 
     pub fn holds_focus(&self, window: &Window, cx: &App) -> bool {
         self.filter_input.focus_handle(cx).is_focused(window)
+            || self.new_target_input.focus_handle(cx).is_focused(window)
+    }
+
+    /// Focus moving between the two inputs delivers one's blur and the
+    /// other's focus in either order, so the flag follows what the window
+    /// says rather than the last event.
+    fn sync_insert_mode(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let insert = self.holds_focus(window, cx);
+        if self.insert_mode != insert {
+            self.insert_mode = insert;
+            cx.notify();
+        }
     }
 
     pub fn focus_handle(&self) -> FocusHandle {
@@ -603,13 +803,7 @@ impl DiagnosticsPage {
             "down" => self.move_cursor(n, cx),
             "up" => self.move_cursor(-n, cx),
             "top" => self.set_cursor(0, cx),
-            "bottom" => {
-                let last = self.prepared.rows.len().saturating_sub(1);
-                self.set_cursor(last, cx);
-                if self.section == Section::Log {
-                    self.follow = true;
-                }
-            }
+            "bottom" => self.jump_to_bottom(cx),
             "page_down" => self.move_cursor(5 * n, cx),
             "page_up" => self.move_cursor(-5 * n, cx),
             "page_down_full" => self.move_cursor(10 * n, cx),
@@ -680,11 +874,24 @@ impl DiagnosticsPage {
     fn render_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
         let weak: WeakEntity<Self> = cx.weak_entity();
         match self.section {
-            Section::Sources | Section::Log => h_flex()
+            Section::Sources => h_flex()
                 .gap_2()
                 .p_2()
                 .child(self.filter_input_el())
                 .into_any_element(),
+            Section::Log => log_view::toolbar(
+                LogView {
+                    levels_on: self.log_filter.levels,
+                    target_select: &self.target_select,
+                    filter: self.filter_input_el(),
+                    follow: self.follow,
+                    popover_open: self.levels.open,
+                    level_rows: self.level_rows.clone(),
+                    new_target_input: &self.new_target_input,
+                    new_target_ok: levels::new_target(&self.levels.new_target).is_some(),
+                },
+                weak,
+            ),
             Section::Data => {
                 let theme = cx.theme();
                 let (text, tone) = if self.catalog_matches {
@@ -865,6 +1072,8 @@ mod tests {
     use geode_core::scopes::SavedScopes;
     use geode_shell::diagnostics::Health;
 
+    use crate::prepared::RowKind;
+
     struct Host {
         page: Entity<DiagnosticsPage>,
     }
@@ -879,7 +1088,6 @@ mod tests {
         #[allow(dead_code)]
         pub frame: Entity<Frame>,
         pub diagnostics: Entity<Diagnostics>,
-        #[allow(dead_code)]
         pub ring: Arc<Ring>,
         pub actions: Rc<RefCell<Vec<String>>>,
     }
@@ -1021,16 +1229,10 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let (h, mut vcx) = open(cx);
+        h.page.update(&mut vcx, |p, cx| p.set_visible(true, cx));
         assert_eq!(h.page.read_with(&vcx, |p, _| p.section()), Section::Sources);
-        h.ring.push(geode_core::log::Record {
-            at: SystemTime::now(),
-            level: geode_core::log::Level::ERROR,
-            target: "geode::shell",
-            message: "boom".into(),
-            seq: 0,
-        });
-        h.diagnostics.update(&mut vcx, |_, cx| cx.notify());
-        vcx.run_until_parked();
+        push(&h.ring, Level::ERROR, "geode::shell", "boom");
+        notify(&h, &mut vcx);
         assert_eq!(
             h.page
                 .read_with(&vcx, |p, _| p.rail_texts[Section::Log as usize].clone())
@@ -1412,6 +1614,217 @@ mod tests {
             h.page.read_with(&vcx, |p, _| p.rebuild_count),
             before,
             "sources ignore a config bump"
+        );
+    }
+
+    fn push(ring: &Ring, level: geode_core::log::Level, target: &'static str, msg: &str) {
+        ring.push(geode_core::log::Record {
+            at: SystemTime::now(),
+            level,
+            target,
+            message: msg.into(),
+            seq: 0,
+        });
+    }
+
+    /// A visible page on the Log section, painted once: the shell shows a
+    /// page before it takes keys, and a hidden page drains nothing.
+    fn open_log_section(h: &Harness, vcx: &mut gpui::VisualTestContext) {
+        vcx.update(|window, cx| {
+            h.page.update(cx, |p, cx| {
+                p.set_visible(true, cx);
+                p.set_section(Section::Log, window, cx);
+            });
+            let _ = window.draw(cx);
+        });
+    }
+
+    fn dispatch(h: &Harness, vcx: &mut gpui::VisualTestContext, name: &str) {
+        let id = ActionId(format!("diagnostics::{name}"));
+        vcx.update(|window, cx| {
+            h.page.update(cx, |p, cx| {
+                assert!(p.dispatch(&id, None, window, cx));
+            });
+        });
+    }
+
+    fn notify(h: &Harness, vcx: &mut gpui::VisualTestContext) {
+        h.diagnostics.update(vcx, |_, cx| cx.notify());
+        vcx.run_until_parked();
+    }
+
+    fn click(vcx: &mut gpui::VisualTestContext, selector: &'static str) {
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let b = vcx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} is painted"));
+        vcx.simulate_click(b.center(), gpui::Modifiers::default());
+    }
+
+    #[gpui::test]
+    fn the_log_section_follows_until_the_cursor_moves_and_bottom_resumes(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use geode_core::log::Level;
+        let (h, mut vcx) = open(cx);
+        open_log_section(&h, &mut vcx);
+        for i in 0..5 {
+            push(&h.ring, Level::INFO, "geode::shell", &format!("m{i}"));
+        }
+        notify(&h, &mut vcx);
+        assert_eq!(h.page.read_with(&vcx, |p, _| p.cursor()), 4);
+        dispatch(&h, &mut vcx, "up");
+        push(&h.ring, Level::INFO, "geode::shell", "m5");
+        notify(&h, &mut vcx);
+        assert_eq!(
+            h.page.read_with(&vcx, |p, _| p.cursor()),
+            3,
+            "not following"
+        );
+        dispatch(&h, &mut vcx, "bottom");
+        push(&h.ring, Level::INFO, "geode::shell", "m6");
+        notify(&h, &mut vcx);
+        assert_eq!(
+            h.page.read_with(&vcx, |p, _| p.cursor()),
+            6,
+            "following again"
+        );
+        // The Follow switch is the pointer route to the same state.
+        dispatch(&h, &mut vcx, "top");
+        assert_eq!(
+            h.page.read_with(&vcx, |p, _| (p.cursor(), p.follow)),
+            (0, false)
+        );
+        click(&mut vcx, "diagnostics-follow");
+        assert_eq!(
+            h.page.read_with(&vcx, |p, _| (p.cursor(), p.follow)),
+            (6, true),
+            "turning follow on jumps to the last row"
+        );
+    }
+
+    #[gpui::test]
+    fn level_toggles_and_the_target_select_filter_the_tail(cx: &mut gpui::TestAppContext) {
+        use geode_core::log::Level;
+        let (h, mut vcx) = open(cx);
+        open_log_section(&h, &mut vcx);
+        push(&h.ring, Level::DEBUG, "geode::query", "planned");
+        push(&h.ring, Level::ERROR, "geode::shell", "boom");
+        notify(&h, &mut vcx);
+        let rows =
+            |vcx: &gpui::VisualTestContext| h.page.read_with(vcx, |p, _| p.prepared().rows.len());
+        assert_eq!(rows(&vcx), 2);
+        click(&mut vcx, "diagnostics-level-DEBUG");
+        assert_eq!(rows(&vcx), 1);
+        h.page.update(&mut vcx, |p, cx| {
+            p.set_log_target(Some("geode::query".into()), cx)
+        });
+        assert_eq!(rows(&vcx), 0, "DEBUG off and only query");
+        click(&mut vcx, "diagnostics-level-DEBUG");
+        assert_eq!(rows(&vcx), 1, "DEBUG back on, still only query");
+        // A target outside the tail is still offered, and selected, by the
+        // select once its items are refreshed.
+        h.page.update(&mut vcx, |p, cx| {
+            p.set_log_target(Some("geode::ingest".into()), cx)
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            h.page
+                .read_with(&vcx, |p, cx| p
+                    .target_select
+                    .read(cx)
+                    .selected_value()
+                    .cloned())
+                .as_deref(),
+            Some("geode::ingest")
+        );
+        h.page.update(&mut vcx, |p, cx| p.set_log_target(None, cx));
+        assert_eq!(rows(&vcx), 2);
+    }
+
+    #[gpui::test]
+    fn a_wrap_while_closed_is_reported_on_the_next_drain(cx: &mut gpui::TestAppContext) {
+        use geode_core::log::Level;
+        let (h, mut vcx) = open(cx); // ring capacity 64
+        open_log_section(&h, &mut vcx);
+        h.page.update(&mut vcx, |p, cx| p.set_visible(false, cx));
+        for i in 0..100 {
+            push(&h.ring, Level::WARN, "geode::ingest", &format!("w{i}"));
+        }
+        // A hidden page ignores the entity's notifications: nothing drains
+        // until it is shown again.
+        notify(&h, &mut vcx);
+        assert_eq!(h.page.read_with(&vcx, |p, _| p.prepared().rows.len()), 0);
+        h.page.update(&mut vcx, |p, cx| p.set_visible(true, cx));
+        let rows = h.page.read_with(&vcx, |p, _| p.prepared().clone());
+        assert!(matches!(rows.rows[0].kind, RowKind::Notice));
+        assert!(
+            rows.rows[0].cells[0].text.contains("36 records lost"),
+            "{}",
+            rows.rows[0].cells[0].text
+        );
+        assert_eq!(rows.rows.len(), 65);
+    }
+
+    #[gpui::test]
+    fn clear_drops_the_retained_tail_and_keeps_draining(cx: &mut gpui::TestAppContext) {
+        use geode_core::log::Level;
+        let (h, mut vcx) = open(cx);
+        open_log_section(&h, &mut vcx);
+        push(&h.ring, Level::INFO, "geode::shell", "a");
+        notify(&h, &mut vcx);
+        click(&mut vcx, "diagnostics-log-clear");
+        assert_eq!(h.page.read_with(&vcx, |p, _| p.prepared().rows.len()), 0);
+        push(&h.ring, Level::INFO, "geode::shell", "b");
+        notify(&h, &mut vcx);
+        assert_eq!(h.page.read_with(&vcx, |p, _| p.prepared().rows.len()), 1);
+    }
+
+    #[gpui::test]
+    fn a_levels_pick_requests_the_level_through_the_entity(cx: &mut gpui::TestAppContext) {
+        use geode_core::log::Level;
+        let (h, mut vcx) = open(cx);
+        open_log_section(&h, &mut vcx);
+        click(&mut vcx, "diagnostics-levels-open");
+        assert!(h.page.read_with(&vcx, |p, _| p.levels.open));
+        click(&mut vcx, "diagnostics-level-pick-ingest-debug");
+        let pending = h
+            .diagnostics
+            .update(&mut vcx, |d, _| d.take_pending_level());
+        // The store's spelling: the bare suffix `LogLevels::with` keeps.
+        assert_eq!(pending, Some(("ingest".to_string(), Level::DEBUG)));
+        assert_eq!(
+            h.diagnostics
+                .read_with(&vcx, |d, _| crate::levels::effective_level(
+                    &d.levels, "ingest"
+                )),
+            Level::DEBUG
+        );
+        // The popover stays open for the next pick and paints the new level.
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            vcx.debug_bounds("diagnostics-level-pick-ingest-trace")
+                .is_some()
+        );
+    }
+
+    #[gpui::test]
+    fn the_copy_button_puts_the_cursor_row_on_the_clipboard(cx: &mut gpui::TestAppContext) {
+        use geode_core::log::Level;
+        let (h, mut vcx) = open(cx);
+        open_log_section(&h, &mut vcx);
+        push(&h.ring, Level::WARN, "geode::ingest", "stale partition");
+        notify(&h, &mut vcx);
+        click(&mut vcx, "diagnostics-copy");
+        let text = vcx.read_from_clipboard().and_then(|i| i.text());
+        assert!(
+            text.as_deref()
+                .is_some_and(|t| t.contains("WARN geode::ingest stale partition")),
+            "{text:?}"
         );
     }
 

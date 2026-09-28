@@ -9,7 +9,7 @@
 
 use geode_core::log::{Level, LogLevels, TARGETS};
 
-use crate::log::{LEVELS, LogFilter};
+use crate::log::LogFilter;
 
 const GEODE_PREFIX: &str = "geode::";
 
@@ -47,9 +47,9 @@ fn suffix(target: &str) -> &str {
 /// names nothing: trimmed, in the store's spelling, and not the default
 /// row, which `request_level` cannot set (it would file a `default`
 /// target rather than move the default).
-pub fn new_target(text: &str) -> Option<String> {
+pub fn new_target(text: &str) -> Option<&str> {
     let t = suffix(text.trim());
-    (!t.is_empty() && t != "default").then(|| t.to_string())
+    (!t.is_empty() && t != "default").then_some(t)
 }
 
 /// The level a target logs at: its explicit entry, else the longest
@@ -96,13 +96,17 @@ pub fn level_rows(levels: &LogLevels) -> Vec<LevelRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::log::LEVELS;
 
     #[test]
     fn rows_list_default_then_known_targets_then_extras_with_inheritance() {
         // Targets are spelled as `LogLevels::with` stores them: bare suffixes.
         let levels = LogLevels {
             default: Level::INFO,
-            targets: vec![("ingest".into(), Level::DEBUG), ("custom".into(), Level::TRACE)],
+            targets: vec![
+                ("ingest".into(), Level::DEBUG),
+                ("custom".into(), Level::TRACE),
+            ],
         };
         let rows = level_rows(&levels);
         assert_eq!(
@@ -154,8 +158,8 @@ mod tests {
 
     #[test]
     fn a_new_target_is_trimmed_stripped_and_never_the_default() {
-        assert_eq!(new_target("  geode::custom "), Some("custom".into()));
-        assert_eq!(new_target("custom"), Some("custom".into()));
+        assert_eq!(new_target("  geode::custom "), Some("custom"));
+        assert_eq!(new_target("custom"), Some("custom"));
         assert_eq!(new_target("   "), None);
         assert_eq!(new_target("default"), None);
         assert_eq!(new_target("geode::"), None);

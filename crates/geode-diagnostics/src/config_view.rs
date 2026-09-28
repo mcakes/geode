@@ -7,14 +7,14 @@
 use geode_shell::actions::ActionId;
 use geode_shell::module::ShellActions;
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, Div, Entity, SharedString, Stateful, WeakEntity, div};
+use gpui::{AnyElement, Context, Div, Entity, SharedString, WeakEntity, div};
 use gpui_component::button::Button;
 use gpui_component::input::Input;
 use gpui_component::table::{DataTable, TableState};
 use gpui_component::{ActiveTheme as _, Selectable as _, Sizable as _, Size, h_flex, v_flex};
 
 use crate::page::DiagnosticsPage;
-use crate::page_chrome::detail_strip;
+use crate::page_chrome::{detail_strip, probed};
 use crate::prepared::PreparedRow;
 use crate::table::SectionDelegate;
 
@@ -30,14 +30,6 @@ pub(crate) struct ConfigView<'a> {
     pub row: Option<&'a PreparedRow>,
     pub filter: Input,
     pub actions: ShellActions,
-}
-
-/// A toolbar button wrapped so a pointer test can find it by `id`.
-fn probed(id: &'static str, button: Button) -> Stateful<Div> {
-    div()
-        .id(id)
-        .debug_selector(move || id.to_string())
-        .child(button)
 }
 
 /// The table fills what its panel leaves after the toolbar and detail
