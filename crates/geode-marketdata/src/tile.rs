@@ -998,7 +998,7 @@ impl MarketDataTile {
         if self
             .publication
             .as_ref()
-            .is_none_or(|watch| !watch.matches(self.spec.dataset, Some(&batch)))
+            .is_none_or(|watch| !watch.is_for(self.spec.dataset, Some(&batch)))
         {
             self.publication = Some(self.frame.update(cx, |frame, _| {
                 frame.watch_publications(self.spec.dataset, Some(&batch))

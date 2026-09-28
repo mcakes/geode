@@ -73,6 +73,14 @@ pub struct PublicationWatch {
 }
 
 impl PublicationWatch {
+    /// Whether this watch was registered for exactly this dataset and key —
+    /// an identity test, unlike [`matches`](Self::matches), which asks
+    /// whether a publish concerns the watch. Use it to decide whether to
+    /// keep a watch or register a new one.
+    pub fn is_for(&self, dataset: &str, batch: Option<&str>) -> bool {
+        self.dataset == dataset && self.batch.as_deref() == batch
+    }
+
     /// Whether a publish of `batch` in `dataset` concerns this watch: a
     /// dataset-wide watch hears a dataset-wide notice; a document watch
     /// hears a batch that is its key or lies under it (`is_key_prefix`),
@@ -2145,6 +2153,22 @@ mod tests {
         );
         assert!(spx.matches("option_chain", Some(&key(&["SPX", "2026-10-16"]))));
         assert!(spx_oct.matches("option_chain", Some(&key(&["SPX", "2026-10-16"]))));
+    }
+
+    #[test]
+    fn is_for_is_exact_where_matches_is_a_prefix() {
+        use geode_core::document::join_key;
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let spx = f.watch_publications("option_chain", Some("SPX"));
+        let oct = join_key(&["SPX".to_string(), "2026-10-16".to_string()]);
+        assert!(spx.is_for("option_chain", Some("SPX")));
+        assert!(!spx.is_for("option_chain", Some(&oct)));
+        assert!(spx.matches("option_chain", Some(&oct)));
+        assert!(!spx.is_for("other", Some("SPX")));
+        assert!(!spx.is_for("option_chain", None));
+        let whole = f.watch_publications("option_chain", None);
+        assert!(whole.is_for("option_chain", None));
+        assert!(!whole.is_for("option_chain", Some("SPX")));
     }
 
     fn named(text: &str) -> geode_core::named::NamedExpressions {
