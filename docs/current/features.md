@@ -804,8 +804,8 @@ committing and report its segment error. Segment display text is allocated by
 
 ## Diagnostics
 
-`geode-diagnostics` is the first [page](shell.md#pages): a surface over the
-workspace presenting shell-owned operational state in five sections, with
+`geode-diagnostics` is the first [page](shell.md#pages): a surface in place
+of the tile surface presenting shell-owned operational state in five sections, with
 sources, stored data, configuration, logs, and performance. The shell's
 `Diagnostics` entity, the shared log ring, the loaded configuration, and the
 frame's requery statistics supply the state. `page::toggle_diagnostics`,
@@ -814,7 +814,10 @@ sidebar button, the palette row "Diagnostics: Open page", or the status
 bar's diagnostics summary; Escape with nothing above the page closes it, as
 does any workspace switch. The page is retained while the window lives, so
 filters, cursors, expansion, and the log tail survive a close and reopen;
-the session saves only the selected section.
+the session saves only the selected section. The toolbar stays above the
+page with every frame control live, so the as-of the Data section's
+resolved markers follow is the one the toolbar shows and can change
+(subject to the pinned-workspace limit below).
 
 The header carries the title, state chips derived from the same inputs as
 the status summary (worst source health with its count, config errors, data

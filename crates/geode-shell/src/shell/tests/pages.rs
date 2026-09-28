@@ -398,11 +398,11 @@ fn a_mode_normal_page_binding_types_in_the_input_and_fires_after_blur(
     );
 }
 
-/// The page takes the whole tile surface plus the toolbar's and stripe's
-/// rows: it starts at the top of the window beside the sidebar and reaches
-/// the status bar. Nothing but the sidebar and status bar remains around it.
+/// The page takes the tile surface alone: it starts beside the sidebar at
+/// the toolbar's bottom edge and reaches the status bar. The toolbar is the
+/// window's title bar and stays painted above it.
 #[gpui::test]
-fn the_page_paints_where_the_workspace_was_and_the_toolbar_is_gone(cx: &mut gpui::TestAppContext) {
+fn the_page_paints_below_the_toolbar_above_the_status_bar(cx: &mut gpui::TestAppContext) {
     let (window, mut cx) = open_shell(
         cx,
         services_with_page(RecordingPageFactory::new("diagnostics")),
@@ -422,12 +422,188 @@ fn the_page_paints_where_the_workspace_was_and_the_toolbar_is_gone(cx: &mut gpui
     let status = cx
         .debug_bounds("shell-status-bar")
         .expect("status bar stays");
+    assert!(
+        cx.debug_bounds("frame-readout").is_some(),
+        "the toolbar stays painted over a page"
+    );
+    assert!(cx.debug_bounds("scope-field").is_some());
     assert_eq!(page.origin.x, sidebar.origin.x + sidebar.size.width);
-    assert_eq!(page.origin.y, gpui::px(0.));
+    assert_eq!(page.origin.y, gpui_component::TITLE_BAR_HEIGHT);
     assert_eq!(
         page.origin.y + page.size.height,
         status.origin.y,
-        "the page reaches the status bar; no toolbar above it since it starts at y = 0"
+        "the page reaches the status bar and no further"
+    );
+    // A page taller than the surface pushes the status bar down with it,
+    // so the edge above holds either way: pin the status bar to the
+    // window's bottom edge too.
+    let viewport = cx.update(|window, _| window.viewport_size());
+    assert_eq!(status.origin.y + status.size.height, viewport.height);
+}
+
+/// A historical frame paints its warning stripe over a page too, and the
+/// page starts below it: the stripe row belongs to the toolbar, not the page.
+#[gpui::test]
+fn a_historical_frame_keeps_its_stripe_above_the_page(cx: &mut gpui::TestAppContext) {
+    let (window, mut cx) = open_shell(
+        cx,
+        services_with_page(RecordingPageFactory::new("diagnostics")),
+    );
+    let shell = shell_of(&window, &mut cx);
+    let frame = shell.read_with(&cx, |s, _| s.frame().clone());
+    let at = chrono::Utc::now() - chrono::Duration::days(1);
+    frame.update(&mut cx, |f, cx| {
+        if f.shared_mut().set_as_of(geode_core::query::AsOf::At(at)) {
+            cx.notify();
+        }
+    });
+    dispatch_action(&shell, "page::toggle_diagnostics", &mut cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let stripe = cx
+        .debug_bounds("as-of-stripe")
+        .expect("the stripe stays over a page");
+    let page = cx.debug_bounds("shell-page").expect("page painted");
+    let status = cx
+        .debug_bounds("shell-status-bar")
+        .expect("status bar stays");
+    assert_eq!(stripe.origin.y, gpui_component::TITLE_BAR_HEIGHT);
+    assert_eq!(page.origin.y, stripe.origin.y + stripe.size.height);
+    assert_eq!(page.origin.y + page.size.height, status.origin.y);
+    let viewport = cx.update(|window, _| window.viewport_size());
+    assert_eq!(status.origin.y + status.size.height, viewport.height);
+}
+
+/// Open the page, focus the scope bar's text field through its registered
+/// action, and type `abc` into it. The window is activated first: the
+/// field's `Focus` event, which records the entry text, fires only from an
+/// active window's draw.
+fn type_in_the_scope_field_over_a_page(
+    shell: &gpui::Entity<ShellView>,
+    cx: &mut gpui::VisualTestContext,
+) {
+    cx.update(|window, _cx| window.activate_window());
+    cx.run_until_parked();
+    dispatch_action(shell, "page::toggle_diagnostics", cx);
+    dispatch_action(shell, "frame::focus_text", cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(super::filter_is_focused(shell, cx));
+    cx.simulate_input("abc");
+    assert_eq!(
+        shell.read_with(cx, |s, cx| s.filter_input.read(cx).value().to_string()),
+        "abc"
+    );
+}
+
+#[gpui::test]
+fn escape_in_the_scope_input_over_a_page_returns_focus_to_the_page(cx: &mut gpui::TestAppContext) {
+    let (window, mut cx) = open_shell(
+        cx,
+        services_with_page(RecordingPageFactory::new("diagnostics")),
+    );
+    let shell = shell_of(&window, &mut cx);
+    type_in_the_scope_field_over_a_page(&shell, &mut cx);
+    cx.simulate_keystrokes("escape");
+    assert_eq!(
+        shell.read_with(&cx, |s, cx| s.filter_input.read(cx).value().to_string()),
+        "",
+        "escape restored the entry text"
+    );
+    assert!(
+        shell.read_with(&cx, |s, _| s.page_open()),
+        "the field took the escape"
+    );
+    assert!(
+        page_focused(&shell, &mut cx),
+        "focus returns to the page, where its bindings are reachable"
+    );
+}
+
+#[gpui::test]
+fn enter_in_the_scope_input_over_a_page_returns_focus_to_the_page(cx: &mut gpui::TestAppContext) {
+    let (window, mut cx) = open_shell(
+        cx,
+        services_with_page(RecordingPageFactory::new("diagnostics")),
+    );
+    let shell = shell_of(&window, &mut cx);
+    type_in_the_scope_field_over_a_page(&shell, &mut cx);
+    cx.simulate_keystrokes("enter");
+    assert_eq!(
+        shell.read_with(&cx, |s, cx| s.filter_input.read(cx).value().to_string()),
+        "abc",
+        "enter keeps the typed text"
+    );
+    assert!(shell.read_with(&cx, |s, _| s.page_open()));
+    assert!(page_focused(&shell, &mut cx));
+}
+
+/// Chords from the scope field resolve against `[workspace]` whether or not
+/// a page is open: `mod+d` (the fixture's `alt-d`) closes the page.
+#[gpui::test]
+fn a_frame_chord_from_the_scope_input_over_a_page_still_resolves(cx: &mut gpui::TestAppContext) {
+    let (window, mut cx) = open_shell(
+        cx,
+        services_with_page(RecordingPageFactory::new("diagnostics")),
+    );
+    let shell = shell_of(&window, &mut cx);
+    type_in_the_scope_field_over_a_page(&shell, &mut cx);
+    cx.simulate_keystrokes("alt-d");
+    assert!(!shell.read_with(&cx, |s, _| s.page_open()));
+    assert_eq!(
+        shell.read_with(&cx, |s, cx| s.filter_input.read(cx).value().to_string()),
+        "abc",
+        "the chord typed nothing"
+    );
+}
+
+/// The add-a-filter menu opened over a page: a press on the page closes
+/// the menu and reaches nothing beneath. The same press with the menu
+/// closed focuses the page's input, so the catcher is what stopped it.
+#[gpui::test]
+fn a_press_on_the_page_closes_the_add_filter_menu_and_goes_no_further(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (window, mut cx) = open_shell(
+        cx,
+        services_with_page(RecordingPageFactory::new("diagnostics")),
+    );
+    let shell = shell_of(&window, &mut cx);
+    dispatch_action(&shell, "page::toggle_diagnostics", &mut cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let plus = cx.debug_bounds("scope-pick-chip").expect("the + paints");
+    cx.simulate_click(plus.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(shell.read_with(&cx, |s, _| s.add_filter_menu.is_some()));
+    let page = cx
+        .debug_bounds("page-diagnostics")
+        .expect("page content paints");
+    let on_input = page.origin + gpui::point(gpui::px(24.), gpui::px(8.));
+    let input_focused = |cx: &mut gpui::VisualTestContext| {
+        cx.update(|window, cx| {
+            let page = shell.read(cx).page.as_ref().unwrap();
+            let handle = page.occupant.content.focus_handle(cx);
+            handle.contains_focused(window, cx) && !handle.is_focused(window)
+        })
+    };
+    cx.simulate_click(on_input, gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(shell.read_with(&cx, |s, _| s.add_filter_menu.is_none()));
+    assert!(shell.read_with(&cx, |s, _| s.page_open()));
+    assert!(
+        !input_focused(&mut cx),
+        "the closing press did not reach the page's input"
+    );
+    assert!(page_focused(&shell, &mut cx), "the menu returns focus home");
+    cx.simulate_click(on_input, gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(
+        input_focused(&mut cx),
+        "control: the same press with no menu focuses the input"
     );
 }
 

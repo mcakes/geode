@@ -763,7 +763,8 @@ impl ShellView {
         // value for Escape to restore; `Change` feeds every keystroke
         // into the session, coalescing into one undo entry; `PressEnter`
         // and `Blur` both close the session (`end_scope_session`) — Enter
-        // additionally hands focus back to the shell root, `Blur` doesn't
+        // additionally hands focus home (`focus_home`: the open page, else
+        // the shell root), `Blur` doesn't
         // need to (something else already has it). Escape's own restore
         // is handled in `handle_key_down`'s filter-focused branch, ahead
         // of this subscription ever seeing the resulting `Blur`.
@@ -789,7 +790,7 @@ impl ShellView {
                 InputEvent::PressEnter { .. } => {
                     view.filter_session_base = None;
                     view.active_frame().update(cx, |f, _| f.end_scope_session());
-                    view.focus_handle.focus(window, cx);
+                    view.focus_home(window, cx);
                     cx.notify();
                 }
                 InputEvent::Blur => {
@@ -1402,8 +1403,9 @@ impl ShellView {
 
     /// Where focus goes when an overlay closes: back to the scope bar's
     /// text field if it was focused when the overlay opened
-    /// (`overlay_return_to_filter`, consumed here), the shell root
+    /// (`overlay_return_to_filter`, consumed here), home (`focus_home`)
     /// otherwise. The one door both `close_modal` and `close_palette` use.
+    /// The field is painted over a page too, so either return is live there.
     pub(super) fn return_focus_from_overlay(
         &mut self,
         window: &mut Window,
@@ -1415,8 +1417,7 @@ impl ShellView {
                 .focus_handle(cx)
                 .focus(window, cx);
         } else {
-            // The open page's handle when one is open (the filter field is
-            // not painted then, so the flag above is never set over a page).
+            // The open page's handle when one is open, else the shell root.
             self.focus_home(window, cx);
         }
     }

@@ -3281,9 +3281,9 @@ run_mutation "page: the ShellActions handle defers its dispatch" \
 # bindings unreachable.
 run_mutation "page: closing an overlay over a page returns focus to the page" \
   crates/geode-shell/src/shell/mod.rs \
-  '            // not painted then, so the flag above is never set over a page).
+  '            // The open page'"'"'s handle when one is open, else the shell root.
             self.focus_home(window, cx);' \
-  '            // not painted then, so the flag above is never set over a page).
+  '            // The open page'"'"'s handle when one is open, else the shell root.
             self.focus_handle.focus(window, cx);' \
   geode-shell \
   closing_the_palette_over_a_page_returns_focus_to_the_page
@@ -6578,12 +6578,21 @@ run_mutation "shell page: a replaced page loses its state" \
   geode-shell \
   a_replaced_page_kind_keeps_its_state_through_the_next_flush
 
-run_mutation "shell page: the toolbar still paints over a page" \
+run_mutation "shell page: the page also takes the toolbar's and stripe's rows" \
   crates/geode-shell/src/shell/render.rs \
-  '        let page_open = self.page_open();' \
-  '        let page_open = false;' \
+  '                    let page_height = content_height;' \
+  '                    let page_height = content_height + toolbar_height + stripe_height;' \
   geode-shell \
-  the_page_paints_where_the_workspace_was_and_the_toolbar_is_gone
+  the_page_paints_below_the_toolbar_above_the_status_bar
+
+run_mutation "shell page: escape in the scope field over a page focuses the shell root" \
+  crates/geode-shell/src/shell/input.rs \
+  '                // bindings are unreachable from the shell root.
+                self.focus_home(window, cx);' \
+  '                // bindings are unreachable from the shell root.
+                self.focus_handle.focus(window, cx);' \
+  geode-shell \
+  escape_in_the_scope_input_over_a_page_returns_focus_to_the_page
 
 run_mutation "shell page: session omits pages" \
   crates/geode-shell/src/session.rs \

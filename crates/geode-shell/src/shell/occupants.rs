@@ -134,7 +134,7 @@ impl ShellView {
     /// set avoids a fresh allocation each frame.
     fn fill_active_tiles(&self, out: &mut HashSet<TileId>) {
         out.clear();
-        // A page covers the workspace: nothing beneath is visible, so no tile
+        // A page covers the tile surface: nothing beneath is visible, so no tile
         // is announced shown and no flip barrier waits on one.
         if self.page_open() {
             return;
@@ -154,7 +154,7 @@ impl ShellView {
     /// allocation between uses.
     pub(super) fn visible_tile_keys(&self, out: &mut Vec<QueryKey>) {
         out.clear();
-        // A page covers the workspace: nothing beneath is visible, so no tile
+        // A page covers the tile surface: nothing beneath is visible, so no tile
         // is announced shown and no flip barrier waits on one.
         if self.page_open() {
             return;

@@ -395,13 +395,18 @@ stale-result handling, publication routing, and window lifetime.
 
 `PageContent` and `PageFactory`, beside the tile seam in
 [`module.rs`](../../crates/geode-shell/src/module.rs), host a surface that
-replaces the workspace instead of living in a tile. While a page is open the
-toolbar, the historical as-of stripe, the tile surface, divider strips, drag
-catchers, and the command line are neither built nor painted; the sidebar
-and status bar stay, and modals, the palette, which-key, the performance
-overlay, and notifications paint above the page as they do above the
-workspace. A page owns its own inputs, has no `:` line, and receives no
-deliveries. `geode-app` registers factories in a `PageRoster`; the shell
+replaces the tile surface instead of living in a tile. While a page is open
+the tile surface, divider strips, drag catchers, and the command line are
+neither built nor painted, and the page takes the tile surface's rect: from
+the sidebar's right edge to the window's, and from below the toolbar (and
+the historical as-of stripe) to the status bar. The toolbar, which is also
+the window's title bar, the stripe, the sidebar, and the status bar stay,
+and every toolbar control (scope field, chips, `+` menu, as-of chip,
+grouping readout, pin) stays live over the page, so the frame's scope and
+as-of stay visible and editable beside it. Modals, the palette, which-key,
+the performance overlay, and notifications paint above the page as they do
+above the workspace. A page owns its own inputs, has no `:` line, and
+receives no deliveries. `geode-app` registers factories in a `PageRoster`; the shell
 stays ignorant of any page's content, and a page changes application state
 only through the `Diagnostics` request channels or the `ShellActions`
 handle it was created with, never by holding `ShellView`.
@@ -448,8 +453,10 @@ consults the open page before any tile, so bare keys type into the input
 and only chords resolve against the stack. A page's bare-key bindings
 therefore live in a `mode == normal` table
 ([keymaps](keymaps.md#context-predicates)). Focus restoration after an
-overlay closes goes to the open page's handle, never the shell root, where
-the page's own bindings are unreachable. A mouse open calls
+overlay closes, and after Escape or Enter in the scope field, goes to the
+open page's handle (`focus_home`), never the shell root, where the page's
+own bindings are unreachable. Chords typed in the scope field resolve
+against `workspace` over a page as they do without one. A mouse open calls
 `prevent_default` so the press cannot bubble to the shell root and take
 the focus back.
 
