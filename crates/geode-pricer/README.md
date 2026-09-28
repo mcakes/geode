@@ -37,7 +37,7 @@ The tile:
 | `store` | The `SheetStore` seam, addressed by key/tag with `Loaded::Refused(Refusal)` for a load that never went out and `save`/`forget` returning `Result<(), Refusal>`; `MemorySheetStore` (in-memory, the tests' fake, whose `set_save_refusal`/`set_load_refusal`/`set_forget_refusal` choose the refusal kind and `set_refusing`/`set_load_refused` are `Busy` shorthands) and `DuckSheetStore` (the store `geode-app` wires: `pricer_sheets` document reads/writes over `DataHandle`, with a `known`-names cache fed from the diagnostics catalog and the store's own confirmed writes). |
 | `grid` | The prepared `GridModel`, rebuilt on change. |
 | `paint` | The per-theme paint memo, floored to a readable ratio. |
-| `delegate` | The table delegate: cells, the tree column (indent, chevron, template tag), editor, expiry date field. |
+| `delegate` | The table delegate: cells and their column colors (sign, named), the tree column (indent, chevron, template tag), editor, expiry date field. |
 | `header` | The prepared header row (notices as `geode_tile::notice::Notice`), the sheet name control and rename field, and the footer. |
 | `popup` | The typeahead, the entry bar's completion list, the sheet picker (`sheet_rows`, `SheetPicker`), and `PricerPick` (what a menu row does). The menu, popup geometry, the `:rm` confirm and the header notices paint through `geode-tile`. |
 | `session` | The tile's session record, including `:autosize`'s fitted widths (`column_widths`, read leniently). |
@@ -291,6 +291,12 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 - `paint` prepares grid-row text colors and tests their contrast across
   every bundled theme. Row text is checked against its base, hover, and
   selection backgrounds; menu colors are `geode_tile::menu::MenuPaint`'s.
+- A view column's `color` paints as in the blotter: `sign` tints a negative
+  measure bearish and a positive one bullish, a named color from
+  `colors.toml` tints the column and its header (resolved through
+  `geode_tile::colour::ColourCache`, invalidated when the factory's
+  `colors` `Arc` changes); a stale cell stays muted and a failed one danger
+  whatever the column's color (`paint::cell_colour`).
   This sweep does not cover every header or typeahead
   token, and the bounded adjustment is not a guarantee for arbitrary themes.
 - A disabled action can hold the menu highlight but paints no highlight

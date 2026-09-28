@@ -3886,9 +3886,14 @@ impl PricerTile {
     pub(crate) fn install_model(&mut self, cx: &mut Context<Self>) {
         let model = Rc::clone(&self.model);
         let loading = self.loading;
+        // The factory's current `colors.toml`: a reload's rebuild lands
+        // here, so the delegate sees the new definitions with the model
+        // planned under them.
+        let colours = self.shared.colours.borrow().clone();
         self.table.update(cx, |t, cx| {
             t.delegate_mut().model = model;
             t.delegate_mut().loading = loading;
+            t.delegate_mut().set_colours(colours);
             // Before `refresh`, which re-reads the tree column's width.
             t.delegate_mut().refresh_numbers();
             t.refresh(cx);
@@ -4465,6 +4470,7 @@ pub(crate) mod tests {
     use crate::core::{Edit, Place, RowSpec, Sheet, TemplateSet, Views, to_rows};
     use crate::store::{MemorySheetStore, SheetStore as _};
     use chrono::Datelike as _;
+    use geode_core::colour::NamedColours;
     use geode_core::groupings::GroupingSlots;
     use geode_core::log::LogLevels;
     use geode_core::pricing::Expiry;
@@ -5093,6 +5099,7 @@ pub(crate) mod tests {
             h.factory.reload(
                 views,
                 TemplateSet::builtin(),
+                NamedColours::default(),
                 None,
                 std::time::Duration::from_secs(60),
                 cx,
@@ -5136,6 +5143,7 @@ pub(crate) mod tests {
             h.factory.reload(
                 views,
                 TemplateSet::builtin(),
+                NamedColours::default(),
                 None,
                 std::time::Duration::from_secs(60),
                 cx,
@@ -5151,6 +5159,183 @@ pub(crate) mod tests {
         keys(&h, &mut vcx, "j l l h k");
         assert!(h.columns(&vcx).is_empty());
         assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor.col), 0);
+    }
+
+    // ---- column colours ----
+
+    /// Reload the factory with `views` (a builtin-layer `views.toml` text)
+    /// and `colours`, as the app's reload observer does.
+    fn reload_views(h: &Harness, vcx: &mut VisualTestContext, views: &str, colours: NamedColours) {
+        let doc = geode_core::config::merge_docs(
+            "views",
+            &[geode_core::config::LayerDoc::builtin("views", views).unwrap()],
+        );
+        let (views, diags) = Views::from_specs(&geode_core::view::ViewSpec::from_doc(&doc).0);
+        assert!(diags.is_empty(), "{diags:?}");
+        vcx.update(|_, cx| {
+            h.factory.reload(
+                views,
+                TemplateSet::builtin(),
+                colours,
+                None,
+                std::time::Duration::from_secs(60),
+                cx,
+            )
+        });
+        vcx.run_until_parked();
+        h.draw(vcx);
+    }
+
+    /// The text colour `render_cell` paints one cell with, by grid row and
+    /// vocabulary name, read through the delegate's own paint decision
+    /// after a draw.
+    fn text_colour(
+        h: &Harness,
+        vcx: &mut VisualTestContext,
+        row: usize,
+        column: &str,
+    ) -> gpui::Hsla {
+        let col = h
+            .columns(vcx)
+            .iter()
+            .position(|c| c == column)
+            .expect("column");
+        h.draw(vcx);
+        h.tile.update(vcx, |t, cx| {
+            t.table.update(cx, |table, cx| {
+                table.delegate_mut().text_colour(row, col, cx.theme())
+            })
+        })
+    }
+
+    /// The colour `render_th` paints a header with, `None` for the
+    /// inherited foreground.
+    fn header_colour(h: &Harness, vcx: &mut VisualTestContext, column: &str) -> Option<gpui::Hsla> {
+        let col = h
+            .columns(vcx)
+            .iter()
+            .position(|c| c == column)
+            .expect("column");
+        h.draw(vcx);
+        h.tile.update(vcx, |t, cx| {
+            t.table.update(cx, |table, cx| {
+                table.delegate_mut().header_colour(col, cx.theme())
+            })
+        })
+    }
+
+    /// One batch answered with `delta01` set per line, in line order.
+    fn answer_deltas(h: &Harness, vcx: &mut VisualTestContext, deltas: &[f64]) {
+        let batch = h.prices().pop().expect("a price request");
+        assert_eq!(
+            batch.lines.len(),
+            deltas.len(),
+            "fixture: one delta per line"
+        );
+        h.deliver(
+            vcx,
+            PriceOutcome {
+                key: batch.key,
+                tag: batch.tag,
+                submitted: std::time::Instant::now(),
+                results: batch
+                    .lines
+                    .iter()
+                    .zip(deltas)
+                    .map(|(l, d)| {
+                        let mut r = result(12.5);
+                        r.set(Measure::Delta01, false, *d);
+                        (l.id, l.revision, Ok(r))
+                    })
+                    .collect(),
+            },
+        );
+    }
+
+    /// A measure's vocabulary default is `sign`, so the uncoloured
+    /// column says `none` explicitly.
+    const SIGNED_VIEW: &str = "[vanilla]\ndataset = \"pricer\"\n\
+        [[vanilla.columns]]\nname = \"npv\"\nformat = { color = \"none\" }\n\
+        [[vanilla.columns]]\nname = \"delta01\"\nformat = { color = \"sign\" }\n";
+
+    /// A `sign` column paints a negative measure in the theme's bearish
+    /// colour and a positive one bullish; a column whose colour is `none`
+    /// keeps the state paint, and a stale cell is muted whatever its sign.
+    #[gpui::test]
+    fn a_negative_measure_paints_bearish_under_sign_colour(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "SPX Z26 4000 P"]);
+        reload_views(&h, &mut vcx, SIGNED_VIEW, NamedColours::default());
+        answer_deltas(&h, &mut vcx, &[-5.0, 5.0]);
+        assert_eq!(h.cell(&vcx, 0, "delta01"), "-5.0000");
+        let (bearish, bullish, own) = vcx.update(|_, cx| {
+            let t = cx.theme();
+            (
+                t.chart_bearish,
+                t.chart_bullish,
+                crate::paint::Paints::derive(t).own,
+            )
+        });
+        assert_ne!(bearish, own, "fixture: bearish reads apart from own");
+        assert_ne!(bullish, own, "fixture: bullish reads apart from own");
+        assert_eq!(text_colour(&h, &mut vcx, 0, "delta01"), bearish);
+        assert_eq!(text_colour(&h, &mut vcx, 1, "delta01"), bullish);
+        assert_eq!(
+            text_colour(&h, &mut vcx, 0, "npv"),
+            own,
+            "no colour on the column: the state paint"
+        );
+        assert_eq!(
+            header_colour(&h, &mut vcx, "delta01"),
+            None,
+            "a sign column's header is uncoloured"
+        );
+        // Reprice: every line goes stale, and a stale cell is muted
+        // however negative its last value was.
+        h.dispatch(&mut vcx, "price", None);
+        let muted = vcx.update(|_, cx| crate::paint::Paints::derive(cx.theme()).muted);
+        assert_eq!(text_colour(&h, &mut vcx, 0, "delta01"), muted);
+    }
+
+    /// A named colour from `colors.toml` tints the column's cells and its
+    /// header with the resolved base, through the shared colour cache.
+    #[gpui::test]
+    fn a_named_colour_tints_the_column(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C"]);
+        let (colours, diags) = NamedColours::from_doc(&geode_core::config::merge_docs(
+            "colors",
+            &[geode_core::config::LayerDoc::builtin("colors", "[rose]\nhue = 10\n").unwrap()],
+        ));
+        assert!(diags.is_empty(), "{diags:?}");
+        reload_views(
+            &h,
+            &mut vcx,
+            "[vanilla]\ndataset = \"pricer\"\n\
+             [[vanilla.columns]]\nname = \"npv\"\nformat = { color = \"rose\" }\n\
+             [[vanilla.columns]]\nname = \"delta01\"\nformat = { color = \"none\" }\n",
+            colours.clone(),
+        );
+        answer_deltas(&h, &mut vcx, &[0.5]);
+        let (expected, own) = vcx.update(|_, cx| {
+            let theme = cx.theme();
+            let resolved = geode_tile::colour::ColourCache::new()
+                .get(
+                    &colours,
+                    "rose",
+                    &geode_shell::shell::colours::anchors_from_theme(theme),
+                    &geode_shell::shell::colours::tokens_from_theme(theme),
+                )
+                .expect("rose is defined");
+            (resolved, crate::paint::Paints::derive(theme).own)
+        });
+        assert_ne!(expected.base, own, "fixture: rose reads apart from own");
+        assert_eq!(text_colour(&h, &mut vcx, 0, "npv"), expected.base);
+        assert_eq!(header_colour(&h, &mut vcx, "npv"), Some(expected.base));
+        assert_eq!(
+            text_colour(&h, &mut vcx, 0, "delta01"),
+            own,
+            "the other column is untouched"
+        );
+        assert_eq!(header_colour(&h, &mut vcx, "delta01"), None);
     }
 
     /// The shell's `Edit column in view…` reads the tile's columns: the
@@ -5967,8 +6152,14 @@ pub(crate) mod tests {
         };
         let (views, settings) = (h.factory.views_for_tests(), h.factory.settings());
         vcx.update(|_, cx| {
-            h.factory
-                .reload(views, flipped, settings.refresh, settings.stale_after, cx)
+            h.factory.reload(
+                views,
+                flipped,
+                NamedColours::default(),
+                settings.refresh,
+                settings.stale_after,
+                cx,
+            )
         });
         h.draw(&mut vcx);
         assert_eq!(h.tags(&vcx)[0], "RR", "the stored package keeps its name");
@@ -6019,8 +6210,14 @@ pub(crate) mod tests {
         };
         let (views, settings) = (h.factory.views_for_tests(), h.factory.settings());
         vcx.update(|_, cx| {
-            h.factory
-                .reload(views, flipped, settings.refresh, settings.stale_after, cx)
+            h.factory.reload(
+                views,
+                flipped,
+                NamedColours::default(),
+                settings.refresh,
+                settings.stale_after,
+                cx,
+            )
         });
         h.draw(&mut vcx);
         assert!(h.entry_text(&vcx).is_some(), "the bar stays open");
@@ -6507,6 +6704,7 @@ pub(crate) mod tests {
             h.factory.reload(
                 views,
                 condor_set(),
+                NamedColours::default(),
                 settings.refresh,
                 settings.stale_after,
                 cx,
@@ -6753,8 +6951,14 @@ pub(crate) mod tests {
         };
         let (views, settings) = (h.factory.views_for_tests(), h.factory.settings());
         vcx.update(|_, cx| {
-            h.factory
-                .reload(views, redefined, settings.refresh, settings.stale_after, cx)
+            h.factory.reload(
+                views,
+                redefined,
+                NamedColours::default(),
+                settings.refresh,
+                settings.stale_after,
+                cx,
+            )
         });
         h.draw(&mut vcx);
         let legs = |h: &Harness, vcx: &VisualTestContext| {
@@ -6994,6 +7198,7 @@ pub(crate) mod tests {
             h.factory.reload(
                 views,
                 TemplateSet::builtin(),
+                NamedColours::default(),
                 None,
                 std::time::Duration::from_secs(60),
                 cx,
@@ -7027,6 +7232,7 @@ pub(crate) mod tests {
             h.factory.reload(
                 views,
                 TemplateSet::builtin(),
+                NamedColours::default(),
                 None,
                 std::time::Duration::from_secs(60),
                 cx,
@@ -7390,6 +7596,7 @@ pub(crate) mod tests {
             h.factory.reload(
                 views,
                 TemplateSet::builtin(),
+                NamedColours::default(),
                 None,
                 std::time::Duration::from_secs(60),
                 cx,
@@ -7421,6 +7628,7 @@ pub(crate) mod tests {
             h.factory.reload(
                 views,
                 TemplateSet::builtin(),
+                NamedColours::default(),
                 None,
                 std::time::Duration::from_secs(60),
                 cx,
@@ -7688,6 +7896,7 @@ pub(crate) mod tests {
             h.factory.reload(
                 slim_views(&["qty", "npv"]),
                 TemplateSet::builtin(),
+                NamedColours::default(),
                 None,
                 std::time::Duration::from_secs(60),
                 cx,

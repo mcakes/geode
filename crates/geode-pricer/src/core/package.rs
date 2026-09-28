@@ -339,6 +339,7 @@ pub fn aggregate(sheet: &Sheet, row: usize, kind: ColumnKind, format: &ColumnFor
         return CellText {
             text: q.to_string(),
             state: CellState::Own,
+            sign: None,
         };
     }
     let gs = groups(sheet, row, kind, format);
@@ -349,6 +350,7 @@ pub fn aggregate(sheet: &Sheet, row: usize, kind: ColumnKind, format: &ColumnFor
         return CellText {
             text: String::new(),
             state: CellState::Blank,
+            sign: None,
         };
     }
     let text = painted(&gs);
@@ -358,7 +360,13 @@ pub fn aggregate(sheet: &Sheet, row: usize, kind: ColumnKind, format: &ColumnFor
         }
         _ => CellState::Own,
     };
-    CellText { text, state }
+    // A package's aggregated text (a strike list, a shift per group) is
+    // never one number; its measures come through `number` with theirs.
+    CellText {
+        text,
+        state,
+        sign: None,
+    }
 }
 
 #[cfg(test)]

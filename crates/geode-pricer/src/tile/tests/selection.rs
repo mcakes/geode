@@ -1687,6 +1687,7 @@ fn a_plain_press_beside_the_cells_clears_the_selection(cx: &mut gpui::TestAppCon
         h.factory.reload(
             views,
             TemplateSet::builtin(),
+            geode_core::colour::NamedColours::default(),
             None,
             std::time::Duration::from_secs(60),
             cx,

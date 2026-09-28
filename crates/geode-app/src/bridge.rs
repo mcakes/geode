@@ -418,8 +418,8 @@ pub fn pricer_templates_from_config(
 
 /// Inputs to the pricer's live reload: the merged `views` doc with both
 /// presentation overlays (the pricer's column plan is built from all three),
-/// the colors they may name (the plan is not yet painted from them; they are
-/// keyed so a later color-aware paint reloads without a change here), the
+/// the colors they may name (a named column's cells and header are painted
+/// from them, so a `colors.toml` edit alone must reach open tiles), the
 /// retired `pricer_views` doc (so one added at runtime raises its
 /// retirement diagnostic without a restart), merged `pricer_templates`, raw
 /// `app.pricing.refresh` and `app.pricing.underlyings`, and the resolved
@@ -560,7 +560,7 @@ pub fn start(
     let factory = Rc::new(BlotterFactory::new(
         handle.clone(),
         setup.views,
-        setup.colours,
+        setup.colours.clone(),
         schema,
         dimensions,
         find_style,
@@ -583,7 +583,10 @@ pub fn start(
             setup.pricer_templates.clone(),
             pricer_settings,
         )
-        .with_underlyings(underlyings.clone()),
+        .with_underlyings(underlyings.clone())
+        // The same startup colors as the blotter: a named `color` on a
+        // pricer view column resolves against them.
+        .with_colours(setup.colours),
     );
     Bridge {
         marketdata: Rc::new(
@@ -914,7 +917,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
             last.set(now);
             // Read everything out of the config before the factory takes
             // `cx` mutably.
-            let (views, templates, mut diags, refresh, stale_after) = {
+            let (views, templates, colours, mut diags, refresh, stale_after) = {
                 let config = shell.read(cx).config();
                 let key = pricer_config_key(config);
                 if last_key.borrow().as_ref() == Some(&key) {
@@ -922,9 +925,14 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 }
                 *last_key.borrow_mut() = Some(key);
                 // `load_views`'s own diagnostics are the ConfigReloaded
-                // observer's to report; only the pricer's are collected here.
+                // observer's to report, as are the colors doc's; only the
+                // pricer's are collected here.
                 let (specs, _) = load_views(config);
                 let (views, diags) = pricer_views_from_specs(config, &specs);
+                let (colours, _) = config
+                    .doc(geode_core::config::COLORS_DOC)
+                    .map(NamedColours::from_doc)
+                    .unwrap_or_default();
                 let (refresh, refresh_diag) = pricing_refresh_from_config(config);
                 // A bad entry keeps the running definition of its name.
                 let (templates, template_diags) =
@@ -940,12 +948,13 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 (
                     views,
                     templates,
+                    colours,
                     diags,
                     refresh,
                     stale_after_from_config(config),
                 )
             };
-            pricer.reload(views, templates, refresh, stale_after, cx);
+            pricer.reload(views, templates, colours, refresh, stale_after, cx);
             for d in &diags {
                 tracing::warn!(target: "geode::pricing", "{d}");
             }
@@ -2236,6 +2245,7 @@ role = "key"
             bridge.pricer.reload(
                 Views::builtin(),
                 TemplateSet::builtin(),
+                NamedColours::default(),
                 None,
                 Duration::from_secs(1),
                 cx,
@@ -4556,6 +4566,48 @@ role = "key"
         assert!(
             factory.colours().get("delta").is_some(),
             "the reload must hand the factory the config's colours"
+        );
+    }
+
+    /// The pricer's reload observer hands the factory the config's named
+    /// colors with the views, so a `colors.toml` edit repaints an open
+    /// pricer tile's named columns.
+    #[gpui::test]
+    fn a_reload_hands_the_pricer_the_new_colours(cx: &mut gpui::TestAppContext) {
+        let services = test_shell_services_with_sources(ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin("views", SLIM_VIEW).unwrap(),
+                LayerDoc::builtin("colors", "[delta]\nhue = 240\n").unwrap(),
+            ],
+            desk: None,
+            user: None,
+        });
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let (handle, _rx) = DataHandle::for_tests();
+        let bridge = test_bridge(handle);
+        cx.update(|cx| attach(&bridge, window, cx));
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        assert!(
+            bridge.pricer.colours().get("delta").is_none(),
+            "fixture: the factory starts with no colours at all"
+        );
+        vcx.update(|_, cx| {
+            let frame = shell.read(cx).frame().clone();
+            frame.update(cx, |f, cx| {
+                f.note_config_reloaded();
+                cx.notify();
+            });
+        });
+        vcx.run_until_parked();
+        assert!(
+            bridge.pricer.colours().get("delta").is_some(),
+            "the reload must hand the pricer the config's colours"
         );
     }
 

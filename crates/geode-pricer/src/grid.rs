@@ -12,6 +12,8 @@ use crate::core::shorthand::render_expiry;
 use crate::core::tree::{Expansion, visible_rows};
 use crate::core::views::ColumnPlan;
 use geode_core::clock::Clock;
+use geode_core::colour::Sign;
+use geode_core::view::Colour;
 use gpui::SharedString;
 
 #[derive(Debug, Clone)]
@@ -26,6 +28,9 @@ pub struct GridColumn {
     pub right: bool,
     pub kind: ColumnKind,
     pub editable: bool,
+    /// The view's `color` for the column, merged from every presentation
+    /// layer: what the delegate paints cells and the header by.
+    pub colour: Colour,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +44,8 @@ pub enum GridRowKind {
 pub struct GridCell {
     pub text: SharedString,
     pub state: CellState,
+    /// A measure's sign as formatted; `None` on a text cell.
+    pub sign: Option<Sign>,
 }
 
 #[derive(Debug, Clone)]
@@ -132,6 +139,7 @@ impl GridModel {
                 right: right_aligned(c.def.kind),
                 kind: c.def.kind,
                 editable: c.def.editable,
+                colour: c.format.colour.clone(),
             })
             .collect();
         let visible = visible_rows(sheet, expansion);
@@ -168,6 +176,7 @@ impl GridModel {
                         GridCell {
                             text: t.text.into(),
                             state: t.state,
+                            sign: t.sign,
                         }
                     })
                     .collect(),
@@ -187,7 +196,7 @@ mod tests {
     use crate::core::sheet::tests::{at, callspread, line, push, result, spx};
     use crate::core::{Expansion, Sheet, Views};
     use geode_core::clock::Clock;
-    use geode_core::pricing::OptionKind;
+    use geode_core::pricing::{Measure, OptionKind};
 
     /// [A, P(L1, L2), B].
     fn sheet() -> Sheet {
@@ -269,6 +278,39 @@ mod tests {
             m.columns[price].right && !m.columns[1].right,
             "numbers read down the right edge"
         );
+    }
+
+    /// A measure cell carries the sign of the value it was formatted
+    /// from (rounded as the text is); a text cell and an unpriced cell
+    /// carry none.
+    #[test]
+    fn a_measure_cell_carries_its_sign_and_a_text_cell_none() {
+        let mut s = sheet();
+        let col = |name: &str| {
+            plan()
+                .columns
+                .iter()
+                .position(|c| c.def.name == name)
+                .unwrap()
+        };
+        let before = build(&s, &Expansion::default());
+        assert_eq!(before.rows[0].cells[col("npv")].sign, None, "unpriced");
+        let mut neg = result(-12.5);
+        neg.set(Measure::Delta01, false, -0.5);
+        neg.set(Measure::Gamma01, false, 0.0);
+        s.deliver_all(vec![(s.id(0), s.revision(0), Ok(neg))], at(0));
+        let m = build(&s, &Expansion::default());
+        assert_eq!(m.rows[0].cells[col("npv")].sign, Some(Sign::Negative));
+        assert_eq!(m.rows[0].cells[col("delta01")].sign, Some(Sign::Negative));
+        assert_eq!(m.rows[0].cells[col("gamma01")].sign, Some(Sign::Zero));
+        assert_eq!(m.rows[0].cells[col("strike")].sign, None, "text");
+        assert_eq!(m.rows[0].cells[col("qty")].sign, None, "a dimension");
+        assert_eq!(
+            m.columns[col("npv")].colour,
+            Colour::Sign,
+            "a measure's vocabulary default"
+        );
+        assert_eq!(m.columns[col("qty")].colour, Colour::None);
     }
 
     #[test]

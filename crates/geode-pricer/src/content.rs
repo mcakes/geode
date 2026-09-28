@@ -8,6 +8,7 @@ use crate::core::template::TemplateSet;
 use crate::core::views::Views;
 use crate::store::SheetStore;
 use crate::tile::PricerTile;
+use geode_core::colour::NamedColours;
 use geode_core::document::split_key;
 use geode_data::DataHandle;
 use geode_shell::actions::{ActionDef, ActionId, ActionRegistry};
@@ -350,6 +351,11 @@ pub(crate) struct Shared {
     /// The entry bar's underlying suggestions; an empty list until the
     /// app hands one over (`PricerFactory::with_underlyings`).
     pub(crate) underlyings: RefCell<Rc<dyn UnderlyingSource>>,
+    /// The `colors.toml` definitions a view's named `color` resolves
+    /// against, one `Arc` per loaded doc: every tile's delegate holds the
+    /// same pointer, so a reload's new `Arc` is what tells it to drop its
+    /// resolved colours (`SheetDelegate::set_colours`).
+    pub(crate) colours: RefCell<Arc<NamedColours>>,
 }
 
 impl Shared {
@@ -555,6 +561,7 @@ impl PricerFactory {
                 retiring: RefCell::new(BTreeSet::new()),
                 tiles: RefCell::new(Vec::new()),
                 underlyings: RefCell::new(Rc::new(UnderlyingList::default())),
+                colours: RefCell::new(Arc::new(NamedColours::default())),
             }),
             catalog_watched: Cell::new(false),
         }
@@ -565,6 +572,18 @@ impl PricerFactory {
     pub fn with_underlyings(self, source: Rc<dyn UnderlyingSource>) -> Self {
         *self.shared.underlyings.borrow_mut() = source;
         self
+    }
+
+    /// The named colours a view's `color` may name. Without this every
+    /// named colour is undefined and its column paints as plain.
+    pub fn with_colours(self, colours: NamedColours) -> Self {
+        *self.shared.colours.borrow_mut() = Arc::new(colours);
+        self
+    }
+
+    /// The named colours the tiles paint from.
+    pub fn colours(&self) -> Arc<NamedColours> {
+        self.shared.colours.borrow().clone()
     }
 
     /// The source every tile's entry bar reads its underlyings from.
@@ -620,19 +639,22 @@ impl PricerFactory {
             .detach();
     }
 
-    /// Replace views, template tables, and live pricing settings. Every open tile
-    /// adopts the tables, re-resolves its view, and restarts its timer. Adapter name
-    /// and availability describe the running data engine and change only on restart.
+    /// Replace views, template tables, named colours, and live pricing settings.
+    /// Every open tile adopts the tables, re-resolves its view, repaints from the
+    /// colours, and restarts its timer. Adapter name and availability describe
+    /// the running data engine and change only on restart.
     pub fn reload(
         &self,
         views: Views,
         templates: TemplateSet,
+        colours: NamedColours,
         refresh: Option<Duration>,
         stale_after: Duration,
         cx: &mut App,
     ) {
         *self.shared.views.borrow_mut() = views;
         *self.shared.templates.borrow_mut() = Arc::new(templates);
+        *self.shared.colours.borrow_mut() = Arc::new(colours);
         {
             let mut s = self.shared.settings.borrow_mut();
             s.refresh = refresh;

@@ -5,7 +5,7 @@
 
 use crate::core::sheet::{LineState, RowKind, Sheet};
 use crate::core::shorthand::{render_barrier_kind, render_expiry, render_strike};
-use geode_core::format::format_number;
+use geode_core::format::{Sign, format_number};
 use geode_core::pricing::{Instrument, Measure, OptionKind};
 use geode_core::view::{Colour, ColumnFormat, Negative, Scale};
 
@@ -674,12 +674,18 @@ pub enum CellState {
 pub struct CellText {
     pub text: String,
     pub state: CellState,
+    /// The sign of the number a measure cell was formatted from, as the
+    /// text shows it (a value that rounds to zero is `Zero`); `None` on
+    /// every other cell. What a `sign` or `tint_sign` column colour
+    /// paints by.
+    pub sign: Option<Sign>,
 }
 
 fn blank() -> CellText {
     CellText {
         text: String::new(),
         state: CellState::Blank,
+        sign: None,
     }
 }
 
@@ -687,6 +693,7 @@ fn own(text: impl Into<String>) -> CellText {
     CellText {
         text: text.into(),
         state: CellState::Own,
+        sign: None,
     }
 }
 
@@ -713,17 +720,22 @@ fn number(
         LineState::Failed(_) => CellText {
             text: "—".into(),
             state: CellState::Failed,
+            sign: None,
         },
         state => match sheet.result(row) {
             None => blank(),
-            Some(r) => CellText {
-                text: format_number(r.get(measure, usd), format).text,
-                state: if *state == LineState::Stale {
-                    CellState::Stale
-                } else {
-                    CellState::Own
-                },
-            },
+            Some(r) => {
+                let formatted = format_number(r.get(measure, usd), format);
+                CellText {
+                    text: formatted.text,
+                    state: if *state == LineState::Stale {
+                        CellState::Stale
+                    } else {
+                        CellState::Own
+                    },
+                    sign: Some(formatted.sign),
+                }
+            }
         },
     }
 }
@@ -811,10 +823,12 @@ pub fn cell_text(
             LineState::Stale => CellText {
                 text: "pricing…".into(),
                 state: CellState::Stale,
+                sign: None,
             },
             LineState::Failed(m) => CellText {
                 text: m.clone(),
                 state: CellState::Failed,
+                sign: None,
             },
         },
     }
@@ -826,6 +840,7 @@ fn shift_cell(own_value: Option<f64>, sheet_value: Option<f64>, format: &ColumnF
         (None, Some(v)) => CellText {
             text: signed(v, format),
             state: CellState::Inherited,
+            sign: None,
         },
         (None, None) => blank(),
     }
@@ -1022,7 +1037,8 @@ mod tests {
             cell(&s, bare, "currency"),
             CellText {
                 text: "USD".into(),
-                state: CellState::Own
+                state: CellState::Own,
+                sign: None
             }
         );
     }
@@ -1044,7 +1060,8 @@ mod tests {
             cell(&s, 0, "qty"),
             CellText {
                 text: "2".into(),
-                state: CellState::Own
+                state: CellState::Own,
+                sign: None
             }
         );
         assert_eq!(cell(&s, 0, "underlying_ref").text, "SPX");
@@ -1055,7 +1072,8 @@ mod tests {
             cell(&s, 0, "barrier"),
             CellText {
                 text: String::new(),
-                state: CellState::Blank
+                state: CellState::Blank,
+                sign: None
             },
             "not a barrier line"
         );
@@ -1067,14 +1085,16 @@ mod tests {
             cell(&s, 1, "barrier"),
             CellText {
                 text: "4200".into(),
-                state: CellState::Own
+                state: CellState::Own,
+                sign: None
             }
         );
         assert_eq!(
             cell(&s, 1, "barrier_type"),
             CellText {
                 text: "DO".into(),
-                state: CellState::Own
+                state: CellState::Own,
+                sign: None
             }
         );
         // The package row aggregates its legs.
@@ -1089,7 +1109,8 @@ mod tests {
                 cell(&s, 2, name),
                 CellText {
                     text: text.into(),
-                    state: CellState::Own
+                    state: CellState::Own,
+                    sign: None
                 },
                 "{name}"
             );
@@ -1099,7 +1120,8 @@ mod tests {
                 cell(&s, 2, name),
                 CellText {
                     text: String::new(),
-                    state: CellState::Blank
+                    state: CellState::Blank,
+                    sign: None
                 },
                 "{name}: no barrier leg, no shift set"
             );
@@ -1123,7 +1145,8 @@ mod tests {
             cell(&s, 0, "spot_shift"),
             CellText {
                 text: String::new(),
-                state: CellState::Blank
+                state: CellState::Blank,
+                sign: None
             }
         );
         s.apply(Edit::SetSheetShift(OwnShifts {
@@ -1135,14 +1158,16 @@ mod tests {
             cell(&s, 0, "spot_shift"),
             CellText {
                 text: "+2.0".into(),
-                state: CellState::Inherited
+                state: CellState::Inherited,
+                sign: None
             }
         );
         assert_eq!(
             cell(&s, 0, "vol_shift"),
             CellText {
                 text: "-1.5".into(),
-                state: CellState::Inherited
+                state: CellState::Inherited,
+                sign: None
             }
         );
         s.apply(Edit::SetShift {
@@ -1157,14 +1182,16 @@ mod tests {
             cell(&s, 1, "spot_shift"),
             CellText {
                 text: "-5.0".into(),
-                state: CellState::Own
+                state: CellState::Own,
+                sign: None
             }
         );
         assert_eq!(
             cell(&s, 1, "vol_shift"),
             CellText {
                 text: "-1.5".into(),
-                state: CellState::Inherited
+                state: CellState::Inherited,
+                sign: None
             }
         );
         // Zero is still a value, own or inherited.
@@ -1180,7 +1207,8 @@ mod tests {
             cell(&s, 1, "spot_shift"),
             CellText {
                 text: "+0.0".into(),
-                state: CellState::Own
+                state: CellState::Own,
+                sign: None
             }
         );
     }
@@ -1197,14 +1225,16 @@ mod tests {
             cell(&s, 0, "npv"),
             CellText {
                 text: String::new(),
-                state: CellState::Blank
+                state: CellState::Blank,
+                sign: None
             }
         );
         assert_eq!(
             cell(&s, 0, "status"),
             CellText {
                 text: "pricing…".into(),
-                state: CellState::Stale
+                state: CellState::Stale,
+                sign: None
             }
         );
         assert_eq!(cell(&s, 0, "priced_at").state, CellState::Blank);
@@ -1213,21 +1243,24 @@ mod tests {
             cell(&s, 0, "npv"),
             CellText {
                 text: "1,234.57".into(),
-                state: CellState::Own
+                state: CellState::Own,
+                sign: Some(Sign::Positive)
             }
         );
         assert_eq!(
             cell(&s, 0, "delta01"),
             CellText {
                 text: "123.4568".into(),
-                state: CellState::Own
+                state: CellState::Own,
+                sign: Some(Sign::Positive)
             }
         );
         assert_eq!(
             cell(&s, 0, "status"),
             CellText {
                 text: String::new(),
-                state: CellState::Own
+                state: CellState::Own,
+                sign: None
             }
         );
         assert_eq!(cell(&s, 0, "priced_at").state, CellState::Own);
@@ -1242,7 +1275,8 @@ mod tests {
             cell(&s, 0, "npv"),
             CellText {
                 text: "1,234.57".into(),
-                state: CellState::Stale
+                state: CellState::Stale,
+                sign: Some(Sign::Positive)
             }
         );
         assert_eq!(cell(&s, 0, "status").state, CellState::Stale);
@@ -1252,21 +1286,24 @@ mod tests {
             cell(&s, 0, "npv"),
             CellText {
                 text: "—".into(),
-                state: CellState::Failed
+                state: CellState::Failed,
+                sign: None
             }
         );
         assert_eq!(
             cell(&s, 0, "rho010"),
             CellText {
                 text: "—".into(),
-                state: CellState::Failed
+                state: CellState::Failed,
+                sign: None
             }
         );
         assert_eq!(
             cell(&s, 0, "status"),
             CellText {
                 text: "refused by the mock".into(),
-                state: CellState::Failed
+                state: CellState::Failed,
+                sign: None
             }
         );
         // A package paints its sums like a line.
@@ -1276,7 +1313,8 @@ mod tests {
             cell(&s, 1, "npv"),
             CellText {
                 text: "-120.00".into(),
-                state: CellState::Own
+                state: CellState::Own,
+                sign: Some(Sign::Negative)
             }
         );
         assert_eq!(cell(&s, 1, "status").text, "");
