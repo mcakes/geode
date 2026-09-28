@@ -381,8 +381,11 @@ impl TimeseriesTile {
             "normal"
         };
         let mut ctx = KeyContext::new("timeseries").pair("mode", mode).counts();
+        // The series list and the menus hold no field and take j/k: the
+        // shared menu steps reach them through `tilelist`. The tile never
+        // publishes `grid`, so no grid motion shadows its own h/l or g/G.
         if let Some(pair) = self.popup.as_ref().and_then(Popup::context_pair) {
-            ctx = ctx.pair("popup", pair);
+            ctx = ctx.pair("popup", pair).tilelist();
         }
         if let Some(kind) = self.popup.as_ref().and_then(Popup::menu_pair) {
             ctx = ctx.pair("menu", kind);
@@ -477,8 +480,15 @@ impl TimeseriesTile {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(verb) = action.0.strip_prefix("timeseries::") else {
-            return false;
+        // The shared menu steps run as the list verbs, so an open list or
+        // menu survives them and keeps its own stepping rule.
+        let verb = match action.0.as_str() {
+            geode_tile::motion::MENU_DOWN => "list_down",
+            geode_tile::motion::MENU_UP => "list_up",
+            id => match id.strip_prefix("timeseries::") {
+                Some(verb) => verb,
+                None => return false,
+            },
         };
         // Handled verbs replace the standing notice. Restore it on unhandled
         // paths so an inert action does not silently erase the last refusal.

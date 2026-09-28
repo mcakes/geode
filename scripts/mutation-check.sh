@@ -2038,11 +2038,11 @@ run_mutation "keybindings: d removes where it should shadow a lower layer" \
 # would silence the binding it is meant to restore.
 run_mutation "keybindings: r shadows instead of removing the user's override" \
   crates/geode-shell/src/keymap_edit.rs \
-  '                if keys.remove(&o.key).is_some() {
-                    removed += 1;
-                }' \
-  '                set_key(keys, o.key.as_str(), value("none"));
-                removed += 1;' \
+  '            if keys.remove(&o.key).is_some() {
+                removed += 1;
+            }' \
+  '            set_key(keys, o.key.as_str(), value("none"));
+            removed += 1;' \
   geode-shell \
   r_resets_a_user_override_by_removing_it
 
@@ -2056,6 +2056,51 @@ run_mutation "keymap: a reset misses the none shadow half of a rebind" \
   geode-shell \
   r_on_a_rebound_builtin_removes_the_new_key_and_lifts_the_shadow
 
+# An old dialog rebind of a module id since renamed into a shared motion
+# left a "none" under the module context over a key that now ships under
+# the grid context. It shadows nothing textually but still silences the
+# key there; without the orphan rule `r` leaves the key dead.
+run_mutation "keymap: a reset leaves an old module rebind's orphan shadow" \
+  crates/geode-shell/src/keymap/build.rs \
+  '            covers_live || orphan' \
+  '            covers_live' \
+  geode-shell \
+  an_old_module_rebind_of_a_retired_motion_is_all_the_motions_override
+
+# A Motion row edit is global: written into the displayed binding's
+# context, it lands in an old override's module context and every other
+# grid tile keeps the old key.
+run_mutation "keybindings: a Motion row rebind writes the displayed module context" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '                context: Some(shared.to_string()),
+                new_key,' \
+  '                context: row.current.as_ref().and_then(|b| b.context_source.clone()),
+                new_key,' \
+  geode-shell \
+  rebinding_a_motion_row_writes_the_shared_context_and_clears_old_overrides
+
+# The same mutation through the app's real modules and tiles: the new key
+# must move every grid tile, not the blotter alone.
+run_mutation "motion e2e: a Motion row rebind writes the displayed module context" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '                context: Some(shared.to_string()),
+                new_key,' \
+  '                context: row.current.as_ref().and_then(|b| b.context_source.clone()),
+                new_key,' \
+  geode-app \
+  a_motion_row_rebind_over_an_old_blotter_override_moves_every_grid_tile
+
+# A Motion row rebind clears the action's old per-module overrides in the
+# same write; left in place they still win in their module contexts.
+run_mutation "keybindings: a Motion row rebind leaves old module overrides" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '            clear: row.overrides.clone(),
+            write,' \
+  '            clear: Vec::new(),
+            write,' \
+  geode-shell \
+  rebinding_a_motion_row_writes_the_shared_context_and_clears_old_overrides
+
 # A shadow silences the LIVE lower binding on its key. Where the desk
 # re-purposed a builtin key to another action, the user's shadow is the
 # desk action's override; claiming it for the builtin action's row would
@@ -2063,8 +2108,8 @@ run_mutation "keymap: a reset misses the none shadow half of a rebind" \
 # one, and leave this one exactly as unbound as before.
 run_mutation "keymap: a reset lifts a shadow over a key a lower layer re-purposed" \
   crates/geode-shell/src/keymap/build.rs \
-  '                    && !lower[i + 1..].iter().any(|later| shadows(later, l))' \
-  '' \
+  '    let live = |i: usize, l: &Binding| !lower[i + 1..].iter().any(|later| shadows(later, l));' \
+  '    let live = |_: usize, _: &Binding| true;' \
   geode-shell \
   a_shadow_over_a_key_a_lower_layer_repurposed_is_the_repurposers_override
 
@@ -2083,8 +2128,8 @@ run_mutation "keymap: a reset takes another action's user binding" \
 # removing someone else's binding.
 run_mutation "keymap: a reset takes a shadow from an unrelated context" \
   crates/geode-shell/src/keymap/build.rs \
-  '                    && shadows(b, l)' \
-  '                    && l.keystrokes == b.keystrokes' \
+  '                .any(|(i, l)| l.action == *action && shadows(b, l) && live(i, l));' \
+  '                .any(|(i, l)| l.action == *action && l.keystrokes == b.keystrokes && live(i, l));' \
   geode-shell \
   a_shadow_in_a_different_context_is_not_this_actions_override
 
@@ -2112,22 +2157,22 @@ run_mutation "keymap: a reset names the rendered key, not the file's spelling" \
 # behind on every miss.
 run_mutation "keymap_edit: a reset creates the entry it was going to remove from" \
   crates/geode-shell/src/keymap_edit.rs \
-  '            for entry in bindings.iter_mut().filter(|entry| {
-                entry.get("context").and_then(Item::as_str) == o.context_source.as_deref()
-            }) {
-                let Some(keys) = entry.get_mut("keys").and_then(Item::as_table_like_mut) else {
-                    continue;
-                };
-                if keys.remove(&o.key).is_some() {
-                    removed += 1;
-                }
-            }' \
-  '            {
-                let keys = keys_table_for(bindings, o.context_source.as_deref());
-                if keys.remove(&o.key).is_some() {
-                    removed += 1;
-                }
-            }' \
+  '        for entry in bindings.iter_mut().filter(|entry| {
+            entry.get("context").and_then(Item::as_str) == o.context_source.as_deref()
+        }) {
+            let Some(keys) = entry.get_mut("keys").and_then(Item::as_table_like_mut) else {
+                continue;
+            };
+            if keys.remove(&o.key).is_some() {
+                removed += 1;
+            }
+        }' \
+  '        {
+            let keys = keys_table_for(bindings, o.context_source.as_deref());
+            if keys.remove(&o.key).is_some() {
+                removed += 1;
+            }
+        }' \
   geode-shell \
   resetting_a_key_that_is_not_there_counts_nothing_and_creates_no_entry
 
@@ -2239,13 +2284,7 @@ run_mutation "keybindings: r cannot lift the user's own none shadow" \
 # notice before run_until_parked rather than only checking the file.
 run_mutation "keybindings: d performs its write without acknowledging it" \
   crates/geode-shell/src/shell/keybindings_view.rs \
-  '        .or_else(|| {
-            Some(if is_user_layer {
-                format!("removing your {key} binding")
-            } else {
-                format!("silencing {key} — {RECOVERY}")
-            })
-        })
+  '        .or(Some(notice))
 ' \
   '' \
   geode-shell \
@@ -2281,12 +2320,12 @@ run_mutation "keybindings: d promises the retired retype recovery" \
 # knowing.
 run_mutation "keybindings: d removes the user's key by its rendered spelling" \
   crates/geode-shell/src/shell/keybindings_view.rs \
-  '    let key = if is_user_layer {
-        bound.key_source.clone()
-    } else {
-        palette::render_binding(&bound.keystrokes)
-    };' \
-  '    let key = palette::render_binding(&bound.keystrokes);' \
+  '            key: if is_user_layer {
+                bound.key_source.clone()
+            } else {
+                palette::render_binding(&bound.keystrokes)
+            },' \
+  '            key: palette::render_binding(&bound.keystrokes),' \
   geode-shell \
   d_on_a_user_binding_spelled_with_mod_removes_it_by_the_files_spelling
 
@@ -3584,12 +3623,13 @@ run_mutation "find: fzf narrows and vim does not" \
   geode-blotter \
   vim_style_jumps_as_typed_commits_and_repeats
 
-run_mutation "cursor: a counted G is a row number" \
-  crates/geode-blotter/src/core/cursor.rs \
-  '                self.row = (c.max(1) as usize - 1).min(len.saturating_sub(1));' \
-  '                self.row = len.saturating_sub(1); let _ = c;' \
+run_mutation "blotter motion: a counted G is a row number" \
+  crates/geode-tile/src/motion.rs \
+  '        Motion::Top(Some(n)) | Motion::Bottom(Some(n)) => (n.max(1) as usize - 1).min(last),' \
+  '        Motion::Top(Some(_)) => 0,
+        Motion::Bottom(Some(_)) => last,' \
   geode-blotter \
-  row_motion_is_counted_and_clamped
+  row_and_column_motions_go_through_the_shared_rules
 
 run_mutation "cache: a NULL measure is None, never a number" \
   crates/geode-blotter/src/core/cache.rs \
@@ -7016,12 +7056,10 @@ run_mutation "shell: MAJ-3 — note_config_reloaded goes back behind the views_c
                     f.note_config_reloaded();' \
   geode-shell a_reload_that_does_not_touch_views_or_dimensions_still_bumps_the_config_version
 
-run_mutation "blotter: ctrl+b moves back ten, not forward" \
-  crates/geode-blotter/src/tile.rs \
-  '                    "page_down_full" => NavCommand::Move(10),
-                    _ => NavCommand::Move(-10),' \
-  '                    "page_down_full" => NavCommand::Move(10),
-                    _ => NavCommand::Move(10),' \
+run_mutation "blotter motion: ctrl+b moves back ten, not forward" \
+  crates/geode-tile/src/motion.rs \
+  '        PAGE_UP => rows(-FULL_PAGE),' \
+  '        PAGE_UP => rows(FULL_PAGE),' \
   geode-blotter motions_expansion_and_yank
 
 run_mutation "line numbers: the relative cursor row shows its absolute number, not 0" \
@@ -13359,57 +13397,13 @@ run_mutation "mdtable: a click while editing cancels the editor" \
   geode-marketdata \
   a_click_while_editing_cancels_the_editor_then_moves
 
-# ---- First-column navigation ---- The market-data keymap binds caret to
-# the first column. Replacing it with zero leaves other bindings intact; the
-# test resolves caret against the built keymap.
-# The anchor includes the normal-mode context to distinguish the same
-# motions in visual mode.
-run_mutation "mdkeys: ^ is the panel's first-column key, matching the blotter" \
-  crates/geode-marketdata/src/content.rs \
-  'context = "marketdata && mode == normal"
-[bindings.keys]
-"j" = "marketdata::down"
-"k" = "marketdata::up"
-"h" = "marketdata::left"
-"l" = "marketdata::right"
-"g g" = "marketdata::top"
-"shift+g" = "marketdata::bottom"
-"^" = "marketdata::first_col"' \
-  'context = "marketdata && mode == normal"
-[bindings.keys]
-"j" = "marketdata::down"
-"k" = "marketdata::up"
-"h" = "marketdata::left"
-"l" = "marketdata::right"
-"g g" = "marketdata::top"
-"shift+g" = "marketdata::bottom"
-"0" = "marketdata::first_col"' \
-  geode-marketdata \
-  caret_and_dollar_resolve_to_the_column_extremes
-
-# The visual block repeats the motions, `^` included: while a selection is
-# live, `^` extends it to the first column. Mutated back to `0`, `^` in
-# visual mode matches nothing.
-run_mutation "mdkeys: ^ is the first-column key in visual mode too" \
-  crates/geode-marketdata/src/content.rs \
-  'context = "marketdata && mode == visual"
-[bindings.keys]
-"j" = "marketdata::down"
-"k" = "marketdata::up"
-"h" = "marketdata::left"
-"l" = "marketdata::right"
-"g g" = "marketdata::top"
-"shift+g" = "marketdata::bottom"
-"^" = "marketdata::first_col"' \
-  'context = "marketdata && mode == visual"
-[bindings.keys]
-"j" = "marketdata::down"
-"k" = "marketdata::up"
-"h" = "marketdata::left"
-"l" = "marketdata::right"
-"g g" = "marketdata::top"
-"shift+g" = "marketdata::bottom"
-"0" = "marketdata::first_col"' \
+# ---- First-column navigation ---- The panel takes `^` from the shell's
+# shared grid motions (it publishes `grid` in normal and visual modes).
+# Rebound to `0`, `^` on the panel matches nothing in either mode.
+run_mutation "md motion: ^ is the panel's first-column key" \
+  crates/geode-shell/src/defaults.rs \
+  '"^" = "motion::line_start"' \
+  '"0" = "motion::line_start"' \
   geode-marketdata \
   caret_and_dollar_resolve_to_the_column_extremes
 
@@ -13827,25 +13821,25 @@ run_mutation "mdheader: a dirty draft sets the dot flag" \
 
 # `k` on the top row enters the strip only when there IS an attribute to
 # land on. Mutated so the guard can never pass, `k` on row 0 always steps
-# within the grid (clamped in place, since row 0 cannot go higher) and the
-# strip is unreachable by keyboard at all.
-run_mutation "mdcursor: k on the top row enters the strip" \
+# within the grid (a bare `k` wraps to the last row, a counted one clamps
+# at row 0) and the strip is unreachable by keyboard at all.
+run_mutation "md motion: k on the top row enters the strip" \
   crates/geode-marketdata/src/core/cursor.rs \
-  '        (Cursor::Cell { row: 0, col }, Motion::Rows(n)) if n < 0 && grid.attrs > 0 => {' \
-  '        (Cursor::Cell { row: 0, col }, Motion::Rows(n)) if n < 0 && grid.attrs > usize::MAX - 1 => {' \
+  '        (Cursor::Cell { row: 0, col }, Motion::Rows { by, .. }) if by < 0 && grid.attrs > 0 => {' \
+  '        (Cursor::Cell { row: 0, col }, Motion::Rows { by, .. }) if by < 0 && grid.attrs > usize::MAX - 1 => {' \
   geode-marketdata k_on_the_top_row_enters_the_strip_at_the_nearest_attribute
 
 # `j` (or any downward motion) out of the strip returns to the grid column
 # the cursor left FROM, remembered in `last_grid_col`. Mutated to land on
 # column 0 instead, a trader who entered the strip from column 3 lands
 # back on column 0 rather than where they started.
-run_mutation "mdcursor: j from the strip returns to the remembered column" \
+run_mutation "md motion: j from the strip returns to the remembered column" \
   crates/geode-marketdata/src/core/cursor.rs \
-  '        (Cursor::Attr(_), Motion::Rows(n)) if n > 0 => Cursor::Cell {
+  '        (Cursor::Attr(_), Motion::Rows { by, .. }) if by > 0 => Cursor::Cell {
             row: 0,
             col: (*last_grid_col).min(max_col),
         },' \
-  '        (Cursor::Attr(_), Motion::Rows(n)) if n > 0 => Cursor::Cell {
+  '        (Cursor::Attr(_), Motion::Rows { by, .. }) if by > 0 => Cursor::Cell {
             row: 0,
             col: 0,
         },' \
@@ -14151,16 +14145,19 @@ run_mutation "mdattr: a multi-word set value is joined with spaces" \
   '            let value = (!tail.is_empty()).then(|| tail.join(""));' \
   geode-marketdata set_parses_an_attribute_with_or_without_a_value
 
-# Arrow keys move the menu highlight like j and k. Removing down from the
-# fragment leaves it unresolved in the open menu.
-run_mutation "mdmenu: the arrow keys move the menu highlight" \
-  crates/geode-marketdata/src/content.rs \
-  '"k" = "marketdata::menu_up"
-"down" = "marketdata::menu_down"
-"up" = "marketdata::menu_up"
-"enter" = "marketdata::menu_pick"' \
-  '"k" = "marketdata::menu_up"
-"enter" = "marketdata::menu_pick"' \
+# Arrow keys step an open tile menu like j and k. Narrowing the builtin
+# arrow block to normal mode leaves them unresolved over the market-data
+# panel's open menu, which reports `mode == menu`.
+run_mutation "tile list: the arrows step an open menu" \
+  crates/geode-shell/src/defaults.rs \
+  'context = "tilelist"
+[bindings.keys]
+"down" = "motion::menu_down"
+"up" = "motion::menu_up"' \
+  'context = "tilelist && mode == normal"
+[bindings.keys]
+"down" = "motion::menu_down"
+"up" = "motion::menu_up"' \
   geode-marketdata dot_and_u_bind_in_normal_mode_and_the_menu_keys_in_menu_mode
 
 # Double-clicking a grid cell opens its editor. Refusing every model column
@@ -14414,19 +14411,132 @@ run_mutation "vimnav: a bare ±1 wraps (spec §20.5)" \
   geode-shell \
   apply_wraps_a_single_step_at_both_ends
 
-run_mutation "blotter cursor: visual mode clamps a bare step (spec §20.5)" \
+run_mutation "blotter motion: visual mode clamps a bare step" \
   crates/geode-blotter/src/core/cursor.rs \
-  '        self.row = if wrap {' \
-  '        self.row = if true {' \
+  '        self.row = motion::row(self.row, len, m, selecting);' \
+  '        self.row = motion::row(self.row, len, m, false);' \
   geode-blotter \
   visual_mode_clamps_a_bare_step
 
-run_mutation "marketdata: the row axis wraps a bare step, the column axis never does (spec §20.5)" \
+run_mutation "md motion: the grid wraps a bare step" \
   crates/geode-marketdata/src/core/cursor.rs \
-  '            row: vimnav::apply(row, grid.rows, NavCommand::Move(n as i64)),' \
-  '            row: vimnav::apply_clamped(row, grid.rows, NavCommand::Move(n as i64)),' \
+  '            row: motion::row(row, grid.rows, m, false),' \
+  '            row: motion::row(row, grid.rows, m, true),' \
   geode-marketdata \
   a_bare_row_step_wraps_and_the_full_page_keys_move_ten
+
+# Every shared motion id reaches the panel's one motion arm; a panel that
+# stops recognising them takes no motion key at all.
+run_mutation "md motion: the panel routes the shared motions" \
+  crates/geode-marketdata/src/tile.rs \
+  '        let verb = if shared_motion.is_some() {' \
+  '        let verb = if false {' \
+  geode-marketdata a_bare_row_step_wraps_and_the_full_page_keys_move_ten
+
+# The shell binds the shared motions under `grid`; a panel that stops
+# publishing the flag takes no motion key at all.
+run_mutation "md motion: the key context publishes grid" \
+  crates/geode-marketdata/src/tile.rs \
+  'KeyContext::new("marketdata").grid()' \
+  'KeyContext::new("marketdata")' \
+  geode-marketdata the_panel_publishes_grid_and_a_counted_g_jumps_to_that_row
+
+run_mutation "motion e2e: a shared override reaches the market-data panel" \
+  crates/geode-marketdata/src/tile.rs \
+  'KeyContext::new("marketdata").grid()' \
+  'KeyContext::new("marketdata")' \
+  geode-app a_shared_motion_override_reaches_each_grid_tile
+
+# `g g`/`G` from the strip under a count land on that row, not the end.
+run_mutation "md motion: a counted G from the strip is that row" \
+  crates/geode-marketdata/src/core/cursor.rs \
+  '            row: motion::row(0, grid.rows, m, false),' \
+  '            row: grid.rows - 1,' \
+  geode-marketdata counted_top_and_bottom_from_the_strip_land_on_that_row
+
+# A palette motion under an open selection editor would move the edit's
+# operand; it refuses like `V`/`v`/`escape`.
+run_mutation "md motion: a motion under a selection editor refuses" \
+  crates/geode-marketdata/src/tile/select.rs \
+  '            "motion" | "visual_rows" | "visual_block" | "escape" => true,' \
+  '            "visual_rows" | "visual_block" | "escape" => true,' \
+  geode-marketdata selection_changing_verbs_refuse_while_a_selection_editor_is_open
+
+# An old user binding on a retired id must bind its shared successor, not
+# some other motion.
+run_mutation "md motion: retired ids rename to the shared ones" \
+  crates/geode-marketdata/src/content.rs \
+  'pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
+    ("marketdata::down", "motion::down"),' \
+  'pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
+    ("marketdata::down", "motion::up"),' \
+  geode-marketdata every_retired_motion_id_renames_to_its_shared_id
+
+# Every shared motion id reaches the pricer's one motion verb; a pricer that
+# stops recognising them takes no motion key at all.
+run_mutation "pricer motion: the tile routes the shared motions" \
+  crates/geode-pricer/src/tile.rs \
+  '        let verb = if shared_motion.is_some() {' \
+  '        let verb = if false {' \
+  geode-pricer motions_move_the_cursor_and_never_into_the_tree_column
+
+# Outside a selection a bare `j` on the last row wraps to the first.
+run_mutation "pricer motion: a bare j wraps outside a selection" \
+  crates/geode-pricer/src/tile.rs \
+  '            let selecting = self.selection.is_some();' \
+  '            let selecting = true;' \
+  geode-pricer motions_move_the_cursor_and_never_into_the_tree_column
+
+# Under a live selection a bare `j`/`k` at an end clamps; a wrap would carry
+# the moving corner across the anchor.
+run_mutation "pricer motion: a selection clamps a bare step" \
+  crates/geode-pricer/src/tile.rs \
+  '            let selecting = self.selection.is_some();' \
+  '            let selecting = false;' \
+  geode-pricer a_bare_step_at_either_end_clamps_under_a_selection
+
+# A palette motion over an open entry bar closes the bar before moving,
+# like every verb that is not the bar's own.
+run_mutation "pricer motion: a motion closes an open field first" \
+  crates/geode-pricer/src/tile.rs \
+  '            if !matches!(verb, "add_below" | "add_above") {
+                self.close_entry(window, cx);
+            }' \
+  '            if !matches!(verb, "add_below" | "add_above" | "motion") {
+                self.close_entry(window, cx);
+            }' \
+  geode-pricer a_motion_closes_an_open_entry_bar_then_moves
+
+# An empty sheet takes no motion, a column move included.
+run_mutation "pricer motion: an empty sheet takes no column move" \
+  crates/geode-pricer/src/tile.rs \
+  $'        let rows: Vec<usize> = self.cursor_rows().collect();\n        if rows.is_empty() {\n            return;\n        }\n        if m.moves_rows() {' \
+  $'        let rows: Vec<usize> = self.cursor_rows().collect();\n        if rows.is_empty() && m.moves_rows() {\n            return;\n        }\n        if m.moves_rows() {' \
+  geode-pricer the_pricer_publishes_grid_and_motions_on_an_empty_sheet_do_nothing
+
+# The shell binds the shared motions under `grid`; a pricer that stops
+# publishing the flag takes no motion key at all.
+run_mutation "pricer motion: the key context publishes grid" \
+  crates/geode-pricer/src/tile.rs \
+  'KeyContext::new("pricer").grid().pair("mode", mode)' \
+  'KeyContext::new("pricer").pair("mode", mode)' \
+  geode-pricer the_pricer_publishes_grid_and_motions_on_an_empty_sheet_do_nothing
+
+run_mutation "motion e2e: a shared override reaches the pricer" \
+  crates/geode-pricer/src/tile.rs \
+  'KeyContext::new("pricer").grid().pair("mode", mode)' \
+  'KeyContext::new("pricer").pair("mode", mode)' \
+  geode-app a_shared_motion_override_reaches_each_grid_tile
+
+# An old user binding on a retired id must bind its shared successor, not
+# some other motion.
+run_mutation "pricer motion: retired ids rename to the shared ones" \
+  crates/geode-pricer/src/content.rs \
+  'pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
+    ("pricer::down", "motion::down"),' \
+  'pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
+    ("pricer::down", "motion::up"),' \
+  geode-pricer every_retired_motion_id_renames_to_its_shared_id
 
 run_mutation "picker: the values list moves through vimnav::apply, not a private ±1 (spec §20.5)" \
   crates/geode-shell/src/shell/picker.rs \
@@ -14898,12 +15008,44 @@ run_mutation "dialog: the object-dialog frozen-row click is dropped while a conf
 # The tile enables row wrapping only when no selection is active.
 # Forcing wrap on makes a bare j jump from the last row to the first
 # and reverses the selected range across its anchor.
-run_mutation "tile: a bare step wraps in normal mode only (spec §20.5)" \
+run_mutation "blotter motion: a bare step wraps in normal mode only" \
   crates/geode-blotter/src/tile.rs \
-  '                    let wrap = d.selection.is_none();' \
-  '                    let wrap = true;' \
+  '                let selecting = d.selection.is_some();' \
+  '                let selecting = false;' \
   geode-blotter \
   a_bare_j_wraps_in_normal_mode_and_clamps_in_visual
+
+# The blotter hands every shared motion id to the shared rules; dropping
+# the route leaves every motion key dispatching to nothing.
+run_mutation "blotter motion: the tile routes the shared motions" \
+  crates/geode-blotter/src/tile.rs \
+  '        if let Some(m) = geode_tile::motion::parse(action, count) {' \
+  '        if let Some(m) = geode_tile::motion::parse(action, count).filter(|_| false) {' \
+  geode-blotter motions_expansion_and_yank
+
+# The shell binds the shared motions under `grid`; a blotter that stops
+# publishing the flag takes no motion key at all.
+run_mutation "blotter motion: the key context publishes grid" \
+  crates/geode-blotter/src/tile.rs \
+  'KeyContext::new("blotter").grid()' \
+  'KeyContext::new("blotter")' \
+  geode-blotter the_key_context_publishes_the_grid_flag
+
+run_mutation "motion e2e: a shared override reaches the blotter" \
+  crates/geode-blotter/src/tile.rs \
+  'KeyContext::new("blotter").grid()' \
+  'KeyContext::new("blotter")' \
+  geode-app a_shared_motion_override_reaches_each_grid_tile
+
+# An old user binding on a retired id must bind its shared successor, not
+# some other motion.
+run_mutation "blotter motion: retired ids rename to the shared ones" \
+  crates/geode-blotter/src/content.rs \
+  '    ("blotter::visual", "blotter::visual_rows"),
+    ("blotter::down", "motion::down"),' \
+  '    ("blotter::visual", "blotter::visual_rows"),
+    ("blotter::down", "motion::up"),' \
+  geode-blotter every_retired_motion_id_renames_to_its_shared_id
 
 # ---- Popup hover and occlusion ---------------------------------------
 #
@@ -24312,6 +24454,214 @@ run_mutation "following: a releasing reply asked before a followed change is sup
   '                    Promotion::Superseded => Delivered::Held,' \
   geode-tile a_releasing_delivery_asked_before_a_followed_change_is_superseded
 
+# A bare j/k wraps at the ends of a grid; without it a trader at the last
+# row has to page back to the top.
+run_mutation "shared motion: a bare single step wraps" \
+  crates/geode-tile/src/motion.rs \
+  '            if !counted && !selecting && by.abs() == 1 {' \
+  '            if false {' \
+  geode-tile a_bare_single_step_wraps_at_both_ends
+
+# A live selection clamps a bare step; a wrap would put the cursor across
+# the anchor and invert the selection.
+run_mutation "shared motion: a selection clamps a bare step" \
+  crates/geode-tile/src/motion.rs \
+  '            if !counted && !selecting && by.abs() == 1 {' \
+  '            if !counted && by.abs() == 1 {' \
+  geode-tile a_live_selection_clamps_a_bare_step
+
+# A counted step clamps, a count of one included.
+run_mutation "shared motion: a counted step clamps" \
+  crates/geode-tile/src/motion.rs \
+  '            if !counted && !selecting && by.abs() == 1 {' \
+  '            if !selecting && by.abs() == 1 {' \
+  geode-tile a_counted_step_clamps_even_a_count_of_one
+
+run_mutation "shared motion: a counted top or bottom is a 1-based row" \
+  crates/geode-tile/src/motion.rs \
+  '        Motion::Top(Some(n)) | Motion::Bottom(Some(n)) => (n.max(1) as usize - 1).min(last),' \
+  '        Motion::Top(Some(_)) => 0,
+        Motion::Bottom(Some(_)) => last,' \
+  geode-tile a_counted_top_or_bottom_jumps_to_that_row
+
+# A cursor left past the end after the rows shrank steps from the last
+# row; from its stale index a bare wrap would land somewhere unrelated.
+run_mutation "shared motion: a stale row past the end steps from the last row" \
+  crates/geode-tile/src/motion.rs \
+  '            let from = at.min(last);' \
+  '            let from = at;' \
+  geode-tile a_stale_position_past_the_end_moves_from_the_last_row
+
+run_mutation "shared motion: a stale column past the end steps from the last column" \
+  crates/geode-tile/src/motion.rs \
+  'Motion::Cols(by) => (at.min(last) as i64)' \
+  'Motion::Cols(by) => (at as i64)' \
+  geode-tile a_stale_position_past_the_end_moves_from_the_last_row
+
+run_mutation "shared motion: half a page is five rows" \
+  crates/geode-tile/src/motion.rs \
+  'pub const HALF_PAGE: i64 = 5;' \
+  'pub const HALF_PAGE: i64 = 10;' \
+  geode-tile the_page_motions_move_five_and_ten_times_the_count
+
+run_mutation "shared motion: a page is ten rows" \
+  crates/geode-tile/src/motion.rs \
+  'pub const FULL_PAGE: i64 = 10;' \
+  'pub const FULL_PAGE: i64 = 5;' \
+  geode-tile the_page_motions_move_five_and_ten_times_the_count
+
+run_mutation "shared motion: the count multiplies a page" \
+  crates/geode-tile/src/motion.rs \
+  '    let n = i64::from(count.unwrap_or(1).max(1));' \
+  '    let n = 1i64;' \
+  geode-tile the_page_motions_move_five_and_ten_times_the_count
+
+run_mutation "shared motion: line end is the last column" \
+  crates/geode-tile/src/motion.rs \
+  '        Motion::LineEnd => last,' \
+  '        Motion::LineEnd => at,' \
+  geode-tile columns_clamp_and_line_start_and_end_reach_the_extremes
+
+run_mutation "shared motion: an empty axis leaves the row alone" \
+  crates/geode-tile/src/motion.rs \
+  '    if len == 0 {
+        return at;
+    }' \
+  '    if len == 0 {
+        return 0;
+    }' \
+  geode-tile an_empty_axis_is_a_no_op
+
+# One shipped context covers both grid modes, so one override remaps both.
+run_mutation "motion keys: the grid context covers visual mode" \
+  crates/geode-shell/src/defaults.rs \
+  'context = "grid && (mode == normal || mode == visual)"
+[bindings.keys]
+"j" = "motion::down"' \
+  'context = "grid && mode == normal"
+[bindings.keys]
+"j" = "motion::down"' \
+  geode-shell grid_motions_resolve_in_normal_and_visual_grid_contexts_only
+
+run_mutation "motion keys: j is the shipped down" \
+  crates/geode-shell/src/defaults.rs \
+  '"j" = "motion::down"' \
+  '"j" = "motion::up"' \
+  geode-shell grid_motions_resolve_in_normal_and_visual_grid_contexts_only
+
+run_mutation "motion keys: an open tile list takes j" \
+  crates/geode-shell/src/defaults.rs \
+  'context = "tilelist"
+[bindings.keys]
+"j" = "motion::menu_down"' \
+  'context = "tilelist && mode == normal"
+[bindings.keys]
+"j" = "motion::menu_down"' \
+  geode-shell an_open_tile_list_takes_j_and_k_as_menu_steps_not_grid_motions
+
+# A tile with an open menu or popup list publishes `tilelist`, so the shared
+# menu steps reach it; without the flag j/k resolve to nothing there (or to
+# the grid) and the menu never moves.
+run_mutation "tile list: the md menu publishes tilelist" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if mode == "menu" {
+            ctx = ctx.tilelist();
+        }' \
+  '' \
+  geode-marketdata tilelist_keys_step_the_open_menu_and_leave_the_grid
+
+# The panel maps the shared step onto its own menu verb; unmapped, the
+# shared id is unhandled and the open menu's highlight stays.
+run_mutation "tile list: the md menu takes the shared step" \
+  crates/geode-marketdata/src/tile.rs \
+  '        } else if action.0 == geode_tile::motion::MENU_DOWN {
+            "menu_down"' \
+  '        } else if action.0 == "never" {
+            "menu_down"' \
+  geode-marketdata tilelist_keys_step_the_open_menu_and_leave_the_grid
+
+run_mutation "tile list: the pricer menu publishes tilelist" \
+  crates/geode-pricer/src/tile.rs \
+  '        if mode == "menu" {
+            cx = cx.tilelist();
+        }' \
+  '' \
+  geode-pricer tilelist_keys_step_the_open_menu_and_leave_the_grid
+
+run_mutation "tile list: the pricer menu takes the shared step" \
+  crates/geode-pricer/src/tile.rs \
+  '        } else if action.0 == geode_tile::motion::MENU_DOWN {
+            "menu_down"' \
+  '        } else if action.0 == "never" {
+            "menu_down"' \
+  geode-pricer tilelist_keys_step_the_open_menu_and_leave_the_grid
+
+run_mutation "tile list: the timeseries popups publish tilelist" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  'ctx = ctx.pair("popup", pair).tilelist();' \
+  'ctx = ctx.pair("popup", pair);' \
+  geode-timeseries tilelist_keys_step_the_open_list
+
+# The down step must reach the list as a down step: with it swapped, the
+# action menu's clamped highlight cannot leave its first enabled row.
+run_mutation "tile list: the timeseries list takes the shared step" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '            geode_tile::motion::MENU_DOWN => "list_down",' \
+  '            geode_tile::motion::MENU_DOWN => "list_up",' \
+  geode-timeseries tilelist_keys_step_the_open_list
+
+# Through the real shell and keymap: with the pricer's menu open, j and
+# down send the menu step, never the grid's motion.
+run_mutation "motion e2e: an open pricer menu takes j" \
+  crates/geode-pricer/src/tile.rs \
+  '        if mode == "menu" {
+            cx = cx.tilelist();
+        }' \
+  '' \
+  geode-app a_menu_motion_steps_the_open_pricer_menu_not_its_grid
+
+run_mutation "motion keys: the motions register under Motion" \
+  crates/geode-shell/src/defaults.rs \
+  '        action(reg, id, title, "Motion");' \
+  '        action(reg, id, title, "Workspace");' \
+  geode-shell each_motion_is_listed_once_under_motion_with_its_vim_key
+
+run_mutation "motion keys: several retired ids rename to one" \
+  crates/geode-shell/src/actions.rs \
+  '        self.renames.insert(old, ActionId(new.to_string()));' \
+  '        if self.renames.values().any(|n| n.0 == new) {
+            return Err(format!("{new} already has a retired id"));
+        }
+        self.renames.insert(old, ActionId(new.to_string()));' \
+  geode-shell several_retired_ids_may_rename_to_one_current_id
+
+run_mutation "motion keys: a grid occupant receives the shared motions" \
+  crates/geode-shell/src/module.rs \
+  '            if self.grid { ctx.grid() } else { ctx }' \
+  '            ctx' \
+  geode-shell a_shared_motion_key_reaches_a_grid_occupant_with_its_count
+
+# ---- Pinned glyph visibility ----
+# An active chip's fill is floored against the title bar; the raw primary
+# sits too close to the bar on several bundled themes.
+run_mutation "chip: an active fill is floored against the title bar" \
+  crates/geode-shell/src/shell/chip.rs \
+  '            let fill = readable_on(
+                over(theme.primary, background),
+                bar,
+                to_rgb(theme.foreground),
+            );' \
+  '            let fill = over(theme.primary, background);' \
+  geode-shell an_active_chip_stands_out_from_the_title_bar_on_every_bundled_theme
+
+# Its text is floored against that fill; primary_foreground alone is
+# unreadable on several bundled themes.
+run_mutation "chip: active text is floored against its fill" \
+  crates/geode-shell/src/shell/chip.rs \
+  '                text: to_hsla(readable_on(to_rgb(theme.primary_foreground), fill, pole)),' \
+  '                text: theme.primary_foreground,' \
+  geode-shell every_chip_tone_is_readable_on_every_bundled_theme
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
@@ -24340,27 +24690,14 @@ if (( build_failures || anchor_failures )); then
   exit 1
 fi
 if (( anchors_only )); then
+  # An entry registered below this point never runs and is never checked:
+  # the run has already ended. Refuse the file rather than pass it.
+  here=$LINENO
+  last=$(grep -n '^run_mutation ' "$0" | tail -1 | cut -d: -f1)
+  if (( last > here )); then
+    echo "ORDER     run_mutation at line $last sits after the end-of-run block" >&2
+    exit 1
+  fi
   # Static checks over every selected entry; see scripts/mutation_anchors.py.
   python3 scripts/mutation_anchors.py "$anchors" || exit 1
 fi
-
-# ---- Pinned glyph visibility (2026-09-28) ----
-# An active chip's fill is floored against the title bar; the raw primary
-# sits too close to the bar on several bundled themes.
-run_mutation "chip: an active fill is floored against the title bar" \
-  crates/geode-shell/src/shell/chip.rs \
-  '            let fill = readable_on(
-                over(theme.primary, background),
-                bar,
-                to_rgb(theme.foreground),
-            );' \
-  '            let fill = over(theme.primary, background);' \
-  geode-shell an_active_chip_stands_out_from_the_title_bar_on_every_bundled_theme
-
-# Its text is floored against that fill; primary_foreground alone is
-# unreadable on several bundled themes.
-run_mutation "chip: active text is floored against its fill" \
-  crates/geode-shell/src/shell/chip.rs \
-  '                text: to_hsla(readable_on(to_rgb(theme.primary_foreground), fill, pole)),' \
-  '                text: theme.primary_foreground,' \
-  geode-shell every_chip_tone_is_readable_on_every_bundled_theme

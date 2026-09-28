@@ -56,8 +56,6 @@ pub const ACTIONS: &[(&str, &str)] = &[
     // The popup verbs: registered beside the rest so the fragment
     // below binds them and the palette lists them.
     ("timeseries::menu", "Actions…"),
-    ("timeseries::list_down", "List: down"),
-    ("timeseries::list_up", "List: up"),
     ("timeseries::list_close", "List: close"),
     ("timeseries::menu_pick", "Menu: pick"),
     ("timeseries::commit", "Commit"),
@@ -71,12 +69,20 @@ pub const ACTIONS: &[(&str, &str)] = &[
 pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
     ("timeseries::colour", "timeseries::color"),
     ("timeseries::pick_colour", "timeseries::pick_color"),
+    ("timeseries::list_down", "motion::menu_down"),
+    ("timeseries::list_up", "motion::menu_up"),
 ];
 
 /// Bindings scoped to the factory's `timeseries` context. Fragment validation
 /// requires each predicate to be a conjunction beginning with that context.
 /// Within the tile, these bindings take precedence over workspace bindings;
 /// outside it, the fragment does not participate in key resolution.
+///
+/// The popups' row steps are not here: the tile publishes `tilelist` while
+/// the series list or a menu is open, and the shell's builtin keymap binds
+/// the shared `motion::menu_down`/`menu_up` (`j`/`k` and the arrows) there.
+/// The tile never publishes `grid`, so the grid motions never reach it and
+/// its own `h`/`l` pan and `g`/`shift+g` jump stand.
 pub const DEFAULT_KEYMAP: &str = r#"
 [[bindings]]
 context = "timeseries && mode == normal"
@@ -119,21 +125,18 @@ context = "timeseries && mode == normal"
 [[bindings]]
 context = "timeseries && mode == normal && popup == series"
 [bindings.keys]
-"j" = "timeseries::list_down"
-"k" = "timeseries::list_up"
 "enter" = "timeseries::list_close"
 "escape" = "timeseries::list_close"
 
 # The menus — the action list, the range menu and the frequency menu —
 # hold no field, so they keep the tile's own keyboard like the series
-# list does; the same `j`/`k` verbs step their rows and `enter` picks the
-# highlighted one. `r` and `f` stay the normal layer's: each toggles its
-# own menu shut, or swaps the menu that is up for its own.
+# list does; the shared menu steps (`j`/`k` and the arrows, bound under
+# `tilelist`) move their rows and `enter` picks the highlighted one. `r`
+# and `f` stay the normal layer's: each toggles its own menu shut, or swaps
+# the menu that is up for its own.
 [[bindings]]
 context = "timeseries && mode == normal && popup == menu"
 [bindings.keys]
-"j" = "timeseries::list_down"
-"k" = "timeseries::list_up"
 "enter" = "timeseries::menu_pick"
 "escape" = "timeseries::list_close"
 "." = "timeseries::list_close"
@@ -308,11 +311,18 @@ impl ModuleFactory for TimeseriesFactory {
 }
 
 /// The keymap a running app resolves this module's menu hints through: the
-/// builtin actions and this module's, this fragment, and an optional user
-/// layer over it. Tests read menu lanes against it rather than against no
-/// keymap, where every chord hint is (correctly) empty.
+/// builtin actions and this module's, the builtin keymap with this fragment
+/// spliced in (the popups' shared steps live only in the former), and an
+/// optional user layer over it. Tests read menu lanes against it rather
+/// than against no keymap, where every chord hint is (correctly) empty.
 #[cfg(test)]
 pub(crate) fn test_bindings(user: Option<&str>) -> Vec<geode_shell::keymap::Binding> {
+    test_keymap(user).bindings().to_vec()
+}
+
+/// [`test_bindings`]' keymap itself, for resolving keys against it.
+#[cfg(test)]
+pub(crate) fn test_keymap(user: Option<&str>) -> geode_shell::keymap::Keymap {
     let mut registry = ActionRegistry::default();
     geode_shell::defaults::register_builtin_actions(&mut registry);
     for (id, title) in ACTIONS {
@@ -324,8 +334,12 @@ pub(crate) fn test_bindings(user: Option<&str>) -> Vec<geode_shell::keymap::Bind
             })
             .unwrap();
     }
-    let mut docs =
-        vec![geode_shell::keymap::fragments::fragment_doc("timeseries", DEFAULT_KEYMAP).unwrap()];
+    let builtin =
+        geode_core::config::LayerDoc::builtin("keymap", geode_shell::defaults::BUILTIN_KEYMAP)
+            .unwrap();
+    let fragment =
+        geode_shell::keymap::fragments::fragment_doc("timeseries", DEFAULT_KEYMAP).unwrap();
+    let mut docs = geode_shell::keymap::fragments::splice(&[builtin], &[fragment]);
     if let Some(text) = user {
         docs.push(geode_core::config::LayerDoc {
             layer: geode_core::config::Layer::User,
@@ -337,7 +351,7 @@ pub(crate) fn test_bindings(user: Option<&str>) -> Vec<geode_shell::keymap::Bind
     let (keymap, diags) =
         geode_shell::keymap::build_keymap(&docs, geode_shell::defaults::default_mod(), &registry);
     assert!(diags.is_empty(), "{diags:?}");
-    keymap.bindings().to_vec()
+    keymap
 }
 
 #[cfg(test)]
@@ -375,5 +389,68 @@ mod tests {
         assert_eq!(bound, vec!["timeseries::color", "timeseries::pick_color"]);
         assert_eq!(diags.len(), 2, "{diags:?}");
         assert!(diags.iter().all(|d| d.severity == Severity::Warning));
+    }
+
+    /// A user keymap written against a retired list step keeps binding the
+    /// shared menu step it became.
+    #[test]
+    fn every_retired_list_step_renames_to_its_shared_id() {
+        let (data, _rx) = DataHandle::for_tests();
+        let factory = TimeseriesFactory::new(data, NamedColours::default());
+        let mut registry = ActionRegistry::default();
+        geode_shell::defaults::register_builtin_actions(&mut registry);
+        factory.register_actions(&mut registry);
+        for (old, new) in [
+            ("timeseries::list_down", "motion::menu_down"),
+            ("timeseries::list_up", "motion::menu_up"),
+        ] {
+            assert_eq!(
+                registry.renamed(&ActionId(old.into())),
+                Some(&ActionId(new.into())),
+                "{old}"
+            );
+            assert!(registry.get(&ActionId(old.into())).is_none(), "{old}");
+        }
+    }
+
+    /// The popups' steps are the builtin keymap's shared menu keys under
+    /// `tilelist`; the fragment keeps each popup's enter, escape and dot.
+    #[test]
+    fn the_popup_steps_are_the_shared_keys_under_tilelist() {
+        use geode_shell::keymap::{KeyContext, MatchResult, Matcher, parse_keystroke};
+        let keymap = test_keymap(None);
+        let popup = |pair: &str| {
+            [
+                KeyContext::new("workspace"),
+                KeyContext::new("tile"),
+                KeyContext::new("timeseries")
+                    .tilelist()
+                    .pair("mode", "normal")
+                    .pair("popup", pair)
+                    .counts(),
+            ]
+        };
+        let (series, menu) = (popup("series"), popup("menu"));
+        for (stack, key, expected) in [
+            (&series, "j", "motion::menu_down"),
+            (&series, "k", "motion::menu_up"),
+            (&series, "down", "motion::menu_down"),
+            (&series, "up", "motion::menu_up"),
+            (&series, "enter", "timeseries::list_close"),
+            (&series, "escape", "timeseries::list_close"),
+            (&menu, "j", "motion::menu_down"),
+            (&menu, "k", "motion::menu_up"),
+            (&menu, "enter", "timeseries::menu_pick"),
+            (&menu, ".", "timeseries::list_close"),
+            // Not a grid: h/l and shift+g stay the tile's own.
+            (&series, "h", "timeseries::pan_left"),
+            (&series, "shift+g", "timeseries::jump_end"),
+        ] {
+            let ks = parse_keystroke(key, geode_shell::defaults::default_mod()).unwrap();
+            match Matcher::default().press(&keymap, ks, stack) {
+                MatchResult::Matched { action, .. } => assert_eq!(action.0, expected, "{key}"),
+                other => panic!("{key}: expected a match, got {other:?}"),
+            }
+        }
     }
 }

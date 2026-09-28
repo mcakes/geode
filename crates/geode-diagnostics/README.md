@@ -29,17 +29,20 @@ The seam it sits on: [pages](../../docs/current/shell.md#pages).
 
 ## Interaction
 
-`[`/`]` cycle sections, and a rail row's press selects one. `j`/`k` move the
-cursor by one, `ctrl+d`/`ctrl+u` by five, `ctrl+f`/`ctrl+b` and the page
-keys by ten, all with count prefixes, and `g g`/`G` jump; the detail strip
-follows the cursor. `z o`/`z c` and
-Enter expand or collapse the cursor row where it expands (Data datasets and
-Config documents); a double-click on a row does the same, and a single click
-only selects. `/` focuses the selected section's filter input, which puts
-the page's context in `mode == insert`, and Escape there returns to normal
-mode; on Perf, which paints no input, `/` is consumed and does nothing.
-Escape in normal mode reaches the shell's `page::close`, as does the
-header's back control through the shell-actions handle.
+`[`/`]` cycle sections, and a rail row's press selects one. The page
+publishes `grid` beside its mode, so the cursor takes the shell's shared
+`motion::*` bindings (`j`/`k` and the arrows, `g g`/`G`, `ctrl+d`/`ctrl+u`,
+`ctrl+f`/`ctrl+b` and the page keys, with count prefixes), applied to rows by
+`geode_tile::motion`; column motions are ignored, and the detail strip
+follows the cursor. The fragment binds only the page's own keys. `z o`/`z c`
+and Enter expand or collapse the cursor row where it expands (Data datasets
+and Config documents); a double-click on a row does the same, and a single
+click only selects. `/` focuses the selected section's filter input, which
+puts the page's context in `mode == insert`, and Escape there returns to
+normal mode; on Perf, which paints no input, `/` is consumed and does
+nothing. Escape in normal mode reaches the shell's `page::close`, as does
+the header's back control through the shell-actions handle. The retired
+`diagnostics::` motion ids are registered as renames (`RENAMED_ACTIONS`).
 
 Sources filters by name and health; Data by dataset name; Config by
 `document.key` and value; Log by message and target text, plus the level

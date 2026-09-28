@@ -34,14 +34,6 @@ pub use page::DiagnosticsPage;
 pub fn init(_cx: &mut App) {}
 
 pub const ACTIONS: &[(&str, &str)] = &[
-    ("diagnostics::down", "Cursor down"),
-    ("diagnostics::up", "Cursor up"),
-    ("diagnostics::top", "Cursor to top"),
-    ("diagnostics::bottom", "Cursor to bottom"),
-    ("diagnostics::page_down", "Half page down"),
-    ("diagnostics::page_up", "Half page up"),
-    ("diagnostics::page_down_full", "Page down"),
-    ("diagnostics::page_up_full", "Page up"),
     ("diagnostics::next_section", "Next section"),
     ("diagnostics::prev_section", "Previous section"),
     ("diagnostics::expand", "Expand"),
@@ -51,33 +43,39 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("diagnostics::blur", "Leave the filter"),
 ];
 
+/// Retired action ids and their successors: a user keymap that still names
+/// an old id binds the new one, with a warning (`ActionRegistry::renamed`).
+pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
+    ("diagnostics::down", "motion::down"),
+    ("diagnostics::up", "motion::up"),
+    ("diagnostics::top", "motion::top"),
+    ("diagnostics::bottom", "motion::bottom"),
+    ("diagnostics::page_down", "motion::half_page_down"),
+    ("diagnostics::page_up", "motion::half_page_up"),
+    ("diagnostics::page_down_full", "motion::page_down"),
+    ("diagnostics::page_up_full", "motion::page_up"),
+];
+
 /// Default bindings supplied through [`PageFactory::default_keymap`].
 /// Binding IDs and their registrations in [`ACTIONS`] live together here,
 /// keeping the shell independent of this feature crate.
 ///
-/// One context with two modes: `[`/`]` cycle sections and `/` focuses the
-/// filter; in insert mode `escape` leaves it. The page's toggle binding is
-/// the factory's `toggle_binding`, emitted by the roster.
+/// One context with two modes. The page publishes `grid` beside its mode,
+/// so its cursor takes the shell's shared `motion::*` bindings, which this
+/// fragment therefore does not repeat: it binds `[`/`]` to cycle sections,
+/// `z o`/`z c`/`enter` to fold, and `/` to focus the filter; in insert mode
+/// `escape` leaves it. The page's toggle binding is the factory's
+/// `toggle_binding`, emitted by the roster.
 ///
 /// The bare keys carry `mode == normal` for the reason a module's do: with
 /// the filter focused the shell's insert route resolves bare keys against
 /// every context that carries `mode == insert`, and the page's context does
-/// then, so a table without the mode clause would fire `j`, `G`, or `enter`
+/// then, so a table without the mode clause would fire `G` or `enter`
 /// instead of typing them.
 pub const DEFAULT_KEYMAP: &str = r#"
 [[bindings]]
 context = "diagnostics && mode == normal"
 [bindings.keys]
-"j" = "diagnostics::down"
-"k" = "diagnostics::up"
-"g g" = "diagnostics::top"
-"shift+g" = "diagnostics::bottom"
-"ctrl+d" = "diagnostics::page_down"
-"ctrl+u" = "diagnostics::page_up"
-"ctrl+f" = "diagnostics::page_down_full"
-"ctrl+b" = "diagnostics::page_up_full"
-"pagedown" = "diagnostics::page_down_full"
-"pageup" = "diagnostics::page_up_full"
 "[" = "diagnostics::prev_section"
 "]" = "diagnostics::next_section"
 "z o" = "diagnostics::expand"
@@ -170,6 +168,11 @@ impl PageFactory for DiagnosticsPageFactory {
                     category: "Diagnostics".to_string(),
                 })
                 .expect("diagnostics action ids are unique");
+        }
+        for (old, new) in RENAMED_ACTIONS {
+            registry
+                .register_rename(old, new)
+                .expect("diagnostics retired ids are unique");
         }
     }
 
@@ -286,5 +289,31 @@ mod tests {
         assert_eq!(factory.default_keymap(), Some(DEFAULT_KEYMAP));
         assert_eq!(factory.toggle_binding(), Some("mod+d"));
         assert_eq!(factory.contexts(), vec!["diagnostics"]);
+    }
+
+    /// A user keymap written against a retired motion id keeps binding the
+    /// shared id it became.
+    #[test]
+    fn every_retired_motion_id_renames_to_its_shared_id() {
+        let factory = DiagnosticsPageFactory::new(Arc::new(Ring::new(4)), Config::default());
+        let mut registry = ActionRegistry::default();
+        geode_shell::defaults::register_builtin_actions(&mut registry);
+        factory.register_actions(&mut registry);
+        for (old, new) in [
+            ("diagnostics::down", "motion::down"),
+            ("diagnostics::up", "motion::up"),
+            ("diagnostics::top", "motion::top"),
+            ("diagnostics::bottom", "motion::bottom"),
+            ("diagnostics::page_down", "motion::half_page_down"),
+            ("diagnostics::page_up", "motion::half_page_up"),
+            ("diagnostics::page_down_full", "motion::page_down"),
+            ("diagnostics::page_up_full", "motion::page_up"),
+        ] {
+            assert_eq!(
+                registry.renamed(&ActionId(old.into())),
+                Some(&ActionId(new.into())),
+                "{old}"
+            );
+        }
     }
 }

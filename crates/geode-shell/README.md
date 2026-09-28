@@ -27,7 +27,7 @@ GPUI globals or provide rendering helpers.
 | Module | Holds |
 |---|---|
 | `tiling` | Split/leaf/stack trees, workspaces, docks, divider and drop-zone geometry. Rendering and navigation share tree geometry; see [tiling contracts](../../docs/current/tiling.md) for focus, transfer, resize, and restoration rules. |
-| `keymap` | Keystrokes, predicates, layered binding resolution, sequences, counts, and module fragments. See [keymaps and actions](../../docs/current/keymaps.md) for matching, filtering, and editor limitations. |
+| `keymap` | Keystrokes, predicates, layered binding resolution, sequences, counts, and module fragments. `GRID`/`TILELIST` are the flags a tile publishes for the shared motions. See [keymaps and actions](../../docs/current/keymaps.md) for matching, filtering, and editor limitations. |
 | `actions` | The shared action registry; the keymap maps keys to action ids and the palette lists them. |
 | `frame` | The shared frame: scope with undo/redo, the active grouping slot, as-of, recent publishes, saved scopes, named expressions (`expressions.toml`, rebuilt on reload), and the data and config generations, as one value every tile observes. The selection lives in lanes — one shared, one per pinned workspace (`pin`, `unpin`) — read through `FrameView` and written through `FrameViewMut`; every lane's generations come from one counter, so a number names one value in any lane. See [workspace lanes](../../docs/current/shell.md#workspace-lanes). `effective_scope` composes the frame and tile scope layers and resolves named references, returning the first missing or invalid one as an error instead of a scope. |
 | `frame_ref` | `FrameRef`, the workspace-bound frame handle a module receives: `read`/`update` resolve to that workspace's lane. |
@@ -40,7 +40,7 @@ GPUI globals or provide rendering helpers.
 | `diagnostics` | Source health, generations, independent config/data diagnostics, stopped data threads (`StoppedThread`, `thread_label`) and the prepared `StoppedSegment`, the `Busy`-refusal total, section versions, cached status summary, and watched/explicit catalog demand. See the [diagnostics contract](../../docs/current/shell.md#diagnostics-state-and-demand). |
 | `colfit` | The pure column-fit measure behind `:autosize` and `tile::autosize_columns`: `FitMetrics` (mono advance at `text_sm`, the `XSmall` cell padding and cursor border at the window's rem, clamped to 2.5–40 rem), the `FittedWidths` map by stable column key, and its lenient `column_widths` session read/write, which clamps a restored width to 25–560 px. `NO_TABLE` and `NOTHING_TO_FIT` are the two refusals. See [autosized columns](../../docs/current/features.md#autosized-columns). |
 | `perf` | The always-compiled frame-time histogram. |
-| `defaults` | The builtin action set and keymap, the Builtin config layer. |
+| `defaults` | The builtin action set and keymap, the Builtin config layer; `MOTION_ACTIONS` (the shared `motion::*` vocabulary, category "Motion", handled by no shell code so it falls through to the focused tile) and `GRID_MOTION_CONTEXT`, the one context the grid motions ship under; `shared_motion_context` names where the keybindings dialog writes a Motion row's edits, after clearing the action's user overrides. |
 
 **Window integration**
 
