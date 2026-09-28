@@ -413,8 +413,12 @@ option exactly: a bulk write has no popup to rank a near miss. Deleted rows
 and cells that refuse are skipped and counted, `set 5 cells, skipped 3 (2
 deleted, 1 wrong type)`. Every member is judged before any write, so when
 nothing accepts, the commit is refused with the editor still open and the
-draft untouched. On a text or date cursor cell an untouched `enter` writes
-the seeded value across the selection. The selection stays after a
+draft untouched. An untouched `enter` writes nothing and closes the editor,
+so a no-op gesture never copies one cell's value across the selection:
+text still equal to what the editor opened on, a date field no digit was
+typed into whose date is unchanged, or `enter` on the option the cell
+already holds. Stepping a date or moving the choice highlight is a change;
+a click on a choice row is always a pick. The selection stays after a
 commit.
 
 **Live steps.** On a number cursor cell with its text untouched, the editor's

@@ -12188,6 +12188,29 @@ run_mutation "mdbulk: a refusing member is counted" \
   geode-marketdata \
   a_flat_block_commit_skips_cells_that_refuse_and_counts_them
 
+# An untouched `enter` over a selection writes nothing: without the guard
+# a no-op gesture copies the cursor cell's text across the selection.
+run_mutation "mdbulk: an untouched text commit over a selection writes nothing" \
+  crates/geode-marketdata/src/tile.rs \
+  '                if self.selection.is_some() && text == editing.opened {' \
+  '                if false && text == editing.opened {' \
+  geode-marketdata \
+  an_untouched_commit_on_a_text_cell_writes_nothing
+
+run_mutation "mdbulk: an untouched date commit over a selection writes nothing" \
+  crates/geode-marketdata/src/tile.rs \
+  '                    if !editing.typed && text == editing.opened {' \
+  '                    if false && text == editing.opened {' \
+  geode-marketdata \
+  an_untouched_date_commit_over_a_selection_writes_nothing
+
+run_mutation "mdbulk: enter on the choice the cell holds writes nothing over a selection" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.selection.is_some() && option == c.opened {' \
+  '        if false && option == c.opened {' \
+  geode-marketdata \
+  an_untouched_choice_commit_over_a_selection_writes_nothing
+
 # A block covers columns only partly, so `d` there refuses rather than
 # deleting every row it touches. Mutated so the guard fires on `Rows`
 # instead, `d` over a block deletes whole rows the trader never selected.
