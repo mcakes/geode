@@ -22743,6 +22743,14 @@ run_mutation "context: a selection counts children of a selected group" \
   '    top_most(&rows, snapshot.rows(), |_| None)' \
   geode-blotter a_selection_lists_its_top_most_rows_only
 
+# Startup hands the roster's context columns to the data handle, or no
+# query carries them and a blotter row offers only its shown columns.
+run_mutation "context: startup never publishes the context columns" \
+  crates/geode-app/src/main.rs \
+  '    bridge.handle.set_context_columns(roster.context_columns());' \
+  '    let _ = roster.context_columns();' \
+  geode-app the_production_roster_opens_market_data_on_an_underlying
+
 # A reload must reach the underlying list, or a desk edit to it waits for
 # a restart.
 run_mutation "pricer app: a reload leaves the underlying list stale" \

@@ -83,7 +83,7 @@ hidden context columns, the pricer the cursor line's sole underlying as
 `underlying_ref`). A column is absent whenever the row names no single value
 (NULL, mixed, or above the column's grouping level), never a guessed key,
 because a panel opened on a made-up value is a plausible wrong answer. A
-tile with no rows answers `None`, the default.
+tile with no cursor row answers `None`, the default.
 
 `tile::open_with` pulls the focused tile's context and lists, in the shared
 choice dialog, every roster kind whose `ModuleFactory::accepts` (column

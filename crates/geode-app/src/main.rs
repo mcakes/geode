@@ -383,6 +383,8 @@ fn usage(reason: &str) -> String {
 /// Register modules backed by the bridge's shared factories and data handle.
 /// The roster's `Rc` forwarding exposes every factory method, including launch
 /// context acceptance, while the bridge retains the factories for live reloads.
+/// Finally hands the roster's context columns to the data handle, so every
+/// query carries them.
 fn add_bridge_modules(roster: &mut ModuleRoster, bridge: &bridge::Bridge) {
     roster.add(Box::new(bridge.factory.clone()));
     roster.add(Box::new(bridge.marketdata.clone()));
@@ -391,6 +393,9 @@ fn add_bridge_modules(roster: &mut ModuleRoster, bridge: &bridge::Bridge) {
     roster.add(Box::new(bridge.dividend.clone()));
     roster.add(Box::new(bridge.timeseries.clone()));
     roster.add(Box::new(bridge.pricer.clone()));
+    // Last, once every factory (and, from Part 2, every dimension action)
+    // is registered: each row then carries the values they open on.
+    bridge.handle.set_context_columns(roster.context_columns());
 }
 
 /// Every builtin config doc: the shell's keymap, the pricer's two bundled
@@ -983,9 +988,10 @@ mod tests {
     }
 
     /// The production roster exposes `underlying_ref`-based launch state for
-    /// CVI and dividend, and names that column in `context_columns`.
-    /// Exercising startup's registration path checks that shared factory
-    /// forwarding preserves `accepts` and `launch_state`.
+    /// CVI and dividend, names that column in `context_columns`, and startup
+    /// hands that list to the data handle. Exercising startup's registration
+    /// path checks that shared factory forwarding preserves `accepts` and
+    /// `launch_state`.
     #[gpui::test]
     fn the_production_roster_opens_market_data_on_an_underlying(cx: &mut gpui::TestAppContext) {
         use geode_core::context::DimensionContext;
@@ -1006,7 +1012,7 @@ mod tests {
         let mut roster = ModuleRoster::new();
         add_bridge_modules(&mut roster, &bridge);
 
-        let spx = DimensionContext::of(&[("underlying_ref", "SPX")]);
+        let spx = DimensionContext::of(&[("lhu", "7"), ("underlying_ref", "SPX")]);
         let accepting: Vec<&str> = roster
             .kinds()
             .into_iter()
@@ -1024,6 +1030,11 @@ mod tests {
                 "{kind}"
             );
         }
+        assert_eq!(
+            bridge.handle.context_columns(),
+            vec!["underlying_ref".to_string()],
+            "startup hands the roster's context columns to the data service"
+        );
     }
 
     /// Production workspace source uses tracing so level filters and the
