@@ -74,6 +74,7 @@ fn refused_over_a_page(id: &str) -> bool {
                 | "tile::find"
                 | "tile::add"
                 | "tile::open_with"
+                | "tile::context_menu"
                 | "tile::autosize_columns"
         )
         || crate::defaults::parse_add_action(id).is_some()
@@ -170,6 +171,7 @@ impl ShellView {
         self.notice = None;
         self.stack_list = None;
         self.add_filter_menu = None;
+        self.row_menu = None;
 
         // The palette reaches every action while a dialog is open. Refuse
         // transient tile controls here: the modal would hide them and block
@@ -525,6 +527,21 @@ impl ShellView {
                     choicedialog::open_tile_kinds_with(self, kinds, context, subject, window, cx);
                 }
             }
+        } else if action.0 == "tile::context_menu" {
+            // The focused tile's cursor row, hung at its recorded anchor (or
+            // the tile's top-left when it records none).
+            let context = self
+                .services
+                .workspaces
+                .active()
+                .focused_tile()
+                .and_then(|t| self.occupants.get(&t))
+                .and_then(|o| o.content.dimension_context(cx))
+                .unwrap_or_default();
+            let at = context
+                .anchor
+                .map(|(x, y)| gpui::point(gpui::px(x), gpui::px(y)));
+            self.open_row_menu(context, at, window, cx);
         } else if action.0 == "tile::autosize_columns" {
             // The focused tile's occupant fits its own table; any other
             // tile is untouched. A refusal (no tile, no table) is a notice.
@@ -1048,6 +1065,15 @@ impl ShellView {
             // matcher below, and its dispatch closes the menu.
             let is_chord = convert_keystroke(&event.keystroke).is_some_and(|ks| ks.mods.is_chord());
             if self.handle_add_filter_key(event.keystroke.key.as_str(), is_chord, window, cx) {
+                return;
+            }
+        }
+
+        if self.row_menu.is_some() {
+            // The row menu consumes every bare key; a chord passes to the
+            // matcher below, and its dispatch closes the menu.
+            let is_chord = convert_keystroke(&event.keystroke).is_some_and(|ks| ks.mods.is_chord());
+            if self.handle_row_menu_key(event.keystroke.key.as_str(), is_chord, window, cx) {
                 return;
             }
         }

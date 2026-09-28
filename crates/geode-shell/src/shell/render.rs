@@ -843,6 +843,31 @@ impl Render for ShellView {
                         })),
                 )
             })
+            // The row menu: hung at its recorded point (the cursor row's
+            // anchor) or at the focused tile's top-left. `render_menu`
+            // closes it on a press outside itself.
+            .when_some(self.row_menu.as_ref(), |el, open| {
+                let at = open
+                    .at()
+                    .or_else(|| focused_rect.map(|r| gpui::point(px(r.x), px(r.y))));
+                let shell = cx.entity();
+                el.when_some(at, |el, at| {
+                    el.child(
+                        div()
+                            .absolute()
+                            .left(at.x)
+                            .top(at.y)
+                            .child(crate::menu::render_menu(
+                                open.menu(),
+                                &crate::menu::MenuIds::new("row-menu", "row-menu-row"),
+                                gpui::Anchor::TopLeft,
+                                &shell,
+                                |v: &mut ShellView, window, cx| v.dismiss_row_menu(window, cx),
+                                cx,
+                            )),
+                    )
+                })
+            })
             // Paint the modal below the palette: a palette opened over the stack
             // must be visible and take clicks above the dialog it covers.
             .when_some(modal, |el, (title, title_extra, build)| {

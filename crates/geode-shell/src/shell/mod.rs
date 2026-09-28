@@ -628,6 +628,11 @@ pub struct ShellView {
     /// closed by any dispatch (which is also how a row commits), by the
     /// palette or a dialog opening, and by a click outside it.
     add_filter_menu: Option<addfilter::AddFilterMenu>,
+    /// The row menu (`tile::context_menu`), or `None` when closed. Owns
+    /// the keyboard while open, as `add_filter_menu` does, and closes the
+    /// same ways: any dispatch, the palette or a dialog opening, a press
+    /// outside it.
+    row_menu: Option<row_menu::RowMenu>,
     /// Reusable storage for the per-frame tile diff. Each reconciliation
     /// clears and refills it, retaining capacity between renders.
     scratch_all_tiles: HashSet<TileId>,
@@ -1328,6 +1333,7 @@ impl ShellView {
             notice: None,
             stack_list: None,
             add_filter_menu: None,
+            row_menu: None,
             scratch_all_tiles: HashSet::new(),
             scratch_active_tiles: HashSet::new(),
             scratch_visible_keys: Vec::new(),

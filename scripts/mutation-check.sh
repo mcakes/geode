@@ -22932,6 +22932,43 @@ run_mutation "row menu: action columns are not context columns" \
   '        for a in self.actions.iter().take(0) {' \
   geode-shell context_columns_include_action_columns_after_factory_columns
 
+# The open row menu owns every bare key: a leak would let a bound bare
+# sequence (`g g`) dispatch, and that dispatch closes the menu.
+run_mutation "row menu: a bare key leaks past the open menu" \
+  crates/geode-shell/src/shell/row_menu.rs \
+  '            _ => {} // any other bare key is consumed' \
+  '            _ => return false,' \
+  geode-shell escape_closes_and_consumes
+
+# A chord passes the open row menu to the matcher; its dispatch closes it.
+run_mutation "row menu: a dispatch leaves the menu open" \
+  crates/geode-shell/src/shell/input.rs \
+  '        self.row_menu = None;' \
+  '        let _ = &self.row_menu;' \
+  geode-shell a_chord_closes_the_row_menu_and_dispatches
+
+# The palette key opens the palette ahead of any dispatch, so its own open
+# must close the row menu.
+run_mutation "row menu: the palette opens over the menu" \
+  crates/geode-shell/src/shell/palette_ctl.rs \
+  '        self.close_row_menu(cx);' \
+  '        let _ = &self.row_menu;' \
+  geode-shell the_palette_closes_the_row_menu
+
+# A row with nothing to offer says so instead of opening an empty menu.
+run_mutation "row menu: an empty menu opens" \
+  crates/geode-shell/src/shell/row_menu.rs \
+  '        if rows.is_empty() {' \
+  '        if false {' \
+  geode-shell g_dot_on_a_row_with_no_actions_says_so
+
+# An Open pick splits the kind restored from its launch state, as `g m` does.
+run_mutation "row menu: an open pick ignores the launch state" \
+  crates/geode-shell/src/shell/row_menu.rs \
+  '                    .and_then(|f| f.launch_state(&open.context));' \
+  '                    .and_then(|_| None);' \
+  geode-shell enter_on_open_splits_a_tile_with_the_launch_state
+
 # A reload must reach the underlying list, or a desk edit to it waits for
 # a restart.
 run_mutation "pricer app: a reload leaves the underlying list stale" \
