@@ -60,7 +60,12 @@ cargo bench -p geode-blotter   # the pure core
   Tile-local requeries clear the stage because they move no frame counter.
   An unresolved named scope arrives at the barrier but keeps what it acted
   on (`Unanswered::KeepActed`): the configuration change that defines the
-  name is the retry.
+  name is the retry. A view the configuration no longer defines takes the
+  same path: it answers the barrier at once, supersedes the query still out
+  for the old view, and the reload that restores the view is the retry.
+- Hiding cancels nothing: an in-flight view query's reply applies while
+  hidden. `closed` (removal) cancels the query by key and answers any open
+  barrier still waiting on the tile.
 - A chevron click and a row double-click are `space`: both go through
   `expand_at_cursor`, the path `zo`/`zc`/`za` take. The chevron listener
   stops propagation and ignores `click_count() > 1`.

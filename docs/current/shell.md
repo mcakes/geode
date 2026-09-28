@@ -236,6 +236,21 @@ promote together. This prevents one frame from showing tiles evaluated under
 different global states. A later frame change replaces the barrier; an old
 result cannot satisfy the new version tuple.
 
+Only visible occupants are barrier participants. Hiding a following tile (a
+stack, dock or workspace switch) cancels nothing: its in-flight query
+finishes, the reply applies when it lands and still answers any barrier the
+tile was enrolled in, and on return the tile requeries only if a counter it
+follows moved while it was hidden. Closing is different: removal calls
+`TileContent::closed`, and a following tile cancels its query by key and
+answers any open barrier still waiting on it, so closing a tile during a
+scope, grouping or as-of change never holds the others to the deadline.
+`closed` fires only for removal while the window lives; quitting the
+application calls it for no occupant. A tile with its own error and no query
+to send (a blotter whose view is no longer configured, or whose scope names
+an undefined expression) answers the barrier at once, as a failed query does.
+Tiles that submit no frame query (pricer, diagnostics) answer every barrier
+at once. The rules live once, in `geode_tile::following`.
+
 Scope text editing is one undoable session. The first real change records the
 base scope, subsequent keystrokes coalesce, and returning exactly to the base
 removes the no-op undo entry. Changes made through another surface during the

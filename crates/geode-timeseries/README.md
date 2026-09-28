@@ -14,7 +14,7 @@ Current behavior and rationale:
 |---|---|
 | `core` | Pure model, range, source resolution, request building, chart-model preparation, session conversion, the three menus' rows (action list, range, frequency) as `geode_tile::menu` rows over `Pick`, the expression field's series-name completion (`core::complete`), and the absolute `#rrggbb` color with the picker's pick mapping (`core::rgb`). |
 | `commands` | The tile-local `:` vocabulary. |
-| `tile` | The retained entity, frame observation, verbs, `:` dispatch, focus, and chart cache key. |
+| `tile` | The retained entity, frame observation, visibility (hiding keeps the series query; `closed` cancels it and answers the barrier), verbs, `:` dispatch, focus, and chart cache key. |
 | `tile::data` | Fetch submission, series queries and delivery filtering over `geode_tile::following` (the barrier staging and promotion rules), and the post-step `release_view` after each promotion and delivery. |
 | `tile::popups` | Opening, input routing, commits, cancellation, focus, and pointer controls for six transient surfaces, including the reusable component color picker, the menus, and the range and frequency trigger doors. |
 | `tile::pointer` | Chart wheel, drag-pan, and split-drag gestures using chart hit testing. |

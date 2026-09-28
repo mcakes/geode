@@ -5230,9 +5230,9 @@ run_mutation "flip: promote only applies a staged snapshot that still answers wh
   '        if false {' \
   geode-blotter a_stage_is_dropped_when_a_counter_the_tile_follows_has_moved
 
-# The clear moved into `FollowingQuery::begin`, which every submitting
-# path runs; the tile's own `drop_stage` now covers only the unconfigured
-# view, and a mutant of it alone would survive behind `begin`.
+# The clear lives in `FollowingQuery::begin`, which every path runs,
+# including the two that ask nothing (an unresolved named scope and an
+# unconfigured view, whose own entries are below).
 run_mutation "flip: a fresh requery clears whatever was staged before it" \
   crates/geode-tile/src/following.rs \
   '    pub fn begin(&mut self, versions: FrameVersions, submitted: Instant) -> u64 {
@@ -13155,18 +13155,25 @@ run_mutation "mdtile: a refused submit arrives and clears acted" \
   geode-marketdata \
   a_refused_request_arrives_at_the_barrier_and_retries
 
-# Hiding a panel cancels its in-flight request, so `acted` — "I have
-# already asked under these versions" — is no longer true of anything
-# that will arrive (fix round 1, MIN-2). Mutated away, a panel hidden
-# mid-round-trip comes back deciding it is up to date and paints the
-# generation it had before it was hidden until the next publish.
-run_mutation "mdtile: hiding a panel clears what it acted on" \
+# Hiding a panel cancels nothing: the outstanding request finishes, its
+# reply applies while hidden, and it still answers any barrier it was
+# enrolled in. Mutated to cancel and close on hide, a tab switch in the
+# middle of a flip throws the answer away.
+# The rule was reversed: hiding keeps the query; the entry now guards that.
+run_mutation "mdtile: hiding a panel keeps its question" \
   crates/geode-marketdata/src/tile.rs \
-  '            self.data.cancel(QueryKey(self.id.0));' \
-  '            self.data.cancel(QueryKey(self.id.0));
-            return;' \
+  '        self.visible = visible;
+        if visible {
+            // The catalog' \
+  '        self.visible = visible;
+        if !visible {
+            self.data.cancel(QueryKey(self.id.0));
+            self.following.close(&mut FrameDoor::new(&self.frame, cx), QueryKey(self.id.0));
+        }
+        if visible {
+            // The catalog' \
   geode-marketdata \
-  a_tile_hidden_mid_flight_requeries_on_reshow
+  a_panel_hidden_mid_flight_paints_the_reply_and_asks_nothing_on_reshow
 
 # Found while building the staging path, not by the review: a key change
 # bumps no frame version, so a snapshot staged for the OLD key passes
@@ -19540,15 +19547,20 @@ run_mutation "timeseries: a pair the tile does not hold is ignored" \
   geode-timeseries \
   a_fetched_ok_marks_the_pair_idle_and_queries_once_and_an_err_marks_it_failed
 
-# A hidden tile paints nothing, so an in-flight query for it is a round
-# trip spent for nothing — and one the pool would rather spend on a
-# visible chart.
-run_mutation "timeseries: a hidden tile cancels in flight" \
+# Hiding keeps the series query in flight: its answer applies while the
+# tile is hidden, and a hidden tile enrolled in a flip still answers it.
+# Mutated to cancel and close on hide, the answer is thrown away.
+# The rule was reversed: hiding keeps the query; the entry now guards that.
+run_mutation "timeseries: hiding keeps the query in flight" \
   crates/geode-timeseries/src/tile/mod.rs \
-  '            self.data.cancel(QueryKey(self.id.0));' \
-  '            let _ = QueryKey(self.id.0);' \
+  '            self.view_waiting = false;
+            self.in_flight.clear();' \
+  '            self.data.cancel(QueryKey(self.id.0));
+            self.following.close(&mut FrameDoor::new(&self.frame, cx), QueryKey(self.id.0));
+            self.view_waiting = false;
+            self.in_flight.clear();' \
   geode-timeseries \
-  a_hidden_tile_cancels_and_a_shown_one_requeries_and_a_restored_one_refetches_once
+  a_hidden_tile_keeps_its_query_and_a_shown_one_refetches_and_a_restored_one_refetches_once
 
 # `enter` picks the HIGHLIGHTED option, never row 0 and never the typed
 # text (the 2026-09-19 choice-core rule). Picking the first declared
@@ -24687,6 +24699,84 @@ run_mutation "mdtile: a refused submit forgets what it asked" \
   '        if unanswered == Unanswered::Retry {' \
   '        if false {' \
   geode-marketdata a_refused_request_arrives_at_the_barrier_and_retries
+
+# Closing a following tile cancels its query by key and answers any open
+# barrier still waiting on it (`closed`, never a hide). Each module's close
+# route is its own named test; the three "a close answers the barrier"
+# entries share the helper line with the geode-tile entry above and differ
+# in package and filter.
+run_mutation "mdtile: a close cancels the request by key" \
+  crates/geode-marketdata/src/tile.rs \
+  '        self.data.cancel(key);
+        self.following' \
+  '        self.following' \
+  geode-marketdata closing_a_panel_mid_flip_cancels_its_request_and_releases_the_barrier
+
+run_mutation "mdtile: a close answers the barrier" \
+  crates/geode-tile/src/following.rs \
+  '        barrier.arrive(key, closing_under)' \
+  '        false' \
+  geode-marketdata closing_a_panel_mid_flip_cancels_its_request_and_releases_the_barrier
+
+# A panel hidden mid-flip answers the barrier with its reply. Mutated to
+# skip the arrival, the other tiles wait out the deadline.
+run_mutation "mdtile: a panel hidden mid-flip still answers the barrier" \
+  crates/geode-tile/src/following.rs \
+  '                if !barrier.arrive(key, held_under) {' \
+  '                if true {' \
+  geode-marketdata a_panel_hidden_mid_flip_still_answers_the_barrier
+
+run_mutation "timeseries: a close cancels the query by key" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '        self.data.cancel(key);
+        self.following' \
+  '        self.following' \
+  geode-timeseries closing_the_tile_mid_flip_cancels_its_query_and_releases_the_barrier
+
+run_mutation "timeseries: a close answers the barrier" \
+  crates/geode-tile/src/following.rs \
+  '        barrier.arrive(key, closing_under)' \
+  '        false' \
+  geode-timeseries closing_the_tile_mid_flip_cancels_its_query_and_releases_the_barrier
+
+run_mutation "blotter: a close cancels the query by key" \
+  crates/geode-blotter/src/tile.rs \
+  '        self.data.cancel(key);
+        self.following' \
+  '        self.following' \
+  geode-blotter closing_a_tile_mid_flip_cancels_its_query_and_releases_the_barrier
+
+run_mutation "blotter: a close answers the barrier" \
+  crates/geode-tile/src/following.rs \
+  '        barrier.arrive(key, closing_under)' \
+  '        false' \
+  geode-blotter closing_a_tile_mid_flip_cancels_its_query_and_releases_the_barrier
+
+# A view the configuration no longer defines is the tile's own error and
+# sends no query; one broken tile never holds the rest open, so it answers
+# the barrier as a refused submission does. Mutated to report the
+# submission as sent, the flip waits out its deadline for an answer that
+# never comes.
+run_mutation "blotter: an unconfigured view answers the barrier" \
+  crates/geode-blotter/src/tile.rs \
+  '            let key = QueryKey(self.tile.0);
+            self.following.submitted(
+                false,' \
+  '            let key = QueryKey(self.tile.0);
+            self.following.submitted(
+                true,' \
+  geode-blotter a_view_removed_under_an_open_barrier_answers_it
+
+# The same path supersedes the question still out for the old view (and
+# drops any stage) through `begin`. Mutated away, that query's late outcome
+# is current, applies and clears the "not configured" error.
+run_mutation "blotter: an unconfigured view supersedes the old view's query" \
+  crates/geode-blotter/src/tile.rs \
+  '            let versions = self.versions(cx);
+            self.following.begin(versions, Instant::now());' \
+  '            let versions = self.versions(cx);
+            let _ = versions;' \
+  geode-blotter a_view_removed_under_an_open_barrier_answers_it
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

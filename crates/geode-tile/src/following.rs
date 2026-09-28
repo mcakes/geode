@@ -258,12 +258,6 @@ impl<T> FollowingQuery<T> {
         self.tag
     }
 
-    /// Drop the stage without submitting (a tile that cannot build its
-    /// request this time).
-    pub fn drop_stage(&mut self) {
-        self.staged = None;
-    }
-
     /// Report whether the submission `begin` recorded went out.
     pub fn submitted(
         &mut self,
@@ -346,14 +340,6 @@ impl<T> FollowingQuery<T> {
         self.acted = None;
         self.in_flight = None;
         self.tag += 1;
-    }
-
-    /// The tile cancelled its outstanding request on hide: nothing will
-    /// answer it, so the next show must ask again. The stage and the tag
-    /// are kept, so a result already held still promotes on its flip.
-    pub fn abandon(&mut self) {
-        self.acted = None;
-        self.in_flight = None;
     }
 
     /// The tile is being removed (the caller has already cancelled its
@@ -645,21 +631,6 @@ mod tests {
             Delivered::Stale,
             "the old question's answer cannot land under the new one"
         );
-    }
-
-    #[test]
-    fn abandon_forgets_the_question_and_keeps_the_stage() {
-        let mut f = fresh_frame();
-        let t0 = Instant::now();
-        let v = flip_scope(&mut f, "a", &[K, OTHER], t0);
-        let mut q = FollowingQuery::<u32>::new();
-        let tag = q.begin(v, t0);
-        q.deliver::<&str>(tag, Ok(1), v, follows_config, &mut f, K);
-        q.abandon();
-        assert_eq!(q.acted(), None);
-        assert!(!q.in_flight());
-        assert!(q.is_staged());
-        assert_eq!(q.tag(), tag);
     }
 
     #[test]

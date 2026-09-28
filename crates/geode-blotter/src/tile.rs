@@ -653,16 +653,31 @@ impl BlotterTile {
     }
 
     fn requery(&mut self, cx: &mut Context<Self>) {
-        // A new query supersedes staged work even when frame versions are
+        // A new question supersedes staged work even when frame versions are
         // unchanged, as with tile-local filters and grouping overrides.
-        // Every path that asks again clears it in `begin`; this path asks
-        // nothing, so it drops the stage itself.
+        // Every path clears it in `begin`, including the two that ask
+        // nothing.
         let Some(view) = self.view() else {
-            self.following.drop_stage();
+            // A view the configuration no longer defines is this tile's
+            // error, never a query, and one broken tile never holds the rest
+            // open: answer the barrier now, as a refused submission does.
+            // `begin` supersedes any query still out for the old view, so
+            // its late outcome cannot clear this error. `acted` stays set:
+            // the reload that defines the view again bumps the config
+            // version, which is the retry.
             self.error = Some(Notice::danger(format!(
                 "view '{}' is not configured",
                 self.view_name
             )));
+            let versions = self.versions(cx);
+            self.following.begin(versions, Instant::now());
+            let key = QueryKey(self.tile.0);
+            self.following.submitted(
+                false,
+                Unanswered::KeepActed,
+                &mut FrameDoor::new(&self.frame, cx),
+                key,
+            );
             cx.notify();
             return;
         };
@@ -808,6 +823,17 @@ impl BlotterTile {
                 self.requery(cx);
             }
         }
+    }
+
+    /// The shell is removing this tile: cancel its view query by key and
+    /// answer any barrier still waiting on it. Hiding cancels nothing. Runs
+    /// inside the shell's occupant reconciliation, so it updates only the
+    /// frame and the data handle.
+    pub fn closed(&mut self, cx: &mut Context<Self>) {
+        let key = QueryKey(self.tile.0);
+        self.data.cancel(key);
+        self.following
+            .close(&mut FrameDoor::new(&self.frame, cx), key);
     }
 
     pub fn set_stack(&mut self, stack: Option<StackHandle>, cx: &mut Context<Self>) {
@@ -1825,7 +1851,7 @@ mod tests {
     use geode_data::{DataHandle, Request};
     use geode_shell::actions::ActionId;
     use geode_shell::frame::{FLIP_DEADLINE, Frame, Publish};
-    use geode_shell::module::FindEvent;
+    use geode_shell::module::{FindEvent, TileContent};
     use geode_shell::tiling::TileId;
     use geode_shell::vimfind::FindStyle;
     use geode_tile::notice::Notice;
@@ -5470,6 +5496,178 @@ mod tests {
             shown_texts(&h.b, &vcx),
             baseline,
             "the stage answers a scope nobody is asking about any more"
+        );
+    }
+
+    /// The blotter never cancelled on hide; this pins the shared rule: the
+    /// reply lands while hidden and reshow asks nothing when nothing it
+    /// follows moved.
+    #[gpui::test]
+    fn a_tile_hidden_mid_flight_paints_the_reply_and_asks_nothing_on_reshow(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.tile.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        let p0 = next_query(&h.requests);
+        h.tile.update(&mut vcx, |t, cx| t.set_visible(false, cx));
+        assert!(
+            h.requests
+                .try_iter()
+                .all(|r| !matches!(r, Request::Cancel { .. })),
+            "a hide is not a close"
+        );
+        deliver(&h, &mut vcx, p0.tag, Ok(snapshot()));
+        assert_eq!(
+            shown_texts(&h.tile, &vcx),
+            vec!["".to_string(), "L1".into(), "L2".into()]
+        );
+        h.tile.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        assert!(h.requests.try_recv().is_err(), "nothing it follows moved");
+    }
+
+    #[gpui::test]
+    fn a_followed_change_while_hidden_requeries_on_reshow(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.tile.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        let p0 = next_query(&h.requests);
+        deliver(&h, &mut vcx, p0.tag, Ok(snapshot()));
+        h.tile.update(&mut vcx, |t, cx| t.set_visible(false, cx));
+        h.frame.update(&mut vcx, |f, cx| {
+            f.set_text(Some("A".into()));
+            cx.notify();
+        });
+        assert!(h.requests.try_recv().is_err(), "a hidden tile asks nothing");
+        h.tile.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        let p1 = next_query(&h.requests);
+        assert!(
+            p1.tag > p0.tag,
+            "the scope moved while hidden: reshow asks again"
+        );
+    }
+
+    /// Closing a tile the barrier still waits on cancels its query and
+    /// answers the barrier before its deadline, and the sibling that staged
+    /// promotes in the same pass.
+    #[gpui::test]
+    fn closing_a_tile_mid_flip_cancels_its_query_and_releases_the_barrier(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_two(cx);
+        h.a.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        h.b.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        let pa0 = next_query(&h.requests);
+        let pb0 = next_query(&h.requests);
+        deliver_to(&h.a, QueryKey(7), &mut vcx, pa0.tag, Ok(snapshot()));
+        deliver_to(&h.b, QueryKey(8), &mut vcx, pb0.tag, Ok(snapshot()));
+        let frame = h.a.read_with(&vcx, |t, _| t.frame.clone());
+        // The shell's order: the change and its barrier in one pass, then
+        // each tile's observer.
+        let opened = Instant::now();
+        frame.update(&mut vcx, |f, cx| {
+            f.set_text(Some("A".into()));
+            f.open_flip([QueryKey(7), QueryKey(8)], opened);
+            cx.notify();
+        });
+        let _pa1 = next_query(&h.requests);
+        let pb1 = next_query(&h.requests);
+        deliver_to(&h.b, QueryKey(8), &mut vcx, pb1.tag, Ok(snapshot2()));
+        let old_texts = vec!["".to_string(), "L1".into(), "L2".into()];
+        assert_eq!(
+            shown_texts(&h.b, &vcx),
+            old_texts,
+            "B holds: A has not answered"
+        );
+        frame.update(&mut vcx, |f, _| {
+            assert!(
+                !f.sweep(opened + FLIP_DEADLINE / 2),
+                "halfway to the deadline, time alone releases nothing"
+            );
+        });
+
+        vcx.update(|_, cx| crate::content::BlotterContent::for_tile(h.a.clone()).closed(cx));
+        assert!(
+            h.requests
+                .try_iter()
+                .any(|r| matches!(r, Request::Cancel { key } if key == QueryKey(7))),
+            "closing A cancels its query"
+        );
+        vcx.run_until_parked();
+        assert!(
+            !frame.read_with(&vcx, |f, _| f.barrier_open()),
+            "and answers the barrier before its deadline"
+        );
+        let new_texts = vec!["".to_string(), "M1".into(), "M2".into()];
+        assert_eq!(
+            shown_texts(&h.b, &vcx),
+            new_texts,
+            "B promotes in the pass the close released"
+        );
+    }
+
+    /// A view a reload removed is this tile's error, and one broken tile
+    /// never holds the rest open: the requery the reload triggers answers
+    /// the open barrier at once instead of leaving it to the deadline. The
+    /// question still out for the old view is superseded, so its late
+    /// outcome cannot clear the error.
+    #[gpui::test]
+    fn a_view_removed_under_an_open_barrier_answers_it(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_two(cx);
+        h.a.update(&mut vcx, |t, _| t.view_name = "wide".into());
+        h.a.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        h.b.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        let pa0 = next_query(&h.requests);
+        let pb0 = next_query(&h.requests);
+        deliver_to(&h.a, QueryKey(7), &mut vcx, pa0.tag, Ok(snapshot()));
+        deliver_to(&h.b, QueryKey(8), &mut vcx, pb0.tag, Ok(snapshot()));
+        let frame = h.a.read_with(&vcx, |t, _| t.frame.clone());
+        let opened = Instant::now();
+        frame.update(&mut vcx, |f, cx| {
+            f.set_text(Some("A".into()));
+            f.open_flip([QueryKey(7), QueryKey(8)], opened);
+            cx.notify();
+        });
+        let pa1 = next_query(&h.requests);
+        let pb1 = next_query(&h.requests);
+        deliver_to(&h.b, QueryKey(8), &mut vcx, pb1.tag, Ok(snapshot2()));
+        assert!(
+            frame.read_with(&vcx, |f, _| f.barrier_open()),
+            "B answered; A's question is still out"
+        );
+
+        // The reload, as the app makes it: the factory's shared views are
+        // replaced (`BlotterFactory::set_views`), then the config counter
+        // moves, which is every tile's cue to requery.
+        h.a.update(&mut vcx, |t, _| {
+            t.views.borrow_mut().retain(|v| v.name != "wide")
+        });
+        frame.update(&mut vcx, |f, cx| {
+            f.note_config_reloaded();
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        let error = |vcx: &gpui::VisualTestContext| {
+            h.a.read_with(vcx, |t, _| t.error.as_ref().map(|e| e.text().to_string()))
+        };
+        assert_eq!(
+            error(&vcx).as_deref(),
+            Some("view 'wide' is not configured")
+        );
+        frame.update(&mut vcx, |f, _| {
+            assert!(
+                !f.sweep(opened + FLIP_DEADLINE / 2),
+                "time has not released it"
+            );
+        });
+        assert!(
+            !frame.read_with(&vcx, |f, _| f.barrier_open()),
+            "the unconfigured view answered the barrier before its deadline"
+        );
+
+        deliver_to(&h.a, QueryKey(7), &mut vcx, pa1.tag, Ok(snapshot2()));
+        assert_eq!(
+            error(&vcx).as_deref(),
+            Some("view 'wide' is not configured"),
+            "a late outcome for the removed view is stale"
         );
     }
 

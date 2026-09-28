@@ -14,8 +14,10 @@ deliveries through `TileContent`.
 
 A module owns its domain state. It observes the shared `Frame`, requests data
 through `DataHandle`, and prepares the immutable or retained model used by its
-renderer. Hidden tiles may release subscriptions. On becoming visible they
-compare followed versions and request anything stale.
+renderer. Hidden tiles may release subscriptions but keep an in-flight query,
+whose reply applies when it lands. On becoming visible they compare followed
+versions and request anything stale. A closed tile cancels its query and
+answers any flip barrier still waiting on it.
 
 Every module follows these interaction rules:
 
@@ -143,6 +145,11 @@ Publication watches are scoped to the datasets the view reads. Global frame
 changes use the flip barrier: promotion requires the staged snapshot's followed
 counters to match, including watched data and configuration. Local pins exempt
 the corresponding frame changes; tile-local requeries clear any staged result.
+Hiding a blotter keeps its view query in flight; closing it cancels the query
+and answers the barrier. A view the configuration no longer defines is shown
+as `view '<name>' is not configured` and answers the barrier at once rather
+than holding the other tiles to the deadline; a late outcome for the old view
+is dropped, and the reload that defines the view again is the retry.
 Restored filters are parsed for syntax, with malformed expressions dropped and
 logged. Interactive `:filter` commands also validate column names against the
 current schema and derived dimensions.
@@ -263,6 +270,13 @@ cannot show the change: Hold offers `:rebase` and `:revert`; automatic rebase
 reports that the edits moved. Replacement and dropped-edit notices take
 precedence. Redelivery of the same generation and returning to the base do
 not produce a republish notice.
+
+The document request follows the frame's as-of and publications of the
+panel's own document, through the flip barrier. Hiding a panel keeps its
+request in flight: the reply applies while hidden, answers any barrier the
+panel was enrolled in, and showing it again asks only if the as-of or the
+document moved meanwhile. Closing the panel cancels the request and answers
+any open barrier still waiting on it.
 
 Base-snapshot retention and same-day group-guard capture require exact
 equality of the source-time/generation pair. They do not use the weaker
@@ -576,7 +590,12 @@ Delivery tags reject superseded queries. Results requested under a pending
 frame flip are staged until promotion is allowed. This coordinates ready
 results, but the barrier timeout can release them while lagging tiles still
 show older data. The tile follows frame as-of changes and ignores grouping
-and scope. Returning a hidden tile to visibility refetches its source pairs.
+and scope. Hiding keeps a series query in flight, and its answer applies
+while hidden. Returning a hidden tile to visibility refetches its source pairs
+(hidden tiles hear no fetch completions), and the refetch's completion
+requeries; the show itself queries only if the as-of moved while hidden.
+Closing the tile cancels its series query and answers any open flip barrier;
+fetches run on.
 The tile's `/` handler does not implement local find.
 
 The series list, add picker, expression editor, custom dates editor, the three

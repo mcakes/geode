@@ -413,9 +413,7 @@ impl TimeseriesTile {
     /// retained result and changed followed versions, also query immediately.
     /// Otherwise a successful fetch completion triggers the query, including
     /// `Ok(0)` when the data tier already covers the span.
-    /// Hiding attempts query cancellation and clears request/fetch tracking.
-    /// Cancellation has no acknowledgement and does not stop upstream fetches
-    /// or retract results already emitted by the data tier.
+    /// Hiding keeps the series query; closing (`closed`) cancels it.
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         if self.visible == visible {
             return;
@@ -437,17 +435,26 @@ impl TimeseriesTile {
                 self.requery(cx);
             }
         } else {
-            // An in-flight query nothing will paint is a round trip
-            // spent for nothing.
-            self.data.cancel(QueryKey(self.id.0));
-            // Forget the cancelled query so showing the tile cannot treat it
-            // as completed work.
-            self.following.abandon();
+            // Hidden tiles hear no fetch completions (the shell broadcasts
+            // `SeriesFetched` to visible tiles only), so fetch tracking is
+            // dropped and every show refetches. The series query itself is
+            // kept: its answer applies when it lands.
             self.view_waiting = false;
             self.in_flight.clear();
         }
         self.rebuild_chrome(cx);
         cx.notify();
+    }
+
+    /// The shell is removing this tile: cancel the series query by key and
+    /// answer any barrier still waiting on it. Fetches run on; their
+    /// completions reach no one. Runs inside the shell's occupant
+    /// reconciliation, so it updates only the frame and the data handle.
+    pub fn closed(&mut self, cx: &mut Context<Self>) {
+        let key = QueryKey(self.id.0);
+        self.data.cancel(key);
+        self.following
+            .close(&mut FrameDoor::new(&self.frame, cx), key);
     }
 
     /// This tile ignores the shell's find events; its local popup actions own

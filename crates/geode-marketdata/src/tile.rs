@@ -1595,6 +1595,11 @@ impl MarketDataTile {
         Ok(held(format!("echo differs ({differing} rows)")))
     }
 
+    /// Hiding cancels nothing and forgets nothing: the outstanding request
+    /// finishes and its reply applies when it lands (it still answers any
+    /// barrier it was enrolled in). Showing again requeries only if a
+    /// counter this panel follows moved since it last asked. Closing is
+    /// `closed`.
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         if self.visible == visible {
             return;
@@ -1612,15 +1617,20 @@ impl MarketDataTile {
             {
                 self.requery(cx);
             }
-        } else {
-            // An in-flight document nothing will paint is a round trip
-            // spent for nothing.
-            self.data.cancel(QueryKey(self.id.0));
-            // Forget the cancelled request so showing the tile cannot treat
-            // an undelivered request as current.
-            self.following.abandon();
         }
         self.changed(cx);
+    }
+
+    /// The shell is removing this panel: cancel the document request by key
+    /// and answer any barrier still waiting on it, so a flip never waits out
+    /// its deadline for a panel that is gone. Runs inside the shell's
+    /// occupant reconciliation, so it updates only the frame and the data
+    /// handle, never the shell.
+    pub fn closed(&mut self, cx: &mut Context<Self>) {
+        let key = QueryKey(self.id.0);
+        self.data.cancel(key);
+        self.following
+            .close(&mut FrameDoor::new(&self.frame, cx), key);
     }
 
     pub fn set_stack(&mut self, stack: Option<StackHandle>, cx: &mut Context<Self>) {
@@ -4326,7 +4336,7 @@ impl MarketDataTile {
 
     /// Whether this panel considers itself to have an outstanding
     /// question — `false` is what makes the next frame change a real
-    /// retry (the refusal and hidden-mid-flight rules).
+    /// retry (the refusal rule).
     #[cfg(test)]
     pub(crate) fn acted_is_none(&self) -> bool {
         self.following.acted().is_none()
@@ -4782,7 +4792,7 @@ mod tests {
     use geode_data::{DataHandle, Request};
     use geode_shell::actions::ActionId;
     use geode_shell::diagnostics::Diagnostics;
-    use geode_shell::frame::{Frame, Publish};
+    use geode_shell::frame::{FLIP_DEADLINE, Frame, Publish};
     use geode_shell::module::{Delivery, FindEvent, ModuleFactory, TileContent};
     use geode_shell::tiling::TileId;
     use gpui::{Entity, Window};
@@ -5261,10 +5271,9 @@ mod tests {
             };
             vcx.update(|window, cx| self.content.deliver(Delivery::Query(outcome), window, cx));
         }
-        /// The next DOCUMENT request, skipping the `Cancel` a
-        /// `set_visible(false)` puts on the same channel — no test asserts
-        /// on a cancel, and every one of them would otherwise have to know
-        /// whether the panel had been hidden at some point.
+        /// The next DOCUMENT request, skipping any `Cancel` (a close puts
+        /// one on the same channel); a test that asserts on a cancel reads
+        /// `raw_requests`.
         fn document_request(&self) -> Option<geode_core::query::DocumentParams> {
             loop {
                 match self.rx.try_recv() {
@@ -5274,6 +5283,10 @@ mod tests {
                     Err(_) => return None,
                 }
             }
+        }
+        /// Everything on the channel since the last drain, `Cancel` included.
+        fn raw_requests(&self) -> Vec<Request> {
+            self.rx.try_iter().collect()
         }
         fn versions(&self, vcx: &gpui::VisualTestContext) -> geode_shell::frame::FrameVersions {
             self.frame.read_with(vcx, |f, _| f.versions())
@@ -6269,22 +6282,148 @@ mod tests {
         );
     }
 
-    /// Hiding cancels the outstanding request and clears acted. Showing the tile again
-    /// must query rather than treat an undelivered request as current.
+    /// Hiding a panel cancels nothing and forgets nothing: the outstanding
+    /// request finishes, its reply paints while the panel is hidden, and
+    /// showing it again asks nothing because nothing it follows moved.
     #[gpui::test]
-    fn a_tile_hidden_mid_flight_requeries_on_reshow(cx: &mut gpui::TestAppContext) {
+    fn a_panel_hidden_mid_flight_paints_the_reply_and_asks_nothing_on_reshow(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let (h, mut vcx) = open(cx);
         h.command(&mut vcx, "key SPX.Z").unwrap();
         h.visible(&mut vcx, true);
         let first = h.document_request().expect("the first request");
-        // Hidden before the outcome lands, then shown again with nothing
-        // about the frame having changed.
         h.visible(&mut vcx, false);
+        assert!(
+            !h.raw_requests()
+                .iter()
+                .any(|r| matches!(r, Request::Cancel { .. })),
+            "a hide is not a close: nothing is cancelled"
+        );
+        h.deliver(&mut vcx, first.tag, Arc::new(cvi(BASE)));
+        assert_eq!(
+            h.rows(&vcx),
+            2,
+            "the reply applies while the panel is hidden"
+        );
+        h.visible(&mut vcx, true);
+        assert!(
+            h.document_request().is_none(),
+            "nothing it follows moved, so nothing is asked"
+        );
+        assert_eq!(h.rows(&vcx), 2);
+    }
+
+    /// The reply to a question asked before a followed change can land while
+    /// the panel is hidden; reshow must still ask again.
+    #[gpui::test]
+    fn a_followed_change_while_hidden_requeries_on_reshow(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let first = h.document_request().expect("the first request");
+        h.visible(&mut vcx, false);
+        let at = chrono::DateTime::parse_from_rfc3339(BASE)
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        h.frame.update(&mut vcx, |f, cx| {
+            f.set_as_of(geode_core::query::AsOf::At(at));
+            cx.notify();
+        });
+        assert!(
+            h.document_request().is_none(),
+            "a hidden panel asks nothing"
+        );
+        h.deliver(&mut vcx, first.tag, Arc::new(cvi(BASE)));
         h.visible(&mut vcx, true);
         let second = h
             .document_request()
-            .expect("a cancelled request must be asked again");
+            .expect("the as-of moved while hidden: reshow asks again");
         assert!(second.tag > first.tag);
+        assert_eq!(second.as_of, geode_core::query::AsOf::At(at));
+    }
+
+    /// A panel hidden while enrolled in an open barrier still answers it with
+    /// its reply, and promotes on the flip while hidden, so a tab switch in
+    /// the middle of a flip never holds the other tiles to the deadline.
+    #[gpui::test]
+    fn a_panel_hidden_mid_flip_still_answers_the_barrier(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let first = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, first, Arc::new(cvi(BASE)));
+        let other = QueryKey(TILE + 1);
+        open_barrier_on_as_of(&h, &mut vcx, &[QueryKey(TILE), other], 60);
+        let second = h.document_request().unwrap().tag;
+        h.visible(&mut vcx, false);
+        h.deliver(
+            &mut vcx,
+            second,
+            Arc::new(document_of(&["t0", "t1", "t2", "t3", "t4"], &NODES, BASE)),
+        );
+        let now = h.versions(&vcx);
+        assert!(
+            !h.frame
+                .read_with(&vcx, |f, _| f.barrier_wants(QueryKey(TILE), now)),
+            "the reply answered the barrier it was enrolled in, hidden or not"
+        );
+        assert_eq!(h.rows(&vcx), 2, "held behind the other tile");
+        h.frame.update(&mut vcx, |f, cx| {
+            assert!(f.arrived(other, now));
+            cx.notify();
+        });
+        assert_eq!(h.rows(&vcx), 5, "and promoted on the flip while hidden");
+    }
+
+    /// Closing a panel cancels its request by key and answers the barrier
+    /// before its deadline, so the other tiles do not wait it out; a late
+    /// reply paints nothing.
+    #[gpui::test]
+    fn closing_a_panel_mid_flip_cancels_its_request_and_releases_the_barrier(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let first = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, first, Arc::new(cvi(BASE)));
+        let opened = Instant::now();
+        let at = chrono::Utc::now() - chrono::Duration::seconds(60);
+        h.frame.update(&mut vcx, |f, cx| {
+            f.set_as_of(geode_core::query::AsOf::At(at));
+            f.open_flip([QueryKey(TILE)], opened);
+            cx.notify();
+        });
+        let second = h.document_request().expect("an as-of change requeries").tag;
+        h.frame.update(&mut vcx, |f, _| {
+            assert!(
+                !f.sweep(opened + FLIP_DEADLINE / 2),
+                "halfway to the deadline, time alone releases nothing"
+            );
+        });
+        assert!(h.barrier_open(&vcx), "waiting on this panel's reply");
+        vcx.update(|_, cx| h.content.closed(cx));
+        assert!(
+            h.raw_requests()
+                .iter()
+                .any(|r| matches!(r, Request::Cancel { key } if *key == QueryKey(TILE))),
+            "a close cancels the request by key"
+        );
+        assert!(
+            !h.barrier_open(&vcx),
+            "the close answered the barrier before its deadline"
+        );
+        h.deliver(
+            &mut vcx,
+            second,
+            Arc::new(document_of(&["t0", "t1", "t2", "t3", "t4"], &NODES, BASE)),
+        );
+        assert_eq!(
+            h.rows(&vcx),
+            2,
+            "a late reply to a closed panel paints nothing"
+        );
     }
 
     #[gpui::test]
@@ -9702,9 +9841,9 @@ edits = [["2026-09-18#2", "amount", 9.0]]
 
     /// The other side of the same gate, and why it is still load-bearing:
     /// a stage whose own `as_of` no longer matches the frame's must NOT
-    /// promote. Reachable while HIDDEN — `set_visible(false)` cancels the
-    /// request but a stage already taken stays, and a hidden panel does
-    /// not requery for the as-of change that follows.
+    /// promote. Reachable while HIDDEN — a hidden panel keeps a stage
+    /// already taken, and does not requery for the as-of change that
+    /// follows.
     #[gpui::test]
     fn a_stage_is_dropped_when_a_counter_the_panel_follows_has_moved(
         cx: &mut gpui::TestAppContext,
