@@ -3,6 +3,9 @@
 
 pub mod scope_sql;
 
+#[cfg(test)]
+mod eval_parity;
+
 // Use `Era` to select grain relations and apply their generation filters,
 // including in membership probes. This keeps every part of an as-of query
 // on the same resolved generations.

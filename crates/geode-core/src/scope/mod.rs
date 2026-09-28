@@ -7,8 +7,10 @@
 //! each other.
 
 pub mod complete;
+pub mod eval;
 pub mod expr;
 
+pub use eval::RowValues;
 pub use expr::{CompareOp, Expr, Literal, ParseError, derived_op_error, parse_expr};
 
 use crate::config::{Diagnostic, Severity};
