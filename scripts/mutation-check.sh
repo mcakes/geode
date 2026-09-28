@@ -24407,6 +24407,28 @@ run_mutation "panels: the builtin dividend statuses match the kind" \
   'choices = ["estimated", "declared", "paid"]' \
   geode-app the_dividend_panel_specs_status_vocabulary_matches_the_dividend_kind
 
+# Panels become tile kinds once at startup; mutated out of the restart set,
+# an edited panels.toml says nothing and the trader waits for a change.
+run_mutation "panels: a panels edit asks for a restart" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                ("panels", &self.panels_baseline),' \
+  '                ("nonesuch", &self.panels_baseline),' \
+  geode-shell a_panels_change_asks_for_a_restart
+
+# A refused panel's error must stay counted after a reload that cannot
+# re-derive it.
+run_mutation "panels: composition diagnostics survive a reload" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '        config_section.extend(self.services.composition_diagnostics.iter().cloned());' \
+  '' \
+  geode-shell a_composition_diagnostic_stays_in_the_config_section_across_a_reload
+
+run_mutation "panels: composition diagnostics are seeded at startup" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            diags.extend(services.composition_diagnostics.iter().cloned());' \
+  '' \
+  geode-shell a_composition_diagnostic_stays_in_the_config_section_across_a_reload
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
