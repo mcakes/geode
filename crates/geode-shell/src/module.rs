@@ -469,8 +469,9 @@ impl ModuleRoster {
     }
 }
 
-/// The content contract for a page: a surface that replaces the workspace
-/// (toolbar, tile surface, command line) while open. Pages own their own
+/// The content contract for a page: a surface that replaces the tile
+/// surface and command line while open; the toolbar, sidebar, and status
+/// bar stay. Pages own their own
 /// inputs, have no `:` line, and receive no deliveries; they persist through
 /// `[pages.<kind>]` rather than the layout tree.
 pub trait PageContent {

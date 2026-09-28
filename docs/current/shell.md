@@ -454,8 +454,11 @@ and only chords resolve against the stack. A page's bare-key bindings
 therefore live in a `mode == normal` table
 ([keymaps](keymaps.md#context-predicates)). Focus restoration after an
 overlay closes, and after Escape or Enter in the scope field, goes to the
-open page's handle (`focus_home`), never the shell root, where the page's
-own bindings are unreachable. Chords typed in the scope field resolve
+open page's handle (`focus_home`) rather than the shell root. A press on
+bare chrome (the toolbar background, the sidebar, the status bar) can still
+leave focus on the shell root; the page's bindings keep working there,
+because the context stack follows the open page, not the focused element.
+Chords typed in the scope field resolve
 against `workspace` over a page as they do without one. A mouse open calls
 `prevent_default` so the press cannot bubble to the shell root and take
 the focus back.
