@@ -194,6 +194,11 @@ pub(crate) enum Editor {
         /// The live step's state, while a selection is live and the cell
         /// steps; `None` otherwise.
         bulk: Option<Bulk>,
+        /// The text the field opened on. Over a selection with no live
+        /// step, `enter` on this text unchanged writes nothing: the cursor
+        /// cell's own value filled across every target would be a wrong
+        /// block from a no-op gesture.
+        initial: String,
     },
     Choice {
         line: LineId,
@@ -209,6 +214,11 @@ pub(crate) enum Editor {
         /// option (case-insensitively): ranking is a subsequence match, so
         /// an untouched highlight is a guess — `HSI` would commit `HSCEI`.
         moved: bool,
+        /// The option the list opened on. Over a selection, `enter` with
+        /// the highlight never moved and the query empty or this option
+        /// writes nothing: the cursor cell's own option filled across the
+        /// targets would turn a put into a call from a no-op gesture.
+        initial: String,
     },
     /// An expiry's segmented date field (every expiry, a tenor included):
     /// a pure field the tile routes keys into (`date_field_key`), its own
@@ -227,6 +237,13 @@ pub(crate) enum Editor {
         /// and dropped only when the field commits or cancels, so the
         /// trader still sees that `enter` replaces the tenor.
         note: Option<SharedString>,
+        /// The date the field opened on (a tenor's is today) and whether
+        /// a digit was typed since. Over a selection, `enter` on that date
+        /// with nothing typed writes nothing: the opening date filled
+        /// across the targets would replace their expiries, a tenor's with
+        /// today, from a no-op gesture.
+        initial: chrono::NaiveDate,
+        typed: bool,
     },
 }
 
@@ -1346,6 +1363,8 @@ impl PricerTile {
                     focus: cx.focus_handle(),
                     paint,
                     note,
+                    initial: date,
+                    typed: false,
                 }
             }
             Ok(CellEditor::Text(text)) => {
@@ -1360,7 +1379,7 @@ impl PricerTile {
                     notice: None,
                 });
                 let input = cx.new(|cx| InputState::new(window, cx));
-                input.update(cx, |s, cx| s.set_value(text, window, cx));
+                input.update(cx, |s, cx| s.set_value(text.clone(), window, cx));
                 Editor::Text {
                     line,
                     col,
@@ -1368,6 +1387,7 @@ impl PricerTile {
                     input,
                     opened,
                     bulk,
+                    initial: text,
                 }
             }
             Ok(CellEditor::Choice {
@@ -1417,6 +1437,7 @@ impl PricerTile {
                     list,
                     free,
                     moved: false,
+                    initial: current,
                 }
             }
         };
@@ -1467,7 +1488,8 @@ impl PricerTile {
             }
         }
         // The editor's borrow ends inside this block, before any `self` call.
-        let (value, (line, col, kind), opened) = {
+        let stepped = untouched.is_some();
+        let (value, (line, col, kind), opened, unchanged) = {
             let Some(editor) = self.editor.as_mut() else {
                 return;
             };
@@ -1479,6 +1501,17 @@ impl PricerTile {
             let opened = match editor {
                 Editor::Text { opened, .. } => opened.clone(),
                 _ => None,
+            };
+            // Whether `enter` leaves the cell as it opened. A live step's
+            // editor answered that above: its typed text is absolute even
+            // when it spells the opening value, since the steps came out.
+            let unchanged = match editor {
+                Editor::Text { initial, .. } => !stepped && text == *initial,
+                Editor::Choice { moved, initial, .. } => {
+                    let typed = text.trim();
+                    !*moved && (typed.is_empty() || typed.eq_ignore_ascii_case(initial))
+                }
+                Editor::Date { .. } => false,
             };
             let value = if let Editor::Choice {
                 list, free, moved, ..
@@ -1505,8 +1538,17 @@ impl PricerTile {
             } else {
                 Choice::Value(text)
             };
-            (value, target, opened)
+            (value, target, opened, unchanged)
         };
+        // Over a selection an unchanged cell writes nothing: its own value
+        // filled across every target would be a plausible wrong block
+        // from a no-op gesture. No edit, no notice, no undo entry.
+        if unchanged && self.selection.is_some() {
+            self.close_editor(window, cx);
+            self.rebuild_chrome();
+            cx.notify();
+            return;
+        }
         let value = match value {
             Choice::Value(v) => Some(v),
             // An untouched free list with nothing typed: the cell keeps
@@ -1647,12 +1689,15 @@ impl PricerTile {
             kind,
             field,
             paint,
+            initial,
+            typed,
             ..
         }) = self.editor.as_mut()
         else {
             return;
         };
         let (line, col, kind) = (*line, *col, *kind);
+        let (initial, typed) = (*initial, *typed);
         let finished = field.complete_pending();
         *paint = DateFieldPaint::of(field, id);
         let date = field.date();
@@ -1663,8 +1708,17 @@ impl PricerTile {
             cx.notify();
             return;
         }
-        // A live selection takes the date to every target line.
+        // A live selection takes a changed or typed date to every target
+        // line. The opening date untyped writes nothing: filled across the
+        // targets it would replace their expiries (a tenor's with today)
+        // from a no-op gesture.
         if self.selection.is_some() {
+            if date == initial && !typed {
+                self.close_editor(window, cx);
+                self.rebuild_chrome();
+                cx.notify();
+                return;
+            }
             let text = date.format("%Y-%m-%d").to_string();
             if !self.cursor_on_editor(line, kind) {
                 self.refuse_moved(window, cx);
@@ -1699,7 +1753,11 @@ impl PricerTile {
         };
         let id = self.id.0;
         let Some(Editor::Date {
-            field, paint, note, ..
+            field,
+            paint,
+            note,
+            typed,
+            ..
         }) = self.editor.as_mut()
         else {
             return false;
@@ -1716,6 +1774,10 @@ impl PricerTile {
                 cx.notify();
             }
             other => {
+                // A typed digit is a deliberate date, even the opening one.
+                if matches!(other, FieldKey::Digit(_)) {
+                    *typed = true;
+                }
                 if field.apply(other) {
                     *paint = DateFieldPaint::of(field, id);
                 }

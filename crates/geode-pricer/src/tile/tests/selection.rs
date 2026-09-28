@@ -711,9 +711,9 @@ fn an_unchanged_value_over_a_selection_is_no_undo_entry(cx: &mut gpui::TestAppCo
 #[gpui::test]
 fn a_picked_type_commits_to_every_selected_line(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &BOOK);
-    goto_column(&h, &mut vcx, "type");
-    h.dispatch(&mut vcx, "visual_rows", None);
-    h.dispatch(&mut vcx, "bottom", None);
+    // Typed on the C line: the cursor cell's own option typed out is no
+    // pick (see the untouched tests below).
+    select_up_to_the_c_line(&h, &mut vcx, "type");
     h.dispatch(&mut vcx, "edit", None);
     set_editor(&h, &mut vcx, "p");
     h.dispatch(&mut vcx, "commit", None);
@@ -743,6 +743,120 @@ fn a_date_commits_to_every_selected_line(cx: &mut gpui::TestAppContext) {
     h.dispatch(&mut vcx, "undo", None);
     assert_eq!(expiry_of(&h, &vcx, 0), Expiry::Date(ymd(2026, 12, 18)));
     assert_ne!(expiry_of(&h, &vcx, 1), want, "one undo took both back");
+}
+
+// ---- an untouched commit over a selection ----
+
+/// Every line selected (`V`) from the bottom up, the cursor on the
+/// 5000 C's `column`.
+fn select_up_to_the_c_line(h: &Harness, vcx: &mut VisualTestContext, column: &str) {
+    goto_column(h, vcx, column);
+    h.dispatch(vcx, "bottom", None);
+    h.dispatch(vcx, "visual_rows", None);
+    h.dispatch(vcx, "top", None);
+}
+
+/// A choice opened and closed with `enter` and no pick: the option it
+/// opened on, filled across the selection, would turn the 4000 P into a
+/// call from a no-op gesture.
+#[gpui::test]
+fn an_untouched_choice_enter_over_a_selection_writes_nothing(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    select_up_to_the_c_line(&h, &mut vcx, "type");
+    h.prices();
+    h.dispatch(&mut vcx, "edit", None);
+    assert_eq!(editor_text(&h, &vcx).as_deref(), Some(""), "a choice list");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(editor_text(&h, &vcx), None, "enter closes the editor");
+    assert_eq!(h.cell(&vcx, 2, "type"), "P", "not the cursor's C");
+    assert_eq!(h.cell(&vcx, 1, "type"), "C");
+    assert_eq!(notice(&h, &vcx), None, "no notice");
+    assert!(!can_undo(&h, &vcx), "no undo entry");
+    assert!(h.prices().is_empty(), "nothing repriced");
+    assert_eq!(h.mode(&mut vcx), "visual", "the selection stays");
+    // The opening option typed out is no pick either.
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "c");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.cell(&vcx, 2, "type"), "P", "the typed opening value");
+    assert!(!can_undo(&h, &vcx));
+}
+
+#[gpui::test]
+fn a_moved_choice_over_a_selection_writes_every_line_in_one_undo(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    select_up_to_the_c_line(&h, &mut vcx, "type");
+    h.dispatch(&mut vcx, "edit", None);
+    h.dispatch(&mut vcx, "insert_down", None); // C → P
+    h.dispatch(&mut vcx, "commit", None);
+    let lines = line_texts(&h, &vcx);
+    assert!(lines.iter().all(|s| s.ends_with(" P")), "{lines:?}");
+    assert_eq!(notice(&h, &vcx).as_deref(), Some("set 4 cells"));
+    h.dispatch(&mut vcx, "escape", None);
+    h.dispatch(&mut vcx, "undo", None);
+    assert_eq!(
+        h.cell(&vcx, 0, "type"),
+        "C",
+        "one undo takes every write back"
+    );
+    assert_eq!(h.cell(&vcx, 1, "type"), "C");
+    assert_eq!(h.cell(&vcx, 2, "type"), "P");
+    assert!(!can_undo(&h, &vcx), "the writes were one entry");
+}
+
+/// A date field closed on the date it opened on, untyped, writes
+/// nothing — even after stepping away and back. A typed segment is a
+/// deliberate date, even the same one.
+#[gpui::test]
+fn an_unchanged_untyped_date_over_a_selection_writes_nothing(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "NDX 3m 100% C"]);
+    goto_column(&h, &mut vcx, "expiry");
+    h.dispatch(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "up", None); // the dated line opens the field
+    let tenor = expiry_of(&h, &vcx, 1);
+    h.dispatch(&mut vcx, "edit", None);
+    h.draw(&mut vcx);
+    keys(&h, &mut vcx, "enter");
+    assert_eq!(h.mode(&mut vcx), "visual", "the field closed");
+    assert_eq!(
+        expiry_of(&h, &vcx, 1),
+        tenor,
+        "the tenor line kept its tenor"
+    );
+    assert_eq!(notice(&h, &vcx), None);
+    assert!(!can_undo(&h, &vcx));
+    h.dispatch(&mut vcx, "edit", None);
+    h.draw(&mut vcx);
+    keys(&h, &mut vcx, "up");
+    keys(&h, &mut vcx, "down");
+    keys(&h, &mut vcx, "enter");
+    assert_eq!(expiry_of(&h, &vcx, 1), tenor, "stepped back is unchanged");
+    assert!(!can_undo(&h, &vcx));
+    h.dispatch(&mut vcx, "edit", None);
+    h.draw(&mut vcx);
+    keys(&h, &mut vcx, "1 8 enter");
+    let want = Expiry::Date(ymd(2026, 12, 18));
+    assert_eq!(expiry_of(&h, &vcx, 1), want, "a typed day is a date");
+    assert!(can_undo(&h, &vcx));
+}
+
+/// A package's type cell opens as text, with no live step: an untouched
+/// `enter` must not fill its text across the selection either.
+#[gpui::test]
+fn an_untouched_package_text_cell_over_a_selection_writes_nothing(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    goto_column(&h, &mut vcx, "type");
+    h.dispatch(&mut vcx, "bottom", None);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "up", None); // the package row
+    h.dispatch(&mut vcx, "edit", None);
+    assert_eq!(editor_text(&h, &vcx).as_deref(), Some("C"), "fixture: text");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(editor_text(&h, &vcx), None, "enter closes the editor");
+    assert_eq!(h.cell(&vcx, 2, "type"), "P", "not the package's C");
+    assert_eq!(notice(&h, &vcx), None);
+    assert!(!can_undo(&h, &vcx));
 }
 
 #[gpui::test]

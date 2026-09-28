@@ -24325,6 +24325,56 @@ run_mutation "pricer select: a single-cell nudge moves an inherited shift from z
   '                let text = input.read(cx).value().to_string();' \
   geode-pricer a_nudge_on_an_inherited_shift_steps_from_the_painted_value
 
+# An unchanged choice or text cell over a selection writes nothing: its
+# own value filled across the targets turned the 4000 P into a call.
+run_mutation "pricer select: an untouched choice or text enter fills the selection" \
+  crates/geode-pricer/src/tile.rs \
+  '        if unchanged && self.selection.is_some() {' \
+  '        if false && self.selection.is_some() {' \
+  geode-pricer an_untouched_choice_enter_over_a_selection_writes_nothing
+
+run_mutation "pricer select: an untouched choice reads as changed" \
+  crates/geode-pricer/src/tile.rs \
+  $'                    !*moved && (typed.is_empty() || typed.eq_ignore_ascii_case(initial))' \
+  '                    false' \
+  geode-pricer an_untouched_choice_enter_over_a_selection_writes_nothing
+
+# A moved highlight is a pick, even onto an empty query.
+run_mutation "pricer select: a moved choice reads as untouched" \
+  crates/geode-pricer/src/tile.rs \
+  $'                    !*moved && (typed.is_empty() || typed.eq_ignore_ascii_case(initial))' \
+  $'                    (typed.is_empty() || typed.eq_ignore_ascii_case(initial))' \
+  geode-pricer a_moved_choice_over_a_selection_writes_every_line_in_one_undo
+
+# A text cell with no live step (a package's type) is unchanged on its
+# opening text.
+run_mutation "pricer select: an untouched package text cell reads as changed" \
+  crates/geode-pricer/src/tile.rs \
+  '                Editor::Text { initial, .. } => !stepped && text == *initial,' \
+  '                Editor::Text { .. } => false,' \
+  geode-pricer an_untouched_package_text_cell_over_a_selection_writes_nothing
+
+# The opening date untyped writes nothing over a selection; it replaced a
+# tenor with today's date.
+run_mutation "pricer select: an untouched date fills the selection" \
+  crates/geode-pricer/src/tile.rs \
+  '            if date == initial && !typed {' \
+  '            if false {' \
+  geode-pricer an_unchanged_untyped_date_over_a_selection_writes_nothing
+
+# A typed day is a deliberate date, even the opening one.
+run_mutation "pricer select: a typed opening date writes nothing" \
+  crates/geode-pricer/src/tile.rs \
+  '            if date == initial && !typed {' \
+  '            if date == initial {' \
+  geode-pricer an_unchanged_untyped_date_over_a_selection_writes_nothing
+
+run_mutation "pricer select: a typed digit is not recorded" \
+  crates/geode-pricer/src/tile.rs \
+  $'                if matches!(other, FieldKey::Digit(_)) {\n                    *typed = true;' \
+  $'                if matches!(other, FieldKey::Digit(_)) {\n                    *typed = false;' \
+  geode-pricer an_unchanged_untyped_date_over_a_selection_writes_nothing
+
 # The fit is the widest content, not whichever cell comes first.
 run_mutation "autosize: the fit measures the first text, not the widest" \
   crates/geode-shell/src/colfit.rs \
