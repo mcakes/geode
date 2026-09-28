@@ -49,10 +49,10 @@ register a retired ID with `ActionRegistry::register_rename` (`config::colours`
 → `config::colors`, `timeseries::colour` → `timeseries::color`,
 `timeseries::pick_colour` → `timeseries::pick_color`, `blotter::visual` →
 `blotter::visual_rows`, and each module's retired motion and menu-step ids →
-`motion::*`, listed in the module's `RENAMED_ACTIONS`). Several retired IDs may
-rename to one current ID; each retired ID is still registered once. A binding
-naming a
-retired ID binds the current action and warns with both IDs, so an existing
+`motion::*`, listed [below](#retired-motion-ids) and in the module's
+`RENAMED_ACTIONS`). Several retired IDs may rename to one current ID; each
+retired ID is still registered once. A binding naming a retired ID binds the
+current action and warns with both IDs, so an existing
 user keymap keeps working until the file is edited; the dialogs write only the
 current ID. `register` refuses a retired ID, so a later registration
 cannot be silently redirected. Startup can use the remaining
@@ -63,26 +63,25 @@ last-good acceptance gate; see [reload](configuration.md#hot-reload).
 cell rectangle. The compatibility name `blotter::visual` resolves to row
 selection.
 
-The blotter's retired motion ids rename as `blotter::down`/`up`/`left`/
-`right`/`top`/`bottom` → the same `motion::*` name, `blotter::page_down`/
-`page_up` → `motion::half_page_down`/`half_page_up`,
-`blotter::page_down_full`/`page_up_full` → `motion::page_down`/`page_up`, and
-`blotter::first_col`/`last_col` → `motion::line_start`/`line_end`. A user
-binding on one of them keeps its own context (for example
-`blotter && mode == normal`), so it still moves only the blotter. The
-market-data panel's retired ids rename the same way from the `marketdata::`
-prefix (`marketdata::down` → `motion::down`, `marketdata::page_down_full` →
-`motion::page_down`, `marketdata::first_col` → `motion::line_start`, and so
-on), and a binding on one keeps its `marketdata && …` context. The line
-pricer's retired ids rename the same way from the `pricer::` prefix
-(`pricer::down` → `motion::down`, `pricer::page_down` →
-`motion::half_page_down`, `pricer::last_col` → `motion::line_end`, and so on),
-and a binding on one keeps its `pricer && …` context. The diagnostics tile's
-eight retired ids rename the same way from the `diagnostics::` prefix
-(`diagnostics::down`/`up`/`top`/`bottom` → the same `motion::*` name,
-`diagnostics::page_down`/`page_up` → `motion::half_page_down`/`half_page_up`,
-`diagnostics::page_down_full`/`page_up_full` → `motion::page_down`/`page_up`),
-and a binding on one keeps its `diagnostics` context.
+### Retired motion ids
+
+Every module-local motion and menu-step id is retired and registered as a
+rename of a `motion::*` id. The suffix decides the target, the same in every
+module that had it:
+
+| Retired id | Current id | Modules |
+|---|---|---|
+| `…::down`, `up`, `top`, `bottom` | the same `motion::*` name | blotter, marketdata, pricer, diagnostics |
+| `…::left`, `right` | the same `motion::*` name | blotter, marketdata, pricer |
+| `…::page_down`, `page_up` | `motion::half_page_down`, `half_page_up` | blotter, marketdata, pricer, diagnostics |
+| `…::page_down_full`, `page_up_full` | `motion::page_down`, `page_up` | blotter, marketdata, pricer, diagnostics |
+| `…::first_col`, `last_col` | `motion::line_start`, `line_end` | blotter, marketdata, pricer |
+| `…::menu_down`, `menu_up` | `motion::menu_down`, `menu_up` | marketdata, pricer |
+| `timeseries::list_down`, `list_up` | `motion::menu_down`, `menu_up` | timeseries |
+
+A user binding on a retired id keeps its own context (for example
+`blotter && mode == normal`), so it still reaches only that module's tile,
+and loading it warns with both ids.
 
 ## Key spelling and primary modifier
 
@@ -136,8 +135,9 @@ The market-data panel reports one of `normal`, `visual`, `menu`, or `insert`.
 An open editor, picker, choice field, or upload confirmation is `insert` even
 while a selection is live, so the editor's `enter`, `escape`, and arrows keep
 their insert-mode meaning over a selection; the action menu is `menu`. Its
-motions are the shared grid motions (the panel publishes `grid` in normal and
-visual modes); its `marketdata && mode == visual` block binds the
+motions are the shared grid motions (the panel publishes `grid` in every
+mode, and the shared bindings match only `mode == normal` or
+`mode == visual`); its `marketdata && mode == visual` block binds the
 selection verbs as single keys — `y` (`marketdata::yank`), `d`
 (`marketdata::delete_row`), `i` and `enter` (`marketdata::edit`), `v`, `V`,
 and `escape` — because a doubled normal-mode form (`y y`, `y c`, `d d`) would
@@ -249,14 +249,13 @@ while its series list or one of its menus (action, range, frequency) is open
 (beside `popup == series|menu`). The timeseries tile never publishes `grid`,
 so its own `h`/`l` pan and `g`/`shift+g` jump are never shadowed. With no list
 open the flag is absent and `j`/`k` fall through to the grid (or to nothing).
-The retired `marketdata::menu_down`/`menu_up`, `pricer::menu_down`/`menu_up`
-and `timeseries::list_down`/`list_up` are registered as renames of
-`motion::menu_down`/`menu_up`, so an old user override keeps working in its
-module context with a load warning.
+The retired menu and list step ids are renames of
+`motion::menu_down`/`menu_up` (see [retired motion ids](#retired-motion-ids)).
 
 What a menu step means (skipping disabled rows, wrapping a series list) stays
 the list's rule; what a tile does around a grid result (entering a header
-strip, closing a field, following a log) stays the tile's.
+strip, closing a field, following a log) stays the tile's; see
+[features](features.md#motion).
 
 ## Module defaults
 
@@ -285,7 +284,8 @@ A grid module's fragment binds no motions: they come from the shared
 verbs (expansion, selection, yank, find, sort, `g m`, escape).
 The market-data panel's fragment binds its verbs and its `mode == menu`
 pick and close keys (`enter`, `escape`, `.`); the menu's steps are the shared
-ones under `tilelist`. `k` on row 0 still enters the attribute strip around the shared result.
+ones under `tilelist`. `k` on row 0 still enters the attribute strip around
+the shared result.
 The line pricer's fragment binds its verbs (`g p`, `g u` and `g m` among
 them, beside the shell's `g g`: a first `g` waits for the second key), its
 `mode == insert` field keys and its `mode == menu` pick and close keys.

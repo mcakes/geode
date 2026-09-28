@@ -86,9 +86,9 @@ pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
 /// Normal, visual, insert, and menu contexts match MarketDataTile's current input
 /// state.
 ///
-/// The grid motions are not here: the panel publishes `grid` in normal and
-/// visual modes, and the shell's builtin keymap binds the shared `motion::*`
-/// ids there once for every grid tile. The menu's steps are not here either:
+/// The grid motions are not here: the panel publishes `grid` in every mode,
+/// and the shell's builtin keymap binds the shared `motion::*` ids once for
+/// every grid tile under `grid` with `mode == normal || mode == visual`. The menu's steps are not here either:
 /// the panel publishes `tilelist` while its action menu is open, and the
 /// builtin keymap binds the shared `motion::menu_down`/`menu_up` there.
 ///

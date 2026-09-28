@@ -131,8 +131,9 @@ context = "timeseries && mode == normal && popup == series"
 # The menus — the action list, the range menu and the frequency menu —
 # hold no field, so they keep the tile's own keyboard like the series
 # list does; the shared menu steps (`j`/`k` and the arrows, bound under
-# `tilelist`) move their rows and `enter` picks the highlighted one. `r` and `f` stay the normal layer's: each toggles its
-# own menu shut, or swaps the menu that is up for its own.
+# `tilelist`) move their rows and `enter` picks the highlighted one. `r`
+# and `f` stay the normal layer's: each toggles its own menu shut, or swaps
+# the menu that is up for its own.
 [[bindings]]
 context = "timeseries && mode == normal && popup == menu"
 [bindings.keys]
@@ -312,8 +313,8 @@ impl ModuleFactory for TimeseriesFactory {
 /// The keymap a running app resolves this module's menu hints through: the
 /// builtin actions and this module's, the builtin keymap with this fragment
 /// spliced in (the popups' shared steps live only in the former), and an
-/// optional user layer over it. Tests read menu lanes against it rather than against no
-/// keymap, where every chord hint is (correctly) empty.
+/// optional user layer over it. Tests read menu lanes against it rather
+/// than against no keymap, where every chord hint is (correctly) empty.
 #[cfg(test)]
 pub(crate) fn test_bindings(user: Option<&str>) -> Vec<geode_shell::keymap::Binding> {
     test_keymap(user).bindings().to_vec()

@@ -156,8 +156,9 @@ Action-menu stepping, hover, picking and painting are `geode_tile::menu`'s:
 the menu opens on its first enabled action; its steps are the shared
 `motion::menu_down`/`menu_up` (`j`/`k`, arrows), which reach it through the
 `tilelist` flag the panel publishes beside `mode == menu`, so the grid under
-it never moves; a step counts enabled actions and skips disabled rows, headings and separators without wrapping, and from a row
-that is not an action lands on the first enabled one; hover can light a
+it never moves; a step counts enabled actions and skips disabled rows,
+headings and separators without wrapping, and from a row that is not an
+action lands on the first enabled one; hover can light a
 refused action, which takes no fill, and Enter or a click on it makes its
 reason the notice and keeps the menu open; key hints are the live keymap's,
 resolved when the menu opens, and follow a reload while the menu is open. A

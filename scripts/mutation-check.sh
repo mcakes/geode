@@ -13303,8 +13303,8 @@ run_mutation "mdheader: a dirty draft sets the dot flag" \
 
 # `k` on the top row enters the strip only when there IS an attribute to
 # land on. Mutated so the guard can never pass, `k` on row 0 always steps
-# within the grid (clamped in place, since row 0 cannot go higher) and the
-# strip is unreachable by keyboard at all.
+# within the grid (a bare `k` wraps to the last row, a counted one clamps
+# at row 0) and the strip is unreachable by keyboard at all.
 run_mutation "md motion: k on the top row enters the strip" \
   crates/geode-marketdata/src/core/cursor.rs \
   '        (Cursor::Cell { row: 0, col }, Motion::Rows { by, .. }) if by < 0 && grid.attrs > 0 => {' \

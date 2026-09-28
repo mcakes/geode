@@ -40,22 +40,8 @@ has the surface. The pricer and market-data use all four, timeseries the
 popups, menus and notice line, and the blotter the notice line. Diagnostics
 has none of them.
 
-- Grid motions are the shell's shared `motion::*` actions, bound once under
-  `grid` and applied by `geode_tile::motion`: a bare `j`/`k` wraps at the
-  ends except while a selection is live, where it clamps; every counted
-  move clamps, `1j` included; a counted `g g` or `G` goes to that 1-based
-  row; `ctrl+d`/`ctrl+u` move 5 rows and `ctrl+f`/`ctrl+b` (and
-  `pagedown`/`pageup`) 10, times the count; columns clamp; a grid with no
-  rows or columns does not move. The blotter, the market-data panel and the
-  line pricer move on them, and so does the diagnostics cursor (rows only).
-- Menu and popup-list steps are the shared `motion::menu_down`/`menu_up`
-  (`j`/`down`, `k`/`up`), bound once under `tilelist`, which a tile publishes
-  while its `.` menu, or timeseries' series list or range/frequency menu, is
-  open. An open menu over a grid takes those keys and the grid stays put; a
-  count steps that many rows. What a step means stays the list's own: a menu
-  clamps over its enabled rows, the series list wraps like the chips.
-  See [shared
-  motions](keymaps.md#shared-motions).
+- Grid motions and menu steps are the shared motion vocabulary; see
+  [Motion](#motion).
 - A popup is deferred above the tile's clip and snaps inside the window with
   an 8-pixel margin. An action menu occludes what it covers, so its hover and
   presses do not reach the tile beneath.
@@ -84,6 +70,49 @@ has none of them.
   tile.
 - A notice is a status (muted), warning or danger line in the theme's text
   tones; which of a tile's notices shows is the tile's own precedence.
+
+### Motion
+
+The motion keys are one shared vocabulary: the shell's `motion::*` actions
+(palette category "Motion"), bound once in the builtin keymap and applied by
+`geode_tile::motion` (see [shared motions](keymaps.md#shared-motions)). A tile
+whose grid cursor takes motions publishes `grid`, and every grid motion is
+bound under the one context `grid && (mode == normal || mode == visual)`, so
+remapping a motion in the keybindings dialog changes it in every grid tile at
+once. The blotter, the market-data panel and the line pricer move on them, and
+so does the diagnostics cursor (rows only). The rules:
+
+- A bare `j`/`k` (`down`/`up`) wraps at the ends, except while a selection is
+  live, where it clamps: wrapping past the anchor would invert the selection.
+- Every counted move clamps, `1j` included.
+- A bare `g g`/`G` goes to the first/last row; a counted one goes to that
+  1-based row, clamped to the last (`5G` and `5gg` both land on row 5).
+- `ctrl+d`/`ctrl+u` move 5 rows and `ctrl+f`/`ctrl+b` (and
+  `pagedown`/`pageup`) 10, times the count.
+- `h`/`l` clamp at the first and last column; `^`/`home` and `$`/`end` go to
+  the first and last column.
+- The arrow keys are bound beside the vim keys, so they move every grid tile.
+- A grid with no rows or columns ignores every motion.
+
+Each tile's own behaviour around the shared result:
+
+- Market-data: `k` on row 0, bare or counted, enters the header attribute
+  strip instead of wrapping when the kind has attributes (see
+  [market-data](#market-data-documents)).
+- Pricer: a motion dispatched from the palette while the entry bar, the cell
+  editor or the action menu is open closes it first, then moves.
+- Diagnostics: a bare `G` in the Log section resumes following the tail; any
+  other motion, a counted `G` included, stops following.
+- Blotter: the column motions move its column cursor.
+- Timeseries has no grid cursor and never publishes `grid`, so its own `h`/`l`
+  pan the view and `g`/`shift+g` jump it to the start and end.
+
+Menu and popup-list steps are the shared `motion::menu_down`/`menu_up`
+(`j`/`down`, `k`/`up`), bound once under `tilelist`, which a tile publishes
+while its `.` menu, or timeseries' series list or range/frequency menu, is
+open. An open menu over a grid takes those keys and the grid stays put; a
+count steps that many rows. What a step means stays the list's own: a menu
+clamps over its enabled rows, the series list wraps like the chips.
 
 ### Autosized columns
 
@@ -194,9 +223,8 @@ planned non-tree columns with the cursor's column highlighted
 (`TileContent::tile_columns`). Hidden columns and dimensions folded into the
 tree are not in the plan and are not offered; reach them through the dialogs.
 
-Motions follow the shared rules (see [Shared tile
-interaction](#shared-tile-interaction)); the column motions (`h`/`l`, the
-arrows, `^`/`$`, `home`/`end`) move the blotter's column cursor.
+Motions follow the [shared rules](#motion); the column motions (`h`/`l`,
+the arrows, `^`/`$`, `home`/`end`) move the blotter's column cursor.
 
 ### Selection
 
@@ -335,14 +363,12 @@ A panel opened through an add (palette, tile picker, `open_with`, duplicate)
 with no underlying opens the underlying picker at once; a restored panel does
 not. Every panel kind accepts an underlying launch context.
 
-The panel moves on the [shared grid motions](#shared-tile-interaction), so
-the arrow keys move its cursor, a bare `j` on the last row wraps to row 0,
-`1j` clamps, and `5G`/`5gg` land on row 5. The header attribute strip sits
-outside the wrap cycle: `k` (or `up`) on row 0, bare or counted, enters the
-strip when the kind has attributes; a downward motion from the strip returns
-to row 0 at the column the cursor left from, and `g g`/`G` (counted or not)
-return to that row of the grid at the same column. A live selection's motions
-clamp and never enter the strip.
+The panel moves on the [shared motions](#motion). The header attribute
+strip sits outside the wrap cycle: `k` (or `up`) on row 0, bare or counted,
+enters the strip when the kind has attributes. From the strip, a downward
+motion returns to row 0 at the column the cursor left from; `g g`/`G` return
+to the grid at that column, uncounted to the first or last row and counted to
+row N. A live selection's motions clamp and never enter the strip.
 
 `[ui] line_numbers` adds a gutter beside the grid's pinned column: the row
 label when shown, otherwise the first value column. The column widens for the
@@ -678,8 +704,8 @@ frequency menu: the six frequencies with their short labels. Short labels are
 text, not keys; `c` paints as a key. Both menus tick the value in force and
 open with the highlight on it (on `Custom dates…` while the range is absolute).
 The shared menu keys (`j`/`k` or the arrows) move, Enter or a click applies
-and closes, and Escape closes; a second `r` or `f` closes its own menu. A frequency the 500,000-point cap refuses over
-the current range, as resolved under the frame's as-of, is a disabled row
+and closes, and Escape closes; a second `r` or `f` closes its own menu. A
+frequency the 500,000-point cap refuses over the current range, as resolved under the frame's as-of, is a disabled row
 reading `over cap`; choosing it shows the full cap message as the notice. The
 rows follow range, frequency, and as-of changes while the menu is open. A
 preset the cap refuses at the current frequency is refused when chosen, with
@@ -791,12 +817,11 @@ starts at the ring's current sequence when opened. If the ring overwrites
 unread records, the next drain reports that gap; this is not a cumulative
 loss counter.
 
-The cursor moves on the [shared grid motions](#shared-tile-interaction) (the
-tile publishes `grid` and `mode == normal`), so the arrow keys move it, a bare
-`j` on the last row wraps to the top, and a counted `g g` or `G` goes to that
-row. Any motion stops following; a bare `G` resumes it, and a counted `G`
-jumps to that row without following. On an empty section a motion
-changes nothing, so a following empty log keeps following through `g g`.
+The cursor moves on the [shared motions](#motion), rows only (the tile
+publishes `grid` and `mode == normal`). Any motion stops following; a bare
+`G` resumes it, and a counted `G` jumps to that row without following. On an
+empty section a motion changes nothing, so a following empty log keeps
+following through `g g`.
 
 Source ages reflect the last row rebuild rather than a ticking timer; the
 absolute timestamp remains visible. Config output is capped at 2,000 leaves
@@ -835,12 +860,8 @@ an empty loaded sheet says `No lines — press o to add one`. A pricer this
 binary lacks is named in danger text with its recovery (`set [pricing]
 adapter and restart`).
 
-The sheet moves on the [shared grid motions](#shared-tile-interaction): a
-bare `j` on the last row wraps to the first (and `k` on the first to the
-last), clamping instead while a selection is live; `1j` clamps; `5G`/`5gg`
-land on row 5; the arrow keys, `^`/`$` and `home`/`end` move the cursor as
-before. Column 0 of the cursor is the first plan column; the tree column is
-never a target. An empty sheet takes no motion. A motion dispatched from the
+The sheet moves on the [shared motions](#motion). Column 0 of the cursor
+is the first plan column; the tree column is never a target. An empty sheet takes no motion. A motion dispatched from the
 palette while the entry bar, the cell editor or the action menu is open closes
 it first, then moves.
 

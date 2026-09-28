@@ -2131,9 +2131,11 @@ impl MarketDataTile {
         // or out of the attribute strip also changes header cursor styling.
         let chrome = match verb {
             "motion" => {
-                let Some(motion) = shared_motion else {
-                    return false;
-                };
+                // `verb` is "motion" only when `parse` returned a motion; a
+                // module id cannot reach this arm, since no `marketdata::`
+                // action is named `motion`.
+                let motion =
+                    shared_motion.expect("the motion verb comes only from a parsed motion");
                 let was_attr = matches!(self.cursor, Cursor::Attr(_));
                 let grid = self.grid();
                 // A live selection's motions clamp at the grid's edges and
@@ -7145,8 +7147,8 @@ mod tests {
         assert_eq!(col(&vcx), last, "columns clamp: l at the last column stays");
     }
 
-    /// The panel publishes `grid` in normal and visual modes, and 5G jumps
-    /// to row 5 (a count the panel used to ignore).
+    /// The panel publishes `grid` (the binding predicate confines the shared
+    /// motions to normal and visual modes), and 5G jumps to row 5.
     #[gpui::test]
     fn the_panel_publishes_grid_and_a_counted_g_jumps_to_that_row(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
