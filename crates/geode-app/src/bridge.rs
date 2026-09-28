@@ -17,7 +17,7 @@ use geode_data::documents::DocumentRegistry;
 use geode_data::source::SourceSpec;
 use geode_data::{
     DataEvent, DataHandle, DataService, DataServiceConfig, EventSink, PricerConfig, PricerRegistry,
-    Refusal,
+    Refusal, VolConfig, VolModelRegistry,
 };
 use geode_marketdata::MarketDataFactory;
 use geode_marketdata::core::{CVI, DIVIDEND};
@@ -68,13 +68,15 @@ pub struct DataSetup {
 
 /// Build setup when both datasets and views documents are present. Empty
 /// parsed definitions still produce Some with any diagnostics; missing either
-/// document returns None. Adapters and pricers come from the caller's registry;
-/// builtin document kinds are registered here for every setup.
+/// document returns None. Adapters, pricers and vol models come from the
+/// caller's registries; builtin document kinds are registered here for every
+/// setup.
 pub fn data_setup(
     config: &Config,
     db_path: PathBuf,
     adapters: AdapterRegistry,
     pricers: PricerRegistry,
+    vol_models: VolModelRegistry,
 ) -> Option<DataSetup> {
     let datasets = config.doc("datasets")?;
     // Require a views document, then use load_views for presentation overlays.
@@ -136,6 +138,30 @@ pub fn data_setup(
             PricerConfig::missing(&pricer_name)
         }
     };
+    // Resolve the configured vol model, defaulting to the demo stand-in. An
+    // unavailable name warns and leaves the model absent; the vol worker
+    // answers every job with that reason while the service still opens.
+    let vol_name = config
+        .get("app", "vol.model")
+        .and_then(|v| v.as_str())
+        .unwrap_or(geode_pricing::DEMO_VOL_MODEL)
+        .to_string();
+    let vol = match vol_models.get(&vol_name) {
+        Some(m) => VolConfig::with(m),
+        None => {
+            diagnostics.push(Diagnostic {
+                severity: Severity::Warning,
+                layer: config.explain("app", "vol.model"),
+                file: None,
+                message: format!(
+                    "vol model \"{vol_name}\" ([vol] model) is not built into this binary (have: {}); every vol slice will say so",
+                    vol_models.names().join(", ")
+                ),
+                path: Some("app.vol.model".to_string()),
+            });
+            VolConfig::missing(&vol_name)
+        }
+    };
     let (pricer_views, view_diags) = pricer_views_from_config(config);
     diagnostics.extend(view_diags);
     let (pricer_templates, template_diags) =
@@ -175,7 +201,7 @@ pub fn data_setup(
                 documents
             },
             pricer,
-            vol: geode_data::VolConfig::default(),
+            vol,
             egress,
         },
         views,
@@ -1182,10 +1208,12 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             s.deliver(Delivery::Price(outcome), window, cx)
                         });
                     }
-                    // Vol outcomes have no shell delivery yet: `Delivery::VolSlices`
-                    // lands with the occupants, and the bridge then routes this
-                    // exactly as `Price` above. Until then nothing submits one.
-                    DataEvent::VolSlices(_) => {}
+                    // Route vol slices to the keyed occupant; the shell discards absent recipients.
+                    DataEvent::VolSlices(outcome) => {
+                        shell.update(cx, |s, cx| {
+                            s.deliver(Delivery::VolSlices(outcome), window, cx)
+                        });
+                    }
                     // A data thread died despite containment, or the request
                     // loop never opened. Its segment and the diagnostics row
                     // stay until restart. Logging is not repeated here: the
@@ -1979,6 +2007,7 @@ role = "key"
             dir.path().join("t.duckdb"),
             AdapterRegistry::default(),
             geode_data::PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
         )
         .unwrap();
         assert!(
@@ -3232,8 +3261,14 @@ role = "key"
         let config = Config::load(&sources);
         let mut pricers = geode_data::PricerRegistry::default();
         pricers.register(std::sync::Arc::new(geode_pricing::MockPricer::new()));
-        let setup = data_setup(&config, db, AdapterRegistry::default(), pricers)
-            .expect("the demo layer declares datasets and views");
+        let setup = data_setup(
+            &config,
+            db,
+            AdapterRegistry::default(),
+            pricers,
+            geode_data::VolModelRegistry::default(),
+        )
+        .expect("the demo layer declares datasets and views");
         let bridge =
             cx.update(|cx| start(setup, FindStyle::default(), Duration::from_secs(60), cx));
         let (services, tiles) = with_a_pricer_tile_on(
@@ -3287,6 +3322,7 @@ role = "key"
             db,
             AdapterRegistry::default(),
             geode_data::PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
         )
         .unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -3474,6 +3510,7 @@ role = "key"
             dir.path().join("a.duckdb"),
             AdapterRegistry::default(),
             pricers.clone(),
+            geode_data::VolModelRegistry::default(),
         )
         .unwrap();
         assert_eq!(setup.config.pricer.name, "mock");
@@ -3497,6 +3534,7 @@ role = "key"
             dir.path().join("b.duckdb"),
             AdapterRegistry::default(),
             pricers,
+            geode_data::VolModelRegistry::default(),
         )
         .unwrap();
         assert_eq!(setup.config.pricer.name, "vendor");
@@ -3514,12 +3552,89 @@ role = "key"
         );
     }
 
+    /// Resolve `[vol] model` through the supplied registry the way the pricer
+    /// resolves. An unknown name warns, names what the binary has, and leaves
+    /// the model absent without preventing setup; no `[vol]` table means the
+    /// demo model.
+    #[test]
+    fn an_unknown_vol_model_warns_and_leaves_the_model_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_with_app = |app_text: &str| {
+            let mut builtin = vec![
+                LayerDoc::builtin(
+                    "datasets",
+                    "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n[risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n",
+                )
+                .unwrap(),
+                LayerDoc::builtin("views", "[v]\ndataset = \"risk\"\ngrouping = [\"book\"]\n")
+                    .unwrap(),
+            ];
+            if !app_text.is_empty() {
+                builtin.push(LayerDoc::builtin("app", app_text).unwrap());
+            }
+            Config::load(&ConfigSources {
+                builtin,
+                ..ConfigSources::default()
+            })
+        };
+
+        let config = config_with_app("[vol]\nmodel = \"vendor\"\n");
+        let setup = data_setup(
+            &config,
+            dir.path().join("a.duckdb"),
+            AdapterRegistry::default(),
+            geode_data::PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
+        )
+        .unwrap();
+        assert_eq!(setup.config.vol.name, "vendor");
+        assert!(setup.config.vol.model.is_none());
+        let d = setup
+            .diagnostics
+            .iter()
+            .find(|d| d.message.contains("vol model"))
+            .unwrap();
+        assert_eq!(d.severity, Severity::Warning);
+        assert!(
+            d.message
+                .contains("vol model \"vendor\" ([vol] model) is not built into this binary"),
+            "{}",
+            d.message
+        );
+        assert_eq!(d.path.as_deref(), Some("app.vol.model"));
+
+        // The default: no [vol] table at all resolves to the registered demo model.
+        let mut vol_models = geode_data::VolModelRegistry::default();
+        vol_models.register(Arc::new(geode_pricing::DemoVolModel));
+        let config = config_with_app("");
+        let setup = data_setup(
+            &config,
+            dir.path().join("b.duckdb"),
+            AdapterRegistry::default(),
+            geode_data::PricerRegistry::default(),
+            vol_models,
+        )
+        .unwrap();
+        assert_eq!(setup.config.vol.name, "demo");
+        assert!(setup.config.vol.model.is_some());
+        assert!(
+            !setup
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("vol model")),
+            "{:?}",
+            setup.diagnostics
+        );
+    }
+
     /// Verify setup carries every local dataset name and excludes non-local ones.
     /// The routing test supplies its set directly, so it cannot prove this extraction.
     #[test]
     fn data_setup_names_every_local_dataset_and_only_those() {
         let mut pricers = geode_data::PricerRegistry::default();
         pricers.register(Arc::new(geode_pricing::MockPricer::new()));
+        let mut vol_models = geode_data::VolModelRegistry::default();
+        vol_models.register(Arc::new(geode_pricing::DemoVolModel));
         let dir = tempfile::tempdir().unwrap();
         let config = Config::load(&ConfigSources {
             builtin: vec![
@@ -3547,6 +3662,7 @@ role = "key"
             dir.path().join("c.duckdb"),
             AdapterRegistry::default(),
             pricers,
+            vol_models,
         )
         .unwrap();
         assert!(setup.diagnostics.is_empty(), "{:?}", setup.diagnostics);
@@ -3640,10 +3756,20 @@ role = "key"
         assert_eq!(frame.read_with(&vcx, |f, _| f.data_version()), before + 1);
     }
 
-    /// A pricing outcome must reach the recording occupant, not merely survive
-    /// the drain loop. Inspect its delivery log through the real bridge and shell.
-    #[gpui::test]
-    fn a_price_event_is_delivered_to_the_shell_as_delivery_price(cx: &mut gpui::TestAppContext) {
+    /// A shell holding one recording tile with a real bridge attached, so a
+    /// keyed delivery test can send an event and read the occupant's log.
+    struct RecordingTile {
+        vcx: gpui::VisualTestContext,
+        log: Rc<RefCell<Vec<Recorded>>>,
+        events: crate::events::Sender,
+        tile: TileId,
+        /// Kept alive so the factories outlive the attached drain.
+        _bridge: Bridge,
+        /// Kept alive so the handle's channel stays open.
+        _rx: std::sync::mpsc::Receiver<geode_data::Request>,
+    }
+
+    fn recording_tile_with_bridge(cx: &mut gpui::TestAppContext) -> RecordingTile {
         let (services, log) = test_shell_services_with_rec_roster();
         let window = open_test_window(cx, services);
         let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
@@ -3653,7 +3779,7 @@ role = "key"
 
         // Opening the recording module creates the first tile in the empty
         // workspace. Its allocated id is 1; verify the occupant before using that
-        // id as the pricing outcome's destination.
+        // id as an outcome's destination.
         vcx.update(|window, cx| {
             shell.update(cx, |s, cx| {
                 s.open_module("rec", window, cx);
@@ -3669,7 +3795,7 @@ role = "key"
             "open_module(\"rec\", ..) must have created a tile at TileId(1)"
         );
 
-        let (handle, _rx) = DataHandle::for_tests();
+        let (handle, rx) = DataHandle::for_tests();
         let factory = Rc::new(BlotterFactory::new(
             handle.clone(),
             Vec::new(),
@@ -3679,7 +3805,7 @@ role = "key"
             FindStyle::default(),
             Duration::from_secs(900),
         ));
-        let (tx, rx) = crate::events::channel();
+        let (tx, events) = crate::events::channel();
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
@@ -3697,7 +3823,7 @@ role = "key"
             pricer: test_pricer(&handle),
             handle,
             factory,
-            events: rx,
+            events,
             dropped: Arc::new(AtomicU64::new(0)),
             sources: Vec::new(),
             local_datasets: Default::default(),
@@ -3705,18 +3831,62 @@ role = "key"
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
-        tx.try_send(DataEvent::Price(geode_core::pricing::PriceOutcome {
-            key: QueryKey(tile.0),
-            tag: 5,
-            submitted: std::time::Instant::now(),
-            results: Vec::new(),
-        }))
-        .unwrap();
-        vcx.run_until_parked();
+        RecordingTile {
+            vcx,
+            log,
+            events: tx,
+            tile,
+            _bridge: bridge,
+            _rx: rx,
+        }
+    }
+
+    /// A pricing outcome must reach the recording occupant, not merely survive
+    /// the drain loop. Inspect its delivery log through the real bridge and shell.
+    #[gpui::test]
+    fn a_price_event_is_delivered_to_the_shell_as_delivery_price(cx: &mut gpui::TestAppContext) {
+        let fixture = recording_tile_with_bridge(cx);
+        let tile = fixture.tile;
+        fixture
+            .events
+            .try_send(DataEvent::Price(geode_core::pricing::PriceOutcome {
+                key: QueryKey(tile.0),
+                tag: 5,
+                submitted: std::time::Instant::now(),
+                results: Vec::new(),
+            }))
+            .unwrap();
+        fixture.vcx.run_until_parked();
         assert!(
-            log.borrow().contains(&Recorded::Priced(tile, 5)),
+            fixture.log.borrow().contains(&Recorded::Priced(tile, 5)),
             "the Price delivery must reach the tile's occupant: {:?}",
-            log.borrow()
+            fixture.log.borrow()
+        );
+    }
+
+    /// A vol-slice outcome takes the same keyed route as a price: the drain
+    /// must hand it to the shell as `Delivery::VolSlices` and the tile's
+    /// occupant must see it.
+    #[gpui::test]
+    fn a_vol_slices_event_is_delivered_to_the_shell_as_delivery_vol_slices(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let fixture = recording_tile_with_bridge(cx);
+        let tile = fixture.tile;
+        fixture
+            .events
+            .try_send(DataEvent::VolSlices(geode_core::vol::VolSliceOutcome {
+                key: QueryKey(tile.0),
+                tag: 6,
+                submitted: std::time::Instant::now(),
+                results: Vec::new(),
+            }))
+            .unwrap();
+        fixture.vcx.run_until_parked();
+        assert!(
+            fixture.log.borrow().contains(&Recorded::VolSliced(tile, 6)),
+            "the VolSlices delivery must reach the tile's occupant: {:?}",
+            fixture.log.borrow()
         );
     }
 
@@ -4836,6 +5006,7 @@ role = "key"
             dir.path().join("geode.duckdb"),
             AdapterRegistry::default(),
             geode_data::PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
         )
         .unwrap();
         let builtin = crate::builtin_layer(None);
@@ -4869,6 +5040,7 @@ role = "key"
             dir.path().join("geode.duckdb"),
             AdapterRegistry::default(),
             geode_data::PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
         )
         .unwrap();
         assert!(
@@ -4919,7 +5091,8 @@ role = "key"
                 &none,
                 "/tmp/x.duckdb".into(),
                 AdapterRegistry::default(),
-                PricerRegistry::default()
+                PricerRegistry::default(),
+                geode_data::VolModelRegistry::default()
             )
             .is_none()
         );
@@ -4940,6 +5113,7 @@ role = "key"
             "/tmp/x.duckdb".into(),
             AdapterRegistry::default(),
             PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
         )
         .unwrap();
         assert_eq!(setup.config.sources.len(), 1);
@@ -4978,6 +5152,7 @@ role = "key"
             "/tmp/x.duckdb".into(),
             AdapterRegistry::default(),
             PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
         )
         .unwrap();
         let view = &setup.views[0];
@@ -5019,6 +5194,7 @@ role = "key"
             "/tmp/x.duckdb".into(),
             AdapterRegistry::default(),
             PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
         )
         .unwrap();
         let v = setup.views.iter().find(|v| v.name == "v").unwrap();
@@ -5058,6 +5234,7 @@ role = "key"
             "/tmp/x.duckdb".into(),
             AdapterRegistry::default(),
             PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
         )
         .unwrap();
         assert!(
@@ -5122,6 +5299,7 @@ role = "key"
             dir.path().join("geode.duckdb"),
             AdapterRegistry::default(),
             pricers,
+            geode_data::VolModelRegistry::default(),
         )
         .expect("the demo layer declares datasets and views");
         let bridge =

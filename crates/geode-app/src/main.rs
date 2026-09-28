@@ -115,6 +115,9 @@ fn main() {
             // The mock pricing implementation is available in every build.
             let mut pricers = geode_data::PricerRegistry::default();
             pricers.register(Arc::new(geode_pricing::MockPricer::new()));
+            // The demo vol model likewise; `[vol] model` selects it by name.
+            let mut vol_models = geode_data::VolModelRegistry::default();
+            vol_models.register(Arc::new(geode_pricing::DemoVolModel));
 
             let (mut services, desk, user, bridge, diagnostics_factory) = build_shell_services(
                 demo_root.as_deref(),
@@ -122,6 +125,7 @@ fn main() {
                 log_control,
                 adapters,
                 pricers,
+                vol_models,
                 cx,
             );
 
@@ -440,6 +444,7 @@ fn build_shell_services(
     log_control: Arc<dyn LevelControl>,
     adapters: geode_data::adapter::AdapterRegistry,
     pricers: geode_data::PricerRegistry,
+    vol_models: geode_data::VolModelRegistry,
     cx: &mut App,
 ) -> (
     ShellServices,
@@ -499,7 +504,7 @@ fn build_shell_services(
         std::env::var("LOCALAPPDATA").ok(),
         std::env::var("HOME").ok(),
     );
-    let bridge = bridge::data_setup(&config, db, adapters, pricers).map(|setup| {
+    let bridge = bridge::data_setup(&config, db, adapters, pricers, vol_models).map(|setup| {
         let find_style = FindStyle::from_config(&config);
         let stale_after = bridge::stale_after_from_config(&config);
         let bridge = bridge::start(setup, find_style, stale_after, cx);
@@ -902,11 +907,14 @@ mod tests {
         // application roster to check their combined fragments and action IDs.
         let mut pricers = geode_data::PricerRegistry::default();
         pricers.register(std::sync::Arc::new(geode_pricing::MockPricer::new()));
+        let mut vol_models = geode_data::VolModelRegistry::default();
+        vol_models.register(std::sync::Arc::new(geode_pricing::DemoVolModel));
         let setup = bridge::data_setup(
             &config,
             dir.path().join("geode.duckdb"),
             geode_data::adapter::AdapterRegistry::default(),
             pricers,
+            vol_models,
         )
         .expect("the demo layer declares datasets and views");
         let bridge =
@@ -949,6 +957,7 @@ mod tests {
             dir.path().join("geode.duckdb"),
             geode_data::adapter::AdapterRegistry::default(),
             geode_data::PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
         )
         .expect("the demo layer declares datasets and views");
         let bridge =

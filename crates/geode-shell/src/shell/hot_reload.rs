@@ -218,6 +218,10 @@ impl ShellView {
             if new_config.get("app", "pricing.adapter").cloned() != self.pricing_baseline {
                 restart.push("pricing");
             }
+            // The vol model is fixed at startup the same way.
+            if new_config.get("app", "vol.model").cloned() != self.vol_baseline {
+                restart.push("vol");
+            }
 
             // Apply log levels without persisting them again: the candidate already
             // came from disk. Report control errors and update the diagnostics model.

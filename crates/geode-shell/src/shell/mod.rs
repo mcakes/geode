@@ -638,6 +638,9 @@ pub struct ShellView {
     /// Reload compares against this baseline to determine whether a restart is
     /// required. The rest of `[pricing]`, including `refresh`, remains live.
     pricing_baseline: Option<toml::Value>,
+    /// The startup `[vol] model` value used to build the data engine's vol
+    /// worker, compared on reload exactly as `pricing_baseline` is.
+    vol_baseline: Option<toml::Value>,
     /// Cached [`pickable_columns`] for the current datasets and dimensions.
     /// Reload rebuilds this list; startup registers per-column actions once.
     /// Columns added later remain reachable through the two-stage `frame::pick`
@@ -1226,6 +1229,8 @@ impl ShellView {
         // engine's pricer was chosen from — see
         // `pricing_baseline`'s field doc.
         let pricing_baseline = services.config.get("app", "pricing.adapter").cloned();
+        // And for the `[vol] model` key — see `vol_baseline`'s field doc.
+        let vol_baseline = services.config.get("app", "vol.model").cloned();
         // The dimension pickers' column list — see
         // `pickable`'s field doc.
         let pickable = pickable_columns(&services.config);
@@ -1289,6 +1294,7 @@ impl ShellView {
             datasets_baseline,
             egress_baseline,
             pricing_baseline,
+            vol_baseline,
             pickable,
             expr_vocab,
             picker: None,
