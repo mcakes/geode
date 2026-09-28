@@ -83,11 +83,13 @@ impl ShellView {
     /// open; with no rows the notice says so and nothing opens. Closes the
     /// palette, the command line, the stack list and the add-a-filter menu
     /// first, and takes the shell root's focus, as the add-a-filter menu
-    /// does.
+    /// does. `by_pointer` is a right press: that press moved focus to the
+    /// tile, so the menu never hands focus back to the scope bar's field.
     pub(crate) fn open_row_menu(
         &mut self,
         context: DimensionContext,
         at: Option<Point<Pixels>>,
+        by_pointer: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -107,7 +109,7 @@ impl ShellView {
         self.matcher.cancel();
         // Recorded before the root takes focus, as the add-a-filter menu
         // records it.
-        let return_to_filter = self.filter_field_focused(window, cx);
+        let return_to_filter = !by_pointer && self.filter_field_focused(window, cx);
         self.row_menu = Some(RowMenu {
             menu: Menu::new(rows, self.services.keymap.bindings()),
             context,
@@ -148,14 +150,14 @@ impl ShellView {
         else {
             return;
         };
-        self.open_row_menu(context, Some(at), window, cx);
+        self.open_row_menu(context, Some(at), true, window, cx);
     }
 
     /// The menu closes itself (`escape`, a press outside it): cancel any
     /// chord prefix typed while it was open and give focus back: to the
     /// scope bar's text field if it held focus when the menu opened (the
     /// palette opened from the field, or a user chord bound in the
-    /// workspace context), home otherwise.
+    /// workspace context) and a key opened it, home otherwise.
     pub(crate) fn dismiss_row_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.drop_row_menu(window, cx) {
             cx.notify();

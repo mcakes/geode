@@ -541,7 +541,7 @@ impl ShellView {
             let at = context
                 .anchor
                 .map(|(x, y)| gpui::point(gpui::px(x), gpui::px(y)));
-            self.open_row_menu(context, at, window, cx);
+            self.open_row_menu(context, at, false, window, cx);
         } else if action.0 == "tile::autosize_columns" {
             // The focused tile's occupant fits its own table; any other
             // tile is untouched. A refusal (no tile, no table) is a notice.

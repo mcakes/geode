@@ -247,7 +247,7 @@ fn escape_returns_focus_to_the_filter_field_it_opened_from(cx: &mut gpui::TestAp
     draw(&mut vcx);
     assert!(vcx.update(|window, _| field.is_focused(window)));
     shell.update_in(&mut vcx, |s, window, cx| {
-        s.open_row_menu(spx_p7(), None, window, cx)
+        s.open_row_menu(spx_p7(), None, false, window, cx)
     });
     draw(&mut vcx);
     assert!(row_menu_titles(&shell, &vcx).is_some());
@@ -279,7 +279,7 @@ fn a_row_menu_with_nowhere_to_hang_is_dropped(cx: &mut gpui::TestAppContext) {
         "a fresh session has no tile"
     );
     shell.update_in(&mut vcx, |s, window, cx| {
-        s.open_row_menu(spx_p7(), None, window, cx)
+        s.open_row_menu(spx_p7(), None, false, window, cx)
     });
     draw(&mut vcx);
     assert!(row_menu_titles(&shell, &vcx).is_none());
@@ -307,12 +307,51 @@ fn a_right_press_opens_the_row_menu_at_the_pointer(cx: &mut gpui::TestAppContext
     draw(&mut vcx);
     let opened_at = shell.read_with(&vcx, |s, _| s.row_menu.as_ref().and_then(|m| m.at()));
     assert_eq!(opened_at, Some(at));
+    let tiles = shell.read_with(&vcx, |s, _| s.occupants.len());
     // A mouse-opened surface must take typed keys (grouping-picker rule).
     vcx.simulate_keystrokes("enter");
     draw(&mut vcx);
-    assert!(
-        shell.read_with(&vcx, |s, _| s.row_menu.is_none()),
+    assert!(shell.read_with(&vcx, |s, _| s.row_menu.is_none()));
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.occupants.len()),
+        tiles + 1,
         "enter picked Open Rec"
+    );
+}
+
+/// A right press moves focus to the tile, so the menu it opens hands focus
+/// home when it closes, never back to the scope bar's text field — even
+/// when the field still held focus at the beat the menu opened (an occupant
+/// that takes no focus on a press). The press's own beat is called directly:
+/// a real press on the recording tile blurs the field through its
+/// `track_focus`, which would hide the case.
+#[gpui::test]
+fn a_right_pressed_menu_never_returns_focus_to_the_filter_field(cx: &mut gpui::TestAppContext) {
+    let mut rec = RecordingFactory::new("rec");
+    rec.accepts = &["underlying_ref"];
+    *rec.press_context.borrow_mut() = Some(spx_p7());
+    let services = services_with_recorders(vec![rec]);
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("ctrl-v");
+    draw(&mut vcx);
+    let id = focused(&shell, &vcx);
+    let at = main_tile_point(&mut vcx, &shell, id, 0.5, 0.5);
+    let field = shell.read_with(&vcx, |s, cx| s.filter_input.read(cx).focus_handle(cx));
+    vcx.update(|window, cx| field.focus(window, cx));
+    draw(&mut vcx);
+    assert!(vcx.update(|window, _| field.is_focused(window)));
+    shell.update_in(&mut vcx, |s, window, cx| {
+        s.open_row_menu_from_press(id, at, window, cx)
+    });
+    draw(&mut vcx);
+    assert!(row_menu_titles(&shell, &vcx).is_some());
+    vcx.simulate_keystrokes("escape");
+    draw(&mut vcx);
+    assert!(row_menu_titles(&shell, &vcx).is_none());
+    assert!(
+        !vcx.update(|window, _| field.is_focused(window)),
+        "the press moved focus to the tile"
     );
 }
 
@@ -356,9 +395,7 @@ fn a_press_outside_the_row_menu_closes_it(cx: &mut gpui::TestAppContext) {
 
 /// The dock's right-press listener opens the menu the same way.
 #[gpui::test]
-fn a_right_press_on_a_docked_tile_opens_the_row_menu_at_the_pointer(
-    cx: &mut gpui::TestAppContext,
-) {
+fn a_right_press_on_a_docked_tile_opens_the_row_menu_at_the_pointer(cx: &mut gpui::TestAppContext) {
     let mut rec = RecordingFactory::new("rec");
     rec.accepts = &["underlying_ref"];
     *rec.press_context.borrow_mut() = Some(spx_p7());
@@ -375,6 +412,16 @@ fn a_right_press_on_a_docked_tile_opens_the_row_menu_at_the_pointer(
     draw(&mut vcx);
     let opened_at = shell.read_with(&vcx, |s, _| s.row_menu.as_ref().and_then(|m| m.at()));
     assert_eq!(opened_at, Some(at));
+    let tiles = shell.read_with(&vcx, |s, _| s.occupants.len());
+    // A mouse-opened surface must take typed keys (grouping-picker rule).
+    vcx.simulate_keystrokes("enter");
+    draw(&mut vcx);
+    assert!(shell.read_with(&vcx, |s, _| s.row_menu.is_none()));
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.occupants.len()),
+        tiles + 1,
+        "enter picked Open Rec"
+    );
 }
 
 /// A chord prefix typed while the menu is open passes to the matcher; a
@@ -399,7 +446,10 @@ fn a_pick_cancels_a_chord_prefix_typed_while_open(cx: &mut gpui::TestAppContext)
     assert_eq!(noops(), 1);
     vcx.simulate_keystrokes("g . ctrl-alt-x");
     draw(&mut vcx);
-    assert!(row_menu_titles(&shell, &vcx).is_some(), "a prefix is no dispatch");
+    assert!(
+        row_menu_titles(&shell, &vcx).is_some(),
+        "a prefix is no dispatch"
+    );
     let row = vcx
         .debug_bounds("row-menu-row-4")
         .expect("the Nemo row paints");

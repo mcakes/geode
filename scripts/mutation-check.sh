@@ -22880,9 +22880,31 @@ run_mutation "context: blotter reads an empty grouping label as a value" \
 # The selection rides the context only while the cursor is inside it.
 run_mutation "context: the selection rides a cursor outside it" \
   crates/geode-blotter/src/delegate.rs \
-  '            Some(r) if r.rows.contains(&self.cursor.row) => {' \
+  '            Some(r) if r.kind == SelectKind::Rows && r.rows.contains(&self.cursor.row) => {' \
   '            Some(r) if true => {' \
   geode-blotter the_dimension_context_follows_the_cursor_row_and_selection
+
+# Only a row (V) selection rides the context; a block selection never does.
+run_mutation "row menu: a block selection fills the selection context" \
+  crates/geode-blotter/src/delegate.rs \
+  '            Some(r) if r.kind == SelectKind::Rows && r.rows.contains(&self.cursor.row) => {' \
+  '            Some(r) if r.rows.contains(&self.cursor.row) => {' \
+  geode-blotter a_block_selection_fills_no_selection_context
+
+# A right press inside a row selection keeps it and the cursor, so the
+# selected rows ride the row menu's context.
+run_mutation "row menu: a right press inside the selection drops it" \
+  crates/geode-blotter/src/tile.rs \
+  '        if !inside {' \
+  '        if true {' \
+  geode-blotter a_right_press_inside_the_selection_keeps_it
+
+# press_context takes the press: a later call (a stale beat) opens nothing.
+run_mutation "row menu: the press is not consumed" \
+  crates/geode-blotter/src/tile.rs \
+  '        let col = self.pressed.take()?;' \
+  '        let col = self.pressed?;' \
+  geode-blotter a_right_press_moves_the_cursor_and_names_the_column
 
 run_mutation "context: a repeated context column is emitted twice" \
   crates/geode-core/src/view.rs \
@@ -22980,8 +23002,8 @@ run_mutation "row menu: a right press ignores press_context" \
 # A right press hangs the menu at the pointer, not the tile's corner.
 run_mutation "row menu: a right press hangs the menu at the tile" \
   crates/geode-shell/src/shell/row_menu.rs \
-  '        self.open_row_menu(context, Some(at), window, cx);' \
-  '        self.open_row_menu(context, None, window, cx);' \
+  '        self.open_row_menu(context, Some(at), true, window, cx);' \
+  '        self.open_row_menu(context, None, true, window, cx);' \
   geode-shell a_right_press_opens_the_row_menu_at_the_pointer
 
 # Both right-press listeners open the menu: the main tree's and the dock's.
@@ -23006,6 +23028,14 @@ run_mutation "row menu: a dismissal forgets the text field" \
   '        self.overlay_return_to_filter = open.return_to_filter;' \
   '        self.overlay_return_to_filter = false;' \
   geode-shell escape_returns_focus_to_the_filter_field_it_opened_from
+
+# A right press moved focus to the tile: the menu it opens never hands
+# focus back to the scope bar's field, whatever held focus at its beat.
+run_mutation "row menu: a right-pressed menu returns focus to the text field" \
+  crates/geode-shell/src/shell/row_menu.rs \
+  '        let return_to_filter = !by_pointer && self.filter_field_focused(window, cx);' \
+  '        let return_to_filter = self.filter_field_focused(window, cx);' \
+  geode-shell a_right_pressed_menu_never_returns_focus_to_the_filter_field
 
 # A pick cancels a chord prefix typed while the menu was open.
 run_mutation "row menu: a prefix survives a pick" \

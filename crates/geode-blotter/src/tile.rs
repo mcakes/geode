@@ -178,6 +178,9 @@ pub struct BlotterTile {
     /// including watched data and configuration; a tile-local requery clears
     /// the stage because it moves no frame counter.
     following: FollowingQuery<(Arc<Snapshot>, Vec<String>)>,
+    /// The display column the last right press landed on, until
+    /// `press_context` takes it for the shell's row menu.
+    pressed: Option<usize>,
 }
 
 /// The frame counters a blotter's answer depends on, copied out of the tile
@@ -446,6 +449,7 @@ impl BlotterTile {
             restored_view_refusal: restored_view_computed,
             find: None,
             following: FollowingQuery::new(),
+            pressed: None,
         }
     }
 
@@ -459,6 +463,26 @@ impl BlotterTile {
     /// before the first snapshot.
     pub fn dimension_context(&self, cx: &App) -> Option<geode_core::context::DimensionContext> {
         self.table.read(cx).delegate().dimension_context()
+    }
+
+    /// The row a right press just landed on, for the shell's row menu,
+    /// leading with the pressed column when it is a dimension the row
+    /// carries (never the tree column or a measure). Takes the press: a
+    /// second call answers `None`.
+    pub fn press_context(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<geode_core::context::DimensionContext> {
+        let col = self.pressed.take()?;
+        let d = self.table.read(cx).delegate();
+        let mut ctx = d.dimension_context()?;
+        ctx.first = d
+            .plan
+            .as_ref()
+            .and_then(|p| p.columns.get(col))
+            .filter(|c| c.kind == ColumnKind::Dimension && ctx.get(&c.name).is_some())
+            .map(|c| c.name.clone());
+        Some(ctx)
     }
 
     /// The presented columns and the cursor's column, for the shell's
@@ -963,6 +987,10 @@ impl BlotterTile {
     /// at the current cursor if none is active, then moves the cursor to the
     /// pointer target. Extending a live selection preserves its kind and anchor.
     fn pointer(&mut self, event: CellPointer, cx: &mut Context<Self>) {
+        if let CellPointer::Context { row, col } = event {
+            self.context_press(row, col, cx);
+            return;
+        }
         let kind_for = |gutter: bool| {
             if gutter {
                 SelectKind::Rows
@@ -993,6 +1021,7 @@ impl BlotterTile {
                     }
                     (row, col, Some(kind_for(gutter)))
                 }
+                CellPointer::Context { .. } => return, // `context_press`, above
             };
             if let Some(kind) = start
                 && d.selection.is_none()
@@ -1005,6 +1034,39 @@ impl BlotterTile {
             d.cursor.col = col.min(cols.saturating_sub(1));
         });
         self.sync_cursor(cx);
+    }
+
+    /// A right press on display cell (`row`, `col`), ahead of the shell's
+    /// row menu. Inside a live row (`V`) selection nothing moves, so the
+    /// selected rows ride along; anywhere else it is a plain press: the
+    /// selection clears and the cursor moves to the cell. Either way the
+    /// column is recorded for [`Self::press_context`].
+    fn context_press(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
+        let inside = self
+            .table
+            .read(cx)
+            .delegate()
+            .resolved
+            .as_ref()
+            .is_some_and(|r| r.kind == SelectKind::Rows && r.rows.contains(&row));
+        if !inside {
+            self.pointer(
+                CellPointer::Press {
+                    row,
+                    col,
+                    shift: false,
+                    gutter: false,
+                },
+                cx,
+            );
+        } else {
+            // The table's own right-press highlight; `sync_cursor` clears
+            // it on the other branch.
+            self.table
+                .update(cx, |t, cx| t.set_right_clicked_row(None, cx));
+        }
+        self.pressed = Some(col);
+        cx.notify();
     }
 
     /// `zo`/`zc`/`za`/`space` on the cursor row, `n` times — and the one
@@ -3174,6 +3236,232 @@ mod tests {
             (d.selection.is_some(), (d.cursor.row, d.cursor.col))
         });
         assert_eq!((sel, cursor), (false, (2, 1)));
+    }
+
+    fn right_press(cx: &mut gpui::VisualTestContext, selector: &'static str) {
+        let at = centre(cx, selector);
+        cx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(at, MouseButton::Right, Modifiers::none());
+    }
+
+    /// gpui-component's table builds its context menu (empty here: the
+    /// shell's row menu stands in for it) on every right press, and that
+    /// menu's dismiss subscription holds it in a cycle only the table's
+    /// next right press breaks, so a test ending after a right press leaks
+    /// it. This breaks it: one more right press, whose deferred rebuild
+    /// never runs because the window closes in the same update.
+    fn release_the_table_menu(cx: &mut gpui::VisualTestContext) {
+        let at = centre(cx, "blotter-cell-0-0");
+        cx.update(|window, cx| {
+            window.dispatch_event(
+                gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                    button: MouseButton::Right,
+                    position: at,
+                    modifiers: Modifiers::none(),
+                    click_count: 1,
+                    first_mouse: false,
+                }),
+                cx,
+            );
+            window.remove_window();
+        });
+        cx.run_until_parked();
+    }
+
+    fn press_context(
+        h: &Harness,
+        cx: &mut gpui::VisualTestContext,
+    ) -> Option<geode_core::context::DimensionContext> {
+        h.tile.update(cx, |t, cx| t.press_context(cx))
+    }
+
+    /// [`delivered`] on a one-level view (`lhu`) that also shows the
+    /// dimension `underlying_ref`, single-valued on each `lhu` row: root;
+    /// L1 (SPX); L2 (NDX). Plan columns: tree, `underlying_ref`, `delta01`.
+    fn delivered_with_a_dimension(
+        cx: &mut gpui::TestAppContext,
+    ) -> (Harness, gpui::VisualTestContext) {
+        let text = "[flat]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n\
+                    [[flat.columns]]\nname = \"underlying_ref\"\nkind = \"dimension\"\n\
+                    [[flat.columns]]\nname = \"delta01\"\n";
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
+        let (h, mut cx) = open_with_views(cx, None, ViewSpec::from_doc(&doc).0);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        let meta = |n: &str| ColumnMeta {
+            name: n.into(),
+            attribution_by_depth: vec![Attribution::Additive; 2],
+            scope_semantics: ScopeSemantics::Direct,
+            summable: n == "delta01",
+            mixed_flag: None,
+        };
+        let snapshot = Snapshot::for_tests(
+            vec![
+                (
+                    meta("lhu"),
+                    TestColumn::Dict(vec![None, Some("L1".into()), Some("L2".into())]),
+                ),
+                (
+                    meta("underlying_ref"),
+                    TestColumn::Dict(vec![None, Some("SPX".into()), Some("NDX".into())]),
+                ),
+                (meta("row_depth"), TestColumn::I32(vec![0, 1, 1])),
+                (
+                    meta("delta01"),
+                    TestColumn::F64(vec![Some(9.0), Some(5.0), Some(4.0)]),
+                ),
+            ],
+            1,
+        );
+        deliver(&h, &mut cx, p.tag, Ok(Arc::new(snapshot)));
+        (h, cx)
+    }
+
+    /// A right press moves the cursor to the pressed cell and records the
+    /// pressed column; `press_context` answers once, leading with that
+    /// column when it is a dimension the row carries.
+    #[gpui::test]
+    fn a_right_press_moves_the_cursor_and_names_the_column(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered_with_a_dimension(cx);
+        right_press(&mut cx, "blotter-cell-1-1");
+        let (cursor, kind) = h.tile.read_with(&cx, |t, cx| {
+            let d = t.table().read(cx).delegate();
+            let c = &d.plan.as_ref().unwrap().columns[1];
+            assert_eq!(c.name, "underlying_ref");
+            ((d.cursor.row, d.cursor.col), c.kind)
+        });
+        assert_eq!(cursor, (1, 1));
+        assert_eq!(kind, ColumnKind::Dimension);
+        let ctx = press_context(&h, &mut cx).expect("a pressed row has a context");
+        assert_eq!(ctx.get("underlying_ref"), Some("SPX"));
+        assert_eq!(ctx.first.as_deref(), Some("underlying_ref"));
+        assert!(ctx.selection.is_empty());
+        assert_eq!(press_context(&h, &mut cx), None, "the press is consumed");
+        release_the_table_menu(&mut cx);
+    }
+
+    /// A measure names no first column: it is no dimension.
+    #[gpui::test]
+    fn a_right_press_on_a_measure_names_no_first_column(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered_with_a_dimension(cx);
+        right_press(&mut cx, "blotter-cell-2-2");
+        let ctx = press_context(&h, &mut cx).expect("a context");
+        assert_eq!(ctx.get("underlying_ref"), Some("NDX"), "row 2's context");
+        assert_eq!(ctx.first, None);
+        release_the_table_menu(&mut cx);
+    }
+
+    /// The tree column names no first column, though its row carries `lhu`.
+    #[gpui::test]
+    fn a_right_press_on_the_tree_names_no_first_column(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered_with_a_dimension(cx);
+        right_press(&mut cx, "blotter-cell-1-0");
+        let ctx = press_context(&h, &mut cx).expect("a context");
+        assert_eq!(ctx.get("lhu"), Some("L1"));
+        assert_eq!(ctx.first, None);
+        release_the_table_menu(&mut cx);
+    }
+
+    #[gpui::test]
+    fn a_right_press_inside_the_selection_keeps_it(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered_with_a_dimension(cx);
+        h.tile.update(&mut cx, |t, cx| {
+            t.with_delegate(cx, |d| {
+                d.cursor.row = 1;
+                d.start_selection(SelectKind::Rows);
+                d.cursor.row = 2;
+            });
+            t.sync_cursor(cx);
+        });
+        let before = h
+            .tile
+            .read_with(&cx, |t, cx| t.table().read(cx).delegate().resolved.clone());
+        right_press(&mut cx, "blotter-cell-1-1");
+        let (after, cursor_row) = h.tile.read_with(&cx, |t, cx| {
+            let d = t.table().read(cx).delegate();
+            (d.resolved.clone(), d.cursor.row)
+        });
+        assert_eq!(after, before, "the selection stays");
+        assert_eq!(cursor_row, 2, "the cursor stays");
+        let ctx = press_context(&h, &mut cx).unwrap();
+        assert_eq!(ctx.selection.len(), 2, "the selected rows ride along");
+        release_the_table_menu(&mut cx);
+    }
+
+    #[gpui::test]
+    fn a_right_press_outside_the_selection_clears_it(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered_with_a_dimension(cx);
+        h.tile.update(&mut cx, |t, cx| {
+            t.with_delegate(cx, |d| {
+                d.cursor.row = 0;
+                d.start_selection(SelectKind::Rows);
+                d.cursor.row = 1;
+            });
+            t.sync_cursor(cx);
+        });
+        right_press(&mut cx, "blotter-cell-2-1");
+        let (sel, cursor_row) = h.tile.read_with(&cx, |t, cx| {
+            let d = t.table().read(cx).delegate();
+            (d.selection.is_some(), d.cursor.row)
+        });
+        assert_eq!((sel, cursor_row), (false, 2));
+        assert!(press_context(&h, &mut cx).unwrap().selection.is_empty());
+        release_the_table_menu(&mut cx);
+    }
+
+    #[gpui::test]
+    fn a_block_selection_fills_no_selection_context(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered_with_a_dimension(cx);
+        h.tile.update(&mut cx, |t, cx| {
+            t.with_delegate(cx, |d| {
+                d.cursor.row = 1;
+                d.start_selection(SelectKind::Block);
+                d.cursor.row = 2;
+            });
+            t.sync_cursor(cx);
+        });
+        let ctx = h
+            .tile
+            .read_with(&cx, |t, cx| {
+                t.table().read(cx).delegate().dimension_context()
+            })
+            .unwrap();
+        assert!(
+            ctx.selection.is_empty(),
+            "only a V (rows) selection rides along"
+        );
+    }
+
+    #[gpui::test]
+    fn the_cursor_row_records_its_anchor(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        let anchor = |h: &Harness, cx: &mut gpui::VisualTestContext| {
+            cx.run_until_parked();
+            h.tile
+                .read_with(cx, |t, cx| {
+                    t.table().read(cx).delegate().dimension_context()
+                })
+                .unwrap()
+                .anchor
+                .expect("an anchor once painted")
+        };
+        let lower_left = |cx: &mut gpui::VisualTestContext, sel: &'static str| {
+            let row = cx.debug_bounds(sel).expect("the row painted");
+            (f32::from(row.left()), f32::from(row.bottom()))
+        };
+        // Within the row's 1px bottom border: the canvas fills the row
+        // inside it.
+        let near = |(ax, ay): (f32, f32), (rx, ry): (f32, f32)| {
+            (ax - rx).abs() <= 1.0 && (ay - ry).abs() <= 1.0
+        };
+        let (at, row) = (anchor(&h, &mut cx), lower_left(&mut cx, "blotter-row-0"));
+        assert!(near(at, row), "{at:?} vs {row:?}");
+        act(&h, &mut cx, "motion::down");
+        let (at, row) = (anchor(&h, &mut cx), lower_left(&mut cx, "blotter-row-1"));
+        assert!(
+            near(at, row),
+            "the anchor follows the cursor row: {at:?} vs {row:?}"
+        );
     }
 
     /// A drag whose press landed outside every cell and gutter (the
