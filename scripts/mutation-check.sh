@@ -5505,14 +5505,13 @@ run_mutation "views: a presentation save pins the desk's column order" \
   geode-shell \
   a_presentation_save_writes_only_what_the_trader_changed
 
-# Write a width override only when it differs from the desk baseline.
-# The fixture declares a desk width and edits another setting so copying
-# the unchanged width becomes observable. The width-specific anchor
-# isolates this check from the precision-based shared overlay entry.
+# Write a width only when the view overlay sets it. The fixture declares a
+# desk width and edits another setting, so writing the inherited width
+# becomes observable.
 run_mutation "views: a presentation save copies the desk's widths into the user's file" \
   crates/geode-shell/src/shell/objectdialog/views.rs \
-  '        if item.presentation.width != below.width {' \
-  '        if true {' \
+  '    if set.has("width")' \
+  '    if true' \
   geode-shell \
   a_presentation_save_writes_only_what_the_trader_changed
 
@@ -7652,12 +7651,9 @@ run_mutation "objectdialog: o asks before forking a desk-owned scope" \
 
 run_mutation "objectdialog: is_dirty ignores a source-only change" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '    pub fn is_dirty(&self) -> bool {
-        self.fields != self.baseline || self.source != self.baseline_source
-    }' \
-  '    pub fn is_dirty(&self) -> bool {
-        self.fields != self.baseline
-    }' \
+  '        self.fields != self.baseline
+            || self.source != self.baseline_source' \
+  '        self.fields != self.baseline' \
   geode-shell overwrite_with_is_seen_even_when_the_painted_summary_collides
 
 run_mutation "objectdialog: writes_by_destination ignores a source-only change" \
@@ -10935,26 +10931,6 @@ run_mutation "objectdialog: a wrapping number wraps" \
   geode-shell \
   a_number_steps_by_its_step_and_wraps_only_when_asked
 
-# The presentation writer omits a key equal to the desk baseline. Both
-# sides resolve through the column kind's default before comparison.
-run_mutation "views: the overlay writer omits keys equal to the desk" \
-  crates/geode-shell/src/shell/objectdialog/views.rs \
-  '        if effective.precision != below_format.precision {' \
-  '        if effective.precision != below_format.precision || true {' \
-  geode-shell \
-  the_writer_emits_only_keys_that_differ_from_the_desk
-
-# The baseline is the kind default WITH THE DESK'S OWN KEYS over
-# it — drop the desk half and every key the desk declares reads as a
-# personalisation and is copied into the trader's overlay, which is the
-# freeze the whole comparison exists to prevent.
-run_mutation "views: the writer's baseline carries the desk's own format keys" \
-  crates/geode-shell/src/shell/objectdialog/views.rs \
-  '        let below_format = kind.clone().with(&below);' \
-  '        let below_format = kind.clone();' \
-  geode-shell \
-  the_writer_emits_only_keys_that_differ_from_the_desk
-
 # A demoted column writes `hidden = true` in its `[columns.<name>]`
 # table. Making the guard unconditional hides every column with a
 # presentation entry, regardless of membership.
@@ -10994,8 +10970,8 @@ run_mutation "objectdialog: the list verbs name the column stage" \
 # back on the next rebuild with the trader's clear gone.
 run_mutation "views: clearing a desk-set key restores the desk's value" \
   crates/geode-shell/src/shell/objectdialog/views.rs \
-  '                    below.label.clone()' \
-  '                    None' \
+  '                "label" => p.label = below.label.clone(),' \
+  '                "label" => p.label = None,' \
   geode-shell \
   clearing_a_desk_label_falls_back_to_the_desk
 
@@ -11249,18 +11225,12 @@ run_mutation "blotter: the colour cache resolves the sign variants" \
   geode-blotter \
   a_tinted_definition_resolves_three_variants_and_an_untinted_one_three_of_the_base
 
-run_mutation "objectdialog: d and r are refused in the column stage" \
+run_mutation "objectdialog: r inherits in the column stage" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    if in_column_stage(shell) {
-        not_a_column_verb(shell, "r");
-        return;
-    }' \
-  '    if false {
-        not_a_column_verb(shell, "r");
-        return;
-    }' \
+  "        NormalCommand::Verb('r') if in_column_stage(shell) => inherit_row(shell, cx)," \
+  "" \
   geode-shell \
-  delete_and_revert_are_refused_in_the_column_stage
+  delete_is_refused_and_r_inherits_in_the_column_stage
 
 run_mutation "objectdialog: enter_column refuses re-entry" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
@@ -11367,25 +11337,23 @@ run_mutation "objectdialog: Schema's column stage is its one writable surface" \
   geode-shell \
   schema_is_writable_in_the_column_stage_alone
 
-# Stepping a view field immediately reports the view layer, including during
-# the write debounce.
-run_mutation "objectdialog: a diverged field's provenance is the view level" \
+# A field set at the view level reads the view layer, even when its value
+# equals the layer below.
+run_mutation "objectdialog: a set field's provenance is the view level" \
   crates/geode-shell/src/shell/objectdialog/dataset_columns.rs \
-  '            if differs_from(below) {' \
-  '            if false {' \
+  '        ColumnDoor::View if inputs.set.has(key) => Some(Provenance::View),' \
+  '' \
   geode-shell \
-  a_stepped_field_reads_view_before_its_write_lands
+  a_set_field_reads_view_even_when_equal_to_its_parent
 
 # Clearing a view key reports the layer it falls back to: dataset before
 # desk.
 run_mutation "objectdialog: a cleared view key falls to the dataset level before the desk" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '                if set(&layers.dataset) {
-                    Some(FellTo::Dataset)
-                } else if set(&layers.desk) {' \
-  '                if set(&layers.desk) {
-                    Some(FellTo::Desk)
-                } else if set(&layers.dataset) {' \
+  '            ColumnDoor::View if views::sets(&ctx.layers.dataset, key) => FellTo::Dataset,
+            ColumnDoor::View if views::sets(&ctx.layers.desk, key) => FellTo::Desk,' \
+  '            ColumnDoor::View if views::sets(&ctx.layers.desk, key) => FellTo::Desk,
+            ColumnDoor::View if views::sets(&ctx.layers.dataset, key) => FellTo::Dataset,' \
   geode-shell \
   a_cleared_view_key_falls_to_the_dataset_level_before_the_desk
 
@@ -11395,7 +11363,7 @@ run_mutation "dataset_columns: the writer keeps the other columns' tables" \
   '            if name != open' \
   '            if false' \
   geode-shell \
-  the_writer_keeps_other_columns_verbatim_and_emits_only_keys_off_the_kind_default
+  schema_writer_keeps_other_columns_and_writes_only_set_keys
 
 # Remove an empty overlay object instead of writing a bare dataset table.
 run_mutation "objectdialog: an empty dataset-overlay object is removed" \
@@ -11471,16 +11439,6 @@ run_mutation "dataset_columns: a key column's kind falls back on its type" \
   geode-shell \
   a_key_column_takes_the_text_kind_from_its_type
 
-# View writes compare against desk plus dataset settings. Comparing only
-# against the desk copies dataset values into view overrides and prevents
-# later dataset edits from taking effect.
-run_mutation "views: the overlay writer's baseline includes the dataset level" \
-  crates/geode-shell/src/shell/objectdialog/views.rs \
-  '    let baseline = baseline_below(draft);' \
-  '    let baseline = desk_baseline(draft);' \
-  geode-shell \
-  a_view_field_equal_to_the_dataset_level_writes_nothing
-
 # Look up dataset presentation by the column's owner, including a joined
 # dataset. Using only the view's primary dataset loses joined-column
 # settings.
@@ -11491,13 +11449,12 @@ run_mutation "views: the dataset layer follows the column's owning dataset" \
   geode-shell \
   a_joined_columns_dataset_layer_comes_from_the_join
 
-# A cleared-key notice compares against the item's own pre-fold value.
-# Without that guard, untouched empty fields can overwrite the notice for
-# the key that actually changed.
+# A released-key notice fires only for a key that was set. Without that
+# guard, an already-inherited empty label reports a release it never made.
 run_mutation "views: a clear is what this keystroke emptied" \
   crates/geode-shell/src/shell/objectdialog/views.rs \
-  '                    if item.presentation.label.is_some() {' \
-  '                    if true {' \
+  '        if set.has(key) {' \
+  '        if true {' \
   geode-shell \
   clearing_a_desk_label_falls_back_to_the_desk
 
