@@ -417,8 +417,11 @@ pub fn pricer_templates_from_config(
 }
 
 /// Inputs to the pricer's live reload: the merged `views` doc with both
-/// presentation overlays and the colors they may name (the pricer's column
-/// plan is built from all four), merged `pricer_templates`, raw
+/// presentation overlays (the pricer's column plan is built from all three),
+/// the colors they may name (the plan is not yet painted from them; they are
+/// keyed so a later color-aware paint reloads without a change here), the
+/// retired `pricer_views` doc (so one added at runtime raises its
+/// retirement diagnostic without a restart), merged `pricer_templates`, raw
 /// `app.pricing.refresh` and `app.pricing.underlyings`, and the resolved
 /// stale threshold. Equal keys leave factory views, templates, suggestions,
 /// and timers alone and avoid repeating invalid-value warnings. The selected
@@ -429,6 +432,7 @@ pub struct PricerConfigKey {
     view_presentation: Option<toml::Table>,
     dataset_presentation: Option<toml::Table>,
     colors: Option<toml::Table>,
+    pricer_views: Option<toml::Table>,
     templates: Option<toml::Table>,
     refresh: Option<toml::Value>,
     underlyings: Option<toml::Value>,
@@ -443,6 +447,7 @@ pub fn pricer_config_key(config: &Config) -> PricerConfigKey {
         colors: config
             .doc(geode_core::config::COLORS_DOC)
             .map(|d| d.value.clone()),
+        pricer_views: config.doc(PRICER_VIEWS_DOC).map(|d| d.value.clone()),
         templates: config.doc(PRICER_TEMPLATES_DOC).map(|d| d.value.clone()),
         refresh: config.get("app", "pricing.refresh").cloned(),
         underlyings: config.get("app", "pricing.underlyings").cloned(),
@@ -1918,6 +1923,31 @@ role = "key"
             ))),
             base,
             "a colors edit"
+        );
+    }
+
+    /// The retired doc is part of the key: one added at runtime, with no
+    /// other pricer-relevant edit, must still reach the reload path that
+    /// raises its retirement diagnostic.
+    #[test]
+    fn a_runtime_added_pricer_views_doc_changes_the_pricer_key() {
+        let config = |extra: Option<LayerDoc>| {
+            let mut builtin = vec![LayerDoc::builtin("views", SLIM_VIEW).unwrap()];
+            builtin.extend(extra);
+            Config::load(&ConfigSources {
+                builtin,
+                desk: None,
+                user: None,
+            })
+        };
+        let base = pricer_config_key(&config(None));
+        assert_ne!(
+            pricer_config_key(&config(Some(
+                LayerDoc::builtin(PRICER_VIEWS_DOC, "[slim]\ncolumns = [\"qty\", \"npv\"]\n")
+                    .unwrap()
+            ))),
+            base,
+            "a pricer_views doc appearing"
         );
     }
 

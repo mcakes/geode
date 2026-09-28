@@ -460,8 +460,8 @@ entry replaces a whole view by name, and `view_presentation.toml` and
 not declare `joins` or a `derived` column: either is an error diagnostic on
 the view, and the pricer drops that view rather than paint part of it. A
 `pricer_views` document is no longer read; its presence is an error naming
-`views.toml`. A reload that changes a view, either overlay or the colors
-reaches open pricer tiles; a tile whose view disappeared shows the first
+`views.toml`. A reload that changes a view or either overlay reaches open
+pricer tiles; a tile whose view disappeared shows the first
 `pricer` view with a header notice, and a view whose every column is hidden
 says so in the header.
 
