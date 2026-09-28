@@ -23,8 +23,8 @@ use geode_marketdata::MarketDataFactory;
 use geode_marketdata::core::{CVI, DIVIDEND};
 use geode_pricer::content::{PricerFactory, PricerSettings, UnderlyingList};
 use geode_pricer::core::{
-    PRICER_SHEETS_DATASET, PRICER_SHEETS_DECLARATION, PRICER_TEMPLATES_DOC, PRICER_VIEWS_DOC,
-    TemplateSet, Views,
+    PRICER_DATASET, PRICER_DATASET_DECLARATION, PRICER_SHEETS_DATASET, PRICER_SHEETS_DECLARATION,
+    PRICER_TEMPLATES_DOC, PRICER_VIEWS_DOC, TemplateSet, Views,
 };
 use geode_pricer::store::DuckSheetStore;
 use geode_shell::diagnostics::{CatalogRequest, Diagnostics, SourceSummary};
@@ -83,7 +83,7 @@ pub fn data_setup(
     let mut diagnostics = Vec::new();
     let (mut schema, d) = SchemaSpec::from_doc(datasets);
     diagnostics.extend(d);
-    diagnostics.extend(pin_pricer_sheets(&mut schema, config));
+    diagnostics.extend(pin_app_datasets(&mut schema, config));
     let (views, d) = load_views(config);
     diagnostics.extend(d);
     let (dimensions, d) = config
@@ -190,33 +190,65 @@ pub fn data_setup(
     })
 }
 
-/// Keep `pricer_sheets` exactly as the app declares it. Its tables are
-/// created once and written positionally (`insert … select *`), so a desk
-/// or user layer redeclaring it with other columns, or the same columns in
-/// another order, would put sheet values into the wrong columns of an
-/// existing database while reads by name decode a plausible wrong sheet.
-/// A redeclaration that differs (or is invalid, and so dropped from the
+/// Keep the app's own datasets exactly as it declares them. `pricer_sheets`
+/// tables are created once and written positionally (`insert … select *`),
+/// so a desk or user layer redeclaring it with other columns, or the same
+/// columns in another order, would put sheet values into the wrong columns
+/// of an existing database while reads by name decode a plausible wrong
+/// sheet. `pricer` is the vocabulary views, scopes and groupings compile
+/// against, so a differing redeclaration would silently change what they
+/// mean. Each is pinned by `pin_app_dataset`; a config with neither (no
+/// builtin layer) is left alone.
+fn pin_app_datasets(schema: &mut SchemaSpec, config: &Config) -> Vec<Diagnostic> {
+    [
+        pin_app_dataset(
+            schema,
+            config,
+            PRICER_SHEETS_DATASET,
+            PRICER_SHEETS_DECLARATION,
+            "a different column list would put sheet values in the wrong columns",
+        ),
+        pin_app_dataset(
+            schema,
+            config,
+            PRICER_DATASET,
+            PRICER_DATASET_DECLARATION,
+            "a differing declaration would change what a view, scope or grouping over the \
+             pricer means",
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// Keep dataset `name` exactly as the app's `declaration` reads. A
+/// redeclaration that differs (or is invalid, and so dropped from the
 /// schema) is replaced by the builtin one and reported as an error naming
-/// the layer and file; an identical one is accepted silently. A config with
-/// no `pricer_sheets` at all (no builtin layer) is left alone.
-fn pin_pricer_sheets(schema: &mut SchemaSpec, config: &Config) -> Option<Diagnostic> {
+/// the layer and file, with `why` explaining what a differing declaration
+/// would break; an identical one is accepted silently. A config with no
+/// `name` at all (no builtin layer) is left alone.
+fn pin_app_dataset(
+    schema: &mut SchemaSpec,
+    config: &Config,
+    name: &str,
+    declaration: &str,
+    why: &str,
+) -> Option<Diagnostic> {
     if !config
         .doc("datasets")
-        .is_some_and(|d| d.value.contains_key(PRICER_SHEETS_DATASET))
+        .is_some_and(|d| d.value.contains_key(name))
     {
         return None;
     }
-    let builtin = LayerDoc::builtin("datasets", PRICER_SHEETS_DECLARATION)
-        .expect("PRICER_SHEETS_DECLARATION is well-formed TOML");
+    let builtin = LayerDoc::builtin("datasets", declaration)
+        .unwrap_or_else(|e| panic!("the app's `{name}` declaration is well-formed TOML: {e}"));
     let (alone, _) = SchemaSpec::from_doc(&merge_docs("datasets", &[builtin]));
     let declared = alone
-        .dataset(PRICER_SHEETS_DATASET)
-        .expect("PRICER_SHEETS_DECLARATION declares pricer_sheets")
+        .dataset(name)
+        .unwrap_or_else(|| panic!("the app's declaration declares `{name}`"))
         .clone();
-    let slot = schema
-        .datasets
-        .iter()
-        .position(|d| d.name == PRICER_SHEETS_DATASET);
+    let slot = schema.datasets.iter().position(|d| d.name == name);
     if slot.is_some_and(|i| schema.datasets[i] == declared) {
         return None;
     }
@@ -228,17 +260,16 @@ fn pin_pricer_sheets(schema: &mut SchemaSpec, config: &Config) -> Option<Diagnos
         .layered_docs("datasets")
         .iter()
         .rev()
-        .find(|d| d.layer != Layer::Builtin && d.table.contains_key(PRICER_SHEETS_DATASET));
+        .find(|d| d.layer != Layer::Builtin && d.table.contains_key(name));
     Some(Diagnostic {
         severity: Severity::Error,
         layer: redeclared.map(|d| d.layer),
         file: redeclared.map(|d| d.file.clone()),
         message: format!(
-            "`{PRICER_SHEETS_DATASET}` is declared by the app; this redeclaration is ignored \
-             (its table's columns are fixed, and a different column list would put sheet \
-             values in the wrong columns)"
+            "`{name}` is declared by the app; this redeclaration is ignored \
+             (its columns are fixed: {why})"
         ),
-        path: Some(format!("datasets.{PRICER_SHEETS_DATASET}")),
+        path: Some(format!("datasets.{name}")),
     })
 }
 
@@ -772,7 +803,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 let mut pin_diags = Vec::new();
                 if let Some(mut schema) = config.doc("datasets").map(|d| SchemaSpec::from_doc(d).0)
                 {
-                    pin_diags.extend(pin_pricer_sheets(&mut schema, config));
+                    pin_diags.extend(pin_app_datasets(&mut schema, config));
                     factory.set_schema(schema);
                 }
                 factory.set_dims(dims.clone());
@@ -4786,9 +4817,9 @@ role = "key"
         );
     }
 
-    /// A desk layer's `datasets.toml` whose body is `pricer_sheets`
-    /// declared as `declaration`, and the sources loading it over the
-    /// builtin layer.
+    /// A desk layer's `datasets.toml` whose body is `declaration` (any
+    /// datasets text: a `pricer_sheets` or `pricer` redeclaration), and
+    /// the sources loading it over the builtin layer.
     fn with_desk_pricer_sheets(dir: &Path, declaration: &str) -> (ConfigSources, PathBuf) {
         let desk = dir.join("desk");
         std::fs::create_dir_all(&desk).unwrap();
@@ -4871,6 +4902,60 @@ role = "key"
             "{:?}",
             setup.diagnostics
         );
+    }
+
+    /// The builtin layer declares the pricer's vocabulary as a computed
+    /// dataset, so views, scopes and groupings can name its columns.
+    #[test]
+    fn the_pricer_dataset_is_declared_computed_in_every_build() {
+        let config = Config::load(&ConfigSources {
+            builtin: crate::builtin_layer(None),
+            desk: None,
+            user: None,
+        });
+        let (schema, _) = SchemaSpec::from_doc(config.doc("datasets").unwrap());
+        let ds = schema
+            .dataset(geode_pricer::core::PRICER_DATASET)
+            .expect("declared by the builtin layer");
+        assert!(ds.computed);
+        assert_eq!(ds.columns.len(), 44);
+    }
+
+    /// The app owns `pricer` too: a differing redeclaration would change
+    /// what a view, scope or grouping over the pricer means, so it is
+    /// ignored with an error naming the layer and its file.
+    #[test]
+    fn a_layer_redeclaring_pricer_differently_is_ignored_with_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sources, file) = with_desk_pricer_sheets(
+            dir.path(),
+            "[pricer]\ncomputed = false\n[pricer.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\n",
+        );
+        let config = Config::load(&sources);
+        let setup = data_setup(
+            &config,
+            dir.path().join("geode.duckdb"),
+            AdapterRegistry::default(),
+            geode_data::PricerRegistry::default(),
+        )
+        .unwrap();
+        let ds = setup
+            .config
+            .schema
+            .dataset(geode_pricer::core::PRICER_DATASET)
+            .expect("the app's declaration");
+        assert!(
+            ds.computed && ds.columns.len() == 44,
+            "the service runs the app's declaration"
+        );
+        let d = setup
+            .diagnostics
+            .iter()
+            .find(|d| d.path.as_deref() == Some("datasets.pricer") && d.severity == Severity::Error)
+            .expect("an error diagnostic");
+        assert_eq!(d.layer, Some(geode_core::config::Layer::Desk));
+        assert_eq!(d.file.as_deref(), Some(file.as_path()));
+        assert!(d.message.contains("ignored"), "{}", d.message);
     }
 
     /// A reload re-reads `datasets` for the blotter's validation schema:

@@ -159,20 +159,23 @@ publication remains positional. Rebuild a demo database after changing column
 membership, roles, grains, or order. A production schema migration must be an
 explicit operation.
 
-Every build declares one dataset in its builtin layer: `pricer_sheets`, the
-line pricer's local document dataset (see [the line pricer](features.md)).
-`datasets` merges per dataset name, so a demo, desk, or user `datasets`
-document adds its datasets beside it, and a `datasets` document always
-exists. Because its tables are written positionally, the app keeps its own
-declaration: a layer that redeclares `pricer_sheets` identically is accepted
-silently, and any other redeclaration — different columns, order, or flags,
-or one invalid enough that the reader dropped it — is replaced by the builtin
-declaration at startup and on reload, with an error diagnostic naming the
-redeclaring layer and file. The Schema dialog still lists `pricer_sheets`; an
-edit saved there is such a redeclaration. Local datasets are not offered as
-the dataset choice in the Views and Sources dialogs: no view reads the app's
-own documents, and the source reader refuses a local dataset. A value that
-already names one is kept, as any current value is.
+Every build declares two datasets in its builtin layer: `pricer_sheets`, the
+line pricer's local document dataset, and `pricer`, its computed vocabulary
+dataset (see [the line pricer](features.md)). `datasets` merges per dataset
+name, so a demo, desk, or user `datasets` document adds its datasets beside
+them, and a `datasets` document always exists. The app keeps its own
+declaration of both — `pricer_sheets` because its tables are written
+positionally, `pricer` because a differing declaration would change what a
+view, scope, or grouping over the pricer means: a layer that redeclares
+either identically is accepted silently, and any other redeclaration —
+different columns, order, or flags, or one invalid enough that the reader
+dropped it — is replaced by the builtin declaration at startup and on reload,
+with an error diagnostic naming the redeclaring layer and file. The Schema
+dialog still lists both; an edit saved there is such a redeclaration. Local
+datasets are not offered as the dataset choice in the Views and Sources
+dialogs: no view reads the app's own documents, and the source reader refuses
+a local dataset. A value that already names one is kept, as any current value
+is.
 
 A measures-family dataset may set `computed = true`: a module answers for it
 in process. No source may feed it (the source reader refuses one), no table is

@@ -393,8 +393,9 @@ fn add_bridge_modules(roster: &mut ModuleRoster, bridge: &bridge::Bridge) {
 
 /// Every builtin config doc: the shell's keymap, the pricer's two bundled
 /// views and seven package templates (a desk or user layer overrides a
-/// view or a template by name), the pricer's `pricer_sheets` dataset, and
-/// the `--demo` layer.
+/// view or a template by name), the pricer's two datasets (`pricer_sheets`,
+/// its local documents, and `pricer`, its computed vocabulary), and the
+/// `--demo` layer.
 fn builtin_layer(demo_root: Option<&Path>) -> Vec<LayerDoc> {
     let mut builtin = vec![
         LayerDoc::builtin("keymap", BUILTIN_KEYMAP).expect("builtin keymap TOML is well-formed"),
@@ -410,9 +411,13 @@ fn builtin_layer(demo_root: Option<&Path>) -> Vec<LayerDoc> {
         .expect("BUILTIN_TEMPLATES is well-formed TOML"),
         // The pricer's sheets, a local document dataset every build
         // declares. `datasets` merges per dataset name, so a demo, desk or
-        // user `datasets` doc adds its own datasets beside this one.
+        // user `datasets` doc adds its own datasets beside these two.
         LayerDoc::builtin("datasets", geode_pricer::core::PRICER_SHEETS_DECLARATION)
             .expect("PRICER_SHEETS_DECLARATION is well-formed TOML"),
+        // The pricer's vocabulary as a computed dataset: views, scopes and
+        // groupings see its columns; nothing stores or queries it.
+        LayerDoc::builtin("datasets", geode_pricer::core::PRICER_DATASET_DECLARATION)
+            .expect("PRICER_DATASET_DECLARATION is well-formed TOML"),
     ];
     if let Some(root) = demo_root {
         builtin.extend(demo::layer(&root.join("src")));
