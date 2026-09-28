@@ -22,8 +22,8 @@ are part of several document contracts.
 
 Top-level entries in `views`, `view_presentation`, `dataset_presentation`,
 `layouts`, `groupings`, `scopes`, `datasets`, `sources`, `egress`, `dimensions`,
-`colors`, `expressions`, `pricer_views`, `pricer_templates`, and `overrides`
-replace whole named objects.
+`colors`, `expressions`, `pricer_views`, `pricer_templates`, `panels`, and
+`overrides` replace whole named objects.
 Overriding one source therefore requires its complete configuration, including
 required fields; omitted fields do not inherit from the lower-layer source.
 

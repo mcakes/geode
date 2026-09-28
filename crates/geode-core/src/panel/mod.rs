@@ -4,12 +4,17 @@
 //! actions it offers. What a kind action does stays code, registered by id
 //! in the composition root.
 
+use crate::config::{Diagnostic, MergedDoc, Severity};
 use crate::schema::ColumnType;
 use crate::view::ColumnFormat;
 use std::sync::Arc;
 
 #[cfg(test)]
 mod tests;
+
+mod read;
+
+pub use read::read_panels;
 
 /// The layered document panels are read from.
 pub const PANELS_DOC: &str = "panels";
@@ -37,7 +42,8 @@ pub struct KindAction {
 /// A value constant across a row-axis slice, such as CVI's forward per
 /// term. The long document repeats it on every node row; the grid paints
 /// it before the ladder using its own format. Row bumps skip these columns.
-/// Slice values are read and uploaded as `f64`.
+/// Slice values are read and uploaded as `f64`; their editors use the
+/// panel's `value_type`, which must therefore be compatible.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SliceValue {
     pub column: String,
@@ -60,6 +66,8 @@ pub enum RowIdentity {
 /// Whether to paint a row-label column. A hidden label still identifies
 /// draft rows across restoration and rebase; only minted identities may
 /// hide it, since a typed identity is named in that column.
+/// With a hidden label, table column 0 becomes the first value, and
+/// search and copy operate on the painted cells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowLabel {
     Shown,
@@ -193,5 +201,21 @@ impl KindActionRegistry {
     /// Registered ids in registration order, for diagnostics.
     pub fn ids(&self) -> Vec<&'static str> {
         self.actions.iter().map(|a| a.id).collect()
+    }
+}
+
+/// An Error refusing panel `name` at `panels.<name>[.<suffix>]`, attributed
+/// to the layer that supplied it. A refused panel never becomes a tile kind.
+pub fn refusal(doc: &MergedDoc, name: &str, suffix: &str, message: &str) -> Diagnostic {
+    Diagnostic {
+        severity: Severity::Error,
+        layer: doc.provenance.get(name).copied(),
+        file: None,
+        message: format!("panel '{name}': {message}; the panel is refused"),
+        path: Some(if suffix.is_empty() {
+            format!("{PANELS_DOC}.{name}")
+        } else {
+            format!("{PANELS_DOC}.{name}.{suffix}")
+        }),
     }
 }
