@@ -94,3 +94,30 @@ fn only_a_shown_row_label_paints_a_label_column() {
     spec.rows.label = RowLabel::Hidden;
     assert!(!spec.rows.shown());
 }
+
+const REANCHOR: KindAction = KindAction {
+    id: "marketdata::cvi_reanchor",
+    title: "Reanchor",
+    built: false,
+};
+
+#[test]
+fn a_registered_kind_action_is_found_by_id_and_a_second_registration_is_refused() {
+    let mut registry = KindActionRegistry::default();
+    registry.register(REANCHOR).unwrap();
+    assert_eq!(registry.get("marketdata::cvi_reanchor"), Some(REANCHOR));
+    assert_eq!(registry.get("marketdata::nonesuch"), None);
+    assert_eq!(registry.ids(), vec!["marketdata::cvi_reanchor"]);
+    let again = KindAction {
+        title: "Other",
+        ..REANCHOR
+    };
+    assert!(
+        registry.register(again).is_err(),
+        "one id, one verb: a second registration would change what a panel's menu row does"
+    );
+    assert_eq!(
+        registry.get("marketdata::cvi_reanchor").unwrap().title,
+        "Reanchor"
+    );
+}

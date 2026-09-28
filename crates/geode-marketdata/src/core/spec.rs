@@ -3,8 +3,8 @@
 //! holds the compiled-in CVI and dividend panels.
 
 pub use geode_core::panel::{
-    Columns, HeaderAttr, KindAction, PanelSpec, RowAxis, RowIdentity, RowLabel, SliceValue,
-    ValueColumn,
+    Columns, HeaderAttr, KindAction, KindActionRegistry, PanelSpec, RowAxis, RowIdentity, RowLabel,
+    SliceValue, ValueColumn,
 };
 use geode_core::schema::ColumnType;
 use geode_core::view::ColumnFormat;
@@ -17,6 +17,33 @@ const fn four_places() -> ColumnFormat {
         precision: 4,
         ..ColumnFormat::TEXT
     }
+}
+
+/// Every kind action this crate's tile dispatches. Both CVI verbs are
+/// unbuilt: the tile answers "not built yet" and the menu greys their rows.
+pub const BUILTIN_KIND_ACTIONS: &[KindAction] = &[
+    KindAction {
+        id: "marketdata::cvi_reanchor",
+        title: "Reanchor",
+        built: false,
+    },
+    KindAction {
+        id: "marketdata::cvi_recalc_forward",
+        title: "Recalc forward",
+        built: false,
+    },
+];
+
+/// [`BUILTIN_KIND_ACTIONS`] as a registry — what the composition root
+/// registers and what this crate's builtin panels are read against.
+pub fn builtin_kind_actions() -> KindActionRegistry {
+    let mut registry = KindActionRegistry::default();
+    for action in BUILTIN_KIND_ACTIONS {
+        registry
+            .register(*action)
+            .expect("the builtin kind-action ids are distinct");
+    }
+    registry
 }
 
 /// One CVI document per underlying, with terms as rows and nodes as columns.
@@ -68,18 +95,7 @@ pub static CVI: LazyLock<Arc<PanelSpec>> = LazyLock::new(|| {
         ],
         value_type: ColumnType::F64,
         format: four_places(),
-        actions: vec![
-            KindAction {
-                id: "marketdata::cvi_reanchor",
-                title: "Reanchor",
-                built: false,
-            },
-            KindAction {
-                id: "marketdata::cvi_recalc_forward",
-                title: "Recalc forward",
-                built: false,
-            },
-        ],
+        actions: BUILTIN_KIND_ACTIONS.to_vec(),
     })
 });
 
@@ -327,5 +343,18 @@ mod tests {
         for c in ["announced_date", "pay_date", "ex_date", "amount", "status"] {
             assert!(cols.iter().find(|v| v.column == c).unwrap().required, "{c}");
         }
+    }
+
+    /// The builtin verbs are CVI's two, both unbuilt, and CVI offers exactly
+    /// the registry's entries — the menu and dispatch read them through it.
+    #[test]
+    fn the_builtin_kind_actions_are_cvis_two_unbuilt_verbs() {
+        let registry = builtin_kind_actions();
+        assert_eq!(
+            registry.ids(),
+            vec!["marketdata::cvi_reanchor", "marketdata::cvi_recalc_forward"]
+        );
+        assert!(BUILTIN_KIND_ACTIONS.iter().all(|a| !a.built));
+        assert_eq!(CVI.actions, BUILTIN_KIND_ACTIONS.to_vec());
     }
 }

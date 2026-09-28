@@ -23,4 +23,7 @@ pub use geode_widgets::datefield::{
     DateTimeField, FieldKey, Precision, Segment, SegmentPaint, SegmentText, route,
 };
 pub use matrix::{Cell, CellKind, MatrixModel, RowModel, cell_text};
-pub use spec::{CVI, Columns, DIVIDEND, KindAction, PanelSpec, STATUSES};
+pub use spec::{
+    BUILTIN_KIND_ACTIONS, CVI, Columns, DIVIDEND, KindAction, PanelSpec, STATUSES,
+    builtin_kind_actions,
+};

@@ -165,3 +165,33 @@ impl PanelSpec {
         }
     }
 }
+
+/// Every kind action this build can offer, by id. A panel lists ids; the
+/// reader resolves each here and refuses an id nobody registered. Adding a
+/// verb is code, registered by the composition root.
+#[derive(Debug, Clone, Default)]
+pub struct KindActionRegistry {
+    actions: Vec<KindAction>,
+}
+
+impl KindActionRegistry {
+    /// Register `action`. A second registration of one id is refused: two
+    /// verbs behind one id would make a panel's menu row do either.
+    pub fn register(&mut self, action: KindAction) -> Result<(), String> {
+        if self.get(action.id).is_some() {
+            return Err(format!("kind action '{}' is registered twice", action.id));
+        }
+        self.actions.push(action);
+        Ok(())
+    }
+
+    /// The action registered under `id`, or `None` when nobody registered it.
+    pub fn get(&self, id: &str) -> Option<KindAction> {
+        self.actions.iter().find(|a| a.id == id).copied()
+    }
+
+    /// Registered ids in registration order, for diagnostics.
+    pub fn ids(&self) -> Vec<&'static str> {
+        self.actions.iter().map(|a| a.id).collect()
+    }
+}
