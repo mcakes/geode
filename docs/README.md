@@ -1,9 +1,14 @@
 # Documentation
 
+New users should start with the [user guide](user-guide.md): a guided demo
+walkthrough that introduces Geode's philosophy, tiles, shared context, and
+everyday interaction patterns.
+
 Start with the documents that describe Geode **as it works now**:
 
 | Document | Purpose |
 |---|---|
+| [User guide](user-guide.md) | First steps, a guided demo walkthrough, and everyday patterns |
 | [Project README](../README.md) | Product overview, setup, and repository map |
 | [Philosophy](PHILOSOPHY.md) | Product and architecture principles |
 | [Architecture](current/architecture.md) | Crate boundaries, runtime ownership, configuration, and failure handling |
