@@ -410,6 +410,11 @@ impl Harness {
         let id = ActionId(format!("timeseries::{verb}"));
         vcx.update(|window, cx| self.content.dispatch(&id, count, window, cx))
     }
+    /// Dispatch a shared `motion::{id}`, the id the shell's keys send.
+    fn motion(&self, vcx: &mut gpui::VisualTestContext, id: &str, count: Option<u32>) {
+        let id = ActionId(format!("motion::{id}"));
+        vcx.update(|window, cx| self.content.dispatch(&id, count, window, cx));
+    }
     fn visible(&self, vcx: &mut gpui::VisualTestContext, visible: bool) {
         vcx.update(|_, cx| self.content.set_visible(visible, cx));
     }
@@ -984,7 +989,7 @@ fn the_edit_verb_on_a_source_slot_says_so(cx: &mut gpui::TestAppContext) {
         Some("SPX.close is not an expression")
     );
     // An unhandled list action with no list open preserves the standing notice.
-    h.dispatch(&mut vcx, "list_down", None);
+    h.motion(&mut vcx, "menu_down", None);
     assert_eq!(
         h.notice(&vcx).as_deref(),
         Some("SPX.close is not an expression")
@@ -1729,6 +1734,50 @@ fn closing_the_tile_mid_flip_cancels_its_query_and_releases_the_barrier(
     );
 }
 
+/// The series list and the action menu publish `tilelist`, so a real `j`
+/// through the spliced keymap reaches each as the shared menu step: the
+/// list's cursor wraps like the chips, the menu's highlight moves. With no
+/// popup open the flag is gone, and the tile never publishes `grid`, so its
+/// own `h`/`l` pan and `g`/`shift+g` jump are not shadowed.
+#[gpui::test]
+fn tilelist_keys_step_the_open_list(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "add VIX@demo_rest").unwrap();
+    let ctx = |vcx: &gpui::VisualTestContext| h.tile.read_with(vcx, |t, _| t.key_context());
+    assert!(!ctx(&vcx).has_flag(geode_shell::keymap::TILELIST));
+    assert!(!ctx(&vcx).has_flag(geode_shell::keymap::GRID));
+
+    h.dispatch(&mut vcx, "list", None);
+    assert!(h.popup_is_series(&vcx));
+    assert!(ctx(&vcx).has_flag(geode_shell::keymap::TILELIST));
+    let before = h.model(&vcx).cursor();
+    h.keys(&mut vcx, "j");
+    let after = h.model(&vcx).cursor();
+    assert_ne!(after, before, "j stepped the series list");
+    assert!(h.popup_is_series(&vcx), "the step kept the list open");
+    h.keys(&mut vcx, "k");
+    assert_eq!(h.model(&vcx).cursor(), before, "k stepped back");
+    h.dispatch(&mut vcx, "list_close", None);
+    assert!(!ctx(&vcx).has_flag(geode_shell::keymap::TILELIST));
+
+    let highlight = |vcx: &gpui::VisualTestContext| {
+        h.tile.read_with(vcx, |t, _| match t.popup() {
+            Some(Popup::Menu(m)) => m.menu.highlighted(),
+            _ => None,
+        })
+    };
+    h.dispatch(&mut vcx, "menu", None);
+    assert!(ctx(&vcx).has_flag(geode_shell::keymap::TILELIST));
+    let before = highlight(&vcx);
+    h.keys(&mut vcx, "down");
+    assert_ne!(highlight(&vcx), before, "down stepped the action menu");
+    h.keys(&mut vcx, "up");
+    assert_eq!(highlight(&vcx), before, "up stepped back");
+    h.dispatch(&mut vcx, "list_close", None);
+    assert!(!ctx(&vcx).has_flag(geode_shell::keymap::TILELIST));
+}
+
 #[gpui::test]
 fn shift_l_opens_the_series_popup_whose_cursor_is_the_chips_cursor(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
@@ -1752,9 +1801,9 @@ fn shift_l_opens_the_series_popup_whose_cursor_is_the_chips_cursor(cx: &mut gpui
     assert_eq!(rows[1].source_rule.as_ref(), "demo_rest · mean");
     assert_eq!(rows[1].axis, "L");
     assert_eq!(rows[1].state.as_ref(), "fetching");
-    h.dispatch(&mut vcx, "list_up", None);
+    h.motion(&mut vcx, "menu_up", None);
     assert_eq!(h.model(&vcx).cursor(), Some(0));
-    h.dispatch(&mut vcx, "list_down", Some(3));
+    h.motion(&mut vcx, "menu_down", Some(3));
     assert_eq!(h.model(&vcx).cursor(), Some(1), "wraps like the chips");
     h.dispatch(&mut vcx, "axis_next", None);
     assert!(h.popup_is_series(&vcx), "a popup verb keeps it open");
@@ -3191,9 +3240,9 @@ fn the_menu_keys_step_over_action_rows_pick_and_close(cx: &mut gpui::TestAppCont
     assert!(h.popup_is_menu(&vcx));
     // Three down from `Add series…` lands on `Range…`; one more skips
     // the separator and the section and lands on `Hide`.
-    h.dispatch(&mut vcx, "list_down", Some(3));
+    h.motion(&mut vcx, "menu_down", Some(3));
     assert!(h.menu_rows(&vcx)[3].1, "{:?}", h.menu_rows(&vcx));
-    h.dispatch(&mut vcx, "list_down", None);
+    h.motion(&mut vcx, "menu_down", None);
     let rows = h.menu_rows(&vcx);
     let lit = rows.iter().position(|(_, on)| *on).unwrap();
     assert_eq!(rows[lit].0, "Hide");
@@ -3385,7 +3434,7 @@ impl Harness {
         self.dispatch(vcx, "menu", None);
         let row = self.menu_row_index(vcx, "Color…");
         while !self.menu_rows(vcx)[row].1 {
-            self.dispatch(vcx, "list_down", None);
+            self.motion(vcx, "menu_down", None);
         }
         self.dispatch(vcx, "menu_pick", None);
         // The component's popup surface paints the frame after its

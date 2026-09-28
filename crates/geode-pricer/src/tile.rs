@@ -785,10 +785,14 @@ impl PricerTile {
     /// shared motion bindings confine themselves to normal and visual, so
     /// an open field or menu keeps its own keys.
     pub fn key_context(&self) -> KeyContext {
-        let cx = KeyContext::new("pricer")
-            .grid()
-            .pair("mode", self.mode())
-            .counts();
+        let mode = self.mode();
+        let mut cx = KeyContext::new("pricer").grid().pair("mode", mode).counts();
+        // The action menu holds j/k while open: the shared menu steps reach
+        // it through this flag, and `mode == menu` keeps the grid's motions
+        // off the sheet beneath it.
+        if mode == "menu" {
+            cx = cx.tilelist();
+        }
         match self.selection.as_ref().map(|s| s.kind) {
             Some(SelectKind::Rows) => cx.pair("select", "rows"),
             Some(SelectKind::Block) => cx.pair("select", "block"),
@@ -2502,8 +2506,14 @@ impl PricerTile {
         let shared_motion = geode_tile::motion::parse(action, count);
         // A shared motion runs as the one "motion" verb, so the field and
         // menu closing below applies to it as to any other verb.
+        // The shared menu steps run as the sheet's own menu verbs, so the
+        // open menu survives them (`verb.starts_with("menu")` below).
         let verb = if shared_motion.is_some() {
             "motion"
+        } else if action.0 == geode_tile::motion::MENU_DOWN {
+            "menu_down"
+        } else if action.0 == geode_tile::motion::MENU_UP {
+            "menu_up"
         } else if let Some(verb) = action.0.strip_prefix("pricer::") {
             verb
         } else {
@@ -7094,7 +7104,7 @@ pub(crate) mod tests {
         // greyed, so the second step lands on Delete row. (A pick on a
         // greyed row is the pointer's:
         // `a_pointer_over_a_disabled_menu_row_lands_without_a_fill`.)
-        h.dispatch(&mut vcx, "menu_down", Some(2));
+        h.motion(&mut vcx, "menu_down", Some(2));
         assert_eq!(
             h.tile
                 .read_with(&vcx, |t, _| t.menu.as_ref().and_then(|m| m.highlighted())),
@@ -7107,9 +7117,47 @@ pub(crate) mod tests {
         assert_eq!(h.mode(&mut vcx), "normal");
         assert_eq!(h.prices()[0].lines.len(), 4);
         h.dispatch(&mut vcx, "menu", None);
-        h.dispatch(&mut vcx, "menu_down", Some(4)); // the second view: barrier
+        h.motion(&mut vcx, "menu_down", Some(4)); // the second view: barrier
         h.dispatch(&mut vcx, "menu_pick", None);
         assert!(h.columns(&vcx).contains(&"barrier".to_string()));
+    }
+
+    /// With the action menu open the sheet publishes `tilelist` over
+    /// `mode == menu`, so the shared menu steps move the menu highlight and
+    /// the sheet's cursor stays where it was. Closing the menu drops the
+    /// flag, and a stray menu step with no menu open moves nothing.
+    #[gpui::test]
+    fn tilelist_keys_step_the_open_menu_and_leave_the_grid(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        answer_all(&h, &mut vcx, 12.5);
+        let at =
+            |vcx: &VisualTestContext| h.tile.read_with(vcx, |t, _| (t.cursor_row(), t.cursor.col));
+        let highlight = |vcx: &VisualTestContext| {
+            h.tile
+                .read_with(vcx, |t, _| t.menu.as_ref().and_then(|m| m.highlighted()))
+        };
+        let flagged = |vcx: &VisualTestContext| {
+            h.tile.read_with(vcx, |t, _| {
+                t.key_context().has_flag(geode_shell::keymap::TILELIST)
+            })
+        };
+        let cursor = at(&vcx);
+        assert!(!flagged(&vcx));
+        h.motion(&mut vcx, "menu_down", None);
+        assert_eq!(at(&vcx), cursor);
+
+        h.dispatch(&mut vcx, "menu", None);
+        assert!(flagged(&vcx));
+        assert_eq!(h.mode(&mut vcx), "menu");
+        let before = highlight(&vcx);
+        h.motion(&mut vcx, "menu_down", None);
+        assert_ne!(highlight(&vcx), before, "the menu stepped");
+        assert_eq!(h.mode(&mut vcx), "menu", "the step kept the menu open");
+        h.motion(&mut vcx, "menu_up", None);
+        assert_eq!(highlight(&vcx), before, "the step back returned");
+        assert_eq!(at(&vcx), cursor, "the sheet did not move");
+        h.dispatch(&mut vcx, "menu_close", None);
+        assert!(!flagged(&vcx));
     }
 
     /// A load answer refreshes an open menu's availability. Delete becomes enabled when
@@ -7151,7 +7199,7 @@ pub(crate) mod tests {
     fn a_reload_under_an_open_menu_relists_its_views(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
         h.dispatch(&mut vcx, "menu", None);
-        h.dispatch(&mut vcx, "menu_down", Some(7)); // view: barrier, the last row
+        h.motion(&mut vcx, "menu_down", Some(7)); // view: barrier, the last row
         vcx.update(|_, cx| {
             h.factory.reload(
                 slim_views("\"qty\", \"price\""),
@@ -7374,7 +7422,7 @@ pub(crate) mod tests {
         // The menu's view rows: Price all, Group, Ungroup, Undo, Redo,
         // Delete row, then views — the second view is row 7.
         h.dispatch(&mut vcx, "menu", None);
-        h.dispatch(&mut vcx, "menu_down", Some(7));
+        h.motion(&mut vcx, "menu_down", Some(7));
         h.dispatch(&mut vcx, "menu_pick", None);
         assert_eq!(
             h.footer(&vcx).as_deref(),
@@ -8392,17 +8440,17 @@ pub(crate) mod tests {
                 );
             }
         }
-        h.dispatch(&mut vcx, "menu_down", Some(1));
+        h.motion(&mut vcx, "menu_down", Some(1));
         let at = h
             .tile
             .read_with(&vcx, |t, _| t.menu.as_ref().and_then(|m| m.highlighted()));
         assert_eq!(at, Some(2), "over the separator onto Group");
-        h.dispatch(&mut vcx, "menu_down", Some(1));
+        h.motion(&mut vcx, "menu_down", Some(1));
         let at = h
             .tile
             .read_with(&vcx, |t, _| t.menu.as_ref().and_then(|m| m.highlighted()));
         assert_eq!(at, Some(8), "over the greyed Ungroup, Undo and Redo");
-        h.dispatch(&mut vcx, "menu_down", Some(1));
+        h.motion(&mut vcx, "menu_down", Some(1));
         let at = h
             .tile
             .read_with(&vcx, |t, _| t.menu.as_ref().and_then(|m| m.highlighted()));

@@ -9,9 +9,10 @@
 //! enabled actions; from a separator, a section or no cursor it lands on the
 //! first enabled action. An all-disabled menu has no cursor.
 //!
-//! Which keys step and pick stays the module's (its own `menu_down`,
-//! `menu_up`, `menu_pick` bindings); the module maps them onto
-//! [`Menu::step`] and [`Menu::pick`].
+//! The keys that step are the shared `motion::menu_down`/`menu_up` (the
+//! shell's builtin bindings under `tilelist`, which the tile publishes while
+//! its menu is open); what picks and closes stays the module's own. The
+//! module maps both onto [`Menu::step`] and [`Menu::pick`].
 
 mod paint;
 mod render;

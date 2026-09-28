@@ -13627,16 +13627,19 @@ run_mutation "mdattr: a multi-word set value is joined with spaces" \
   '            let value = (!tail.is_empty()).then(|| tail.join(""));' \
   geode-marketdata set_parses_an_attribute_with_or_without_a_value
 
-# Arrow keys move the menu highlight like j and k. Removing down from the
-# fragment leaves it unresolved in the open menu.
-run_mutation "mdmenu: the arrow keys move the menu highlight" \
-  crates/geode-marketdata/src/content.rs \
-  '"k" = "marketdata::menu_up"
-"down" = "marketdata::menu_down"
-"up" = "marketdata::menu_up"
-"enter" = "marketdata::menu_pick"' \
-  '"k" = "marketdata::menu_up"
-"enter" = "marketdata::menu_pick"' \
+# Arrow keys step an open tile menu like j and k. Narrowing the builtin
+# arrow block to normal mode leaves them unresolved over the market-data
+# panel's open menu, which reports `mode == menu`.
+run_mutation "tile list: the arrows step an open menu" \
+  crates/geode-shell/src/defaults.rs \
+  'context = "tilelist"
+[bindings.keys]
+"down" = "motion::menu_down"
+"up" = "motion::menu_up"' \
+  'context = "tilelist && mode == normal"
+[bindings.keys]
+"down" = "motion::menu_down"
+"up" = "motion::menu_up"' \
   geode-marketdata dot_and_u_bind_in_normal_mode_and_the_menu_keys_in_menu_mode
 
 # Double-clicking a grid cell opens its editor. Refusing every model column
@@ -13997,16 +14000,14 @@ run_mutation "pricer motion: an empty sheet takes no column move" \
 # publishing the flag takes no motion key at all.
 run_mutation "pricer motion: the key context publishes grid" \
   crates/geode-pricer/src/tile.rs \
-  '        let cx = KeyContext::new("pricer")
-            .grid()' \
-  '        let cx = KeyContext::new("pricer")' \
+  'KeyContext::new("pricer").grid().pair("mode", mode)' \
+  'KeyContext::new("pricer").pair("mode", mode)' \
   geode-pricer the_pricer_publishes_grid_and_motions_on_an_empty_sheet_do_nothing
 
 run_mutation "motion e2e: a shared override reaches the pricer" \
   crates/geode-pricer/src/tile.rs \
-  '        let cx = KeyContext::new("pricer")
-            .grid()' \
-  '        let cx = KeyContext::new("pricer")' \
+  'KeyContext::new("pricer").grid().pair("mode", mode)' \
+  'KeyContext::new("pricer").pair("mode", mode)' \
   geode-app a_shared_motion_override_reaches_each_grid_tile
 
 # An old user binding on a retired id must bind its shared successor, not
@@ -23579,6 +23580,67 @@ run_mutation "motion keys: an open tile list takes j" \
 [bindings.keys]
 "j" = "motion::menu_down"' \
   geode-shell an_open_tile_list_takes_j_and_k_as_menu_steps_not_grid_motions
+
+# A tile with an open menu or popup list publishes `tilelist`, so the shared
+# menu steps reach it; without the flag j/k resolve to nothing there (or to
+# the grid) and the menu never moves.
+run_mutation "tile list: the md menu publishes tilelist" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if mode == "menu" {
+            ctx = ctx.tilelist();
+        }' \
+  '' \
+  geode-marketdata tilelist_keys_step_the_open_menu_and_leave_the_grid
+
+# The panel maps the shared step onto its own menu verb; unmapped, the
+# shared id is unhandled and the open menu's highlight stays.
+run_mutation "tile list: the md menu takes the shared step" \
+  crates/geode-marketdata/src/tile.rs \
+  '        } else if action.0 == geode_tile::motion::MENU_DOWN {
+            "menu_down"' \
+  '        } else if action.0 == "never" {
+            "menu_down"' \
+  geode-marketdata tilelist_keys_step_the_open_menu_and_leave_the_grid
+
+run_mutation "tile list: the pricer menu publishes tilelist" \
+  crates/geode-pricer/src/tile.rs \
+  '        if mode == "menu" {
+            cx = cx.tilelist();
+        }' \
+  '' \
+  geode-pricer tilelist_keys_step_the_open_menu_and_leave_the_grid
+
+run_mutation "tile list: the pricer menu takes the shared step" \
+  crates/geode-pricer/src/tile.rs \
+  '        } else if action.0 == geode_tile::motion::MENU_DOWN {
+            "menu_down"' \
+  '        } else if action.0 == "never" {
+            "menu_down"' \
+  geode-pricer tilelist_keys_step_the_open_menu_and_leave_the_grid
+
+run_mutation "tile list: the timeseries popups publish tilelist" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  'ctx = ctx.pair("popup", pair).tilelist();' \
+  'ctx = ctx.pair("popup", pair);' \
+  geode-timeseries tilelist_keys_step_the_open_list
+
+# The down step must reach the list as a down step: with it swapped, the
+# action menu's clamped highlight cannot leave its first enabled row.
+run_mutation "tile list: the timeseries list takes the shared step" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '            geode_tile::motion::MENU_DOWN => "list_down",' \
+  '            geode_tile::motion::MENU_DOWN => "list_up",' \
+  geode-timeseries tilelist_keys_step_the_open_list
+
+# Through the real shell and keymap: with the pricer's menu open, j and
+# down send the menu step, never the grid's motion.
+run_mutation "motion e2e: an open pricer menu takes j" \
+  crates/geode-pricer/src/tile.rs \
+  '        if mode == "menu" {
+            cx = cx.tilelist();
+        }' \
+  '' \
+  geode-app a_menu_motion_steps_the_open_pricer_menu_not_its_grid
 
 run_mutation "motion keys: the motions register under Motion" \
   crates/geode-shell/src/defaults.rs \

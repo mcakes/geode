@@ -48,6 +48,12 @@ has none of them.
   `pagedown`/`pageup`) 10, times the count; columns clamp; a grid with no
   rows or columns does not move. The blotter, the market-data panel and the
   line pricer move on them, and so does the diagnostics cursor (rows only).
+- Menu and popup-list steps are the shared `motion::menu_down`/`menu_up`
+  (`j`/`down`, `k`/`up`), bound once under `tilelist`, which a tile publishes
+  while its `.` menu, or timeseries' series list or range/frequency menu, is
+  open. An open menu over a grid takes those keys and the grid stays put; a
+  count steps that many rows. What a step means stays the list's own: a menu
+  clamps over its enabled rows, the series list wraps like the chips.
   See [shared
   motions](keymaps.md#shared-motions).
 - A popup is deferred above the tile's clip and snaps inside the window with
@@ -671,8 +677,8 @@ labels, then `Custom dates…` (`c`). `f` and the frequency trigger open the
 frequency menu: the six frequencies with their short labels. Short labels are
 text, not keys; `c` paints as a key. Both menus tick the value in force and
 open with the highlight on it (on `Custom dates…` while the range is absolute).
-`j`/`k` move, Enter or a click applies and closes, and Escape closes; a second
-`r` or `f` closes its own menu. A frequency the 500,000-point cap refuses over
+The shared menu keys (`j`/`k` or the arrows) move, Enter or a click applies
+and closes, and Escape closes; a second `r` or `f` closes its own menu. A frequency the 500,000-point cap refuses over
 the current range, as resolved under the frame's as-of, is a disabled row
 reading `over cap`; choosing it shows the full cap message as the notice. The
 rows follow range, frequency, and as-of changes while the menu is open. A

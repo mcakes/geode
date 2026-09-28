@@ -35,7 +35,7 @@ Current behavior and rationale:
 | `tile::select` | The `V`/`v` grid selection: its state doors, label-anchored resolution, and every verb that takes it as operand (`y`, `d`, `:bump`, the bulk commit, the live step and its undo). |
 | `delegate` | `MatrixDelegate`, the `TableDelegate` over gpui-component's table. Holds `:autosize`'s fitted widths by column label (`__row_axis` for the row labels), which `column()` prefers over the fixed defaults. |
 | `popup` | Underlying picker and cell-choice state and rendering over `geode_tile::popover`; the action menu is `geode_tile::menu`'s. Menu/picker anchor at the header; choices anchor beneath their target cell. |
-| `content` | The `TileContent` wrapper and `MarketDataFactory`, one per `PanelSpec`, plus the module's `ACTIONS` and `DEFAULT_KEYMAP` fragment. |
+| `content` | The `TileContent` wrapper and `MarketDataFactory`, one per `PanelSpec`, plus the module's `ACTIONS`, `DEFAULT_KEYMAP` fragment (no grid motions and no menu steps: both are the shell's shared `motion::*` bindings) and the retired ids' renames (`RENAMED_ACTIONS`). |
 
 ## Commands
 
@@ -153,8 +153,10 @@ the notice, `upload cancelled: a new document arrived`. The upload confirm is
 returns the keyboard to the tile.
 
 Action-menu stepping, hover, picking and painting are `geode_tile::menu`'s:
-the menu opens on its first enabled action; motion counts enabled actions and
-skips disabled rows, headings and separators without wrapping, and from a row
+the menu opens on its first enabled action; its steps are the shared
+`motion::menu_down`/`menu_up` (`j`/`k`, arrows), which reach it through the
+`tilelist` flag the panel publishes beside `mode == menu`, so the grid under
+it never moves; a step counts enabled actions and skips disabled rows, headings and separators without wrapping, and from a row
 that is not an action lands on the first enabled one; hover can light a
 refused action, which takes no fill, and Enter or a click on it makes its
 reason the notice and keeps the menu open; key hints are the live keymap's,

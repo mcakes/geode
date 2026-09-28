@@ -37,8 +37,6 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("marketdata::find_prev", "Find previous"),
     ("marketdata::escape", "Escape"),
     ("marketdata::menu", "Actions menu"),
-    ("marketdata::menu_down", "Menu: next"),
-    ("marketdata::menu_up", "Menu: previous"),
     ("marketdata::menu_pick", "Menu: pick"),
     ("marketdata::menu_close", "Menu: close"),
     ("marketdata::insert_up", "Insert: up"),
@@ -80,6 +78,8 @@ pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
     ("marketdata::page_up_full", "motion::page_up"),
     ("marketdata::first_col", "motion::line_start"),
     ("marketdata::last_col", "motion::line_end"),
+    ("marketdata::menu_down", "motion::menu_down"),
+    ("marketdata::menu_up", "motion::menu_up"),
 ];
 
 /// Module bindings supplied above shell defaults and below desk/user overrides.
@@ -88,7 +88,9 @@ pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
 ///
 /// The grid motions are not here: the panel publishes `grid` in normal and
 /// visual modes, and the shell's builtin keymap binds the shared `motion::*`
-/// ids there once for every grid tile.
+/// ids there once for every grid tile. The menu's steps are not here either:
+/// the panel publishes `tilelist` while its action menu is open, and the
+/// builtin keymap binds the shared `motion::menu_down`/`menu_up` there.
 ///
 /// Visual mode is a live `V`/`v` selection. Its consuming verbs are single
 /// keys (`y`, `d`): the doubled normal-mode forms would leave the first
@@ -150,10 +152,6 @@ context = "marketdata && mode == insert"
 [[bindings]]
 context = "marketdata && mode == menu"
 [bindings.keys]
-"j" = "marketdata::menu_down"
-"k" = "marketdata::menu_up"
-"down" = "marketdata::menu_down"
-"up" = "marketdata::menu_up"
 "enter" = "marketdata::menu_pick"
 "escape" = "marketdata::menu_close"
 "." = "marketdata::menu_close"
@@ -713,32 +711,30 @@ mod tests {
         }
     }
 
-    /// Normal mode opens the menu with dot and the picker with u. Menu mode
-    /// handles letter/arrow navigation, Enter, Escape, and dot to close.
+    /// Normal mode opens the menu with dot and the picker with u. With the
+    /// menu open, the builtin keymap's shared menu steps take j/k and the
+    /// arrows (the grid's motions stay out under `mode == menu`), and the
+    /// fragment keeps Enter, Escape, and dot to close.
     #[test]
     fn dot_and_u_bind_in_normal_mode_and_the_menu_keys_in_menu_mode() {
-        let doc = fragment_doc(CVI.kind, DEFAULT_KEYMAP).unwrap();
-        let (keymap, diags) = build_keymap(&[doc], default_mod(), &registry());
-        assert!(diags.is_empty(), "{diags:?}");
-        let normal = [
-            KeyContext::new("workspace"),
-            KeyContext::new("tile"),
-            KeyContext::new("marketdata")
-                .pair("mode", "normal")
-                .counts(),
-        ];
+        let keymap = keymap_with_builtins();
+        let normal = panel_stack("normal");
         let menu = [
             KeyContext::new("workspace"),
             KeyContext::new("tile"),
-            KeyContext::new("marketdata").pair("mode", "menu").counts(),
+            KeyContext::new("marketdata")
+                .grid()
+                .tilelist()
+                .pair("mode", "menu")
+                .counts(),
         ];
         for (stack, spec, expected) in [
             (&normal, ".", "marketdata::menu"),
             (&normal, "u", "marketdata::load_underlying"),
-            (&menu, "j", "marketdata::menu_down"),
-            (&menu, "k", "marketdata::menu_up"),
-            (&menu, "down", "marketdata::menu_down"),
-            (&menu, "up", "marketdata::menu_up"),
+            (&menu, "j", "motion::menu_down"),
+            (&menu, "k", "motion::menu_up"),
+            (&menu, "down", "motion::menu_down"),
+            (&menu, "up", "motion::menu_up"),
             (&menu, "enter", "marketdata::menu_pick"),
             (&menu, "escape", "marketdata::menu_close"),
             (&menu, ".", "marketdata::menu_close"),
@@ -798,6 +794,8 @@ mod tests {
             ("marketdata::page_down_full", "motion::page_down"),
             ("marketdata::page_up_full", "motion::page_up"),
             ("marketdata::first_col", "motion::line_start"),
+            ("marketdata::menu_down", "motion::menu_down"),
+            ("marketdata::menu_up", "motion::menu_up"),
             ("marketdata::last_col", "motion::line_end"),
         ] {
             assert_eq!(

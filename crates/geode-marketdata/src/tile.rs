@@ -930,6 +930,12 @@ impl MarketDataTile {
             "normal"
         };
         let mut ctx = KeyContext::new("marketdata").grid().pair("mode", mode);
+        // The action menu holds j/k while open: the shared menu steps reach
+        // it through this flag, and `mode == menu` keeps the grid's motions
+        // off the cells beneath it.
+        if mode == "menu" {
+            ctx = ctx.tilelist();
+        }
         if let Some(s) = &self.selection {
             ctx = ctx.pair(
                 "select",
@@ -2075,8 +2081,14 @@ impl MarketDataTile {
         let shared_motion = geode_tile::motion::parse(action, count);
         // A shared motion runs as the one "motion" verb, so the popup,
         // selection-editor and chrome rules below treat every motion alike.
+        // The shared menu steps run as the panel's own menu verbs, so they
+        // keep the open popup and its stepping rule (skip disabled rows).
         let verb = if shared_motion.is_some() {
             "motion"
+        } else if action.0 == geode_tile::motion::MENU_DOWN {
+            "menu_down"
+        } else if action.0 == geode_tile::motion::MENU_UP {
+            "menu_up"
         } else if let Some(verb) = action.0.strip_prefix("marketdata::") {
             verb
         } else {
@@ -11551,8 +11563,8 @@ edits = [["2099-01-01", "-1", 1.0]]
         });
         h.visible(&mut vcx, true);
         h.dispatch(&mut vcx, "load_underlying", None);
-        h.dispatch(&mut vcx, "menu_down", None);
-        h.dispatch(&mut vcx, "menu_down", None);
+        h.motion(&mut vcx, "menu_down", None);
+        h.motion(&mut vcx, "menu_down", None);
         h.dispatch(&mut vcx, "commit", None);
         let req = h
             .document_request()
@@ -11591,8 +11603,8 @@ edits = [["2099-01-01", "-1", 1.0]]
         });
         h.visible(&mut vcx, true);
         h.dispatch(&mut vcx, "load_underlying", None);
-        h.dispatch(&mut vcx, "menu_down", None);
-        h.dispatch(&mut vcx, "menu_down", None);
+        h.motion(&mut vcx, "menu_down", None);
+        h.motion(&mut vcx, "menu_down", None);
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.picker_highlighted_key()),
             Some("CCC.Z".to_string())
@@ -11637,7 +11649,7 @@ edits = [["2099-01-01", "-1", 1.0]]
         });
         h.visible(&mut vcx, true);
         h.dispatch(&mut vcx, "load_underlying", None);
-        h.dispatch(&mut vcx, "menu_down", None);
+        h.motion(&mut vcx, "menu_down", None);
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.picker_highlighted_key()),
             Some("CCC.Z".to_string()),
@@ -11869,7 +11881,7 @@ edits = [["2099-01-01", "-1", 1.0]]
             PICKER_ROWS - 1
         );
         assert!(vcx.debug_bounds(past).is_none(), "row {PICKER_ROWS} is not");
-        h.dispatch(&mut vcx, "menu_down", Some(100));
+        h.motion(&mut vcx, "menu_down", Some(100));
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.picker_highlighted_key()),
             Some(keys[19].clone()),
@@ -12210,6 +12222,45 @@ auto = "discard"
         );
     }
 
+    /// With the action menu open the panel publishes `tilelist` over
+    /// `mode == menu`, so the shared menu steps (j/k, arrows) move the menu
+    /// highlight and the grid stays where it was. With no menu open the
+    /// flag is gone and a stray menu step moves nothing.
+    #[gpui::test]
+    fn tilelist_keys_step_the_open_menu_and_leave_the_grid(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        let cursor = h.tile.read_with(&vcx, |t, _| t.cursor());
+        let ctx = h.tile.read_with(&vcx, |t, _| t.key_context());
+        assert!(!ctx.has_flag(geode_shell::keymap::TILELIST));
+        h.motion(&mut vcx, "menu_down", None);
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor()), cursor);
+
+        h.dispatch(&mut vcx, "menu", None);
+        let ctx = h.tile.read_with(&vcx, |t, _| t.key_context());
+        assert!(ctx.has_flag(geode_shell::keymap::TILELIST));
+        assert_eq!(ctx.get("mode"), Some("menu"));
+        let before = h.tile.read_with(&vcx, |t, _| t.menu_highlighted());
+        h.motion(&mut vcx, "menu_down", None);
+        let after = h.tile.read_with(&vcx, |t, _| t.menu_highlighted());
+        assert_ne!(after, before, "the menu stepped");
+        assert_eq!(h.mode(&vcx), "menu", "the step kept the menu open");
+        h.motion(&mut vcx, "menu_up", None);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.menu_highlighted()),
+            before,
+            "the step back returned"
+        );
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            cursor,
+            "the grid did not move"
+        );
+        h.dispatch(&mut vcx, "menu_close", None);
+        let ctx = h.tile.read_with(&vcx, |t, _| t.key_context());
+        assert!(!ctx.has_flag(geode_shell::keymap::TILELIST));
+    }
+
     /// The menu's `On new document` section ticks the policy in force,
     /// and picking another row sets it and closes the menu — through the
     /// ordinary `menu_pick` path, two `j`s down from the first row on a
@@ -12234,7 +12285,7 @@ auto = "discard"
         );
 
         for _ in 0..2 {
-            h.dispatch(&mut vcx, "menu_down", None);
+            h.motion(&mut vcx, "menu_down", None);
         }
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.menu_highlighted()),
@@ -13968,7 +14019,7 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         h.with_document(&mut vcx);
         h.edit_one_cell(&mut vcx);
         h.dispatch(&mut vcx, "menu", None);
-        h.dispatch(&mut vcx, "menu_down", None); // Upload
+        h.motion(&mut vcx, "menu_down", None); // Upload
         h.dispatch(&mut vcx, "menu_pick", None);
         draw(&mut vcx);
         assert_eq!(

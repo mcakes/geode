@@ -26,8 +26,9 @@ impl TimeseriesTile {
             }
             // Menu navigation clamps over enabled action rows, skipping disabled rows
             // and headings/separators. Pointer hover may still select a disabled row.
-            // Enter picks; Escape closes. Every menu kind shares these actions; the
-            // series list uses separate context for them.
+            // Enter picks; Escape closes. Every menu kind shares these actions, and
+            // the series list takes the same steps (the shared `motion::menu_*`,
+            // arriving here as `list_down`/`list_up`) under its own rule below.
             "list_down" | "list_up" if menu_open => {
                 let delta = if verb == "list_down" {
                     n as isize

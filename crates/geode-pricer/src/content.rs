@@ -61,8 +61,6 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("pricer::insert_down", "Insert: down"),
     ("pricer::insert_up_big", "Insert: up (big)"),
     ("pricer::insert_down_big", "Insert: down (big)"),
-    ("pricer::menu_down", "Menu: next"),
-    ("pricer::menu_up", "Menu: previous"),
     ("pricer::menu_pick", "Menu: pick"),
     ("pricer::menu_close", "Menu: close"),
 ];
@@ -91,6 +89,8 @@ pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
     ("pricer::page_up_full", "motion::page_up"),
     ("pricer::first_col", "motion::line_start"),
     ("pricer::last_col", "motion::line_end"),
+    ("pricer::menu_down", "motion::menu_down"),
+    ("pricer::menu_up", "motion::menu_up"),
 ];
 
 /// Registered but deliberately unbound: `:price` and the menu reach it.
@@ -109,7 +109,9 @@ pub const NO_DEFAULT_KEY: &[&str] = &["pricer::price"];
 ///
 /// The grid motions are not here: the tile publishes `grid`, and the
 /// shell's builtin keymap binds the shared `motion::*` ids once for every
-/// grid tile in normal and visual modes.
+/// grid tile in normal and visual modes. The menu's steps are not here
+/// either: the tile publishes `tilelist` while its action menu is open, and
+/// the builtin keymap binds the shared `motion::menu_down`/`menu_up` there.
 ///
 /// `v` and `shift+v` start a selection, and the tile then reports
 /// `mode == visual`, where the shared motions move the selection's moving
@@ -182,10 +184,6 @@ context = "pricer && mode == insert"
 [[bindings]]
 context = "pricer && mode == menu"
 [bindings.keys]
-"j" = "pricer::menu_down"
-"k" = "pricer::menu_up"
-"down" = "pricer::menu_down"
-"up" = "pricer::menu_up"
 "enter" = "pricer::menu_pick"
 "escape" = "pricer::menu_close"
 "." = "pricer::menu_close"
@@ -902,6 +900,38 @@ mod tests {
         assert_eq!(resolve(".", "menu").as_deref(), Some("pricer::menu_close"));
     }
 
+    /// With the menu open the builtin keymap's shared menu steps take j/k
+    /// and the arrows (the grid's motions stay out under `mode == menu`),
+    /// and the fragment keeps Enter, Escape, and dot.
+    #[test]
+    fn the_menu_steps_are_the_shared_keys_under_tilelist() {
+        let keymap = keymap();
+        let stack = [
+            KeyContext::new("workspace"),
+            KeyContext::new("tile"),
+            KeyContext::new("pricer")
+                .grid()
+                .tilelist()
+                .pair("mode", "menu")
+                .counts(),
+        ];
+        for (key, expected) in [
+            ("j", "motion::menu_down"),
+            ("k", "motion::menu_up"),
+            ("down", "motion::menu_down"),
+            ("up", "motion::menu_up"),
+            ("enter", "pricer::menu_pick"),
+            ("escape", "pricer::menu_close"),
+            (".", "pricer::menu_close"),
+        ] {
+            let ks = parse_keystroke(key, default_mod()).unwrap();
+            match Matcher::default().press(&keymap, ks, &stack) {
+                MatchResult::Matched { action, .. } => assert_eq!(action.0, expected, "{key}"),
+                other => panic!("{key}: expected a match, got {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn v_and_shift_v_start_selections_in_normal_mode() {
         assert_eq!(
@@ -1003,6 +1033,8 @@ mod tests {
             ("pricer::page_up_full", "motion::page_up"),
             ("pricer::first_col", "motion::line_start"),
             ("pricer::last_col", "motion::line_end"),
+            ("pricer::menu_down", "motion::menu_down"),
+            ("pricer::menu_up", "motion::menu_up"),
         ] {
             assert_eq!(
                 registry.renamed(&ActionId(old.into())),

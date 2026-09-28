@@ -243,6 +243,17 @@ The grid rules in `geode_tile::motion`:
   column.
 - On an empty axis every motion leaves the position unchanged.
 
+Three tiles publish `tilelist`: the market-data panel and the line pricer while
+their `.` action menu is open (beside `mode == menu`), and the timeseries tile
+while its series list or one of its menus (action, range, frequency) is open
+(beside `popup == series|menu`). The timeseries tile never publishes `grid`,
+so its own `h`/`l` pan and `g`/`shift+g` jump are never shadowed. With no list
+open the flag is absent and `j`/`k` fall through to the grid (or to nothing).
+The retired `marketdata::menu_down`/`menu_up`, `pricer::menu_down`/`menu_up`
+and `timeseries::list_down`/`list_up` are registered as renames of
+`motion::menu_down`/`menu_up`, so an old user override keeps working in its
+module context with a load warning.
+
 What a menu step means (skipping disabled rows, wrapping a series list) stays
 the list's rule; what a tile does around a grid result (entering a header
 strip, closing a field, following a log) stays the tile's.
@@ -273,10 +284,13 @@ A grid module's fragment binds no motions: they come from the shared
 `motion::*` bindings under `grid`. The blotter's fragment binds only its
 verbs (expansion, selection, yank, find, sort, `g m`, escape).
 The market-data panel's fragment binds its verbs and its `mode == menu`
-keys; `k` on row 0 still enters the attribute strip around the shared result.
+pick and close keys (`enter`, `escape`, `.`); the menu's steps are the shared
+ones under `tilelist`. `k` on row 0 still enters the attribute strip around the shared result.
 The line pricer's fragment binds its verbs (`g p`, `g u` and `g m` among
 them, beside the shell's `g g`: a first `g` waits for the second key), its
-`mode == insert` field keys and its `mode == menu` keys.
+`mode == insert` field keys and its `mode == menu` pick and close keys.
+The timeseries fragment binds its popups' `enter`, `escape` and `.`; their
+row steps are the shared ones under `tilelist`.
 The diagnostics fragment binds only `[`/`]` and `z o`/`z c`; the tile publishes
 `grid` and `mode == normal` so the shared motions reach its cursor.
 

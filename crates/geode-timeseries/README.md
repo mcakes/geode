@@ -20,7 +20,7 @@ Current behavior and rationale:
 | `tile::pointer` | Chart wheel, drag-pan, and split-drag gestures using chart hit testing. |
 | `popup` | State and rendering for the series list, add picker, custom dates editor and the expression field's completion list, plus expression-editor state; rows share `geode_tile::popover::row_shell`; the menus are `geode_tile::menu`'s. Date fields and the inline expression editor have their own renderers; the component renders its own color picker. The notice line paints through `geode_tile::notice`. |
 | `header` | Prepared chips, the range and frequency triggers (each hangs its own popup and shows an open state while it is up), the action-menu button, inline expression field, color-picker trigger, and empty state. |
-| `content` | `TileContent` wrapper, factory, actions, and keymap fragment. |
+| `content` | `TileContent` wrapper, factory, actions, keymap fragment, and the retired ids' renames (`RENAMED_ACTIONS`). The popups' row steps are not in the fragment: they are the shell's shared `motion::menu_down`/`menu_up`. |
 
 ## Commands
 
@@ -39,6 +39,11 @@ cargo bench -p geode-timeseries
 - `ChartKey` contains everything chart preparation reads and excludes cursor
   movement.
 - One closer owns every popup and blurs a focused editor before dropping it.
+- The series list and the three menus publish `tilelist` (beside
+  `popup == series|menu`), so the shared menu steps (`j`/`k`, arrows) reach
+  them as `list_down`/`list_up`; the list wraps, a menu clamps over its
+  enabled rows. The tile never publishes `grid`, so its own `h`/`l` pan and
+  `g`/`shift+g` jump are never shadowed by a grid motion.
 - `:` remains local to this tile.
 - A series is named by its label (`Slot::label`); slot numbers never reach
   the screen, a notice, or the `:` vocabulary. `:rule`, `:color`, `:yaxis`,

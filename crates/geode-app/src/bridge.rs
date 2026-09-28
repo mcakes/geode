@@ -5615,6 +5615,40 @@ role = "key"
             .collect()
     }
 
+    /// With a grid tile's action menu open, `j` and `down` send the shared
+    /// menu step and never the grid's motion: the tile publishes `tilelist`
+    /// over `mode == menu`, which the grid bindings' context excludes.
+    #[gpui::test]
+    fn a_menu_motion_steps_the_open_pricer_menu_not_its_grid(cx: &mut gpui::TestAppContext) {
+        init_grid_modules(cx);
+        for kind in ["pricer", "cvi"] {
+            assert_eq!(
+                dispatch_counts(
+                    cx,
+                    kind,
+                    None,
+                    &[".", "j", "down"],
+                    &[
+                        &format!("{}::menu", module_context(kind)),
+                        "motion::menu_down",
+                        "motion::down",
+                    ],
+                ),
+                vec![1, 2, 0],
+                "{kind}: the open menu takes j and down"
+            );
+        }
+    }
+
+    /// The module context (and action prefix) a grid kind's tile publishes.
+    fn module_context(kind: &str) -> &'static str {
+        match kind {
+            "cvi" => "marketdata",
+            "pricer" => "pricer",
+            other => panic!("no menu fixture for {other}"),
+        }
+    }
+
     /// One user override of a shared motion, under the shipped context,
     /// reaches every grid tile through the real shell and keymap.
     #[gpui::test]
