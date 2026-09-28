@@ -63,6 +63,7 @@ The main configuration documents have distinct owners:
 | `views.toml` | Queryable views, joins, columns, expressions, grouping, and sorting |
 | `sources.toml` | File, subscription, and fetch sources with readiness and adapter settings |
 | `egress.toml` | Upload targets: adapter and a per-document address template |
+| `panels.toml` | Market-data panels: the dataset, document kind, layout, formats, and kind actions of each panel tile kind |
 | `dimensions.toml` | Derived dimensions used for grouping and scope |
 | `groupings.toml` | The nine shared grouping slots |
 | `scopes.toml` | Named scopes |
@@ -136,9 +137,11 @@ column or a disallowed operator on a derived dimension is refused with the
 field still open rather than accepted and left to fail later at query time
 (see [input-and-dialogs.md's Frame expression](input-and-dialogs.md#frame-expression)
 and [configuration-dialogs.md's Scope expression field](configuration-dialogs.md#scope-expression-field)).
-Source adapter names, document kinds, module keymap fragments, and pricer
-names depend on what the assembled application has registered, so `geode-app`
-performs those cross-crate checks at startup and reload.
+Source adapter names, document kinds, module keymap fragments, pricer
+names, and market-data panels depend on what the assembled application has
+registered, so `geode-app` performs those cross-crate checks. Panels are
+checked at startup only (they are
+[restart-required](#market-data-panels)); the rest at startup and reload.
 
 `expressions.toml` holds named scope expressions: an expression text saved
 under a name so a saved scope or the frame can refer to it instead of copying
@@ -277,6 +280,132 @@ representation, but running workers and panel target lists retain their startup
 configuration. The restart indicator compares the layered egress document with
 its startup baseline; restoring those inputs clears the indicator.
 
+## Market-data panels
+
+`panels.toml` defines the market-data panel tile kinds. Each top-level table
+is one panel, and its name is the tile kind: `[cvi]` is the `cvi` kind, its
+add-tile action is `tile::add_cvi`, and a saved session records its tiles as
+`module = "cvi"`. The builtin layer ships `cvi` and `dividend`
+([`builtin_panels.toml`](../../crates/geode-marketdata/src/core/builtin_panels.toml)).
+A desk or user panel with a new name adds a kind. One with an existing name
+replaces that panel whole: a `[cvi]` override that gives only a `title`
+inherits nothing from the builtin and is refused for its missing keys.
+
+```toml
+[cvi_wide]
+title = "CVI (wide)"
+dataset = "cvi_params"
+document = "cvi_params"
+actions = ["marketdata::cvi_reanchor"]
+value = { type = "f64", format = { precision = 6 } }
+rows = { column = "term", identity = "date", label = "shown" }
+columns = { axis = "node" }
+header = [
+  { column = "anchor_date", label = "anchor", type = "date" },
+  { column = "spot_ref", label = "spot", type = "f64" },
+]
+slice = [
+  { column = "forward", label = "fwd", format = { precision = 3 } },
+  { column = "atm", label = "atm" },
+  { column = "skew", label = "skew" },
+]
+```
+
+| Key | Required | Meaning |
+|---|---|---|
+| `title` | yes | The tile title and badge text |
+| `dataset` | yes | The document dataset the panel reads |
+| `document` | yes | The registered document kind `:upload` serializes with |
+| `value` | yes | `type` (`f64` or `i64`) and `format` of a pivot's grid values; a flat panel's fallback type |
+| `rows` | yes | `column`, `identity` (`"minted"`, or `f64`, `i64`, `date`, `utf8` for a trader-named row), and `label` (`"shown"` or `"hidden"`) |
+| `columns` | yes | Exactly one of `axis = "<column>"` (a pivot: one grid column per distinct axis value) or `values = [ … ]` (a flat table) |
+| `header` | no | `[ { column, label, type } … ]`: document attributes shown and edited in the header, in this order |
+| `slice` | no | `[ { column, label, format? } … ]`: per-slice values painted ahead of a pivot's grid |
+| `actions` | no | Registered kind-action ids, in menu order |
+
+Each flat value column is `{ column, label, type, required, format?,
+choices? }`. `type` is `f64`, `i64`, `date`, or `utf8`; `required` (a
+boolean) says whether an inserted row must fill the cell; `choices` is a
+closed, non-empty list of distinct strings and applies to `utf8` only.
+
+A `format` table accepts the view format keys `precision` (0–12),
+`thousands`, `negative`, and `scale`, over a base of no places, no grouping,
+minus signs, and no scaling. An `f64` value or column must state its
+`precision`: the panel will not guess how many places a value carries. A
+slice's `format` overlays the panel's `value.format`; a slice without one
+takes it whole. `format` is refused on a `date` or `utf8` column. Panels
+paint every value in the foreground, so `color` is an unknown key here, and
+a malformed format value is an error rather than a view reader's warning.
+
+### Refusals
+
+The panel's name must be lower-case ASCII letters, digits, and `_`, starting
+with a letter, and must not be another module's kind (`blotter`,
+`timeseries`, `pricer`, `diagnostics`, `placeholder`). Beyond that, a panel
+is refused with one Error at `panels.<name>[.<field>]` when:
+
+- a key is unknown, a required key is missing, or a value has the wrong
+  shape or type, including a malformed `format` and an `f64` without a
+  `precision`;
+- its `dataset` is not declared, or is not a document dataset;
+- its `document` names no registered document kind, or a kind whose columns
+  and types do not match the dataset's document columns;
+- a named column is missing from the dataset, has the wrong role (a header
+  column must be a document attribute; a value, flat column, or slice must be
+  a value column), or has a type other than the one the panel states;
+- the row axis is not the dataset's first axis, or the panel does not lay out
+  exactly the dataset's axes (the row axis alone for a flat panel, the row
+  axis then `columns.axis` for a pivot);
+- a minted row identity sits on a non-`utf8` axis, or a typed identity has a
+  hidden label (a new row is named in the row-label column);
+- a pivot does not leave exactly one value column unnamed for its grid, or
+  that column's type is not `value.type`;
+- a slice column is not `f64`, or its type differs from `value.type` (slices
+  are edited as the panel's value type and read and uploaded as `f64`), or a
+  flat panel has slices;
+- two flat columns, or two slices, share a label, or a slice label could
+  also be a pivot column label (a number over a numeric axis, a
+  `YYYY-MM-DD` date over a date axis);
+- a pivot with slices has an axis of another type: its labels come from the
+  data, so no slice label can be proven distinct at load;
+- a column is named twice across `rows`, `columns`, `header`, and `slice`;
+- a column the document kind writes is not named by the panel. The
+  dataset's document key is exempt, because the tile supplies it, and so is
+  a pivot's one unnamed value column, which is its grid;
+- an action id is not registered, or is listed twice.
+
+A refused panel is not a tile kind: it has no add-tile action and no picker
+row, the status bar's config error count includes it, and the diagnostics
+tile names its path. A saved tile of a refused kind restores as a
+placeholder with its session record kept, so a fix and a restart bring it
+back. These Errors stay in the config section across hot reloads and do not
+block one.
+
+Any panel over an undeclared dataset is refused, the builtin ones included.
+`cvi_params` and `dividend_schedule` are declared only by the `--demo`
+layer, so a configuration that has a `views` document but no market-data
+datasets starts with `config 2 errors`. No layer can remove a builtin panel
+— an override of the same name must itself be a valid panel — so clear
+them by declaring both document datasets, as
+[`examples/demo-config/datasets.toml`](../../examples/demo-config/datasets.toml)
+does. The panels are then accepted and show nothing until a source
+publishes their documents. Without any `views` document no data module
+starts, panels included, and no panel is checked.
+
+### Restart and kind actions
+
+`panels` is restart-required: the running panel kinds, their specs, and
+their Errors are fixed at startup. An edit sets the status bar's restart
+indicator (`panels changed — restart to apply`) and changes no open panel;
+returning the documents to their startup contents clears it.
+
+A kind action is registered code, not configuration. `geode-app` registers
+each action's id, title, and whether it is built; a panel offers any
+registered action by id. The builtin set is CVI's
+`marketdata::cvi_reanchor` and `marketdata::cvi_recalc_forward`, both
+unbuilt: their menu rows are disabled and the tile answers `not built yet`.
+Adding an action means adding its handler and registration.
+
 ## Runtime edits
 
 The application writes only the user layer. Desk configuration is shared and
@@ -354,7 +483,7 @@ Accepted candidates update runtime state according to their inputs:
 | `expressions`, `datasets`, or `dimensions` | Rebuild named expressions; a changed or redefined entry bumps the frame's config version so a tile whose scope references it requeries |
 | `datasets` or `dimensions` | Rebuild dimension-picker columns |
 | Views, either presentation document, dimensions, or colors | Emit `ConfigReloaded` for the app bridge |
-| Sources, datasets, egress, or `app.pricing.adapter` differing from startup | Mark restart required; return to the startup inputs to clear it |
+| Sources, datasets, egress, panels, or `app.pricing.adapter` differing from startup | Mark restart required; return to the startup inputs to clear it |
 
 Document-change checks compare the original per-layer documents, including
 their paths, rather than just merged values. Source and dataset changes can

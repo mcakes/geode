@@ -22,7 +22,7 @@ Config directories:
 
 | Layer | Where |
 |---|---|
-| Builtin | compiled in (`geode_shell::defaults`, plus `builtin_layer`'s keymap, the pricer's bundled views and templates, and its `pricer_sheets` dataset) |
+| Builtin | compiled in (`geode_shell::defaults`, plus `builtin_layer`'s keymap, the pricer's bundled views and templates, its `pricer_sheets` dataset, and the builtin market-data panels) |
 | Desk | `$GEODE_DESK_CONFIG`, if set |
 | User | `$APPDATA/geode` when set, otherwise `$HOME/.config/geode` |
 
@@ -48,7 +48,7 @@ sessions from 14:30 to 21:00 UTC, without holiday or daylight-saving rules.
 | Module | Holds |
 |---|---|
 | `main` | Startup composition: logging, config, registry and keymap, roster, service, and window. Pure argument parsing and user-path resolution; `config_dirs` reads the environment. |
-| `bridge` | Service setup and module factories, window event routing (including stopped data threads, and the handle's `Busy`-refusal total read on each drained event into `Diagnostics`), catalog refresh/retry (a `Stopped` refusal drops the demand), and forwarding view reloads to the data service (a refused hand-off is a diagnostic). |
+| `bridge` | Service setup and module factories (loads `panels` against the registered document kinds and kind actions and builds one market-data factory per accepted panel; refused panels, including one named after another module's kind, become composition diagnostics in the shell's config section), window event routing (including stopped data threads, and the handle's `Busy`-refusal total read on each drained event into `Diagnostics`), catalog refresh/retry (a `Stopped` refusal drops the demand), and forwarding view reloads to the data service (a refused hand-off is a diagnostic). |
 | `events` | Coalesced pending state with a one-slot wakeup channel. Retains publication book unions and highest-tagged query results; upload outcomes have separate `(tile key, tag)` entries; local-write outcomes never coalesce. |
 | `demo` | `--demo`: the temp directory, the emitted sources, the compiled-in demo config layer. |
 | `demo_bus` | Demo-only CVI and dividend producers publishing through `ChannelAdapter` and the normal document writers/parsers. The same adapter accepts configured uploads, whose bus messages follow subscription ingestion. |

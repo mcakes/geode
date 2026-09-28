@@ -60,10 +60,10 @@ fn provenance(as_of: &str) -> Provenance {
 }
 
 /// `amount`'s own format: four places, no grouping — the same reasoning
-/// `spec::CVI_FORMAT` gives for a small number whose fourth place is
-/// real, distinct from `ColumnFormat::MEASURE` so this fixture actually
-/// exercises a column with its OWN format rather than the panel's
-/// default.
+/// the builtin CVI panel's `value.format` gives for a small number whose
+/// fourth place is real, distinct from `ColumnFormat::MEASURE` so this
+/// fixture actually exercises a column with its OWN format rather than the
+/// panel's default.
 const SCHEDULE_AMOUNT_FORMAT: ColumnFormat = ColumnFormat {
     precision: 4,
     thousands: false,

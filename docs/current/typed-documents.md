@@ -136,6 +136,30 @@ per-column properties. Explicit values in column tables win conflicts with
 those spellings. Diagnostics retain the spelling that created an entry, so
 an unknown column warning points to a key actually present in the file.
 
+## Market-data panels
+
+The `panels` reader has two halves, both pure. [`read_panels`](../../crates/geode-core/src/panel/read.rs)
+judges each panel alone: its name, required keys, value shapes, formats,
+choices, row identity and label, label uniqueness, columns named once, and
+kind-action ids against a `KindActionRegistry`, which resolves each id to its
+registered title and built state. [`load_panels`](../../crates/geode-core/src/panel/check.rs)
+runs it, then checks each surviving panel against the schema and the
+registered document kinds: the dataset is a declared document dataset, the
+kind fits it (`check_kind_against`), the axes, column roles and types agree,
+a pivot leaves one grid value, slice labels cannot collide with axis labels,
+and every column the kind writes is named. The full list is in
+[configuration](configuration.md#market-data-panels).
+
+Unlike the view readers, nothing here only warns. The first problem refuses
+the whole panel with one Error at `panels.<name>` or
+`panels.<name>.<field>` (for example `panels.cvi.dataset` or
+`panels.dividend.columns.values.3.format.precision`), attributed to the
+layer that supplied the panel; its neighbours still load. An unknown key is
+refused because a misspelt `format` would otherwise paint a plausible wrong
+grid. Accepted panels keep document order, and `config_version` is skipped.
+`geode-app` additionally refuses a panel named after another module's kind
+and builds one tile kind per accepted panel.
+
 ## Grouping slots and saved scopes
 
 [`GroupingSlots`](../../crates/geode-core/src/groupings.rs) reads slots 1–9.

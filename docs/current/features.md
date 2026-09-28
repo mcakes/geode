@@ -293,10 +293,20 @@ there is no multi-range selection — and there is no paste; `y` is yank-only.
 `geode-documents` owns typed wire-format parsers and writers. A parser produces
 `DocumentRows`, the shared struct-of-arrays representation, without opening a
 file or socket. `geode-data` knows only the `DocumentKind` trait; `geode-app`
-registers the concrete CVI and dividend kinds.
+registers the concrete CVI and dividend document kinds, the kind actions, and
+one panel factory per accepted panel.
 
 `geode-marketdata` renders a document as either a matrix or a flat typed table.
-`PanelSpec` describes axes and value columns. `MatrixModel` is rebuilt on a
+Panels are configuration (`panels.toml`, see
+[configuration](configuration.md#market-data-panels)): a `PanelSpec` names
+the dataset, document kind, axes, value columns, header attributes, slices,
+formats, and offered kind actions. CVI and dividend ship as builtin panels; a
+desk or user panel over a declared document dataset and a registered document
+kind becomes a new tile kind after a restart. Kind actions are registered
+code: CVI's two, reanchor and recalc forward, are not built, so their menu
+rows are disabled and the tile answers "not built yet". A refused panel is
+not a tile kind; a saved tile of that kind restores as a placeholder and its
+session record is kept for a later restart. `MatrixModel` is rebuilt on a
 delivery or structural edit. Ordinary cell commits patch it when possible;
 editing a Sent draft rebuilds to clear sent styling throughout the grid.
 
@@ -1505,6 +1515,12 @@ tile for focus, key, pointer, popup, and delivery behavior. Render delegates
 are tested through prepared models rather than pixel claims unavailable to a
 headless context. Display checks remain necessary for exact color, geometry,
 and animation.
+
+`geode-app`'s startup-composition tests build the real services from
+configuration directories and open the real shell window, but do not attach
+the data bridge: its event drain is woken from the real data thread, which
+gpui's test scheduler refuses. The bridge's own tests attach it over a test
+data handle, and each feature crate tests delivery into its tiles.
 
 Benchmarks cover blotter flattening and formatting, market-data model building,
 chart preparation, series querying, document parsing, line-pricer core

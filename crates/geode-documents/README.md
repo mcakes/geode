@@ -35,6 +35,10 @@ cargo bench -p geode-documents     # document parse and write
 - CVI and dividend wire tag names remain unverified against the desk's XSD.
   `SLICE_VALUES` in `src/cvi.rs` and `TAGS` in `src/dividend.rs` pair wire
   tags with column names for both parser and writer.
+- `dividend::STATUSES` is the closed status vocabulary the dividend kind
+  parses and writes. The builtin dividend panel's `status` `choices`
+  (`geode-marketdata`'s `core/builtin_panels.toml`) must list the same
+  values; a `geode-app` composition test (`demo_bus`) holds them equal.
 - Parse and write failures return typed errors; the data service owns source
   health and diagnostic routing.
 - The same kind writes demo and uploaded documents and parses subscribed
