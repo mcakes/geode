@@ -264,6 +264,7 @@ fn request_values(view: &mut ShellView, column: &str, cx: &mut Context<ShellView
     // from matching a new request for the same column.
     view.next_picker_tag += 1;
     let tag = view.next_picker_tag;
+    let frame = view.target_frame();
     let Some(p) = view.picker.as_mut() else {
         return;
     };
@@ -271,7 +272,7 @@ fn request_values(view: &mut ShellView, column: &str, cx: &mut Context<ShellView
     p.values = None;
     // Pre-tick the current selection.
     let (scope, as_of) = {
-        let f = view.frame.read(cx);
+        let f = frame.read(cx);
         (f.scope().clone(), f.as_of().clone())
     };
     p.ticked = scope
@@ -452,10 +453,10 @@ fn handle_values_key(
         return true;
     }
     if ks.mods == Modifiers::NONE && ks.key == "enter" {
-        let scope = shell.frame.read(cx).scope().clone();
+        let scope = shell.target_frame().read(cx).scope().clone();
         let new_scope = shell.picker.as_ref().map(|p| p.apply(&scope));
         if let Some(new_scope) = new_scope {
-            shell.frame.update(cx, |f, cx| {
+            shell.target_frame().update(cx, |f, cx| {
                 if f.set_scope(new_scope) {
                     cx.notify();
                 }

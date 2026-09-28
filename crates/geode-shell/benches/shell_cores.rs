@@ -286,6 +286,7 @@ fn bench_session(c: &mut Criterion) {
                 black_box(&ws),
                 black_box(&no_tiles),
                 None,
+                &geode_shell::session::PinnedRecords::new(),
                 &geode_shell::palette_usage::PaletteUsage::new(),
                 &geode_shell::session::PageRecords::new(),
             ))
@@ -296,6 +297,7 @@ fn bench_session(c: &mut Criterion) {
         &ws,
         &no_tiles,
         None,
+        &geode_shell::session::PinnedRecords::new(),
         &geode_shell::palette_usage::PaletteUsage::new(),
         &geode_shell::session::PageRecords::new(),
     );

@@ -9,6 +9,7 @@ use std::collections::HashSet;
 
 use gpui::{App, Context, FocusHandle, Focusable as _, Window};
 
+use crate::frame::FrameRef;
 use crate::module::Delivery;
 use crate::module::ModuleFactory as _;
 use crate::module::placeholder::PLACEHOLDER_KIND;
@@ -187,20 +188,23 @@ impl ShellView {
     }
 
     /// Reconcile tile occupants, visibility, and stack positions at render time.
-    /// Create missing occupants, notify removed occupants that they are hidden,
-    /// then drop them. Reusable tile sets retain capacity between frames and
-    /// are temporarily taken out of `self` while factory calls borrow services.
+    /// Create missing occupants, tell removed occupants they are hidden and
+    /// closed, then drop them. Reusable tile sets retain capacity between
+    /// frames and are temporarily taken out of `self` while factory calls
+    /// borrow services.
     /// A fresh `add_tile` occupant that is on screen and focused hears
     /// `TileContent::launched` once, deferred after the render.
     pub(super) fn ensure_occupants(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut all = std::mem::take(&mut self.scratch_all_tiles);
         self.fill_all_tiles(&mut all);
-        // Tell removed occupants they are hidden before dropping them, so they
-        // can release subscriptions with a live GPUI context. The visibility
-        // diff below can only reach occupants still in the map.
+        // Tell removed occupants they are hidden and then closed before
+        // dropping them, so they can release subscriptions and cancel their
+        // queries with a live GPUI context. The visibility diff below can only
+        // reach occupants still in the map.
         for (id, o) in self.occupants.iter() {
             if !all.contains(id) {
                 o.content.set_visible(false, cx);
+                o.content.closed(cx);
             }
         }
         self.occupants.retain(|id, _| all.contains(id));
@@ -267,11 +271,25 @@ impl ShellView {
             // Only an `add_tile` request (no matching restored record) may be
             // told it was launched: a restore must never take focus.
             let from_add = matched.is_none() && pending_factory.is_some();
+            // The tile's own workspace, not the active one: an occupant
+            // restored into a hidden workspace reads that workspace's lane.
+            // Every tile reaching here is placed in some workspace's tree;
+            // the active fallback only keeps a release build running.
+            debug_assert!(
+                self.services.workspaces.workspace_of(*id).is_some(),
+                "occupant for unplaced tile {id:?}"
+            );
+            let ws = self
+                .services
+                .workspaces
+                .workspace_of(*id)
+                .unwrap_or_else(|| self.services.workspaces.active_ix());
+            let frame = FrameRef::new(self.frame.clone(), ws);
             let occupant = match factory {
                 Some(f) => f.create(
                     *id,
                     state,
-                    self.frame.clone(),
+                    frame.clone(),
                     self.diagnostics.clone(),
                     window,
                     cx,
@@ -279,7 +297,7 @@ impl ShellView {
                 None => crate::module::placeholder::PlaceholderFactory.create(
                     *id,
                     None,
-                    self.frame.clone(),
+                    frame.clone(),
                     self.diagnostics.clone(),
                     window,
                     cx,

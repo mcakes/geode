@@ -206,6 +206,7 @@ fn main() {
                 services.workspaces = restored.workspaces;
                 services.restored_tiles = restored.tiles;
                 services.restored_frame = restored.frame;
+                services.restored_pinned = restored.pinned;
                 services.restored_palette_usage = restored.palette_usage;
                 services.restored_pages = restored.pages;
             }
@@ -278,13 +279,13 @@ fn main() {
                         .expect("the window's root view is the shell");
                     let frame = shell.read(cx).frame().clone();
                     let last_config_version =
-                        std::rc::Rc::new(std::cell::Cell::new(frame.read(cx).versions().config));
+                        std::rc::Rc::new(std::cell::Cell::new(frame.read(cx).config_version()));
                     // Register this observer before the diagnostics page registers its
                     // own. GPUI invokes observers in registration order: the shared
                     // factory configuration must be current before the page consumes
                     // the same version bump and rebuilds its config section.
                     cx.observe(&frame, move |frame, cx| {
-                        let now = frame.read(cx).versions().config;
+                        let now = frame.read(cx).config_version();
                         if now != last_config_version.get() {
                             last_config_version.set(now);
                             diagnostics_factory.set_config(shell.read(cx).config().clone());
@@ -575,6 +576,7 @@ fn build_shell_services(
         roster,
         restored_tiles: std::collections::BTreeMap::new(),
         restored_frame: None,
+        restored_pinned: Default::default(),
         restored_palette_usage: geode_shell::palette_usage::PaletteUsage::new(),
         log: Some(LogServices {
             ring: log_ring,

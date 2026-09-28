@@ -1,16 +1,10 @@
-//! Synthetic market-data documents (market-data-documents plan, Task 10;
-//! `dividend` added by the dividend-schedule plan, Task 10).
-//! `geode-demo-data` depends on `geode-core` alone here — it produces
-//! [`geode_core::document::DocumentRows`] and never writes XML; turning
-//! those rows into wire bytes is `geode-documents`' job
-//! (`geode_documents::CviKind::write`/`DividendKind::write`), called from
-//! `geode-app`'s demo bus, not from here.
+//! Seeded CVI grids and dividend schedules as [`geode_core::document::DocumentRows`].
+//! Generators retain independent state per key. `geode-app`'s demo bus passes
+//! their rows to `geode-documents` for wire encoding; this module performs no I/O.
 
-/// FNV-1a: a small, stable (not `HashMap`'s randomised default) string
-/// hash, shared by both generators below to seed a key's own RNG and, in
-/// `cvi`, to spread `base_spot_ref`'s "other" branch — nothing here
-/// needs cryptographic strength, only that the same key always hashes
-/// the same way across processes, which `RandomState` does not promise.
+/// Stable per-key hash for RNG seeds, fallback spot levels and dividend IDs.
+/// It keeps output reproducible across processes; cryptographic strength is
+/// unnecessary.
 fn fnv1a(s: &str) -> u64 {
     let mut hash: u64 = 0xcbf29ce484222325;
     for b in s.bytes() {
@@ -20,8 +14,7 @@ fn fnv1a(s: &str) -> u64 {
     hash
 }
 
-/// The CVI document kind (spec §6.3): a seeded generator over a fixed
-/// node ladder and eight listed monthly expiries.
+/// Seeded CVI grids with a fixed node ladder and eight monthly listed expiries.
 pub mod cvi {
     use super::fnv1a;
     use chrono::{Datelike, NaiveDate};
@@ -30,32 +23,22 @@ pub mod cvi {
     use rand::{Rng, SeedableRng};
     use std::collections::HashMap;
 
-    /// The CVI node ladder (market-data spec §6.3), fixed across every
-    /// document this generator ever produces — `CviKind::write` refuses a
-    /// grid whose node list is not the same on every term (spec's "full
-    /// and positional" rule), so there is exactly one ladder here, not
-    /// one drawn per call.
+    /// The same node ladder appears on every term. `CviKind::write` requires
+    /// a full grid with matching node positions across terms.
     pub const NODES: [f64; 12] = [
         -20.0, -15.0, -10.0, -5.0, -2.5, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0, 3.5,
     ];
 
-    /// Eight listed expiries per document (Task 10 brief): one per month,
-    /// starting the month `anchor` itself falls in.
+    /// Eight consecutive monthly expiries, beginning with the first whose
+    /// third Friday is on or after the anchor date.
     const EXPIRY_MONTHS: usize = 8;
 
-    /// The maximum a single walk step ever moves one node's `param`
-    /// between two successive calls for the same key — small enough that
-    /// the smile stays recognisably the same shape from one document to
-    /// the next, big enough that `successive_documents_drift` never sees
-    /// two calls collide on an identical grid by chance.
+    /// Bounds for the nonzero step applied to each node parameter per publish.
     const MAX_WALK_STEP: f64 = 0.02;
     const MIN_WALK_STEP: f64 = 0.0005;
 
-    /// The per-slice values (2026-09-17): `forward` is the spot carried
-    /// out to the term at a per-key rate drawn once from this range (a
-    /// fraction per month, so 0.2–0.5%/month), `atm` is a decimal vol
-    /// held inside `ATM_RANGE` and walked per publish, `skew` a
-    /// negative slope held inside `SKEW_RANGE` and walked the same way.
+    /// Forward uses a fixed per-key carry rate of 0.2–0.5% per month. ATM
+    /// volatility and skew walk independently within their respective ranges.
     const CARRY_PER_MONTH: std::ops::RangeInclusive<f64> = 0.002..=0.005;
     const ATM_RANGE: std::ops::RangeInclusive<f64> = 0.15..=0.30;
     const SKEW_RANGE: std::ops::RangeInclusive<f64> = -2.0..=0.0;
@@ -63,10 +46,8 @@ pub mod cvi {
     const SKEW_WALK_STEP: f64 = 0.02;
     const DAYS_PER_MONTH: f64 = 30.4375;
 
-    /// A per-underlying starting level: three named benchmarks (SPX,
-    /// NDX, RUT), and a stable hash for anything else so an unfamiliar
-    /// vocabulary still gets a plausible, deterministic spot rather than
-    /// one default value shared by every other underlying.
+    /// Starting spot levels for named indices, with a deterministic per-key
+    /// fallback for other underlyings.
     fn base_spot_ref(key: &str) -> f64 {
         match key {
             "SPX" => 7650.0,
@@ -76,18 +57,12 @@ pub mod cvi {
         }
     }
 
-    /// The smile/skew a key's very first document starts from: a
-    /// deterministic function of the node and the term's position in the
-    /// ladder, so two generators built with the same seed produce an
-    /// identical first document before any walk step has ever been
-    /// drawn (`same_seed_same_documents`).
+    /// Initial smile parameters depend only on the node and term position.
     fn baseline_param(node: f64, term_idx: usize) -> f64 {
         -0.01 * node + 0.02 * (term_idx as f64 + 1.0).ln()
     }
 
-    /// One seeded walk step of at most `step`, then held inside `range`:
-    /// a clamp rather than a reflection, because a demo value at the
-    /// edge of its range for a publish or two is what a real feed does.
+    /// A seeded step of magnitude below `step`, clamped to `range`.
     fn walk_within(
         rng: &mut StdRng,
         value: f64,
@@ -99,20 +74,15 @@ pub mod cvi {
         (value + magnitude * sign).clamp(*range.start(), *range.end())
     }
 
-    /// The per-key, per-term slice values between publishes. `carry` is
-    /// fixed from the key's first call (so `forward` follows `spot_ref`
-    /// and never drifts on its own); `atm` and `skew` are one walk state
-    /// per term, term-major beside `CviGenerator::walk`.
+    /// Per-key slice state. Carry is fixed, so forward remains tied to spot;
+    /// ATM and skew each retain one walk value per term.
     struct SliceWalk {
         carry: f64,
         atm: Vec<f64>,
         skew: Vec<f64>,
     }
 
-    /// The third Friday of `year`/`month` — CVI's listed-expiry
-    /// convention. Its own test below pins the day-of-week arithmetic
-    /// against a hand-checked date, so a future refactor of the offset
-    /// math cannot silently drift the whole expiry ladder by a week.
+    /// The monthly listed-expiry convention: the third Friday.
     fn third_friday(year: i32, month: u32) -> NaiveDate {
         let first = NaiveDate::from_ymd_opt(year, month, 1).expect("valid calendar month");
         let first_weekday = first.weekday().num_days_from_monday(); // Mon=0..Sun=6
@@ -123,17 +93,8 @@ pub mod cvi {
             .expect("the third Friday of a month is always within it")
     }
 
-    /// `EXPIRY_MONTHS` monthly listed expiries, ascending, starting at the
-    /// first month whose third Friday is ON OR AFTER `anchor` —
-    /// `the_grid_is_full_and_term_major`'s "terms sorted" rests on this
-    /// always producing an ascending list.
-    ///
-    /// The anchor's own calendar month is skipped when that month's
-    /// listed expiry has already passed (an anchor drawn the day after a
-    /// month's third Friday, say): a document whose nearest term already
-    /// expired is not a plausible live CVI grid, and starting from
-    /// `(anchor.year(), anchor.month())` unconditionally used to produce
-    /// exactly that.
+    /// Eight ascending monthly third Fridays, all on or after `anchor`.
+    /// Skip the anchor month when its listed expiry has passed.
     fn expiries(anchor: NaiveDate) -> Vec<NaiveDate> {
         let (mut y0, mut m0) = (anchor.year(), anchor.month());
         if third_friday(y0, m0) < anchor {
@@ -154,23 +115,18 @@ pub mod cvi {
             .collect()
     }
 
-    /// A seeded CVI document generator (Task 10): the same node ladder
-    /// and expiry ladder on every call for a key, `spot_ref` fixed from
-    /// that key's very first call, and `param` drifting by a small
-    /// seeded random-walk step from the previous call — everything else
-    /// held identical, so two successive documents for one key are
-    /// visibly the same shape, just moved.
+    /// A CVI generator with independent seeded state per key. Node and expiry
+    /// axes, spot, carry and forward stay fixed. Node parameters, ATM and skew
+    /// walk on subsequent calls for that key.
     pub struct CviGenerator {
         seed: u64,
         underlyings: Vec<String>,
         anchor: NaiveDate,
         expiries: Vec<NaiveDate>,
-        /// Fixed once per key, at its first `next_document` call — never
-        /// redrawn afterwards (`successive_documents_drift`: two calls
-        /// for one key share `spot_ref`).
+        /// Spot is drawn once per key and retained for all subsequent documents.
         spot: HashMap<String, f64>,
-        /// One walk state per key, term-major (spec §6.3's row order),
-        /// length `expiries.len() * NODES.len()`.
+        /// Term-major node parameters, with `expiries.len() * NODES.len()` entries
+        /// per key.
         walk: HashMap<String, Vec<f64>>,
         /// The per-slice values' own walk, one entry per term.
         slices: HashMap<String, SliceWalk>,
@@ -197,10 +153,8 @@ pub mod cvi {
             &self.underlyings
         }
 
-        /// The next document for `key`: the same node ladder, the same
-        /// eight listed expiries, `spot_ref` fixed from this key's first
-        /// call, and `param` drifted by one seeded walk step per node
-        /// from the previous call for this key.
+        /// Return the initial grid or advance this key’s node, ATM and skew walks.
+        /// Other keys’ state and RNG sequences are unaffected.
         pub fn next_document(&mut self, key: &str) -> DocumentRows {
             let n_terms = self.expiries.len();
             if !self.walk.contains_key(key) {
@@ -214,11 +168,8 @@ pub mod cvi {
                 let baseline: Vec<f64> = (0..n_terms)
                     .flat_map(|t| NODES.iter().map(move |n| baseline_param(*n, t)))
                     .collect();
-                // The slice values' starting points: one carry rate per
-                // key, an ATM level with a gentle upward term structure,
-                // a skew that flattens with the term — each drawn after
-                // the spot and the smile, so the existing draws keep
-                // their order.
+                // Carry is fixed per key. Initial ATM rises with term;
+                // skew flattens with term.
                 let carry = rng.random_range(CARRY_PER_MONTH);
                 let atm0: f64 = rng.random_range(0.16..=0.24);
                 let skew0: f64 = rng.random_range(-1.6..=-0.8);
@@ -245,10 +196,7 @@ pub mod cvi {
                     .get_mut(key)
                     .expect("checked present by the branch above");
                 for p in params.iter_mut() {
-                    // The mutation entry "the generator's drift" targets
-                    // this step: forcing it to 0 must make two
-                    // successive documents for one key compare equal,
-                    // which `successive_documents_drift` alone catches.
+                    // Each node takes an independent nonzero step.
                     let magnitude = rng.random_range(MIN_WALK_STEP..MAX_WALK_STEP);
                     let sign: f64 = if rng.random_bool(0.5) { 1.0 } else { -1.0 };
                     *p += magnitude * sign;
@@ -266,11 +214,8 @@ pub mod cvi {
             }
 
             let spot_ref = self.spot[key];
-            // A demo document is produced at most every few seconds by
-            // one background thread (`geode_app::demo_bus`), never on
-            // the receiver hot path PHILOSOPHY §6 governs — this clone
-            // is the one allocation `next_document` makes beyond the
-            // axis columns it has to build regardless.
+            // The document owns its parameter column; retain the walk
+            // state for this key's next publish.
             let params = self.walk[key].clone();
 
             let total = n_terms * NODES.len();
@@ -328,11 +273,8 @@ pub mod cvi {
             vec!["SPX".to_string(), "NDX".to_string()]
         }
 
-        /// Hand-built rather than through `SchemaSpec::from_doc` +
-        /// `config::test_support` (Task 10 brief): pulling in
-        /// `geode-core`'s `test-support` feature here would be one more
-        /// moving part for the same dataset every other test builds by
-        /// hand already declares in `examples/demo-config/datasets.toml`.
+        /// CVI schema matching `examples/demo-config/datasets.toml`, assembled
+        /// directly to validate generated rows without loading configuration.
         fn cvi_dataset_spec() -> DatasetSpec {
             let col = |name: &str, ty: ColumnType, role: ColumnRole, textual: bool| ColumnSpec {
                 name: name.to_string(),
@@ -425,11 +367,8 @@ pub mod cvi {
             );
         }
 
-        /// The per-slice values (2026-09-17): each is constant across a
-        /// term's twelve nodes — the shape `CviKind::write` refuses
-        /// otherwise — `forward` carries the spot out with the term,
-        /// `atm` is a decimal vol and `skew` a negative slope, both
-        /// held in their ranges across many publishes.
+        /// Each slice value repeats across its term’s twelve nodes. Forward
+        /// grows with the term; ATM and skew remain within their walk bounds.
         #[test]
         fn slice_values_are_constant_within_a_term_and_in_range() {
             let mut g = CviGenerator::new(3, underlyings(), anchor());
@@ -519,12 +458,8 @@ pub mod cvi {
             );
         }
 
-        /// Part 2 residual: `expiries` used to start at the anchor's OWN
-        /// month regardless of whether that month's third Friday had
-        /// already passed — an anchor drawn the day after September's own
-        /// listed expiry (2026-09-18) still opened the ladder with a term
-        /// already one day expired. The ladder must start at the first
-        /// month whose third Friday is ON OR AFTER the anchor.
+        /// The first expiry must be on or after the anchor, including anchors
+        /// after the current month’s listed expiry.
         #[test]
         fn expiries_skip_a_month_whose_third_friday_has_already_passed() {
             let anchor = NaiveDate::from_ymd_opt(2026, 9, 19).unwrap();
@@ -539,12 +474,9 @@ pub mod cvi {
     }
 }
 
-/// The dividend-schedule document kind (dividend-schedule plan, spec
-/// §6.3): a seeded generator producing one schedule per underlying,
-/// walked and occasionally extended on every subsequent call so the
-/// panel's rebase-by-label path (the design spec's §5.1) has real
-/// mismatches to rebase against, not merely a reshuffled copy of the
-/// same rows.
+/// Seeded dividend schedules with stable row identities, amount walks,
+/// status promotions and periodic appends. Changing values and row sets
+/// exercise rebasing an open draft against incoming documents.
 pub mod dividend {
     use super::fnv1a;
     use chrono::{Days, NaiveDate};
@@ -553,73 +485,43 @@ pub mod dividend {
     use rand::{Rng, SeedableRng};
     use std::collections::HashMap;
 
-    /// The dividend status vocabulary (design spec §6.1), copied here
-    /// verbatim rather than imported: `geode-demo-data` must not depend
-    /// on `geode-documents` (workspace layering rule), so this crate
-    /// keeps its own copy of the four words. A `geode-app` test (Task
-    /// 11) asserts this array equals `geode_documents::DividendKind::
-    /// STATUSES` so the two cannot drift apart unnoticed — nothing here
-    /// needs to know that; this is simply where the demo side of the
-    /// truth lives.
+    /// Closed status vocabulary shared with `DividendKind`. The app tests
+    /// agreement between the two crates so this generator does not need a
+    /// dependency on the document codec.
     pub const STATUSES: [&str; 4] = ["estimated", "declared", "paid", "cancelled"];
 
-    /// The three index underlyings that get a 30–40-row schedule with a
-    /// couple of same-ex-date pairs (Task 10 brief); every other name
-    /// gets a plain 8–12-row quarterly schedule.
+    /// Index schedules have 30–40 rows with repeated ex-dates. Other keys
+    /// have 8–12 quarterly rows and may include one additional special.
     fn is_index(key: &str) -> bool {
         matches!(key, "SPX" | "NDX" | "RUT")
     }
 
-    /// The largest a single walk step ever moves one row's `amount`
-    /// between two successive republishes for the same key, and the
-    /// smallest — mirrors CVI's `MAX_WALK_STEP`/`MIN_WALK_STEP` pair, at
-    /// a scale that suits a per-share cash amount rather than a vol
-    /// point. `MIN_AMOUNT` is the floor an amount is clamped to rather
-    /// than ever crossing into zero or negative (Task 10 brief).
+    /// Amount step bounds and a positive floor, in per-share cash units.
     const MAX_WALK_STEP: f64 = 0.05;
     const MIN_WALK_STEP: f64 = 0.001;
     const MIN_AMOUNT: f64 = 0.01;
 
-    /// A row is created `declared` rather than `estimated` once its
-    /// `ex_date` is this close to `today` — the "near" half of the
-    /// brief's "past → paid, near → declared, far → estimated" rule,
-    /// applied in full at creation (review ruling, 2026-09-19: an
-    /// earlier build deferred this case to `republish`'s promotion
-    /// step, which left an index schedule's near-dated rows reading
-    /// `estimated` on the very first document — the reading a fresh
-    /// panel actually sees).
+    /// At creation, non-cancelled rows with ex-dates from today through this
+    /// window are declared. Past rows are paid; later rows are estimated.
     const NEAR_DAYS: i64 = 30;
 
-    /// Every third republish promotes the nearest-dated `estimated` row
-    /// to `declared` (review ruling, 2026-09-19) — since creation now
-    /// applies the full three-way status rule, every row that starts
-    /// life `estimated` is already further than `NEAR_DAYS` from
-    /// `today`; this is the one way any of those far-out rows ever
-    /// moves, distance from `today` notwithstanding.
+    /// Every third republish promotes the nearest estimated row to declared,
+    /// regardless of its distance from the fixed schedule date.
     const PROMOTE_EVERY: u32 = 3;
 
-    /// Every fifth republish appends one new row to the schedule (Task
-    /// 10 brief) — the upstream-insert-under-a-draft case the design
-    /// spec's §5.1 wants exercised for real.
+    /// Every fifth republish appends a new future row, allowing incoming
+    /// schedules to grow while a draft remains open.
     const APPEND_EVERY: u32 = 5;
 
     /// One in twenty rows is cancelled, drawn once at creation.
     const CANCEL_CHANCE: f64 = 0.05;
 
-    /// One dividend row's fixed identity (`ordinal`, its three dates)
-    /// and its slowly-drifting state (`amount`, `status`) — a
-    /// republish either leaves a row untouched or nudges it by one small
-    /// step; nothing here is ever regenerated, so an id and its dates
-    /// are stable for the life of the generator. `status` alone is
-    /// authoritative for "is this row cancelled": once set to
-    /// `"cancelled"` at creation it is never read as `"estimated"` by
-    /// `promote_nearest_estimated`'s `status == "estimated"` filter, so
-    /// there is no separate `cancelled` flag to keep in sync with it.
+    /// A dividend row retains its identity and dates for the generator’s
+    /// lifetime. Amount may walk; only estimated status is eligible for
+    /// promotion, so cancelled rows remain cancelled.
     struct Row {
-        /// This row's position in creation order for its key — the
-        /// `<n>` half of its id (`D<hash>-<n>`), assigned once and never
-        /// reused: an append after a schedule already has N rows always
-        /// gets ordinal N, regardless of the schedule's ex-date order.
+        /// Creation-order suffix in `D<hash>-<ordinal>`, independent of ex-date
+        /// sort order. Appended rows receive new ordinals.
         ordinal: usize,
         ex_date: NaiveDate,
         announced_date: NaiveDate,
@@ -628,28 +530,17 @@ pub mod dividend {
         status: String,
     }
 
-    /// One seeded walk step of at most `MAX_WALK_STEP`, floored at
-    /// `MIN_AMOUNT` rather than reflected — the same clamp-not-reflect
-    /// choice `cvi::walk_within` makes, and for the same reason: a demo
-    /// amount sitting at its floor for a publish or two is what a real
-    /// feed does too.
+    /// Apply a seeded amount step, clamping at the positive `MIN_AMOUNT` floor.
     fn walk_amount(rng: &mut StdRng, amount: f64) -> f64 {
         let magnitude = rng.random_range(MIN_WALK_STEP..MAX_WALK_STEP);
         let sign: f64 = if rng.random_bool(0.5) { 1.0 } else { -1.0 };
         (amount + magnitude * sign).max(MIN_AMOUNT)
     }
 
-    /// A freshly drawn row for `ex_date`: `announced_date` 30–60 days
-    /// before it, `pay_date` 14–28 days after it (Task 10 brief), an
-    /// amount in a plausible per-share range, a one-in-twenty chance of
-    /// being cancelled outright, and otherwise the full three-way date
-    /// rule — `paid` if `ex_date` has already passed `today`, `declared`
-    /// if it is within `NEAR_DAYS`, else `estimated` — applied here in
-    /// full (review ruling, 2026-09-19) so a schedule's first document
-    /// is honest about every row's status from the start; a fresh panel
-    /// must never see `estimated` on a row the rule already calls
-    /// `declared`. `republish`'s promotion step handles only what this
-    /// static rule cannot: a far-out `estimated` row's eventual move.
+    /// Create a row with an announcement date 30–60 days before its ex-date
+    /// and a pay date 14–28 days after it. Cancellation overrides status: past
+    /// ex-dates are paid, dates within `NEAR_DAYS` are declared, and later
+    /// dates are estimated.
     fn new_row(rng: &mut StdRng, ordinal: usize, today: NaiveDate, ex_date: NaiveDate) -> Row {
         let announced_date = ex_date - Days::new(rng.random_range(30..=60));
         let pay_date = ex_date + Days::new(rng.random_range(14..=28));
@@ -675,10 +566,8 @@ pub mod dividend {
         }
     }
 
-    /// `count` ex dates roughly `step_days` apart, starting a little
-    /// before `today` so the schedule carries a few already-paid rows
-    /// alongside its future ones, each with a few days of jitter so two
-    /// schedules of the same shape never land on the exact same grid.
+    /// Generate dates roughly `step_days` apart, with a short lookback from
+    /// `today` and seeded jitter in each date and interval.
     fn spaced_dates(
         rng: &mut StdRng,
         today: NaiveDate,
@@ -702,18 +591,9 @@ pub mod dividend {
         dates
     }
 
-    /// `count` distinct indices in `0..bound`, drawn by rejection
-    /// sampling and kept in the order they were drawn — never a
-    /// `HashSet`'s, which is not a deterministic function of its
-    /// content: `RandomState::new()` perturbs its hasher on every call
-    /// (a DoS mitigation, not a documented guarantee), so two
-    /// separately-constructed `HashSet`s holding the exact same values
-    /// can iterate in different orders even in the same thread. That
-    /// bit two identically-seeded generators here — `same_seed_
-    /// same_documents`'s own failure before this helper existed —
-    /// because which base date a duplicate landed on, and so which row
-    /// got which ordinal, depended on iteration order rather than only
-    /// on the rng draws.
+    /// Draw distinct indices by rejection sampling, preserving draw order.
+    /// Stable order keeps duplicate-date placement and row ordinals
+    /// reproducible for a given seed.
     fn distinct_indices(rng: &mut StdRng, count: usize, bound: usize) -> Vec<usize> {
         let mut chosen = Vec::with_capacity(count);
         while chosen.len() < count {
@@ -725,14 +605,9 @@ pub mod dividend {
         chosen
     }
 
-    /// A fresh schedule for a key that has never been seen before: the
-    /// index shape (30–40 rows, two or three forced same-ex-date pairs)
-    /// or the regular shape (8–12 quarterly rows plus an occasional
-    /// special), per the Task 10 brief. `pairs` picks its base dates by
-    /// **distinct** index so a duplicate never lands on an already-
-    /// duplicated date — without that, two duplicates could collide on
-    /// the same base date and leave only one same-ex-date group instead
-    /// of the two or three the shape promises.
+    /// Build an index schedule with 30–40 rows and two or three same-ex-date
+    /// pairs, or a regular schedule with 8–12 quarterly rows and an optional
+    /// special. Distinct base indices keep index pairs on different dates.
     fn build_schedule(rng: &mut StdRng, today: NaiveDate, key: &str) -> Vec<Row> {
         let mut rows = Vec::new();
         if is_index(key) {
@@ -763,11 +638,8 @@ pub mod dividend {
         rows
     }
 
-    /// Every republish walks one or two amounts by one seeded step each
-    /// — the one thing every republish does, independent of the
-    /// per-count decisions (`promote_nearest_estimated`, `append_row`)
-    /// `next_document` layers on top by comparing its own republish
-    /// count against `PROMOTE_EVERY`/`APPEND_EVERY`.
+    /// Walk one or two distinct rows on every republish, independently of
+    /// the promotion and append cadence.
     fn walk_amounts(rng: &mut StdRng, rows: &mut [Row]) {
         let n = if rows.len() >= 2 && rng.random_bool(0.5) {
             2
@@ -779,14 +651,9 @@ pub mod dividend {
         }
     }
 
-    /// Promotes the nearest-dated `estimated` row to `declared`,
-    /// whatever its distance from `today` (review ruling, 2026-09-19).
-    /// Since `new_row` now applies the full three-way status rule at
-    /// creation, every row reading `estimated` by the time this runs is
-    /// already further than `NEAR_DAYS` out — a cancelled row is never a
-    /// candidate, since its status is always `cancelled`, never
-    /// `estimated`, from the moment it is drawn. A no-op once a
-    /// schedule has no `estimated` rows left.
+    /// Promote the nearest estimated row, regardless of its distance from
+    /// the schedule date. Leave other statuses unchanged; do nothing if no
+    /// estimated row remains.
     fn promote_nearest_estimated(rows: &mut [Row]) {
         if let Some(row) = rows
             .iter_mut()
@@ -797,10 +664,8 @@ pub mod dividend {
         }
     }
 
-    /// Appends one new row to an already-seeded schedule, dated after
-    /// its latest existing row — the every-fifth-republish case (Task 10
-    /// brief), simulating the issuer adding a fresh future dividend to a
-    /// schedule a trader is already watching.
+    /// Append a row 60–120 days after the latest existing ex-date, retaining
+    /// all existing identities and dates.
     fn append_row(rng: &mut StdRng, today: NaiveDate, rows: &mut Vec<Row>) {
         let last_ex = rows.iter().map(|r| r.ex_date).max().unwrap_or(today);
         let ex_date = last_ex + Days::new(rng.random_range(60..=120));
@@ -808,12 +673,8 @@ pub mod dividend {
         rows.push(new_row(rng, ordinal, today, ex_date));
     }
 
-    /// Builds the outgoing document from a key's current schedule: rows
-    /// in `DividendKind::COLUMNS` order (key `underlying_ref`; axis
-    /// `dividend_id`; values `ex_date`, `announced_date`, `pay_date`,
-    /// `amount`, `status`; attributes `currency`, `schedule_date`),
-    /// sorted by `(ex_date, id)` — never the schedule's own creation
-    /// order, which only an id's ordinal relies on.
+    /// Build the `DividendKind` columns with rows sorted by `(ex_date, id)`.
+    /// The stored schedule remains in creation order, which determines IDs.
     fn build_document(key: &str, today: NaiveDate, rows: &[Row]) -> DocumentRows {
         let hash = fnv1a(key) % 100_000;
         let ids: Vec<String> = rows
@@ -855,12 +716,8 @@ pub mod dividend {
         }
     }
 
-    /// A seeded dividend-schedule generator (Task 10): one schedule per
-    /// key, built on that key's first call and walked/occasionally
-    /// extended on every call after — everything else (the node/term
-    /// analogue here is the row set itself) held identical between
-    /// documents, so two successive documents for one key are visibly
-    /// the same schedule, just nudged.
+    /// A seeded schedule per key. Existing row IDs and dates remain stable
+    /// as amounts walk, estimated rows become declared, and new rows append.
     pub struct DividendGenerator {
         seed: u64,
         underlyings: Vec<String>,
@@ -869,10 +726,8 @@ pub mod dividend {
         /// `build_document` sorts a fresh copy for every call instead.
         rows: HashMap<String, Vec<Row>>,
         rngs: HashMap<String, StdRng>,
-        /// Republishes served for this key so far (the very first,
-        /// schedule-building call does not count) — compared against
-        /// `PROMOTE_EVERY`/`APPEND_EVERY` to decide whether this call
-        /// also promotes/appends.
+        /// Per-key publish count excluding the initial schedule, used for
+        /// promotion and append cadence.
         republishes: HashMap<String, u32>,
     }
 
@@ -926,9 +781,8 @@ pub mod dividend {
                     .expect("seeded alongside the schedule");
                 *count += 1;
                 let n = *count;
-                // The walk happens on every republish; promotion and
-                // appending are separate, count-gated decisions layered
-                // on top (review ruling, 2026-09-19 — see `PROMOTE_EVERY`).
+                // Amounts walk every time; promotion and appending use
+                // separate cadences against the same publish count.
                 walk_amounts(rng, rows);
                 if n.is_multiple_of(PROMOTE_EVERY) {
                     promote_nearest_estimated(rows);
@@ -1071,17 +925,8 @@ pub mod dividend {
             }
         }
 
-        /// Review ruling (2026-09-19): creation applies the full
-        /// three-way status rule, not just past → `paid`, so a row
-        /// within 30 days of `today` must already read `declared` — and
-        /// a past row `paid` — on the very first document, before any
-        /// republish ever runs. `cancelled` is a one-in-twenty override
-        /// independent of the date rule, so it is accepted wherever
-        /// `declared`/`paid` would otherwise be expected; the one thing
-        /// this test must never see in either bucket is `estimated`,
-        /// which is exactly the bug the ruling fixed (an index
-        /// schedule's near-dated row used to read `estimated` on its
-        /// first document, the reading a freshly opened panel sees).
+        /// The initial document applies the past/near status rules. Cancellation
+        /// is an independent override accepted in either date range.
         #[test]
         fn near_rows_are_declared_on_the_first_document() {
             let mut g = DividendGenerator::new(1, underlyings(), today());
@@ -1093,10 +938,7 @@ pub mod dividend {
             let mut saw_near = false;
             for (ex, status) in ex_dates.iter().zip(statuses.iter()) {
                 let days = (*ex - today()).num_days();
-                // A row further out than NEAR_DAYS is correctly
-                // "estimated" — only the past-or-near window is this
-                // test's concern (a row beyond it deliberately keeps no
-                // assertion here).
+                // This test covers the past and near date ranges.
                 if *ex < today() {
                     saw_past = true;
                     assert!(
@@ -1119,14 +961,8 @@ pub mod dividend {
             );
         }
 
-        /// Review ruling (2026-09-19): every third republish promotes
-        /// the single nearest-dated `estimated` row to `declared` —
-        /// compares the document from the second republish (before
-        /// promotion) against the third's (where it fires) and checks
-        /// that exactly one row's status changed, that it changed from
-        /// `estimated` to `declared`, and that it is the row the second
-        /// document's own nearest-dated `estimated` row names — never
-        /// merely "some row changed".
+        /// The third republish changes exactly the nearest estimated row to
+        /// declared; it neither changes other statuses nor appends rows.
         #[test]
         fn the_third_republish_promotes_the_nearest_estimated_row() {
             let mut g = DividendGenerator::new(21, underlyings(), today());

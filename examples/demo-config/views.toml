@@ -1,6 +1,5 @@
-# The --demo layer's views. `tree` is the shape the blotter runs and
-# the requery benchmarks measure; `wide` is the 100-column view the
-# DataTable swap trigger is measured on (spec §6.6).
+# Demo views: `tree` is the default blotter view and query benchmark shape;
+# `wide` exercises rendering and querying with 100 selected columns.
 config_version = 1
 
 [tree]
@@ -26,10 +25,8 @@ format = { precision = 0, negative = "parens" }
 [wide]
 dataset = "risk_snapshot"
 grouping = ["book", "lhu", "position_ref"]
-# Every measure and its `_usd` twin (38 columns, expanded mechanically
-# from `datasets.toml`'s declared measures), then derived columns
-# `d01 = delta01 * 1` through `d62 = delta01 * 62`, for 100 columns —
-# the count the DataTable swap trigger is measured against (spec §6.6).
+# All 22 measures plus 16 USD twins, followed by 62 derived columns
+# (`d01 = delta01 * 1` through `d62 = delta01 * 62`): 100 columns total.
 [[wide.columns]]
 name = "delta01"
 

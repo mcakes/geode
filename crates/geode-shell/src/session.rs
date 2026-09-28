@@ -33,10 +33,12 @@
 //! a warning. Dock fullscreen is unsupported and ignored with a warning.
 //!
 //! `workspaces.N.tiles.<id>` stores a module name and opaque state. `[frame]`
-//! stores scope, grouping slot, and as-of; `[palette.usage]` stores usage counts
-//! and timestamps; `[pages.<kind>]` stores one opaque table per page kind
-//! (whether a page was open is not recorded). Unknown keys are ignored on read
-//! and not preserved on save.
+//! stores the shared lane's scope, grouping slot, and as-of; `workspaces.N.frame`
+//! stores a pinned workspace's own lane in the same format, and its presence
+//! means workspace N is pinned. `[palette.usage]` stores usage counts and
+//! timestamps; `[pages.<kind>]` stores one opaque table per page kind (whether
+//! a page was open is not recorded). Unknown keys are ignored on read and not
+//! preserved on save.
 //!
 //! An invalid main tree or session header rejects the entire session. Docks,
 //! tile records, frame fields, palette usage, and page tables recover locally
@@ -56,7 +58,7 @@ use std::path::Path;
 use crate::palette_usage::PaletteUsage;
 use crate::tiling::{
     DOCK_MAX_SIZE, DOCK_MIN_SIZE, Dock, DockSide, Docks, FocusRegion, Node, Orientation, TileId,
-    Tree, Workspace, Workspaces,
+    Tree, Workspace, WorkspaceIx, Workspaces,
 };
 use geode_core::query::AsOf;
 use geode_core::scope::{DimensionSelection, Scope, parse_expr};
@@ -88,6 +90,10 @@ pub type TileRecords = BTreeMap<u64, TileRecord>;
 /// factory is carried through the next save unchanged.
 pub type PageRecords = BTreeMap<String, toml::Table>;
 
+/// Pinned workspaces' own frame lanes, written as `workspaces.N.frame`. A key
+/// present here means that workspace is pinned; an absent key is unpinned.
+pub type PinnedRecords = BTreeMap<WorkspaceIx, FrameRecord>;
+
 /// What [`load`]/[`from_toml`] hand back: the restored layout, each tile's
 /// module record, the frame's own restored state if the file had one, page
 /// state, and any non-fatal warnings accumulated healing any of it.
@@ -96,6 +102,8 @@ pub struct Restored {
     pub workspaces: Workspaces,
     pub tiles: TileRecords,
     pub frame: Option<FrameRecord>,
+    /// Pinned workspace lanes from `workspaces.N.frame`; empty when none is pinned.
+    pub pinned: PinnedRecords,
     /// Palette usage from `[palette.usage]`; absent history starts empty.
     pub palette_usage: PaletteUsage,
     /// Page state from `[pages.<kind>]`; an absent table restores as empty.
@@ -265,11 +273,13 @@ impl FrameRecord {
 /// Serialize all materialized workspaces without I/O. Write tile records only
 /// under the workspace whose main or dock tree contains the ID; omit stale
 /// records. Include `[frame]` whenever `frame` is `Some`, even if its table is
-/// empty, and palette usage and pages only when nonempty.
+/// empty, `workspaces.N.frame` for exactly the workspaces in `pinned`, and
+/// palette usage and pages only when nonempty.
 pub fn to_toml(
     workspaces: &Workspaces,
     tiles: &TileRecords,
     frame: Option<&FrameRecord>,
+    pinned: &PinnedRecords,
     palette_usage: &PaletteUsage,
     pages: &PageRecords,
 ) -> toml::Table {
@@ -368,6 +378,12 @@ pub fn to_toml(
             ws_table.insert("tiles".to_string(), toml::Value::Table(tiles_table));
         }
 
+        // A pinned workspace carries its own lane; presence means pinned, so
+        // an unpinned workspace must write none or it would restore pinned.
+        if let Some(record) = WorkspaceIx::new(ix).and_then(|w| pinned.get(&w)) {
+            ws_table.insert("frame".to_string(), toml::Value::Table(record.to_toml()));
+        }
+
         spaces_table.insert(ix.to_string(), toml::Value::Table(ws_table));
     }
     root.insert("workspaces".to_string(), toml::Value::Table(spaces_table));
@@ -412,9 +428,11 @@ pub fn to_toml(
 /// a visible empty dock remains a valid focus target.
 ///
 /// Malformed or locally dangling tile records warn and are dropped. Frame,
-/// palette, and page fields recover independently; a missing version warns but
-/// still loads. Recovery does not imply schema validation of module, page, or
-/// frame state.
+/// palette, and page fields recover independently; a non-table
+/// `workspaces.N.frame` warns and that workspace restores unpinned, while a
+/// table recovers its usable fields like `[frame]`; a missing version warns
+/// but still loads. Recovery does not imply schema validation of module, page,
+/// or frame state.
 pub fn from_toml(table: &toml::Table) -> Result<Restored, Vec<String>> {
     let mut warnings = Vec::new();
     match table.get("config_version") {
@@ -450,6 +468,7 @@ pub fn from_toml(table: &toml::Table) -> Result<Restored, Vec<String>> {
 
     let mut spaces = BTreeMap::new();
     let mut tiles = TileRecords::new();
+    let mut pinned = PinnedRecords::new();
     if let Some(workspaces_value) = table.get("workspaces") {
         match workspaces_value.as_table() {
             Some(workspaces_table) => {
@@ -457,6 +476,19 @@ pub fn from_toml(table: &toml::Table) -> Result<Restored, Vec<String>> {
                     match parse_workspace(key, value, &mut warnings, &mut tiles) {
                         Ok((ix, workspace)) => {
                             spaces.insert(ix, workspace);
+                            match value.get("frame") {
+                                None => {}
+                                Some(toml::Value::Table(t)) => {
+                                    let record = FrameRecord::from_toml(t, &mut warnings);
+                                    // `None` is unreachable: `parse_workspace` bounds `ix` to 1..=9.
+                                    if let Some(w) = WorkspaceIx::new(ix) {
+                                        pinned.insert(w, record);
+                                    }
+                                }
+                                Some(_) => warnings.push(format!(
+                                    "workspaces.{ix}.frame is not a table; workspace {ix} restores unpinned"
+                                )),
+                            }
                         }
                         Err(e) => errors.push(e),
                     }
@@ -524,6 +556,7 @@ pub fn from_toml(table: &toml::Table) -> Result<Restored, Vec<String>> {
         workspaces,
         tiles,
         frame,
+        pinned,
         palette_usage,
         pages,
         warnings,
@@ -936,10 +969,11 @@ pub fn to_string_pretty(
     workspaces: &Workspaces,
     tiles: &TileRecords,
     frame: Option<&FrameRecord>,
+    pinned: &PinnedRecords,
     palette_usage: &PaletteUsage,
     pages: &PageRecords,
 ) -> Result<String, String> {
-    let table = to_toml(workspaces, tiles, frame, palette_usage, pages);
+    let table = to_toml(workspaces, tiles, frame, pinned, palette_usage, pages);
     toml::to_string_pretty(&table).map_err(|e| e.to_string())
 }
 
@@ -969,10 +1003,11 @@ pub fn save(
     workspaces: &Workspaces,
     tiles: &TileRecords,
     frame: Option<&FrameRecord>,
+    pinned: &PinnedRecords,
     palette_usage: &PaletteUsage,
     pages: &PageRecords,
 ) -> std::io::Result<()> {
-    let text = to_string_pretty(workspaces, tiles, frame, palette_usage, pages)
+    let text = to_string_pretty(workspaces, tiles, frame, pinned, palette_usage, pages)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     write_atomic(path, &text)
 }
@@ -986,6 +1021,7 @@ pub fn load(path: &Path) -> Restored {
         workspaces: Workspaces::new(),
         tiles: TileRecords::new(),
         frame: None,
+        pinned: PinnedRecords::new(),
         palette_usage: PaletteUsage::new(),
         pages: PageRecords::new(),
         warnings,
@@ -1068,7 +1104,15 @@ mod tests {
             },
         );
 
-        let text = to_string_pretty(&ws, &tiles, None, &no_usage(), &no_pages()).unwrap();
+        let text = to_string_pretty(
+            &ws,
+            &tiles,
+            None,
+            &PinnedRecords::new(),
+            &no_usage(),
+            &no_pages(),
+        )
+        .unwrap();
         assert!(
             text.contains(&format!("[workspaces.1.tiles.{}]", ids[0].0)),
             "{text}"
@@ -1093,7 +1137,14 @@ mod tests {
                 state: toml::Table::new(),
             },
         );
-        let mut table = to_toml(&ws, &tiles, None, &no_usage(), &no_pages());
+        let mut table = to_toml(
+            &ws,
+            &tiles,
+            None,
+            &PinnedRecords::new(),
+            &no_usage(),
+            &no_pages(),
+        );
         // Force the stray record in under workspace 1 regardless of what
         // `to_toml` filtered.
         let ws_table = table["workspaces"]["1"].as_table_mut().unwrap();
@@ -1120,7 +1171,14 @@ mod tests {
     fn a_tile_record_without_a_module_or_with_a_bad_state_is_dropped_with_a_warning() {
         let ws = two_tile_workspaces();
         let id = ws.active().tree().tiles()[0].0;
-        let mut table = to_toml(&ws, &TileRecords::new(), None, &no_usage(), &no_pages());
+        let mut table = to_toml(
+            &ws,
+            &TileRecords::new(),
+            None,
+            &PinnedRecords::new(),
+            &no_usage(),
+            &no_pages(),
+        );
         let ws_table = table["workspaces"]["1"].as_table_mut().unwrap();
         let mut tiles_table = toml::Table::new();
         let mut no_module = toml::Table::new();
@@ -1136,8 +1194,15 @@ mod tests {
     fn a_session_without_tiles_still_loads_and_writes_no_tiles_table() {
         // Tile records are optional even when a layout contains tiles.
         let ws = two_tile_workspaces();
-        let text =
-            to_string_pretty(&ws, &TileRecords::new(), None, &no_usage(), &no_pages()).unwrap();
+        let text = to_string_pretty(
+            &ws,
+            &TileRecords::new(),
+            None,
+            &PinnedRecords::new(),
+            &no_usage(),
+            &no_pages(),
+        )
+        .unwrap();
         assert!(!text.contains("tiles"), "{text}");
         let restored = from_toml(&text.parse().unwrap()).unwrap();
         assert!(restored.tiles.is_empty());
@@ -1157,7 +1222,14 @@ mod tests {
         let _e = ws.stack_active().unwrap(); // stack in the dock
         let _ = (a, d);
 
-        let table = to_toml(&ws, &TileRecords::new(), None, &no_usage(), &no_pages());
+        let table = to_toml(
+            &ws,
+            &TileRecords::new(),
+            None,
+            &PinnedRecords::new(),
+            &no_usage(),
+            &no_pages(),
+        );
         let text = toml::to_string(&table).unwrap();
         assert!(text.contains("kind = \"stack\""), "{text}");
         assert!(text.contains("members = ["), "{text}");
@@ -1236,7 +1308,14 @@ members = [1, -4]
     #[test]
     fn round_trips_a_fresh_workspaces() {
         let ws = Workspaces::new();
-        let table = to_toml(&ws, &TileRecords::new(), None, &no_usage(), &no_pages());
+        let table = to_toml(
+            &ws,
+            &TileRecords::new(),
+            None,
+            &PinnedRecords::new(),
+            &no_usage(),
+            &no_pages(),
+        );
         let Restored {
             workspaces: restored,
             warnings,
@@ -1258,7 +1337,14 @@ members = [1, -4]
         apply_workspace_action(&mut ws, &act("workspace::fullscreen_tile"));
         ws.switch(1);
 
-        let table = to_toml(&ws, &TileRecords::new(), None, &no_usage(), &no_pages());
+        let table = to_toml(
+            &ws,
+            &TileRecords::new(),
+            None,
+            &PinnedRecords::new(),
+            &no_usage(),
+            &no_pages(),
+        );
         let Restored {
             workspaces: restored,
             warnings,
@@ -1302,6 +1388,7 @@ members = [1, -4]
             &Workspaces::new(),
             &TileRecords::new(),
             None,
+            &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
         );
@@ -1328,6 +1415,7 @@ members = [1, -4]
             &Workspaces::new(),
             &TileRecords::new(),
             None,
+            &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
         );
@@ -1639,6 +1727,7 @@ members = [1, -4]
             &ws,
             &TileRecords::new(),
             None,
+            &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
         )
@@ -1676,6 +1765,7 @@ members = [1, -4]
             &Workspaces::new(),
             &TileRecords::new(),
             None,
+            &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
         )
@@ -1694,6 +1784,7 @@ members = [1, -4]
             &Workspaces::new(),
             &TileRecords::new(),
             None,
+            &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
         )
@@ -1707,7 +1798,14 @@ members = [1, -4]
         ws.split_active(Orientation::Horizontal);
         ws.split_active(Orientation::Horizontal);
         ws.split_active(Orientation::Horizontal);
-        let table = to_toml(&ws, &TileRecords::new(), None, &no_usage(), &no_pages());
+        let table = to_toml(
+            &ws,
+            &TileRecords::new(),
+            None,
+            &PinnedRecords::new(),
+            &no_usage(),
+            &no_pages(),
+        );
         let Restored {
             workspaces: mut restored,
             warnings,
@@ -1752,7 +1850,14 @@ members = [1, -4]
     #[test]
     fn round_trips_docks_and_region() {
         let ws = docked_workspaces();
-        let table = to_toml(&ws, &TileRecords::new(), None, &no_usage(), &no_pages());
+        let table = to_toml(
+            &ws,
+            &TileRecords::new(),
+            None,
+            &PinnedRecords::new(),
+            &no_usage(),
+            &no_pages(),
+        );
         let Restored {
             workspaces: restored,
             warnings,
@@ -1806,7 +1911,14 @@ members = [1, -4]
             "fixture sanity: the dock really is empty"
         );
 
-        let table = to_toml(&ws, &TileRecords::new(), None, &no_usage(), &no_pages());
+        let table = to_toml(
+            &ws,
+            &TileRecords::new(),
+            None,
+            &PinnedRecords::new(),
+            &no_usage(),
+            &no_pages(),
+        );
         let Restored {
             workspaces: restored,
             warnings,
@@ -1832,8 +1944,15 @@ members = [1, -4]
         // Omit dock fields when all docks and the focus region are at defaults.
         let mut ws = Workspaces::new();
         ws.split_active(Orientation::Horizontal);
-        let text =
-            to_string_pretty(&ws, &TileRecords::new(), None, &no_usage(), &no_pages()).unwrap();
+        let text = to_string_pretty(
+            &ws,
+            &TileRecords::new(),
+            None,
+            &PinnedRecords::new(),
+            &no_usage(),
+            &no_pages(),
+        )
+        .unwrap();
         assert!(!text.contains("docks"), "{text}");
         assert!(!text.contains("region"), "{text}");
     }
@@ -1841,7 +1960,14 @@ members = [1, -4]
     #[test]
     fn restored_docked_tile_ids_do_not_collide_with_new_allocations() {
         let ws = docked_workspaces();
-        let table = to_toml(&ws, &TileRecords::new(), None, &no_usage(), &no_pages());
+        let table = to_toml(
+            &ws,
+            &TileRecords::new(),
+            None,
+            &PinnedRecords::new(),
+            &no_usage(),
+            &no_pages(),
+        );
         let Restored {
             workspaces: mut restored,
             warnings: _,
@@ -1878,6 +2004,7 @@ members = [1, -4]
             &Workspaces::new(),
             &TileRecords::new(),
             None,
+            &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
         );
@@ -1920,6 +2047,7 @@ members = [1, -4]
             &Workspaces::new(),
             &TileRecords::new(),
             None,
+            &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
         );
@@ -1951,6 +2079,7 @@ members = [1, -4]
                 &Workspaces::new(),
                 &TileRecords::new(),
                 None,
+                &PinnedRecords::new(),
                 &no_usage(),
                 &no_pages(),
             );
@@ -1993,6 +2122,7 @@ members = [1, -4]
             &Workspaces::new(),
             &TileRecords::new(),
             None,
+            &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
         );
@@ -2036,6 +2166,7 @@ members = [1, -4]
             &Workspaces::new(),
             &TileRecords::new(),
             None,
+            &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
         );
@@ -2063,6 +2194,7 @@ members = [1, -4]
             &Workspaces::new(),
             &TileRecords::new(),
             None,
+            &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
         );
@@ -2163,6 +2295,7 @@ members = [1, -4]
             &Workspaces::new(),
             &TileRecords::new(),
             None,
+            &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
         );
@@ -2204,6 +2337,7 @@ members = [1, -4]
             &Workspaces::new(),
             &TileRecords::new(),
             None,
+            &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
         );
@@ -2244,6 +2378,7 @@ members = [1, -4]
             &Workspaces::new(),
             &TileRecords::new(),
             None,
+            &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
         );
@@ -2291,6 +2426,7 @@ members = [1, -4]
             &Workspaces::new(),
             &TileRecords::new(),
             None,
+            &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
         );
@@ -2348,6 +2484,7 @@ members = [1, -4]
             &Workspaces::new(),
             &TileRecords::new(),
             None,
+            &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
         );
@@ -2397,6 +2534,7 @@ members = [1, -4]
             &Workspaces::new(),
             &TileRecords::new(),
             None,
+            &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
         );
@@ -2450,12 +2588,100 @@ members = [1, -4]
     }
 
     #[test]
+    fn a_pinned_lane_round_trips_under_its_workspace() {
+        let mut spaces = Workspaces::new();
+        spaces.switch(2);
+        let mut pinned = PinnedRecords::new();
+        pinned.insert(WorkspaceIx::new(2).unwrap(), sample_frame_record());
+        let table = to_toml(
+            &spaces,
+            &TileRecords::new(),
+            None,
+            &pinned,
+            &no_usage(),
+            &no_pages(),
+        );
+        let ws2 = table["workspaces"]["2"].as_table().unwrap();
+        assert!(ws2.contains_key("frame"));
+        assert!(
+            !table["workspaces"]["1"]
+                .as_table()
+                .unwrap()
+                .contains_key("frame"),
+            "an unpinned workspace writes no frame"
+        );
+        let restored = from_toml(&table).unwrap();
+        assert_eq!(restored.pinned, pinned);
+    }
+
+    #[test]
+    fn a_non_table_workspace_frame_restores_unpinned_with_a_warning() {
+        let mut table = to_toml(
+            &Workspaces::new(),
+            &TileRecords::new(),
+            None,
+            &PinnedRecords::new(),
+            &no_usage(),
+            &no_pages(),
+        );
+        table["workspaces"]["1"]
+            .as_table_mut()
+            .unwrap()
+            .insert("frame".into(), toml::Value::Integer(3));
+        let restored = from_toml(&table).unwrap();
+        assert!(restored.pinned.is_empty());
+        assert!(
+            restored
+                .warnings
+                .iter()
+                .any(|w| w.contains("workspaces.1.frame"))
+        );
+    }
+
+    #[test]
+    fn a_partial_pinned_record_keeps_its_usable_fields() {
+        let mut table = to_toml(
+            &Workspaces::new(),
+            &TileRecords::new(),
+            None,
+            &PinnedRecords::new(),
+            &no_usage(),
+            &no_pages(),
+        );
+        let frame: toml::Table = r#"
+            slot = 2
+            as_of = "not a date"
+            named = ["undefined_name"]
+        "#
+        .parse()
+        .unwrap();
+        table["workspaces"]["1"]
+            .as_table_mut()
+            .unwrap()
+            .insert("frame".into(), toml::Value::Table(frame));
+        let restored = from_toml(&table).unwrap();
+        let record = &restored.pinned[&WorkspaceIx::FIRST];
+        assert_eq!(record.active_slot, Some(2));
+        assert_eq!(
+            record.scope.named,
+            vec!["undefined_name".to_string()],
+            "an undefined name is kept; the lane refuses per query"
+        );
+        assert_eq!(record.as_of, AsOf::Live);
+        assert!(
+            restored.warnings.iter().any(|w| w.contains("as_of")),
+            "the bad as-of warns"
+        );
+    }
+
+    #[test]
     fn a_frame_record_round_trips_through_session_toml_with_every_field() {
         let record = sample_frame_record();
         let table = to_toml(
             &Workspaces::new(),
             &TileRecords::new(),
             Some(&record),
+            &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
         );
@@ -2524,6 +2750,7 @@ members = [1, -4]
             &Workspaces::new(),
             &TileRecords::new(),
             None,
+            &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
         );
@@ -2543,6 +2770,7 @@ members = [1, -4]
             &Workspaces::new(),
             &TileRecords::new(),
             None,
+            &PinnedRecords::new(),
             &usage,
             &no_pages(),
         )
@@ -2563,6 +2791,7 @@ members = [1, -4]
             &Workspaces::new(),
             &TileRecords::new(),
             None,
+            &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
         );
@@ -2576,6 +2805,7 @@ members = [1, -4]
             &Workspaces::new(),
             &TileRecords::new(),
             None,
+            &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
         );
@@ -2595,6 +2825,7 @@ members = [1, -4]
             &Workspaces::new(),
             &TileRecords::new(),
             None,
+            &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
         );
@@ -2611,6 +2842,7 @@ members = [1, -4]
             &Workspaces::new(),
             &TileRecords::new(),
             None,
+            &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
         );
@@ -2639,6 +2871,7 @@ members = [1, -4]
             &workspaces,
             &TileRecords::new(),
             None,
+            &PinnedRecords::new(),
             &PaletteUsage::new(),
             &pages,
         )
@@ -2656,6 +2889,7 @@ members = [1, -4]
             &workspaces,
             &TileRecords::new(),
             None,
+            &PinnedRecords::new(),
             &PaletteUsage::new(),
             &PageRecords::new(),
         )

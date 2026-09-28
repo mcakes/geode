@@ -88,6 +88,18 @@ the same draft before validation and persistence. This avoids independent
 copies of an object's nested state. Returning from a Schema column refreshes
 its read-only summaries from configuration with pending edits included.
 
+A Column stage can also be entered directly from a tile. "Edit column in
+view…" (`config::view_column`) and "Edit column in schema…"
+(`config::schema_column`) list the focused tile's presented columns; see
+[input and dialogs](input-and-dialogs.md#grouping-scope-tile-log-and-column-choices).
+A pick opens Views on the tile's view, or Schema on the dataset that owns the
+column (the view's primary dataset, then its joins in declaration order), and
+enters that column's stage. Both are resolved against configuration with
+pending edits folded in, not the tile's copy. An undefined view, or a column
+no dataset of the view declares, stays in Browse with a footer notice; a
+column the object no longer has stops on the object's Edit stage with a
+notice. Escape then walks the usual ladder: Edit, Browse, close.
+
 Rows carry no destination badge: every field of one stage writes the same
 place (the object's document, or a Column stage's one overlay), so the badge
 would read the same on every row. Rows name a layer instead where one
@@ -118,11 +130,21 @@ The dialog announces this fork and the revert operation. Future lower-layer
 changes to that object no longer flow through the copied definition.
 Presentation-only edits preserve definition inheritance.
 
-View presentation is compared property by property with the view definition
-plus dataset presentation, resolved through the column-kind defaults. Equal
-values are omitted, so editing a width does not also pin inherited formatting.
-Clearing a label or entering an auto width restores the value below and shows
-that value immediately. An empty overlay removes its user-layer object.
+Each column-stage field is either set at the stage's layer (the view's
+overlay on Views, the dataset's on Schema) or inherited from the layers
+below. Which keys that overlay holds is read when the view is opened (Views)
+or when the column is (Schema); changing a
+value sets it, even to a value equal to the one it inherits, which pins it.
+`r` makes the selected field inherit again, `shift+r` every field, and a
+set field's ↺ does what `r` does; an empty Label or `auto` Width inherits
+too. An inherited field shows the value in force below it, badged with the
+layer that sets it (`dataset` or `desk` on Views; none for the kind default
+or on Schema); a set field carries the `view` or `dataset` badge. The
+writers write exactly the set keys: a column with none is dropped, and an
+empty object removes its user-layer entry. Keys already on disk read as
+set, so an overlay key equal to its parent shows as pinned until `r`
+releases it. Inherited values are resolved from the layers read when the
+column opens; a parent changed elsewhere shows the next time it is opened.
 
 Presentation writers own their modelled overlay shape. The view writer
 rebuilds the overlay and drops unmodelled keys. The dataset writer preserves

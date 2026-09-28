@@ -25,4 +25,4 @@ pub use dropzones::{
     locate_drop_target, rect_contains, resolve_drop_target,
 };
 pub use tree::{Direction, DividerAddress, Node, Orientation, Rect, TileId, Tree};
-pub use workspaces::{RESIZE_STEP, Workspace, Workspaces, apply_workspace_action};
+pub use workspaces::{RESIZE_STEP, Workspace, WorkspaceIx, Workspaces, apply_workspace_action};

@@ -13,10 +13,17 @@ use std::borrow::Cow;
 
 use gpui::{AssetSource, Result, SharedString};
 
-// `Save`: the scope bar's save chip (`shell::toolbar`). `Activity`: the
-// diagnostics page's sidebar button. `Copy`: the diagnostics page's log
-// detail copy button (`geode_diagnostics::page_chrome`).
-gpui_kit_assets::icon_assets!(ExtraIcons, [Save, Activity, Copy]);
+gpui_kit_assets::icon_assets!(
+    ExtraIcons,
+    [
+        // The scope bar's save chip and the frame readout's workspace pin
+        // glyph (`shell::toolbar`).
+        Save, Pin,
+        // The diagnostics page's sidebar button (`Activity`) and its log
+        // detail copy button (`Copy`, `geode_diagnostics::page_chrome`).
+        Activity, Copy,
+    ]
+);
 
 /// [`ExtraIcons`] over [`gpui_kit_assets::Assets`].
 pub struct AppAssets;
@@ -47,7 +54,12 @@ mod tests {
     #[test]
     fn the_extra_icons_the_shell_paints_are_served() {
         use gpui_kit_assets::IconName;
-        for icon in [IconName::Save, IconName::Activity, IconName::Copy] {
+        for icon in [
+            IconName::Save,
+            IconName::Pin,
+            IconName::Activity,
+            IconName::Copy,
+        ] {
             let path = icon.path();
             let bytes = AppAssets.load(&path).unwrap();
             assert!(bytes.is_some_and(|b| !b.is_empty()), "{path} is not served");

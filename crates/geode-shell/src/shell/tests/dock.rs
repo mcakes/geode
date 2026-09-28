@@ -83,7 +83,7 @@ fn ctrl_bracket_keystroke_toggles_the_left_dock_and_paints_its_hint(cx: &mut gpu
     assert_eq!(
         region,
         crate::tiling::FocusRegion::Dock(crate::tiling::DockSide::Left),
-        "showing a dock focuses it (spec 2026-09-08 add-tile §8), empty or not"
+        "showing a dock focuses it, empty or not"
     );
 
     let hint_bounds = cx.debug_bounds("dock-empty-hint-left");

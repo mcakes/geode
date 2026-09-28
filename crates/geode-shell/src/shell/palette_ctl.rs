@@ -114,7 +114,7 @@ impl ShellView {
             PaletteItem::Scope(name) => {
                 // Load the live saved scope, notifying only when the frame changed.
                 let name = name.clone();
-                self.frame.update(cx, |f, cx| {
+                self.target_frame().update(cx, |f, cx| {
                     if let Ok(true) = f.load_scope(&name) {
                         cx.notify();
                     }
@@ -128,7 +128,8 @@ impl ShellView {
     /// overlay start after the palette is gone. Empty results simply close. Over
     /// a dialog stack, dialog actions may push another entry; other actions run
     /// behind it and restore focus to the top dialog. Tile command-line, find,
-    /// and stack-list actions refuse while a dialog remains open.
+    /// stack-list, workspace-switch, and pin actions refuse while a dialog
+    /// remains open.
     pub(super) fn commit_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let selected = self.palette.as_ref().and_then(PaletteState::selected_item);
         self.close_palette(window, cx);

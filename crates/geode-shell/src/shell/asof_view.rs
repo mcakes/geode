@@ -44,7 +44,7 @@ pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellVie
         return;
     }
     let clock = view.clock(cx);
-    let frame = view.frame.read(cx);
+    let frame = view.target_frame().read(cx);
     let publishes: Vec<_> = frame.recent_publishes().iter().cloned().collect();
     // The retained scroll handle must follow the fresh state's first row.
     view.as_of_scroll.scroll_to_item(0);
@@ -81,7 +81,7 @@ fn apply_commit(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    shell.frame.update(cx, |f, cx| {
+    shell.target_frame().update(cx, |f, cx| {
         let next = match commit {
             Commit::At(t) => AsOf::At(t),
             Commit::Live => AsOf::Live,

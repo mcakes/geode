@@ -14,7 +14,7 @@ use geode_core::config::Config;
 use geode_core::log::{Level, Ring};
 use geode_shell::actions::ActionId;
 use geode_shell::diagnostics::{DiagVersions, Diagnostics};
-use geode_shell::frame::{Frame, FrameVersions};
+use geode_shell::frame::{FrameRef, FrameVersions};
 use geode_shell::keymap::KeyContext;
 use geode_shell::module::ShellActions;
 use geode_shell::shell::{chip, scale};
@@ -69,7 +69,7 @@ fn title_for(section: Section) -> SharedString {
 }
 
 pub struct DiagnosticsPage {
-    pub(crate) frame: Entity<Frame>,
+    pub(crate) frame: FrameRef,
     pub(crate) diagnostics: Entity<Diagnostics>,
     config: Rc<RefCell<Config>>,
     actions: ShellActions,
@@ -143,7 +143,7 @@ pub struct DiagnosticsPage {
 impl DiagnosticsPage {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        frame: Entity<Frame>,
+        frame: FrameRef,
         diagnostics: Entity<Diagnostics>,
         ring: Arc<Ring>,
         config: Rc<RefCell<Config>>,
@@ -284,8 +284,10 @@ impl DiagnosticsPage {
         // The app registers its config-refresh frame observer before pages
         // are created; it must update the shared `Config` before this
         // observer rebuilds config rows on the same version change.
-        cx.observe(&frame, |this, frame, cx| {
-            let now = frame.read(cx).versions();
+        cx.observe(frame.entity(), |this, _, cx| {
+            // Read through the page's own handle: the observed entity alone
+            // would answer for the shared lane, not the bound workspace's.
+            let now = this.frame.read(cx).versions();
             // Hidden: move the baseline only, as the diagnostics observer
             // does. The catalog refresh below is a visible page's too; the
             // show requests its own.
@@ -1146,6 +1148,8 @@ mod tests {
     use geode_core::log::LogLevels;
     use geode_core::scopes::SavedScopes;
     use geode_shell::diagnostics::Health;
+    use geode_shell::frame::Frame;
+    use geode_shell::tiling::WorkspaceIx;
 
     use crate::prepared::RowKind;
 
@@ -1196,6 +1200,9 @@ mod tests {
         let window = cx
             .update(|cx| {
                 cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    // The page is bound to unpinned workspace 1, so the shared
+                    // lane is its lane and tests address it as `f.shared()` /
+                    // `f.shared_mut()`.
                     let frame =
                         cx.new(|_| Frame::new(GroupingSlots::default(), SavedScopes::new(), None));
                     let diagnostics = cx.new(|_| Diagnostics::new(LogLevels::default()));
@@ -1204,7 +1211,7 @@ mod tests {
                     cx.new(|cx| {
                         let page = cx.new(|cx| {
                             DiagnosticsPage::new(
-                                frame.clone(),
+                                FrameRef::new(frame.clone(), WorkspaceIx::FIRST),
                                 diagnostics.clone(),
                                 ring2,
                                 config2,
@@ -1224,8 +1231,9 @@ mod tests {
             .root(&mut vcx)
             .unwrap()
             .read_with(&vcx, |h, _| h.page.clone());
-        let (frame, diagnostics) =
-            page.read_with(&vcx, |p, _| (p.frame.clone(), p.diagnostics.clone()));
+        let (frame, diagnostics) = page.read_with(&vcx, |p, _| {
+            (p.frame.entity().clone(), p.diagnostics.clone())
+        });
         // Focus-in and focus-out reach their listeners only in an active
         // window, as a shown window is; the test platform activates on
         // its executor, so it is parked before the first draw.
@@ -1489,7 +1497,7 @@ mod tests {
         );
         let at = geode_core::query::AsOf::At(chrono::Utc::now());
         h.frame.update(&mut vcx, |f, cx| {
-            let _ = f.set_as_of(at.clone());
+            let _ = f.shared_mut().set_as_of(at.clone());
             cx.notify();
         });
         vcx.run_until_parked();

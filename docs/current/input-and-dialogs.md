@@ -15,7 +15,7 @@ this order:
 
 | Owner | Routing |
 |---|---|
-| Palette over a dialog stack | Takes precedence over the modal handler below: the palette owns keys while it is open, whether or not a dialog is open beneath it. Every action is listed; an `opens_dialog` action pushes, and any other action runs behind the stack and returns focus to the top dialog. Three actions that would open real transient chrome behind the stack (`tile::command_line`, `tile::find`, `stack::pick`) are refused instead — see [palette and which-key](#palette-and-which-key). |
+| Palette over a dialog stack | Takes precedence over the modal handler below: the palette owns keys while it is open, whether or not a dialog is open beneath it. Every action is listed; an `opens_dialog` action pushes, and any other action runs behind the stack and returns focus to the top dialog. Three actions that would open real transient chrome behind the stack (`tile::command_line`, `tile::find`, `stack::pick`) are refused instead, as are workspace switches (`workspace::switch_*`) and the pin toggle (`frame::pin_workspace`) — see [palette and which-key](#palette-and-which-key). |
 | Shell modal or component dialog | Excludes the ordinary matcher. A shell modal's handler gets first refusal. A chord it declines is dispatched only if it is bound to a dialog-opening action or the palette toggle; every other chord stays inert. Unclaimed Escape closes the top dialog. |
 | Focused per-tile command line | Handles its own keys. The effective palette toggle remains available and cancels the line. |
 | Focused scope text field | Typing bypasses the matcher. Single-key chords resolve against the workspace context only. |
@@ -76,6 +76,21 @@ still lower in the stack. The backdrop occludes what it covers, so a click
 outside the panel only closes the dialog; it never also reaches a scope-bar
 chip or tile beneath.
 
+Object dialogs are the exception to one-per-kind: they stack per domain.
+Over a Views dialog, Colors, Scopes, or any other domain pushes, so a trader
+editing a column can open Colors from the palette, add the color the column
+needs, and Escape back. The covered dialog's whole state and scroll offset are
+parked in its own stack entry (`ShellModal::parked_object`) and restored when
+the cover pops: the same stage, row, open field, and caret. The same domain
+never nests, because two drafts of one file would race each other's writes:
+requesting it from the top does nothing, and from lower in the stack posts
+"views is already open underneath" (the notice names the domain). A covered
+object dialog still receives its values replies and reload refreshes, and its
+column `color` choices follow named colors created above it, with the current
+selection kept by name and the draft left clean. A failed configuration write
+rebuilds only the drafts that contributed edits to the failed batch; a covered
+dialog with nothing in it keeps its unsaved draft.
+
 Revealing the covered entry restores the shared input's text and caret to
 what they were when it was covered, and gives back its focus: mode dialogs
 (Settings, Keybindings, the Object dialog, As-of) resolve focus from their own
@@ -93,10 +108,19 @@ themselves because they do not pass through the keyboard handler's tail.
 Writing an input value does not emit `InputEvent::Change`; model mutations
 cannot depend on such an event to keep text synchronized.
 
-Known limitation: the stack holds one instance per `DialogKind`, so a second
-request for a live kind cannot open beside the first even from a different
-call site. The three `choicedialog` pickers (grouping, tile kind, log level)
-share one kind and so count as one instance for this purpose.
+Each entry records the workspace active when it was pushed
+(`ShellModal::workspace`). Frame dialogs — the dimension picker, as-of,
+grouping, the scope picker, the frame expression dialog, and the Scopes
+dialog's frame actions — read and commit the lane of the workspace recorded on the stack's
+base entry, through `ShellView::target_frame`, so a dialog opened in a pinned
+workspace changes only that workspace's lane (see
+[workspace lanes](shell.md#workspace-lanes)).
+
+Known limitation: apart from object dialogs, the stack holds one instance per
+`DialogKind`, so a second request for a live kind cannot open beside the first
+even from a different call site. The `choicedialog` pickers (grouping, scope,
+tile kind, column, log level) share one kind and one state field, so none of them can
+open while another is anywhere in the stack.
 
 A multi-screen dialog registers its back step with `dialog::set_back`: a
 predicate over its current state and the transition Escape's final back step
@@ -193,6 +217,14 @@ differs from an ordinary palette action, which is allowed to run behind the
 stack, as described just above: these three are refused instead of left
 stranded.
 
+"Switch to workspace N" (`workspace::switch_*`) and "Toggle the frame pin for
+this workspace" (`frame::pin_workspace`) are refused the same way, with the
+same notice. Either would change which frame lane the active workspace reads
+while the dialog stays bound to the lane it opened in, so the toolbar would
+mix two lanes (historical tiles without the historical stripe, for example).
+Refusing them keeps the dialog's lane and the active lane the same workspace
+for as long as a dialog is open.
+
 While a page is open the same three are refused with `close the page first
 (esc)`, and so are `tile::add`, every per-kind add action,
 `tile::open_with`, `tile::autosize_columns`, and every `workspace::`,
@@ -238,9 +270,12 @@ so `g` reads `G` and `shift+g` reads `⇧G`.
 - A hint line that names keys inside prose writes them between backticks
   (``"double-click or `ctrl+k` → Add a tile"``); `kbd::marked` paints each
   backticked run as chips and the rest as text.
-- A module menu hint stored as a keymap spec goes through `kbd::menu_spec`.
-  A `:` command-line verb stays text because it is not a key, and so does a
-  spec naming `mod`, because the alias is the user's.
+- A module action-menu hint is an action identity that `geode_tile::menu`
+  resolves against the live keymap when the menu opens, when its rows
+  rebuild, and when the keymap is republished; the keys paint through
+  `kbd::menu_binding`. A `:` command-line verb (an unbound action's
+  fallback) or a label such as a range preset's `1w` stays text because it
+  is not a key.
 - A menu's trailing lane paints keys the way gpui-component's `PopupMenu`
   does: the label without the chip's fill or padding, in the lane's color,
   so a highlighted row's keys follow the highlight.
@@ -249,8 +284,8 @@ so `g` reads `G` and `shift+g` reads `⇧G`.
   is what a user types into a keymap file.
 
 Hardcoded hints name the shipped key. A user rebinding does not change the
-empty-state hint's `ctrl+k` or a module menu's hint; the palette, keybinding
-rows, tooltips and the timeseries footer and menu read the live keymap.
+empty-state hint's `ctrl+k`; the palette, keybinding rows, tooltips, the
+timeseries footer, and every module's action menu read the live keymap.
 
 ## Per-tile command and find lines
 
@@ -298,7 +333,7 @@ described in [features](features.md#autosized-columns).
 
 ## Scope text and stack selection
 
-The toolbar scope field edits `Frame::scope().text` live. Focus captures the
+The toolbar scope field edits `FrameView::scope().text` live. Focus captures the
 entry text and opens a scope session; text changes coalesce into one undo
 entry. Enter and blur keep the result and end the session. Escape restores
 the entry text while still inside the session, then ends it and returns focus
@@ -376,7 +411,7 @@ needed to adopt a changed clock configuration. Commits update the frame's as-of
 and close the dialog. As-of undo swaps with the previous value rather than
 walking a history stack.
 
-## Grouping, tile, and log choices
+## Grouping, scope, tile, log, and column choices
 
 [`shell/choicedialog.rs`](../../crates/geode-shell/src/shell/choicedialog.rs)
 uses a filter-only `ChoiceList` with a target-specific commit. Tab completes,
@@ -386,8 +421,10 @@ level stage.
 | Target | Rows and commit |
 |---|---|
 | Grouping | View default, then filled slots 1–9; opens on the active choice. Empty-query digits commit directly, with zero choosing the default. Unfilled digits are consumed. Commit rechecks slot existence, reports removal if needed, then closes. |
+| Scope (`frame::scope`, `mod+o`, and the toolbar's load glyph) | One row per saved scope, named, in the saved set's name order, read from the target frame's live saved scopes at open, so a scope saved or reloaded since startup is listed (the palette's `scope::<name>` rows are registered once at startup). Opens on the first saved scope equal to the frame's current scope, else the first row, so Enter on an untouched picker changes nothing. Commit loads through `ShellView::load_saved_scope`, the `scope::<name>` actions' own path: one undoable `set_scope` step in the target lane. A name removed by a reload while the picker was open loads nothing, closes, and reports "that saved scope no longer exists". With no saved scope the list is replaced by a hint to narrow the scope and save it with the save glyph (painted once the scope is non-empty) or `scope::save_current` (its chord when bound, else its palette title); Enter there does nothing and the footer offers only Escape. |
 | Tile kind | Roster order excluding the placeholder. Closes before adding to the tile focused at commit time: fills a placeholder or splits a real tile using the configured placement. |
 | Tile kind with context (`tile::open_with`) | The same rows, pre-filtered to kinds whose factory accepts the focused tile's captured launch context, titled `Open {underlying} in…`. Commit always splits, passing the factory's translated `launch_state` as the new tile's restored record. |
+| Column (`config::view_column`, `config::schema_column`) | The focused tile's presented columns from `TileContent::tile_columns`, captured at open; a row reads the header label, then ` · name` when they differ. Schema omits columns no dataset of the view declares in current configuration (derived view columns, and derived dimensions a view lists as plain dimension columns). Opens on the cursor's column, else the first row. Before the list opens, a tile with no columns refuses with "this tile has no dataset columns", a Schema list with nothing left with "no schema columns in this tile's view", and a target dialog already in the stack with the stack's own refusal. Commit closes the list, then opens the dialog on that column's Column stage (see [configuration dialogs](configuration-dialogs.md#stages-and-ownership)). Palette-only, no default binding. |
 | Log level | Choose a logging target, then its level. Escape or the Back button from levels returns to a rebuilt target list and clears the filter; a level choice submits `Diagnostics::request_level`. |
 
 Closing and reopening creates fresh dialog state. These pickers apply on

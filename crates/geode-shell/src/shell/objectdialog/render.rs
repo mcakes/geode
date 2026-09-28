@@ -22,8 +22,10 @@
 
 use std::rc::Rc;
 
-use geode_core::config::{Layer, Severity, check_object_name};
+use geode_core::config::{Layer, Severity, check_object_name, load_views};
 use geode_core::query::{DistinctOutcome, DistinctParams};
+use geode_core::schema::SchemaSpec;
+use geode_core::view::{DatasetPresentationSpec, ViewSpec};
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Div, Entity, MouseButton, Window, div, rems};
 use gpui_component::button::{Button, ButtonVariants as _};
@@ -38,8 +40,8 @@ use super::sources;
 use super::views;
 use super::{
     ColumnContext, ColumnDoor, ColumnLayers, Completions, Confirm, Destination, Domain, Draft,
-    EditRow, FellTo, FieldKind, Fold, NameSeed, ObjectDialogState, ObjectRow, READ_ONLY_NOTICE,
-    RowDrag, RowVocabulary, Stage, Step,
+    EditRow, FieldKind, Fold, NameSeed, ObjectDialogState, ObjectRow, READ_ONLY_NOTICE, RowDrag,
+    RowVocabulary, Stage, Step,
 };
 use crate::dialogmode::{self, DialogMode, EscapeStep, NormalCommand};
 use crate::footer::{Hint, HintRow};
@@ -70,17 +72,21 @@ const VISIBLE_ROWS: usize = 10;
 const WIDTH: f32 = 640.0;
 
 /// Open the object dialog on `domain` (`config::views`, palette-only —
-/// see `defaults::register_builtin_actions`). A no-op when this kind is
-/// already open (see `dialog::can_open`).
+/// see `defaults::register_builtin_actions`). A no-op when this domain is
+/// already open (see `dialog::can_open_object`); over an object dialog of
+/// another domain it stacks.
 pub fn open(
     view: &mut ShellView,
     domain: Domain,
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    if !dialog::can_open(view, dialog::DialogKind::Object) {
+    if !dialog::can_open_object(view, domain) {
         return;
     }
+    // A covered object dialog of another domain keeps its whole state in its own
+    // stack entry until this one closes.
+    dialog::park_object_dialog(view);
     // Fresh state every open — nothing survives a close/reopen, the same
     // contract `palette` and both list dialogs hold.
     view.object_dialog = Some(ObjectDialogState::new(domain));
@@ -553,7 +559,7 @@ fn create_from_name(shell: &mut ShellView, cx: &mut Context<ShellView>) {
         NameSeed::FromFrame => {
             // Capture current frame scope at confirmation time. Recheck emptiness
             // because frame scope can change while the naming prompt is open.
-            let scope = shell.frame.read(cx).scope().clone();
+            let scope = shell.target_frame().read(cx).scope().clone();
             if scope.is_empty() {
                 set_notice(shell, EMPTY_SCOPE_NOTICE.to_string());
                 cx.notify();
@@ -657,18 +663,14 @@ pub(in crate::shell) fn open_save_scope(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    // `open`'s own guard (below) refuses to open a SECOND modal, but it returns
-    // silently — this door kept going past that refusal and mutated whatever
-    // `object_dialog` was already there instead (a Views dialog's
-    // `begin_naming`/`naming_seed`, say), because a second `open(..)` call two lines
-    // down is a no-op while the first branch's `state.notice = ..` and this function's
-    // own `begin_naming` read `shell.object_dialog` regardless of whose it is. Guarding
-    // here, before either branch touches it, is what makes "no modal is already open"
-    // the one precondition both branches share with `open` itself.
-    if !dialog::can_open(shell, dialog::DialogKind::Object) {
+    // Guard before either branch touches `object_dialog`: `open` refuses a second
+    // Scopes dialog silently, and without this check the notice or `begin_naming`
+    // below would land on whichever object dialog is live. Another domain's dialog
+    // (Views, say) is parked by `open` and comes back when Scopes closes.
+    if !dialog::can_open_object(shell, Domain::Scopes) {
         return;
     }
-    if shell.frame.read(cx).scope().is_empty() {
+    if shell.target_frame().read(cx).scope().is_empty() {
         open(shell, Domain::Scopes, window, cx);
         if let Some(state) = shell.object_dialog.as_mut() {
             state.notice = Some(EMPTY_SCOPE_NOTICE.to_string());
@@ -701,9 +703,10 @@ pub(in crate::shell) fn open_object(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    // `open` refuses a second object dialog silently; without this guard the edit
-    // below would land on whatever object dialog is already up (see `open_save_scope`).
-    if !dialog::can_open(shell, dialog::DialogKind::Object) {
+    // `open` refuses this domain silently when it is already open; without this
+    // guard the edit below would land on whatever object dialog is live (see
+    // `open_save_scope`).
+    if !dialog::can_open_object(shell, domain) {
         return;
     }
     let defined = {
@@ -722,6 +725,99 @@ pub(in crate::shell) fn open_object(
     }
     // `open` synchronized the shared input for Browse; the edit stage needs its own
     // pass so focus and text match the stage now on screen.
+    dialog::sync_dialog_text(shell, window, cx);
+    cx.notify();
+}
+
+/// The object an edit-column route opens for `column` of `view`: the view itself for
+/// Views; for Schema, the first dataset of the view (primary, then joins) that declares
+/// the column — the owner dataset presentation resolves to. `Err` is the footer notice.
+fn resolve_column_object(
+    domain: Domain,
+    views: &[ViewSpec],
+    schema: &SchemaSpec,
+    view: &str,
+    column: &str,
+) -> Result<String, String> {
+    let Some(spec) = views.iter().find(|v| v.name == view) else {
+        return Err(format!("view '{view}' is not defined"));
+    };
+    match domain {
+        Domain::Schema => DatasetPresentationSpec::owner_of(spec, column, schema)
+            .map(str::to_string)
+            .ok_or_else(|| format!("'{column}' is not declared by any dataset of view '{view}'")),
+        _ => Ok(view.to_string()),
+    }
+}
+
+/// The views and schema as the edit-column route reads them: pending edits folded in.
+fn views_and_schema(shell: &ShellView) -> (Vec<ViewSpec>, SchemaSpec) {
+    let pending = apply::config_with_pending(shell);
+    let config = pending.as_ref().unwrap_or(&shell.services.config);
+    let (views, _) = load_views(config);
+    let schema = config
+        .doc("datasets")
+        .map(|doc| SchemaSpec::from_doc(doc).0)
+        .unwrap_or_default();
+    (views, schema)
+}
+
+/// Which of `columns` the Schema route can open for `view`: those some dataset of the
+/// view declares, by the same `owner_of` the commit resolves through. A tile cannot
+/// flag a derived dimension the view lists as a plain `dimension` column, so the
+/// Schema list asks the config instead of offering a row whose pick could only fail.
+/// `None` when the view is undefined: the list then filters nothing, and the commit
+/// reports the missing view.
+pub(in crate::shell) fn schema_declared<'a>(
+    shell: &ShellView,
+    view: &str,
+    columns: impl IntoIterator<Item = &'a str>,
+) -> Option<Vec<bool>> {
+    let (views, schema) = views_and_schema(shell);
+    let spec = views.iter().find(|v| v.name == view)?;
+    Some(
+        columns
+            .into_iter()
+            .map(|c| DatasetPresentationSpec::owner_of(spec, c, &schema).is_some())
+            .collect(),
+    )
+}
+
+/// Open `domain`'s dialog straight onto `column`'s Column stage for a tile's `view`
+/// (`config::view_column` / `config::schema_column`). Resolves the object against the
+/// pending-aware config at this moment, not the tile's copy, because a reload or a
+/// queued edit may have changed the view since the tile planned. Each failure lands in
+/// the dialog's footer notice at the stage it reached: an unresolvable object stays in
+/// Browse, a column the object no longer has stops on its Edit stage.
+pub(in crate::shell) fn open_column(
+    shell: &mut ShellView,
+    domain: Domain,
+    view: &str,
+    column: &str,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    // Same guard as `open_object`: without it the stages below would land on whatever
+    // object dialog is live.
+    if !dialog::can_open_object(shell, domain) {
+        return;
+    }
+    let object = {
+        let (views, schema) = views_and_schema(shell);
+        resolve_column_object(domain, &views, &schema, view, column)
+    };
+    open(shell, domain, window, cx);
+    match object {
+        Err(notice) => set_notice(shell, notice),
+        Ok(object) => {
+            enter_edit_stage(shell, &object, None, cx);
+            if !enter_column_stage(shell, column, cx) {
+                set_notice(shell, format!("'{column}' is not a column of '{object}'"));
+            }
+        }
+    }
+    // `open` synchronized the shared input for Browse; the stage now on screen needs
+    // its own pass.
     dialog::sync_dialog_text(shell, window, cx);
     cx.notify();
 }
@@ -857,29 +953,20 @@ fn enter_edit_stage(
 ///
 /// Read colors and overlay baselines from the pending-aware config. Clear mode, query,
 /// confirmation, and viewport for the new stage. If the column cannot be resolved,
-/// discard the prepared context and leave the current stage intact.
-fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<ShellView>) {
+/// discard the prepared context, leave the current stage intact and return `false`.
+fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<ShellView>) -> bool {
     // Use pending edits for the named-color choices and presentation baselines. A
     // stage opened during debounce must not overwrite a value it cannot yet see.
     let pending = apply::config_with_pending(shell);
     let config = pending.as_ref().unwrap_or(&shell.services.config);
-    let colours: Vec<String> = config
-        .doc(colours::DOC)
-        .map(|doc| {
-            geode_core::colour::NamedColours::from_doc(doc)
-                .0
-                .names()
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
+    let colours = colours::names(config);
     let Some(state) = shell.object_dialog.as_ref() else {
-        return;
+        return false;
     };
     let domain = state.domain;
     let object = match &state.stage {
         Stage::Edit { object } | Stage::Column { object, .. } => object.clone(),
-        _ => return,
+        _ => return false,
     };
     // Read the Schema seed from the same pending-aware config before borrowing the
     // draft mutably. Preserve the dataset's other edited columns in its overlay.
@@ -891,10 +978,10 @@ fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<Shel
         (schema, dataset_columns::overlay_object(config, &object))
     });
     let Some(state) = shell.object_dialog.as_mut() else {
-        return;
+        return false;
     };
     let Some(draft) = state.draft.as_mut() else {
-        return;
+        return false;
     };
     let (fields, ctx) = match domain {
         Domain::Views => {
@@ -903,7 +990,7 @@ fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<Shel
                 .and_then(|items| items.iter().find(|i| i.name == column))
                 .cloned()
             else {
-                return;
+                return false;
             };
             // The layer between the desk view and this view's own overlay, refreshed
             // from the PENDING-aware config before the context is built: a
@@ -926,14 +1013,26 @@ fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<Shel
         // this one.
         Domain::Schema => {
             let Some((schema, overlay_object)) = schema_seed else {
-                return;
+                return false;
             };
             let Some(dataset) = schema.dataset(&object) else {
-                return;
+                return false;
             };
             let Some(item) = dataset_columns::item_for(dataset, column, &overlay_object) else {
-                return;
+                return false;
             };
+            // The keys the dataset overlay sets for this column — `item_for` parsed the
+            // overlay alone, so its presentation is exactly that. A column entered
+            // before in this draft keeps the state it was left in.
+            let keys = views::PresentationKeys::of(&item.presentation);
+            draft
+                .presentation_set
+                .entry(column.to_string())
+                .or_insert(keys);
+            draft
+                .baseline_presentation_set
+                .entry(column.to_string())
+                .or_insert(keys);
             (
                 views::column_fields(&item, &colours, Destination::DatasetPresentation),
                 ColumnContext {
@@ -950,12 +1049,12 @@ fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<Shel
         // No other domain has a column stage: Groupings, Scopes, Sources
         // and Colors have no per-column presentation to open, and
         // `column_stage_target` never names a row on one.
-        _ => return,
+        _ => return false,
     };
     draft.column_ctx = Some(ctx);
     if !draft.enter_column(column, fields) {
         draft.column_ctx = None;
-        return;
+        return false;
     }
     // Settle selection at stage entry because pointer activation bypasses the keyboard
     // handler's final settle.
@@ -977,6 +1076,7 @@ fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<Shel
     // the viewport goes with it — `enter_edit_stage`'s own reset.
     shell.object_dialog_scroll.scroll_to_item(0);
     cx.notify();
+    true
 }
 
 /// Fold the column fields and return to the parent object, selecting the column. Schema
@@ -1043,7 +1143,7 @@ fn enter_values_stage(shell: &mut ShellView, column: &str, cx: &mut Context<Shel
         return;
     };
     let scope = scopes::draft_scope(draft, config, column);
-    let as_of = shell.frame.read(cx).as_of().clone();
+    let as_of = shell.target_frame().read(cx).as_of().clone();
     shell.next_picker_tag += 1;
     let tag = shell.next_picker_tag;
     let Some(state) = shell.object_dialog.as_mut() else {
@@ -1346,8 +1446,7 @@ fn handle_edit_key_inner(
                 {
                     false
                 }
-                // Any other modifier: claimed and dropped, as it was
-                // before this key did anything at all here.
+                // Other modifiers are consumed without moving between fields.
                 _ => return true,
             };
             // Apply the stage's write gate before filter-mode stepping.
@@ -1523,6 +1622,10 @@ fn handle_edit_key_inner(
             }
         }
         NormalCommand::Verb('d') => arm_delete(shell, cx),
+        // In a column stage `r` and `shift+r` release the field(s) to the layers below;
+        // everywhere else `r` is the object's revert.
+        NormalCommand::Verb('r') if in_column_stage(shell) => inherit_row(shell, cx),
+        NormalCommand::Verb('R') if in_column_stage(shell) => inherit_all_rows(shell, cx),
         NormalCommand::Verb('r') => arm_revert(shell),
         NormalCommand::Verb('o') => overwrite_scope(shell, cx),
         // `x` removes a member into its catalogue. Route its own refusal directly to
@@ -2344,16 +2447,11 @@ fn revalidate(shell: &mut ShellView) {
     if let Some(draft) = draft_mut(shell) {
         draft.diagnostics = diagnostics;
     }
-    // Explain a cleared key's inherited value after reseeding its field. Name the
-    // actual fallback layer: dataset presentation takes precedence over the view
-    // definition. No lower layer means the field uses its default without a notice.
-    if let Some(Fold { key, to: Some(to) }) = fold {
-        let layer = match to {
-            FellTo::Desk => "the desk",
-            FellTo::Dataset => "the dataset",
-            FellTo::EachView => "each view",
-        };
-        set_notice(shell, format!("{key} follows {layer} again"));
+    // Explain a released key's inherited value after reseeding its field. Name the
+    // layer it now follows: dataset presentation takes precedence over the view
+    // definition, and with neither it is the kind default.
+    if let Some(Fold { key, to }) = fold {
+        set_notice(shell, format!("{key} follows {} again", to.phrase()));
     }
 }
 
@@ -2633,20 +2731,76 @@ fn named_expression_users(shell: &ShellView, name: &str, cx: &App) -> Option<Str
                 .collect()
         })
         .unwrap_or_default();
-    let frame = shell.frame.read(cx).scope().named.iter().any(|n| n == name);
+    let frame = shell
+        .target_frame()
+        .read(cx)
+        .scope()
+        .named
+        .iter()
+        .any(|n| n == name);
     super::used_by_sentence(users, frame)
 }
 
 /// Arm reversion when a user definition or presentation overlays an inherited object.
 /// User-only objects cannot revert because no inherited object remains. The view
 /// overlay counts even when its definition was never copied.
-fn arm_revert(shell: &mut ShellView) {
-    // Revert affects the whole object and associated view presentation, so it is
-    // unavailable from a single-column projection.
-    if in_column_stage(shell) {
-        not_a_column_verb(shell, "r");
+/// `r` in a column stage: the selected field inherits again. Blocked by a pending
+/// confirmation like every row mutation.
+fn inherit_row(shell: &mut ShellView, cx: &mut Context<ShellView>) {
+    if armed_confirm(shell).is_some() {
         return;
     }
+    match draft_mut(shell).map(Draft::inherit_selected) {
+        Some(Ok(Fold { key, to })) => {
+            revalidate(shell);
+            set_notice(shell, format!("{key} follows {} again", to.phrase()));
+            commit_change(shell, cx);
+        }
+        Some(Err(notice)) if !notice.is_empty() => set_notice(shell, notice),
+        _ => {}
+    }
+    cx.notify();
+}
+
+/// `shift+r` in a column stage: every field inherits again.
+fn inherit_all_rows(shell: &mut ShellView, cx: &mut Context<ShellView>) {
+    if armed_confirm(shell).is_some() {
+        return;
+    }
+    match draft_mut(shell).map(Draft::inherit_all) {
+        Some(Ok(())) => {
+            revalidate(shell);
+            set_notice(shell, "every field follows the layers below".to_string());
+            commit_change(shell, cx);
+        }
+        Some(Err(notice)) if !notice.is_empty() => set_notice(shell, notice),
+        _ => {}
+    }
+    cx.notify();
+}
+
+/// A click on a set field's ↺: `r` on that row, the cursor moved there first.
+fn on_inherit_clicked(
+    shell: &mut ShellView,
+    position: usize,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    if let Some(state) = shell.object_dialog.as_mut()
+        && state.notice.take().is_some()
+    {
+        cx.notify();
+    }
+    if let Some(draft) = draft_mut(shell)
+        && position < draft.visible_rows().len()
+    {
+        draft.selected = position;
+    }
+    inherit_row(shell, cx);
+    dialog::sync_dialog_text(shell, window, cx);
+}
+
+fn arm_revert(shell: &mut ShellView) {
     // `arm_delete`'s own values-stage guard, for the same reason.
     if in_values_stage(shell) {
         not_a_values_verb(shell);
@@ -2711,7 +2865,7 @@ fn run_overwrite(shell: &mut ShellView, cx: &mut Context<ShellView>) -> bool {
         cx.notify();
         return false;
     }
-    let scope = shell.frame.read(cx).scope().clone();
+    let scope = shell.target_frame().read(cx).scope().clone();
     let config = shell.services.config.clone();
     let changed = draft_mut(shell).is_some_and(|draft| {
         scopes::overwrite_with(draft, &scope, &config);
@@ -3481,10 +3635,14 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     let flagged = draft.flagged_rows(domain.doc());
     // the column stage's layers, resolved once per render. `None` off the stage — see
     // `provenance_slot`.
-    let provenance_inputs = draft
-        .column_ctx
-        .as_ref()
-        .map(dataset_columns::ProvenanceInputs::new);
+    let provenance_inputs = draft.column_ctx.as_ref().map(|ctx| {
+        let set = draft
+            .column()
+            .and_then(|column| draft.presentation_set.get(column))
+            .copied()
+            .unwrap_or_default();
+        dataset_columns::ProvenanceInputs::new(ctx, set)
+    });
     // Choice entry paints its ranked options instead of the object's field rows.
     let list: AnyElement = if let Some(choice) =
         draft.choice.as_ref().filter(|_| draft.choice_entry())
@@ -3580,6 +3738,10 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                             // fills `layer` below on its own rows, which are not
                             // column-stage rows, so the two never both appear.
                             .children(provenance_inputs.as_ref().map(|inputs| {
+                                // A set field's badge reads in the foreground and carries
+                                // ↺; an inherited one is muted and has none, and a
+                                // same-size spacer keeps the values in one column.
+                                let is_set = inputs.set.has(&field.key);
                                 badge_slot(
                                     &PROVENANCE_NAMES,
                                     dataset_columns::provenance_of(inputs, field).map(|p| {
@@ -3588,9 +3750,42 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                                             format!("objectdialog-field-provenance-{}", field.key),
                                         )
                                     }),
+                                    if is_set {
+                                        theme.foreground
+                                    } else {
+                                        theme.muted_foreground
+                                    },
                                     theme,
                                     cx,
                                 )
+                            }))
+                            .children(provenance_inputs.as_ref().map(|inputs| {
+                                let is_set = inputs.set.has(&field.key);
+                                let key = field.key.clone();
+                                let control = div()
+                                    .id(("objectdialog-field-inherit", m.row))
+                                    .px_1()
+                                    .rounded(theme.radius_tokens().sm)
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child("\u{21ba}");
+                                if is_set {
+                                    let entity = entity.clone();
+                                    control
+                                        .pointer_states(tick_states)
+                                        .debug_selector(move || {
+                                            format!("objectdialog-field-inherit-{key}")
+                                        })
+                                        .on_mouse_down(MouseButton::Left, move |_e, window, cx| {
+                                            cx.stop_propagation();
+                                            entity.update(cx, |shell, cx| {
+                                                on_inherit_clicked(shell, position, window, cx);
+                                            });
+                                        })
+                                        .into_any_element()
+                                } else {
+                                    control.invisible().into_any_element()
+                                }
                             }))
                             // the layer a schema row's value came from — `None` on
                             // every writable domain (`Field:: layer`'s own doc has the
@@ -3604,6 +3799,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                                             format!("objectdialog-field-layer-{}", field.key),
                                         )
                                     }),
+                                    theme.muted_foreground,
                                     theme,
                                     cx,
                                 )
@@ -4101,6 +4297,20 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         if types {
             hints.push(i_hint(selected_row));
         }
+        // `r` names itself only on a set row; `shift+r` while anything is set.
+        let set = draft
+            .column()
+            .and_then(|column| draft.presentation_set.get(column))
+            .copied()
+            .unwrap_or_default();
+        if let Some(EditRow::Field(i)) = selected_row
+            && draft.fields.get(i).is_some_and(|f| set.has(&f.key))
+        {
+            hints.push(Hint::new(HintRow::Edit, &["r"], "inherit"));
+        }
+        if set.any() {
+            hints.push(Hint::new(HintRow::Edit, &["shift+r"], "inherit all"));
+        }
         hints.extend(leave(format!("back to {}", draft.name)));
         hints
     } else {
@@ -4218,9 +4428,8 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 .child(hint_line),
         );
 
-    // The live `Input` renders only when it actually owns the keystrokes — see this
-    // module's own "one switch" note, now also the edit stage's rule. `slash_filters:
-    // true` for the same reason as browse's own call.
+    // The live `Input` renders only while it owns the keystrokes. Normal mode
+    // shows a frozen filter row whose click enters filter mode, as in browse.
     let frozen_query = (state.mode == DialogMode::Normal).then_some(dialog::FrozenFilter {
         query: draft.query.as_str(),
         slash_filters: true,
@@ -4604,6 +4813,7 @@ const LAYER_NAMES: [&str; 3] = [
 fn badge_slot(
     names: &[&'static str],
     badge: Option<(&'static str, String)>,
+    fg: gpui::Hsla,
     theme: &gpui_component::Theme,
     cx: &App,
 ) -> AnyElement {
@@ -4626,13 +4836,7 @@ fn badge_slot(
             .top_0()
             .right_0()
             .whitespace_nowrap()
-            .child(dialog::badge(
-                name,
-                theme.muted_foreground,
-                theme.border,
-                Some(selector),
-                cx,
-            ))
+            .child(dialog::badge(name, fg, theme.border, Some(selector), cx))
     });
     div()
         .relative()
@@ -5007,6 +5211,22 @@ pub(in crate::shell) fn on_row_dropped(
     cx.notify();
 }
 
+/// After a reload, every open object dialog's `color` choices follow the configured
+/// named colors, including a dialog covered by the Colors dialog that just created
+/// one.
+pub(in crate::shell) fn refresh_color_choices(shell: &mut ShellView) {
+    let names = colours::names(&shell.services.config);
+    for state in shell
+        .object_dialog
+        .iter_mut()
+        .chain(dialog::parked_objects_mut(&mut shell.modals))
+    {
+        if let Some(draft) = state.draft.as_mut() {
+            draft.refresh_color_options(&names);
+        }
+    }
+}
+
 /// A `DistinctOutcome` addressed to `SCOPES_KEY`, routed here by
 /// `ShellView::deliver_distinct`. Applied only when a Scopes dialog is
 /// open in the Values stage for `outcome.column` and the tag is the
@@ -5014,18 +5234,25 @@ pub(in crate::shell) fn on_row_dropped(
 /// a stage the trader has already left, or to a superseded request,
 /// changes nothing. `Ok` installs the ticked list as a CLEAN baseline
 /// (delivered ticks are the saved scope, not dirt); `Err` installs the
-/// failure row.
+/// failure row. A Scopes dialog covered by another domain's dialog still
+/// owns its request, so the reply reaches it wherever it is in the stack.
 pub(in crate::shell) fn deliver_values(
     shell: &mut ShellView,
     outcome: DistinctOutcome,
     cx: &mut Context<ShellView>,
 ) {
-    let Some(state) = shell.object_dialog.as_mut() else {
+    let live = shell
+        .object_dialog
+        .as_ref()
+        .is_some_and(|state| state.domain == Domain::Scopes);
+    let Some(state) = shell
+        .object_dialog
+        .iter_mut()
+        .chain(dialog::parked_objects_mut(&mut shell.modals))
+        .find(|state| state.domain == Domain::Scopes)
+    else {
         return;
     };
-    if state.domain != Domain::Scopes {
-        return;
-    }
     let Stage::Values { column, .. } = &state.stage else {
         return;
     };
@@ -5056,8 +5283,98 @@ pub(in crate::shell) fn deliver_values(
     // Delivery replaces the loading row outside keyboard handling. Settle onto the
     // first available stop, skipping the Values header when there are value rows.
     draft.settle_selection(Domain::Scopes);
-    // Scroll to the settled cursor, which can differ from the initial index zero.
+    // Scroll to the settled cursor, which can differ from the initial index zero. A
+    // parked dialog does not own the shared scroll handle.
     let selected = draft.selected;
-    shell.object_dialog_scroll.scroll_to_item(selected);
+    if live {
+        shell.object_dialog_scroll.scroll_to_item(selected);
+    }
     cx.notify();
+}
+
+#[cfg(test)]
+mod column_route_tests {
+    use super::*;
+    use geode_core::config::{LayerDoc, merge_docs};
+    use geode_core::schema::SchemaSpec;
+    use geode_core::view::{JoinSpec, ViewColumn, ViewSpec};
+
+    fn schema() -> SchemaSpec {
+        let text = "[risk_snapshot.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+                    [risk_snapshot.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n\
+                    [instrument_ref.columns.instrument_ref]\ntype = \"utf8\"\nrole = \"key\"\n\
+                    [instrument_ref.columns.spot]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"instrument\"\n";
+        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
+        SchemaSpec::from_doc(&doc).0
+    }
+
+    fn views() -> Vec<ViewSpec> {
+        vec![ViewSpec {
+            name: "tree".into(),
+            dataset: "risk_snapshot".into(),
+            joins: vec![JoinSpec {
+                dataset: "instrument_ref".into(),
+                on: vec!["instrument_ref".into()],
+                required: true,
+            }],
+            columns: vec![
+                ViewColumn::Measure {
+                    name: "npv".into(),
+                    required: true,
+                },
+                ViewColumn::Measure {
+                    name: "spot".into(),
+                    required: true,
+                },
+                ViewColumn::Derived {
+                    name: "npv_x2".into(),
+                    sql: "npv * 2".into(),
+                    required: true,
+                },
+            ],
+            ..ViewSpec::default()
+        }]
+    }
+
+    #[test]
+    fn views_resolves_to_the_view_itself() {
+        assert_eq!(
+            resolve_column_object(Domain::Views, &views(), &schema(), "tree", "npv"),
+            Ok("tree".to_string())
+        );
+    }
+
+    #[test]
+    fn schema_resolves_a_primary_column_to_the_view_dataset() {
+        assert_eq!(
+            resolve_column_object(Domain::Schema, &views(), &schema(), "tree", "npv"),
+            Ok("risk_snapshot".to_string())
+        );
+    }
+
+    #[test]
+    fn schema_resolves_a_joined_column_to_its_owning_dataset() {
+        assert_eq!(
+            resolve_column_object(Domain::Schema, &views(), &schema(), "tree", "spot"),
+            Ok("instrument_ref".to_string())
+        );
+    }
+
+    #[test]
+    fn schema_refuses_a_column_no_dataset_declares() {
+        assert_eq!(
+            resolve_column_object(Domain::Schema, &views(), &schema(), "tree", "npv_x2"),
+            Err("'npv_x2' is not declared by any dataset of view 'tree'".to_string())
+        );
+    }
+
+    #[test]
+    fn an_undefined_view_is_refused_for_both_domains() {
+        for domain in [Domain::Views, Domain::Schema] {
+            assert_eq!(
+                resolve_column_object(domain, &views(), &schema(), "gone", "npv"),
+                Err("view 'gone' is not defined".to_string())
+            );
+        }
+    }
 }

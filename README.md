@@ -5,6 +5,9 @@ risk, pricing, execution and data visualisation in one permanent,
 keyboard-driven shell. It is written in Rust on gpui (Zed's UI framework)
 and gpui-component, with DuckDB as the store.
 
+New to Geode? Start with the [user guide](docs/user-guide.md), a guided demo
+walkthrough of tiles, shared scope, grouping, and the everyday workflow.
+
 Three principles from the charter (`docs/PHILOSOPHY.md`) shape everything
 in this repository:
 
@@ -145,8 +148,8 @@ required reading.
 
 The shell, data service, blotter, diagnostics, configuration dialogs,
 market-data editor, timeseries viewer, chart, shared date-time field, and
-line-pricer tile are built. Market-data egress and the line pricer's durable
-sheet store are not built; pricer sheets live in memory for one run. There are
-no production vendor adapters; demo sources exercise each supported source
+line-pricer tile are built, including market-data uploads to configured egress
+targets and automatically saved pricer sheets. There are no production vendor
+adapters; demo sources exercise each supported source
 shape. Some recent UI paths still need real-window display checks. The current
 subsystem guides record their specific limitations.

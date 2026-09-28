@@ -372,11 +372,8 @@ fn parse(bytes: &[u8]) -> Result<ParsedDocument, ParseError> {
                     }
                     Shape::Leaf(Leaf::Node) => nodes.push(number("node", trimmed)?),
                     Shape::Leaf(Leaf::Term) => {
-                        // Same rule as the singular leaves above, at the
-                        // one site the first fix wave left uncovered: a
-                        // second `<term>` in one `<slice>` used to win
-                        // silently, publishing the slice under the second
-                        // date with the first discarded.
+                        // A slice has one term. Reject a repeated leaf rather
+                        // than silently publishing under its second date.
                         if slice.term.is_some() {
                             return Err(already_filled("term"));
                         }
@@ -971,14 +968,9 @@ role = "attribute"
         );
     }
 
-    /// Every element this model reads at most once is refused on its
-    /// second occurrence, rather than overwritten or MERGED. A second
-    /// `<cviParams>` used to append its nodes to the first's ladder and
-    /// its slices to the first's rows, producing a document whose
-    /// (term, node) pairs repeat — `DocumentRows::validate` refuses that
-    /// shape too, but only after the parse has already thrown away which
-    /// element was duplicated, so the report a trader sees would name a
-    /// cell instead of the element the feed really sent twice.
+    /// Repeated singular containers are refused by element name. Merging
+    /// them could duplicate grid rows and defer the error to validation,
+    /// which cannot identify the duplicated XML container.
     #[test]
     fn a_repeated_singular_container_is_refused_naming_it() {
         // A whole second `<cviParams>` carrying only `<slices>`: the
@@ -1010,9 +1002,7 @@ role = "attribute"
 
     #[test]
     fn a_repeated_singular_leaf_is_refused_naming_it() {
-        // A second `<spotRef>`: the last one used to win silently, so a
-        // document carrying two different spots published one of them
-        // with nothing recording that the other existed.
+        // Refuse repeated spot values rather than choosing one silently.
         let doc = DOC.replacen(
             "<spotRef>7650</spotRef>",
             "<spotRef>7650</spotRef><spotRef>7700</spotRef>",

@@ -102,7 +102,7 @@ mod watching {
             &self,
             tile: TileId,
             _restored: Option<&toml::Table>,
-            _frame: Entity<Frame>,
+            _frame: crate::frame::FrameRef,
             diagnostics: Entity<Diagnostics>,
             _window: &mut Window,
             cx: &mut App,
@@ -180,6 +180,7 @@ fn services_with_an_unknown_restored_kind() -> (
         &Workspaces::new(),
         &session::TileRecords::new(),
         None,
+        &crate::session::PinnedRecords::new(),
         &crate::palette_usage::PaletteUsage::new(),
         &crate::session::PageRecords::new(),
     );
@@ -299,6 +300,7 @@ fn an_occupant_created_outside_the_active_workspace_is_told_it_is_hidden(
         &Workspaces::new(),
         &session::TileRecords::new(),
         None,
+        &crate::session::PinnedRecords::new(),
         &crate::palette_usage::PaletteUsage::new(),
         &crate::session::PageRecords::new(),
     );
@@ -522,6 +524,69 @@ fn closing_a_tile_drops_its_occupant_and_switching_workspaces_toggles_visibility
         shell.read_with(&cx, |s, _| s.occupant_kind(tile)),
         None,
         "occupant dropped with its tile"
+    );
+}
+
+/// Closing a tile tells its occupant it closed, after telling it it is
+/// hidden; a workspace switch hides without closing. Following tiles cancel
+/// only on `closed`, so a switch reported as a close would cancel a query
+/// whose answer the trader expects on return.
+#[gpui::test]
+fn closing_a_tile_tells_its_occupant_it_closed_and_a_workspace_switch_does_not(
+    cx: &mut gpui::TestAppContext,
+) {
+    use crate::module::recording::Recorded;
+    let (services, log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    cx.simulate_keystrokes("ctrl-v");
+    let shell = shell_of(&window, &mut cx);
+    let tile = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    cx.simulate_keystrokes("alt-2");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.simulate_keystrokes("alt-1");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(
+        log.borrow()
+            .iter()
+            .any(|r| matches!(r, Recorded::Visible(t, false) if *t == tile)),
+        "the switch did hide the tile: {:?}",
+        log.borrow()
+    );
+    assert!(
+        !log.borrow()
+            .iter()
+            .any(|r| matches!(r, Recorded::Closed(_))),
+        "a switch hides; it never closes: {:?}",
+        log.borrow()
+    );
+
+    cx.simulate_keystrokes("ctrl-w");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+        let _ = window.draw(cx);
+    });
+    let log = log.borrow();
+    let hidden = log
+        .iter()
+        .rposition(|r| matches!(r, Recorded::Visible(t, false) if *t == tile))
+        .expect("hidden before removal");
+    let closed = log
+        .iter()
+        .position(|r| matches!(r, Recorded::Closed(t) if *t == tile))
+        .expect("closing a tile tells its occupant");
+    assert!(hidden < closed, "hidden first, then closed: {log:?}");
+    assert_eq!(
+        log.iter()
+            .filter(|r| matches!(r, Recorded::Closed(_)))
+            .count(),
+        1,
+        "closed once, and only the closed tile: {log:?}"
     );
 }
 
@@ -1191,7 +1256,7 @@ fn shift_d_duplicates_the_focused_tile_with_its_state_and_ctrl_shift_d_stacks_it
     });
     // Give the recorder some state through its own `:` command.
     cx.simulate_keystrokes(":");
-    cx.simulate_input("sort delta01"); // an exact completion word runs as typed (commandline.rs §3.4)
+    cx.simulate_input("sort delta01"); // an exact completion word runs as typed
     cx.simulate_keystrokes("enter");
 
     cx.simulate_keystrokes("shift-d");
@@ -1332,7 +1397,7 @@ fn a_pending_request_lands_on_exactly_the_tile_that_asked(cx: &mut gpui::TestApp
         shell.read_with(&cx, |s, _| s.occupant_kind(other)),
         Some(crate::module::placeholder::PLACEHOLDER_KIND),
         "the plain split asked for nothing, and there is no default kind \
-         to guess with (§7.1) — it gets a placeholder"
+         to guess with — it gets a placeholder"
     );
 }
 
@@ -1712,4 +1777,78 @@ fn palette_is_focused(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContex
             .focus_handle(cx)
             .is_focused(window)
     })
+}
+
+/// Each occupant is handed its own workspace's frame: a tile added in
+/// workspace 2 reads workspace 2's lane, never the active one at some
+/// later moment.
+#[gpui::test]
+fn an_occupant_is_created_with_its_own_workspaces_frame(cx: &mut gpui::TestAppContext) {
+    let (services, log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
+    dispatch_and_draw(&shell, &mut cx, "workspace::switch_2");
+    dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
+    let framed: Vec<u8> = log
+        .borrow()
+        .iter()
+        .filter_map(|r| match r {
+            crate::module::recording::Recorded::Framed(_, ws) => Some(ws.get()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(framed, vec![1, 2]);
+}
+
+/// A tile restored into a hidden workspace is framed by that workspace,
+/// not by the one active when its occupant is created on the first render.
+#[gpui::test]
+fn a_tile_restored_into_a_hidden_workspace_is_framed_by_it(cx: &mut gpui::TestAppContext) {
+    let mut table = session::to_toml(
+        &Workspaces::new(),
+        &session::TileRecords::new(),
+        None,
+        &crate::session::PinnedRecords::new(),
+        &crate::palette_usage::PaletteUsage::new(),
+        &crate::session::PageRecords::new(),
+    );
+    let ws2: toml::Table = r#"
+        focused = 1
+        [node]
+        kind = "leaf"
+        id = 1
+        [tiles.1]
+        module = "rec"
+    "#
+    .parse()
+    .unwrap();
+    if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
+        ws_table.insert("2".to_string(), toml::Value::Table(ws2));
+    }
+    let restored = session::from_toml(&table).unwrap();
+    assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+    assert_eq!(
+        restored.workspaces.active_index(),
+        1,
+        "sanity: workspace 1, not 2, is active"
+    );
+
+    let (mut services, log) = services_with_recorder();
+    services.workspaces = restored.workspaces;
+    services.restored_tiles = restored.tiles;
+    let (_window, mut cx) = open_shell(cx, services);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    let framed: Vec<(TileId, u8)> = log
+        .borrow()
+        .iter()
+        .filter_map(|r| match r {
+            crate::module::recording::Recorded::Framed(t, ws) => Some((*t, ws.get())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(framed, vec![(TileId(1), 2)]);
 }

@@ -4,14 +4,22 @@
 //! observes. Pure: `ShellView` holds it in a gpui entity and notifies; a
 //! module reads it through that entity.
 //!
+//! The selection (scope with its history, active slot, as-of) lives in a
+//! lane: one shared lane, plus one per pinned workspace. A workspace reads
+//! and writes its lane through `Frame::view`/`Frame::view_mut`; definitions
+//! and publications stay frame-wide. Lane generations all come from one
+//! counter, so a number names exactly one value in any lane.
+//!
 //! Every mutation bumps exactly the counters it affects, so a tile can
 //! compare the fields it follows against the ones it last acted on with
 //! one integer compare each — a pinned tile ignores `grouping`, an
 //! unscoped tile ignores `scope`. Publication watches narrow `data` to the
 //! datasets/documents a consumer reads; other counters retain their contracts.
 
+pub use crate::frame_ref::FrameRef;
 use crate::perf::RequeryStats;
 use crate::scopebar::{self, ScopeBarModel};
+use crate::tiling::WorkspaceIx;
 use geode_core::config::Layer;
 use geode_core::groupings::GroupingSlots;
 use geode_core::named::NamedExpressions;
@@ -19,7 +27,8 @@ use geode_core::query::{AsOf, QueryKey};
 use geode_core::scope::{Expr, Scope};
 use geode_core::scopes::SavedScopes;
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
@@ -35,7 +44,7 @@ pub const UNDO_DEPTH: usize = 32;
 /// Maximum recent publishes retained, most recently received first.
 pub const RECENT_PUBLISHES: usize = 32;
 
-/// [`Frame::replace_expression_term`]'s refusal: the scope no longer has
+/// [`FrameViewMut::replace_expression_term`]'s refusal: the scope no longer has
 /// the expected term at that index (it changed since the caller read it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TermGone;
@@ -53,7 +62,7 @@ pub struct Publish {
 /// A tile's retained interest in a dataset, or one document within it.
 /// Hidden tiles keep their watches, so no event history or catch-up scan is
 /// needed. The frame retains only weak references; closed tiles release them.
-/// Read through `Frame::versions_for` wherever a request or staged result is
+/// Read through `FrameView::versions_for` wherever a request or staged result is
 /// compared, so requery and promotion use exactly the same dependency boundary.
 #[derive(Debug, Clone)]
 pub struct PublicationWatch {
@@ -79,10 +88,10 @@ pub struct FrameVersions {
     pub scope: u64,
     pub grouping: u64,
     pub as_of: u64,
-    /// Global on `Frame::versions`, dependency-specific on `Frame::versions_for`.
+    /// Global on `FrameView::versions`, dependency-specific on `FrameView::versions_for`.
     pub data: u64,
     pub config: u64,
-    /// Bumped by [`Frame::save_scope`] without changing `config`: saving a
+    /// Bumped by [`FrameViewMut::save_scope`] without changing `config`: saving a
     /// named snapshot leaves the active query inputs unchanged. Consumers that
     /// only follow scope/grouping/as-of/data/config need not requery.
     pub saved_scopes: u64,
@@ -128,6 +137,64 @@ struct ScopeSession {
     redo_snapshot: Vec<Scope>,
 }
 
+/// Advance the frame-wide generation counter and return the new value.
+/// Every lane draws its scope/grouping/as-of numbers from this one counter,
+/// so a number names exactly one value in any lane: a tile that switches
+/// lanes can never mistake different content for "unchanged".
+fn fresh(counter: &mut u64) -> u64 {
+    *counter += 1;
+    *counter
+}
+
+/// The selection one workspace sees: the shared lane, or a pinned
+/// workspace's own. Definitions (slots, saved scopes, named expressions)
+/// and publications stay on `Frame`.
+#[derive(Debug, Default)]
+struct Lane {
+    scope: Scope,
+    /// Bounded stack of outgoing scopes, oldest first — `undo_scope` pops
+    /// the back, `redo_scope` pushes it back on. Capped at [`UNDO_DEPTH`]
+    /// by `push_undo`, which drops the oldest entry once full.
+    scope_undo: Vec<Scope>,
+    scope_redo: Vec<Scope>,
+    /// An explicitly opened scope-editing session, usually owned by the text field.
+    scope_session: Option<ScopeSession>,
+    active_slot: Option<u8>,
+    as_of: AsOf,
+    /// The remembered as-of value. Repeated undo swaps between two values.
+    previous_as_of: Option<AsOf>,
+    scope_gen: u64,
+    grouping_gen: u64,
+    as_of_gen: u64,
+}
+
+impl Lane {
+    /// A pinned workspace's starting lane: the same values and generations
+    /// (equal content, so equal numbers are truthful and nothing
+    /// requeries), with no history of its own.
+    fn pinned_copy(&self) -> Lane {
+        Lane {
+            scope: self.scope.clone(),
+            active_slot: self.active_slot,
+            as_of: self.as_of.clone(),
+            scope_gen: self.scope_gen,
+            grouping_gen: self.grouping_gen,
+            as_of_gen: self.as_of_gen,
+            ..Lane::default()
+        }
+    }
+
+    /// Push an outgoing scope, cap history, and clear redo. Used by ordinary
+    /// scope edits and the first mutation of an open editing session.
+    fn push_undo(&mut self, outgoing: Scope) {
+        self.scope_undo.push(outgoing);
+        if self.scope_undo.len() > UNDO_DEPTH {
+            self.scope_undo.remove(0);
+        }
+        self.scope_redo.clear();
+    }
+}
+
 /// Cache key and shared scope-bar model.
 type BarCache = RefCell<
     Option<(
@@ -140,19 +207,14 @@ type BarCache = RefCell<
 
 #[derive(Debug)]
 pub struct Frame {
-    scope: Scope,
-    /// Bounded stack of outgoing scopes, oldest first — `undo_scope` pops
-    /// the back, `redo_scope` pushes it back on. Capped at [`UNDO_DEPTH`]
-    /// by `push_undo`, which drops the oldest entry once full.
-    scope_undo: Vec<Scope>,
-    scope_redo: Vec<Scope>,
-    /// An explicitly opened scope-editing session, usually owned by the text field.
-    scope_session: Option<ScopeSession>,
+    /// The lane every unpinned workspace resolves to.
+    shared: Lane,
+    /// One lane per pinned workspace. Ordered so session writes are stable.
+    pinned: BTreeMap<WorkspaceIx, Lane>,
+    /// Source of every lane's scope/grouping/as-of generation; also advanced
+    /// by pin and unpin, which makes it the session writer's dirty signal.
+    generation: u64,
     slots: GroupingSlots,
-    active_slot: Option<u8>,
-    as_of: AsOf,
-    /// The remembered as-of value. Repeated undo swaps between two values.
-    previous_as_of: Option<AsOf>,
     /// Publishes in arrival order, newest first, capped at [`RECENT_PUBLISHES`].
     recent_publishes: VecDeque<Publish>,
     publication_watches: HashMap<String, DatasetWatches>,
@@ -163,6 +225,9 @@ pub struct Frame {
     /// Latest saved scope awaiting persistence to user `scopes.toml`.
     /// A later save replaces this pending value until the observer drains it.
     pending_scope_persist: Option<(String, Scope)>,
+    /// Frame-wide counters. Only `data`, `config`, `saved_scopes`, and `flip`
+    /// are read from here; its scope/grouping/as-of fields stay zero, because
+    /// [`FrameView::versions`] composes those from the resolved lane.
     versions: FrameVersions,
     /// Module requery timings, exposed through the shared frame handle.
     pub requery: RequeryStats,
@@ -172,6 +237,7 @@ pub struct Frame {
     pending_persist: Option<(u8, Vec<String>)>,
     /// Lazy model cache keyed by versions excluding flip, clock, and local date.
     /// `Rc` makes a hit cheap; interior mutability permits caching through `&self`.
+    /// Lane generations are unique across lanes, so one cache serves them all.
     bar_cache: BarCache,
     /// Current scope/grouping/as-of barrier, if one is waiting for arrivals.
     barrier: Option<FlipBarrier>,
@@ -180,14 +246,10 @@ pub struct Frame {
 impl Frame {
     pub fn new(slots: GroupingSlots, saved: SavedScopes, user_dir: Option<PathBuf>) -> Frame {
         Frame {
-            scope: Scope::default(),
-            scope_undo: Vec::new(),
-            scope_redo: Vec::new(),
-            scope_session: None,
+            shared: Lane::default(),
+            pinned: BTreeMap::new(),
+            generation: 0,
             slots,
-            active_slot: None,
-            as_of: AsOf::Live,
-            previous_as_of: None,
             recent_publishes: VecDeque::new(),
             publication_watches: HashMap::new(),
             saved_scopes: saved,
@@ -202,301 +264,130 @@ impl Frame {
         }
     }
 
-    pub fn versions(&self) -> FrameVersions {
-        self.versions
+    fn lane(&self, ws: Option<WorkspaceIx>) -> &Lane {
+        ws.and_then(|w| self.pinned.get(&w)).unwrap_or(&self.shared)
+    }
+
+    fn lane_mut(&mut self, ws: Option<WorkspaceIx>) -> &mut Lane {
+        let Frame { shared, pinned, .. } = self;
+        match ws.and_then(|w| pinned.get_mut(&w)) {
+            Some(lane) => lane,
+            None => shared,
+        }
+    }
+
+    pub fn view(&self, ws: WorkspaceIx) -> FrameView<'_> {
+        FrameView {
+            frame: self,
+            lane: self.lane(Some(ws)),
+        }
+    }
+
+    pub fn view_mut(&mut self, ws: WorkspaceIx) -> FrameViewMut<'_> {
+        FrameViewMut {
+            frame: self,
+            ws: Some(ws),
+        }
+    }
+
+    /// The shared lane explicitly, whatever any workspace is pinned to.
+    /// Session restore and `[frame]` writes use it.
+    pub fn shared(&self) -> FrameView<'_> {
+        FrameView {
+            frame: self,
+            lane: &self.shared,
+        }
+    }
+
+    pub fn shared_mut(&mut self) -> FrameViewMut<'_> {
+        FrameViewMut {
+            frame: self,
+            ws: None,
+        }
+    }
+
+    /// Give `ws` its own lane, copied from the shared one. `false` when it
+    /// is already pinned. Advances the generation without touching the
+    /// lane's numbers.
+    pub fn pin(&mut self, ws: WorkspaceIx) -> bool {
+        if self.pinned.contains_key(&ws) {
+            return false;
+        }
+        let lane = self.shared.pinned_copy();
+        self.pinned.insert(ws, lane);
+        fresh(&mut self.generation);
+        true
+    }
+
+    /// Drop `ws`'s lane, discarding its selection and history; it resolves
+    /// to the shared lane again. `false` when it was not pinned.
+    pub fn unpin(&mut self, ws: WorkspaceIx) -> bool {
+        if self.pinned.remove(&ws).is_none() {
+            return false;
+        }
+        fresh(&mut self.generation);
+        true
+    }
+
+    pub fn is_pinned(&self, ws: WorkspaceIx) -> bool {
+        self.pinned.contains_key(&ws)
+    }
+
+    pub fn pinned_workspaces(&self) -> impl Iterator<Item = WorkspaceIx> + '_ {
+        self.pinned.keys().copied()
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn config_version(&self) -> u64 {
+        self.versions.config
+    }
+
+    pub fn data_version(&self) -> u64 {
+        self.versions.data
     }
 
     pub fn user_dir(&self) -> Option<&Path> {
         self.user_dir.as_deref()
     }
 
-    pub fn scope(&self) -> &Scope {
-        &self.scope
-    }
-
-    /// Push an outgoing scope, cap history, and clear redo. Used by ordinary
-    /// scope edits and the first mutation of an open editing session.
-    fn push_undo(&mut self, outgoing: Scope) {
-        self.scope_undo.push(outgoing);
-        if self.scope_undo.len() > UNDO_DEPTH {
-            self.scope_undo.remove(0);
-        }
-        self.scope_redo.clear();
-    }
-
-    /// Replace the scope, pushing its outgoing value and clearing redo.
-    /// An equal value returns false without changing history or versions.
-    pub fn set_scope(&mut self, scope: Scope) -> bool {
-        if self.scope == scope {
-            return false;
-        }
-        let outgoing = std::mem::replace(&mut self.scope, scope);
-        self.push_undo(outgoing);
-        self.versions.scope += 1;
-        true
-    }
-
-    pub fn clear_scope(&mut self) -> bool {
-        self.set_scope(Scope::default())
-    }
-
-    /// Start or replace a session, capturing the current scope and redo stack.
-    /// Nothing is pushed until the first actual session edit.
-    pub fn begin_scope_session(&mut self) {
-        self.scope_session = Some(ScopeSession {
-            base: self.scope.clone(),
-            pushed: false,
-            redo_snapshot: self.scope_redo.clone(),
-        });
-    }
-
-    /// Replace the scope and bump its version on an actual change. An open
-    /// session pushes its base only once, even if other edits move the stack.
-    /// Without a session, each change pushes the outgoing scope and clears redo.
-    pub fn set_scope_in_session(&mut self, scope: Scope) -> bool {
-        if self.scope == scope {
-            return false;
-        }
-        match self.scope_session.as_ref() {
-            Some(session) if !session.pushed => {
-                let base = session.base.clone();
-                self.push_undo(base);
-                if let Some(session) = self.scope_session.as_mut() {
-                    session.pushed = true;
-                }
-            }
-            Some(_) => {}
-            None => {
-                let outgoing = self.scope.clone();
-                self.push_undo(outgoing);
-            }
-        }
-        self.scope = scope;
-        self.versions.scope += 1;
-        true
-    }
-
-    /// End coalescing. If the session pushed its base, the current scope equals
-    /// that base, and the base remains the top undo entry, pop it and restore
-    /// the captured redo stack. Otherwise leave history as it stands.
-    /// Subsequent edits use ordinary history until another session is opened.
-    pub fn end_scope_session(&mut self) {
-        if let Some(session) = self.scope_session.take()
-            && session.pushed
-            && self.scope_undo.last() == Some(&session.base)
-            && self.scope == session.base
-        {
-            self.scope_undo.pop();
-            self.scope_redo = session.redo_snapshot;
-        }
-    }
-
-    /// Undo one scope edit. An empty stack returns false without a version bump.
-    pub fn undo_scope(&mut self) -> bool {
-        let Some(previous) = self.scope_undo.pop() else {
-            return false;
-        };
-        let current = std::mem::replace(&mut self.scope, previous);
-        self.scope_redo.push(current);
-        self.versions.scope += 1;
-        true
-    }
-
-    /// Redo one scope edit. An ordinary edit or the first mutation of a new
-    /// session clears this stack; later mutations in an open session do not.
-    pub fn redo_scope(&mut self) -> bool {
-        let Some(next) = self.scope_redo.pop() else {
-            return false;
-        };
-        let current = std::mem::replace(&mut self.scope, next);
-        self.scope_undo.push(current);
-        self.versions.scope += 1;
-        true
-    }
-
-    /// Remove every selection for a column through the undoable `set_scope`
-    /// path. Preserve other fields, including `impossible`. Return false when
-    /// there is no matching selection.
-    pub fn drop_dimension(&mut self, column: &str) -> bool {
-        let mut s = self.scope.clone();
-        let before = s.dimensions.len();
-        s.dimensions.retain(|d| d.column != column);
-        if s.dimensions.len() == before {
-            return false;
-        }
-        self.set_scope(s)
-    }
-
-    /// Remove named expression `name` from the scope through the undoable
-    /// `set_scope` path. Return false when the scope does not name it.
-    pub fn drop_named(&mut self, name: &str) -> bool {
-        let mut s = self.scope.clone();
-        let before = s.named.len();
-        s.named.retain(|n| n != name);
-        if s.named.len() == before {
-            return false;
-        }
-        self.set_scope(s)
-    }
-
-    /// Remove top-level expression term `i` (`Expr::conjuncts` order)
-    /// through the undoable `set_scope` path; the remaining terms are
-    /// rebuilt as a left-folded `and` chain, and removing the last one
-    /// leaves no expression. Out of range (including no expression)
-    /// returns false and changes nothing.
-    pub fn drop_expression_term(&mut self, i: usize) -> bool {
-        self.edit_expression_term(i, None, None, None)
-            .unwrap_or(false)
-    }
-
-    /// Replace top-level expression term `i` with `term`, or remove it
-    /// with `None`, through the undoable `set_scope` path. The other terms
-    /// keep their order. `expected` is the term the caller read at `i`
-    /// (the dialog's seed); `Err(TermGone)` unless term `i` still equals
-    /// it — the scope changed since the caller read it, and an index alone
-    /// would silently edit whichever term now sits there. `Ok(false)` when
-    /// the result equals the current scope.
-    pub fn replace_expression_term(
-        &mut self,
-        i: usize,
-        expected: &Expr,
-        term: Option<Expr>,
-    ) -> Result<bool, TermGone> {
-        self.edit_expression_term(i, Some(expected), term, None)
-    }
-
-    /// Whether top-level expression term `i` still equals `expected`: the
-    /// check [`Self::replace_expression_term`] makes, for a caller that must
-    /// refuse before doing anything else (writing a definition).
-    pub fn expression_term_is(&self, i: usize, expected: &Expr) -> bool {
-        self.scope
-            .expression
-            .as_ref()
-            .and_then(|e| e.conjuncts().get(i).copied())
-            .is_some_and(|t| t == expected)
-    }
-
-    /// Replace top-level expression term `i` with the named expression
-    /// `name`: the term leaves the expression and the name joins the named
-    /// list, in one `set_scope` so a single undo puts the term back.
-    /// `expected` guards the index as in [`Self::replace_expression_term`].
-    pub fn name_expression_term(
-        &mut self,
-        i: usize,
-        expected: &Expr,
-        name: &str,
-    ) -> Result<bool, TermGone> {
-        self.edit_expression_term(i, Some(expected), None, Some(name))
-    }
-
-    fn edit_expression_term(
-        &mut self,
-        i: usize,
-        expected: Option<&Expr>,
-        term: Option<Expr>,
-        name: Option<&str>,
-    ) -> Result<bool, TermGone> {
-        let mut terms: Vec<Expr> = self
-            .scope
-            .expression
-            .as_ref()
-            .map(|e| e.conjuncts().into_iter().cloned().collect())
-            .unwrap_or_default();
-        let Some(current) = terms.get(i) else {
-            return Err(TermGone);
-        };
-        if expected.is_some_and(|e| e != current) {
-            return Err(TermGone);
-        }
-        match term {
-            Some(t) => terms[i] = t,
-            None => {
-                terms.remove(i);
-            }
-        }
-        let mut s = self.scope.clone();
-        s.expression = Expr::from_conjuncts(terms);
-        if let Some(name) = name
-            && !s.named.iter().any(|n| n == name)
-        {
-            s.named.push(name.to_string());
-        }
-        Ok(self.set_scope(s))
-    }
-
-    /// Remove the whole expression layer through the undoable `set_scope`
-    /// path; false (and no history entry) when there is none.
-    pub fn clear_expression(&mut self) -> bool {
-        if self.scope.expression.is_none() {
-            return false;
-        }
-        let mut s = self.scope.clone();
-        s.expression = None;
-        self.set_scope(s)
-    }
-
-    /// Set (or clear, with `None`/whitespace-only) the scope's text
-    /// filter — an undoable edit like `drop_dimension`, going through the
-    /// ordinary (non-session) `set_scope` path. `begin_scope_session`/
-    /// `set_scope_in_session` is the coalescing alternative a live text
-    /// field drives per keystroke.
-    pub fn set_text(&mut self, text: Option<String>) -> bool {
-        let mut s = self.scope.clone();
-        s.text = text.filter(|t| !t.trim().is_empty());
-        self.set_scope(s)
-    }
-
     pub fn slots(&self) -> &GroupingSlots {
         &self.slots
     }
 
-    pub fn active_slot(&self) -> Option<u8> {
-        self.active_slot
-    }
-
-    pub fn active_grouping(&self) -> Option<&[String]> {
-        self.slots.get(self.active_slot?)
-    }
-
-    /// `Some(n)` activates a filled slot; `None` returns following tiles
-    /// to their views' own grouping. `false` when nothing changed or the
-    /// slot is empty.
-    pub fn set_active_slot(&mut self, slot: Option<u8>) -> bool {
-        if let Some(n) = slot
-            && self.slots.get(n).is_none()
-        {
-            return false;
-        }
-        if self.active_slot == slot {
-            return false;
-        }
-        self.active_slot = slot;
-        self.versions.grouping += 1;
-        true
-    }
-
-    /// Replace grouping slots after reload. A change bumps config and grouping,
-    /// even if the active slot is unchanged. Clear an active slot that disappeared.
+    /// Replace grouping slots after reload. A change bumps config and every
+    /// lane's grouping, even where the active slot is unchanged. Clear an
+    /// active slot that disappeared.
     pub fn replace_slots(&mut self, slots: GroupingSlots) -> bool {
         if self.slots == slots {
             return false;
         }
         self.slots = slots;
-        if self
-            .active_slot
-            .is_some_and(|n| self.slots.get(n).is_none())
-        {
-            self.active_slot = None;
-        }
         self.versions.config += 1;
-        self.versions.grouping += 1;
+        // Every lane regroups, hidden pinned ones included: the numbers a
+        // lane's active slot names may now hold other columns.
+        let Frame {
+            shared,
+            pinned,
+            slots,
+            generation,
+            ..
+        } = self;
+        for lane in std::iter::once(shared).chain(pinned.values_mut()) {
+            if lane.active_slot.is_some_and(|n| slots.get(n).is_none()) {
+                lane.active_slot = None;
+            }
+            lane.grouping_gen = fresh(generation);
+        }
         true
     }
 
     /// Save a nonempty grouping in slot 1–9 and replace the pending write.
-    /// Bump grouping only if that slot is active. Production grouping edits use
-    /// the Groupings dialog's config writer; this model API remains independently
-    /// usable and covered by tests.
+    /// Bump grouping only in the lanes where that slot is active. Production
+    /// grouping edits use the Groupings dialog's config writer; this model API
+    /// remains independently usable and covered by tests.
     pub fn save_slot(&mut self, slot: u8, grouping: Vec<String>) -> Result<(), String> {
         let persisted = grouping.clone();
         if !self.slots.set(slot, grouping) {
@@ -504,8 +395,16 @@ impl Frame {
                 "slot must be 1–9 and the grouping non-empty (got {slot})"
             ));
         }
-        if self.active_slot == Some(slot) {
-            self.versions.grouping += 1;
+        let Frame {
+            shared,
+            pinned,
+            generation,
+            ..
+        } = self;
+        for lane in std::iter::once(shared).chain(pinned.values_mut()) {
+            if lane.active_slot == Some(slot) {
+                lane.grouping_gen = fresh(generation);
+            }
         }
         self.pending_persist = Some((slot, persisted));
         Ok(())
@@ -514,32 +413,6 @@ impl Frame {
     /// Drain the latest pending slot write for the shell's background writer.
     pub fn take_pending_persist(&mut self) -> Option<(u8, Vec<String>)> {
         self.pending_persist.take()
-    }
-
-    pub fn as_of(&self) -> &AsOf {
-        &self.as_of
-    }
-
-    /// Replace as-of and remember its outgoing value for `undo_as_of`.
-    /// An equal value returns false without changing versions or history.
-    pub fn set_as_of(&mut self, as_of: AsOf) -> bool {
-        if self.as_of == as_of {
-            return false;
-        }
-        self.previous_as_of = Some(std::mem::replace(&mut self.as_of, as_of));
-        self.versions.as_of += 1;
-        true
-    }
-
-    /// Swap current and remembered as-of. Repeated calls toggle the pair.
-    pub fn undo_as_of(&mut self) -> bool {
-        let Some(previous) = self.previous_as_of.take() else {
-            return false;
-        };
-        let current = std::mem::replace(&mut self.as_of, previous);
-        self.previous_as_of = Some(current);
-        self.versions.as_of += 1;
-        true
     }
 
     /// Watch a whole dataset (`None`) or one document's encoded batch key.
@@ -571,23 +444,6 @@ impl Frame {
             dataset: dataset.to_owned(),
             batch: batch.map(str::to_owned),
             revision,
-        }
-    }
-
-    /// Frame counters for one consumer. Only `data` is narrowed to its watched
-    /// publications; scope/grouping/as-of and flip identity remain unchanged.
-    /// Watches must come from this frame and remain alive with the consumer.
-    pub fn versions_for<'a>(
-        &self,
-        watches: impl IntoIterator<Item = &'a PublicationWatch>,
-    ) -> FrameVersions {
-        FrameVersions {
-            data: watches
-                .into_iter()
-                .map(|watch| watch.revision.get())
-                .max()
-                .unwrap_or(0),
-            ..self.versions
         }
     }
 
@@ -646,106 +502,13 @@ impl Frame {
         true
     }
 
-    /// Save the current scope in memory, replace the pending scope write, and
-    /// bump saved_scopes. Validate the object name and reject reserved action
-    /// names to prevent collisions when registering `scope::<name>` actions.
-    /// An existing name is overwritten; an empty scope is accepted.
-    pub fn save_scope(&mut self, name: &str) -> Result<(), String> {
-        let name = geode_core::config::check_object_name(name)
-            .map_err(|_| format!("'{}' is not a usable scope name", name.trim()))?;
-        if geode_core::scopes::RESERVED_NAMES.contains(&name) {
-            return Err(format!("'{name}' is reserved"));
-        }
-        self.saved_scopes
-            .insert(name.to_string(), self.scope.clone());
-        self.pending_scope_persist = Some((name.to_string(), self.scope.clone()));
-        self.versions.saved_scopes += 1;
-        Ok(())
-    }
-
-    /// Load a saved scope by name, going through `set_scope` so it's
-    /// undoable like any other scope change. `Err` when no scope by that
-    /// name exists; `Ok(false)` when it exists but is already the current
-    /// scope.
-    pub fn load_scope(&mut self, name: &str) -> Result<bool, String> {
-        let scope = self
-            .saved_scopes
-            .get(name)
-            .cloned()
-            .ok_or_else(|| format!("no saved scope '{name}'"))?;
-        Ok(self.set_scope(scope))
-    }
-
     /// Drain the latest pending scope write for the shell's background writer.
     pub fn take_pending_scope_persist(&mut self) -> Option<(String, Scope)> {
         self.pending_scope_persist.take()
     }
 
-    /// Clear undo and redo without changing scope or ending an open session.
-    /// Session restoration uses this after applying its initial scope.
-    pub fn clear_history(&mut self) {
-        self.scope_undo.clear();
-        self.scope_redo.clear();
-    }
-
     pub fn note_config_reloaded(&mut self) {
         self.versions.config += 1;
-    }
-
-    /// Compose the frame scope with the tile layer through `Scope::and_then`,
-    /// then fold in every named expression it references. A missing or
-    /// invalid name is an error the caller shows instead of querying:
-    /// skipping it would widen the scope and produce plausible wrong totals.
-    pub fn effective_scope(&self, tile: &Scope) -> Result<Scope, String> {
-        self.scope.and_then(tile).resolve(&self.named)
-    }
-
-    /// Return cached scope-bar labels for versions excluding flip, the configured
-    /// clock, and today's date on that clock. Clock/date changes invalidate labels
-    /// even without a frame mutation, covering zone reloads and midnight.
-    /// The caller supplies cached time inputs; this method reads no global clock.
-    pub fn bar_model(
-        &self,
-        clock: geode_core::clock::Clock,
-        today: chrono::NaiveDate,
-    ) -> Rc<ScopeBarModel> {
-        // `flip` alone never changes what the bar shows — keyed out here
-        // (rather than relying on it happening to already match) so a
-        // flip costs a refcount bump like any other unrelated notify,
-        // not a rebuild.
-        let mut versions = self.versions();
-        versions.flip = 0;
-        if let Some((cached_versions, cached_clock, cached_today, cached)) =
-            self.bar_cache.borrow().as_ref()
-            && *cached_versions == versions
-            && *cached_clock == clock
-            && *cached_today == today
-        {
-            return Rc::clone(cached);
-        }
-        let built = Rc::new(scopebar::build_model(self, clock, today));
-        *self.bar_cache.borrow_mut() = Some((versions, clock, today, Rc::clone(&built)));
-        built
-    }
-
-    /// Replace the barrier with the current scope/grouping/as-of identity and
-    /// these tile keys. An empty key set clears it without bumping flip.
-    /// No version changes or notifications are emitted here.
-    ///
-    /// The shell must open the barrier before occupant frame observers run:
-    /// tiles unaffected by the changed inputs can then self-arrive immediately.
-    /// Shell observer registration precedes occupant registration to enforce this.
-    pub fn open_flip(&mut self, keys: impl IntoIterator<Item = QueryKey>, now: Instant) {
-        let awaiting: HashSet<QueryKey> = keys.into_iter().collect();
-        if awaiting.is_empty() {
-            self.barrier = None;
-            return;
-        }
-        self.barrier = Some(FlipBarrier {
-            versions: self.versions,
-            awaiting,
-            opened: now,
-        });
     }
 
     fn matches(b: &FlipBarrier, v: FrameVersions) -> bool {
@@ -811,6 +574,530 @@ impl Frame {
     }
 }
 
+/// One workspace's reading of the frame: shared state through `Deref`,
+/// selection state from the lane the workspace resolves to.
+#[derive(Clone, Copy)]
+pub struct FrameView<'a> {
+    frame: &'a Frame,
+    lane: &'a Lane,
+}
+
+impl Deref for FrameView<'_> {
+    type Target = Frame;
+    fn deref(&self) -> &Frame {
+        self.frame
+    }
+}
+
+impl<'a> FrameView<'a> {
+    pub fn versions(&self) -> FrameVersions {
+        FrameVersions {
+            scope: self.lane.scope_gen,
+            grouping: self.lane.grouping_gen,
+            as_of: self.lane.as_of_gen,
+            ..self.frame.versions
+        }
+    }
+
+    /// `versions` with `data` narrowed to `watches` (see `PublicationWatch`).
+    /// Scope/grouping/as-of and flip identity are this lane's, unchanged.
+    /// Watches must come from this frame and remain alive with the consumer.
+    pub fn versions_for<'w>(
+        &self,
+        watches: impl IntoIterator<Item = &'w PublicationWatch>,
+    ) -> FrameVersions {
+        FrameVersions {
+            data: watches
+                .into_iter()
+                .map(|w| w.revision.get())
+                .max()
+                .unwrap_or(0),
+            ..self.versions()
+        }
+    }
+
+    pub fn scope(&self) -> &'a Scope {
+        &self.lane.scope
+    }
+
+    pub fn active_slot(&self) -> Option<u8> {
+        self.lane.active_slot
+    }
+
+    pub fn active_grouping(&self) -> Option<&'a [String]> {
+        self.frame.slots.get(self.lane.active_slot?)
+    }
+
+    pub fn as_of(&self) -> &'a AsOf {
+        &self.lane.as_of
+    }
+
+    /// Whether top-level expression term `i` still equals `expected`: the
+    /// check [`FrameViewMut::replace_expression_term`] makes, for a caller
+    /// that must refuse before doing anything else (writing a definition).
+    pub fn expression_term_is(&self, i: usize, expected: &Expr) -> bool {
+        self.lane
+            .scope
+            .expression
+            .as_ref()
+            .and_then(|e| e.conjuncts().get(i).copied())
+            .is_some_and(|t| t == expected)
+    }
+
+    /// Compose the lane scope with the tile layer through `Scope::and_then`,
+    /// then fold in every named expression it references. A missing or
+    /// invalid name is an error the caller shows instead of querying:
+    /// skipping it would widen the scope and produce plausible wrong totals.
+    pub fn effective_scope(&self, tile: &Scope) -> Result<Scope, String> {
+        self.lane.scope.and_then(tile).resolve(&self.frame.named)
+    }
+
+    /// Return cached scope-bar labels for versions excluding flip, the configured
+    /// clock, and today's date on that clock. Clock/date changes invalidate labels
+    /// even without a frame mutation, covering zone reloads and midnight.
+    /// The caller supplies cached time inputs; this method reads no global clock.
+    pub fn bar_model(
+        &self,
+        clock: geode_core::clock::Clock,
+        today: chrono::NaiveDate,
+    ) -> Rc<ScopeBarModel> {
+        // `flip` alone never changes what the bar shows — keyed out here
+        // (rather than relying on it happening to already match) so a
+        // flip costs a refcount bump like any other unrelated notify,
+        // not a rebuild.
+        let mut versions = self.versions();
+        versions.flip = 0;
+        if let Some((cached_versions, cached_clock, cached_today, cached)) =
+            self.frame.bar_cache.borrow().as_ref()
+            && *cached_versions == versions
+            && *cached_clock == clock
+            && *cached_today == today
+        {
+            return Rc::clone(cached);
+        }
+        let built = Rc::new(scopebar::build_model(self, clock, today));
+        *self.frame.bar_cache.borrow_mut() = Some((versions, clock, today, Rc::clone(&built)));
+        built
+    }
+}
+
+/// One workspace's writable frame. The lane is resolved per call, so a
+/// pin or unpin through `DerefMut` redirects later calls at once.
+pub struct FrameViewMut<'a> {
+    frame: &'a mut Frame,
+    /// `None` addresses the shared lane explicitly.
+    ws: Option<WorkspaceIx>,
+}
+
+impl Deref for FrameViewMut<'_> {
+    type Target = Frame;
+    fn deref(&self) -> &Frame {
+        self.frame
+    }
+}
+
+impl DerefMut for FrameViewMut<'_> {
+    fn deref_mut(&mut self) -> &mut Frame {
+        self.frame
+    }
+}
+
+impl<'a> FrameViewMut<'a> {
+    pub fn view(&self) -> FrameView<'_> {
+        FrameView {
+            frame: &*self.frame,
+            lane: self.frame.lane(self.ws),
+        }
+    }
+
+    // Reads answer for this lane, so a lane read through a mutable view
+    // never needs a separate `view()` call.
+
+    pub fn versions(&self) -> FrameVersions {
+        self.view().versions()
+    }
+
+    pub fn versions_for<'w>(
+        &self,
+        watches: impl IntoIterator<Item = &'w PublicationWatch>,
+    ) -> FrameVersions {
+        self.view().versions_for(watches)
+    }
+
+    pub fn scope(&self) -> &Scope {
+        &self.frame.lane(self.ws).scope
+    }
+
+    pub fn active_slot(&self) -> Option<u8> {
+        self.frame.lane(self.ws).active_slot
+    }
+
+    pub fn active_grouping(&self) -> Option<&[String]> {
+        self.view().active_grouping()
+    }
+
+    pub fn as_of(&self) -> &AsOf {
+        &self.frame.lane(self.ws).as_of
+    }
+
+    pub fn expression_term_is(&self, i: usize, expected: &Expr) -> bool {
+        self.view().expression_term_is(i, expected)
+    }
+
+    pub fn effective_scope(&self, tile: &Scope) -> Result<Scope, String> {
+        self.view().effective_scope(tile)
+    }
+
+    pub fn bar_model(
+        &self,
+        clock: geode_core::clock::Clock,
+        today: chrono::NaiveDate,
+    ) -> Rc<ScopeBarModel> {
+        self.view().bar_model(clock, today)
+    }
+
+    fn lane(&mut self) -> &mut Lane {
+        self.frame.lane_mut(self.ws)
+    }
+
+    fn bump_scope(&mut self) {
+        let g = fresh(&mut self.frame.generation);
+        self.lane().scope_gen = g;
+    }
+
+    fn bump_grouping(&mut self) {
+        let g = fresh(&mut self.frame.generation);
+        self.lane().grouping_gen = g;
+    }
+
+    fn bump_as_of(&mut self) {
+        let g = fresh(&mut self.frame.generation);
+        self.lane().as_of_gen = g;
+    }
+
+    /// Replace the scope, pushing its outgoing value and clearing redo.
+    /// An equal value returns false without changing history or versions.
+    pub fn set_scope(&mut self, scope: Scope) -> bool {
+        let lane = self.lane();
+        if lane.scope == scope {
+            return false;
+        }
+        let outgoing = std::mem::replace(&mut lane.scope, scope);
+        lane.push_undo(outgoing);
+        self.bump_scope();
+        true
+    }
+
+    pub fn clear_scope(&mut self) -> bool {
+        self.set_scope(Scope::default())
+    }
+
+    /// Start or replace a session, capturing the current scope and redo stack.
+    /// Nothing is pushed until the first actual session edit.
+    pub fn begin_scope_session(&mut self) {
+        let lane = self.lane();
+        lane.scope_session = Some(ScopeSession {
+            base: lane.scope.clone(),
+            pushed: false,
+            redo_snapshot: lane.scope_redo.clone(),
+        });
+    }
+
+    /// Replace the scope and bump its version on an actual change. An open
+    /// session pushes its base only once, even if other edits move the stack.
+    /// Without a session, each change pushes the outgoing scope and clears redo.
+    pub fn set_scope_in_session(&mut self, scope: Scope) -> bool {
+        let lane = self.lane();
+        if lane.scope == scope {
+            return false;
+        }
+        match lane.scope_session.as_ref() {
+            Some(session) if !session.pushed => {
+                let base = session.base.clone();
+                lane.push_undo(base);
+                if let Some(session) = lane.scope_session.as_mut() {
+                    session.pushed = true;
+                }
+            }
+            Some(_) => {}
+            None => {
+                let outgoing = lane.scope.clone();
+                lane.push_undo(outgoing);
+            }
+        }
+        lane.scope = scope;
+        self.bump_scope();
+        true
+    }
+
+    /// End coalescing. If the session pushed its base, the current scope equals
+    /// that base, and the base remains the top undo entry, pop it and restore
+    /// the captured redo stack. Otherwise leave history as it stands.
+    /// Subsequent edits use ordinary history until another session is opened.
+    pub fn end_scope_session(&mut self) {
+        let lane = self.lane();
+        if let Some(session) = lane.scope_session.take()
+            && session.pushed
+            && lane.scope_undo.last() == Some(&session.base)
+            && lane.scope == session.base
+        {
+            lane.scope_undo.pop();
+            lane.scope_redo = session.redo_snapshot;
+        }
+    }
+
+    /// Undo one scope edit. An empty stack returns false without a version bump.
+    pub fn undo_scope(&mut self) -> bool {
+        let lane = self.lane();
+        let Some(previous) = lane.scope_undo.pop() else {
+            return false;
+        };
+        let current = std::mem::replace(&mut lane.scope, previous);
+        lane.scope_redo.push(current);
+        self.bump_scope();
+        true
+    }
+
+    /// Redo one scope edit. An ordinary edit or the first mutation of a new
+    /// session clears this stack; later mutations in an open session do not.
+    pub fn redo_scope(&mut self) -> bool {
+        let lane = self.lane();
+        let Some(next) = lane.scope_redo.pop() else {
+            return false;
+        };
+        let current = std::mem::replace(&mut lane.scope, next);
+        lane.scope_undo.push(current);
+        self.bump_scope();
+        true
+    }
+
+    /// Remove every selection for a column through the undoable `set_scope`
+    /// path. Preserve other fields, including `impossible`. Return false when
+    /// there is no matching selection.
+    pub fn drop_dimension(&mut self, column: &str) -> bool {
+        let mut s = self.lane().scope.clone();
+        let before = s.dimensions.len();
+        s.dimensions.retain(|d| d.column != column);
+        if s.dimensions.len() == before {
+            return false;
+        }
+        self.set_scope(s)
+    }
+
+    /// Remove named expression `name` from the scope through the undoable
+    /// `set_scope` path. Return false when the scope does not name it.
+    pub fn drop_named(&mut self, name: &str) -> bool {
+        let mut s = self.lane().scope.clone();
+        let before = s.named.len();
+        s.named.retain(|n| n != name);
+        if s.named.len() == before {
+            return false;
+        }
+        self.set_scope(s)
+    }
+
+    /// Remove top-level expression term `i` (`Expr::conjuncts` order)
+    /// through the undoable `set_scope` path; the remaining terms are
+    /// rebuilt as a left-folded `and` chain, and removing the last one
+    /// leaves no expression. Out of range (including no expression)
+    /// returns false and changes nothing.
+    pub fn drop_expression_term(&mut self, i: usize) -> bool {
+        self.edit_expression_term(i, None, None, None)
+            .unwrap_or(false)
+    }
+
+    /// Replace top-level expression term `i` with `term`, or remove it
+    /// with `None`, through the undoable `set_scope` path. The other terms
+    /// keep their order. `expected` is the term the caller read at `i`
+    /// (the dialog's seed); `Err(TermGone)` unless term `i` still equals
+    /// it — the scope changed since the caller read it, and an index alone
+    /// would silently edit whichever term now sits there. `Ok(false)` when
+    /// the result equals the current scope.
+    pub fn replace_expression_term(
+        &mut self,
+        i: usize,
+        expected: &Expr,
+        term: Option<Expr>,
+    ) -> Result<bool, TermGone> {
+        self.edit_expression_term(i, Some(expected), term, None)
+    }
+
+    /// Replace top-level expression term `i` with the named expression
+    /// `name`: the term leaves the expression and the name joins the named
+    /// list, in one `set_scope` so a single undo puts the term back.
+    /// `expected` guards the index as in [`Self::replace_expression_term`].
+    pub fn name_expression_term(
+        &mut self,
+        i: usize,
+        expected: &Expr,
+        name: &str,
+    ) -> Result<bool, TermGone> {
+        self.edit_expression_term(i, Some(expected), None, Some(name))
+    }
+
+    fn edit_expression_term(
+        &mut self,
+        i: usize,
+        expected: Option<&Expr>,
+        term: Option<Expr>,
+        name: Option<&str>,
+    ) -> Result<bool, TermGone> {
+        let lane = self.lane();
+        let mut terms: Vec<Expr> = lane
+            .scope
+            .expression
+            .as_ref()
+            .map(|e| e.conjuncts().into_iter().cloned().collect())
+            .unwrap_or_default();
+        let Some(current) = terms.get(i) else {
+            return Err(TermGone);
+        };
+        if expected.is_some_and(|e| e != current) {
+            return Err(TermGone);
+        }
+        match term {
+            Some(t) => terms[i] = t,
+            None => {
+                terms.remove(i);
+            }
+        }
+        let mut s = lane.scope.clone();
+        s.expression = Expr::from_conjuncts(terms);
+        if let Some(name) = name
+            && !s.named.iter().any(|n| n == name)
+        {
+            s.named.push(name.to_string());
+        }
+        Ok(self.set_scope(s))
+    }
+
+    /// Remove the whole expression layer through the undoable `set_scope`
+    /// path; false (and no history entry) when there is none.
+    pub fn clear_expression(&mut self) -> bool {
+        let lane = self.lane();
+        if lane.scope.expression.is_none() {
+            return false;
+        }
+        let mut s = lane.scope.clone();
+        s.expression = None;
+        self.set_scope(s)
+    }
+
+    /// Set (or clear, with `None`/whitespace-only) the scope's text
+    /// filter — an undoable edit like `drop_dimension`, going through the
+    /// ordinary (non-session) `set_scope` path. `begin_scope_session`/
+    /// `set_scope_in_session` is the coalescing alternative a live text
+    /// field drives per keystroke.
+    pub fn set_text(&mut self, text: Option<String>) -> bool {
+        let mut s = self.lane().scope.clone();
+        s.text = text.filter(|t| !t.trim().is_empty());
+        self.set_scope(s)
+    }
+
+    /// `Some(n)` activates a filled slot; `None` returns following tiles
+    /// to their views' own grouping. `false` when nothing changed or the
+    /// slot is empty.
+    pub fn set_active_slot(&mut self, slot: Option<u8>) -> bool {
+        if let Some(n) = slot
+            && self.frame.slots.get(n).is_none()
+        {
+            return false;
+        }
+        if self.lane().active_slot == slot {
+            return false;
+        }
+        self.lane().active_slot = slot;
+        self.bump_grouping();
+        true
+    }
+
+    /// Replace as-of and remember its outgoing value for `undo_as_of`.
+    /// An equal value returns false without changing versions or history.
+    pub fn set_as_of(&mut self, as_of: AsOf) -> bool {
+        let lane = self.lane();
+        if lane.as_of == as_of {
+            return false;
+        }
+        lane.previous_as_of = Some(std::mem::replace(&mut lane.as_of, as_of));
+        self.bump_as_of();
+        true
+    }
+
+    /// Swap current and remembered as-of. Repeated calls toggle the pair.
+    pub fn undo_as_of(&mut self) -> bool {
+        let lane = self.lane();
+        let Some(previous) = lane.previous_as_of.take() else {
+            return false;
+        };
+        let current = std::mem::replace(&mut lane.as_of, previous);
+        lane.previous_as_of = Some(current);
+        self.bump_as_of();
+        true
+    }
+
+    /// Save this lane's scope in memory, replace the pending scope write, and
+    /// bump saved_scopes. Validate the object name and reject reserved action
+    /// names to prevent collisions when registering `scope::<name>` actions.
+    /// An existing name is overwritten; an empty scope is accepted.
+    pub fn save_scope(&mut self, name: &str) -> Result<(), String> {
+        let name = geode_core::config::check_object_name(name)
+            .map_err(|_| format!("'{}' is not a usable scope name", name.trim()))?;
+        if geode_core::scopes::RESERVED_NAMES.contains(&name) {
+            return Err(format!("'{name}' is reserved"));
+        }
+        let scope = self.scope().clone();
+        self.frame
+            .saved_scopes
+            .insert(name.to_string(), scope.clone());
+        self.frame.pending_scope_persist = Some((name.to_string(), scope));
+        self.frame.versions.saved_scopes += 1;
+        Ok(())
+    }
+
+    /// Load a saved scope by name, going through `set_scope` so it's
+    /// undoable like any other scope change. `Err` when no scope by that
+    /// name exists; `Ok(false)` when it exists but is already the current
+    /// scope.
+    pub fn load_scope(&mut self, name: &str) -> Result<bool, String> {
+        let scope = self
+            .frame
+            .saved_scopes
+            .get(name)
+            .cloned()
+            .ok_or_else(|| format!("no saved scope '{name}'"))?;
+        Ok(self.set_scope(scope))
+    }
+
+    /// Clear undo and redo without changing scope or ending an open session.
+    /// Session restoration uses this after applying its initial scope.
+    pub fn clear_history(&mut self) {
+        let lane = self.lane();
+        lane.scope_undo.clear();
+        lane.scope_redo.clear();
+    }
+
+    /// Replace the barrier with this lane's scope/grouping/as-of identity and
+    /// these tile keys. An empty key set clears it without bumping flip.
+    /// No version changes or notifications are emitted here.
+    ///
+    /// The shell must open the barrier before occupant frame observers run:
+    /// tiles unaffected by the changed inputs can then self-arrive immediately.
+    /// Shell observer registration precedes occupant registration to enforce this.
+    pub fn open_flip(&mut self, keys: impl IntoIterator<Item = QueryKey>, now: Instant) {
+        let awaiting: HashSet<QueryKey> = keys.into_iter().collect();
+        if awaiting.is_empty() {
+            self.frame.barrier = None;
+            return;
+        }
+        let versions = self.versions();
+        self.frame.barrier = Some(FlipBarrier {
+            versions,
+            awaiting,
+            opened: now,
+        });
+    }
+}
+
 /// `term` joined to `existing` with `and` (`existing and term`), or `term`
 /// alone when there is no expression. Appending never replaces: the
 /// existing expression keeps narrowing.
@@ -856,8 +1143,156 @@ pub fn persist_scope_to_user_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tiling::WorkspaceIx;
     use geode_core::clock::Clock;
     use geode_core::scope::{DimensionSelection, Scope};
+
+    fn ws(n: u8) -> WorkspaceIx {
+        WorkspaceIx::new(n).unwrap()
+    }
+
+    #[test]
+    fn pinning_copies_values_and_generations_with_empty_history() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.shared_mut().set_scope(book_scope("BK000"));
+        f.shared_mut().set_active_slot(Some(1));
+        f.shared_mut().set_as_of(AsOf::At(chrono::Utc::now()));
+        // Every generation has moved off its initial value, so a copy that
+        // dropped any of them would differ from the shared lane's.
+        let initial = Frame::new(slots(), SavedScopes::new(), None)
+            .shared()
+            .versions();
+        let shared = f.shared().versions();
+        assert_ne!(shared.scope, initial.scope);
+        assert_ne!(shared.grouping, initial.grouping);
+        assert_ne!(shared.as_of, initial.as_of);
+        assert!(f.pin(ws(2)));
+        assert_eq!(f.view(ws(2)).scope(), f.shared().scope());
+        assert_eq!(f.view(ws(2)).active_slot(), Some(1));
+        assert_eq!(f.view(ws(2)).as_of(), f.shared().as_of());
+        assert_eq!(f.view(ws(2)).versions(), f.shared().versions());
+        assert!(!f.view_mut(ws(2)).undo_scope(), "a new lane has no history");
+        assert!(!f.pin(ws(2)), "pinning twice is refused");
+    }
+
+    #[test]
+    fn an_edit_in_one_lane_leaves_the_other_alone() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.pin(ws(2));
+        let shared_before = f.shared().versions();
+        assert!(f.view_mut(ws(2)).set_scope(book_scope("BK001")));
+        assert_eq!(f.shared().versions(), shared_before);
+        assert_eq!(f.shared().scope(), &Scope::default());
+        let pinned_before = f.view(ws(2)).versions();
+        assert!(f.view_mut(ws(1)).set_as_of(AsOf::At(chrono::Utc::now())));
+        assert_eq!(f.view(ws(2)).versions(), pinned_before);
+        assert_eq!(f.view(ws(2)).as_of(), &AsOf::Live);
+    }
+
+    #[test]
+    fn generations_are_unique_across_lanes() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.pin(ws(2));
+        f.shared_mut().set_scope(book_scope("BK000"));
+        f.view_mut(ws(2)).set_scope(book_scope("BK001"));
+        assert_ne!(f.shared().versions().scope, f.view(ws(2)).versions().scope);
+        let seen = f.view(ws(2)).versions();
+        assert!(f.unpin(ws(2)));
+        assert!(
+            !f.unpin(ws(2)),
+            "unpinning an unpinned workspace is refused"
+        );
+        assert_ne!(
+            f.view(ws(2)).versions().scope,
+            seen.scope,
+            "after unpin a tile must see a change when the content differs"
+        );
+    }
+
+    #[test]
+    fn unpinning_an_untouched_lane_keeps_the_generations() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.shared_mut().set_scope(book_scope("BK000"));
+        f.pin(ws(3));
+        let seen = f.view(ws(3)).versions();
+        f.unpin(ws(3));
+        assert!(
+            f.view(ws(3)).versions().same_flip_identity(seen),
+            "equal content keeps equal numbers, so nothing requeries"
+        );
+    }
+
+    #[test]
+    fn undo_is_per_lane() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.shared_mut().set_scope(book_scope("BK000"));
+        f.pin(ws(2));
+        f.view_mut(ws(2)).set_scope(book_scope("BK001"));
+        assert!(f.view_mut(ws(2)).undo_scope());
+        assert_eq!(f.view(ws(2)).scope(), &book_scope("BK000"));
+        assert!(
+            !f.view_mut(ws(2)).undo_scope(),
+            "pinned history starts at the pin"
+        );
+        assert!(f.shared_mut().undo_scope());
+        assert_eq!(f.shared().scope(), &Scope::default());
+    }
+
+    #[test]
+    fn a_slot_reload_regroups_every_lane_and_clears_a_vanished_slot_in_a_hidden_lane() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.pin(ws(2));
+        f.view_mut(ws(2)).set_active_slot(Some(2));
+        let (shared_g, pinned_g) = (
+            f.shared().versions().grouping,
+            f.view(ws(2)).versions().grouping,
+        );
+        let mut only_one = GroupingSlots::default();
+        only_one.set(1, vec!["book".into()]);
+        assert!(f.replace_slots(only_one));
+        assert_eq!(f.view(ws(2)).active_slot(), None, "slot 2 vanished");
+        assert_ne!(f.view(ws(2)).versions().grouping, pinned_g);
+        assert_ne!(f.shared().versions().grouping, shared_g);
+    }
+
+    #[test]
+    fn saving_a_slot_regroups_only_lanes_on_that_slot() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.pin(ws(2));
+        f.view_mut(ws(2)).set_active_slot(Some(1));
+        f.shared_mut().set_active_slot(Some(2));
+        let (shared_g, pinned_g) = (
+            f.shared().versions().grouping,
+            f.view(ws(2)).versions().grouping,
+        );
+        f.save_slot(1, vec!["lhu".into()]).unwrap();
+        assert_ne!(f.view(ws(2)).versions().grouping, pinned_g);
+        assert_eq!(f.shared().versions().grouping, shared_g);
+    }
+
+    #[test]
+    fn the_generation_advances_on_pin_unpin_and_every_lane_edit() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let g0 = f.generation();
+        f.pin(ws(2));
+        let g1 = f.generation();
+        assert!(g1 > g0);
+        f.view_mut(ws(2)).set_text(Some("spx".into()));
+        let g2 = f.generation();
+        assert!(g2 > g1);
+        f.unpin(ws(2));
+        assert!(f.generation() > g2);
+    }
+
+    #[test]
+    fn a_barrier_opened_on_one_lane_wants_nothing_from_another() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.pin(ws(2));
+        f.view_mut(ws(2)).set_scope(book_scope("BK001"));
+        f.view_mut(ws(2)).open_flip([QueryKey(1)], Instant::now());
+        assert!(f.barrier_wants(QueryKey(1), f.view(ws(2)).versions()));
+        assert!(!f.barrier_wants(QueryKey(1), f.shared().versions()));
+    }
 
     fn hm(h: u32, m: u32) -> chrono::NaiveTime {
         chrono::NaiveTime::from_hms_opt(h, m, 0).unwrap()
@@ -883,29 +1318,29 @@ mod tests {
     #[test]
     fn each_mutation_bumps_exactly_its_own_counter() {
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
-        let v0 = f.versions();
+        let v0 = f.shared().versions();
 
-        assert!(f.set_scope(book_scope("BK000")));
-        let v1 = f.versions();
-        assert_eq!(v1.scope, v0.scope + 1);
+        assert!(f.shared_mut().set_scope(book_scope("BK000")));
+        let v1 = f.shared().versions();
+        assert_ne!(v1.scope, v0.scope);
         assert_eq!(
             (v1.grouping, v1.as_of, v1.data, v1.config),
             (v0.grouping, v0.as_of, v0.data, v0.config)
         );
 
-        assert!(f.set_active_slot(Some(2)));
-        let v2 = f.versions();
-        assert_eq!(v2.grouping, v1.grouping + 1);
+        assert!(f.shared_mut().set_active_slot(Some(2)));
+        let v2 = f.shared().versions();
+        assert_ne!(v2.grouping, v1.grouping);
         assert_eq!(v2.scope, v1.scope);
 
         assert!(
-            f.set_as_of(AsOf::At(
+            f.shared_mut().set_as_of(AsOf::At(
                 chrono::DateTime::parse_from_rfc3339("2026-09-03T14:05:00Z")
                     .unwrap()
                     .with_timezone(&chrono::Utc)
             ))
         );
-        assert_eq!(f.versions().as_of, v2.as_of + 1);
+        assert_ne!(f.shared().versions().as_of, v2.as_of);
 
         f.note_published(Publish {
             dataset: "risk".into(),
@@ -913,48 +1348,48 @@ mod tests {
             books: 1,
             at: chrono::Utc::now(),
         });
-        assert_eq!(f.versions().data, v2.data + 1);
+        assert_eq!(f.shared().versions().data, v2.data + 1);
         f.note_config_reloaded();
-        assert_eq!(f.versions().config, v2.config + 1);
+        assert_eq!(f.shared().versions().config, v2.config + 1);
     }
 
     #[test]
     fn an_unchanged_value_bumps_nothing() {
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
-        let v0 = f.versions();
-        assert!(!f.set_scope(Scope::default()));
-        assert!(!f.set_active_slot(None));
-        assert!(!f.set_as_of(AsOf::Live));
-        assert_eq!(f.versions(), v0);
+        let v0 = f.shared().versions();
+        assert!(!f.shared_mut().set_scope(Scope::default()));
+        assert!(!f.shared_mut().set_active_slot(None));
+        assert!(!f.shared_mut().set_as_of(AsOf::Live));
+        assert_eq!(f.shared().versions(), v0);
     }
 
     #[test]
     fn an_empty_slot_cannot_be_activated() {
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
-        assert!(!f.set_active_slot(Some(5)));
-        assert_eq!(f.active_slot(), None);
-        assert!(f.set_active_slot(Some(1)));
+        assert!(!f.shared_mut().set_active_slot(Some(5)));
+        assert_eq!(f.shared().active_slot(), None);
+        assert!(f.shared_mut().set_active_slot(Some(1)));
         assert_eq!(
-            f.active_grouping(),
+            f.shared().active_grouping(),
             Some(&["book".to_string(), "lhu".into()][..])
         );
-        assert!(f.set_active_slot(None));
-        assert_eq!(f.active_grouping(), None);
+        assert!(f.shared_mut().set_active_slot(None));
+        assert_eq!(f.shared().active_grouping(), None);
     }
 
     #[test]
     fn effective_scope_composes_global_and_tile() {
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
-        f.set_scope(book_scope("BK000"));
+        f.shared_mut().set_scope(book_scope("BK000"));
         let tile = Scope {
             text: Some("spx".into()),
             ..Scope::default()
         };
-        let eff = f.effective_scope(&tile).unwrap();
+        let eff = f.shared().effective_scope(&tile).unwrap();
         assert_eq!(eff.dimensions, book_scope("BK000").dimensions);
         assert_eq!(eff.text.as_deref(), Some("spx"));
         assert_eq!(
-            f.effective_scope(&Scope::default()),
+            f.shared().effective_scope(&Scope::default()),
             Ok(book_scope("BK000"))
         );
     }
@@ -962,30 +1397,34 @@ mod tests {
     #[test]
     fn replacing_slots_bumps_config_and_grouping_and_drops_a_vanished_active_slot() {
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
-        f.set_active_slot(Some(2));
-        let v = f.versions();
+        f.shared_mut().set_active_slot(Some(2));
+        let v = f.shared().versions();
         let mut fewer = GroupingSlots::default();
         fewer.set(1, vec!["book".into()]);
         assert!(f.replace_slots(fewer));
-        assert_eq!(f.active_slot(), None, "slot 2 no longer exists");
-        assert_eq!(f.versions().config, v.config + 1);
-        assert_eq!(f.versions().grouping, v.grouping + 1);
+        assert_eq!(f.shared().active_slot(), None, "slot 2 no longer exists");
+        assert_eq!(f.shared().versions().config, v.config + 1);
+        assert_ne!(f.shared().versions().grouping, v.grouping);
     }
 
     #[test]
     fn saving_a_slot_updates_memory_and_bumps_grouping_only_when_active() {
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
-        let v = f.versions();
+        let v = f.shared().versions();
         assert!(f.save_slot(3, vec!["lhu".into()]).is_ok());
         assert_eq!(f.slots().label(3).as_deref(), Some("lhu"));
-        assert_eq!(f.versions().grouping, v.grouping, "not the active slot");
-        f.set_active_slot(Some(3));
-        let v = f.versions();
+        assert_eq!(
+            f.shared().versions().grouping,
+            v.grouping,
+            "not the active slot"
+        );
+        f.shared_mut().set_active_slot(Some(3));
+        let v = f.shared().versions();
         assert!(f.save_slot(3, vec!["book".into()]).is_ok());
         assert_eq!(f.take_pending_persist(), Some((3, vec!["book".into()])));
-        assert_eq!(
-            f.versions().grouping,
-            v.grouping + 1,
+        assert_ne!(
+            f.shared().versions().grouping,
+            v.grouping,
             "the active slot changed"
         );
         assert!(f.save_slot(0, vec!["book".into()]).is_err());
@@ -1021,29 +1460,35 @@ mod tests {
     fn undo_and_redo_walk_a_bounded_stack() {
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
         for i in 0..40 {
-            assert!(f.set_scope(book_scope(&format!("BK{i:03}"))));
+            assert!(f.shared_mut().set_scope(book_scope(&format!("BK{i:03}"))));
         }
         // 32 undos land on BK007 (40 sets, depth 32); a 33rd does nothing.
         for _ in 0..32 {
-            assert!(f.undo_scope());
+            assert!(f.shared_mut().undo_scope());
         }
-        assert_eq!(f.scope().dimensions[0].values, vec!["BK007".to_string()]);
-        assert!(!f.undo_scope());
-        assert!(f.redo_scope());
-        assert_eq!(f.scope().dimensions[0].values, vec!["BK008".to_string()]);
+        assert_eq!(
+            f.shared().scope().dimensions[0].values,
+            vec!["BK007".to_string()]
+        );
+        assert!(!f.shared_mut().undo_scope());
+        assert!(f.shared_mut().redo_scope());
+        assert_eq!(
+            f.shared().scope().dimensions[0].values,
+            vec!["BK008".to_string()]
+        );
         // A new set clears redo.
-        assert!(f.set_scope(book_scope("X")));
-        assert!(!f.redo_scope());
+        assert!(f.shared_mut().set_scope(book_scope("X")));
+        assert!(!f.shared_mut().redo_scope());
     }
 
     #[test]
     fn a_no_op_set_pushes_nothing() {
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
-        assert!(f.set_scope(book_scope("A")));
-        assert!(!f.set_scope(book_scope("A")));
-        assert!(f.undo_scope());
-        assert!(f.scope().is_empty());
-        assert!(!f.undo_scope());
+        assert!(f.shared_mut().set_scope(book_scope("A")));
+        assert!(!f.shared_mut().set_scope(book_scope("A")));
+        assert!(f.shared_mut().undo_scope());
+        assert!(f.shared().scope().is_empty());
+        assert!(!f.shared_mut().undo_scope());
     }
 
     #[test]
@@ -1051,31 +1496,31 @@ mod tests {
         // A session returning to its base removes its own undo entry and restores
         // the redo history captured before typing began.
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
-        f.set_scope(book_scope("A"));
-        assert!(f.undo_scope());
-        let redo_before = f.scope_redo.clone();
+        f.shared_mut().set_scope(book_scope("A"));
+        assert!(f.shared_mut().undo_scope());
+        let redo_before = f.shared.scope_redo.clone();
         assert!(!redo_before.is_empty(), "fixture must seed a redo entry");
 
-        let depth_before = f.scope_undo.len();
-        f.begin_scope_session();
-        let mut s = f.scope().clone();
+        let depth_before = f.shared.scope_undo.len();
+        f.shared_mut().begin_scope_session();
+        let mut s = f.shared().scope().clone();
         s.text = Some("a".into());
-        assert!(f.set_scope_in_session(s));
-        let mut s = f.scope().clone();
+        assert!(f.shared_mut().set_scope_in_session(s));
+        let mut s = f.shared().scope().clone();
         s.text = None;
-        assert!(f.set_scope_in_session(s));
-        f.end_scope_session();
+        assert!(f.shared_mut().set_scope_in_session(s));
+        f.shared_mut().end_scope_session();
         assert_eq!(
-            f.scope_undo.len(),
+            f.shared.scope_undo.len(),
             depth_before,
             "the session's own push must be popped once it ends where it began"
         );
         assert!(
-            !f.undo_scope(),
+            !f.shared_mut().undo_scope(),
             "nothing to undo: the session never actually changed anything"
         );
         assert_eq!(
-            f.scope_redo, redo_before,
+            f.shared.scope_redo, redo_before,
             "a no-op session must not destroy redo history from before it opened"
         );
     }
@@ -1085,35 +1530,35 @@ mod tests {
         // An unrelated scope edit can move the undo stack during a text session.
         // The session still pushes its base only once.
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
-        f.set_scope(book_scope("A"));
-        let base = f.scope().clone();
-        f.begin_scope_session();
+        f.shared_mut().set_scope(book_scope("A"));
+        let base = f.shared().scope().clone();
+        f.shared_mut().begin_scope_session();
 
         // The session's own first mutation: pushes `base` once.
-        let mut s = f.scope().clone();
+        let mut s = f.shared().scope().clone();
         s.text = Some("a".into());
-        assert!(f.set_scope_in_session(s));
-        assert_eq!(f.scope_undo.last(), Some(&base));
-        let len_after_first_push = f.scope_undo.len();
+        assert!(f.shared_mut().set_scope_in_session(s));
+        assert_eq!(f.shared.scope_undo.last(), Some(&base));
+        let len_after_first_push = f.shared.scope_undo.len();
 
         // Mid-session external mutation (the mouse route) — pushes its
         // own outgoing scope; `base` is no longer the stack top.
-        assert!(f.drop_dimension("book"));
-        assert_ne!(f.scope_undo.last(), Some(&base));
+        assert!(f.shared_mut().drop_dimension("book"));
+        assert_ne!(f.shared.scope_undo.last(), Some(&base));
 
         // A second session mutation must not push `base` again just
         // because the stack top moved.
-        let mut s = f.scope().clone();
+        let mut s = f.shared().scope().clone();
         s.text = Some("ab".into());
-        assert!(f.set_scope_in_session(s));
+        assert!(f.shared_mut().set_scope_in_session(s));
         assert_eq!(
-            f.scope_undo.len(),
+            f.shared.scope_undo.len(),
             len_after_first_push + 1,
             "the session must not re-push its own base after an external \
              mutation moved the stack top"
         );
         assert_eq!(
-            f.scope_undo.iter().filter(|s| *s == &base).count(),
+            f.shared.scope_undo.iter().filter(|s| *s == &base).count(),
             1,
             "the base scope must appear on the undo stack exactly once"
         );
@@ -1122,41 +1567,47 @@ mod tests {
     #[test]
     fn a_text_session_coalesces_into_one_undo_entry() {
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
-        f.set_scope(book_scope("A"));
-        f.begin_scope_session();
+        f.shared_mut().set_scope(book_scope("A"));
+        f.shared_mut().begin_scope_session();
         for t in ["s", "sp", "spx"] {
-            let mut s = f.scope().clone();
+            let mut s = f.shared().scope().clone();
             s.text = Some(t.into());
-            assert!(f.set_scope_in_session(s));
+            assert!(f.shared_mut().set_scope_in_session(s));
         }
-        f.end_scope_session();
-        assert!(f.undo_scope());
+        f.shared_mut().end_scope_session();
+        assert!(f.shared_mut().undo_scope());
         assert_eq!(
-            f.scope().text,
+            f.shared().scope().text,
             None,
             "one undo returns to before the session"
         );
-        assert_eq!(f.scope().dimensions[0].values, vec!["A".to_string()]);
-        assert!(f.redo_scope());
-        assert_eq!(f.scope().text.as_deref(), Some("spx"));
+        assert_eq!(
+            f.shared().scope().dimensions[0].values,
+            vec!["A".to_string()]
+        );
+        assert!(f.shared_mut().redo_scope());
+        assert_eq!(f.shared().scope().text.as_deref(), Some("spx"));
     }
 
     #[test]
     fn as_of_remembers_one_previous_value_in_both_directions() {
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
         let t = chrono::Utc::now();
-        assert!(f.set_as_of(AsOf::At(t)));
-        assert!(f.set_as_of(AsOf::Live));
-        assert!(f.undo_as_of());
-        assert_eq!(f.as_of(), &AsOf::At(t));
-        assert!(f.undo_as_of(), "undo swaps, so it can go back again");
-        assert_eq!(f.as_of(), &AsOf::Live);
+        assert!(f.shared_mut().set_as_of(AsOf::At(t)));
+        assert!(f.shared_mut().set_as_of(AsOf::Live));
+        assert!(f.shared_mut().undo_as_of());
+        assert_eq!(f.shared().as_of(), &AsOf::At(t));
+        assert!(
+            f.shared_mut().undo_as_of(),
+            "undo swaps, so it can go back again"
+        );
+        assert_eq!(f.shared().as_of(), &AsOf::Live);
     }
 
     #[test]
     fn recent_publishes_keep_the_last_thirty_two_newest_first() {
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
-        let v0 = f.versions().data;
+        let v0 = f.shared().versions().data;
         for i in 0..40u32 {
             f.note_published(Publish {
                 dataset: "risk".into(),
@@ -1165,7 +1616,7 @@ mod tests {
                 at: chrono::Utc::now() + chrono::Duration::seconds(i as i64),
             });
         }
-        assert_eq!(f.versions().data, v0 + 40);
+        assert_eq!(f.shared().versions().data, v0 + 40);
         assert_eq!(f.recent_publishes().len(), RECENT_PUBLISHES);
         assert!(f.recent_publishes()[0].at > f.recent_publishes()[1].at);
     }
@@ -1175,18 +1626,18 @@ mod tests {
         let mut saved = SavedScopes::new();
         saved.insert("eu".into(), book_scope("BK001"));
         let mut f = Frame::new(slots(), saved, None);
-        assert!(f.load_scope("eu").unwrap());
-        assert_eq!(f.scope(), &book_scope("BK001"));
-        assert!(f.load_scope("nope").is_err());
-        f.set_scope(book_scope("BK002"));
-        f.save_scope("mine").unwrap();
+        assert!(f.shared_mut().load_scope("eu").unwrap());
+        assert_eq!(f.shared().scope(), &book_scope("BK001"));
+        assert!(f.shared_mut().load_scope("nope").is_err());
+        f.shared_mut().set_scope(book_scope("BK002"));
+        f.shared_mut().save_scope("mine").unwrap();
         assert_eq!(f.saved_scopes()["mine"], book_scope("BK002"));
         assert_eq!(
             f.take_pending_scope_persist(),
             Some(("mine".into(), book_scope("BK002")))
         );
         assert_eq!(f.take_pending_scope_persist(), None);
-        assert!(f.save_scope("").is_err());
+        assert!(f.shared_mut().save_scope("").is_err());
     }
 
     /// Reserved scope names must fail before mutating memory or pending writes,
@@ -1194,9 +1645,9 @@ mod tests {
     #[test]
     fn save_scope_refuses_the_reserved_save_current_name() {
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
-        f.set_scope(book_scope("BK001"));
+        f.shared_mut().set_scope(book_scope("BK001"));
         assert_eq!(
-            f.save_scope("save_current"),
+            f.shared_mut().save_scope("save_current"),
             Err("'save_current' is reserved".to_string())
         );
         assert!(!f.saved_scopes().contains_key("save_current"));
@@ -1207,10 +1658,10 @@ mod tests {
     fn save_scope_bumps_saved_scopes_not_config() {
         // Saving a named snapshot leaves the active query inputs unchanged.
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
-        f.set_scope(book_scope("A"));
-        let before = f.versions();
-        f.save_scope("mine").unwrap();
-        let after = f.versions();
+        f.shared_mut().set_scope(book_scope("A"));
+        let before = f.shared().versions();
+        f.shared_mut().save_scope("mine").unwrap();
+        let after = f.shared().versions();
         assert_eq!(
             after.config, before.config,
             "save_scope must not bump config"
@@ -1221,16 +1672,16 @@ mod tests {
     #[test]
     fn drop_dimension_and_set_text_are_undoable_edits() {
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
-        f.set_scope(book_scope("A"));
-        assert!(f.drop_dimension("book"));
-        assert!(f.scope().is_empty());
-        assert!(!f.drop_dimension("book"));
-        assert!(f.set_text(Some("spx".into())));
-        assert!(!f.set_text(Some("spx".into())));
-        assert!(f.undo_scope());
-        assert!(f.scope().is_empty());
-        assert!(f.undo_scope());
-        assert_eq!(f.scope(), &book_scope("A"));
+        f.shared_mut().set_scope(book_scope("A"));
+        assert!(f.shared_mut().drop_dimension("book"));
+        assert!(f.shared().scope().is_empty());
+        assert!(!f.shared_mut().drop_dimension("book"));
+        assert!(f.shared_mut().set_text(Some("spx".into())));
+        assert!(!f.shared_mut().set_text(Some("spx".into())));
+        assert!(f.shared_mut().undo_scope());
+        assert!(f.shared().scope().is_empty());
+        assert!(f.shared_mut().undo_scope());
+        assert_eq!(f.shared().scope(), &book_scope("A"));
     }
 
     fn expr_scope(text: &str) -> Scope {
@@ -1241,7 +1692,8 @@ mod tests {
     }
 
     fn term_texts(f: &Frame) -> Vec<String> {
-        f.scope()
+        f.shared()
+            .scope()
             .expression
             .as_ref()
             .map(|e| e.conjuncts().iter().map(|t| t.to_string()).collect())
@@ -1251,88 +1703,117 @@ mod tests {
     #[test]
     fn drop_expression_term_removes_only_that_term_and_is_undoable() {
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
-        f.set_scope(expr_scope("a = 1 and b = 2 and c = 3"));
-        assert!(f.drop_expression_term(1));
+        f.shared_mut()
+            .set_scope(expr_scope("a = 1 and b = 2 and c = 3"));
+        assert!(f.shared_mut().drop_expression_term(1));
         assert_eq!(term_texts(&f), vec!["a = 1", "c = 3"]);
-        assert!(!f.drop_expression_term(2), "out of range changes nothing");
+        assert!(
+            !f.shared_mut().drop_expression_term(2),
+            "out of range changes nothing"
+        );
         assert_eq!(term_texts(&f), vec!["a = 1", "c = 3"]);
-        assert!(f.drop_expression_term(0));
-        assert!(f.drop_expression_term(0), "the last term");
-        assert_eq!(f.scope().expression, None, "the last term leaves none");
-        assert!(!f.drop_expression_term(0), "no expression, no term");
-        assert!(f.undo_scope());
+        assert!(f.shared_mut().drop_expression_term(0));
+        assert!(f.shared_mut().drop_expression_term(0), "the last term");
+        assert_eq!(
+            f.shared().scope().expression,
+            None,
+            "the last term leaves none"
+        );
+        assert!(
+            !f.shared_mut().drop_expression_term(0),
+            "no expression, no term"
+        );
+        assert!(f.shared_mut().undo_scope());
         assert_eq!(term_texts(&f), vec!["c = 3"]);
-        assert!(f.undo_scope());
-        assert!(f.undo_scope());
+        assert!(f.shared_mut().undo_scope());
+        assert!(f.shared_mut().undo_scope());
         assert_eq!(term_texts(&f), vec!["a = 1", "b = 2", "c = 3"]);
     }
 
     #[test]
     fn replace_expression_term_keeps_the_others_and_refuses_out_of_range() {
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
-        f.set_scope(expr_scope("a = 1 and b = 2 and c = 3"));
+        f.shared_mut()
+            .set_scope(expr_scope("a = 1 and b = 2 and c = 3"));
         let p = |t: &str| geode_core::scope::parse_expr(t).unwrap();
         let x = p("x = 9");
         assert_eq!(
-            f.replace_expression_term(1, &p("b = 2"), Some(x.clone())),
+            f.shared_mut()
+                .replace_expression_term(1, &p("b = 2"), Some(x.clone())),
             Ok(true)
         );
         assert_eq!(term_texts(&f), vec!["a = 1", "x = 9", "c = 3"]);
         assert_eq!(
-            f.replace_expression_term(1, &x, Some(x.clone())),
+            f.shared_mut()
+                .replace_expression_term(1, &x, Some(x.clone())),
             Ok(false),
             "the same term again is no edit"
         );
         assert_eq!(
-            f.replace_expression_term(1, &p("b = 2"), Some(p("y = 1"))),
+            f.shared_mut()
+                .replace_expression_term(1, &p("b = 2"), Some(p("y = 1"))),
             Err(TermGone),
             "index 1 now holds a different term: refuse rather than edit it"
         );
         assert_eq!(
-            f.replace_expression_term(1, &p("b = 2"), None),
+            f.shared_mut().replace_expression_term(1, &p("b = 2"), None),
             Err(TermGone),
             "nor remove it"
         );
         assert_eq!(term_texts(&f), vec!["a = 1", "x = 9", "c = 3"]);
         assert_eq!(
-            f.replace_expression_term(3, &x, Some(x.clone())),
+            f.shared_mut()
+                .replace_expression_term(3, &x, Some(x.clone())),
             Err(TermGone)
         );
-        assert_eq!(f.replace_expression_term(2, &p("c = 3"), None), Ok(true));
+        assert_eq!(
+            f.shared_mut().replace_expression_term(2, &p("c = 3"), None),
+            Ok(true)
+        );
         assert_eq!(term_texts(&f), vec!["a = 1", "x = 9"]);
-        assert!(f.undo_scope());
-        assert!(f.undo_scope());
+        assert!(f.shared_mut().undo_scope());
+        assert!(f.shared_mut().undo_scope());
         assert_eq!(term_texts(&f), vec!["a = 1", "b = 2", "c = 3"]);
     }
 
     #[test]
     fn name_expression_term_swaps_the_term_for_the_name_in_one_undo_step() {
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
-        f.set_scope(expr_scope("a = 1 and b = 2 and c = 3"));
+        f.shared_mut()
+            .set_scope(expr_scope("a = 1 and b = 2 and c = 3"));
         let p = |t: &str| geode_core::scope::parse_expr(t).unwrap();
-        assert!(f.expression_term_is(1, &p("b = 2")));
-        assert!(!f.expression_term_is(1, &p("a = 1")));
-        assert!(!f.expression_term_is(3, &p("b = 2")), "out of range");
+        assert!(f.shared().expression_term_is(1, &p("b = 2")));
+        assert!(!f.shared().expression_term_is(1, &p("a = 1")));
+        assert!(
+            !f.shared().expression_term_is(3, &p("b = 2")),
+            "out of range"
+        );
         assert_eq!(
-            f.name_expression_term(1, &p("a = 1"), "bee"),
+            f.shared_mut().name_expression_term(1, &p("a = 1"), "bee"),
             Err(TermGone),
             "index 1 holds a different term: refuse rather than name it"
         );
-        assert_eq!(f.scope().named, Vec::<String>::new());
-        assert_eq!(f.name_expression_term(1, &p("b = 2"), "bee"), Ok(true));
+        assert_eq!(f.shared().scope().named, Vec::<String>::new());
+        assert_eq!(
+            f.shared_mut().name_expression_term(1, &p("b = 2"), "bee"),
+            Ok(true)
+        );
         assert_eq!(term_texts(&f), vec!["a = 1", "c = 3"]);
-        assert_eq!(f.scope().named, vec!["bee".to_string()]);
-        assert!(f.undo_scope(), "one step");
+        assert_eq!(f.shared().scope().named, vec!["bee".to_string()]);
+        assert!(f.shared_mut().undo_scope(), "one step");
         assert_eq!(term_texts(&f), vec!["a = 1", "b = 2", "c = 3"]);
-        assert_eq!(f.scope().named, Vec::<String>::new());
+        assert_eq!(f.shared().scope().named, Vec::<String>::new());
 
         // A scope may already list the name (a reference whose definition
         // is missing); naming a term after it lists it once.
-        let mut s = f.scope().clone();
+        let mut s = f.shared().scope().clone();
         s.named = vec!["gone".to_string()];
-        f.set_scope(s);
-        assert_eq!(f.name_expression_term(0, &p("a = 1"), "gone"), Ok(true));
-        assert_eq!(f.scope().named, vec!["gone".to_string()]);
+        f.shared_mut().set_scope(s);
+        assert_eq!(
+            f.shared_mut().name_expression_term(0, &p("a = 1"), "gone"),
+            Ok(true)
+        );
+        assert_eq!(f.shared().scope().named, vec!["gone".to_string()]);
     }
 
     #[test]
@@ -1351,21 +1832,25 @@ mod tests {
     #[test]
     fn clear_expression_drops_the_layer_and_is_a_no_op_without_one() {
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
-        assert!(!f.clear_expression());
+        assert!(!f.shared_mut().clear_expression());
         let mut s = expr_scope("a = 1 and b = 2");
         s.text = Some("spx".into());
-        f.set_scope(s);
-        assert!(f.clear_expression());
-        assert_eq!(f.scope().expression, None);
-        assert_eq!(f.scope().text.as_deref(), Some("spx"), "other layers stay");
-        assert!(f.undo_scope());
+        f.shared_mut().set_scope(s);
+        assert!(f.shared_mut().clear_expression());
+        assert_eq!(f.shared().scope().expression, None);
+        assert_eq!(
+            f.shared().scope().text.as_deref(),
+            Some("spx"),
+            "other layers stay"
+        );
+        assert!(f.shared_mut().undo_scope());
         assert_eq!(term_texts(&f), vec!["a = 1", "b = 2"]);
     }
 
     #[test]
     fn the_bar_model_is_cached_on_versions_and_describes_the_scope() {
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
-        f.set_active_slot(Some(1));
+        f.shared_mut().set_active_slot(Some(1));
         let mut s = book_scope("BK001");
         s.dimensions[0].values.push("BK002".into());
         s.dimensions.push(DimensionSelection {
@@ -1374,11 +1859,11 @@ mod tests {
         });
         s.text = Some("spx".into());
         s.expression = Some(geode_core::scope::parse_expr("npv > 0").unwrap());
-        f.set_scope(s);
+        f.shared_mut().set_scope(s);
         let clock = Clock::utc();
         let today = clock.today(chrono::Utc::now());
-        let m1 = f.bar_model(clock, today);
-        let m2 = f.bar_model(clock, today);
+        let m1 = f.shared().bar_model(clock, today);
+        let m2 = f.shared().bar_model(clock, today);
         assert!(Rc::ptr_eq(&m1, &m2));
         assert_eq!(m1.slot, Some((1, "book / lhu".into())));
         assert_eq!(m1.chips[0].summary, "book ∈ BK001, BK002");
@@ -1387,13 +1872,13 @@ mod tests {
         assert_eq!(m1.terms.len(), 1);
         assert_eq!(m1.terms[0].label, "npv > 0");
         assert_eq!(m1.as_of, None);
-        f.set_text(None);
-        assert!(!Rc::ptr_eq(&m1, &f.bar_model(clock, today)));
+        f.shared_mut().set_text(None);
+        assert!(!Rc::ptr_eq(&m1, &f.shared().bar_model(clock, today)));
 
         // Changing the clock invalidates the cache with unchanged versions and date.
-        let m3 = f.bar_model(clock, today);
+        let m3 = f.shared().bar_model(clock, today);
         let other_clock = Clock::utc().with_times(hm(7, 0), hm(17, 0));
-        let m4 = f.bar_model(other_clock, today);
+        let m4 = f.shared().bar_model(other_clock, today);
         assert!(
             !Rc::ptr_eq(&m3, &m4),
             "a different clock must rebuild even with versions and today unchanged"
@@ -1404,12 +1889,12 @@ mod tests {
     fn the_bar_model_cache_rebuilds_when_today_changes_with_versions_unchanged() {
         // Midnight invalidates a cached today-only label without a frame mutation.
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
-        f.set_scope(book_scope("A"));
+        f.shared_mut().set_scope(book_scope("A"));
         let clock = Clock::utc();
         let day1 = clock.today(chrono::Utc::now());
-        let m1 = f.bar_model(clock, day1);
+        let m1 = f.shared().bar_model(clock, day1);
         let day2 = day1 + chrono::Duration::days(1);
-        let m2 = f.bar_model(clock, day2);
+        let m2 = f.shared().bar_model(clock, day2);
         assert!(
             !Rc::ptr_eq(&m1, &m2),
             "versions unchanged but the date moved on: must rebuild"
@@ -1421,10 +1906,11 @@ mod tests {
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
         let s = book_scope("A").and_then(&book_scope("B"));
         assert!(s.impossible);
-        f.set_scope(s);
+        f.shared_mut().set_scope(s);
         let clock = Clock::utc();
         assert_eq!(
-            f.bar_model(clock, clock.today(chrono::Utc::now()))
+            f.shared()
+                .bar_model(clock, clock.today(chrono::Utc::now()))
                 .impossible
                 .as_deref(),
             Some("∅ book")
@@ -1471,10 +1957,10 @@ mod tests {
     #[test]
     fn a_barrier_releases_when_every_key_arrives_and_bumps_flip_once() {
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
-        f.set_scope(book_scope("A"));
-        let v = f.versions();
+        f.shared_mut().set_scope(book_scope("A"));
+        let v = f.shared().versions();
         let t0 = Instant::now();
-        f.open_flip([QueryKey(1), QueryKey(2)], t0);
+        f.shared_mut().open_flip([QueryKey(1), QueryKey(2)], t0);
         assert!(f.barrier_open());
         assert!(f.barrier_wants(QueryKey(1), v));
         assert!(!f.barrier_wants(QueryKey(3), v));
@@ -1482,9 +1968,9 @@ mod tests {
         stale.scope -= 1;
         assert!(!f.barrier_wants(QueryKey(1), stale));
         assert!(!f.arrived(QueryKey(1), v));
-        assert_eq!(f.versions().flip, v.flip);
+        assert_eq!(f.shared().versions().flip, v.flip);
         assert!(f.arrived(QueryKey(2), v));
-        assert_eq!(f.versions().flip, v.flip + 1);
+        assert_eq!(f.shared().versions().flip, v.flip + 1);
         assert!(!f.barrier_open());
         assert!(!f.arrived(QueryKey(2), v), "nothing open");
     }
@@ -1492,23 +1978,24 @@ mod tests {
     #[test]
     fn the_deadline_releases_with_whatever_arrived() {
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
-        let v = f.versions();
+        let v = f.shared().versions();
         let t0 = Instant::now();
-        f.open_flip([QueryKey(1), QueryKey(2)], t0);
+        f.shared_mut().open_flip([QueryKey(1), QueryKey(2)], t0);
         assert!(!f.sweep(t0 + Duration::from_millis(100)));
         assert!(f.sweep(t0 + FLIP_DEADLINE + Duration::from_millis(1)));
-        assert_eq!(f.versions().flip, v.flip + 1);
+        assert_eq!(f.shared().versions().flip, v.flip + 1);
         assert!(!f.barrier_open());
     }
 
     #[test]
     fn a_new_mutation_while_open_replaces_the_barrier() {
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
-        f.open_flip([QueryKey(1)], Instant::now());
-        let v_old = f.versions();
-        f.set_scope(book_scope("B"));
-        let v_new = f.versions();
-        f.open_flip([QueryKey(1), QueryKey(2)], Instant::now());
+        f.shared_mut().open_flip([QueryKey(1)], Instant::now());
+        let v_old = f.shared().versions();
+        f.shared_mut().set_scope(book_scope("B"));
+        let v_new = f.shared().versions();
+        f.shared_mut()
+            .open_flip([QueryKey(1), QueryKey(2)], Instant::now());
         assert!(!f.barrier_wants(QueryKey(1), v_old));
         assert!(f.barrier_wants(QueryKey(2), v_new));
     }
@@ -1519,9 +2006,9 @@ mod tests {
         // an arrival for this barrier. Opening barriers on frame notifications is
         // a separate shell responsibility.
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
-        f.set_scope(book_scope("A"));
-        let v = f.versions();
-        f.open_flip([QueryKey(1)], Instant::now());
+        f.shared_mut().set_scope(book_scope("A"));
+        let v = f.shared().versions();
+        f.shared_mut().open_flip([QueryKey(1)], Instant::now());
         let mut only_data_changed = v;
         only_data_changed.data += 1;
         assert!(
@@ -1556,31 +2043,41 @@ mod tests {
             at: chrono::Utc::now(),
         };
         f.note_published(publish("cvi", "SPX"));
-        assert_eq!(f.versions_for([&spx]).data, 1);
-        assert_eq!(f.versions_for([&spx_twin]).data, 1);
-        assert_eq!(f.versions_for([&ndx, &risk]).data, 0);
+        assert_eq!(f.shared().versions_for([&spx]).data, 1);
+        assert_eq!(f.shared().versions_for([&spx_twin]).data, 1);
+        assert_eq!(f.shared().versions_for([&ndx, &risk]).data, 0);
         // Updates outlive the recent-publish history, without storing interests
         // for thousands of unrelated datasets or document keys.
         for n in 0..1000 {
             f.note_published(publish(&format!("other-{n}"), "SPX"));
             f.note_published(publish("cvi", &format!("other-{n}")));
         }
-        assert_eq!(f.versions_for([&spx]).data, 1);
-        assert_eq!(f.versions_for([&ndx, &risk]).data, 0);
+        assert_eq!(f.shared().versions_for([&spx]).data, 1);
+        assert_eq!(f.shared().versions_for([&ndx, &risk]).data, 0);
         assert_eq!(f.publication_watches.len(), 2);
         assert_eq!(f.publication_watches["cvi"].documents.len(), 2);
         assert_eq!(f.recent_publishes().len(), RECENT_PUBLISHES);
         f.note_published(publish("risk", "EOD"));
-        assert_eq!(f.versions_for([&spx, &risk]).data, f.versions().data);
-        f.set_scope(book_scope("BK000"));
-        f.set_as_of(AsOf::At(chrono::Utc::now()));
-        assert!(f.versions_for([&spx]).same_flip_identity(f.versions()));
+        assert_eq!(
+            f.shared().versions_for([&spx, &risk]).data,
+            f.shared().versions().data
+        );
+        f.shared_mut().set_scope(book_scope("BK000"));
+        f.shared_mut().set_as_of(AsOf::At(chrono::Utc::now()));
+        assert!(
+            f.shared()
+                .versions_for([&spx])
+                .same_flip_identity(f.shared().versions())
+        );
         drop((risk, spx, ndx));
         let _new = f.watch_publications("new", None);
         assert!(!f.publication_watches.contains_key("risk"));
         assert_eq!(f.publication_watches["cvi"].documents.len(), 1);
         f.note_published(publish("cvi", "SPX"));
-        assert_eq!(f.versions_for([&spx_twin]).data, f.versions().data);
+        assert_eq!(
+            f.shared().versions_for([&spx_twin]).data,
+            f.shared().versions().data
+        );
     }
 
     fn named(text: &str) -> geode_core::named::NamedExpressions {
@@ -1600,14 +2097,14 @@ mod tests {
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
         let mut scope = book_scope("BK000");
         scope.named = vec!["gone".into()];
-        f.set_scope(scope);
+        f.shared_mut().set_scope(scope);
         assert_eq!(
-            f.effective_scope(&Scope::default()),
+            f.shared().effective_scope(&Scope::default()),
             Err("named expression 'gone' is missing".to_string())
         );
 
         assert!(f.replace_named_expressions(named("[gone]\nexpression = \"npv > 0\"\n")));
-        let resolved = f.effective_scope(&Scope::default()).unwrap();
+        let resolved = f.shared().effective_scope(&Scope::default()).unwrap();
         assert!(resolved.named.is_empty(), "{resolved:?}");
         assert_eq!(
             resolved.expression.map(|e| e.to_string()).as_deref(),
@@ -1619,17 +2116,17 @@ mod tests {
     #[test]
     fn replace_named_expressions_bumps_config_exactly_when_content_changes() {
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
-        let v0 = f.versions();
+        let v0 = f.shared().versions();
         let liq = named("[liq]\nexpression = \"npv > 0\"\n");
         assert!(f.replace_named_expressions(liq.clone()));
-        let v1 = f.versions();
+        let v1 = f.shared().versions();
         assert_eq!(v1.config, v0.config + 1);
         assert_eq!(f.named_expressions(), &liq);
 
         assert!(!f.replace_named_expressions(liq), "same content");
-        assert_eq!(f.versions(), v1);
+        assert_eq!(f.shared().versions(), v1);
 
         assert!(f.replace_named_expressions(named("[liq]\nexpression = \"npv > 5\"\n")));
-        assert_eq!(f.versions().config, v1.config + 1);
+        assert_eq!(f.shared().versions().config, v1.config + 1);
     }
 }

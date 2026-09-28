@@ -7,9 +7,8 @@ publish.workspace = true
 [lib]
 bench = false
 
-# MIN-12 (Phase 4b Task 5 fix round 1): no geode-data dependency, normal
-# or dev — this module needs no `DataHandle` (the whole point of the
-# shell/data split geode-diagnostics itself sits on the shell side of).
+# Diagnostics reads shell-owned state and submits no data requests.
+# Keep geode-data out of both normal and development dependencies.
 [dependencies]
 geode-core.workspace = true
 geode-shell.workspace = true

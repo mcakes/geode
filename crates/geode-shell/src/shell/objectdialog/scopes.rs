@@ -362,7 +362,7 @@ fn rendered_doc_table(draft: &Draft) -> toml::Table {
 /// `o`, confirmed: overwrite `draft` with `scope`'s own contents.
 ///
 /// `scope` is a plain value, not a `Frame` — `render.rs`'s
-/// `run_confirmed` reads `shell.frame.read(cx).scope().clone()` at the
+/// `run_confirmed` reads `shell.target_frame().read(cx).scope().clone()` at the
 /// call site and hands the result in here, which is what keeps a gpui
 /// `Entity` out of this module (and out of `Domain`'s whole surface)
 /// entirely; `config` is the same `shell.services.config` the caller

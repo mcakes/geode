@@ -42,7 +42,7 @@ fn clicking_the_readout_opens_the_picker_and_enter_activates_the_typed_slot(
     cx: &mut gpui::TestAppContext,
 ) {
     let (_window, mut vcx, shell, frame) = open_with_slots(cx);
-    assert_eq!(frame.read_with(&vcx, |f, _| f.active_slot()), None);
+    assert_eq!(frame.read_with(&vcx, |f, _| f.shared().active_slot()), None);
 
     let readout = vcx
         .debug_bounds("scope-grouping")
@@ -77,7 +77,10 @@ fn clicking_the_readout_opens_the_picker_and_enter_activates_the_typed_slot(
     vcx.simulate_keystrokes("enter");
     vcx.run_until_parked();
 
-    assert_eq!(frame.read_with(&vcx, |f, _| f.active_slot()), Some(3));
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.shared().active_slot()),
+        Some(3)
+    );
     assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
     assert!(shell.read_with(&vcx, |s, _| s.choice_dialog.is_none()));
 }
@@ -88,11 +91,11 @@ fn clicking_the_readout_opens_the_picker_and_enter_activates_the_typed_slot(
 fn mod_g_opens_the_picker_on_the_active_slot(cx: &mut gpui::TestAppContext) {
     let (_window, mut vcx, shell, frame) = open_with_slots(cx);
     frame.update(&mut vcx, |f, cx| {
-        assert!(f.set_active_slot(Some(3)));
+        assert!(f.shared_mut().set_active_slot(Some(3)));
         cx.notify();
     });
     vcx.run_until_parked();
-    let before = frame.read_with(&vcx, |f, _| f.versions().grouping);
+    let before = frame.read_with(&vcx, |f, _| f.shared().versions().grouping);
 
     vcx.simulate_keystrokes("alt-g");
     vcx.run_until_parked();
@@ -105,9 +108,12 @@ fn mod_g_opens_the_picker_on_the_active_slot(cx: &mut gpui::TestAppContext) {
     );
     vcx.simulate_keystrokes("enter");
     vcx.run_until_parked();
-    assert_eq!(frame.read_with(&vcx, |f, _| f.active_slot()), Some(3));
     assert_eq!(
-        frame.read_with(&vcx, |f, _| f.versions().grouping),
+        frame.read_with(&vcx, |f, _| f.shared().active_slot()),
+        Some(3)
+    );
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.shared().versions().grouping),
         before,
         "re-picking the active slot bumps nothing"
     );
@@ -128,17 +134,20 @@ fn a_digit_jumps_to_a_filled_slot_and_zero_to_the_view_default(cx: &mut gpui::Te
         shell.read_with(&vcx, |s, _| s.choice_dialog.is_some()),
         "an empty slot's digit does nothing"
     );
-    assert_eq!(frame.read_with(&vcx, |f, _| f.active_slot()), None);
+    assert_eq!(frame.read_with(&vcx, |f, _| f.shared().active_slot()), None);
 
     vcx.simulate_keystrokes("1");
     vcx.run_until_parked();
-    assert_eq!(frame.read_with(&vcx, |f, _| f.active_slot()), Some(1));
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.shared().active_slot()),
+        Some(1)
+    );
     assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
 
     vcx.simulate_keystrokes("alt-g");
     vcx.simulate_keystrokes("0");
     vcx.run_until_parked();
-    assert_eq!(frame.read_with(&vcx, |f, _| f.active_slot()), None);
+    assert_eq!(frame.read_with(&vcx, |f, _| f.shared().active_slot()), None);
     assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
 }
 
@@ -151,7 +160,7 @@ fn a_digit_after_text_filters_rather_than_jumps(cx: &mut gpui::TestAppContext) {
     vcx.simulate_keystrokes("1");
     vcx.run_until_parked();
     assert!(shell.read_with(&vcx, |s, _| s.choice_dialog.is_some()));
-    assert_eq!(frame.read_with(&vcx, |f, _| f.active_slot()), None);
+    assert_eq!(frame.read_with(&vcx, |f, _| f.shared().active_slot()), None);
     let query = shell.read_with(&vcx, |s, _| {
         s.choice_dialog.as_ref().map(|p| p.list.query().to_string())
     });
@@ -171,7 +180,10 @@ fn a_row_click_activates_that_slot(cx: &mut gpui::TestAppContext) {
         .expect("the filtered row");
     vcx.simulate_click(row.center(), gpui::Modifiers::default());
     vcx.run_until_parked();
-    assert_eq!(frame.read_with(&vcx, |f, _| f.active_slot()), Some(3));
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.shared().active_slot()),
+        Some(3)
+    );
     assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
 }
 
@@ -185,7 +197,7 @@ fn enter_with_no_match_does_nothing_and_escape_closes(cx: &mut gpui::TestAppCont
     vcx.simulate_keystrokes("enter");
     vcx.run_until_parked();
     assert!(shell.read_with(&vcx, |s, _| s.choice_dialog.is_some()));
-    assert_eq!(frame.read_with(&vcx, |f, _| f.active_slot()), None);
+    assert_eq!(frame.read_with(&vcx, |f, _| f.shared().active_slot()), None);
     vcx.simulate_keystrokes("escape");
     vcx.run_until_parked();
     assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
@@ -214,7 +226,10 @@ fn enter_re_feeds_the_fields_live_text_before_picking(cx: &mut gpui::TestAppCont
     );
     vcx.simulate_keystrokes("enter");
     vcx.run_until_parked();
-    assert_eq!(frame.read_with(&vcx, |f, _| f.active_slot()), Some(3));
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.shared().active_slot()),
+        Some(3)
+    );
 }
 
 /// A slot emptied under the open picker (a `groupings.toml` reload —
@@ -234,7 +249,7 @@ fn picking_a_slot_emptied_under_the_picker_says_so(cx: &mut gpui::TestAppContext
     vcx.run_until_parked();
     vcx.simulate_keystrokes("3");
     vcx.run_until_parked();
-    assert_eq!(frame.read_with(&vcx, |f, _| f.active_slot()), None);
+    assert_eq!(frame.read_with(&vcx, |f, _| f.shared().active_slot()), None);
     assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
     assert_eq!(
         shell.read_with(&vcx, |s, _| s.notice),

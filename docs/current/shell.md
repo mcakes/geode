@@ -21,8 +21,8 @@ or perform blocking work.
 State with a narrower owner stays outside `ShellView`:
 
 - `Workspaces` and the tiling tree own layout and structural focus.
-- `Frame` owns the scope, grouping, as-of value, recent publications, and
-  version counters observed by tiles.
+- `Frame` owns the scope, grouping, as-of value (shared, or per pinned
+  workspace), recent publications, and version counters observed by tiles.
 - Each module entity owns its cursor, subscriptions, draft, and prepared
   presentation.
 - GPUI component state, such as `InputState` and `TableState`, owns reusable
@@ -68,7 +68,11 @@ fullscreen, so a dock never shows the segment.
 Tile occupants are created through the app-supplied `ModuleRoster`. A new
 occupant begins hidden and receives an explicit visibility value during the
 next reconciliation. Hidden occupants may release live subscriptions and
-must requery when shown if their followed versions changed.
+must requery when shown if their followed versions changed. Removing an
+occupant (closing its tile, or filling a placeholder in place) calls
+`set_visible(false)` and then `closed`, once, before the occupant is dropped.
+Hiding never calls `closed`: a workspace switch, a dock toggle or a stack
+cycle only hides.
 
 ### Launch context
 
@@ -183,6 +187,70 @@ expressions, and version counters. Every mutation bumps only the counters
 affected by that change, so a tile can cheaply ignore dimensions it does not
 follow.
 
+### Workspace lanes
+
+The selection lives in a lane: scope with its undo/redo stacks and open text
+session, the active grouping slot, and as-of with its one remembered previous
+value. The frame holds one shared lane and one lane per pinned workspace. An
+unpinned workspace reads and writes the shared lane; a pinned one reads and
+writes only its own. Definitions stay shared across lanes — grouping slot
+contents, saved scopes, named expressions — as do recent publications and the
+data and config versions.
+
+Every lane draws its scope, grouping, and as-of generations from one
+frame-wide counter, so a generation number names exactly one value in any
+lane. A tile compares numbers, not content; with per-lane counters a tile
+whose workspace changed lanes could see an equal number over different
+content and skip a requery it needed. Pinning copies the shared lane's values
+and generations into the new lane with empty history — equal content under
+equal numbers, so nothing requeries. Unpinning discards the lane, its history
+included, without a confirm; nothing is promoted to the shared lane, and the
+workspace reads the shared lane again. A grouping reload (`replace_slots`)
+bumps grouping in every lane, hidden pinned ones included, and clears an
+active slot that no longer exists in each lane separately; saving a slot
+(`save_slot`) bumps grouping only in the lanes where that slot is active.
+
+Tiles receive a `FrameRef` bound to their workspace (see
+[architecture](architecture.md)), so a pin or unpin changes the lane a tile
+reads without it re-subscribing. Any lane's change notifies every observer;
+each tile's version compare filters out the lanes it does not read.
+
+Only the active workspace's lane opens a flip barrier: its visible tiles are
+the ones a barrier coordinates, so the shell compares and opens against the
+active lane. A workspace switch is not a frame change: it re-seeds the flip
+baseline from the new active lane instead of opening a barrier. When the
+switch leaves or enters a pinned workspace, the old lane's text session ends
+and the scope field re-reads the new lane; a focused field keeps focus and
+opens a fresh session there, so Escape restores the new lane's text. A switch
+between two unpinned workspaces leaves the field's session whole, because
+ending it would split one edit into two undo entries. Pinning and unpinning
+rebind the field the same way.
+
+The toolbar's first readout control is a pin glyph, before the as-of chip:
+a bare, muted verb while the active workspace is unpinned, a solid chip in
+the theme's primary color while it is pinned (`Tone::Active`: the fill is
+moved toward `foreground` where a theme's primary sits too close to its title
+bar, so the on state reads at a glance on every bundled theme). The glyph
+keeps a chip's height in both states, so toggling it does not shift the
+readout. Its tooltip is "Pin the frame to workspace N" or "Frame
+pinned to workspace N". A click toggles the pin, as does the palette action
+`frame::pin_workspace` ("Toggle the frame pin for this workspace", category
+Frame), which has no default binding. The pin covers scope, grouping, and
+as-of together; there is no per-part pin.
+
+Shell surfaces resolve their lane through `ShellView::target_frame`: the
+workspace recorded on the base entry of the modal stack when a dialog is
+open, else the active workspace. A dialog therefore reads and commits the
+lane it was opened from. The flip barrier and the toolbar's scope text field
+use the active workspace's lane directly. Under a modal the two name the same
+workspace: the palette refuses `workspace::switch_*` and
+`frame::pin_workspace` while a dialog is open (see
+[input and dialogs](input-and-dialogs.md#palette-and-which-key)), so the
+active lane cannot move, and the toolbar cannot mix two lanes, beneath an
+open dialog. The session's `[frame]` record is
+written from and restored into the shared lane explicitly, whatever is
+active.
+
 A scope (`geode_core::scope::Scope`) has four parts: dimension selections, a
 list of named-expression references (`named`), a text filter, and an
 expression. A query combines all four with AND. Composing scope layers
@@ -194,7 +262,7 @@ A named reference is not itself expression syntax — the grammar has no token
 for it — so it cannot combine with `or` or `not`, and a named expression
 cannot itself reference another one.
 
-`Frame::effective_scope` composes the frame and tile layers and then resolves
+`FrameView::effective_scope` composes the frame and tile layers and then resolves
 every named reference through `Scope::resolve` against the frame's own
 `NamedExpressions` (read from `expressions.toml`; see
 [configuration](configuration.md#documents)), folding each into `expression`
@@ -232,6 +300,24 @@ promote together. This prevents one frame from showing tiles evaluated under
 different global states. A later frame change replaces the barrier; an old
 result cannot satisfy the new version tuple.
 
+Only visible occupants are barrier participants. Hiding a following tile (a
+stack, dock or workspace switch) cancels nothing: its in-flight query
+finishes, the reply applies when it lands (unless a counter the tile follows
+moved since it asked, in which case it is dropped, as a superseded stage is)
+and still answers any barrier the tile was enrolled in, and on return the tile
+requeries only if a counter it follows moved while it was hidden. Closing is
+different: removal calls `TileContent::closed`, and a following tile cancels
+its query by key and answers any open barrier still waiting on it, so closing
+a tile during a scope, grouping or as-of change never holds the others to the
+deadline. `closed` fires only for removal while the window lives; quitting the
+application calls it for no occupant. A tile with its own error and no query
+to send (a blotter whose view is no longer configured, or whose scope names an
+undefined expression) answers the barrier at once, as a failed query does.
+Tiles that submit no frame query (pricer, diagnostics) answer every barrier at
+once. The rules live once, in `geode_tile::following`, which reads the
+frame only through the tile's `FrameRef`: a tile in a pinned workspace
+answers the barrier with its own lane's versions, not the shared lane's.
+
 Scope text editing is one undoable session. The first real change records the
 base scope, subsequent keystrokes coalesce, and returning exactly to the base
 removes the no-op undo entry. Changes made through another surface during the
@@ -245,7 +331,7 @@ then the contradiction chip. The frame still holds one `Expr`; the terms are
 a view of it, and an edit rebuilds a left-folded `and` chain from the
 remaining terms (`Expr::from_conjuncts`). A term chip's body opens the
 expression dialog on that term; the `×` inside it drops that term alone
-(`Frame::drop_expression_term`). As on a dimension chip, the `×` occludes the
+(`FrameViewMut::drop_expression_term`). As on a dimension chip, the `×` occludes the
 body's hitbox, which is what keeps its press from also opening the dialog.
 Term chips are addressed by index, which is stable within one scope version;
 the term dialog also carries the term it was seeded with and refuses inline
@@ -257,7 +343,7 @@ A named chip's tooltip is the expression text. A name the frame's
 `≡ name · missing` or `≡ name · invalid`, whose tooltip is the reason
 `Scope::resolve` gives; every tile that scope reaches refuses to query until
 the name is defined again or removed. The `×` inside a named chip removes that
-name (`Frame::drop_named`, undoable through `set_scope`) and does nothing
+name (`FrameViewMut::drop_named`, undoable through `set_scope`) and does nothing
 else. Named chips are keyed by name, so their element ids survive a
 neighbour's removal. The chip body has the chips' hover and pressed fills,
 and a click on it opens the Expressions dialog on that name
@@ -271,6 +357,14 @@ and Enter applies the rest (see
 [input and dialogs](input-and-dialogs.md#frame-expression)). A scope whose
 only content is a name is not empty: the chips row and the save glyph paint
 for it.
+
+The load glyph (a folder-open icon, `scope-load-chip`) follows the `+` and
+paints whatever the scope holds, empty included; a click opens the scope
+picker (`frame::scope`, `mod+o`; see
+[input and dialogs](input-and-dialogs.md#grouping-scope-tile-log-and-column-choices)),
+and the glyph holds its pressed fill while the picker is open. The save
+glyph, when the scope is savable, comes after it, so its appearance never
+moves the load glyph.
 
 The `+` verb opens the "Add a filter" menu under itself: "Dimension…"
 dispatches `frame::pick`, "Expression…" dispatches `frame::add_expression` (whose dialog offers the
@@ -517,6 +611,7 @@ The writer emits `config_version = 1` and these records:
 | `workspaces.N.docks.<side>` | Left, right, or bottom dock tree, focused tile, visibility, and size |
 | `workspaces.N.tiles.<id>` | Module name and its opaque state table |
 | `frame` | Dimension selections, named-expression references, text/expression scope, grouping slot, and as-of |
+| `workspaces.N.frame` | Pinned lane for workspace N (same fields as `frame`); present iff workspace N is pinned |
 | `palette.usage` | Per-row usage count and last-used timestamp |
 | `pages.<kind>` | One opaque table per page kind from `PageContent::serialize`, kept for kinds that never opened this session; the diagnostics page writes its `section` |
 
@@ -553,6 +648,7 @@ a later save replaces it with the current state.
 | Main fullscreen combined with dock focus | Clear fullscreen and keep dock focus, with a warning |
 | Malformed or locally dangling tile record | Warn and drop the record |
 | Invalid optional frame or palette data | Retain usable fields/entries and warn for the errors their readers report |
+| `workspaces.N.frame` is not a table | Warn; the workspace restores unpinned |
 
 Frame restoration parses scope expressions but does not validate columns
 against the current schema. Invalid slots, expression syntax, date strings,
@@ -564,6 +660,15 @@ kept without checking they are defined; a missing or invalid one becomes the
 frame's resolution error on the next query rather than failing restoration.
 The shell applies scope, slot, and as-of, then clears scope history. Undo/redo
 history and recent publishes start fresh; saved scopes come from config.
+A `workspaces.N.frame` table is read by the same reader, so a partial record
+keeps its usable fields. Each restored pinned lane is pinned, filled, and has
+its scope history cleared like the shared one, before the flip baseline is
+seeded, so a restored lane never reads as just changed. Its active slot is
+cleared before the recorded one applies, so a recorded slot that is now empty
+leaves the lane with no slot rather than the shared lane's. A pinned record
+whose workspace the restored layout lacks is skipped with a warning; this is
+a defensive check, since one session read supplies both the layout and the
+pins and cannot produce such a record.
 
 The shell creates occupants from restored records through the module roster.
 Only the factory matching a record's module name receives its state. An
@@ -577,9 +682,10 @@ so ordinary additions do not reuse them.
 Workspace actions mark layout state dirty and return without session file I/O.
 The shared reload watcher checks for a session snapshot on its 500 ms tick,
 before any configuration-scan early return. It also compares serialized module
-state, frame versions, and palette usage versions, so those changes can trigger
-a save independently of layout dirt. This is periodic coalescing, not a timer
-reset after each action; other work adds to the interval.
+state, the frame's generation counter, and palette usage versions, so those
+changes can trigger a save independently of layout dirt. This is periodic
+coalescing, not a timer reset after each action; other work adds to the
+interval.
 
 Snapshot collection and TOML serialization run on the UI thread. The watcher
 awaits the file write on the background executor before continuing its loop.

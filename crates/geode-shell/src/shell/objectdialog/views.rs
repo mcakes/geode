@@ -11,7 +11,7 @@ use geode_core::config::{Config, Diagnostic, Layer, LayerDoc, Severity, load_vie
 use geode_core::schema::{ColumnRole, DatasetSpec, SchemaSpec};
 use geode_core::view::{
     Colour, ColumnFormat, ColumnPresentation, DATASET_PRESENTATION_DOC, DatasetPresentationSpec,
-    Negative, Scale, ViewColumn, ViewSpec,
+    Negative, Scale, ViewColumn, ViewPresentationSpec, ViewSpec,
 };
 
 use super::{
@@ -425,19 +425,12 @@ fn with_current_color_key(column: &toml::Table) -> toml::Table {
 
 /// Render the entire user view-presentation object from the draft's members. Write
 /// order only when it differs from the definition order this same save will produce,
-/// and write per-column values only when they differ from the baseline: view definition
-/// plus dataset presentation, resolved through kind defaults. This keeps an unrelated
-/// edit from freezing inherited formats into the overlay. Hidden columns are explicit
-/// per-view entries; available candidates are excluded.
-///
-/// Clearing a label or width means inherit. `fold_into` restores the baseline value
-/// before rendering, so the matching overlay key disappears. Empty column tables are
-/// omitted. The writer owns this overlay block completely: unmodelled keys and legacy
-/// top-level presentation spellings are not carried forward.
-///
-/// Keep each comparison on its own outer condition: mutation anchors target these
-/// lines. Label and width compare optional values; format keys compare resolved values.
-#[allow(clippy::collapsible_if)]
+/// and per column exactly the keys the column sets at the view level
+/// (`Draft::presentation_set`) — a key equal to its parent that is set is a pin and is
+/// written; an inherited key never is. Hidden columns are explicit per-view entries;
+/// available candidates are excluded. Empty column tables are omitted. The writer owns
+/// this overlay block completely: unmodelled keys and legacy top-level presentation
+/// spellings are not carried forward.
 fn presentation_table(draft: &Draft) -> toml_edit::Table {
     let mut table = toml_edit::Table::new();
     // Only the view's own columns are presented at all — a column still
@@ -449,7 +442,6 @@ fn presentation_table(draft: &Draft) -> toml_edit::Table {
         .iter()
         .collect();
     let order = doc_order(draft);
-    let baseline = baseline_below(draft);
 
     let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
     if names != order {
@@ -462,57 +454,15 @@ fn presentation_table(draft: &Draft) -> toml_edit::Table {
 
     let mut columns = toml_edit::Table::new();
     for item in &items {
-        let below = baseline
+        let set = draft
+            .presentation_set
             .get(item.name.as_str())
-            .cloned()
+            .copied()
             .unwrap_or_default();
-        // Compare both sides after applying kind defaults. Folding all seven fields
-        // makes implicit defaults explicit on the item; persisting those unchanged
-        // values would turn an unrelated edit into an override of inherited settings.
-        let kind = kind_default(item);
-        let below_format = kind.clone().with(&below);
-        let effective = kind.with(&item.presentation);
-        let mut t = toml_edit::Table::new();
-
-        if effective.precision != below_format.precision {
-            if let Some(v) = item.presentation.precision {
-                t["precision"] = toml_edit::value(i64::from(v));
-            }
-        }
-        if effective.thousands != below_format.thousands {
-            if let Some(v) = item.presentation.thousands {
-                t["thousands"] = toml_edit::value(v);
-            }
-        }
-        if effective.negative != below_format.negative {
-            if let Some(v) = item.presentation.negative {
-                t["negative"] = toml_edit::value(negative_key(v));
-            }
-        }
-        if effective.colour != below_format.colour {
-            if let Some(v) = &item.presentation.colour {
-                t["color"] = toml_edit::value(color_key(v));
-            }
-        }
-        if effective.scale != below_format.scale {
-            if let Some(v) = item.presentation.scale {
-                t["scale"] = toml_edit::value(scale_key(v));
-            }
-        }
-        if item.presentation.label != below.label {
-            if let Some(v) = &item.presentation.label {
-                t["label"] = toml_edit::value(v.as_str());
-            }
-        }
-        if item.presentation.width != below.width {
-            if let Some(v) = item.presentation.width {
-                t["width"] = width_value(v);
-            }
-        }
+        let mut t = set_keys_table(&item.presentation, set);
         if !item.included {
             t["hidden"] = toml_edit::value(true);
         }
-
         if !t.is_empty() {
             columns[item.name.as_str()] = toml_edit::Item::Table(t);
         }
@@ -643,10 +593,10 @@ pub(super) fn dataset_layer_for(
         .unwrap_or_default()
 }
 
-/// Definition presentation with dataset presentation applied, by column. Both the fold
-/// and the writer use this baseline so inherited dataset values are not persisted as
-/// new view overrides. The dataset layer is captured on the draft because the writer
-/// receives no Config.
+/// Definition presentation with dataset presentation applied, by column — what an
+/// inherited view key resolves to. Test-only: the stage builds the same merge per
+/// column through `ColumnLayers::below_view`.
+#[cfg(test)]
 pub(super) fn baseline_below(draft: &Draft) -> BTreeMap<String, ColumnPresentation> {
     let mut below = desk_baseline(draft);
     for (col, dataset) in &draft.dataset_layer {
@@ -797,6 +747,86 @@ pub const COLUMN_KEYS: [&str; 7] = [
     "color",
 ];
 
+/// Whether `p` holds `key` — one of [`COLUMN_KEYS`] — at all. The layer questions
+/// (which layer sets a key, which keys an overlay sets) are presence questions.
+pub fn sets(p: &ColumnPresentation, key: &str) -> bool {
+    match key {
+        "label" => p.label.is_some(),
+        "width" => p.width.is_some(),
+        "scale" => p.scale.is_some(),
+        "precision" => p.precision.is_some(),
+        "thousands" => p.thousands.is_some(),
+        "negative" => p.negative.is_some(),
+        "color" => p.colour.is_some(),
+        _ => false,
+    }
+}
+
+/// Which of [`COLUMN_KEYS`] a column stage's overlay sets for one column. The writers
+/// write exactly these; every other key inherits from the layers below. Read from
+/// PRESENCE in the parsed overlay, never from values: a key equal to its parent that
+/// is on disk is a pin.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PresentationKeys([bool; 7]);
+
+impl PresentationKeys {
+    fn index(key: &str) -> Option<usize> {
+        COLUMN_KEYS.iter().position(|k| *k == key)
+    }
+
+    pub fn has(&self, key: &str) -> bool {
+        Self::index(key).is_some_and(|i| self.0[i])
+    }
+
+    pub fn set(&mut self, key: &str, on: bool) {
+        if let Some(i) = Self::index(key) {
+            self.0[i] = on;
+        }
+    }
+
+    pub fn any(&self) -> bool {
+        self.0.iter().any(|b| *b)
+    }
+
+    /// The keys a parsed overlay column holds. Parsing first means the legacy
+    /// spellings count and a malformed value, which is not in force, does not.
+    pub fn of(p: &ColumnPresentation) -> PresentationKeys {
+        let mut keys = PresentationKeys::default();
+        for key in COLUMN_KEYS {
+            keys.set(key, sets(p, key));
+        }
+        keys
+    }
+}
+
+/// The set keys of each of `view`'s own columns in its presentation overlay, as the
+/// merged doc holds it — the object a user-layer write replaces. An overlay entry for
+/// a column the view does not have is not in force (the overlay's `apply` ignores it)
+/// and seeds nothing, so a column re-added from the catalogue starts inherited.
+pub(super) fn presentation_set_for(
+    config: &Config,
+    view: &str,
+) -> BTreeMap<String, PresentationKeys> {
+    let Some(doc) = config.doc(PRESENTATION_DOC) else {
+        return BTreeMap::new();
+    };
+    let (views, _) = load_views(config);
+    let Some(members) = views.iter().find(|v| v.name == view).map(|v| &v.columns) else {
+        return BTreeMap::new();
+    };
+    let (spec, _) = ViewPresentationSpec::from_doc(doc);
+    spec.views
+        .get(view)
+        .map(|v| {
+            v.columns
+                .iter()
+                .filter(|(name, _)| members.iter().any(|c| c.name() == name.as_str()))
+                .map(|(name, p)| (name.clone(), PresentationKeys::of(p)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Display value for a column with no explicit width. `auto` selects the
 /// column kind's default width; it does not request measurement of the
 /// contents. A visible choice distinguishes this from an unfilled field.
@@ -809,31 +839,39 @@ pub(super) const AUTO: &str = "auto";
 const MIN_WIDTH: i64 = 20;
 const MAX_WIDTH: i64 = 2000;
 
-/// Build the same seven presentation fields for Views and Schema, with every field
-/// carrying the supplied overlay destination. Seed effective values using kind defaults
-/// rather than unset placeholders. The writer later omits values equal to its inherited
-/// baseline.
-///
-/// Named colors follow the built-in choices. Preserve an unknown configured color as
-/// an extra option so the current value remains visible and repairable.
-pub fn column_fields(item: &ListItem, colors: &[String], dest: Destination) -> Vec<Field> {
-    let p = &item.presentation;
-    let effective = kind_default(item).with(p);
-
-    let mut color_options: Vec<String> = geode_core::colour::RESERVED_NAMES
+/// The options a column's `color` choice offers: the reserved names, then the named
+/// colors, then `current` if neither lists it, so an unknown or removed color stays
+/// visible and repairable. The one builder of this list, shared by [`column_fields`]
+/// and [`super::Draft::refresh_color_options`] so the two cannot drift.
+pub fn color_options(colors: &[String], current: &str) -> Vec<String> {
+    let mut options: Vec<String> = geode_core::colour::RESERVED_NAMES
         .iter()
         .map(|name| (*name).to_string())
         .collect();
-    color_options.extend(
+    options.extend(
         colors
             .iter()
             .filter(|name| !geode_core::colour::RESERVED_NAMES.contains(&name.as_str()))
             .cloned(),
     );
-    let current_color = color_key(&effective.colour);
-    if !color_options.contains(&current_color) {
-        color_options.push(current_color.clone());
+    if !options.iter().any(|option| option == current) {
+        options.push(current.to_string());
     }
+    options
+}
+
+/// Build the same seven presentation fields for Views and Schema, with every field
+/// carrying the supplied overlay destination. Seed effective values using kind defaults
+/// rather than unset placeholders. The writer later omits values equal to its inherited
+/// baseline.
+///
+/// Named colors follow the built-in choices (see [`color_options`]).
+pub fn column_fields(item: &ListItem, colors: &[String], dest: Destination) -> Vec<Field> {
+    let p = &item.presentation;
+    let effective = kind_default(item).with(p);
+
+    let current_color = color_key(&effective.colour);
+    let color_options = color_options(colors, &current_color);
 
     let fields = vec![
         text_row("label", "Label", p.label.clone().unwrap_or_default(), dest),
@@ -949,80 +987,162 @@ fn negative_keys() -> Vec<String> {
     ["minus", "parens"].iter().map(|s| s.to_string()).collect()
 }
 
-/// Fold current column fields into the item before validation and writing. Format
-/// fields become explicit values; the writer omits values equal to its baseline so this
-/// does not freeze inherited settings.
+/// Resolve the seven column fields into `item` through `set`: a set key takes the
+/// field's value; an inherited key takes the layer below's (`None` there means the kind
+/// default). The writers write exactly the set keys, so an inherited key is never
+/// frozen into an overlay however often the fold runs.
 ///
-/// An empty label or auto width stops overriding and restores the value below, which
-/// may come from dataset presentation or the view definition. The caller reseeds those
-/// fields immediately to show what will read back. Return the cleared key so the caller
-/// can name its fallback layer.
-///
-/// Detect clearing against the item's previous value, not the baseline: an already
-/// empty field is not a new clear and must not replace another key's notice. An
-/// unparseable width leaves its previous value intact.
+/// An empty Label or `auto` Width is the one inherit a field value itself expresses: it
+/// releases that key, and the key is returned when it was set, so the caller can name
+/// the layer it now follows. An unparseable width leaves the previous value intact.
 pub fn fold_into(
     item: &mut ListItem,
     fields: &[Field],
     below: &ColumnPresentation,
+    set: &mut PresentationKeys,
 ) -> Option<&'static str> {
-    let mut cleared = None;
+    let mut released = None;
     for field in fields {
-        match (field.key.as_str(), &field.kind) {
-            ("label", FieldKind::Text(text)) => {
-                let text = text.trim();
-                item.presentation.label = if text.is_empty() {
-                    if item.presentation.label.is_some() {
-                        cleared = Some("label");
-                    }
-                    below.label.clone()
-                } else {
-                    Some(text.to_string())
-                };
+        let key = match (field.key.as_str(), &field.kind) {
+            ("label", FieldKind::Text(text)) if text.trim().is_empty() => "label",
+            ("width", FieldKind::Text(text)) if text.trim() == AUTO => "width",
+            _ => continue,
+        };
+        if set.has(key) {
+            released = Some(key);
+        }
+        set.set(key, false);
+    }
+    let p = &mut item.presentation;
+    for field in fields {
+        let key = field.key.as_str();
+        if !set.has(key) {
+            match key {
+                "label" => p.label = below.label.clone(),
+                "width" => p.width = below.width,
+                "scale" => p.scale = below.scale,
+                "precision" => p.precision = below.precision,
+                "thousands" => p.thousands = below.thousands,
+                "negative" => p.negative = below.negative,
+                "color" => p.colour = below.colour.clone(),
+                _ => {}
             }
+            continue;
+        }
+        match (key, &field.kind) {
+            ("label", FieldKind::Text(text)) => p.label = Some(text.trim().to_string()),
             ("width", FieldKind::Text(text)) => {
-                let text = text.trim();
-                if text == AUTO {
-                    if item.presentation.width.is_some() {
-                        cleared = Some("width");
-                    }
-                    item.presentation.width = below.width;
-                } else if let Ok(width) = text.parse::<f32>() {
-                    item.presentation.width = Some(width);
+                if let Ok(width) = text.trim().parse::<f32>() {
+                    p.width = Some(width);
                 }
             }
             ("scale", FieldKind::Choice { options, selected }) => {
-                if let Some(scale) = options.get(*selected).and_then(|key| scale_from_key(key)) {
-                    item.presentation.scale = Some(scale);
+                if let Some(scale) = options.get(*selected).and_then(|k| scale_from_key(k)) {
+                    p.scale = Some(scale);
                 }
             }
             ("precision", FieldKind::Number { value, .. }) => {
                 if let Ok(precision) = u8::try_from(*value) {
-                    item.presentation.precision = Some(precision);
+                    p.precision = Some(precision);
                 }
             }
-            ("thousands", FieldKind::Bool(value)) => item.presentation.thousands = Some(*value),
+            ("thousands", FieldKind::Bool(value)) => p.thousands = Some(*value),
             ("negative", FieldKind::Choice { options, selected }) => {
-                if let Some(negative) = options
-                    .get(*selected)
-                    .and_then(|key| negative_from_key(key))
-                {
-                    item.presentation.negative = Some(negative);
+                if let Some(negative) = options.get(*selected).and_then(|k| negative_from_key(k)) {
+                    p.negative = Some(negative);
                 }
             }
             ("color", FieldKind::Choice { options, selected }) => {
-                if let Some(color) = options.get(*selected).map(|key| color_from_key(key)) {
-                    item.presentation.colour = Some(color);
+                if let Some(color) = options.get(*selected).map(|k| color_from_key(k)) {
+                    p.colour = Some(color);
                 }
             }
-            // A key this fold does not know, or a field whose kind is not
-            // the one that key is built with: left alone rather than
-            // guessed at. Unreachable through `column_fields`, which is
-            // the only builder of these fields.
+            // A key this fold does not know, or a field whose kind is not the one that
+            // key is built with: left alone rather than guessed at. Unreachable through
+            // `column_fields`, the only builder of these fields.
             _ => {}
         }
     }
-    cleared
+    released
+}
+
+/// One column's overlay table: exactly the keys in `set`, with `p`'s values. Shared by
+/// the view and dataset writers so the two cannot disagree about what a set key writes.
+pub(super) fn set_keys_table(p: &ColumnPresentation, set: PresentationKeys) -> toml_edit::Table {
+    let mut t = toml_edit::Table::new();
+    if set.has("precision")
+        && let Some(v) = p.precision
+    {
+        t["precision"] = toml_edit::value(i64::from(v));
+    }
+    if set.has("thousands")
+        && let Some(v) = p.thousands
+    {
+        t["thousands"] = toml_edit::value(v);
+    }
+    if set.has("negative")
+        && let Some(v) = p.negative
+    {
+        t["negative"] = toml_edit::value(negative_key(v));
+    }
+    if set.has("color")
+        && let Some(v) = &p.colour
+    {
+        t["color"] = toml_edit::value(color_key(v));
+    }
+    if set.has("scale")
+        && let Some(v) = p.scale
+    {
+        t["scale"] = toml_edit::value(scale_key(v));
+    }
+    if set.has("label")
+        && let Some(v) = &p.label
+    {
+        t["label"] = toml_edit::value(v.as_str());
+    }
+    if set.has("width")
+        && let Some(v) = p.width
+    {
+        t["width"] = width_value(v);
+    }
+    t
+}
+
+/// Show `item`'s value for `field`'s key — after a fold, the inherited value of an
+/// inherited key. A color not among the options is appended so the field never
+/// silently shows another one.
+pub(super) fn reseed_field(field: &mut Field, item: &ListItem) {
+    let effective = kind_default(item).with(&item.presentation);
+    match (field.key.as_str(), &mut field.kind) {
+        ("label", FieldKind::Text(text)) => {
+            *text = item.presentation.label.clone().unwrap_or_default();
+        }
+        ("width", FieldKind::Text(text)) => *text = width_text(item.presentation.width),
+        ("precision", FieldKind::Number { value, .. }) => {
+            *value = i64::from(effective.precision);
+        }
+        ("thousands", FieldKind::Bool(b)) => *b = effective.thousands,
+        ("scale", FieldKind::Choice { options, selected }) => {
+            select_option(options, selected, scale_key(effective.scale));
+        }
+        ("negative", FieldKind::Choice { options, selected }) => {
+            select_option(options, selected, negative_key(effective.negative));
+        }
+        ("color", FieldKind::Choice { options, selected }) => {
+            select_option(options, selected, &color_key(&effective.colour));
+        }
+        _ => {}
+    }
+}
+
+fn select_option(options: &mut Vec<String>, selected: &mut usize, key: &str) {
+    *selected = match options.iter().position(|o| o == key) {
+        Some(i) => i,
+        None => {
+            options.push(key.to_string());
+            options.len() - 1
+        }
+    };
 }
 
 /// Permit typed editing only for label and width. Their field shapes are Text; other
@@ -1171,8 +1291,8 @@ pub fn help(key: &str) -> &'static str {
 /// Shared help for the seven presentation fields in either column-stage domain.
 pub fn column_help(key: &str) -> &'static str {
     match key {
-        "label" => "The header text — empty stops overriding what the desk or dataset level sets",
-        "width" => "Column width in pixels, or auto for the kind's default width",
+        "label" => "The header text — empty or r inherits the label below",
+        "width" => "Column width in pixels; auto or r inherits",
         "scale" => "Divide values for display: none, k (thousands), M (millions)",
         "precision" => "Decimal places shown, 0 to 12",
         "thousands" => "Group digits with thousands separators",
@@ -1992,10 +2112,103 @@ role = "value"
         );
     }
 
-    /// The overlay writer emits only changed per-column keys under `columns`; it does
-    /// not emit legacy top-level hidden or width entries.
+    /// A key is set when the overlay holds it, whatever its value; `hidden` is not a
+    /// column-stage key.
     #[test]
-    fn the_writer_emits_only_keys_that_differ_from_the_desk() {
+    fn presentation_keys_read_presence_not_value() {
+        let p = ColumnPresentation {
+            label: Some("Δ".into()),
+            colour: Some(Colour::Named("delta".into())),
+            hidden: Some(true),
+            ..ColumnPresentation::default()
+        };
+        let k = PresentationKeys::of(&p);
+        assert!(k.has("label"));
+        assert!(k.has("color"));
+        assert!(!k.has("width"));
+        assert!(!k.has("hidden"), "hidden is not a column-stage key");
+        assert!(k.any());
+        assert!(!PresentationKeys::default().any());
+    }
+
+    /// A Views draft reads which keys the view overlay sets per column: the legacy
+    /// top-level `width` map counts, a desk definition's label does not.
+    #[test]
+    fn a_views_draft_seeds_its_set_from_the_overlay() {
+        let config = config_from(&[
+            (
+                Layer::Builtin,
+                "datasets",
+                "[risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"instrument\"\n\
+                 [risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n",
+            ),
+            (
+                Layer::Desk,
+                "views",
+                "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\nlabel = \"NPV\"\n\
+                 [[tree.columns]]\nname = \"book\"\nkind = \"dimension\"\n",
+            ),
+            (
+                Layer::User,
+                PRESENTATION_DOC,
+                "[tree]\nwidth = { book = 90 }\n[tree.columns.npv]\ncolor = \"sign\"\n",
+            ),
+        ]);
+        let draft = Domain::Views.draft(&config, "tree");
+        let npv = draft
+            .presentation_set
+            .get("npv")
+            .copied()
+            .unwrap_or_default();
+        assert!(npv.has("color"));
+        assert!(
+            !npv.has("label"),
+            "the desk's label is not set at the view level"
+        );
+        let book = draft
+            .presentation_set
+            .get("book")
+            .copied()
+            .unwrap_or_default();
+        assert!(book.has("width"), "the legacy width map counts as set");
+        assert_eq!(draft.presentation_set, draft.baseline_presentation_set);
+    }
+
+    /// An overlay entry for a column the view no longer has is not in force
+    /// (`ViewPresentationSpec::apply` ignores it), so it seeds nothing: re-adding the
+    /// column from the catalogue must not freeze its dataset values as view pins.
+    #[test]
+    fn an_overlay_entry_for_a_column_the_view_lacks_seeds_nothing() {
+        let config = config_from(&[
+            (
+                Layer::Builtin,
+                "datasets",
+                "[risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"instrument\"\n\
+                 [risk.columns.vega]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"instrument\"\n",
+            ),
+            (
+                Layer::Desk,
+                "views",
+                "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\n",
+            ),
+            (
+                Layer::User,
+                PRESENTATION_DOC,
+                "[tree.columns.vega]\nscale = \"M\"\n",
+            ),
+        ]);
+        let draft = Domain::Views.draft(&config, "tree");
+        assert!(
+            !draft.presentation_set.contains_key("vega"),
+            "{:?}",
+            draft.presentation_set
+        );
+    }
+
+    /// The overlay writer emits exactly the set keys under `columns`, a pin equal to its
+    /// parent included; it does not emit legacy top-level hidden or width entries.
+    #[test]
+    fn the_writer_emits_exactly_the_set_keys() {
         // desk: npv has scale k, precision 2; the trader sets precision 0 and a color, and hides book.
         let config = config_with_view(
             "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\nformat = { scale = \"k\", precision = 2 }\n[[tree.columns]]\nname = \"book\"\nkind = \"dimension\"\n",
@@ -2007,6 +2220,10 @@ role = "value"
             items[0].presentation.colour = Some(Colour::Named("delta".to_string()));
             items[1].included = false;
         }
+        let mut set = PresentationKeys::default();
+        set.set("precision", true);
+        set.set("color", true);
+        draft.presentation_set.insert("npv".into(), set);
         let text = super::super::object_text("tree", to_table(&draft, Destination::Presentation));
         assert!(text.contains("[tree.columns.npv]"), "{text}");
         assert!(
@@ -2025,16 +2242,19 @@ role = "value"
             !text.contains("\nwidth = {") && !text.contains("hidden = ["),
             "no legacy spelling: {text}"
         );
-        // Setting precision back to the desk's value drops the key.
+        // Set to the desk's own value, precision stays written: it is pinned.
         items_mut(&mut draft)[0].presentation.precision = Some(2);
         let text = super::super::object_text("tree", to_table(&draft, Destination::Presentation));
-        assert!(!text.contains("precision"), "{text}");
+        assert!(
+            text.contains("precision = 2"),
+            "a pin equal to its parent: {text}"
+        );
     }
 
-    /// View overlays compare against definition plus dataset presentation. An edit to
-    /// one field must not copy inherited dataset values into per-view overrides.
+    /// An edit to one field must not copy inherited dataset values into per-view
+    /// overrides: only the set key is written.
     #[test]
-    fn a_view_field_equal_to_the_dataset_level_writes_nothing() {
+    fn an_inherited_field_equal_or_not_writes_nothing() {
         // desk: npv width 50. dataset level: npv width 140, scale k.
         // The trader steps scale to k in the VIEW stage — equal to the
         // dataset level, so nothing is written; then width to 200 — only
@@ -2089,7 +2309,10 @@ role = "value"
             "the dataset level is merged over the desk's own 50"
         );
         let mut folded = item.clone();
-        fold_into(&mut folded, &fields, &below);
+        let mut set = PresentationKeys::default();
+        set.set("width", true);
+        fold_into(&mut folded, &fields, &below, &mut set);
+        draft.presentation_set.insert("npv".into(), set);
         // Put the folded item back and render.
         if let Some(FieldKind::OrderedList { items, .. }) = draft
             .fields
@@ -2334,12 +2557,10 @@ role = "value"
         );
     }
 
-    /// the fold is what carries a keystroke in the stage back onto the item the overlay
-    /// writer renders from. `auto` is a value, not a blank — it clears the width rather
-    /// than parsing as one — and an empty label is the column's own name, so it clears
-    /// too.
+    /// The fold resolves each field through the set: a set key takes the field's
+    /// value, an inherited key the layer below's. `auto` releases a set width.
     #[test]
-    fn fold_into_writes_the_fields_back_and_auto_clears_the_width() {
+    fn fold_into_resolves_set_and_inherited_keys() {
         let mut item = ListItem {
             name: "npv".into(),
             included: true,
@@ -2370,16 +2591,33 @@ role = "value"
                 _ => {}
             }
         }
-        // A desk that declares nothing: `auto` and an empty label have
-        // nothing to fall back to, so each really does clear its key.
+        let below = ColumnPresentation {
+            precision: Some(0),
+            colour: Some(Colour::Named("delta".into())),
+            width: Some(140.0),
+            ..ColumnPresentation::default()
+        };
+        let mut set = PresentationKeys::default();
+        set.set("precision", true);
+        set.set("label", true);
+        set.set("width", true);
         assert_eq!(
-            fold_into(&mut item, &fields, &ColumnPresentation::default()),
-            None,
-            "nothing followed the desk — there is no desk value to follow"
+            fold_into(&mut item, &fields, &below, &mut set),
+            Some("width"),
+            "auto released the set width"
         );
-        assert_eq!(item.presentation.width, None);
-        assert_eq!(item.presentation.precision, Some(4));
-        assert_eq!(item.presentation.colour, Some(Colour::Sign));
+        assert!(!set.has("width"));
+        assert_eq!(item.presentation.width, Some(140.0), "the width below");
+        assert_eq!(
+            item.presentation.precision,
+            Some(4),
+            "set: the field's value"
+        );
+        assert_eq!(
+            item.presentation.colour,
+            Some(Colour::Named("delta".into())),
+            "inherited: the layer below's, though the field shows sign"
+        );
         assert_eq!(item.presentation.label.as_deref(), Some("NPV"));
     }
 
@@ -2398,14 +2636,22 @@ role = "value"
             "sanity: the item carries the desk's label"
         );
         assert!(open_column(&mut draft, "npv", &[]));
+        set_text_field(&mut draft, "label", "Mine");
+        draft
+            .presentation_set
+            .entry("npv".into())
+            .or_default()
+            .set("label", true);
+        assert_eq!(draft.fold_column(), None);
         clear_text_field(&mut draft, "label");
         assert_eq!(
             draft.fold_column(),
             Some(Fold {
                 key: "label",
-                to: Some(FellTo::Desk)
+                to: FellTo::Desk
             })
         );
+        assert!(!draft.presentation_set["npv"].has("label"));
 
         assert_eq!(
             draft.list_items("columns").unwrap()[0]
@@ -2432,9 +2678,7 @@ role = "value"
         assert_eq!(
             draft.fold_column(),
             None,
-            "the field was already empty, so this keystroke cleared \
-             nothing — a clear is measured against the ITEM, not against \
-             whether some layer below sets the key"
+            "the label was not set, so this keystroke released nothing"
         );
         assert_eq!(
             draft.list_items("columns").unwrap()[0].presentation.label,
@@ -2454,12 +2698,19 @@ role = "value"
         let item = draft.list_items("columns").unwrap()[0].clone();
         assert_eq!(item.presentation.width, Some(140.0), "sanity");
         assert!(open_column(&mut draft, "npv", &[]));
+        set_text_field(&mut draft, "width", "90");
+        draft
+            .presentation_set
+            .entry("npv".into())
+            .or_default()
+            .set("width", true);
+        assert_eq!(draft.fold_column(), None);
         set_text_field(&mut draft, "width", AUTO);
         assert_eq!(
             draft.fold_column(),
             Some(Fold {
                 key: "width",
-                to: Some(FellTo::Desk)
+                to: FellTo::Desk
             })
         );
 
@@ -2523,6 +2774,58 @@ role = "value"
                 "{untouched} is the measure default the desk never declared: {text}"
             );
         }
+    }
+
+    /// A pin made in one visit to a column is still there after leaving the column
+    /// and opening it again within the same dialog.
+    #[test]
+    fn set_state_survives_leaving_and_reentering_the_column() {
+        let config =
+            config_with_view("[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\n");
+        let mut draft = Domain::Views.draft(&config, "tree");
+        assert!(open_column(&mut draft, "npv", &[]));
+        draft.selected = draft.fields.iter().position(|f| f.key == "color").unwrap();
+        assert_eq!(draft.toggle_selected(), Step::Changed);
+        draft.fold_column();
+        draft.leave_column();
+        assert!(open_column(&mut draft, "npv", &[]));
+        assert!(draft.presentation_set["npv"].has("color"));
+        let color = draft.fields.iter().find(|f| f.key == "color").unwrap();
+        assert!(
+            matches!(&color.kind, FieldKind::Choice { options, selected } if options[*selected] == "none"),
+            "the pinned value, stepped off the measure default sign: {:?}",
+            color.kind
+        );
+    }
+
+    /// An inherited color not among the offered names is added, never swapped for
+    /// whatever sits at index 0.
+    #[test]
+    fn reseeding_an_unknown_inherited_color_adds_its_option() {
+        let item = ListItem {
+            name: "npv".into(),
+            included: true,
+            kind: Some("measure".into()),
+            presentation: ColumnPresentation {
+                colour: Some(Colour::Named("gone".into())),
+                ..ColumnPresentation::default()
+            },
+            note: None,
+        };
+        let mut field = column_fields(
+            &item_of_kind(Some("measure")),
+            &[],
+            Destination::Presentation,
+        )
+        .into_iter()
+        .find(|f| f.key == "color")
+        .unwrap();
+        reseed_field(&mut field, &item);
+        assert!(
+            matches!(&field.kind, FieldKind::Choice { options, selected } if options[*selected] == "gone"),
+            "{:?}",
+            field.kind
+        );
     }
 
     /// `width` is a `Text` because `auto` is one of its values; everything else it

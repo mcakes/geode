@@ -495,15 +495,18 @@ pub(crate) fn render_header(
 }
 
 /// The notice line under the header: the last refusal or advisory, in
-/// the danger tone as TEXT (no fill — it is a sentence, not a state).
+/// the notice door's danger tone as TEXT (no fill — it is a sentence, not
+/// a state).
 pub(crate) fn render_notice(notice: &SharedString, theme: &Theme) -> impl IntoElement {
-    let paint = chip_paint(theme, Tone::DangerText);
     h_flex()
         .w_full()
         .px_2()
         .text_xs()
-        .text_color(paint.text)
-        .child(notice.clone())
+        .child(geode_tile::notice::paint(
+            notice,
+            geode_tile::notice::Tone::Danger,
+            theme,
+        ))
 }
 
 /// Inline expression editor between the header and chart. Parse and reference

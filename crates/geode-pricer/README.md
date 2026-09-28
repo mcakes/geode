@@ -22,12 +22,13 @@ The pure core (`core`, no element, entity, window, or data service):
 | `columns`, `views` | Column vocabulary, prepared column plans, and cell text. |
 | `package` | A package row's aggregated cells: its legs' distinct values in leg order joined with `/`, and the package quantity while the legs fit its template; how an edit to one of those cells maps onto its legs. |
 | `cell` | Cell commit validation, the typeahead vocabularies, the expiry date commit, and nudging. |
-| `entry` | Where `o` lands, lifting a typed package out of a leg position, the entry bar's label, and entry history. |
+| `entry` | Where `o` and `shift+o` land, lifting a typed package out of a leg position, the entry bar's label, and entry history. |
 | `complete` | Entry-bar completion: the slot at the caret, suggestions, hint, and the Tab cycle. |
 | `clip` | The yank register and where `p`/`shift+p` land. |
 | `tree` | Package expansion and the visible-row walk. |
 | `commands` | The `:` vocabulary (including `:autosize [reset]`): parse and completions. |
 | `storage` | The frozen `pricer_sheets` declaration; conversion between sheets, document rows, and a document answer. |
+| `select` | What a grid selection reaches on the sheet: the leaf lines an edit writes (`lines_of`), the top-most rows a verb or total acts on (`top_most`), the `g p` and `shift+j`/`shift+k` plans with their refusals, position risk totals (`risk_totals`), and the bulk notices' skip counts. |
 
 The tile:
 
@@ -37,11 +38,12 @@ The tile:
 | `grid` | The prepared `GridModel`, rebuilt on change. |
 | `paint` | The per-theme paint memo, floored to a readable ratio. |
 | `delegate` | The table delegate: cells, the tree column (indent, chevron, template tag), editor, expiry date field. |
-| `header` | The prepared header row and footer. |
-| `popup` | The typeahead, the entry bar's completion list, and the `.` action menu. |
+| `header` | The prepared header row (notices as `geode_tile::notice::Notice`), the sheet name control and rename field, and the footer. |
+| `popup` | The typeahead, the entry bar's completion list, the sheet picker (`sheet_rows`, `SheetPicker`), and `PricerPick` (what a menu row does). The menu, popup geometry, the `:rm` confirm and the header notices paint through `geode-tile`. |
 | `session` | The tile's session record, including `:autosize`'s fitted widths (`column_widths`, read leniently). |
 | `content` | The factory, keymap fragment, actions, settings, and the read-only `UnderlyingSource` seam. |
 | `tile` | `PricerTile`: modes, verbs, repricing, write-behind, load. |
+| `tile::select` | The `V`/`v` selection's state doors (start, clear, re-resolve, footer extent and totals), the selection verbs, the one-typed-value commit, and the live step (`bulk_step`, `settle_bulk`, `take_back_steps`). |
 
 The application uses `DuckSheetStore`: sheets are `pricer_sheets` documents in
 DuckDB and survive a restart. Session records retain sheet names and UI state;
@@ -55,7 +57,8 @@ cargo bench -p geode-pricer
 ```
 
 The `test-support` feature exposes read-only accessors a host's tests observe
-a tile through (`PricerTile::sheet`, `PricerTile::is_loading`). `geode-app`'s
+a tile through (`PricerTile::sheet`, `PricerTile::is_loading`,
+`PricerTile::sheet_field_text`). `geode-app`'s
 dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 `--workspace` builds on one feature set.
 
@@ -65,7 +68,8 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   history step, commit and reload, and a Tab at a moved caret re-ranks first.
   A completion write is one range replace (one undo step) whose own `Change`
   is skipped as its echo, so the Tab cycle survives it. `lib::init` reclaims
-  `tab`/`shift-tab` in the bar's `PricerEntry` context from gpui-component's
+  `tab`/`shift-tab` in the bar's `PricerEntry` context (and the sheet
+  picker's `PricerSheetPicker`, where `tab` completes) from gpui-component's
   focus cycling.
 - Entry completion suggests configured underlyings, upcoming monthly expiries,
   tenors, option types, templates, and barrier kinds. It replaces the token at
@@ -188,7 +192,8 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 - `g m` opens the module picker with the cursor row's underlying as launch
   context. A package contributes an underlying only when all its legs share
   one; an empty sheet or mixed-underlying package contributes none.
-- The tile arrives at flip barriers itself; it submits no view query.
+- The tile arrives at flip barriers itself; it submits no view query
+  (`geode_tile::following::arrive_immediately`).
 - An empty sheet is never saved. A sheet whose load failed is never saved
   (`save_blocked`); a change not yet queued by the store (`dirty`), or whose
   queued save was reported failed (`save_failed`), is saved when the tile
@@ -223,10 +228,30 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   `save_blocked` sheet, which it reloads. `:name` forgets the old name only after a save under
   the new one is confirmed, and is refused on a sheet whose load failed (its
   fallback would replace the real document). `:rm` refuses every open name.
-- The `:rm` confirmation uses a focused prompt in the
-  header whose `on_key_down` consumes every key (bare `y` confirms), the
-  tile in `insert` mode while armed, cancelled by focus leaving or a pointer
-  press, blurred before it drops.
+- The `:rm` confirmation is `geode_tile::confirm`'s: a focused prompt in
+  the header that consumes every key (bare `y` confirms), with the door's
+  Yes/No buttons (`y` and "any other key"), the tile in `insert` mode while
+  armed, cancelled by focus leaving or a pointer press anywhere but the two
+  buttons, blurred before it drops. A `:` command arriving under it
+  withdraws it unanswered. After an answer the shell's focus restoration
+  path returns the keyboard to the tile.
+- The sheet picker and the rename field are pointer forms of `:e`/`:rm` and
+  `:name`: a pick goes through `edit_sheet`/`arm_remove`, and the field's
+  text through `commands::parse` and `rename`, so no refusal is restated.
+  The picker paints through `geode_tile::popover` (surface, `row_shell`,
+  `empty_row`, `anchor_popup`). Both report `mode == insert` and count in
+  `holds_focus`, blur before they drop, and close on any other verb, `:`
+  and `/`. `RenameBlock` is the rename refusal known before a name is typed
+  (the menu greys the row with its reason). The name's press listener runs
+  in the capture phase (a second click toggles the picker closed before its
+  outside-press closer runs) and prevents default so no focus-tracking
+  ancestor takes the new field's focus. The name's outside-press listener
+  (not hover-gated, so it hears presses on surfaces painted over the tile)
+  clears `last_press_on_name`, so a double-click renames only when both
+  presses hit the name. A press with any modifier opens nothing and leaves
+  default alone: mod+drag and mod+double-click fullscreen stay the shell's.
+  `lib::init` reclaims `tab` in the rename field's `PricerRename` context,
+  and the field consumes it, so the keyboard never leaves the open field.
 - Known names are the store's (`set_known` from the diagnostics catalog,
   which only adds and never re-adds a name confirmed forgotten until a
   save of it is confirmed; confirmed saves; less confirmed forgets) plus
@@ -263,27 +288,85 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   before every `refresh`, keyed by row count, relative cursor row and
   mode. Gutter text uses the row's floored muted paint (the row's
   own text paint on the cursor row).
-- `paint` prepares grid-row and action-menu text colors and tests their
-  contrast across every bundled theme. Row text is checked against its base,
-  hover, and selection backgrounds; menu text against popover and enabled
-  highlight backgrounds. This sweep does not cover every header or typeahead
+- `paint` prepares grid-row text colors and tests their contrast across
+  every bundled theme. Row text is checked against its base, hover, and
+  selection backgrounds; menu colors are `geode_tile::menu::MenuPaint`'s.
+  This sweep does not cover every header or typeahead
   token, and the bounded adjustment is not a guarantee for arbitrary themes.
 - A disabled action can hold the menu highlight but paints no highlight
   fill. Picking it reports its reason and keeps the menu open.
-- A menu command's title is its palette title (`content::action_title`); the
-  menu's keyboard navigation skips separators, section headers, and disabled
-  rows. Disabled actions can still hold the highlight after a pointer move,
-  opening the menu, or rebuilding its rows.
+- A menu command's title is its palette title (`content::action_title`) and
+  its key hint the action's live chord (`:price` when the keymap binds none,
+  an empty lane for the other actions), resolved when the menu opens or its
+  rows rebuild and again on every keymap publish while it is open. The menu
+  opens on its first enabled action; keyboard navigation skips separators,
+  section headers, and disabled rows, and from a row that is not an action
+  lands on the first enabled one. Disabled actions can still hold the
+  highlight after a pointer move or a rebuild of the rows under it.
 - Default column widths are checked against labels and representative large
   values at the largest font size, including padding and cursor borders.
   These samples are not numeric limits: an overflowing right-aligned value
   can still lose leading digits.
 
+- A selection is anchored by `LineId` and the plan column's vocabulary
+  name and re-resolved in `sync_cursor`, which every cursor move and every
+  model install (a delivery, an edit, a reload) runs; render and the
+  delegate only read the prepared `resolved`, extent and totals. A lost
+  anchor clears it with a footer notice; a sheet replace (`:e`, `:new`, a
+  load) clears it first, silently, since line ids restart per sheet and
+  would re-resolve onto unrelated lines. A verb that
+  ends the selection clears it before its edit, and restores and
+  re-resolves it when the edit is refused.
+- Edits act on lines (`lines_of`, deduplicated, so a package selected with
+  its own leg writes the leg once); verbs and totals act on top-most rows
+  (`top_most`), since a package already carries its legs. Totals are
+  `qty × value` per line and the folded sum per package, and a column with
+  any unpriced or failed row is `None` (painted `—`), never a partial sum.
+- A typed commit writes the cursor's column only, under `V` and `v`, each
+  line judged on its own instrument, as one `apply_edits` batch. A selected
+  package's qty (commit or step) goes through `package::commit`, so the legs
+  move by the template's weights; its legs are dropped from the per-line
+  targets, and a list-form package is refused. A commit over a selection
+  that leaves the cursor cell as it opened writes nothing (`Editor::*::initial`:
+  a choice with `moved` unset and the query empty or the opening option, a
+  date on its opening day with no digit `typed`, a text field with no live
+  step on its opening text): the cell's own value filled across the targets
+  would be a wrong block from a no-op gesture.
+- The live step (`Editor::Text::bulk`, opened only on a steppable column with
+  a selection live) applies each press through `apply_batch` without
+  recording it: all or nothing, a refusal from any cell refusing the press.
+  A line's stepped cells compose into one `SetInstrument` and one
+  `SetShift` per press (`cell::edit_on` over the press's working copy):
+  both rewrite the whole record, so edits built per column from the sheet
+  would have a later column put back an earlier one's step. An inherited
+  shift's empty text steps from the sheet's value (`cell::step_from`, shared
+  with the single-cell nudge), so it moves from what the cell paints; from
+  zero, a painted `+2.0` went to `+1.0` on `up`. The before and after marks
+  are keyed by `LineId`, so a press's bookkeeping stays linear.
+  The press's inverse joins the bulk before the rebuild, so a rebuild that
+  drops the editor records it. `enter` untouched records the steps as one
+  entry (none when they net to zero, nothing written when none was taken);
+  every other close (`close_editor`) rolls them back only while they are the
+  sheet's last change — `edit_seq`, bumped by every `after_edit`, unchanged
+  and every stepped line's qty, instrument and shift as the last step left
+  them — and otherwise records them. `flush_save` (close, quit) settles a
+  stepped bulk by the same rule (`take_back_steps`: rolled back while it is
+  the last change, else recorded and saved) and closes its editor before the
+  final save; an unstepped one stays with its open editor. A sheet replace
+  drops the bulk unrecorded (`forget_steps`). A palette verb closes the
+  editor first, so the palette's `undo` mid-step rolls the steps back and
+  then undoes the entry before them.
+- Pointer selection goes through the same `start_selection`/`clear_selection`
+  doors as the keys (`PricerTile::pointer`, fed `CellPointer` by the
+  delegate on mouse-down). The delegate's `drag_origin` is set only by a
+  press that a cell, the tree cell or the gutter caught, and cleared by any
+  release, so a button held from elsewhere never drags a selection. A press
+  in the open editor's own cell, or on a chevron, sets `inner_press` so the
+  row's bubbling handler does not report it; the editor's press reports
+  nothing and the chevron's reports a plain press.
+
 ## Known limitations
 
-- The action menu's key hints are the default bindings, written into the
-  menu; a user rebind is not reflected there. The market-data action list has
-  the same limitation.
 - Column widths are fixed pixels and do not follow font size. The defaults
   fit the tested samples at the largest font step and leave more space at
   smaller steps. `:autosize` (or the palette's "Autosize columns") fits
@@ -293,3 +376,8 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   vocabulary name (`__tree` for the tree) in the session record. A font
   change does not rescale fitted widths; run `:autosize` again. A fitted
   width also overrides a view width changed later, until `:autosize reset`.
+- Grid selections are one contiguous row range or rectangle. There is no
+  paste of a yanked TSV block (`p` puts only rows a `V` yank remembered), a
+  count is ignored by `d`, `shift+j`/`shift+k`, `g p` and `g u` while selecting,
+  a typed value under `v` fills one column, and a list-form package's qty
+  cannot be bulk-set or stepped (its skip reads only `refused`).

@@ -57,7 +57,7 @@ use geode_core::scope::{Expr, Scope, parse_expr};
 
 use crate::exprcomplete::{ExprCompletion, NamedOffer};
 
-use crate::frame::Frame;
+use crate::frame::FrameViewMut;
 use crate::keymap::{Keystroke, Modifiers};
 
 use super::ShellView;
@@ -270,10 +270,10 @@ fn append_missing(named: &mut Vec<String>, staged: &[String]) {
     }
 }
 
-/// Apply `text` and the `staged` names to `frame` as `mode` says.
+/// Apply `text` and the `staged` names to `frame`'s lane as `mode` says.
 /// `Ok(changed)` means the dialog closes; `Err(message)` stays inline (a
 /// parse error, an unknown column, or [`TERM_GONE`]). Every change goes
-/// through `Frame::set_scope`, so undo sees it. Whole and Add change the
+/// through `FrameViewMut::set_scope`, so undo sees it. Whole and Add change the
 /// names and the expression in ONE `set_scope`: two calls would leave two
 /// undo entries, and one undo would restore half the edit.
 ///
@@ -282,7 +282,7 @@ fn append_missing(named: &mut Vec<String>, staged: &[String]) {
 /// names the frame lacks and joins the text with `and`; with neither, it
 /// changes nothing. Term ignores `staged` (it never has any).
 pub fn apply(
-    frame: &mut Frame,
+    frame: &mut FrameViewMut<'_>,
     mode: &Mode,
     text: &str,
     staged: &[String],
@@ -395,7 +395,10 @@ pub fn open_term(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    let Some(mode) = Mode::term(index, view.frame.read(cx).scope().expression.as_ref()) else {
+    let Some(mode) = Mode::term(
+        index,
+        view.target_frame().read(cx).scope().expression.as_ref(),
+    ) else {
         return;
     };
     open(view, mode, window, cx);
@@ -410,7 +413,7 @@ pub fn open(view: &mut ShellView, mode: Mode, window: &mut Window, cx: &mut Cont
     if !dialog::can_open(view, dialog::DialogKind::ScopeExpr) {
         return;
     }
-    let current = view.frame.read(cx).scope();
+    let current = view.target_frame().read(cx).scope();
     let seed = mode.seed(current.expression.as_ref());
     let staged = seed_staged(&mode, current);
     let title = mode.title();
@@ -448,6 +451,7 @@ pub fn open(view: &mut ShellView, mode: Mode, window: &mut Window, cx: &mut Cont
 /// its chip is gone.
 pub(crate) fn sync_named_offers(view: &mut ShellView, cx: &mut Context<ShellView>) {
     let vocab = view.expr_vocab.clone();
+    let frame = view.target_frame();
     let Some(state) = view.scope_expr_dialog.as_mut() else {
         return;
     };
@@ -455,7 +459,7 @@ pub(crate) fn sync_named_offers(view: &mut ShellView, cx: &mut Context<ShellView
     if state.naming.is_some() {
         return;
     }
-    let frame = view.frame.read(cx);
+    let frame = frame.read(cx);
     let offers = named_offers(
         &state.mode,
         frame.named_expressions(),
@@ -554,7 +558,7 @@ fn handle_key(
     };
     let text = shell.dialog_input.read(cx).value().to_string();
     let vocab = shell.expr_vocab.clone();
-    let outcome = shell.frame.update(cx, |f, cx| {
+    let outcome = shell.target_frame().update(cx, |f, cx| {
         let outcome = apply(f, &mode, &text, &staged, &vocab);
         if outcome == Ok(true) {
             cx.notify();
@@ -716,7 +720,10 @@ fn save_named(
         _ => None,
     };
     if let Some((index, seeded)) = &term
-        && !shell.frame.read(cx).expression_term_is(*index, seeded)
+        && !shell
+            .target_frame()
+            .read(cx)
+            .expression_term_is(*index, seeded)
     {
         return Err(TERM_GONE.to_string());
     }
@@ -731,7 +738,7 @@ fn save_named(
     )?;
     if let Some(config) = apply::config_with_pending(shell) {
         let named = super::hot_reload::rebuild_named_expressions(&config);
-        shell.frame.update(cx, |f, cx| {
+        shell.target_frame().update(cx, |f, cx| {
             if f.replace_named_expressions(named) {
                 cx.notify();
             }
@@ -741,7 +748,7 @@ fn save_named(
         // The term was checked above and nothing between changes the
         // frame's scope, so the swap cannot refuse here; a refusal would
         // close with the definition written and the term left in place.
-        shell.frame.update(cx, |f, cx| {
+        shell.target_frame().update(cx, |f, cx| {
             let swapped = f.name_expression_term(index, &seeded, &name);
             debug_assert_eq!(swapped, Ok(true), "the term was checked before the write");
             cx.notify();
@@ -934,13 +941,14 @@ fn staged_chips(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::frame::Frame;
     use geode_core::groupings::GroupingSlots;
     use geode_core::scope::Scope;
     use geode_core::scopes::SavedScopes;
 
     fn frame_with(expr: Option<&str>) -> Frame {
         let mut f = Frame::new(GroupingSlots::default(), SavedScopes::new(), None);
-        f.set_scope(Scope {
+        f.shared_mut().set_scope(Scope {
             expression: expr.map(|t| parse_expr(t).unwrap()),
             ..Scope::default()
         });
@@ -948,7 +956,8 @@ mod tests {
     }
 
     fn terms(f: &Frame) -> Vec<String> {
-        f.scope()
+        f.shared()
+            .scope()
             .expression
             .as_ref()
             .map(|e| e.conjuncts().iter().map(|t| t.to_string()).collect())
@@ -968,7 +977,7 @@ mod tests {
     }
 
     fn term_mode(f: &Frame, index: usize) -> Mode {
-        Mode::term(index, f.scope().expression.as_ref()).expect("the term exists")
+        Mode::term(index, f.shared().scope().expression.as_ref()).expect("the term exists")
     }
 
     #[test]
@@ -990,15 +999,27 @@ mod tests {
     fn whole_mode_replaces_and_empty_clears() {
         let mut f = frame_with(Some("a = 1 and b = 2"));
         assert_eq!(
-            apply(&mut f, &Mode::Whole, "c = 3", &[], &ExprVocab::default()),
+            apply(
+                &mut f.shared_mut(),
+                &Mode::Whole,
+                "c = 3",
+                &[],
+                &ExprVocab::default()
+            ),
             Ok(true)
         );
         assert_eq!(terms(&f), vec!["c = 3"]);
         assert_eq!(
-            apply(&mut f, &Mode::Whole, "  ", &[], &ExprVocab::default()),
+            apply(
+                &mut f.shared_mut(),
+                &Mode::Whole,
+                "  ",
+                &[],
+                &ExprVocab::default()
+            ),
             Ok(true)
         );
-        assert_eq!(f.scope().expression, None);
+        assert_eq!(f.shared().scope().expression, None);
     }
 
     #[test]
@@ -1006,13 +1027,19 @@ mod tests {
         let mut f = frame_with(Some("a = 1 and b = 2 and c = 3"));
         let mode = term_mode(&f, 1);
         assert_eq!(
-            apply(&mut f, &mode, "x = 9", &[], &ExprVocab::default()),
+            apply(
+                &mut f.shared_mut(),
+                &mode,
+                "x = 9",
+                &[],
+                &ExprVocab::default()
+            ),
             Ok(true)
         );
         assert_eq!(terms(&f), vec!["a = 1", "x = 9", "c = 3"]);
         let mode = term_mode(&f, 0);
         assert_eq!(
-            apply(&mut f, &mode, "", &[], &ExprVocab::default()),
+            apply(&mut f.shared_mut(), &mode, "", &[], &ExprVocab::default()),
             Ok(true)
         );
         assert_eq!(terms(&f), vec!["x = 9", "c = 3"]);
@@ -1025,25 +1052,37 @@ mod tests {
     fn a_term_changed_underneath_refuses_edit_and_removal() {
         let mut f = frame_with(Some("a = 1 and b = 2"));
         let mode = term_mode(&f, 1);
-        f.set_scope(Scope {
+        f.shared_mut().set_scope(Scope {
             expression: Some(parse_expr("x = 1 and y = 2").unwrap()),
             ..Scope::default()
         });
         assert_eq!(
-            apply(&mut f, &mode, "b = 3", &[], &ExprVocab::default()),
+            apply(
+                &mut f.shared_mut(),
+                &mode,
+                "b = 3",
+                &[],
+                &ExprVocab::default()
+            ),
             Err(TERM_GONE.to_string())
         );
         assert_eq!(
-            apply(&mut f, &mode, "", &[], &ExprVocab::default()),
+            apply(&mut f.shared_mut(), &mode, "", &[], &ExprVocab::default()),
             Err(TERM_GONE.to_string())
         );
         assert_eq!(terms(&f), vec!["x = 1", "y = 2"]);
-        f.set_scope(Scope {
+        f.shared_mut().set_scope(Scope {
             expression: Some(parse_expr("x = 1").unwrap()),
             ..Scope::default()
         });
         assert_eq!(
-            apply(&mut f, &mode, "b = 3", &[], &ExprVocab::default()),
+            apply(
+                &mut f.shared_mut(),
+                &mode,
+                "b = 3",
+                &[],
+                &ExprVocab::default()
+            ),
             Err(TERM_GONE.to_string())
         );
         assert_eq!(terms(&f), vec!["x = 1"]);
@@ -1053,19 +1092,31 @@ mod tests {
     fn add_mode_joins_with_and_sets_when_none_and_empty_changes_nothing() {
         let mut f = frame_with(None);
         assert_eq!(
-            apply(&mut f, &Mode::Add, "   ", &[], &ExprVocab::default()),
+            apply(
+                &mut f.shared_mut(),
+                &Mode::Add,
+                "   ",
+                &[],
+                &ExprVocab::default()
+            ),
             Ok(false),
             "empty: no change"
         );
-        assert_eq!(f.scope().expression, None);
+        assert_eq!(f.shared().scope().expression, None);
         assert_eq!(
-            apply(&mut f, &Mode::Add, "a = 1", &[], &ExprVocab::default()),
+            apply(
+                &mut f.shared_mut(),
+                &Mode::Add,
+                "a = 1",
+                &[],
+                &ExprVocab::default()
+            ),
             Ok(true)
         );
         assert_eq!(terms(&f), vec!["a = 1"]);
         assert_eq!(
             apply(
-                &mut f,
+                &mut f.shared_mut(),
                 &Mode::Add,
                 "b = 2 or c = 3",
                 &[],
@@ -1074,7 +1125,8 @@ mod tests {
             Ok(true)
         );
         assert_eq!(
-            f.scope()
+            f.shared()
+                .scope()
                 .expression
                 .as_ref()
                 .map(ToString::to_string)
@@ -1089,7 +1141,14 @@ mod tests {
         let f0 = frame_with(Some("a = 1"));
         for mode in [Mode::Whole, term_mode(&f0, 0), Mode::Add] {
             let mut f = frame_with(Some("a = 1"));
-            let err = apply(&mut f, &mode, "book =", &[], &ExprVocab::default()).unwrap_err();
+            let err = apply(
+                &mut f.shared_mut(),
+                &mode,
+                "book =",
+                &[],
+                &ExprVocab::default(),
+            )
+            .unwrap_err();
             assert!(err.contains("at column"), "{mode:?}: {err}");
             assert_eq!(terms(&f), vec!["a = 1"], "{mode:?}");
         }
@@ -1154,10 +1213,10 @@ mod tests {
     #[test]
     fn whole_apply_sets_names_and_text_in_one_undo_step() {
         let mut f = frame_with(Some("a = 1"));
-        let before = f.scope().clone();
+        let before = f.shared().scope().clone();
         assert_eq!(
             apply(
-                &mut f,
+                &mut f.shared_mut(),
                 &Mode::Whole,
                 "b = 2",
                 &names(&["liq"]),
@@ -1165,10 +1224,14 @@ mod tests {
             ),
             Ok(true)
         );
-        assert_eq!(f.scope().named, names(&["liq"]));
+        assert_eq!(f.shared().scope().named, names(&["liq"]));
         assert_eq!(terms(&f), vec!["b = 2"]);
-        assert!(f.undo_scope());
-        assert_eq!(f.scope(), &before, "one undo restores names and text");
+        assert!(f.shared_mut().undo_scope());
+        assert_eq!(
+            f.shared().scope(),
+            &before,
+            "one undo restores names and text"
+        );
     }
 
     /// Add appends only the names the frame lacks, and joins the text,
@@ -1176,13 +1239,13 @@ mod tests {
     #[test]
     fn add_apply_appends_only_the_missing_names() {
         let mut f = frame_with(Some("a = 1"));
-        let mut scope = f.scope().clone();
+        let mut scope = f.shared().scope().clone();
         scope.named = names(&["liq"]);
-        f.set_scope(scope);
-        let before = f.scope().clone();
+        f.shared_mut().set_scope(scope);
+        let before = f.shared().scope().clone();
         assert_eq!(
             apply(
-                &mut f,
+                &mut f.shared_mut(),
                 &Mode::Add,
                 "b = 2",
                 &names(&["hedges", "liq"]),
@@ -1190,10 +1253,10 @@ mod tests {
             ),
             Ok(true)
         );
-        assert_eq!(f.scope().named, names(&["liq", "hedges"]));
+        assert_eq!(f.shared().scope().named, names(&["liq", "hedges"]));
         assert_eq!(terms(&f), vec!["a = 1", "b = 2"]);
-        assert!(f.undo_scope());
-        assert_eq!(f.scope(), &before);
+        assert!(f.shared_mut().undo_scope());
+        assert_eq!(f.shared().scope(), &before);
     }
 
     /// An empty field with names staged applies the names alone, in both
@@ -1203,7 +1266,7 @@ mod tests {
         let mut f = frame_with(None);
         assert_eq!(
             apply(
-                &mut f,
+                &mut f.shared_mut(),
                 &Mode::Add,
                 "  ",
                 &names(&["liq"]),
@@ -1211,12 +1274,12 @@ mod tests {
             ),
             Ok(true)
         );
-        assert_eq!(f.scope().named, names(&["liq"]));
-        assert_eq!(f.scope().expression, None);
+        assert_eq!(f.shared().scope().named, names(&["liq"]));
+        assert_eq!(f.shared().scope().expression, None);
         let mut f = frame_with(Some("a = 1"));
         assert_eq!(
             apply(
-                &mut f,
+                &mut f.shared_mut(),
                 &Mode::Whole,
                 "",
                 &names(&["hedges"]),
@@ -1224,8 +1287,8 @@ mod tests {
             ),
             Ok(true)
         );
-        assert_eq!(f.scope().named, names(&["hedges"]));
-        assert_eq!(f.scope().expression, None);
+        assert_eq!(f.shared().scope().named, names(&["hedges"]));
+        assert_eq!(f.shared().scope().expression, None);
     }
 
     /// An empty field with nothing staged: Whole clears the expression
@@ -1233,21 +1296,33 @@ mod tests {
     #[test]
     fn empty_text_with_nothing_staged_keeps_todays_results() {
         let mut f = frame_with(Some("a = 1"));
-        let mut scope = f.scope().clone();
+        let mut scope = f.shared().scope().clone();
         scope.named = names(&["liq"]);
-        f.set_scope(scope);
-        let before = f.scope().clone();
+        f.shared_mut().set_scope(scope);
+        let before = f.shared().scope().clone();
         assert_eq!(
-            apply(&mut f, &Mode::Add, "", &[], &ExprVocab::default()),
+            apply(
+                &mut f.shared_mut(),
+                &Mode::Add,
+                "",
+                &[],
+                &ExprVocab::default()
+            ),
             Ok(false)
         );
-        assert_eq!(f.scope(), &before);
+        assert_eq!(f.shared().scope(), &before);
         assert_eq!(
-            apply(&mut f, &Mode::Whole, "", &[], &ExprVocab::default()),
+            apply(
+                &mut f.shared_mut(),
+                &Mode::Whole,
+                "",
+                &[],
+                &ExprVocab::default()
+            ),
             Ok(true)
         );
-        assert_eq!(f.scope().expression, None);
-        assert!(f.scope().named.is_empty());
+        assert_eq!(f.shared().scope().expression, None);
+        assert!(f.shared().scope().named.is_empty());
     }
 
     /// Offers leave out staged names; Term mode offers none; an invalid

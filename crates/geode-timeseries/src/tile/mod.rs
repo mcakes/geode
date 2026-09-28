@@ -7,9 +7,10 @@
 //! to retain the chart's cached paths; only visible-window statistics need a
 //! new query. Refusals become notices or inline popup errors.
 //!
-//! `data` owns fetch tracking, tagged series delivery, and flip-barrier
-//! staging. Only the frame's as-of counter invalidates an established series
-//! request; flip releases staged results without triggering a query.
+//! `data` owns fetch tracking and tagged series delivery over
+//! `geode_tile::following` (the flip-barrier staging). Only the frame's as-of
+//! counter invalidates an established series request; flip releases staged
+//! results without triggering a query.
 //! `popups` owns opening, input, commit, and dismissal for local editors.
 
 use std::cell::RefCell;
@@ -26,7 +27,7 @@ use geode_core::series::{Frequency, SeriesOutcome, SeriesResult, SlotKind};
 use geode_data::{DataHandle, FetchParams};
 use geode_shell::actions::ActionId;
 use geode_shell::diagnostics::Diagnostics;
-use geode_shell::frame::{Frame, FrameVersions};
+use geode_shell::frame::{FrameRef, FrameVersions};
 use geode_shell::keymap::KeyContext;
 use geode_shell::module::{FindEvent, StackHandle};
 use geode_shell::series::SeriesSettings;
@@ -56,10 +57,11 @@ use crate::core::{
 use crate::header::{self, HeaderModel};
 use crate::popup::{
     ColorPick, DateFieldPaint, ExprField, MenuState, PickContext, PickerStage, PickerState, Popup,
-    PopupKind, RangePopup, SeriesPopup, Which, render_menu, render_picker, render_range,
-    render_series_popup,
+    PopupKind, RangePopup, SeriesPopup, Which, render_picker, render_range, render_series_popup,
 };
 use crate::tile::pointer::{ChartBounds, Drag};
+use geode_tile::following::{Delivered, FollowingQuery, FrameDoor, Promotion, Unanswered};
+use geode_tile::menu::{Menu, MenuHost, MenuIds, Row};
 
 mod data;
 mod pointer;
@@ -103,7 +105,7 @@ struct ChartKey {
 
 pub struct TimeseriesTile {
     id: TileId,
-    frame: Entity<Frame>,
+    frame: FrameRef,
     /// Catalogue used by the add picker. The observer updates an open identity
     /// list when its options change; series-row provenance comes from results.
     diagnostics: Entity<Diagnostics>,
@@ -126,18 +128,12 @@ pub struct TimeseriesTile {
     /// chips' swatches and the chart model's line colors are both
     /// resolved against it.
     theme_key: Option<[Hsla; 28]>,
-    /// The tag of the request in flight, so a stale answer is dropped.
-    tag: u64,
-    /// The frame versions the request in flight was made under.
-    acted: Option<FrameVersions>,
-    query_in_flight: bool,
+    /// The series query under the flip barrier (see `geode_tile::following`):
+    /// only the frame's as-of invalidates it.
+    following: FollowingQuery<SeriesResult>,
     /// A view move is waiting for the request in flight to answer before it
     /// asks for its own window's statistics. See [`Self::view_moved`].
     view_waiting: bool,
-    /// A delivery staged behind the flip barrier.
-    staged: Option<(SeriesResult, FrameVersions)>,
-    /// Most recently observed flip generation, whether or not a result was staged.
-    last_flip: u64,
     visible: bool,
     /// The next delivery resets the view to the new full range.
     reset_view: bool,
@@ -176,7 +172,7 @@ impl TimeseriesTile {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: TileId,
-        frame: Entity<Frame>,
+        frame: FrameRef,
         diagnostics: Entity<Diagnostics>,
         data: DataHandle,
         colors: Rc<RefCell<Arc<NamedColours>>>,
@@ -210,10 +206,13 @@ impl TimeseriesTile {
             cx.notify();
         })
         .detach();
-        // The footer names live chords, so a keymap reload re-resolves
-        // it — once, here, never per frame.
+        // The footer and an open menu name live chords, so a keymap reload
+        // re-resolves both — once, here, never per frame.
         cx.observe_global::<geode_shell::tips::Chords>(|this, cx| {
             this.footer = header::footer_hints(cx);
+            if let Some(Popup::Menu(m)) = &mut this.popup {
+                m.menu.rehint(&geode_tile::menu::live_bindings(cx));
+            }
             cx.notify();
         })
         .detach();
@@ -223,13 +222,22 @@ impl TimeseriesTile {
             cx.notify();
         })
         .detach();
-        cx.observe(&frame, |this, frame, cx| {
+        cx.observe(frame.entity(), |this, _, cx| {
             // Process flip releases before the visibility guard so hidden tiles can
             // promote staged data. Promotion still checks the followed as-of version.
-            let now = frame.read(cx).versions();
-            if now.flip != this.last_flip {
-                this.last_flip = now.flip;
-                this.promote(cx);
+            // Read through the tile's own handle: the observed entity alone
+            // would answer for the shared lane, not this workspace's.
+            let now = this.frame.read(cx).versions();
+            // The post-step: every promotion that took something releases a
+            // view move waiting behind it.
+            match this.following.on_flip(now, Self::differs_on_followed) {
+                Promotion::Empty => {}
+                Promotion::Superseded => this.release_view(cx),
+                Promotion::Apply(result) => {
+                    this.apply_result(result, cx);
+                    cx.notify();
+                    this.release_view(cx);
+                }
             }
             // An open frequency menu's disabled rows are the point cap
             // over the range AS RESOLVED under the frame's as-of, so any
@@ -244,7 +252,11 @@ impl TimeseriesTile {
             }
             // Established series requests follow as-of only. Frame scope, grouping,
             // and unrelated dataset publications do not change their inputs.
-            if !this.model.slots().is_empty() && this.follows_changed(now) {
+            if !this.model.slots().is_empty()
+                && this
+                    .following
+                    .follows_changed(now, Self::differs_on_followed)
+            {
                 // Changing as-of can move both ends of a relative range. Clear fetch
                 // tracking even though the stored Range is unchanged, then ask for gaps
                 // before querying cached points.
@@ -253,7 +265,8 @@ impl TimeseriesTile {
                 // makes `follows_changed` true, but resubmitting its unanswered fetches on
                 // every unrelated frame notification would duplicate work.
                 if this
-                    .acted
+                    .following
+                    .acted()
                     .is_some_and(|acted| Self::differs_on_followed(acted, now))
                 {
                     this.in_flight.clear();
@@ -267,7 +280,9 @@ impl TimeseriesTile {
                 // else on this path re-prepares them.
                 this.rebuild_chrome(cx);
             } else {
-                this.self_arrive(now, cx);
+                let key = QueryKey(this.id.0);
+                this.following
+                    .self_arrive(&mut FrameDoor::new(&this.frame, cx), key, now);
             }
         })
         .detach();
@@ -334,12 +349,8 @@ impl TimeseriesTile {
             chart_version: 1,
             last_chart_key,
             theme_key: None,
-            tag: 0,
-            acted: None,
-            query_in_flight: false,
+            following: FollowingQuery::new(),
             view_waiting: false,
-            staged: None,
-            last_flip: 0,
             visible: false,
             reset_view: false,
             in_flight: HashSet::new(),
@@ -404,9 +415,7 @@ impl TimeseriesTile {
     /// retained result and changed followed versions, also query immediately.
     /// Otherwise a successful fetch completion triggers the query, including
     /// `Ok(0)` when the data tier already covers the span.
-    /// Hiding attempts query cancellation and clears request/fetch tracking.
-    /// Cancellation has no acknowledgement and does not stop upstream fetches
-    /// or retract results already emitted by the data tier.
+    /// Hiding keeps the series query; closing (`closed`) cancels it.
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         if self.visible == visible {
             return;
@@ -419,23 +428,35 @@ impl TimeseriesTile {
                 self.fetch_pending(cx);
             }
             let now = self.frame.read(cx).versions();
-            if self.result.is_some() && !self.model.slots().is_empty() && self.follows_changed(now)
+            if self.result.is_some()
+                && !self.model.slots().is_empty()
+                && self
+                    .following
+                    .follows_changed(now, Self::differs_on_followed)
             {
                 self.requery(cx);
             }
         } else {
-            // An in-flight query nothing will paint is a round trip
-            // spent for nothing.
-            self.data.cancel(QueryKey(self.id.0));
-            // Clear acted versions so showing a tile cannot treat its cancelled
-            // request as completed work.
-            self.acted = None;
-            self.query_in_flight = false;
+            // Hidden tiles hear no fetch completions (the shell broadcasts
+            // `SeriesFetched` to visible tiles only), so fetch tracking is
+            // dropped and every show refetches. The series query itself is
+            // kept: its answer applies when it lands.
             self.view_waiting = false;
             self.in_flight.clear();
         }
         self.rebuild_chrome(cx);
         cx.notify();
+    }
+
+    /// The shell is removing this tile: cancel the series query by key and
+    /// answer any barrier still waiting on it. Fetches run on; their
+    /// completions reach no one. Runs inside the shell's occupant
+    /// reconciliation, so it updates only the frame and the data handle.
+    pub fn closed(&mut self, cx: &mut Context<Self>) {
+        let key = QueryKey(self.id.0);
+        self.data.cancel(key);
+        self.following
+            .close(&mut FrameDoor::new(&self.frame, cx), key);
     }
 
     /// This tile ignores the shell's find events; its local popup actions own
@@ -711,7 +732,7 @@ impl TimeseriesTile {
     /// latest view ([`Self::release_view`]).
     fn view_moved(&mut self, changed: Changed, cx: &mut Context<Self>) {
         if changed.query() && self.visible && !self.model.slots().is_empty() {
-            if self.query_in_flight {
+            if self.following.in_flight() {
                 self.view_waiting = true;
             } else {
                 self.requery(cx);
@@ -777,19 +798,17 @@ impl TimeseriesTile {
 
     /// Rebuild an open menu's rows over the model and the frame as they are
     /// now, keeping the highlight on its row where that row is still an action,
-    /// else landing on the first enabled one. Answers whether the rows moved.
+    /// else snapping it to the nearest action. Answers whether the rows moved.
     fn refresh_menu_rows(&mut self, cx: &App) -> bool {
         let Some(Popup::Menu(m)) = &self.popup else {
             return false;
         };
         let rows = self.menu_rows(m.kind, cx);
+        let bindings = geode_tile::menu::live_bindings(cx);
         let Some(Popup::Menu(m)) = &mut self.popup else {
             return false;
         };
-        m.highlighted = menu::step(&rows, m.highlighted, 0);
-        let moved = m.rows != rows;
-        m.rows = rows;
-        moved
+        m.menu.replace_rows(rows, &bindings)
     }
 
     /// Prepare header, title, open series-list rows and an open menu's rows.
@@ -821,7 +840,7 @@ impl TimeseriesTile {
         // the frequency and the cap over the range — and a `:` line runs
         // under an open menu (the menu context leaves `:` to the tile).
         // The highlight stays on its row where that row is still an
-        // action, else lands on the first enabled one.
+        // action, else snaps to the nearest action.
         self.refresh_menu_rows(cx);
         let offset_secs = local_offset_secs(cx);
         let key = chart_key(
@@ -891,7 +910,7 @@ impl TimeseriesTile {
     /// arrive?" has to hand `barrier_wants`.
     #[cfg(test)]
     pub(crate) fn acted(&self) -> Option<FrameVersions> {
-        self.acted
+        self.following.acted()
     }
 }
 
@@ -1055,13 +1074,13 @@ impl Render for TimeseriesTile {
         let under_range = match self.popup.as_ref() {
             Some(Popup::Range(r)) => Some(render_range(r, &tile, tile_id, cx).into_any_element()),
             Some(Popup::Menu(m)) if m.kind == MenuKind::Range => {
-                Some(render_menu(m, &tile, tile_id, cx).into_any_element())
+                Some(paint_menu(m, &tile, cx).into_any_element())
             }
             _ => None,
         };
         let under_freq = match self.popup.as_ref() {
             Some(Popup::Menu(m)) if m.kind == MenuKind::Frequency => {
-                Some(render_menu(m, &tile, tile_id, cx).into_any_element())
+                Some(paint_menu(m, &tile, cx).into_any_element())
             }
             _ => None,
         };
@@ -1077,9 +1096,7 @@ impl Render for TimeseriesTile {
                 cx,
             )),
             Some(Popup::Picker(p)) => Some(render_picker(p, &tile, tile_id, cx)),
-            Some(Popup::Menu(m)) if m.kind == MenuKind::Actions => {
-                Some(render_menu(m, &tile, tile_id, cx))
-            }
+            Some(Popup::Menu(m)) if m.kind == MenuKind::Actions => Some(paint_menu(m, &tile, cx)),
             // The expression field is not an overlay: it is a strip in
             // the body, below; the color picker is drawn in its target
             // chip, and the range and frequency popups under their
@@ -1154,6 +1171,28 @@ impl Render for TimeseriesTile {
             .child(body)
             .child(header::render_footer(&self.footer, theme))
     }
+}
+
+/// Paint an open menu through the door: the action list hangs from the
+/// header's right edge, the range and frequency menus under their triggers.
+/// A press outside closes it only while THIS menu is still up: a press on
+/// another menu's trigger runs first (capture phase) and has already swapped
+/// its own menu in, which this press must not close.
+fn paint_menu(m: &MenuState, tile: &Entity<TimeseriesTile>, cx: &App) -> gpui::Deferred {
+    let kind = m.kind;
+    geode_tile::menu::render_menu(
+        &m.menu,
+        &m.ids,
+        match kind {
+            MenuKind::Actions => gpui::Anchor::TopRight,
+            MenuKind::Range | MenuKind::Frequency => gpui::Anchor::TopLeft,
+        },
+        tile,
+        move |t: &mut TimeseriesTile, window, cx| {
+            t.outside_press(PopupKind::Menu(kind), window, cx)
+        },
+        cx,
+    )
 }
 
 /// What one `enter` in the picker turns out to mean, decided while the

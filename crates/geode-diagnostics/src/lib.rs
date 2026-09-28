@@ -23,7 +23,7 @@ use geode_core::config::Config;
 use geode_core::log::Ring;
 use geode_shell::actions::{ActionDef, ActionId, ActionRegistry};
 use geode_shell::diagnostics::{DIAGNOSTICS_PAGE_KIND, Diagnostics};
-use geode_shell::frame::Frame;
+use geode_shell::frame::FrameRef;
 use geode_shell::keymap::KeyContext;
 use geode_shell::module::{PageContent, PageFactory, PageOccupant, ShellActions};
 use gpui::{App, AppContext as _, Entity, SharedString, Window};
@@ -184,7 +184,7 @@ impl PageFactory for DiagnosticsPageFactory {
     fn create(
         &self,
         restored: Option<&toml::Table>,
-        frame: Entity<Frame>,
+        frame: FrameRef,
         diagnostics: Entity<Diagnostics>,
         actions: ShellActions,
         window: &mut Window,

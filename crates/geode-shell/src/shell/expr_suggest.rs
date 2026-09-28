@@ -52,7 +52,7 @@ pub(crate) fn completion_mut(view: &mut ShellView) -> Option<&mut ExprCompletion
 fn values_scope(view: &ShellView, cx: &App) -> Option<Scope> {
     match view.top_kind() {
         Some(DialogKind::ScopeExpr) => {
-            let current = view.frame.read(cx).scope();
+            let current = view.target_frame().read(cx).scope();
             let state = view.scope_expr_dialog.as_ref()?;
             Some(scope_expr_view::request_scope(
                 &state.mode,
@@ -126,7 +126,7 @@ fn request_values(view: &mut ShellView, column: String, cx: &mut Context<ShellVi
     let Some(scope) = values_scope(view, cx) else {
         return;
     };
-    let as_of = view.frame.read(cx).as_of().clone();
+    let as_of = view.target_frame().read(cx).as_of().clone();
     view.next_picker_tag += 1;
     let tag = view.next_picker_tag;
     let vocab = view.expr_vocab.clone();
@@ -165,12 +165,16 @@ pub(crate) fn deliver(view: &mut ShellView, outcome: DistinctOutcome, cx: &mut C
                 .completion
                 .deliver(&outcome.column, outcome.tag, outcome.values.clone(), &vocab);
     }
-    if !landed
-        && let Some(state) = view.object_dialog.as_mut()
-        && super::objectdialog::expression_entry_open(state)
-        && let Some(c) = state.expr.as_mut()
-    {
-        landed = c.deliver(&outcome.column, outcome.tag, outcome.values, &vocab);
+    if !landed {
+        // The live object dialog and every parked one: an expression field covered
+        // by another domain's dialog still owns its request.
+        landed = view
+            .object_dialog
+            .iter_mut()
+            .chain(super::dialog::parked_objects_mut(&mut view.modals))
+            .filter(|state| super::objectdialog::expression_entry_open(state))
+            .filter_map(|state| state.expr.as_mut())
+            .any(|c| c.deliver(&outcome.column, outcome.tag, outcome.values.clone(), &vocab));
     }
     if landed {
         cx.notify();

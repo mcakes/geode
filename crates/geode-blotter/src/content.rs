@@ -10,7 +10,7 @@ use geode_core::view::ViewSpec;
 use geode_data::DataHandle;
 use geode_shell::actions::{ActionDef, ActionId, ActionRegistry};
 use geode_shell::diagnostics::Diagnostics;
-use geode_shell::frame::Frame;
+use geode_shell::frame::FrameRef;
 use geode_shell::keymap::KeyContext;
 use geode_shell::module::{
     Delivery, FindEvent, ModuleFactory, StackHandle, TileContent, TileOccupant,
@@ -163,6 +163,9 @@ impl TileContent for BlotterContent {
     fn set_visible(&self, visible: bool, cx: &mut App) {
         self.tile.update(cx, |t, cx| t.set_visible(visible, cx))
     }
+    fn closed(&self, cx: &mut App) {
+        self.tile.update(cx, |t, cx| t.closed(cx))
+    }
     fn set_stack(&self, stack: Option<StackHandle>, cx: &mut App) {
         self.tile.update(cx, |t, cx| t.set_stack(stack, cx))
     }
@@ -174,6 +177,9 @@ impl TileContent for BlotterContent {
     }
     fn launch_context(&self, cx: &App) -> geode_core::launch::LaunchContext {
         self.tile.read(cx).launch_context(cx)
+    }
+    fn tile_columns(&self, cx: &App) -> Option<geode_core::tile_columns::TileColumns> {
+        self.tile.read(cx).tile_columns(cx)
     }
 }
 
@@ -286,7 +292,7 @@ impl ModuleFactory for BlotterFactory {
         &self,
         tile: TileId,
         restored: Option<&toml::Table>,
-        frame: Entity<Frame>,
+        frame: FrameRef,
         _diagnostics: Entity<Diagnostics>,
         window: &mut Window,
         cx: &mut App,
@@ -322,6 +328,7 @@ mod tests {
     use geode_core::log::LogLevels;
     use geode_core::scopes::SavedScopes;
     use geode_shell::defaults::default_mod;
+    use geode_shell::frame::Frame;
     use geode_shell::keymap::fragments::{check_fragment, fragment_doc};
     use geode_shell::keymap::{KeyContext, MatchResult, Matcher, build_keymap, parse_keystroke};
 
@@ -529,7 +536,14 @@ mod tests {
                     let frame =
                         cx.new(|_| Frame::new(GroupingSlots::default(), SavedScopes::new(), None));
                     let diagnostics = cx.new(|_| Diagnostics::new(LogLevels::default()));
-                    let occupant = factory.create(TileId(1), None, frame, diagnostics, window, cx);
+                    let occupant = factory.create(
+                        TileId(1),
+                        None,
+                        FrameRef::new(frame, geode_shell::tiling::WorkspaceIx::FIRST),
+                        diagnostics,
+                        window,
+                        cx,
+                    );
                     occupant.view.downcast::<BlotterTile>().unwrap()
                 })
             })

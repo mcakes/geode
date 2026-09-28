@@ -10,27 +10,12 @@ bench = false
 [dependencies]
 geode-core.workspace = true
 chrono = "0.4.42"
-# XML for the desk's market-data documents (spec §6). 0.41.0 was already
-# in Cargo.lock before this crate existed — gpui's Linux platform deps
-# reach it through `wayland-scanner` and `xcb` — so this pins the version
-# cargo already resolves and adds no second copy of it anywhere
-# (`cargo tree -i quick-xml` names one). It IS a new compiled crate on
-# macOS and Windows, where those two are not built.
-#
-# Default features only: no `encoding` (the desk's documents are UTF-8)
-# and no `serialize` (the walk is hand-written, deliberately — see
-# `cvi.rs`'s module doc for the three reasons).
+# Parse and write UTF-8 XML with an explicit event walk. The optional
+# encoding and serialization features are not needed.
 quick-xml = "0.41"
 
 [dev-dependencies]
-# Test-feature parity (2026-09-19): `cargo test --workspace` resolves
-# geode-core WITH `test-support` (geode-shell's dev-dependencies turn it
-# on, and cargo unifies features across every member it builds together),
-# so a `cargo test -p` of this crate alone must ask for the same thing or
-# it builds a second geode-core — and everything above it — that differs
-# only in that feature. One artifact per crate per profile is the rule;
-# `cargo tree -p <member> -i geode-core --format '{p} [{f}]'` must agree
-# with `cargo tree --workspace` for every member.
+# Match workspace test features so package-only tests reuse core artifacts.
 geode-core = { workspace = true, features = ["test-support"] }
 criterion = "0.8.2"
 proptest = "1"

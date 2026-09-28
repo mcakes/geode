@@ -14,11 +14,11 @@ use geode_core::series::{BucketRule, Frequency, SlotKind, SlotProvenance, SlotRe
 use geode_data::{DataHandle, Request};
 use geode_shell::actions::{ActionId, ActionRegistry};
 use geode_shell::diagnostics::Diagnostics;
-use geode_shell::frame::Frame;
+use geode_shell::frame::{Frame, FrameRef};
 use geode_shell::keymap::{KeyContext, Keymap, MatchResult, Matcher, build_keymap};
 use geode_shell::module::{Delivery, ModuleFactory, ModuleRoster, TileContent, TileOccupant};
 use geode_shell::series::{FetchSource, SeriesSettings};
-use geode_shell::tiling::TileId;
+use geode_shell::tiling::{TileId, WorkspaceIx};
 use geode_widgets::datefield::Segment;
 use gpui::{Entity, SharedString, Window};
 use gpui_component::color_picker::ColorPickerState;
@@ -169,7 +169,7 @@ impl ModuleFactory for Handle {
         &self,
         tile: TileId,
         restored: Option<&toml::Table>,
-        frame: Entity<Frame>,
+        frame: FrameRef,
         diagnostics: Entity<Diagnostics>,
         window: &mut Window,
         cx: &mut gpui::App,
@@ -231,8 +231,8 @@ fn open_barrier_on_as_of(
 ) {
     let keys = keys.to_vec();
     h.frame.update(vcx, |f, cx| {
-        f.set_as_of(AsOf::At(at));
-        f.open_flip(keys, std::time::Instant::now());
+        f.shared_mut().set_as_of(AsOf::At(at));
+        f.shared_mut().open_flip(keys, std::time::Instant::now());
         cx.notify();
     });
 }
@@ -336,13 +336,17 @@ fn open_full(
             let factory = factory.clone();
             let keymap = keymap.clone();
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                // The tile sits in unpinned workspace 1, so the shared lane is
+                // its lane and tests address it as `f.shared()` /
+                // `f.shared_mut()`. A test that pins must reach the tile's lane
+                // through its `FrameRef` instead.
                 let frame =
                     cx.new(|_| Frame::new(GroupingSlots::default(), SavedScopes::new(), None));
                 let diagnostics = cx.new(|_| Diagnostics::new(LogLevels::default()));
                 let occupant = factory.create(
                     TileId(TILE),
                     restored.as_ref(),
-                    frame.clone(),
+                    FrameRef::new(frame.clone(), WorkspaceIx::FIRST),
                     diagnostics.clone(),
                     window,
                     cx,
@@ -430,7 +434,7 @@ impl Harness {
         }
     }
     /// Everything submitted since the last drain except a `Cancel` —
-    /// what a test asserting on ORDER reads, since a hide's cancel is
+    /// what a test asserting on ORDER reads, since a close's cancel is
     /// housekeeping rather than a question.
     fn requests(&self) -> Vec<Request> {
         self.raw_requests()
@@ -749,14 +753,13 @@ impl Harness {
     fn menu_ticked(&self, vcx: &gpui::VisualTestContext) -> String {
         self.tile
             .read_with(vcx, |t, _| match t.popup() {
-                Some(Popup::Menu(m)) => m.rows.iter().find_map(|r| match r {
-                    menu::MenuRow::Action {
-                        title,
-                        checked: Some(true),
-                        ..
-                    } => Some(title.to_string()),
-                    _ => None,
-                }),
+                Some(Popup::Menu(m)) => m
+                    .menu
+                    .rows()
+                    .iter()
+                    .filter_map(|r| r.action())
+                    .find(|a| a.tick() == Some(true))
+                    .map(|a| a.title().to_string()),
                 _ => None,
             })
             .expect("a menu row is ticked")
@@ -918,7 +921,7 @@ fn normal_mode_verbs_drive_the_model_and_bump_the_chart_version(cx: &mut gpui::T
     assert_eq!(h.model(&vcx).slots()[1].axis, Axis::Right);
     assert!(
         h.chart(&vcx).version > v0,
-        "a chrome change rebuilds the chart model (§8.5's version contract)"
+        "a chrome change rebuilds the chart model"
     );
     // Two axis steps from Right pass through BottomLeft to BottomRight.
     h.dispatch(&mut vcx, "axis_next", Some(2));
@@ -1078,11 +1081,11 @@ fn every_colon_command_leaves_the_frame_alone(cx: &mut gpui::TestAppContext) {
             "no sweep line for `:{word}`"
         );
     }
-    let before = h.frame.read_with(&vcx, |f, _| f.versions());
+    let before = h.frame.read_with(&vcx, |f, _| f.shared().versions());
     for line in lines {
         assert!(commands::parse(line).is_ok(), "`{line}` no longer parses");
         let _ = vcx.update(|window, cx| h.content.command(line, window, cx));
-        let after = h.frame.read_with(&vcx, |f, _| f.versions());
+        let after = h.frame.read_with(&vcx, |f, _| f.shared().versions());
         assert_eq!(
             (after.scope, after.grouping, after.as_of),
             (before.scope, before.grouping, before.as_of),
@@ -1115,10 +1118,7 @@ fn serialize_and_restore_round_trip_the_model(cx: &mut gpui::TestAppContext) {
     h.dispatch(&mut vcx, "zoom_in", None);
     let table = vcx.update(|_, cx| h.content.serialize(cx));
     assert_eq!(table.get("slots").unwrap().as_array().unwrap().len(), 3);
-    assert!(
-        table.get("view").is_none(),
-        "the view is not persisted (§9.11)"
-    );
+    assert!(table.get("view").is_none(), "the view is not persisted");
     let (h2, mut vcx2) = open_with(cx, Some(table.clone()));
     let m = h2.model(&vcx2);
     assert_eq!(m.slots().len(), 3);
@@ -1306,7 +1306,7 @@ fn a_range_change_refetches_a_pair_whose_fetch_has_not_answered(cx: &mut gpui::T
     // An unrelated frame notification before the first fetch returns must not
     // resubmit that span. With no acted query yet, requery can still be needed.
     h.frame.update(&mut vcx, |f, cx| {
-        f.set_scope(geode_core::scope::Scope {
+        f.shared_mut().set_scope(geode_core::scope::Scope {
             text: Some("spx".into()),
             ..Default::default()
         });
@@ -1528,7 +1528,7 @@ fn a_query_change_requeries_and_a_range_change_fetches_and_queries(cx: &mut gpui
     );
     assert!(
         matches!(reqs[1], Request::Series(_)),
-        "…and queries the cached part at once (§9.10)"
+        "…and queries the cached part at once"
     );
     // Stats over the visible window: a pan requeries while
     // percentiles are on.
@@ -1558,11 +1558,12 @@ fn the_tile_follows_as_of_only_and_stages_under_an_open_barrier(cx: &mut gpui::T
     h.deliver_series(&mut vcx, tag, result_with(&[1], 5));
     // A scope bump: nothing, and it must not hold the barrier either.
     h.frame.update(&mut vcx, |f, cx| {
-        f.set_scope(geode_core::scope::Scope {
+        f.shared_mut().set_scope(geode_core::scope::Scope {
             text: Some("spx".into()),
             ..Default::default()
         });
-        f.open_flip([QueryKey(TILE)], std::time::Instant::now());
+        f.shared_mut()
+            .open_flip([QueryKey(TILE)], std::time::Instant::now());
         cx.notify();
     });
     assert!(h.series_request().is_none(), "scope is not followed");
@@ -1619,7 +1620,7 @@ fn the_tile_follows_as_of_only_and_stages_under_an_open_barrier(cx: &mut gpui::T
 }
 
 #[gpui::test]
-fn a_hidden_tile_cancels_and_a_shown_one_requeries_and_a_restored_one_refetches_once(
+fn a_hidden_tile_keeps_its_query_and_a_shown_one_refetches_and_a_restored_one_refetches_once(
     cx: &mut gpui::TestAppContext,
 ) {
     let (h, mut vcx) = open(cx);
@@ -1628,24 +1629,30 @@ fn a_hidden_tile_cancels_and_a_shown_one_requeries_and_a_restored_one_refetches_
     h.requests();
     h.deliver_fetched(&mut vcx, "demo_kdb", "SPX.close", Ok(1));
     let tag = h.series_request().unwrap().tag;
-    // A tile with a result on screen is what a hide/show round trip
-    // is about; a tile that has never been answered comes back
-    // through its fetch, which the restore half below pins.
-    h.deliver_series(&mut vcx, tag, result_with(&[1], 5));
-    h.requests();
+    // Hidden with the query still out: a hide is not a close.
     h.visible(&mut vcx, false);
     assert!(
-        matches!(h.raw_requests().last(), Some(Request::Cancel { key }) if *key == QueryKey(TILE))
+        !h.raw_requests()
+            .iter()
+            .any(|r| matches!(r, Request::Cancel { .. })),
+        "a hide is not a close: the query is kept"
+    );
+    h.deliver_series(&mut vcx, tag, result_with(&[1], 5));
+    assert_eq!(
+        h.chart(&vcx).buckets.len(),
+        5,
+        "its answer applies while hidden"
     );
     h.visible(&mut vcx, true);
     let reqs = h.requests();
     assert!(
         reqs.iter().any(|r| matches!(r, Request::Fetch(_))),
-        "shown: refetch (§9.10)…"
+        "shown: refetch…"
     );
     assert!(
-        reqs.iter().any(|r| matches!(r, Request::Series(_))),
-        "…and requery"
+        !reqs.iter().any(|r| matches!(r, Request::Series(_))),
+        "…but no query from the show itself: nothing it follows moved, and \
+         the refetch's completion is what asks again"
     );
     let table = vcx.update(|_, cx| h.content.serialize(cx));
     let (h2, mut vcx2) = open_with(cx, Some(table));
@@ -1666,6 +1673,68 @@ fn a_hidden_tile_cancels_and_a_shown_one_requeries_and_a_restored_one_refetches_
     assert!(
         h2.fetch_request().is_some(),
         "every show refetches (coverage subtraction makes it cheap)"
+    );
+}
+
+#[gpui::test]
+fn an_as_of_change_while_hidden_requeries_on_reshow(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_loaded(cx, 5);
+    h.visible(&mut vcx, false);
+    h.requests();
+    let at = chrono::Utc::now() - chrono::Duration::days(30);
+    h.frame.update(&mut vcx, |f, cx| {
+        f.shared_mut().set_as_of(AsOf::At(at));
+        cx.notify();
+    });
+    assert!(h.requests().is_empty(), "a hidden tile asks nothing");
+    h.visible(&mut vcx, true);
+    let reqs = h.requests();
+    let Some(Request::Series(q)) = reqs.iter().find(|r| matches!(r, Request::Series(_))) else {
+        panic!("the as-of moved while hidden: reshow asks again: {reqs:?}");
+    };
+    assert_eq!(q.as_of, AsOf::At(at));
+}
+
+#[gpui::test]
+fn closing_the_tile_mid_flip_cancels_its_query_and_releases_the_barrier(
+    cx: &mut gpui::TestAppContext,
+) {
+    // The shell's recorder test pins that removal reaches `closed`;
+    // this test pins what `closed` does.
+    let (h, mut vcx) = open_loaded(cx, 5);
+    h.requests();
+    let at = chrono::Utc::now() - chrono::Duration::days(30);
+    let opened = std::time::Instant::now();
+    h.frame.update(&mut vcx, |f, cx| {
+        let mut lane = f.shared_mut();
+        lane.set_as_of(AsOf::At(at));
+        lane.open_flip([QueryKey(TILE)], opened);
+        cx.notify();
+    });
+    let q = h.series_request().expect("an as-of change queries");
+    h.frame.update(&mut vcx, |f, _| {
+        assert!(
+            !f.sweep(opened + geode_shell::frame::FLIP_DEADLINE / 2),
+            "halfway to the deadline, time alone releases nothing"
+        );
+    });
+    assert!(h.frame.read_with(&vcx, |f, _| f.barrier_open()));
+    vcx.update(|_, cx| h.content.closed(cx));
+    assert!(
+        h.raw_requests()
+            .iter()
+            .any(|r| matches!(r, Request::Cancel { key } if *key == QueryKey(TILE))),
+        "a close cancels the query by key"
+    );
+    assert!(
+        !h.frame.read_with(&vcx, |f, _| f.barrier_open()),
+        "and answers the barrier before its deadline"
+    );
+    h.deliver_series(&mut vcx, q.tag, result_with(&[1], 9));
+    assert_eq!(
+        h.chart(&vcx).buckets.len(),
+        5,
+        "a late answer to a closed tile paints nothing"
     );
 }
 
@@ -2573,7 +2642,7 @@ fn an_absolute_range_reopens_on_the_dates_it_stores(cx: &mut gpui::TestAppContex
     // An as-of inside the stored span clips queries, but must not rewrite the
     // To date merely because the editor opens and commits.
     h.frame.update(&mut vcx, |f, cx| {
-        f.set_as_of(AsOf::At(
+        f.shared_mut().set_as_of(AsOf::At(
             "2026-01-20T00:00:00Z".parse::<DateTime<Utc>>().unwrap(),
         ));
         cx.notify();
@@ -2649,8 +2718,8 @@ fn f_opens_the_frequency_menu_and_a_capped_row_is_disabled_with_its_reason(
     assert_eq!(
         h.tile
             .read_with(&vcx, |t, _| match t.popup() {
-                Some(Popup::Menu(m)) => match m.rows[capped].trailing() {
-                    Some(menu::Trailing::Text(text)) => Some(text.to_string()),
+                Some(Popup::Menu(m)) => match m.menu.rows()[capped].action().unwrap().trailing() {
+                    geode_tile::menu::Trailing::Text(text) => Some(text.to_string()),
                     _ => None,
                 },
                 _ => None,
@@ -2836,16 +2905,17 @@ impl Harness {
     fn menu_rows(&self, vcx: &gpui::VisualTestContext) -> Vec<(String, bool)> {
         self.tile.read_with(vcx, |t, _| match t.popup() {
             Some(Popup::Menu(m)) => m
-                .rows
+                .menu
+                .rows()
                 .iter()
                 .enumerate()
                 .map(|(i, r)| {
                     let title = match r {
-                        menu::MenuRow::Action { title, .. } => title.to_string(),
-                        menu::MenuRow::Separator => "---".into(),
-                        menu::MenuRow::Section(s) => format!("[{s}]"),
+                        geode_tile::menu::Row::Action(a) => a.title().to_string(),
+                        geode_tile::menu::Row::Separator => "---".into(),
+                        geode_tile::menu::Row::Section(s) => format!("[{s}]"),
                     };
-                    (title, i == m.highlighted)
+                    (title, Some(i) == m.menu.highlighted())
                 })
                 .collect(),
             _ => Vec::new(),
@@ -3654,12 +3724,12 @@ fn an_as_of_change_refreshes_an_open_frequency_menus_cap_reasons(cx: &mut gpui::
     h.keys(&mut vcx, "f");
     let enabled = |h: &Harness, vcx: &gpui::VisualTestContext, want: &str| {
         h.tile.read_with(vcx, |t, _| match t.popup() {
-            Some(Popup::Menu(m)) => m.rows.iter().any(|r| {
-                matches!(
-                    r,
-                    menu::MenuRow::Action { title, enabled: Ok(()), .. } if title.as_ref() == want
-                )
-            }),
+            Some(Popup::Menu(m)) => m
+                .menu
+                .rows()
+                .iter()
+                .filter_map(|r| r.action())
+                .any(|a| a.is_enabled() && a.title().as_ref() == want),
             _ => false,
         })
     };
@@ -3668,7 +3738,7 @@ fn an_as_of_change_refreshes_an_open_frequency_menus_cap_reasons(cx: &mut gpui::
         "six years of 5m is over the cap"
     );
     h.frame.update(&mut vcx, |f, cx| {
-        f.set_as_of(AsOf::At(
+        f.shared_mut().set_as_of(AsOf::At(
             "2020-06-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap(),
         ));
         cx.notify();
@@ -3718,4 +3788,44 @@ fn a_view_move_while_a_query_is_out_waits_for_its_answer(cx: &mut gpui::TestAppC
     h.wheel(&mut vcx, at, -40., 0.);
     h.dispatch(&mut vcx, "rule", None);
     assert!(h.series_request().is_some(), "a query change never waits");
+}
+
+/// Publish the keymap a running app resolves this tile's hints through
+/// (this module's fragment, plus an optional user layer) as `Chords`, the
+/// way the shell does on a keymap reload.
+fn publish_chords(vcx: &mut gpui::VisualTestContext, user: Option<&str>) {
+    let bindings = crate::content::test_bindings(user);
+    vcx.update(|_, cx| cx.set_global(geode_shell::tips::Chords(std::sync::Arc::new(bindings))));
+    vcx.run_until_parked();
+}
+
+#[gpui::test]
+fn an_open_menu_follows_a_keymap_reload(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    publish_chords(&mut vcx, None);
+    h.keys(&mut vcx, "r");
+    let lane = |h: &Harness, vcx: &gpui::VisualTestContext| {
+        h.tile.read_with(vcx, |t, _| match t.popup() {
+            Some(Popup::Menu(m)) => m
+                .menu
+                .rows()
+                .iter()
+                .filter_map(|r| r.action())
+                .find(|a| a.title().as_ref() == "Custom dates…")
+                .map(|a| a.lane().clone()),
+            _ => None,
+        })
+    };
+    let c = geode_shell::keymap::parse_binding("c", geode_shell::keymap::Modifiers::NONE).unwrap();
+    assert_eq!(lane(&h, &vcx), Some(geode_tile::menu::Lane::Keys(c)));
+    publish_chords(
+        &mut vcx,
+        Some(
+            "[[bindings]]\ncontext = \"timeseries && mode == normal && popup == menu && menu == range\"\n[bindings.keys]\n\"c\" = \"none\"\n\"shift+c\" = \"timeseries::range_custom\"\n",
+        ),
+    );
+    let shift_c =
+        geode_shell::keymap::parse_binding("shift+c", geode_shell::keymap::Modifiers::NONE)
+            .unwrap();
+    assert_eq!(lane(&h, &vcx), Some(geode_tile::menu::Lane::Keys(shift_c)));
 }

@@ -14,7 +14,7 @@ Current behavior and rationale:
 |---|---|
 | `core` | Column plans, expansion paths, visible-row traversal, cursor movement, find, selection summaries, cursor-row launch context, TSV export, command parsing, and visible-window formatting without GPUI. |
 | `delegate` | `TableDelegate` adapter with prepared rows and cached cell text. Holds `:autosize`'s fitted widths by column name, which `column()` prefers over the plan's; `fit_columns` measures the header and the format cache's window only. Owns selection and paint caches; reports cell gestures and chevron clicks to the tile. |
-| `tile` | `BlotterTile`, the entity per tile: local query overrides, requests through `DataHandle`, frame observation, snapshot staging and application, header and footer rendering. |
+| `tile` | `BlotterTile`, the entity per tile: local query overrides, requests through `DataHandle`, frame observation over `geode_tile::following`, snapshot application, header and footer rendering. The header notice is a `geode_tile::notice::Notice`: dropped sorts and selections are warnings, query and configuration failures danger. |
 | `content` | The `TileContent` wrapper and `BlotterFactory`, the roster entry the app builds with the data handle. |
 | `colour_cache` | Caches each named color's base and sign variants until theme inputs or definitions change. |
 
@@ -53,12 +53,21 @@ cargo bench -p geode-blotter   # the pure core
 - A `NonAttributable` cell is NULL. Read numeric columns only through
   `f64_at`/`f64_value`; the format cache is the one place a cell becomes
   text.
-- `FrameVersions.flip` is excluded from `follows_changed` on purpose: it
-  tells an already-staged tile to promote, not to requery.
-- A staged snapshot is promoted only while its followed frame counters
-  still match, including watched data and configuration. Pins exempt only
-  the corresponding frame changes. Tile-local requeries clear the stage so
-  an older result cannot overwrite a new local query.
+- The query runs on `geode_tile::following`. `Followed` names the counters
+  an answer depends on (scope unless unscoped, grouping unless pinned, as-of
+  unless pinned, always watched data and configuration); it decides both
+  requery and promotion, so the two agree. `flip` is never a requery input.
+  Tile-local requeries clear the stage because they move no frame counter.
+  An unresolved named scope arrives at the barrier but keeps what it acted
+  on (`Unanswered::KeepActed`): the configuration change that defines the
+  name is the retry. A view the configuration no longer defines takes the
+  same path: it answers the barrier at once, supersedes the query still out
+  for the old view, and the reload that restores the view is the retry.
+- Hiding cancels nothing: an in-flight view query's reply applies while
+  hidden, unless a followed counter moved since it asked
+  (`Delivered::Superseded`: dropped, not applied, not an arrival; the reshow
+  asks again). `closed` (removal) cancels the query by key and answers any
+  open barrier still waiting on the tile.
 - A chevron click and a row double-click are `space`: both go through
   `expand_at_cursor`, the path `zo`/`zc`/`za` take. The chevron listener
   stops propagation and ignores `click_count() > 1`.
@@ -75,6 +84,9 @@ cargo bench -p geode-blotter   # the pure core
 - `g m` opens another module using the cursor row's underlying. The grouping
   must contain `underlying_ref`, and the cursor must be at or below its level
   with a non-NULL value. A visual selection does not change the launch context.
+- `tile_columns` reports the plan's non-tree columns and the cursor's column
+  for the shell's edit-column actions; the tree column is never active, and
+  derived view columns are flagged so Schema can leave them out.
 - Frame scope names resolve against current expression definitions before a
   query is submitted. Missing names show an error, invalidate older pending
   results, and release the tile's flip-barrier wait. Updating definitions

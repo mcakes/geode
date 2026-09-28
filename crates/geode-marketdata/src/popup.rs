@@ -1,45 +1,29 @@
-//! Tile-owned menu, underlying picker, and cell-choice popups. Deferred
-//! anchoring lets them escape tile/table clips, and occlusion prevents pointer
-//! hits reaching the grid beneath. Menu and underlying picker anchor at the
-//! header; Choice anchors at its target cell. Picker and Choice own focused
-//! inputs and use insert routing. The tile owns opening, commits, and closing;
-//! these painters consume row presses and forward picks and hover selection.
+//! Tile-owned underlying picker and cell-choice popups; the action menu is
+//! `geode_tile::menu`'s. Deferred anchoring lets them escape tile/table clips,
+//! and occlusion prevents pointer hits reaching the grid beneath. Menu and
+//! underlying picker anchor at the header; Choice anchors at its target cell.
+//! Picker and Choice own focused inputs and use insert routing. The tile owns
+//! opening, commits, and closing; these painters consume row presses and
+//! forward picks and hover selection.
 
-use crate::core::menu::MenuRow;
 use crate::tile::MarketDataTile;
+use geode_shell::actions::ActionId;
 use geode_shell::choice::{ChoiceList, DEFAULT_CAP};
 use geode_shell::shell::scale;
+use geode_tile::menu::Menu;
+use geode_tile::popover::{self, ROW_HEIGHT, ROW_INSET};
 use gpui::prelude::*;
-use gpui::{
-    Anchor, AnchoredPositionMode, App, Div, Entity, IntoElement, MouseButton, SharedString,
-    anchored, deferred, div, px,
-};
+use gpui::{Anchor, App, Entity, IntoElement, MouseButton, SharedString, div};
 use gpui_component::input::{Input, InputState};
-use gpui_component::{ActiveTheme as _, ThemeStyled as _, h_flex, v_flex};
-use std::rc::Rc;
-
-/// Popup-row height in design pixels, scaled with the shell's rem size.
-const ROW_HEIGHT: f32 = 26.0;
-/// Horizontal row inset in design pixels.
-const ROW_INSET: f32 = 8.0;
-/// The popup's minimum width at the design rem.
-const MIN_WIDTH: f32 = 240.0;
-
-/// Shared popover treatment, minimum width, and content spacing for all variants.
-fn popover_surface(cx: &App) -> Div {
-    v_flex()
-        .min_w(scale::design(MIN_WIDTH))
-        .p_1()
-        .gap_y_0p5()
-        .text_sm()
-        .popover_style(cx)
-}
+use gpui_component::{ActiveTheme as _, h_flex};
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 /// The tile's mutually exclusive popup state. Menu uses menu-mode routing;
 /// Picker and Choice own focused inputs and use insert-mode routing.
 pub(crate) enum Popup {
-    Menu(MenuState),
+    /// The action list: the door's menu over action ids.
+    Menu(Menu<ActionId>),
     Picker(PickerState),
     Choice(ChoicePopup),
 }
@@ -60,6 +44,9 @@ pub(crate) struct ChoicePopup {
     /// [`Self::prepare`] indexes by `Ranked::row`.
     option_labels: Vec<SharedString>,
     paint: Rc<ChoicePaint>,
+    /// The cell's value when the popup opened. Over a selection, `enter`
+    /// on this same option is a no-op, never a fill of the selection.
+    pub opened: String,
 }
 
 /// The rows [`render_choice`] paints — the painted WINDOW of the ranked
@@ -100,6 +87,7 @@ impl ChoicePopup {
             cell,
             labels,
             option_labels,
+            opened: current.to_string(),
         };
         popup.prepare();
         popup
@@ -131,14 +119,6 @@ impl ChoicePopup {
             highlighted: self.list.highlighted(),
         });
     }
-}
-
-/// The action list's own state: the prepared rows ([`crate::core::menu::rows`],
-/// built once when the menu opens — never in `render`) and which one is
-/// highlighted.
-pub(crate) struct MenuState {
-    pub rows: Vec<MenuRow>,
-    pub highlighted: usize,
 }
 
 /// Maximum painted picker rows. The shared ChoiceList moves this window to
@@ -273,128 +253,6 @@ impl PickerRows {
     }
 }
 
-/// Paint the header-anchored action list. Hover updates selection; a row
-/// press uses the same pick path as Enter. Outside presses close the popup.
-pub(crate) fn render_menu(
-    m: &MenuState,
-    tile: &Entity<MarketDataTile>,
-    tile_id: u64,
-    cx: &App,
-) -> impl IntoElement {
-    let theme = cx.theme();
-    let mut list = popover_surface(cx)
-        .debug_selector(move || format!("marketdata-menu-{tile_id}"))
-        // Occlude the grid so popup hover and press events do not also hit its rows.
-        .occlude()
-        .on_mouse_down_out({
-            let tile = tile.clone();
-            move |_, window, cx| tile.update(cx, |t, cx| t.close_popup_with_window(window, cx))
-        });
-    for (i, row) in m.rows.iter().enumerate() {
-        list = list.child(match row {
-            // `PopupMenu`'s own separator: a hairline-class rule bleeding
-            // into the container's inset, half a step of air either side.
-            MenuRow::Separator => div()
-                .my_0p5()
-                .mx_neg_1()
-                .border_b(px(2.))
-                .border_color(theme.border)
-                .into_any_element(),
-            MenuRow::Section(s) => div()
-                .px(scale::design(ROW_INSET))
-                .pt_1()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child(s.clone())
-                .into_any_element(),
-            MenuRow::Action {
-                title,
-                hint,
-                enabled,
-                checked,
-                ..
-            } => {
-                let disabled = enabled.is_err();
-                // The trailing lane follows the row's highlight, as the
-                // title does, so its keys never sit muted on the accent.
-                let lane = if i == m.highlighted && !disabled {
-                    theme.accent_foreground
-                } else {
-                    theme.muted_foreground
-                };
-                // A disabled row says why; an enabled one shows its key
-                // (or its `:` verb).
-                let reason = match enabled {
-                    Err(r) => div().child(*r).into_any_element(),
-                    Ok(()) => geode_shell::shell::kbd::menu_spec(hint, lane),
-                };
-                // A choice row carries a tick or a same-width blank
-                // ahead of its title, so the group's titles align
-                // whichever one is in force. Two static strings — a
-                // frame formats nothing here.
-                let tick: Option<&'static str> = checked.map(|on| if on { "\u{2713}" } else { "" });
-                h_flex()
-                    .h(scale::design(ROW_HEIGHT))
-                    .px(scale::design(ROW_INSET))
-                    .rounded(theme.radius)
-                    .items_center()
-                    .justify_between()
-                    .gap_4()
-                    // Selected enabled rows use accent colors. Navigation can land on a
-                    // disabled row, but it remains muted and picking it reports the refusal.
-                    .when(i == m.highlighted && !disabled, |d| {
-                        d.bg(theme.accent).text_color(theme.accent_foreground)
-                    })
-                    .when(i != m.highlighted || disabled, |d| {
-                        d.text_color(if disabled {
-                            theme.muted_foreground
-                        } else {
-                            theme.popover_foreground
-                        })
-                    })
-                    .debug_selector(move || format!("marketdata-menu-row-{tile_id}-{i}"))
-                    // Consume row presses so a pick cannot also trigger the shell's tile-level
-                    // handling for the surface beneath this popup. The header toggle deliberately
-                    // allows that propagation because it must also focus its tile.
-                    .on_mouse_down(MouseButton::Left, {
-                        let tile = tile.clone();
-                        move |_, window, cx| {
-                            cx.stop_propagation();
-                            tile.update(cx, |t, cx| t.menu_pick(i, window, cx))
-                        }
-                    })
-                    // Hovering a row is the mouse form of `j`/`k`: the
-                    // highlight follows the pointer (greyed rows too — a
-                    // hover is a hover, and `enter` on one is a notice).
-                    // gpui gates this on the row's own hitbox, so it never
-                    // fires for the row beneath the pointer's neighbour.
-                    .on_mouse_move({
-                        let tile = tile.clone();
-                        move |_, _, cx| tile.update(cx, |t, cx| t.menu_hover(i, cx))
-                    })
-                    .child(
-                        h_flex()
-                            .gap_1()
-                            .when_some(tick, |d, tick| {
-                                d.child(div().w(scale::design(14.)).flex_shrink_0().child(tick))
-                            })
-                            .child(title.clone()),
-                    )
-                    .child(div().text_color(lane).child(reason))
-                    .into_any_element()
-            }
-        });
-    }
-    deferred(
-        anchored()
-            .anchor(Anchor::TopRight)
-            .position_mode(AnchoredPositionMode::Local)
-            .snap_to_window_with_margin(px(8.))
-            .child(list),
-    )
-    .with_priority(1)
-}
-
 /// Paint the underlying picker's focused input and moving window of prepared
 /// catalogue labels. Click commits; hover changes selection. An empty match list
 /// shows the same fallback message as an empty or unavailable catalogue.
@@ -405,9 +263,9 @@ pub(crate) fn render_picker(
     cx: &App,
 ) -> impl IntoElement {
     let theme = cx.theme();
-    let mut list = popover_surface(cx)
+    let mut list = popover::surface(cx)
         .debug_selector(move || format!("marketdata-picker-{tile_id}"))
-        // Occludes for the same reason the menu does (see `render_menu`).
+        // Occlude the grid so popup hover and press events do not also hit its rows.
         .occlude()
         .on_mouse_down_out({
             let tile = tile.clone();
@@ -425,15 +283,7 @@ pub(crate) fn render_picker(
         );
     let rows = &p.rows;
     if rows.painted_len() == 0 {
-        list = list.child(
-            div()
-                .h(scale::design(ROW_HEIGHT))
-                .px(scale::design(ROW_INSET))
-                .flex()
-                .items_center()
-                .text_color(theme.muted_foreground)
-                .child("no underlyings known"),
-        );
+        list = list.child(popover::empty_row(theme, "no underlyings known"));
     } else {
         // Only the painted WINDOW is painted (the constant's own doc
         // comment): the query narrows the ranked list, and stepping past
@@ -461,7 +311,7 @@ pub(crate) fn render_picker(
                             tile.update(cx, |t, cx| t.picker_pick(row_i, window, cx))
                         }
                     })
-                    // The mouse form of `up`/`down` (see `render_menu`).
+                    // The mouse form of `up`/`down`: the highlight follows the pointer.
                     .on_mouse_move({
                         let tile = tile.clone();
                         move |_, _, cx| tile.update(cx, |t, cx| t.picker_hover(row_i, cx))
@@ -471,14 +321,7 @@ pub(crate) fn render_picker(
             );
         }
     }
-    deferred(
-        anchored()
-            .anchor(Anchor::TopRight)
-            .position_mode(AnchoredPositionMode::Local)
-            .snap_to_window_with_margin(px(8.))
-            .child(list),
-    )
-    .with_priority(1)
+    popover::anchor_popup(list, Anchor::TopRight)
 }
 
 /// Paint a Choice cell's prepared input and option window. Click picks, hover
@@ -492,9 +335,9 @@ pub(crate) fn render_choice(
     cx: &App,
 ) -> impl IntoElement {
     let theme = cx.theme();
-    let mut list = popover_surface(cx)
+    let mut list = popover::surface(cx)
         .debug_selector(move || format!("marketdata-choice-{tile_id}"))
-        // Occludes for the same reason the menu does (see `render_menu`).
+        // Occlude the grid so popup hover and press events do not also hit its rows.
         .occlude()
         .on_mouse_down_out({
             let tile = tile.clone();
@@ -512,15 +355,7 @@ pub(crate) fn render_choice(
     if p.rows.is_empty() {
         // Asked and answered, never a blank rectangle (`render_picker`'s
         // own rule): `enter` on this refuses with the same words.
-        list = list.child(
-            div()
-                .h(scale::design(ROW_HEIGHT))
-                .px(scale::design(ROW_INSET))
-                .flex()
-                .items_center()
-                .text_color(theme.muted_foreground)
-                .child("no option matches"),
-        );
+        list = list.child(popover::empty_row(theme, "no option matches"));
     } else {
         for (row_i, text) in p.rows.iter().enumerate() {
             list = list.child(
@@ -536,9 +371,8 @@ pub(crate) fn render_choice(
                         d.text_color(theme.popover_foreground)
                     })
                     .debug_selector(move || format!("marketdata-choice-row-{tile_id}-{row_i}"))
-                    // `stop_propagation` for the menu row's reason (see
-                    // `render_menu`): a click that means "pick a row"
-                    // must not also be a click on the grid beneath.
+                    // A click that means "pick a row" must not also be a
+                    // click on the grid beneath.
                     .on_mouse_down(MouseButton::Left, {
                         let tile = tile.clone();
                         move |_, window, cx| {
@@ -546,7 +380,7 @@ pub(crate) fn render_choice(
                             tile.update(cx, |t, cx| t.choice_pick(row_i, window, cx))
                         }
                     })
-                    // The mouse form of `up`/`down` (see `render_menu`).
+                    // The mouse form of `up`/`down`: the highlight follows the pointer.
                     .on_mouse_move({
                         let tile = tile.clone();
                         move |_, _, cx| tile.update(cx, |t, cx| t.choice_hover(row_i, cx))
@@ -556,14 +390,7 @@ pub(crate) fn render_choice(
             );
         }
     }
-    deferred(
-        anchored()
-            .anchor(Anchor::TopLeft)
-            .position_mode(AnchoredPositionMode::Local)
-            .snap_to_window_with_margin(px(8.))
-            .child(list),
-    )
-    .with_priority(1)
+    popover::anchor_popup(list, Anchor::TopLeft)
 }
 
 #[cfg(test)]

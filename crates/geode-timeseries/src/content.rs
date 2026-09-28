@@ -10,7 +10,7 @@ use geode_core::colour::NamedColours;
 use geode_data::DataHandle;
 use geode_shell::actions::{ActionDef, ActionId, ActionRegistry};
 use geode_shell::diagnostics::Diagnostics;
-use geode_shell::frame::Frame;
+use geode_shell::frame::FrameRef;
 use geode_shell::keymap::KeyContext;
 use geode_shell::module::{
     Delivery, FindEvent, ModuleFactory, StackHandle, TileContent, TileOccupant,
@@ -211,6 +211,10 @@ impl TileContent for TimeseriesContent {
         self.tile.update(cx, |t, cx| t.set_visible(visible, cx))
     }
 
+    fn closed(&self, cx: &mut App) {
+        self.tile.update(cx, |t, cx| t.closed(cx))
+    }
+
     fn set_stack(&self, stack: Option<StackHandle>, cx: &mut App) {
         self.tile.update(cx, |t, cx| t.set_stack(stack, cx))
     }
@@ -278,7 +282,7 @@ impl ModuleFactory for TimeseriesFactory {
         &self,
         tile: TileId,
         restored: Option<&toml::Table>,
-        frame: Entity<Frame>,
+        frame: FrameRef,
         diagnostics: Entity<Diagnostics>,
         window: &mut Window,
         cx: &mut App,
@@ -301,6 +305,39 @@ impl ModuleFactory for TimeseriesFactory {
             content: Box::new(TimeseriesContent { tile: entity }),
         }
     }
+}
+
+/// The keymap a running app resolves this module's menu hints through: the
+/// builtin actions and this module's, this fragment, and an optional user
+/// layer over it. Tests read menu lanes against it rather than against no
+/// keymap, where every chord hint is (correctly) empty.
+#[cfg(test)]
+pub(crate) fn test_bindings(user: Option<&str>) -> Vec<geode_shell::keymap::Binding> {
+    let mut registry = ActionRegistry::default();
+    geode_shell::defaults::register_builtin_actions(&mut registry);
+    for (id, title) in ACTIONS {
+        registry
+            .register(ActionDef {
+                id: ActionId(id.to_string()),
+                title: title.to_string(),
+                category: "Timeseries".into(),
+            })
+            .unwrap();
+    }
+    let mut docs =
+        vec![geode_shell::keymap::fragments::fragment_doc("timeseries", DEFAULT_KEYMAP).unwrap()];
+    if let Some(text) = user {
+        docs.push(geode_core::config::LayerDoc {
+            layer: geode_core::config::Layer::User,
+            name: "keymap".into(),
+            file: "user/keymap.toml".into(),
+            table: text.parse().unwrap(),
+        });
+    }
+    let (keymap, diags) =
+        geode_shell::keymap::build_keymap(&docs, geode_shell::defaults::default_mod(), &registry);
+    assert!(diags.is_empty(), "{diags:?}");
+    keymap.bindings().to_vec()
 }
 
 #[cfg(test)]

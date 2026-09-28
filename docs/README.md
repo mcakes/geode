@@ -1,9 +1,14 @@
 # Documentation
 
+New users should start with the [user guide](user-guide.md): a guided demo
+walkthrough that introduces Geode's philosophy, tiles, shared context, and
+everyday interaction patterns.
+
 Start with the documents that describe Geode **as it works now**:
 
 | Document | Purpose |
 |---|---|
+| [User guide](user-guide.md) | First steps, a guided demo walkthrough, and everyday patterns |
 | [Project README](../README.md) | Product overview, setup, and repository map |
 | [Philosophy](PHILOSOPHY.md) | Product and architecture principles |
 | [Architecture](current/architecture.md) | Crate boundaries, runtime ownership, configuration, and failure handling |
@@ -20,6 +25,9 @@ Start with the documents that describe Geode **as it works now**:
 | [Crate READMEs](../crates/) | Local module maps and crate contracts |
 | [Performance](current/performance.md) | Budgets, instrumentation, reference values, and known gaps |
 | [Measurement log](perf.md) | Chronological benchmark results and investigations |
+
+`modules.md` is an undated feature-ideas inventory, not a current capability
+reference or committed roadmap.
 
 `phase-history.md` and `superpowers/` are an archive of proposals,
 implementation steps, rulings, and review findings. They may describe

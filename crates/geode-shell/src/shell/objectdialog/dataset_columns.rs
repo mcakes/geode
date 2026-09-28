@@ -6,115 +6,44 @@
 //! dataset because a user-layer dataset object replaces that object whole.
 
 use super::views;
-use super::{ColumnContext, ColumnDoor, Draft, Field, FieldKind, ListItem, Provenance};
+use super::{ColumnContext, ColumnDoor, Draft, Field, ListItem, Provenance};
 use geode_core::config::Config;
 use geode_core::schema::{ColumnType, DatasetSpec};
-use geode_core::view::{ColumnFormat, ColumnPresentation};
+use geode_core::view::ColumnPresentation;
 
 /// The doc this door writes: `dataset_presentation.toml`, user layer.
 /// Named here rather than spelled again, the same way `views::DOC` and
 /// `views::PRESENTATION_DOC` are the one spelling for theirs.
 pub const DOC: &str = geode_core::view::DATASET_PRESENTATION_DOC;
 
-/// Per-column inputs shared by all seven provenance checks in one render. Compute
-/// allocating baseline merges and kind defaults once for the column.
+/// Per-column inputs shared by all seven provenance checks in one render: the open
+/// door's context and which keys the column sets at the stage's layer.
 pub struct ProvenanceInputs<'a> {
     pub ctx: &'a ColumnContext,
-    /// View definition with dataset presentation applied. Used only for the Views
-    /// stage; the Dataset stage compares against the unset presentation.
-    pub below: Option<ColumnPresentation>,
-    pub kind: ColumnFormat,
+    pub set: views::PresentationKeys,
 }
 
 impl<'a> ProvenanceInputs<'a> {
-    pub fn new(ctx: &'a ColumnContext) -> ProvenanceInputs<'a> {
-        ProvenanceInputs {
-            below: match ctx.door {
-                ColumnDoor::View => Some(ctx.layers.below_view()),
-                ColumnDoor::Dataset => None,
-            },
-            kind: ctx
-                .item
-                .as_ref()
-                .map(views::kind_default)
-                .unwrap_or(ColumnFormat::MEASURE),
-            ctx,
-        }
+    pub fn new(ctx: &'a ColumnContext, set: views::PresentationKeys) -> ProvenanceInputs<'a> {
+        ProvenanceInputs { ctx, set }
     }
 }
 
-/// Provenance of the current draft value, recomputed at paint so it tracks an edit
-/// before persistence.
-///
-/// In Views, a value differing from the definition-plus-dataset baseline is `View`;
-/// otherwise name the dataset or definition layer that sets the key. In Schema, a
-/// nondefault value or an explicitly stored dataset key is `Dataset`. Other fields have
-/// no badge.
+/// The layer a column-stage field's value comes from. A set field is the stage's own
+/// layer (`View`, or `Dataset` from the Schema door) whatever its value — a pin equal to
+/// its parent included. An inherited Views field names the layer that sets the key:
+/// the dataset level above the desk view's definition, or nothing for the kind default.
+/// An inherited Schema field has no badge: below the dataset level each view resolves
+/// its own value.
 pub fn provenance_of(inputs: &ProvenanceInputs, field: &Field) -> Option<Provenance> {
     let ctx = inputs.ctx;
-    let kind = &inputs.kind;
     let key = field.key.as_str();
-    let set_in = |p: &ColumnPresentation| match key {
-        "label" => p.label.is_some(),
-        "width" => p.width.is_some(),
-        "scale" => p.scale.is_some(),
-        "precision" => p.precision.is_some(),
-        "thousands" => p.thousands.is_some(),
-        "negative" => p.negative.is_some(),
-        "color" => p.colour.is_some(),
-        // A key this stage does not paint is set at no layer, so it
-        // carries no provenance — the same answer `differs_from`'s own
-        // fallthrough gives, and between them this function answers
-        // `None` for it through either door.
-        _ => false,
-    };
-    let differs_from = |p: &ColumnPresentation| {
-        let effective = kind.clone().with(p);
-        match (key, &field.kind) {
-            // Both sides trimmed: the field's own text is trimmed on the
-            // way into `views::fold_into`, so a layer whose label was
-            // written with surrounding space would otherwise read as a
-            // divergence the trader never made.
-            ("label", FieldKind::Text(t)) => t.trim() != p.label.as_deref().unwrap_or("").trim(),
-            ("width", FieldKind::Text(t)) => t.trim() != views::width_text(p.width),
-            ("scale", FieldKind::Choice { options, selected }) => {
-                options.get(*selected).map(String::as_str)
-                    != Some(views::scale_key(effective.scale))
-            }
-            ("precision", FieldKind::Number { value, .. }) => {
-                *value != i64::from(effective.precision)
-            }
-            ("thousands", FieldKind::Bool(b)) => *b != effective.thousands,
-            ("negative", FieldKind::Choice { options, selected }) => {
-                options.get(*selected).map(String::as_str)
-                    != Some(views::negative_key(effective.negative))
-            }
-            ("color", FieldKind::Choice { options, selected }) => {
-                options.get(*selected).map(String::as_str)
-                    != Some(views::color_key(&effective.colour).as_str())
-            }
-            _ => false,
-        }
-    };
-    let unset = ColumnPresentation::default();
     match ctx.door {
-        ColumnDoor::Dataset => {
-            (differs_from(&unset) || set_in(&ctx.layers.dataset)).then_some(Provenance::Dataset)
-        }
-        ColumnDoor::View => {
-            // `Some` for this door by construction
-            // ([`ProvenanceInputs::new`]); borrowed, never cloned.
-            let below = inputs.below.as_ref().unwrap_or(&unset);
-            if differs_from(below) {
-                Some(Provenance::View)
-            } else if set_in(&ctx.layers.dataset) {
-                Some(Provenance::Dataset)
-            } else if set_in(&ctx.layers.desk) {
-                Some(Provenance::Desk)
-            } else {
-                None
-            }
-        }
+        ColumnDoor::Dataset => inputs.set.has(key).then_some(Provenance::Dataset),
+        ColumnDoor::View if inputs.set.has(key) => Some(Provenance::View),
+        ColumnDoor::View if views::sets(&ctx.layers.dataset, key) => Some(Provenance::Dataset),
+        ColumnDoor::View if views::sets(&ctx.layers.desk, key) => Some(Provenance::Desk),
+        ColumnDoor::View => None,
     }
 }
 
@@ -195,7 +124,7 @@ fn kind_for_type(ty: ColumnType) -> Option<&'static str> {
 }
 
 /// Render the dataset's whole presentation object, preserving other columns verbatim
-/// and replacing the open column with its nondefault fields. Drop that column when no
+/// and replacing the open column with the keys it sets at the dataset level. Drop that column when no
 /// keys remain; an empty dataset object becomes an overlay removal.
 ///
 /// Only `columns` is retained at the dataset-object level. Unknown sibling keys are not
@@ -224,54 +153,18 @@ pub fn table(draft: &Draft) -> toml_edit::Table {
     }
     if let Some(item) = ctx.item.as_ref() {
         let mut folded = item.clone();
-        views::fold_into(&mut folded, &draft.fields, &ColumnPresentation::default());
-        let kind = views::kind_default(&folded);
-        let effective = kind.clone().with(&folded.presentation);
-        let p = &folded.presentation;
-        let mut t = toml_edit::Table::new();
-        // The five format keys compare RESOLVED against the kind default,
-        // for `views::presentation_table`'s own reason: the fold writes a
-        // `Some` for every one of them (each field was seeded with the
-        // value in force), so a raw-`Option` comparison would copy the
-        // whole kind default into the trader's file on the first
-        // keystroke.
-        if effective.precision != kind.precision
-            && let Some(v) = p.precision
-        {
-            t["precision"] = toml_edit::value(i64::from(v));
-        }
-        if effective.thousands != kind.thousands
-            && let Some(v) = p.thousands
-        {
-            t["thousands"] = toml_edit::value(v);
-        }
-        if effective.negative != kind.negative
-            && let Some(v) = p.negative
-        {
-            t["negative"] = toml_edit::value(views::negative_key(v));
-        }
-        if effective.colour != kind.colour
-            && let Some(v) = &p.colour
-        {
-            t["color"] = toml_edit::value(views::color_key(v));
-        }
-        if effective.scale != kind.scale
-            && let Some(v) = p.scale
-        {
-            t["scale"] = toml_edit::value(views::scale_key(v));
-        }
-        // `label` and `width` have no kind default to resolve against —
-        // a column either has one or it does not — so both compare as
-        // bare `Option`s, and a cleared one (`fold_into` wrote the
-        // baseline's `None` back) simply is not written.
-        if let Some(v) = &p.label
-            && !v.is_empty()
-        {
-            t["label"] = toml_edit::value(v.as_str());
-        }
-        if let Some(v) = p.width {
-            t["width"] = views::width_value(v);
-        }
+        let mut set = draft
+            .presentation_set
+            .get(open)
+            .copied()
+            .unwrap_or_default();
+        views::fold_into(
+            &mut folded,
+            &draft.fields,
+            &ColumnPresentation::default(),
+            &mut set,
+        );
+        let t = views::set_keys_table(&folded.presentation, set);
         if !t.is_empty() {
             columns[open] = toml_edit::Item::Table(t);
         }
@@ -304,7 +197,7 @@ pub fn row_summary(item: &ListItem) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{ColumnLayers, Destination, ListItem};
+    use super::super::{ColumnLayers, Destination, FieldKind, ListItem};
     use super::*;
     use geode_core::view::{ColumnPresentation, Scale};
 
@@ -339,10 +232,16 @@ mod tests {
         fields.into_iter().find(|f| f.key == key).unwrap()
     }
 
-    fn provenance(ctx: &ColumnContext, field: &Field) -> Option<Provenance> {
-        provenance_of(&ProvenanceInputs::new(ctx), field)
+    fn provenance(ctx: &ColumnContext, set: &[&str], field: &Field) -> Option<Provenance> {
+        let mut keys = views::PresentationKeys::default();
+        for key in set {
+            keys.set(key, true);
+        }
+        provenance_of(&ProvenanceInputs::new(ctx, keys), field)
     }
 
+    /// A set field reads the stage's own layer; an inherited one names the layer that
+    /// sets it, or nothing for the kind default.
     #[test]
     fn provenance_names_the_layer_whose_value_is_in_force() {
         let layers = ColumnLayers {
@@ -363,24 +262,64 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert_eq!(provenance(&c, &field(&c, "label")), Some(Provenance::Desk));
+        let set = ["precision"];
         assert_eq!(
-            provenance(&c, &field(&c, "scale")),
+            provenance(&c, &set, &field(&c, "label")),
+            Some(Provenance::Desk)
+        );
+        assert_eq!(
+            provenance(&c, &set, &field(&c, "scale")),
             Some(Provenance::Dataset)
         );
         assert_eq!(
-            provenance(&c, &field(&c, "precision")),
+            provenance(&c, &set, &field(&c, "precision")),
             Some(Provenance::View)
         );
         assert_eq!(
-            provenance(&c, &field(&c, "color")),
+            provenance(&c, &set, &field(&c, "color")),
             None,
             "kind default: no chip"
         );
     }
 
+    /// A pin equal to its parent is still the view's own value.
     #[test]
-    fn a_stepped_field_reads_view_before_its_write_lands() {
+    fn a_set_field_reads_view_even_when_equal_to_its_parent() {
+        let layers = ColumnLayers {
+            dataset: ColumnPresentation {
+                scale: Some(Scale::Thousands),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let c = ctx(ColumnDoor::View, layers, &ColumnPresentation::default());
+        assert_eq!(
+            provenance(&c, &["scale"], &field(&c, "scale")),
+            Some(Provenance::View)
+        );
+    }
+
+    #[test]
+    fn the_dataset_door_reads_dataset_or_nothing() {
+        let layers = ColumnLayers {
+            dataset: ColumnPresentation {
+                width: Some(90.0),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let c = ctx(ColumnDoor::Dataset, layers, &ColumnPresentation::default());
+        assert_eq!(
+            provenance(&c, &["width"], &field(&c, "width")),
+            Some(Provenance::Dataset)
+        );
+        assert_eq!(provenance(&c, &["width"], &field(&c, "label")), None);
+    }
+
+    /// Provenance is the set, not the value: an inherited field names its source
+    /// whatever it happens to show.
+    #[test]
+    fn an_inherited_field_names_its_source_whatever_it_shows() {
         let layers = ColumnLayers {
             dataset: ColumnPresentation {
                 scale: Some(Scale::Thousands),
@@ -396,73 +335,15 @@ mod tests {
                 .position(|o| o == views::scale_key(Scale::Millions))
                 .unwrap();
         }
-        assert_eq!(provenance(&c, &scale), Some(Provenance::View));
-    }
-
-    #[test]
-    fn the_dataset_door_reads_dataset_or_nothing() {
-        let layers = ColumnLayers {
-            dataset: ColumnPresentation {
-                width: Some(90.0),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let c = ctx(ColumnDoor::Dataset, layers, &ColumnPresentation::default());
-        assert_eq!(
-            provenance(&c, &field(&c, "width")),
-            Some(Provenance::Dataset)
-        );
-        assert_eq!(provenance(&c, &field(&c, "label")), None);
-    }
-
-    /// Returning a view field to its baseline immediately restores the lower-layer
-    /// badge; provenance must not depend on a saved view-overlay key.
-    #[test]
-    fn a_field_stepped_back_to_the_layer_below_reads_that_layer() {
-        let layers = ColumnLayers {
-            dataset: ColumnPresentation {
-                scale: Some(Scale::Thousands),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let c = ctx(
-            ColumnDoor::View,
-            layers,
-            // The trader's own view-level override, as the doc holds it.
-            &ColumnPresentation {
-                scale: Some(Scale::Millions),
-                ..Default::default()
-            },
-        );
-        let mut scale = field(&c, "scale");
-        assert_eq!(
-            provenance(&c, &scale),
-            Some(Provenance::View),
-            "sanity: as opened, the field shows the view's own value"
-        );
-        if let FieldKind::Choice { options, selected } = &mut scale.kind {
-            *selected = options
-                .iter()
-                .position(|o| o == views::scale_key(Scale::Thousands))
-                .unwrap();
-        }
-        assert_eq!(
-            provenance(&c, &scale),
-            Some(Provenance::Dataset),
-            "stepped back to the dataset level's own value, the chip \
-             names the dataset — which is what the file will say 250 ms \
-             later, since the writer omits every key equal to the layer \
-             below"
-        );
+        assert_eq!(provenance(&c, &[], &scale), Some(Provenance::Dataset));
     }
 }
 
 #[cfg(test)]
 mod writer_tests {
-    use super::super::{ColumnLayers, Destination, Draft};
+    use super::super::{ColumnLayers, Destination, Draft, FieldKind};
     use super::*;
+    use geode_core::view::ColumnFormat;
     use geode_core::view::Scale;
 
     fn risk_schema() -> geode_core::schema::SchemaSpec {
@@ -543,7 +424,7 @@ mod writer_tests {
     }
 
     #[test]
-    fn the_writer_keeps_other_columns_verbatim_and_emits_only_keys_off_the_kind_default() {
+    fn schema_writer_keeps_other_columns_and_writes_only_set_keys() {
         let schema = risk_schema();
         let risk = schema.dataset("risk").unwrap();
         let overlay_object =
@@ -557,13 +438,18 @@ mod writer_tests {
             overlay_object,
             item: Some(item),
         });
-        // Precision left at the kind default (2): not written. Width kept.
-        // Thousands stepped: written.
+        // Width set on disk: kept. Thousands stepped: written. Precision pinned at
+        // the kind default (2): written. Scale inherited: not written.
         for f in &mut draft.fields {
             if f.key == "thousands" {
                 f.kind = FieldKind::Bool(false);
             }
         }
+        let mut set = views::PresentationKeys::default();
+        for key in ["width", "thousands", "precision"] {
+            set.set(key, true);
+        }
+        draft.presentation_set.insert("npv".into(), set);
         draft.column = Some("npv".into());
         let text = written(table(&draft));
         assert!(
@@ -573,7 +459,8 @@ mod writer_tests {
         assert!(text.contains("[risk.columns.npv]"), "{text}");
         assert!(text.contains("width = 90"), "{text}");
         assert!(text.contains("thousands = false"), "{text}");
-        assert!(!text.contains("precision"), "{text}");
+        assert!(text.contains("precision = 2"), "a pinned default: {text}");
+        assert!(!text.contains("scale"), "{text}");
     }
 
     #[test]
@@ -591,6 +478,9 @@ mod writer_tests {
             item: Some(item),
         });
         draft.column = Some("npv".into());
+        let mut set = views::PresentationKeys::default();
+        set.set("width", true);
+        draft.presentation_set.insert("npv".into(), set);
         for f in &mut draft.fields {
             if f.key == "width" {
                 f.kind = FieldKind::Text("auto".into());

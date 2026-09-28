@@ -83,9 +83,14 @@ impl ShellView {
             };
             let restored = self.services.restored_pages.remove(kind);
             let actions = self.shell_actions(cx);
+            // The page's frame handle is bound to the workspace it is first
+            // opened over, as a tile's is to its own. Every unpinned
+            // workspace resolves to the shared lane; a page retained from
+            // one workspace and reopened over a pinned one reads its first
+            // workspace's lane.
             let occupant = factory.create(
                 restored.as_ref(),
-                self.frame.clone(),
+                self.frame_at(self.active_ix()),
                 self.diagnostics.clone(),
                 actions,
                 window,

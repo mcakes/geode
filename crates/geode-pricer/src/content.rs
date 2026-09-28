@@ -12,7 +12,7 @@ use geode_core::document::split_key;
 use geode_data::DataHandle;
 use geode_shell::actions::{ActionDef, ActionId, ActionRegistry};
 use geode_shell::diagnostics::Diagnostics;
-use geode_shell::frame::Frame;
+use geode_shell::frame::FrameRef;
 use geode_shell::keymap::KeyContext;
 use geode_shell::module::{
     Delivery, FindEvent, ModuleFactory, StackHandle, TileContent, TileOccupant,
@@ -43,10 +43,14 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("pricer::page_up_full", "Full page up"),
     ("pricer::yank_row", "Yank row"),
     ("pricer::yank_col", "Yank column"),
+    ("pricer::yank", "Yank selection"),
+    ("pricer::visual_rows", "Select rows"),
+    ("pricer::visual_block", "Select cells"),
     ("pricer::find_next", "Find next"),
     ("pricer::find_prev", "Find previous"),
-    ("pricer::escape", "Clear find and dismissible notice"),
-    ("pricer::add_below", "Add lines…"),
+    ("pricer::escape", "Clear selection, else find and notice"),
+    ("pricer::add_below", "Add lines below…"),
+    ("pricer::add_above", "Add lines above…"),
     ("pricer::edit", "Edit cell…"),
     ("pricer::delete", "Delete row"),
     ("pricer::undo", "Undo"),
@@ -64,6 +68,10 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("pricer::expand_all", "Expand all packages"),
     ("pricer::collapse_all", "Collapse all packages"),
     ("pricer::price", "Reprice all lines"),
+    ("pricer::open_sheet", "Open sheet…"),
+    ("pricer::rename_sheet", "Rename sheet…"),
+    ("pricer::new_sheet", "New sheet"),
+    ("pricer::remove_sheet", "Remove sheet…"),
     ("pricer::commit", "Commit edit"),
     ("pricer::cancel", "Cancel edit"),
     ("pricer::insert_up", "Insert: up"),
@@ -85,20 +93,77 @@ pub(crate) fn action_title(id: &'static str) -> &'static str {
         .map_or(id, |(_, title)| title)
 }
 
-/// Registered but deliberately unbound: `:price` and the menu reach it.
-pub const NO_DEFAULT_KEY: &[&str] = &["pricer::price"];
+/// Registered but deliberately unbound: `:price` and the menu reach
+/// repricing; the sheet verbs are the `:e`/`:name`/`:new`/`:rm` commands'
+/// pointer and palette forms (the header's sheet name, the menu).
+pub const NO_DEFAULT_KEY: &[&str] = &[
+    "pricer::price",
+    "pricer::open_sheet",
+    "pricer::rename_sheet",
+    "pricer::new_sheet",
+    "pricer::remove_sheet",
+];
 
 /// The module's keymap fragment. Every predicate is a
-/// plain conjunction whose first identifier is `pricer`. Both text fields
-/// (the entry field and the cell editor) report `mode == insert` — the one
-/// word the shell's insert-focus predicate reads — and share one block;
-/// the tile routes `commit`/`cancel`/`insert_*` by which field is open. No
+/// plain conjunction whose first identifier is `pricer`. Every field (the
+/// entry field, the cell editor, the sheet picker's filter and the rename
+/// field) and the armed `:rm` prompt report `mode == insert` — the one word
+/// the shell's insert-focus predicate reads — and share one block; the tile
+/// routes `commit`/`cancel`/`insert_*` by which field is open (the prompt
+/// consumes its keys before they reach the block). No
 /// chord is bound there, so `ctrl+k` keeps opening the palette from inside
 /// a field. `y` alone is unbound: an
 /// exact match dispatches at once, so it would make `y y` and `y c`
 /// unreachable. `g` alone is not bound for the same reason (`g g`, `g p`,
 /// `g u`, `g m`).
+///
+/// `v` and `shift+v` start a selection, and the tile then reports
+/// `mode == visual`, whose block repeats the motions (the cursor is the
+/// selection's moving corner). There the verbs are single keys: `y`,
+/// `d`, `shift+j`/`shift+k`, `g p`, `g u`, `i` and `enter` act on the
+/// whole selection, so no doubled `y y` or `d d` has to stay reachable.
+/// `escape` there clears only the selection.
+///
+/// The visual block comes first so the normal block is the later one: a
+/// menu or tooltip hint names an action's LAST live binding
+/// (`effective_binding`), and the menu is opened from normal mode, where
+/// delete is `d d`. With visual last, the hint would name its bare `d`.
 pub const DEFAULT_KEYMAP: &str = r#"
+[[bindings]]
+context = "pricer && mode == visual"
+[bindings.keys]
+"j" = "pricer::down"
+"k" = "pricer::up"
+"h" = "pricer::left"
+"l" = "pricer::right"
+"down" = "pricer::down"
+"up" = "pricer::up"
+"left" = "pricer::left"
+"right" = "pricer::right"
+"g g" = "pricer::top"
+"shift+g" = "pricer::bottom"
+"^" = "pricer::first_col"
+"$" = "pricer::last_col"
+"home" = "pricer::first_col"
+"end" = "pricer::last_col"
+"ctrl+d" = "pricer::page_down"
+"ctrl+u" = "pricer::page_up"
+"ctrl+f" = "pricer::page_down_full"
+"ctrl+b" = "pricer::page_up_full"
+"pagedown" = "pricer::page_down_full"
+"pageup" = "pricer::page_up_full"
+"y" = "pricer::yank"
+"d" = "pricer::delete"
+"shift+j" = "pricer::move_down"
+"shift+k" = "pricer::move_up"
+"g p" = "pricer::group"
+"g u" = "pricer::ungroup"
+"i" = "pricer::edit"
+"enter" = "pricer::edit"
+"v" = "pricer::visual_block"
+"shift+v" = "pricer::visual_rows"
+"escape" = "pricer::escape"
+
 [[bindings]]
 context = "pricer && mode == normal"
 [bindings.keys]
@@ -128,6 +193,7 @@ context = "pricer && mode == normal"
 "shift+n" = "pricer::find_prev"
 "escape" = "pricer::escape"
 "o" = "pricer::add_below"
+"shift+o" = "pricer::add_above"
 "i" = "pricer::edit"
 "enter" = "pricer::edit"
 "d d" = "pricer::delete"
@@ -147,6 +213,8 @@ context = "pricer && mode == normal"
 "z c" = "pricer::collapse"
 "z shift+r" = "pricer::expand_all"
 "z shift+m" = "pricer::collapse_all"
+"v" = "pricer::visual_block"
+"shift+v" = "pricer::visual_rows"
 
 [[bindings]]
 context = "pricer && mode == insert"
@@ -629,7 +697,9 @@ impl PricerFactory {
     pub fn flush_all(&self, cx: &mut App) {
         for tile in self.live_tiles() {
             tile.update(cx, |t, cx| {
-                t.flush_save();
+                if t.flush_save(cx) {
+                    t.rebuild(cx);
+                }
                 t.rebuild_chrome();
                 cx.notify();
             });
@@ -719,7 +789,7 @@ impl ModuleFactory for PricerFactory {
         &self,
         tile: TileId,
         restored: Option<&toml::Table>,
-        frame: Entity<Frame>,
+        frame: FrameRef,
         diagnostics: Entity<Diagnostics>,
         window: &mut Window,
         cx: &mut App,
@@ -864,9 +934,46 @@ mod tests {
     }
 
     #[test]
-    fn shift_o_is_unbound_and_add_above_is_gone() {
-        assert!(!DEFAULT_KEYMAP.contains("shift+o"));
-        assert!(!ACTIONS.iter().any(|(id, _)| *id == "pricer::add_above"));
+    fn v_and_shift_v_start_selections_in_normal_mode() {
+        assert_eq!(
+            resolve("v", "normal").as_deref(),
+            Some("pricer::visual_block")
+        );
+        assert_eq!(
+            resolve("shift+v", "normal").as_deref(),
+            Some("pricer::visual_rows")
+        );
+    }
+
+    #[test]
+    fn visual_mode_binds_single_key_verbs_and_the_motions() {
+        for (key, action) in [
+            ("j", "pricer::down"),
+            ("y", "pricer::yank"),
+            ("d", "pricer::delete"),
+            ("shift+j", "pricer::move_down"),
+            ("shift+k", "pricer::move_up"),
+            ("g p", "pricer::group"),
+            ("g u", "pricer::ungroup"),
+            ("g g", "pricer::top"),
+            ("i", "pricer::edit"),
+            ("enter", "pricer::edit"),
+            ("v", "pricer::visual_block"),
+            ("shift+v", "pricer::visual_rows"),
+            ("escape", "pricer::escape"),
+        ] {
+            assert_eq!(resolve(key, "visual").as_deref(), Some(action), "{key}");
+        }
+    }
+
+    #[test]
+    fn o_adds_below_and_shift_o_adds_above() {
+        assert_eq!(resolve("o", "normal").as_deref(), Some("pricer::add_below"));
+        assert_eq!(
+            resolve("shift+o", "normal").as_deref(),
+            Some("pricer::add_above")
+        );
+        assert!(ACTIONS.iter().any(|(id, _)| *id == "pricer::add_above"));
     }
 
     #[test]

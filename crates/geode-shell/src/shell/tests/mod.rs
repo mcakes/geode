@@ -235,6 +235,7 @@ pub(super) fn services_with_recorders(
         roster,
         restored_tiles: crate::session::TileRecords::new(),
         restored_frame: None,
+        restored_pinned: Default::default(),
         restored_palette_usage: crate::palette_usage::PaletteUsage::new(),
         log: None,
         action_tail: std::sync::Arc::new(std::sync::Mutex::new(
@@ -657,20 +658,24 @@ mod diagnostics;
 mod dialog_stack;
 mod dock;
 mod drag;
+mod edit_column;
 mod flip;
 mod grouping;
 mod input;
 mod keybindings_dialog;
 mod launch;
+mod object_stack;
 mod objectdialog;
 mod occupants;
 mod pages;
 mod palette;
 mod perf;
 mod picker;
+mod pin;
 mod reload;
 mod scope_expr;
 mod scopebar;
+mod scopepicker;
 mod session;
 mod stacks;
 mod tilepicker;

@@ -3,10 +3,15 @@
 //! frame readout, and scope text [`Input`]. `ShellView` owns the input and
 //! its editing session; this module renders the cached [`ScopeBarModel`].
 //!
-//! The readout separates as-of, grouping, and scope with inset hairlines.
+//! The readout's first control is the pin glyph, which toggles whether the
+//! active workspace holds its own frame lane; it paints as a selected
+//! solid primary chip while pinned and as a bare verb otherwise. The readout
+//! then separates pin, as-of, grouping, and scope with inset hairlines.
 //! The as-of chip alone uses warning colors. Grouping opens a picker and
 //! stays visibly pressed while it is open. Filled selection chips contain
-//! a separate, occluding close target; add/save actions are bare glyphs.
+//! a separate, occluding close target; add/load/save actions are bare
+//! glyphs. The load glyph opens the scope picker and, like the grouping
+//! readout, stays pressed while it is open.
 //!
 //! Scope chips show dimensions, named expressions, top-level expression
 //! terms, and any
@@ -36,6 +41,7 @@ use super::control::{self, ControlPaint, PointerStates as _};
 use super::scale;
 use crate::fonts;
 use crate::scopebar::ScopeBarModel;
+use crate::tiling::WorkspaceIx;
 use crate::tips;
 
 /// Compact width of the filter field in design pixels.
@@ -46,10 +52,49 @@ const FILTER_WIDTH: f32 = 200.0;
 /// `+`/save glyphs so the verbs sit on the chips' centre line.
 pub(super) const GLYPH_BOX: f32 = 14.0;
 
+/// The pin glyph's square in both states, in design pixels: a chip's
+/// height, so the filled pinned state reads as a chip and toggling it
+/// does not shift the readout.
+const PIN_BOX: f32 = 20.0;
+
 /// The inset hairline between two segments, in design pixels: shorter
 /// than the row so it reads as a segment boundary inside the bar, not a
 /// pane divider through it.
 const DIVIDER_HEIGHT: f32 = 14.0;
+
+/// Whether the active workspace holds its own frame lane.
+#[derive(Clone, Copy)]
+pub struct PinState {
+    pub ws: WorkspaceIx,
+    pub pinned: bool,
+}
+
+/// Tooltip titles by workspace, static so hovering allocates nothing.
+const PIN_TITLES: [&str; 9] = [
+    "Pin the frame to workspace 1",
+    "Pin the frame to workspace 2",
+    "Pin the frame to workspace 3",
+    "Pin the frame to workspace 4",
+    "Pin the frame to workspace 5",
+    "Pin the frame to workspace 6",
+    "Pin the frame to workspace 7",
+    "Pin the frame to workspace 8",
+    "Pin the frame to workspace 9",
+];
+const PINNED_TITLES: [&str; 9] = [
+    "Frame pinned to workspace 1",
+    "Frame pinned to workspace 2",
+    "Frame pinned to workspace 3",
+    "Frame pinned to workspace 4",
+    "Frame pinned to workspace 5",
+    "Frame pinned to workspace 6",
+    "Frame pinned to workspace 7",
+    "Frame pinned to workspace 8",
+    "Frame pinned to workspace 9",
+];
+const PIN_HINT: &str = "pinning keeps scope, grouping, and as-of changes in this workspace";
+const PINNED_HINT: &str =
+    "scope, grouping, and as-of changes stay here · click to rejoin the shared frame";
 
 /// A labeled chip with stable identity for tooltips and pointer state.
 /// The lazy debug selector allocates only when test instrumentation reads
@@ -142,28 +187,35 @@ fn divider(selector: &'static str, colour: Hsla) -> impl IntoElement {
 /// one element, so a struct would only move the assembly for no reader
 /// benefit. `grouping_open` is whether the grouping picker is up right
 /// now — the readout paints its pressed fill for as long as it is (a
-/// control that owns a popup stays visibly pressed until it closes).
+/// control that owns a popup stays visibly pressed until it closes);
+/// `scope_open` is the same for the scope picker and the load glyph, which
+/// `on_load` opens.
 /// `add_menu` is the add-a-filter menu's painted panel while it is open
 /// ([`super::addfilter::render`]); the `+` hangs it under itself and holds
 /// its pressed fill for as long as it is there. `on_term_open` and
 /// `on_term_close` take the expression term's index; `on_named_open` and
-/// `on_named_close` take the named expression's name.
+/// `on_named_close` take the named expression's name. `pin` is the active
+/// workspace and whether it is pinned; `on_pin` toggles that pin.
 #[allow(clippy::too_many_arguments)]
 pub fn toolbar(
     filter_input: &Entity<InputState>,
     model: &ScopeBarModel,
     grouping_open: bool,
+    scope_open: bool,
     add_menu: Option<AnyElement>,
     on_chip_close: impl Fn(&str, &mut Window, &mut App) + Clone + 'static,
     on_chip_open: impl Fn(&str, &mut Window, &mut App) + Clone + 'static,
     on_add: impl Fn(&mut Window, &mut App) + Clone + 'static,
     on_save: impl Fn(&mut Window, &mut App) + Clone + 'static,
+    on_load: impl Fn(&mut Window, &mut App) + Clone + 'static,
     on_grouping: impl Fn(&mut Window, &mut App) + Clone + 'static,
     on_as_of: impl Fn(&mut Window, &mut App) + Clone + 'static,
     on_term_open: impl Fn(usize, &mut Window, &mut App) + Clone + 'static,
     on_term_close: impl Fn(usize, &mut Window, &mut App) + Clone + 'static,
     on_named_open: impl Fn(&str, &mut Window, &mut App) + Clone + 'static,
     on_named_close: impl Fn(&str, &mut Window, &mut App) + Clone + 'static,
+    pin: PinState,
+    on_pin: impl Fn(&mut Window, &mut App) + Clone + 'static,
     cx: &App,
 ) -> impl IntoElement {
     let theme = cx.theme();
@@ -469,6 +521,32 @@ pub fn toolbar(
                 )
             }),
     );
+    // The load glyph opens the scope picker (`frame::scope`). Always
+    // painted: loading a saved scope is as useful on an empty scope as on
+    // a full one, and the picker says how to save one when none exist. It
+    // sits before the conditional save glyph so save appearing never moves
+    // it, and it holds its pressed fill while the picker is up, as the
+    // grouping readout does. `FolderOpen` is in the default icon bundle.
+    verbs = verbs.child(
+        verb(
+            "scope-load-chip",
+            Icon::new(CatalogIcon::FolderOpen),
+            chip_fg,
+            glyph_radius,
+            glyph_states,
+            scope_open.then_some("scope-load-chip-open"),
+            || "scope-load-chip".to_string(),
+        )
+        .tooltip(tips::tip(
+            "tip-scope-load-chip",
+            "Load a named scope",
+            Some("frame::scope"),
+            None,
+        ))
+        .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+            on_load(window, cx)
+        }),
+    );
     if model.savable {
         // Show Save only when the scope is savable. Its icon comes from the
         // shared catalog and requires the app's `ExtraIcons` asset source; the
@@ -545,10 +623,52 @@ pub fn toolbar(
                 .debug_selector(|| "scope-grouping-chevron".to_string())
         });
 
-    // The frame readout: AS OF first when scoped to a snapshot
-    // rather than the live data, then the grouping, then the scope, a
-    // hairline between neighbours. Mono face, matching every other
-    // data-adjacent readout in the shell.
+    let i = usize::from(pin.ws.get() - 1);
+    let (title, hint) = if pin.pinned {
+        (PINNED_TITLES[i], PINNED_HINT)
+    } else {
+        (PIN_TITLES[i], PIN_HINT)
+    };
+    // Pinned paints solid in the theme's primary (`Tone::Active`) so the
+    // on state reads at a glance; unpinned is a bare verb like `+` and save.
+    let (pin_fg, pin_bg, pin_states) = if pin.pinned {
+        let pinned_paint = chip::chip_paint(theme, chip::Tone::Active);
+        (
+            pinned_paint.text,
+            pinned_paint.fill,
+            control::for_chip(theme, &pinned_paint, theme.title_bar),
+        )
+    } else {
+        (chip_fg, None, glyph_states)
+    };
+    let pin_glyph = div()
+        .id("scope-pin")
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(scale::design(PIN_BOX))
+        .rounded(chip_radius)
+        .text_color(pin_fg)
+        .when_some(pin_bg, |el, bg| el.bg(bg))
+        .child(Icon::new(CatalogIcon::Pin).small())
+        .debug_selector(|| "scope-pin".to_string())
+        // A title-bar control (module doc: title-bar controls).
+        .occlude()
+        .pointer_states(pin_states)
+        .tooltip(tips::tip_with(
+            SharedString::new_static("tip-scope-pin"),
+            SharedString::new_static(title),
+            Some("frame::pin_workspace"),
+            Some(SharedString::new_static(hint)),
+        ))
+        .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+            on_pin(window, cx)
+        });
+
+    // The frame readout: the pin glyph, then AS OF when scoped to a
+    // snapshot rather than the live data, then the grouping, then the
+    // scope, a hairline between neighbours. Mono face, matching every
+    // other data-adjacent readout in the shell.
     let readout = h_flex()
         .flex_1()
         .justify_center()
@@ -557,6 +677,8 @@ pub fn toolbar(
         .font_family(fonts::MONO)
         .text_sm()
         .debug_selector(|| "frame-readout".to_string())
+        .child(pin_glyph)
+        .child(divider("scope-divider-pin", theme.title_bar_border))
         .when_some(
             model.as_of_badge.as_ref().zip(model.as_of_full.as_ref()),
             |el, (badge, full)| {

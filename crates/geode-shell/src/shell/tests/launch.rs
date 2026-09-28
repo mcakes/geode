@@ -93,6 +93,7 @@ fn a_restored_tile_is_not_launched(cx: &mut gpui::TestAppContext) {
         &Workspaces::new(),
         &crate::session::TileRecords::new(),
         None,
+        &crate::session::PinnedRecords::new(),
         &crate::palette_usage::PaletteUsage::new(),
         &crate::session::PageRecords::new(),
     );

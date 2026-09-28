@@ -1234,19 +1234,31 @@ fn open_note_amount(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTest
     (h, vcx)
 }
 
-/// On a text cursor cell the selection edit is absolute from the start:
-/// an untouched `enter` writes the seeded text to every accepting cell.
+/// An untouched `enter` over a selection writes nothing, whatever the
+/// cursor cell's editor: a no-op gesture must never copy one cell's value
+/// across the selection. A real change still commits absolutely.
 #[gpui::test]
-fn an_untouched_commit_on_a_text_cell_writes_the_seed_to_every_accepting_cell(
-    cx: &mut gpui::TestAppContext,
-) {
+fn an_untouched_commit_on_a_text_cell_writes_nothing(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_note_amount(cx);
     h.dispatch(&mut vcx, "visual_rows", None); // cursor on D1's note
     h.dispatch(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "edit", None);
     assert_eq!(h.editor_value(&vcx).as_deref(), Some("plain"));
     h.dispatch(&mut vcx, "commit", None);
-    assert_eq!(h.col_texts(&vcx, 0), vec!["plain", "plain"]);
+    assert_eq!(h.col_texts(&vcx, 0), vec!["special", "plain"]);
+    assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
+    assert_eq!(notice_of(&h, &vcx), None);
+    assert_eq!(
+        h.mode(&vcx),
+        "visual",
+        "the editor closed; the selection stays"
+    );
+
+    // A changed text still writes to every accepting cell.
+    h.dispatch(&mut vcx, "edit", None);
+    h.set_editor(&mut vcx, "odd");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.col_texts(&vcx, 0), vec!["odd", "odd"]);
     assert_eq!(
         h.col_texts(&vcx, 1),
         vec!["1.25", "0.50"],
@@ -1256,6 +1268,50 @@ fn an_untouched_commit_on_a_text_cell_writes_the_seed_to_every_accepting_cell(
         notice_of(&h, &vcx).as_deref(),
         Some("set 2 cells, skipped 2 (2 wrong type)")
     );
+}
+
+#[gpui::test]
+fn an_untouched_choice_commit_over_a_selection_writes_nothing(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_flat(cx);
+    h.with_flat_document(&mut vcx);
+    h.dispatch(&mut vcx, "right", Some(2)); // status: declared / estimated
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "edit", None);
+    assert!(h.tile.read_with(&vcx, |t, _| t.choice_popup_open()));
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.col_texts(&vcx, 2), vec!["declared", "estimated"]);
+    assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
+    assert!(!h.tile.read_with(&vcx, |t, _| t.choice_popup_open()));
+
+    // Moving the highlight is a pick: it writes.
+    h.dispatch(&mut vcx, "edit", None);
+    h.dispatch(&mut vcx, "insert_up", None);
+    h.dispatch(&mut vcx, "commit", None);
+    let picked = h.col_texts(&vcx, 2);
+    assert_eq!(picked[0], picked[1], "one option written to both");
+    assert_ne!(
+        picked[1], "estimated",
+        "the moved highlight, not the opening value"
+    );
+}
+
+#[gpui::test]
+fn an_untouched_date_commit_over_a_selection_writes_nothing(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_flat(cx);
+    h.with_flat_document(&mut vcx);
+    h.dispatch(&mut vcx, "visual_block", None); // ex column
+    h.dispatch(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "edit", None);
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.col_texts(&vcx, 0), vec!["2026-12-18", "2027-03-19"]);
+    assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
+
+    // A stepped date is a change: it writes.
+    h.dispatch(&mut vcx, "edit", None);
+    h.dispatch(&mut vcx, "insert_up", None);
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.col_texts(&vcx, 0), vec!["2027-03-20", "2027-03-20"]);
 }
 
 // Mouse: shift+click and drag, through the same doors the keys use.

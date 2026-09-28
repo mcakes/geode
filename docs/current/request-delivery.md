@@ -62,7 +62,7 @@ to the ordinary service queue. A refusal has no outcome. Once serviced,
 `EgressWorkers` resolves the target and document kind, expands the address,
 and offers the rows and kind, not yet encoded, to the target's eight-entry
 queue. Each target has one worker that encodes and sends its jobs serially,
-so encoding no longer delays other service requests.
+so encoding does not delay other service requests.
 
 Validation and target-queue failures emit an error with the original tile key
 and tag from the service thread. Encoding errors, transport results, and
