@@ -6,6 +6,8 @@
 //! `PricerRegistry`; an unknown `[pricing] adapter` produces per-line errors
 //! without preventing startup.
 
+pub mod black;
+
 use geode_core::pricing::{
     Instrument, MarketOverrides, OptionKind, PriceRequest, PriceResult, Pricer, PricingError,
     Strike,
