@@ -27,6 +27,7 @@ enum Key {
     Distinct(QueryKey),
     Catalog(QueryKey),
     Price(QueryKey),
+    VolSlices(QueryKey),
     /// Keyed on `(tile, tag)`, not on the tile alone: uploads are separate
     /// user actions whose outcomes must remain distinct. Keying on the tile would
     /// let `Sender::try_send`'s highest-tag-wins coalescing drop an earlier
@@ -58,6 +59,7 @@ fn key(event: &DataEvent, seq: u64) -> Key {
         DataEvent::Distinct(o) => Key::Distinct(o.key),
         DataEvent::Catalog(o) => Key::Catalog(o.key),
         DataEvent::Price(o) => Key::Price(o.key),
+        DataEvent::VolSlices(o) => Key::VolSlices(o.key),
         DataEvent::Upload(o) => Key::Upload(o.key, o.tag),
         DataEvent::Published { dataset, batch, .. } => {
             Key::Published(dataset.clone(), batch.clone())
@@ -86,6 +88,7 @@ fn tag(event: &DataEvent) -> Option<u64> {
         DataEvent::Distinct(o) => Some(o.tag),
         DataEvent::Catalog(o) => Some(o.tag),
         DataEvent::Price(o) => Some(o.tag),
+        DataEvent::VolSlices(o) => Some(o.tag),
         DataEvent::Upload(o) => Some(o.tag),
         _ => None,
     }
@@ -416,6 +419,39 @@ mod tests {
         );
         assert!(matches!(rx.recv().await.unwrap(), DataEvent::Query(o) if o.tag == 4095));
         assert!(matches!(rx.recv().await.unwrap(), DataEvent::LoadEnded));
+        assert!(rx.recv().await.is_err());
+    }
+
+    /// A vol-slice answer is a tagged outcome like a query's: two under one
+    /// key coalesce to a single pending entry, a late lower tag cannot
+    /// replace the higher one already waiting, and an answer for another
+    /// key is its own entry rather than a replacement.
+    #[gpui::test]
+    async fn vol_slices_coalesce_by_key_and_a_lower_tag_never_replaces_a_higher_one() {
+        let (tx, rx) = channel();
+        let outcome = |key, tag| {
+            DataEvent::VolSlices(geode_core::vol::VolSliceOutcome {
+                key: QueryKey(key),
+                tag,
+                submitted: Instant::now(),
+                results: Vec::new(),
+            })
+        };
+        tx.try_send(outcome(7, 2)).unwrap();
+        tx.try_send(outcome(7, 1)).unwrap();
+        assert_eq!(rx.pending.lock().unwrap().events.len(), 1);
+        // A higher tag under a different key must not displace key 7's answer.
+        tx.try_send(outcome(8, 3)).unwrap();
+        assert_eq!(rx.pending.lock().unwrap().events.len(), 2);
+        drop(tx);
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            DataEvent::VolSlices(o) if o.key == QueryKey(7) && o.tag == 2
+        ));
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            DataEvent::VolSlices(o) if o.key == QueryKey(8) && o.tag == 3
+        ));
         assert!(rx.recv().await.is_err());
     }
 

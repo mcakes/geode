@@ -3281,9 +3281,9 @@ run_mutation "page: the ShellActions handle defers its dispatch" \
 # bindings unreachable.
 run_mutation "page: closing an overlay over a page returns focus to the page" \
   crates/geode-shell/src/shell/mod.rs \
-  '            // not painted then, so the flag above is never set over a page).
+  '            // The open page'"'"'s handle when one is open, else the shell root.
             self.focus_home(window, cx);' \
-  '            // not painted then, so the flag above is never set over a page).
+  '            // The open page'"'"'s handle when one is open, else the shell root.
             self.focus_handle.focus(window, cx);' \
   geode-shell \
   closing_the_palette_over_a_page_returns_focus_to_the_page
@@ -6578,12 +6578,21 @@ run_mutation "shell page: a replaced page loses its state" \
   geode-shell \
   a_replaced_page_kind_keeps_its_state_through_the_next_flush
 
-run_mutation "shell page: the toolbar still paints over a page" \
+run_mutation "shell page: the page also takes the toolbar's and stripe's rows" \
   crates/geode-shell/src/shell/render.rs \
-  '        let page_open = self.page_open();' \
-  '        let page_open = false;' \
+  '                    let page_height = content_height;' \
+  '                    let page_height = content_height + toolbar_height + stripe_height;' \
   geode-shell \
-  the_page_paints_where_the_workspace_was_and_the_toolbar_is_gone
+  the_page_paints_below_the_toolbar_above_the_status_bar
+
+run_mutation "shell page: escape in the scope field over a page focuses the shell root" \
+  crates/geode-shell/src/shell/input.rs \
+  '                // bindings are unreachable from the shell root.
+                self.focus_home(window, cx);' \
+  '                // bindings are unreachable from the shell root.
+                self.focus_handle.focus(window, cx);' \
+  geode-shell \
+  escape_in_the_scope_input_over_a_page_returns_focus_to_the_page
 
 run_mutation "shell page: session omits pages" \
   crates/geode-shell/src/session.rs \
@@ -16138,6 +16147,133 @@ run_mutation "service: cancel does not reach the pricing worker" \
   '' \
   geode-data a_price_request_reaches_the_sink_as_a_price_event_and_cancel_reaches_the_worker
 
+# ---- Vol slice door: demo model, worker and routing ----
+
+run_mutation "vol: an expiry outside the terms is refused" \
+  crates/geode-pricing/src/demo_vol.rs \
+  '        if expiry < first || expiry > last {' \
+  '        if false {' \
+  geode-pricing an_expiry_outside_the_terms_is_refused_naming_the_range
+
+run_mutation "vol: total variance, not vol, is linear between terms" \
+  crates/geode-pricing/src/demo_vol.rs \
+  '                ((wa + (wb - wa) * w) / t).sqrt().max(VOL_FLOOR)' \
+  '                (va + (vb - va) * w).max(VOL_FLOOR)' \
+  geode-pricing between_terms_total_variance_is_linear_in_time
+
+run_mutation "vol: terms are sorted before bracketing" \
+  crates/geode-pricing/src/demo_vol.rs \
+  '        dates.sort();' \
+  '        let _ = &dates;' \
+  geode-pricing terms_are_sorted_before_bracketing
+
+run_mutation "vol: a chain point is placed by its own vol" \
+  crates/geode-pricing/src/demo_vol.rs \
+  '                coordinate_of(req.coordinate, req.forward, strike, vol.max(VOL_FLOOR), t)' \
+  '                coordinate_of(req.coordinate, req.forward, strike, 0.2, t)' \
+  geode-pricing a_map_places_chain_points_by_their_own_vols
+
+run_mutation "vol: density is the second difference of call prices" \
+  crates/geode-pricing/src/demo_vol.rs \
+  '            let pdf = 2.0 * ((prices[i + 1] - prices[i]) / h1 - (prices[i] - prices[i - 1]) / h0)' \
+  '            let pdf = 2.0 * ((prices[i + 1] - prices[i]) / h1)' \
+  geode-pricing a_flat_smiles_density_integrates_to_about_one_over_a_wide_grid
+
+run_mutation "vol: a non-positive strike fails the job" \
+  crates/geode-pricing/src/demo_vol.rs \
+  '                if let Some(bad) = strikes.iter().find(|k| !positive(**k)) {' \
+  '                if let Some(bad) = strikes.iter().find(|k| !(**k).is_finite()) {' \
+  geode-pricing a_non_positive_strike_fails_the_job_naming_it
+
+run_mutation "vol: a term on the anchor sits before the next day's" \
+  crates/geode-pricing/src/demo_vol.rs \
+  '    let days = if days <= 0 { MIN_DAYS } else { days as f64 };' \
+  '    let days = (days as f64).max(1.0);' \
+  geode-pricing an_anchor_day_and_next_day_term_still_slice_the_far_term
+
+run_mutation "vol: terms coincident in time refuse the document" \
+  crates/geode-pricing/src/demo_vol.rs \
+  '        if let Some(pair) = out.windows(2).find(|w| w[1].t <= w[0].t) {' \
+  '        if let Some(pair) = out.windows(2).find(|_| false) {' \
+  geode-pricing terms_that_share_a_year_fraction_are_refused
+
+run_mutation "vol: a node at or below -100% refuses its term" \
+  crates/geode-pricing/src/demo_vol.rs \
+  '            if rows.iter().any(|&i| nodes[i] <= -100.0) {' \
+  '            if rows.iter().any(|&i| nodes[i] < -100.0) {' \
+  geode-pricing a_node_at_or_below_minus_one_hundred_is_refused
+
+run_mutation "vol: density needs strictly ascending strikes" \
+  crates/geode-pricing/src/demo_vol.rs \
+  '        if req.density && strikes.windows(2).any(|w| w[1] <= w[0]) {' \
+  '        if req.density && strikes.windows(2).any(|w| w[1] < w[0]) {' \
+  geode-pricing density_on_strikes_not_strictly_ascending_is_refused
+
+run_mutation "vol restart: a [vol] model change requires a restart" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '            if new_config.get("app", "vol.model").cloned() != self.vol_baseline {' \
+  '            if false && new_config.get("app", "vol.model").cloned() != self.vol_baseline {' \
+  geode-shell a_vol_model_change_requires_a_restart_and_a_revert_clears_it
+
+run_mutation "vol worker: a replacement for a queued key takes its slot" \
+  crates/geode-data/src/vol/worker.rs \
+  '        if let Some(slot) = q.pending.get_mut(&key) {
+            *slot = params;
+        } else {' \
+  '        if false {
+        } else {' \
+  geode-data the_queue_is_bounded_by_distinct_keys_and_a_stopped_worker_refuses
+
+run_mutation "vol worker: a panic fails one job, not the batch" \
+  crates/geode-data/src/vol/worker.rs \
+  '            Err(format!("vol model panicked: {message}"))' \
+  '            Ok(VolResult::Map(Vec::new()))' \
+  geode-data a_panicking_job_fails_alone_and_the_worker_survives
+
+run_mutation "vol worker: a missing document index is refused before the model" \
+  crates/geode-data/src/vol/worker.rs \
+  '        && *document >= params.documents.len()' \
+  '        && *document > params.documents.len()' \
+  geode-data a_job_naming_a_missing_document_errors_without_stopping_the_batch
+
+run_mutation "vol worker: cancel stops a running batch at the job boundary" \
+  crates/geode-data/src/vol/worker.rs \
+  '                if q.cancel_running || q.shutdown {' \
+  '                if q.shutdown {' \
+  geode-data cancel_drops_a_queued_batch_and_stops_a_running_one_at_the_job_boundary
+
+run_mutation "vol service: a full queue answers every job" \
+  crates/geode-data/src/service.rs \
+  '            results: (0..jobs)
+                .map(|_| Err("the vol queue is full; resubmit".to_string()))
+                .collect(),' \
+  '            results: Vec::new(),' \
+  geode-data a_full_vol_queue_answers_the_refused_batch_with_an_error_per_job
+
+run_mutation "vol service: cancel reaches the vol worker" \
+  crates/geode-data/src/service.rs \
+  '        self.vol.cancel(key);' \
+  '' \
+  geode-data a_vol_request_reaches_the_sink_and_cancel_reaches_the_vol_worker
+
+run_mutation "vol handle: a request-loop panic answers every job" \
+  crates/geode-data/src/handle.rs \
+  '                    results: (0..jobs).map(|_| Err(reason.clone())).collect(),' \
+  '                    results: Vec::new(),' \
+  geode-data a_request_loop_panic_on_a_vol_batch_answers_every_job_with_the_reason
+
+run_mutation "shell: a vol slices delivery is routed by key" \
+  crates/geode-shell/src/module.rs \
+  '            Delivery::VolSlices(outcome) => Some(outcome.key),' \
+  '            Delivery::VolSlices(_) => None,' \
+  geode-shell a_vol_slices_delivery_is_routed_to_its_tile_by_key
+
+run_mutation "app: vol slices coalesce by key" \
+  crates/geode-app/src/events.rs \
+  '        DataEvent::VolSlices(o) => Key::VolSlices(o.key),' \
+  '        DataEvent::VolSlices(_) => Key::Diagnostics,' \
+  geode-app vol_slices_coalesce_by_key_and_a_lower_tag_never_replaces_a_higher_one
+
 # ---- Tile stacks ---- A stack paints only its active member. Focus, close,
 # move, restoration and drop operations keep that member and the stack's
 # bookkeeping consistent.
@@ -19395,10 +19531,10 @@ run_mutation "bridge: a DataEvent::Upload reaches the shell" \
 # removes every configured target from the running service.
 run_mutation "bridge: data_setup wires the resolved egress list into DataServiceConfig" \
   crates/geode-app/src/bridge.rs \
-  '            pricer,
+  '            vol,
             egress,
         },' \
-  '            pricer,
+  '            vol,
             egress: Vec::new(),
         },' \
   geode-app \

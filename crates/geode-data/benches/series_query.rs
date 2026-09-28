@@ -96,6 +96,7 @@ fn service() -> (
         documents: Default::default(),
         egress: Vec::new(),
         pricer: PricerConfig::default(),
+        vol: geode_data::VolConfig::default(),
     })
     .unwrap();
     (dir, service, rx, start)

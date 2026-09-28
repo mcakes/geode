@@ -15,6 +15,7 @@ pub mod service;
 pub mod source;
 pub mod store;
 pub mod supervise;
+pub mod vol;
 
 pub use egress::{UploadOutcome, UploadParams};
 pub use handle::{DataHandle, REQUEST_BOUND, Refusal, Request};
@@ -22,6 +23,7 @@ pub use pricing::{PricerConfig, PricerRegistry};
 pub use service::{
     DataEvent, DataService, DataServiceConfig, EventSink, FetchParams, LocalForget, QueryParams,
 };
+pub use vol::{VolConfig, VolModelRegistry};
 
 #[cfg(test)]
 mod consistency_tests;
