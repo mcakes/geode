@@ -4,6 +4,7 @@
 //! palette, the status-bar summary, and `mod+d`.
 
 mod config_view;
+mod levels;
 pub mod log;
 pub mod model;
 mod page;
