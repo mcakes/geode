@@ -119,4 +119,20 @@ mod tests {
         let right = (s.eval(1.0 + h) - s.eval(1.0)) / h;
         assert!((left - right).abs() < 1e-4, "{left} {right}");
     }
+
+    #[test]
+    fn a_natural_spline_is_smooth_at_every_interior_knot_on_uneven_spacing() {
+        // Uneven spacing with a curved ladder: every interior second
+        // derivative is nonzero, so a wrong forward elimination (or an
+        // h index swap) breaks C1 continuity at some knot past the first.
+        let xs = [-0.2, -0.1, 0.0, 0.05, 0.1];
+        let ys = [0.35, 0.27, 0.2, 0.19, 0.21];
+        let s = Spline::natural(&xs, &ys).unwrap();
+        let h = 1e-6;
+        for x in &xs[1..xs.len() - 1] {
+            let left = (s.eval(*x) - s.eval(x - h)) / h;
+            let right = (s.eval(x + h) - s.eval(*x)) / h;
+            assert!((left - right).abs() < 1e-4, "{x}: {left} {right}");
+        }
+    }
 }
