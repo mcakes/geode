@@ -423,26 +423,34 @@ mod tests {
     }
 
     /// A vol-slice answer is a tagged outcome like a query's: two under one
-    /// key coalesce to a single pending entry, and a late lower tag cannot
-    /// replace the higher one already waiting.
+    /// key coalesce to a single pending entry, a late lower tag cannot
+    /// replace the higher one already waiting, and an answer for another
+    /// key is its own entry rather than a replacement.
     #[gpui::test]
     async fn vol_slices_coalesce_by_key_and_a_lower_tag_never_replaces_a_higher_one() {
         let (tx, rx) = channel();
-        let outcome = |tag| {
+        let outcome = |key, tag| {
             DataEvent::VolSlices(geode_core::vol::VolSliceOutcome {
-                key: QueryKey(7),
+                key: QueryKey(key),
                 tag,
                 submitted: Instant::now(),
                 results: Vec::new(),
             })
         };
-        tx.try_send(outcome(2)).unwrap();
-        tx.try_send(outcome(1)).unwrap();
+        tx.try_send(outcome(7, 2)).unwrap();
+        tx.try_send(outcome(7, 1)).unwrap();
         assert_eq!(rx.pending.lock().unwrap().events.len(), 1);
+        // A higher tag under a different key must not displace key 7's answer.
+        tx.try_send(outcome(8, 3)).unwrap();
+        assert_eq!(rx.pending.lock().unwrap().events.len(), 2);
         drop(tx);
         assert!(matches!(
             rx.recv().await.unwrap(),
             DataEvent::VolSlices(o) if o.key == QueryKey(7) && o.tag == 2
+        ));
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            DataEvent::VolSlices(o) if o.key == QueryKey(8) && o.tag == 3
         ));
         assert!(rx.recv().await.is_err());
     }
