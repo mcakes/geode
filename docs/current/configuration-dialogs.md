@@ -88,6 +88,18 @@ the same draft before validation and persistence. This avoids independent
 copies of an object's nested state. Returning from a Schema column refreshes
 its read-only summaries from configuration with pending edits included.
 
+A Column stage can also be entered directly from a tile. "Edit column in
+view…" (`config::view_column`) and "Edit column in schema…"
+(`config::schema_column`) list the focused tile's presented columns; see
+[input and dialogs](input-and-dialogs.md#grouping-tile-log-and-column-choices).
+A pick opens Views on the tile's view, or Schema on the dataset that owns the
+column (the view's primary dataset, then its joins in declaration order), and
+enters that column's stage. Both are resolved against configuration with
+pending edits folded in, not the tile's copy. An undefined view, or a column
+no dataset of the view declares, stays in Browse with a footer notice; a
+column the object no longer has stops on the object's Edit stage with a
+notice. Escape then walks the usual ladder: Edit, Browse, close.
+
 Rows carry no destination badge: every field of one stage writes the same
 place (the object's document, or a Column stage's one overlay), so the badge
 would read the same on every row. Rows name a layer instead where one

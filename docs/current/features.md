@@ -161,6 +161,11 @@ format.
 fixed); a row above that level, a grouping without it, or a NULL value opens
 the plain tile picker.
 
+"Edit column in view…" and "Edit column in schema…" list the blotter's
+planned non-tree columns with the cursor's column highlighted
+(`TileContent::tile_columns`). Hidden columns and dimensions folded into the
+tree are not in the plan and are not offered; reach them through the dialogs.
+
 ### Selection
 
 `V` (`blotter::visual_rows`) selects whole rows from the cursor; `v`
