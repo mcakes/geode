@@ -16302,6 +16302,15 @@ run_mutation "vol chain prefix: freshness needs the separator" \
   '        let under = prefix.to_string();' \
   geode-data a_prefix_never_matches_a_longer_underlying
 
+run_mutation "vol chain prefix: the service reports prefix freshness" \
+  crates/geode-data/src/query/read.rs \
+  '                            .live_source_time_under(
+                                &params.dataset,
+                                &join_key(&params.document_key),
+                            )?' \
+  '                            .live_source_time(&params.dataset, &join_key(&params.document_key), None)?' \
+  geode-data the_service_reports_a_live_prefix_requests_freshness
+
 run_mutation "vol chain prefix: an as-of read pins each matched generation" \
   crates/geode-data/src/query/document.rs \
   '                        format!(" and gen_id in ({ids})")' \
