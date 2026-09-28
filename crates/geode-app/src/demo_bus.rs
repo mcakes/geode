@@ -7,10 +7,12 @@
 
 use geode_core::document::{DocumentKind, DocumentRows};
 use geode_data::adapter::ChannelFeed;
+use geode_demo_data::documents::chain::ChainGenerator;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use std::sync::Arc;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -18,6 +20,9 @@ use std::time::Duration;
 /// Generation, serialization, and publication run to completion before the
 /// next check; this interval bounds the sleep slice, not total stop latency.
 const STOP_POLL: Duration = Duration::from_millis(20);
+
+/// A producer's generator: the next document for a key, or `None` to skip.
+pub type NextDocument = dyn FnMut(&str) -> Option<DocumentRows> + Send;
 
 /// A document generator and its destination topics.
 ///
@@ -29,7 +34,13 @@ pub struct Producer {
     pub kind: Arc<dyn DocumentKind>,
     pub topic_prefix: &'static str,
     pub keys: Vec<String>,
-    pub next: Box<dyn FnMut(&str) -> DocumentRows + Send>,
+    /// Publishes of each key in the startup burst. It is 1 for a kind with
+    /// one document per key. A producer that rotates through several
+    /// documents per key, like the chain's expiries, sets how many it takes
+    /// to publish them all.
+    pub startup_repeats: usize,
+    /// `None` skips this publish: a producer whose input is not ready yet.
+    pub next: Box<NextDocument>,
 }
 
 /// A running demo bus thread, stopped and joined on drop.
@@ -63,8 +74,8 @@ impl Drop for DemoBus {
 
 /// Spawns the `geode-demo-bus` thread over `producers`.
 ///
-/// Startup attempts one publish per key in producer order then key order,
-/// without waiting for a cadence. Ingestion and delivery remain asynchronous.
+/// Startup attempts `startup_repeats` publishes per key, in producer order
+/// then key order, without waiting for a cadence. Ingestion and delivery remain asynchronous.
 /// Subsequent publishes follow [`round_robin_schedule`], with one wait per
 /// publish across all producers. Jitter is seeded and capped at `cadence`,
 /// giving nonnegative waits from `cadence - jitter` through `cadence + jitter`
@@ -112,7 +123,9 @@ fn sleep_checking_stop(duration: Duration, stop: &AtomicBool) -> bool {
 }
 
 /// Generates and serializes one document, then publishes it to the topic
-/// formed by concatenating the prefix and key. Serialization errors log a
+/// formed by concatenating the prefix and key. A generator that returns
+/// `None` (its input is not ready yet) skips this publish silently.
+/// Serialization errors log a
 /// warning and skip this publish. A full or disconnected inbound queue drops
 /// the message; the feed counts refusals and the bus warns only on the first.
 /// There is no immediate retry. Generator and serializer panics are not caught.
@@ -120,11 +133,13 @@ fn publish_one(
     feed: &ChannelFeed,
     kind: &Arc<dyn DocumentKind>,
     topic_prefix: &str,
-    next: &mut (dyn FnMut(&str) -> DocumentRows + Send),
+    next: &mut NextDocument,
     key: &str,
     warned_full: &mut bool,
 ) {
-    let rows = next(key);
+    let Some(rows) = next(key) else {
+        return;
+    };
     let bytes = match kind.write(&rows) {
         Ok(bytes) => bytes,
         Err(e) => {
@@ -144,6 +159,23 @@ fn publish_one(
             "demo bus: the inbound queue is full; at least one publish was dropped"
         );
     }
+}
+
+/// The chain producer's body: price the underlying's next expiry off the
+/// latest CVI document the CVI producer stored for it, or skip (`None`)
+/// when there is none yet — the chain never publishes without the curve
+/// it is meant to sit near.
+pub fn chain_next(
+    latest_cvi: &Mutex<HashMap<String, DocumentRows>>,
+    chain: &mut ChainGenerator,
+    key: &str,
+) -> Option<DocumentRows> {
+    let cvi = latest_cvi
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(key)
+        .cloned()?;
+    Some(chain.next_document(key, &cvi, chrono::Utc::now()))
 }
 
 /// The one flat schedule the cadence loop replays forever: every
@@ -179,22 +211,25 @@ fn run(
 ) {
     let mut warned_full = false;
 
-    // Attempt every key once before the first cadence wait. Parsing and
-    // store publication happen asynchronously after feed admission.
+    // Attempt every key `startup_repeats` times before the first cadence
+    // wait. Parsing and store publication happen asynchronously after feed
+    // admission.
     for producer in producers.iter_mut() {
         let keys = producer.keys.clone();
         for key in &keys {
-            if stop.load(Ordering::Relaxed) {
-                return;
+            for _ in 0..producer.startup_repeats.max(1) {
+                if stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                publish_one(
+                    &feed,
+                    &producer.kind,
+                    producer.topic_prefix,
+                    producer.next.as_mut(),
+                    key,
+                    &mut warned_full,
+                );
             }
-            publish_one(
-                &feed,
-                &producer.kind,
-                producer.topic_prefix,
-                producer.next.as_mut(),
-                key,
-                &mut warned_full,
-            );
         }
     }
 
@@ -255,7 +290,8 @@ mod tests {
             kind: Arc::new(CviKind),
             topic_prefix: "marketdata/cvi/",
             keys: underlyings,
-            next: Box::new(move |key| generator.next_document(key)),
+            startup_repeats: 1,
+            next: Box::new(move |key| Some(generator.next_document(key))),
         }
     }
 
@@ -265,8 +301,93 @@ mod tests {
             kind: Arc::new(DividendKind),
             topic_prefix: "marketdata/dividend/",
             keys: underlyings,
-            next: Box::new(move |key| generator.next_document(key)),
+            startup_repeats: 1,
+            next: Box::new(move |key| Some(generator.next_document(key))),
         }
+    }
+
+    fn cvi_and_chain_producers(underlyings: Vec<String>, anchor: NaiveDate) -> Vec<Producer> {
+        use geode_demo_data::documents::chain::{ChainGenerator, EXPIRIES};
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+        let latest: Arc<Mutex<HashMap<String, DocumentRows>>> = Arc::default();
+        let mut cvi = CviGenerator::new(42, underlyings.clone(), anchor);
+        let mut chain = ChainGenerator::new(42, underlyings.clone(), anchor);
+        let store = Arc::clone(&latest);
+        vec![
+            Producer {
+                kind: Arc::new(CviKind),
+                topic_prefix: "marketdata/cvi/",
+                keys: underlyings.clone(),
+                startup_repeats: 1,
+                next: Box::new(move |key| {
+                    let doc = cvi.next_document(key);
+                    store.lock().unwrap().insert(key.to_string(), doc.clone());
+                    Some(doc)
+                }),
+            },
+            Producer {
+                kind: Arc::new(geode_documents::OptionChainKind),
+                topic_prefix: "marketdata/chain/",
+                keys: underlyings,
+                startup_repeats: EXPIRIES,
+                next: Box::new(move |key| chain_next(&latest, &mut chain, key)),
+            },
+        ]
+    }
+
+    #[test]
+    fn the_startup_burst_publishes_every_expiry_of_every_chain() {
+        use geode_demo_data::documents::chain::EXPIRIES;
+        let (adapter, feed) = ChannelAdapter::new("demo_bus");
+        let (sink, rx) = MessageSink::bounded(256);
+        let mut sub = adapter.subscription().expect("channel adapters subscribe");
+        sub.subscribe(&["marketdata/chain/>".to_string()], sink, Arc::new(|_| {}))
+            .unwrap();
+        let underlyings = vec!["SPX".to_string(), "NDX".to_string()];
+        let anchor = NaiveDate::from_ymd_opt(2026, 9, 12).unwrap();
+        let _bus = spawn(
+            feed,
+            cvi_and_chain_producers(underlyings, anchor),
+            Duration::from_secs(3600),
+            Duration::ZERO,
+            42,
+        );
+        let mut keys = HashSet::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while keys.len() < 2 * EXPIRIES && Instant::now() < deadline {
+            if let Ok(m) = rx.recv_timeout(Duration::from_millis(200)) {
+                let parsed = geode_documents::OptionChainKind
+                    .parse(&m.bytes)
+                    .expect("a well-formed option chain document");
+                keys.insert(parsed.rows.key);
+            }
+        }
+        assert_eq!(
+            keys.len(),
+            2 * EXPIRIES,
+            "every (underlying, expiry) at startup"
+        );
+    }
+
+    #[test]
+    fn the_chain_producer_skips_an_underlying_with_no_cvi_yet() {
+        use geode_demo_data::documents::chain::ChainGenerator;
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+        let anchor = NaiveDate::from_ymd_opt(2026, 9, 12).unwrap();
+        let latest: Mutex<HashMap<String, DocumentRows>> = Mutex::default();
+        let mut chain = ChainGenerator::new(42, vec!["SPX".to_string()], anchor);
+        assert!(
+            chain_next(&latest, &mut chain, "SPX").is_none(),
+            "no CVI yet: skip, don't panic"
+        );
+        let cvi = CviGenerator::new(42, vec!["SPX".to_string()], anchor).next_document("SPX");
+        latest.lock().unwrap().insert("SPX".to_string(), cvi);
+        assert!(
+            chain_next(&latest, &mut chain, "SPX").is_some(),
+            "with a CVI it publishes"
+        );
     }
 
     /// Two producers (three CVI keys, two dividend keys) — the burst

@@ -130,8 +130,9 @@ fn main() {
             );
 
             // Start document producers after the service installs its subscriptions.
-            // Both use the risk generator's underlying vocabulary so demo datasets share
-            // identities. Keep the bus alive until the quit hook stops its thread.
+            // Three producers share the risk generator's underlyings; the chain
+            // producer prices off the CVI producer's latest document for its
+            // underlying. Keep the bus alive until the quit hook stops its thread.
             let mut demo_bus = demo_feed.map(|feed| {
                 // Seed synthetic document dates from the configured application clock.
                 let today = geode_core::clock::Clock::from_config(&services.config)
@@ -149,18 +150,48 @@ fn main() {
                         underlyings.clone(),
                         today,
                     );
+                // One anchor (`today`) for both CVI and chain: the chain clamps its
+                // curve date to the CVI's terms, and a shared anchor keeps its
+                // expiries inside them.
+                let mut chain_generator = geode_demo_data::documents::chain::ChainGenerator::new(
+                    42,
+                    underlyings.clone(),
+                    today,
+                );
+                let latest_cvi: Arc<
+                    Mutex<std::collections::HashMap<String, geode_core::document::DocumentRows>>,
+                > = Arc::default();
+                let cvi_store = Arc::clone(&latest_cvi);
                 let producers = vec![
                     demo_bus::Producer {
                         kind: Arc::new(geode_documents::CviKind),
                         topic_prefix: "marketdata/cvi/",
                         keys: underlyings.clone(),
-                        next: Box::new(move |key| cvi_generator.next_document(key)),
+                        startup_repeats: 1,
+                        next: Box::new(move |key| {
+                            let doc = cvi_generator.next_document(key);
+                            cvi_store
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .insert(key.to_string(), doc.clone());
+                            Some(doc)
+                        }),
                     },
                     demo_bus::Producer {
                         kind: Arc::new(geode_documents::DividendKind),
                         topic_prefix: "marketdata/dividend/",
+                        keys: underlyings.clone(),
+                        startup_repeats: 1,
+                        next: Box::new(move |key| Some(dividend_generator.next_document(key))),
+                    },
+                    demo_bus::Producer {
+                        kind: Arc::new(geode_documents::OptionChainKind),
+                        topic_prefix: "marketdata/chain/",
                         keys: underlyings,
-                        next: Box::new(move |key| dividend_generator.next_document(key)),
+                        startup_repeats: geode_demo_data::documents::chain::EXPIRIES,
+                        next: Box::new(move |key| {
+                            demo_bus::chain_next(&latest_cvi, &mut chain_generator, key)
+                        }),
                     },
                 ];
                 demo_bus::spawn(
