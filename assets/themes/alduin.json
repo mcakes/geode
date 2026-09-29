@@ -8,6 +8,11 @@
       "name": "Alduin",
       "mode": "dark",
       "colors": {
+        "chart.1": "#87afaf",
+        "chart.2": "#b4a17b",
+        "chart.3": "#aa7983",
+        "chart.4": "#718754",
+        "chart.5": "#c4c0b5",
         "accent.background": "#2e2b29",
         "accent.foreground": "#ebdbb2",
         "background": "#1C1C1C",

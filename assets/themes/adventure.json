@@ -8,6 +8,11 @@
       "name": "Adventure",
       "mode": "dark",
       "colors": {
+        "chart.1": "#4384ad",
+        "chart.2": "#aa7900",
+        "chart.3": "#af8787",
+        "chart.4": "#41b3a9",
+        "chart.5": "#e4d5c7",
         "accent.background": "#25292d",
         "accent.foreground": "#feffff",
         "background": "#040404",
@@ -163,6 +168,11 @@
       "name": "Adventure Time",
       "mode": "dark",
       "colors": {
+        "chart.1": "#7284c6",
+        "chart.2": "#ce7837",
+        "chart.3": "#97a88a",
+        "chart.4": "#a794bd",
+        "chart.5": "#c7c7d4",
         "accent.background": "#36345f",
         "accent.foreground": "#C7C7D4",
         "background": "#1f1d45",

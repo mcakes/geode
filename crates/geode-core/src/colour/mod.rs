@@ -405,13 +405,48 @@ pub fn interpolate_hue(degrees: f32, tone: Tone, anchors: &Anchors) -> Rgb {
 /// lightness with sufficient contrast.
 pub const READABLE_RATIO: f32 = 3.0;
 
+/// Minimum contrast for small text, including chips and control labels.
+pub const TEXT_READABLE_RATIO: f32 = 4.5;
+
+/// Keep readable text unchanged; otherwise move its OKLCH lightness toward
+/// black or white, whichever contrasts more with the actual background.
+/// Unlike a theme foreground, that endpoint always permits 4.5:1 on opaque
+/// sRGB surfaces. A little headroom protects the result through conversion
+/// and quantization; middle-grey surfaces may permit less than 4.7:1.
+pub fn readable_text_on(rgb: Rgb, background: Rgb) -> Rgb {
+    if contrast_ratio(rgb, background) >= TEXT_READABLE_RATIO {
+        return rgb;
+    }
+    let black = Rgb {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+    };
+    let white = Rgb {
+        r: 1.0,
+        g: 1.0,
+        b: 1.0,
+    };
+    let pole = if contrast_ratio(black, background) >= contrast_ratio(white, background) {
+        black
+    } else {
+        white
+    };
+    let target = (TEXT_READABLE_RATIO + 0.2).min(contrast_ratio(pole, background) - 0.01);
+    with_contrast(rgb, background, pole, target)
+}
+
 /// Move OKLCH lightness toward `toward` to seek `READABLE_RATIO` against
 /// `background`, retaining hue and clipping chroma to the display gamut.
 /// Already-readable colors are unchanged; otherwise 16 bisection steps
 /// choose the adjustment. If no point on this lightness path clears the
 /// ratio, the endpoint is returned without a contrast guarantee.
 pub fn readable_on(rgb: Rgb, background: Rgb, toward: Rgb) -> Rgb {
-    if contrast_ratio(rgb, background) >= READABLE_RATIO {
+    with_contrast(rgb, background, toward, READABLE_RATIO)
+}
+
+fn with_contrast(rgb: Rgb, background: Rgb, toward: Rgb, ratio: f32) -> Rgb {
+    if contrast_ratio(rgb, background) >= ratio {
         return rgb;
     }
     let lch = lab_to_lch(srgb_to_oklab(rgb));
@@ -426,7 +461,7 @@ pub fn readable_on(rgb: Rgb, background: Rgb, toward: Rgb) -> Rgb {
     let (mut lo, mut hi) = (0.0_f32, 1.0_f32);
     for _ in 0..16 {
         let mid = (lo + hi) / 2.0;
-        if contrast_ratio(at(mid), background) >= READABLE_RATIO {
+        if contrast_ratio(at(mid), background) >= ratio {
             hi = mid;
         } else {
             lo = mid;
@@ -730,6 +765,61 @@ mod tests {
             },
         );
         assert!((ratio - 21.0).abs() < 0.01, "{ratio}");
+    }
+
+    #[test]
+    fn text_contrast_clears_on_light_dark_and_middle_tone_surfaces() {
+        // Include the middle luminances where neither black nor white can
+        // reach the preferred 4.7:1 headroom, but one can always reach 4.5:1.
+        let inks = [
+            Rgb {
+                r: 0.98,
+                g: 0.98,
+                b: 0.98,
+            },
+            Rgb {
+                r: 0.1,
+                g: 0.1,
+                b: 0.1,
+            },
+            Rgb {
+                r: 0.5,
+                g: 0.55,
+                b: 0.5,
+            },
+            Rgb {
+                r: 1.0,
+                g: 0.0,
+                b: 0.4,
+            },
+            Rgb {
+                r: 0.0,
+                g: 0.8,
+                b: 1.0,
+            },
+        ];
+        for r in [0.0, 0.25, 0.46, 0.5, 0.75, 1.0] {
+            for g in [0.0, 0.25, 0.46, 0.5, 0.75, 1.0] {
+                for b in [0.0, 0.25, 0.46, 0.5, 0.75, 1.0] {
+                    let background = Rgb { r, g, b };
+                    for ink in inks.into_iter().chain([background]) {
+                        let result = readable_text_on(ink, background);
+                        assert!(
+                            contrast_ratio(result, background) >= TEXT_READABLE_RATIO,
+                            "{ink:?} on {background:?} -> {result:?}"
+                        );
+                        if contrast_ratio(ink, background) >= TEXT_READABLE_RATIO {
+                            assert_eq!(result, ink, "readable text must keep its theme color");
+                        }
+                        assert!(
+                            [result.r, result.g, result.b]
+                                .into_iter()
+                                .all(|c| (0.0..=1.0).contains(&c))
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

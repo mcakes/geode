@@ -578,6 +578,12 @@ a 3:1 contrast ratio. Custom themes can prevent the available lightness range
 from reaching that target; untinted semantic tokens retain their exact color.
 See [color resolution](typed-documents.md#colors-and-numeric-formatting).
 
+Default chart series use an explicit five-color palette chosen for each named
+variant. Bundled palettes are checked for at least 3:1 background contrast
+and separation between all five resolved colors. Chip and control text uses
+a separate 4.5:1 floor against its actual fill, including hover and pressed
+states. Colors that already meet the text floor stay unchanged.
+
 `[time]` configures the trader-facing IANA time zone and start/end-of-day
 presets. Displayed times use `geode_core::clock::Clock`; crates do not read
 `chrono::Local` directly. Log and crash filenames still roll by UTC date so

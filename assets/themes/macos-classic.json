@@ -9,6 +9,11 @@
       "mode": "light",
       "shadow": false,
       "colors": {
+        "chart.1": "#0060de",
+        "chart.2": "#947040",
+        "chart.3": "#84627c",
+        "chart.4": "#4d8878",
+        "chart.5": "#3c4653",
         "accent.background": "#E0E0E0",
         "accent.foreground": "#000000",
         "background": "#F9F9F9",
@@ -143,6 +148,11 @@
       "mode": "dark",
       "shadow": false,
       "colors": {
+        "chart.1": "#419cff",
+        "chart.2": "#c8aa6c",
+        "chart.3": "#b28bae",
+        "chart.4": "#7fab9a",
+        "chart.5": "#dedede",
         "accent.background": "#282629",
         "accent.foreground": "#CACCCA",
         "background": "#131313",

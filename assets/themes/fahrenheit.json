@@ -8,6 +8,11 @@
       "name": "Fahrenheit",
       "mode": "dark",
       "colors": {
+        "chart.1": "#b7795e",
+        "chart.2": "#b4a16d",
+        "chart.3": "#6985b0",
+        "chart.4": "#669e99",
+        "chart.5": "#ffffce",
         "accent.background": "#171717",
         "accent.foreground": "#FFFFCE",
         "background": "#000000",

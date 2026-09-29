@@ -11777,7 +11777,7 @@ run_mutation "colour: contrast_ratio applies the WCAG +0.05 floor" \
 # bundled-theme tests both check this through the resolver.
 run_mutation "colour: the readability floor pulls lightness until 3:1" \
   crates/geode-core/src/colour/mod.rs \
-  '    if contrast_ratio(rgb, background) >= READABLE_RATIO {
+  '    if contrast_ratio(rgb, background) >= ratio {
         return rgb;
     }' \
   '    if true {
@@ -11788,7 +11788,7 @@ run_mutation "colour: the readability floor pulls lightness until 3:1" \
 
 run_mutation "theme: bundled themes clear 3:1 through the resolver" \
   crates/geode-core/src/colour/mod.rs \
-  '    if contrast_ratio(rgb, background) >= READABLE_RATIO {
+  '    if contrast_ratio(rgb, background) >= ratio {
         return rgb;
     }' \
   '    if true {
@@ -13586,7 +13586,8 @@ run_mutation "mdpaint: the floored tones re-derive when a theme input moves" \
 # ---- Shared status chips ---- Blotter, diagnostics and shell status chips
 # use the same colour builder. Warning foreground tokens over translucent
 # warning fills can be unreadable; the bundled-theme sweep measures contrast
-# rather than text content.
+# rather than text content. The token test separately checks which token
+# starts the correction, since the floor can repair an incorrect choice.
 run_mutation "chip: a tinted warning chip's text is foreground, not warning_foreground" \
   crates/geode-shell/src/shell/chip.rs \
   '        Tone::Warning => ChipPaint {
@@ -13598,7 +13599,7 @@ run_mutation "chip: a tinted warning chip's text is foreground, not warning_fore
             text: theme.warning_foreground,
         },' \
   geode-shell \
-  every_chip_tone_is_readable_on_every_bundled_theme
+  tones_resolve_to_their_documented_tokens
 
 # Danger chips use readable text over the composited danger tint;
 # danger_foreground can fall below the contrast floor.
@@ -13613,20 +13614,13 @@ run_mutation "chip: a tinted danger chip's text is foreground, not danger_foregr
             text: theme.danger_foreground,
         },' \
   geode-shell \
-  every_chip_tone_is_readable_on_every_bundled_theme
+  tones_resolve_to_their_documented_tokens
 
-# The text-only tones are floored. Mutated to the identity, a stale
-# dataset time or a degraded-source row paints the raw `warning`, which
-# ten bundled themes ship under 3:1 against their own background.
-run_mutation "chip: text-only tones are floored to 3:1 against the background" \
+# Filled and text-only chips use the small-text floor on their actual ground.
+run_mutation "chip: chip text is floored to 4.5:1 on the actual surface" \
   crates/geode-shell/src/shell/chip.rs \
-  '    to_hsla(readable_on(
-        to_rgb(colour),
-        to_rgb(theme.background),
-        to_rgb(theme.foreground),
-    ))' \
-  '    let _ = theme;
-    colour' \
+  '    paint.text = text_on(paint.text, paint.fill, surface);' \
+  '    let _ = surface;' \
   geode-shell \
   every_chip_tone_is_readable_on_every_bundled_theme
 
@@ -13736,14 +13730,14 @@ run_mutation "listrow: every row hover goes through paint_row" \
 # surface; colour sweeps verify both properties.
 run_mutation "control: hover text is floored over the hover fill" \
   crates/geode-shell/src/shell/control.rs \
-  '        hover_text: to_hsla(readable_on(text, hover, toward)),' \
+  '        hover_text: to_hsla(readable_text_on(text, hover)),' \
   '        hover_text: to_hsla(text),' \
   geode-shell \
   every_control_state_is_readable_on_every_bundled_theme
 
 run_mutation "control: pressed text is floored over the pressed fill" \
   crates/geode-shell/src/shell/control.rs \
-  '        pressed_text: to_hsla(readable_on(text, pressed, toward)),' \
+  '        pressed_text: to_hsla(readable_text_on(text, pressed)),' \
   '        pressed_text: to_hsla(text),' \
   geode-shell \
   every_control_state_is_readable_on_every_bundled_theme
@@ -25466,13 +25460,8 @@ run_mutation "chip: an active fill is floored against the title bar" \
   '            let fill = over(theme.primary, background);' \
   geode-shell an_active_chip_stands_out_from_the_title_bar_on_every_bundled_theme
 
-# Its text is floored against that fill; primary_foreground alone is
-# unreadable on several bundled themes.
-run_mutation "chip: active text is floored against its fill" \
-  crates/geode-shell/src/shell/chip.rs \
-  '                text: to_hsla(readable_on(to_rgb(theme.primary_foreground), fill, pole)),' \
-  '                text: theme.primary_foreground,' \
-  geode-shell every_chip_tone_is_readable_on_every_bundled_theme
+# Active text now uses the common chip floor, covered by the shared
+# chip-text mutation above.
 
 # ---- In-process scope evaluator ----
 # The evaluator copies what DuckDB does with scope_sql's predicate; the

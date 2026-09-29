@@ -9,6 +9,11 @@
       "mode": "light",
       "shadow": false,
       "colors": {
+        "chart.1": "#ad4565",
+        "chart.2": "#527e78",
+        "chart.3": "#707d39",
+        "chart.4": "#75628f",
+        "chart.5": "#565b60",
         "accent.background": "#EBE4E1",
         "accent.foreground": "#060606",
         "background": "#FEFAF9",
@@ -146,6 +151,11 @@
       "name": "Molokai Dark",
       "mode": "dark",
       "colors": {
+        "chart.1": "#ce648c",
+        "chart.2": "#70a8b5",
+        "chart.3": "#a0b763",
+        "chart.4": "#ac8baa",
+        "chart.5": "#d2cfb7",
         "accent.background": "#2b2f30",
         "accent.foreground": "#f8f8f2",
         "background": "#1b1d1e",

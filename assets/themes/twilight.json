@@ -8,6 +8,11 @@
       "name": "Twilight",
       "mode": "dark",
       "colors": {
+        "chart.1": "#cda869",
+        "chart.2": "#778385",
+        "chart.3": "#7f925a",
+        "chart.4": "#c06d44",
+        "chart.5": "#dcdcdc",
         "accent.background": "#2b2b2b",
         "accent.foreground": "#dcdcdc",
         "background": "#141414",

@@ -8,6 +8,11 @@
       "name": "Flexoki Light",
       "mode": "light",
       "colors": {
+        "chart.1": "#4385be",
+        "chart.2": "#ad8301",
+        "chart.3": "#95607f",
+        "chart.4": "#66800b",
+        "chart.5": "#474642",
         "accent.background": "#E8E4CE",
         "accent.foreground": "#100F0F",
         "background": "#FFFCF0",
@@ -171,6 +176,11 @@
       "name": "Flexoki Dark",
       "mode": "dark",
       "colors": {
+        "chart.1": "#6b95b7",
+        "chart.2": "#d0a86a",
+        "chart.3": "#b0819b",
+        "chart.4": "#75934e",
+        "chart.5": "#cecdc3",
         "accent.background": "#242221",
         "accent.foreground": "#CECDC3",
         "background": "#100F0F",

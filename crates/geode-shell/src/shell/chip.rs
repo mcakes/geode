@@ -1,28 +1,22 @@
 //! Shared colours for status chips and semantic text.
 //!
-//! Warning and danger chips use translucent semantic fills with `foreground`
-//! text. The corresponding `warning_foreground` and `danger_foreground`
-//! tokens are intended for solid fills and can become unreadable over tints.
-//! Neutral chips use the theme's secondary fill and text pair. Active chips
-//! use a solid `primary`, floored against the title bar so the on state
-//! stands out, with `primary_foreground` floored against that fill.
+//! Warning and danger chips keep their translucent semantic fills; neutral
+//! chips keep `secondary`. Text starts with the paired theme token, then
+//! clears 4.5:1 against the composited fill. Active chips also keep a 3:1
+//! fill/title-bar floor so their on state remains visible.
 //!
-//! Text-only tones use `warning` or `danger`, adjusted toward `foreground`
-//! when needed to meet the readability floor against the background.
-//! Theme sweeps below check every tone's text against its composited fill
-//! or background surface.
+//! Use `chip_paint_on` for chips on chrome or a popover; `chip_paint` resolves
+//! against the main background. Pointer states use the same text floor in
+//! `control`, measured against their own hover and pressed fills.
 
-use geode_core::colour::{READABLE_RATIO, Rgb, contrast_ratio, readable_on};
+use geode_core::colour::{Rgb, TEXT_READABLE_RATIO, contrast_ratio, readable_on, readable_text_on};
 use gpui::Hsla;
 use gpui_component::Theme;
 
 use super::colours::{over, to_hsla, to_rgb};
 
-/// The tint a chip fill takes of its semantic colour: light enough that
-/// `foreground` stays readable over it on every bundled theme, strong
-/// enough to read as that colour. One value for every tone, so two chips
-/// in one header are the same object at two colours rather than two
-/// designs.
+/// A modest semantic tint shared by warning and danger chips. Text is
+/// corrected independently against the tint composited on its actual surface.
 pub const FILL_ALPHA: f32 = 0.25;
 
 /// What a chip means — its fill's semantic colour, or, for a run of text
@@ -45,8 +39,8 @@ pub enum Tone {
     DangerText,
     /// A user-selected state with no hazard, such as a pinned grouping or a
     /// tile filter. Uses `secondary_foreground` on `secondary`, reserving
-    /// warning colour for states that need attention. The fill can be faint
-    /// on some themes; text readability is checked by the theme sweep.
+    /// warning colour for states that need attention. Text is adjusted only
+    /// when the pair falls below 4.5:1 on its actual surface.
     Neutral,
     /// An on state the trader switched on that changes what the screen
     /// shows, such as a workspace's pinned frame: a solid `primary` whose
@@ -65,13 +59,18 @@ pub struct ChipPaint {
     pub text: Hsla,
 }
 
-/// The colours for a chip of `tone` on `theme` — the one place a chip's
-/// text and fill are decided. Read per render (it is a few field reads
-/// and, for `WarningText`, one contrast check); a caller painting many
-/// per frame may hold the answer across a theme signature as the blotter
-/// does for named colours.
+/// Resolve a chip on the main background. Chrome and popover callers use
+/// [`chip_paint_on`] so translucent fills are measured on their actual surface.
 pub fn chip_paint(theme: &Theme, tone: Tone) -> ChipPaint {
-    match tone {
+    chip_paint_on(theme, tone, theme.background)
+}
+
+/// Resolve a chip's text and fill on `surface`, composited over the theme
+/// background if the surface is translucent. Read per render so theme changes
+/// are reflected immediately.
+pub fn chip_paint_on(theme: &Theme, tone: Tone, surface: Hsla) -> ChipPaint {
+    let surface = to_hsla(over(surface, to_rgb(theme.background)));
+    let mut paint = match tone {
         Tone::Warning => ChipPaint {
             fill: Some(theme.warning.opacity(FILL_ALPHA)),
             text: theme.foreground,
@@ -82,11 +81,11 @@ pub fn chip_paint(theme: &Theme, tone: Tone) -> ChipPaint {
         },
         Tone::WarningText => ChipPaint {
             fill: None,
-            text: floored_text(theme, theme.warning),
+            text: theme.warning,
         },
         Tone::DangerText => ChipPaint {
             fill: None,
-            text: floored_text(theme, theme.danger),
+            text: theme.danger,
         },
         Tone::Neutral => ChipPaint {
             fill: Some(theme.secondary),
@@ -100,30 +99,26 @@ pub fn chip_paint(theme: &Theme, tone: Tone) -> ChipPaint {
                 bar,
                 to_rgb(theme.foreground),
             );
-            // The text pole is whichever end of the theme contrasts more
-            // with the fill, so a light fill takes dark text and vice versa.
-            let pole = [theme.foreground, theme.background]
-                .map(to_rgb)
-                .into_iter()
-                .max_by(|a, b| contrast_ratio(*a, fill).total_cmp(&contrast_ratio(*b, fill)))
-                .unwrap_or(background);
             ChipPaint {
                 fill: Some(to_hsla(fill)),
-                text: to_hsla(readable_on(to_rgb(theme.primary_foreground), fill, pole)),
+                text: theme.primary_foreground,
             }
         }
-    }
+    };
+    paint.text = text_on(paint.text, paint.fill, surface);
+    paint
 }
 
-/// Use `colour` as text on the theme background, adjusting its lightness
-/// toward `foreground` when needed to meet the readability floor. Delegates
-/// to [`geode_core::colour::readable_on`].
-fn floored_text(theme: &Theme, colour: Hsla) -> Hsla {
-    to_hsla(readable_on(
-        to_rgb(colour),
-        to_rgb(theme.background),
-        to_rgb(theme.foreground),
-    ))
+/// Text for an application-owned chip or bare label on an opaque surface.
+/// Keep the original token (including its alpha) when it already clears.
+pub(crate) fn text_on(text: Hsla, fill: Option<Hsla>, surface: Hsla) -> Hsla {
+    let ground = fill.map_or_else(|| to_rgb(surface), |fill| over(fill, to_rgb(surface)));
+    let ink = over(text, ground);
+    if contrast_ratio(ink, ground) >= TEXT_READABLE_RATIO {
+        text
+    } else {
+        to_hsla(readable_text_on(ink, ground))
+    }
 }
 
 /// The ground a chip's text lands on: its fill composited over the
@@ -138,15 +133,17 @@ pub fn ground(theme: &Theme, paint: &ChipPaint) -> Rgb {
     }
 }
 
-/// Whether `paint` clears the readability floor on `theme` — what the
-/// sweep test asserts and what a caller can ask before inventing a tone.
+/// Whether `paint` clears the text floor on the main theme background.
+/// For another surface, measure against the fill composited on that surface.
 pub fn is_readable(theme: &Theme, paint: &ChipPaint) -> bool {
-    contrast_ratio(to_rgb(paint.text), ground(theme, paint)) >= READABLE_RATIO
+    contrast_ratio(over(paint.text, ground(theme, paint)), ground(theme, paint))
+        >= TEXT_READABLE_RATIO
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use geode_core::colour::READABLE_RATIO;
     use gpui_component::ActiveTheme as _;
 
     const TONES: [Tone; 6] = [
@@ -171,18 +168,50 @@ mod tests {
             cx.update(|cx| {
                 Theme::global_mut(cx).apply_config(&entry);
                 let theme = cx.theme();
-                for tone in TONES {
-                    checked += 1;
-                    let paint = chip_paint(theme, tone);
-                    let ratio = contrast_ratio(to_rgb(paint.text), ground(theme, &paint));
-                    if ratio < READABLE_RATIO {
-                        failures.push(format!("{name}: {tone:?} at {ratio:.2}:1"));
+                for (surface_name, surface) in [
+                    ("background", theme.background),
+                    ("title bar", theme.title_bar),
+                    ("status bar", theme.status_bar),
+                    ("popover", theme.popover),
+                    ("table", theme.table),
+                ] {
+                    let surface_rgb = over(surface, to_rgb(theme.background));
+                    for tone in TONES {
+                        checked += 1;
+                        let paint = chip_paint_on(theme, tone, surface);
+                        let ground = paint
+                            .fill
+                            .map_or(surface_rgb, |fill| over(fill, surface_rgb));
+                        let ratio = contrast_ratio(over(paint.text, ground), ground);
+                        if ratio < TEXT_READABLE_RATIO {
+                            failures.push(format!(
+                                "{name}: {tone:?} on {surface_name} at {ratio:.2}:1"
+                            ));
+                        }
+                        let states =
+                            crate::shell::control::for_chip(theme, &paint, to_hsla(surface_rgb));
+                        assert!(
+                            crate::shell::control::is_readable(&states),
+                            "{name}: {tone:?} on {surface_name}"
+                        );
                     }
+                    // Scope and expression chips use muted tokens rather than
+                    // a semantic tone, but have the same small-text requirement.
+                    let text = text_on(
+                        theme.muted_foreground,
+                        Some(theme.muted),
+                        to_hsla(surface_rgb),
+                    );
+                    let ground = over(theme.muted, surface_rgb);
+                    assert!(
+                        contrast_ratio(over(text, ground), ground) >= TEXT_READABLE_RATIO,
+                        "{name}: muted chip on {surface_name}"
+                    );
                 }
             });
         }
         assert!(
-            checked >= 5 * 40,
+            checked >= TONES.len() * 5 * 40,
             "the sweep saw {checked} checks — bundled themes missing?"
         );
         assert!(

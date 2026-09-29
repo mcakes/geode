@@ -1,0 +1,1029 @@
+[
+  {
+    "name": "Default Light",
+    "before_chart": [
+      "#7394dc",
+      "#5787f0",
+      "#2563eb",
+      "#124bc7",
+      "#0e3895"
+    ],
+    "after_chart": [
+      "#456e94",
+      "#9a805e",
+      "#3b4046",
+      "#996d89",
+      "#527b65"
+    ],
+    "chips": [
+      {
+        "label": "Pinned",
+        "before": 14.23,
+        "after": 14.23
+      },
+      {
+        "label": "As of 14:30",
+        "before": 16.81,
+        "after": 16.81
+      },
+      {
+        "label": "Invalid scope",
+        "before": 14.2,
+        "after": 14.2
+      },
+      {
+        "label": "Frame pinned",
+        "before": 17.18,
+        "after": 17.18
+      }
+    ],
+    "chart_min_contrast": 3.73,
+    "min_oklab_distance": 0.095
+  },
+  {
+    "name": "Default Dark",
+    "before_chart": [
+      "#e6f1fe",
+      "#a3cbfc",
+      "#60a5fa",
+      "#1d7ff8",
+      "#065ec9"
+    ],
+    "after_chart": [
+      "#80a4c3",
+      "#bba17b",
+      "#d0d2d5",
+      "#aa88a0",
+      "#598672"
+    ],
+    "chips": [
+      {
+        "label": "Pinned",
+        "before": 14.5,
+        "after": 14.5
+      },
+      {
+        "label": "As of 14:30",
+        "before": 10.69,
+        "after": 10.69
+      },
+      {
+        "label": "Invalid scope",
+        "before": 13.14,
+        "after": 13.14
+      },
+      {
+        "label": "Frame pinned",
+        "before": 17.18,
+        "after": 17.18
+      }
+    ],
+    "chart_min_contrast": 4.79,
+    "min_oklab_distance": 0.09
+  },
+  {
+    "name": "Nord",
+    "before_chart": [
+      "#88c0d0",
+      "#81a1c1",
+      "#5e81ac",
+      "#b48ead",
+      "#a3be8c"
+    ],
+    "after_chart": [
+      "#88c0d0",
+      "#ebcb8b",
+      "#b48ead",
+      "#6083ae",
+      "#a3be8c"
+    ],
+    "chips": [
+      {
+        "label": "Pinned",
+        "before": 8.73,
+        "after": 8.73
+      },
+      {
+        "label": "As of 14:30",
+        "before": 5.1,
+        "after": 5.1
+      },
+      {
+        "label": "Invalid scope",
+        "before": 7.14,
+        "after": 7.14
+      },
+      {
+        "label": "Frame pinned",
+        "before": 6.24,
+        "after": 6.24
+      }
+    ],
+    "chart_min_contrast": 3.2,
+    "min_oklab_distance": 0.095
+  },
+  {
+    "name": "Everforest Dark",
+    "before_chart": [
+      "#d1e7e4",
+      "#a8d1cb",
+      "#7fbbb3",
+      "#57a49a",
+      "#467f77"
+    ],
+    "after_chart": [
+      "#7fbbb3",
+      "#e69875",
+      "#a7c080",
+      "#b58a9f",
+      "#d3c6aa"
+    ],
+    "chips": [
+      {
+        "label": "Pinned",
+        "before": 3.62,
+        "after": 4.7
+      },
+      {
+        "label": "As of 14:30",
+        "before": 4.69,
+        "after": 4.69
+      },
+      {
+        "label": "Invalid scope",
+        "before": 5.48,
+        "after": 5.48
+      },
+      {
+        "label": "Frame pinned",
+        "before": 5.98,
+        "after": 5.98
+      }
+    ],
+    "chart_min_contrast": 4.66,
+    "min_oklab_distance": 0.084
+  },
+  {
+    "name": "Ayu Light",
+    "before_chart": [
+      "#7199a6",
+      "#589cb2",
+      "#3d9ebc",
+      "#319abc",
+      "#25738d"
+    ],
+    "after_chart": [
+      "#347e96",
+      "#a66e29",
+      "#6e7e3b",
+      "#986b65",
+      "#4a535d"
+    ],
+    "chips": [
+      {
+        "label": "Pinned",
+        "before": 4.88,
+        "after": 4.88
+      },
+      {
+        "label": "As of 14:30",
+        "before": 5.22,
+        "after": 5.22
+      },
+      {
+        "label": "Invalid scope",
+        "before": 4.76,
+        "after": 4.76
+      },
+      {
+        "label": "Frame pinned",
+        "before": 3.39,
+        "after": 4.7
+      }
+    ],
+    "chart_min_contrast": 4.19,
+    "min_oklab_distance": 0.076
+  },
+  {
+    "name": "Bloomberg",
+    "before_chart": [
+      "#ff8c00",
+      "#ffb340",
+      "#ffd980",
+      "#35c7d6",
+      "#3a7fd5"
+    ],
+    "after_chart": [
+      "#ff8c00",
+      "#35c7d6",
+      "#ddd5c4",
+      "#6689b3",
+      "#b39862"
+    ],
+    "chips": [
+      {
+        "label": "Pinned",
+        "before": 8.91,
+        "after": 8.91
+      },
+      {
+        "label": "As of 14:30",
+        "before": 5.99,
+        "after": 5.99
+      },
+      {
+        "label": "Invalid scope",
+        "before": 7.88,
+        "after": 7.88
+      },
+      {
+        "label": "Frame pinned",
+        "before": 9.0,
+        "after": 9.0
+      }
+    ],
+    "chart_min_contrast": 5.79,
+    "min_oklab_distance": 0.128
+  },
+  {
+    "name": "Twilight",
+    "before_chart": [
+      "#5f6368",
+      "#5e6266",
+      "#5f6265",
+      "#5f6265",
+      "#606264"
+    ],
+    "after_chart": [
+      "#cda869",
+      "#778385",
+      "#7f925a",
+      "#c06d44",
+      "#dcdcdc"
+    ],
+    "chips": [
+      {
+        "label": "Pinned",
+        "before": 11.04,
+        "after": 11.04
+      },
+      {
+        "label": "As of 14:30",
+        "before": 8.35,
+        "after": 8.35
+      },
+      {
+        "label": "Invalid scope",
+        "before": 9.77,
+        "after": 9.77
+      },
+      {
+        "label": "Frame pinned",
+        "before": 7.46,
+        "after": 7.46
+      }
+    ],
+    "chart_min_contrast": 4.71,
+    "min_oklab_distance": 0.087
+  },
+  {
+    "name": "Adventure",
+    "before_chart": [
+      "#83abd2",
+      "#6092c5",
+      "#417ab3",
+      "#34628f",
+      "#3a5d81"
+    ],
+    "after_chart": [
+      "#4384ad",
+      "#aa7900",
+      "#af8787",
+      "#41b3a9",
+      "#e4d5c7"
+    ],
+    "chips": [],
+    "chart_min_contrast": 5.02,
+    "min_oklab_distance": 0.123
+  },
+  {
+    "name": "Adventure Time",
+    "before_chart": [
+      "#577ed5",
+      "#3766ce",
+      "#3e68c2",
+      "#466ab4",
+      "#4e6ba5"
+    ],
+    "after_chart": [
+      "#7284c6",
+      "#ce7837",
+      "#97a88a",
+      "#a794bd",
+      "#c7c7d4"
+    ],
+    "chips": [],
+    "chart_min_contrast": 4.42,
+    "min_oklab_distance": 0.094
+  },
+  {
+    "name": "Alduin",
+    "before_chart": [
+      "#d1e1e1",
+      "#acc8c8",
+      "#87afaf",
+      "#639595",
+      "#4a7070"
+    ],
+    "after_chart": [
+      "#87afaf",
+      "#b4a17b",
+      "#aa7983",
+      "#718754",
+      "#c4c0b5"
+    ],
+    "chips": [],
+    "chart_min_contrast": 4.3,
+    "min_oklab_distance": 0.083
+  },
+  {
+    "name": "Asciinema",
+    "before_chart": [
+      "#7bd0e8",
+      "#50c0e0",
+      "#26b0d7",
+      "#1e8dac",
+      "#176a81"
+    ],
+    "after_chart": [
+      "#26b0d7",
+      "#ddaf3c",
+      "#9d80ac",
+      "#70ad98",
+      "#cccccc"
+    ],
+    "chips": [],
+    "chart_min_contrast": 5.42,
+    "min_oklab_distance": 0.097
+  },
+  {
+    "name": "Aurora Light",
+    "before_chart": [
+      "#6898ce",
+      "#3b82f6",
+      "#2563eb",
+      "#1d4ed8",
+      "#1e40af"
+    ],
+    "after_chart": [
+      "#436b97",
+      "#8b6846",
+      "#374151",
+      "#80617e",
+      "#507568"
+    ],
+    "chips": [],
+    "chart_min_contrast": 5.04,
+    "min_oklab_distance": 0.09
+  },
+  {
+    "name": "Ayu Dark",
+    "before_chart": [
+      "#e3f4ff",
+      "#9edbfe",
+      "#5ac1fe",
+      "#16a7fe",
+      "#0181cd"
+    ],
+    "after_chart": [
+      "#5ac1fe",
+      "#cda269",
+      "#91a663",
+      "#b997bd",
+      "#b3b1ad"
+    ],
+    "chips": [],
+    "chart_min_contrast": 7.11,
+    "min_oklab_distance": 0.081
+  },
+  {
+    "name": "Bloomberg Modern",
+    "before_chart": [
+      "#ff6f00",
+      "#4c8dd8",
+      "#26a65b",
+      "#b57edc",
+      "#3bb3c4"
+    ],
+    "after_chart": [
+      "#ff6f00",
+      "#4c8dd8",
+      "#26a65b",
+      "#b57edc",
+      "#3bb3c4"
+    ],
+    "chips": [],
+    "chart_min_contrast": 5.62,
+    "min_oklab_distance": 0.119
+  },
+  {
+    "name": "Catppuccin Frappe",
+    "before_chart": [
+      "#ffffff",
+      "#cedbf8",
+      "#8caaee",
+      "#4a79e4",
+      "#3268df"
+    ],
+    "after_chart": [
+      "#8caaee",
+      "#c4ad77",
+      "#b48fa9",
+      "#85b1a5",
+      "#c6d0f5"
+    ],
+    "chips": [],
+    "chart_min_contrast": 5.32,
+    "min_oklab_distance": 0.095
+  },
+  {
+    "name": "Catppuccin Latte",
+    "before_chart": [
+      "#7e8790",
+      "#6c89a4",
+      "#578ab8",
+      "#418acd",
+      "#2a68a2"
+    ],
+    "after_chart": [
+      "#53779b",
+      "#9e6b32",
+      "#715177",
+      "#617b60",
+      "#a06569"
+    ],
+    "chips": [],
+    "chart_min_contrast": 3.74,
+    "min_oklab_distance": 0.078
+  },
+  {
+    "name": "Catppuccin Macchiato",
+    "before_chart": [
+      "#ffffff",
+      "#d0defb",
+      "#8aadf4",
+      "#447ced",
+      "#2362e2"
+    ],
+    "after_chart": [
+      "#8aadf4",
+      "#d2b88a",
+      "#c6a0bc",
+      "#86b4a6",
+      "#cad3f5"
+    ],
+    "chips": [],
+    "chart_min_contrast": 6.97,
+    "min_oklab_distance": 0.107
+  },
+  {
+    "name": "Catppuccin Mocha",
+    "before_chart": [
+      "#ffffff",
+      "#d3e3fd",
+      "#89b4fa",
+      "#3f85f7",
+      "#0b5bdf"
+    ],
+    "after_chart": [
+      "#89b4fa",
+      "#d9c49a",
+      "#c7a2bd",
+      "#87b5a1",
+      "#cdd6f4"
+    ],
+    "chips": [],
+    "chart_min_contrast": 7.65,
+    "min_oklab_distance": 0.113
+  },
+  {
+    "name": "Everforest Light",
+    "before_chart": [
+      "#839794",
+      "#739a95",
+      "#629d96",
+      "#529f95",
+      "#417b73"
+    ],
+    "after_chart": [
+      "#477b73",
+      "#a36949",
+      "#82904a",
+      "#956a80",
+      "#454b43"
+    ],
+    "chips": [],
+    "chart_min_contrast": 3.37,
+    "min_oklab_distance": 0.08
+  },
+  {
+    "name": "Fahrenheit",
+    "before_chart": [
+      "#1b54b6",
+      "#2456ab",
+      "#2c58a0",
+      "#345995",
+      "#3b5a89"
+    ],
+    "after_chart": [
+      "#b7795e",
+      "#b4a16d",
+      "#6985b0",
+      "#669e99",
+      "#ffffce"
+    ],
+    "chips": [],
+    "chart_min_contrast": 5.58,
+    "min_oklab_distance": 0.09
+  },
+  {
+    "name": "Flexoki Dark",
+    "before_chart": [
+      "#3c85d9",
+      "#2671c7",
+      "#2260a8",
+      "#2f609c",
+      "#3b618f"
+    ],
+    "after_chart": [
+      "#6b95b7",
+      "#d0a86a",
+      "#b0819b",
+      "#75934e",
+      "#cecdc3"
+    ],
+    "chips": [],
+    "chart_min_contrast": 5.5,
+    "min_oklab_distance": 0.106
+  },
+  {
+    "name": "Flexoki Light",
+    "before_chart": [
+      "#7197b8",
+      "#6398c5",
+      "#4385be",
+      "#356a99",
+      "#285073"
+    ],
+    "after_chart": [
+      "#4385be",
+      "#ad8301",
+      "#95607f",
+      "#66800b",
+      "#474642"
+    ],
+    "chips": [],
+    "chart_min_contrast": 3.39,
+    "min_oklab_distance": 0.112
+  },
+  {
+    "name": "Gruvbox Dark",
+    "before_chart": [
+      "#6bb1b4",
+      "#53a0a3",
+      "#458588",
+      "#3e7174",
+      "#497072"
+    ],
+    "after_chart": [
+      "#458588",
+      "#d79921",
+      "#b16286",
+      "#98971a",
+      "#ebdbb2"
+    ],
+    "chips": [],
+    "chart_min_contrast": 3.87,
+    "min_oklab_distance": 0.102
+  },
+  {
+    "name": "Gruvbox Light",
+    "before_chart": [
+      "#0a8fa8",
+      "#087a90",
+      "#076678",
+      "#065260",
+      "#043d48"
+    ],
+    "after_chart": [
+      "#076678",
+      "#b57614",
+      "#8f3f71",
+      "#427b58",
+      "#665c54"
+    ],
+    "chips": [],
+    "chart_min_contrast": 3.33,
+    "min_oklab_distance": 0.099
+  },
+  {
+    "name": "Harper",
+    "before_chart": [
+      "#f1f7fc",
+      "#b8d6ee",
+      "#7fb5e1",
+      "#4694d4",
+      "#2870ab"
+    ],
+    "after_chart": [
+      "#b296c6",
+      "#7fb5e1",
+      "#bc9c66",
+      "#759c80",
+      "#c8c4bb"
+    ],
+    "chips": [],
+    "chart_min_contrast": 6.78,
+    "min_oklab_distance": 0.096
+  },
+  {
+    "name": "Hybrid Dark",
+    "before_chart": [
+      "#1d90c1",
+      "#197ca6",
+      "#227093",
+      "#336f8d",
+      "#416e85"
+    ],
+    "after_chart": [
+      "#72a6bf",
+      "#a7995d",
+      "#a57896",
+      "#648c69",
+      "#c2c6c8"
+    ],
+    "chips": [],
+    "chart_min_contrast": 4.33,
+    "min_oklab_distance": 0.104
+  },
+  {
+    "name": "Hybrid Light",
+    "before_chart": [
+      "#002385",
+      "#001e72",
+      "#00195f",
+      "#00144c",
+      "#000f39"
+    ],
+    "after_chart": [
+      "#005f87",
+      "#896f3d",
+      "#75556b",
+      "#47715d",
+      "#454b51"
+    ],
+    "chips": [],
+    "chart_min_contrast": 3.75,
+    "min_oklab_distance": 0.097
+  },
+  {
+    "name": "Jellybeans",
+    "before_chart": [
+      "#ffffff",
+      "#cfe1ef",
+      "#97bedc",
+      "#5f9bc9",
+      "#3877a7"
+    ],
+    "after_chart": [
+      "#97bedc",
+      "#ffba7b",
+      "#b294bb",
+      "#94b979",
+      "#e8e8d3"
+    ],
+    "chips": [],
+    "chart_min_contrast": 6.82,
+    "min_oklab_distance": 0.109
+  },
+  {
+    "name": "Kibble",
+    "before_chart": [
+      "#8995e4",
+      "#5f6fdb",
+      "#384fd8",
+      "#3b54c8",
+      "#4259b2"
+    ],
+    "after_chart": [
+      "#6bc85f",
+      "#6482c2",
+      "#b6a05c",
+      "#a886b4",
+      "#c6cec0"
+    ],
+    "chips": [],
+    "chart_min_contrast": 5.03,
+    "min_oklab_distance": 0.101
+  },
+  {
+    "name": "Mellifluous Dark",
+    "before_chart": [
+      "#abc1e4",
+      "#7fa1d7",
+      "#5481c9",
+      "#3765ae",
+      "#42669f"
+    ],
+    "after_chart": [
+      "#7f8ab2",
+      "#c98d54",
+      "#999765",
+      "#c3a2ba",
+      "#c1c4ca"
+    ],
+    "chips": [],
+    "chart_min_contrast": 5.12,
+    "min_oklab_distance": 0.075
+  },
+  {
+    "name": "Mellifluous Light",
+    "before_chart": [
+      "#858487",
+      "#868392",
+      "#88819d",
+      "#8277a1",
+      "#5f567d"
+    ],
+    "after_chart": [
+      "#5a6599",
+      "#a1784a",
+      "#626d34",
+      "#92758b",
+      "#525b62"
+    ],
+    "chips": [],
+    "chart_min_contrast": 3.2,
+    "min_oklab_distance": 0.089
+  },
+  {
+    "name": "Modus Operandi",
+    "before_chart": [
+      "#0031a9",
+      "#006800",
+      "#a60000",
+      "#721045",
+      "#005e8b"
+    ],
+    "after_chart": [
+      "#0031a9",
+      "#006800",
+      "#a60000",
+      "#721045",
+      "#005e8b"
+    ],
+    "chips": [],
+    "chart_min_contrast": 7.05,
+    "min_oklab_distance": 0.132
+  },
+  {
+    "name": "Modus Vivendi",
+    "before_chart": [
+      "#2fafff",
+      "#44bc44",
+      "#ff5f59",
+      "#feacd0",
+      "#00d3d0"
+    ],
+    "after_chart": [
+      "#2fafff",
+      "#44bc44",
+      "#ff5f59",
+      "#feacd0",
+      "#00d3d0"
+    ],
+    "chips": [],
+    "chart_min_contrast": 7.03,
+    "min_oklab_distance": 0.137
+  },
+  {
+    "name": "Molokai Dark",
+    "before_chart": [
+      "#0a7bb3",
+      "#116d9e",
+      "#276d96",
+      "#356d8f",
+      "#416c87"
+    ],
+    "after_chart": [
+      "#ce648c",
+      "#70a8b5",
+      "#a0b763",
+      "#ac8baa",
+      "#d2cfb7"
+    ],
+    "chips": [],
+    "chart_min_contrast": 4.69,
+    "min_oklab_distance": 0.101
+  },
+  {
+    "name": "Molokai Light",
+    "before_chart": [
+      "#c4826b",
+      "#d97855",
+      "#e16032",
+      "#c0471c",
+      "#903515"
+    ],
+    "after_chart": [
+      "#ad4565",
+      "#527e78",
+      "#707d39",
+      "#75628f",
+      "#565b60"
+    ],
+    "chips": [],
+    "chart_min_contrast": 4.33,
+    "min_oklab_distance": 0.087
+  },
+  {
+    "name": "Solarized Dark",
+    "before_chart": [
+      "#1974b3",
+      "#2b74ac",
+      "#3874a3",
+      "#43749b",
+      "#4d7392"
+    ],
+    "after_chart": [
+      "#6095b5",
+      "#b29a58",
+      "#ad7c91",
+      "#7da28a",
+      "#d0c7ab"
+    ],
+    "chips": [],
+    "chart_min_contrast": 4.34,
+    "min_oklab_distance": 0.086
+  },
+  {
+    "name": "Solarized Light",
+    "before_chart": [
+      "#7f929f",
+      "#6a7e8c",
+      "#586975",
+      "#46545e",
+      "#353f46"
+    ],
+    "after_chart": [
+      "#526c80",
+      "#a3854d",
+      "#826878",
+      "#667c51",
+      "#354046"
+    ],
+    "chips": [],
+    "chart_min_contrast": 3.23,
+    "min_oklab_distance": 0.071
+  },
+  {
+    "name": "Spaceduck",
+    "before_chart": [
+      "#1fd2ff",
+      "#00c4f5",
+      "#00a3cc",
+      "#0082a3",
+      "#106982"
+    ],
+    "after_chart": [
+      "#089cc5",
+      "#b89c50",
+      "#c86d8c",
+      "#76aa91",
+      "#bbbdb1"
+    ],
+    "chips": [],
+    "chart_min_contrast": 5.39,
+    "min_oklab_distance": 0.105
+  },
+  {
+    "name": "Tokyo Moon",
+    "before_chart": [
+      "#ffffff",
+      "#cfdeff",
+      "#82aaff",
+      "#3576ff",
+      "#1860fd"
+    ],
+    "after_chart": [
+      "#82aaff",
+      "#d4b581",
+      "#b49aa9",
+      "#82a777",
+      "#c0caf5"
+    ],
+    "chips": [],
+    "chart_min_contrast": 5.64,
+    "min_oklab_distance": 0.116
+  },
+  {
+    "name": "Tokyo Night",
+    "before_chart": [
+      "#ffffff",
+      "#c0d3fb",
+      "#7aa2f7",
+      "#3471f3",
+      "#1d5ce2"
+    ],
+    "after_chart": [
+      "#7aa2f7",
+      "#c1a172",
+      "#a18da9",
+      "#829e73",
+      "#c0caf5"
+    ],
+    "chips": [],
+    "chart_min_contrast": 5.61,
+    "min_oklab_distance": 0.092
+  },
+  {
+    "name": "Tokyo Storm",
+    "before_chart": [
+      "#ffffff",
+      "#c0d3fb",
+      "#7aa2f7",
+      "#3471f3",
+      "#2968ef"
+    ],
+    "after_chart": [
+      "#7aa2f7",
+      "#c9a675",
+      "#ac91cb",
+      "#90ac7b",
+      "#c0caf5"
+    ],
+    "chips": [],
+    "chart_min_contrast": 5.32,
+    "min_oklab_distance": 0.08
+  },
+  {
+    "name": "TradingView Dark",
+    "before_chart": [
+      "#2962ff",
+      "#26a69a",
+      "#ef5350",
+      "#ff9800",
+      "#ab47bc"
+    ],
+    "after_chart": [
+      "#2962ff",
+      "#26a69a",
+      "#ef5350",
+      "#ff9800",
+      "#ab47bc"
+    ],
+    "chips": [],
+    "chart_min_contrast": 3.65,
+    "min_oklab_distance": 0.17
+  },
+  {
+    "name": "macOS Classic Dark",
+    "before_chart": [
+      "#c1dfff",
+      "#81bdff",
+      "#419cff",
+      "#017bff",
+      "#045ec2"
+    ],
+    "after_chart": [
+      "#419cff",
+      "#c8aa6c",
+      "#b28bae",
+      "#7fab9a",
+      "#dedede"
+    ],
+    "chips": [],
+    "chart_min_contrast": 6.37,
+    "min_oklab_distance": 0.108
+  },
+  {
+    "name": "macOS Classic Light",
+    "before_chart": [
+      "#388eff",
+      "#0b75ff",
+      "#0060de",
+      "#004db2",
+      "#003a85"
+    ],
+    "after_chart": [
+      "#0060de",
+      "#947040",
+      "#84627c",
+      "#4d8878",
+      "#3c4653"
+    ],
+    "chips": [],
+    "chart_min_contrast": 3.9,
+    "min_oklab_distance": 0.109
+  }
+]
