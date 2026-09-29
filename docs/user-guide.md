@@ -255,6 +255,15 @@ as **N hidden**, hidden lines keep pricing, and `:unscoped` shows every line.
 A line you add that the scope hides lands in the sheet with a footer saying
 so.
 
+The sheet follows the shared grouping too: press `ctrl+3` and its lines
+gather under underlying rows that sum their lines. `:group underlying_ref,
+expiry` pins the pricer's own grouping and `:unpin` follows the frame
+again, as in a blotter; the header lists the levels and strikes through any
+the sheet cannot group by. A grouping row is read-only: edit the lines
+under it. Lines only move (`shift+j`/`shift+k`) in the flat sheet, so clear
+the grouping first. To build a custom package from lines, use `g p` (or
+`:package [n]`); `g u` or `:unpackage` takes it apart.
+
 Sheets save automatically after an idle second following a change. Give one a
 recognizable name with `:name first-look`; later, `:e first-look` opens it.
 Watch for a **sheet not saved** notice: an edit appearing in the grid does not

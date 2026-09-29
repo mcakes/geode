@@ -1785,6 +1785,47 @@ are recorded only as a warning: at load 34–43 `apply_scope_1000` read
 5.67 ms and the scoped build 806 µs; at load 34 → 129 they read 11.3 ms and
 18.5 ms with intervals several milliseconds wide.
 
+### Pricer grouping (2026-09-28)
+
+What a rebuild costs the pricer tile now that every grid is built from a
+rollup tree. The tile's one build site runs the scope, `effective_chain`,
+`rollup::build` and `GridModel::build`; an ungrouped sheet builds the
+empty-chain rollup too, so its real flat rebuild is `rebuild_1000_flat`,
+not `grid_build_1000` (kept as the grid-only reference with its history).
+
+Fixtures: `grid_build_1000` / `rebuild_1000_flat` use the scope section's
+sheet (1,000 entries, 1,200 rows, every package open, every line priced).
+The grouped benches use 1,000 priced entries over SPX/NDX/SX5E/RTY ×
+Z26/H27/M27, a call spread every tenth entry and a Z26/H27 calendar every
+twentieth (so calendars split under `expiry`), under `[underlying_ref,
+expiry, position_ref]` with every group and package open and the bundled
+`vanilla` view: `rollup_1000` is the tree alone, `grid_build_1000_grouped`
+the grid from a prebuilt tree (group rows fold and read unanimity over
+their legs), `rebuild_1000_grouped` both, as the tile runs them.
+
+`cargo bench -p geode-pricer --bench core --
+'rollup_1000|grid_build_1000|rebuild_1000'` twice back to back. Apple M5
+Pro, rustc 1.96.0, bench profile, 100 samples. Load average (1 min) 9.0 →
+8.2 → 6.7 across the runs (fifteen-minute average about 17: other
+sessions' builds).
+
+| Benchmark | Run 1 | Run 2 |
+|---|---|---|
+| `grid_build_1000` (grid only, reference) | 1.96 ms (1.9582; 1.8700–2.0564) | 1.65 ms (1.6517; 1.6433–1.6617) |
+| `rebuild_1000_flat` (empty-chain rollup + grid) | 1.68 ms (1.6825; 1.6789–1.6862) | 1.68 ms (1.6802; 1.6745–1.6874) |
+| `grid_build_1000_scoped` | 681 µs (681.45; 679.96–683.00) | 685 µs (685.13; 683.18–687.54) |
+| `rollup_1000` | 334 µs (333.72; 330.74–337.53) | 335 µs (335.05; 333.83–336.29) |
+| `grid_build_1000_grouped` | 2.83 ms (2.8329; 2.8191–2.8519) | 2.83 ms (2.8306; 2.8099–2.8600) |
+| `rebuild_1000_grouped` (rollup + grid) | 3.17 ms (3.1653; 3.1520–3.1820) | 3.15 ms (3.1453; 3.1390–3.1518) |
+
+Run 1's `grid_build_1000` was the first bench after the build and its
+interval is wide; run 2 matches the scope section's 1.65–1.70 ms. The
+empty-chain rollup adds about 30 µs to a flat rebuild. A grouped rebuild is
+about 3.2 ms, inside the 8 ms budget: the group rows' folds and unanimity
+reads cost about 1.2 ms over the flat grid, the tree 0.33 ms. The tile's
+cursor and anchor lookups (`row_at`, `painted_ancestor`, `Rollup::parent`)
+are linear scans run once per rebuild and are not benched separately.
+
 ## Timeseries chart (spec §8, Part 3)
 
 What one **cache miss** costs the render thread in `geode-chart`: the

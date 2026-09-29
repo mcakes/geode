@@ -26,10 +26,10 @@ The pure core (`core`, no element, entity, window, or data service):
 | `complete` | Entry-bar completion: the slot at the caret, suggestions, hint, and the Tab cycle. |
 | `clip` | The yank register and where `p`/`shift+p` land. |
 | `tree` | Package expansion and the visible-row walk. |
-| `commands` | The `:` vocabulary (including `:autosize [reset]`): parse and completions. |
+| `commands` | The `:` vocabulary (including `:autosize [reset]`, `:package [n]`/`:unpackage`, `:group <columns>`/`:group slot <n>`/`:unpin`): parse and completions (`:group` completes `rollup::groupable_vocabulary` and `slot`). |
 | `storage` | The frozen `pricer_sheets` declaration; conversion between sheets, document rows, and a document answer. |
 | `select` | What a grid selection reaches on the sheet: the leaf lines an edit writes (`lines_of`), the top-most rows a verb or total acts on (`top_most`), the `g p` and `shift+j`/`shift+k` plans with their refusals, position risk totals (`risk_totals`, and `risk_totals_visible`, which counts only a partly hidden package's shown legs), and the bulk notices' skip counts. |
-| `rollup` | The shown lines under a grouping chain. `effective_chain` drops levels `pricer` cannot group by (a column it lacks, a measure, a derived dimension over either or over a synthetic key, any level after `position_ref`/`instrument_ref`). `build` partitions shown legs and bare lines by their `SheetRow` value per level (NULL distinct from empty and last; numbers by number, text by byte order), then gathers them by parent in sheet order; a package whose legs fall under several groups appears under each (`split`; `partial` when fewer than all its legs). `position_ref` is the package node, `instrument_ref` makes every leg a leaf. `legs_under` gives a node's legs. Pure; the flat case is the empty chain. |
+| `rollup` | The shown lines under a grouping chain. `effective_chain` drops levels `pricer` cannot group by (a column it lacks, a measure, a derived dimension over either or over a synthetic key, any level after `position_ref`/`instrument_ref`, a repeated level; `value_levels` counts the kept value levels, the regroup's prune depth). `build` partitions shown legs and bare lines by their `SheetRow` value per level (NULL distinct from empty and last; numbers by number, text by byte order), then gathers them by parent in sheet order; a package whose legs fall under several groups appears under each (`split`; `partial` when fewer than all its legs). `position_ref` is the package node, `instrument_ref` makes every leg a leaf. `legs_under` gives a node's legs. Pure; the flat case is the empty chain. |
 | `visibility` | Which lines the frame's scope hides: `apply_scope` runs `geode_core::scope::eval` over each line as a `pricer` dataset row (`SheetRow`, the values its cells paint; measures result × qty; a leg's `template` its package's; `status` `fresh` for a fresh line; `expiry` the ISO date of a dated expiry, a tenor's text) and returns a `Visibility` (shown per sheet row, hidden line count), or a refusal that hides nothing. Selections on columns `pricer` lacks, or on `position_ref`/`instrument_ref` (`NOT_SCOPEABLE`: the sheet's synthetic `p<id>`/`i<id>`), are dropped; an expression naming one refuses. The scope is bound once (`Scope::bind`) before any line, so an empty sheet refuses a row-independent error too. |
 
 The tile:
@@ -37,15 +37,15 @@ The tile:
 | Module | Holds |
 |---|---|
 | `store` | The `SheetStore` seam, addressed by key/tag with `Loaded::Refused(Refusal)` for a load that never went out and `save`/`forget` returning `Result<(), Refusal>`; `MemorySheetStore` (in-memory, the tests' fake, whose `set_save_refusal`/`set_load_refusal`/`set_forget_refusal` choose the refusal kind and `set_refusing`/`set_load_refused` are `Busy` shorthands) and `DuckSheetStore` (the store `geode-app` wires: `pricer_sheets` document reads/writes over `DataHandle`, with a `known`-names cache fed from the diagnostics catalog and the store's own confirmed writes). |
-| `grid` | The prepared `GridModel`, rebuilt on change. |
-| `paint` | The per-theme paint memo, floored to a readable ratio. |
-| `delegate` | The table delegate: cells and their column colors (sign, named), the connector tree column (indent; a package's chevron, template chip, summary and muted leg count; a leg's `├`/`└` connector and shorthand; a bare line's shorthand), editor, expiry date field. |
-| `header` | The prepared header row (notices as `geode_tile::notice::Notice`), the sheet name control and rename field, and the footer. |
+| `grid` | The prepared `GridModel`, rebuilt on change: the rollup flattened under the group and package expansions. A group row (`GridRowKind::Group`, no sheet row; `node` and `path` name it) sums its legs' fold, reads the fold's status, counts its legs and reads each other dimension's unanimity (`mixed` where legs differ or a blank sits beside a value; `core::columns::group_cell_text`); a split or partly hidden package row paints its node's legs only (`· n of M legs`). |
+| `paint` | The per-theme paint memo, floored to a readable ratio; the group palette (`group_ground` and its text, floored on it and on hover and selected). |
+| `delegate` | The table delegate: cells and their column colors (sign, named), the connector tree column (indent; a group row's chevron and medium-weight label over its own ground; a package's chevron, template chip, summary and muted leg count; a leg's `├`/`└` connector and shorthand; a bare line's shorthand), editor, expiry date field. |
+| `header` | The prepared header row (notices as `geode_tile::notice::Notice`; the grouping chain as written, dropped levels struck through, and the `pinned` chip), the sheet name control and rename field, and the footer. |
 | `popup` | The typeahead, the entry bar's completion list, the sheet picker (`sheet_rows`, `SheetPicker`), and `PricerPick` (what a menu row does). The menu, popup geometry, the `:rm` confirm and the header notices paint through `geode-tile`. |
-| `session` | The tile's session record, including `:autosize`'s fitted widths (`column_widths`, read leniently). |
+| `session` | The tile's session record, including `:autosize`'s fitted widths (`column_widths`, read leniently), the grouping pin (`pinned` / `pinned_slot`) and the open groups (`expanded_paths`, NULL as `{ null = true }`). |
 | `content` | The factory, keymap fragment (verbs, field keys and the menu's pick and close keys; the grid motions and the menu steps are the shell's shared `motion::*` bindings), actions, the retired motion ids' renames (`RENAMED_ACTIONS`), settings, and the read-only `UnderlyingSource` seam. |
-| `tile` | `PricerTile`: modes (a key context that publishes `grid`, and `tilelist` while the action menu is open so the shared menu steps reach it), verbs, repricing, write-behind, load. Every `motion::*` id runs as one verb through `geode_tile::motion`, so it closes an open field or menu first like any other verb. `tile_columns` reports the plan's columns under the sheet's view with the cursor's column active, so the shell's `Edit column in view…` opens the Views dialog there. The frame observer re-reads the frame's effective scope (the empty scope under `:unscoped`), rebuilds when it changed, then answers the flip barrier on every path; `rebuild` applies the scope before every `GridModel::build`, keeps a refusal as a standing header notice, and moves a cursor whose line the scope hid to the nearest shown line above (else below) in sheet order. |
-| `tile::select` | `partly_hidden_refusal`, the one door every structural verb (`d`, `shift+j`/`shift+k`, `g p`, `g u`, and `:group`/`:ungroup`) passes before it mutates; the `V`/`v` selection's state doors (start, clear, re-resolve, footer extent and totals), the selection verbs, the one-typed-value commit, and the live step (`bulk_step`, `settle_bulk`, `take_back_steps`). |
+| `tile` | `PricerTile`: modes (a key context that publishes `grid`, and `tilelist` while the action menu is open so the shared menu steps reach it), verbs, repricing, write-behind, load. Every `motion::*` id runs as one verb through `geode_tile::motion`, so it closes an open field or menu first like any other verb. `tile_columns` reports the plan's columns under the sheet's view with the cursor's column active, so the shell's `Edit column in view…` opens the Views dialog there. The frame observer re-reads the frame's effective scope (the empty scope under `:unscoped`), rebuilds when it changed, then the grouping chain (`read_grouping`: pin, slot pin, the frame's active slot, the view's own), rebuilds when either changed, then answers the flip barrier on every path; `rebuild` is the one build site — the scope, then `effective_chain` and `rollup::build` under one dimensions borrow, the group expansion pruned, then `GridModel::build` — keeps a refusal as a standing header notice, and moves a cursor whose line the scope hid to the nearest shown line above (else below) in sheet order. The cursor is an `At` (a line within its group path, or a group path), so a split package's second row and a group row keep their place across a rebuild. |
+| `tile::select` | `partly_hidden_refusal`, the one door every structural verb (`d`, `shift+j`/`shift+k`, `g p`, `g u`, and `:package`/`:unpackage`) passes before it mutates — a group row (`GROUP_ROW`), a split package (`SPLIT`), a partly hidden one, a move or counted `g p` under a value grouping (`MOVE_GROUPED`, `PACKAGE_GROUPED`); the `V`/`v` selection's state doors (start, clear, re-resolve, footer extent and totals), the selection verbs, the one-typed-value commit, and the live step (`bulk_step`, `settle_bulk`, `take_back_steps`). |
 
 The application uses `DuckSheetStore`: sheets are `pricer_sheets` documents in
 DuckDB and survive a restart. Session records retain sheet names and UI state;
@@ -86,6 +86,20 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   refuse with `PARTLY_HIDDEN`, a selection containing one refuses whole, and
   a counted `g p` over a hidden line refuses with `HIDDEN_IN_RANGE`. A new
   verb that mutates a package's legs must pass `partly_hidden_refusal`.
+- A grouping value is the scope value (`SheetRow`): a group and a scope on
+  the same column mean the same value, so `expiry` groups by ISO date while
+  its tree label reads as the cell does. A group path keeps NULL (`None`)
+  apart from the empty string, in the tree and in the session record.
+- A group row and a split package's row are read-only (`GROUP_ROW`,
+  `SPLIT`) through the same gates as a partly hidden package: each would
+  reach lines another row paints. A group row's measures fold every leg
+  beneath it and its dimensions read unanimity, never one leg's value; a
+  split row folds only its node's legs, so a total over both rows of a
+  calendar counts each leg once.
+- Under a value grouping painted order is not sheet order: a move and a
+  counted `g p` refuse (`MOVE_GROUPED`, `PACKAGE_GROUPED`), keyed on
+  `PricerTile::grouped`. A chain of structural levels alone is the flat
+  sheet for both.
 - Completion never runs in render; the tile refreshes it on every text change,
   history step, commit and reload, and a Tab at a moved caret re-ranks first.
   A completion write is one range replace (one undo step) whose own `Change`

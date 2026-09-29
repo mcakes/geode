@@ -994,9 +994,10 @@ legs' distinct expiries and strikes (`Z26 4800/5200`) and a muted leg count
 (`· 2 legs`). Each leg hangs from `├` (`└` on the package's last leg) under
 the package's chevron, with its full shorthand in muted text; a bare line
 shows its full shorthand. Every row reserves the slot, so roots share one
-leading edge, and a leg's text starts where its package's chip starts. No
-row carries a ground of its own: the table's hover and selected-row fills
-are the only row grounds. Column 0 is fixed at a width that fits a two-leg
+leading edge, and a leg's text starts where its package's chip starts. Only
+a grouping row (see [grouping](#grouping)) carries a ground of its own; on
+every other row the table's hover and selected-row fills are the only row
+grounds. Column 0 is fixed at a width that fits a two-leg
 call spread's package row (`▾ CS Z26 4800/5200 · 2 legs`) at the largest
 font; a longer summary ends in `…` and the leg count stays whole. Find (`/`,
 `n`, `N`) matches the shorthand column 0 paints on a line or leg; a
@@ -1092,9 +1093,9 @@ Normal-mode keys:
 | `d d` | Delete the row (a package with its legs) |
 | `u` / `ctrl+r` | Undo / redo; 100 entries, strictly last-in first-out. A step that brings rows back puts the cursor on the first of them, and a package that was open comes back open |
 | `y y` / `y c` | Copy the row's shorthand (and remember it for `p`) / the column's cells |
-| `p` / `shift+p` | Put the remembered rows below / above as one undo entry, the cursor on the first landed row; when any of them is a package the whole run lands at a root boundary |
-| `shift+j` / `shift+k` | Move the row within its parent |
-| `g p` / `g u` | Group the cursor row and the next `count − 1` roots into a custom package / ungroup |
+| `p` / `shift+p` | Put the remembered rows below / above as one undo entry, the cursor on the first landed row; when any of them is a package the whole run lands at a root boundary. On a grouping row both put at the end of the sheet and say so |
+| `shift+j` / `shift+k` | Move the row within its parent (refused under a value grouping) |
+| `g p` / `g u` | Package the cursor row and the next `count − 1` roots into a custom package / unpackage it (`:package [n]` / `:unpackage`) |
 | `g m` | Open a panel on the cursor row's underlying |
 | `.` | Open the action menu |
 | `shift+v` / `v` | Select rows / a block of cells from the cursor (see [Selection](#selection-2)) |
@@ -1103,7 +1104,7 @@ Normal-mode keys:
 context column the market-data panels accept: a line's or leg's own, a
 package's when its legs share one; otherwise the plain tile picker.
 
-The action menu offers repricing, grouping, ungrouping, undo, redo, deletion,
+The action menu offers repricing, packaging, unpackaging, undo, redo, deletion,
 the sheet verbs (Open sheet…, Rename sheet…, New sheet, Remove sheet…; see
 [sheets by pointer](#sheets-by-pointer)), and view selection. Key hints are
 the actions' live chords (`:price` and the sheet rows' `:e`, `:name`, `:new`,
@@ -1175,10 +1176,14 @@ as `ctrl+k` available.
 
 The `:` verbs change only this tile: `view <name>`, `shift spot|vol <n>|clear`,
 `spot <underlying> <level>|clear`, `price`, `refresh <duration>|off|default`,
-`group [n]`, `ungroup`, `e <sheet>`, `new`, `name <sheet>`, and `rm <sheet>`.
-`view`, `refresh`, `shift`, `spot`, `group`, `ungroup`, and `name` (and the
-menu's view rows) are refused while the sheet is still loading, because the
-loaded document would replace what they set.
+`package [n]`, `unpackage`, `group <columns>`, `group slot <n>`, `unpin`,
+`e <sheet>`, `new`, `name <sheet>`, and `rm <sheet>`.
+`view`, `refresh`, `shift`, `spot`, `package`, `unpackage`, and `name` (and
+the menu's view rows) are refused while the sheet is still loading, because
+the loaded document would replace what they set. `group` and `unpin` are
+not: the grouping belongs to the tile, not the document. `:ungroup` is no
+longer a verb, and `:group 2` pins a grouping by a column named `2` (which
+the header strikes through), never packages two rows.
 
 The sheet verbs work on this tile's own sheet, or, for `rm`, on a sheet no
 tile holds:
@@ -1364,7 +1369,7 @@ A partly hidden package's row is read-only. These refuse with
 `package partly hidden by the scope: edit its legs` and change nothing: `i`,
 `enter` or a double-click on its cells; a typed commit or a live step over a
 selection containing it; and the structural verbs `d`, `shift+j`/`shift+k`,
-`g p` and `g u`, from keys, the `.` menu, `:group` or `:ungroup`, because
+`g p` and `g u`, from keys, the `.` menu, `:package` or `:unpackage`, because
 each would act on the hidden legs too. A selection containing one refuses
 whole. Yank, put, fold and find still work, and a shown leg edits and
 deletes as usual. A counted `g p` takes the next sheet rows, hidden ones
@@ -1389,12 +1394,137 @@ shared scope and that `:unscoped` re-attaches it. The flag rides the tile's
 session record, as the blotter's does. `:unscoped` again re-applies the
 frame's current scope at once.
 
-Known limitations: `shift+j`/`shift+k` on a shown line can swap it with a
-hidden sibling, which changes sheet order with no visible change; the `.`
+`shift+j`/`shift+k` (and a `V` block move) step past siblings the scope
+hides: one step moves the row past the next shown sibling, so a move always
+changes what is painted. Swapping with a hidden sibling would change sheet
+order with nothing visible.
+
+Known limitations: the `.`
 menu keeps `delete` and `ungroup` enabled on a partly hidden package and
 refuses on pick rather than showing them disabled; the scope is re-evaluated
 synchronously over every line on every rebuild, so its cost grows linearly
 with the sheet (1,000 lines are measured in [performance](performance.md)).
+
+### Grouping
+
+The tile arranges its shown lines under a grouping chain, as a blotter
+arranges positions, and follows the frame's grouping the way a blotter
+does. The chain is, in order of precedence: a `:group <columns>` pin; a
+`:group slot <n>` pin, which reads frame slot `n` (the view's own grouping
+while that slot is empty); the frame's active slot; the planned view's own
+`grouping`. `:unpin` drops either pin and the tile follows the frame
+again. `:group` takes columns separated by spaces or commas and completes
+the groupable ones and `slot`; a bare `:group` refuses with `group needs
+columns or \`slot N\``, and `:group slot <n>` on an empty slot with `slot n
+is empty`. The frame observer regroups before the tile answers the frame's
+flip barrier, so a grouping change paints in step with the other tiles.
+
+The chain's levels are the `pricer` dataset's groupable columns and the
+derived dimensions over them (see
+[configuration](configuration.md#pricing)). The tile drops a level it
+cannot group by and keeps the rest:
+
+- a column `pricer` lacks (a desk `lhu`), a measure, and a derived
+  dimension over either, or over `position_ref` / `instrument_ref`, whose
+  values are the sheet's own ids and could only map to NULL;
+- a level after `position_ref` or `instrument_ref`, since a line is the
+  finest node the tree has and nothing groups inside a package;
+- a level already in the chain. The blotter keeps a repeated level (only
+  its Groupings dialog refuses one), so a hand-written `[u, u]` groups once
+  in the pricer and twice in a blotter.
+
+The header shows the chain as written, kept levels in normal text joined by
+a muted `›` and dropped ones muted and struck through, followed by a
+neutral `pinned` chip while a pin holds. Nothing is shown for an empty
+chain.
+
+`position_ref` and `instrument_ref` are structural levels: `position_ref`
+is the package row itself (packages over their legs, bare lines alone) and
+`instrument_ref` makes every leg a line of its own with no package row.
+Either ends the tree. A chain of structural levels alone paints lines in
+sheet order.
+
+Every other level is a value level. A line is grouped by the value it reads
+as a scope value (see [the frame's scope](#the-frames-scope)), so a group
+and a scope mean the same value: an `expiry` group holds the ISO date
+`2026-12-18`, a `status` group `fresh`, a leg's `template` is its
+package's. NULL is a group of its own, apart from an empty value. Groups
+order numbers by number, text by byte order (`NDX` before `SPX`), and NULL
+last; inside a group, lines keep sheet order. The tree label reads the
+value as the grouped column's cells spell it (an expiry group `Z26`, a
+strike as the strike column formats it), NULL as `—`; a derived dimension
+reads its label. An empty package (every leg removed) sits under the values
+its own row reads, so under an instrument column it forms a lone NULL
+group.
+
+**Group rows.** A group row has a chevron and its label at medium weight,
+and a ground of its own (`secondary` over the table ground); hover and
+selection replace it as they replace a line's. Its text, and a view's named
+column color, are floored to the readable ratio on that ground as well as
+the hover and selected ones. Its cells:
+
+- measures: the fold of every leg beneath, qty-weighted, as a package row
+  folds its legs. Unlike local currencies paint `—` in the local columns
+  while the `_usd` twins still sum; a failed leg makes the sum a danger `—`;
+- `status` and `priced at`: the legs' fold, as a package row reads them
+  (`pricing…` while any leg reprices, a failure's reason, the oldest
+  attempt);
+- `qty`: the number of legs beneath;
+- the grouped column and every ancestor level's column: the group's value,
+  blank for a NULL group;
+- every other dimension: its value where every leg agrees, a muted `mixed`
+  where two differ or a blank sits beside a value, blank where none has one
+  (the blotter's rule).
+
+Groups open and close like packages (`space`/`z a`, `z o`, `z c`, the
+chevron), `z c` on a line inside a group closes the group and lands on it,
+and `z shift+r` / `z shift+m` open or close every group and package. Groups
+start closed. Find matches a group row's label. The cursor follows its line
+across a regroup, landing on the nearest painted group row when the line's
+group is closed. A regroup to a shorter chain forgets the open state of
+groups deeper than it.
+
+**Split packages.** A package whose legs fall under different groups
+appears under each, with only that group's legs: a calendar under `expiry`
+sits under both dates. Its leg count reads `· n of M legs`, and its summary,
+cells and find key cover only those legs, as for a package the scope partly
+hides. A selection total counts each split row's own legs, so the two rows
+of a calendar add up to the whole package.
+
+**What is read-only.** A group row has no line behind it; a split package
+row would reach legs another group paints. Both refuse cell edits (`i`,
+`enter`, double-click, a selection's typed commit or live step) and the
+structural verbs `d`, `shift+j`/`shift+k`, `g p` and `g u` (keys, the `.`
+menu, `:package`, `:unpackage`), with `a grouping row: edit its lines` and
+`split package: edit its legs` in the footer; a package both split and
+partly hidden reads the split reason. A selection containing either refuses
+whole. A split package's legs, and the lines under a group, edit as usual.
+`y y` on a group row copies the shorthand of its lines, and a `V` selection
+over a group row totals and yanks its lines once, whether or not their rows
+are selected too. A selection cannot start on a group row (`select from a
+line or package row`), though its moving end can rest on one. `o` and `p` /
+`shift+p` with the cursor on a group row have no line to land beside: `o`'s
+label reads `at end`, and a put lands at the end of the sheet with `put at
+the end of the sheet` in the footer. `g m` on a group row opens the plain
+tile picker.
+
+**Moving and packaging under a grouping.** Under a chain with a value level
+the painted order is not sheet order, so `shift+j`/`shift+k` refuse with
+`lines move in the flat sheet: clear the grouping first`, and a counted
+`g p` (or `:package n`) with `a counted g p packages in the flat sheet:
+clear the grouping first`: it takes the next rows in sheet order, which may
+be painted under other groups. A plain `g p` still packages its one line,
+and `g p` under `V` still packages a contiguous selection. A chain of
+structural levels alone moves and packages as the flat sheet does.
+
+Known limitations: the `.` menu keeps `ungroup` enabled on a split package
+row and refuses on pick; a group the scope hides entirely loses its open
+state, so it comes back closed; a group's label is spelt from its first
+leg, so two legs whose values group together but spell differently (an
+absolute and a percent strike of the same number) label by the first; a
+cursor on a group row is not saved (a restored tile starts on row 0).
+Blotter group rows have no ground of their own, so the two tiles' group
+rows look different.
 
 ### Selection
 
@@ -1443,7 +1573,7 @@ selection and says why in the footer; a success notice goes to the header.
   selection on the moved lines. Rows under different parents refuse (`can't
   move: selection spans packages`), as does the end of the parent (`cannot
   move past the end`).
-- `g p` under `V` groups the selected root lines into one custom package,
+- `g p` under `V` packages the selected root lines into one custom package,
   opens it and puts the cursor on it, ending the selection. It refuses a
   selection that includes a package, lines inside a package, or lines that
   are not contiguous — `Group` takes a run, so a gap would sweep an unselected
@@ -1663,10 +1793,17 @@ ends a standing pricing-refusal streak, so `loading…` is never covered by
 `REFUSED`.
 
 The session record keeps the sheet name, view, refresh setting, cursor line,
-and open packages (only those still on the sheet: a deleted or ungrouped
+and open packages (only those still on the sheet: a deleted or unpackaged
 package's id stays in the tile's open set until a load or `z shift+r` /
 `z shift+m` replaces the set, so an undo reinstates it open, but it is never
-saved). A new tile takes the next free `untitled-N` name, skipping names open
+saved). It also keeps the grouping pin (`pinned`, the pinned columns, or
+`pinned_slot`, a slot 1–9; any other slot is ignored) and the open groups
+as `expanded_paths`: one array per open group, a string per value from the
+root, `{ null = true }` for a NULL value so it stays apart from an empty
+string; a path holding anything else is dropped whole. An open group nested
+under a closed one is saved too. A load pending at restore holds the saved
+paths until the sheet arrives, and `:e` carries them to the next sheet. A
+cursor on a group row is not saved; a line cursor is. A new tile takes the next free `untitled-N` name, skipping names open
 in another tile, known documents, and names with a save still queued.
 **Known limitation:** before the first catalog arrives a new tile can pick an
 `untitled-N` that already has a document this session has not seen; its first

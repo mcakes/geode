@@ -81,6 +81,8 @@ the measurement log for fixture and hardware details.
 | Line-pricer grid build | 1,000 entries / 1,200 sheet rows, every package open, each package row's `/`-joined leg values | 1.42 ms |
 | Line-pricer scope apply | 1,000 entries / 1,200 sheet rows, three-term expression plus text filter, half hidden | 1.92 ms |
 | Line-pricer scoped grid build | the same sheet under that scope | 692 µs |
+| Line-pricer flat rebuild | 1,000 entries / 1,200 sheet rows, every package open: the empty-chain rollup plus the grid build, as the tile runs it | 1.68 ms |
+| Line-pricer grouped rebuild | 1,000 entries over four underlyings × three expiries under `[underlying_ref, expiry, position_ref]`, every group and package open: rollup plus grid | 3.15 ms (rollup 335 µs) |
 | In-process scope evaluation | one row, three-term expression plus text filter | 570 ns |
 | Scope expression suggestion refresh | 20,000 cached values, ranked and capped at 50 | 6.82 ms |
 

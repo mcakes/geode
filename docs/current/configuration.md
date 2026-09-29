@@ -201,6 +201,16 @@ Derived dimensions in `dimensions.toml` apply to the pricer's scope as to a
 blotter's: a `dimensions` edit alone reloads the pricer, and the reload hands
 its factory the new dimensions before every open tile re-applies its scope.
 
+The pricer groups by the `pricer` dataset's groupable columns — the columns
+its grains carry, which are its keys (`position_ref`, `instrument_ref`) and
+its dimensions (`underlying_ref`, `expiry`, `strike` and the rest; `:group`
+completes the list), never a measure — and by derived dimensions over those
+dimensions. A derived
+dimension over either key is not groupable in the pricer: the keys hold the
+sheet's own `p<id>` / `i<id>`, which a desk map can never name. A grouping
+level outside this vocabulary is dropped by the tile and struck through in
+its header (see [grouping](features.md#grouping)).
+
 ## Source configuration
 
 `sources.toml` has one top-level table per source, such as `[risk_files]`.
@@ -615,6 +625,9 @@ entry replaces a whole view by name, and `view_presentation.toml` and
 `dataset_presentation.toml` apply as they do to any view. A pricer view may
 not declare `joins` or a `derived` column: either is an error diagnostic on
 the view, and the pricer drops that view rather than paint part of it. A
+pricer view's `grouping` is honoured: it is the tile's chain when neither a
+`:group` pin nor the frame's active slot gives one (see
+[grouping](features.md#grouping)). A
 `pricer_views` document is no longer read; its presence is an error naming
 `views.toml`. A reload that changes a view, either overlay or the colors
 reaches open pricer tiles; a tile whose view disappeared shows the first

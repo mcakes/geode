@@ -214,6 +214,23 @@ fn bench(c: &mut Criterion) {
             ))
         })
     });
+    // The tile's flat rebuild as it runs: the grid is always built from a
+    // rollup, so an ungrouped sheet pays for an empty-chain tree too.
+    let no_levels = DerivedDimensions::default();
+    g.bench_function("rebuild_1000_flat", |b| {
+        b.iter(|| {
+            let chain = effective_chain(&[], &no_levels);
+            let tree = rollup::build(&s, &visibility, &chain, &no_levels, Clock::utc());
+            black_box(GridModel::build(
+                &s,
+                &tree,
+                &no_groups,
+                &expansion,
+                &plan,
+                Clock::utc(),
+            ))
+        })
+    });
 
     // The scope the tile applies on every rebuild: a three-term expression
     // and a text filter over every line of the priced, opened sheet above.
@@ -285,6 +302,21 @@ fn bench(c: &mut Criterion) {
     expansion.open_all(&s);
     g.bench_function("grid_build_1000_grouped", |b| {
         b.iter(|| {
+            black_box(GridModel::build(
+                &s,
+                &tree,
+                &groups,
+                &expansion,
+                &plan,
+                Clock::utc(),
+            ))
+        })
+    });
+    // Both steps together, as the tile's rebuild under the grouping runs
+    // them (the 8 ms budget applies to this sum).
+    g.bench_function("rebuild_1000_grouped", |b| {
+        b.iter(|| {
+            let tree = rollup::build(&s, &visibility, &chain, &dims, Clock::utc());
             black_box(GridModel::build(
                 &s,
                 &tree,
