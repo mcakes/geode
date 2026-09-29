@@ -12,6 +12,7 @@ pub mod dataset;
 pub mod edit;
 pub mod entry;
 pub mod package;
+pub mod rollup;
 pub mod select;
 pub mod sheet;
 pub mod shorthand;
@@ -30,6 +31,7 @@ pub use columns::{
 pub use complete::{Completion, Inputs, MAX_ROWS, Slot, Suggestion, slot_at};
 pub use dataset::{PRICER_DATASET, PRICER_DATASET_DECLARATION, pricer_dataset};
 pub use edit::{Edit, EditError, Undo};
+pub use rollup::{EffectiveChain, Node, NodeKind, Rollup, effective_chain, legs_under};
 pub use sheet::{
     Delivered, Folded, LineId, LineSpec, LineState, OwnShifts, Place, Refresh, RowKind, RowRecord,
     RowSpec, Sheet,
