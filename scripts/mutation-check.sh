@@ -26183,7 +26183,7 @@ run_mutation "pricer grouping: a split package counts as painted once" \
   crates/geode-pricer/src/tile.rs \
   '        rows.next().is_none().then_some(first)' \
   '        Some(first)' \
-  geode-pricer motions_walk_past_a_split_packages_second_row
+  geode-pricer a_split_rows_cursor_keeps_its_node_across_a_shorter_regroup
 
 # Find searches every row the grid would paint with every group open, in
 # rollup preorder, and a match opens its groups.
