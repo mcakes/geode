@@ -9,10 +9,13 @@
 //! enabled actions; from a separator, a section or no cursor it lands on the
 //! first enabled action. An all-disabled menu has no cursor.
 //!
-//! The keys that step are geode-tile's shared `motion::menu_down`/`menu_up`
-//! (the shell's builtin bindings under `tilelist`, which the tile publishes
-//! while its menu is open); what picks and closes stays the module's own. The
-//! module maps both onto [`Menu::step`] and [`Menu::pick`].
+//! In a tile's menu, the keys that step are geode-tile's shared
+//! `motion::menu_down`/`menu_up` (the shell's builtin bindings under
+//! `tilelist`, which the tile publishes while its menu is open); what picks
+//! and closes stays the module's own. The module maps both onto
+//! [`Menu::step`] and [`Menu::pick`]. The shell's row menu reads its keys
+//! itself (`handle_row_menu_key`): bare `j`/`down` and `k`/`up` step,
+//! `enter` picks, `escape` closes.
 //!
 //! The shell owns the menu; geode-tile re-exports it as `geode_tile::menu`.
 

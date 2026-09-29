@@ -677,8 +677,8 @@ fn a_click_on_a_dialog_row_under_the_palette_does_not_open_it(cx: &mut gpui::Tes
     );
 }
 
-/// Palette requests for tile command lines, find prompts, and stack lists
-/// refuse with a notice while a dialog is open. The modal keeps its state
+/// Palette requests for tile command lines, find prompts, stack lists and
+/// the row menu refuse with a notice while a dialog is open. The modal keeps its state
 /// and no hidden tile control acquires an unusable keyboard route.
 #[gpui::test]
 fn palette_transient_chrome_is_refused_over_a_dialog(cx: &mut gpui::TestAppContext) {
@@ -687,6 +687,7 @@ fn palette_transient_chrome_is_refused_over_a_dialog(cx: &mut gpui::TestAppConte
         ("Open the tile command line", "tile::command_line"),
         ("Find in tile", "tile::find"),
         ("Stack: Pick", "stack::pick"),
+        ("Row actions", "tile::context_menu"),
     ] {
         dispatch_action(&shell, "config::views", &mut vcx);
         draw(&mut vcx);
@@ -713,6 +714,10 @@ fn palette_transient_chrome_is_refused_over_a_dialog(cx: &mut gpui::TestAppConte
         assert!(
             shell.read_with(&vcx, |s, _| s.stack_list.is_none()),
             "{id} must not open the stack list"
+        );
+        assert!(
+            shell.read_with(&vcx, |s, _| s.row_menu.is_none()),
+            "{id} must not open the row menu"
         );
         assert_eq!(
             kinds(&shell, &mut vcx),

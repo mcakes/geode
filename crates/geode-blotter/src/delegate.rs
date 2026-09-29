@@ -496,17 +496,25 @@ impl BlotterDelegate {
         self.shown.get(self.cursor.row).map(|r| *r as usize)
     }
 
-    /// The cursor row's dimension context: its single-valued columns and,
-    /// when the cursor row is inside a live row (`V`) selection, each
-    /// selected top-most row's; a block selection never rides along. The
-    /// anchor is the cursor row's painted lower-left. `None` before the
-    /// first snapshot.
+    /// The cursor row's dimension context (see [`Self::context_at_row`]).
     pub fn dimension_context(&self) -> Option<geode_core::context::DimensionContext> {
+        self.context_at_row(self.cursor.row)
+    }
+
+    /// Display row `display_row`'s dimension context: its single-valued
+    /// columns and, when that row is inside a live row (`V`) selection,
+    /// each selected top-most row's; a block selection never rides along.
+    /// The anchor is the cursor row's painted lower-left, whichever row is
+    /// asked. `None` before the first snapshot or past the shown rows.
+    pub fn context_at_row(
+        &self,
+        display_row: usize,
+    ) -> Option<geode_core::context::DimensionContext> {
         let snapshot = self.snapshot.as_ref()?;
         let plan = self.plan.as_ref()?;
-        let row = *self.shown.get(self.cursor.row)? as usize;
+        let row = *self.shown.get(display_row)? as usize;
         let selection = match &self.resolved {
-            Some(r) if r.kind == SelectKind::Rows && r.rows.contains(&self.cursor.row) => {
+            Some(r) if r.kind == SelectKind::Rows && r.rows.contains(&display_row) => {
                 crate::core::context::selection_values(snapshot, plan, &self.shown, r)
             }
             _ => Vec::new(),

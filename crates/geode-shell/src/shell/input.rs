@@ -44,7 +44,8 @@ fn pull_direction(id: &str) -> Option<Direction> {
 }
 
 /// The notice produced when a palette action tries to open transient chrome
-/// (the command line, find, or the stack list) while a dialog is open.
+/// (the command line, find, the stack list, or the row menu) while a dialog
+/// is open.
 pub(super) const CLOSE_DIALOG_FIRST: &str = "close the dialog first";
 
 /// The notice when an action wants transient tile chrome, or would add,
@@ -56,12 +57,13 @@ pub(super) const CLOSE_PAGE_FIRST: &str = "close the page first (esc)";
 pub(crate) const NO_MODULE_OPENS: &str = "no module opens on the context at the cursor";
 
 /// The action ids refused with [`CLOSE_PAGE_FIRST`] while a page is open:
-/// the transient tile chrome (the `:` line, find, the stack list) and every
-/// layout edit — add, open-with, autosize, and the whole `workspace::`,
-/// `dock::`, and `stack::` families, which close, fullscreen, move, resize,
-/// refocus, dock, or restack tiles nobody can see (`Close tile` would
-/// destroy an unseen tile with no undo). `workspace::switch_*` is the one
-/// exception: a switch closes the page first and is the route home.
+/// the transient tile chrome (the `:` line, find, the stack list, the row
+/// menu) and every layout edit — add, open-with, autosize, and the whole
+/// `workspace::`, `dock::`, and `stack::` families, which close,
+/// fullscreen, move, resize, refocus, dock, or restack tiles nobody can see
+/// (`Close tile` would destroy an unseen tile with no undo).
+/// `workspace::switch_*` is the one exception: a switch closes the page
+/// first and is the route home.
 fn refused_over_a_page(id: &str) -> bool {
     if id.starts_with("workspace::") {
         return !id.starts_with("workspace::switch_");
@@ -182,7 +184,11 @@ impl ShellView {
         if self.modal_open()
             && (matches!(
                 action.0.as_str(),
-                "tile::command_line" | "tile::find" | "stack::pick" | "frame::pin_workspace"
+                "tile::command_line"
+                    | "tile::find"
+                    | "stack::pick"
+                    | "tile::context_menu"
+                    | "frame::pin_workspace"
             ) || action.0.starts_with("workspace::switch_"))
         {
             self.notice = Some(CLOSE_DIALOG_FIRST);

@@ -3295,6 +3295,207 @@ role = "key"
         );
     }
 
+    /// The row menu's production path end to end: a real blotter hosted in
+    /// the shell, a right press on one of its cells, the shell reading the
+    /// occupant's `press_context` through `TileContent` (the blotter's
+    /// forwarder, not a test double), and `enter` typed after the press
+    /// (the mouse-opened rule). The press lands on SPX inside a `V`
+    /// selection whose cursor sits on NDX: the menu opens SPX, the pressed
+    /// row (spec ruling 6), never the cursor row.
+    #[gpui::test]
+    fn a_right_press_on_a_blotter_cell_opens_the_pressed_rows_menu(cx: &mut gpui::TestAppContext) {
+        use geode_core::attribution::{Attribution, ScopeSemantics};
+        use geode_core::grid::selection::SelectKind;
+        use geode_core::snapshot::{ColumnMeta, Snapshot, TestColumn};
+        let (handle, rx) = DataHandle::for_tests();
+        let views = geode_core::view::ViewSpec::from_doc(&geode_core::config::merge_docs(
+            "views",
+            &[LayerDoc::builtin(
+                "views",
+                "[flat]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n\
+                 [[flat.columns]]\nname = \"underlying_ref\"\nkind = \"dimension\"\n\
+                 [[flat.columns]]\nname = \"delta01\"\n",
+            )
+            .unwrap()],
+        ))
+        .0;
+        let tiles = BlotterTiles::default();
+        let mut services = test_shell_services();
+        let mut roster = ModuleRoster::new();
+        roster.add(Box::new(KeepingBlotter {
+            factory: BlotterFactory::new(
+                handle,
+                views,
+                NamedColours::default(),
+                SchemaSpec::default(),
+                DerivedDimensions::default(),
+                FindStyle::default(),
+                Duration::from_secs(900),
+            ),
+            tiles: tiles.clone(),
+        }));
+        let mut rec = RecordingFactory::new("rec");
+        rec.accepts = &["underlying_ref"];
+        let log = rec.log.clone();
+        roster.add(Box::new(rec));
+        roster.register_actions(&mut services.registry);
+        let (fragments, diags) = roster.keymap_fragments();
+        assert!(diags.is_empty(), "{diags:?}");
+        let layered = geode_shell::keymap::fragments::splice(
+            &[LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap()],
+            &fragments,
+        );
+        let (keymap, diags) = build_keymap(&layered, services.mod_alias, &services.registry);
+        assert!(diags.is_empty(), "{diags:?}");
+        services.keymap = keymap;
+        services.roster = roster;
+        let mut table = geode_shell::session::to_toml(
+            &Workspaces::new(),
+            &TileRecords::new(),
+            None,
+            &geode_shell::session::PinnedRecords::new(),
+            &geode_shell::palette_usage::PaletteUsage::new(),
+            &geode_shell::session::PageRecords::new(),
+        );
+        let ws1: toml::Table = r#"
+            focused = 1
+            [node]
+            kind = "leaf"
+            id = 1
+            [tiles.1]
+            module = "blotter"
+            [tiles.1.state]
+            view = "flat"
+        "#
+        .parse()
+        .unwrap();
+        if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
+            ws_table.insert("1".to_string(), toml::Value::Table(ws1));
+        }
+        let restored = geode_shell::session::from_toml(&table).unwrap();
+        assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+        services.workspaces = restored.workspaces;
+        services.restored_tiles = restored.tiles;
+
+        cx.update(gpui_component::init);
+        cx.update(geode_blotter::init);
+        let window = open_shell_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let tile = tiles.borrow()[0].clone();
+
+        // Answer the tile's first query: root; L1 (SPX); L2 (NDX).
+        let tag = loop {
+            match rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the tile asks for its rows")
+            {
+                geode_data::Request::Query(p) => break p.tag,
+                _ => continue,
+            }
+        };
+        let meta = |n: &str| ColumnMeta {
+            name: n.into(),
+            attribution_by_depth: vec![Attribution::Additive; 2],
+            scope_semantics: ScopeSemantics::Direct,
+            summable: n == "delta01",
+            mixed_flag: None,
+        };
+        let dict = |a: &str, b: &str| TestColumn::Dict(vec![None, Some(a.into()), Some(b.into())]);
+        let snap = Arc::new(Snapshot::for_tests(
+            vec![
+                (meta("lhu"), dict("L1", "L2")),
+                (meta("underlying_ref"), dict("SPX", "NDX")),
+                (meta("row_depth"), TestColumn::I32(vec![0, 1, 1])),
+                (
+                    meta("delta01"),
+                    TestColumn::F64(vec![Some(9.0), Some(5.0), Some(4.0)]),
+                ),
+            ],
+            1,
+        ));
+        tile.update(&mut vcx, |t, cx| {
+            t.deliver(
+                geode_core::query::QueryOutcome {
+                    key: QueryKey(1),
+                    tag,
+                    snapshot: Ok(snap),
+                    submitted: std::time::Instant::now(),
+                },
+                cx,
+            )
+        });
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        // `V` on SPX, then `j` to NDX: rows 1..3 selected, cursor on NDX.
+        vcx.simulate_keystrokes("j shift-v j");
+        vcx.run_until_parked();
+        let (kind, rows, cursor) = tile.read_with(&vcx, |t, cx| {
+            let d = t.table().read(cx).delegate();
+            let r = d.resolved.clone().expect("a V selection");
+            (r.kind, r.rows, d.cursor.row)
+        });
+        assert_eq!((kind, rows, cursor), (SelectKind::Rows, 1..3, 2));
+
+        // Right-press SPX's underlying_ref cell, inside the selection.
+        let at = vcx
+            .debug_bounds("blotter-cell-1-1")
+            .expect("SPX's underlying_ref cell is painted")
+            .center();
+        vcx.simulate_mouse_down(at, gpui::MouseButton::Right, gpui::Modifiers::none());
+        vcx.simulate_mouse_up(at, gpui::MouseButton::Right, gpui::Modifiers::none());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        // A mouse-opened surface takes typed keys: `enter` picks Open Rec.
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        let launched: Vec<_> = log
+            .borrow()
+            .iter()
+            .filter_map(|r| match r {
+                Recorded::Created(_, state) => Some(state.clone()),
+                _ => None,
+            })
+            .collect();
+        let expected: toml::Table = r#"underlying = ["SPX"]"#.parse().unwrap();
+        assert_eq!(
+            launched,
+            vec![Some(expected)],
+            "the press opened the pressed row's menu (SPX), not the cursor row's (NDX)"
+        );
+
+        // gpui-component's table holds the menu it builds on every right
+        // press in a cycle only its next right press breaks: press once
+        // more and close the window in the same update, so the deferred
+        // rebuild never runs (as the blotter's `release_the_table_menu`).
+        let at = vcx
+            .debug_bounds("blotter-cell-0-0")
+            .expect("the root row is painted")
+            .center();
+        vcx.update(|window, cx| {
+            window.dispatch_event(
+                gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                    button: gpui::MouseButton::Right,
+                    position: at,
+                    modifiers: gpui::Modifiers::none(),
+                    click_count: 1,
+                    first_mouse: false,
+                }),
+                cx,
+            );
+            window.remove_window();
+        });
+        vcx.run_until_parked();
+    }
+
     /// [`test_bridge`] with `pricer` as its pricer factory, and the sender
     /// of its mailbox so a test can post data events to the real drain.
     fn test_bridge_with_pricer(

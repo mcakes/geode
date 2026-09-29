@@ -442,6 +442,8 @@ impl ModuleRoster {
         self.actions.push(action);
     }
 
+    /// The registered row menu actions, in registration order; a
+    /// `RowPick::Action` names one by its index here.
     pub fn actions(&self) -> &[Rc<dyn DimensionAction>] {
         &self.actions
     }

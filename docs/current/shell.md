@@ -157,8 +157,8 @@ A crate adds a row by implementing `dimension::DimensionAction`: `id`,
 `title`, the `column` whose section it sits in, `available` (enabled, or
 disabled with the reason its row shows; enabled by default) and `run`.
 `geode-app` registers it with `ModuleRoster::add_action` in
-`add_bridge_modules`, before the roster's `context_columns` are published,
-so each row carries the action's column. `run` gets the menu's context and
+`add_bridge_modules` (none are registered yet), before the roster's
+`context_columns` are published, so each row carries the action's column. `run` gets the menu's context and
 an `ActionCx`, after the menu has closed: `open_tile(kind, state)` splits a
 tile beside the focused one, as `g m` does, and `notice(text)` sets the
 status notice.

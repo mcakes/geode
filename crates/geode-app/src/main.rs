@@ -1165,10 +1165,7 @@ label = "skew"
             let stack = [
                 KeyContext::new("workspace"),
                 KeyContext::new("tile"),
-                KeyContext::new(kind)
-                    .grid()
-                    .pair("mode", "normal")
-                    .counts(),
+                KeyContext::new(kind).grid().pair("mode", "normal").counts(),
             ];
             let mut m = Matcher::default();
             let g = parse_keystroke("g", mod_alias).unwrap();

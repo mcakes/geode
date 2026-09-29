@@ -235,8 +235,8 @@ a row holding no registered context column (an `lhu` subtotal, say) opens the
 plain tile picker.
 
 `g .` opens the shell's [row menu](shell.md#row-menu) on the cursor row,
-hung just under it: a section per value in the row's context (`underlying_ref
-· SPX`) listing the panels that open on it. When the cursor row has
+hung just under it: a section per value that some panel or action takes
+(`underlying_ref · SPX`) listing the panels that open on it. When the cursor row has
 scrolled out of view the menu hangs at the tile's top-left instead. A
 right-click on a row's cell, or on the row beside its cells, opens the same
 menu at the pointer, the clicked column's section first when that column is

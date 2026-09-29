@@ -178,9 +178,9 @@ pub struct BlotterTile {
     /// including watched data and configuration; a tile-local requery clears
     /// the stage because it moves no frame counter.
     following: FollowingQuery<(Arc<Snapshot>, Vec<String>)>,
-    /// The display column the last right press landed on, until
-    /// `press_context` takes it for the shell's row menu.
-    pressed: Option<usize>,
+    /// The display cell (row, column) the last right press landed on,
+    /// until `press_context` takes it for the shell's row menu.
+    pressed: Option<(usize, usize)>,
 }
 
 /// The frame counters a blotter's answer depends on, copied out of the tile
@@ -465,17 +465,19 @@ impl BlotterTile {
         self.table.read(cx).delegate().dimension_context()
     }
 
-    /// The row a right press just landed on, for the shell's row menu,
-    /// leading with the pressed column when it is a dimension the row
-    /// carries (never the tree column or a measure). Takes the press: a
-    /// second call answers `None`.
+    /// The row a right press just landed on, for the shell's row menu:
+    /// the pressed row's own values (not the cursor's, which a press
+    /// inside a `V` selection leaves in place), with the selection riding
+    /// along when that row is inside it, leading with the pressed column
+    /// when it is a dimension the row carries (never the tree column or a
+    /// measure). Takes the press: a second call answers `None`.
     pub fn press_context(
         &mut self,
         cx: &mut Context<Self>,
     ) -> Option<geode_core::context::DimensionContext> {
-        let col = self.pressed.take()?;
+        let (row, col) = self.pressed.take()?;
         let d = self.table.read(cx).delegate();
-        let mut ctx = d.dimension_context()?;
+        let mut ctx = d.context_at_row(row)?;
         ctx.first = d
             .plan
             .as_ref()
@@ -1040,7 +1042,7 @@ impl BlotterTile {
     /// row menu. Inside a live row (`V`) selection nothing moves, so the
     /// selected rows ride along; anywhere else it is a plain press: the
     /// selection clears and the cursor moves to the cell. Either way the
-    /// column is recorded for [`Self::press_context`].
+    /// cell is recorded for [`Self::press_context`].
     fn context_press(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
         let inside = self
             .table
@@ -1065,7 +1067,7 @@ impl BlotterTile {
             self.table
                 .update(cx, |t, cx| t.set_right_clicked_row(None, cx));
         }
-        self.pressed = Some(col);
+        self.pressed = Some((row, col));
         cx.notify();
     }
 
@@ -3399,6 +3401,12 @@ mod tests {
         assert_eq!(cursor_row, 2, "the cursor stays");
         let ctx = press_context(&h, &mut cx).unwrap();
         assert_eq!(ctx.selection.len(), 2, "the selected rows ride along");
+        assert_eq!(
+            ctx.get("underlying_ref"),
+            Some("SPX"),
+            "the pressed row's value, not the cursor row's (NDX)"
+        );
+        assert_eq!(ctx.first.as_deref(), Some("underlying_ref"));
         release_the_table_menu(&mut cx);
     }
 

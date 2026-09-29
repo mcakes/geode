@@ -3084,10 +3084,19 @@ run_mutation "dialog stack: a workspace switch runs behind the stack instead of 
 
 run_mutation "dialog stack: the pin toggle runs behind the stack instead of being refused" \
   crates/geode-shell/src/shell/input.rs \
-  '"tile::command_line" | "tile::find" | "stack::pick" | "frame::pin_workspace"' \
-  '"tile::command_line" | "tile::find" | "stack::pick"' \
+  '                    | "frame::pin_workspace"' \
+  '                    | "frame::pin_workspace_never"' \
   geode-shell \
   switching_and_pinning_are_refused_behind_a_dialog
+
+# Row actions from the palette over a dialog would open nothing and say
+# nothing (open_row_menu is a no-op under a modal): it is refused aloud.
+run_mutation "dialog stack: the row menu is silently dropped over a dialog" \
+  crates/geode-shell/src/shell/input.rs \
+  $'                    | "tile::context_menu"\n                    | "frame::pin_workspace"' \
+  '                    | "frame::pin_workspace"' \
+  geode-shell \
+  palette_transient_chrome_is_refused_over_a_dialog
 
 # ---- overlays restore focus to their originating field
 
@@ -22877,18 +22886,18 @@ run_mutation "context: blotter reads an empty grouping label as a value" \
   '        if let Some(v) = value {' \
   geode-blotter an_empty_grouping_label_is_absent
 
-# The selection rides the context only while the cursor is inside it.
+# The selection rides the context only while the asked row is inside it.
 run_mutation "context: the selection rides a cursor outside it" \
   crates/geode-blotter/src/delegate.rs \
-  '            Some(r) if r.kind == SelectKind::Rows && r.rows.contains(&self.cursor.row) => {' \
+  '            Some(r) if r.kind == SelectKind::Rows && r.rows.contains(&display_row) => {' \
   '            Some(r) if true => {' \
   geode-blotter the_dimension_context_follows_the_cursor_row_and_selection
 
 # Only a row (V) selection rides the context; a block selection never does.
 run_mutation "row menu: a block selection fills the selection context" \
   crates/geode-blotter/src/delegate.rs \
-  '            Some(r) if r.kind == SelectKind::Rows && r.rows.contains(&self.cursor.row) => {' \
-  '            Some(r) if r.rows.contains(&self.cursor.row) => {' \
+  '            Some(r) if r.kind == SelectKind::Rows && r.rows.contains(&display_row) => {' \
+  '            Some(r) if r.rows.contains(&display_row) => {' \
   geode-blotter a_block_selection_fills_no_selection_context
 
 # A right press inside a row selection keeps it and the cursor, so the
@@ -22902,9 +22911,25 @@ run_mutation "row menu: a right press inside the selection drops it" \
 # press_context takes the press: a later call (a stale beat) opens nothing.
 run_mutation "row menu: the press is not consumed" \
   crates/geode-blotter/src/tile.rs \
-  '        let col = self.pressed.take()?;' \
-  '        let col = self.pressed?;' \
+  '        let (row, col) = self.pressed.take()?;' \
+  '        let (row, col) = self.pressed?;' \
   geode-blotter a_right_press_moves_the_cursor_and_names_the_column
+
+# A press inside a V selection leaves the cursor where it was; the menu is
+# still the pressed row's (spec ruling 6), never the cursor row's.
+run_mutation "row menu: a press inside the selection answers the cursor row" \
+  crates/geode-blotter/src/tile.rs \
+  '        let mut ctx = d.context_at_row(row)?;' \
+  '        let mut ctx = d.context_at_row(d.cursor.row + 0 * row)?;' \
+  geode-blotter a_right_press_inside_the_selection_keeps_it
+
+# The blotter's TileContent forwarder is the production press_context seam;
+# the trait default (None) would leave every product row menu dead.
+run_mutation "row menu: the blotter content drops press_context" \
+  crates/geode-blotter/src/content.rs \
+  '        self.tile.update(cx, |t, cx| t.press_context(cx))' \
+  '        { let _ = cx; None }' \
+  geode-app a_right_press_on_a_blotter_cell_opens_the_pressed_rows_menu
 
 # A cursor row scrolled out paints no longer: its anchor clears, or `g .`
 # hangs the menu beside whatever row sits at the old point.
