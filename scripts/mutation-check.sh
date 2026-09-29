@@ -17326,22 +17326,22 @@ run_mutation "pricer core: an old revision's delivery is installed" \
 
 run_mutation "pricer core: a package sums its legs unsigned" \
   crates/geode-pricer/src/core/sheet.rs \
-  '                        let q = self.qty[leg] as f64;' \
-  '                        let q = (self.qty[leg] as f64).abs();' \
+  '                    let q = self.qty[leg] as f64;' \
+  '                    let q = (self.qty[leg] as f64).abs();' \
   geode-pricer a_package_sums_qty_times_value_over_its_legs_with_signed_quantities
 
 run_mutation "pricer core: a failed leg still sums" \
   crates/geode-pricer/src/core/sheet.rs \
-  '            self.result[p] = if complete && failed.is_none() {' \
-  '            self.result[p] = if complete {' \
+  '            result: if any && complete && failed.is_none() {' \
+  '            result: if any && complete {' \
   geode-pricer a_package_sums_qty_times_value_over_its_legs_with_signed_quantities
 
 # A local-currency sum over USD and EUR legs is a sum of unlike units: the
 # fold marks the package MIXED, and a local cell or total paints a gap.
 run_mutation "pricer core: a package over differing currencies keeps the first leg's" \
   crates/geode-pricer/src/core/sheet.rs \
-  '                        if acc.currency != r.currency {' \
-  '                        if false {' \
+  '                    if acc.currency != r.currency {' \
+  '                    if false {' \
   geode-pricer a_package_over_differing_currencies_folds_to_a_mixed_currency
 
 run_mutation "pricer totals: a mixed-currency local total is a gap" \
@@ -17514,9 +17514,9 @@ run_mutation "pricer templates: a reload leaves the open bar's history stale" \
 # The reload observer must hand the factory the configured set.
 run_mutation "pricer app: a reload hands the factory the builtin templates" \
   crates/geode-app/src/bridge.rs \
-  '            };
+  '            pricer.set_dims(dims);
             pricer.reload(views, templates, colours, refresh, stale_after, cx);' \
-  '            };
+  '            pricer.set_dims(dims);
             let _ = templates;
             pricer.reload(views, TemplateSet::builtin(), colours, refresh, stale_after, cx);' \
   geode-app a_config_reload_hands_the_pricer_factory_its_templates
@@ -20587,8 +20587,8 @@ run_mutation "pricer tile: the session record carries dead package ids" \
 # Undoing row deletion places the cursor on the restored rows.
 run_mutation "pricer tile: an undo that restores rows leaves the cursor below them" \
   crates/geode-pricer/src/tile.rs \
-  '                if let Some(id) = restored {' \
-  '                if let Some(id) = restored.filter(|_| false) {' \
+  '                if let Some(&id) = restored.first() {' \
+  '                if let Some(&id) = restored.first().filter(|_| false) {' \
   geode-pricer dd_then_u_on_an_open_package_restores_it_open_under_the_cursor
 
 # A leg restored under a closed package would put the cursor on a hidden
@@ -20959,8 +20959,8 @@ run_mutation "pricer tile: the cursor follows a re-pointed editor" \
 # over a column that is not the one it opened on.
 run_mutation "pricer tile: an editor whose column left the plan closes" \
   crates/geode-pricer/src/tile.rs \
-  '            None => self.drop_orphaned_editor(cx),' \
-  '            None => {}' \
+  '                self.drop_orphaned_editor(if scoped { SCOPE_DROPPED_EDIT } else { MOVED }, cx)' \
+  '                let _ = scoped;' \
   geode-pricer a_view_reload_without_the_edited_column_closes_the_editor
 
 # The window-less close still blurs before the field drops.
@@ -21736,7 +21736,7 @@ run_mutation "timeseries colour picker: removing the target closes the picker" \
 run_mutation "pricer grid: a package's tag is its search text" \
   crates/geode-pricer/src/grid.rs \
   '                    SharedString::new_static(template.token()),' \
-  '                    package_search(sheet, r).into(),' \
+  '                    package_search(sheet, r, None).into(),' \
   geode-pricer rows_follow_the_expansion_and_carry_depth_ids_tags_and_search_keys
 
 # Find reads the unpainted search key, not the painted tag. Anchored on
@@ -23655,15 +23655,15 @@ run_mutation "pricer package: qty ignores whether the legs fit" \
 # A shift paints muted only when every leg inherits.
 run_mutation "pricer package: a shift reads inherited while a leg sets its own" \
   crates/geode-pricer/src/core/package.rs \
-  '        Some(pick) if sheet.children(row).all(|l| pick(sheet.shift(l)).is_none()) => {' \
-  '        Some(_) => {' \
+  '        Some(pick) if legs.iter().all(|&l| pick(sheet.shift(l)).is_none()) => CellState::Inherited,' \
+  '        Some(_) => CellState::Inherited,' \
   geode-pricer shifts_group_by_effective_value_and_mute_when_all_inherit
 
 # Shifts group by the effective value: an own 2 and an inherited 2 are one.
 run_mutation "pricer package: shifts group by the own value" \
   crates/geode-pricer/src/core/package.rs \
-  '                    .map(|l| (l, pick(sheet.shift(l)).or(sheet_value))),' \
-  '                    .map(|l| (l, pick(sheet.shift(l)))),' \
+  '                    .map(|&l| (l, pick(sheet.shift(l)).or(sheet_value))),' \
+  '                    .map(|&l| (l, pick(sheet.shift(l)))),' \
   geode-pricer shifts_group_by_effective_value_and_mute_when_all_inherit
 
 # A shift group opens for editing on the plain number, not the signed cell.
@@ -25061,11 +25061,13 @@ run_mutation "pricer dataset: declaration mirrors COLUMNS" \
   '[pricer.columns.expiry]
 type = "utf8"
 role = "dimension"
+textual = true
 grain = "instrument"
 [pricer.columns.strike]' \
   '[pricer.columns.strike]
 type = "utf8"
 role = "dimension"
+textual = true
 grain = "instrument"
 [pricer.columns.expiry]' \
   geode-pricer the_declaration_names_exactly_the_paint_vocabulary
@@ -25196,22 +25198,22 @@ run_mutation "pricer plan: move_column reorders" \
 # leg would hang from a tee and the package would never close.
 run_mutation "pricer grid: the last leg takes the corner" \
   crates/geode-pricer/src/grid.rs \
-  '                        last: sheet.children(p).end == r + 1,' \
+  '                        last: !(r + 1..sheet.children(p).end).any(|l| visibility.is_shown(l)),' \
   '                        last: false,' \
   geode-pricer the_last_leg_of_every_package_takes_the_corner_connector
 
 # A package row's note counts its own legs.
 run_mutation "pricer grid: a package counts its legs" \
   crates/geode-pricer/src/grid.rs \
-  '                    SharedString::from(leg_note(sheet.children(r).len())),' \
-  '                    SharedString::from(leg_note(0)),' \
+  '                    let total = sheet.children(r).len();' \
+  '                    let total = 0;' \
   geode-pricer the_tree_text_is_prepared_per_row_kind
 
 # One leg reads "1 leg", not "1 legs".
 run_mutation "pricer grid: one leg is singular" \
   crates/geode-pricer/src/grid.rs \
-  '    if n == 1 {' \
-  '    if false {' \
+  '        (1, 1) => "· 1 leg".to_string(),' \
+  '        (0, 1) => "· 1 leg".to_string(),' \
   geode-pricer a_one_leg_package_counts_one_leg_and_its_leg_is_last
 
 # A package summary names each strike once; a straddle would otherwise
@@ -25469,6 +25471,441 @@ run_mutation "chip: active text is floored against its fill" \
   '                text: to_hsla(readable_on(to_rgb(theme.primary_foreground), fill, pole)),' \
   '                text: theme.primary_foreground,' \
   geode-shell every_chip_tone_is_readable_on_every_bundled_theme
+
+# ---- In-process scope evaluator ----
+# The evaluator copies what DuckDB does with scope_sql's predicate; the
+# parity fixture in geode-data is the detecting test for the SQL facts.
+run_mutation "scope eval: NaN orders above every number" \
+  crates/geode-core/src/scope/eval.rs \
+  '                (true, false) => Ordering::Greater,' \
+  '                (true, false) => Ordering::Less,' \
+  geode-data evaluate_agrees_with_scope_sql_on_every_operator
+
+run_mutation "scope eval: a number widens an i64 comparison to DOUBLE" \
+  crates/geode-core/src/scope/eval.rs \
+  '            ColumnType::I64 if any_num => Domain::F64,' \
+  '            ColumnType::I64 if false => Domain::F64,' \
+  geode-data evaluate_agrees_with_scope_sql_on_every_operator
+
+run_mutation "scope eval: a number casts a text column to DOUBLE" \
+  crates/geode-core/src/scope/eval.rs \
+  '            ColumnType::Utf8 if any_num => Domain::F64,' \
+  '            ColumnType::Utf8 if false => Domain::F64,' \
+  geode-data evaluate_agrees_with_scope_sql_on_every_operator
+
+run_mutation "scope eval: a derived constant folds before a literal converts" \
+  crates/geode-core/src/scope/eval.rs \
+  '        if let Some(c) = self.constant(dims) {' \
+  '        if let Some(c) = None::<bool> {' \
+  geode-data evaluate_agrees_with_scope_sql_on_every_operator
+
+run_mutation "scope eval: text to BIGINT rounds half away from zero" \
+  crates/geode-core/src/scope/eval.rs \
+  '    let r = f.round();' \
+  '    let r = f.trunc();' \
+  geode-data evaluate_agrees_with_scope_sql_on_every_operator
+
+run_mutation "scope eval: an unmapped derived selection keeps nothing before any refusal" \
+  crates/geode-core/src/scope/eval.rs \
+  '                return constant(false);
+            }
+            scopeable(ds, dims, &sel.column)?;' \
+  '            }
+            scopeable(ds, dims, &sel.column)?;' \
+  geode-data evaluate_agrees_with_scope_sql_on_every_operator
+
+run_mutation "scope eval: a text filter with no textual column folds to false" \
+  crates/geode-core/src/scope/eval.rs \
+  '        if self.text.is_some() && textual.is_empty() {' \
+  '        if false {' \
+  geode-data a_text_filter_over_a_dataset_with_no_textual_column_matches_nothing
+
+run_mutation "scope eval: like's _ matches one character" \
+  crates/geode-core/src/scope/eval.rs \
+  '        if j < p.len() && (p[j] == '\''_'\'' || (p[j] != '\''%'\'' && p[j] == v[i])) {' \
+  '        if j < p.len() && (p[j] != '\''%'\'' && p[j] == v[i]) {' \
+  geode-core like_matches_wildcards_case_insensitively_with_no_escape
+
+run_mutation "scope eval: Kleene and is UNKNOWN when neither side is FALSE" \
+  crates/geode-core/src/scope/eval.rs \
+  'fn and(a: Option<bool>, b: Option<bool>) -> Option<bool> {
+    match (a, b) {
+        (Some(false), _) | (_, Some(false)) => Some(false),
+        (Some(true), Some(true)) => Some(true),
+        _ => None,' \
+  'fn and(a: Option<bool>, b: Option<bool>) -> Option<bool> {
+    match (a, b) {
+        (Some(false), _) | (_, Some(false)) => Some(false),
+        (Some(true), Some(true)) => Some(true),
+        _ => Some(false),' \
+  geode-core and_and_or_follow_kleene_logic
+
+run_mutation "scope eval: Kleene or is UNKNOWN when neither side is TRUE" \
+  crates/geode-core/src/scope/eval.rs \
+  'fn or(a: Option<bool>, b: Option<bool>) -> Option<bool> {
+    match (a, b) {
+        (Some(true), _) | (_, Some(true)) => Some(true),
+        (Some(false), Some(false)) => Some(false),
+        _ => None,' \
+  'fn or(a: Option<bool>, b: Option<bool>) -> Option<bool> {
+    match (a, b) {
+        (Some(true), _) | (_, Some(true)) => Some(true),
+        (Some(false), Some(false)) => Some(false),
+        _ => Some(false),' \
+  geode-core and_and_or_follow_kleene_logic
+
+# ---- Pricer scope: evaluator operators, visibility, refusal ----
+# `=` holds only on equal values.
+run_mutation "scope eval: = holds on unequal values" \
+  crates/geode-core/src/scope/eval.rs \
+  '        CompareOp::Eq => ord == Ordering::Equal,' \
+  '        CompareOp::Eq => ord != Ordering::Less,' \
+  geode-data evaluate_agrees_with_scope_sql_on_every_operator
+
+# Text compares by bytes, as DuckDB's binary collation: case matters.
+run_mutation "scope eval: text compares case-insensitively" \
+  crates/geode-core/src/scope/eval.rs \
+  '            (Scalar::Text(a), Scalar::Text(b)) => a.as_bytes().cmp(b.as_bytes()),' \
+  '            (Scalar::Text(a), Scalar::Text(b)) => a.to_lowercase().cmp(&b.to_lowercase()),' \
+  geode-data evaluate_agrees_with_scope_sql_on_every_operator
+
+# `<` is strict.
+run_mutation "scope eval: < keeps the equal value" \
+  crates/geode-core/src/scope/eval.rs \
+  '        CompareOp::Lt => ord == Ordering::Less,' \
+  '        CompareOp::Lt => ord != Ordering::Greater,' \
+  geode-data evaluate_agrees_with_scope_sql_on_every_operator
+
+# like's % matches any run, the empty run at the end included.
+run_mutation "scope eval: like's trailing % needs a character" \
+  crates/geode-core/src/scope/eval.rs \
+  '    p[j..].iter().all(|c| *c == '\''%'\'')' \
+  '    p[j..].is_empty()' \
+  geode-core like_matches_wildcards_case_insensitively_with_no_escape
+
+# like is ilike: case-insensitive.
+run_mutation "scope eval: like is case-sensitive" \
+  crates/geode-core/src/scope/eval.rs \
+  '    let v: Vec<char> = value.to_lowercase().chars().collect();' \
+  '    let v: Vec<char> = value.chars().collect();' \
+  geode-core like_matches_wildcards_case_insensitively_with_no_escape
+
+# `in` is any-equal.
+run_mutation "scope eval: in needs every value equal" \
+  crates/geode-core/src/scope/eval.rs \
+  '                            Some(lits.iter().any(|l| v.cmp_sql(l) == Ordering::Equal))' \
+  '                            Some(lits.iter().all(|l| v.cmp_sql(l) == Ordering::Equal))' \
+  geode-data evaluate_agrees_with_scope_sql_on_every_operator
+
+# not over UNKNOWN is UNKNOWN: a NULL never matches under not.
+run_mutation "scope eval: not over a NULL is TRUE" \
+  crates/geode-core/src/scope/eval.rs \
+  '            Expr::Not(e) => e.eval(row, ds, dims)?.map(|v| !v),' \
+  '            Expr::Not(e) => Some(e.eval(row, ds, dims)?.map(|v| !v).unwrap_or(true)),' \
+  geode-core not_over_a_null_comparison_is_unknown_and_drops_the_row
+
+# The text filter searches only textual columns (a needle found only in a
+# number or a non-textual code matches nothing).
+run_mutation "scope eval: the text filter searches every column" \
+  crates/geode-core/src/scope/eval.rs \
+  '        let textual: Vec<&str> = ds.textual_columns().map(|c| c.name.as_str()).collect();' \
+  '        let textual: Vec<&str> = ds.columns.iter().map(|c| c.name.as_str()).collect();' \
+  geode-data evaluate_agrees_with_scope_sql_on_every_operator
+
+# A derived comparison is membership of the source value's mapping.
+run_mutation "scope eval: any mapped source is a derived member" \
+  crates/geode-core/src/scope/eval.rs \
+  '                .is_some_and(|derived| wanted_by(wanted, derived)),' \
+  '                .is_some(),' \
+  geode-data evaluate_agrees_with_scope_sql_on_every_operator
+
+# `impossible` keeps nothing, before anything else is looked at.
+run_mutation "scope eval: impossible keeps rows" \
+  crates/geode-core/src/scope/eval.rs \
+  '        if self.impossible {' \
+  '        if false {' \
+  geode-core an_impossible_scope_keeps_nothing
+
+# A WHERE clause keeps only TRUE: UNKNOWN drops the row.
+run_mutation "scope eval: UNKNOWN keeps the row" \
+  crates/geode-core/src/scope/eval.rs \
+  '        Ok(kept == Some(true))' \
+  '        Ok(kept != Some(false))' \
+  geode-core not_over_a_null_comparison_is_unknown_and_drops_the_row
+
+# A package shows when ANY of its legs matches.
+run_mutation "pricer visibility: a package needs every leg to show" \
+  crates/geode-pricer/src/core/visibility.rs \
+  '            shown[p] = legs.is_empty() || legs.clone().any(|l| shown[l]);' \
+  '            shown[p] = legs.is_empty() || legs.clone().all(|l| shown[l]);' \
+  geode-pricer an_expression_hides_non_matching_lines_and_keeps_a_package_with_any_match
+
+# A desk-wide selection on a column the pricer lacks (book) is dropped,
+# not refused: it must not blank the pricer.
+run_mutation "pricer visibility: a selection on a missing column is kept" \
+  crates/geode-pricer/src/core/visibility.rs \
+  '        .retain(|d| scope_column(ds, dims, &d.column));' \
+  '        .retain(|d| !NOT_SCOPEABLE.contains(&dims.base_column(&d.column)));' \
+  geode-pricer a_selection_on_a_column_pricer_lacks_is_dropped_not_refused
+
+# A refused scope hides nothing, even after a scope that hid lines.
+run_mutation "pricer scope: a refusal keeps the last narrowing" \
+  crates/geode-pricer/src/tile.rs \
+  '                self.visibility = Visibility::all(&self.sheet);' \
+  '                let _ = Visibility::all(&self.sheet);' \
+  geode-pricer a_refused_scope_notices_and_hides_nothing
+
+# A partly hidden package aggregates its shown legs only: the full fold
+# under a row whose legs are partly hidden is a plausible wrong total.
+run_mutation "pricer grid: a partial package aggregates every leg" \
+  crates/geode-pricer/src/grid.rs \
+  '                let legs = visibility.shown_legs(sheet, r);' \
+  '                let legs: Vec<usize> = sheet.children(r).collect();' \
+  geode-pricer a_partly_hidden_package_paints_its_shown_legs_aggregate_and_note
+
+# A typed usize::MAX count refuses instead of overflowing.
+run_mutation "pricer edit: group's end overflows" \
+  crates/geode-pricer/src/core/edit.rs \
+  '        let end = first.saturating_add(count);' \
+  '        let end = first + count;' \
+  geode-pricer a_huge_counted_group_refuses_without_overflowing
+
+run_mutation "pricer scope: the group door's range overflows" \
+  crates/geode-pricer/src/tile/select.rs \
+  '                    let taken = row..row.saturating_add(count.max(1)).min(self.sheet.len());' \
+  '                    let taken = row..(row + count.max(1)).min(self.sheet.len());' \
+  geode-pricer a_huge_counted_group_refuses_without_overflowing
+
+# The pricer's frame observer applies the scope before it arrives at the
+# flip barrier; without it a frame scope never reaches the pricer.
+run_mutation "pricer scope: the observer applies the frame's scope" \
+  crates/geode-pricer/src/tile.rs \
+  $'            this.follow_scope(cx);\n            // Arrive through' \
+  $'            // Arrive through' \
+  geode-pricer a_frame_scope_hides_lines_and_the_header_counts_them
+
+# Every rebuild re-applies the scope in force: a delivery moves a line in
+# or out of a scope over a measure.
+run_mutation "pricer scope: a rebuild re-applies the scope" \
+  crates/geode-pricer/src/tile.rs \
+  $'        self.apply_visibility();\n        let model = Rc::new(GridModel::build(' \
+  $'        let model = Rc::new(GridModel::build(' \
+  geode-pricer a_delivery_reevaluates_the_scope
+
+# `:unscoped` reads no frame scope.
+run_mutation "pricer scope: unscoped still reads the frame" \
+  crates/geode-pricer/src/tile.rs \
+  $'    if unscoped {\n        return Ok(Scope::default());\n    }\n    frame\n        .read(cx)' \
+  $'    if false {\n        return Ok(Scope::default());\n    }\n    frame\n        .read(cx)' \
+  geode-pricer unscoped_shows_every_line_and_restores_from_the_session
+
+# `:unscoped` rides the session record, as the blotter's does.
+run_mutation "pricer scope: unscoped is not written to the session" \
+  crates/geode-pricer/src/session.rs \
+  $'        if self.unscoped {\n            t.insert("unscoped"' \
+  $'        if false {\n            t.insert("unscoped"' \
+  geode-pricer unscoped_shows_every_line_and_restores_from_the_session
+
+run_mutation "pricer scope: a restored record's unscoped is ignored" \
+  crates/geode-pricer/src/session.rs \
+  '            unscoped: t.get("unscoped").and_then(|v| v.as_bool()).unwrap_or(false),' \
+  '            unscoped: t.get("unscoped-ignored").and_then(|v| v.as_bool()).unwrap_or(false),' \
+  geode-pricer a_tile_restored_unscoped_ignores_the_frame_scope
+
+# A refused scope hides nothing AND says so: silently showing every line
+# under a scope the trader set reads as a plausible scoped book.
+run_mutation "pricer scope: a refusal paints no notice" \
+  crates/geode-pricer/src/tile.rs \
+  '                    self.scope_refusal = Some(message.into());' \
+  '                    self.scope_refusal = None;' \
+  geode-pricer a_refused_scope_notices_and_hides_nothing
+
+# The header counts hidden lines.
+run_mutation "pricer scope: the header drops the hidden count" \
+  crates/geode-pricer/src/header.rs \
+  '        hidden: (i.hidden > 0).then(|| format!("{} hidden", i.hidden).into()),' \
+  '        hidden: None,' \
+  geode-pricer a_frame_scope_hides_lines_and_the_header_counts_them
+
+# A cursor on a line the scope hides goes to the nearest shown row above,
+# not to the row that slid into its old index.
+run_mutation "pricer scope: a hidden cursor falls back by index" \
+  crates/geode-pricer/src/tile.rs \
+  '        if !hidden || model.grid_row_of(id).is_some() {' \
+  '        if true {' \
+  geode-pricer the_cursor_on_a_hidden_leg_moves_to_a_visible_row
+
+# A partly hidden package row is read-only: the editor never opens on it.
+run_mutation "pricer scope: the editor opens on a partly hidden package" \
+  crates/geode-pricer/src/tile.rs \
+  $'        if self.partly_hidden(row) {\n            self.footer = Some(PARTLY_HIDDEN.into());\n            return;\n        }' \
+  $'        if false {\n            self.footer = Some(PARTLY_HIDDEN.into());\n            return;\n        }' \
+  geode-pricer an_edit_on_a_partly_hidden_package_row_is_refused_with_the_footer
+
+# A selected package stands for every leg, hidden ones too: a typed
+# commit over it refuses whole.
+run_mutation "pricer scope: a selection commit writes a partly hidden package" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'        if self.selection_partly_hidden() {\n            self.footer = Some(PARTLY_HIDDEN.into());\n            self.sync_editor(cx);' \
+  $'        if false {\n            self.footer = Some(PARTLY_HIDDEN.into());\n            self.sync_editor(cx);' \
+  geode-pricer a_selection_commit_over_a_partly_hidden_package_is_refused
+
+run_mutation "pricer scope: a selection step moves a partly hidden package" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'        if self.selection_partly_hidden() {\n            self.footer = Some(PARTLY_HIDDEN.into());\n            self.rebuild_chrome();' \
+  $'        if false {\n            self.footer = Some(PARTLY_HIDDEN.into());\n            self.rebuild_chrome();' \
+  geode-pricer a_selection_step_over_a_partly_hidden_package_is_refused
+
+# Selection totals over a partly hidden package count its shown legs, as
+# its row paints them.
+run_mutation "pricer scope: selection totals ignore the scope" \
+  crates/geode-pricer/src/tile/select.rs \
+  '        let sums = risk_totals_visible(&self.sheet, &top, &measures, &self.visibility);' \
+  '        let sums = risk_totals_visible(&self.sheet, &top, &measures, &Visibility::all(&self.sheet));' \
+  geode-pricer a_selection_total_over_a_partly_hidden_package_counts_its_shown_legs
+
+# A partly hidden package's find key reads its shown legs, as its summary.
+run_mutation "pricer grid: a partial package's key reads every leg" \
+  crates/geode-pricer/src/grid.rs \
+  "    if shown.is_none() && !text.is_empty() && !text.contains('\\n') {" \
+  "    if !text.is_empty() && !text.contains('\\n') {" \
+  geode-pricer a_partly_hidden_packages_find_key_reads_only_its_shown_legs
+
+# Structural verbs on a partly hidden package act on its hidden legs too:
+# the one door refuses them all.
+run_mutation "pricer scope: structural verbs ignore a partly hidden package" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'            .any(|r| self.partly_hidden(r))\n            .then_some(PARTLY_HIDDEN)' \
+  $'            .any(|_| false)\n            .then_some(PARTLY_HIDDEN)' \
+  geode-pricer row_verbs_on_a_partly_hidden_package_are_refused
+
+# A selection refuses whole when any of its rows is a partly hidden package.
+run_mutation "pricer scope: a selection's structural target is the cursor row" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'        let targets: Vec<usize> = if selected {\n            self.selected_sheet_rows()' \
+  $'        let targets: Vec<usize> = if false {\n            self.selected_sheet_rows()' \
+  geode-pricer selection_verbs_over_a_partly_hidden_package_refuse_whole
+
+# `g u` on a shown leg dissolves its package: the target is the parent.
+run_mutation "pricer scope: g u on a leg targets the leg" \
+  crates/geode-pricer/src/tile/select.rs \
+  '                "ungroup" => vec![self.sheet.parent(row).unwrap_or(row)],' \
+  '                "ungroup" => vec![row],' \
+  geode-pricer a_shown_leg_ungroups_nothing_but_deletes_itself
+
+# A counted `g p` reaches every root it would take as a member.
+run_mutation "pricer scope: a counted g p checks the cursor row alone" \
+  crates/geode-pricer/src/tile/select.rs \
+  '                    let taken = row..row.saturating_add(count.max(1)).min(self.sheet.len());' \
+  '                    let taken = row..row.saturating_add(1).min(self.sheet.len());' \
+  geode-pricer a_counted_group_reaching_a_partly_hidden_package_is_refused
+
+# The command door asks the same question as the keys.
+run_mutation "pricer scope: :ungroup skips the door" \
+  crates/geode-pricer/src/tile.rs \
+  $'                if let Some(why) = self.partly_hidden_refusal("ungroup", 1, false) {\n                    return Err(why.into());\n                }' \
+  $'                if let Some(_why) = None::<&str> {\n                    return Err(_why.into());\n                }' \
+  geode-pricer row_verbs_on_a_partly_hidden_package_are_refused
+
+# A counted `g p` takes the next sheet rows, hidden ones included: it
+# refuses rather than package a line the trader never saw.
+run_mutation "pricer scope: a counted g p absorbs a hidden line" \
+  crates/geode-pricer/src/tile/select.rs \
+  '                    if taken.clone().any(|r| !self.visibility.is_shown(r)) {' \
+  '                    if false {' \
+  geode-pricer a_counted_group_over_a_hidden_line_is_refused
+
+# Cursor recovery walks sheet order, so a restored cursor (no previous
+# model holds its line) recovers too; the old model's rows would not.
+run_mutation "pricer scope: a restored hidden cursor falls to row 0" \
+  crates/geode-pricer/src/tile.rs \
+  $'        let Some(at) = self.sheet.index_of(id) else {\n            return;\n        };\n        let shown' \
+  $'        let Some(at) = self.model.grid_row_of(id) else {\n            return;\n        };\n        let shown' \
+  geode-pricer a_restored_cursor_on_a_hidden_line_lands_above_it
+
+# The tile arrives at the barrier on every path, a refused scope and a
+# frame change while unscoped included.
+run_mutation "pricer scope: arrival only when a scope applied" \
+  crates/geode-pricer/src/tile.rs \
+  '            following::arrive_immediately(&mut FrameDoor::new(&frame, cx), QueryKey(this.id.0));' \
+  '            if this.scope_refusal.is_none() && !this.unscoped { following::arrive_immediately(&mut FrameDoor::new(&frame, cx), QueryKey(this.id.0)); }' \
+  geode-pricer the_tile_arrives_on_a_refused_scope_and_while_unscoped
+
+# A fresh line's status scopes as `fresh`, not its blank cell: otherwise
+# `status = 'fresh'` hides every line.
+run_mutation "pricer scope: a fresh status reads its blank cell" \
+  crates/geode-pricer/src/core/visibility.rs \
+  '            ColumnKind::Status if matches!(sheet.state(row), LineState::Fresh) => {' \
+  '            ColumnKind::Status if false => {' \
+  geode-pricer status_fresh_shows_priced_lines_and_hides_stale_ones
+
+# The synthetic keys never match a desk value: a selection on them drops
+# and an expression naming them refuses, rather than hiding every line.
+run_mutation "pricer scope: the synthetic keys are scope columns" \
+  crates/geode-pricer/src/core/visibility.rs \
+  '    ds.column(base).is_some() && !NOT_SCOPEABLE.contains(&base)' \
+  '    ds.column(base).is_some()' \
+  geode-pricer the_synthetic_keys_are_not_scope_columns
+
+run_mutation "pricer scope: a derived dimension escapes the synthetic-key rule" \
+  crates/geode-pricer/src/core/visibility.rs \
+  '    ds.column(base).is_some() && !NOT_SCOPEABLE.contains(&base)' \
+  '    ds.column(base).is_some() && !NOT_SCOPEABLE.contains(&column)' \
+  geode-pricer a_derived_dimension_over_a_synthetic_key_is_not_applicable
+
+# A dated expiry scopes by its ISO date (desk data's spelling), a tenor by
+# its text.
+run_mutation "pricer scope: a dated expiry scopes by its painted code" \
+  crates/geode-pricer/src/core/visibility.rs \
+  '                    Expiry::Date(d) => d.format("%Y-%m-%d").to_string(),' \
+  '                    Expiry::Date(d) => d.format("%d%b%y").to_string(),' \
+  geode-pricer expiry_scopes_by_iso_date_or_tenor
+
+run_mutation "pricer scope: a tenor scopes upper-cased" \
+  crates/geode-pricer/src/core/visibility.rs \
+  '                    Expiry::Tenor(t) => t.clone(),' \
+  '                    Expiry::Tenor(t) => t.to_uppercase(),' \
+  geode-pricer expiry_scopes_by_iso_date_or_tenor
+
+# A line the trader adds that the scope hides says so in the footer, at
+# every landing: the entry bar, a put, an undo or redo restore.
+run_mutation "pricer scope: a hidden landing is silent" \
+  crates/geode-pricer/src/tile.rs \
+  $'        if hidden {\n            self.footer = Some(HIDDEN_LANDING.into());' \
+  $'        if false {\n            self.footer = Some(HIDDEN_LANDING.into());' \
+  geode-pricer an_entry_bar_line_the_scope_hides_says_so
+
+run_mutation "pricer scope: an entry-bar insert skips the landing note" \
+  crates/geode-pricer/src/tile.rs \
+  $'.map(|r| self.sheet.id(r)).collect();\n                self.note_hidden_landing(ids);' \
+  $'.map(|r| self.sheet.id(r)).collect();\n                let _ = ids;' \
+  geode-pricer an_entry_bar_line_the_scope_hides_says_so
+
+run_mutation "pricer scope: a put skips the landing note" \
+  crates/geode-pricer/src/tile.rs \
+  $'        let ids: Vec<LineId> = (first..at).map(|r| self.sheet.id(r)).collect();\n        self.note_hidden_landing(ids);' \
+  $'        let ids: Vec<LineId> = (first..at).map(|r| self.sheet.id(r)).collect();\n        let _ = ids;' \
+  geode-pricer a_put_or_restore_the_scope_hides_says_so
+
+run_mutation "pricer scope: a restore skips the landing note" \
+  crates/geode-pricer/src/tile.rs \
+  '                self.note_hidden_landing(restored);' \
+  '                let _ = restored;' \
+  geode-pricer a_put_or_restore_the_scope_hides_says_so
+
+# A `dimensions` edit alone reloads the pricer, and the reload hands the
+# factory the new dimensions.
+run_mutation "pricer key: dimensions left out" \
+  crates/geode-app/src/bridge.rs \
+  '        dimensions: config.doc("dimensions").map(|d| d.value.clone()),' \
+  '        dimensions: None,' \
+  geode-app a_dimensions_reload_reaches_the_pricer
+
+run_mutation "pricer reload: dimensions not handed over" \
+  crates/geode-app/src/bridge.rs \
+  '            pricer.set_dims(dims);' \
+  '            let _ = dims;' \
+  geode-app a_dimensions_reload_reaches_the_pricer
 
 # One id, one verb. Accepting a second registration of an id would let a
 # panel's menu row dispatch whichever verb the lookup found first.

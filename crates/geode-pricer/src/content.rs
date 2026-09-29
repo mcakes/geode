@@ -9,6 +9,7 @@ use crate::core::views::Views;
 use crate::store::SheetStore;
 use crate::tile::PricerTile;
 use geode_core::colour::NamedColours;
+use geode_core::dimensions::DerivedDimensions;
 use geode_core::document::split_key;
 use geode_data::DataHandle;
 use geode_shell::actions::{ActionDef, ActionId, ActionRegistry};
@@ -323,6 +324,11 @@ pub(crate) struct Shared {
     /// same pointer, so a reload's new `Arc` is what tells it to drop its
     /// resolved colours (`SheetDelegate::set_colours`).
     pub(crate) colours: RefCell<Arc<NamedColours>>,
+    /// The `dimensions` doc's derived dimensions a frame scope may name
+    /// (`region = 'US'` over `underlying_ref`). Replaced by the app on a
+    /// reload before `PricerFactory::reload`, whose rebuild re-applies
+    /// every tile's scope against them.
+    pub(crate) dims: RefCell<DerivedDimensions>,
 }
 
 impl Shared {
@@ -531,6 +537,7 @@ impl PricerFactory {
                 tiles: RefCell::new(Vec::new()),
                 underlyings: RefCell::new(Rc::new(UnderlyingList::default())),
                 colours: RefCell::new(Arc::new(NamedColours::default())),
+                dims: RefCell::new(DerivedDimensions::default()),
             }),
             catalog_watched: Cell::new(false),
         }
@@ -548,6 +555,25 @@ impl PricerFactory {
     pub fn with_colours(self, colours: NamedColours) -> Self {
         *self.shared.colours.borrow_mut() = Arc::new(colours);
         self
+    }
+
+    /// The derived dimensions a frame scope over the pricer may name.
+    /// Without this none is defined, and a scope naming one refuses.
+    pub fn with_dims(self, dims: DerivedDimensions) -> Self {
+        *self.shared.dims.borrow_mut() = dims;
+        self
+    }
+
+    /// Replace the derived dimensions. Tiles read them at their next
+    /// rebuild; the app calls this before [`Self::reload`], which rebuilds
+    /// every tile.
+    pub fn set_dims(&self, dims: DerivedDimensions) {
+        *self.shared.dims.borrow_mut() = dims;
+    }
+
+    /// The derived dimensions the tiles apply scopes against.
+    pub fn dims(&self) -> DerivedDimensions {
+        self.shared.dims.borrow().clone()
     }
 
     /// The named colours the tiles paint from.

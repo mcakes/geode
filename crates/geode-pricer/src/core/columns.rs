@@ -3,10 +3,11 @@
 //! theme colours. Formatting takes the configured clock explicitly and needs no GPUI
 //! context.
 
-use crate::core::sheet::{LineState, RowKind, Sheet};
+use crate::core::sheet::{Folded, LineState, RowKind, Sheet};
 use crate::core::shorthand::{render_barrier_kind, render_expiry, render_strike};
+use chrono::{DateTime, Utc};
 use geode_core::format::{Sign, format_number};
-use geode_core::pricing::{Instrument, Measure, OptionKind};
+use geode_core::pricing::{Instrument, Measure, OptionKind, PriceResult};
 use geode_core::view::{Colour, ColumnFormat, Negative, Scale};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -710,19 +711,19 @@ pub(crate) fn signed(value: f64, format: &ColumnFormat) -> String {
 }
 
 fn number(
-    sheet: &Sheet,
-    row: usize,
+    state: &LineState,
+    result: Option<&PriceResult>,
     measure: Measure,
     usd: bool,
     format: &ColumnFormat,
 ) -> CellText {
-    match sheet.state(row) {
+    match state {
         LineState::Failed(_) => CellText {
             text: "—".into(),
             state: CellState::Failed,
             sign: None,
         },
-        state => match sheet.result(row) {
+        state => match result {
             None => blank(),
             // A package whose legs priced in unlike currencies has no
             // local figure: the folded sum would read as a real one. The
@@ -822,24 +823,62 @@ pub fn cell_text(
             sheet.sheet_shift().vol_pts,
             format,
         ),
-        ColumnKind::Measure { measure, usd } => number(sheet, row, measure, usd, format),
-        ColumnKind::PricedAt => match sheet.priced_at(row) {
-            // Use the configured clock for the recorded pricing attempt time.
-            Some(t) => own(clock.hms(t)),
-            None => blank(),
+        ColumnKind::Measure { measure, usd } => {
+            number(sheet.state(row), sheet.result(row), measure, usd, format)
+        }
+        ColumnKind::PricedAt => priced_at(sheet.priced_at(row), clock),
+        ColumnKind::Status => status(sheet.state(row)),
+    }
+}
+
+/// Package `package`'s cell over `legs`, a subset of its legs in sheet
+/// order, with `folded` their [`Sheet::fold_legs`]: the aggregating
+/// columns through [`crate::core::package::aggregate_over`], the results,
+/// status and pricing time from the fold, and the package's own identity
+/// columns as [`cell_text`] paints them. The same functions paint the
+/// whole package, so a subset can never be summed or spelled another way.
+pub fn subset_cell_text(
+    sheet: &Sheet,
+    package: usize,
+    legs: &[usize],
+    folded: &Folded,
+    def: &ColumnDef,
+    format: &ColumnFormat,
+    clock: geode_core::clock::Clock,
+) -> CellText {
+    match def.kind {
+        kind if crate::core::package::aggregates(kind) => {
+            crate::core::package::aggregate_over(sheet, package, legs, kind, format)
+        }
+        ColumnKind::Measure { measure, usd } => {
+            number(&folded.state, folded.result.as_ref(), measure, usd, format)
+        }
+        ColumnKind::PricedAt => priced_at(folded.priced_at, clock),
+        ColumnKind::Status => status(&folded.state),
+        _ => cell_text(sheet, package, def, format, clock),
+    }
+}
+
+/// The recorded pricing attempt time, on the configured clock.
+fn priced_at(at: Option<DateTime<Utc>>, clock: geode_core::clock::Clock) -> CellText {
+    match at {
+        Some(t) => own(clock.hms(t)),
+        None => blank(),
+    }
+}
+
+fn status(state: &LineState) -> CellText {
+    match state {
+        LineState::Fresh => own(""),
+        LineState::Stale => CellText {
+            text: "pricing…".into(),
+            state: CellState::Stale,
+            sign: None,
         },
-        ColumnKind::Status => match sheet.state(row) {
-            LineState::Fresh => own(""),
-            LineState::Stale => CellText {
-                text: "pricing…".into(),
-                state: CellState::Stale,
-                sign: None,
-            },
-            LineState::Failed(m) => CellText {
-                text: m.clone(),
-                state: CellState::Failed,
-                sign: None,
-            },
+        LineState::Failed(m) => CellText {
+            text: m.clone(),
+            state: CellState::Failed,
+            sign: None,
         },
     }
 }

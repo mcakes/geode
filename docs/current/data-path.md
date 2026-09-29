@@ -411,6 +411,50 @@ the shell's job, before a query is ever submitted (see
 [the shared frame](shell.md#the-shared-frame)); this refusal is the safety net
 behind that call site, not a path meant to be exercised in normal use.
 
+The line pricer's sheet never reaches DuckDB, so the pricer evaluates the
+frame's scope in process with `geode_core::scope::eval` (`Scope::matches`
+over one row at a time). The SQL lowering in `scope_sql` is the authority:
+the evaluator copies what DuckDB does with the predicate that lowering emits,
+and a parity fixture in `geode-data` (`query/eval_parity.rs`) runs every
+operator, NULL case, cross-type cast and constant fold through both paths
+over one in-memory table and asserts equal row sets, or that both refuse.
+Where the two could disagree, the fixture decides and the evaluator follows
+the SQL. What it pins that a reader would not guess:
+
+- `like` is DuckDB's `ilike` with no ESCAPE clause: case-insensitive, `%`
+  any run, `_` one character, and a backslash an ordinary character. It is
+  refused on anything but a text column and a text pattern.
+- The text filter is a case-insensitive substring OR-ed over the dataset's
+  textual columns only; a needle found only in a number or a non-textual
+  column matches nothing, and a dataset with no textual column makes the
+  filter match nothing.
+- `=` and ordering on text compare bytes, so case matters.
+- A number against a text column casts the *column* to DOUBLE, one row at a
+  time (a row that is not a number fails the query); ordering between text
+  and a number is refused. Text against an i64 column casts the *literal* to
+  BIGINT, rounding half away from zero (`qty = '2.5'` is `qty = 3`); a number
+  against an i64 column compares as DOUBLE (`qty = 2.5` matches nothing).
+- NaN equals itself and orders above every number.
+- A derived dimension compares by membership of its source value. A derived
+  value no source maps to makes `=` and `in` the constant false and `!=` the
+  constant true (keeping a NULL source), and DuckDB folds that constant before
+  it converts the literal beside it, so `region = 'APAC' and strike = 'abc'`
+  keeps nothing rather than failing.
+- NULL is three-valued: a comparison reaching NULL is UNKNOWN, `not UNKNOWN`
+  is UNKNOWN, and only TRUE keeps a row. `not (currency = 'USD')` does not
+  keep a row whose currency is NULL.
+
+An evaluator error on any row refuses the whole scope, because the same
+statement fails whole in DuckDB; keeping the rows that did evaluate would
+narrow the result in a way no query does. The evaluator is stricter in one
+place: it reports a row that fails a cast even where DuckDB's filter order
+might discard that row first, a case where DuckDB's own result is not stable.
+It can therefore refuse where DuckDB succeeds, but never keeps a row DuckDB
+would drop. Not pinned by the fixture: which text spellings cast to BOOL,
+date literals other than ISO `YYYY-MM-DD`, and DOUBLE spellings such as `inf`
+or `+5`. Timestamp and bool columns, and a derived dimension over a non-text
+source, are refused in process.
+
 The [typed-document reference](typed-documents.md) describes schema and view
 validation, grain meaning, scope composition, and checks deferred to query
 compilation. A typed reader returning a value does not prove every requested

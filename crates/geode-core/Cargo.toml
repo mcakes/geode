@@ -58,3 +58,7 @@ harness = false
 [[bench]]
 name = "config_merge"
 harness = false
+
+[[bench]]
+name = "scope"
+harness = false

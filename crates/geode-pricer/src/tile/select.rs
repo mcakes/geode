@@ -8,7 +8,8 @@ use super::*;
 use crate::core::cell::READ_ONLY;
 use crate::core::package::{self, package_qty};
 use crate::core::select::{
-    Skip, Skips, group_plan, lines_of, move_plan, risk_totals, set_notice, step_notice, top_most,
+    Skip, Skips, group_plan, lines_of, move_plan, risk_totals_visible, set_notice, step_notice,
+    top_most,
 };
 use crate::core::sheet::OwnShifts;
 use geode_core::grid::selection::Lost;
@@ -129,7 +130,7 @@ impl PricerTile {
             })
             .collect();
         let measures: Vec<(Measure, bool)> = planned.iter().map(|(m, _)| *m).collect();
-        let sums = risk_totals(&self.sheet, &top, &measures);
+        let sums = risk_totals_visible(&self.sheet, &top, &measures, &self.visibility);
         self.totals.clear();
         for ((_, planned), sum) in planned.into_iter().zip(sums) {
             let cell = match sum {
@@ -162,6 +163,16 @@ impl PricerTile {
             .clone()
             .filter_map(|g| self.model.rows.get(g).and_then(|m| m.row))
             .collect()
+    }
+
+    /// Whether the selection holds a package row the scope partly hides.
+    /// A selected package stands for every leg (`lines_of`), hidden ones
+    /// too, so a bulk write through it would reach legs no row paints:
+    /// the whole write refuses with [`PARTLY_HIDDEN`].
+    pub(crate) fn selection_partly_hidden(&self) -> bool {
+        self.selected_sheet_rows()
+            .into_iter()
+            .any(|r| self.partly_hidden(r))
     }
 
     /// What a bulk edit reaches: the selected rows' leaf lines (a package
@@ -205,6 +216,13 @@ impl PricerTile {
     ) -> bool {
         if self.loading {
             self.footer = Some("the sheet is still loading".into());
+            self.rebuild_chrome();
+            cx.notify();
+            return false;
+        }
+        if self.selection_partly_hidden() {
+            self.footer = Some(PARTLY_HIDDEN.into());
+            self.sync_editor(cx);
             self.rebuild_chrome();
             cx.notify();
             return false;
@@ -318,6 +336,54 @@ impl PricerTile {
         }
     }
 
+    /// The one door every structural verb passes before it mutates: `d`,
+    /// `shift+j`/`shift+k`, `g p` and `g u` (keys, the `.` menu, and
+    /// `:group`/`:ungroup`) refuse with [`PARTLY_HIDDEN`] when their target
+    /// includes a package the scope partly hides, since each would act on
+    /// its hidden legs too. `selected`: the verb acts on the live
+    /// selection, which then refuses as a whole — no part of it is acted
+    /// on. Otherwise the target is the cursor row; for `g u` its package
+    /// (a leg's parent). A counted `g p` takes the `count` sheet rows from
+    /// the cursor (`Edit::Group`), so it also refuses with
+    /// [`HIDDEN_IN_RANGE`] when any of them is hidden: it would package a
+    /// line the trader never saw. (A selection's `g p` holds only shown
+    /// rows, and `group_plan` refuses a gap.) A shown leg on its own is
+    /// not a package and stays editable. Verbs that mutate nothing (yank,
+    /// fold, find, motions) never ask.
+    pub(crate) fn partly_hidden_refusal(
+        &self,
+        verb: &str,
+        count: usize,
+        selected: bool,
+    ) -> Option<&'static str> {
+        if !matches!(
+            verb,
+            "delete" | "move_down" | "move_up" | "group" | "ungroup"
+        ) {
+            return None;
+        }
+        let targets: Vec<usize> = if selected {
+            self.selected_sheet_rows()
+        } else {
+            let row = self.cursor_sheet_row()?;
+            match verb {
+                "ungroup" => vec![self.sheet.parent(row).unwrap_or(row)],
+                "group" => {
+                    let taken = row..row.saturating_add(count.max(1)).min(self.sheet.len());
+                    if taken.clone().any(|r| !self.visibility.is_shown(r)) {
+                        return Some(HIDDEN_IN_RANGE);
+                    }
+                    taken.collect()
+                }
+                _ => vec![row],
+            }
+        };
+        targets
+            .into_iter()
+            .any(|r| self.partly_hidden(r))
+            .then_some(PARTLY_HIDDEN)
+    }
+
     /// `y` over a selection, which it ends. Under `V` the clipboard gets
     /// the top-most rows' shorthand, one per line, and the register their
     /// specs — a package's legs are already in its own spec, so copying
@@ -370,7 +436,10 @@ impl PricerTile {
     /// any remove, since each remove shifts the indices after it; the
     /// removes run bottom-up so the earlier indices stay valid.
     pub(crate) fn delete_selection(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
-        if let Some(why) = self.row_verb_refusal("delete") {
+        if let Some(why) = self
+            .row_verb_refusal("delete")
+            .or_else(|| self.partly_hidden_refusal("delete", 1, true))
+        {
             return Err(why.into());
         }
         let top = top_most(&self.sheet, &self.selected_sheet_rows());
@@ -536,6 +605,15 @@ impl PricerTile {
         // sign of it in the field.
         if !self.cursor_on_editor(line, kind) {
             return None;
+        }
+        // Refused here rather than answered `None`: the single-field
+        // nudge would then step the editor's text, which the commit would
+        // refuse anyway.
+        if self.selection_partly_hidden() {
+            self.footer = Some(PARTLY_HIDDEN.into());
+            self.rebuild_chrome();
+            cx.notify();
+            return Some(());
         }
         let (lines, cols) = self.selection_targets();
         let top = top_most(&self.sheet, &self.selected_sheet_rows());

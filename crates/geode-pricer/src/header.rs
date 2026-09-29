@@ -42,9 +42,17 @@ pub(crate) const PRICER_LABEL: &str = "pricer";
 
 pub(crate) struct HeaderInputs<'a> {
     pub sheet: &'a Sheet,
-    /// The tile's notice, chosen in order from a pricing submission refusal, a
-    /// transient notice, or a view fallback. `None` allows the missing-pricer notice.
+    /// The tile's notice, chosen in order from a pricing submission refusal or
+    /// a transient notice. `None` lets `standing` show.
     pub notice: Option<SharedString>,
+    /// A standing notice painted while `notice` is `None`: a refused frame
+    /// scope (danger), else the view fallback (warning). `None` allows the
+    /// missing-pricer notice.
+    pub standing: Option<Notice>,
+    /// Lines the frame's scope hides; `0` paints no chip.
+    pub hidden: usize,
+    /// `:unscoped`: the tile ignores the frame's scope.
+    pub unscoped: bool,
     /// The armed `:rm` confirm's question.
     pub prompt: Option<SharedString>,
     /// The save state's own slot (a refused save, or a failed load that
@@ -79,6 +87,10 @@ pub(crate) struct HeaderModel {
     pub prompt: Option<SharedString>,
     /// The save state (see `HeaderInputs::save`), always a warning.
     pub save: Option<Notice>,
+    /// `N hidden` while the frame's scope hides any line (muted).
+    pub hidden: Option<SharedString>,
+    /// The `unscoped` chip (warning tone) while `:unscoped` is on.
+    pub unscoped: bool,
 }
 
 pub(crate) fn prepare(i: HeaderInputs) -> HeaderModel {
@@ -103,11 +115,13 @@ pub(crate) fn prepare(i: HeaderInputs) -> HeaderModel {
     let notice = match i.notice {
         Some(n) if n.as_ref() == LOADING => Some(Notice::status(n)),
         Some(n) => Some(Notice::warning(n)),
-        None => i.settings.pricer_missing.then(|| {
-            Notice::danger(format!(
-                "pricer '{}' is not built into this binary; set [pricing] adapter and restart",
-                i.settings.pricer
-            ))
+        None => i.standing.or_else(|| {
+            i.settings.pricer_missing.then(|| {
+                Notice::danger(format!(
+                    "pricer '{}' is not built into this binary; set [pricing] adapter and restart",
+                    i.settings.pricer
+                ))
+            })
         }),
     };
     HeaderModel {
@@ -123,6 +137,8 @@ pub(crate) fn prepare(i: HeaderInputs) -> HeaderModel {
         notice,
         prompt: i.prompt,
         save: i.save.map(Notice::warning),
+        hidden: (i.hidden > 0).then(|| format!("{} hidden", i.hidden).into()),
+        unscoped: i.unscoped,
     }
 }
 
@@ -137,6 +153,10 @@ impl HeaderModel {
             self.view.to_string(),
         ];
         out.extend(self.shifts.iter().map(|s| s.to_string()));
+        if self.unscoped {
+            out.push("unscoped".to_string());
+        }
+        out.extend(self.hidden.iter().map(|s| s.to_string()));
         out.extend(self.prompt.iter().map(|s| s.to_string()));
         out.extend(self.pricing.iter().map(|s| s.to_string()));
         out.extend(self.failed.iter().map(|s| s.to_string()));
@@ -182,6 +202,8 @@ pub(crate) struct HeaderChrome<'a> {
     pub rename: Option<&'a Entity<InputState>>,
     /// The open sheet picker, rendered by the tile, hung from the name.
     pub picker: Option<AnyElement>,
+    /// The `unscoped` chip's tooltip selector, built once with the tile.
+    pub unscoped_tip: SharedString,
 }
 
 /// The rename field's key context: `lib::init` reclaims `tab`/`shift-tab`
@@ -273,6 +295,8 @@ pub(crate) fn render(h: &HeaderModel, mut c: HeaderChrome, theme: &Theme) -> imp
     let muted = theme.muted_foreground;
     let danger = chip_paint(theme, Tone::DangerText).text;
     let chip = chip_paint(theme, Tone::Neutral);
+    let warn_chip = chip_paint(theme, Tone::Warning);
+    let unscoped_tip = c.unscoped_tip.clone();
     let tile_id = c.tile_id.0;
     let name = sheet_name(h.name.clone(), &mut c, tile_id, theme);
     // The sheet's identity: its name and the view it is shown through, one
@@ -293,7 +317,38 @@ pub(crate) fn render(h: &HeaderModel, mut c: HeaderChrome, theme: &Theme) -> imp
                 .when_some(chip.fill, |el, fill| el.bg(fill))
                 .text_color(chip.text)
                 .child(s.clone())
-        }));
+        }))
+        // The frame's scope over this tile: detached (`:unscoped`), or
+        // how many lines it hides. The blotter's chip and tooltip.
+        .when(h.unscoped, |el| {
+            el.child(
+                div()
+                    .id(ElementId::NamedInteger(
+                        SharedString::new_static("pricer-unscoped"),
+                        tile_id,
+                    ))
+                    .debug_selector(|| "pricer-unscoped".into())
+                    .text_color(warn_chip.text)
+                    .when_some(warn_chip.fill, |el, fill| el.bg(fill))
+                    .px_1()
+                    .rounded(theme.radius_tokens().sm)
+                    .child("unscoped")
+                    .tooltip(tips::tip_with(
+                        unscoped_tip,
+                        SharedString::new_static("Ignores the shared scope"),
+                        None,
+                        Some(SharedString::new_static(":unscoped re-attaches it")),
+                    )),
+            )
+        })
+        .when_some(h.hidden.clone(), |el, n| {
+            el.child(
+                div()
+                    .text_color(muted)
+                    .debug_selector(|| "pricer-hidden".into())
+                    .child(n),
+            )
+        });
     let mut cluster = Cluster::new(c.tile_id);
     // The removal prompt owns the keyboard; the confirm door answers every
     // key on it before the shell root sees one, and paints its Yes/No.
@@ -508,6 +563,9 @@ mod tests {
         let h = prepare(HeaderInputs {
             sheet: &s,
             notice: None,
+            standing: None,
+            hidden: 0,
+            unscoped: false,
             prompt: None,
             save: None,
             settings: &settings(false),
@@ -533,6 +591,9 @@ mod tests {
         let h = prepare(HeaderInputs {
             sheet: &s,
             notice: None,
+            standing: None,
+            hidden: 0,
+            unscoped: false,
             prompt: None,
             save: None,
             settings: &settings(false),
@@ -548,6 +609,9 @@ mod tests {
         let h = prepare(HeaderInputs {
             sheet: &s,
             notice: None,
+            standing: None,
+            hidden: 0,
+            unscoped: false,
             prompt: None,
             save: None,
             settings: &settings(false),
@@ -587,6 +651,9 @@ mod tests {
         let h = prepare(HeaderInputs {
             sheet: &s,
             notice: None,
+            standing: None,
+            hidden: 0,
+            unscoped: false,
             prompt: None,
             save: None,
             settings: &settings(true),
@@ -606,6 +673,9 @@ mod tests {
         let h = prepare(HeaderInputs {
             sheet: &s,
             notice: Some(LOADING.into()),
+            standing: None,
+            hidden: 0,
+            unscoped: false,
             prompt: None,
             save: None,
             settings: &settings(true),
@@ -623,6 +693,9 @@ mod tests {
         let h = prepare(HeaderInputs {
             sheet: &s,
             notice: Some("sheet 'book' was not found; opened empty".into()),
+            standing: None,
+            hidden: 0,
+            unscoped: false,
             prompt: None,
             save: None,
             settings: &settings(true),

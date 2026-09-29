@@ -503,7 +503,9 @@ pub fn pricer_templates_from_config(
 /// the colors they may name (a named column's cells and header are painted
 /// from them, so a `colors.toml` edit alone must reach open tiles), the
 /// retired `pricer_views` doc (so one added at runtime raises its
-/// retirement diagnostic without a restart), merged `pricer_templates`, raw
+/// retirement diagnostic without a restart), merged `pricer_templates`, the
+/// `dimensions` doc (a frame scope over the pricer may name a derived
+/// dimension, so an edit to it must re-apply open tiles' scopes), raw
 /// `app.pricing.refresh` and `app.pricing.underlyings`, and the resolved
 /// stale threshold. Equal keys leave factory views, templates, suggestions,
 /// and timers alone and avoid repeating invalid-value warnings. The selected
@@ -516,6 +518,8 @@ pub struct PricerConfigKey {
     colors: Option<toml::Table>,
     pricer_views: Option<toml::Table>,
     templates: Option<toml::Table>,
+    /// The derived dimensions a frame scope over the pricer may name.
+    dimensions: Option<toml::Table>,
     refresh: Option<toml::Value>,
     underlyings: Option<toml::Value>,
     stale_after: Duration,
@@ -531,6 +535,7 @@ pub fn pricer_config_key(config: &Config) -> PricerConfigKey {
             .map(|d| d.value.clone()),
         pricer_views: config.doc(PRICER_VIEWS_DOC).map(|d| d.value.clone()),
         templates: config.doc(PRICER_TEMPLATES_DOC).map(|d| d.value.clone()),
+        dimensions: config.doc("dimensions").map(|d| d.value.clone()),
         refresh: config.get("app", "pricing.refresh").cloned(),
         underlyings: config.get("app", "pricing.underlyings").cloned(),
         stale_after: stale_after_from_config(config),
@@ -638,6 +643,7 @@ pub fn start(
     // service configuration to its worker thread.
     let schema = setup.config.schema.clone();
     let dimensions = setup.dimensions.clone();
+    let pricer_dims = setup.dimensions.clone();
     let sources = source_shapes(&setup.config.sources, &schema);
     let local_datasets = Rc::new(setup.local_datasets);
     let panels = setup.panels;
@@ -692,7 +698,10 @@ pub fn start(
         .with_underlyings(underlyings.clone())
         // The same startup colors as the blotter: a named `color` on a
         // pricer view column resolves against them.
-        .with_colours(setup.colours),
+        .with_colours(setup.colours)
+        // The derived dimensions a frame scope may name over `pricer`
+        // (`region` over `underlying_ref`), as the blotter's.
+        .with_dims(pricer_dims),
     );
     // Panels and blotters use the same configured stale threshold.
     let panels = panel_factories(&handle, panels, stale_after, &egress_targets);
@@ -1008,7 +1017,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
             last.set(now);
             // Read everything out of the config before the factory takes
             // `cx` mutably.
-            let (views, templates, colours, mut diags, refresh, stale_after) = {
+            let (views, templates, colours, dims, mut diags, refresh, stale_after) = {
                 let config = shell.read(cx).config();
                 let key = pricer_config_key(config);
                 if last_key.borrow().as_ref() == Some(&key) {
@@ -1023,6 +1032,12 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 let (colours, _) = config
                     .doc(geode_core::config::COLORS_DOC)
                     .map(NamedColours::from_doc)
+                    .unwrap_or_default();
+                // The dimensions doc's own diagnostics are the
+                // ConfigReloaded observer's to report.
+                let (dims, _) = config
+                    .doc("dimensions")
+                    .map(DerivedDimensions::from_doc)
                     .unwrap_or_default();
                 let (refresh, refresh_diag) = pricing_refresh_from_config(config);
                 // A bad entry keeps the running definition of its name.
@@ -1040,11 +1055,15 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     views,
                     templates,
                     colours,
+                    dims,
                     diags,
                     refresh,
                     stale_after_from_config(config),
                 )
             };
+            // Before `reload`: its rebuild re-applies every tile's scope
+            // against the new dimensions.
+            pricer.set_dims(dims);
             pricer.reload(views, templates, colours, refresh, stale_after, cx);
             for d in &diags {
                 tracing::warn!(target: "geode::pricing", "{d}");
@@ -2056,6 +2075,67 @@ role = "key"
             base,
             "a pricer_views doc appearing"
         );
+    }
+
+    /// A frame scope over the pricer may name a derived dimension, so a
+    /// `dimensions` edit alone must change the key, and the reload observer
+    /// hands the factory the new dimensions before its tiles rebuild.
+    #[gpui::test]
+    fn a_dimensions_reload_reaches_the_pricer(cx: &mut gpui::TestAppContext) {
+        const REGION: &str = "[region]\nfrom = \"underlying_ref\"\n\
+                              [region.values]\nUS = [\"SPX\", \"NDX\"]\n";
+        let config = |extra: Option<LayerDoc>| {
+            let mut builtin = vec![LayerDoc::builtin("views", SLIM_VIEW).unwrap()];
+            builtin.extend(extra);
+            Config::load(&ConfigSources {
+                builtin,
+                desk: None,
+                user: None,
+            })
+        };
+        let base = pricer_config_key(&config(None));
+        assert_ne!(
+            pricer_config_key(&config(Some(
+                LayerDoc::builtin("dimensions", REGION).unwrap()
+            ))),
+            base,
+            "a dimensions edit"
+        );
+
+        let services = test_shell_services_with_sources(ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin("views", SLIM_VIEW).unwrap(),
+                LayerDoc::builtin("dimensions", REGION).unwrap(),
+            ],
+            desk: None,
+            user: None,
+        });
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let (handle, _rx) = DataHandle::for_tests();
+        let bridge = test_bridge(handle);
+        assert!(
+            bridge.pricer.dims().get("region").is_none(),
+            "fixture: built with no dimensions"
+        );
+        cx.update(|cx| attach(&bridge, window, cx));
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        vcx.update(|_, cx| {
+            let frame = shell.read(cx).frame().clone();
+            frame.update(cx, |f, cx| {
+                f.note_config_reloaded();
+                cx.notify();
+            });
+        });
+        vcx.run_until_parked();
+        let dims = bridge.pricer.dims();
+        let region = dims.get("region").expect("the reload's dimensions");
+        assert_eq!(region.from, "underlying_ref");
     }
 
     /// Pricer view reloads follow the frame's config revision: the observer
