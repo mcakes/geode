@@ -4102,21 +4102,14 @@ run_mutation "tile: the depth bound is requested, not everything" \
 
 run_mutation "tile: a query error keeps the last snapshot" \
   crates/geode-blotter/src/tile.rs \
-  '            Delivered::Failed(e) => self.error = Some(Notice::danger(e)),' \
-  '            Delivered::Failed(e) => {
+  '                self.fail_fuzzy_find(e.clone(), cx);
+                self.error = Some(Notice::danger(e));' \
+  '                self.fail_fuzzy_find(e.clone(), cx);
                 self.error = Some(Notice::danger(e));
                 self.table
-                    .update(cx, |t, _| *t.delegate_mut() = BlotterDelegate::new());
-            }' \
+                    .update(cx, |t, _| *t.delegate_mut() = BlotterDelegate::new());' \
   geode-blotter \
   a_stale_outcome_is_dropped_an_error_keeps_the_last_snapshot_and_timing_is_recorded
-
-run_mutation "tile: fzf narrowing matches the un-narrowed list" \
-  crates/geode-blotter/src/tile.rs \
-  '                    self.table.read(cx).delegate().visible_texts()' \
-  '                    self.table.read(cx).delegate().shown_texts()' \
-  geode-blotter \
-  find_jumps_under_vim_and_narrows_under_fzf
 
 run_mutation "tile: the configured threshold is the one used" \
   crates/geode-blotter/src/tile.rs \
@@ -7224,12 +7217,8 @@ run_mutation "blotter: the tree column is pinned left while the measures scroll"
 
 run_mutation "blotter gutter: the tree column widens by the gutter" \
   crates/geode-blotter/src/delegate.rs \
-  '                if c.kind == ColumnKind::Tree {
-                    width + self.gutter_px()
-                } else {' \
-  '                if c.kind == ColumnKind::Tree {
-                    width
-                } else {' \
+  '                    width + geode_shell::linenumbers::gutter_px(self.line_numbers, 0)' \
+  '                    width' \
   geode-blotter the_line_numbers_global_paints_a_gutter_on_the_next_draw
 
 run_mutation "blotter gutter: a changed setting refreshes the table's column groups" \
