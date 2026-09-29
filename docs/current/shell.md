@@ -443,6 +443,14 @@ summary, and closes through `page::close`, the same toggle, or any
 `workspace::switch_N`, which closes the page and then switches. A toggle
 naming a kind no factory registered logs a warning and opens nothing.
 
+A tile opens the diagnostics page by queueing `request_diagnostics_page` on
+the shared `Diagnostics` entity (its health chip does this); the shell's
+diagnostics observer drains it through `open_page`, never the toggle, so the
+request only ever opens. It begins as a dispatched action does: the crash
+report's action tail records `page::toggle_diagnostics`, and the shell's
+notice, stack list and add-filter menu expire. Under a modal it is then
+refused with the toggle's `close the dialog first` notice.
+
 While a page is open the key context stack is `page`, then the page's own
 context, then `palette` when it is open. `workspace` and `tile` are absent,
 so tile movement, dock, stack, `:`, and `/` bindings cannot fire into a
@@ -541,6 +549,15 @@ Source health remains absent until the first report, even if description or
 poll events created the source entry. Unreported sources do not contribute to
 the status summary. A changed health or detail records a transition, including
 recovery, with the most recent 16 retained per source.
+
+Each source's description carries the dataset it loads into
+(`SourceSummary.dataset`, from `SourceSpec.dataset` at attach). A tile asks
+`health_for_datasets` or `health_for_sources` for a `TileHealth`: the worst
+unhealthy source it reads by `Health::severity`, the lowest name on a tie, the
+reason (the health's own, else the source's detail) and how many other read
+sources are also unhealthy. Only described, reported sources count for the
+dataset question; Ok and Pending are silent; an unknown dataset or source is
+ignored.
 
 Config loads replace the current diagnostic batch; a clean load clears it and
 an identical load adds no history. The model retains the latest 16 changed

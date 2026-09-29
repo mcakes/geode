@@ -3734,8 +3734,8 @@ run_mutation "asof-pin: the pinned chip paints" \
 # The provenance warning chip is suppressed while pinned.
 run_mutation "asof-pin: the frame chip hides while pinned" \
   crates/geode-blotter/src/tile.rs \
-  '            if matches!(self.tile_as_of, TileAsOf::Follow)' \
-  '            if true' \
+  '        if matches!(self.tile_as_of, TileAsOf::Follow)' \
+  '        if true' \
   geode-blotter \
   a_pinned_tile_paints_the_neutral_chip_and_hides_the_frame_one
 
@@ -6145,8 +6145,8 @@ run_mutation "diagnostics: SOURCE_HISTORY_CAP loosened from 16" \
 
 run_mutation "diagnostics: summary's LABELS silently drops degraded" \
   crates/geode-shell/src/diagnostics.rs \
-  'const LABELS: [&str; 5] = ["ok", "pending", "pending_too_long", "degraded", "failed"];' \
-  'const LABELS: [&str; 4] = ["ok", "pending", "pending_too_long", "failed"];' \
+  'const SUMMARY_LABELS: [&str; 5] = ["ok", "pending", "pending_too_long", "degraded", "failed"];' \
+  'const SUMMARY_LABELS: [&str; 4] = ["ok", "pending", "pending_too_long", "failed"];' \
   geode-shell the_summary_counts_sources_by_health_and_config_errors
 
 run_mutation "diagnostics: note_published requests a catalog regardless of watchers" \
@@ -7270,8 +7270,8 @@ run_mutation "shell: dispatch never records the dispatched action into the tail"
             .action_tail
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .record(&action.0);' \
-  '        let _ = &action.0;' \
+            .record(id);' \
+  '        let _ = id;' \
   geode-shell dispatching_three_actions_leaves_their_hashes_in_the_tail_in_order
 
 run_mutation "trim_log_files keeps one file more than asked (keep + 1, not keep)" \
@@ -14027,10 +14027,10 @@ run_mutation "mdmenu: a greyed row is a notice, not a dispatch" \
 # propagation opens a menu on an unfocused tile; the host's bubble-phase
 # click counter detects it.
 run_mutation "mdmenu: the ⋯ click does not stop propagation" \
-  crates/geode-marketdata/src/header.rs \
-  '                    tile.update(cx, |t, cx| t.toggle_menu(window, cx))' \
-  '                    cx.stop_propagation();
-                    tile.update(cx, |t, cx| t.toggle_menu(window, cx))' \
+  crates/geode-tile/src/header.rs \
+  '            on_press(window, cx);' \
+  '            cx.stop_propagation();
+            on_press(window, cx);' \
   geode-marketdata a_menu_button_click_still_reaches_the_tiles_own_listeners
 
 # Find closes the popup before handling any variant. This shell-owned action
@@ -20678,11 +20678,9 @@ run_mutation "timeseries menu: stepping skips disabled rows" \
 # The ⋯ button toggles in the CAPTURE phase, ahead of the open menu's
 # own `on_mouse_down_out`; in the bubble phase a second click reopens.
 run_mutation "timeseries mouse: the actions button toggles in capture" \
-  crates/geode-timeseries/src/header.rs \
-  '            ))
-            .capture_any_mouse_down({' \
-  '            ))
-            .on_any_mouse_down({' \
+  crates/geode-tile/src/header.rs \
+  '        .capture_any_mouse_down(move |event, window, cx| {' \
+  '        .on_any_mouse_down(move |event, window, cx| {' \
   geode-timeseries the_actions_button_toggles_the_menu_and_a_row_click_dispatches_or_explains
 
 # The range trigger toggles in the CAPTURE phase, the `⋯` button's
@@ -26103,6 +26101,322 @@ run_mutation "panels: a configured panel paints its own ladder format" \
   '        std::iter::repeat_with(|| CellKind::Number(spec.format.clone())).take(grid.columns.len()),' \
   '        std::iter::repeat_with(|| CellKind::Number(geode_core::view::ColumnFormat { precision: 4, ..spec.format.clone() })).take(grid.columns.len()),' \
   geode-marketdata a_user_layer_panel_paints_its_own_title_and_formats
+
+# ---- Tile header and source health -------------------------------------
+
+# One rank for every rollup; a swapped pair reorders the status bar, the
+# page's worst health and a tile's chip together.
+run_mutation "health rank: degraded outranks pending_too_long" \
+  crates/geode-core/src/health.rs \
+  '            Health::Degraded { .. } => 3,' \
+  '            Health::Degraded { .. } => 2,' \
+  geode-core severity_ranks_ok_pending_too_long_degraded_failed
+
+# The status summary counts by severity index; a clamped index files
+# failures under degraded.
+run_mutation "health rank: the summary counts under the severity index" \
+  crates/geode-shell/src/diagnostics.rs \
+  '            counts[usize::from(health.severity())] += 1;' \
+  '            counts[usize::from(health.severity()).min(3)] += 1;' \
+  geode-shell the_summary_counts_every_health_under_its_own_label
+
+# The page ranks by severity; ranking by label text calls
+# pending_too_long worse than degraded.
+run_mutation "health rank: the page ranks by severity, not label" \
+  crates/geode-diagnostics/src/model.rs \
+  '            Some(w) if w.severity() >= h.severity() => Some(w),' \
+  '            Some(w) if w.label() >= h.label() => Some(w),' \
+  geode-diagnostics the_page_ranks_health_by_the_core_severity
+
+# Ok and Pending are silent; a looser gate shows a chip for a pending CSV.
+run_mutation "tile health: Ok and Pending are silent" \
+  crates/geode-shell/src/diagnostics.rs \
+  '            if health.severity() <= silent {' \
+  '            if health.severity() < silent {' \
+  geode-shell ok_and_pending_are_silent
+
+# The dataset filter; dropped, every unhealthy source reaches every tile.
+run_mutation "tile health: a source outside the datasets is ignored" \
+  crates/geode-shell/src/diagnostics.rs \
+  '            if !reads(name, state) {' \
+  '            if false && !reads(name, state) {' \
+  geode-shell a_source_outside_the_datasets_is_ignored
+
+# The tie rule; `>=` hands a tie to the last name, not the first.
+run_mutation "tile health: a tie picks the lowest source name" \
+  crates/geode-shell/src/diagnostics.rs \
+  '                Some((_, _, w)) => health.severity() > w.severity(),' \
+  '                Some((_, _, w)) => health.severity() >= w.severity(),' \
+  geode-shell a_tie_picks_the_lowest_source_name
+
+# `others` excludes the worst source itself.
+run_mutation "tile health: others counts only the other sources" \
+  crates/geode-shell/src/diagnostics.rs \
+  '            others: unhealthy - 1,' \
+  '            others: unhealthy,' \
+  geode-shell others_counts_the_other_unhealthy_sources_only
+
+# The bridge links a source to its dataset, not its own name.
+run_mutation "tile health: the bridge links a source to its dataset" \
+  crates/geode-app/src/bridge.rs \
+  '                    dataset: source.dataset.clone(),' \
+  '                    dataset: source.name.clone(),' \
+  geode-app describing_a_source_carries_its_dataset
+
+# The shell drains a tile's page request; skipped, the chip does nothing.
+run_mutation "tile header: the shell opens a queued diagnostics page" \
+  crates/geode-shell/src/shell/mod.rs \
+  '        if pending_page {' \
+  '        if false && pending_page {' \
+  geode-shell a_queued_page_open_opens_the_diagnostics_page
+
+# Opening only: drained through the toggle, a second chip click closes it.
+run_mutation "tile header: a queued page open never closes the page" \
+  crates/geode-shell/src/shell/page.rs \
+  '        self.open_page(kind, window, cx);
+    }' \
+  '        self.toggle_page(kind, window, cx);
+    }' \
+  geode-shell a_queued_page_open_never_closes_the_page
+
+# A queued open under a modal is refused with the close-the-dialog notice;
+# without the guard the page opens behind the modal.
+run_mutation "tile header: a queued page open under a modal is refused" \
+  crates/geode-shell/src/shell/page.rs \
+  '        if self.modal_open() {
+            self.notice = Some(super::input::CLOSE_DIALOG_FIRST);' \
+  '        if false && self.modal_open() {
+            self.notice = Some(super::input::CLOSE_DIALOG_FIRST);' \
+  geode-shell a_queued_page_open_under_a_modal_is_refused
+
+# The version gate: every diagnostics notify would re-ask and re-format.
+run_mutation "tile header: health re-asks only when sources moved" \
+  crates/geode-tile/src/header.rs \
+  '        if self.seen == Some(now) {' \
+  '        if false && self.seen == Some(now) {' \
+  geode-tile refresh_asks_only_when_the_sources_version_moved
+
+# The chip's click queues the page.
+run_mutation "tile header: the chip click asks for the page" \
+  crates/geode-tile/src/header.rs \
+  '                d.request_diagnostics_page();' \
+  '' \
+  geode-tile clicking_the_health_chip_queues_the_diagnostics_page
+
+# Cluster order; the tail reversed, the chip lands left of the times.
+run_mutation "tile header: the cluster paints in order" \
+  crates/geode-tile/src/header.rs \
+  '    let mut row = h_flex().items_center().gap_3();' \
+  '    let mut row = h_flex().flex_row_reverse().items_center().gap_3();' \
+  geode-tile the_cluster_paints_in_order_and_no_chip_without_health
+
+# Failed is danger, not warning.
+run_mutation "tile header: a failed chip is the danger tone" \
+  crates/geode-tile/src/header.rs \
+  '            Health::Failed { .. } => ("failed", chip::Tone::Danger),' \
+  '            Health::Failed { .. } => ("failed", chip::Tone::Warning),' \
+  geode-tile the_chip_words_tones_and_tooltip
+
+# A stale run takes the warning text tone.
+run_mutation "tile header: a stale run is warning text" \
+  crates/geode-tile/src/header.rs \
+  '    if stale {
+        chip_paint(theme, chip::Tone::WarningText).text' \
+  '    if false {
+        chip_paint(theme, chip::Tone::WarningText).text' \
+  geode-tile a_stale_run_takes_the_warning_text_tone
+
+# The chip's press is its own: bubbling on, it would refocus the tile and
+# reach the shell root under the page it just asked for.
+run_mutation "tile header: the chip press stops at the chip" \
+  crates/geode-tile/src/header.rs \
+  '            cx.stop_propagation();
+            window.prevent_default();' \
+  '            window.prevent_default();' \
+  geode-tile clicking_the_health_chip_queues_the_diagnostics_page
+
+# The paint route reads the run's text(); painting the bare label drops a
+# module's `stale` word.
+run_mutation "tile header: a stale run paints its stale label" \
+  crates/geode-tile/src/header.rs \
+  '            .child(t.text().clone())' \
+  '            .child(t.label.clone())' \
+  geode-tile a_stale_run_paints_its_stale_label
+
+# The panel's observer asks about its dataset; skipped, a failed source
+# never reaches the header.
+run_mutation "tile health: market-data refreshes on a health change" \
+  crates/geode-marketdata/src/tile.rs \
+  '            if this
+                .health
+                .refresh(cx, |d| d.health_for_datasets(&[dataset]))' \
+  '            if false
+                && this
+                    .health
+                    .refresh(cx, |d| d.health_for_datasets(&[dataset]))' \
+  geode-marketdata a_degraded_panel_source_shows_the_chip_and_recovery_clears_it
+
+# The panel asks about its own spec's dataset; asking about another
+# panel's dataset leaves a degraded `cvi_params` source off the header.
+run_mutation "tile health: market-data asks about its own dataset" \
+  crates/geode-marketdata/src/tile.rs \
+  '            let dataset = this.spec.dataset.as_str();' \
+  '            let dataset = "dividend_schedule";' \
+  geode-marketdata a_degraded_panel_source_shows_the_chip_and_recovery_clears_it
+
+# A new tile asks at once; without it a tile opened on a failed store is
+# silent until the next health change.
+run_mutation "tile health: the pricer asks when it opens" \
+  crates/geode-pricer/src/tile.rs \
+  '        health.reask(cx, |d| d.health_for_datasets(&[PRICER_SHEETS_DATASET]));' \
+  '' \
+  geode-pricer a_tile_opened_after_its_source_failed_shows_the_chip_at_once
+
+# The observer re-asks on a health change.
+run_mutation "tile health: the pricer refreshes on a health change" \
+  crates/geode-pricer/src/tile.rs \
+  '                .refresh(cx, |d| d.health_for_datasets(&[PRICER_SHEETS_DATASET]))' \
+  '                .refresh(cx, |d| d.health_for_datasets(&["cvi_params"]))' \
+  geode-pricer a_failed_sheet_store_source_shows_the_chip_and_recovery_clears_it
+
+# End to end in the app: the chip's click reaches the page.
+run_mutation "tile header: a chip click opens the page in the app" \
+  crates/geode-tile/src/header.rs \
+  '                d.request_diagnostics_page();' \
+  '' \
+  geode-app a_health_chip_click_opens_the_diagnostics_page
+
+# A new panel asks at once; without it a panel opened on a failed source
+# is silent until the next health change.
+run_mutation "tile health: market-data asks when it opens" \
+  crates/geode-marketdata/src/tile.rs \
+  '        health.reask(cx, |d| d.health_for_datasets(&[spec.dataset.as_str()]));' \
+  '' \
+  geode-marketdata a_panel_opened_after_its_source_failed_shows_the_chip_at_once
+
+# The tile re-asks when its series change; without it a removed series'
+# failure keeps its chip.
+run_mutation "tile health: timeseries re-asks when its series change" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '        self.health.reask(cx, |d| d.health_for_sources(&sources));' \
+  '' \
+  geode-timeseries removing_the_only_series_on_a_failed_source_clears_the_chip
+
+# The observer re-asks on a health change.
+run_mutation "tile health: timeseries refreshes on a health change" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '            if this.health.refresh(cx, |d| d.health_for_sources(&sources)) {' \
+  '            if false && this.health.refresh(cx, |d| d.health_for_sources(&sources)) {' \
+  geode-timeseries the_chip_follows_the_worst_of_the_series_sources
+
+# Expressions read no source; a source slot's source is the question.
+run_mutation "tile health: timeseries asks about its source slots" \
+  crates/geode-timeseries/src/header.rs \
+  '            SlotKind::Source { source, .. } => Some(source.as_str()),' \
+  '            SlotKind::Source { .. } => None,' \
+  geode-timeseries slot_sources_are_the_source_slots_sources_once_each
+
+# One height for every header.
+run_mutation "tile header: every header is HEADER_HEIGHT tall" \
+  crates/geode-tile/src/header.rs \
+  '        .h(scale::design(HEADER_HEIGHT))' \
+  '        .h(scale::design(HEADER_HEIGHT + 4.0))' \
+  geode-timeseries the_header_is_the_shared_height
+
+# A slot chip, swatch target included, fits inside the shared strip.
+run_mutation "timeseries header: a slot chip fits the 22 px strip" \
+  crates/geode-timeseries/src/header.rs \
+  'const SWATCH_TARGET: f32 = 16.0;' \
+  'const SWATCH_TARGET: f32 = 30.0;' \
+  geode-timeseries a_slot_chip_fits_inside_the_header
+
+# The left slot clips instead of growing: without a zero minimum width a
+# long left side pushes the health chip and `⋯` off the tile.
+run_mutation "tile header: an overlong left side leaves the cluster on the tile" \
+  crates/geode-tile/src/header.rs \
+  '    let slot = h_flex().min_w_0().overflow_hidden();' \
+  '    let slot = h_flex();' \
+  geode-tile an_overlong_left_side_leaves_the_cluster_inside_the_header
+
+# The question is the snapshot's datasets; asked about nothing, the chip
+# never shows.
+run_mutation "tile health: the blotter asks about its snapshot's datasets" \
+  crates/geode-blotter/src/header.rs \
+  '        let mut datasets: Vec<String> = p.datasets.iter().map(|f| f.dataset.clone()).collect();' \
+  '        let mut datasets: Vec<String> = Vec::new();' \
+  geode-blotter a_failed_source_of_a_delivered_dataset_shows_the_chip
+
+# A new snapshot over other datasets re-asks; without it the old datasets'
+# chip survives.
+run_mutation "tile health: the blotter re-asks when a snapshot lands" \
+  crates/geode-blotter/src/tile.rs \
+  '            self.health.reask(cx, |d| d.health_for_datasets(&datasets));' \
+  '' \
+  geode-blotter a_new_snapshots_datasets_move_the_chip
+
+# The first snapshot re-asks too; without it a source already failed before
+# delivery shows no chip until the next health report.
+run_mutation "tile health: the blotter's first snapshot asks at once" \
+  crates/geode-blotter/src/tile.rs \
+  '            self.health.reask(cx, |d| d.health_for_datasets(&datasets));' \
+  '' \
+  geode-blotter a_source_failed_before_the_first_snapshot_shows_the_chip_on_delivery
+
+# The blotter observes Diagnostics; answered with nothing, a report after
+# delivery never reaches the header.
+run_mutation "tile health: the blotter refreshes on a health change" \
+  crates/geode-blotter/src/tile.rs \
+  '                .refresh(cx, |d| d.health_for_datasets(&datasets))' \
+  '                .refresh(cx, |_| None)' \
+  geode-blotter a_failed_source_of_a_delivered_dataset_shows_the_chip
+
+# The cluster's text is capped at TEXT_SHARE of the header; uncapped, a
+# long error takes every pixel the tail leaves and the left side collapses.
+run_mutation "tile header: a long notice leaves the left side its share" \
+  crates/geode-tile/src/header.rs \
+  '            .max_w(relative(TEXT_SHARE))' \
+  '            .max_w(relative(1.0))' \
+  geode-tile an_overlong_notice_cuts_and_leaves_the_tail_and_left_side
+
+# A notice in the cluster is one line cut with an ellipsis; allowed to
+# wrap, a long error runs out of the 22 px strip.
+run_mutation "tile header: a long notice stays one line" \
+  crates/geode-tile/src/notice.rs \
+  '        .truncate()' \
+  '        .overflow_hidden()' \
+  geode-tile an_overlong_notice_cuts_and_leaves_the_tail_and_left_side
+
+# A pending-too-long source has no reason of its own; without the detail
+# fallback its chip explains nothing.
+run_mutation "tile health: a reasonless state explains itself by its detail" \
+  crates/geode-shell/src/diagnostics.rs \
+  '            _ => state.detail.clone(),' \
+  '            _ => String::new(),' \
+  geode-shell pending_too_long_shows_and_explains_itself_by_its_detail
+
+# The chip's tooltip counts the other unhealthy sources.
+run_mutation "tile header: the chip prepares +N more" \
+  crates/geode-tile/src/header.rs \
+  '            more: (h.others > 0).then(|| format!("+{} more", h.others).into()),' \
+  '            more: None,' \
+  geode-tile the_chip_words_tones_and_tooltip
+
+# The header's times are prepared; without the clock observer re-preparing
+# them, a zone change repaints the old zone's times.
+run_mutation "tile header: the blotter re-prepares its times on a clock change" \
+  crates/geode-blotter/src/tile.rs \
+  '        cx.observe_global::<geode_shell::clock::AppClock>(|this, cx| {
+            this.prepare_header(cx);' \
+  '        cx.observe_global::<geode_shell::clock::AppClock>(|this, cx| {' \
+  geode-blotter the_freshness_readout_reads_the_installed_app_clock_and_follows_a_later_change
+
+# The chip's page open begins as the action does; skipped, the last refusal
+# stays up over the page it opened and the crash tail misses the open.
+run_mutation "tile header: a queued page open expires the notice" \
+  crates/geode-shell/src/shell/page.rs \
+  '        self.begin_action(&format!("page::toggle_{kind}"));' \
+  '' \
+  geode-shell a_queued_page_open_clears_the_notice_and_records_the_action
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

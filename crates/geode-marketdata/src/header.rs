@@ -1,5 +1,7 @@
 //! Prepared panel header: identity, attributes, draft status, upload/echo
-//! feedback, source time, and the action-menu control. HeaderModel::prepare formats
+//! feedback and source time, painted through `geode_tile::header::frame`
+//! beside the shared cluster's health chip and action-menu control.
+//! HeaderModel::prepare formats
 //! text on state changes; render uses the prepared strings and current theme.
 
 use crate::core::SegmentPaint;
@@ -14,28 +16,23 @@ use chrono::{DateTime, Utc};
 use geode_core::clock::Clock;
 use geode_shell::fonts;
 use geode_shell::module::StackHandle;
-use geode_shell::shell::control::{self, PointerStates as _};
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::tips;
 use geode_tile::confirm::{self, Confirm};
+use geode_tile::header::{Cluster, HealthChip, MenuTrigger, TimeRun};
 use geode_tile::notice::{self, Notice};
 use gpui::prelude::*;
-use gpui::{ElementId, Entity, FocusHandle, Hsla, SharedString, div, rems};
+use gpui::{AnyElement, ElementId, Entity, FocusHandle, Hsla, SharedString, div, rems};
 use gpui_component::input::Input;
 use gpui_component::{Theme, h_flex};
-
-/// The header strip's height, in pixels at the design rem
-/// (`geode_shell::shell::scale`) — the blotter's own header height, so
-/// the two tiles' strips line up side by side; the tile anchors its
-/// popup under it by the same constant.
-pub(crate) const HEADER_HEIGHT: f32 = 22.0;
+use std::rc::Rc;
 
 /// What one prepared header run is painted as. The tone is resolved to a
 /// theme colour at paint (never a stored colour, so a theme switch needs
-/// no rebuild), and `Time` is the one tone whose colour depends on the
-/// clock — the staleness reading, which is a comparison per frame and not
-/// a format.
+/// no rebuild). `Time` is a quiet time stamp (`sent HH:MM`); the source
+/// time is the shared frame's `TimeRun`, whose stale colour is decided
+/// there, so no tone depends on the clock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Tone {
     Plain,
@@ -45,20 +42,13 @@ pub(crate) enum Tone {
 }
 
 /// One run's text colour: the theme's own secondary/primary text for the
-/// quiet tones, the floored `warning` for `Warn` (and for `Time` once the
-/// document is stale). Notices are the notice door's. Never
-/// `warning_foreground` — that is the token for text on a SOLID warning
-/// fill, and a run has no fill.
-pub(crate) fn tone_colour(
-    tone: Tone,
-    stale: bool,
-    theme: &Theme,
-    floored: &FlooredTones,
-) -> gpui::Hsla {
+/// quiet tones, the floored `warning` for `Warn`. Notices are the notice
+/// door's. Never `warning_foreground` — that is the token for text on a
+/// SOLID warning fill, and a run has no fill.
+pub(crate) fn tone_colour(tone: Tone, theme: &Theme, floored: &FlooredTones) -> gpui::Hsla {
     match tone {
         Tone::Plain => theme.muted_foreground,
         Tone::Key => theme.foreground,
-        Tone::Time if stale => floored.warn,
         Tone::Time => theme.muted_foreground,
         Tone::Warn => floored.warn,
     }
@@ -217,11 +207,14 @@ pub(crate) struct HeaderModel {
     /// The echo's line, painted after the state and the incomplete-rows
     /// chip, ahead of the upload error and the notice.
     pub echo: Option<(SharedString, Tone)>,
-    /// The armed upload confirm's question, painted last before the time
-    /// on the element that holds the keyboard while it is armed.
+    /// The armed upload confirm's question, the last status item — after
+    /// it come the notice and the time — painted on the element that holds
+    /// the keyboard while it is armed.
     pub prompt: Option<SharedString>,
     /// The generation's source time, `HH:MM:SS` on the trader's own clock.
     pub time: Option<SharedString>,
+    /// `time` followed by ` stale`, prepared so paint never formats.
+    pub time_stale: Option<SharedString>,
     /// The tile's own clock reading, applied at paint (`render`'s job,
     /// never `prepare`'s — a staleness comparison is per frame, not per
     /// change).
@@ -277,6 +270,9 @@ impl HeaderModel {
             echo: i.echo.map(|(text, tone)| (text.clone(), tone)),
             prompt: i.prompt.cloned(),
             time: i.source_at.map(|t| i.clock.hms(t).into()),
+            time_stale: i
+                .source_at
+                .map(|t| format!("{} stale", i.clock.hms(t)).into()),
             stale: false,
         }
     }
@@ -307,27 +303,29 @@ impl HeaderModel {
         if let Some(e) = &self.upload_error {
             out.push(e.text().to_string());
         }
-        if let Some(n) = &self.notice {
-            out.push(n.text().to_string());
-        }
         if let Some(p) = &self.prompt {
             out.push(p.to_string());
         }
+        if let Some(n) = &self.notice {
+            out.push(n.text().to_string());
+        }
         if let Some(t) = &self.time {
-            out.push(if self.stale {
-                format!("{t} stale")
-            } else {
-                t.to_string()
+            out.push(match (&self.time_stale, self.stale) {
+                (Some(s), true) => s.to_string(),
+                _ => t.to_string(),
             });
         }
         out
     }
 }
 
-/// Render prepared identity, attribute, status, upload, and time runs.
-/// The attribute cursor and editor are passed separately from prepared values;
-/// menu_open controls the action button's selected appearance. A pending upload
-/// prompt is the confirm door's: it holds the keyboard and answers its keys.
+/// Render the header through the shared frame: kind badge, underlying and
+/// attributes on the left; state, incomplete rows, echo, upload error and
+/// the confirm prompt as cluster status; then the notice, the time, the
+/// health chip and `⋯` from the shared cluster. The attribute cursor and
+/// editor are passed separately from prepared values; `menu_open` keeps the
+/// action button's selected fill. A pending upload prompt is the confirm
+/// door's: it holds the keyboard and answers its keys.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render(
     h: &HeaderModel,
@@ -339,28 +337,17 @@ pub(crate) fn render(
     tones: &FlooredTones,
     tile: &Entity<MarketDataTile>,
     tile_id: u64,
+    menu_selector: SharedString,
     menu_tip_selector: SharedString,
     state_tip_selector: SharedString,
     stack: Option<&StackHandle>,
+    health: Option<&HealthChip>,
 ) -> impl IntoElement {
     let muted = theme.muted_foreground;
-    let mut row = h_flex()
-        .w_full()
-        .h(scale::design(HEADER_HEIGHT))
-        .items_center()
-        .gap_3()
-        .px_2()
-        .text_sm()
-        .text_color(muted)
-        .border_b_1()
-        .border_color(theme.border)
-        .debug_selector(move || format!("marketdata-header-{tile_id}"));
-
-    // Keep the shared stack marker first in the header strip.
-    row = row.children(stack.and_then(|s| s.marker(theme, TileId(tile_id))));
+    let mut left = h_flex().items_center().gap_3();
 
     // 1. Kind badge.
-    row = row.child(
+    left = left.child(
         div()
             .px_1p5()
             .rounded(theme.radius_tokens().sm)
@@ -373,14 +360,14 @@ pub(crate) fn render(
     // 2. Underlying, bold, plus the dirty dot.
     match &h.underlying {
         Some(u) => {
-            row = row.child(
+            left = left.child(
                 div()
                     .font_weight(gpui::FontWeight::BOLD)
-                    .text_color(tone_colour(Tone::Key, false, theme, tones))
+                    .text_color(tone_colour(Tone::Key, theme, tones))
                     .child(u.clone()),
             );
             if h.dirty {
-                row = row.child(
+                left = left.child(
                     div()
                         .size(scale::design(8.))
                         .rounded_full()
@@ -390,7 +377,7 @@ pub(crate) fn render(
             }
         }
         None => {
-            row = row.child(div().text_color(muted).child("no underlying — load…"));
+            left = left.child(div().text_color(muted).child("no underlying — load…"));
         }
     }
 
@@ -438,31 +425,30 @@ pub(crate) fn render(
             }
             _ => value.child(attr.text.clone()),
         };
-        row = row.child(
+        left = left.child(
             h_flex()
                 .gap_1()
                 .child(
                     div()
-                        .text_color(tone_colour(Tone::Plain, false, theme, tones))
+                        .text_color(tone_colour(Tone::Plain, theme, tones))
                         .child(attr.label.clone()),
                 )
                 .child(value),
         );
     }
 
-    // 4. Flex spacer.
-    row = row.child(div().flex_1());
-
-    // 5. State, then notice.
+    // Module-own status, in order: state, incomplete rows, echo, upload
+    // error, the confirm prompt.
+    let mut status: Vec<AnyElement> = Vec::new();
     if let Some((text, tone)) = &h.state {
-        row = row.child(
+        status.push(
             div()
                 .id(ElementId::NamedInteger(
                     SharedString::new_static("marketdata-state"),
                     tile_id,
                 ))
                 .debug_selector(move || format!("marketdata-state-{tile_id}"))
-                .text_color(tone_colour(*tone, false, theme, tones))
+                .text_color(tone_colour(*tone, theme, tones))
                 .child(text.clone())
                 .when(matches!(h.badge, DraftBadge::Behind { .. }), |el| {
                     el.tooltip(tips::tip_with(
@@ -473,104 +459,90 @@ pub(crate) fn render(
                             ":rebase adopts it · :revert drops your edits",
                         )),
                     ))
-                }),
+                })
+                .into_any_element(),
         );
     }
     // Incomplete inserted rows show a warning because upload will reject them.
     if let Some((text, tone)) = &h.incomplete {
-        row = row.child(
+        status.push(
             div()
                 .debug_selector(move || format!("marketdata-incomplete-{tile_id}"))
-                .text_color(tone_colour(*tone, false, theme, tones))
-                .child(text.clone()),
+                .text_color(tone_colour(*tone, theme, tones))
+                .child(text.clone())
+                .into_any_element(),
         );
     }
     if let Some((text, tone)) = &h.echo {
-        row = row.child(
+        status.push(
             div()
                 .debug_selector(move || format!("marketdata-echo-{tile_id}"))
-                .text_color(tone_colour(*tone, false, theme, tones))
-                .child(text.clone()),
+                .text_color(tone_colour(*tone, theme, tones))
+                .child(text.clone())
+                .into_any_element(),
         );
     }
     if let Some(e) = &h.upload_error {
-        row = row.child(
-            notice::render(e, theme)
-                .debug_selector(move || format!("marketdata-upload-error-{tile_id}")),
+        status.push(
+            // Cut to one line in the cluster; the tooltip keeps the whole
+            // error readable.
+            notice::truncated(
+                e,
+                ElementId::NamedInteger(
+                    SharedString::new_static("marketdata-upload-error"),
+                    tile_id,
+                ),
+                SharedString::new_static("tip-marketdata-upload-error"),
+                theme,
+            )
+            .debug_selector(move || format!("marketdata-upload-error-{tile_id}"))
+            .into_any_element(),
         );
-    }
-    if let Some(n) = &h.notice {
-        row = row.child(notice::render(n, theme));
     }
     // The upload prompt holds the keyboard and answers its keys before shell
     // routing (bare y submits; any other key cancels), in the foreground tone.
     if let (Some(_), Some(pending)) = (&h.prompt, confirm) {
-        row = row.child(confirm::prompt(
-            pending,
-            tile,
-            move || format!("marketdata-upload-confirm-{tile_id}"),
-            theme,
-        ));
-    }
-
-    // 6. Time, with the stale marker — `tone_colour` decides the colour,
-    // as it does for every other run here, so the stale rule is spelled
-    // once.
-    if let Some(t) = &h.time {
-        row = row.child(
-            h_flex()
-                .gap_1()
-                .text_color(tone_colour(Tone::Time, h.stale, theme, tones))
-                .child(t.clone())
-                .when(h.stale, |d| d.child("stale")),
+        status.push(
+            confirm::prompt(
+                pending,
+                tile,
+                move || format!("marketdata-upload-confirm-{tile_id}"),
+                theme,
+            )
+            .into_any_element(),
         );
     }
 
-    // Toggle the action menu in capture phase, before its outside-press
-    // listener can close it. A bubble-phase toggle would see an already-closed
-    // popup and reopen it on the second click. Keep propagation enabled so the
-    // shell still focuses the tile and runs its normal pointer handling.
-    row = row.child(
-        div()
-            .id(ElementId::NamedInteger(
-                SharedString::new_static("marketdata-menu-button"),
-                tile_id,
-            ))
-            .px_1p5()
-            .rounded(theme.radius_tokens().sm)
-            .border_1()
-            .border_color(theme.border)
-            .when(menu_open, |d| d.bg(theme.secondary))
-            .text_color(muted)
-            // Closed uses bare-control pointer feedback; open retains its selected fill.
-            // Colors are derived against the header's tile background.
-            .when(!menu_open, |d| {
-                d.pointer_states(control::paint(
-                    theme,
-                    control::Rest::Bare,
-                    theme.background,
-                    muted,
-                ))
-            })
-            .child("⋯")
-            .debug_selector(move || format!("marketdata-menu-button-{tile_id}"))
-            .capture_any_mouse_down({
-                let tile = tile.clone();
-                move |event, window, cx| {
-                    if event.button != gpui::MouseButton::Left {
-                        return;
-                    }
-                    tile.update(cx, |t, cx| t.toggle_menu(window, cx))
-                }
-            })
-            .tooltip(tips::tip_with(
-                menu_tip_selector,
-                SharedString::new_static("Actions"),
-                Some("marketdata::menu"),
-                None,
-            )),
-    );
-    row
+    // The shared cluster: status, the notice, the time (its stale label
+    // prepared), the health chip, `⋯`. The trigger toggles in the capture
+    // phase and lets the press bubble on so the shell still focuses the tile.
+    let mut cluster = Cluster::new(TileId(tile_id));
+    cluster.status = status;
+    cluster.notices.extend(h.notice.clone());
+    cluster.times.extend(h.time.clone().map(|label| TimeRun {
+        label,
+        stale_label: h.time_stale.clone(),
+        stale: h.stale,
+    }));
+    cluster.health = health;
+    cluster.menu = Some(MenuTrigger {
+        id: ElementId::NamedInteger(SharedString::new_static("marketdata-menu-button"), tile_id),
+        selector: menu_selector,
+        tip_selector: menu_tip_selector,
+        action: "marketdata::menu",
+        open: menu_open,
+        on_press: Rc::new({
+            let tile = tile.clone();
+            move |window, cx| tile.update(cx, |t, cx| t.toggle_menu(window, cx))
+        }),
+    });
+    geode_tile::header::frame(
+        stack.and_then(|s| s.marker(theme, TileId(tile_id))),
+        left,
+        cluster,
+        theme,
+    )
+    .debug_selector(move || format!("marketdata-header-{tile_id}"))
 }
 
 #[cfg(test)]
@@ -796,6 +768,27 @@ mod tests {
         assert!(
             !h.stale,
             "staleness is the tile's clock reading, applied at paint"
+        );
+    }
+
+    /// Paint order after the migration: status (state, incomplete, echo,
+    /// upload error, prompt), then the notice, then the time.
+    #[test]
+    fn the_prompt_paints_before_the_notice_and_the_time_is_last() {
+        let model = model_with_rows();
+        let key = vec!["SPX.Z".to_string()];
+        let notice: SharedString = "'abc' is not a number".into();
+        let prompt: SharedString = "upload 1 edit to desk? (y/n)".into();
+        let mut i = inputs(&model, Some(&key), DraftBadge::Dirty);
+        i.notice = Some(&notice);
+        i.prompt = Some(&prompt);
+        i.source_at = Some(chrono::Utc::now());
+        let texts = HeaderModel::prepare(i).texts();
+        let at = |s: &str| texts.iter().position(|t| t == s).unwrap();
+        assert!(at("upload 1 edit to desk? (y/n)") < at("'abc' is not a number"));
+        assert_eq!(
+            texts.len() - 1,
+            texts.iter().position(|t| t.contains(':')).unwrap()
         );
     }
 

@@ -48,28 +48,14 @@ pub fn health_title(health: &Health) -> &'static str {
     }
 }
 
-/// Severity by variant only. `Health`'s derived `Ord` also compares reason
-/// text, so `max()` over it would call the lexically largest reason the
-/// worst and `==` would split two `Failed` sources into two counts; the
-/// status summary counts by label, and the page must agree with it.
-fn health_rank(health: &Health) -> u8 {
-    match health {
-        Health::Ok => 0,
-        Health::Pending => 1,
-        Health::PendingTooLong => 2,
-        Health::Degraded { .. } => 3,
-        Health::Failed { .. } => 4,
-    }
-}
-
-/// The worst reported health by variant. Among equals the first by source
-/// name wins, so the returned reason is deterministic.
+/// The worst reported health by [`Health::severity`]. Among equals the first
+/// by source name wins, so the returned reason is deterministic.
 fn worst_health(d: &Diagnostics) -> Option<&Health> {
     d.sources
         .values()
         .filter_map(|s| s.health.as_ref())
         .fold(None, |worst: Option<&Health>, h| match worst {
-            Some(w) if health_rank(w) >= health_rank(h) => Some(w),
+            Some(w) if w.severity() >= h.severity() => Some(w),
             _ => Some(h),
         })
 }
@@ -124,7 +110,7 @@ pub fn source_rows(d: &Diagnostics, clock: Clock) -> Vec<SourceRow> {
         .filter(|(_, s)| s.health.is_some())
         .map(|(name, s)| (name.as_str(), s))
         .collect();
-    let rank = |s: &SourceState| s.health.as_ref().map(health_rank).unwrap_or(0);
+    let rank = |s: &SourceState| s.health.as_ref().map(Health::severity).unwrap_or(0);
     reported.sort_by(|a, b| rank(b.1).cmp(&rank(a.1)).then_with(|| a.0.cmp(b.0)));
     let mut unreported: Vec<(&str, &SourceState)> = d
         .sources
@@ -724,6 +710,18 @@ pub(crate) mod tests {
     use geode_core::query::{CatalogSnapshot, DatasetCatalog, GenerationInfo, PartitionCatalog};
     use std::time::{Duration, SystemTime};
 
+    /// The page's worst health is the core severity, not label or reason
+    /// order: `degraded` outranks `pending_too_long` although it sorts
+    /// before it as text.
+    #[test]
+    fn the_page_ranks_health_by_the_core_severity() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        let t = std::time::SystemTime::UNIX_EPOCH;
+        d.note_health("a", Health::Degraded { reason: "r".into() }, "r".into(), t);
+        d.note_health("b", Health::PendingTooLong, "f.csv".into(), t);
+        assert_eq!(worst_health(&d).map(Health::label), Some("degraded"));
+    }
+
     fn clock() -> Clock {
         Clock::utc()
     }
@@ -788,6 +786,7 @@ pub(crate) mod tests {
         use geode_shell::diagnostics::SourceSummary;
         let mut d = Diagnostics::new(LogLevels::default());
         let summary = |shape: SourceShape, topics: Vec<String>| SourceSummary {
+            dataset: String::new(),
             paths: vec!["/x".into()],
             priority: "1".into(),
             readiness: "ready".into(),

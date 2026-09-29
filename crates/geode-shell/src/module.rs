@@ -1335,6 +1335,15 @@ pub mod recording {
         insert: bool,
     }
 
+    impl RecordingPageView {
+        /// Whether the page's own focus handle holds the keyboard — reach
+        /// for a test outside this crate that opens the page by a route the
+        /// shell does not dispatch itself (a tile's health chip click).
+        pub fn is_focused(&self, window: &Window) -> bool {
+            self.focus_handle.is_focused(window)
+        }
+    }
+
     impl Render for RecordingPageView {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
             let kind = self.kind;

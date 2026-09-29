@@ -825,6 +825,7 @@ impl ModuleFactory for PricerFactory {
             PricerTile::new(
                 tile,
                 frame,
+                diagnostics.clone(),
                 self.data.clone(),
                 self.shared.clone(),
                 restored,

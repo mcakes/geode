@@ -73,6 +73,22 @@ has none of them.
   tile.
 - A notice is a status (muted), warning or danger line in the theme's text
   tones; which of a tile's notices shows is the tile's own precedence.
+- Every tile header is `geode_tile::header::frame`: 22 px at the design rem,
+  the stack marker first, the module's own left side, then a right cluster in
+  a fixed order — status items, notices, source times, the health chip, `⋯`.
+  Status items and notices shrink: each is one line, cut with an ellipsis
+  when it does not fit, and together they take at most half the header
+  (`TEXT_SHARE`); a cut notice shows its whole text in its tooltip. Source
+  times, the chip and `⋯` never shrink. The left side takes what remains and
+  clips, so neither a long left side nor a long notice pushes the times, the
+  chip or `⋯` off the tile — they leave it only when the tile is narrower
+  than those three alone.
+  A stale source time takes the warning text tone. The health chip appears
+  only while a source the tile reads is PendingTooLong (`pending`), Degraded
+  (`degraded`) or Failed (`failed`); its tooltip names the worst source and
+  its reason, with `+N more` for other unhealthy sources. Clicking it opens
+  the diagnostics page and never closes it; it has no key of its own — the
+  page's own binding (`mod+d`) is the keyboard route.
 
 ### Motion
 
@@ -234,6 +250,15 @@ column's grouping level, a mixed value, or a NULL value leaves it absent, and
 a row holding no registered context column (an `lhu` subtotal, say) opens the
 plain tile picker.
 
+The header is the shared 22 px strip. The view, grouping, state chips
+(`pinned`, `unscoped`, `filtered`, a tile as-of), the frame's `AS OF` warning
+and the in-flight `…` sit on the left and clip when the tile is too narrow.
+Dataset times sit in the header's right cluster with the health chip,
+which covers the datasets of the tile's current snapshot; the notice sits
+before them. The chip's question moves with each delivered snapshot: a view
+over other datasets drops a chip for the old ones at once. The blotter has no
+`⋯` menu.
+
 "Edit column in view…" and "Edit column in schema…" list the blotter's
 planned non-tree columns with the cursor's column highlighted
 (`TileContent::tile_columns`). Hidden columns and dimensions folded into the
@@ -384,6 +409,12 @@ kind-action rows included; `Upload`, `Rebase`, `Revert edits` and the three
 policy rows (`:auto hold`, `:auto rebase`, `:auto replace`) fall back to their
 `:` verbs when unbound, and the other rows to an empty lane. A disabled row's
 reason becomes the notice.
+
+The header is the [shared frame](#shared-tile-interaction): kind badge,
+underlying and attributes on the left; then the state, incomplete rows, echo,
+upload error and the upload prompt, the notice, the source time (`HH:MM:SS
+stale` in the warning text tone once stale), the health chip and `⋯`. The
+header's health chip covers the panel's dataset.
 
 A panel opened through an add (palette, tile picker, `open_with`, duplicate)
 with no underlying opens the underlying picker at once; a restored panel does
@@ -726,10 +757,12 @@ hints are the live keymap's and are re-resolved when the menu opens, when its
 chrome rebuilds, and when the keymap is republished; an action the keymap
 binds nowhere shows an empty lane.
 
-The header shows the range and the frequency as two triggers, `1y ▾` and
-`1d ▾`; an absolute range shows its dates, `2025-09-26 – 2026-09-26 ▾`. Each
-trigger opens its own menu under it and stays filled while that menu (or, for
-the range, the dates editor) is up; a second click closes it. `r` and the range
+The header is the shared 22 px strip; its health chip is the worst health
+over the series' sources. The header shows the range and the frequency as two
+triggers, `1y ▾` and `1d ▾`; an absolute range shows its dates,
+`2025-09-26 – 2026-09-26 ▾`. Each trigger opens its own menu under it and
+stays filled while that menu (or, for the range, the dates editor) is up; a
+second click closes it. `r` and the range
 trigger open the range menu: the seven presets written out with their short
 labels, then `Custom dates…` (`c`). `f` and the frequency trigger open the
 frequency menu: the six frequencies with their short labels. Short labels are
@@ -954,7 +987,10 @@ dense header: the sheet name (a control: see [sheets by pointer](#sheets-by-poin
 while lines are stale, `N failed` in danger text while any line's last answer
 was a failure, `pricer <name>`, the last priced time, which reads `stale` once
 it is older than the shell's `stale_after`, and a `⋯` button at the trailing
-edge that opens and closes the action menu (the pointer's `.`). A pending load
+edge that opens and closes the action menu (the pointer's `.`). The header is
+the [shared frame](#shared-tile-interaction): notices paint after the status
+items, and the health chip sits between the time and `⋯`. The health chip
+covers `pricer_sheets` only (see the pricer README's limits). A pending load
 paints `loading…` muted in the header and `Loading sheet…` in the empty table;
 an empty loaded sheet says `No lines — press o to add one`. A pricer this
 binary lacks is named in danger text with its recovery (`set [pricing]

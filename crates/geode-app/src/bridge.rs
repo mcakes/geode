@@ -821,6 +821,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
             d.describe_source(
                 &source.name,
                 SourceSummary {
+                    dataset: source.dataset.clone(),
                     paths: source.paths.clone(),
                     priority: format!("{:?}", source.priority),
                     readiness: format!("{:?}", source.readiness),
@@ -2562,6 +2563,90 @@ role = "key"
         assert!(
             !dispatched("workspace::duplicate_horizontal"),
             "a capital typed into the entry field ran a shell binding"
+        );
+    }
+
+    /// The whole route: a real health report on the shell's `Diagnostics`
+    /// reaches a hosted pricer tile's header, and a real click on the chip
+    /// opens the diagnostics page through the shell's drain.
+    #[gpui::test]
+    fn a_health_chip_click_opens_the_diagnostics_page(cx: &mut gpui::TestAppContext) {
+        use geode_shell::module::recording::{PageRecorded, RecordingPageFactory};
+        let mut services = test_shell_services_with_a_pricer_tile();
+        let page = RecordingPageFactory::new("diagnostics");
+        let log = page.log();
+        let page_view = page.view();
+        services.pages.add(Box::new(page));
+        let window = open_pricer_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        assert_eq!(
+            shell.read_with(&vcx, |s, _| s.open_page_kind_for_test()),
+            None,
+            "fixture: no page is open before the click"
+        );
+        let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+        diagnostics.update(&mut vcx, |d, cx| {
+            d.describe_source(
+                "sheets_src",
+                geode_shell::diagnostics::SourceSummary::for_dataset("pricer_sheets"),
+            );
+            d.note_health(
+                "sheets_src",
+                geode_shell::diagnostics::Health::Failed {
+                    reason: "disk full".into(),
+                },
+                "disk full".into(),
+                std::time::SystemTime::UNIX_EPOCH,
+            );
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let at = vcx
+            .debug_bounds("tile-health-1")
+            .expect("the pricer tile paints its chip")
+            .center();
+        vcx.simulate_event(gpui::MouseDownEvent {
+            position: at,
+            modifiers: gpui::Modifiers::default(),
+            button: gpui::MouseButton::Left,
+            click_count: 1,
+            first_mouse: false,
+        });
+        vcx.simulate_event(gpui::MouseUpEvent {
+            position: at,
+            modifiers: gpui::Modifiers::default(),
+            button: gpui::MouseButton::Left,
+            click_count: 1,
+        });
+        vcx.run_until_parked();
+        // Right after the click, parked: the page is open AND holds focus.
+        // `open_page`'s `prevent_default` does nothing on this route (the
+        // chip's own mouse-down already ran), so focus is the fact to pin.
+        assert!(log.borrow().contains(&PageRecorded::Visible(true)));
+        assert_eq!(
+            shell.read_with(&vcx, |s, _| s.open_page_kind_for_test()),
+            Some("diagnostics"),
+            "the page is open"
+        );
+        assert!(
+            vcx.update(|window, cx| {
+                page_view
+                    .borrow()
+                    .as_ref()
+                    .expect("the page was created")
+                    .read(cx)
+                    .is_focused(window)
+            }),
+            "the page holds focus after a chip click"
         );
     }
 
@@ -5208,6 +5293,66 @@ role = "key"
                 .is_none(),
             "no report yet — not Health::Pending, not anything"
         );
+    }
+
+    /// `attach` describes each source with its dataset, so a tile asking
+    /// about the dataset hears about the source. The name differs from the
+    /// dataset here so a link built from the name would fail.
+    #[gpui::test]
+    fn describing_a_source_carries_its_dataset(cx: &mut gpui::TestAppContext) {
+        let window = open_test_window(cx, test_shell_services());
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let (handle, _rx) = DataHandle::for_tests();
+        let factory = Rc::new(BlotterFactory::new(
+            handle.clone(),
+            Vec::new(),
+            NamedColours::default(),
+            SchemaSpec::default(),
+            DerivedDimensions::default(),
+            FindStyle::default(),
+            Duration::from_secs(900),
+        ));
+        let (_tx, rx) = crate::events::channel();
+        let bridge = Bridge {
+            panels: Vec::new(),
+            timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
+                handle.clone(),
+                NamedColours::default(),
+            )),
+            pricer: test_pricer(&handle),
+            handle,
+            factory,
+            events: rx,
+            dropped: Arc::new(AtomicU64::new(0)),
+            sources: vec![(
+                SourceSpec::directory("risk_src", "risk", vec!["/data/risk/*.csv".into()]),
+                SourceShape::Directory,
+            )],
+            local_datasets: Default::default(),
+            pricer_key: None,
+            underlyings: Default::default(),
+        };
+        cx.update(|cx| attach(&bridge, window, cx));
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+        diagnostics.update(&mut vcx, |d, cx| {
+            d.note_health(
+                "risk_src",
+                geode_shell::diagnostics::Health::Failed {
+                    reason: "torn".into(),
+                },
+                "torn".into(),
+                std::time::SystemTime::UNIX_EPOCH,
+            );
+            cx.notify();
+        });
+        let asked = diagnostics.read_with(&vcx, |d, _| d.health_for_datasets(&["risk"]));
+        assert_eq!(asked.map(|h| h.source), Some("risk_src".to_string()));
     }
 
     #[test]

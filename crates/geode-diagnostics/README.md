@@ -126,9 +126,10 @@ cargo test -p geode-diagnostics --release -- --ignored log_rebuild_timing --noca
   `set_visible(false)` closes the popover too, so a closed page cannot
   reopen with it armed.
 - Health ranks by variant, never by `Health`'s derived `Ord`, which
-  compares reason text; the header chip counts sources by label, as the
-  status summary does. A source known only from an ingest load still gets a
-  row.
+  compares reason text; the header chip counts sources per variant, as the
+  status summary does. Health is ranked by `Health::severity` (geode-core),
+  the same rank the status summary and a tile's header chip use. A source
+  known only from an ingest load still gets a row.
 - The Levels popover spells targets as `LogLevels` stores them, bare
   suffixes without `geode::`. Its default row is read-only, because
   `request_level` files a target and `default` is not one, and it offers no
