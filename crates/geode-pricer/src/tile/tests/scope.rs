@@ -482,3 +482,122 @@ fn a_restored_cursor_on_a_hidden_line_lands_above_it(cx: &mut gpui::TestAppConte
     });
     assert_eq!(at, Some(2), "the 4800 leg, above the hidden 5200 leg");
 }
+
+/// A line the trader types in the entry bar under a scope that hides it
+/// lands in the sheet but not the grid: the footer says so, where the
+/// cursor leaving it would otherwise read as a lost line. A line the
+/// scope shows says nothing.
+#[gpui::test]
+fn an_entry_bar_line_the_scope_hides_says_so(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    h.visible(&mut vcx, true);
+    set_expr(&h, &mut vcx, "strike > 4500");
+    h.dispatch(&mut vcx, "add_below", None);
+    typed(&h, &mut vcx, "SPX Z26 3000 P");
+    // `enter` in the bar resolves to `pricer::commit` in the shell keymap.
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.entry_error(&vcx), None);
+    assert_eq!(h.sheet_len(&vcx), 6, "the line landed");
+    assert_eq!(hidden(&h, &vcx), 2, "B and the new line");
+    assert_eq!(h.footer(&vcx).as_deref(), Some(HIDDEN_LANDING));
+    typed(&h, &mut vcx, "SPX Z26 5100 C");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.sheet_len(&vcx), 7);
+    assert_eq!(h.footer(&vcx), None, "a shown line says nothing");
+}
+
+/// `p` of a line the scope hides says so; so does the redo that puts it
+/// back, and the undo that restores a deleted line the scope now hides.
+#[gpui::test]
+fn a_put_or_restore_the_scope_hides_says_so(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    h.dispatch(&mut vcx, "yank_row", None);
+    set_expr(&h, &mut vcx, "strike != 5000");
+    h.dispatch(&mut vcx, "put_below", None);
+    assert_eq!(h.sheet_len(&vcx), 6, "the put landed");
+    assert_eq!(hidden(&h, &vcx), 2, "A and its copy");
+    assert_eq!(h.footer(&vcx).as_deref(), Some(HIDDEN_LANDING));
+    h.dispatch(&mut vcx, "undo", None);
+    assert_eq!(h.sheet_len(&vcx), 5);
+    assert_eq!(h.footer(&vcx), None, "taking a line away lands nothing");
+    h.dispatch(&mut vcx, "redo", None);
+    assert_eq!(h.sheet_len(&vcx), 6);
+    assert_eq!(h.footer(&vcx).as_deref(), Some(HIDDEN_LANDING));
+
+    // B deleted while shown, then hidden by the scope: its undo says so.
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    h.motion(&mut vcx, "down", Some(2));
+    h.dispatch(&mut vcx, "delete", None);
+    assert_eq!(h.sheet_len(&vcx), 4, "fixture: B deleted");
+    set_expr(&h, &mut vcx, "strike > 4500");
+    h.dispatch(&mut vcx, "undo", None);
+    assert_eq!(h.sheet_len(&vcx), 5);
+    assert_eq!(hidden(&h, &vcx), 1);
+    assert_eq!(h.footer(&vcx).as_deref(), Some(HIDDEN_LANDING));
+}
+
+/// A scope that hides the line an open editor edits drops the edit and
+/// says the scope did it, not that the cell moved.
+#[gpui::test]
+fn a_scope_hiding_the_edited_line_drops_the_edit_and_says_why(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    goto_column(&h, &mut vcx, "strike");
+    h.dispatch(&mut vcx, "edit", None);
+    assert_ne!(h.mode(&mut vcx), "normal", "fixture: the editor is open");
+    set_expr(&h, &mut vcx, "strike != 5000");
+    assert_eq!(h.mode(&mut vcx), "normal");
+    assert_eq!(h.footer(&vcx).as_deref(), Some(SCOPE_DROPPED_EDIT));
+}
+
+/// An unresolved named expression refuses in the same words as every
+/// other scope refusal.
+#[gpui::test]
+fn an_unresolved_named_expression_refuses_with_the_prefix(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    let scope = Scope {
+        named: vec!["liq".into()],
+        ..Default::default()
+    };
+    h.frame.update(&mut vcx, |f, cx| {
+        f.shared_mut().set_scope(scope);
+        cx.notify();
+    });
+    assert_eq!(
+        h.notice(&vcx).as_deref(),
+        Some("scope refused: named expression 'liq' is missing")
+    );
+    assert_eq!(hidden(&h, &vcx), 0);
+}
+
+/// A scope refusal and the view fallback's notice both stand: the header
+/// shows the refusal, then the view notice.
+#[gpui::test]
+fn a_scope_refusal_does_not_mask_the_view_notice(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    let views = slim_views(&["qty", "npv"]);
+    vcx.update(|_, cx| {
+        h.factory.reload(
+            views,
+            TemplateSet::builtin(),
+            NamedColours::default(),
+            None,
+            std::time::Duration::from_secs(60),
+            cx,
+        )
+    });
+    let view = "view 'vanilla' is not defined; showing 'slim'";
+    assert_eq!(h.notice(&vcx).as_deref(), Some(view), "fixture");
+    set_expr(&h, &mut vcx, "book = 'X'");
+    assert_eq!(
+        h.notice(&vcx),
+        Some(format!(
+            "scope refused: 'book' is not a pricer column · {view}"
+        ))
+    );
+    set_expr(&h, &mut vcx, "strike > 0");
+    assert_eq!(
+        h.notice(&vcx).as_deref(),
+        Some(view),
+        "the refusal withdrew"
+    );
+}

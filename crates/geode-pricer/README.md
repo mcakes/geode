@@ -29,7 +29,7 @@ The pure core (`core`, no element, entity, window, or data service):
 | `commands` | The `:` vocabulary (including `:autosize [reset]`): parse and completions. |
 | `storage` | The frozen `pricer_sheets` declaration; conversion between sheets, document rows, and a document answer. |
 | `select` | What a grid selection reaches on the sheet: the leaf lines an edit writes (`lines_of`), the top-most rows a verb or total acts on (`top_most`), the `g p` and `shift+j`/`shift+k` plans with their refusals, position risk totals (`risk_totals`, and `risk_totals_visible`, which counts only a partly hidden package's shown legs), and the bulk notices' skip counts. |
-| `visibility` | Which lines the frame's scope hides: `apply_scope` runs `geode_core::scope::eval` over each line as a `pricer` dataset row (`SheetRow`, the values its cells paint; measures result × qty; a leg's `template` its package's) and returns a `Visibility` (shown per sheet row, hidden line count), or a refusal that hides nothing. Selections on columns `pricer` lacks are dropped; an expression naming one refuses. |
+| `visibility` | Which lines the frame's scope hides: `apply_scope` runs `geode_core::scope::eval` over each line as a `pricer` dataset row (`SheetRow`, the values its cells paint; measures result × qty; a leg's `template` its package's; `status` `fresh` for a fresh line; `expiry` the ISO date of a dated expiry, a tenor's text) and returns a `Visibility` (shown per sheet row, hidden line count), or a refusal that hides nothing. Selections on columns `pricer` lacks, or on `position_ref`/`instrument_ref` (`NOT_SCOPEABLE`: the sheet's synthetic `p<id>`/`i<id>`), are dropped; an expression naming one refuses. The scope is bound once (`Scope::bind`) before any line, so an empty sheet refuses a row-independent error too. |
 
 The tile:
 
@@ -70,6 +70,15 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   (the SQL it mirrors fails the whole query). Never drop the failing term or
   line and keep the rest; that narrows the sheet in a way no query does.
   Hidden lines stay in the sheet and keep pricing and saving.
+- A column whose sheet values can never equal the desk's must not narrow
+  silently: `SheetRow` answers the desk's spelling where the cell paints
+  another (`status` `fresh`, `expiry` ISO date), and `position_ref` /
+  `instrument_ref` are not scope columns. A new column whose value is
+  synthetic joins `NOT_SCOPEABLE`.
+- An insert, put, undo or redo that lands a line the scope hides sets the
+  footer `HIDDEN_LANDING` (`note_hidden_landing`); a line never vanishes
+  without a word. An editor whose line the scope hides closes with
+  `SCOPE_DROPPED_EDIT`, not `MOVED`.
 - A package shows when any leg does. A partly hidden package's row paints its
   shown legs only (`· N of M legs`, summary, aggregates, fold, find key,
   selection totals) and is read-only: cell edits and every structural verb

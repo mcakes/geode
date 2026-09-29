@@ -1292,8 +1292,14 @@ scope with its named expressions resolved; the pricer has no tile scope
 layer (`:filter`).
 
 A line's values are the ones its cells paint. Text columns read the painted
-text; `strike`, `barrier` and the shifts read the number as typed (a percent
-strike reads its percent); `qty` reads the integer. A measure reads result ×
+text; `strike` and `barrier` read the number as typed (a percent strike reads
+its percent); a shift reads the shift its cell paints, the sheet's when the
+line has none; `qty` reads the integer. Two text columns read a scope value
+their cell does not paint, so a desk scope matches: `status` reads `fresh`
+for a fresh line (whose cell is blank), beside `pricing…` and a failure's
+text; `expiry` reads the ISO date `2026-12-18` for a dated expiry, whose cell
+paints `Z26` or `20DEC26`, and a tenor's text (`3m`) otherwise. The text
+filter therefore finds a dated expiry by `2026-12`, not by `z26`. A measure reads result ×
 qty, the position value `risk_snapshot` means by the same name, although the
 line's cell paints the per-unit result: `npv < 0` keeps a short line whose
 per-unit npv is positive. A leg's `template` is its package's token, because
@@ -1315,16 +1321,25 @@ What the pricer drops and what it refuses:
 - A dimension selection on a column `pricer` lacks (a desk-wide `book`
   selection) is dropped, as any dataset drops a selection it cannot answer.
   It does not blank the pricer.
+- `position_ref` and `instrument_ref` count as columns the pricer lacks,
+  directly or through a derived dimension. The sheet declares them for
+  grouping, but their values are its own `p<id>` / `i<id>`, never a desk
+  reference, so a desk scope on them could only hide every line.
 - An expression naming a column `pricer` lacks refuses the whole scope, with
   `scope refused: 'book' is not a pricer column`. The pricer never evaluates
   the half of `underlying_ref = 'SPX' and book = 'X'` it knows.
+- An unresolved named expression refuses with
+  `scope refused: named expression '<name>' is missing` (or `is invalid`).
 - A comparison DuckDB would reject refuses the whole scope with
   `scope refused: <reason>`, even when only one line's value fails
-  (`underlying_ref = 5` casts every underlying to a number).
+  (`underlying_ref = 5` casts every underlying to a number). A refusal that
+  depends on no line (`strike like '5%'`) is checked once before any line,
+  so an empty sheet refuses it too.
 - A refused scope hides nothing. The refusal stands in the header as a
   danger notice while it holds, through deliveries and edits, and goes when
   the frame's scope becomes one the pricer can honour. A transient notice
-  covers it while that notice lasts.
+  covers it while that notice lasts. While a view fallback notice also
+  holds, the header shows both: the refusal, ` · `, then the view notice.
 
 Hidden lines stay in the sheet: they keep pricing, saving and repricing on
 the refresh timer. The header counts them in muted text as `N hidden`, absent
@@ -1349,7 +1364,14 @@ when any of them is hidden. `:unscoped` shows the whole package to edit it.
 When the scope hides the cursor's line, the cursor moves to the nearest
 shown line above it in sheet order, else the nearest below, not to whatever
 row slid into its index. A cursor restored from the session onto a hidden
-line recovers the same way.
+line recovers the same way. An open editor whose line the scope hides is
+dropped with `the line is hidden by the scope; edit dropped`.
+
+A line the trader adds can land hidden: an entry-bar insert, a put, or an
+undo or redo that restores a line the scope does not match. The line is in
+the sheet and prices, but the cursor cannot rest on it, so the footer says
+`added line is hidden by the scope (:unscoped shows it)` rather than letting
+it vanish without a word.
 
 `:unscoped` makes the tile ignore the frame's scope and show every line; the
 header paints a warning `unscoped` chip whose tooltip says it ignores the
@@ -1360,9 +1382,9 @@ frame's current scope at once.
 Known limitations: `shift+j`/`shift+k` on a shown line can swap it with a
 hidden sibling, which changes sheet order with no visible change; the `.`
 menu keeps `delete` and `ungroup` enabled on a partly hidden package and
-refuses on pick rather than showing them disabled; evaluating the scope over
-1,000 lines and rebuilding the grid is measured in
-[performance](performance.md).
+refuses on pick rather than showing them disabled; the scope is re-evaluated
+synchronously over every line on every rebuild, so its cost grows linearly
+with the sheet (1,000 lines are measured in [performance](performance.md)).
 
 ### Selection
 

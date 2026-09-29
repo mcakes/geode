@@ -249,7 +249,11 @@ new prices. `u` undoes a sheet edit and `ctrl+r` redoes it.
 
 The sheet's prices come from its configured pricing adapter. Demo results are
 for exploring the workflow. The sheet is separate from the risk blotter;
-adding a line does not add a position to the risk data.
+adding a line does not add a position to the risk data. The frame's shared
+scope still hides pricer lines that do not match it: the header counts them
+as **N hidden**, hidden lines keep pricing, and `:unscoped` shows every line.
+A line you add that the scope hides lands in the sheet with a footer saying
+so.
 
 Sheets save automatically after an idle second following a change. Give one a
 recognizable name with `:name first-look`; later, `:e first-look` opens it.
@@ -301,6 +305,7 @@ ask your desk's configuration owner about adding it to the shared defaults.
 | Two blotters disagree | Compare their views and header markers for grouping pins, local filters, unscoped mode, and local as-of settings. |
 | A blotter ignores a grouping change | Run `:unpin` to resume following the shared grouping. |
 | A blotter ignores the shared scope | Check its unscoped marker. `:unscoped` toggles this mode; running it again restores scope following. |
+| A pricer header shows **N hidden**, or a line you added disappeared | The shared scope hides those lines; they are still in the sheet and still pricing. `:unscoped` on the pricer shows every line. |
 | A value is blank or marked `mixed` | Blank does not mean zero. Some measures cannot be attributed at that grouping depth; `mixed` means an ungrouped dimension has several contributing values. |
 | A number remains visible after an error | It may be the last good result. Read the notice and timestamp. |
 | Letter keys type instead of moving | An input is active. Finish or cancel that input before using navigation keys. |

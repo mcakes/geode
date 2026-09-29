@@ -16,7 +16,7 @@ use crate::core::sheet::{LineState, RowKind, Sheet};
 use geode_core::clock::Clock;
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::document::Value;
-use geode_core::pricing::{Instrument, Strike};
+use geode_core::pricing::{Expiry, Instrument, Strike};
 use geode_core::scope::{RowValues, Scope};
 
 /// Which sheet rows show under a scope.
@@ -59,11 +59,30 @@ impl Visibility {
     }
 }
 
+/// Columns `pricer` declares that a scope may not name. The sheet's
+/// `position_ref` and `instrument_ref` are its own `p<id>` / `i<id>`,
+/// never a desk reference, so a desk scope over them could only ever hide
+/// every line: they are treated as columns the pricer lacks. They stay
+/// declared, since grouping reads them.
+const NOT_SCOPEABLE: [&str; 2] = ["position_ref", "instrument_ref"];
+
+/// Whether a scope may name `column` (a derived dimension through its
+/// source) on the pricer.
+fn scope_column(
+    ds: &geode_core::schema::DatasetSpec,
+    dims: &DerivedDimensions,
+    column: &str,
+) -> bool {
+    let base = dims.base_column(column);
+    ds.column(base).is_some() && !NOT_SCOPEABLE.contains(&base)
+}
+
 /// Apply `scope` (already the frame's effective scope, named expressions
 /// resolved) to `sheet`. Dimension selections on columns `pricer` lacks
-/// are dropped first (`applicable_to`); an expression column `pricer`
-/// lacks refuses with `scope refused: '<col>' is not a pricer column`;
-/// any evaluator error refuses with `scope refused: <message>`. A refusal
+/// or may not scope by ([`NOT_SCOPEABLE`]) are dropped first; such a
+/// column in the expression refuses with `scope refused: '<col>' is not
+/// a pricer column`; any evaluator error refuses with `scope refused:
+/// <message>`, a row-independent one even over an empty sheet. A refusal
 /// hides nothing — the caller shows the message and paints `all`.
 pub fn apply_scope(
     sheet: &Sheet,
@@ -72,26 +91,32 @@ pub fn apply_scope(
     clock: Clock,
 ) -> Result<Visibility, String> {
     let ds = pricer_dataset();
-    let (scope, _dropped) = scope.applicable_to(ds, dims);
+    let (mut scope, _dropped) = scope.applicable_to(ds, dims);
+    scope
+        .dimensions
+        .retain(|d| scope_column(ds, dims, &d.column));
     if scope.is_empty() {
         return Ok(Visibility::all(sheet));
     }
     if let Some(e) = &scope.expression {
         for c in e.columns() {
-            if ds.column(dims.base_column(c)).is_none() {
+            if !scope_column(ds, dims, c) {
                 return Err(format!("scope refused: '{c}' is not a pricer column"));
             }
         }
     }
+    let refused = |e| format!("scope refused: {e}");
+    // Once, before any line: an empty sheet refuses what a full one would.
+    let bound = scope.bind(ds, dims).map_err(refused)?;
     let mut shown = vec![true; sheet.len()];
     let mut hidden = 0;
     for (row, slot) in shown.iter_mut().enumerate() {
         if !sheet.is_line(row) {
             continue;
         }
-        let keep = scope
-            .matches(&SheetRow { sheet, row, clock }, ds, dims)
-            .map_err(|e| format!("scope refused: {e}"))?;
+        let keep = bound
+            .matches(&SheetRow { sheet, row, clock })
+            .map_err(refused)?;
         if !keep {
             *slot = false;
             hidden += 1;
@@ -107,11 +132,19 @@ pub fn apply_scope(
 }
 
 /// A sheet line as the `pricer` dataset's row: every declared column by
-/// name, typed as declared (strike the number as typed; measures result ×
+/// name, typed as declared (strike the number as typed; a shift the one
+/// the cell paints, the sheet's when the line has none; measures result ×
 /// qty in local and usd; blank → None). One implementation, used by the
 /// evaluator, so scope values and cell values cannot drift: a text column
-/// reads the text [`cell_text`] paints, except a leg's `template`, which is
-/// its package's (a position-grain column; the leg's own cell is blank).
+/// reads the text [`cell_text`] paints, except
+///
+/// - a leg's `template`, its package's (a position-grain column; the
+///   leg's own cell is blank);
+/// - `status`, `fresh` for a fresh line, whose cell paints blank (the
+///   vocabulary is `fresh` / `pricing…` / the failure text);
+/// - `expiry`, the ISO date `YYYY-MM-DD` of a dated expiry, as desk data
+///   spells it, where the cell paints `Z26` / `20DEC26`; a tenor is its
+///   text.
 pub struct SheetRow<'a> {
     pub sheet: &'a Sheet,
     pub row: usize,
@@ -156,11 +189,19 @@ impl RowValues for SheetRow<'_> {
                 (_, Some(_)) if sheet.is_package(row) => None,
                 (_, Some(r)) => Some(Value::F64(r.get(measure, usd) * sheet.qty(row) as f64)),
             },
+            ColumnKind::Expiry => instrument.map(|i| {
+                Value::Utf8(match i.expiry() {
+                    Expiry::Date(d) => d.format("%Y-%m-%d").to_string(),
+                    Expiry::Tenor(t) => t.clone(),
+                })
+            }),
+            ColumnKind::Status if matches!(sheet.state(row), LineState::Fresh) => {
+                Some(Value::Utf8("fresh".into()))
+            }
             ColumnKind::SheetName
             | ColumnKind::PositionRef
             | ColumnKind::InstrumentRef
             | ColumnKind::UnderlyingRef
-            | ColumnKind::Expiry
             | ColumnKind::OptionType
             | ColumnKind::Currency
             | ColumnKind::BarrierType
@@ -183,7 +224,7 @@ mod tests {
     use geode_core::scope::{DimensionSelection, parse_expr};
 
     /// Rows: 0 SPX line, 1 CS, 2 and 3 its legs (4800 C, 5200 C), 4 NDX
-    /// line, 5 CAL, 6 and 7 its legs (Z26 C, H27 C).
+    /// line, 5 CAL, 6 and 7 its legs (H27 C, Z26 C).
     fn sheet() -> Sheet {
         let mut s = Sheet::new("t");
         push(
@@ -362,6 +403,99 @@ mod tests {
         assert_eq!(shown(&s, &v), vec![1, 2, 3]);
     }
 
+    /// A fresh line's status reads `fresh` (its painted cell is blank):
+    /// `status = 'fresh'` shows priced lines and hides the ones pricing.
+    #[test]
+    fn status_fresh_shows_priced_lines_and_hides_stale_ones() {
+        let mut s = sheet();
+        s.deliver_all(vec![(s.id(0), s.revision(0), Ok(result(1.0)))], at(0));
+        let v = apply(&s, &expr("status = 'fresh'")).unwrap();
+        assert_eq!(shown(&s, &v), vec![0], "only the priced SPX line");
+        let v = apply(&s, &expr("status = 'pricing…'")).unwrap();
+        assert!(!v.is_shown(0));
+        assert!(v.is_shown(4), "the unpriced NDX line is pricing");
+    }
+
+    /// `position_ref` and `instrument_ref` are the sheet's own `p<id>` /
+    /// `i<id>`, never a desk reference: a selection on them is dropped
+    /// (as a column the pricer lacks) and an expression naming them
+    /// refuses, rather than hiding every line.
+    #[test]
+    fn the_synthetic_keys_are_not_scope_columns() {
+        let s = sheet();
+        for column in ["position_ref", "instrument_ref"] {
+            let sel = Scope {
+                dimensions: vec![DimensionSelection {
+                    column: column.into(),
+                    values: vec!["POS-1".into()],
+                }],
+                ..Scope::default()
+            };
+            assert_eq!(apply(&s, &sel), Ok(Visibility::all(&s)), "{column}");
+            assert_eq!(
+                apply(&s, &expr(&format!("{column} = 'p1'"))),
+                Err(format!("scope refused: '{column}' is not a pricer column")),
+            );
+        }
+    }
+
+    /// A derived dimension over a synthetic key is not applicable either.
+    #[test]
+    fn a_derived_dimension_over_a_synthetic_key_is_not_applicable() {
+        let s = sheet();
+        let doc = merge_docs(
+            "dimensions",
+            &[LayerDoc::builtin(
+                "dimensions",
+                "[desk_pos]\nfrom = \"position_ref\"\n[desk_pos.values]\nmine = [\"p1\"]\n",
+            )
+            .unwrap()],
+        );
+        let (dims, diags) = DerivedDimensions::from_doc(&doc);
+        assert!(diags.is_empty(), "{diags:?}");
+        let sel = Scope {
+            dimensions: vec![DimensionSelection {
+                column: "desk_pos".into(),
+                values: vec!["mine".into()],
+            }],
+            ..Scope::default()
+        };
+        assert_eq!(
+            apply_scope(&s, &sel, &dims, Clock::utc()),
+            Ok(Visibility::all(&s))
+        );
+        assert_eq!(
+            apply_scope(&s, &expr("desk_pos = 'mine'"), &dims, Clock::utc()),
+            Err("scope refused: 'desk_pos' is not a pricer column".to_string())
+        );
+    }
+
+    /// A dated expiry's scope value is its ISO date, as the desk's data
+    /// spells it (the cell still paints `Z26`); a tenor is its text.
+    #[test]
+    fn expiry_scopes_by_iso_date_or_tenor() {
+        let mut s = sheet();
+        push(&mut s, vec![parse_builtin("SPX 3m 5000 C").unwrap()]);
+        let v = apply(&s, &expr("expiry = '2026-12-18'")).unwrap();
+        // Row 7 is the CAL's Z26 leg; its H27 leg (row 6) hides.
+        assert_eq!(shown(&s, &v), vec![0, 1, 2, 3, 4, 5, 7], "every Z26 line");
+        let v = apply(&s, &expr("expiry = '3m'")).unwrap();
+        assert_eq!(shown(&s, &v), vec![8]);
+        let v = apply(&s, &expr("expiry = 'Z26'")).unwrap();
+        assert_eq!(v.hidden, 7, "the painted month code is not the value");
+    }
+
+    /// A row-independent refusal refuses with no line to evaluate.
+    #[test]
+    fn an_empty_sheet_still_refuses_a_bind_error() {
+        let s = Sheet::new("t");
+        let r = apply(&s, &expr("strike like '5%'"));
+        assert!(
+            r.as_ref().is_err_and(|e| e.starts_with("scope refused: ")),
+            "{r:?}"
+        );
+    }
+
     #[test]
     fn sheet_row_values_match_the_painted_cells() {
         let mut s = sheet();
@@ -398,6 +532,14 @@ mod tests {
                 let ctx = format!("row {row} column {}", def.name);
                 match def.kind {
                     ColumnKind::Template => {} // a leg reads its package's; tested above
+                    // A fresh status paints blank but scopes as `fresh`
+                    // (`status_fresh_...`); stale and failed match below.
+                    ColumnKind::Status if matches!(s.state(row), LineState::Fresh) => {
+                        assert_eq!(got, Some(Value::Utf8("fresh".into())), "{ctx}")
+                    }
+                    // The cell paints `Z26`; the scope value is the ISO
+                    // date desk data carries (`expiry_scopes_by_...`).
+                    ColumnKind::Expiry => {}
                     ColumnKind::Qty => {
                         assert_eq!(got, Some(Value::I64(cell.text.parse().unwrap())), "{ctx}")
                     }
@@ -448,7 +590,7 @@ mod tests {
                 clock
             }
             .value("expiry"),
-            Some(Value::Utf8("Z26".into()))
+            Some(Value::Utf8("2026-12-18".into()))
         );
         assert_eq!(
             SheetRow {

@@ -20442,8 +20442,8 @@ run_mutation "pricer tile: the session record carries dead package ids" \
 # Undoing row deletion places the cursor on the restored rows.
 run_mutation "pricer tile: an undo that restores rows leaves the cursor below them" \
   crates/geode-pricer/src/tile.rs \
-  '                if let Some(id) = restored {' \
-  '                if let Some(id) = restored.filter(|_| false) {' \
+  '                if let Some(&id) = restored.first() {' \
+  '                if let Some(&id) = restored.first().filter(|_| false) {' \
   geode-pricer dd_then_u_on_an_open_package_restores_it_open_under_the_cursor
 
 # A leg restored under a closed package would put the cursor on a hidden
@@ -20816,8 +20816,8 @@ run_mutation "pricer tile: the cursor follows a re-pointed editor" \
 # over a column that is not the one it opened on.
 run_mutation "pricer tile: an editor whose column left the plan closes" \
   crates/geode-pricer/src/tile.rs \
-  '            None => self.drop_orphaned_editor(cx),' \
-  '            None => {}' \
+  '                self.drop_orphaned_editor(if scoped { SCOPE_DROPPED_EDIT } else { MOVED }, cx)' \
+  '                let _ = scoped;' \
   geode-pricer a_view_reload_without_the_edited_column_closes_the_editor
 
 # The window-less close still blurs before the field drops.
@@ -25364,7 +25364,7 @@ run_mutation "scope eval: text to BIGINT rounds half away from zero" \
 
 run_mutation "scope eval: an unmapped derived selection keeps nothing before any refusal" \
   crates/geode-core/src/scope/eval.rs \
-  '                return Ok(false);
+  '                return constant(false);
             }
             scopeable(ds, dims, &sel.column)?;' \
   '            }
@@ -25501,8 +25501,8 @@ run_mutation "pricer visibility: a package needs every leg to show" \
 # not refused: it must not blank the pricer.
 run_mutation "pricer visibility: a selection on a missing column is kept" \
   crates/geode-pricer/src/core/visibility.rs \
-  '    let (scope, _dropped) = scope.applicable_to(ds, dims);' \
-  '    let (scope, _dropped) = (scope.clone(), Vec::<String>::new());' \
+  '    let (mut scope, _dropped) = scope.applicable_to(ds, dims);' \
+  '    let (mut scope, _dropped) = (scope.clone(), Vec::<String>::new());' \
   geode-pricer a_selection_on_a_column_pricer_lacks_is_dropped_not_refused
 
 # A refused scope hides nothing, even after a scope that hid lines.
@@ -25552,8 +25552,8 @@ run_mutation "pricer scope: a rebuild re-applies the scope" \
 # `:unscoped` reads no frame scope.
 run_mutation "pricer scope: unscoped still reads the frame" \
   crates/geode-pricer/src/tile.rs \
-  $'    if unscoped {\n        return Ok(Scope::default());\n    }\n    frame.read(cx).effective_scope' \
-  $'    if false {\n        return Ok(Scope::default());\n    }\n    frame.read(cx).effective_scope' \
+  $'    if unscoped {\n        return Ok(Scope::default());\n    }\n    frame\n        .read(cx)' \
+  $'    if false {\n        return Ok(Scope::default());\n    }\n    frame\n        .read(cx)' \
   geode-pricer unscoped_shows_every_line_and_restores_from_the_session
 
 # `:unscoped` rides the session record, as the blotter's does.
@@ -25687,6 +25687,68 @@ run_mutation "pricer scope: arrival only when a scope applied" \
   '            following::arrive_immediately(&mut FrameDoor::new(&frame, cx), QueryKey(this.id.0));' \
   '            if this.scope_refusal.is_none() && !this.unscoped { following::arrive_immediately(&mut FrameDoor::new(&frame, cx), QueryKey(this.id.0)); }' \
   geode-pricer the_tile_arrives_on_a_refused_scope_and_while_unscoped
+
+# A fresh line's status scopes as `fresh`, not its blank cell: otherwise
+# `status = 'fresh'` hides every line.
+run_mutation "pricer scope: a fresh status reads its blank cell" \
+  crates/geode-pricer/src/core/visibility.rs \
+  '            ColumnKind::Status if matches!(sheet.state(row), LineState::Fresh) => {' \
+  '            ColumnKind::Status if false => {' \
+  geode-pricer status_fresh_shows_priced_lines_and_hides_stale_ones
+
+# The synthetic keys never match a desk value: a selection on them drops
+# and an expression naming them refuses, rather than hiding every line.
+run_mutation "pricer scope: the synthetic keys are scope columns" \
+  crates/geode-pricer/src/core/visibility.rs \
+  '    ds.column(base).is_some() && !NOT_SCOPEABLE.contains(&base)' \
+  '    ds.column(base).is_some()' \
+  geode-pricer the_synthetic_keys_are_not_scope_columns
+
+run_mutation "pricer scope: a derived dimension escapes the synthetic-key rule" \
+  crates/geode-pricer/src/core/visibility.rs \
+  '    ds.column(base).is_some() && !NOT_SCOPEABLE.contains(&base)' \
+  '    ds.column(base).is_some() && !NOT_SCOPEABLE.contains(&column)' \
+  geode-pricer a_derived_dimension_over_a_synthetic_key_is_not_applicable
+
+# A dated expiry scopes by its ISO date (desk data's spelling), a tenor by
+# its text.
+run_mutation "pricer scope: a dated expiry scopes by its painted code" \
+  crates/geode-pricer/src/core/visibility.rs \
+  '                    Expiry::Date(d) => d.format("%Y-%m-%d").to_string(),' \
+  '                    Expiry::Date(d) => d.format("%d%b%y").to_string(),' \
+  geode-pricer expiry_scopes_by_iso_date_or_tenor
+
+run_mutation "pricer scope: a tenor scopes upper-cased" \
+  crates/geode-pricer/src/core/visibility.rs \
+  '                    Expiry::Tenor(t) => t.clone(),' \
+  '                    Expiry::Tenor(t) => t.to_uppercase(),' \
+  geode-pricer expiry_scopes_by_iso_date_or_tenor
+
+# A line the trader adds that the scope hides says so in the footer, at
+# every landing: the entry bar, a put, an undo or redo restore.
+run_mutation "pricer scope: a hidden landing is silent" \
+  crates/geode-pricer/src/tile.rs \
+  $'        if hidden {\n            self.footer = Some(HIDDEN_LANDING.into());' \
+  $'        if false {\n            self.footer = Some(HIDDEN_LANDING.into());' \
+  geode-pricer an_entry_bar_line_the_scope_hides_says_so
+
+run_mutation "pricer scope: an entry-bar insert skips the landing note" \
+  crates/geode-pricer/src/tile.rs \
+  $'.map(|r| self.sheet.id(r)).collect();\n                self.note_hidden_landing(ids);' \
+  $'.map(|r| self.sheet.id(r)).collect();\n                let _ = ids;' \
+  geode-pricer an_entry_bar_line_the_scope_hides_says_so
+
+run_mutation "pricer scope: a put skips the landing note" \
+  crates/geode-pricer/src/tile.rs \
+  $'        let ids: Vec<LineId> = (first..at).map(|r| self.sheet.id(r)).collect();\n        self.note_hidden_landing(ids);' \
+  $'        let ids: Vec<LineId> = (first..at).map(|r| self.sheet.id(r)).collect();\n        let _ = ids;' \
+  geode-pricer a_put_or_restore_the_scope_hides_says_so
+
+run_mutation "pricer scope: a restore skips the landing note" \
+  crates/geode-pricer/src/tile.rs \
+  '                self.note_hidden_landing(restored);' \
+  '                let _ = restored;' \
+  geode-pricer a_put_or_restore_the_scope_hides_says_so
 
 # A `dimensions` edit alone reloads the pricer, and the reload hands the
 # factory the new dimensions.

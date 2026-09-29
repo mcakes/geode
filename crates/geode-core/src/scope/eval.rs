@@ -224,17 +224,48 @@ impl Scope {
     /// query, so a caller must refuse the scope if any row errs. Dropping
     /// only the failing row and keeping the rest would narrow the rows in
     /// a way the SQL never does.
+    ///
+    /// Over many rows, [`Scope::bind`] once and [`BoundScope::matches`]
+    /// each row: the row-independent checks then run once.
     pub fn matches(
         &self,
         row: &dyn RowValues,
         ds: &DatasetSpec,
         dims: &DerivedDimensions,
     ) -> Result<bool, String> {
+        self.bind(ds, dims)?.matches(row)
+    }
+
+    /// The row-independent refusals `matches` would report on any row,
+    /// answered with no row: a caller over an empty set of rows still
+    /// refuses what the SQL's compiler or binder refuses.
+    pub fn bind_check(&self, ds: &DatasetSpec, dims: &DerivedDimensions) -> Result<(), String> {
+        self.bind(ds, dims).map(|_| ())
+    }
+
+    /// Run the row-independent part of `matches` once: its refusals, and
+    /// the constants that decide every row (`impossible`, a derived value
+    /// nothing maps to, a text filter with nothing to search).
+    pub fn bind<'a>(
+        &'a self,
+        ds: &'a DatasetSpec,
+        dims: &'a DerivedDimensions,
+    ) -> Result<BoundScope<'a>, String> {
+        let constant = |value| {
+            Ok(BoundScope {
+                scope: self,
+                ds,
+                dims,
+                textual: Vec::new(),
+                needle: None,
+                constant: Some(value),
+            })
+        };
         if !self.named.is_empty() {
             return Err("scope carries unresolved named expressions".into());
         }
         if self.impossible {
-            return Ok(false);
+            return constant(false);
         }
         let selections: Vec<_> = self
             .dimensions
@@ -245,7 +276,7 @@ impl Scope {
             if let Some(d) = dims.get(&sel.column)
                 && !d.values.values().any(|v| sel.values.contains(v))
             {
-                return Ok(false);
+                return constant(false);
             }
             scopeable(ds, dims, &sel.column)?;
         }
@@ -283,11 +314,42 @@ impl Scope {
         // which DuckDB folds before converting the expression's literals.
         // The expression folds its own constants in `eval`.
         if self.text.is_some() && textual.is_empty() {
-            return Ok(false);
+            return constant(false);
         }
+        Ok(BoundScope {
+            scope: self,
+            ds,
+            dims,
+            textual,
+            needle: self.text.as_ref().map(|t| t.to_lowercase()),
+            constant: None,
+        })
+    }
+}
 
+/// A scope whose row-independent checks passed ([`Scope::bind`]): answers
+/// each row as [`Scope::matches`] does, without repeating them.
+pub struct BoundScope<'a> {
+    scope: &'a Scope,
+    ds: &'a DatasetSpec,
+    dims: &'a DerivedDimensions,
+    textual: Vec<&'a str>,
+    /// The text filter, lower-cased once.
+    needle: Option<String>,
+    /// Every row's verdict, when the scope decides it without a row.
+    constant: Option<bool>,
+}
+
+impl BoundScope<'_> {
+    /// Whether `row` is kept; see [`Scope::matches`].
+    pub fn matches(&self, row: &dyn RowValues) -> Result<bool, String> {
+        if let Some(c) = self.constant {
+            return Ok(c);
+        }
+        let (scope, ds, dims) = (self.scope, self.ds, self.dims);
+        let selections = scope.dimensions.iter().filter(|s| !s.values.is_empty());
         let mut kept = Some(true);
-        for sel in &selections {
+        for sel in selections {
             let member = match dims.get(&sel.column) {
                 Some(d) => match row.value(&d.from) {
                     None => None,
@@ -306,20 +368,19 @@ impl Scope {
             };
             kept = and(kept, member);
         }
-        if let Some(needle) = &self.text {
-            let needle = needle.to_lowercase();
+        if let Some(needle) = &self.needle {
             let mut found = Some(false);
-            for name in &textual {
+            for name in &self.textual {
                 let hit = match row.value(name) {
                     None => None,
-                    Some(Value::Utf8(s)) => Some(s.to_lowercase().contains(&needle)),
+                    Some(Value::Utf8(s)) => Some(s.to_lowercase().contains(needle.as_str())),
                     Some(other) => return Err(mismatch(name, &other)),
                 };
                 found = or(found, hit);
             }
             kept = and(kept, found);
         }
-        if let Some(e) = &self.expression {
+        if let Some(e) = &scope.expression {
             kept = and(kept, e.eval(row, ds, dims)?);
         }
         Ok(kept == Some(true))
@@ -744,6 +805,36 @@ mod tests {
             scope
                 .matches(&row(Some("x"), None), &ds(), &DerivedDimensions::default())
                 .is_err()
+        );
+    }
+
+    /// `bind_check` answers a row-independent refusal with no row at all
+    /// (an empty sheet still refuses), in `matches`'s own words; a bound
+    /// scope then answers each row as `matches` does.
+    #[test]
+    fn bind_check_refuses_without_a_row_as_matches_does() {
+        let dims = DerivedDimensions::default();
+        let scope = |t: &str| Scope {
+            expression: Some(parse_expr(t).unwrap()),
+            ..Scope::default()
+        };
+        let bad = scope("n like '5%'");
+        let refused = bad.bind_check(&ds(), &dims);
+        assert!(refused.is_err(), "{refused:?}");
+        assert_eq!(
+            refused.map(|_| true),
+            bad.matches(&row(Some("x"), Some(1.0)), &ds(), &dims)
+        );
+        let good = scope("a = 'x'");
+        assert_eq!(good.bind_check(&ds(), &dims), Ok(()));
+        let spec = ds();
+        let bound = good.bind(&spec, &dims).unwrap();
+        assert_eq!(bound.matches(&row(Some("x"), None)), Ok(true));
+        assert_eq!(bound.matches(&row(Some("y"), None)), Ok(false));
+        assert_eq!(
+            bound.matches(&row(None, None)),
+            Ok(false),
+            "NULL is not TRUE"
         );
     }
 

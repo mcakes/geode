@@ -214,6 +214,15 @@ pub(crate) const MOVED: &str = "the cell moved; edit refused";
 /// this.
 pub(crate) const PARTLY_HIDDEN: &str = "package partly hidden by the scope: edit its legs";
 
+/// An insert, put, undo or redo that lands a line the frame's scope hides
+/// says so: the line is in the sheet, pricing, but the cursor cannot rest
+/// on it, and a line that vanishes without a word reads as lost.
+pub(crate) const HIDDEN_LANDING: &str = "added line is hidden by the scope (:unscoped shows it)";
+
+/// An open editor whose line the frame's scope now hides is dropped with
+/// this, not `MOVED`: the cell did not move, the scope hid it.
+pub(crate) const SCOPE_DROPPED_EDIT: &str = "the line is hidden by the scope; edit dropped";
+
 /// A counted `g p` whose run of rows includes one the scope hides: it
 /// would package a line the trader never saw.
 pub(crate) const HIDDEN_IN_RANGE: &str = "a line in that range is hidden by the scope";
@@ -570,7 +579,10 @@ fn read_scope(frame: &FrameRef, unscoped: bool, cx: &App) -> Result<Scope, Strin
     if unscoped {
         return Ok(Scope::default());
     }
-    frame.read(cx).effective_scope(&Scope::default())
+    frame
+        .read(cx)
+        .effective_scope(&Scope::default())
+        .map_err(|e| format!("scope refused: {e}"))
 }
 
 fn app_clock(cx: &App) -> Clock {
@@ -1385,7 +1397,14 @@ impl PricerTile {
             cx,
         ) {
             Ok(()) => {
-                let id = self.sheet.id(landed_row(at));
+                let first = landed_row(at);
+                let id = self.sheet.id(first);
+                let landed = match &spec {
+                    RowSpec::Package { legs, .. } => 1 + legs.len(),
+                    _ => 1,
+                };
+                let ids: Vec<LineId> = (first..first + landed).map(|r| self.sheet.id(r)).collect();
+                self.note_hidden_landing(ids);
                 if matches!(spec, RowSpec::Package { .. }) {
                     self.expansion.set(id, true);
                 }
@@ -2920,12 +2939,19 @@ impl PricerTile {
         // Select the first row reinstated by a Restore inverse. Other history steps
         // keep the cursor's existing LineId, subject to the rebuild's cursor
         // resolution.
-        let restored = self.undo.peek(redo).and_then(|u| {
-            u.inverse.iter().find_map(|e| match e {
-                Edit::Restore { rows, .. } => rows.first().map(|r| r.id),
-                _ => None,
+        let restored: Vec<LineId> = self
+            .undo
+            .peek(redo)
+            .map(|u| {
+                u.inverse
+                    .iter()
+                    .flat_map(|e| match e {
+                        Edit::Restore { rows, .. } => rows.iter().map(|r| r.id).collect(),
+                        _ => Vec::new(),
+                    })
+                    .collect()
             })
-        });
+            .unwrap_or_default();
         let stepped = if redo {
             self.undo.redo(&mut self.sheet)
         } else {
@@ -2933,7 +2959,7 @@ impl PricerTile {
         };
         match stepped {
             Ok(true) => {
-                if let Some(id) = restored {
+                if let Some(&id) = restored.first() {
                     // Open a restored leg's parent so the selected row is visible.
                     if let Some(p) = self.sheet.index_of(id).and_then(|r| self.sheet.parent(r)) {
                         self.expansion.set(self.sheet.id(p), true);
@@ -2941,6 +2967,7 @@ impl PricerTile {
                     self.cursor.line = Some(id);
                 }
                 self.after_edit(cx);
+                self.note_hidden_landing(restored);
                 Ok(())
             }
             Ok(false) => Err(if redo {
@@ -2998,6 +3025,8 @@ impl PricerTile {
             }
             at += 1;
         }
+        let ids: Vec<LineId> = (first..at).map(|r| self.sheet.id(r)).collect();
+        self.note_hidden_landing(ids);
         self.cursor.line = Some(self.sheet.id(first));
         self.rebuild(cx);
         Ok(())
@@ -4057,6 +4086,20 @@ impl PricerTile {
         }
     }
 
+    /// Footer [`HIDDEN_LANDING`] when the scope in force hides any of
+    /// `ids`, the lines an insert, put or restore just landed. Called
+    /// after that edit's rebuild, so `visibility` has judged them.
+    fn note_hidden_landing(&mut self, ids: impl IntoIterator<Item = LineId>) {
+        let hidden = ids.into_iter().any(|id| {
+            self.sheet
+                .index_of(id)
+                .is_some_and(|r| !self.visibility.is_shown(r))
+        });
+        if hidden {
+            self.footer = Some(HIDDEN_LANDING.into());
+        }
+    }
+
     /// Whether sheet row `row` is a package the scope partly hides: its
     /// row is read-only (`PARTLY_HIDDEN`).
     pub(crate) fn partly_hidden(&self, row: usize) -> bool {
@@ -4088,7 +4131,8 @@ impl PricerTile {
 
     /// Keep an open editor attached to its LineId and ColumnKind across rebuilds.
     /// Update its plan index and the cursor column together. If either target leaves
-    /// the visible grid or plan, close the editor and show MOVED.
+    /// the visible grid or plan, close the editor and show MOVED, or
+    /// SCOPE_DROPPED_EDIT when the frame's scope hid its line.
     fn follow_editor(&mut self, cx: &mut Context<Self>) {
         let Some(editor) = self.editor.as_mut() else {
             return;
@@ -4100,14 +4144,22 @@ impl PricerTile {
                 editor.set_col(c);
                 self.cursor.col = c;
             }
-            None => self.drop_orphaned_editor(cx),
+            None => {
+                let scoped = self
+                    .sheet
+                    .index_of(line)
+                    .is_some_and(|r| !self.visibility.is_shown(r));
+                self.drop_orphaned_editor(if scoped { SCOPE_DROPPED_EDIT } else { MOVED }, cx)
+            }
         }
     }
 
     /// Remove an editor whose target disappeared during a rebuild without a Window.
     /// Retain its focus handle until deferred access to the opening window can blur it.
     /// Check that it still owns focus so a newer field is not blurred.
-    fn drop_orphaned_editor(&mut self, cx: &mut Context<Self>) {
+    /// `why` is the footer: `MOVED`, or `SCOPE_DROPPED_EDIT` when the
+    /// frame's scope hid the line.
+    fn drop_orphaned_editor(&mut self, why: &'static str, cx: &mut Context<Self>) {
         // Mid-rebuild a rollback would rebuild inside the rebuild: steps
         // still in the sheet are recorded instead, so they stay undoable
         // rather than landing with no history.
@@ -4117,7 +4169,7 @@ impl PricerTile {
             self.undo.record(bulk.undo);
         }
         if self.release_editor(cx) {
-            self.footer = Some(MOVED.into());
+            self.footer = Some(why.into());
         }
     }
 
@@ -4151,11 +4203,13 @@ impl PricerTile {
         } else {
             self.notice.clone()
         };
-        let standing = self
-            .scope_refusal
-            .clone()
-            .map(Notice::danger)
-            .or_else(|| self.view_notice.clone().map(Notice::warning));
+        // Both stand while both hold: the refusal (danger) first, then
+        // the view fallback, so neither masks the other.
+        let standing = match (&self.scope_refusal, &self.view_notice) {
+            (Some(scope), Some(view)) => Some(Notice::danger(format!("{scope} · {view}"))),
+            (Some(scope), None) => Some(Notice::danger(scope.clone())),
+            (None, view) => view.clone().map(Notice::warning),
+        };
         self.header = header::prepare(HeaderInputs {
             sheet: &self.sheet,
             notice,
