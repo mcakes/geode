@@ -11,6 +11,7 @@ pub mod context;
 pub mod dimensions;
 pub mod document;
 pub mod egress_config;
+pub mod expansion;
 pub mod format;
 pub mod grid;
 pub mod groupings;

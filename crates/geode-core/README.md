@@ -35,6 +35,7 @@ Reader defaults, partial validation, and presentation rules are described in
 | `query` | Requests and outcomes for views, distinct values, catalogs, and documents; request keys, tags, and as-of parsing. |
 | `snapshot` | Immutable, `Arc`-shared columnar results, attribution and freshness metadata, and typed cell access. Feature modules can read cells without an Arrow dependency; construction and raw array access also expose Arrow types. |
 | `tree` | The parent/child index of a rollup result, built once on the query worker. |
+| `expansion` | The path-keyed open/closed state of a grouped tree (`Path`, `Expansion`), shared by the blotter and the pricer. A path is the grouping values from the root, `None` for NULL, so it survives requery and sibling reordering; `prune_to` drops paths deeper than a new grouping. Named `expansion`, not `tree`, because `tree` is the snapshot's index. |
 | `document` | Columnar document rows, keys, attributes, parser/writer traits, and schema validation for feed and application-authored documents. |
 | `panel` | Market-data panel vocabulary (`PanelSpec`, `KindActionRegistry`) and the pure `panels` reader: `read_panels` judges each panel alone, `load_panels` also checks it against the schema and document kinds. Every problem refuses the panel with one Error; nothing is guessed. |
 | `series` | Timeseries requests, bucket frequencies and rules, aligned results, and fetch provenance. `series::expr` parses arithmetic over source names and resolves references to slot IDs. |

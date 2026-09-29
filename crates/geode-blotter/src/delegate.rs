@@ -5,13 +5,14 @@
 
 use crate::core::cache::{FormatCache, cell};
 use crate::core::cursor::{Cursor, find_by_path, restore_by_path};
-use crate::core::expansion::{Expansion, Path, depth_bound, path_of};
+use crate::core::expansion::{depth_bound, path_of};
 use crate::core::flatten::{SortOrder, SortSpec, flatten};
 use crate::core::format::Sign;
 use crate::core::plan::{ColumnKind, ColumnPlan};
 use crate::core::select::summarize;
 use geode_core::attribution::Attribution;
 use geode_core::colour::{Anchors, NamedColours, Tokens};
+use geode_core::expansion::{Expansion, Path};
 use geode_core::grid::selection::{Lost, Resolved, SelectKind, Selection, UNSUMMABLE_MARK};
 use geode_core::snapshot::Snapshot;
 use geode_core::view::{Colour, ViewSpec};

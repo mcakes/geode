@@ -12,7 +12,7 @@ Current behavior and rationale:
 
 | Module | Holds |
 |---|---|
-| `core` | Column plans, expansion paths, visible-row traversal, cursor movement (`core::cursor`, moved by `geode_tile::motion`), find, selection summaries, cursor-row dimension context, TSV export, command parsing, and visible-window formatting without GPUI. |
+| `core` | Column plans, expansion paths (`core::expansion`: `path_of` and `depth_bound` over `geode_core::expansion::Expansion`), visible-row traversal, cursor movement (`core::cursor`, moved by `geode_tile::motion`), find, selection summaries, cursor-row dimension context, TSV export, command parsing, and visible-window formatting without GPUI. |
 | `delegate` | `TableDelegate` adapter with prepared rows and cached cell text. Holds `:autosize`'s fitted widths by column name, which `column()` prefers over the plan's; `fit_columns` measures the header and the format cache's window only. Owns selection and paint caches; reports cell gestures and chevron clicks to the tile. |
 | `tile` | `BlotterTile`, the entity per tile: a key context that publishes `grid` (so the shell's shared `motion::*` keys reach it), `dispatch` routing every `motion::*` id through `geode_tile::motion`, local query overrides, requests through `DataHandle`, frame observation over `geode_tile::following`, snapshot application, header and footer rendering. The header notice is a `geode_tile::notice::Notice`: dropped sorts and selections are warnings, query and configuration failures danger. |
 | `content` | The `TileContent` wrapper and `BlotterFactory`, the roster entry the app builds with the data handle. |

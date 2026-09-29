@@ -3609,10 +3609,10 @@ run_mutation "expansion: the depth bound is one past the deepest open node" \
   the_depth_bound_is_one_past_the_deepest_open_node_capped_at_the_grouping
 
 run_mutation "expansion: closing one node under open_all leaves its siblings open" \
-  crates/geode-blotter/src/core/expansion.rs \
+  crates/geode-core/src/expansion.rs \
   '            !self.closed.contains(path)' \
   '            true' \
-  geode-blotter \
+  geode-core \
   close_under_open_all_closes_only_that_node
 
 run_mutation "find: fzf narrows and vim does not" \

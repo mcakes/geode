@@ -3,8 +3,8 @@
 //! sibling set without changing the snapshot. Rebuild after snapshot,
 //! expansion, or sort changes; rendering reads the prepared list.
 
-use crate::core::expansion::{Expansion, Path};
 use crate::core::plan::{ColumnKind, ColumnPlan};
+use geode_core::expansion::{Expansion, Path};
 use geode_core::snapshot::Snapshot;
 use std::cmp::Ordering;
 
@@ -289,10 +289,11 @@ fn text_key(snapshot: &Snapshot, i: usize, row: usize) -> TextKey<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::expansion::{Expansion, path_of};
+    use crate::core::expansion::path_of;
     use crate::core::plan::ColumnPlan;
     use geode_core::attribution::{Attribution, ScopeSemantics};
     use geode_core::config::{LayerDoc, merge_docs};
+    use geode_core::expansion::Expansion;
     use geode_core::snapshot::{ColumnMeta, Snapshot, TestColumn};
     use geode_core::view::ViewSpec;
 
