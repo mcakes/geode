@@ -1719,6 +1719,14 @@ impl ShellView {
         self.occupants.get(&tile).map(|o| o.content.title(cx))
     }
 
+    /// The open page's kind, or `None` while no page is open — cross-crate
+    /// test reach, the same door as `picker()`: `geode-app`'s tests open the
+    /// page from a tile's health chip, a route with no shell dispatch.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn open_page_kind_for_test(&self) -> Option<&'static str> {
+        self.open_page_kind()
+    }
+
     /// The configured clock (`AppClock`), for the shell's own painters.
     pub fn clock(&self, cx: &gpui::App) -> geode_core::clock::Clock {
         cx.global::<crate::clock::AppClock>().0

@@ -73,6 +73,15 @@ has none of them.
   tile.
 - A notice is a status (muted), warning or danger line in the theme's text
   tones; which of a tile's notices shows is the tile's own precedence.
+- Every tile header is `geode_tile::header::frame`: 22 px at the design rem,
+  the stack marker first, the module's own left side, then a right cluster in
+  a fixed order — status items, notices, source times, the health chip, `⋯`.
+  A stale source time takes the warning text tone. The health chip appears
+  only while a source the tile reads is PendingTooLong (`pending`), Degraded
+  (`degraded`) or Failed (`failed`); its tooltip names the worst source and
+  its reason, with `+N more` for other unhealthy sources. Clicking it opens
+  the diagnostics page and never closes it; it has no key of its own — the
+  page's own binding (`mod+d`) is the keyboard route.
 
 ### Motion
 

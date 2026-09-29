@@ -25755,6 +25755,53 @@ run_mutation "tile header: a queued page open never closes the page" \
     }' \
   geode-shell a_queued_page_open_never_closes_the_page
 
+# A queued open under a modal is refused with the close-the-dialog notice;
+# without the guard the page opens behind the modal.
+run_mutation "tile header: a queued page open under a modal is refused" \
+  crates/geode-shell/src/shell/page.rs \
+  '        if self.modal_open() {
+            self.notice = Some(super::input::CLOSE_DIALOG_FIRST);' \
+  '        if false && self.modal_open() {
+            self.notice = Some(super::input::CLOSE_DIALOG_FIRST);' \
+  geode-shell a_queued_page_open_under_a_modal_is_refused
+
+# The version gate: every diagnostics notify would re-ask and re-format.
+run_mutation "tile header: health re-asks only when sources moved" \
+  crates/geode-tile/src/header.rs \
+  '        if self.seen == Some(now) {' \
+  '        if false && self.seen == Some(now) {' \
+  geode-tile refresh_asks_only_when_the_sources_version_moved
+
+# The chip's click queues the page.
+run_mutation "tile header: the chip click asks for the page" \
+  crates/geode-tile/src/header.rs \
+  '                d.request_diagnostics_page();' \
+  '' \
+  geode-tile clicking_the_health_chip_queues_the_diagnostics_page
+
+# Cluster order; reversed, the chip lands left of the notices.
+run_mutation "tile header: the cluster paints in order" \
+  crates/geode-tile/src/header.rs \
+  '    let mut row = h_flex().items_center().gap_3();' \
+  '    let mut row = h_flex().flex_row_reverse().items_center().gap_3();' \
+  geode-tile the_cluster_paints_in_order_and_no_chip_without_health
+
+# Failed is danger, not warning.
+run_mutation "tile header: a failed chip is the danger tone" \
+  crates/geode-tile/src/header.rs \
+  '            Health::Failed { .. } => ("failed", chip::Tone::Danger),' \
+  '            Health::Failed { .. } => ("failed", chip::Tone::Warning),' \
+  geode-tile the_chip_words_tones_and_tooltip
+
+# A stale run takes the warning text tone.
+run_mutation "tile header: a stale run is warning text" \
+  crates/geode-tile/src/header.rs \
+  '    if stale {
+        chip_paint(theme, chip::Tone::WarningText).text' \
+  '    if false {
+        chip_paint(theme, chip::Tone::WarningText).text' \
+  geode-tile a_stale_run_takes_the_warning_text_tone
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
