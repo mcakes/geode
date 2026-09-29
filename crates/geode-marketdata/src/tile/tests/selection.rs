@@ -228,7 +228,7 @@ fn y_over_rows_copies_a_header_and_every_painted_column_then_ends_the_selection(
     let (axis, columns, labels) = h.tile.read_with(&vcx, |t, _| {
         let m = t.model();
         (
-            t.spec.rows.column,
+            t.spec.rows.column.clone(),
             m.columns.join("\t"),
             [m.rows[0].label.to_string(), m.rows[1].label.to_string()],
         )
@@ -463,40 +463,42 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
 /// Two numeric columns of different declared types — `amount` (F64) and
 /// `units` (I64) — over one row, for the all-or-nothing and per-column
 /// step rules. `cell_ref`s are `(0, 0)` amount and `(0, 1)` units.
-const SCHEDULE_MIXED: PanelSpec = PanelSpec {
-    kind: "sched_mixed",
-    title: "Mixed",
-    dataset: "div_schedule_mixed",
-    document: "div_schedule_mixed",
-    rows: RowAxis {
-        column: "dividend_id",
-        identity: RowIdentity::Minted,
-        label: RowLabel::Shown,
-    },
-    columns: Columns::Values(&[
-        ValueColumn {
-            column: "amount",
-            label: "amount",
-            ty: ColumnType::F64,
-            format: ColumnFormat::MEASURE,
-            choices: None,
-            required: true,
+static SCHEDULE_MIXED: LazyLock<Arc<PanelSpec>> = LazyLock::new(|| {
+    Arc::new(PanelSpec {
+        kind: "sched_mixed".into(),
+        title: "Mixed".into(),
+        dataset: "div_schedule_mixed".into(),
+        document: "div_schedule_mixed".into(),
+        rows: RowAxis {
+            column: "dividend_id".into(),
+            identity: RowIdentity::Minted,
+            label: RowLabel::Shown,
         },
-        ValueColumn {
-            column: "units",
-            label: "units",
-            ty: ColumnType::I64,
-            format: ColumnFormat::MEASURE,
-            choices: None,
-            required: true,
-        },
-    ]),
-    header: &[],
-    slice_values: &[],
-    value_type: ColumnType::F64,
-    format: ColumnFormat::MEASURE,
-    actions: &[],
-};
+        columns: Columns::Values(vec![
+            ValueColumn {
+                column: "amount".into(),
+                label: "amount".into(),
+                ty: ColumnType::F64,
+                format: ColumnFormat::MEASURE,
+                choices: None,
+                required: true,
+            },
+            ValueColumn {
+                column: "units".into(),
+                label: "units".into(),
+                ty: ColumnType::I64,
+                format: ColumnFormat::MEASURE,
+                choices: None,
+                required: true,
+            },
+        ]),
+        header: Vec::new(),
+        slice_values: Vec::new(),
+        value_type: ColumnType::F64,
+        format: ColumnFormat::MEASURE,
+        actions: Vec::new(),
+    })
+});
 
 fn open_mixed(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTestContext) {
     let (h, mut vcx) = open_spec(cx, &SCHEDULE_MIXED, None);
@@ -1168,40 +1170,42 @@ fn escape_after_an_auto_replace_says_nothing_about_steps(cx: &mut gpui::TestAppC
 
 /// A flat panel with a free-text `note` beside a number `amount`, over
 /// two rows: a text cursor cell for the absolute-commit rule.
-const SCHEDULE_NOTE_AMOUNT: PanelSpec = PanelSpec {
-    kind: "sched_note_amount",
-    title: "Notes",
-    dataset: "div_schedule_note_amount",
-    document: "div_schedule_note_amount",
-    rows: RowAxis {
-        column: "dividend_id",
-        identity: RowIdentity::Minted,
-        label: RowLabel::Shown,
-    },
-    columns: Columns::Values(&[
-        ValueColumn {
-            column: "note",
-            label: "note",
-            ty: ColumnType::Utf8,
-            format: ColumnFormat::MEASURE,
-            choices: None,
-            required: false,
+static SCHEDULE_NOTE_AMOUNT: LazyLock<Arc<PanelSpec>> = LazyLock::new(|| {
+    Arc::new(PanelSpec {
+        kind: "sched_note_amount".into(),
+        title: "Notes".into(),
+        dataset: "div_schedule_note_amount".into(),
+        document: "div_schedule_note_amount".into(),
+        rows: RowAxis {
+            column: "dividend_id".into(),
+            identity: RowIdentity::Minted,
+            label: RowLabel::Shown,
         },
-        ValueColumn {
-            column: "amount",
-            label: "amount",
-            ty: ColumnType::F64,
-            format: ColumnFormat::MEASURE,
-            choices: None,
-            required: true,
-        },
-    ]),
-    header: &[],
-    slice_values: &[],
-    value_type: ColumnType::F64,
-    format: ColumnFormat::MEASURE,
-    actions: &[],
-};
+        columns: Columns::Values(vec![
+            ValueColumn {
+                column: "note".into(),
+                label: "note".into(),
+                ty: ColumnType::Utf8,
+                format: ColumnFormat::MEASURE,
+                choices: None,
+                required: false,
+            },
+            ValueColumn {
+                column: "amount".into(),
+                label: "amount".into(),
+                ty: ColumnType::F64,
+                format: ColumnFormat::MEASURE,
+                choices: None,
+                required: true,
+            },
+        ]),
+        header: Vec::new(),
+        slice_values: Vec::new(),
+        value_type: ColumnType::F64,
+        format: ColumnFormat::MEASURE,
+        actions: Vec::new(),
+    })
+});
 
 fn open_note_amount(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTestContext) {
     let (h, mut vcx) = open_spec(cx, &SCHEDULE_NOTE_AMOUNT, None);
@@ -1675,8 +1679,13 @@ fn an_upload_armed_mid_step_sends_the_draft_as_it_was_before_i(cx: &mut gpui::Te
     h.edit_one_cell(&mut vcx); // fwd on the first term: the one edit to send
     let before = h.tile.read_with(&vcx, |t, _| t.draft().clone());
     let expected = h.tile.read_with(&vcx, |t, _| {
-        crate::core::upload::assemble(&t.painted_snapshot().unwrap(), t.spec, t.model(), t.draft())
-            .unwrap()
+        crate::core::upload::assemble(
+            &t.painted_snapshot().unwrap(),
+            &t.spec,
+            t.model(),
+            t.draft(),
+        )
+        .unwrap()
     });
     select_two_nodes_by_two_terms(&h, &mut vcx);
     h.dispatch(&mut vcx, "edit", None);

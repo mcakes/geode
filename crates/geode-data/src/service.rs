@@ -2312,6 +2312,65 @@ mod tests {
         (dir, service, rx)
     }
 
+    /// A service over the two-part-key `option_chain` fixture. SPX has two
+    /// expiries: 2026-10-16 published at 14:00 and republished at 14:10,
+    /// 2026-11-20 published once at 14:05. SPXW (a string extension of
+    /// SPX) publishes at 14:02 and again at 14:12, so it holds both the
+    /// newest source time and the greatest generation in the dataset.
+    fn chain_service() -> (
+        tempfile::TempDir,
+        DataService,
+        std::sync::mpsc::Receiver<DataEvent>,
+    ) {
+        use crate::store::ddl::tests_support::{chain_dataset, chain_doc};
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
+        let ds = chain_dataset();
+        store.apply_schema(&ds).unwrap();
+        crate::store::catalog::Catalog::new(store.writer())
+            .ensure_tables()
+            .unwrap();
+        for (u, e, mids, at) in [
+            ("SPX", "2026-10-16", [0.20, 0.18], "2026-09-12T14:00:00Z"),
+            ("SPXW", "2026-10-16", [0.50, 0.50], "2026-09-12T14:02:00Z"),
+            ("SPX", "2026-11-20", [0.22, 0.19], "2026-09-12T14:05:00Z"),
+            ("SPX", "2026-10-16", [0.21, 0.17], "2026-09-12T14:10:00Z"),
+            ("SPXW", "2026-10-16", [0.51, 0.51], "2026-09-12T14:12:00Z"),
+        ] {
+            crate::store::document::publish_document(
+                &store,
+                &crate::store::document::DocumentPublishRequest {
+                    dataset: &ds,
+                    source: "opra_sim",
+                    rows: &chain_doc(u, e, mids),
+                    source_time: ts(at),
+                    received_at: ts(at),
+                    bytes: 0,
+                },
+            )
+            .unwrap();
+        }
+        drop(store);
+
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(ds);
+        let (service, rx) = DataService::open_channel(DataServiceConfig {
+            db_path: dir.path().join("geode.duckdb"),
+            schema,
+            views: Vec::new(),
+            dimensions: DerivedDimensions::default(),
+            query_workers: 2,
+            sources: Vec::new(),
+            adapters: Default::default(),
+            documents: Default::default(),
+            egress: Vec::new(),
+            pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
+        })
+        .unwrap();
+        (dir, service, rx)
+    }
+
     /// A service over a `local = true` document dataset (`sheets`) plus
     /// the CVI fixture dataset (not `local`), with a `FakePricer` behind
     /// the pricing worker and a `FakeVolModel` behind the vol worker —
@@ -4147,6 +4206,73 @@ mod tests {
         assert!(
             ndx_generation < spx_generation,
             "NDX.Z's own generation, not the dataset's newest"
+        );
+        svc.shutdown();
+    }
+
+    /// A live request by a key prefix reads every document under it
+    /// through the service and reports the matched set's freshness: the
+    /// STALEST matched document's newest source time (SPX 2026-11-20 at
+    /// 14:05, not SPX 2026-10-16's 14:10 republish) and the greatest
+    /// matched generation (SPX 2026-10-16's republish, not SPXW's newer
+    /// one). An exact-batch freshness lookup finds no batch named `SPX`
+    /// and reports neither.
+    #[test]
+    fn the_service_reports_a_live_prefix_requests_freshness() {
+        let (_dir, svc, rx) = chain_service();
+        let request = |key: u64, parts: &[&str]| DocumentParams {
+            key: QueryKey(key),
+            tag: 1,
+            submitted: Instant::now(),
+            dataset: "option_chain".into(),
+            document_key: parts.iter().map(|p| p.to_string()).collect(),
+            as_of: AsOf::Live,
+        };
+
+        svc.document(&request(6, &["SPX"])).unwrap();
+        let spx = next(&rx).snapshot.unwrap();
+        let rows: Vec<(String, String, f64)> = (0..spx.rows())
+            .map(|r| {
+                (
+                    spx.text_value("underlying_ref", r).unwrap().to_string(),
+                    spx.text_value("expiry", r).unwrap().to_string(),
+                    spx.f64_value("mid_vol", r).unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("SPX".into(), "2026-10-16".into(), 0.21),
+                ("SPX".into(), "2026-10-16".into(), 0.17),
+                ("SPX".into(), "2026-11-20".into(), 0.22),
+                ("SPX".into(), "2026-11-20".into(), 0.19),
+            ],
+            "both SPX expiries, no SPXW rows"
+        );
+        let freshness = &spx.provenance().datasets[0];
+        assert_eq!(freshness.dataset, "option_chain");
+        assert_eq!(
+            freshness.as_of.as_deref(),
+            Some(ts("2026-09-12T14:05:00Z").to_rfc3339().as_str()),
+            "the stalest SPX expiry's newest time"
+        );
+
+        // The greatest SPX generation is SPX 2026-10-16's republish.
+        svc.document(&request(7, &["SPX", "2026-10-16"])).unwrap();
+        let october = next(&rx).snapshot.unwrap();
+        let october_generation = october.provenance().datasets[0].generation;
+        svc.document(&request(8, &["SPXW"])).unwrap();
+        let spxw = next(&rx).snapshot.unwrap();
+        let spxw_generation = spxw.provenance().datasets[0].generation;
+        assert!(october_generation.is_some());
+        assert_eq!(
+            freshness.generation, october_generation,
+            "the greatest SPX generation"
+        );
+        assert!(
+            spxw_generation > october_generation,
+            "SPXW's newer generation must not leak into SPX's"
         );
         svc.shutdown();
     }

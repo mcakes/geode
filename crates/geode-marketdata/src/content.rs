@@ -238,12 +238,15 @@ impl TileContent for MarketDataContent {
     }
 }
 
-/// Builds one panel's tiles. One factory per [`PanelSpec`] — the roster
-/// keys on the kind, and a second document kind is a second factory over
-/// the same tile and the same context.
+/// Builds one panel's tiles. One factory per accepted [`PanelSpec`] — the
+/// roster keys on the kind, and every panel is a factory over the same tile
+/// and the same context.
 pub struct MarketDataFactory {
     data: DataHandle,
-    spec: &'static PanelSpec,
+    /// The spec's kind, leaked once in [`Self::new`]: the shell keys tiles,
+    /// add-tile actions and session records by a `&'static str`.
+    kind: &'static str,
+    spec: Arc<PanelSpec>,
     /// Shared staleness threshold. Updating this Cell changes what existing
     /// tiles read without recreating them.
     stale_after: Rc<Cell<Duration>>,
@@ -255,21 +258,23 @@ pub struct MarketDataFactory {
     /// Every resolved egress target, as name → accepted document names in
     /// `egress.toml` order — empty until `geode-app` calls
     /// [`Self::with_egress`]. `Arc`, not `Rc`: `geode-app` builds one list
-    /// from `egress.toml` and shares it, unmodified, between the CVI and
-    /// dividend factories built over the same resolved targets. `create`
+    /// from `egress.toml` and shares it, unmodified, between every panel
+    /// factory built over the same resolved targets. `create`
     /// narrows it to this spec's own document with [`targets_for`];
     /// `:upload` resolves and completes its target from the narrowed list.
     egress: Arc<Vec<(String, Vec<String>)>>,
 }
 
 impl MarketDataFactory {
-    pub fn new(
-        data: DataHandle,
-        spec: &'static PanelSpec,
-        stale_after: Duration,
-    ) -> MarketDataFactory {
+    pub fn new(data: DataHandle, spec: Arc<PanelSpec>, stale_after: Duration) -> MarketDataFactory {
+        // The shell keys tiles, add-tile actions and session records by a
+        // `&'static str` kind. Panels are fixed for a launch, so factories are
+        // built once per launch and this leaks one short name per panel,
+        // never again.
+        let kind: &'static str = Box::leak(spec.kind.clone().into_boxed_str());
         MarketDataFactory {
             data,
+            kind,
             spec,
             stale_after: Rc::new(Cell::new(stale_after)),
             ships_keymap: true,
@@ -285,9 +290,10 @@ impl MarketDataFactory {
         self
     }
 
-    /// Suppress the shared fragment for additional panel factories. They still
-    /// declare the marketdata context and register shared and kind-specific actions;
-    /// only one factory needs to contribute identical default bindings.
+    /// Suppress the shared fragment. `geode-app` calls this for every panel
+    /// factory after the first: they still declare the marketdata context and
+    /// register shared and kind-specific actions; only one factory needs to
+    /// contribute identical default bindings.
     pub fn without_keymap(mut self) -> MarketDataFactory {
         self.ships_keymap = false;
         self
@@ -299,8 +305,8 @@ impl MarketDataFactory {
         self.stale_after.set(d);
     }
 
-    pub fn spec(&self) -> &'static PanelSpec {
-        self.spec
+    pub fn spec(&self) -> &Arc<PanelSpec> {
+        &self.spec
     }
 }
 
@@ -318,7 +324,7 @@ fn targets_for(egress: &[(String, Vec<String>)], document: &str) -> Vec<SharedSt
 
 impl ModuleFactory for MarketDataFactory {
     fn kind(&self) -> &'static str {
-        self.spec.kind
+        self.kind
     }
 
     /// Declare the shared keymap context independently of this panel's roster kind.
@@ -365,7 +371,7 @@ impl ModuleFactory for MarketDataFactory {
         }
         // Register per-kind operations alongside the shared vocabulary so menus,
         // palette, and custom bindings can address them.
-        for a in self.spec.actions {
+        for a in &self.spec.actions {
             let _ = registry.register(ActionDef {
                 id: ActionId(a.id.to_string()),
                 title: a.title.to_string(),
@@ -388,11 +394,11 @@ impl ModuleFactory for MarketDataFactory {
         window: &mut Window,
         cx: &mut App,
     ) -> TileOccupant {
-        let egress_targets = targets_for(&self.egress, self.spec.document);
+        let egress_targets = targets_for(&self.egress, &self.spec.document);
         let entity = cx.new(|cx| {
             MarketDataTile::new(
                 tile,
-                self.spec,
+                Arc::clone(&self.spec),
                 frame,
                 diagnostics,
                 self.data.clone(),
@@ -404,7 +410,7 @@ impl ModuleFactory for MarketDataFactory {
             )
         });
         TileOccupant {
-            kind: self.spec.kind,
+            kind: self.kind,
             view: entity.clone().into(),
             content: Box::new(MarketDataContent { tile: entity }),
         }
@@ -414,7 +420,7 @@ impl ModuleFactory for MarketDataFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{CVI, DIVIDEND};
+    use crate::core::test_fixtures::{CVI, DIVIDEND};
     use geode_data::DataHandle;
     use geode_shell::actions::{ActionDef, ActionId, ActionRegistry};
     use geode_shell::defaults::default_mod;
@@ -443,7 +449,7 @@ mod tests {
         let builtin =
             geode_core::config::LayerDoc::builtin("keymap", geode_shell::defaults::BUILTIN_KEYMAP)
                 .unwrap();
-        let fragment = fragment_doc(CVI.kind, DEFAULT_KEYMAP).unwrap();
+        let fragment = fragment_doc(&CVI.kind, DEFAULT_KEYMAP).unwrap();
         let docs = geode_shell::keymap::fragments::splice(&[builtin], &[fragment]);
         let mut reg = registry();
         geode_shell::defaults::register_builtin_actions(&mut reg);
@@ -484,7 +490,7 @@ mod tests {
     #[test]
     fn the_default_keymap_binds_exactly_the_actions_this_module_registers() {
         use std::collections::BTreeSet;
-        let doc = fragment_doc(CVI.kind, DEFAULT_KEYMAP).expect("the fragment parses");
+        let doc = fragment_doc(&CVI.kind, DEFAULT_KEYMAP).expect("the fragment parses");
         let (doc, diags) = check_fragment(doc, &["marketdata"]);
         assert!(
             diags.is_empty(),
@@ -492,7 +498,8 @@ mod tests {
         );
         let mut reg = registry();
         let (data, _rx) = DataHandle::for_tests();
-        MarketDataFactory::new(data, &CVI, Duration::from_secs(60)).register_actions(&mut reg);
+        MarketDataFactory::new(data, Arc::clone(&CVI), Duration::from_secs(60))
+            .register_actions(&mut reg);
         let (keymap, diags) = build_keymap(&[doc], default_mod(), &reg);
         assert!(
             diags.is_empty(),
@@ -530,7 +537,7 @@ mod tests {
     #[test]
     fn the_factory_ships_the_fragment_and_declares_the_marketdata_context() {
         let (data, _rx) = DataHandle::for_tests();
-        let factory = MarketDataFactory::new(data, &CVI, Duration::from_secs(60));
+        let factory = MarketDataFactory::new(data, Arc::clone(&CVI), Duration::from_secs(60));
         assert_eq!(factory.kind(), "cvi");
         assert_eq!(factory.contexts(), vec!["marketdata"]);
         assert_eq!(factory.default_keymap(), Some(DEFAULT_KEYMAP));
@@ -542,7 +549,7 @@ mod tests {
     #[test]
     fn a_panel_accepts_an_underlying_and_translates_it_to_its_restored_key() {
         let (data, _rx) = DataHandle::for_tests();
-        let f = MarketDataFactory::new(data, &CVI, Duration::from_secs(900));
+        let f = MarketDataFactory::new(data, Arc::clone(&CVI), Duration::from_secs(900));
         assert_eq!(f.accepts(), &["underlying_ref"]);
         let state = f
             .launch_state(&DimensionContext::of(&[("underlying_ref", "SPX")]))
@@ -559,8 +566,8 @@ mod tests {
     #[test]
     fn without_keymap_ships_no_fragment_and_still_registers_actions() {
         let (data, _rx) = DataHandle::for_tests();
-        let factory =
-            MarketDataFactory::new(data, &DIVIDEND, Duration::from_secs(60)).without_keymap();
+        let factory = MarketDataFactory::new(data, Arc::clone(&DIVIDEND), Duration::from_secs(60))
+            .without_keymap();
         assert_eq!(factory.kind(), "dividend");
         assert_eq!(factory.contexts(), vec!["marketdata"]);
         assert_eq!(factory.default_keymap(), None);
@@ -612,7 +619,7 @@ mod tests {
     /// block's bare `d`, which does nothing outside a selection.
     #[test]
     fn delete_rows_hint_names_the_normal_mode_chord() {
-        let doc = fragment_doc(CVI.kind, DEFAULT_KEYMAP).unwrap();
+        let doc = fragment_doc(&CVI.kind, DEFAULT_KEYMAP).unwrap();
         let (keymap, diags) = build_keymap(&[doc], default_mod(), &registry());
         assert!(diags.is_empty(), "{diags:?}");
         let b = geode_shell::keymap::effective_binding(
@@ -652,7 +659,7 @@ mod tests {
     /// The fragment adds no insert-mode chords that could shadow shared shell actions.
     #[test]
     fn enter_and_escape_resolve_in_insert_mode() {
-        let doc = fragment_doc(CVI.kind, DEFAULT_KEYMAP).unwrap();
+        let doc = fragment_doc(&CVI.kind, DEFAULT_KEYMAP).unwrap();
         let (keymap, diags) = build_keymap(&[doc], default_mod(), &registry());
         assert!(diags.is_empty(), "{diags:?}");
         let stack = [KeyContext::new("marketdata")
@@ -682,7 +689,7 @@ mod tests {
         use geode_core::config::LayerDoc;
         let builtin = LayerDoc::builtin("keymap", geode_shell::defaults::BUILTIN_KEYMAP)
             .expect("builtin keymap TOML is well-formed");
-        let fragment = fragment_doc(CVI.kind, DEFAULT_KEYMAP).unwrap();
+        let fragment = fragment_doc(&CVI.kind, DEFAULT_KEYMAP).unwrap();
         let layered = geode_shell::keymap::fragments::splice(&[builtin], &[fragment]);
         let mut reg = registry();
         geode_shell::defaults::register_builtin_actions(&mut reg);
@@ -776,7 +783,7 @@ mod tests {
     #[test]
     fn every_retired_motion_id_renames_to_its_shared_id() {
         let (data, _rx) = DataHandle::for_tests();
-        let factory = MarketDataFactory::new(data, &CVI, Duration::from_secs(60));
+        let factory = MarketDataFactory::new(data, Arc::clone(&CVI), Duration::from_secs(60));
         let mut registry = ActionRegistry::default();
         geode_shell::defaults::register_builtin_actions(&mut registry);
         factory.register_actions(&mut registry);
@@ -809,8 +816,9 @@ mod tests {
     fn the_kind_actions_are_registered() {
         let mut registry = ActionRegistry::default();
         let (data, _rx) = DataHandle::for_tests();
-        MarketDataFactory::new(data, &CVI, Duration::from_secs(60)).register_actions(&mut registry);
-        for a in CVI.actions {
+        MarketDataFactory::new(data, Arc::clone(&CVI), Duration::from_secs(60))
+            .register_actions(&mut registry);
+        for a in &CVI.actions {
             assert!(
                 registry.get(&ActionId(a.id.to_string())).is_some(),
                 "{}",

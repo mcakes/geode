@@ -5,12 +5,17 @@
 //! receive and parse those bytes through the normal ingestion path.
 //! The application starts this bus only in demo mode.
 
+use chrono::NaiveDate;
 use geode_core::document::{DocumentKind, DocumentRows};
 use geode_data::adapter::ChannelFeed;
+use geode_demo_data::documents::chain::ChainGenerator;
+use geode_demo_data::documents::cvi::CviGenerator;
+use geode_demo_data::documents::dividend::DividendGenerator;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use std::sync::Arc;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -18,6 +23,9 @@ use std::time::Duration;
 /// Generation, serialization, and publication run to completion before the
 /// next check; this interval bounds the sleep slice, not total stop latency.
 const STOP_POLL: Duration = Duration::from_millis(20);
+
+/// A producer's generator: the next document for a key, or `None` to skip.
+pub type NextDocument = dyn FnMut(&str) -> Option<DocumentRows> + Send;
 
 /// A document generator and its destination topics.
 ///
@@ -29,7 +37,13 @@ pub struct Producer {
     pub kind: Arc<dyn DocumentKind>,
     pub topic_prefix: &'static str,
     pub keys: Vec<String>,
-    pub next: Box<dyn FnMut(&str) -> DocumentRows + Send>,
+    /// Publishes of each key in the startup burst. It is 1 for a kind with
+    /// one document per key. A producer that rotates through several
+    /// documents per key, like the chain's expiries, sets how many it takes
+    /// to publish them all.
+    pub startup_repeats: usize,
+    /// `None` skips this publish: a producer whose input is not ready yet.
+    pub next: Box<NextDocument>,
 }
 
 /// A running demo bus thread, stopped and joined on drop.
@@ -63,13 +77,14 @@ impl Drop for DemoBus {
 
 /// Spawns the `geode-demo-bus` thread over `producers`.
 ///
-/// Startup attempts one publish per key in producer order then key order,
-/// without waiting for a cadence. Ingestion and delivery remain asynchronous.
-/// Subsequent publishes follow [`round_robin_schedule`], with one wait per
-/// publish across all producers. Jitter is seeded and capped at `cadence`,
-/// giving nonnegative waits from `cadence - jitter` through `cadence + jitter`
-/// at millisecond jitter resolution. Adding producers lengthens the schedule
-/// without multiplying its steady-state publication rate.
+/// Startup attempts `startup_repeats` publishes per key, in producer order
+/// then key order, without waiting for a cadence. Ingestion and delivery
+/// remain asynchronous. Subsequent publishes follow [`round_robin_schedule`],
+/// with one wait per publish across all producers. Jitter is seeded and
+/// capped at `cadence`, giving nonnegative waits from `cadence - jitter`
+/// through `cadence + jitter` at millisecond jitter resolution. Adding
+/// producers lengthens the schedule without multiplying its steady-state
+/// publication rate.
 ///
 /// Shutdown is checked between publishes and during waits. Thread creation
 /// failure panics.
@@ -112,19 +127,23 @@ fn sleep_checking_stop(duration: Duration, stop: &AtomicBool) -> bool {
 }
 
 /// Generates and serializes one document, then publishes it to the topic
-/// formed by concatenating the prefix and key. Serialization errors log a
-/// warning and skip this publish. A full or disconnected inbound queue drops
-/// the message; the feed counts refusals and the bus warns only on the first.
-/// There is no immediate retry. Generator and serializer panics are not caught.
+/// formed by concatenating the prefix and key. A generator that returns
+/// `None` (its input is not ready yet) skips this publish silently.
+/// Serialization errors log a warning and skip this publish. A full or
+/// disconnected inbound queue drops the message; the feed counts refusals
+/// and the bus warns only on the first. There is no immediate retry.
+/// Generator and serializer panics are not caught.
 fn publish_one(
     feed: &ChannelFeed,
     kind: &Arc<dyn DocumentKind>,
     topic_prefix: &str,
-    next: &mut (dyn FnMut(&str) -> DocumentRows + Send),
+    next: &mut NextDocument,
     key: &str,
     warned_full: &mut bool,
 ) {
-    let rows = next(key);
+    let Some(rows) = next(key) else {
+        return;
+    };
     let bytes = match kind.write(&rows) {
         Ok(bytes) => bytes,
         Err(e) => {
@@ -144,6 +163,82 @@ fn publish_one(
             "demo bus: the inbound queue is full; at least one publish was dropped"
         );
     }
+}
+
+/// The CVI producer's body: generate the underlying's next CVI document and
+/// store a clone under `key` for [`chain_next`] to price off, surviving a
+/// poisoned lock. Always publishes.
+pub fn cvi_next(
+    cvi: &mut CviGenerator,
+    latest_cvi: &Mutex<HashMap<String, DocumentRows>>,
+    key: &str,
+) -> Option<DocumentRows> {
+    let doc = cvi.next_document(key);
+    latest_cvi
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(key.to_string(), doc.clone());
+    Some(doc)
+}
+
+/// The chain producer's body: price the underlying's next expiry off the
+/// latest CVI document the CVI producer stored for it, or skip (`None`)
+/// when there is none yet — the chain never publishes without the curve
+/// it is meant to sit near.
+pub fn chain_next(
+    latest_cvi: &Mutex<HashMap<String, DocumentRows>>,
+    chain: &mut ChainGenerator,
+    key: &str,
+) -> Option<DocumentRows> {
+    let cvi = latest_cvi
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(key)
+        .cloned()?;
+    Some(chain.next_document(key, &cvi, chrono::Utc::now()))
+}
+
+/// The `--demo` producers, in publish order: CVI, dividend, then option
+/// chain, each over `underlyings` and seeded with 42.
+///
+/// The chain producer prices off the CVI producer's latest document for
+/// its underlying (the shared store [`cvi_next`] fills and [`chain_next`]
+/// reads). The startup burst runs producers in list order, so the chain
+/// must stay after the CVI or its burst finds no curve and skips (the
+/// cadence recovers, but slowly). One anchor (`today`) serves both CVI
+/// and chain: the chain clamps its curve date to the CVI's terms, and a
+/// shared anchor keeps its expiries inside them.
+pub fn demo_producers(underlyings: Vec<String>, today: NaiveDate) -> Vec<Producer> {
+    let mut cvi_generator = CviGenerator::new(42, underlyings.clone(), today);
+    let mut dividend_generator = DividendGenerator::new(42, underlyings.clone(), today);
+    let mut chain_generator = ChainGenerator::new(42, underlyings.clone(), today);
+    let latest_cvi: Arc<Mutex<HashMap<String, DocumentRows>>> = Arc::default();
+    vec![
+        Producer {
+            kind: Arc::new(geode_documents::CviKind),
+            topic_prefix: "marketdata/cvi/",
+            keys: underlyings.clone(),
+            startup_repeats: 1,
+            next: Box::new({
+                let latest_cvi = Arc::clone(&latest_cvi);
+                move |key| cvi_next(&mut cvi_generator, &latest_cvi, key)
+            }),
+        },
+        Producer {
+            kind: Arc::new(geode_documents::DividendKind),
+            topic_prefix: "marketdata/dividend/",
+            keys: underlyings.clone(),
+            startup_repeats: 1,
+            next: Box::new(move |key| Some(dividend_generator.next_document(key))),
+        },
+        Producer {
+            kind: Arc::new(geode_documents::OptionChainKind),
+            topic_prefix: "marketdata/chain/",
+            keys: underlyings,
+            startup_repeats: geode_demo_data::documents::chain::EXPIRIES,
+            next: Box::new(move |key| chain_next(&latest_cvi, &mut chain_generator, key)),
+        },
+    ]
 }
 
 /// The one flat schedule the cadence loop replays forever: every
@@ -179,22 +274,25 @@ fn run(
 ) {
     let mut warned_full = false;
 
-    // Attempt every key once before the first cadence wait. Parsing and
-    // store publication happen asynchronously after feed admission.
+    // Attempt every key `startup_repeats` times before the first cadence
+    // wait. Parsing and store publication happen asynchronously after feed
+    // admission.
     for producer in producers.iter_mut() {
         let keys = producer.keys.clone();
         for key in &keys {
-            if stop.load(Ordering::Relaxed) {
-                return;
+            for _ in 0..producer.startup_repeats.max(1) {
+                if stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                publish_one(
+                    &feed,
+                    &producer.kind,
+                    producer.topic_prefix,
+                    producer.next.as_mut(),
+                    key,
+                    &mut warned_full,
+                );
             }
-            publish_one(
-                &feed,
-                &producer.kind,
-                producer.topic_prefix,
-                producer.next.as_mut(),
-                key,
-                &mut warned_full,
-            );
         }
     }
 
@@ -241,10 +339,7 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::NaiveDate;
     use geode_data::adapter::{Adapter, ChannelAdapter, MessageSink};
-    use geode_demo_data::documents::cvi::CviGenerator;
-    use geode_demo_data::documents::dividend::DividendGenerator;
     use geode_documents::{CviKind, DividendKind};
     use std::collections::HashSet;
     use std::time::Instant;
@@ -255,7 +350,8 @@ mod tests {
             kind: Arc::new(CviKind),
             topic_prefix: "marketdata/cvi/",
             keys: underlyings,
-            next: Box::new(move |key| generator.next_document(key)),
+            startup_repeats: 1,
+            next: Box::new(move |key| Some(generator.next_document(key))),
         }
     }
 
@@ -265,8 +361,109 @@ mod tests {
             kind: Arc::new(DividendKind),
             topic_prefix: "marketdata/dividend/",
             keys: underlyings,
-            next: Box::new(move |key| generator.next_document(key)),
+            startup_repeats: 1,
+            next: Box::new(move |key| Some(generator.next_document(key))),
         }
+    }
+
+    /// The production list must keep CVI ahead of chain: the chain prices
+    /// off the latest CVI its producer stored, and the startup burst runs
+    /// producers in list order, so a chain placed first finds no curve and
+    /// skips its whole burst.
+    #[test]
+    fn the_demo_producers_run_cvi_then_dividend_then_chain() {
+        use geode_demo_data::documents::chain::EXPIRIES;
+        let underlyings = vec!["SPX".to_string(), "NDX".to_string()];
+        let today = NaiveDate::from_ymd_opt(2026, 9, 12).unwrap();
+        let producers = demo_producers(underlyings.clone(), today);
+        assert_eq!(
+            producers.iter().map(|p| p.topic_prefix).collect::<Vec<_>>(),
+            vec![
+                "marketdata/cvi/",
+                "marketdata/dividend/",
+                "marketdata/chain/"
+            ]
+        );
+        assert_eq!(
+            producers
+                .iter()
+                .map(|p| p.startup_repeats)
+                .collect::<Vec<_>>(),
+            vec![1, 1, EXPIRIES]
+        );
+        assert!(producers.iter().all(|p| p.keys == underlyings));
+    }
+
+    #[test]
+    fn the_startup_burst_publishes_every_expiry_of_every_chain() {
+        use geode_demo_data::documents::chain::EXPIRIES;
+        let (adapter, feed) = ChannelAdapter::new("demo_bus");
+        let (sink, rx) = MessageSink::bounded(256);
+        let mut sub = adapter.subscription().expect("channel adapters subscribe");
+        sub.subscribe(&["marketdata/chain/>".to_string()], sink, Arc::new(|_| {}))
+            .unwrap();
+        let underlyings = vec!["SPX".to_string(), "NDX".to_string()];
+        let anchor = NaiveDate::from_ymd_opt(2026, 9, 12).unwrap();
+        let _bus = spawn(
+            feed,
+            demo_producers(underlyings, anchor),
+            Duration::from_secs(3600),
+            Duration::ZERO,
+            42,
+        );
+        let mut keys = HashSet::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while keys.len() < 2 * EXPIRIES && Instant::now() < deadline {
+            if let Ok(m) = rx.recv_timeout(Duration::from_millis(200)) {
+                let parsed = geode_documents::OptionChainKind
+                    .parse(&m.bytes)
+                    .expect("a well-formed option chain document");
+                keys.insert(parsed.rows.key);
+            }
+        }
+        assert_eq!(
+            keys.len(),
+            2 * EXPIRIES,
+            "every (underlying, expiry) at startup"
+        );
+    }
+
+    #[test]
+    fn the_cvi_producer_stores_what_it_publishes() {
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+        let anchor = NaiveDate::from_ymd_opt(2026, 9, 12).unwrap();
+        let latest: Mutex<HashMap<String, DocumentRows>> = Mutex::default();
+        let mut cvi = CviGenerator::new(42, vec!["SPX".to_string()], anchor);
+        let published =
+            cvi_next(&mut cvi, &latest, "SPX").expect("the CVI producer always publishes");
+        let store = latest.lock().unwrap();
+        assert_eq!(store.len(), 1, "only the published key is stored");
+        assert_eq!(
+            store.get("SPX"),
+            Some(&published),
+            "the store holds exactly what was published"
+        );
+    }
+
+    #[test]
+    fn the_chain_producer_skips_an_underlying_with_no_cvi_yet() {
+        use geode_demo_data::documents::chain::ChainGenerator;
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+        let anchor = NaiveDate::from_ymd_opt(2026, 9, 12).unwrap();
+        let latest: Mutex<HashMap<String, DocumentRows>> = Mutex::default();
+        let mut chain = ChainGenerator::new(42, vec!["SPX".to_string()], anchor);
+        assert!(
+            chain_next(&latest, &mut chain, "SPX").is_none(),
+            "no CVI yet: skip, don't panic"
+        );
+        let cvi = CviGenerator::new(42, vec!["SPX".to_string()], anchor).next_document("SPX");
+        latest.lock().unwrap().insert("SPX".to_string(), cvi);
+        assert!(
+            chain_next(&latest, &mut chain, "SPX").is_some(),
+            "with a CVI it publishes"
+        );
     }
 
     /// Two producers (three CVI keys, two dividend keys) — the burst
@@ -382,14 +579,36 @@ mod tests {
         );
     }
 
-    /// The panel and document parser must use the same dividend statuses.
-    /// The composition root verifies agreement without a feature-to-parser dependency.
+    /// The dividend panel the composition root loads declares its status
+    /// choices once, in its TOML; the parser and the demo generator must
+    /// offer exactly those. Only the composition root sees the loaded panel
+    /// and the parser together, without a feature-to-parser dependency.
     #[test]
     fn the_dividend_panel_specs_status_vocabulary_matches_the_dividend_kind() {
-        assert_eq!(
-            geode_marketdata::core::STATUSES,
-            geode_documents::dividend::STATUSES
-        );
+        let dir = tempfile::tempdir().unwrap();
+        let config = geode_core::config::Config::load(&geode_core::config::ConfigSources {
+            builtin: crate::builtin_layer(Some(dir.path())),
+            ..Default::default()
+        });
+        let setup = crate::bridge::data_setup(
+            &config,
+            dir.path().join("geode.duckdb"),
+            geode_data::adapter::AdapterRegistry::default(),
+            geode_data::PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
+        )
+        .expect("the demo layer declares datasets and views");
+        let dividend = setup
+            .panels
+            .iter()
+            .find(|p| p.kind == "dividend")
+            .expect("the builtin dividend panel is accepted");
+        let choices = dividend
+            .value_column("status")
+            .and_then(|c| c.choices.as_deref())
+            .expect("status declares its choices");
+        assert_eq!(choices, geode_documents::dividend::STATUSES);
+        assert_eq!(choices, geode_demo_data::documents::dividend::STATUSES);
     }
 
     /// Upload bytes must reach the subscribed source and return through an
@@ -563,9 +782,10 @@ mod tests {
         use geode_data::query::as_of::AsOf;
         use geode_data::{DataEvent, DataService, PricerRegistry, VolModelRegistry};
         use geode_marketdata::core::upload::{assemble, echo_differs};
-        use geode_marketdata::core::{DIVIDEND, Draft, MatrixModel};
+        use geode_marketdata::core::{Draft, MatrixModel, builtin_panel};
         use std::sync::mpsc::Receiver;
 
+        let dividend = builtin_panel("dividend");
         let src_dir = tempfile::tempdir().unwrap();
         let config = Config::load(&ConfigSources {
             builtin: crate::demo::layer(src_dir.path()),
@@ -664,7 +884,7 @@ mod tests {
         // The panel's own route: a clean model of the base, an inserted
         // row under the FIRST document row carrying the LATEST ex date,
         // then the painted model and the assembled upload.
-        let clean = MatrixModel::build(&base, &DIVIDEND, &Draft::default()).unwrap();
+        let clean = MatrixModel::build(&base, &dividend, &Draft::default()).unwrap();
         let first_label = clean.rows[0].label.to_string();
         let mut draft = Draft::default();
         let label = draft.mint_label(|l| clean.rows.iter().any(|r| r.label.as_ref() == l));
@@ -682,8 +902,8 @@ mod tests {
         ] {
             assert!(draft.set_row_cell(&label, column, value), "{column}");
         }
-        let painted = MatrixModel::build(&base, &DIVIDEND, &draft).unwrap();
-        let sent = assemble(&base, &DIVIDEND, &painted, &draft).expect("assembles");
+        let painted = MatrixModel::build(&base, &dividend, &draft).unwrap();
+        let sent = assemble(&base, &dividend, &painted, &draft).expect("assembles");
         let Column::Date(sent_ex) = &sent.values[0].1 else {
             panic!("ex_date is a date column");
         };
@@ -693,9 +913,9 @@ mod tests {
         );
 
         let echoed = round_trip(&service, &rx, 2, sent.clone());
-        let clean = MatrixModel::build(&echoed, &DIVIDEND, &Draft::default()).unwrap();
+        let clean = MatrixModel::build(&echoed, &dividend, &Draft::default()).unwrap();
         let delivered =
-            assemble(&echoed, &DIVIDEND, &clean, &Draft::default()).expect("the echo assembles");
+            assemble(&echoed, &dividend, &clean, &Draft::default()).expect("the echo assembles");
         let Column::Date(echo_ex) = &delivered.values[0].1 else {
             panic!("ex_date is a date column");
         };
@@ -703,7 +923,7 @@ mod tests {
             sent_ex, echo_ex,
             "the store reorders the rows — otherwise this test proves nothing"
         );
-        assert_eq!(echo_differs(&DIVIDEND, &sent, &delivered), 0);
+        assert_eq!(echo_differs(&dividend, &sent, &delivered), 0);
 
         service.shutdown();
     }

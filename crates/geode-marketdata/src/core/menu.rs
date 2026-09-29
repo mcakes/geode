@@ -128,7 +128,7 @@ pub fn rows(i: &MenuInputs, clock: Clock) -> Vec<Row<ActionId>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::CVI;
+    use crate::core::test_fixtures::CVI;
     use geode_tile::menu::{first_enabled, step};
 
     fn inputs(badge: DraftBadge) -> MenuInputs<'static> {
@@ -137,7 +137,7 @@ mod tests {
             upload_built: false,
             policy: UpdatePolicy::Hold,
             kind_title: "CVI",
-            kind_actions: CVI.actions,
+            kind_actions: &CVI.actions,
         }
     }
     fn checked(rows: &[Row<ActionId>]) -> Vec<(String, Option<bool>)> {

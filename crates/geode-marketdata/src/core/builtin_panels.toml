@@ -1,0 +1,108 @@
+# Market-data panels compiled into every build, below desk and user layers.
+# A higher layer replaces a panel of the same name whole.
+#
+# cvi: one CVI document per underlying, terms down the side, nodes across.
+# Parameters keep their own units at four places, without grouping or
+# scaling; a sign carries no profit/loss meaning. The forward is a price at
+# two places; atm and skew take the panel's value format.
+[cvi]
+title = "CVI"
+dataset = "cvi_params"
+document = "cvi_params"
+actions = ["marketdata::cvi_reanchor", "marketdata::cvi_recalc_forward"]
+
+[cvi.value]
+type = "f64"
+format = { precision = 4 }
+
+[cvi.rows]
+column = "term"
+identity = "date"
+label = "shown"
+
+[cvi.columns]
+axis = "node"
+
+[[cvi.header]]
+column = "anchor_date"
+label = "anchor"
+type = "date"
+
+[[cvi.header]]
+column = "spot_ref"
+label = "spot"
+type = "f64"
+
+[[cvi.slice]]
+column = "forward"
+label = "fwd"
+format = { precision = 2 }
+
+[[cvi.slice]]
+column = "atm"
+label = "atm"
+
+[[cvi.slice]]
+column = "skew"
+label = "skew"
+
+# dividend: one schedule per underlying, a row per payment. Minted row ids
+# identify rows without a label column. Every column is required for an
+# inserted row: an estimated schedule still supplies estimated dates. The
+# amount keeps four places for fractional cents. Status is the closed
+# vocabulary the dividend document kind parses.
+[dividend]
+title = "Dividend"
+dataset = "dividend_schedule"
+document = "dividend_schedule"
+
+[dividend.value]
+type = "f64"
+format = { precision = 4 }
+
+[dividend.rows]
+column = "dividend_id"
+identity = "minted"
+label = "hidden"
+
+[[dividend.columns.values]]
+column = "ex_date"
+label = "ex"
+type = "date"
+required = true
+
+[[dividend.columns.values]]
+column = "announced_date"
+label = "announced"
+type = "date"
+required = true
+
+[[dividend.columns.values]]
+column = "pay_date"
+label = "pay"
+type = "date"
+required = true
+
+[[dividend.columns.values]]
+column = "amount"
+label = "amount"
+type = "f64"
+format = { precision = 4 }
+required = true
+
+[[dividend.columns.values]]
+column = "status"
+label = "status"
+type = "utf8"
+choices = ["estimated", "declared", "paid", "cancelled"]
+required = true
+
+[[dividend.header]]
+column = "currency"
+label = "ccy"
+type = "utf8"
+
+[[dividend.header]]
+column = "schedule_date"
+label = "struck"
+type = "date"

@@ -193,7 +193,7 @@ impl MarketDataTile {
         let label = matches!(r.kind, SelectKind::Rows) && self.spec.rows.shown();
         let mut out = Vec::with_capacity(r.rows.len() + 1);
         let header: Vec<&str> = label
-            .then_some(self.spec.rows.column)
+            .then_some(self.spec.rows.column.as_str())
             .into_iter()
             .chain(
                 r.cols
@@ -572,7 +572,7 @@ impl MarketDataTile {
             let Some(kind) = self.model.kind_of(col) else {
                 continue;
             };
-            let ty = declared_type(self.spec, &self.model, col);
+            let ty = declared_type(&self.spec, &self.model, col);
             match bulk::accept(kind, ty, self.column_required(col), text) {
                 Ok(value) => writes.push(((row, col), value)),
                 Err(skip) => skips.add(skip),

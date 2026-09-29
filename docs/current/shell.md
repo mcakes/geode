@@ -304,6 +304,17 @@ Dataset and document watches narrow publication invalidation to consumers
 that read the affected data. The frame keeps weak watches, allowing closed
 tiles to disappear without explicit deregistration.
 
+A document watch names an encoded batch key, and it also hears every document
+under that key when the key is a shorter prefix of a multi-part key: a watch
+on `SPX` in `option_chain` fires for `SPX␟2026-10-16` and every other SPX
+expiry. Matching happens at a key-part boundary (`is_key_prefix`), so the same
+watch never fires for `SPXW␟…`. On each publish the frame looks up the batch
+and each of its key-part prefixes, so the cost grows with key arity, not with
+the number of watches. `PublicationWatch::matches` answers whether a publish
+concerns a watch and follows the same prefix rule; `PublicationWatch::is_for`
+is the exact identity test a tile uses to decide whether it can keep a watch
+or must register a new one for a different key.
+
 A scope, grouping, or as-of change opens a flip barrier. Following tiles stage
 their results until all participants answer or the deadline passes, then
 promote together. This prevents one frame from showing tiles evaluated under

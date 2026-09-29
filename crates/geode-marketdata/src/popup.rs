@@ -18,6 +18,7 @@ use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme as _, h_flex};
 use std::collections::BTreeMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
 /// The tile's mutually exclusive popup state. Menu uses menu-mode routing;
 /// Picker and Choice own focused inputs and use insert-mode routing.
@@ -64,17 +65,16 @@ impl ChoicePopup {
     /// value the vocabulary no longer lists — a hole is still editable).
     pub(crate) fn new(
         input: Entity<InputState>,
-        options: &'static [&'static str],
+        options: Arc<[String]>,
         current: &str,
         cell: (usize, usize),
         labels: (SharedString, SharedString),
     ) -> Self {
-        let mut list =
-            ChoiceList::new(options.iter().map(|s| s.to_string()).collect(), DEFAULT_CAP);
+        let mut list = ChoiceList::new(options.to_vec(), DEFAULT_CAP);
         list.place(Some(current));
         let option_labels = options
             .iter()
-            .map(|s| SharedString::new_static(s))
+            .map(|s| SharedString::from(s.clone()))
             .collect();
         let mut popup = Self {
             paint: Rc::new(ChoicePaint {

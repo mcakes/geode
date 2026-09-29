@@ -142,6 +142,12 @@ pub struct ShellServices {
     /// again by `build_keymap`. Startup also includes this list in
     /// [`Self::keymap_diagnostics`].
     pub keymap_fragment_diagnostics: Vec<Diagnostic>,
+    /// Diagnostics from startup-only composition the shell cannot recompute,
+    /// such as market-data panels refused at startup. Seeded into the config
+    /// section and restated after every reload: only a restart changes which
+    /// panels exist, so a fix on disk shows `restart required` beside the
+    /// standing error until then.
+    pub composition_diagnostics: Vec<Diagnostic>,
     /// The app's registered pages, in sidebar order. Empty in tests that
     /// build no page.
     pub pages: PageRoster,
@@ -655,6 +661,10 @@ pub struct ShellView {
     /// resolved target's transport live, so `egress.toml` is restart-
     /// required exactly as `sources.toml` is.
     egress_baseline: Vec<LayerDoc>,
+    /// Same purpose as [`sources_baseline`](Self::sources_baseline), for
+    /// the `panels` doc: panels become tile kinds once at startup, so
+    /// `panels.toml` is restart-required.
+    panels_baseline: Vec<LayerDoc>,
     /// The startup `[pricing] adapter` value used to build the data engine.
     /// Reload compares against this baseline to determine whether a restart is
     /// required. The rest of `[pricing]`, including `refresh`, remains live.
@@ -1175,6 +1185,7 @@ impl ShellView {
             diags.extend(crate::series::default_source_diagnostic(cfg));
             diags.extend(clock_diags.iter().cloned());
             diags.extend(services.keymap_diagnostics.iter().cloned());
+            diags.extend(services.composition_diagnostics.iter().cloned());
             diags
         };
         diagnostics.update(cx, |d, _cx| {
@@ -1247,6 +1258,10 @@ impl ShellView {
         let sources_baseline = services.config.layered_docs("sources").to_vec();
         let datasets_baseline = services.config.layered_docs("datasets").to_vec();
         let egress_baseline = services.config.layered_docs("egress").to_vec();
+        let panels_baseline = services
+            .config
+            .layered_docs(geode_core::panel::PANELS_DOC)
+            .to_vec();
         // Same reasoning, for the `[pricing] adapter` key the data
         // engine's pricer was chosen from — see
         // `pricing_baseline`'s field doc.
@@ -1319,6 +1334,7 @@ impl ShellView {
             sources_baseline,
             datasets_baseline,
             egress_baseline,
+            panels_baseline,
             pricing_baseline,
             vol_baseline,
             pickable,
@@ -1665,6 +1681,30 @@ impl ShellView {
     #[cfg(any(test, feature = "test-support"))]
     pub fn picker(&self) -> Option<&picker::PickerState> {
         self.picker.as_ref()
+    }
+
+    /// Apply a loaded candidate exactly as the file watcher would —
+    /// cross-crate test reach, the same door `picker()` opens: `geode-app`'s
+    /// composition tests reload without a watcher (`apply_reload` is
+    /// `pub(super)`).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn apply_reload_for_test(&mut self, config: Config, cx: &mut Context<Self>) {
+        self.apply_reload(config, cx);
+    }
+
+    /// The running shell's services (registry, roster) — cross-crate test
+    /// reach, the same door as `picker()`: `geode-app`'s composition tests
+    /// check that a reload added no tile kind and no add-tile action.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn services(&self) -> &ShellServices {
+        &self.services
+    }
+
+    /// The title `tile`'s occupant paints, or `None` without an occupant —
+    /// cross-crate test reach, the same door as `picker()`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn occupant_title(&self, tile: TileId, cx: &gpui::App) -> Option<gpui::SharedString> {
+        self.occupants.get(&tile).map(|o| o.content.title(cx))
     }
 
     /// The configured clock (`AppClock`), for the shell's own painters.

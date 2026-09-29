@@ -265,7 +265,7 @@ impl HeaderModel {
             n => Some((format!("{n} rows incomplete").into(), Tone::Warn)),
         };
         HeaderModel {
-            title: i.spec.title.into(),
+            title: i.spec.title.clone().into(),
             underlying,
             dirty,
             attrs: i.model.header.clone(),
@@ -576,7 +576,7 @@ pub(crate) fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::CVI;
+    use crate::core::test_fixtures::CVI;
 
     fn model_with_header(entries: &[(&str, &str, &str)]) -> MatrixModel {
         MatrixModel {

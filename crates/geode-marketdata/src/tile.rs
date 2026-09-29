@@ -461,7 +461,7 @@ enum Yank {
 
 pub struct MarketDataTile {
     id: TileId,
-    spec: &'static PanelSpec,
+    spec: Arc<PanelSpec>,
     frame: FrameRef,
     diagnostics: Entity<Diagnostics>,
     data: DataHandle,
@@ -614,7 +614,7 @@ impl MarketDataTile {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: TileId,
-        spec: &'static PanelSpec,
+        spec: Arc<PanelSpec>,
         frame: FrameRef,
         diagnostics: Entity<Diagnostics>,
         data: DataHandle,
@@ -695,7 +695,7 @@ impl MarketDataTile {
             .try_global::<UiSettings>()
             .map_or(LineNumbers::Off, |s| s.line_numbers);
         let table = cx.new(|cx| {
-            let mut delegate = MatrixDelegate::new(spec, weak_tile, id.0, tones);
+            let mut delegate = MatrixDelegate::new(&spec, weak_tile, id.0, tones);
             delegate.line_numbers = line_numbers;
             // A missing or garbled record is an empty map, never a refusal.
             delegate.fitted = widths_from_record(restored);
@@ -843,14 +843,16 @@ impl MarketDataTile {
         })
         .detach();
 
+        let model = Rc::new(MatrixModel::empty(&spec, key.as_deref().unwrap_or(&[])));
+        let title = Self::compute_title(&spec, key.as_deref());
         let mut this = MarketDataTile {
             id,
             spec,
             frame,
             diagnostics,
             data,
-            model: Rc::new(MatrixModel::empty(spec, key.as_deref().unwrap_or(&[]))),
-            title: Self::compute_title(spec, key.as_deref()),
+            model,
+            title,
             unresolved_restore: !draft.is_empty(),
             parked,
             key,
@@ -998,10 +1000,10 @@ impl MarketDataTile {
         if self
             .publication
             .as_ref()
-            .is_none_or(|watch| !watch.matches(self.spec.dataset, Some(&batch)))
+            .is_none_or(|watch| !watch.is_for(&self.spec.dataset, Some(&batch)))
         {
             self.publication = Some(self.frame.update(cx, |frame, _| {
-                frame.watch_publications(self.spec.dataset, Some(&batch))
+                frame.watch_publications(&self.spec.dataset, Some(&batch))
             }));
         }
         let (as_of, versions) = {
@@ -1150,7 +1152,7 @@ impl MarketDataTile {
         if self.editor.is_some() {
             self.close_editor(window, cx);
         }
-        let document = self.spec.document;
+        let document = &self.spec.document;
         let target = match target {
             Some(t) => {
                 if !self.egress_targets.iter().any(|e| e.as_ref() == t) {
@@ -1183,7 +1185,7 @@ impl MarketDataTile {
         if self.draft.is_sent() {
             return Err("already sent".into());
         }
-        match self.draft.incomplete_rows(self.spec, &self.model.columns) {
+        match self.draft.incomplete_rows(&self.spec, &self.model.columns) {
             0 => {}
             1 => return Err("1 row incomplete".into()),
             n => return Err(format!("{n} rows incomplete")),
@@ -1191,7 +1193,7 @@ impl MarketDataTile {
         let Some(snapshot) = self.painted_snapshot() else {
             return Err("no document to upload".into());
         };
-        let rows = crate::core::upload::assemble(&snapshot, self.spec, &self.model, &self.draft)?;
+        let rows = crate::core::upload::assemble(&snapshot, &self.spec, &self.model, &self.draft)?;
         let cells = match self.draft.cell_count() {
             1 => "1 cell".to_string(),
             n => format!("{n} cells"),
@@ -1290,7 +1292,7 @@ impl MarketDataTile {
             key: QueryKey(self.id.0),
             tag: self.upload_tag,
             target: pending.target,
-            document: self.spec.document.into(),
+            document: self.spec.document.clone(),
             rows: pending.rows,
         });
         if let Err(refusal) = queued {
@@ -1390,7 +1392,7 @@ impl MarketDataTile {
                     // draft for its labels alone (what `:rebase` does),
                     // and the second, below, paints the re-placed edits.
                     // A refusal of either changes nothing but the notice.
-                    let clean = match MatrixModel::build(&snapshot, self.spec, &Draft::default()) {
+                    let clean = match MatrixModel::build(&snapshot, &self.spec, &Draft::default()) {
                         Ok(model) => model,
                         Err(e) => {
                             self.notice = Some(e.into());
@@ -1462,7 +1464,7 @@ impl MarketDataTile {
         // Validate the delivered snapshot even while Behind paints the retained base.
         // It becomes the target for rebase, so recording an unbuildable document would
         // leave the draft without a usable resolution target.
-        let built = match MatrixModel::build(&snapshot, self.spec, &draft) {
+        let built = match MatrixModel::build(&snapshot, &self.spec, &draft) {
             Ok(model) => model,
             Err(e) => {
                 self.notice = Some(e.into());
@@ -1520,7 +1522,7 @@ impl MarketDataTile {
                 // once per restore; failure leaves the draft unresolved.
                 let clean = self
                     .painted_snapshot()
-                    .and_then(|s| MatrixModel::build(&s, self.spec, &Draft::default()).ok());
+                    .and_then(|s| MatrixModel::build(&s, &self.spec, &Draft::default()).ok());
                 let Some(clean) = clean else {
                     self.unresolved_restore = true;
                     self.install_model(cx);
@@ -1579,7 +1581,7 @@ impl MarketDataTile {
         {
             return Ok(EchoStep::Held(held.clone()));
         }
-        let clean = MatrixModel::build(snapshot, self.spec, &Draft::default())?;
+        let clean = MatrixModel::build(snapshot, &self.spec, &Draft::default())?;
         let held = |text: String| {
             EchoStep::Held(Echo::Differs {
                 newer: delivered.clone(),
@@ -1587,11 +1589,11 @@ impl MarketDataTile {
             })
         };
         let delivered =
-            match crate::core::upload::assemble(snapshot, self.spec, &clean, &Draft::default()) {
+            match crate::core::upload::assemble(snapshot, &self.spec, &clean, &Draft::default()) {
                 Ok(delivered) => delivered,
                 Err(e) => return Ok(held(format!("echo not comparable: {e}"))),
             };
-        let differing = crate::core::upload::echo_differs(self.spec, sent, &delivered);
+        let differing = crate::core::upload::echo_differs(&self.spec, sent, &delivered);
         if differing == 0 {
             let line = format!(
                 "sent {}, confirmed {}",
@@ -1657,7 +1659,7 @@ impl MarketDataTile {
     fn compute_title(spec: &PanelSpec, key: Option<&[String]>) -> SharedString {
         match key {
             Some(k) => format!("{} · {}", spec.title, display_key(k)).into(),
-            None => spec.title.into(),
+            None => spec.title.clone().into(),
         }
     }
 
@@ -1683,7 +1685,7 @@ impl MarketDataTile {
         if base_of(&base) != draft.base {
             return;
         }
-        if let Ok(base_model) = MatrixModel::build(&base, self.spec, &Draft::default()) {
+        if let Ok(base_model) = MatrixModel::build(&base, &self.spec, &Draft::default()) {
             draft.capture_groups(&base_model);
         }
     }
@@ -1693,14 +1695,14 @@ impl MarketDataTile {
     fn rebuild_model(&mut self, cx: &mut Context<Self>) {
         let Some(snapshot) = self.painted_snapshot() else {
             self.model = Rc::new(MatrixModel::empty(
-                self.spec,
+                &self.spec,
                 self.key.as_deref().unwrap_or(&[]),
             ));
             self.clamp_cursor();
             self.install_model(cx);
             return;
         };
-        match MatrixModel::build(&snapshot, self.spec, &self.draft) {
+        match MatrixModel::build(&snapshot, &self.spec, &self.draft) {
             Ok(model) => self.model = Rc::new(model),
             // A document that cannot be laid out as a grid (a hole, a
             // repeated pair, a missing axis) leaves the last good model
@@ -2050,7 +2052,7 @@ impl MarketDataTile {
             .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
             .map(|t| t.with_timezone(&chrono::Utc));
         self.header = HeaderModel::prepare(HeaderInputs {
-            spec: self.spec,
+            spec: &self.spec,
             key: self.key.as_deref(),
             model: &self.model,
             badge: self.draft.badge(),
@@ -2063,7 +2065,7 @@ impl MarketDataTile {
             }),
             prompt: self.pending_upload.as_ref().map(|c| c.prompt_text()),
             source_at: self.source_at,
-            incomplete: self.draft.incomplete_rows(self.spec, &self.model.columns),
+            incomplete: self.draft.incomplete_rows(&self.spec, &self.model.columns),
             clock: self.clock,
         });
     }
@@ -2473,7 +2475,7 @@ impl MarketDataTile {
                 let text = self.model.rows[row].cells[col].text.clone();
                 let labels = self.model.label_of(cell);
                 if let Some(CellKind::Choice(options)) = self.model.kind_of(col) {
-                    self.open_choice(cell, labels, &text, options, window, cx);
+                    self.open_choice(cell, labels, &text, Arc::clone(options), window, cx);
                     return;
                 }
                 let wants_date = matches!(self.model.kind_of(col), Some(CellKind::Date));
@@ -2818,7 +2820,7 @@ impl MarketDataTile {
                 // Only Number cells support arithmetic nudging. Reject other kinds
                 // without changing typed text. This declared-type check also
                 // establishes the kind used by the precision lookup below.
-                let Some(ty) = declared_type(self.spec, &self.model, *col) else {
+                let Some(ty) = declared_type(&self.spec, &self.model, *col) else {
                     self.notice = Some("not a numeric cell".into());
                     return true;
                 };
@@ -2892,7 +2894,7 @@ impl MarketDataTile {
                 // this `else` cannot run — spelled as the moved-grid
                 // refusal rather than an `unwrap`, because a panic on the
                 // render thread is never the answer.
-                let Some(ty) = declared_type(self.spec, &self.model, cell.1) else {
+                let Some(ty) = declared_type(&self.spec, &self.model, cell.1) else {
                     self.close_editor(window, cx);
                     self.notice = Some(CELL_MOVED.into());
                     return true;
@@ -3035,7 +3037,7 @@ impl MarketDataTile {
             cell.0,
             cell.1,
             &snapshot,
-            self.spec,
+            &self.spec,
             &self.draft,
         );
         if patched {
@@ -3062,12 +3064,10 @@ impl MarketDataTile {
             self.notice = Some(CELL_MOVED.into());
             return true;
         }
-        let Some(attr) = self
-            .spec
-            .header
-            .iter()
-            .find(|a| a.column == column.as_ref())
-        else {
+        // A handle, not a borrow of `self`: the editor closes (`&mut self`)
+        // between finding the attribute and writing it.
+        let spec = Arc::clone(&self.spec);
+        let Some(attr) = spec.header.iter().find(|a| a.column == column.as_ref()) else {
             self.close_editor(window, cx);
             self.notice = Some(CELL_MOVED.into());
             return true;
@@ -3091,7 +3091,7 @@ impl MarketDataTile {
                 return true;
             }
         };
-        self.draft.set_attr(attr.column, value, &base);
+        self.draft.set_attr(&attr.column, value, &base);
         self.close_editor(window, cx);
         self.notice = None;
         self.rebuild_model(cx);
@@ -3314,8 +3314,8 @@ impl MarketDataTile {
                 badge: self.draft.badge(),
                 upload_built: true,
                 policy: self.policy,
-                kind_title: self.spec.title,
-                kind_actions: self.spec.actions,
+                kind_title: &self.spec.title,
+                kind_actions: &self.spec.actions,
             },
             self.clock,
         );
@@ -3452,7 +3452,7 @@ impl MarketDataTile {
         cell: (usize, usize),
         labels: (SharedString, SharedString),
         current: &str,
-        options: &'static [&'static str],
+        options: Arc<[String]>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -3605,7 +3605,7 @@ impl MarketDataTile {
         let Some(CellKind::Choice(options)) = self.model.kind_of(col) else {
             return Err("not a choice cell".to_string());
         };
-        let options: &'static [&'static str] = options;
+        let options = Arc::clone(options);
         let len = options.len() as isize;
         if len == 0 {
             // A spec declaring `choices: Some(&[])` — nothing to step
@@ -3613,7 +3613,7 @@ impl MarketDataTile {
             return Err("the column declares no options".to_string());
         }
         let current = self.model.rows[row].cells[col].text.as_ref();
-        let next = match options.iter().position(|o| *o == current) {
+        let next = match options.iter().position(|o| o.as_str() == current) {
             Some(i) => (i as isize + delta).rem_euclid(len),
             None if delta > 0 => 0,
             None => len - 1,
@@ -3623,7 +3623,7 @@ impl MarketDataTile {
         self.commit_cell_value(
             cell,
             labels,
-            Value::Utf8(options[next as usize].to_string()),
+            Value::Utf8(options[next as usize].clone()),
             window,
             cx,
         );
@@ -3817,7 +3817,7 @@ impl MarketDataTile {
             .snapshot
             .clone()
             .ok_or_else(|| NOT_BEHIND.to_string())?;
-        let newer_model = MatrixModel::build(&snapshot, self.spec, &Draft::default())?;
+        let newer_model = MatrixModel::build(&snapshot, &self.spec, &Draft::default())?;
         let (_, dropped) = self.draft.rebase(&newer_model);
         self.leave_behind();
         // Cleared before the rebuild so the check below can tell "this
@@ -4119,7 +4119,7 @@ impl MarketDataTile {
                 .spec
                 .header
                 .iter()
-                .map(|a| a.column)
+                .map(|a| a.column.as_str())
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("no attribute '{attr}' ({names})")
@@ -4151,7 +4151,7 @@ impl MarketDataTile {
                     .ok_or_else(unknown)?;
                 let parsed = parse_attr(&value, header_attr.ty)?;
                 let base = self.attr_edit_base()?;
-                self.draft.set_attr(header_attr.column, parsed, &base);
+                self.draft.set_attr(&header_attr.column, parsed, &base);
                 self.rebuild_model(cx);
                 self.changed(cx);
                 Ok(())
@@ -4200,7 +4200,7 @@ impl MarketDataTile {
         }
         self.unresolved_restore = !self.draft.is_empty();
         self.key = Some(key);
-        self.title = Self::compute_title(self.spec, self.key.as_deref());
+        self.title = Self::compute_title(&self.spec, self.key.as_deref());
         // What an echo said belongs to the outgoing underlying's upload.
         self.echo = None;
         self.snapshot = None;
@@ -4815,11 +4815,11 @@ mod tests {
     use super::*;
     use crate::commands;
     use crate::content::MarketDataFactory;
+    use crate::core::DraftState;
     use crate::core::draft::RowEdit;
     use crate::core::spec::{RowAxis, RowIdentity, RowLabel, ValueColumn};
     use crate::core::test_fixtures;
-    use crate::core::test_fixtures::at;
-    use crate::core::{CVI, DIVIDEND, DraftState};
+    use crate::core::test_fixtures::{CVI, DIVIDEND, at};
     use crate::delegate::LABEL_COL;
     use geode_core::attribution::{Attribution, ScopeSemantics};
     use geode_core::groupings::GroupingSlots;
@@ -4905,8 +4905,8 @@ mod tests {
     }
     use std::cell::RefCell;
     use std::rc::Rc;
-    use std::sync::Arc;
     use std::sync::mpsc::Receiver;
+    use std::sync::{Arc, LazyLock};
     use std::time::{Duration, Instant};
 
     const TILE: u64 = 3;
@@ -5126,7 +5126,7 @@ mod tests {
 
     fn open_spec(
         cx: &mut gpui::TestAppContext,
-        spec: &'static PanelSpec,
+        spec: &Arc<PanelSpec>,
         restored: Option<toml::Table>,
     ) -> (Harness, gpui::VisualTestContext) {
         open_spec_with_egress(cx, spec, restored, Vec::new())
@@ -5137,7 +5137,7 @@ mod tests {
     /// own document by the factory exactly as `geode-app` wires it.
     fn open_spec_with_egress(
         cx: &mut gpui::TestAppContext,
-        spec: &'static PanelSpec,
+        spec: &Arc<PanelSpec>,
         restored: Option<toml::Table>,
         egress: Vec<(String, Vec<String>)>,
     ) -> (Harness, gpui::VisualTestContext) {
@@ -5155,8 +5155,9 @@ mod tests {
         // — in the harness only, since the app always has this installed.
         cx.update(crate::init);
         let (data, rx) = DataHandle::for_tests();
-        let factory = MarketDataFactory::new(data.clone(), spec, Duration::from_secs(15 * 60))
-            .with_egress(Arc::new(egress));
+        let factory =
+            MarketDataFactory::new(data.clone(), Arc::clone(spec), Duration::from_secs(15 * 60))
+                .with_egress(Arc::new(egress));
         let slot: Rc<RefCell<Option<Built>>> = Rc::new(RefCell::new(None));
         let window = cx
             .update(|cx| {
@@ -5249,8 +5250,8 @@ mod tests {
             ),
             ("bbg".to_string(), vec!["dividend_schedule".to_string()]),
         ]);
-        let factory =
-            MarketDataFactory::new(data, &CVI, Duration::from_secs(60)).with_egress(egress);
+        let factory = MarketDataFactory::new(data, Arc::clone(&CVI), Duration::from_secs(60))
+            .with_egress(egress);
         let slot: Rc<RefCell<Option<Entity<MarketDataTile>>>> = Rc::new(RefCell::new(None));
         let out = slot.clone();
         cx.update(|cx| {
@@ -6012,6 +6013,97 @@ mod tests {
         assert!(
             chips.iter().any(|c| c == &local),
             "the source time on the trader's own clock ({local}): {chips:?}"
+        );
+    }
+
+    /// A user-layer panel over `cvi_params`, read as the application reads
+    /// it (builtin panels beneath, merged, the full structural reader),
+    /// paints its own title and formats: the ladder at the user's six
+    /// places and `fwd` at three, where the builtin CVI paints four and two.
+    #[gpui::test]
+    fn a_user_layer_panel_paints_its_own_title_and_formats(cx: &mut gpui::TestAppContext) {
+        use crate::core::spec::{BUILTIN_PANELS, builtin_kind_actions};
+        use geode_core::config::{Layer, LayerDoc, merge_docs};
+        use geode_core::panel::{PANELS_DOC, read_panels};
+        const WIDE: &str = r#"config_version = 1
+
+[cvi_wide]
+title = "CVI (wide)"
+dataset = "cvi_params"
+document = "cvi_params"
+actions = ["marketdata::cvi_reanchor"]
+
+[cvi_wide.value]
+type = "f64"
+format = { precision = 6 }
+
+[cvi_wide.rows]
+column = "term"
+identity = "date"
+label = "shown"
+
+[cvi_wide.columns]
+axis = "node"
+
+[[cvi_wide.header]]
+column = "anchor_date"
+label = "anchor"
+type = "date"
+
+[[cvi_wide.header]]
+column = "spot_ref"
+label = "spot"
+type = "f64"
+
+[[cvi_wide.slice]]
+column = "forward"
+label = "fwd"
+format = { precision = 3 }
+
+[[cvi_wide.slice]]
+column = "atm"
+label = "atm"
+
+[[cvi_wide.slice]]
+column = "skew"
+label = "skew"
+"#;
+        let builtin = LayerDoc::builtin(PANELS_DOC, BUILTIN_PANELS).unwrap();
+        let user = LayerDoc {
+            layer: Layer::User,
+            file: "panels.toml".into(),
+            ..LayerDoc::builtin(PANELS_DOC, WIDE).unwrap()
+        };
+        let (panels, diags) = read_panels(
+            &merge_docs(PANELS_DOC, &[builtin, user]),
+            &builtin_kind_actions(),
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let spec = panels
+            .into_iter()
+            .find(|p| p.kind == "cvi_wide")
+            .expect("the user panel reads");
+
+        let (h, mut vcx) = open_spec(cx, &Arc::new(spec), None);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+
+        let (chips, title) = h.tile.read_with(&vcx, |t, _| (t.header_texts(), t.title()));
+        assert!(chips.iter().any(|c| c == "CVI (wide)"), "{chips:?}");
+        assert_eq!(title.as_ref(), "CVI (wide) · SPX.Z");
+        assert_eq!(
+            h.row_texts(&vcx, 0),
+            vec![
+                "4500.000",
+                "0.180000",
+                "-1.000000",
+                "0.100000",
+                "0.200000",
+                "0.300000"
+            ],
+            "fwd at the slice's three places; atm, skew and the ladder at the panel's six"
         );
     }
 
@@ -8321,58 +8413,62 @@ deleted = true
 
     /// Required free-text fixture for text-editor tests. SCHEDULE's status is a Choice
     /// popup; this panel instead matches SCHEDULE_OPTIONAL_NOTE with a required value.
-    const SCHEDULE_REQUIRED_NOTE: PanelSpec = PanelSpec {
-        kind: "sched_note_req",
-        title: "Dividends (note)",
-        dataset: "div_schedule_note",
-        document: "div_schedule_note",
-        rows: RowAxis {
-            column: "dividend_id",
-            identity: RowIdentity::Minted,
-            label: RowLabel::Shown,
-        },
-        columns: Columns::Values(&[ValueColumn {
-            column: "note",
-            label: "note",
-            ty: ColumnType::Utf8,
+    static SCHEDULE_REQUIRED_NOTE: LazyLock<Arc<PanelSpec>> = LazyLock::new(|| {
+        Arc::new(PanelSpec {
+            kind: "sched_note_req".into(),
+            title: "Dividends (note)".into(),
+            dataset: "div_schedule_note".into(),
+            document: "div_schedule_note".into(),
+            rows: RowAxis {
+                column: "dividend_id".into(),
+                identity: RowIdentity::Minted,
+                label: RowLabel::Shown,
+            },
+            columns: Columns::Values(vec![ValueColumn {
+                column: "note".into(),
+                label: "note".into(),
+                ty: ColumnType::Utf8,
+                format: ColumnFormat::MEASURE,
+                choices: None,
+                required: true,
+            }]),
+            header: Vec::new(),
+            slice_values: Vec::new(),
+            value_type: ColumnType::F64,
             format: ColumnFormat::MEASURE,
-            choices: None,
-            required: true,
-        }]),
-        header: &[],
-        slice_values: &[],
-        value_type: ColumnType::F64,
-        format: ColumnFormat::MEASURE,
-        actions: &[],
-    };
+            actions: Vec::new(),
+        })
+    });
 
     /// A one-column flat panel whose value is optional free text — what
     /// tells "empty is refused" (a required column) from "empty is a
     /// value" (an optional one).
-    const SCHEDULE_OPTIONAL_NOTE: PanelSpec = PanelSpec {
-        kind: "sched_note",
-        title: "Dividends (note)",
-        dataset: "div_schedule_note",
-        document: "div_schedule_note",
-        rows: RowAxis {
-            column: "dividend_id",
-            identity: RowIdentity::Minted,
-            label: RowLabel::Shown,
-        },
-        columns: Columns::Values(&[ValueColumn {
-            column: "note",
-            label: "note",
-            ty: ColumnType::Utf8,
+    static SCHEDULE_OPTIONAL_NOTE: LazyLock<Arc<PanelSpec>> = LazyLock::new(|| {
+        Arc::new(PanelSpec {
+            kind: "sched_note".into(),
+            title: "Dividends (note)".into(),
+            dataset: "div_schedule_note".into(),
+            document: "div_schedule_note".into(),
+            rows: RowAxis {
+                column: "dividend_id".into(),
+                identity: RowIdentity::Minted,
+                label: RowLabel::Shown,
+            },
+            columns: Columns::Values(vec![ValueColumn {
+                column: "note".into(),
+                label: "note".into(),
+                ty: ColumnType::Utf8,
+                format: ColumnFormat::MEASURE,
+                choices: None,
+                required: false,
+            }]),
+            header: Vec::new(),
+            slice_values: Vec::new(),
+            value_type: ColumnType::F64,
             format: ColumnFormat::MEASURE,
-            choices: None,
-            required: false,
-        }]),
-        header: &[],
-        slice_values: &[],
-        value_type: ColumnType::F64,
-        format: ColumnFormat::MEASURE,
-        actions: &[],
-    };
+            actions: Vec::new(),
+        })
+    });
 
     fn schedule_note_snapshot() -> Snapshot {
         Snapshot::for_tests_with_provenance(
@@ -9057,30 +9153,32 @@ deleted = true
     /// rather than being guessed from what the text happens to parse as:
     /// `"3"` is a valid `F64` too, so only checking the RESULT type
     /// (`Value::I64`, not `Value::F64`) proves which one was used.
-    const SCHEDULE_I64: PanelSpec = PanelSpec {
-        kind: "sched_i64",
-        title: "Dividends (i64)",
-        dataset: "div_schedule_i64",
-        document: "div_schedule_i64",
-        rows: RowAxis {
-            column: "dividend_id",
-            identity: RowIdentity::Minted,
-            label: RowLabel::Shown,
-        },
-        columns: Columns::Values(&[ValueColumn {
-            column: "units",
-            label: "units",
-            ty: ColumnType::I64,
+    static SCHEDULE_I64: LazyLock<Arc<PanelSpec>> = LazyLock::new(|| {
+        Arc::new(PanelSpec {
+            kind: "sched_i64".into(),
+            title: "Dividends (i64)".into(),
+            dataset: "div_schedule_i64".into(),
+            document: "div_schedule_i64".into(),
+            rows: RowAxis {
+                column: "dividend_id".into(),
+                identity: RowIdentity::Minted,
+                label: RowLabel::Shown,
+            },
+            columns: Columns::Values(vec![ValueColumn {
+                column: "units".into(),
+                label: "units".into(),
+                ty: ColumnType::I64,
+                format: ColumnFormat::MEASURE,
+                choices: None,
+                required: true,
+            }]),
+            header: Vec::new(),
+            slice_values: Vec::new(),
+            value_type: ColumnType::F64,
             format: ColumnFormat::MEASURE,
-            choices: None,
-            required: true,
-        }]),
-        header: &[],
-        slice_values: &[],
-        value_type: ColumnType::F64,
-        format: ColumnFormat::MEASURE,
-        actions: &[],
-    };
+            actions: Vec::new(),
+        })
+    });
 
     fn schedule_i64_snapshot() -> Snapshot {
         Snapshot::for_tests_with_provenance(
@@ -10735,7 +10833,7 @@ edits = [["2099-01-01", "-1", 1.0]]
         }
         // Kind actions register beside ACTIONS, as the content's registration
         // does, so a user layer may bind them.
-        for a in CVI.actions {
+        for a in &CVI.actions {
             registry
                 .register(geode_shell::actions::ActionDef {
                     id: ActionId(a.id.to_string()),
@@ -10745,7 +10843,7 @@ edits = [["2099-01-01", "-1", 1.0]]
                 .expect("no duplicate ids");
         }
         let mut docs = vec![
-            geode_shell::keymap::fragments::fragment_doc(CVI.kind, crate::content::DEFAULT_KEYMAP)
+            geode_shell::keymap::fragments::fragment_doc(&CVI.kind, crate::content::DEFAULT_KEYMAP)
                 .expect("the fragment parses"),
         ];
         if let Some(text) = user {
@@ -13587,7 +13685,7 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         let expected = h.tile.read_with(&vcx, |t, _| {
             crate::core::upload::assemble(
                 &t.painted_snapshot().unwrap(),
-                t.spec,
+                &t.spec,
                 t.model(),
                 t.draft(),
             )
@@ -14829,15 +14927,17 @@ cells = {{ ex = {{ type = "date", value = "2027-06-18" }}, amount = 0.75, status
         let (data, rx) = DataHandle::for_tests();
         let captured = Rc::new(RefCell::new(None));
         let factory = Capturing {
-            inner: MarketDataFactory::new(data, &CVI, Duration::from_secs(15 * 60)).with_egress(
-                Arc::new(vec![("sophis".to_string(), vec!["cvi_params".to_string()])]),
-            ),
+            inner: MarketDataFactory::new(data, Arc::clone(&CVI), Duration::from_secs(15 * 60))
+                .with_egress(Arc::new(vec![(
+                    "sophis".to_string(),
+                    vec!["cvi_params".to_string()],
+                )])),
             tile: captured.clone(),
         };
         let (config, builtin) = ShellServices::config_and_builtin(ConfigSources::default());
         let mut registry = geode_shell::actions::ActionRegistry::default();
         register_builtin_actions(&mut registry);
-        register_add_actions(&mut registry, &[CVI.kind]);
+        register_add_actions(&mut registry, &["cvi"]);
         let mut roster = geode_shell::module::ModuleRoster::new();
         roster.add(Box::new(factory));
         roster.register_actions(&mut registry);
@@ -14905,6 +15005,7 @@ edits = [["2026-11-20", "-1", 9.5]]
             keymap_diagnostics: Vec::new(),
             keymap_fragments: fragments,
             keymap_fragment_diagnostics: Vec::new(),
+            composition_diagnostics: Vec::new(),
             pages: geode_shell::module::PageRoster::new(),
             restored_pages: std::collections::BTreeMap::new(),
         };

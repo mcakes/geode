@@ -18,6 +18,7 @@ use geode_core::snapshot::Snapshot;
 use geode_core::view::ColumnFormat;
 use gpui::SharedString;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 /// A column's display and editor kind, parallel to [`MatrixModel::columns`].
 /// Pivot ladder and slice columns are numeric. Flat columns use their
@@ -27,7 +28,7 @@ pub enum CellKind {
     Number(ColumnFormat),
     Date,
     Text,
-    Choice(&'static [&'static str]),
+    Choice(Arc<[String]>),
 }
 
 /// The one formatter a [`Cell`]'s text is ever built through — the
@@ -218,7 +219,7 @@ impl MatrixModel {
         }
 
         let rows_idx = snapshot
-            .column_index(spec.rows.column)
+            .column_index(&spec.rows.column)
             .ok_or_else(|| format!("the document has no '{}' column", spec.rows.column))?;
         let key = key_of(snapshot, spec, rows_idx)?;
         let header = header_of(snapshot, spec, draft);
@@ -326,7 +327,7 @@ impl MatrixModel {
                 let Some(vc) = spec.flat_columns().get(col) else {
                     return false;
                 };
-                let Some(idx) = snapshot.column_index(vc.column) else {
+                let Some(idx) = snapshot.column_index(&vc.column) else {
                     return false;
                 };
                 read_flat_value(snapshot, idx, doc_row, vc.ty)
@@ -393,14 +394,14 @@ fn header_of(snapshot: &Snapshot, spec: &PanelSpec, draft: &Draft) -> Vec<Header
     spec.header
         .iter()
         .filter_map(|attr| {
-            let idx = snapshot.column_index(attr.column)?;
-            let (text, edited) = match draft.attrs.get(attr.column) {
+            let idx = snapshot.column_index(&attr.column)?;
+            let (text, edited) = match draft.attrs.get(&attr.column) {
                 Some(value) => (attr_text(value), true),
                 None => (label_at(snapshot, idx, 0)?, false),
             };
             Some(HeaderCell {
-                column: attr.column.into(),
-                label: attr.label.into(),
+                column: attr.column.clone().into(),
+                label: attr.label.clone().into(),
                 text: text.into(),
                 edited,
             })
@@ -511,7 +512,7 @@ fn index_grid(
     let mut seen_rows: HashMap<String, usize> = HashMap::new();
     let mut seen_cols: HashMap<String, ()> = HashMap::new();
     for row in 0..snapshot.rows() {
-        let row_label = required_label(snapshot, rows_idx, row, spec.rows.column)?;
+        let row_label = required_label(snapshot, rows_idx, row, &spec.rows.column)?;
         let col_label = required_label(snapshot, col_idx, row, axis)?;
         let ri = match seen_rows.entry(row_label.clone()) {
             std::collections::hash_map::Entry::Occupied(e) => *e.get(),
@@ -639,13 +640,13 @@ fn pivot(
     let slices: Vec<(&crate::core::spec::SliceValue, usize)> = spec
         .slice_values
         .iter()
-        .filter_map(|sv| snapshot.column_index(sv.column).map(|idx| (sv, idx)))
+        .filter_map(|sv| snapshot.column_index(&sv.column).map(|idx| (sv, idx)))
         .collect();
     // A slice label is a column label: `Draft` resolves edits by label and
     // indexes `columns` by it, so a node that reads `fwd` would make two
     // columns one name.
     for (sv, _) in &slices {
-        if grid.columns.iter().any(|c| c == sv.label) {
+        if grid.columns.contains(&sv.label) {
             return Err(format!(
                 "the slice value '{}' is labelled '{}', which is also a {axis} label; \
                  a column label must name one column",
@@ -742,7 +743,7 @@ fn pivot(
     Ok((
         slices
             .iter()
-            .map(|(sv, _)| SharedString::from(sv.label))
+            .map(|(sv, _)| SharedString::from(sv.label.clone()))
             .chain(grid.columns.into_iter().map(SharedString::from))
             .collect(),
         column_kinds,
@@ -774,10 +775,10 @@ fn axis_value(snapshot: &Snapshot, idx: usize, row: usize) -> Value {
 /// [`cell_text`] follows for a mismatch, rather than refuse a spec that
 /// declares one.
 fn flat_kind(vc: &ValueColumn) -> CellKind {
-    match (vc.ty, vc.choices) {
+    match (vc.ty, &vc.choices) {
         (ColumnType::F64 | ColumnType::I64, _) => CellKind::Number(vc.format.clone()),
         (ColumnType::Date, _) => CellKind::Date,
-        (_, Some(choices)) => CellKind::Choice(choices),
+        (_, Some(choices)) => CellKind::Choice(Arc::clone(choices)),
         (ColumnType::Utf8 | ColumnType::Timestamp | ColumnType::Bool, None) => CellKind::Text,
     }
 }
@@ -826,7 +827,7 @@ fn flatten(snapshot: &Snapshot, spec: &PanelSpec, draft: &Draft, rows_idx: usize
     let mut idxs = Vec::with_capacity(flat_columns.len());
     for vc in flat_columns {
         let idx = snapshot
-            .column_index(vc.column)
+            .column_index(&vc.column)
             .ok_or_else(|| format!("the document has no '{}' column", vc.column))?;
         idxs.push(idx);
     }
@@ -848,7 +849,7 @@ fn flatten(snapshot: &Snapshot, spec: &PanelSpec, draft: &Draft, rows_idx: usize
 
     let columns = flat_columns
         .iter()
-        .map(|vc| SharedString::from(vc.label))
+        .map(|vc| SharedString::from(vc.label.clone()))
         .collect();
     let column_kinds: Vec<CellKind> = flat_columns.iter().map(flat_kind).collect();
 
@@ -861,7 +862,7 @@ fn flatten(snapshot: &Snapshot, spec: &PanelSpec, draft: &Draft, rows_idx: usize
     let mut seen: HashMap<String, usize> = HashMap::with_capacity(snapshot.rows());
     let mut rows = Vec::with_capacity(snapshot.rows());
     for row in 0..snapshot.rows() {
-        let label = required_label(snapshot, rows_idx, row, spec.rows.column)?;
+        let label = required_label(snapshot, rows_idx, row, &spec.rows.column)?;
         if let Some(previous) = seen.insert(label.clone(), row) {
             return Err(format!(
                 "the document repeats {}='{label}' (rows {previous} and {row}): a row \
@@ -1084,11 +1085,10 @@ mod tests {
     use super::*;
     use crate::core::draft::{Draft, DraftState};
     use crate::core::spec::{
-        CVI, Columns, HeaderAttr, PanelSpec, RowAxis, RowIdentity, RowLabel, SliceValue,
-        ValueColumn,
+        Columns, HeaderAttr, PanelSpec, RowAxis, RowIdentity, RowLabel, SliceValue, ValueColumn,
     };
     use crate::core::test_fixtures::{
-        SCHEDULE, at, date, schedule_snapshot, schedule_snapshot_with_extra_value,
+        CVI, SCHEDULE, at, date, schedule_snapshot, schedule_snapshot_with_extra_value,
     };
     use geode_core::attribution::{Attribution, ScopeSemantics};
     use geode_core::document::Value;
@@ -1096,6 +1096,7 @@ mod tests {
     use geode_core::snapshot::{ColumnMeta, Freshness, Provenance, Snapshot, TestColumn};
     use geode_core::view::ColumnFormat;
     use proptest::prelude::*;
+    use std::sync::LazyLock;
 
     const TERMS: [&str; 2] = ["2026-10-16", "2026-11-20"];
     const NODES: [f64; 3] = [-20.0, -1.0, 3.5];
@@ -1463,26 +1464,28 @@ mod tests {
     #[test]
     fn a_slice_label_colliding_with_an_axis_label_is_refused() {
         // CVI's three slice values, the first relabelled as a node.
-        const COLLIDING: PanelSpec = PanelSpec {
-            slice_values: &[
-                SliceValue {
-                    column: "forward",
-                    label: "-20",
-                    format: ColumnFormat::MEASURE,
-                },
-                SliceValue {
-                    column: "atm",
-                    label: "atm",
-                    format: ColumnFormat::MEASURE,
-                },
-                SliceValue {
-                    column: "skew",
-                    label: "skew",
-                    format: ColumnFormat::MEASURE,
-                },
-            ],
-            ..CVI
-        };
+        static COLLIDING: LazyLock<Arc<PanelSpec>> = LazyLock::new(|| {
+            Arc::new(PanelSpec {
+                slice_values: vec![
+                    SliceValue {
+                        column: "forward".into(),
+                        label: "-20".into(),
+                        format: ColumnFormat::MEASURE,
+                    },
+                    SliceValue {
+                        column: "atm".into(),
+                        label: "atm".into(),
+                        format: ColumnFormat::MEASURE,
+                    },
+                    SliceValue {
+                        column: "skew".into(),
+                        label: "skew".into(),
+                        format: ColumnFormat::MEASURE,
+                    },
+                ],
+                ..(**CVI).clone()
+            })
+        });
         let err = MatrixModel::build(&full_grid(), &COLLIDING, &Draft::default())
             .expect_err("a node labelled -20 and a slice value labelled -20");
         assert!(err.contains("'-20'"), "{err}");
@@ -1635,44 +1638,46 @@ mod tests {
     /// behaviour that has nothing to do with a column's own type (row
     /// routing, repeated labels, the pivot's one-value-column rule).
     /// [`SCHEDULE`] (below) is the typed-cell fixture proper.
-    const FLAT_SPEC: PanelSpec = PanelSpec {
-        kind: "sched",
-        title: "Dividends",
-        dataset: "div_schedule",
-        document: "div_schedule",
-        rows: RowAxis {
-            column: "ex_date",
-            identity: RowIdentity::Typed(ColumnType::Date),
-            label: RowLabel::Shown,
-        },
-        columns: Columns::Values(&[
-            ValueColumn {
-                column: "gross",
-                label: "gross",
-                ty: ColumnType::F64,
-                format: ColumnFormat::MEASURE,
-                choices: None,
-                required: true,
+    static FLAT_SPEC: LazyLock<Arc<PanelSpec>> = LazyLock::new(|| {
+        Arc::new(PanelSpec {
+            kind: "sched".into(),
+            title: "Dividends".into(),
+            dataset: "div_schedule".into(),
+            document: "div_schedule".into(),
+            rows: RowAxis {
+                column: "ex_date".into(),
+                identity: RowIdentity::Typed(ColumnType::Date),
+                label: RowLabel::Shown,
             },
-            ValueColumn {
-                column: "net",
-                label: "net",
-                ty: ColumnType::F64,
-                format: ColumnFormat::MEASURE,
-                choices: None,
-                required: true,
-            },
-        ]),
-        header: &[HeaderAttr {
-            column: "currency",
-            label: "currency",
-            ty: ColumnType::Utf8,
-        }],
-        slice_values: &[],
-        value_type: ColumnType::F64,
-        format: ColumnFormat::MEASURE,
-        actions: &[],
-    };
+            columns: Columns::Values(vec![
+                ValueColumn {
+                    column: "gross".into(),
+                    label: "gross".into(),
+                    ty: ColumnType::F64,
+                    format: ColumnFormat::MEASURE,
+                    choices: None,
+                    required: true,
+                },
+                ValueColumn {
+                    column: "net".into(),
+                    label: "net".into(),
+                    ty: ColumnType::F64,
+                    format: ColumnFormat::MEASURE,
+                    choices: None,
+                    required: true,
+                },
+            ]),
+            header: vec![HeaderAttr {
+                column: "currency".into(),
+                label: "currency".into(),
+                ty: ColumnType::Utf8,
+            }],
+            slice_values: Vec::new(),
+            value_type: ColumnType::F64,
+            format: ColumnFormat::MEASURE,
+            actions: Vec::new(),
+        })
+    });
 
     fn flat_snapshot() -> Snapshot {
         flat_snapshot_dated(&["2026-10-16", "2026-11-20", "2026-12-18"])
@@ -1803,23 +1808,25 @@ mod tests {
         // The schedule's two value columns pivoted on its own row axis:
         // both cannot fit one cell, and filling from the first would hide
         // a whole column of numbers.
-        const PIVOTED: PanelSpec = PanelSpec {
-            kind: "sched",
-            title: "Dividends",
-            dataset: "div_schedule",
-            document: "div_schedule",
-            rows: RowAxis {
-                column: "ex_date",
-                identity: RowIdentity::Typed(ColumnType::Date),
-                label: RowLabel::Shown,
-            },
-            columns: Columns::Axis("currency"),
-            header: &[],
-            slice_values: &[],
-            value_type: ColumnType::F64,
-            format: ColumnFormat::MEASURE,
-            actions: &[],
-        };
+        static PIVOTED: LazyLock<Arc<PanelSpec>> = LazyLock::new(|| {
+            Arc::new(PanelSpec {
+                kind: "sched".into(),
+                title: "Dividends".into(),
+                dataset: "div_schedule".into(),
+                document: "div_schedule".into(),
+                rows: RowAxis {
+                    column: "ex_date".into(),
+                    identity: RowIdentity::Typed(ColumnType::Date),
+                    label: RowLabel::Shown,
+                },
+                columns: Columns::Axis("currency".into()),
+                header: Vec::new(),
+                slice_values: Vec::new(),
+                value_type: ColumnType::F64,
+                format: ColumnFormat::MEASURE,
+                actions: Vec::new(),
+            })
+        });
         let err = MatrixModel::build(&flat_snapshot(), &PIVOTED, &Draft::default())
             .expect_err("one value per cell");
         assert!(err.contains("gross") && err.contains("net"), "{err}");
@@ -2213,25 +2220,25 @@ mod tests {
     #[test]
     fn a_flat_inserted_row_is_complete_once_its_required_columns_are_filled() {
         let spec = PanelSpec {
-            columns: Columns::Values(&[
+            columns: Columns::Values(vec![
                 ValueColumn {
-                    column: "gross",
-                    label: "gross",
+                    column: "gross".into(),
+                    label: "gross".into(),
                     ty: ColumnType::F64,
                     format: ColumnFormat::MEASURE,
                     choices: None,
                     required: true,
                 },
                 ValueColumn {
-                    column: "net",
-                    label: "net",
+                    column: "net".into(),
+                    label: "net".into(),
                     ty: ColumnType::F64,
                     format: ColumnFormat::MEASURE,
                     choices: None,
                     required: false,
                 },
             ]),
-            ..FLAT_SPEC.clone()
+            ..(**FLAT_SPEC).clone()
         };
         let m = MatrixModel::build(&flat_snapshot(), &spec, &Draft::default()).unwrap();
         let mut d = Draft::default();

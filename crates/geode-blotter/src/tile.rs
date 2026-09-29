@@ -586,7 +586,7 @@ impl BlotterTile {
                 .publications
                 .iter()
                 .zip(datasets())
-                .all(|(watch, dataset)| watch.matches(dataset, None))
+                .all(|(watch, dataset)| watch.is_for(dataset, None))
         {
             return;
         }

@@ -1,6 +1,7 @@
 //! Shared vocabulary and pure logic for Geode: configuration, schema,
 //! scopes, query values, snapshots, health, the dimension context at a
-//! tile's cursor, documents, series, pricing, and editor nudging.
+//! tile's cursor, documents, series, pricing, market-data panels, and editor
+//! nudging.
 
 pub mod attribution;
 pub mod clock;
@@ -17,6 +18,7 @@ pub mod health;
 pub mod log;
 pub mod named;
 pub mod nudge;
+pub mod panel;
 pub mod panic;
 pub mod pricing;
 pub mod query;

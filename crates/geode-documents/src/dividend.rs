@@ -41,9 +41,10 @@ const AXES: [&str; 1] = ["dividend_id"];
 const VALUES: [&str; 5] = ["ex_date", "announced_date", "pay_date", "amount", "status"];
 const ATTRIBUTES: [&str; 2] = ["currency", "schedule_date"];
 
-/// Closed status vocabulary accepted by the parser and writer. The market-data
-/// panel declares matching choices without depending on this crate; an app
-/// composition test checks that the two declarations agree.
+/// Closed status vocabulary accepted by the parser and writer. The builtin
+/// dividend panel declares matching `choices` in its TOML without depending
+/// on this crate; an app composition test checks that the loaded panel and
+/// this vocabulary agree.
 pub const STATUSES: [&str; 4] = ["estimated", "declared", "paid", "cancelled"];
 
 /// Wire tags and column names shared by parser and writer. The names remain
@@ -823,10 +824,11 @@ role = "attribute"
     }
 
     #[test]
-    fn builtin_kinds_offers_both_kinds() {
+    fn builtin_kinds_offers_every_kind() {
         let kinds = crate::builtin_kinds();
-        assert_eq!(kinds.len(), 2);
+        assert_eq!(kinds.len(), 3);
         assert!(kinds.iter().any(|k| k.name() == NAME));
+        assert!(kinds.iter().any(|k| k.name() == crate::chain::NAME));
     }
 
     #[test]
