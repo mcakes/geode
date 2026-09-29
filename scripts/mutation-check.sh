@@ -25704,6 +25704,41 @@ run_mutation "health rank: the page ranks by severity, not label" \
   '            Some(w) if w.label() >= h.label() => Some(w),' \
   geode-diagnostics the_page_ranks_health_by_the_core_severity
 
+# Ok and Pending are silent; a looser gate shows a chip for a pending CSV.
+run_mutation "tile health: Ok and Pending are silent" \
+  crates/geode-shell/src/diagnostics.rs \
+  '            if health.severity() <= silent {' \
+  '            if health.severity() < silent {' \
+  geode-shell ok_and_pending_are_silent
+
+# The dataset filter; dropped, every unhealthy source reaches every tile.
+run_mutation "tile health: a source outside the datasets is ignored" \
+  crates/geode-shell/src/diagnostics.rs \
+  '            if !reads(name, state) {' \
+  '            if false && !reads(name, state) {' \
+  geode-shell a_source_outside_the_datasets_is_ignored
+
+# The tie rule; `>=` hands a tie to the last name, not the first.
+run_mutation "tile health: a tie picks the lowest source name" \
+  crates/geode-shell/src/diagnostics.rs \
+  '                Some((_, _, w)) => health.severity() > w.severity(),' \
+  '                Some((_, _, w)) => health.severity() >= w.severity(),' \
+  geode-shell a_tie_picks_the_lowest_source_name
+
+# `others` excludes the worst source itself.
+run_mutation "tile health: others counts only the other sources" \
+  crates/geode-shell/src/diagnostics.rs \
+  '            others: unhealthy - 1,' \
+  '            others: unhealthy,' \
+  geode-shell others_counts_the_other_unhealthy_sources_only
+
+# The bridge links a source to its dataset, not its own name.
+run_mutation "tile health: the bridge links a source to its dataset" \
+  crates/geode-app/src/bridge.rs \
+  '                    dataset: source.dataset.clone(),' \
+  '                    dataset: source.name.clone(),' \
+  geode-app describing_a_source_carries_its_dataset
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

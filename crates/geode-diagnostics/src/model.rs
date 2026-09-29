@@ -786,6 +786,7 @@ pub(crate) mod tests {
         use geode_shell::diagnostics::SourceSummary;
         let mut d = Diagnostics::new(LogLevels::default());
         let summary = |shape: SourceShape, topics: Vec<String>| SourceSummary {
+            dataset: String::new(),
             paths: vec!["/x".into()],
             priority: "1".into(),
             readiness: "ready".into(),

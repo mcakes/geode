@@ -812,6 +812,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
             d.describe_source(
                 &source.name,
                 SourceSummary {
+                    dataset: source.dataset.clone(),
                     paths: source.paths.clone(),
                     priority: format!("{:?}", source.priority),
                     readiness: format!("{:?}", source.readiness),
@@ -5130,6 +5131,65 @@ role = "key"
         );
     }
 
+    /// `attach` describes each source with its dataset, so a tile asking
+    /// about the dataset hears about the source. The name differs from the
+    /// dataset here so a link built from the name would fail.
+    #[gpui::test]
+    fn describing_a_source_carries_its_dataset(cx: &mut gpui::TestAppContext) {
+        let window = open_test_window(cx, test_shell_services());
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let (handle, _rx) = DataHandle::for_tests();
+        let factory = Rc::new(BlotterFactory::new(
+            handle.clone(),
+            Vec::new(),
+            NamedColours::default(),
+            SchemaSpec::default(),
+            DerivedDimensions::default(),
+            FindStyle::default(),
+            Duration::from_secs(900),
+        ));
+        let (_tx, rx) = crate::events::channel();
+        let bridge = Bridge {
+            panels: Vec::new(),
+            timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
+                handle.clone(),
+                NamedColours::default(),
+            )),
+            pricer: test_pricer(&handle),
+            handle,
+            factory,
+            events: rx,
+            dropped: Arc::new(AtomicU64::new(0)),
+            sources: vec![(
+                SourceSpec::directory("risk_src", "risk", vec!["/data/risk/*.csv".into()]),
+                SourceShape::Directory,
+            )],
+            local_datasets: Default::default(),
+            pricer_key: None,
+            underlyings: Default::default(),
+        };
+        cx.update(|cx| attach(&bridge, window, cx));
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+        diagnostics.update(&mut vcx, |d, cx| {
+            d.note_health(
+                "risk_src",
+                geode_shell::diagnostics::Health::Failed {
+                    reason: "torn".into(),
+                },
+                "torn".into(),
+                std::time::SystemTime::UNIX_EPOCH,
+            );
+            cx.notify();
+        });
+        let asked = diagnostics.read_with(&vcx, |d, _| d.health_for_datasets(&["risk"]));
+        assert_eq!(asked.map(|h| h.source), Some("risk_src".to_string()));
+    }
     #[test]
     fn the_database_path_prefers_config_then_demo_then_the_platform_dir() {
         let empty = Config::load(&ConfigSources::default());

@@ -129,6 +129,10 @@ pub enum CatalogRequest {
 /// sources without depending on `geode-data` types.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceSummary {
+    /// The dataset this source loads into (`SourceSpec.dataset`). The only
+    /// link from a source to what a tile reads; `sources` is
+    /// restart-required, so it never changes mid-session.
+    pub dataset: String,
     pub paths: Vec<String>,
     pub priority: String,
     pub readiness: String,
@@ -144,6 +148,23 @@ pub struct SourceSummary {
     /// from `SourceSpec` and the dataset family; adapter names and empty topic
     /// lists alone cannot distinguish all three shapes.
     pub shape: SourceShape,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl SourceSummary {
+    /// A directory source loading into `dataset`, everything else empty:
+    /// what a test needs to link a source to a dataset.
+    pub fn for_dataset(dataset: &str) -> SourceSummary {
+        SourceSummary {
+            dataset: dataset.to_string(),
+            paths: Vec::new(),
+            priority: String::new(),
+            readiness: String::new(),
+            adapter: "test".into(),
+            topics: Vec::new(),
+            shape: SourceShape::Directory,
+        }
+    }
 }
 
 /// How many transitions [`SourceState::history`] keeps, newest last.
@@ -234,6 +255,22 @@ pub struct DiagVersions {
     pub config: u64,
     pub log_levels: u64,
     pub perf: u64,
+}
+
+/// What a tile's header chip shows: the worst unhealthy source among those
+/// the tile reads. Never built for Ok or Pending — those are silent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TileHealth {
+    /// PendingTooLong, Degraded or Failed.
+    pub worst: Health,
+    /// The worst source; on a tie, the lowest name.
+    pub source: String,
+    /// `Degraded`/`Failed`'s own reason when it has one, else the source's
+    /// detail (a pending source's waiting file). May be empty.
+    pub reason: String,
+    /// How many other sources the tile reads are also unhealthy
+    /// (PendingTooLong or worse).
+    pub others: usize,
 }
 
 /// Shared operational state. Mutators maintain the combined and section
@@ -376,6 +413,64 @@ impl Diagnostics {
         }
         self.version += 1;
         self.versions.sources += 1;
+    }
+
+    /// The worst unhealthy source loading into any of `datasets`. Only
+    /// described, reported sources count; Ok and Pending are silent; an
+    /// unknown dataset is ignored, never an error.
+    pub fn health_for_datasets(&self, datasets: &[&str]) -> Option<TileHealth> {
+        self.tile_health(|_, state| {
+            state
+                .spec
+                .as_ref()
+                .is_some_and(|s| datasets.contains(&s.dataset.as_str()))
+        })
+    }
+
+    /// [`Self::health_for_datasets`] by source name, for a tile that names
+    /// its sources itself (timeseries). No description needed.
+    pub fn health_for_sources(&self, sources: &[&str]) -> Option<TileHealth> {
+        self.tile_health(|name, _| sources.contains(&name))
+    }
+
+    fn tile_health(&self, reads: impl Fn(&str, &SourceState) -> bool) -> Option<TileHealth> {
+        let silent = Health::Pending.severity();
+        let mut worst: Option<(&str, &SourceState, &Health)> = None;
+        let mut unhealthy = 0usize;
+        // `sources` is a BTreeMap: names ascend, so replacing only on a
+        // strictly worse severity keeps the lowest name on a tie.
+        for (name, state) in &self.sources {
+            let Some(health) = &state.health else {
+                continue;
+            };
+            if health.severity() <= silent {
+                continue;
+            }
+            if !reads(name, state) {
+                continue;
+            }
+            unhealthy += 1;
+            let replace = match worst {
+                None => true,
+                Some((_, _, w)) => health.severity() > w.severity(),
+            };
+            if replace {
+                worst = Some((name, state, health));
+            }
+        }
+        let (name, state, health) = worst?;
+        let reason = match health {
+            Health::Degraded { reason } | Health::Failed { reason } if !reason.is_empty() => {
+                reason.clone()
+            }
+            _ => state.detail.clone(),
+        };
+        Some(TileHealth {
+            worst: health.clone(),
+            source: name.to_string(),
+            reason,
+            others: unhealthy - 1,
+        })
     }
 
     /// Record a source's last/next poll and how many files were ready.
@@ -855,6 +950,138 @@ pub fn fnv1a(s: &str) -> u64 {
 mod tests {
     use super::*;
 
+    fn linked(d: &mut Diagnostics, source: &str, dataset: &str) {
+        d.describe_source(source, SourceSummary::for_dataset(dataset));
+    }
+
+    fn report(d: &mut Diagnostics, source: &str, health: Health) {
+        let detail = match &health {
+            Health::Degraded { reason } | Health::Failed { reason } => reason.clone(),
+            _ => String::new(),
+        };
+        d.note_health(source, health, detail, SystemTime::UNIX_EPOCH);
+    }
+
+    fn failed(r: &str) -> Health {
+        Health::Failed { reason: r.into() }
+    }
+
+    fn degraded(r: &str) -> Health {
+        Health::Degraded { reason: r.into() }
+    }
+
+    #[test]
+    fn the_worst_source_a_tile_reads_wins() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        linked(&mut d, "a_src", "risk");
+        linked(&mut d, "b_src", "risk");
+        report(&mut d, "a_src", degraded("late column"));
+        report(&mut d, "b_src", failed("torn read"));
+        let h = d.health_for_datasets(&["risk"]).unwrap();
+        assert_eq!(h.worst, failed("torn read"));
+        assert_eq!(h.source, "b_src");
+        assert_eq!(h.reason, "torn read");
+        assert_eq!(h.others, 1);
+    }
+
+    #[test]
+    fn ok_and_pending_are_silent() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        linked(&mut d, "a_src", "risk");
+        linked(&mut d, "b_src", "risk");
+        report(&mut d, "a_src", Health::Ok);
+        report(&mut d, "b_src", Health::Pending);
+        assert_eq!(d.health_for_datasets(&["risk"]), None);
+    }
+
+    /// PendingTooLong shows; with no reason of its own it explains itself
+    /// by the source's detail (the file it is waiting on).
+    #[test]
+    fn pending_too_long_shows_and_explains_itself_by_its_detail() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        linked(&mut d, "a_src", "risk");
+        d.note_health(
+            "a_src",
+            Health::PendingTooLong,
+            "BK000.csv".into(),
+            SystemTime::UNIX_EPOCH,
+        );
+        let h = d.health_for_datasets(&["risk"]).unwrap();
+        assert_eq!(h.worst, Health::PendingTooLong);
+        assert_eq!(h.reason, "BK000.csv");
+        assert_eq!(h.others, 0);
+    }
+
+    #[test]
+    fn a_source_outside_the_datasets_is_ignored() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        linked(&mut d, "a_src", "risk");
+        linked(&mut d, "b_src", "pnl");
+        report(&mut d, "b_src", failed("torn read"));
+        assert_eq!(d.health_for_datasets(&["risk"]), None);
+        assert_eq!(
+            d.health_for_datasets(&["nope"]),
+            None,
+            "an unknown dataset is no error"
+        );
+    }
+
+    /// Only sources with a report count; a report on a source nothing
+    /// described has no dataset link and is ignored by the dataset question.
+    #[test]
+    fn an_unreported_or_undescribed_source_is_ignored() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        linked(&mut d, "a_src", "risk");
+        report(&mut d, "loose", failed("torn read"));
+        assert_eq!(d.health_for_datasets(&["risk"]), None);
+    }
+
+    #[test]
+    fn a_tie_picks_the_lowest_source_name() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        linked(&mut d, "b_src", "risk");
+        linked(&mut d, "a_src", "risk");
+        linked(&mut d, "c_src", "risk");
+        report(&mut d, "c_src", failed("z"));
+        report(&mut d, "b_src", failed("y"));
+        report(&mut d, "a_src", failed("x"));
+        let h = d.health_for_datasets(&["risk"]).unwrap();
+        assert_eq!(h.source, "a_src");
+        assert_eq!(h.others, 2);
+    }
+
+    #[test]
+    fn others_counts_the_other_unhealthy_sources_only() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        for (s, ds) in [
+            ("a_src", "risk"),
+            ("b_src", "risk"),
+            ("c_src", "risk"),
+            ("d_src", "pnl"),
+        ] {
+            linked(&mut d, s, ds);
+        }
+        report(&mut d, "a_src", failed("x"));
+        report(&mut d, "b_src", degraded("y"));
+        report(&mut d, "c_src", Health::Ok);
+        report(&mut d, "d_src", failed("z"));
+        assert_eq!(d.health_for_datasets(&["risk"]).unwrap().others, 1);
+        assert_eq!(d.health_for_datasets(&["risk", "pnl"]).unwrap().others, 2);
+    }
+
+    /// The source question needs no description: timeseries names its
+    /// sources directly.
+    #[test]
+    fn health_for_sources_reads_by_name() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        report(&mut d, "demo_kdb", degraded("gap"));
+        report(&mut d, "demo_rest", failed("down"));
+        let h = d.health_for_sources(&["demo_kdb"]).unwrap();
+        assert_eq!(h.source, "demo_kdb");
+        assert_eq!(h.others, 0);
+        assert_eq!(d.health_for_sources(&["unknown"]), None);
+    }
+
     /// Every variant is counted under its own label, in severity order;
     /// two failures with different reasons are one count of two.
     #[test]
@@ -938,6 +1165,7 @@ mod tests {
         d.describe_source(
             "risk",
             SourceSummary {
+                dataset: String::new(),
                 paths: vec![],
                 priority: "".into(),
                 readiness: "".into(),
@@ -1025,6 +1253,7 @@ mod tests {
         d.describe_source(
             "risk",
             SourceSummary {
+                dataset: String::new(),
                 paths: vec!["/data/*.csv".into()],
                 priority: "latest_risk".into(),
                 readiness: "sentinel".into(),
@@ -1164,6 +1393,7 @@ mod tests {
         d.describe_source(
             "risk",
             SourceSummary {
+                dataset: String::new(),
                 paths: vec!["/data/*.csv".into()],
                 priority: "latest_risk".into(),
                 readiness: "sentinel".into(),
@@ -1184,6 +1414,7 @@ mod tests {
     fn describe_source_is_a_no_op_for_an_identical_summary() {
         let mut d = Diagnostics::new(LogLevels::default());
         let summary = SourceSummary {
+            dataset: String::new(),
             paths: vec!["/x".into()],
             priority: "p".into(),
             readiness: "r".into(),
