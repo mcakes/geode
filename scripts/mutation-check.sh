@@ -25928,6 +25928,14 @@ run_mutation "tile health: the blotter re-asks when a snapshot lands" \
   '' \
   geode-blotter a_new_snapshots_datasets_move_the_chip
 
+# The first snapshot re-asks too; without it a source already failed before
+# delivery shows no chip until the next health report.
+run_mutation "tile health: the blotter's first snapshot asks at once" \
+  crates/geode-blotter/src/tile.rs \
+  '            self.health.reask(cx, |d| d.health_for_datasets(&datasets));' \
+  '' \
+  geode-blotter a_source_failed_before_the_first_snapshot_shows_the_chip_on_delivery
+
 # The blotter observes Diagnostics; answered with nothing, a report after
 # delivery never reaches the header.
 run_mutation "tile health: the blotter refreshes on a health change" \

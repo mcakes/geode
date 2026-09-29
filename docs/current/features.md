@@ -248,7 +248,7 @@ plain tile picker.
 The header is the shared 22 px strip. The view, grouping, state chips
 (`pinned`, `unscoped`, `filtered`, a tile as-of), the frame's `AS OF` warning
 and the in-flight `…` sit on the left and clip when the tile is too narrow.
-Dataset times now sit in the header's right cluster with the health chip,
+Dataset times sit in the header's right cluster with the health chip,
 which covers the datasets of the tile's current snapshot; the notice sits
 before them. The chip's question moves with each delivered snapshot: a view
 over other datasets drops a chip for the old ones at once. The blotter has no

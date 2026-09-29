@@ -6678,6 +6678,42 @@ mod tests {
         assert_eq!(chip_word(&h, &cx), None);
     }
 
+    /// A source already failed before the first snapshot shows the chip
+    /// on that delivery alone: the landing snapshot re-asks, with no
+    /// further health report to prompt the observer.
+    #[gpui::test]
+    fn a_source_failed_before_the_first_snapshot_shows_the_chip_on_delivery(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut cx) = open(cx);
+        report_described(&h, &mut cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let tag = next_query(&h.requests).tag;
+        assert_eq!(chip_word(&h, &cx), None, "no snapshot: nothing is read");
+        deliver(&h, &mut cx, tag, Ok(snapshot_over(&["risk"])));
+        assert_eq!(chip_word(&h, &cx), Some("failed".into()));
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds("tile-health-7").is_some());
+    }
+
+    fn report_described(h: &Harness, cx: &mut gpui::VisualTestContext) {
+        h.diagnostics.update(cx, |d, cx| {
+            d.describe_source("risk_src", SourceSummary::for_dataset("risk"));
+            d.note_health(
+                "risk_src",
+                Health::Failed {
+                    reason: "torn".into(),
+                },
+                "torn".into(),
+                std::time::SystemTime::UNIX_EPOCH,
+            );
+            cx.notify();
+        });
+        cx.run_until_parked();
+    }
+
     /// A later snapshot over other datasets moves the question with it.
     #[gpui::test]
     fn a_new_snapshots_datasets_move_the_chip(cx: &mut gpui::TestAppContext) {
