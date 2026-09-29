@@ -6906,6 +6906,112 @@ pub(crate) mod tests {
         });
     }
 
+    /// A group row's state colours and a named column colour take the
+    /// group palette: a stale status muted and a failed sum danger, each
+    /// floored on the group ground, and a view's named colour floored on
+    /// it too — the line palette's colours are measured on the table
+    /// ground, not this one. The theme's `secondary` is set to the named
+    /// colour, so the group ground is that colour and every group paint
+    /// differs from its line twin (on the default theme some coincide).
+    #[gpui::test]
+    fn a_group_rows_state_and_named_colours_are_floored_on_its_ground(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "NDX Z26 4000 P"]);
+        let doc = "[rose]\nhue = 10\n";
+        let (colours, diags) = NamedColours::from_doc(&geode_core::config::merge_docs(
+            "colors",
+            &[geode_core::config::LayerDoc::builtin("colors", doc).unwrap()],
+        ));
+        assert!(diags.is_empty(), "{diags:?}");
+        let view = "[vanilla]\ndataset = \"pricer\"\n\
+             [[vanilla.columns]]\nname = \"npv\"\nformat = { color = \"rose\" }\n\
+             [[vanilla.columns]]\nname = \"status\"\n";
+        reload_views(&h, &mut vcx, view, colours.clone());
+        h.command(&mut vcx, "group underlying_ref").unwrap();
+        h.tile.update_in(&mut vcx, |t, _, cx| {
+            t.group_expansion.open_all();
+            t.rebuild(cx);
+        });
+        h.draw(&mut vcx);
+        assert_eq!(
+            h.tree(&vcx),
+            ["NDX", "NDX Z26 4000 P", "SPX", "SPX Z26 5000 C"]
+        );
+        let rose = vcx.update(|_, cx| {
+            let theme = cx.theme();
+            geode_tile::colour::ColourCache::new()
+                .get(
+                    &colours,
+                    "rose",
+                    &geode_shell::shell::colours::anchors_from_theme(theme),
+                    &geode_shell::shell::colours::tokens_from_theme(theme),
+                )
+                .expect("rose is defined")
+                .for_sign(Some(geode_core::colour::Sign::Positive))
+        });
+        // The group ground made rose itself (`secondary` feeds neither the
+        // colour anchors nor the tokens, so rose resolves the same): every
+        // group paint must now move off its line twin. Through the theme
+        // global, so the tile's own observer re-derives the paints.
+        vcx.update(|_, cx| {
+            gpui_component::Theme::global_mut(cx).secondary = rose;
+            cx.refresh_windows();
+        });
+        vcx.run_until_parked();
+        let paints = h
+            .tile
+            .read_with(&vcx, |t, cx| t.table.read(cx).delegate().paints);
+        assert_eq!(paints.group_ground, rose, "fixture: the ground is rose");
+        assert_ne!(paints.group_muted, paints.muted, "fixture: muted moves");
+        assert_ne!(paints.group_danger, paints.danger, "fixture: danger moves");
+        assert_ne!(paints.floor_on_group(rose), rose, "fixture: rose moves");
+
+        // Unpriced: every status `pricing…`.
+        assert_eq!(h.cell(&vcx, 2, "status"), "pricing…");
+        assert_eq!(text_colour(&h, &mut vcx, 2, "status"), paints.group_muted);
+        assert_eq!(text_colour(&h, &mut vcx, 3, "status"), paints.muted);
+
+        // SPX prices, NDX fails.
+        let ndx = h.tile.read_with(&vcx, |t, _| t.sheet.id(1).0);
+        for b in h.prices() {
+            h.deliver(
+                &mut vcx,
+                PriceOutcome {
+                    key: b.key,
+                    tag: b.tag,
+                    submitted: std::time::Instant::now(),
+                    results: b
+                        .lines
+                        .iter()
+                        .map(|l| {
+                            let r = if l.id == ndx {
+                                Err("no vol".to_string())
+                            } else {
+                                Ok(result(12.5))
+                            };
+                            (l.id, l.revision, r)
+                        })
+                        .collect(),
+                },
+            );
+        }
+        assert_eq!(text_colour(&h, &mut vcx, 0, "npv"), paints.group_danger);
+        assert_eq!(text_colour(&h, &mut vcx, 1, "npv"), paints.danger);
+
+        assert_eq!(h.cell(&vcx, 2, "npv"), "12.50");
+        assert_eq!(
+            text_colour(&h, &mut vcx, 3, "npv"),
+            rose,
+            "a line: as resolved"
+        );
+        assert_eq!(
+            text_colour(&h, &mut vcx, 2, "npv"),
+            paints.floor_on_group(rose),
+            "the SPX group: floored on its ground"
+        );
+    }
+
     #[gpui::test]
     fn tree_verbs_open_and_close_packages_and_a_leg_collapses_to_its_package(
         cx: &mut gpui::TestAppContext,

@@ -26139,6 +26139,124 @@ run_mutation "pricer grouping: o on a group row lands at the top" \
   $'        let place = if self.cursor_on_group() {\n            Place::Root {\n                at: 0,' \
   geode-pricer put_and_add_on_a_group_row_go_to_the_end
 
+# ---- pricer grouping: the rollup, group cells and group paint ----------------
+
+# A level past a structural one is dropped (a line is the finest node);
+# kept, it would group inside a package, which the grid has no row for.
+run_mutation "pricer rollup: a level after position_ref is kept" \
+  crates/geode-pricer/src/core/rollup.rs \
+  '        match (ended || repeat, resolve(name, &groupable, dims)) {' \
+  '        match (repeat, resolve(name, &groupable, dims)) {' \
+  geode-pricer a_dropped_level_is_reported_and_skipped
+
+run_mutation "pricer rollup: a repeated level is kept" \
+  crates/geode-pricer/src/core/rollup.rs \
+  '        match (ended || repeat, resolve(name, &groupable, dims)) {' \
+  '        match (ended, resolve(name, &groupable, dims)) {' \
+  geode-pricer a_repeated_level_is_dropped
+
+# A derived dimension over a synthetic key could only be NULL: kept, it
+# groups every line under one plausible `—`.
+run_mutation "pricer rollup: a derived dimension over position_ref is kept" \
+  crates/geode-pricer/src/core/rollup.rs \
+  '    (groupable.contains(&base) && base != POSITION_REF && base != INSTRUMENT_REF)' \
+  '    (groupable.contains(&base))' \
+  geode-pricer a_dropped_level_is_reported_and_skipped
+
+# NULL groups sort last, as the blotter's do.
+run_mutation "pricer rollup: NULL sorts first" \
+  crates/geode-pricer/src/core/rollup.rs \
+  $'        (None, Some(_)) => Ordering::Greater,\n        (Some(_), None) => Ordering::Less,' \
+  $'        (None, Some(_)) => Ordering::Less,\n        (Some(_), None) => Ordering::Greater,' \
+  geode-pricer levels_group_shown_legs_by_value_nulls_last
+
+# A NULL group's path segment is None, apart from an empty value's
+# Some(""): conflated, opening one opens the other.
+run_mutation "pricer rollup: a NULL path segment is the empty string" \
+  crates/geode-pricer/src/core/rollup.rs \
+  '                let segment = value.as_ref().map(text);' \
+  '                let segment = Some(value.as_ref().map(text).unwrap_or_default());' \
+  geode-pricer a_derived_dimension_groups_by_its_label
+
+# A package whose legs fall under two nodes is split (read-only, `· n of
+# M legs`); unflagged, its row edits as if it held every leg.
+run_mutation "pricer rollup: a calendar under expiry is not split" \
+  crates/geode-pricer/src/core/rollup.rs \
+  '                        split: legs.len() < shown,' \
+  '                        split: false,' \
+  geode-pricer a_calendar_splits_under_expiry
+
+# position_ref is the package node itself; instrument_ref makes every leg
+# a leaf. Swapped, the tree loses (or invents) its package rows.
+run_mutation "pricer rollup: position_ref makes every leg a leaf" \
+  crates/geode-pricer/src/core/rollup.rs \
+  '        POSITION_REF => return Some(Level::Positions),' \
+  '        POSITION_REF => return Some(Level::Instruments),' \
+  geode-pricer position_ref_as_a_level_is_the_package_node
+
+run_mutation "pricer rollup: instrument_ref keeps the package rows" \
+  crates/geode-pricer/src/core/rollup.rs \
+  '        INSTRUMENT_REF => return Some(Level::Instruments),' \
+  '        INSTRUMENT_REF => return Some(Level::Positions),' \
+  geode-pricer instrument_ref_as_a_level_makes_every_leg_a_leaf
+
+# A group's dimension reads `mixed` where its legs differ, and where a
+# blank sits beside a value: any_value would claim one leg's value for all.
+run_mutation "pricer grid: a group row reads its first leg's differing value" \
+  crates/geode-pricer/src/core/columns.rs \
+  '        Some(_) if blanks || differ => CellText {' \
+  '        Some(_) if blanks => CellText {' \
+  geode-pricer a_group_row_sums_its_legs_and_reads_unanimity
+
+run_mutation "pricer grid: a group row reads a value beside a blank" \
+  crates/geode-pricer/src/core/columns.rs \
+  '        Some(_) if blanks || differ => CellText {' \
+  '        Some(_) if differ => CellText {' \
+  geode-pricer a_blank_beside_a_value_is_mixed
+
+# A group sums every leg under it; summing some is a plausible wrong total.
+run_mutation "pricer grid: a group row sums its first leg only" \
+  crates/geode-pricer/src/grid.rs \
+  '        let folded = self.sheet.fold_legs(legs.iter().copied());' \
+  '        let folded = self.sheet.fold_legs(legs.iter().take(1).copied());' \
+  geode-pricer a_group_row_sums_its_legs_and_reads_unanimity
+
+# Over unlike currencies a group's local sum is `—`, not the USD figure
+# painted under a local heading.
+run_mutation "pricer grid: a mixed-currency group's local sum reads its USD sum" \
+  crates/geode-pricer/src/core/columns.rs \
+  $'        ColumnKind::Measure { measure, usd } => {\n            number(&folded.state, folded.result.as_ref(), measure, usd, format)\n        }\n        ColumnKind::PricedAt => priced_at(folded.priced_at, clock),\n        ColumnKind::Status => status(&folded.state),\n        ColumnKind::Qty => own(legs.to_string()),' \
+  $'        ColumnKind::Measure { measure, usd: _ } => {\n            number(&folded.state, folded.result.as_ref(), measure, true, format)\n        }\n        ColumnKind::PricedAt => priced_at(folded.priced_at, clock),\n        ColumnKind::Status => status(&folded.state),\n        ColumnKind::Qty => own(legs.to_string()),' \
+  geode-pricer a_mixed_currency_group_paints_no_local_sum
+
+# A split package's row sums only its node's legs: the whole fold under
+# each date node counts the calendar twice.
+run_mutation "pricer grid: a split package sums every leg" \
+  crates/geode-pricer/src/grid.rs \
+  '        let subset = partial.then(|| (legs, sheet.fold_legs(legs.iter().copied())));' \
+  '        let subset = (partial && !split).then(|| (legs, sheet.fold_legs(legs.iter().copied())));' \
+  geode-pricer a_split_package_reads_n_of_m_legs_under_each_node
+
+# A group row paints from the group palette, floored on its own ground:
+# the line palette is measured on the table ground and can fall under 3:1.
+run_mutation "pricer paint: a group row takes the line palette" \
+  crates/geode-pricer/src/delegate.rs \
+  $'        if group {\n            let base = self.paints.group_text(cell.state);' \
+  $'        if false {\n            let base = self.paints.group_text(cell.state);' \
+  geode-pricer a_group_rows_state_and_named_colours_are_floored_on_its_ground
+
+run_mutation "pricer paint: a group row's named colour is not floored" \
+  crates/geode-pricer/src/delegate.rs \
+  '                    Some(c) => self.on_group(c.for_sign(Some(sign))),' \
+  '                    Some(c) => c.for_sign(Some(sign)),' \
+  geode-pricer a_group_rows_state_and_named_colours_are_floored_on_its_ground
+
+run_mutation "pricer paint: a failed group cell paints the line danger" \
+  crates/geode-pricer/src/paint.rs \
+  '            CellState::Failed => self.group_danger,' \
+  '            CellState::Failed => self.danger,' \
+  geode-pricer a_group_rows_state_and_named_colours_are_floored_on_its_ground
+
 # A `dimensions` edit alone reloads the pricer, and the reload hands the
 # factory the new dimensions.
 run_mutation "pricer key: dimensions left out" \

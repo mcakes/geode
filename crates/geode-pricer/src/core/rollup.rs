@@ -726,6 +726,26 @@ mod tests {
     #[test]
     fn position_ref_as_a_level_is_the_package_node() {
         let s = sheet();
+        // Packages over their legs and bare lines, never a group row per
+        // `p<id>` value: the package row is this level's node.
+        assert_eq!(
+            shape(&roll(&s, &["underlying_ref", "position_ref"])),
+            lines(
+                "
+                NDX
+                  L4
+                SPX
+                  L0
+                  P1 [2, 3]
+                    L2
+                    L3
+                  P5 [6, 7]
+                    L6
+                    L7
+                  L8
+                "
+            )
+        );
         assert_eq!(roll(&s, &["position_ref"]), roll(&s, &[]));
         assert_eq!(
             roll(&s, &["underlying_ref", "position_ref"]),
