@@ -335,10 +335,9 @@ pub struct Diagnostics {
     summary_cache: RefCell<(u64, Rc<str>)>,
 }
 
-/// The status summary's source labels, indexed by [`Health::severity`].
-/// `build_summary` keeps its own copy as `LABELS`; a test holds the two and
-/// the severity order together.
-#[cfg(test)]
+/// The status summary's source labels, indexed by [`Health::severity`]:
+/// `build_summary` counts under these, and a test holds them to the
+/// severity order.
 const SUMMARY_LABELS: [&str; 5] = ["ok", "pending", "pending_too_long", "degraded", "failed"];
 
 impl Diagnostics {
@@ -830,8 +829,7 @@ impl Diagnostics {
     }
 
     fn build_summary(&self) -> String {
-        const LABELS: [&str; 5] = ["ok", "pending", "pending_too_long", "degraded", "failed"];
-        let mut counts = [0usize; LABELS.len()];
+        let mut counts = [0usize; SUMMARY_LABELS.len()];
         for s in self.sources.values() {
             let Some(health) = &s.health else {
                 continue; // Unreported sources have no health to count.
@@ -839,7 +837,7 @@ impl Diagnostics {
             counts[usize::from(health.severity())] += 1;
         }
         let mut parts: Vec<String> = Vec::new();
-        let source_parts: Vec<String> = LABELS
+        let source_parts: Vec<String> = SUMMARY_LABELS
             .iter()
             .zip(counts.iter())
             .filter(|&(_, &n)| n > 0)
@@ -949,6 +947,9 @@ pub fn fnv1a(s: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use geode_core::config::{Diagnostic, Layer};
+    use std::path::PathBuf;
+    use std::time::Duration;
 
     fn linked(d: &mut Diagnostics, source: &str, dataset: &str) {
         d.describe_source(source, SourceSummary::for_dataset(dataset));
@@ -1057,6 +1058,7 @@ mod tests {
             ("a_src", "risk"),
             ("b_src", "risk"),
             ("c_src", "risk"),
+            ("e_src", "risk"),
             ("d_src", "pnl"),
         ] {
             linked(&mut d, s, ds);
@@ -1064,6 +1066,7 @@ mod tests {
         report(&mut d, "a_src", failed("x"));
         report(&mut d, "b_src", degraded("y"));
         report(&mut d, "c_src", Health::Ok);
+        report(&mut d, "e_src", Health::Pending);
         report(&mut d, "d_src", failed("z"));
         assert_eq!(d.health_for_datasets(&["risk"]).unwrap().others, 1);
         assert_eq!(d.health_for_datasets(&["risk", "pnl"]).unwrap().others, 2);
@@ -1113,9 +1116,6 @@ mod tests {
             assert_eq!(SUMMARY_LABELS[usize::from(h.severity())], h.label());
         }
     }
-    use geode_core::config::{Diagnostic, Layer};
-    use std::path::PathBuf;
-    use std::time::Duration;
 
     #[test]
     fn a_repeated_identical_health_does_not_bump_the_version() {

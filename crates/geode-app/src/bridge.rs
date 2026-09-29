@@ -5190,6 +5190,7 @@ role = "key"
         let asked = diagnostics.read_with(&vcx, |d, _| d.health_for_datasets(&["risk"]));
         assert_eq!(asked.map(|h| h.source), Some("risk_src".to_string()));
     }
+
     #[test]
     fn the_database_path_prefers_config_then_demo_then_the_platform_dir() {
         let empty = Config::load(&ConfigSources::default());

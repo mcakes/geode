@@ -6145,8 +6145,8 @@ run_mutation "diagnostics: SOURCE_HISTORY_CAP loosened from 16" \
 
 run_mutation "diagnostics: summary's LABELS silently drops degraded" \
   crates/geode-shell/src/diagnostics.rs \
-  'const LABELS: [&str; 5] = ["ok", "pending", "pending_too_long", "degraded", "failed"];' \
-  'const LABELS: [&str; 4] = ["ok", "pending", "pending_too_long", "failed"];' \
+  'const SUMMARY_LABELS: [&str; 5] = ["ok", "pending", "pending_too_long", "degraded", "failed"];' \
+  'const SUMMARY_LABELS: [&str; 4] = ["ok", "pending", "pending_too_long", "failed"];' \
   geode-shell the_summary_counts_sources_by_health_and_config_errors
 
 run_mutation "diagnostics: note_published requests a catalog regardless of watchers" \
