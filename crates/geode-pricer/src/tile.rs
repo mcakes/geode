@@ -820,8 +820,10 @@ impl PricerTile {
             this.confirm = None;
         })
         .detach();
-        // The sheet store's dataset. The pricer behind the pricing door reads
-        // no dataset today; one that does must be added to this question.
+        // The sheet store's dataset, which is local: no source loads into it,
+        // so in production this chip stays silent. The pricer behind the
+        // pricing door reads no dataset today; one that reads a dataset a
+        // source feeds must be added to this question.
         // Asked once now, so a tile opened after a failure shows the chip
         // before any further diagnostics notification.
         let mut health = HealthWatch::new(diagnostics.clone(), id);

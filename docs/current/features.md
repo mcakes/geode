@@ -76,8 +76,13 @@ has none of them.
 - Every tile header is `geode_tile::header::frame`: 22 px at the design rem,
   the stack marker first, the module's own left side, then a right cluster in
   a fixed order — status items, notices, source times, the health chip, `⋯`.
-  The left side takes the free width and clips when the tile is too narrow;
-  the cluster never shrinks, so the chip and `⋯` stay on the tile.
+  Status items and notices shrink: each is one line, cut with an ellipsis
+  when it does not fit, and together they take at most half the header
+  (`TEXT_SHARE`); a cut notice shows its whole text in its tooltip. Source
+  times, the chip and `⋯` never shrink. The left side takes what remains and
+  clips, so neither a long left side nor a long notice pushes the times, the
+  chip or `⋯` off the tile — they leave it only when the tile is narrower
+  than those three alone.
   A stale source time takes the warning text tone. The health chip appears
   only while a source the tile reads is PendingTooLong (`pending`), Degraded
   (`degraded`) or Failed (`failed`); its tooltip names the worst source and

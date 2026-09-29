@@ -142,13 +142,17 @@ impl ShellView {
 
     /// Open `kind` for a request queued from outside the shell (a tile's
     /// health chip). Opens only — an open page stays open — and is refused
-    /// under a modal exactly as `page::toggle_<kind>` is.
+    /// under a modal exactly as `page::toggle_<kind>` is. The request is the
+    /// pointer route of that action, so it begins as the action does: the
+    /// crash tail records `page::toggle_<kind>` (the registered id, so the
+    /// report can name it) and the last notice expires.
     pub(super) fn open_page_on_request(
         &mut self,
         kind: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.begin_action(&format!("page::toggle_{kind}"));
         if self.modal_open() {
             self.notice = Some(super::input::CLOSE_DIALOG_FIRST);
             cx.notify();

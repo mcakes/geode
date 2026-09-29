@@ -961,3 +961,35 @@ fn a_queued_page_open_under_a_modal_is_refused(cx: &mut gpui::TestAppContext) {
         assert_eq!(s.notice, Some(CLOSE_DIALOG_FIRST));
     });
 }
+
+/// The chip's request begins as the page's action does: the last refusal
+/// expires rather than staying over the page, and the crash tail names
+/// `page::toggle_diagnostics`.
+#[gpui::test]
+fn a_queued_page_open_clears_the_notice_and_records_the_action(cx: &mut gpui::TestAppContext) {
+    let (window, mut cx) = open_shell(
+        cx,
+        services_with_page(RecordingPageFactory::new("diagnostics")),
+    );
+    let shell = shell_of(&window, &mut cx);
+    dispatch_action(&shell, "page::toggle_diagnostics", &mut cx);
+    dispatch_action(&shell, "workspace::close_tile", &mut cx);
+    shell.read_with(&cx, |s, _| {
+        assert_eq!(s.notice, Some(CLOSE_PAGE_FIRST), "a refusal is showing");
+    });
+    let diagnostics = shell.read_with(&cx, |s, _| s.diagnostics().clone());
+    diagnostics.update(&mut cx, |d, cx| {
+        d.request_diagnostics_page();
+        cx.notify();
+    });
+    cx.run_until_parked();
+    shell.read_with(&cx, |s, _| {
+        assert!(s.page_open());
+        assert_eq!(s.notice, None, "the request expired the old refusal");
+        let last = s.services.action_tail.lock().unwrap().recent().last();
+        assert_eq!(
+            last,
+            Some(crate::diagnostics::fnv1a("page::toggle_diagnostics"))
+        );
+    });
+}

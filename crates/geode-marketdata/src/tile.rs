@@ -805,9 +805,6 @@ impl MarketDataTile {
         })
         .detach();
         cx.observe(&diagnostics, |this, _diagnostics, cx| {
-            // Refresh prepared picker rows only while the picker is open. Command
-            // completions read the catalog directly, and opening requests a fresh
-            // catalog.
             // Health first: the picker gate below returns on every other
             // notification.
             let dataset = this.spec.dataset.as_str();
@@ -817,6 +814,9 @@ impl MarketDataTile {
             {
                 cx.notify();
             }
+            // Refresh prepared picker rows only while the picker is open. Command
+            // completions read the catalog directly, and opening requests a fresh
+            // catalog.
             if !matches!(this.popup, Some(Popup::Picker(_))) {
                 return;
             }

@@ -7270,8 +7270,8 @@ run_mutation "shell: dispatch never records the dispatched action into the tail"
             .action_tail
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .record(&action.0);' \
-  '        let _ = &action.0;' \
+            .record(id);' \
+  '        let _ = id;' \
   geode-shell dispatching_three_actions_leaves_their_hashes_in_the_tail_in_order
 
 run_mutation "trim_log_files keeps one file more than asked (keep + 1, not keep)" \
@@ -26214,7 +26214,7 @@ run_mutation "tile header: the chip click asks for the page" \
   '' \
   geode-tile clicking_the_health_chip_queues_the_diagnostics_page
 
-# Cluster order; reversed, the chip lands left of the notices.
+# Cluster order; the tail reversed, the chip lands left of the times.
 run_mutation "tile header: the cluster paints in order" \
   crates/geode-tile/src/header.rs \
   '    let mut row = h_flex().items_center().gap_3();' \
@@ -26380,6 +26380,54 @@ run_mutation "tile health: the blotter refreshes on a health change" \
   '                .refresh(cx, |d| d.health_for_datasets(&datasets))' \
   '                .refresh(cx, |_| None)' \
   geode-blotter a_failed_source_of_a_delivered_dataset_shows_the_chip
+
+# The cluster's text is capped at TEXT_SHARE of the header; uncapped, a
+# long error takes every pixel the tail leaves and the left side collapses.
+run_mutation "tile header: a long notice leaves the left side its share" \
+  crates/geode-tile/src/header.rs \
+  '            .max_w(relative(TEXT_SHARE))' \
+  '            .max_w(relative(1.0))' \
+  geode-tile an_overlong_notice_cuts_and_leaves_the_tail_and_left_side
+
+# A notice in the cluster is one line cut with an ellipsis; allowed to
+# wrap, a long error runs out of the 22 px strip.
+run_mutation "tile header: a long notice stays one line" \
+  crates/geode-tile/src/notice.rs \
+  '        .truncate()' \
+  '        .overflow_hidden()' \
+  geode-tile an_overlong_notice_cuts_and_leaves_the_tail_and_left_side
+
+# A pending-too-long source has no reason of its own; without the detail
+# fallback its chip explains nothing.
+run_mutation "tile health: a reasonless state explains itself by its detail" \
+  crates/geode-shell/src/diagnostics.rs \
+  '            _ => state.detail.clone(),' \
+  '            _ => String::new(),' \
+  geode-shell pending_too_long_shows_and_explains_itself_by_its_detail
+
+# The chip's tooltip counts the other unhealthy sources.
+run_mutation "tile header: the chip prepares +N more" \
+  crates/geode-tile/src/header.rs \
+  '            more: (h.others > 0).then(|| format!("+{} more", h.others).into()),' \
+  '            more: None,' \
+  geode-tile the_chip_words_tones_and_tooltip
+
+# The header's times are prepared; without the clock observer re-preparing
+# them, a zone change repaints the old zone's times.
+run_mutation "tile header: the blotter re-prepares its times on a clock change" \
+  crates/geode-blotter/src/tile.rs \
+  '        cx.observe_global::<geode_shell::clock::AppClock>(|this, cx| {
+            this.prepare_header(cx);' \
+  '        cx.observe_global::<geode_shell::clock::AppClock>(|this, cx| {' \
+  geode-blotter the_freshness_readout_reads_the_installed_app_clock_and_follows_a_later_change
+
+# The chip's page open begins as the action does; skipped, the last refusal
+# stays up over the page it opened and the crash tail misses the open.
+run_mutation "tile header: a queued page open expires the notice" \
+  crates/geode-shell/src/shell/page.rs \
+  '        self.begin_action(&format!("page::toggle_{kind}"));' \
+  '' \
+  geode-shell a_queued_page_open_clears_the_notice_and_records_the_action
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

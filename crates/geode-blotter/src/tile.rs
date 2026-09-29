@@ -2687,8 +2687,10 @@ mod tests {
     }
 
     /// Freshness text uses the installed `AppClock` and reflects a later zone
-    /// change. The helper mirrors render's uncached formatting; assertions use
-    /// known Tokyo/UTC times independently of `Clock` formatting.
+    /// change. The helper reads the prepared header model render paints, so
+    /// the zone change shows only if the clock observer re-prepares it;
+    /// assertions use known Tokyo/UTC times independently of `Clock`
+    /// formatting.
     #[gpui::test]
     fn the_freshness_readout_reads_the_installed_app_clock_and_follows_a_later_change(
         cx: &mut gpui::TestAppContext,

@@ -4,8 +4,9 @@
 //! shows; this door paints the winner, so a tone is one color in every tile.
 
 use geode_shell::shell::chip::{self, chip_paint};
+use geode_shell::tips;
 use gpui::prelude::*;
-use gpui::{Div, Hsla, SharedString, div};
+use gpui::{Div, ElementId, Hsla, SharedString, Stateful, div};
 use gpui_component::Theme;
 
 /// What a notice means to the trader.
@@ -77,6 +78,29 @@ pub fn paint(text: &SharedString, tone: Tone, theme: &Theme) -> Div {
 /// A prepared [`Notice`] through [`paint`].
 pub fn render(notice: &Notice, theme: &Theme) -> Div {
     paint(&notice.text, notice.tone, theme)
+}
+
+/// A notice in a width-bound slot (a header cluster): one line, cut with an
+/// ellipsis where the slot is narrower than the text, and the whole text in
+/// its tooltip. Unbounded, a long error either wraps out of a one-line strip
+/// or pushes its neighbours off the tile; cut without the tooltip, the rest
+/// of it is unreadable. `id` must be unique among the slot's siblings.
+pub fn truncated(
+    notice: &Notice,
+    id: impl Into<ElementId>,
+    tip_selector: SharedString,
+    theme: &Theme,
+) -> Stateful<Div> {
+    render(notice, theme)
+        .id(id)
+        .min_w_0()
+        .truncate()
+        .tooltip(tips::tip_with(
+            tip_selector,
+            notice.text.clone(),
+            None,
+            None,
+        ))
 }
 
 #[cfg(test)]

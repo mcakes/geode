@@ -446,8 +446,10 @@ naming a kind no factory registered logs a warning and opens nothing.
 A tile opens the diagnostics page by queueing `request_diagnostics_page` on
 the shared `Diagnostics` entity (its health chip does this); the shell's
 diagnostics observer drains it through `open_page`, never the toggle, so the
-request only ever opens. Under a modal it is refused with the toggle's
-`close the dialog first` notice.
+request only ever opens. It begins as a dispatched action does: the crash
+report's action tail records `page::toggle_diagnostics`, and the shell's
+notice, stack list and add-filter menu expire. Under a modal it is then
+refused with the toggle's `close the dialog first` notice.
 
 While a page is open the key context stack is `page`, then the page's own
 context, then `palette` when it is open. `workspace` and `tile` are absent,

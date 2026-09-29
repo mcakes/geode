@@ -484,9 +484,19 @@ pub(crate) fn render(
     }
     if let Some(e) = &h.upload_error {
         status.push(
-            notice::render(e, theme)
-                .debug_selector(move || format!("marketdata-upload-error-{tile_id}"))
-                .into_any_element(),
+            // Cut to one line in the cluster; the tooltip keeps the whole
+            // error readable.
+            notice::truncated(
+                e,
+                ElementId::NamedInteger(
+                    SharedString::new_static("marketdata-upload-error"),
+                    tile_id,
+                ),
+                SharedString::new_static("tip-marketdata-upload-error"),
+                theme,
+            )
+            .debug_selector(move || format!("marketdata-upload-error-{tile_id}"))
+            .into_any_element(),
         );
     }
     // The upload prompt holds the keyboard and answers its keys before shell

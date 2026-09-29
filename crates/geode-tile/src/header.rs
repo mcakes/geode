@@ -1,7 +1,9 @@
 //! The header strip every tile paints: one height, the shared stack marker
 //! first, the module's own left side taking the free width (clipped when it
-//! runs out), and a right cluster that never shrinks, in a fixed order —
-//! status, notices, times, health, `⋯`. The frame formats nothing: every
+//! runs out), and a right cluster in a fixed order — status, notices, times,
+//! health, `⋯`. Status and notices are text of any length: they shrink, one
+//! line each and cut with an ellipsis, within at most [`TEXT_SHARE`] of the
+//! header; times, health and `⋯` never shrink. The frame formats nothing: every
 //! string arrives prepared, and a time run's stale flag is the only thing a
 //! tile decides per frame.
 //!
@@ -22,7 +24,8 @@ use geode_shell::tiling::TileId;
 use geode_shell::tips;
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Div, ElementId, Entity, Hsla, MouseButton, SharedString, Stateful, Window, div,
+    AnyElement, App, Div, ElementId, Entity, Hsla, MouseButton, SharedString, Stateful, Window,
+    div, relative,
 };
 use gpui_component::{Theme, h_flex};
 
@@ -32,6 +35,15 @@ use crate::notice::{self, Notice};
 /// (`shell::scale`), so headers line up across a split. Popups anchor
 /// under it by the same constant.
 pub const HEADER_HEIGHT: f32 = 22.0;
+
+/// The most of the header's width the cluster's status and notices may
+/// take together. A 100-character error then leaves the left side the rest
+/// less the times, chip and `⋯`, instead of collapsing it to nothing.
+pub const TEXT_SHARE: f32 = 0.5;
+
+/// The notices' shared tooltip selector: each tooltip carries its notice's
+/// full text, the only place a cut notice can be read whole.
+const NOTICE_TIP: &str = "tip-tile-notice";
 
 /// The page's own action, named in the chip's tooltip: its binding is the
 /// chip's keyboard route. The chip has no key of its own.
@@ -163,17 +175,21 @@ impl Cluster<'_> {
 }
 
 /// The strip: marker, the module's left side (flexible, clipped), the
-/// cluster (fixed). The caller adds its own debug selector (and the blotter
-/// its mono face).
+/// cluster's text (shrinking, capped at [`TEXT_SHARE`]), its fixed tail. The
+/// caller adds its own debug selector (and the blotter its mono face).
 pub fn frame(
     marker: Option<Stateful<Div>>,
     left: impl IntoElement,
     cluster: Cluster<'_>,
     theme: &Theme,
 ) -> Div {
-    // The left side takes the free width and clips when it runs out; the
-    // cluster never shrinks, so health and `⋯` stay on the tile however
-    // long a view name, chip row or attribute list grows.
+    let tile = cluster.tile.0;
+    let (text, tail) = paint_cluster(cluster, theme);
+    // The left side has no basis of its own: it takes what the cluster
+    // leaves and clips. The cluster's text takes its natural width up to
+    // TEXT_SHARE and then cuts, so neither side collapses the other; the
+    // tail (times, health, `⋯`) never shrinks, so it stays on the tile
+    // unless the tile is narrower than the tail alone.
     let slot = h_flex().min_w_0().overflow_hidden();
     h_flex()
         .w_full()
@@ -186,17 +202,46 @@ pub fn frame(
         .border_b_1()
         .border_color(theme.border)
         .children(marker)
-        .child(slot.flex_1().items_center().child(left))
-        .child(paint_cluster(cluster, theme).flex_none())
+        .child(
+            slot.flex_1()
+                .items_center()
+                .debug_selector(move || format!("tile-header-left-{tile}"))
+                .child(left),
+        )
+        .children(text)
+        .child(tail.flex_none())
 }
 
-fn paint_cluster(c: Cluster<'_>, theme: &Theme) -> Div {
+/// The cluster in two parts: its text (status and notices; `None` when it
+/// has none, so no empty gap is laid out) and its fixed tail.
+fn paint_cluster(c: Cluster<'_>, theme: &Theme) -> (Option<Stateful<Div>>, Div) {
     let tile = c.tile.0;
+    let text = (!c.status.is_empty() || !c.notices.is_empty()).then(|| {
+        h_flex()
+            .id(ElementId::NamedInteger(
+                SharedString::new_static("tile-cluster-text"),
+                tile,
+            ))
+            .flex_shrink(1.0)
+            .min_w_0()
+            .max_w(relative(TEXT_SHARE))
+            .overflow_hidden()
+            .items_center()
+            .gap_3()
+            // A status item is the module's own element: the wrapper bounds
+            // it, and its text inherits one line and the ellipsis.
+            .children(
+                c.status
+                    .into_iter()
+                    .map(|s| div().min_w_0().truncate().child(s)),
+            )
+            .children(c.notices.iter().enumerate().map(|(i, n)| {
+                notice::truncated(n, i, SharedString::new_static(NOTICE_TIP), theme)
+                    .debug_selector(move || format!("tile-notice-{tile}-{i}"))
+            }))
+    });
     let mut row = h_flex().items_center().gap_3();
-    row = row.children(c.status);
-    row = row.children(c.notices.iter().enumerate().map(|(i, n)| {
-        notice::render(n, theme).debug_selector(move || format!("tile-notice-{tile}-{i}"))
-    }));
+    row = row.whitespace_nowrap();
     row = row.children(c.times.iter().enumerate().map(|(i, t)| {
         div()
             .text_color(time_color(t.stale, theme))
@@ -205,7 +250,7 @@ fn paint_cluster(c: Cluster<'_>, theme: &Theme) -> Div {
     }));
     row = row.children(c.health.map(|h| health_chip(h, theme)));
     row = row.children(c.menu.map(|m| menu_button(m, theme)));
-    row
+    (text, row)
 }
 
 fn health_chip(h: &HealthChip, theme: &Theme) -> Stateful<Div> {
@@ -494,6 +539,7 @@ mod tests {
         /// How many fixed-width runs the left side carries: enough of them
         /// overflow a narrow header.
         left_runs: usize,
+        notice: Notice,
     }
 
     fn plain_time() -> TimeRun {
@@ -515,7 +561,7 @@ mod tests {
                     .child("2 pricing…")
                     .into_any_element(),
             );
-            cluster.notices.push(Notice::warning("not saved"));
+            cluster.notices.push(self.notice.clone());
             cluster.times = self.times.clone();
             cluster.health = self.watch.chip();
             cluster.menu = Some(MenuTrigger {
@@ -565,6 +611,7 @@ mod tests {
                 parent: Rc::new(Cell::new(0)),
                 times: vec![plain_time()],
                 left_runs: 0,
+                notice: Notice::warning("not saved"),
             }
         });
         (view, diagnostics, presses, vcx)
@@ -743,5 +790,65 @@ mod tests {
                 "{s} at {b:?} escapes the header {strip:?}"
             );
         }
+    }
+
+    /// A notice far wider than the tile cuts to one line inside its share:
+    /// it ends before the time run, the time, chip and `⋯` stay inside the
+    /// header, and the left side keeps a share of its own.
+    #[gpui::test]
+    fn an_overlong_notice_cuts_and_leaves_the_tail_and_left_side(cx: &mut TestAppContext) {
+        let (view, diagnostics, _, vcx) = open_strip(cx);
+        view.update(vcx, |s, cx| {
+            s.notice = Notice::danger(
+                "IO Error: Could not set lock on file \"/tmp/geode-demo/store.duckdb\": \
+                 Conflicting lock is held in another process; see the concurrency docs",
+            );
+            cx.notify();
+        });
+        vcx.simulate_resize(gpui::size(gpui::px(640.0), gpui::px(300.0)));
+        show_failure(&view, &diagnostics, vcx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let rem = vcx.update(|window, _| window.rem_size());
+        let strip = vcx.debug_bounds("strip").expect("the strip is painted");
+        let height = f32::from(strip.size.height);
+        assert!(
+            (height - scale::design_px(HEADER_HEIGHT, rem)).abs() < 0.5,
+            "{height}"
+        );
+        let notice = vcx
+            .debug_bounds("tile-notice-3-0")
+            .expect("the notice is painted");
+        assert!(
+            notice.top() >= strip.top() && notice.bottom() <= strip.bottom(),
+            "the notice wraps out of the strip: {notice:?} in {strip:?}"
+        );
+        let time = vcx
+            .debug_bounds("tile-time-3-0")
+            .expect("the time is painted");
+        assert!(
+            notice.right() <= time.left(),
+            "the notice {notice:?} runs into the time {time:?}"
+        );
+        for s in ["tile-time-3-0", "tile-health-3", "strip-menu"] {
+            let b = vcx
+                .debug_bounds(s)
+                .unwrap_or_else(|| panic!("{s} is painted"));
+            assert!(
+                b.left() >= strip.left()
+                    && b.right() <= strip.right()
+                    && b.top() >= strip.top()
+                    && b.bottom() <= strip.bottom(),
+                "{s} at {b:?} escapes the header {strip:?}"
+            );
+        }
+        let left = vcx
+            .debug_bounds("tile-header-left-3")
+            .expect("the left slot is painted");
+        assert!(
+            left.size.width > strip.size.width * 0.1,
+            "the notice collapsed the left side: {left:?} of {strip:?}"
+        );
     }
 }
