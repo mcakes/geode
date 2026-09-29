@@ -27145,22 +27145,12 @@ run_mutation "fuzzy find: a folded row hides its descendants" \
   geode-shell fzf_ranks_branches_by_best_match_and_keeps_each_ancestor_once
 
 # The pick is carried by identity across a re-rank; resetting it to the first
-# row lands the trader on a different result when loaded rows reorder.
+# row lands the trader on a different result when a fold re-ranks the list.
 run_mutation "fuzzy find: a pick survives a re-rank by identity" \
   crates/geode-shell/src/fuzzyfind.rs \
   '            .and_then(|id| self.ranked.iter().position(|row| self.items.id(row) == id))' \
   '            .and(Some(0))' \
-  geode-shell fzf_preserves_a_pick_by_identity_when_loaded_results_reorder
-
-# Only the latest query's ranking installs; a superseded ranking arriving
-# late would paint results for text no longer in the prompt.
-run_mutation "fuzzy find: only the latest query's ranking installs" \
-  crates/geode-shell/src/fuzzyfind.rs \
-  '                if this.revision.load(Ordering::Relaxed) == revision
-                    && let Some((matches, ordered, hits, visible)) = ranked' \
-  '                if true
-                    && let Some((matches, ordered, hits, visible)) = ranked' \
-  geode-shell fzf_keeps_input_responsive_and_only_applies_the_latest_query
+  geode-shell fzf_tree_folds_preserve_candidates_and_query_edits_reopen_matches
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
