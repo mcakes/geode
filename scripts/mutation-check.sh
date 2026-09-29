@@ -25501,8 +25501,8 @@ run_mutation "pricer visibility: a package needs every leg to show" \
 # not refused: it must not blank the pricer.
 run_mutation "pricer visibility: a selection on a missing column is kept" \
   crates/geode-pricer/src/core/visibility.rs \
-  '    let (mut scope, _dropped) = scope.applicable_to(ds, dims);' \
-  '    let (mut scope, _dropped) = (scope.clone(), Vec::<String>::new());' \
+  '        .retain(|d| scope_column(ds, dims, &d.column));' \
+  '        .retain(|d| !NOT_SCOPEABLE.contains(&dims.base_column(&d.column)));' \
   geode-pricer a_selection_on_a_column_pricer_lacks_is_dropped_not_refused
 
 # A refused scope hides nothing, even after a scope that hid lines.

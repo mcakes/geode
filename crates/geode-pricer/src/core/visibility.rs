@@ -91,7 +91,8 @@ pub fn apply_scope(
     clock: Clock,
 ) -> Result<Visibility, String> {
     let ds = pricer_dataset();
-    let (mut scope, _dropped) = scope.applicable_to(ds, dims);
+    // `Scope::applicable_to`'s drop, widened to the synthetic keys.
+    let mut scope = scope.clone();
     scope
         .dimensions
         .retain(|d| scope_column(ds, dims, &d.column));
