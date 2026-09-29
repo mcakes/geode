@@ -8,6 +8,11 @@
       "name": "Harper",
       "mode": "dark",
       "colors": {
+        "chart.1": "#b296c6",
+        "chart.2": "#7fb5e1",
+        "chart.3": "#bc9c66",
+        "chart.4": "#759c80",
+        "chart.5": "#c8c4bb",
         "accent.background": "#27222c",
         "accent.foreground": "#a8a49d",
         "background": "#010101",

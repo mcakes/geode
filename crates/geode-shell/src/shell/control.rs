@@ -24,7 +24,7 @@
 //! style on the same element in debug builds. Theme sweeps below check fill
 //! distinction and text readability for each supported control pairing.
 
-use geode_core::colour::{READABLE_RATIO, Rgb, contrast_ratio, readable_on};
+use geode_core::colour::{Rgb, TEXT_READABLE_RATIO, contrast_ratio, readable_text_on};
 use gpui::prelude::*;
 use gpui::{Hsla, StatefulInteractiveElement};
 use gpui_component::Theme;
@@ -164,12 +164,11 @@ pub fn control_paint(inputs: &ControlInputs) -> ControlPaint {
         &[(rest, DISTINCT_RATIO), (hover, PRESSED_STEP)],
     );
     let text = to_rgb(inputs.text);
-    let toward = to_rgb(inputs.foreground);
     ControlPaint {
         hover: to_hsla(hover),
-        hover_text: to_hsla(readable_on(text, hover, toward)),
+        hover_text: to_hsla(readable_text_on(text, hover)),
         pressed: to_hsla(pressed),
-        pressed_text: to_hsla(readable_on(text, pressed, toward)),
+        pressed_text: to_hsla(readable_text_on(text, pressed)),
     }
 }
 
@@ -197,8 +196,8 @@ fn distinct_fill(candidate: Rgb, base: Rgb, toward: Hsla, apart_from: &[(Rgb, f3
 /// readability sweep asserts. The fills are opaque, so the ground is the
 /// fill itself.
 pub fn is_readable(paint: &ControlPaint) -> bool {
-    contrast_ratio(to_rgb(paint.hover_text), to_rgb(paint.hover)) >= READABLE_RATIO
-        && contrast_ratio(to_rgb(paint.pressed_text), to_rgb(paint.pressed)) >= READABLE_RATIO
+    contrast_ratio(to_rgb(paint.hover_text), to_rgb(paint.hover)) >= TEXT_READABLE_RATIO
+        && contrast_ratio(to_rgb(paint.pressed_text), to_rgb(paint.pressed)) >= TEXT_READABLE_RATIO
 }
 
 #[cfg(test)]
@@ -365,7 +364,7 @@ mod tests {
         );
     }
 
-    /// Every state's text clears the 3:1 floor over that state's fill on
+    /// Every state's text clears the 4.5:1 floor over that state's fill on
     /// EVERY bundled theme, at every shipped site, with no exception list.
     #[gpui::test]
     fn every_control_state_is_readable_on_every_bundled_theme(cx: &mut gpui::TestAppContext) {
@@ -374,10 +373,10 @@ mod tests {
             let paint = control_paint(inputs);
             let hover = contrast_ratio(to_rgb(paint.hover_text), to_rgb(paint.hover));
             let pressed = contrast_ratio(to_rgb(paint.pressed_text), to_rgb(paint.pressed));
-            if hover < READABLE_RATIO {
+            if hover < TEXT_READABLE_RATIO {
                 failures.push(format!("{name}: {label} hover at {hover:.2}:1"));
             }
-            if pressed < READABLE_RATIO {
+            if pressed < TEXT_READABLE_RATIO {
                 failures.push(format!("{name}: {label} pressed at {pressed:.2}:1"));
             }
         });
@@ -526,7 +525,7 @@ mod tests {
             let painted = paint(theme, Rest::Bare, theme.background, theme.foreground);
             let ratio = contrast_ratio(to_rgb(theme.foreground), to_rgb(painted.pressed));
             assert!(
-                ratio >= READABLE_RATIO,
+                ratio >= TEXT_READABLE_RATIO,
                 "foreground over the pressed fill is {ratio:.2}:1 on the default theme"
             );
             assert_eq!(painted.pressed_text, theme.foreground);

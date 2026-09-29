@@ -33,6 +33,7 @@ mod pin;
 #[cfg(feature = "profiling")]
 pub mod profiling_hook;
 mod render;
+pub mod row_menu;
 pub mod scale;
 pub mod scope_expr_view;
 mod session_io;
@@ -529,6 +530,8 @@ pub struct ShellView {
     /// mutated by `handle_command_line_key`/`on_command_line_changed` and
     /// painted by `commandline_view::render`.
     command_line: Option<CommandLine>,
+    /// Completion viewport, retained across renders and reset on each prompt open.
+    command_scroll: ScrollHandle,
     /// The scope bar's text input. Each focused edit updates the frame inside
     /// one undo session. The stable entity preserves cursor, selection, and
     /// focus across renders.
@@ -627,6 +630,11 @@ pub struct ShellView {
     /// closed by any dispatch (which is also how a row commits), by the
     /// palette or a dialog opening, and by a click outside it.
     add_filter_menu: Option<addfilter::AddFilterMenu>,
+    /// The row menu (`tile::context_menu`), or `None` when closed. Owns
+    /// the keyboard while open, as `add_filter_menu` does, and closes the
+    /// same ways: any dispatch, the palette or a dialog opening, a press
+    /// outside it.
+    row_menu: Option<row_menu::RowMenu>,
     /// Reusable storage for the per-frame tile diff. Each reconciliation
     /// clears and refills it, retaining capacity between renders.
     scratch_all_tiles: HashSet<TileId>,
@@ -1191,11 +1199,10 @@ impl ShellView {
         diagnostics.update(cx, |d, _cx| {
             d.note_config(startup_diagnostics, std::time::SystemTime::now());
         });
-        // Same drain-only shape as the frame's own observer above, minus
-        // the `Window` — none of `on_diagnostics_changed`'s three drains
-        // need one.
-        cx.observe(&diagnostics, |view, diagnostics, cx| {
-            view.on_diagnostics_changed(diagnostics, cx);
+        // Window-bound like the frame's observer above: the page-open drain
+        // moves focus to the page.
+        cx.observe_in(&diagnostics, window, |view, diagnostics, window, cx| {
+            view.on_diagnostics_changed(diagnostics, window, cx);
         })
         .detach();
 
@@ -1293,6 +1300,7 @@ impl ShellView {
             palette_input,
             command_input,
             command_line: None,
+            command_scroll: ScrollHandle::new(),
             dialog_input,
             desk_dir,
             user_dir,
@@ -1327,6 +1335,7 @@ impl ShellView {
             notice: None,
             stack_list: None,
             add_filter_menu: None,
+            row_menu: None,
             scratch_all_tiles: HashSet::new(),
             scratch_active_tiles: HashSet::new(),
             scratch_visible_keys: Vec::new(),
@@ -1545,12 +1554,22 @@ impl ShellView {
         cx.notify();
     }
 
-    /// Apply queued log-level and overlay requests from shared diagnostics.
-    /// Modules access that entity without reaching `ShellView`. Catalog
-    /// requests are drained by the app bridge, which owns data-service access.
-    fn on_diagnostics_changed(&mut self, diagnostics: Entity<Diagnostics>, cx: &mut Context<Self>) {
-        let (pending_level, pending_overlay) = diagnostics.update(cx, |d, _cx| {
-            (d.take_pending_level(), d.take_pending_overlay_toggle())
+    /// Apply queued log-level, overlay and page-open requests from shared
+    /// diagnostics. Modules access that entity without reaching `ShellView`.
+    /// Catalog requests are drained by the app bridge, which owns
+    /// data-service access.
+    fn on_diagnostics_changed(
+        &mut self,
+        diagnostics: Entity<Diagnostics>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (pending_level, pending_overlay, pending_page) = diagnostics.update(cx, |d, _cx| {
+            (
+                d.take_pending_level(),
+                d.take_pending_overlay_toggle(),
+                d.take_pending_diagnostics_page(),
+            )
         });
         if let Some((target, level)) = pending_level {
             let levels = diagnostics.read(cx).levels.clone();
@@ -1573,6 +1592,9 @@ impl ShellView {
         if pending_overlay {
             let next = !self.perf_overlay;
             self.set_perf_overlay(next, cx);
+        }
+        if pending_page {
+            self.open_page_on_request(crate::diagnostics::DIAGNOSTICS_PAGE_KIND, window, cx);
         }
         cx.notify();
     }
@@ -1705,6 +1727,14 @@ impl ShellView {
     #[cfg(any(test, feature = "test-support"))]
     pub fn occupant_title(&self, tile: TileId, cx: &gpui::App) -> Option<gpui::SharedString> {
         self.occupants.get(&tile).map(|o| o.content.title(cx))
+    }
+
+    /// The open page's kind, or `None` while no page is open — cross-crate
+    /// test reach, the same door as `picker()`: `geode-app`'s tests open the
+    /// page from a tile's health chip, a route with no shell dispatch.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn open_page_kind_for_test(&self) -> Option<&'static str> {
+        self.open_page_kind()
     }
 
     /// The configured clock (`AppClock`), for the shell's own painters.

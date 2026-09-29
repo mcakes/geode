@@ -8,6 +8,11 @@
       "name": "Ayu Light",
       "mode": "light",
       "colors": {
+        "chart.1": "#347e96",
+        "chart.2": "#a66e29",
+        "chart.3": "#6e7e3b",
+        "chart.4": "#986b65",
+        "chart.5": "#4a535d",
         "accent.background": "#dadadc",
         "accent.foreground": "#5C6773",
         "background": "#FCFCFC",
@@ -235,6 +240,11 @@
       "name": "Ayu Dark",
       "mode": "dark",
       "colors": {
+        "chart.1": "#5ac1fe",
+        "chart.2": "#cda269",
+        "chart.3": "#91a663",
+        "chart.4": "#b997bd",
+        "chart.5": "#b3b1ad",
         "accent.background": "#20242b",
         "accent.foreground": "#B3B1AD",
         "background": "#0D1016",

@@ -8,6 +8,11 @@
       "name": "Kibble",
       "mode": "dark",
       "colors": {
+        "chart.1": "#6bc85f",
+        "chart.2": "#6482c2",
+        "chart.3": "#b6a05c",
+        "chart.4": "#a886b4",
+        "chart.5": "#c6cec0",
         "accent.background": "#252525",
         "accent.foreground": "#f7f7f7",
         "background": "#0e100a",

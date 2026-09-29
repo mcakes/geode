@@ -1,14 +1,13 @@
 //! Render a tile-bottom prompt with Input and inline error text.
-//! The command popup paints the first eight ranked candidates, without scrolling
-//! or click handlers. Selection cycles across the full candidate list, so a
-//! highlight beyond those eight is not visible in this popup.
+//! The command popup scrolls the full candidate list in a viewport capped at
+//! eight rows. The controller keeps keyboard selection visible.
 
 use crate::commandline::{CommandLine, Prompt};
 use crate::fonts;
 use crate::shell::scale;
 use crate::tiling::Rect;
 use gpui::prelude::*;
-use gpui::{App, Entity, IntoElement, Pixels, div, px};
+use gpui::{App, Entity, IntoElement, Pixels, ScrollHandle, div, px, rems};
 use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
@@ -24,6 +23,7 @@ const MAX_ROWS: usize = 8;
 pub fn render(
     line: &CommandLine,
     input: &Entity<InputState>,
+    scroll: &ScrollHandle,
     tile: Rect,
     rem_size: Pixels,
     cx: &App,
@@ -63,10 +63,14 @@ pub fn render(
     let mut layer = div().absolute().left_0().top_0().size_full().child(strip);
     if line.prompt == Prompt::Command && !line.candidates.is_empty() {
         let rows = line.candidates.len().min(MAX_ROWS);
-        let mut list = v_flex()
+        // Account for p_1 on both edges and the physical border hairlines.
+        let chrome_height = f32::from(rems(0.5).to_pixels(rem_size)) + 2.0;
+        let list_height =
+            (rows as f32 * row_height).min((strip_top - tile.y - 1.0 - chrome_height).max(0.0));
+        let popup = v_flex()
             .absolute()
             .left(px(tile.x + 1.0))
-            .top(px(strip_top - rows as f32 * row_height - 2.0))
+            .top(px(strip_top - list_height - chrome_height))
             .w(px(((tile.w - 2.0) * 0.5).clamp(
                 scale::design_px(160.0, rem_size),
                 scale::design_px(420.0, rem_size),
@@ -76,10 +80,17 @@ pub fn render(
             .border_color(theme.border)
             .rounded(theme.radius)
             .p_1();
-        for (i, r) in line.candidates.iter().take(MAX_ROWS).enumerate() {
+        let mut list = v_flex()
+            .id("command-completions")
+            .h(px(list_height))
+            .overflow_y_scroll()
+            .track_scroll(scroll)
+            .debug_selector(|| "completion-list".to_string());
+        for (i, r) in line.candidates.iter().enumerate() {
             let text = &line.words[r.row];
             let mut row = div()
                 .h(px(row_height))
+                .flex_shrink_0()
                 .px_2()
                 .flex()
                 .items_center()
@@ -99,7 +110,7 @@ pub fn render(
             }
             list = list.child(row);
         }
-        layer = layer.child(list);
+        layer = layer.child(popup.child(list));
     }
     layer
 }

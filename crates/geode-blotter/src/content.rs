@@ -63,13 +63,15 @@ pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
 /// from the shell's shared `motion::*` bindings under `grid`, which
 /// `BlotterTile::key_context` publishes in both modes; this fragment binds
 /// only blotter verbs.
-/// `g m` invokes the shell's `tile::open_with` using the cursor row's context.
+/// `g m` invokes the shell's `tile::open_with` using the cursor row's context,
+/// and `g .` its `tile::context_menu` (the row menu) on the cursor row.
 /// Module fragments may bind shell actions within the module's own context.
 pub const DEFAULT_KEYMAP: &str = r#"
 [[bindings]]
 context = "blotter && mode == normal"
 [bindings.keys]
 "g m" = "tile::open_with"
+"g ." = "tile::context_menu"
 "z o" = "blotter::expand"
 "z c" = "blotter::collapse"
 "z a" = "blotter::toggle"
@@ -170,6 +172,9 @@ impl TileContent for BlotterContent {
     }
     fn dimension_context(&self, cx: &App) -> Option<geode_core::context::DimensionContext> {
         self.tile.read(cx).dimension_context(cx)
+    }
+    fn press_context(&self, cx: &mut App) -> Option<geode_core::context::DimensionContext> {
+        self.tile.update(cx, |t, cx| t.press_context(cx))
     }
     fn tile_columns(&self, cx: &App) -> Option<geode_core::tile_columns::TileColumns> {
         self.tile.read(cx).tile_columns(cx)
@@ -286,7 +291,7 @@ impl ModuleFactory for BlotterFactory {
         tile: TileId,
         restored: Option<&toml::Table>,
         frame: FrameRef,
-        _diagnostics: Entity<Diagnostics>,
+        diagnostics: Entity<Diagnostics>,
         window: &mut Window,
         cx: &mut App,
     ) -> TileOccupant {
@@ -294,6 +299,7 @@ impl ModuleFactory for BlotterFactory {
             BlotterTile::new(
                 tile,
                 frame,
+                diagnostics,
                 self.data.clone(),
                 self.views.clone(),
                 self.colours.clone(),
@@ -365,9 +371,10 @@ mod tests {
         }
         for action in &bound {
             assert!(
-                action.starts_with("blotter::") || *action == "tile::open_with",
+                action.starts_with("blotter::")
+                    || matches!(*action, "tile::open_with" | "tile::context_menu"),
                 "{action} is a shell action this module's keymap binds but does not name; \
-                 only tile::open_with is deliberately named here"
+                 only tile::open_with and tile::context_menu are deliberately named here"
             );
         }
     }
@@ -554,6 +561,29 @@ mod tests {
             .unwrap();
         assert_eq!(normal["keys"]["g m"].as_str(), Some("tile::open_with"));
         assert!(normal["keys"].get("g g").is_none());
+    }
+
+    /// `g .` opens the shell's row menu, under the same context as `g m`.
+    #[test]
+    fn g_dot_opens_the_row_menu_in_normal_mode() {
+        let t: toml::Table = DEFAULT_KEYMAP.parse().unwrap();
+        let normal = t["bindings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["context"].as_str() == Some("blotter && mode == normal"))
+            .unwrap();
+        assert_eq!(normal["keys"]["g ."].as_str(), Some("tile::context_menu"));
+        let keymap = keymap_with_builtins();
+        let stack = blotter_stack("normal");
+        let mut m = Matcher::default();
+        let g = parse_keystroke("g", default_mod()).unwrap();
+        assert_eq!(m.press(&keymap, g, &stack), MatchResult::Pending);
+        let dot = parse_keystroke(".", default_mod()).unwrap();
+        match m.press(&keymap, dot, &stack) {
+            MatchResult::Matched { action, .. } => assert_eq!(action.0, "tile::context_menu"),
+            other => panic!("g .: {other:?}"),
+        }
     }
 
     /// One tile per open window, its own `VisualTestContext`.

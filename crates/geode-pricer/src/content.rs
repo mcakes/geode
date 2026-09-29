@@ -122,7 +122,7 @@ pub const NO_DEFAULT_KEY: &[&str] = &[
 /// a field. `y` alone is unbound: an
 /// exact match dispatches at once, so it would make `y y` and `y c`
 /// unreachable. `g` alone is not bound for the same reason (`g p`, `g u`,
-/// `g m` here, and the shell's shared `g g`).
+/// `g m`, `g .` here, and the shell's shared `g g`).
 ///
 /// The grid motions are not here: the tile publishes `grid`, and the
 /// shell's builtin keymap binds the shared `motion::*` ids once for every
@@ -179,6 +179,7 @@ context = "pricer && mode == normal"
 "g p" = "pricer::group"
 "g u" = "pricer::ungroup"
 "g m" = "tile::open_with"
+"g ." = "tile::context_menu"
 "." = "pricer::menu"
 "space" = "pricer::toggle"
 "z a" = "pricer::toggle"
@@ -825,6 +826,7 @@ impl ModuleFactory for PricerFactory {
             PricerTile::new(
                 tile,
                 frame,
+                diagnostics.clone(),
                 self.data.clone(),
                 self.shared.clone(),
                 restored,
@@ -1135,5 +1137,23 @@ mod tests {
             .unwrap();
         assert_eq!(normal["keys"]["g m"].as_str(), Some("tile::open_with"));
         assert_eq!(normal["keys"]["g u"].as_str(), Some("pricer::ungroup"));
+    }
+
+    /// `g .` opens the shell's row menu, under the same context as `g m`,
+    /// and resolves through the spliced keymap.
+    #[test]
+    fn g_dot_opens_the_row_menu_in_normal_mode() {
+        let t: toml::Table = DEFAULT_KEYMAP.parse().unwrap();
+        let normal = t["bindings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["context"].as_str() == Some("pricer && mode == normal"))
+            .unwrap();
+        assert_eq!(normal["keys"]["g ."].as_str(), Some("tile::context_menu"));
+        assert_eq!(
+            resolve("g .", "normal").as_deref(),
+            Some("tile::context_menu")
+        );
     }
 }

@@ -70,7 +70,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn every_bundled_themes_palette_is_readable(cx: &mut gpui::TestAppContext) {
+    fn every_bundled_themes_palette_is_readable_and_separated(cx: &mut gpui::TestAppContext) {
         use gpui_component::{ActiveTheme, Theme};
         cx.update(gpui_component::init);
         let (service, _) = geode_shell::theme::load_bundled();
@@ -78,6 +78,20 @@ mod tests {
         let mut checked = 0;
         for name in service.names() {
             let entry = service.resolve(&name).unwrap().clone();
+            // Missing or misspelled chart keys silently become a blue ramp
+            // upstream. Every Geode variant must carry its reviewed palette.
+            assert!(
+                [
+                    &entry.colors.chart_1,
+                    &entry.colors.chart_2,
+                    &entry.colors.chart_3,
+                    &entry.colors.chart_4,
+                    &entry.colors.chart_5,
+                ]
+                .iter()
+                .all(|color| color.is_some()),
+                "{name}: missing chart colors"
+            );
             cx.update(|cx| {
                 Theme::global_mut(cx).apply_config(&entry);
                 let t = cx.theme();
@@ -91,6 +105,24 @@ mod tests {
                     let ratio = contrast_ratio(to_rgb(p.colour(i)), to_rgb(t.background));
                     if ratio < READABLE_RATIO {
                         failures.push(format!("{name}: chart_{} at {ratio:.2}:1", i + 1));
+                    }
+                    // Local screening floor chosen with the reviewed palette
+                    // gallery, not an accessibility standard. Measure every
+                    // pair AFTER contrast correction, which can collapse two
+                    // initially distinct colors onto the same lightness.
+                    let a = geode_core::colour::oklab::srgb_to_oklab(to_rgb(p.colour(i)));
+                    for j in i + 1..Palette::LEN {
+                        let b = geode_core::colour::oklab::srgb_to_oklab(to_rgb(p.colour(j)));
+                        let distance =
+                            ((a.l - b.l).powi(2) + (a.a - b.a).powi(2) + (a.b - b.b).powi(2))
+                                .sqrt();
+                        if distance < 0.07 {
+                            failures.push(format!(
+                                "{name}: chart_{} and chart_{} only {distance:.3} apart",
+                                i + 1,
+                                j + 1
+                            ));
+                        }
                     }
                 }
             });

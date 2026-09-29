@@ -91,7 +91,9 @@ names, such as `underlying_ref`) names at least one column present in it; the
 other columns a row carries do not block a kind. The dialog is titled
 `Open {subject} in…`, the subject being the first context value, in context
 order, of a column a listed kind accepts. `ModuleRoster::context_columns` is
-the union of every factory's `accepts`. A pick always splits: the factory's
+every factory's `accepts`, then every row menu action's column (see
+[Row menu](#row-menu)); `geode-app` hands it to the data service so each row
+carries those values. A pick always splits: the factory's
 `launch_state` translates the context into that kind's own restored-state
 table, so a source and a target agree without depending on each other. A
 context holding no registered context column (empty, or only columns such as
@@ -107,6 +109,59 @@ duplicate, never a session restore) that is the focused tile on its first
 render. A module that is useless without further state, such as a panel
 added with no state — from the palette, the tile picker, or
 `tile::open_with` falling back to the picker — asks for it here.
+
+### Row menu
+
+The row menu lists what a row's single-valued columns let the user do. The
+shell owns it (`shell/row_menu.rs`), so every grid gets the same menu from
+its one `dimension_context`. Two routes open it:
+
+- `tile::context_menu` ("Row actions…", category Tiles) takes the focused
+  tile's `dimension_context` and hangs the menu at the context's `anchor`
+  (window-space logical pixels, the cursor row's lower-left as the tile
+  last painted it), or at the tile's top-left when it records none. The
+  blotter and pricer bind it to `g .` in normal mode, beside `g m`.
+- A right press on a tile first focuses it, as a left press does, then
+  defers one beat so the module's own press handling has landed, and asks
+  the occupant's `TileContent::press_context` for the pressed row. The
+  default answers `None` and nothing opens; an answer opens the menu at the
+  pointer. The blotter answers it; the pricer answers `dimension_context`
+  only, so it has `g .` but no right-press menu.
+
+`dimension::menu_rows` builds the rows. Each context column, the clicked
+column (`DimensionContext::first`) first and then the rest in context
+order, gets a section headed `{column} · {value}` holding "Open {Kind}" for
+every roster kind whose `accepts` names that column, then every registered
+action on that column. A kind accepting several present columns sits in the
+first such section only. Sections with no rows are left out, and
+separators part the rest. A context with no rows at all opens nothing: the
+status notice reads "no actions for this row" (`NO_ROW_ACTIONS`). That is
+also the answer with no tile focused or a tile that answers no context.
+
+While open, the menu owns the keys: `j`/`down` and `k`/`up` step over
+enabled rows, `enter` picks the highlighted row, and `escape` closes it.
+Any other bare key is consumed. A chord passes to the matcher, and its
+dispatch closes the menu. The menu also closes on a pick, a press outside
+it, any dispatched action, a dialog opening, or the palette opening. It
+does not open while a modal is open, and it is refused over a page. A
+disabled row shows its reason and is inert, to a click or to `enter`.
+Picking "Open {Kind}" splits a new tile of that kind beside the focused
+one, restored from its factory's `launch_state` of the context, as a
+`tile::open_with` pick does. When a dismissal (`escape`, a press outside)
+closes it, focus returns to the scope bar's text field only if that field
+held focus and a key opened the menu; otherwise to the shell root. Opening
+the menu closes the palette, the command line, the stack list and the
+add-a-filter menu, and takes the shell root's focus.
+
+A crate adds a row by implementing `dimension::DimensionAction`: `id`,
+`title`, the `column` whose section it sits in, `available` (enabled, or
+disabled with the reason its row shows; enabled by default) and `run`.
+`geode-app` registers it with `ModuleRoster::add_action` in
+`add_bridge_modules` (none are registered yet), before the roster's
+`context_columns` are published, so each row carries the action's column. `run` gets the menu's context and
+an `ActionCx`, after the menu has closed: `open_tile(kind, state)` splits a
+tile beside the focused one, as `g m` does, and `notice(text)` sets the
+status notice.
 
 ## Actions and keyboard routing
 
@@ -443,6 +498,14 @@ summary, and closes through `page::close`, the same toggle, or any
 `workspace::switch_N`, which closes the page and then switches. A toggle
 naming a kind no factory registered logs a warning and opens nothing.
 
+A tile opens the diagnostics page by queueing `request_diagnostics_page` on
+the shared `Diagnostics` entity (its health chip does this); the shell's
+diagnostics observer drains it through `open_page`, never the toggle, so the
+request only ever opens. It begins as a dispatched action does: the crash
+report's action tail records `page::toggle_diagnostics`, and the shell's
+notice, stack list and add-filter menu expire. Under a modal it is then
+refused with the toggle's `close the dialog first` notice.
+
 While a page is open the key context stack is `page`, then the page's own
 context, then `palette` when it is open. `workspace` and `tile` are absent,
 so tile movement, dock, stack, `:`, and `/` bindings cannot fire into a
@@ -452,7 +515,7 @@ the focused occupant. The palette still reaches every action id over a
 page, so `ShellView::dispatch` refuses with a notice the ones that would
 open chrome or change a layout the trader cannot see: the tile command
 line, find, `tile::add` and every per-kind add action, `tile::open_with`,
-`tile::autosize_columns`, and every `workspace::`, `dock::`, and `stack::`
+`tile::context_menu`, `tile::autosize_columns`, and every `workspace::`, `dock::`, and `stack::`
 action other than the workspace switches, which close the page first. The
 refusal is one predicate in `input.rs`; `Close tile` over a page would
 otherwise destroy an unseen tile with no undo.
@@ -541,6 +604,15 @@ Source health remains absent until the first report, even if description or
 poll events created the source entry. Unreported sources do not contribute to
 the status summary. A changed health or detail records a transition, including
 recovery, with the most recent 16 retained per source.
+
+Each source's description carries the dataset it loads into
+(`SourceSummary.dataset`, from `SourceSpec.dataset` at attach). A tile asks
+`health_for_datasets` or `health_for_sources` for a `TileHealth`: the worst
+unhealthy source it reads by `Health::severity`, the lowest name on a tie, the
+reason (the health's own, else the source's detail) and how many other read
+sources are also unhealthy. Only described, reported sources count for the
+dataset question; Ok and Pending are silent; an unknown dataset or source is
+ignored.
 
 Config loads replace the current diagnostic batch; a clean load clears it and
 an identical load adds no history. The model retains the latest 16 changed

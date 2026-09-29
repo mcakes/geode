@@ -9,6 +9,11 @@
       "mode": "light",
       "shadow": false,
       "colors": {
+        "chart.1": "#005f87",
+        "chart.2": "#896f3d",
+        "chart.3": "#75556b",
+        "chart.4": "#47715d",
+        "chart.5": "#454b51",
         "accent.background": "#c8ced1",
         "accent.foreground": "#1c1c1c",
         "background": "#E4E4E4",
@@ -153,6 +158,11 @@
       "name": "Hybrid Dark",
       "mode": "dark",
       "colors": {
+        "chart.1": "#72a6bf",
+        "chart.2": "#a7995d",
+        "chart.3": "#a57896",
+        "chart.4": "#648c69",
+        "chart.5": "#c2c6c8",
         "accent.background": "#31393a",
         "accent.foreground": "#e8e8e8",
         "background": "#1D1F21",

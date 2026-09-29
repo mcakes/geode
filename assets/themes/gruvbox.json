@@ -8,6 +8,11 @@
       "name": "Gruvbox Light",
       "mode": "light",
       "colors": {
+        "chart.1": "#076678",
+        "chart.2": "#b57614",
+        "chart.3": "#8f3f71",
+        "chart.4": "#427b58",
+        "chart.5": "#665c54",
         "accent.background": "#e6d19e",
         "accent.foreground": "#3c3836",
         "background": "#fbf1c7",
@@ -158,6 +163,11 @@
       "name": "Gruvbox Dark",
       "mode": "dark",
       "colors": {
+        "chart.1": "#458588",
+        "chart.2": "#d79921",
+        "chart.3": "#b16286",
+        "chart.4": "#98971a",
+        "chart.5": "#ebdbb2",
         "accent.background": "#303030",
         "accent.foreground": "#ebdbb2",
         "background": "#1d2021",

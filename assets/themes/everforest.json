@@ -8,6 +8,11 @@
       "name": "Everforest Light",
       "mode": "light",
       "colors": {
+        "chart.1": "#477b73",
+        "chart.2": "#a36949",
+        "chart.3": "#82904a",
+        "chart.4": "#956a80",
+        "chart.5": "#454b43",
         "accent.background": "#E7E5D4",
         "accent.foreground": "#5F6D75",
         "background": "#FEFCEE",
@@ -152,6 +157,11 @@
       "name": "Everforest Dark",
       "mode": "dark",
       "colors": {
+        "chart.1": "#7fbbb3",
+        "chart.2": "#e69875",
+        "chart.3": "#a7c080",
+        "chart.4": "#b58a9f",
+        "chart.5": "#d3c6aa",
         "accent.background": "#3c4448",
         "accent.foreground": "#d3c6aa",
         "background": "#262E34",

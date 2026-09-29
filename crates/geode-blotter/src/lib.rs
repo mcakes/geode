@@ -8,6 +8,7 @@
 pub mod content;
 pub mod core;
 pub mod delegate;
+mod header;
 pub mod tile;
 
 pub use content::BlotterFactory;

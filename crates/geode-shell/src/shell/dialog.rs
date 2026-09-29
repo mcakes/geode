@@ -452,6 +452,7 @@ pub fn open_shell_dialog_with_key<F>(
     // The scope bar's add-a-filter menu is transient chrome under a modal's
     // key route; it never survives one opening.
     view.add_filter_menu = None;
+    view.close_row_menu(cx);
 
     // Recorded after the palette close above (which may itself have just
     // returned focus to the field) and before the dialog takes focus, for

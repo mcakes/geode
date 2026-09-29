@@ -69,7 +69,7 @@ for capacity, coalescing, and worker shutdown behavior.
 | Module | Holds |
 |---|---|
 | `supervise` | `spawn_supervised`, the one door for long-lived data threads, and `REQUEST_LOOP` (`geode-data`), the request loop's thread name. |
-| `service` | `DataService`, `DataServiceConfig`, `DataEvent`, and the `HealthTracker` (two lanes per source, `discovery` and `load`; the worse by `severity_rank` wins). |
+| `service` | `DataService`, `DataServiceConfig`, `DataEvent`, and the `HealthTracker` (two lanes per source, `discovery` and `load`; the worse by `Health::severity` wins). |
 | `handle` | `DataHandle`, `Refusal`, and `Request`: queries, distinct values, the catalog, a document by key, a series fetch, identities, an upload, a local publish, and a local forget. |
 | `source` | Directory discovery, sentinel parsing, and readiness classification. Configuration types are shared with `geode-core`; stable-mtime readiness is accepted by configuration but unsupported at runtime. |
 | `adapter` | Subscription, upload, and fetch capabilities; a registry, bounded message sink, and topic matching. Includes the in-process `ChannelAdapter`; the app can register additional implementations such as its demo series adapter. |

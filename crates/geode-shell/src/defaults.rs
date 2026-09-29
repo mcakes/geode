@@ -411,6 +411,9 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     // accept one of its columns. Outside the `tile::add_` prefix, like
     // `tile::add`.
     action(reg, "tile::open_with", "Open with context…", "Tiles");
+    // The row menu on the focused tile's cursor row: the kinds and
+    // dimension actions its single-valued columns offer.
+    action(reg, "tile::context_menu", "Row actions\u{2026}", "Tiles");
     // Fits the focused tile's table columns to their content
     // (`TileContent::autosize_columns`). Palette-only: no default key.
     action(reg, "tile::autosize_columns", "Autosize columns", "Tile");

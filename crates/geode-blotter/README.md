@@ -14,7 +14,8 @@ Current behavior and rationale:
 |---|---|
 | `core` | Column plans, expansion paths (`core::expansion`: `path_of` and `depth_bound` over `geode_core::expansion::Expansion`), visible-row traversal, cursor movement (`core::cursor`, moved by `geode_tile::motion`), find, selection summaries, cursor-row dimension context, TSV export, command parsing, and visible-window formatting without GPUI. |
 | `delegate` | `TableDelegate` adapter with prepared rows and cached cell text. Holds `:autosize`'s fitted widths by column name, which `column()` prefers over the plan's; `fit_columns` measures the header and the format cache's window only. Owns selection and paint caches; reports cell gestures and chevron clicks to the tile. |
-| `tile` | `BlotterTile`, the entity per tile: a key context that publishes `grid` (so the shell's shared `motion::*` keys reach it), `dispatch` routing every `motion::*` id through `geode_tile::motion`, local query overrides, requests through `DataHandle`, frame observation over `geode_tile::following`, snapshot application, header and footer rendering. The header notice is a `geode_tile::notice::Notice`: dropped sorts and selections are warnings, query and configuration failures danger. |
+| `header` | The prepared header: dataset time runs (oldest first), the frame's `AS OF` warning text and the datasets its health question reads, rebuilt when a snapshot lands or the clock changes. |
+| `tile` | `BlotterTile`, the entity per tile: a key context that publishes `grid` (so the shell's shared `motion::*` keys reach it), `dispatch` routing every `motion::*` id through `geode_tile::motion`, local query overrides, requests through `DataHandle`, frame observation over `geode_tile::following`, snapshot application, the header painted through `geode_tile::header::frame` (view, grouping and chips on the left; the notice, dataset times and the health chip over its snapshot's provenance datasets in the cluster; no `⋯`: the blotter has no action menu) and footer rendering. The header notice is a `geode_tile::notice::Notice`: dropped sorts and selections are warnings, query and configuration failures danger. |
 | `content` | The `TileContent` wrapper and `BlotterFactory`, the roster entry the app builds with the data handle. |
 
 ## Commands
@@ -95,8 +96,18 @@ cargo bench -p geode-blotter   # the pure core
   grouping path (a subtotal carries only its own levels and those above), the
   shown dimension columns, then the hidden context columns the data service
   adds. A NULL, empty or mixed value is absent. The context also carries the
-  selection's rows while the cursor is inside a visual selection; `g m` opens
-  on the cursor row's values alone.
+  selection's rows while the cursor is inside a `V` (rows) selection, never a
+  `v` block; `g m` opens on the cursor row's values alone. Its `anchor` is the
+  cursor row's lower-left in window space, recorded at paint and cleared when
+  that row scrolls out of view.
+- `g .` opens the shell's row menu on that context. A right press on a cell,
+  or on a row beside its cells, emits `CellPointer::Context`; the tile then
+  keeps the cursor and selection when the row is inside a `V` selection, and
+  otherwise clears the selection and moves the cursor there, as a plain
+  press does. `press_context` answers that row's context once, with `first`
+  set to the pressed column when it is a dimension the row carries (a press
+  beside the cells uses the cursor's column). A filler row below the data
+  opens nothing.
 - `tile_columns` reports the plan's non-tree columns and the cursor's column
   for the shell's edit-column actions; the tree column is never active, and
   derived view columns are flagged so Schema can leave them out.

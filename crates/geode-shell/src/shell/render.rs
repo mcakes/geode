@@ -272,6 +272,14 @@ impl Render for ShellView {
                 }
             };
 
+        // A row menu with no point to hang from (none recorded, and no
+        // focused tile rect: under a page, or with no tile focused) would
+        // paint nothing yet swallow every key: drop it here. No notify —
+        // this frame paints without it — so the drop cannot loop.
+        if focused_rect.is_none() && self.row_menu.as_ref().is_some_and(|m| m.at().is_none()) {
+            self.drop_row_menu(window, cx);
+        }
+
         let active_index = self.services.workspaces.active_index();
         let non_empty = self.services.workspaces.non_empty_indices();
         let reload_message = self.last_reload.status_message();
@@ -764,6 +772,7 @@ impl Render for ShellView {
                     el.child(commandline_view::render(
                         line,
                         &self.command_input,
+                        &self.command_scroll,
                         rect,
                         rem_size,
                         cx,
@@ -842,6 +851,31 @@ impl Render for ShellView {
                             view.dismiss_add_filter_menu(window, cx)
                         })),
                 )
+            })
+            // The row menu: hung at its recorded point (the cursor row's
+            // anchor) or at the focused tile's top-left. `render_menu`
+            // closes it on a press outside itself.
+            .when_some(self.row_menu.as_ref(), |el, open| {
+                let at = open
+                    .at()
+                    .or_else(|| focused_rect.map(|r| gpui::point(px(r.x), px(r.y))));
+                let shell = cx.entity();
+                el.when_some(at, |el, at| {
+                    el.child(
+                        div()
+                            .absolute()
+                            .left(at.x)
+                            .top(at.y)
+                            .child(crate::menu::render_menu(
+                                open.menu(),
+                                &crate::menu::MenuIds::new("row-menu", "row-menu-row"),
+                                gpui::Anchor::TopLeft,
+                                &shell,
+                                |v: &mut ShellView, window, cx| v.dismiss_row_menu(window, cx),
+                                cx,
+                            )),
+                    )
+                })
             })
             // Paint the modal below the palette: a palette opened over the stack
             // must be visible and take clicks above the dialog it covers.
@@ -1301,16 +1335,25 @@ impl ShellView {
                         )
                         // Right press selects the tile so its context-menu keys route
                         // to that occupant. Reuse focus restoration without arming a
-                        // drag or handling double-click gestures.
+                        // drag or handling double-click gestures, then opens the
+                        // row menu at the pointer if the occupant answers
+                        // `press_context`.
                         .on_mouse_down(
                             MouseButton::Right,
-                            cx.listener(move |view, _event: &MouseDownEvent, window, cx| {
+                            cx.listener(move |view, event: &MouseDownEvent, window, cx| {
                                 view.leave_command_line(window, cx);
                                 if view.services.workspaces.active_mut().focus_main_tile(id) {
                                     view.session_dirty = true;
                                 }
                                 view.pending_focus_restore = true;
                                 cx.notify();
+                                // One beat later, so the module's own press
+                                // handling (a cursor move delivered as an
+                                // event) has landed before its context is read.
+                                let at = event.position;
+                                cx.defer_in(window, move |view, window, cx| {
+                                    view.open_row_menu_from_press(id, at, window, cx);
+                                });
                             }),
                         ),
                 );
@@ -1367,7 +1410,7 @@ impl ShellView {
                                 MouseButton::Right,
                                 // The tree tile's right-press focus tail, for a
                                 // docked tile (same reason, same shape).
-                                cx.listener(move |view, _event: &MouseDownEvent, window, cx| {
+                                cx.listener(move |view, event: &MouseDownEvent, window, cx| {
                                     view.leave_command_line(window, cx);
                                     if view
                                         .services
@@ -1379,6 +1422,10 @@ impl ShellView {
                                     }
                                     view.pending_focus_restore = true;
                                     cx.notify();
+                                    let at = event.position;
+                                    cx.defer_in(window, move |view, window, cx| {
+                                        view.open_row_menu_from_press(id, at, window, cx);
+                                    });
                                 }),
                             ),
                     );

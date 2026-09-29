@@ -674,6 +674,7 @@ mod perf;
 mod picker;
 mod pin;
 mod reload;
+mod row_menu;
 mod scope_expr;
 mod scopebar;
 mod scopepicker;

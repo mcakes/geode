@@ -26,11 +26,13 @@ use geode_tile::colour::{ColourCache, Resolved as ColourResolved};
 use gpui::prelude::*;
 use gpui::{
     App, ClickEvent, Context, Div, EventEmitter, Hsla, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, SharedString, Stateful, TextAlign, Window, div, px,
+    MouseMoveEvent, MouseUpEvent, SharedString, Stateful, TextAlign, Window, canvas, div, px,
 };
 use gpui_component::table::{Column, ColumnFixed, ColumnSort, TableDelegate, TableState};
 use gpui_component::{ActiveTheme as _, Theme};
+use std::cell::Cell;
 use std::ops::Range;
+use std::rc::Rc;
 use std::sync::Arc;
 
 /// A single left click landed on the tree column's disclosure glyph of
@@ -61,6 +63,8 @@ pub enum CellPointer {
         col: usize,
         gutter: bool,
     },
+    /// A right press: the shell's row menu opens on this cell's row.
+    Context { row: usize, col: usize },
 }
 
 impl EventEmitter<CellPointer> for TableState<BlotterDelegate> {}
@@ -201,6 +205,13 @@ pub struct BlotterDelegate {
     /// calculation. Reusing the result avoids conversions and contrast
     /// correction for every visible row on every frame.
     chevron: Option<(control::ControlInputs, control::ControlPaint)>,
+    /// The cursor row's painted lower-left, in window coordinates, written
+    /// at prepaint by a canvas `render_tr` puts in that row alone: where
+    /// `g .` hangs the row menu. `None` until the cursor row first paints.
+    cursor_anchor: Rc<Cell<Option<(f32, f32)>>>,
+    /// Set by a cell's right press and taken by its row's, which bubbles
+    /// after it, so a press on a cell is not reported twice.
+    context_reported: bool,
 }
 
 /// The name column `col_ix` carries a `Colour::Named` of, if it does.
@@ -265,6 +276,8 @@ impl BlotterDelegate {
             drag_last: None,
             drag_origin: None,
             fitted: FittedWidths::new(),
+            cursor_anchor: Rc::new(Cell::new(None)),
+            context_reported: false,
         }
     }
 
@@ -484,15 +497,25 @@ impl BlotterDelegate {
         self.shown.get(self.cursor.row).map(|r| *r as usize)
     }
 
-    /// The cursor row's dimension context: its single-valued columns and,
-    /// when the cursor row is inside the live selection, each selected
-    /// top-most row's. `None` before the first snapshot.
+    /// The cursor row's dimension context (see [`Self::context_at_row`]).
     pub fn dimension_context(&self) -> Option<geode_core::context::DimensionContext> {
+        self.context_at_row(self.cursor.row)
+    }
+
+    /// Display row `display_row`'s dimension context: its single-valued
+    /// columns and, when that row is inside a live row (`V`) selection,
+    /// each selected top-most row's; a block selection never rides along.
+    /// The anchor is the cursor row's painted lower-left, whichever row is
+    /// asked. `None` before the first snapshot or past the shown rows.
+    pub fn context_at_row(
+        &self,
+        display_row: usize,
+    ) -> Option<geode_core::context::DimensionContext> {
         let snapshot = self.snapshot.as_ref()?;
         let plan = self.plan.as_ref()?;
-        let row = *self.shown.get(self.cursor.row)? as usize;
+        let row = *self.shown.get(display_row)? as usize;
         let selection = match &self.resolved {
-            Some(r) if r.rows.contains(&self.cursor.row) => {
+            Some(r) if r.kind == SelectKind::Rows && r.rows.contains(&display_row) => {
                 crate::core::context::selection_values(snapshot, plan, &self.shown, r)
             }
             _ => Vec::new(),
@@ -500,6 +523,7 @@ impl BlotterDelegate {
         Some(geode_core::context::DimensionContext {
             values: crate::core::context::values_at(snapshot, plan, row),
             selection,
+            anchor: self.cursor_anchor.get(),
             ..Default::default()
         })
     }
@@ -985,10 +1009,13 @@ impl BlotterDelegate {
     /// call, `false` for the cell's — and is carried into every `Drag`
     /// this element emits verbatim: the selection a drag makes is decided
     /// by where it started, not by whatever cell the pointer is over now.
+    /// A cell (not its gutter) also reports a right press as `Context`.
     ///
-    /// None of the four listeners stop propagation: the row's own
-    /// `SelectRow`/tile-focus press must still arrive, and a fast
-    /// double-click still reaches gpui's own click-count tracking.
+    /// None of the listeners stop propagation: the row's own
+    /// `SelectRow`/tile-focus press must still arrive, a fast
+    /// double-click still reaches gpui's own click-count tracking, and a
+    /// right press still reaches the shell's tile listener, which opens
+    /// the row menu.
     fn wire_pointer(
         el: Div,
         cx: &Context<TableState<Self>>,
@@ -1058,6 +1085,21 @@ impl BlotterDelegate {
                 this.delegate_mut().drag_origin = None;
             }),
         )
+        // A right press names its cell for the shell's row menu. Wired on
+        // the cell alone: the gutter is the cell's child, so a right press
+        // on it bubbles here and is reported once.
+        .when(!gutter, |el| {
+            el.on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                    this.delegate_mut().context_reported = true;
+                    cx.emit(CellPointer::Context {
+                        row: row_ix,
+                        col: col_ix,
+                    });
+                }),
+            )
+        })
     }
 }
 
@@ -1263,6 +1305,11 @@ impl TableDelegate for BlotterDelegate {
         _window: &mut Window,
         _cx: &mut Context<TableState<Self>>,
     ) {
+        // A cursor row outside the window paints no longer, so its last
+        // anchor would point at whatever row sits there now.
+        if !visible_range.contains(&self.cursor.row) {
+            self.cursor_anchor.set(None);
+        }
         self.refill_window(visible_range);
     }
 
@@ -1298,9 +1345,28 @@ impl TableDelegate for BlotterDelegate {
             .resolved
             .as_ref()
             .is_some_and(|r| r.kind == SelectKind::Rows && r.contains_row(row_ix));
+        // The cursor row alone records its painted lower-left (canvas
+        // bounds are window coordinates) for `dimension_context`'s anchor.
+        let anchor = (self.cursor.row == row_ix).then(|| self.cursor_anchor.clone());
         div()
             .id(("row", row_ix))
+            .debug_selector(|| format!("blotter-row-{row_ix}"))
             .when(tint, |el| el.bg(cx.theme().selection.opacity(0.35)))
+            .when_some(anchor, |el, anchor| {
+                el.child(
+                    canvas(
+                        move |bounds, _, _| {
+                            anchor.set(Some((
+                                f32::from(bounds.origin.x),
+                                f32::from(bounds.bottom()),
+                            )));
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .size_full(),
+                )
+            })
             // A press on the row outside every cell — the trailing filler
             // column, row padding — is still a plain click: it
             // reports a press at the cursor's column so the tile's one
@@ -1322,6 +1388,30 @@ impl TableDelegate for BlotterDelegate {
                         shift: e.modifiers.shift,
                         gutter: false,
                     });
+                }),
+            )
+            // A right press there, likewise, is one at the cursor's column.
+            // A cell that already reported it set `context_reported`; the
+            // row clears it, since it bubbles last.
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                    let d = this.delegate_mut();
+                    // Only this take resets the flag. It is always reached
+                    // because a cell's right press bubbles to its row, which
+                    // holds while the table is `cell_selectable(false)`:
+                    // gpui-component's cell handler stops propagation when
+                    // cells are selectable.
+                    if std::mem::take(&mut d.context_reported) {
+                        return;
+                    }
+                    // A filler row below the data (painted only with
+                    // `stripe(true)`) is blank space: no menu.
+                    if row_ix >= d.shown.len() {
+                        return;
+                    }
+                    let col = d.cursor.col;
+                    cx.emit(CellPointer::Context { row: row_ix, col });
                 }),
             )
     }

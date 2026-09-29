@@ -3,7 +3,7 @@
 //! events go to that occupant; command completion and execution use its vocabulary.
 //! Errors remain inline until a text edit or successful close.
 
-use gpui::{Context, Focusable as _, KeyDownEvent, Window};
+use gpui::{Context, Focusable as _, KeyDownEvent, ScrollHandle, Window};
 
 use crate::commandline::{self, CommandLine, Prompt};
 use crate::module::FindEvent;
@@ -28,8 +28,13 @@ impl ShellView {
         }
         self.matcher.cancel();
         self.command_line = Some(CommandLine::new(prompt, tile));
+        self.command_scroll = ScrollHandle::new();
         self.command_input
             .update(cx, |input, cx| input.set_value("", window, cx));
+        // set_value does not emit a change event; populate suggestions on open.
+        if prompt == Prompt::Command {
+            self.on_command_line_changed(window, cx);
+        }
         self.command_input
             .read(cx)
             .focus_handle(cx)
@@ -106,6 +111,7 @@ impl ShellView {
                 let words = o.content.completions(&text, cursor, cx);
                 if let Some(line) = self.command_line.as_mut() {
                     line.refresh(&text, cursor, words);
+                    self.command_scroll.scroll_to_item(line.highlighted);
                 }
             }
         }
@@ -206,6 +212,7 @@ impl ShellView {
                     }
                 }
             }
+            self.command_scroll.scroll_to_item(c.highlighted);
             cx.notify();
             return true;
         }

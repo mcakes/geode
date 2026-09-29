@@ -44,7 +44,8 @@ fn pull_direction(id: &str) -> Option<Direction> {
 }
 
 /// The notice produced when a palette action tries to open transient chrome
-/// (the command line, find, or the stack list) while a dialog is open.
+/// (the command line, find, the stack list, or the row menu) while a dialog
+/// is open.
 pub(super) const CLOSE_DIALOG_FIRST: &str = "close the dialog first";
 
 /// The notice when an action wants transient tile chrome, or would add,
@@ -56,12 +57,13 @@ pub(super) const CLOSE_PAGE_FIRST: &str = "close the page first (esc)";
 pub(crate) const NO_MODULE_OPENS: &str = "no module opens on the context at the cursor";
 
 /// The action ids refused with [`CLOSE_PAGE_FIRST`] while a page is open:
-/// the transient tile chrome (the `:` line, find, the stack list) and every
-/// layout edit — add, open-with, autosize, and the whole `workspace::`,
-/// `dock::`, and `stack::` families, which close, fullscreen, move, resize,
-/// refocus, dock, or restack tiles nobody can see (`Close tile` would
-/// destroy an unseen tile with no undo). `workspace::switch_*` is the one
-/// exception: a switch closes the page first and is the route home.
+/// the transient tile chrome (the `:` line, find, the stack list, the row
+/// menu) and every layout edit — add, open-with, autosize, and the whole
+/// `workspace::`, `dock::`, and `stack::` families, which close,
+/// fullscreen, move, resize, refocus, dock, or restack tiles nobody can see
+/// (`Close tile` would destroy an unseen tile with no undo).
+/// `workspace::switch_*` is the one exception: a switch closes the page
+/// first and is the route home.
 fn refused_over_a_page(id: &str) -> bool {
     if id.starts_with("workspace::") {
         return !id.starts_with("workspace::switch_");
@@ -74,6 +76,7 @@ fn refused_over_a_page(id: &str) -> bool {
                 | "tile::find"
                 | "tile::add"
                 | "tile::open_with"
+                | "tile::context_menu"
                 | "tile::autosize_columns"
         )
         || crate::defaults::parse_add_action(id).is_some()
@@ -139,6 +142,28 @@ impl ShellView {
         })
     }
 
+    /// What every action does before it routes, whether it arrived through
+    /// `dispatch` or a pointer route that stands in for one (a tile's health
+    /// chip opening a page): record `id` in the crash report's action tail,
+    /// and expire the notice, the stack list, the add-filter menu and the row
+    /// menu. A route that skipped this would leave the last refusal showing
+    /// over the page it opened and drop the action from the crash tail.
+    pub(super) fn begin_action(&mut self, id: &str) {
+        // Record every action before routing so the crash report includes ones
+        // that no handler recognizes. The tail stores hashes without allocating per key.
+        self.services
+            .action_tail
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .record(id);
+        // Notices and the stack list expire on the next action. The list handles
+        // its own bare keys before dispatch, so only external actions close it here.
+        self.notice = None;
+        self.stack_list = None;
+        self.add_filter_menu = None;
+        self.row_menu = None;
+    }
+
     /// Dispatch a resolved action from either the keymap or palette. Workspace
     /// actions go through `apply_workspace_action`; shell actions are handled
     /// here, and remaining ids reach the focused occupant with their count.
@@ -153,23 +178,11 @@ impl ShellView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Record every dispatch before routing so the crash report includes actions
-        // that no handler recognizes. The tail stores hashes without allocating per key.
-        self.services
-            .action_tail
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .record(&action.0);
+        self.begin_action(&action.0);
         // The one line every dispatched action leaves in the daily log
         // (`[log] shell = "debug"`): which action, with what count. The
         // branch that resolved it says so on its own line just before.
         tracing::debug!(target: "geode::shell", action = %action.0, count = ?count, "dispatch");
-
-        // Notices and the stack list expire on the next dispatch. The list handles
-        // its own bare keys before dispatch, so only external actions close it here.
-        self.notice = None;
-        self.stack_list = None;
-        self.add_filter_menu = None;
 
         // The palette reaches every action while a dialog is open. Refuse
         // transient tile controls here: the modal would hide them and block
@@ -180,7 +193,11 @@ impl ShellView {
         if self.modal_open()
             && (matches!(
                 action.0.as_str(),
-                "tile::command_line" | "tile::find" | "stack::pick" | "frame::pin_workspace"
+                "tile::command_line"
+                    | "tile::find"
+                    | "stack::pick"
+                    | "tile::context_menu"
+                    | "frame::pin_workspace"
             ) || action.0.starts_with("workspace::switch_"))
         {
             self.notice = Some(CLOSE_DIALOG_FIRST);
@@ -525,6 +542,21 @@ impl ShellView {
                     choicedialog::open_tile_kinds_with(self, kinds, context, subject, window, cx);
                 }
             }
+        } else if action.0 == "tile::context_menu" {
+            // The focused tile's cursor row, hung at its recorded anchor (or
+            // the tile's top-left when it records none).
+            let context = self
+                .services
+                .workspaces
+                .active()
+                .focused_tile()
+                .and_then(|t| self.occupants.get(&t))
+                .and_then(|o| o.content.dimension_context(cx))
+                .unwrap_or_default();
+            let at = context
+                .anchor
+                .map(|(x, y)| gpui::point(gpui::px(x), gpui::px(y)));
+            self.open_row_menu(context, at, false, window, cx);
         } else if action.0 == "tile::autosize_columns" {
             // The focused tile's occupant fits its own table; any other
             // tile is untouched. A refusal (no tile, no table) is a notice.
@@ -1048,6 +1080,15 @@ impl ShellView {
             // matcher below, and its dispatch closes the menu.
             let is_chord = convert_keystroke(&event.keystroke).is_some_and(|ks| ks.mods.is_chord());
             if self.handle_add_filter_key(event.keystroke.key.as_str(), is_chord, window, cx) {
+                return;
+            }
+        }
+
+        if self.row_menu.is_some() {
+            // The row menu consumes every bare key; a chord passes to the
+            // matcher below, and its dispatch closes the menu.
+            let is_chord = convert_keystroke(&event.keystroke).is_some_and(|ks| ks.mods.is_chord());
+            if self.handle_row_menu_key(event.keystroke.key.as_str(), is_chord, window, cx) {
                 return;
             }
         }

@@ -8,6 +8,11 @@
       "name": "Spaceduck",
       "mode": "dark",
       "colors": {
+        "chart.1": "#089cc5",
+        "chart.2": "#b89c50",
+        "chart.3": "#c86d8c",
+        "chart.4": "#76aa91",
+        "chart.5": "#bbbdb1",
         "accent.background": "#212440",
         "accent.foreground": "#a3a49d",
         "background": "#0F111B",

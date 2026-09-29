@@ -10,6 +10,7 @@
 
 use crate::actions::{ActionId, ActionRegistry};
 use crate::diagnostics::Diagnostics;
+use crate::dimension::DimensionAction;
 use crate::frame::FrameRef;
 use crate::keymap::KeyContext;
 use crate::keymap::fragments;
@@ -265,6 +266,14 @@ pub trait TileContent {
     fn dimension_context(&self, _cx: &App) -> Option<DimensionContext> {
         None
     }
+    /// The context of the row a right press just landed on, for the shell's
+    /// row menu, or `None` for a tile that opens no menu on a right press.
+    /// Called once per right press, after the module's own press handling
+    /// has run; a module records the pressed row and column in its own
+    /// press handler and answers from them here.
+    fn press_context(&self, _cx: &mut App) -> Option<DimensionContext> {
+        None
+    }
     /// The view columns this tile presents and the one at its cursor, pulled
     /// by the shell when `config::view_column` / `config::schema_column`
     /// runs, so the module needs no handle into the shell. `None` (the
@@ -416,6 +425,7 @@ impl<F: ModuleFactory + ?Sized> ModuleFactory for Rc<F> {
 #[derive(Default)]
 pub struct ModuleRoster {
     factories: Vec<Box<dyn ModuleFactory>>,
+    actions: Vec<Rc<dyn DimensionAction>>,
 }
 
 impl ModuleRoster {
@@ -425,6 +435,17 @@ impl ModuleRoster {
 
     pub fn add(&mut self, factory: Box<dyn ModuleFactory>) {
         self.factories.push(factory);
+    }
+
+    /// Register a row menu action; the menu lists them in this order.
+    pub fn add_action(&mut self, action: Rc<dyn DimensionAction>) {
+        self.actions.push(action);
+    }
+
+    /// The registered row menu actions, in registration order; a
+    /// `RowPick::Action` names one by its index here.
+    pub fn actions(&self) -> &[Rc<dyn DimensionAction>] {
+        &self.actions
     }
 
     pub fn register_actions(&self, registry: &mut ActionRegistry) {
@@ -444,16 +465,23 @@ impl ModuleRoster {
         self.factories.iter().map(|f| f.kind()).collect()
     }
 
-    /// Every column some factory accepts, first mention first. `geode-app`
-    /// hands this to the data service so each row carries these values.
+    /// Every column some factory accepts, then every action's column, first
+    /// mention first. `geode-app` hands this to the data service so each
+    /// row carries these values.
     pub fn context_columns(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
+        let mut push = |c: &str| {
+            if !out.iter().any(|o| o == c) {
+                out.push(c.to_string());
+            }
+        };
         for f in &self.factories {
             for c in f.accepts() {
-                if !out.iter().any(|o| o == c) {
-                    out.push(c.to_string());
-                }
+                push(c);
             }
+        }
+        for a in &self.actions {
+            push(a.column());
         }
         out
     }
@@ -921,6 +949,9 @@ pub mod recording {
         /// source's context AFTER `tile::open_with` has opened its dialog,
         /// and so prove the shell captured it at open.
         pub dimension_context: Rc<RefCell<Option<DimensionContext>>>,
+        /// What every occupant this factory creates answers from
+        /// `press_context`; shared and mutable like `dimension_context`.
+        pub press_context: Rc<RefCell<Option<DimensionContext>>>,
         /// What `accepts` answers. Empty by default, so every existing
         /// fixture stays out of `tile::open_with`'s list.
         pub accepts: &'static [&'static str],
@@ -950,6 +981,7 @@ pub mod recording {
                 contexts: &[],
                 input: Rc::new(RefCell::new(None)),
                 dimension_context: Rc::new(RefCell::new(None)),
+                press_context: Rc::new(RefCell::new(None)),
                 accepts: &[],
                 tile_columns: Rc::new(RefCell::new(None)),
                 edit_on_launch: false,
@@ -1013,6 +1045,8 @@ pub mod recording {
         /// Shared with [`RecordingFactory::dimension_context`]; see it for
         /// why it is mutable after creation.
         dimension_context: Rc<RefCell<Option<DimensionContext>>>,
+        /// Shared with [`RecordingFactory::press_context`].
+        press_context: Rc<RefCell<Option<DimensionContext>>>,
         /// Shared with [`RecordingFactory::tile_columns`].
         tile_columns: Rc<RefCell<Option<TileColumns>>>,
         /// Shared with [`RecordingFactory::edit_on_launch`]; see it for what
@@ -1191,6 +1225,9 @@ pub mod recording {
         fn dimension_context(&self, _cx: &App) -> Option<DimensionContext> {
             self.dimension_context.borrow().clone()
         }
+        fn press_context(&self, _cx: &mut App) -> Option<DimensionContext> {
+            self.press_context.borrow().clone()
+        }
         fn tile_columns(&self, _cx: &App) -> Option<TileColumns> {
             self.tile_columns.borrow().clone()
         }
@@ -1306,6 +1343,7 @@ pub mod recording {
                     input: self.input.clone(),
                     stack: RefCell::new(None),
                     dimension_context: self.dimension_context.clone(),
+                    press_context: self.press_context.clone(),
                     tile_columns: self.tile_columns.clone(),
                     edit_on_launch: self.edit_on_launch,
                     grid: self.grid,
@@ -1333,6 +1371,15 @@ pub mod recording {
         /// as the diagnostics page tracks its own: `key_context` is asked
         /// without a `Window`, so the flag is what carries `mode`.
         insert: bool,
+    }
+
+    impl RecordingPageView {
+        /// Whether the page's own focus handle holds the keyboard — reach
+        /// for a test outside this crate that opens the page by a route the
+        /// shell does not dispatch itself (a tile's health chip click).
+        pub fn is_focused(&self, window: &Window) -> bool {
+            self.focus_handle.is_focused(window)
+        }
     }
 
     impl Render for RecordingPageView {
@@ -1554,6 +1601,49 @@ pub mod recording {
             }
         }
     }
+
+    /// A dimension action for hosting tests: records each run's context.
+    pub struct RecordingAction {
+        pub id: &'static str,
+        pub title: &'static str,
+        pub column: &'static str,
+        pub available: Result<(), SharedString>,
+        pub runs: Rc<RefCell<Vec<DimensionContext>>>,
+    }
+
+    impl RecordingAction {
+        pub fn new(id: &'static str, title: &'static str, column: &'static str) -> Self {
+            Self {
+                id,
+                title,
+                column,
+                available: Ok(()),
+                runs: Rc::default(),
+            }
+        }
+    }
+
+    impl crate::dimension::DimensionAction for RecordingAction {
+        fn id(&self) -> &'static str {
+            self.id
+        }
+
+        fn title(&self) -> SharedString {
+            SharedString::new_static(self.title)
+        }
+
+        fn column(&self) -> &'static str {
+            self.column
+        }
+
+        fn available(&self, _: &DimensionContext) -> Result<(), SharedString> {
+            self.available.clone()
+        }
+
+        fn run(&self, ctx: &DimensionContext, _: &mut crate::shell::row_menu::ActionCx<'_, '_>) {
+            self.runs.borrow_mut().push(ctx.clone());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1590,6 +1680,28 @@ mod tests {
         b.accepts = &["position_ref", "underlying_ref"];
         roster.add(Box::new(a));
         roster.add(Box::new(b));
+        assert_eq!(
+            roster.context_columns(),
+            vec!["underlying_ref".to_string(), "position_ref".into()]
+        );
+    }
+
+    #[test]
+    fn context_columns_include_action_columns_after_factory_columns() {
+        let mut roster = ModuleRoster::new();
+        let mut a = recording::RecordingFactory::new("a");
+        a.accepts = &["underlying_ref"];
+        roster.add(Box::new(a));
+        roster.add_action(std::rc::Rc::new(recording::RecordingAction::new(
+            "x",
+            "X",
+            "position_ref",
+        )));
+        roster.add_action(std::rc::Rc::new(recording::RecordingAction::new(
+            "y",
+            "Y",
+            "underlying_ref",
+        )));
         assert_eq!(
             roster.context_columns(),
             vec!["underlying_ref".to_string(), "position_ref".into()]

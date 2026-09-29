@@ -775,6 +775,18 @@ Sources sharing a dataset therefore receive the same persisted degradation
 at startup, which can conservatively over-report a source's load health.
 Seeds use publication's batch key so a corrected load can clear them.
 
+Health reaches a tile through the shell's `Diagnostics` entity, never the
+data handle. The app bridge describes each source with its dataset at attach;
+a tile maps what it reads to sources through that link (the blotter: its
+snapshot's provenance datasets; market-data: its panel's dataset; the pricer:
+`pricer_sheets`; timeseries: its series' sources by name) and re-asks only
+when `DiagVersions.sources` moves. **Known limitation:** the pricer's chip
+never shows in production today. Its question is `pricer_sheets`, a local
+dataset that no source loads into, so no source health ever maps to it; and
+the pricer behind the pricing door reads no dataset. The chip stays silent
+until a real pricer declares a dataset that a source feeds, and the pricer
+tile adds it to its question.
+
 Non-local publication events advance matching dataset/document watches; a
 document watch on a key prefix advances for every document under it, at the
 same key-part boundary a prefix read uses. Local publications update

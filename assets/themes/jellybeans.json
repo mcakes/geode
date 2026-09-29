@@ -8,6 +8,11 @@
       "name": "Jellybeans",
       "mode": "dark",
       "colors": {
+        "chart.1": "#97bedc",
+        "chart.2": "#ffba7b",
+        "chart.3": "#b294bb",
+        "chart.4": "#94b979",
+        "chart.5": "#e8e8d3",
         "accent.background": "#292929",
         "accent.foreground": "#e8e8e8",
         "background": "#151515",

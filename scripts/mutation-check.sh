@@ -3083,10 +3083,19 @@ run_mutation "dialog stack: a workspace switch runs behind the stack instead of 
 
 run_mutation "dialog stack: the pin toggle runs behind the stack instead of being refused" \
   crates/geode-shell/src/shell/input.rs \
-  '"tile::command_line" | "tile::find" | "stack::pick" | "frame::pin_workspace"' \
-  '"tile::command_line" | "tile::find" | "stack::pick"' \
+  '                    | "frame::pin_workspace"' \
+  '                    | "frame::pin_workspace_never"' \
   geode-shell \
   switching_and_pinning_are_refused_behind_a_dialog
+
+# Row actions from the palette over a dialog would open nothing and say
+# nothing (open_row_menu is a no-op under a modal): it is refused aloud.
+run_mutation "dialog stack: the row menu is silently dropped over a dialog" \
+  crates/geode-shell/src/shell/input.rs \
+  $'                    | "tile::context_menu"\n                    | "frame::pin_workspace"' \
+  '                    | "frame::pin_workspace"' \
+  geode-shell \
+  palette_transient_chrome_is_refused_over_a_dialog
 
 # ---- overlays restore focus to their originating field
 
@@ -3734,8 +3743,8 @@ run_mutation "asof-pin: the pinned chip paints" \
 # The provenance warning chip is suppressed while pinned.
 run_mutation "asof-pin: the frame chip hides while pinned" \
   crates/geode-blotter/src/tile.rs \
-  '            if matches!(self.tile_as_of, TileAsOf::Follow)' \
-  '            if true' \
+  '        if matches!(self.tile_as_of, TileAsOf::Follow)' \
+  '        if true' \
   geode-blotter \
   a_pinned_tile_paints_the_neutral_chip_and_hides_the_frame_one
 
@@ -6145,8 +6154,8 @@ run_mutation "diagnostics: SOURCE_HISTORY_CAP loosened from 16" \
 
 run_mutation "diagnostics: summary's LABELS silently drops degraded" \
   crates/geode-shell/src/diagnostics.rs \
-  'const LABELS: [&str; 5] = ["ok", "pending", "pending_too_long", "degraded", "failed"];' \
-  'const LABELS: [&str; 4] = ["ok", "pending", "pending_too_long", "failed"];' \
+  'const SUMMARY_LABELS: [&str; 5] = ["ok", "pending", "pending_too_long", "degraded", "failed"];' \
+  'const SUMMARY_LABELS: [&str; 4] = ["ok", "pending", "pending_too_long", "failed"];' \
   geode-shell the_summary_counts_sources_by_health_and_config_errors
 
 run_mutation "diagnostics: note_published requests a catalog regardless of watchers" \
@@ -7270,8 +7279,8 @@ run_mutation "shell: dispatch never records the dispatched action into the tail"
             .action_tail
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .record(&action.0);' \
-  '        let _ = &action.0;' \
+            .record(id);' \
+  '        let _ = id;' \
   geode-shell dispatching_three_actions_leaves_their_hashes_in_the_tail_in_order
 
 run_mutation "trim_log_files keeps one file more than asked (keep + 1, not keep)" \
@@ -11777,7 +11786,7 @@ run_mutation "colour: contrast_ratio applies the WCAG +0.05 floor" \
 # bundled-theme tests both check this through the resolver.
 run_mutation "colour: the readability floor pulls lightness until 3:1" \
   crates/geode-core/src/colour/mod.rs \
-  '    if contrast_ratio(rgb, background) >= READABLE_RATIO {
+  '    if contrast_ratio(rgb, background) >= ratio {
         return rgb;
     }' \
   '    if true {
@@ -11788,7 +11797,7 @@ run_mutation "colour: the readability floor pulls lightness until 3:1" \
 
 run_mutation "theme: bundled themes clear 3:1 through the resolver" \
   crates/geode-core/src/colour/mod.rs \
-  '    if contrast_ratio(rgb, background) >= READABLE_RATIO {
+  '    if contrast_ratio(rgb, background) >= ratio {
         return rgb;
     }' \
   '    if true {
@@ -13586,7 +13595,8 @@ run_mutation "mdpaint: the floored tones re-derive when a theme input moves" \
 # ---- Shared status chips ---- Blotter, diagnostics and shell status chips
 # use the same colour builder. Warning foreground tokens over translucent
 # warning fills can be unreadable; the bundled-theme sweep measures contrast
-# rather than text content.
+# rather than text content. The token test separately checks which token
+# starts the correction, since the floor can repair an incorrect choice.
 run_mutation "chip: a tinted warning chip's text is foreground, not warning_foreground" \
   crates/geode-shell/src/shell/chip.rs \
   '        Tone::Warning => ChipPaint {
@@ -13598,7 +13608,7 @@ run_mutation "chip: a tinted warning chip's text is foreground, not warning_fore
             text: theme.warning_foreground,
         },' \
   geode-shell \
-  every_chip_tone_is_readable_on_every_bundled_theme
+  tones_resolve_to_their_documented_tokens
 
 # Danger chips use readable text over the composited danger tint;
 # danger_foreground can fall below the contrast floor.
@@ -13613,20 +13623,13 @@ run_mutation "chip: a tinted danger chip's text is foreground, not danger_foregr
             text: theme.danger_foreground,
         },' \
   geode-shell \
-  every_chip_tone_is_readable_on_every_bundled_theme
+  tones_resolve_to_their_documented_tokens
 
-# The text-only tones are floored. Mutated to the identity, a stale
-# dataset time or a degraded-source row paints the raw `warning`, which
-# ten bundled themes ship under 3:1 against their own background.
-run_mutation "chip: text-only tones are floored to 3:1 against the background" \
+# Filled and text-only chips use the small-text floor on their actual ground.
+run_mutation "chip: chip text is floored to 4.5:1 on the actual surface" \
   crates/geode-shell/src/shell/chip.rs \
-  '    to_hsla(readable_on(
-        to_rgb(colour),
-        to_rgb(theme.background),
-        to_rgb(theme.foreground),
-    ))' \
-  '    let _ = theme;
-    colour' \
+  '    paint.text = text_on(paint.text, paint.fill, surface);' \
+  '    let _ = surface;' \
   geode-shell \
   every_chip_tone_is_readable_on_every_bundled_theme
 
@@ -13736,14 +13739,14 @@ run_mutation "listrow: every row hover goes through paint_row" \
 # surface; colour sweeps verify both properties.
 run_mutation "control: hover text is floored over the hover fill" \
   crates/geode-shell/src/shell/control.rs \
-  '        hover_text: to_hsla(readable_on(text, hover, toward)),' \
+  '        hover_text: to_hsla(readable_text_on(text, hover)),' \
   '        hover_text: to_hsla(text),' \
   geode-shell \
   every_control_state_is_readable_on_every_bundled_theme
 
 run_mutation "control: pressed text is floored over the pressed fill" \
   crates/geode-shell/src/shell/control.rs \
-  '        pressed_text: to_hsla(readable_on(text, pressed, toward)),' \
+  '        pressed_text: to_hsla(readable_text_on(text, pressed)),' \
   '        pressed_text: to_hsla(text),' \
   geode-shell \
   every_control_state_is_readable_on_every_bundled_theme
@@ -14023,7 +14026,7 @@ run_mutation "mdmenu: an unrelated action closes the popup first" \
 # open. Falling through to close-and-dispatch would execute the refused
 # action.
 run_mutation "mdmenu: a greyed row is a notice, not a dispatch" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '            Err(reason) => Err(reason.clone()),' \
   '            Err(_) => Ok(action.pick.clone()),' \
   geode-marketdata enter_on_a_greyed_row_notices_and_keeps_the_menu
@@ -14033,10 +14036,10 @@ run_mutation "mdmenu: a greyed row is a notice, not a dispatch" \
 # propagation opens a menu on an unfocused tile; the host's bubble-phase
 # click counter detects it.
 run_mutation "mdmenu: the ⋯ click does not stop propagation" \
-  crates/geode-marketdata/src/header.rs \
-  '                    tile.update(cx, |t, cx| t.toggle_menu(window, cx))' \
-  '                    cx.stop_propagation();
-                    tile.update(cx, |t, cx| t.toggle_menu(window, cx))' \
+  crates/geode-tile/src/header.rs \
+  '            on_press(window, cx);' \
+  '            cx.stop_propagation();
+            on_press(window, cx);' \
   geode-marketdata a_menu_button_click_still_reaches_the_tiles_own_listeners
 
 # Find closes the popup before handling any variant. This shell-owned action
@@ -15169,7 +15172,7 @@ run_mutation "blotter motion: retired ids rename to the shared ones" \
 # The host's hover-gated counter detects the leak; keyboard tests do not
 # exercise this hit-testing boundary.
 run_mutation "mdmenu: the popup occludes what is painted beneath it" \
-  crates/geode-tile/src/menu/render.rs \
+  crates/geode-shell/src/menu/render.rs \
   '        // Occlude what the menu covers so its hover and presses do not also reach it.
         .occlude()' \
   '        // Occlude what the menu covers so its hover and presses do not also reach it.' \
@@ -15179,7 +15182,7 @@ run_mutation "mdmenu: the popup occludes what is painted beneath it" \
 # Hovering a row moves the highlight. Mutated to a no-op, the row still
 # paints and clicks; only the highlight stays where the keys left it.
 run_mutation "mdmenu: hovering a menu row moves the highlight" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '        self.highlighted = Some(index);
         true' \
   '        let _ = index;
@@ -15390,7 +15393,7 @@ run_mutation "mdmenu: a kind row hints its live chord" \
 # Menu navigation skips disabled rows, so a downward step cannot land on
 # unavailable Upload.
 run_mutation "mdmenu: stepping skips disabled rows" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '            (at + 1..rows.len()).find(|&i| rows[i].lands())' \
   '            (at + 1..rows.len()).find(|&i| rows[i].is_action())' \
   geode-marketdata \
@@ -15399,7 +15402,7 @@ run_mutation "mdmenu: stepping skips disabled rows" \
 # The same mutation seen through the tile's `menu_down` route: two steps
 # from `Load underlying…` no longer reach `rebase edits`.
 run_mutation "mdmenu: menu_down skips disabled rows in the tile" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '            (at + 1..rows.len()).find(|&i| rows[i].lands())' \
   '            (at + 1..rows.len()).find(|&i| rows[i].is_action())' \
   geode-marketdata \
@@ -15407,7 +15410,7 @@ run_mutation "mdmenu: menu_down skips disabled rows in the tile" \
 
 # Stepping never lands on a separator or a section heading.
 run_mutation "mdmenu: stepping skips separators and sections" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '            (at + 1..rows.len()).find(|&i| rows[i].lands())' \
   '            (at + 1..rows.len()).next()' \
   geode-marketdata \
@@ -20670,7 +20673,7 @@ run_mutation "timeseries mouse: an empty tile disables the slot rows" \
 
 # Stepping never lands on a separator or a section heading.
 run_mutation "timeseries mouse: menu stepping skips non-rows" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '            (at + 1..rows.len()).find(|&i| rows[i].lands())' \
   '            (at + 1..rows.len()).next()' \
   geode-timeseries stepping_skips_separators_and_sections_and_clamps
@@ -20678,7 +20681,7 @@ run_mutation "timeseries mouse: menu stepping skips non-rows" \
 # Menu motion skips disabled rows. Otherwise an empty tile can highlight
 # Hide instead of advancing to an available action.
 run_mutation "timeseries menu: stepping skips disabled rows" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '            (at + 1..rows.len()).find(|&i| rows[i].lands())' \
   '            (at + 1..rows.len()).find(|&i| rows[i].is_action())' \
   geode-timeseries stepping_skips_disabled_rows
@@ -20686,11 +20689,9 @@ run_mutation "timeseries menu: stepping skips disabled rows" \
 # The ⋯ button toggles in the CAPTURE phase, ahead of the open menu's
 # own `on_mouse_down_out`; in the bubble phase a second click reopens.
 run_mutation "timeseries mouse: the actions button toggles in capture" \
-  crates/geode-timeseries/src/header.rs \
-  '            ))
-            .capture_any_mouse_down({' \
-  '            ))
-            .on_any_mouse_down({' \
+  crates/geode-tile/src/header.rs \
+  '        .capture_any_mouse_down(move |event, window, cx| {' \
+  '        .on_any_mouse_down(move |event, window, cx| {' \
   geode-timeseries the_actions_button_toggles_the_menu_and_a_row_click_dispatches_or_explains
 
 # The range trigger toggles in the CAPTURE phase, the `⋯` button's
@@ -20760,7 +20761,7 @@ run_mutation "timeseries frequency menu: an as-of change refreshes the cap reaso
 # a frequency's short label) as text: a label routed to the key lane would
 # paint as nothing, or as a key it is not.
 run_mutation "timeseries menus: a short label is text, not a key" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '        Hint::Label(text) => Lane::Text(text.clone()),' \
   '        Hint::Label(_) => Lane::Empty,' \
   geode-timeseries the_range_menu_writes_the_presets_out_ticks_the_current_and_ends_on_custom
@@ -20786,10 +20787,10 @@ run_mutation "timeseries triggers: the editor keeps the range trigger open" \
 # keyboard actions.
 run_mutation "shell: a right press focuses the tile" \
   crates/geode-shell/src/shell/render.rs \
-  '                            cx.listener(move |view, _event: &MouseDownEvent, window, cx| {
+  '                            cx.listener(move |view, event: &MouseDownEvent, window, cx| {
                                 view.leave_command_line(window, cx);
                                 if view.services.workspaces.active_mut().focus_main_tile(id) {' \
-  '                            cx.listener(move |view, _event: &MouseDownEvent, window, cx| {
+  '                            cx.listener(move |view, event: &MouseDownEvent, window, cx| {
                                 view.leave_command_line(window, cx);
                                 if false {' \
   geode-shell a_right_click_focuses_the_tile_and_never_arms_a_drag
@@ -20858,7 +20859,7 @@ run_mutation "timeseries frequency menu: a pick writes that frequency" \
 # A disabled row's pick is the notice and nothing else: mutated, the
 # action list's greyed `Remove` closes the menu and dispatches.
 run_mutation "timeseries menus: a disabled row explains and stays" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '            Err(reason) => Err(reason.clone()),' \
   '            Err(_) => Ok(action.pick.clone()),' \
   geode-timeseries the_actions_button_toggles_the_menu_and_a_row_click_dispatches_or_explains
@@ -20989,7 +20990,7 @@ run_mutation "pricer tile: an open menu re-checks its rows on a rebuild" \
   geode-pricer a_reload_under_an_open_menu_relists_its_views
 
 run_mutation "pricer tile: a re-checked menu clamps its highlight" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '        self.highlighted = snap(&self.rows, self.highlighted);' \
   '' \
   geode-pricer a_reload_under_an_open_menu_relists_its_views
@@ -20997,7 +20998,7 @@ run_mutation "pricer tile: a re-checked menu clamps its highlight" \
 # The menu's highlight steps over separators and section headers: a
 # highlight on structure makes `enter` pick nothing.
 run_mutation "pricer popup: menu steps land on pickable rows only" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '            (at + 1..rows.len()).find(|&i| rows[i].lands())' \
   '            (at + 1..rows.len()).next()' \
   geode-pricer the_menu_groups_its_rows_names_keys_and_says_why_a_row_is_disabled
@@ -21005,7 +21006,7 @@ run_mutation "pricer popup: menu steps land on pickable rows only" \
 # Menu motion skips disabled rows, so Group advances past an unavailable
 # Ungroup to Delete row.
 run_mutation "pricer popup: menu steps skip disabled rows" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '            (at + 1..rows.len()).find(|&i| rows[i].lands())' \
   '            (at + 1..rows.len()).find(|&i| rows[i].is_action())' \
   geode-pricer the_menu_groups_its_rows_names_keys_and_says_why_a_row_is_disabled
@@ -21021,7 +21022,7 @@ run_mutation "pricer tile: the delegate mirrors loading" \
 # A disabled menu row never takes the highlight fill: a fill there is a
 # misleading hover response on a row that will only refuse.
 run_mutation "pricer popup: a disabled menu row takes no fill" \
-  crates/geode-tile/src/menu/paint.rs \
+  crates/geode-shell/src/menu/paint.rs \
   '        (_, false) => RowPaint {
             fill: None,' \
   '        (_, false) => RowPaint {
@@ -23030,12 +23031,73 @@ run_mutation "context: blotter reads an empty grouping label as a value" \
   '        if let Some(v) = value {' \
   geode-blotter an_empty_grouping_label_is_absent
 
-# The selection rides the context only while the cursor is inside it.
+# The selection rides the context only while the asked row is inside it.
 run_mutation "context: the selection rides a cursor outside it" \
   crates/geode-blotter/src/delegate.rs \
-  '            Some(r) if r.rows.contains(&self.cursor.row) => {' \
+  '            Some(r) if r.kind == SelectKind::Rows && r.rows.contains(&display_row) => {' \
   '            Some(r) if true => {' \
   geode-blotter the_dimension_context_follows_the_cursor_row_and_selection
+
+# Only a row (V) selection rides the context; a block selection never does.
+run_mutation "row menu: a block selection fills the selection context" \
+  crates/geode-blotter/src/delegate.rs \
+  '            Some(r) if r.kind == SelectKind::Rows && r.rows.contains(&display_row) => {' \
+  '            Some(r) if r.rows.contains(&display_row) => {' \
+  geode-blotter a_block_selection_fills_no_selection_context
+
+# A right press inside a row selection keeps it and the cursor, so the
+# selected rows ride the row menu's context.
+run_mutation "row menu: a right press inside the selection drops it" \
+  crates/geode-blotter/src/tile.rs \
+  '        if !inside {' \
+  '        if true {' \
+  geode-blotter a_right_press_inside_the_selection_keeps_it
+
+# press_context takes the press: a later call (a stale beat) opens nothing.
+run_mutation "row menu: the press is not consumed" \
+  crates/geode-blotter/src/tile.rs \
+  '        let (row, col) = self.pressed.take()?;' \
+  '        let (row, col) = self.pressed?;' \
+  geode-blotter a_right_press_moves_the_cursor_and_names_the_column
+
+# A press inside a V selection leaves the cursor where it was; the menu is
+# still the pressed row's (spec ruling 6), never the cursor row's.
+run_mutation "row menu: a press inside the selection answers the cursor row" \
+  crates/geode-blotter/src/tile.rs \
+  '        let mut ctx = d.context_at_row(row)?;' \
+  '        let mut ctx = d.context_at_row(d.cursor.row + 0 * row)?;' \
+  geode-blotter a_right_press_inside_the_selection_keeps_it
+
+# The blotter's TileContent forwarder is the production press_context seam;
+# the trait default (None) would leave every product row menu dead.
+run_mutation "row menu: the blotter content drops press_context" \
+  crates/geode-blotter/src/content.rs \
+  '        self.tile.update(cx, |t, cx| t.press_context(cx))' \
+  '        { let _ = cx; None }' \
+  geode-app a_right_press_on_a_blotter_cell_opens_the_pressed_rows_menu
+
+# A cursor row scrolled out paints no longer: its anchor clears, or `g .`
+# hangs the menu beside whatever row sits at the old point.
+run_mutation "row menu: a scrolled-out cursor row keeps its anchor" \
+  crates/geode-blotter/src/delegate.rs \
+  '            self.cursor_anchor.set(None);' \
+  '            let _ = &self.cursor_anchor;' \
+  geode-blotter the_anchor_clears_when_the_cursor_row_scrolls_out
+
+# A right press beside the cells is one at the cursor's column.
+run_mutation "row menu: a right press beside the cells opens nothing" \
+  crates/geode-blotter/src/delegate.rs \
+  '                    cx.emit(CellPointer::Context { row: row_ix, col });' \
+  '                    let _ = (row_ix, col);' \
+  geode-blotter a_right_press_beside_the_cells_opens_the_rows_context
+
+# The row bubbles after a cell's right press; reporting it again at the old
+# cursor column overwrites the pressed column.
+run_mutation "row menu: a cell's right press is reported twice" \
+  crates/geode-blotter/src/delegate.rs \
+  '                    if std::mem::take(&mut d.context_reported) {' \
+  '                    if false {' \
+  geode-blotter a_right_press_moves_the_cursor_and_names_the_column
 
 run_mutation "context: a repeated context column is emitted twice" \
   crates/geode-core/src/view.rs \
@@ -23056,6 +23118,131 @@ run_mutation "context: startup never publishes the context columns" \
   '    bridge.handle.set_context_columns(roster.context_columns());' \
   '    let _ = roster.context_columns();' \
   geode-app the_production_roster_opens_market_data_on_an_underlying
+
+# The row menu leads with the column the user clicked, not context order.
+run_mutation "row menu: the clicked column does not lead" \
+  crates/geode-shell/src/dimension.rs \
+  '    if let Some(first) = &ctx.first {' \
+  '    if let Some(first) = &None::<String> {' \
+  geode-shell the_clicked_column_leads
+
+# A column with no kinds and no actions gets no heading.
+run_mutation "row menu: an empty section is painted" \
+  crates/geode-shell/src/dimension.rs \
+  '        if section.is_empty() {' \
+  '        if false {' \
+  geode-shell an_empty_or_actionless_context_has_no_rows
+
+# A kind accepting two present columns is offered once, under the first.
+run_mutation "row menu: a kind repeats in every accepted section" \
+  crates/geode-shell/src/dimension.rs \
+  '            if placed.contains(&kind) {' \
+  '            if false {' \
+  geode-shell a_kind_accepting_two_present_columns_sits_in_the_first_only
+
+# An action's column must be a context column, or no row carries its value.
+run_mutation "row menu: action columns are not context columns" \
+  crates/geode-shell/src/module.rs \
+  '        for a in &self.actions {' \
+  '        for a in self.actions.iter().take(0) {' \
+  geode-shell context_columns_include_action_columns_after_factory_columns
+
+# The open row menu owns every bare key: a leak would let a bound bare
+# sequence (`g g`) dispatch, and that dispatch closes the menu.
+run_mutation "row menu: a bare key leaks past the open menu" \
+  crates/geode-shell/src/shell/row_menu.rs \
+  '            _ => {} // any other bare key is consumed' \
+  '            _ => return false,' \
+  geode-shell escape_closes_and_consumes
+
+# A chord passes the open row menu to the matcher; its dispatch closes it.
+run_mutation "row menu: a dispatch leaves the menu open" \
+  crates/geode-shell/src/shell/input.rs \
+  '        self.row_menu = None;' \
+  '        let _ = &self.row_menu;' \
+  geode-shell a_chord_closes_the_row_menu_and_dispatches
+
+# The palette key opens the palette ahead of any dispatch, so its own open
+# must close the row menu.
+run_mutation "row menu: the palette opens over the menu" \
+  crates/geode-shell/src/shell/palette_ctl.rs \
+  '        self.close_row_menu(cx);' \
+  '        let _ = &self.row_menu;' \
+  geode-shell the_palette_closes_the_row_menu
+
+# A row with nothing to offer says so instead of opening an empty menu.
+run_mutation "row menu: an empty menu opens" \
+  crates/geode-shell/src/shell/row_menu.rs \
+  '        if rows.is_empty() {' \
+  '        if false {' \
+  geode-shell g_dot_on_a_row_with_no_actions_says_so
+
+# An Open pick splits the kind restored from its launch state, as `g m` does.
+run_mutation "row menu: an open pick ignores the launch state" \
+  crates/geode-shell/src/shell/row_menu.rs \
+  '                    .and_then(|f| f.launch_state(&open.context));' \
+  '                    .and_then(|_| None);' \
+  geode-shell enter_on_open_splits_a_tile_with_the_launch_state
+
+# A right press answers from press_context, not the cursor row's
+# dimension_context: a tile that opens no menu on a press stays quiet.
+run_mutation "row menu: a right press ignores press_context" \
+  crates/geode-shell/src/shell/row_menu.rs \
+  '            .and_then(|o| o.content.press_context(cx))' \
+  '            .and_then(|o| o.content.dimension_context(cx))' \
+  geode-shell a_right_press_on_a_tile_without_press_context_opens_nothing
+
+# A right press hangs the menu at the pointer, not the tile's corner.
+run_mutation "row menu: a right press hangs the menu at the tile" \
+  crates/geode-shell/src/shell/row_menu.rs \
+  '        self.open_row_menu(context, Some(at), true, window, cx);' \
+  '        self.open_row_menu(context, None, true, window, cx);' \
+  geode-shell a_right_press_opens_the_row_menu_at_the_pointer
+
+# Both right-press listeners open the menu: the main tree's and the dock's.
+# Multi-line anchors, since each listener's lines at the shorter indent
+# are substrings of the other's.
+run_mutation "row menu: a main-tree right press opens nothing" \
+  crates/geode-shell/src/shell/render.rs \
+  $'                                let at = event.position;\n                                cx.defer_in(window, move |view, window, cx| {\n                                    view.open_row_menu_from_press(id, at, window, cx);\n                                });' \
+  '                                let _ = event;' \
+  geode-shell a_right_press_opens_the_row_menu_at_the_pointer
+
+run_mutation "row menu: a docked right press opens nothing" \
+  crates/geode-shell/src/shell/render.rs \
+  $'                                    let at = event.position;\n                                    cx.defer_in(window, move |view, window, cx| {\n                                        view.open_row_menu_from_press(id, at, window, cx);\n                                    });' \
+  '                                    let _ = event;' \
+  geode-shell a_right_press_on_a_docked_tile_opens_the_row_menu_at_the_pointer
+
+# Opened while the scope bar's text field held focus, the menu hands
+# focus back there when it closes itself.
+run_mutation "row menu: a dismissal forgets the text field" \
+  crates/geode-shell/src/shell/row_menu.rs \
+  '        self.overlay_return_to_filter = open.return_to_filter;' \
+  '        self.overlay_return_to_filter = false;' \
+  geode-shell escape_returns_focus_to_the_filter_field_it_opened_from
+
+# A right press moved focus to the tile: the menu it opens never hands
+# focus back to the scope bar's field, whatever held focus at its beat.
+run_mutation "row menu: a right-pressed menu returns focus to the text field" \
+  crates/geode-shell/src/shell/row_menu.rs \
+  '        let return_to_filter = !by_pointer && self.filter_field_focused(window, cx);' \
+  '        let return_to_filter = self.filter_field_focused(window, cx);' \
+  geode-shell a_right_pressed_menu_never_returns_focus_to_the_filter_field
+
+# A pick cancels a chord prefix typed while the menu was open.
+run_mutation "row menu: a prefix survives a pick" \
+  crates/geode-shell/src/shell/row_menu.rs \
+  $'        // after the pick.\n        self.matcher.cancel();' \
+  '        // after the pick.' \
+  geode-shell a_pick_cancels_a_chord_prefix_typed_while_open
+
+# A menu with nowhere to hang paints nothing but would swallow every key.
+run_mutation "row menu: an unpaintable menu stays open" \
+  crates/geode-shell/src/shell/render.rs \
+  '        if focused_rect.is_none() && self.row_menu.as_ref().is_some_and(|m| m.at().is_none()) {' \
+  '        if false {' \
+  geode-shell a_row_menu_with_nowhere_to_hang_is_dropped
 
 # A reload must reach the underlying list, or a desk edit to it waits for
 # a restart.
@@ -24580,137 +24767,137 @@ run_mutation "tile notice: warning paints the danger token" \
 
 # A popup hangs by the corner its caller names.
 run_mutation "tile popover: a popup ignores its corner" \
-  crates/geode-tile/src/popover.rs \
+  crates/geode-shell/src/popover.rs \
   '            .anchor(corner)' \
   '            .anchor(Anchor::TopLeft)' \
-  geode-tile a_popup_hangs_from_its_anchor_corner
+  geode-shell a_popup_hangs_from_its_anchor_corner
 
 # A popup near the window edge keeps the snap margin.
 run_mutation "tile popover: a popup snaps to the window edge itself" \
-  crates/geode-tile/src/popover.rs \
+  crates/geode-shell/src/popover.rs \
   '            .snap_to_window_with_margin(px(SNAP_MARGIN))' \
   '            .snap_to_window_with_margin(px(0.))' \
-  geode-tile a_popup_near_the_edge_snaps_inside_the_margin
+  geode-shell a_popup_near_the_edge_snaps_inside_the_margin
 
 # ---- geode-tile: menu door ---------------------------------------------
 #
 # Stepping lands on actions only: a highlight on structure makes `enter`
 # pick nothing.
 run_mutation "tile menu: stepping lands on separators" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '            (at + 1..rows.len()).find(|&i| rows[i].lands())' \
   '            (at + 1..rows.len()).next()' \
-  geode-tile stepping_skips_separators_and_sections_and_clamps
+  geode-shell stepping_skips_separators_and_sections_and_clamps
 
 # Nor on a disabled action: `j` lands on a greyed row that only refuses.
 run_mutation "tile menu: stepping lands on disabled rows" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '            (at + 1..rows.len()).find(|&i| rows[i].lands())' \
   '            (at + 1..rows.len()).find(|&i| rows[i].is_action())' \
-  geode-tile stepping_skips_disabled_actions
+  geode-shell stepping_skips_disabled_actions
 
 # From a separator, a section or no cursor, a step lands on the first
 # enabled action.
 run_mutation "tile menu: a step from structure searches from it" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '    let Some(from) = from.filter(|&i| rows.get(i).is_some_and(Row::is_action)) else {' \
   '    let Some(from) = from else {' \
-  geode-tile stepping_from_a_non_action_row_lands_on_the_first_enabled_action
+  geode-shell stepping_from_a_non_action_row_lands_on_the_first_enabled_action
 
 # An all-disabled menu has no cursor.
 run_mutation "tile menu: an all-disabled menu gets a cursor" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '    rows.iter().position(Row::lands)' \
   '    rows.iter().position(Row::is_action)' \
-  geode-tile an_all_disabled_menu_has_no_cursor
+  geode-shell an_all_disabled_menu_has_no_cursor
 
 # A rebuilt menu's highlight looks back before it looks forward.
 run_mutation "tile menu: snap only looks forward" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '        .find(|&i| rows.get(i).is_some_and(Row::is_action))
         .or_else(|| (at..rows.len()).find(|&i| rows[i].is_action()))' \
   '        .find(|_| false)
         .or_else(|| (at..rows.len()).find(|&i| rows[i].is_action()))' \
-  geode-tile snap_keeps_or_finds_the_nearest_action
+  geode-shell snap_keeps_or_finds_the_nearest_action
 
 # A hint is the live chord: mutated, every chord row falls to its unbound form.
 run_mutation "tile menu: a hint ignores the live keymap" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '        Hint::Chord { action, unbound } => match chord_for(bindings, action) {' \
   '        Hint::Chord { action: _, unbound } => match None::<Vec<Keystroke>> {' \
-  geode-tile a_hint_resolves_to_the_live_chord_or_its_unbound_form
+  geode-shell a_hint_resolves_to_the_live_chord_or_its_unbound_form
 
 run_mutation "tile menu: a rebind does not reach the hint" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '        Hint::Chord { action, unbound } => match chord_for(bindings, action) {' \
   '        Hint::Chord { action: _, unbound } => match None::<Vec<Keystroke>> {' \
-  geode-tile a_hint_follows_a_user_rebind_through_the_live_keymap
+  geode-shell a_hint_follows_a_user_rebind_through_the_live_keymap
 
 # An unbound verb row names its `:` verb.
 run_mutation "tile menu: an unbound verb paints nothing" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '                Unbound::Verb(verb) => Lane::Text(verb.clone()),' \
   '                Unbound::Verb(_) => Lane::Empty,' \
-  geode-tile a_hint_resolves_to_the_live_chord_or_its_unbound_form
+  geode-shell a_hint_resolves_to_the_live_chord_or_its_unbound_form
 
 # A label is text in the lane; routed to the key lane it would paint nothing.
 run_mutation "tile menu: a label paints nothing" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '        Hint::Label(text) => Lane::Text(text.clone()),' \
   '        Hint::Label(_) => Lane::Empty,' \
-  geode-tile a_hint_resolves_to_the_live_chord_or_its_unbound_form
+  geode-shell a_hint_resolves_to_the_live_chord_or_its_unbound_form
 
 # A capped row keeps the lane narrow with its short reason.
 run_mutation "tile menu: a short reason is ignored" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '            (Err(reason), _) => Trailing::Text(self.short_reason.as_ref().unwrap_or(reason)),' \
   '            (Err(reason), _) => Trailing::Text(reason),' \
-  geode-tile a_disabled_row_trails_its_short_reason_else_its_reason
+  geode-shell a_disabled_row_trails_its_short_reason_else_its_reason
 
 # A disabled row's pick is its reason, never the verb it refuses.
 run_mutation "tile menu: a disabled pick dispatches" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '            Err(reason) => Err(reason.clone()),' \
   '            Err(_) => Ok(action.pick.clone()),' \
-  geode-tile a_pick_of_a_disabled_row_is_its_reason
+  geode-shell a_pick_of_a_disabled_row_is_its_reason
 
 # Hover lands on action rows only.
 run_mutation "tile menu: hover lights structure" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '        if self.highlighted == Some(index) || !self.rows.get(index).is_some_and(Row::is_action) {' \
   '        if self.highlighted == Some(index) {' \
-  geode-tile highlight_moves_only_onto_action_rows_and_reports_a_change
+  geode-shell highlight_moves_only_onto_action_rows_and_reports_a_change
 
 # A rebuild snaps the highlight.
 run_mutation "tile menu: a rebuild keeps an out-of-range highlight" \
-  crates/geode-tile/src/menu/mod.rs \
+  crates/geode-shell/src/menu/mod.rs \
   '        self.highlighted = snap(&self.rows, self.highlighted);' \
   '' \
-  geode-tile replace_rows_resolves_hints_and_snaps_the_highlight
+  geode-shell replace_rows_resolves_hints_and_snaps_the_highlight
 
 # A disabled row takes no fill.
 run_mutation "tile menu: a disabled row takes the fill" \
-  crates/geode-tile/src/menu/paint.rs \
+  crates/geode-shell/src/menu/paint.rs \
   '        (_, false) => RowPaint {
             fill: None,' \
   '        (_, false) => RowPaint {
             fill: Some(p.active_fill),' \
-  geode-tile only_an_enabled_lit_row_takes_the_fill
+  geode-shell only_an_enabled_lit_row_takes_the_fill
 
 # The floor moves toward the pole with more contrast.
 run_mutation "tile menu: the floor moves toward the weaker pole" \
-  crates/geode-tile/src/menu/paint.rs \
+  crates/geode-shell/src/menu/paint.rs \
   '    if contrast_ratio(BLACK, ground) >= contrast_ratio(WHITE, ground) {' \
   '    if contrast_ratio(BLACK, ground) < contrast_ratio(WHITE, ground) {' \
-  geode-tile a_color_equal_to_its_ground_floors_to_the_readable_ratio
+  geode-shell a_color_equal_to_its_ground_floors_to_the_readable_ratio
 
 # The menu occludes what it covers.
 run_mutation "tile menu: the menu does not occlude" \
-  crates/geode-tile/src/menu/render.rs \
+  crates/geode-shell/src/menu/render.rs \
   '        // Occlude what the menu covers so its hover and presses do not also reach it.
         .occlude()' \
   '        // Occlude what the menu covers so its hover and presses do not also reach it.' \
-  geode-tile a_hover_lights_its_row_and_the_menu_occludes_what_it_covers
+  geode-shell a_hover_lights_its_row_and_the_menu_occludes_what_it_covers
 
 # ---- geode-tile: confirm door ------------------------------------------
 #
@@ -25466,13 +25653,8 @@ run_mutation "chip: an active fill is floored against the title bar" \
   '            let fill = over(theme.primary, background);' \
   geode-shell an_active_chip_stands_out_from_the_title_bar_on_every_bundled_theme
 
-# Its text is floored against that fill; primary_foreground alone is
-# unreadable on several bundled themes.
-run_mutation "chip: active text is floored against its fill" \
-  crates/geode-shell/src/shell/chip.rs \
-  '                text: to_hsla(readable_on(to_rgb(theme.primary_foreground), fill, pole)),' \
-  '                text: theme.primary_foreground,' \
-  geode-shell every_chip_tone_is_readable_on_every_bundled_theme
+# Active text now uses the common chip floor, covered by the shared
+# chip-text mutation above.
 
 # ---- In-process scope evaluator ----
 # The evaluator copies what DuckDB does with scope_sql's predicate; the
@@ -26575,6 +26757,322 @@ run_mutation "panels: a configured panel paints its own ladder format" \
   '        std::iter::repeat_with(|| CellKind::Number(spec.format.clone())).take(grid.columns.len()),' \
   '        std::iter::repeat_with(|| CellKind::Number(geode_core::view::ColumnFormat { precision: 4, ..spec.format.clone() })).take(grid.columns.len()),' \
   geode-marketdata a_user_layer_panel_paints_its_own_title_and_formats
+
+# ---- Tile header and source health -------------------------------------
+
+# One rank for every rollup; a swapped pair reorders the status bar, the
+# page's worst health and a tile's chip together.
+run_mutation "health rank: degraded outranks pending_too_long" \
+  crates/geode-core/src/health.rs \
+  '            Health::Degraded { .. } => 3,' \
+  '            Health::Degraded { .. } => 2,' \
+  geode-core severity_ranks_ok_pending_too_long_degraded_failed
+
+# The status summary counts by severity index; a clamped index files
+# failures under degraded.
+run_mutation "health rank: the summary counts under the severity index" \
+  crates/geode-shell/src/diagnostics.rs \
+  '            counts[usize::from(health.severity())] += 1;' \
+  '            counts[usize::from(health.severity()).min(3)] += 1;' \
+  geode-shell the_summary_counts_every_health_under_its_own_label
+
+# The page ranks by severity; ranking by label text calls
+# pending_too_long worse than degraded.
+run_mutation "health rank: the page ranks by severity, not label" \
+  crates/geode-diagnostics/src/model.rs \
+  '            Some(w) if w.severity() >= h.severity() => Some(w),' \
+  '            Some(w) if w.label() >= h.label() => Some(w),' \
+  geode-diagnostics the_page_ranks_health_by_the_core_severity
+
+# Ok and Pending are silent; a looser gate shows a chip for a pending CSV.
+run_mutation "tile health: Ok and Pending are silent" \
+  crates/geode-shell/src/diagnostics.rs \
+  '            if health.severity() <= silent {' \
+  '            if health.severity() < silent {' \
+  geode-shell ok_and_pending_are_silent
+
+# The dataset filter; dropped, every unhealthy source reaches every tile.
+run_mutation "tile health: a source outside the datasets is ignored" \
+  crates/geode-shell/src/diagnostics.rs \
+  '            if !reads(name, state) {' \
+  '            if false && !reads(name, state) {' \
+  geode-shell a_source_outside_the_datasets_is_ignored
+
+# The tie rule; `>=` hands a tie to the last name, not the first.
+run_mutation "tile health: a tie picks the lowest source name" \
+  crates/geode-shell/src/diagnostics.rs \
+  '                Some((_, _, w)) => health.severity() > w.severity(),' \
+  '                Some((_, _, w)) => health.severity() >= w.severity(),' \
+  geode-shell a_tie_picks_the_lowest_source_name
+
+# `others` excludes the worst source itself.
+run_mutation "tile health: others counts only the other sources" \
+  crates/geode-shell/src/diagnostics.rs \
+  '            others: unhealthy - 1,' \
+  '            others: unhealthy,' \
+  geode-shell others_counts_the_other_unhealthy_sources_only
+
+# The bridge links a source to its dataset, not its own name.
+run_mutation "tile health: the bridge links a source to its dataset" \
+  crates/geode-app/src/bridge.rs \
+  '                    dataset: source.dataset.clone(),' \
+  '                    dataset: source.name.clone(),' \
+  geode-app describing_a_source_carries_its_dataset
+
+# The shell drains a tile's page request; skipped, the chip does nothing.
+run_mutation "tile header: the shell opens a queued diagnostics page" \
+  crates/geode-shell/src/shell/mod.rs \
+  '        if pending_page {' \
+  '        if false && pending_page {' \
+  geode-shell a_queued_page_open_opens_the_diagnostics_page
+
+# Opening only: drained through the toggle, a second chip click closes it.
+run_mutation "tile header: a queued page open never closes the page" \
+  crates/geode-shell/src/shell/page.rs \
+  '        self.open_page(kind, window, cx);
+    }' \
+  '        self.toggle_page(kind, window, cx);
+    }' \
+  geode-shell a_queued_page_open_never_closes_the_page
+
+# A queued open under a modal is refused with the close-the-dialog notice;
+# without the guard the page opens behind the modal.
+run_mutation "tile header: a queued page open under a modal is refused" \
+  crates/geode-shell/src/shell/page.rs \
+  '        if self.modal_open() {
+            self.notice = Some(super::input::CLOSE_DIALOG_FIRST);' \
+  '        if false && self.modal_open() {
+            self.notice = Some(super::input::CLOSE_DIALOG_FIRST);' \
+  geode-shell a_queued_page_open_under_a_modal_is_refused
+
+# The version gate: every diagnostics notify would re-ask and re-format.
+run_mutation "tile header: health re-asks only when sources moved" \
+  crates/geode-tile/src/header.rs \
+  '        if self.seen == Some(now) {' \
+  '        if false && self.seen == Some(now) {' \
+  geode-tile refresh_asks_only_when_the_sources_version_moved
+
+# The chip's click queues the page.
+run_mutation "tile header: the chip click asks for the page" \
+  crates/geode-tile/src/header.rs \
+  '                d.request_diagnostics_page();' \
+  '' \
+  geode-tile clicking_the_health_chip_queues_the_diagnostics_page
+
+# Cluster order; the tail reversed, the chip lands left of the times.
+run_mutation "tile header: the cluster paints in order" \
+  crates/geode-tile/src/header.rs \
+  '    let mut row = h_flex().items_center().gap_3();' \
+  '    let mut row = h_flex().flex_row_reverse().items_center().gap_3();' \
+  geode-tile the_cluster_paints_in_order_and_no_chip_without_health
+
+# Failed is danger, not warning.
+run_mutation "tile header: a failed chip is the danger tone" \
+  crates/geode-tile/src/header.rs \
+  '            Health::Failed { .. } => ("failed", chip::Tone::Danger),' \
+  '            Health::Failed { .. } => ("failed", chip::Tone::Warning),' \
+  geode-tile the_chip_words_tones_and_tooltip
+
+# A stale run takes the warning text tone.
+run_mutation "tile header: a stale run is warning text" \
+  crates/geode-tile/src/header.rs \
+  '    if stale {
+        chip_paint(theme, chip::Tone::WarningText).text' \
+  '    if false {
+        chip_paint(theme, chip::Tone::WarningText).text' \
+  geode-tile a_stale_run_takes_the_warning_text_tone
+
+# The chip's press is its own: bubbling on, it would refocus the tile and
+# reach the shell root under the page it just asked for.
+run_mutation "tile header: the chip press stops at the chip" \
+  crates/geode-tile/src/header.rs \
+  '            cx.stop_propagation();
+            window.prevent_default();' \
+  '            window.prevent_default();' \
+  geode-tile clicking_the_health_chip_queues_the_diagnostics_page
+
+# The paint route reads the run's text(); painting the bare label drops a
+# module's `stale` word.
+run_mutation "tile header: a stale run paints its stale label" \
+  crates/geode-tile/src/header.rs \
+  '            .child(t.text().clone())' \
+  '            .child(t.label.clone())' \
+  geode-tile a_stale_run_paints_its_stale_label
+
+# The panel's observer asks about its dataset; skipped, a failed source
+# never reaches the header.
+run_mutation "tile health: market-data refreshes on a health change" \
+  crates/geode-marketdata/src/tile.rs \
+  '            if this
+                .health
+                .refresh(cx, |d| d.health_for_datasets(&[dataset]))' \
+  '            if false
+                && this
+                    .health
+                    .refresh(cx, |d| d.health_for_datasets(&[dataset]))' \
+  geode-marketdata a_degraded_panel_source_shows_the_chip_and_recovery_clears_it
+
+# The panel asks about its own spec's dataset; asking about another
+# panel's dataset leaves a degraded `cvi_params` source off the header.
+run_mutation "tile health: market-data asks about its own dataset" \
+  crates/geode-marketdata/src/tile.rs \
+  '            let dataset = this.spec.dataset.as_str();' \
+  '            let dataset = "dividend_schedule";' \
+  geode-marketdata a_degraded_panel_source_shows_the_chip_and_recovery_clears_it
+
+# A new tile asks at once; without it a tile opened on a failed store is
+# silent until the next health change.
+run_mutation "tile health: the pricer asks when it opens" \
+  crates/geode-pricer/src/tile.rs \
+  '        health.reask(cx, |d| d.health_for_datasets(&[PRICER_SHEETS_DATASET]));' \
+  '' \
+  geode-pricer a_tile_opened_after_its_source_failed_shows_the_chip_at_once
+
+# The observer re-asks on a health change.
+run_mutation "tile health: the pricer refreshes on a health change" \
+  crates/geode-pricer/src/tile.rs \
+  '                .refresh(cx, |d| d.health_for_datasets(&[PRICER_SHEETS_DATASET]))' \
+  '                .refresh(cx, |d| d.health_for_datasets(&["cvi_params"]))' \
+  geode-pricer a_failed_sheet_store_source_shows_the_chip_and_recovery_clears_it
+
+# End to end in the app: the chip's click reaches the page.
+run_mutation "tile header: a chip click opens the page in the app" \
+  crates/geode-tile/src/header.rs \
+  '                d.request_diagnostics_page();' \
+  '' \
+  geode-app a_health_chip_click_opens_the_diagnostics_page
+
+# A new panel asks at once; without it a panel opened on a failed source
+# is silent until the next health change.
+run_mutation "tile health: market-data asks when it opens" \
+  crates/geode-marketdata/src/tile.rs \
+  '        health.reask(cx, |d| d.health_for_datasets(&[spec.dataset.as_str()]));' \
+  '' \
+  geode-marketdata a_panel_opened_after_its_source_failed_shows_the_chip_at_once
+
+# The tile re-asks when its series change; without it a removed series'
+# failure keeps its chip.
+run_mutation "tile health: timeseries re-asks when its series change" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '        self.health.reask(cx, |d| d.health_for_sources(&sources));' \
+  '' \
+  geode-timeseries removing_the_only_series_on_a_failed_source_clears_the_chip
+
+# The observer re-asks on a health change.
+run_mutation "tile health: timeseries refreshes on a health change" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '            if this.health.refresh(cx, |d| d.health_for_sources(&sources)) {' \
+  '            if false && this.health.refresh(cx, |d| d.health_for_sources(&sources)) {' \
+  geode-timeseries the_chip_follows_the_worst_of_the_series_sources
+
+# Expressions read no source; a source slot's source is the question.
+run_mutation "tile health: timeseries asks about its source slots" \
+  crates/geode-timeseries/src/header.rs \
+  '            SlotKind::Source { source, .. } => Some(source.as_str()),' \
+  '            SlotKind::Source { .. } => None,' \
+  geode-timeseries slot_sources_are_the_source_slots_sources_once_each
+
+# One height for every header.
+run_mutation "tile header: every header is HEADER_HEIGHT tall" \
+  crates/geode-tile/src/header.rs \
+  '        .h(scale::design(HEADER_HEIGHT))' \
+  '        .h(scale::design(HEADER_HEIGHT + 4.0))' \
+  geode-timeseries the_header_is_the_shared_height
+
+# A slot chip, swatch target included, fits inside the shared strip.
+run_mutation "timeseries header: a slot chip fits the 22 px strip" \
+  crates/geode-timeseries/src/header.rs \
+  'const SWATCH_TARGET: f32 = 16.0;' \
+  'const SWATCH_TARGET: f32 = 30.0;' \
+  geode-timeseries a_slot_chip_fits_inside_the_header
+
+# The left slot clips instead of growing: without a zero minimum width a
+# long left side pushes the health chip and `⋯` off the tile.
+run_mutation "tile header: an overlong left side leaves the cluster on the tile" \
+  crates/geode-tile/src/header.rs \
+  '    let slot = h_flex().min_w_0().overflow_hidden();' \
+  '    let slot = h_flex();' \
+  geode-tile an_overlong_left_side_leaves_the_cluster_inside_the_header
+
+# The question is the snapshot's datasets; asked about nothing, the chip
+# never shows.
+run_mutation "tile health: the blotter asks about its snapshot's datasets" \
+  crates/geode-blotter/src/header.rs \
+  '        let mut datasets: Vec<String> = p.datasets.iter().map(|f| f.dataset.clone()).collect();' \
+  '        let mut datasets: Vec<String> = Vec::new();' \
+  geode-blotter a_failed_source_of_a_delivered_dataset_shows_the_chip
+
+# A new snapshot over other datasets re-asks; without it the old datasets'
+# chip survives.
+run_mutation "tile health: the blotter re-asks when a snapshot lands" \
+  crates/geode-blotter/src/tile.rs \
+  '            self.health.reask(cx, |d| d.health_for_datasets(&datasets));' \
+  '' \
+  geode-blotter a_new_snapshots_datasets_move_the_chip
+
+# The first snapshot re-asks too; without it a source already failed before
+# delivery shows no chip until the next health report.
+run_mutation "tile health: the blotter's first snapshot asks at once" \
+  crates/geode-blotter/src/tile.rs \
+  '            self.health.reask(cx, |d| d.health_for_datasets(&datasets));' \
+  '' \
+  geode-blotter a_source_failed_before_the_first_snapshot_shows_the_chip_on_delivery
+
+# The blotter observes Diagnostics; answered with nothing, a report after
+# delivery never reaches the header.
+run_mutation "tile health: the blotter refreshes on a health change" \
+  crates/geode-blotter/src/tile.rs \
+  '                .refresh(cx, |d| d.health_for_datasets(&datasets))' \
+  '                .refresh(cx, |_| None)' \
+  geode-blotter a_failed_source_of_a_delivered_dataset_shows_the_chip
+
+# The cluster's text is capped at TEXT_SHARE of the header; uncapped, a
+# long error takes every pixel the tail leaves and the left side collapses.
+run_mutation "tile header: a long notice leaves the left side its share" \
+  crates/geode-tile/src/header.rs \
+  '            .max_w(relative(TEXT_SHARE))' \
+  '            .max_w(relative(1.0))' \
+  geode-tile an_overlong_notice_cuts_and_leaves_the_tail_and_left_side
+
+# A notice in the cluster is one line cut with an ellipsis; allowed to
+# wrap, a long error runs out of the 22 px strip.
+run_mutation "tile header: a long notice stays one line" \
+  crates/geode-tile/src/notice.rs \
+  '        .truncate()' \
+  '        .overflow_hidden()' \
+  geode-tile an_overlong_notice_cuts_and_leaves_the_tail_and_left_side
+
+# A pending-too-long source has no reason of its own; without the detail
+# fallback its chip explains nothing.
+run_mutation "tile health: a reasonless state explains itself by its detail" \
+  crates/geode-shell/src/diagnostics.rs \
+  '            _ => state.detail.clone(),' \
+  '            _ => String::new(),' \
+  geode-shell pending_too_long_shows_and_explains_itself_by_its_detail
+
+# The chip's tooltip counts the other unhealthy sources.
+run_mutation "tile header: the chip prepares +N more" \
+  crates/geode-tile/src/header.rs \
+  '            more: (h.others > 0).then(|| format!("+{} more", h.others).into()),' \
+  '            more: None,' \
+  geode-tile the_chip_words_tones_and_tooltip
+
+# The header's times are prepared; without the clock observer re-preparing
+# them, a zone change repaints the old zone's times.
+run_mutation "tile header: the blotter re-prepares its times on a clock change" \
+  crates/geode-blotter/src/tile.rs \
+  '        cx.observe_global::<geode_shell::clock::AppClock>(|this, cx| {
+            this.prepare_header(cx);' \
+  '        cx.observe_global::<geode_shell::clock::AppClock>(|this, cx| {' \
+  geode-blotter the_freshness_readout_reads_the_installed_app_clock_and_follows_a_later_change
+
+# The chip's page open begins as the action does; skipped, the last refusal
+# stays up over the page it opened and the crash tail misses the open.
+run_mutation "tile header: a queued page open expires the notice" \
+  crates/geode-shell/src/shell/page.rs \
+  '        self.begin_action(&format!("page::toggle_{kind}"));' \
+  '' \
+  geode-shell a_queued_page_open_clears_the_notice_and_records_the_action
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

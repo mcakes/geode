@@ -17,14 +17,14 @@ fn launched(log: &Log, tile: TileId) -> usize {
         .count()
 }
 
-fn draw(cx: &mut gpui::VisualTestContext) {
+pub(super) fn draw(cx: &mut gpui::VisualTestContext) {
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
     cx.run_until_parked();
 }
 
-fn focused(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> TileId {
+pub(super) fn focused(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> TileId {
     shell.read_with(cx, |s, _| {
         s.services.workspaces.active().focused_tile().unwrap()
     })
@@ -196,7 +196,7 @@ fn spx() -> DimensionContext {
     DimensionContext::of(&[("underlying_ref", "SPX")])
 }
 
-fn underlying_state(u: &str) -> toml::Table {
+pub(super) fn underlying_state(u: &str) -> toml::Table {
     let mut t = toml::Table::new();
     t.insert(
         "underlying".into(),
