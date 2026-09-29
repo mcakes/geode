@@ -37,6 +37,7 @@ use geode_shell::shell::colours::{
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::vimnav::NavCommand;
+use geode_tile::header::HealthWatch;
 use geode_widgets::datefield::{DateTimeField, FieldKey, Precision, Segment, route};
 use gpui::prelude::*;
 use gpui::{
@@ -166,6 +167,11 @@ pub struct TimeseriesTile {
     /// What the picker's commits are written against; outlives the
     /// popup on purpose (see [`PickContext`]), replaced at each open.
     pick_context: Option<PickContext>,
+    /// The `⋯` control's debug selector, prepared once.
+    menu_selector: SharedString,
+    /// The header's health half: the series' sources, re-asked when
+    /// source health moves or a slot changes the set of sources.
+    health: HealthWatch,
 }
 
 impl TimeseriesTile {
@@ -291,6 +297,12 @@ impl TimeseriesTile {
         // notifications, and retain the highlight when the option list is unchanged.
         // The source stage instead lists configured sources.
         cx.observe(&diagnostics, |this, _diagnostics, cx| {
+            // Health first: the picker gate below returns on every other
+            // notification.
+            let sources = header::slot_sources(&this.model);
+            if this.health.refresh(cx, |d| d.health_for_sources(&sources)) {
+                cx.notify();
+            }
             if !matches!(
                 this.popup,
                 Some(Popup::Picker(PickerState {
@@ -336,6 +348,8 @@ impl TimeseriesTile {
             colors_ptr,
             offset_secs,
         ));
+        let mut health = HealthWatch::new(diagnostics.clone(), id);
+        health.reask(cx, |d| d.health_for_sources(&header::slot_sources(&model)));
         TimeseriesTile {
             id,
             frame,
@@ -365,6 +379,8 @@ impl TimeseriesTile {
             drag: None,
             color_picker: None,
             pick_context: None,
+            menu_selector: format!("timeseries-menu-button-{}", id.0).into(),
+            health,
         }
     }
 
@@ -834,6 +850,10 @@ impl TimeseriesTile {
         let color_of = color_fn(Arc::clone(&self.colors.borrow()), cx.theme());
         self.header = HeaderModel::prepare(&self.model, default_source.as_deref(), &color_of);
         self.title = header::title_text(&self.model);
+        // The question is the series' sources: a slot added or removed
+        // changes it without any health change.
+        let sources = header::slot_sources(&self.model);
+        self.health.reask(cx, |d| d.health_for_sources(&sources));
         // List rows have inputs outside the chart key, including fetch state and
         // provenance. Refresh them even when chart geometry can be reused.
         if matches!(self.popup, Some(Popup::Series(_))) {
@@ -908,6 +928,12 @@ impl TimeseriesTile {
     #[cfg(test)]
     pub(crate) fn notice(&self) -> Option<&SharedString> {
         self.notice.as_ref()
+    }
+
+    /// The header's health chip, if a source a series reads is unhealthy.
+    #[cfg(test)]
+    pub(crate) fn health_chip(&self) -> Option<&geode_tile::header::HealthChip> {
+        self.health.chip()
     }
 
     #[cfg(test)]
@@ -1160,13 +1186,15 @@ impl Render for TimeseriesTile {
                     under_range,
                     under_freq,
                 },
+                self.menu_selector.clone(),
+                self.health.chip(),
             ))
             .when_some(popup, |el, popup_el| {
                 el.child(
                     div()
                         .absolute()
                         .right_0()
-                        .top(scale::design(header::HEADER_HEIGHT))
+                        .top(scale::design(geode_tile::header::HEADER_HEIGHT))
                         .child(popup_el),
                 )
             });

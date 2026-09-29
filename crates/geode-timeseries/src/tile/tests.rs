@@ -13,11 +13,12 @@ use geode_core::scopes::SavedScopes;
 use geode_core::series::{BucketRule, Frequency, SlotKind, SlotProvenance, SlotResult};
 use geode_data::{DataHandle, Request};
 use geode_shell::actions::{ActionId, ActionRegistry};
-use geode_shell::diagnostics::Diagnostics;
+use geode_shell::diagnostics::{Diagnostics, Health};
 use geode_shell::frame::{Frame, FrameRef};
 use geode_shell::keymap::{KeyContext, Keymap, MatchResult, Matcher, build_keymap};
 use geode_shell::module::{Delivery, ModuleFactory, ModuleRoster, TileContent, TileOccupant};
 use geode_shell::series::{FetchSource, SeriesSettings};
+use geode_shell::shell::scale;
 use geode_shell::tiling::{TileId, WorkspaceIx};
 use geode_widgets::datefield::Segment;
 use gpui::{Entity, SharedString, Window};
@@ -25,6 +26,7 @@ use gpui_component::color_picker::ColorPickerState;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::mpsc::Receiver;
+use std::time::SystemTime;
 
 const TILE: u64 = 7;
 
@@ -3877,4 +3879,104 @@ fn an_open_menu_follows_a_keymap_reload(cx: &mut gpui::TestAppContext) {
         geode_shell::keymap::parse_binding("shift+c", geode_shell::keymap::Modifiers::NONE)
             .unwrap();
     assert_eq!(lane(&h, &vcx), Some(geode_tile::menu::Lane::Keys(shift_c)));
+}
+
+fn note(h: &Harness, vcx: &mut gpui::VisualTestContext, source: &str, health: Health) {
+    h.diagnostics.update(vcx, |d, cx| {
+        d.note_health(source, health, "why".into(), SystemTime::UNIX_EPOCH);
+        cx.notify();
+    });
+    vcx.run_until_parked();
+}
+
+fn chip(h: &Harness, vcx: &gpui::VisualTestContext) -> Option<(String, Option<String>)> {
+    h.tile.read_with(vcx, |t, _| {
+        t.health_chip()
+            .map(|c| (c.word().to_string(), c.more().map(str::to_string)))
+    })
+}
+
+/// The header chip is the worst health over the series' own sources.
+#[gpui::test]
+fn the_chip_follows_the_worst_of_the_series_sources(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    note(
+        &h,
+        &mut vcx,
+        "demo_rest",
+        Health::Failed {
+            reason: "down".into(),
+        },
+    );
+    assert_eq!(chip(&h, &vcx), None, "no series reads demo_rest");
+    note(
+        &h,
+        &mut vcx,
+        "demo_kdb",
+        Health::Degraded {
+            reason: "gap".into(),
+        },
+    );
+    assert_eq!(chip(&h, &vcx), Some(("degraded".into(), None)));
+    h.command(&mut vcx, "add VIX@demo_rest").unwrap();
+    vcx.run_until_parked();
+    assert_eq!(
+        chip(&h, &vcx),
+        Some(("failed".into(), Some("+1 more".into())))
+    );
+}
+
+/// Removing a series changes the question with no health change: the
+/// removed series' failure leaves with it.
+#[gpui::test]
+fn removing_the_only_series_on_a_failed_source_clears_the_chip(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "add VIX@demo_rest").unwrap();
+    note(
+        &h,
+        &mut vcx,
+        "demo_rest",
+        Health::Failed {
+            reason: "down".into(),
+        },
+    );
+    assert!(chip(&h, &vcx).is_some());
+    h.command(&mut vcx, "remove VIX@demo_rest").unwrap();
+    vcx.run_until_parked();
+    assert_eq!(chip(&h, &vcx), None);
+}
+
+/// Timeseries' header is the shared height, so it lines up across a split.
+#[gpui::test]
+fn the_header_is_the_shared_height(cx: &mut gpui::TestAppContext) {
+    let (_h, mut vcx) = open(cx);
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let rem = vcx.update(|window, _| window.rem_size());
+    let header = vcx.debug_bounds("timeseries-header-7").expect("painted");
+    let want = scale::design_px(geode_tile::header::HEADER_HEIGHT, rem);
+    assert!((f32::from(header.size.height) - want).abs() < 0.5);
+}
+
+/// A slot chip (its swatch target included) fits inside the 22 px strip:
+/// the strip centres its children, so an oversized chip would spill past
+/// the header's top and bottom edges rather than stretch it.
+#[gpui::test]
+fn a_slot_chip_fits_inside_the_header(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let header = vcx.debug_bounds("timeseries-header-7").expect("painted");
+    for selector in ["timeseries-chip-7-1", "timeseries-swatch-7-1"] {
+        let b = vcx.debug_bounds(selector).expect("painted");
+        assert!(
+            b.top() >= header.top() && b.bottom() <= header.bottom(),
+            "{selector} {b:?} spills out of the header {header:?}"
+        );
+    }
 }

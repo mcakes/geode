@@ -741,8 +741,9 @@ hints are the live keymap's and are re-resolved when the menu opens, when its
 chrome rebuilds, and when the keymap is republished; an action the keymap
 binds nowhere shows an empty lane.
 
-The header shows the range and the frequency as two triggers, `1y ▾` and
-`1d ▾`; an absolute range shows its dates, `2025-09-26 – 2026-09-26 ▾`. Each
+The header is the shared 22 px strip; its health chip is the worst health
+over the series' sources. The header shows the range and the frequency as two
+triggers, `1y ▾` and `1d ▾`; an absolute range shows its dates, `2025-09-26 – 2026-09-26 ▾`. Each
 trigger opens its own menu under it and stays filled while that menu (or, for
 the range, the dates editor) is up; a second click closes it. `r` and the range
 trigger open the range menu: the seven presets written out with their short

@@ -21,6 +21,7 @@ use geode_shell::shell::kbd;
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::tips::{self, Chords, chord_for};
+use geode_tile::header::{Cluster, HealthChip, MenuTrigger};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Div, ElementId, Entity, Hsla, MouseButton, MouseDownEvent, SharedString,
@@ -30,15 +31,33 @@ use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
 use gpui_component::{ActiveTheme as _, Sizable as _, Theme, h_flex, v_flex};
 
+use std::rc::Rc;
+
 use crate::core::Range;
 use crate::core::model::{Color, Model, SlotState};
 use crate::popup::ExprField;
 use crate::tile::TimeseriesTile;
 
-/// The header strip's height at the design rem, and the footer's — both
-/// on [`scale`], so `Small`/`Large` scale the frame with the text in it.
-pub(crate) const HEADER_HEIGHT: f32 = 26.0;
+/// The footer's height at the design rem, on [`scale`], so
+/// `Small`/`Large` scale it with the text in it. The header's is the
+/// shared `geode_tile::header::HEADER_HEIGHT`.
 pub(crate) const FOOTER_HEIGHT: f32 = 20.0;
+
+/// The sources the tile's series read, once each, sorted: the tile's
+/// health question. Expressions read no source of their own.
+pub(crate) fn slot_sources(model: &Model) -> Vec<&str> {
+    let mut sources: Vec<&str> = model
+        .slots()
+        .iter()
+        .filter_map(|s| match &s.kind {
+            SlotKind::Source { source, .. } => Some(source.as_str()),
+            SlotKind::Expr(_) => None,
+        })
+        .collect();
+    sources.sort_unstable();
+    sources.dedup();
+    sources
+}
 
 /// Guidance shown instead of the chart when no slots exist. Backtick-quoted
 /// keys name the add and compose actions and paint as chips via `kbd::marked`.
@@ -271,6 +290,7 @@ fn trigger(
         })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_header(
     h: &HeaderModel,
     theme: &Theme,
@@ -278,6 +298,8 @@ pub(crate) fn render_header(
     tile_id: u64,
     stack: Option<&StackHandle>,
     popups: HeaderPopups,
+    menu_selector: SharedString,
+    health: Option<&HealthChip>,
 ) -> impl IntoElement {
     let HeaderPopups {
         menu_open,
@@ -287,23 +309,12 @@ pub(crate) fn render_header(
         under_range,
         under_freq,
     } = popups;
-    let mut row = h_flex()
-        .w_full()
-        .h(scale::design(HEADER_HEIGHT))
-        .items_center()
-        .gap_2()
-        .px_2()
-        .text_sm()
-        .text_color(theme.muted_foreground)
-        .border_b_1()
-        .border_color(theme.border)
-        .debug_selector(move || format!("timeseries-header-{tile_id}"));
-
-    // Stack position and interaction come from the shell's shared marker.
-    row = row.children(stack.and_then(|s| s.marker(theme, TileId(tile_id))));
+    // The module's own left side; the shared frame adds the stack marker
+    // before it and the cluster after it.
+    let mut left = h_flex().items_center().gap_2();
 
     // The module badge uses the secondary surface and its paired text color.
-    row = row.child(
+    left = left.child(
         div()
             .px_1p5()
             .rounded(theme.radius_tokens().sm)
@@ -313,15 +324,15 @@ pub(crate) fn render_header(
             .child("Timeseries"),
     );
 
-    // Derive shared bare-control pointer states once for the triggers, the swatch
-    // targets, and the menu button, avoiding repeated contrast calculations.
+    // Derive shared bare-control pointer states once for the triggers and the
+    // swatch targets, avoiding repeated contrast calculations.
     let bare_states = control::paint(
         theme,
         control::Rest::Bare,
         theme.background,
         theme.muted_foreground,
     );
-    row = row
+    left = left
         .child(trigger(
             theme,
             bare_states,
@@ -455,43 +466,29 @@ pub(crate) fn render_header(
                 None,
             ));
         }
-        row = row.child(el);
+        left = left.child(el);
     }
 
-    // Handle the action-menu toggle in capture phase before the open
-    // popup's outside-press listener can close it; otherwise a second click would
-    // reopen it. Keep propagation so the shell focuses the tile receiving the click.
-    let muted = theme.muted_foreground;
-    row = row.child(div().flex_1()).child(
-        div()
-            .id(ElementId::Name(SharedString::new_static("ts-menu-button")))
-            .debug_selector(move || format!("timeseries-menu-button-{tile_id}"))
-            .px_1p5()
-            .rounded(theme.radius_tokens().sm)
-            .border_1()
-            .border_color(theme.border)
-            .when(menu_open, |d| d.bg(theme.secondary))
-            .text_color(muted)
-            // While open, retain the popup-owner fill without additional hover feedback.
-            .when(!menu_open, |d| d.pointer_states(bare_states))
-            .child("⋯")
-            .tooltip(tips::tip(
-                "tip-timeseries-menu",
-                "Actions",
-                Some("timeseries::menu"),
-                None,
-            ))
-            .capture_any_mouse_down({
-                let tile = tile.clone();
-                move |event, window, cx| {
-                    if event.button != MouseButton::Left {
-                        return;
-                    }
-                    tile.update(cx, |t, cx| t.toggle_menu(window, cx))
-                }
-            }),
-    );
-    row
+    let mut cluster = Cluster::new(TileId(tile_id));
+    cluster.health = health;
+    cluster.menu = Some(MenuTrigger {
+        id: ElementId::Name(SharedString::new_static("ts-menu-button")),
+        selector: menu_selector,
+        tip_selector: SharedString::new_static("tip-timeseries-menu"),
+        action: "timeseries::menu",
+        open: menu_open,
+        on_press: Rc::new({
+            let tile = tile.clone();
+            move |window, cx| tile.update(cx, |t, cx| t.toggle_menu(window, cx))
+        }),
+    });
+    geode_tile::header::frame(
+        stack.and_then(|s| s.marker(theme, TileId(tile_id))),
+        left,
+        cluster,
+        theme,
+    )
+    .debug_selector(move || format!("timeseries-header-{tile_id}"))
 }
 
 /// The notice line under the header: the last refusal or advisory, in
@@ -634,6 +631,14 @@ mod tests {
         m.add_source("SPX.close", "demo_kdb", "series").unwrap();
         m.add_source("VIX", "demo_rest", "series").unwrap();
         m
+    }
+
+    #[test]
+    fn slot_sources_are_the_source_slots_sources_once_each() {
+        let mut m = two();
+        m.add_source("SPX.open", "demo_kdb", "series").unwrap();
+        m.add_expr("SPX.close / VIX", Expr::Ref(1)).unwrap();
+        assert_eq!(slot_sources(&m), vec!["demo_kdb", "demo_rest"]);
     }
 
     #[test]

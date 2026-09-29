@@ -20684,11 +20684,9 @@ run_mutation "timeseries menu: stepping skips disabled rows" \
 # The ⋯ button toggles in the CAPTURE phase, ahead of the open menu's
 # own `on_mouse_down_out`; in the bubble phase a second click reopens.
 run_mutation "timeseries mouse: the actions button toggles in capture" \
-  crates/geode-timeseries/src/header.rs \
-  '            ))
-            .capture_any_mouse_down({' \
-  '            ))
-            .on_any_mouse_down({' \
+  crates/geode-tile/src/header.rs \
+  '        .capture_any_mouse_down(move |event, window, cx| {' \
+  '        .on_any_mouse_down(move |event, window, cx| {' \
   geode-timeseries the_actions_button_toggles_the_menu_and_a_row_click_dispatches_or_explains
 
 # The range trigger toggles in the CAPTURE phase, the `⋯` button's
@@ -25869,6 +25867,42 @@ run_mutation "tile health: market-data asks when it opens" \
   '        health.reask(cx, |d| d.health_for_datasets(&[spec.dataset.as_str()]));' \
   '' \
   geode-marketdata a_panel_opened_after_its_source_failed_shows_the_chip_at_once
+
+# The tile re-asks when its series change; without it a removed series'
+# failure keeps its chip.
+run_mutation "tile health: timeseries re-asks when its series change" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '        self.health.reask(cx, |d| d.health_for_sources(&sources));' \
+  '' \
+  geode-timeseries removing_the_only_series_on_a_failed_source_clears_the_chip
+
+# The observer re-asks on a health change.
+run_mutation "tile health: timeseries refreshes on a health change" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '            if this.health.refresh(cx, |d| d.health_for_sources(&sources)) {' \
+  '            if false && this.health.refresh(cx, |d| d.health_for_sources(&sources)) {' \
+  geode-timeseries the_chip_follows_the_worst_of_the_series_sources
+
+# Expressions read no source; a source slot's source is the question.
+run_mutation "tile health: timeseries asks about its source slots" \
+  crates/geode-timeseries/src/header.rs \
+  '            SlotKind::Source { source, .. } => Some(source.as_str()),' \
+  '            SlotKind::Source { .. } => None,' \
+  geode-timeseries slot_sources_are_the_source_slots_sources_once_each
+
+# One height for every header.
+run_mutation "tile header: every header is HEADER_HEIGHT tall" \
+  crates/geode-tile/src/header.rs \
+  '        .h(scale::design(HEADER_HEIGHT))' \
+  '        .h(scale::design(HEADER_HEIGHT + 4.0))' \
+  geode-timeseries the_header_is_the_shared_height
+
+# A slot chip, swatch target included, fits inside the shared strip.
+run_mutation "timeseries header: a slot chip fits the 22 px strip" \
+  crates/geode-timeseries/src/header.rs \
+  'const SWATCH_TARGET: f32 = 16.0;' \
+  'const SWATCH_TARGET: f32 = 30.0;' \
+  geode-timeseries a_slot_chip_fits_inside_the_header
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
