@@ -1388,7 +1388,17 @@ impl TableDelegate for BlotterDelegate {
                 MouseButton::Right,
                 cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                     let d = this.delegate_mut();
+                    // Only this take resets the flag. It is always reached
+                    // because a cell's right press bubbles to its row, which
+                    // holds while the table is `cell_selectable(false)`:
+                    // gpui-component's cell handler stops propagation when
+                    // cells are selectable.
                     if std::mem::take(&mut d.context_reported) {
+                        return;
+                    }
+                    // A filler row below the data (painted only with
+                    // `stripe(true)`) is blank space: no menu.
+                    if row_ix >= d.shown.len() {
                         return;
                     }
                     let col = d.cursor.col;

@@ -3512,6 +3512,42 @@ mod tests {
         assert_eq!(anchor(&h, &mut cx), None);
     }
 
+    /// Blank space below the data opens no menu and leaves the selection
+    /// alone (controller ruling). The table is built with `stripe(false)`,
+    /// so it paints no filler rows there: no row reports the press.
+    #[gpui::test]
+    fn a_right_press_below_the_data_opens_nothing(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered_with_a_dimension(cx);
+        h.tile.update(&mut cx, |t, cx| {
+            t.with_delegate(cx, |d| {
+                d.cursor.row = 1;
+                d.start_selection(SelectKind::Rows);
+                d.cursor.row = 2;
+            });
+            t.sync_cursor(cx);
+        });
+        let last = centre_bounds(&mut cx, "blotter-row-2");
+        let at = gpui::point(last.center().x, last.bottom() + last.size.height * 2.5);
+        let viewport = cx.update(|window, _| window.viewport_size());
+        assert!(
+            at.y < viewport.height && cx.debug_bounds("blotter-row-3").is_none(),
+            "sanity: the point is inside the window, below the last data row"
+        );
+        cx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(at, MouseButton::Right, Modifiers::none());
+        let (sel, cursor_row) = h.tile.read_with(&cx, |t, cx| {
+            let d = t.table().read(cx).delegate();
+            (d.selection.is_some(), d.cursor.row)
+        });
+        assert_eq!((sel, cursor_row), (true, 2), "the V selection survives");
+        assert_eq!(
+            press_context(&h, &mut cx),
+            None,
+            "blank space opens no menu"
+        );
+        release_the_table_menu(&mut cx);
+    }
+
     /// A right press on a row outside its cells (the trailing filler) is a
     /// right press at the cursor's column, as a left press there is a press.
     #[gpui::test]
