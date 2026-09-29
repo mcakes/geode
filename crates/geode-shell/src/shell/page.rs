@@ -139,4 +139,21 @@ impl ShellView {
             self.open_page(kind, window, cx);
         }
     }
+
+    /// Open `kind` for a request queued from outside the shell (a tile's
+    /// health chip). Opens only — an open page stays open — and is refused
+    /// under a modal exactly as `page::toggle_<kind>` is.
+    pub(super) fn open_page_on_request(
+        &mut self,
+        kind: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.modal_open() {
+            self.notice = Some(super::input::CLOSE_DIALOG_FIRST);
+            cx.notify();
+            return;
+        }
+        self.open_page(kind, window, cx);
+    }
 }

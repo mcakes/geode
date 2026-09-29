@@ -894,3 +894,70 @@ fn the_overlay_mirror_follows_a_keyboard_toggle(cx: &mut gpui::TestAppContext) {
     assert!(!diagnostics.read_with(&cx, |d, _| d.overlay_visible()));
     assert!(!shell.read_with(&cx, |s, _| s.perf_overlay));
 }
+
+/// A queued request from a tile's health chip opens the diagnostics page
+/// through the shell's own diagnostics observer.
+#[gpui::test]
+fn a_queued_page_open_opens_the_diagnostics_page(cx: &mut gpui::TestAppContext) {
+    let factory = RecordingPageFactory::new("diagnostics");
+    let log = factory.log();
+    let (window, mut cx) = open_shell(cx, services_with_page(factory));
+    let shell = shell_of(&window, &mut cx);
+    let diagnostics = shell.read_with(&cx, |s, _| s.diagnostics().clone());
+    diagnostics.update(&mut cx, |d, cx| {
+        d.request_diagnostics_page();
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.open_page_kind()),
+        Some("diagnostics")
+    );
+    assert!(log.borrow().contains(&PageRecorded::Visible(true)));
+    assert!(
+        !diagnostics.update(&mut cx, |d, _| d.take_pending_diagnostics_page()),
+        "the shell drained the request"
+    );
+}
+
+/// The request only ever opens: a second one while the page is open
+/// leaves it open (a toggle would close it).
+#[gpui::test]
+fn a_queued_page_open_never_closes_the_page(cx: &mut gpui::TestAppContext) {
+    let factory = RecordingPageFactory::new("diagnostics");
+    let log = factory.log();
+    let (window, mut cx) = open_shell(cx, services_with_page(factory));
+    let shell = shell_of(&window, &mut cx);
+    let diagnostics = shell.read_with(&cx, |s, _| s.diagnostics().clone());
+    for _ in 0..2 {
+        diagnostics.update(&mut cx, |d, cx| {
+            d.request_diagnostics_page();
+            cx.notify();
+        });
+        cx.run_until_parked();
+    }
+    assert!(shell.read_with(&cx, |s, _| s.page_open()));
+    assert!(!log.borrow().contains(&PageRecorded::Visible(false)));
+}
+
+/// Under a modal the request is refused as the toggle is.
+#[gpui::test]
+fn a_queued_page_open_under_a_modal_is_refused(cx: &mut gpui::TestAppContext) {
+    let (window, mut cx) = open_shell(
+        cx,
+        services_with_page(RecordingPageFactory::new("diagnostics")),
+    );
+    let shell = shell_of(&window, &mut cx);
+    dispatch_action(&shell, "settings::open", &mut cx);
+    let diagnostics = shell.read_with(&cx, |s, _| s.diagnostics().clone());
+    diagnostics.update(&mut cx, |d, cx| {
+        d.request_diagnostics_page();
+        cx.notify();
+    });
+    cx.run_until_parked();
+    shell.read_with(&cx, |s, _| {
+        assert!(s.modal_open());
+        assert!(!s.page_open());
+        assert_eq!(s.notice, Some(CLOSE_DIALOG_FIRST));
+    });
+}

@@ -25739,6 +25739,22 @@ run_mutation "tile health: the bridge links a source to its dataset" \
   '                    dataset: source.name.clone(),' \
   geode-app describing_a_source_carries_its_dataset
 
+# The shell drains a tile's page request; skipped, the chip does nothing.
+run_mutation "tile header: the shell opens a queued diagnostics page" \
+  crates/geode-shell/src/shell/mod.rs \
+  '        if pending_page {' \
+  '        if false && pending_page {' \
+  geode-shell a_queued_page_open_opens_the_diagnostics_page
+
+# Opening only: drained through the toggle, a second chip click closes it.
+run_mutation "tile header: a queued page open never closes the page" \
+  crates/geode-shell/src/shell/page.rs \
+  '        self.open_page(kind, window, cx);
+    }' \
+  '        self.toggle_page(kind, window, cx);
+    }' \
+  geode-shell a_queued_page_open_never_closes_the_page
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
