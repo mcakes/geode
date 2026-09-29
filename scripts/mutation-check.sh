@@ -20378,11 +20378,13 @@ run_mutation "pricer entry bar: a chevron press that closes the bar hands off no
 # leg is hidden and the cursor names a row the model does not paint.
 run_mutation "pricer entry bar: o on a closed package leaves it closed" \
   crates/geode-pricer/src/tile.rs \
-  '        let place = place_for(&self.sheet, self.cursor_sheet_row(), below);
+  '            place_for(&self.sheet, self.cursor_sheet_row(), below)
+        };
         if let Place::Leg { package, .. } = place {
             self.expansion.set(self.sheet.id(package), true);
         }' \
-  '        let place = place_for(&self.sheet, self.cursor_sheet_row(), below);' \
+  '            place_for(&self.sheet, self.cursor_sheet_row(), below)
+        };' \
   geode-pricer o_on_a_closed_package_opens_it_and_lands_on_its_first_leg
 
 # The palette's commit focuses the shell root before it dispatches
@@ -23106,8 +23108,8 @@ run_mutation "pricer entry bar: a history step leaves the list stale" \
 # always pass below, `O` lands its first line under the row instead.
 run_mutation "pricer entry bar: shift+o lands below the cursor row" \
   crates/geode-pricer/src/tile.rs \
-  '        let place = place_for(&self.sheet, self.cursor_sheet_row(), below);' \
-  '        let place = place_for(&self.sheet, self.cursor_sheet_row(), true);' \
+  '            place_for(&self.sheet, self.cursor_sheet_row(), below)' \
+  '            place_for(&self.sheet, self.cursor_sheet_row(), true)' \
   geode-pricer shift_o_lands_above_the_cursor_row_and_continues_below_what_landed
 
 # Above the first row is the top of the sheet, not its end.
@@ -25885,8 +25887,8 @@ run_mutation "pricer scope: an entry-bar insert skips the landing note" \
 
 run_mutation "pricer scope: a put skips the landing note" \
   crates/geode-pricer/src/tile.rs \
-  $'        let ids: Vec<LineId> = (first..at).map(|r| self.sheet.id(r)).collect();\n        self.note_hidden_landing(ids);' \
-  $'        let ids: Vec<LineId> = (first..at).map(|r| self.sheet.id(r)).collect();\n        let _ = ids;' \
+  $'        }\n        self.note_hidden_landing(ids);\n        self.cursor.set_line(self.sheet.id(first));' \
+  $'        }\n        let _ = ids;\n        self.cursor.set_line(self.sheet.id(first));' \
   geode-pricer a_put_or_restore_the_scope_hides_says_so
 
 run_mutation "pricer scope: a restore skips the landing note" \
@@ -25955,8 +25957,8 @@ run_mutation "pricer grouping: the cursor falls to its old index" \
 # row it was set on.
 run_mutation "pricer grouping: a split package's second row snaps to its first" \
   crates/geode-pricer/src/tile.rs \
-  '                Some(exact.map_or(first, |i| first + i))' \
-  '                Some(exact.map_or(first, |_| first))' \
+  '            .position(|r| r.id == Some(id) && self.enclosing_path(r.node) == Some(within))' \
+  '            .position(|r| r.id == Some(id))' \
   geode-pricer motions_walk_past_a_split_packages_second_row
 
 # Fold verbs and the chevron act on a group row's path.
@@ -26046,7 +26048,7 @@ run_mutation "pricer grouping: totals count a group row's descendant again" \
 # Line movement: refused under a grouping; past hidden siblings without.
 run_mutation "pricer grouping: shift+j moves under a grouping" \
   crates/geode-pricer/src/tile/select.rs \
-  '        if matches!(verb, "move_down" | "move_up") && !self.chain.is_flat() {' \
+  '        if matches!(verb, "move_down" | "move_up") && self.grouped() {' \
   '        if matches!(verb, "move_down" | "move_up") && false {' \
   geode-pricer line_moves_refuse_under_a_grouping
 
@@ -26087,6 +26089,55 @@ run_mutation "pricer grouping: a NULL path segment reads as empty" \
   $'        toml::Value::Table(t) if t.get("null").and_then(|v| v.as_bool()) == Some(true) => {\n            Some(None)' \
   $'        toml::Value::Table(t) if t.get("null").and_then(|v| v.as_bool()) == Some(true) => {\n            Some(Some(String::new()))' \
   geode-pricer a_record_round_trips_through_its_table
+
+# A selection anchor carries its group path: anchored on a split
+# package's second row, it stays there.
+run_mutation "pricer grouping: a split anchor resolves to the package's first row" \
+  crates/geode-pricer/src/tile/select.rs \
+  '                    .filter(|at| matches!(at, At::Line { .. }));' \
+  $'                    .filter(|at| matches!(at, At::Line { .. }))\n                    .map(|at| match at {\n                        At::Line { id, .. } => At::Line { id, within: None },\n                        g => g,\n                    });' \
+  geode-pricer a_selection_anchored_on_a_split_packages_second_row_stays_there
+
+# A cursor whose node closed lands on the nearest painted group on its
+# path unless its id paints inside that group.
+run_mutation "pricer grouping: a regrouped line lands on its old group row" \
+  crates/geode-pricer/src/tile.rs \
+  '                Some(inside.unwrap_or(group))' \
+  '                Some(group)' \
+  geode-pricer the_cursor_follows_its_line_across_a_regroup
+
+# A counted g p under a value grouping refuses; a structural chain alone
+# moves and packages as the flat sheet.
+run_mutation "pricer grouping: a counted g p packages under a grouping" \
+  crates/geode-pricer/src/tile/select.rs \
+  '        if verb == "group" && !selected && count > 1 && self.grouped() {' \
+  '        if verb == "group" && !selected && count > 1 && false {' \
+  geode-pricer a_counted_package_refuses_under_a_value_grouping
+
+run_mutation "pricer grouping: a structural chain counts as a grouping" \
+  crates/geode-pricer/src/tile.rs \
+  '        rollup::value_levels(&self.chain) > 0' \
+  '        !self.chain.is_flat()' \
+  geode-pricer a_structural_chain_moves_and_packages_as_the_flat_sheet
+
+# p/P and o on a grouping row go to the end, deliberately; p says so.
+run_mutation "pricer grouping: a put on a group row says nothing" \
+  crates/geode-pricer/src/tile.rs \
+  $'        if on_group {\n            self.footer = Some(PUT_AT_END.into());\n        }' \
+  '' \
+  geode-pricer put_and_add_on_a_group_row_go_to_the_end
+
+run_mutation "pricer grouping: a put on a group row lands by the sheet's first row" \
+  crates/geode-pricer/src/tile.rs \
+  $'        let place = if on_group {\n            Place::Root {\n                at: self.sheet.len(),' \
+  $'        let place = if on_group {\n            Place::Root {\n                at: 0,' \
+  geode-pricer put_and_add_on_a_group_row_go_to_the_end
+
+run_mutation "pricer grouping: o on a group row lands at the top" \
+  crates/geode-pricer/src/tile.rs \
+  $'        let place = if self.cursor_on_group() {\n            Place::Root {\n                at: self.sheet.len(),' \
+  $'        let place = if self.cursor_on_group() {\n            Place::Root {\n                at: 0,' \
+  geode-pricer put_and_add_on_a_group_row_go_to_the_end
 
 # A `dimensions` edit alone reloads the pricer, and the reload hands the
 # factory the new dimensions.

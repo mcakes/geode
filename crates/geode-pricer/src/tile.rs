@@ -271,8 +271,18 @@ pub(crate) const SPLIT: &str = "split package: edit its legs";
 pub(crate) const GROUP_ROW: &str = "a grouping row: edit its lines";
 
 /// `shift+j`/`shift+k` move a line among its siblings in sheet order,
-/// which a grouping does not paint: refused while any grouping applies.
+/// which a value grouping does not paint: refused while one applies
+/// (`PricerTile::grouped`).
 pub(crate) const MOVE_GROUPED: &str = "lines move in the flat sheet: clear the grouping first";
+
+/// A counted `g p` takes the next rows in SHEET order, which a value
+/// grouping may paint under other groups: refused while one applies.
+pub(crate) const PACKAGE_GROUPED: &str =
+    "a counted g p packages in the flat sheet: clear the grouping first";
+
+/// `p`/`shift+p` on a grouping row have no line to land beside: the rows
+/// go at the end of the sheet, and the footer says so.
+pub(crate) const PUT_AT_END: &str = "put at the end of the sheet";
 
 /// An insert, put, undo or redo that lands a line the frame's scope hides
 /// says so: the line is in the sheet, pricing, but the cursor cannot rest
@@ -641,7 +651,7 @@ pub struct PricerTile {
     underlyings_rev: Option<u64>,
     /// The live `V`/`v` selection, anchored by line and plan column name
     /// so a rebuild re-finds the same cells. `None` outside visual mode.
-    pub(crate) selection: Option<Selection<LineId, &'static str>>,
+    pub(crate) selection: Option<Selection<At, &'static str>>,
     /// `selection` resolved against the model and cursor at the last
     /// change point; render and the delegate only read it.
     pub(crate) resolved: Option<Resolved>,
@@ -1377,7 +1387,15 @@ impl PricerTile {
             self.footer = Some("the sheet is still loading".into());
             return;
         }
-        let place = place_for(&self.sheet, self.cursor_sheet_row(), below);
+        // A grouping row has no line to land beside: the bar adds at the
+        // end of the sheet (its label says `at end`).
+        let place = if self.cursor_on_group() {
+            Place::Root {
+                at: self.sheet.len(),
+            }
+        } else {
+            place_for(&self.sheet, self.cursor_sheet_row(), below)
+        };
         if let Place::Leg { package, .. } = place {
             self.expansion.set(self.sheet.id(package), true);
         }
@@ -3167,7 +3185,15 @@ impl PricerTile {
             .iter()
             .find(|s| matches!(s, RowSpec::Package { .. }))
             .unwrap_or(&specs[0]);
-        let place = put_place(&self.sheet, self.cursor_sheet_row(), below, lead);
+        // A grouping row has no line to land beside: at the end, said so.
+        let on_group = self.cursor_on_group();
+        let place = if on_group {
+            Place::Root {
+                at: self.sheet.len(),
+            }
+        } else {
+            put_place(&self.sheet, self.cursor_sheet_row(), below, lead)
+        };
         // Open the parent before inserting a leg so the new row is visible and
         // cursor reconciliation can select it.
         if let Place::Leg { package, .. } = place {
@@ -3192,6 +3218,9 @@ impl PricerTile {
             at += 1;
         }
         let ids: Vec<LineId> = (first..at).map(|r| self.sheet.id(r)).collect();
+        if on_group {
+            self.footer = Some(PUT_AT_END.into());
+        }
         self.note_hidden_landing(ids);
         self.cursor.set_line(self.sheet.id(first));
         self.rebuild(cx);
@@ -4626,12 +4655,67 @@ impl PricerTile {
                 let Some(within) = within else {
                     return Some(first);
                 };
-                let exact = self.model.rows[first..]
-                    .iter()
-                    .position(|r| r.id == Some(*id) && self.enclosing_path(r.node) == Some(within));
-                Some(exact.map_or(first, |i| first + i))
+                if let Some(exact) = self.exact_row(*id, within) {
+                    return Some(exact);
+                }
+                // Not painted at `within` (its group closed, or a regroup
+                // moved it): the nearest painted group on its path, unless
+                // the id paints inside that group (a regroup to a shorter
+                // chain) — never the same id's row under another node, a
+                // split package's other half. A path the tree no longer has
+                // at all follows the id.
+                let Some((k, group)) = (1..=within.len())
+                    .rev()
+                    .find_map(|k| self.group_row(&within[..k]).map(|g| (k, g)))
+                else {
+                    return Some(first);
+                };
+                let inside = self.model.rows.iter().position(|r| {
+                    r.id == Some(*id)
+                        && self
+                            .enclosing_path(r.node)
+                            .is_some_and(|p| p.starts_with(&within[..k]))
+                });
+                Some(inside.unwrap_or(group))
             }
         }
+    }
+
+    /// The row painting `id` within group path `within`, exactly.
+    fn exact_row(&self, id: LineId, within: &Path) -> Option<usize> {
+        self.model
+            .rows
+            .iter()
+            .position(|r| r.id == Some(id) && self.enclosing_path(r.node) == Some(within))
+    }
+
+    /// The painted grouping row whose path is `path`.
+    fn group_row(&self, path: &[Option<String>]) -> Option<usize> {
+        self.model
+            .rows
+            .iter()
+            .position(|r| r.path.as_deref() == Some(path))
+    }
+
+    /// A selection anchor's row: `row_at` without its fallbacks — an
+    /// anchor whose own row no longer paints is lost (the selection clears
+    /// and says so), never moved onto another row.
+    pub(crate) fn anchor_row(&self, at: &At) -> Option<usize> {
+        match at {
+            At::Group(path) => self.group_row(path),
+            At::Line { id, within: None } => self.model.grid_row_of(*id),
+            At::Line {
+                id,
+                within: Some(within),
+            } => self.exact_row(*id, within),
+        }
+    }
+
+    /// Whether a value grouping applies: sheet order is then not the
+    /// painted order. A chain of structural levels alone (`position_ref`,
+    /// `instrument_ref`) paints in sheet order.
+    pub(crate) fn grouped(&self) -> bool {
+        rollup::value_levels(&self.chain) > 0
     }
 
     /// What the cursor rests on at grid row `row`: its line, recorded
@@ -4767,7 +4851,12 @@ impl PricerTile {
             self.cursor.at = Some(at);
         }
         match self.cursor_row() {
-            Some(r) => self.cursor.last_row = r,
+            Some(r) => {
+                // The row it resolved to names the target from here on: a
+                // line that landed on its group's row rests on that group.
+                self.cursor.at = self.at_of_row(r);
+                self.cursor.last_row = r;
+            }
             None => self.set_cursor_row(self.cursor.last_row),
         }
     }

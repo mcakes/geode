@@ -57,10 +57,12 @@ impl PricerTile {
                 }
             }
             None => {
+                // A line or package row, with its node's group path: a
+                // split package paints once per node under one id.
                 let line = self
                     .cursor_row()
-                    .and_then(|g| self.model.rows.get(g))
-                    .and_then(|r| r.id);
+                    .and_then(|g| self.at_of_row(g))
+                    .filter(|at| matches!(at, At::Line { .. }));
                 let col = self.plan.columns.get(self.cursor.col).map(|c| c.def.name);
                 let (Some(line), Some(col)) = (line, col) else {
                     self.footer = Some(NO_ANCHOR.into());
@@ -98,7 +100,7 @@ impl PricerTile {
             Some(row) => sel.resolve_with(
                 (row, self.cursor.col),
                 self.plan.columns.len(),
-                |id| self.model.grid_row_of(*id),
+                |at| self.anchor_row(at),
                 |name| self.plan.columns.iter().position(|c| c.def.name == *name),
             ),
             None => Err(Lost::Row),
@@ -413,8 +415,11 @@ impl PricerTile {
         ) {
             return None;
         }
-        if matches!(verb, "move_down" | "move_up") && !self.chain.is_flat() {
+        if matches!(verb, "move_down" | "move_up") && self.grouped() {
             return Some(MOVE_GROUPED);
+        }
+        if verb == "group" && !selected && count > 1 && self.grouped() {
+            return Some(PACKAGE_GROUPED);
         }
         let targets: Vec<usize> = if selected {
             if self.selection_holds_group() {

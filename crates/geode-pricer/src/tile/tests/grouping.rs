@@ -570,6 +570,57 @@ fn a_move_steps_past_a_sibling_the_scope_hides(cx: &mut gpui::TestAppContext) {
     assert_eq!(h.tree(&vcx), ["SPX Z26 5000 C", "SPX Z26 5200 C"]);
 }
 
+/// The pin and the open grouping rows ride the session record: a tile
+/// restored from it groups the same way with the same rows open (a
+/// nested open path included), and a record saved mid-load keeps them.
+#[gpui::test]
+fn the_pin_and_the_open_groups_round_trip_the_session(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &MIXED);
+    h.command(&mut vcx, "group underlying_ref strike").unwrap();
+    cursor_to(&h, &mut vcx, "SPX");
+    h.dispatch(&mut vcx, "toggle", None);
+    cursor_to(&h, &mut vcx, "5000");
+    h.dispatch(&mut vcx, "toggle", None);
+    let before = h.tree(&vcx);
+    let saved = h.serialize(&mut vcx);
+    let r = crate::session::Record::from_table(&saved);
+    assert_eq!(
+        r.pinned,
+        Some(vec!["underlying_ref".to_string(), "strike".to_string()])
+    );
+    assert_eq!(r.pinned_slot, None);
+    assert_eq!(
+        r.expanded_paths,
+        vec![
+            vec![Some("SPX".to_string())],
+            vec![Some("SPX".to_string()), Some("5000".to_string())]
+        ]
+    );
+    // Restored through the factory, from the same store.
+    let (r2, mut vcx2) = open_full(
+        cx,
+        Some(saved.clone()),
+        h.store.clone(),
+        PricerSettings::default(),
+    );
+    assert_eq!(r2.tree(&vcx2), before, "grouped and opened as it was");
+    assert!(r2.header(&vcx2).contains(&"pinned".to_string()));
+    // Mid-load, the record keeps what it was restored with.
+    let rows = h.store.get("book").unwrap();
+    h.store.set_pending(true);
+    let (r3, mut vcx3) = open_full(cx, Some(saved), h.store.clone(), PricerSettings::default());
+    let mid = crate::session::Record::from_table(&r3.serialize(&mut vcx3));
+    assert_eq!(mid.expanded_paths, r.expanded_paths, "held while loading");
+    r3.tile
+        .update(&mut vcx3, |t, cx| t.loaded(Ok(Some(rows)), cx));
+    assert_eq!(r3.tree(&vcx3), before);
+    // A slot pin is its own key.
+    slots(&r2, &mut vcx2, &[(1, &["expiry"])]);
+    r2.command(&mut vcx2, "group slot 1").unwrap();
+    let r = crate::session::Record::from_table(&r2.serialize(&mut vcx2));
+    assert_eq!((r.pinned, r.pinned_slot), (None, Some(1)));
+}
+
 /// A package split across nodes paints once per node, with one id: `j`
 /// walks every row, the second split row included, instead of snapping
 /// back to the first row that id names.
@@ -587,4 +638,94 @@ fn motions_walk_past_a_split_packages_second_row(cx: &mut gpui::TestAppContext) 
     }
     assert_eq!(seen, (0..rows).collect::<Vec<_>>());
     assert_eq!(split_rows(&h, &vcx).len(), 2, "fixture: split twice");
+}
+
+/// A `V` anchored on a split package's SECOND painted row stays there:
+/// the selection is that row alone and totals its node's leg, not the
+/// other node's half (the anchor carries its group path).
+#[gpui::test]
+fn a_selection_anchored_on_a_split_packages_second_row_stays_there(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &CALENDAR);
+    price_distinctly(&h, &mut vcx);
+    h.command(&mut vcx, "group expiry").unwrap();
+    h.dispatch(&mut vcx, "expand_all", None);
+    let second = split_rows(&h, &vcx)[1];
+    let own = npv(&h, &vcx, second);
+    cursor_to_row(&h, &mut vcx, second);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    let rows = h
+        .tile
+        .read_with(&vcx, |t, _| t.resolved().map(|r| r.rows.clone()));
+    assert_eq!(rows, Some(second..second + 1));
+    assert_eq!(npv_total(&h, &vcx), Some(format!("{own:.2}")));
+    // Extending down one row keeps the anchor where it was.
+    h.motion(&mut vcx, "down", None);
+    let rows = h
+        .tile
+        .read_with(&vcx, |t, _| t.resolved().map(|r| r.rows.clone()));
+    assert_eq!(rows, Some(second..second + 2));
+}
+
+/// A counted `g p` under a value grouping refuses and packages nothing:
+/// its run is in sheet order, which the grouping does not paint.
+#[gpui::test]
+fn a_counted_package_refuses_under_a_value_grouping(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "NDX Z26 4000 P", "SPX Z26 4000 P"]);
+    h.command(&mut vcx, "group underlying_ref").unwrap();
+    h.dispatch(&mut vcx, "expand_all", None);
+    cursor_to(&h, &mut vcx, "SPX Z26 5000 C");
+    let len = h.sheet_len(&vcx);
+    h.dispatch(&mut vcx, "group", Some(2));
+    assert_eq!(h.footer(&vcx).as_deref(), Some(PACKAGE_GROUPED));
+    assert_eq!(
+        h.command(&mut vcx, "package 2"),
+        Err(PACKAGE_GROUPED.to_string())
+    );
+    assert_eq!(h.sheet_len(&vcx), len, "nothing packaged");
+    // A single line packages alone: nothing in sheet order is swept in.
+    h.dispatch(&mut vcx, "group", None);
+    assert_eq!(h.sheet_len(&vcx), len + 1);
+}
+
+/// A chain of structural levels alone paints in sheet order: moves and a
+/// counted `g p` work as in the flat sheet.
+#[gpui::test]
+fn a_structural_chain_moves_and_packages_as_the_flat_sheet(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "NDX Z26 4000 P", "SPX Z26 4000 P"]);
+    h.command(&mut vcx, "group position_ref").unwrap();
+    assert_eq!(kept(&h, &vcx), ["position_ref"]);
+    cursor_to(&h, &mut vcx, "SPX Z26 5000 C");
+    h.dispatch(&mut vcx, "move_down", None);
+    assert_eq!(h.footer(&vcx), None);
+    assert_eq!(h.tree(&vcx)[..2], ["NDX Z26 4000 P", "SPX Z26 5000 C"]);
+    h.motion(&mut vcx, "top", None);
+    h.dispatch(&mut vcx, "group", Some(2));
+    assert_eq!(h.footer(&vcx), None);
+    assert_eq!(h.sheet_len(&vcx), 4, "a package over two lines");
+}
+
+/// `p` and `shift+p` on a grouping row put at the end of the sheet and
+/// say so; `o` there opens the bar labelled `at end`.
+#[gpui::test]
+fn put_and_add_on_a_group_row_go_to_the_end(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &MIXED);
+    h.command(&mut vcx, "group underlying_ref").unwrap();
+    cursor_to(&h, &mut vcx, "NDX");
+    h.dispatch(&mut vcx, "toggle", None);
+    cursor_to(&h, &mut vcx, "NDX Z26 4000 P");
+    h.dispatch(&mut vcx, "yank_row", None);
+    let len = h.sheet_len(&vcx);
+    for verb in ["put_below", "put_above"] {
+        cursor_to(&h, &mut vcx, "SPX");
+        h.dispatch(&mut vcx, verb, None);
+        assert_eq!(h.footer(&vcx).as_deref(), Some(PUT_AT_END), "{verb}");
+        let last = h
+            .tile
+            .read_with(&vcx, |t, _| t.sheet.shorthand(t.sheet.len() - 1));
+        assert_eq!(last, "NDX Z26 4000 P", "{verb} lands last");
+    }
+    assert_eq!(h.sheet_len(&vcx), len + 2);
+    cursor_to(&h, &mut vcx, "SPX");
+    h.dispatch(&mut vcx, "add_below", None);
+    assert_eq!(h.entry_label(&vcx).as_deref(), Some("at end"));
 }
