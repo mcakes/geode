@@ -196,6 +196,19 @@ mod tests {
         );
     }
 
+    /// `:group none` is an empty `pinned` array: it reads back as the
+    /// empty pin, never as no pin.
+    #[test]
+    fn an_empty_pinned_array_is_the_empty_pin() {
+        let t: toml::Table = toml::from_str("pinned = []").unwrap();
+        assert_eq!(Record::from_table(&t).pinned, Some(Vec::new()));
+        let none = Record {
+            pinned: Some(Vec::new()),
+            ..Record::default()
+        };
+        assert_eq!(Record::from_table(&none.to_table()), none);
+    }
+
     /// NULL is `{ null = true }`, distinct from the empty string; a path
     /// holding any other shape is dropped whole (a shortened path would
     /// open a different node), the rest kept. A slot out of 1–9 is no pin.

@@ -211,6 +211,18 @@ filtering survive through the module's session record. Named colors come from
 shared configuration; cursor, selection, expansion, and sort state are not
 persisted by the tile.
 
+The tile's grouping is, in order of precedence: a `:group <columns>` pin; a
+`:group slot <n>` pin (the view's own grouping while that slot is empty);
+the frame's active slot; the view's own `grouping`. `:group none` pins the
+empty grouping: the view with no grouping levels, a single total row, as a
+view without `grouping` shows. `none` is reserved beside `slot` — it is
+never read as a column, and `:group none <anything>` is refused. A bare
+`:group` refuses with `group needs columns, \`slot N\` or \`none\``.
+`:group` completes the groupable dimensions, `none` and `slot`. While a pin
+holds, a frame grouping change or slot switch does not regroup the tile;
+`:unpin` follows the frame again at once. The pin is saved as `pinned` (an
+empty array for `none`) or `pinned_slot`.
+
 The `DataTable` delegate paints a prepared row model. Rendering does not
 recompile columns or format the whole dataset. Each delivered snapshot builds
 a candidate column plan so presentation changes are recognized even when the
@@ -266,6 +278,9 @@ this row` instead.
 The header is the shared 22 px strip. The view, grouping, state chips
 (`pinned`, `unscoped`, `filtered`, a tile as-of), the frame's `AS OF` warning
 and the in-flight `…` sit on the left and clip when the tile is too narrow.
+The grouping reads as its levels joined by ` / `, or a muted `ungrouped` for
+no levels (a view without `grouping`, or `:group none`); the tile's title
+reads `view · ungrouped` likewise, never a dangling `view · `.
 Dataset times sit in the header's right cluster with the health chip,
 which covers the datasets of the tile's current snapshot; the notice sits
 before them. The chip's question moves with each delivered snapshot: a view
@@ -1230,7 +1245,7 @@ as `ctrl+k` available.
 
 The `:` verbs change only this tile: `view <name>`, `shift spot|vol <n>|clear`,
 `spot <underlying> <level>|clear`, `price`, `refresh <duration>|off|default`,
-`package [n]`, `unpackage`, `group <columns>`, `group slot <n>`, `unpin`,
+`package [n]`, `unpackage`, `group <columns>`, `group slot <n>`, `group none`, `unpin`,
 `e <sheet>`, `new`, `name <sheet>`, and `rm <sheet>`.
 `view`, `refresh`, `shift`, `spot`, `package`, `unpackage`, and `name` (and
 the menu's view rows) are refused while the sheet is still loading, because
@@ -1238,7 +1253,8 @@ the loaded document would replace what they set. `group` and `unpin` are
 not: the grouping belongs to the tile, not the document. `:ungroup` is not
 a verb, and a `:group` whose every level the tile would drop (`:group 2`,
 `:group nosuchcol`) refuses with `no groupable column in <columns>; :package N
-packages lines` and pins nothing — it never packages rows.
+packages lines` and pins nothing — it never packages rows. `:group none`
+names no level, so it is not refused: it pins the flat sheet.
 
 The sheet verbs work on this tile's own sheet, or, for `rm`, on a sheet no
 tile holds:
@@ -1467,11 +1483,15 @@ arranges positions, and follows the frame's grouping the way a blotter
 does. The chain is, in order of precedence: a `:group <columns>` pin; a
 `:group slot <n>` pin, which reads frame slot `n` (the view's own grouping
 while that slot is empty); the frame's active slot; the planned view's own
-`grouping`. `:unpin` drops either pin and the tile follows the frame
-again. `:group` takes columns separated by spaces or commas and completes
-the groupable ones and `slot`; a bare `:group` refuses with `group needs
-columns or \`slot N\``, and `:group slot <n>` on an empty slot with `slot n
-is empty`. The frame observer regroups before the tile answers the frame's
+`grouping`. `:group none` pins the empty chain: the flat sheet, whatever
+the frame's grouping, with moves and a counted `g p` as in any flat sheet.
+`none` is reserved beside `slot` — never read as a column, and `:group none
+<anything>` is refused with `usage: group none`. `:unpin` drops any pin and
+the tile follows the frame again at once. `:group` takes columns separated
+by spaces or commas and completes the groupable ones, `none` and `slot`; a
+bare `:group` refuses with `group needs columns, \`slot N\` or \`none\``,
+and `:group slot <n>` on an empty slot with `slot n is empty`. The pin is
+saved as `pinned` (an empty array for `none`) or `pinned_slot`. The frame observer regroups before the tile answers the frame's
 flip barrier, so a grouping change paints in step with the other tiles.
 
 The chain's levels are the `pricer` dataset's groupable columns and the
@@ -1491,8 +1511,10 @@ cannot group by and keeps the rest:
 The header shows the chain as written, kept levels in normal text joined by
 a muted `›` and dropped ones muted and struck through, followed by a
 neutral `pinned` chip while a pin holds. Nothing is shown for an empty
-chain. A `:group` whose every level would be dropped is refused rather than
-pinned (see the `:` verbs above), so a pin always groups by something.
+chain, except under `:group none`, where a muted `ungrouped` stands in the
+chain's place beside the `pinned` chip. A `:group` whose every level would
+be dropped is refused rather than pinned (see the `:` verbs above), so a
+column pin always groups by something; only `none` pins the flat sheet.
 
 `position_ref` and `instrument_ref` are structural levels: `position_ref`
 is the package row itself (packages over their legs, bare lines alone) and

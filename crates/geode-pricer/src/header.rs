@@ -61,6 +61,9 @@ pub(crate) struct HeaderInputs<'a> {
     pub chain: &'a EffectiveChain,
     /// `:group` / `:group slot N` pin the grouping: a `pinned` chip.
     pub pinned: bool,
+    /// `:group none` pins the empty chain: a muted `ungrouped` where the
+    /// chain would be.
+    pub ungrouped: bool,
     /// The armed `:rm` confirm's question.
     pub prompt: Option<SharedString>,
     /// The save state's own slot (a refused save, or a failed load that
@@ -105,6 +108,9 @@ pub(crate) struct HeaderModel {
     pub chain: Vec<(SharedString, bool)>,
     /// The `pinned` chip (neutral) while the grouping is pinned.
     pub pinned: bool,
+    /// Muted `ungrouped` text in the chain's place while `:group none`
+    /// pins the empty chain.
+    pub ungrouped: bool,
 }
 
 /// `requested` in order, each level marked kept or dropped. `kept` is a
@@ -173,6 +179,7 @@ pub(crate) fn prepare(i: HeaderInputs) -> HeaderModel {
         unscoped: i.unscoped,
         chain: chain_items(i.requested, i.chain),
         pinned: i.pinned,
+        ungrouped: i.ungrouped,
     }
 }
 
@@ -194,6 +201,9 @@ impl HeaderModel {
                 format!("~{name}~")
             }
         }));
+        if self.ungrouped {
+            out.push("ungrouped".to_string());
+        }
         if self.pinned {
             out.push("pinned".to_string());
         }
@@ -391,6 +401,16 @@ pub(crate) fn render(h: &HeaderModel, mut c: HeaderChrome, theme: &Theme) -> imp
                             .map(IntoElement::into_any_element)
                             .chain(std::iter::once(level.into_any_element()))
                     })),
+            )
+        })
+        // `:group none`: the flat sheet by choice, said where the chain
+        // would be.
+        .when(h.ungrouped, |el| {
+            el.child(
+                div()
+                    .debug_selector(|| "pricer-ungrouped".into())
+                    .text_color(muted)
+                    .child("ungrouped"),
             )
         })
         .when(h.pinned, |el| {
@@ -655,6 +675,7 @@ mod tests {
             requested: &[],
             chain: &EffectiveChain::default(),
             pinned: false,
+            ungrouped: false,
             prompt: None,
             save: None,
             settings: &settings(false),
@@ -686,6 +707,7 @@ mod tests {
             requested: &[],
             chain: &EffectiveChain::default(),
             pinned: false,
+            ungrouped: false,
             prompt: None,
             save: None,
             settings: &settings(false),
@@ -707,6 +729,7 @@ mod tests {
             requested: &[],
             chain: &EffectiveChain::default(),
             pinned: false,
+            ungrouped: false,
             prompt: None,
             save: None,
             settings: &settings(false),
@@ -734,6 +757,7 @@ mod tests {
             requested: &[],
             chain: &EffectiveChain::default(),
             pinned: false,
+            ungrouped: false,
             prompt: Some("remove 'old'? (y/n)".into()),
             save: Some("not saved".into()),
             settings: &settings(false),
@@ -758,6 +782,7 @@ mod tests {
             requested: &[],
             chain: &EffectiveChain::default(),
             pinned: false,
+            ungrouped: false,
             prompt: None,
             save: None,
             settings: &settings(true),
@@ -783,6 +808,7 @@ mod tests {
             requested: &[],
             chain: &EffectiveChain::default(),
             pinned: false,
+            ungrouped: false,
             prompt: None,
             save: None,
             settings: &settings(true),
@@ -806,6 +832,7 @@ mod tests {
             requested: &[],
             chain: &EffectiveChain::default(),
             pinned: false,
+            ungrouped: false,
             prompt: None,
             save: None,
             settings: &settings(true),

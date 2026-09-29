@@ -26170,8 +26170,8 @@ run_mutation "pricer grouping: the header marks every level kept" \
 # `:group N` pins a grouping; the package verb is `:package N`.
 run_mutation "pricer grouping: :group N still packages" \
   crates/geode-pricer/src/core/commands.rs \
-  '        ["group", ..] => Ok(Command::Group(' \
-  $'        ["group", n] if n.parse::<usize>().is_ok() => Ok(Command::Package(n.parse().ok())),\n        ["group", ..] => Ok(Command::Group(' \
+  '        ["group", ..] => {' \
+  $'        ["group", n] if n.parse::<usize>().is_ok() => Ok(Command::Package(n.parse().ok())),\n        ["group", ..] => {' \
   geode-pricer package_and_unpackage_are_the_package_verbs
 
 run_mutation "pricer grouping: :group completes nothing after a column" \
@@ -26396,9 +26396,63 @@ run_mutation "pricer grouping: find walks the rollup out of order" \
 # `:group` whose every level would drop refuses and pins nothing.
 run_mutation "pricer grouping: :group pins a chain that groups by nothing" \
   crates/geode-pricer/src/tile.rs \
-  '                if effective.kept.is_empty() {' \
+  '                if effective.kept.is_empty() && !chain.is_empty() {' \
   '                if false {' \
   geode-pricer a_group_with_no_groupable_level_refuses
+
+# `:group none` pins the empty grouping in both modules: it parses to the
+# empty pin, is exempt from the pricer's no-groupable-column refusal,
+# round-trips the session as `pinned = []`, and reads `ungrouped`.
+run_mutation "pricer grouping: :group none is refused as grouping by nothing" \
+  crates/geode-pricer/src/tile.rs \
+  '                if effective.kept.is_empty() && !chain.is_empty() {' \
+  '                if effective.kept.is_empty() {' \
+  geode-pricer group_none_pins_the_flat_sheet_until_unpin
+
+run_mutation "pricer grouping: :group none parses as a column named none" \
+  crates/geode-pricer/src/core/commands.rs \
+  '        ["group", "none"] => Ok(Command::Group(Vec::new())),' \
+  '        ["group", "none"] => Ok(Command::Group(vec!["none".into()])),' \
+  geode-pricer group_none_parses_to_the_empty_pin_and_is_reserved
+
+run_mutation "pricer grouping: an empty pinned array reads as no pin" \
+  crates/geode-pricer/src/session.rs \
+  '            pinned: t.get("pinned").and_then(|v| v.as_array()).map(|a| {' \
+  '            pinned: t.get("pinned").and_then(|v| v.as_array()).filter(|a| !a.is_empty()).map(|a| {' \
+  geode-pricer an_empty_pinned_array_is_the_empty_pin
+
+run_mutation "pricer grouping: a restored empty pin follows the frame" \
+  crates/geode-pricer/src/tile.rs \
+  '            (None, Some(chain)) => Pin::Grouping(chain.clone()),' \
+  '            (None, Some(chain)) if !chain.is_empty() => Pin::Grouping(chain.clone()),
+            (None, Some(_)) => Pin::None,' \
+  geode-pricer a_group_none_pin_round_trips_the_session
+
+run_mutation "pricer grouping: the header omits ungrouped under :group none" \
+  crates/geode-pricer/src/tile.rs \
+  '            ungrouped: matches!(&self.pin, Pin::Grouping(chain) if chain.is_empty()),' \
+  '            ungrouped: false,' \
+  geode-pricer group_none_pins_the_flat_sheet_until_unpin
+
+run_mutation "blotter grouping: :group none parses as a column named none" \
+  crates/geode-blotter/src/core/commands.rs \
+  '                    None => Ok(Command::Group(Vec::new())),' \
+  '                    None => Ok(Command::Group(vec!["none".into()])),' \
+  geode-blotter group_none_parses_to_the_empty_pin_and_is_reserved
+
+run_mutation "blotter grouping: an empty pinned array restores as no pin" \
+  crates/geode-blotter/src/tile.rs \
+  '            Some(t) if t.get("pinned").and_then(|v| v.as_array()).is_some() => Pin::Grouping(' \
+  '            Some(t) if t.get("pinned").and_then(|v| v.as_array()).is_some_and(|a| !a.is_empty()) => Pin::Grouping(' \
+  geode-blotter a_group_none_pin_round_trips_through_the_session
+
+run_mutation "blotter grouping: an empty grouping titles with a dangling separator" \
+  crates/geode-blotter/src/tile.rs \
+  '    if grouping.is_empty() {
+        "ungrouped".to_string()' \
+  '    if false {
+        "ungrouped".to_string()' \
+  geode-blotter an_empty_grouping_titles_as_ungrouped
 
 # `y y` / `V y` on a split package row yank that node's legs.
 run_mutation "pricer grouping: y y on a split row yanks the whole package" \

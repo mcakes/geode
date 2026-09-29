@@ -80,6 +80,19 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ),
 ];
 
+/// The grouping as the header and title read it: levels joined by ` / `,
+/// or `ungrouped` for no levels (a flat view, or `:group none`), so the
+/// title never ends in a dangling `view · `.
+fn grouping_text(grouping: &[String]) -> String {
+    if grouping.is_empty() {
+        "ungrouped".to_string()
+    } else {
+        GroupingSlots::label_of(grouping)
+    }
+}
+
+/// The tile's grouping override. `Grouping(vec![])` is `:group none`: the
+/// view with no levels, pinned like any chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pin {
     None,
@@ -155,8 +168,9 @@ pub struct BlotterTile {
     /// The prepared header: dataset time runs, the frame's as-of warning,
     /// and the datasets the health question reads.
     header: crate::header::HeaderModel,
-    /// `GroupingSlots::label_of(&last_grouping)`, prepared where
-    /// `last_grouping` is set.
+    /// [`grouping_text`] of `last_grouping`, prepared where
+    /// `last_grouping` is set; empty until the first query resolves a
+    /// grouping.
     grouping_label: SharedString,
     /// The header's health half over `header.datasets`.
     health: HealthWatch,
@@ -440,7 +454,9 @@ impl BlotterTile {
         })
         .detach();
 
-        let title = Self::compute_title(&view_name, &[]);
+        // No grouping is resolved until the first query: the title names
+        // the view alone rather than claiming `ungrouped`.
+        let title: SharedString = view_name.clone().into();
 
         BlotterTile {
             tile,
@@ -469,7 +485,7 @@ impl BlotterTile {
             publications: Vec::new(),
             last_grouping: Vec::new(),
             header: Default::default(),
-            grouping_label: GroupingSlots::label_of(&[]).into(),
+            grouping_label: SharedString::default(),
             health: HealthWatch::new(diagnostics, tile),
             title,
             stack: None,
@@ -843,7 +859,7 @@ impl BlotterTile {
         let submitted = Instant::now();
         let tag = self.following.begin(versions, submitted);
         self.last_grouping = grouping.clone();
-        self.grouping_label = GroupingSlots::label_of(&self.last_grouping).into();
+        self.grouping_label = grouping_text(&self.last_grouping).into();
         self.title = Self::compute_title(&self.view_name, &self.last_grouping);
         let key = QueryKey(self.tile.0);
         let queued = self.data.query(QueryParams {
@@ -956,7 +972,7 @@ impl BlotterTile {
     }
 
     fn compute_title(view_name: &str, grouping: &[String]) -> SharedString {
-        format!("{} · {}", view_name, GroupingSlots::label_of(grouping)).into()
+        format!("{} · {}", view_name, grouping_text(grouping)).into()
     }
 
     /// A view the blotter can query: not over a computed dataset.
@@ -1787,7 +1803,13 @@ impl gpui::Render for BlotterTile {
                     .text_color(theme.foreground)
                     .child(self.view_name.clone()),
             )
-            .child(div().child(self.grouping_label.clone()));
+            .child(
+                div()
+                    .when(self.last_grouping.is_empty(), |el| {
+                        el.text_color(theme.muted_foreground)
+                    })
+                    .child(self.grouping_label.clone()),
+            );
         match &self.pin {
             Pin::None => {}
             _ => {
@@ -2909,6 +2931,112 @@ mod tests {
             p.grouping.as_deref(),
             Some(&["lhu".to_string()][..]),
             "rejoined slot 1"
+        );
+    }
+
+    /// A flat view (no `grouping`) and a `:group none` pin read the same:
+    /// `view · ungrouped`, never a dangling `view · `.
+    #[test]
+    fn an_empty_grouping_titles_as_ungrouped() {
+        assert_eq!(
+            BlotterTile::compute_title("flat", &[]).as_ref(),
+            "flat · ungrouped"
+        );
+        assert_eq!(
+            BlotterTile::compute_title("tree", &["lhu".into(), "book".into()]).as_ref(),
+            "tree · lhu / book"
+        );
+    }
+
+    /// `:group none` pins the empty grouping through the command door: the
+    /// tile queries the view with no levels, reads `view · ungrouped`, and
+    /// a frame slot change does not regroup it; `:unpin` follows the
+    /// frame's active slot again at once.
+    #[gpui::test]
+    fn group_none_flattens_the_tile_ignores_the_frame_and_unpin_follows_again(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.tile.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        assert_eq!(
+            p.grouping.as_deref(),
+            Some(&["lhu".to_string(), "underlying_ref".into()][..]),
+            "grouped by the view before the pin"
+        );
+
+        h.tile.update_in(&mut vcx, |t, window, cx| {
+            t.command("group none", window, cx).unwrap()
+        });
+        let p = next_query(&h.requests);
+        assert_eq!(
+            p.grouping.as_deref(),
+            Some(&[][..] as &[String]),
+            "no grouping levels"
+        );
+        h.tile.read_with(&vcx, |t, _| {
+            assert_eq!(t.pin, Pin::Grouping(Vec::new()));
+            assert_eq!(t.title().as_ref(), "tree · ungrouped");
+            assert_eq!(t.grouping_label.as_ref(), "ungrouped");
+        });
+
+        h.frame.update(&mut vcx, |f, cx| {
+            f.shared_mut().set_active_slot(Some(2));
+            cx.notify();
+        });
+        assert!(
+            h.requests.recv_timeout(Duration::from_millis(200)).is_err(),
+            "a `none`-pinned tile does not follow the frame's slot"
+        );
+
+        h.tile.update_in(&mut vcx, |t, window, cx| {
+            t.command("unpin", window, cx).unwrap()
+        });
+        let p = next_query(&h.requests);
+        assert_eq!(
+            p.grouping.as_deref(),
+            Some(&["underlying_ref".to_string(), "lhu".into()][..]),
+            "unpinned: the frame's active slot at once"
+        );
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.title()).as_ref(),
+            "tree · underlying_ref / lhu"
+        );
+    }
+
+    /// A `none` pin is written as an empty `pinned` array, and the factory's
+    /// restore path reads that back as the empty pin, not as "no pin": the
+    /// restored tile queries flat and ignores a frame slot change.
+    #[gpui::test]
+    fn a_group_none_pin_round_trips_through_the_session(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.tile.update_in(&mut vcx, |t, window, cx| {
+            t.command("group none", window, cx).unwrap()
+        });
+        let state = h.tile.read_with(&vcx, |t, cx| t.serialize(cx));
+        assert_eq!(
+            state.get("pinned").and_then(|v| v.as_array()).map(Vec::len),
+            Some(0),
+            "{state:?}"
+        );
+
+        let (h2, mut vcx2) = open_with(cx, Some(&state));
+        assert_eq!(
+            h2.tile.read_with(&vcx2, |t, _| t.pin.clone()),
+            Pin::Grouping(Vec::new())
+        );
+        h2.tile.update(&mut vcx2, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h2.requests);
+        assert_eq!(p.grouping.as_deref(), Some(&[][..] as &[String]));
+        h2.frame.update(&mut vcx2, |f, cx| {
+            f.shared_mut().set_active_slot(Some(2));
+            cx.notify();
+        });
+        assert!(
+            h2.requests
+                .recv_timeout(Duration::from_millis(200))
+                .is_err(),
+            "the restored pin still ignores the frame"
         );
     }
 

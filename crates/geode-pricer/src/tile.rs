@@ -171,8 +171,9 @@ struct FindState {
 }
 
 /// The tile's grouping override, as the blotter's: `:group <cols…>`
-/// pins a chain, `:group slot N` a frame slot, `:unpin` follows the
-/// frame again. Session keys `pinned` / `pinned_slot`.
+/// pins a chain, `:group none` the empty chain (the flat sheet),
+/// `:group slot N` a frame slot, `:unpin` follows the frame again.
+/// Session keys `pinned` (an empty array for `none`) / `pinned_slot`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) enum Pin {
     #[default]
@@ -3714,8 +3715,9 @@ impl PricerTile {
             Command::Group(chain) => {
                 // A chain `pricer` would drop whole pins nothing: `:group 2`
                 // reads as a count, and the package verb is `:package N`.
+                // The empty chain is `:group none`, the flat sheet by choice.
                 let effective = rollup::effective_chain(&chain, &self.shared.dims.borrow());
-                if effective.kept.is_empty() {
+                if effective.kept.is_empty() && !chain.is_empty() {
                     return Err(format!(
                         "no groupable column in {}; :package N packages lines",
                         chain.join(" ")
@@ -4748,6 +4750,7 @@ impl PricerTile {
             requested: &self.requested,
             chain: &self.chain,
             pinned: self.pin != Pin::None,
+            ungrouped: matches!(&self.pin, Pin::Grouping(chain) if chain.is_empty()),
             prompt: self.confirm.as_ref().map(|c| c.prompt_text().clone()),
             save: self.save_notice.clone(),
             settings: &settings,

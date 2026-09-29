@@ -26,7 +26,7 @@ The pure core (`core`, no element, entity, window, or data service):
 | `complete` | Entry-bar completion: the slot at the caret, suggestions, hint, and the Tab cycle. |
 | `clip` | The yank register and where `p`/`shift+p` land. |
 | `tree` | Package expansion and the visible-row walk. |
-| `commands` | The `:` vocabulary (including `:autosize [reset]`, `:package [n]`/`:unpackage`, `:group <columns>`/`:group slot <n>`/`:unpin`): parse and completions (`:group` completes `rollup::groupable_vocabulary` and `slot`). |
+| `commands` | The `:` vocabulary (including `:autosize [reset]`, `:package [n]`/`:unpackage`, `:group <columns>`/`:group slot <n>`/`:group none`/`:unpin`): parse and completions (`:group` completes `rollup::groupable_vocabulary`, `none` and `slot`; `none` is reserved, never a column). |
 | `storage` | The frozen `pricer_sheets` declaration; conversion between sheets, document rows, and a document answer. |
 | `select` | What a grid selection reaches on the sheet: the leaf lines an edit writes (`lines_of`), the top-most rows a verb or total acts on (`top_most`), the `g p` and `shift+j`/`shift+k` plans with their refusals, position risk totals (`risk_totals`, and `risk_totals_visible`, which counts only a partly hidden package's shown legs), and the bulk notices' skip counts. |
 | `rollup` | The shown lines under a grouping chain. `effective_chain` drops levels `pricer` cannot group by (a column it lacks, a measure, a derived dimension over either or over a synthetic key, any level after `position_ref`/`instrument_ref`, a repeated level; `value_levels` counts the kept value levels, the regroup's prune depth). `build` partitions shown legs and bare lines by their `SheetRow` value per level (NULL distinct from empty and last; numbers by number, text by byte order), then gathers them by parent in sheet order; a package whose legs fall under several groups appears under each (`split`; `partial` when fewer than all its legs). `position_ref` is the package node, `instrument_ref` makes every leg a leaf. `legs_under` gives a node's legs. Pure; the flat case is the empty chain. |
@@ -114,7 +114,9 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   path. An editor whose line a rebuild leaves inside a closed group closes
   with `REGROUPED_EDIT`, not `MOVED`.
 - `:group` whose every level `effective_chain` drops refuses and pins
-  nothing (`:group 2` is not a count). `y y` and `V y` on a split package
+  nothing (`:group 2` is not a count). `:group none` is the empty chain
+  (`Pin::Grouping(vec![])`, session `pinned = []`), exempt from that
+  refusal: the flat sheet pinned, a muted `ungrouped` in the header. `y y` and `V y` on a split package
   row yank that node's legs (`grid_rows_under`), as the row shows them.
 - Completion never runs in render; the tile refreshes it on every text change,
   history step, commit and reload, and a Tab at a moved caret re-ranks first.

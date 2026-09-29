@@ -186,13 +186,13 @@ fn package_and_unpackage_are_the_package_verbs(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// `:group` completes the groupable `pricer` columns and `slot`; a
+/// `:group` completes the groupable `pricer` columns, `none` and `slot`; a
 /// measure is not groupable.
 #[gpui::test]
 fn colon_group_completes_the_groupable_columns(cx: &mut gpui::TestAppContext) {
     let (h, vcx) = open_seeded(cx, &MIXED);
     let got = h.tile.read_with(&vcx, |t, _| t.completions("group ", 6));
-    for want in ["underlying_ref", "expiry", "position_ref", "slot"] {
+    for want in ["underlying_ref", "expiry", "position_ref", "none", "slot"] {
         assert!(got.contains(&want.to_string()), "{want} in {got:?}");
     }
     assert!(!got.contains(&"npv".to_string()), "{got:?}");
@@ -912,6 +912,73 @@ fn a_group_with_no_groupable_level_refuses(cx: &mut gpui::TestAppContext) {
         assert!(!h.header(&vcx).contains(&"pinned".to_string()), "{line}");
         assert_eq!(h.tree(&vcx).len(), 3, "{line}: still flat");
     }
+}
+
+/// `:group none` pins the empty chain: the flat sheet under a grouped
+/// frame, with no "no groupable column" refusal. The header shows the
+/// `pinned` chip and a muted `ungrouped` where the chain would be (no
+/// chain chips); moves and a counted `g p` work as in the flat sheet; a
+/// frame slot change does not regroup it; `:unpin` follows the frame at
+/// once.
+#[gpui::test]
+fn group_none_pins_the_flat_sheet_until_unpin(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &MIXED);
+    slots(&h, &mut vcx, &[(1, &["underlying_ref"]), (2, &["expiry"])]);
+    activate(&h, &mut vcx, Some(1));
+    assert_eq!(h.tree(&vcx), ["NDX", "SPX"], "grouped by the frame");
+
+    h.command(&mut vcx, "group none").unwrap();
+    assert!(kept(&h, &vcx).is_empty());
+    assert_eq!(h.tree(&vcx).len(), 3, "the flat sheet");
+    let header = h.header(&vcx);
+    for want in ["pinned", "ungrouped"] {
+        assert!(header.contains(&want.to_string()), "{want} in {header:?}");
+    }
+    h.draw(&mut vcx);
+    assert!(vcx.debug_bounds("pricer-chain").is_none(), "no chain chips");
+    assert!(vcx.debug_bounds("pricer-ungrouped").is_some());
+    assert!(vcx.debug_bounds("pricer-pinned").is_some());
+
+    // Moves and a counted `g p` work as in the flat sheet.
+    cursor_to(&h, &mut vcx, "SPX Z26 5000 C");
+    h.dispatch(&mut vcx, "move_down", None);
+    assert_eq!(h.footer(&vcx), None);
+    assert_eq!(h.tree(&vcx)[..2], ["NDX Z26 4000 P", "SPX Z26 5000 C"]);
+    h.motion(&mut vcx, "top", None);
+    let len = h.sheet_len(&vcx);
+    h.dispatch(&mut vcx, "group", Some(2));
+    assert_eq!(h.footer(&vcx), None);
+    assert_eq!(h.sheet_len(&vcx), len + 1, "a package over two lines");
+
+    activate(&h, &mut vcx, Some(2));
+    assert!(kept(&h, &vcx).is_empty(), "the frame does not regroup it");
+    assert!(h.header(&vcx).contains(&"ungrouped".to_string()));
+
+    h.command(&mut vcx, "unpin").unwrap();
+    assert_eq!(kept(&h, &vcx), ["expiry"], "the frame's slot at once");
+    let header = h.header(&vcx);
+    for gone in ["pinned", "ungrouped"] {
+        assert!(!header.contains(&gone.to_string()), "{gone} in {header:?}");
+    }
+}
+
+/// A `none` pin is saved as an empty `pinned` array and the factory's
+/// restore reads it back as the empty pin, not as "no pin": the restored
+/// tile stays flat under a grouped frame.
+#[gpui::test]
+fn a_group_none_pin_round_trips_the_session(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &MIXED);
+    h.command(&mut vcx, "group none").unwrap();
+    let saved = h.serialize(&mut vcx);
+    let r = crate::session::Record::from_table(&saved);
+    assert_eq!((r.pinned, r.pinned_slot), (Some(Vec::new()), None));
+
+    let (r2, mut vcx2) = open_full(cx, Some(saved), h.store.clone(), PricerSettings::default());
+    slots(&r2, &mut vcx2, &[(1, &["underlying_ref"])]);
+    activate(&r2, &mut vcx2, Some(1));
+    assert!(kept(&r2, &vcx2).is_empty(), "restored pinned to none");
+    assert_eq!(r2.tree(&vcx2).len(), 3);
+    assert!(r2.header(&vcx2).contains(&"pinned".to_string()));
 }
 
 /// On a split package row, `y y` and `V y` yank what the row shows: its

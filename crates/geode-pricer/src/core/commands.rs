@@ -34,6 +34,7 @@ pub enum Command {
     Unpackage,
     /// `:group <cols…>`: pin this tile to a grouping chain (the
     /// blotter's `Pin::Grouping`); columns split on commas or spaces.
+    /// `:group none` is the empty chain: the flat sheet.
     Group(Vec<String>),
     /// `:group slot N`: pin this tile to frame slot `N` (1–9).
     GroupSlot(u8),
@@ -156,7 +157,11 @@ pub fn parse(line: &str) -> Result<Command, String> {
         ["unpackage"] => Ok(Command::Unpackage),
         ["unpackage", ..] => Err("usage: unpackage".into()),
         // The blotter's `:group`: a bare one names nothing to pin.
-        ["group"] => Err("group needs columns or `slot N`".into()),
+        ["group"] => Err("group needs columns, `slot N` or `none`".into()),
+        // `none` pins the empty grouping: the flat sheet, whatever the
+        // frame's grouping becomes.
+        ["group", "none"] => Ok(Command::Group(Vec::new())),
+        ["group", "none", ..] => Err("usage: group none".into()),
         ["group", "slot", rest @ ..] => match rest {
             [n] => n
                 .parse::<u8>()
@@ -166,14 +171,18 @@ pub fn parse(line: &str) -> Result<Command, String> {
                 .ok_or_else(|| GROUP_SLOT_USAGE.into()),
             _ => Err(GROUP_SLOT_USAGE.into()),
         },
-        ["group", ..] => Ok(Command::Group(
-            words[1..]
+        ["group", ..] => {
+            let chain: Vec<String> = words[1..]
                 .iter()
                 .flat_map(|w| w.split(','))
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
-                .collect(),
-        )),
+                .collect();
+            if chain.iter().any(|c| c == "none") {
+                return Err("`none` is reserved: `:group none` alone ungroups this tile".into());
+            }
+            Ok(Command::Group(chain))
+        }
         ["unpin"] => Ok(Command::Unpin),
         ["unpin", ..] => Err("usage: unpin".into()),
         ["e", name] => sheet_name("e", name).map(Command::Edit),
@@ -233,9 +242,10 @@ pub fn completions(
         ["group"] => groupable
             .iter()
             .cloned()
-            .chain(["slot".to_string()])
+            .chain(["none".to_string(), "slot".to_string()])
             .collect(),
         ["group", "slot"] => (1..=9).map(|n| n.to_string()).collect(),
+        ["group", "none", ..] => Vec::new(),
         ["group", ..] => groupable.to_vec(),
         _ => Vec::new(),
     }
@@ -372,10 +382,6 @@ mod tests {
         assert_eq!(parse("group 2"), Ok(Command::Group(vec!["2".into()])));
         assert_eq!(parse("ungroup"), Err("unknown command 'ungroup'".into()));
         assert_eq!(
-            parse("group"),
-            Err("group needs columns or `slot N`".into())
-        );
-        assert_eq!(
             parse("group slot 0"),
             Err("group slot needs a slot number 1–9".into())
         );
@@ -399,6 +405,31 @@ mod tests {
             Err(":e: a sheet name cannot hold a control character".into())
         );
         assert_eq!(parse("bogus"), Err("unknown command 'bogus'".into()));
+    }
+
+    /// `:group none` pins the empty grouping (the flat sheet). `none` is
+    /// reserved beside `slot`: never a column, nothing after it, and
+    /// completion offers it beside `slot`.
+    #[test]
+    fn group_none_parses_to_the_empty_pin_and_is_reserved() {
+        assert_eq!(parse("group none"), Ok(Command::Group(Vec::new())));
+        assert_eq!(parse("group none expiry"), Err("usage: group none".into()));
+        assert!(
+            parse("group expiry none")
+                .unwrap_err()
+                .contains("`none` is reserved"),
+            "`none` is never a column name"
+        );
+        assert_eq!(
+            parse("group"),
+            Err("group needs columns, `slot N` or `none`".into())
+        );
+        let groupable = vec!["expiry".to_string()];
+        assert_eq!(
+            completions("group ", 6, &[], &[], &[], &groupable),
+            vec!["expiry", "none", "slot"]
+        );
+        assert!(completions("group none ", 11, &[], &[], &[], &groupable).is_empty());
     }
 
     #[test]
@@ -438,7 +469,7 @@ mod tests {
         assert!(completions("new ", 4, &views, &unds).is_empty());
         assert_eq!(
             completions("group ", 6, &views, &unds),
-            vec!["expiry", "underlying_ref", "slot"]
+            vec!["expiry", "underlying_ref", "none", "slot"]
         );
         assert_eq!(
             completions("group expiry ", 13, &views, &unds),

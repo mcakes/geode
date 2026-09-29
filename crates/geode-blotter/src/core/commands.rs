@@ -88,15 +88,26 @@ pub fn parse(line: &str) -> Result<Command, String> {
         "group" => {
             let mut words = rest.split_whitespace();
             match words.next() {
-                None => Err("group needs columns or `slot N`".into()),
+                None => Err("group needs columns, `slot N` or `none`".into()),
                 Some("slot") => slot(words.next(), "group slot").map(Command::GroupSlot),
                 Some("save") => Ok(Command::Refused(REFUSED_GROUP_SAVE)),
+                // `none` pins the empty grouping: the view with no levels,
+                // whatever the frame's grouping becomes.
+                Some("none") => match words.next() {
+                    None => Ok(Command::Group(Vec::new())),
+                    Some(_) => Err("group none takes nothing more".into()),
+                },
                 Some(_) => {
                     let columns: Vec<String> = rest
                         .split(|c: char| c == ',' || c.is_whitespace())
                         .filter(|s| !s.is_empty())
                         .map(str::to_string)
                         .collect();
+                    if columns.iter().any(|c| c == "none") {
+                        return Err(
+                            "`none` is reserved: `:group none` alone ungroups this tile".into()
+                        );
+                    }
                     Ok(Command::Group(columns))
                 }
             }
@@ -210,10 +221,11 @@ pub fn completions(line: &str, cursor: usize, vocab: &Vocabulary) -> Vec<String>
         ["sort", _, "abs"] => vec!["asc".into(), "desc".into()],
         ["group"] => {
             let mut v = vocab.dimensions.clone();
-            v.push("slot".into());
+            v.extend(["none", "slot"].map(String::from));
             v
         }
         ["group", "slot"] => (1..=9).map(|n| n.to_string()).collect(),
+        ["group", "none", ..] => Vec::new(),
         ["group", ..] => vocab.dimensions.clone(),
         ["filter"] => {
             let mut v = vocab.dimensions.clone();
@@ -389,7 +401,7 @@ mod tests {
         assert!(names("sort clear ").is_empty());
         assert_eq!(
             names("group "),
-            vec!["book", "lhu", "slot"],
+            vec!["book", "lhu", "none", "slot"],
             "group completes dimensions (book, lhu), never the delta01 measure"
         );
         assert_eq!(names("group lhu,"), vec!["book", "lhu"]);
@@ -423,9 +435,37 @@ mod tests {
         assert_eq!(completions(line, cursor, &v), vec!["clear", "délta"]);
     }
 
+    /// `:group none` pins the empty grouping: the view with no levels.
+    /// `none` is reserved beside `slot`, never a column, and takes nothing
+    /// after it; completion offers it beside `slot`.
+    #[test]
+    fn group_none_parses_to_the_empty_pin_and_is_reserved() {
+        assert_eq!(parse("group none").unwrap(), Command::Group(Vec::new()));
+        assert_eq!(parse("group  none ").unwrap(), Command::Group(Vec::new()));
+        assert_eq!(
+            parse("group none lhu").unwrap_err(),
+            "group none takes nothing more"
+        );
+        assert!(
+            parse("group lhu none")
+                .unwrap_err()
+                .contains("`none` is reserved"),
+            "`none` is never a column name"
+        );
+        assert_eq!(
+            parse("group").unwrap_err(),
+            "group needs columns, `slot N` or `none`"
+        );
+        assert_eq!(
+            completions("group ", 6, &vocab()),
+            vec!["book", "lhu", "none", "slot"]
+        );
+        assert!(completions("group none ", 11, &vocab()).is_empty());
+    }
+
     /// Grouping and filtering offer dimensions absent from the displayed
     /// columns. Sorting offers only the column vocabulary. `group` also
-    /// offers its `slot` subcommand.
+    /// offers its `slot` and `none` subcommands.
     #[test]
     fn group_and_drop_complete_dimensions_not_measures() {
         let vocab = Vocabulary {
@@ -435,7 +475,7 @@ mod tests {
         };
         assert_eq!(
             completions("group ", 6, &vocab),
-            vec!["book", "currency", "slot"]
+            vec!["book", "currency", "none", "slot"]
         );
         assert_eq!(
             completions("sort ", 5, &vocab),
@@ -482,7 +522,7 @@ mod tests {
         assert_eq!(completions("asof ", 5, &vocab()), vec!["clear", "live"]);
         assert_eq!(
             completions("group ", 6, &vocab()),
-            vec!["book", "lhu", "slot"],
+            vec!["book", "lhu", "none", "slot"],
             "`save` is no longer offered after `group`"
         );
     }

@@ -154,7 +154,8 @@ that exception.
 
 Move between tiles with `mod+h/j/k/l` for left/down/up/right, or click the
 tile you want. In the pinned tile, run `:unpin` to make its grouping follow the
-frame again. Press `ctrl+3` to return both to underlying-first grouping.
+frame again. `:group none` pins a tile to no grouping at all — the view's
+single total row in a blotter, the flat sheet in a pricer — until `:unpin`. Press `ctrl+3` to return both to underlying-first grouping.
 
 This distinction repeats throughout Geode: **shared actions coordinate views;
 tile commands let one view answer a different question.** A `:` command

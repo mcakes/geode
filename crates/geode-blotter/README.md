@@ -27,6 +27,13 @@ cargo bench -p geode-blotter   # the pure core
 
 ## Invariants
 
+- `:group none` is `Pin::Grouping(vec![])`, saved as `pinned = []` and
+  restored as the empty pin (not "no pin"): the view with no grouping
+  levels, ignoring the frame's grouping until `:unpin`. `none` and `slot`
+  are reserved after `:group`. An empty grouping (this pin or a view
+  without `grouping`) reads `ungrouped` in the header and `view ·
+  ungrouped` in the title; before the first query the title is the view
+  name alone.
 - `:autosize` and the shell's `tile::autosize_columns` run one method,
   `BlotterTile::autosize_columns`. It measures only rows in the format
   cache (the window the table last asked for), never the whole snapshot. A
