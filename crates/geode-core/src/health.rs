@@ -4,8 +4,8 @@
 //! Variants are declared in increasing severity, but derived `Ord` also compares
 //! reason strings within a variant. Health rollups must compare explicit severity
 //! ranks and preserve simultaneous findings; taking `max` over `Health` values
-//! would choose one reason by lexical order. The data layer uses its internal
-//! `health::severity_rank` for this purpose.
+//! would choose one reason by lexical order. [`Health::severity`] is that rank;
+//! every rollup uses it.
 //!
 //! This type lives below both the shell and data crates so diagnostics can carry
 //! health without a dependency between those crates.
@@ -63,11 +63,50 @@ impl Health {
     pub fn is_ok(&self) -> bool {
         matches!(self, Health::Ok)
     }
+
+    /// Severity by variant only: Ok 0, Pending 1, PendingTooLong 2,
+    /// Degraded 3, Failed 4. Every rollup ranks with this — the data
+    /// layer's lanes, the status summary, the diagnostics page and a tile's
+    /// health chip — never with the derived `Ord`, which falls through to
+    /// reason text within a variant.
+    pub fn severity(&self) -> u8 {
+        match self {
+            Health::Ok => 0,
+            Health::Pending => 1,
+            Health::PendingTooLong => 2,
+            Health::Degraded { .. } => 3,
+            Health::Failed { .. } => 4,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The one rollup rank. Reason text never moves it: two failures with
+    /// different reasons rank equal, unlike the derived `Ord`.
+    #[test]
+    fn severity_ranks_ok_pending_too_long_degraded_failed() {
+        let ranks: Vec<u8> = [
+            Health::Ok,
+            Health::Pending,
+            Health::PendingTooLong,
+            Health::Degraded { reason: "z".into() },
+            Health::Failed { reason: "a".into() },
+        ]
+        .iter()
+        .map(Health::severity)
+        .collect();
+        assert_eq!(ranks, vec![0, 1, 2, 3, 4]);
+        assert_eq!(
+            Health::Failed { reason: "a".into() }.severity(),
+            Health::Failed {
+                reason: "zzz".into()
+            }
+            .severity()
+        );
+    }
 
     /// Variants sort in severity order. This does not establish a valid rollup:
     /// same-variant values also compare their reason text.

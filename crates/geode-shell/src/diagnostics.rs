@@ -298,6 +298,12 @@ pub struct Diagnostics {
     summary_cache: RefCell<(u64, Rc<str>)>,
 }
 
+/// The status summary's source labels, indexed by [`Health::severity`].
+/// `build_summary` keeps its own copy as `LABELS`; a test holds the two and
+/// the severity order together.
+#[cfg(test)]
+const SUMMARY_LABELS: [&str; 5] = ["ok", "pending", "pending_too_long", "degraded", "failed"];
+
 impl Diagnostics {
     pub fn new(levels: LogLevels) -> Diagnostics {
         Diagnostics {
@@ -735,9 +741,7 @@ impl Diagnostics {
             let Some(health) = &s.health else {
                 continue; // Unreported sources have no health to count.
             };
-            if let Some(idx) = LABELS.iter().position(|&l| l == health.label()) {
-                counts[idx] += 1;
-            }
+            counts[usize::from(health.severity())] += 1;
         }
         let mut parts: Vec<String> = Vec::new();
         let source_parts: Vec<String> = LABELS
@@ -850,6 +854,38 @@ pub fn fnv1a(s: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every variant is counted under its own label, in severity order;
+    /// two failures with different reasons are one count of two.
+    #[test]
+    fn the_summary_counts_every_health_under_its_own_label() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        let t = SystemTime::UNIX_EPOCH;
+        d.note_health("a", Health::Ok, "".into(), t);
+        d.note_health("b", Health::Pending, "".into(), t);
+        d.note_health("c", Health::PendingTooLong, "f.csv".into(), t);
+        d.note_health("d", Health::Degraded { reason: "r".into() }, "r".into(), t);
+        d.note_health("e", Health::Failed { reason: "r".into() }, "r".into(), t);
+        d.note_health("f", Health::Failed { reason: "s".into() }, "s".into(), t);
+        assert_eq!(
+            d.summary().as_ref(),
+            "sources 1 ok · 1 pending · 1 pending_too_long · 1 degraded · 2 failed"
+        );
+    }
+
+    /// The summary's label table is indexed by `Health::severity`.
+    #[test]
+    fn summary_labels_are_indexed_by_severity() {
+        for h in [
+            Health::Ok,
+            Health::Pending,
+            Health::PendingTooLong,
+            Health::Degraded { reason: "r".into() },
+            Health::Failed { reason: "r".into() },
+        ] {
+            assert_eq!(SUMMARY_LABELS[usize::from(h.severity())], h.label());
+        }
+    }
     use geode_core::config::{Diagnostic, Layer};
     use std::path::PathBuf;
     use std::time::Duration;

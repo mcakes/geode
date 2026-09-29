@@ -25678,6 +25678,32 @@ run_mutation "panels: a configured panel paints its own ladder format" \
   '        std::iter::repeat_with(|| CellKind::Number(geode_core::view::ColumnFormat { precision: 4, ..spec.format.clone() })).take(grid.columns.len()),' \
   geode-marketdata a_user_layer_panel_paints_its_own_title_and_formats
 
+# ---- Tile header and source health -------------------------------------
+
+# One rank for every rollup; a swapped pair reorders the status bar, the
+# page's worst health and a tile's chip together.
+run_mutation "health rank: degraded outranks pending_too_long" \
+  crates/geode-core/src/health.rs \
+  '            Health::Degraded { .. } => 3,' \
+  '            Health::Degraded { .. } => 2,' \
+  geode-core severity_ranks_ok_pending_too_long_degraded_failed
+
+# The status summary counts by severity index; a clamped index files
+# failures under degraded.
+run_mutation "health rank: the summary counts under the severity index" \
+  crates/geode-shell/src/diagnostics.rs \
+  '            counts[usize::from(health.severity())] += 1;' \
+  '            counts[usize::from(health.severity()).min(3)] += 1;' \
+  geode-shell the_summary_counts_every_health_under_its_own_label
+
+# The page ranks by severity; ranking by label text calls
+# pending_too_long worse than degraded.
+run_mutation "health rank: the page ranks by severity, not label" \
+  crates/geode-diagnostics/src/model.rs \
+  '            Some(w) if w.severity() >= h.severity() => Some(w),' \
+  '            Some(w) if w.label() >= h.label() => Some(w),' \
+  geode-diagnostics the_page_ranks_health_by_the_core_severity
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
