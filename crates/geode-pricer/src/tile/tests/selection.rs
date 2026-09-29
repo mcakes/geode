@@ -355,8 +355,8 @@ fn row_verbs_in_a_block_refuse_and_name_v(cx: &mut gpui::TestAppContext) {
     for (verb, text) in [
         ("delete", "d deletes rows — use V"),
         ("move_down", "shift+j/k move rows — use V"),
-        ("group", "g p groups rows — use V"),
-        ("ungroup", "g u ungroups rows — use V"),
+        ("group", "g p packages rows — use V"),
+        ("ungroup", "g u unpackages rows — use V"),
     ] {
         h.dispatch(&mut vcx, verb, None);
         assert_eq!(h.footer(&vcx).as_deref(), Some(text), "{verb}");

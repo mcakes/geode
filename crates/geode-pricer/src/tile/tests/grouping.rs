@@ -163,15 +163,14 @@ fn a_dropped_level_is_struck_through_in_the_header(cx: &mut gpui::TestAppContext
 }
 
 /// `:package [count]` / `:unpackage` are the package verbs now, the keys
-/// `g p` / `g u` still reach them, and `:group 2` pins a grouping by a
-/// column named `2` (dropped) — it never packages two lines.
+/// `g p` / `g u` still reach them, and `:group 2` names a column `2`
+/// that `pricer` cannot group by — it refuses, and never packages two
+/// lines.
 #[gpui::test]
 fn package_and_unpackage_are_the_package_verbs(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "SPX Z26 4000 P", "NDX Z26 4000 P"]);
-    h.command(&mut vcx, "group 2").unwrap();
+    assert!(h.command(&mut vcx, "group 2").is_err());
     assert_eq!(h.sheet_len(&vcx), 3, "no package");
-    assert_eq!(h.header(&vcx)[3..5], ["~2~", "pinned"]);
-    h.command(&mut vcx, "unpin").unwrap();
     h.command(&mut vcx, "package 2").unwrap();
     assert_eq!(h.sheet_len(&vcx), 4, "a package row over two lines");
     h.command(&mut vcx, "unpackage").unwrap();
@@ -728,4 +727,255 @@ fn put_and_add_on_a_group_row_go_to_the_end(cx: &mut gpui::TestAppContext) {
     cursor_to(&h, &mut vcx, "SPX");
     h.dispatch(&mut vcx, "add_below", None);
     assert_eq!(h.entry_label(&vcx).as_deref(), Some("at end"));
+}
+
+/// A line typed into the entry bar that lands in a closed group opens
+/// that group, and the cursor rests on the line — it never vanishes into
+/// a closed group.
+#[gpui::test]
+fn an_entered_line_opens_its_closed_group(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &MIXED);
+    h.command(&mut vcx, "group underlying_ref").unwrap();
+    assert_eq!(h.tree(&vcx), ["NDX", "SPX"], "fixture: every group closed");
+    cursor_to(&h, &mut vcx, "NDX");
+    h.dispatch(&mut vcx, "add_below", None);
+    typed(&h, &mut vcx, "SPX Z26 3000 P");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(
+        h.tree(&vcx),
+        [
+            "NDX",
+            "SPX",
+            "SPX Z26 5000 C",
+            "-5 SPX Z26 4800/5200 CS",
+            "SPX Z26 3000 P"
+        ],
+        "its SPX group opened; NDX stays closed"
+    );
+    assert_eq!(cursor_text(&h, &vcx).as_deref(), Some("SPX Z26 3000 P"));
+}
+
+/// `p` whose lines land in a closed group opens it and rests on what
+/// landed.
+#[gpui::test]
+fn a_put_into_a_closed_group_opens_it(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &MIXED);
+    h.command(&mut vcx, "group underlying_ref").unwrap();
+    cursor_to(&h, &mut vcx, "NDX");
+    h.dispatch(&mut vcx, "toggle", None);
+    cursor_to(&h, &mut vcx, "NDX Z26 4000 P");
+    h.dispatch(&mut vcx, "yank_row", None);
+    cursor_to(&h, &mut vcx, "NDX");
+    h.dispatch(&mut vcx, "toggle", None);
+    assert_eq!(h.tree(&vcx), ["NDX", "SPX"], "fixture: NDX closed again");
+    cursor_to(&h, &mut vcx, "SPX");
+    h.dispatch(&mut vcx, "put_below", None);
+    assert_eq!(
+        h.tree(&vcx),
+        ["NDX", "NDX Z26 4000 P", "NDX Z26 4000 P", "SPX"],
+        "the put line's NDX group opened"
+    );
+    assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(2), "on the put line");
+}
+
+/// An undo restoring a line into a closed group opens the group and
+/// rests on the restored line.
+#[gpui::test]
+fn an_undo_restoring_into_a_closed_group_opens_it(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &MIXED);
+    h.command(&mut vcx, "group underlying_ref").unwrap();
+    cursor_to(&h, &mut vcx, "SPX");
+    h.dispatch(&mut vcx, "toggle", None);
+    cursor_to(&h, &mut vcx, "SPX Z26 5000 C");
+    h.dispatch(&mut vcx, "delete", None);
+    cursor_to(&h, &mut vcx, "SPX");
+    h.dispatch(&mut vcx, "toggle", None);
+    assert_eq!(h.tree(&vcx), ["NDX", "SPX"], "fixture: SPX closed");
+    h.dispatch(&mut vcx, "undo", None);
+    assert_eq!(
+        h.tree(&vcx),
+        ["NDX", "SPX", "SPX Z26 5000 C", "-5 SPX Z26 4800/5200 CS"]
+    );
+    assert_eq!(cursor_text(&h, &vcx).as_deref(), Some("SPX Z26 5000 C"));
+}
+
+/// [SPX 5000 C, SPX 5000 P, SPX 4000 P]: under `strike` the 5000 group
+/// outlives one of its lines moving to 4000.
+const STRIKES: [&str; 3] = ["SPX Z26 5000 C", "SPX Z26 5000 P", "SPX Z26 4000 P"];
+
+/// An edit of the grouped column moves the line to another group: the
+/// cursor follows the line there, not onto its old group's row.
+#[gpui::test]
+fn an_edit_of_the_grouped_value_keeps_the_cursor_on_its_line(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &STRIKES);
+    h.command(&mut vcx, "group strike").unwrap();
+    h.dispatch(&mut vcx, "expand_all", None);
+    cursor_to(&h, &mut vcx, "SPX Z26 5000 C");
+    goto_column(&h, &mut vcx, "strike");
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "4000");
+    h.dispatch(&mut vcx, "commit", None);
+    assert!(
+        h.tree(&vcx).contains(&"5000".to_string()),
+        "fixture: 5000 stays"
+    );
+    assert_eq!(cursor_text(&h, &vcx).as_deref(), Some("SPX Z26 4000 C"));
+}
+
+/// A `V` edit of the grouped column keeps the selection: its anchor line
+/// paints once, in its new group.
+#[gpui::test]
+fn a_selection_edit_of_the_grouped_value_keeps_the_selection(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &STRIKES);
+    h.command(&mut vcx, "group strike").unwrap();
+    h.dispatch(&mut vcx, "expand_all", None);
+    cursor_to(&h, &mut vcx, "SPX Z26 5000 C");
+    goto_column(&h, &mut vcx, "strike");
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "4000");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.footer(&vcx), None, "no lost anchor");
+    assert_eq!(h.mode(&mut vcx), "visual");
+    let row = h.cursor(&vcx).unwrap().0;
+    assert_eq!(cursor_text(&h, &vcx).as_deref(), Some("SPX Z26 4000 C"));
+    let rows = h
+        .tile
+        .read_with(&vcx, |t, _| t.resolved().map(|r| r.rows.clone()));
+    assert_eq!(rows, Some(row..row + 1));
+}
+
+fn find(h: &Harness, vcx: &mut VisualTestContext, e: FindEvent) {
+    vcx.update(|window, cx| h.content.find(e, window, cx));
+}
+
+/// `/` reaches lines inside closed groups: a match opens its groups and
+/// the cursor rests on it; `n`/`N` walk the rollup as it paints with
+/// every group open; a closed package is found by its legs.
+#[gpui::test]
+fn find_opens_the_groups_of_a_match_inside_them(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &MIXED);
+    h.command(&mut vcx, "group underlying_ref").unwrap();
+    assert_eq!(h.tree(&vcx), ["NDX", "SPX"], "fixture: every group closed");
+    h.motion(&mut vcx, "top", None);
+    find(&h, &mut vcx, FindEvent::Changed("z26".into()));
+    assert_eq!(cursor_text(&h, &vcx).as_deref(), Some("NDX Z26 4000 P"));
+    assert_eq!(h.tree(&vcx), ["NDX", "NDX Z26 4000 P", "SPX"]);
+    find(&h, &mut vcx, FindEvent::Committed("z26".into()));
+    h.dispatch(&mut vcx, "find_next", None);
+    assert_eq!(cursor_text(&h, &vcx).as_deref(), Some("SPX Z26 5000 C"));
+    h.dispatch(&mut vcx, "find_next", None);
+    assert_eq!(
+        cursor_text(&h, &vcx).as_deref(),
+        Some("-5 SPX Z26 4800/5200 CS")
+    );
+    h.dispatch(&mut vcx, "find_next", None);
+    assert_eq!(
+        cursor_text(&h, &vcx).as_deref(),
+        Some("NDX Z26 4000 P"),
+        "wraps in painted order"
+    );
+    h.dispatch(&mut vcx, "find_prev", None);
+    assert_eq!(
+        cursor_text(&h, &vcx).as_deref(),
+        Some("-5 SPX Z26 4800/5200 CS")
+    );
+    // Two levels deep, all closed: a closed package is found by a leg's
+    // strike, and both its groups open.
+    h.command(&mut vcx, "group underlying_ref expiry").unwrap();
+    h.dispatch(&mut vcx, "collapse_all", None);
+    assert_eq!(h.tree(&vcx), ["NDX", "SPX"], "fixture: all closed");
+    h.motion(&mut vcx, "top", None);
+    find(&h, &mut vcx, FindEvent::Changed("5200".into()));
+    assert_eq!(
+        cursor_text(&h, &vcx).as_deref(),
+        Some("-5 SPX Z26 4800/5200 CS"),
+        "{:?}",
+        h.tree(&vcx)
+    );
+}
+
+/// `:group` whose every level `pricer` would drop refuses and pins
+/// nothing: `:group 2` is not a package verb in disguise.
+#[gpui::test]
+fn a_group_with_no_groupable_level_refuses(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &MIXED);
+    for (line, cols) in [("group 2", "2"), ("group nosuchcol lhu", "nosuchcol lhu")] {
+        assert_eq!(
+            h.command(&mut vcx, line),
+            Err(format!(
+                "no groupable column in {cols}; :package N packages lines"
+            )),
+            "{line}"
+        );
+        assert!(kept(&h, &vcx).is_empty(), "{line}: nothing pinned");
+        assert!(!h.header(&vcx).contains(&"pinned".to_string()), "{line}");
+        assert_eq!(h.tree(&vcx).len(), 3, "{line}: still flat");
+    }
+}
+
+/// On a split package row, `y y` and `V y` yank what the row shows: its
+/// legs under that node, not the whole package.
+#[gpui::test]
+fn a_yank_on_a_split_package_row_yanks_its_nodes_legs(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &CALENDAR);
+    h.command(&mut vcx, "group expiry").unwrap();
+    h.dispatch(&mut vcx, "expand_all", None);
+    let register = |h: &Harness, vcx: &VisualTestContext| {
+        h.tile.read_with(vcx, |t, _| {
+            t.register.as_ref().map(|r| {
+                r.iter()
+                    .map(|s| matches!(s, RowSpec::Package { .. }))
+                    .collect::<Vec<_>>()
+            })
+        })
+    };
+    for split in split_rows(&h, &vcx) {
+        let leg = h.tree(&vcx)[split + 1].clone();
+        cursor_to_row(&h, &mut vcx, split);
+        h.dispatch(&mut vcx, "yank_row", None);
+        assert_eq!(clipboard(&mut vcx).as_deref(), Some(leg.as_str()), "y y");
+        assert_eq!(register(&h, &vcx), Some(vec![false]), "y y: one line");
+        h.tile.update(&mut vcx, |t, _| t.register = None);
+        cursor_to_row(&h, &mut vcx, split);
+        h.dispatch(&mut vcx, "visual_rows", None);
+        h.dispatch(&mut vcx, "yank", None);
+        assert_eq!(clipboard(&mut vcx).as_deref(), Some(leg.as_str()), "V y");
+        assert_eq!(register(&h, &vcx), Some(vec![false]), "V y: one line");
+    }
+}
+
+/// An editor whose line a regroup puts inside a closed group is dropped
+/// with a footer that says so, not the generic "the cell moved".
+#[gpui::test]
+fn an_editor_a_regroup_hides_says_its_line_moved_group(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &MIXED);
+    slots(&h, &mut vcx, &[(1, &["underlying_ref"])]);
+    cursor_to(&h, &mut vcx, "NDX Z26 4000 P");
+    goto_column(&h, &mut vcx, "strike");
+    h.dispatch(&mut vcx, "edit", None);
+    assert!(h.tile.read_with(&vcx, |t, _| t.editor.is_some()), "fixture");
+    activate(&h, &mut vcx, Some(1));
+    assert!(h.tile.read_with(&vcx, |t, _| t.editor.is_none()), "dropped");
+    assert_eq!(
+        h.footer(&vcx).as_deref(),
+        Some("the line moved to another group; edit dropped")
+    );
+}
+
+/// A split package's cursor keeps its node across a regroup to a shorter
+/// chain: on the calendar's `H27 · 5000` row, a regroup to `expiry` alone
+/// lands on its `H27` row, not on the `H27` group row nor its `Z26` half.
+#[gpui::test]
+fn a_split_rows_cursor_keeps_its_node_across_a_shorter_regroup(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &CALENDAR);
+    h.command(&mut vcx, "group expiry strike").unwrap();
+    h.dispatch(&mut vcx, "expand_all", None);
+    let splits = split_rows(&h, &vcx);
+    assert_eq!(splits.len(), 2, "fixture: split under both dates");
+    cursor_to_row(&h, &mut vcx, splits[1]);
+    h.command(&mut vcx, "group expiry").unwrap();
+    let splits = split_rows(&h, &vcx);
+    assert_eq!(splits.len(), 2, "still split under both dates");
+    assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(splits[1]));
 }

@@ -20963,8 +20963,8 @@ run_mutation "pricer tile: the cursor follows a re-pointed editor" \
 # over a column that is not the one it opened on.
 run_mutation "pricer tile: an editor whose column left the plan closes" \
   crates/geode-pricer/src/tile.rs \
-  '                self.drop_orphaned_editor(if scoped { SCOPE_DROPPED_EDIT } else { MOVED }, cx)' \
-  '                let _ = scoped;' \
+  '                self.drop_orphaned_editor(why, cx)' \
+  '                let _ = why;' \
   geode-pricer a_view_reload_without_the_edited_column_closes_the_editor
 
 # The window-less close still blurs before the field drops.
@@ -21748,11 +21748,9 @@ run_mutation "pricer grid: a package's tag is its search text" \
 # harness's own `tree()` helper keeps the equivalent call on one line, so
 # the two never collide.
 run_mutation "pricer tile: find reads the painted tag" \
-  crates/geode-pricer/src/tile.rs \
-  '            .map(|r| r.search.to_string())
-            .collect()' \
-  '            .map(|r| r.tag.to_string())
-            .collect()' \
+  crates/geode-pricer/src/grid.rs \
+  '                package_search(sheet, *row, partial.then_some(legs.as_slice())).into(),' \
+  '                SharedString::new_static(if let RowKind::Package { template } = sheet.kind(*row) { template.token() } else { "" }),' \
   geode-pricer find_matches_shorthand_that_no_column_shows
 
 # The pricer's gutter follows `[ui] line_numbers` through the observed
@@ -25881,14 +25879,14 @@ run_mutation "pricer scope: a hidden landing is silent" \
 
 run_mutation "pricer scope: an entry-bar insert skips the landing note" \
   crates/geode-pricer/src/tile.rs \
-  $'.map(|r| self.sheet.id(r)).collect();\n                self.note_hidden_landing(ids);' \
-  $'.map(|r| self.sheet.id(r)).collect();\n                let _ = ids;' \
+  $'                self.reveal.extend(ids.iter().copied());\n                self.note_hidden_landing(ids);' \
+  $'                self.reveal.extend(ids.iter().copied());\n                let _ = ids;' \
   geode-pricer an_entry_bar_line_the_scope_hides_says_so
 
 run_mutation "pricer scope: a put skips the landing note" \
   crates/geode-pricer/src/tile.rs \
-  $'        }\n        self.note_hidden_landing(ids);\n        self.cursor.set_line(self.sheet.id(first));' \
-  $'        }\n        let _ = ids;\n        self.cursor.set_line(self.sheet.id(first));' \
+  $'        self.reveal.extend(ids.iter().copied());\n        self.note_hidden_landing(ids);\n        self.cursor.set_line(self.sheet.id(first));' \
+  $'        self.reveal.extend(ids.iter().copied());\n        let _ = ids;\n        self.cursor.set_line(self.sheet.id(first));' \
   geode-pricer a_put_or_restore_the_scope_hides_says_so
 
 run_mutation "pricer scope: a restore skips the landing note" \
@@ -26098,13 +26096,14 @@ run_mutation "pricer grouping: a split anchor resolves to the package's first ro
   $'                    .filter(|at| matches!(at, At::Line { .. }))\n                    .map(|at| match at {\n                        At::Line { id, .. } => At::Line { id, within: None },\n                        g => g,\n                    });' \
   geode-pricer a_selection_anchored_on_a_split_packages_second_row_stays_there
 
-# A cursor whose node closed lands on the nearest painted group on its
-# path unless its id paints inside that group.
-run_mutation "pricer grouping: a regrouped line lands on its old group row" \
+# A split package's cursor whose node a regroup removed lands on the
+# nearest painted group on its path unless its id paints inside that group.
+# (A line painted once follows its id before this fallback: `only_row`.)
+run_mutation "pricer grouping: a regrouped split row lands on its old group row" \
   crates/geode-pricer/src/tile.rs \
   '                Some(inside.unwrap_or(group))' \
   '                Some(group)' \
-  geode-pricer the_cursor_follows_its_line_across_a_regroup
+  geode-pricer a_split_rows_cursor_keeps_its_node_across_a_shorter_regroup
 
 # A counted g p under a value grouping refuses; a structural chain alone
 # moves and packages as the flat sheet.
@@ -26138,6 +26137,106 @@ run_mutation "pricer grouping: o on a group row lands at the top" \
   $'        let place = if self.cursor_on_group() {\n            Place::Root {\n                at: self.sheet.len(),' \
   $'        let place = if self.cursor_on_group() {\n            Place::Root {\n                at: 0,' \
   geode-pricer put_and_add_on_a_group_row_go_to_the_end
+
+# A line an insert, put or restore lands inside a closed group opens its
+# groups (`reveal`, consumed by the next rebuild), so it paints and takes the
+# cursor instead of vanishing.
+run_mutation "pricer grouping: an entered line stays in its closed group" \
+  crates/geode-pricer/src/tile.rs \
+  $'                self.reveal.extend(ids.iter().copied());\n                self.note_hidden_landing(ids);' \
+  '                self.note_hidden_landing(ids);' \
+  geode-pricer an_entered_line_opens_its_closed_group
+
+run_mutation "pricer grouping: a put line stays in its closed group" \
+  crates/geode-pricer/src/tile.rs \
+  $'        }\n        self.reveal.extend(ids.iter().copied());' \
+  '        }' \
+  geode-pricer a_put_into_a_closed_group_opens_it
+
+run_mutation "pricer grouping: a restored line stays in its closed group" \
+  crates/geode-pricer/src/tile.rs \
+  '                self.reveal.extend(restored.iter().copied());' \
+  '' \
+  geode-pricer an_undo_restoring_into_a_closed_group_opens_it
+
+run_mutation "pricer grouping: a rebuild opens no landed line's group" \
+  crates/geode-pricer/src/tile.rs \
+  $'        for id in std::mem::take(&mut self.reveal) {\n            self.open_groups_of(id);\n        }' \
+  '        self.reveal.clear();' \
+  geode-pricer an_entered_line_opens_its_closed_group
+
+# A line painted exactly once is its own row wherever it now paints: an edit
+# of the grouped value moves it, and the cursor and a V anchor follow it.
+run_mutation "pricer grouping: an edited line's cursor lands on its old group row" \
+  crates/geode-pricer/src/tile.rs \
+  $'                if let Some(only) = self.only_row(*id) {\n                    return Some(only);\n                }' \
+  '' \
+  geode-pricer an_edit_of_the_grouped_value_keeps_the_cursor_on_its_line
+
+run_mutation "pricer grouping: a V edit of the grouped value loses its anchor" \
+  crates/geode-pricer/src/tile.rs \
+  '            } => self.exact_row(*id, within).or_else(|| self.only_row(*id)),' \
+  '            } => self.exact_row(*id, within),' \
+  geode-pricer a_selection_edit_of_the_grouped_value_keeps_the_selection
+
+run_mutation "pricer grouping: a split package counts as painted once" \
+  crates/geode-pricer/src/tile.rs \
+  '        rows.next().is_none().then_some(first)' \
+  '        Some(first)' \
+  geode-pricer motions_walk_past_a_split_packages_second_row
+
+# Find searches every row the grid would paint with every group open, in
+# rollup preorder, and a match opens its groups.
+run_mutation "pricer grouping: find opens no group over its match" \
+  crates/geode-pricer/src/tile.rs \
+  '            opened |= self.group_expansion.open(path[..k].to_vec());' \
+  '            opened |= false;' \
+  geode-pricer find_opens_the_groups_of_a_match_inside_them
+
+run_mutation "pricer grouping: find stops at a closed group's row" \
+  crates/geode-pricer/src/grid.rs \
+  '                (key, true)' \
+  '                (key, false)' \
+  geode-pricer find_opens_the_groups_of_a_match_inside_them
+
+run_mutation "pricer grouping: find searches a closed package's legs" \
+  crates/geode-pricer/src/grid.rs \
+  '                packages.is_open(sheet.id(*row)),' \
+  '                true,' \
+  geode-pricer find_targets_are_the_all_open_rows_and_their_search_keys
+
+run_mutation "pricer grouping: find walks the rollup out of order" \
+  crates/geode-pricer/src/grid.rs \
+  '            stack.extend(node.children.iter().rev());' \
+  '            stack.extend(node.children.iter());' \
+  geode-pricer find_targets_are_the_all_open_rows_and_their_search_keys
+
+# `:group` whose every level would drop refuses and pins nothing.
+run_mutation "pricer grouping: :group pins a chain that groups by nothing" \
+  crates/geode-pricer/src/tile.rs \
+  '                if effective.kept.is_empty() {' \
+  '                if false {' \
+  geode-pricer a_group_with_no_groupable_level_refuses
+
+# `y y` / `V y` on a split package row yank that node's legs.
+run_mutation "pricer grouping: y y on a split row yanks the whole package" \
+  crates/geode-pricer/src/tile.rs \
+  '                    let mut rows = self.grid_rows_under(g);' \
+  $'                    let mut rows = match self.model.rows[g].row {\n                        Some(r) => vec![r],\n                        None => self.grid_rows_under(g),\n                    };' \
+  geode-pricer a_yank_on_a_split_package_row_yanks_its_nodes_legs
+
+run_mutation "pricer grouping: V y on a split row yanks the whole package" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'            SelectKind::Rows => {\n                let top = self.selection_total_rows();' \
+  $'            SelectKind::Rows => {\n                let top = top_most(&self.sheet, &self.selected_sheet_rows());' \
+  geode-pricer a_yank_on_a_split_package_row_yanks_its_nodes_legs
+
+# An editor a regroup leaves inside a closed group says so.
+run_mutation "pricer grouping: a regroup-dropped editor says the cell moved" \
+  crates/geode-pricer/src/tile.rs \
+  '                    Some(r) if col.is_some() && self.under_closed_group(r) => REGROUPED_EDIT,' \
+  '                    Some(_) if false => REGROUPED_EDIT,' \
+  geode-pricer an_editor_a_regroup_hides_says_its_line_moved_group
 
 # ---- pricer grouping: the rollup, group cells and group paint ----------------
 

@@ -367,9 +367,8 @@ mod tests {
         assert_eq!(parse("package 0"), Err("usage: package [count]".into()));
         assert_eq!(parse("unpackage 2"), Err("usage: unpackage".into()));
         // The retired package verbs are gone, not aliased: `:group 2`
-        // pins a grouping by a column named `2` (which `pricer` lacks, so
-        // the tile drops it and the header strikes it through), never
-        // packages two lines.
+        // parses as a grouping by a column named `2` (which `pricer`
+        // lacks, so the tile refuses the pin), never packages two lines.
         assert_eq!(parse("group 2"), Ok(Command::Group(vec!["2".into()])));
         assert_eq!(parse("ungroup"), Err("unknown command 'ungroup'".into()));
         assert_eq!(

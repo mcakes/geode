@@ -1088,11 +1088,11 @@ Normal-mode keys:
 | Keys | Effect |
 |---|---|
 | `o` | Open the entry bar under the header; `enter` adds the line below the cursor row (on a leg, the next leg; on a package, its first leg; with no cursor row, at the end; a package typed inside a package lands just after that package) and keeps the bar open for the next; `up`/`down` walk the sheet's own lines as history; `tab`/`shift+tab` complete the token at the caret; `escape` closes it |
-| `shift+o` | The same bar, but the first line lands above the cursor row (on a leg, before that leg in its package; on a package or a top-level line, before it; on the first row, `at top`); each further line lands after the one just added, so a typed run reads top to bottom |
+| `shift+o` | The same bar, but the first line lands above the cursor row (on a leg, before that leg in its package; on a package or a top-level line, before it; on the first row, `at top`; on a grouping row, `at end`); each further line lands after the one just added, so a typed run reads top to bottom |
 | `i`, `enter`, double-click | Edit the cell in place; `up`/`down` (`shift`: ten) step a number by the precision its text carries, or the expiry date field's active segment |
 | `d d` | Delete the row (a package with its legs) |
 | `u` / `ctrl+r` | Undo / redo; 100 entries, strictly last-in first-out. A step that brings rows back puts the cursor on the first of them, and a package that was open comes back open |
-| `y y` / `y c` | Copy the row's shorthand (and remember it for `p`) / the column's cells |
+| `y y` / `y c` | Copy the shorthand of what the row shows (and remember it for `p`): a line or package its own, a grouping row its lines, a split package row its legs under that group / the column's cells |
 | `p` / `shift+p` | Put the remembered rows below / above as one undo entry, the cursor on the first landed row; when any of them is a package the whole run lands at a root boundary. On a grouping row both put at the end of the sheet and say so |
 | `shift+j` / `shift+k` | Move the row within its parent (refused under a value grouping) |
 | `g p` / `g u` | Package the cursor row and the next `count − 1` roots into a custom package / unpackage it (`:package [n]` / `:unpackage`) |
@@ -1181,9 +1181,10 @@ The `:` verbs change only this tile: `view <name>`, `shift spot|vol <n>|clear`,
 `view`, `refresh`, `shift`, `spot`, `package`, `unpackage`, and `name` (and
 the menu's view rows) are refused while the sheet is still loading, because
 the loaded document would replace what they set. `group` and `unpin` are
-not: the grouping belongs to the tile, not the document. `:ungroup` is no
-longer a verb, and `:group 2` pins a grouping by a column named `2` (which
-the header strikes through), never packages two rows.
+not: the grouping belongs to the tile, not the document. `:ungroup` is not
+a verb, and a `:group` whose every level the tile would drop (`:group 2`,
+`:group nosuchcol`) refuses with `no groupable column in <columns>; :package N
+packages lines` and pins nothing — it never packages rows.
 
 The sheet verbs work on this tile's own sheet, or, for `rm`, on a sheet no
 tile holds:
@@ -1421,7 +1422,7 @@ flip barrier, so a grouping change paints in step with the other tiles.
 
 The chain's levels are the `pricer` dataset's groupable columns and the
 derived dimensions over them (see
-[configuration](configuration.md#pricing)). The tile drops a level it
+[configuration](configuration.md#validation-boundaries)). The tile drops a level it
 cannot group by and keeps the rest:
 
 - a column `pricer` lacks (a desk `lhu`), a measure, and a derived
@@ -1436,7 +1437,8 @@ cannot group by and keeps the rest:
 The header shows the chain as written, kept levels in normal text joined by
 a muted `›` and dropped ones muted and struck through, followed by a
 neutral `pinned` chip while a pin holds. Nothing is shown for an empty
-chain.
+chain. A `:group` whose every level would be dropped is refused rather than
+pinned (see the `:` verbs above), so a pin always groups by something.
 
 `position_ref` and `instrument_ref` are structural levels: `position_ref`
 is the package row itself (packages over their legs, bare lines alone) and
@@ -1477,12 +1479,29 @@ the hover and selected ones. Its cells:
   (the blotter's rule).
 
 Groups open and close like packages (`space`/`z a`, `z o`, `z c`, the
-chevron), `z c` on a line inside a group closes the group and lands on it,
-and `z shift+r` / `z shift+m` open or close every group and package. Groups
-start closed. Find matches a group row's label. The cursor follows its line
-across a regroup, landing on the nearest painted group row when the line's
-group is closed. A regroup to a shorter chain forgets the open state of
-groups deeper than it.
+chevron). `z c` on a line whose parent is a group (a bare line, or a leg standing
+alone under `instrument_ref`) closes the group and lands on it; on a leg
+under a package row it closes that package, as without a grouping.
+`z shift+r` / `z shift+m` open or close every group and package. Groups
+start closed.
+
+Find (`/`, `n`, `shift+n`) searches every row the tile would paint with
+every group open, in that order — a group row by its label, a line by its
+shorthand, a package by its key, which covers its legs whether or not it is
+open. A match inside closed groups opens them (vim's `foldopen`) and the
+cursor rests on it; the groups stay open after `escape`. A line that an
+entry-bar insert, a put, or an undo or redo lands inside a closed group
+opens that group too, so the line paints and the cursor rests on it (a line
+the scope hides still reads `added line is hidden by the scope`).
+
+The cursor follows its line across a regroup, landing on the nearest
+painted group row when the line's group is closed. When an edit or a
+delivery changes the value a line is grouped by, the line moves to its new
+group and the cursor (and a `V` selection anchored on it) follows it there;
+only a split package, painted once per group, falls back to a group row on
+its old path. An open editor whose line a regroup puts inside a closed group
+is dropped with `the line moved to another group; edit dropped`. A regroup
+to a shorter chain forgets the open state of groups deeper than it.
 
 **Split packages.** A package whose legs fall under different groups
 appears under each, with only that group's legs: a calendar under `expiry`
@@ -1501,10 +1520,11 @@ partly hidden reads the split reason. A selection containing either refuses
 whole. A split package's legs, and the lines under a group, edit as usual.
 `y y` on a group row copies the shorthand of its lines, and a `V` selection
 over a group row totals and yanks its lines once, whether or not their rows
-are selected too. A selection cannot start on a group row (`select from a
-line or package row`), though its moving end can rest on one. `o` and `p` /
-`shift+p` with the cursor on a group row have no line to land beside: `o`'s
-label reads `at end`, and a put lands at the end of the sheet with `put at
+are selected too. `y y` or `V y` on a split package row yanks that row's
+legs, as its cells show them, not the whole package. A selection cannot start on a group row (`select from a
+line or package row`), though its moving end can rest on one. `o`,
+`shift+o` and `p` / `shift+p` with the cursor on a group row have no line to
+land beside: the bar's label reads `at end`, and a put lands at the end of the sheet with `put at
 the end of the sheet` in the footer. `g m` on a group row opens the plain
 tile picker.
 
@@ -1582,8 +1602,8 @@ selection and says why in the footer; a success notice goes to the header.
   entry and ends the selection; with no package selected it refuses with `no
   package selected`.
 - Under `v` the row verbs refuse and name `V` (`d deletes rows — use V`,
-  `shift+j/k move rows — use V`, `g p groups rows — use V`, `g u ungroups
-  rows — use V`): a block's cells are not a set of rows, and acting on its
+  `shift+j/k move rows — use V`, `g p packages rows — use V`, `g u
+  unpackages rows — use V`): a block's cells are not a set of rows, and acting on its
   rows would edit rows never picked as rows.
 
 A count on `d`, `shift+j`/`shift+k`, `g p` or `g u` is ignored while a

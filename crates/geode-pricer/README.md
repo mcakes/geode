@@ -100,6 +100,22 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   counted `g p` refuse (`MOVE_GROUPED`, `PACKAGE_GROUPED`), keyed on
   `PricerTile::grouped`. A chain of structural levels alone is the flat
   sheet for both.
+- A line never vanishes into a closed group: an insert, put, undo or redo
+  queues its landed ids in `reveal`, and the next `rebuild` opens every group
+  enclosing them between the rollup and the grid (`open_groups_of`), so
+  `GridModel::build` keeps its one call site. Find searches
+  `grid::find_targets` — every row the grid would paint with every group
+  open, in rollup preorder, keyed as those rows' `search` — and a match
+  opens its groups (`land_on_node`).
+- `row_at` / `anchor_row` resolve a line painted exactly once to that row
+  (`only_row`) wherever it now paints, so an edit or a delivery that changes
+  the grouped value keeps the cursor and a `V` anchor on the line; only a
+  split package, painted once per node, falls back to a group row on its old
+  path. An editor whose line a rebuild leaves inside a closed group closes
+  with `REGROUPED_EDIT`, not `MOVED`.
+- `:group` whose every level `effective_chain` drops refuses and pins
+  nothing (`:group 2` is not a count). `y y` and `V y` on a split package
+  row yank that node's legs (`grid_rows_under`), as the row shows them.
 - Completion never runs in render; the tile refreshes it on every text change,
   history step, commit and reload, and a Tab at a moved caret re-ranks first.
   A completion write is one range replace (one undo step) whose own `Change`

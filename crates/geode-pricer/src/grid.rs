@@ -281,6 +281,81 @@ impl GridModel {
     }
 }
 
+/// A group row's tree label ([`Flatten::label`]), which is also its
+/// find key.
+fn group_label(
+    sheet: &Sheet,
+    plan: &ColumnPlan,
+    clock: Clock,
+    column: &str,
+    first: Option<usize>,
+    raw: &SharedString,
+) -> SharedString {
+    let (Some(def), Some(leg)) = (crate::core::columns::column(column), first) else {
+        return raw.clone();
+    };
+    let format = plan
+        .columns
+        .iter()
+        .find(|c| c.def.name == def.name)
+        .map_or(&def.default_format, |c| &c.format);
+    let t = leg_reading(sheet, leg, def, format, clock);
+    if t.text.is_empty() {
+        raw.clone()
+    } else {
+        t.text.into()
+    }
+}
+
+/// Find's targets: every row [`GridModel::build`] would paint with every
+/// group open and the packages as `packages` has them, in that order
+/// (the rollup's preorder), as `(node, find key)`. The keys are the
+/// painted rows' `search`: a group's label, a package's
+/// `package_search` (a closed package is found by its legs), a line's
+/// shorthand. No cells are formatted.
+pub fn find_targets(
+    sheet: &Sheet,
+    rollup: &Rollup,
+    packages: &Expansion,
+    plan: &ColumnPlan,
+    clock: Clock,
+) -> Vec<(usize, SharedString)> {
+    let mut out = Vec::with_capacity(rollup.nodes.len());
+    let mut stack: Vec<usize> = rollup.roots.iter().rev().copied().collect();
+    while let Some(id) = stack.pop() {
+        let node = &rollup.nodes[id];
+        let (key, descend) = match &node.kind {
+            NodeKind::Group {
+                column,
+                value,
+                label,
+                ..
+            } => {
+                let key = match value {
+                    None => SharedString::new_static(NULL_LABEL),
+                    Some(_) => {
+                        let first = legs_under(rollup, id).first().copied();
+                        group_label(sheet, plan, clock, column, first, label)
+                    }
+                };
+                (key, true)
+            }
+            NodeKind::Package {
+                row, legs, partial, ..
+            } => (
+                package_search(sheet, *row, partial.then_some(legs.as_slice())).into(),
+                packages.is_open(sheet.id(*row)),
+            ),
+            NodeKind::Leaf { row } => (sheet.shorthand(*row).into(), false),
+        };
+        out.push((id, key));
+        if descend {
+            stack.extend(node.children.iter().rev());
+        }
+    }
+    out
+}
+
 /// The walk behind [`GridModel::build`].
 struct Flatten<'a> {
     sheet: &'a Sheet,
@@ -385,21 +460,7 @@ impl<'a> Flatten<'a> {
     /// and a derived dimension, which has no cells, read the rollup's
     /// label.
     fn label(&self, column: &str, first: Option<usize>, raw: &SharedString) -> SharedString {
-        let (Some(def), Some(leg)) = (crate::core::columns::column(column), first) else {
-            return raw.clone();
-        };
-        let format = self
-            .plan
-            .columns
-            .iter()
-            .find(|c| c.def.name == def.name)
-            .map_or(&def.default_format, |c| &c.format);
-        let t = leg_reading(self.sheet, leg, def, format, self.clock);
-        if t.text.is_empty() {
-            raw.clone()
-        } else {
-            t.text.into()
-        }
+        group_label(self.sheet, self.plan, self.clock, column, first, raw)
     }
 
     fn group_cells(&mut self, legs: &[usize]) -> Vec<GridCell> {
@@ -1443,5 +1504,30 @@ mod tests {
             "SPX Z26 4800 C",
             "the leg's own shorthand"
         );
+    }
+
+    /// Find's targets are the rows the grid paints with every group open,
+    /// in order, keyed as those rows' `search` — whatever the groups'
+    /// own state; a closed package contributes its row alone, an open
+    /// one its legs too.
+    #[test]
+    fn find_targets_are_the_all_open_rows_and_their_search_keys() {
+        let s = fixture();
+        let mut packages = Expansion::default();
+        packages.set(s.id(1), true);
+        for levels in [
+            &["underlying_ref"][..],
+            &["underlying_ref", "expiry"],
+            &["expiry"],
+        ] {
+            let (r, open) = grouped(&s, levels, &all_open(), &packages);
+            let got = find_targets(&s, &r, &packages, &plan(), Clock::utc());
+            let want: Vec<(usize, SharedString)> = open
+                .rows
+                .iter()
+                .map(|row| (row.node.expect("every row is a node"), row.search.clone()))
+                .collect();
+            assert_eq!(got, want, "{levels:?}");
+        }
     }
 }

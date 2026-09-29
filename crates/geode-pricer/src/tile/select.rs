@@ -380,8 +380,8 @@ impl PricerTile {
         match verb {
             "delete" => Some("d deletes rows — use V"),
             "move_down" | "move_up" => Some("shift+j/k move rows — use V"),
-            "group" => Some("g p groups rows — use V"),
-            "ungroup" => Some("g u ungroups rows — use V"),
+            "group" => Some("g p packages rows — use V"),
+            "ungroup" => Some("g u unpackages rows — use V"),
             _ => None,
         }
     }
