@@ -3734,8 +3734,8 @@ run_mutation "asof-pin: the pinned chip paints" \
 # The provenance warning chip is suppressed while pinned.
 run_mutation "asof-pin: the frame chip hides while pinned" \
   crates/geode-blotter/src/tile.rs \
-  '            if matches!(self.tile_as_of, TileAsOf::Follow)' \
-  '            if true' \
+  '        if matches!(self.tile_as_of, TileAsOf::Follow)' \
+  '        if true' \
   geode-blotter \
   a_pinned_tile_paints_the_neutral_chip_and_hides_the_frame_one
 
@@ -25911,6 +25911,30 @@ run_mutation "tile header: an overlong left side leaves the cluster on the tile"
   '    let slot = h_flex().min_w_0().overflow_hidden();' \
   '    let slot = h_flex();' \
   geode-tile an_overlong_left_side_leaves_the_cluster_inside_the_header
+
+# The question is the snapshot's datasets; asked about nothing, the chip
+# never shows.
+run_mutation "tile health: the blotter asks about its snapshot's datasets" \
+  crates/geode-blotter/src/header.rs \
+  '        let mut datasets: Vec<String> = p.datasets.iter().map(|f| f.dataset.clone()).collect();' \
+  '        let mut datasets: Vec<String> = Vec::new();' \
+  geode-blotter a_failed_source_of_a_delivered_dataset_shows_the_chip
+
+# A new snapshot over other datasets re-asks; without it the old datasets'
+# chip survives.
+run_mutation "tile health: the blotter re-asks when a snapshot lands" \
+  crates/geode-blotter/src/tile.rs \
+  '            self.health.reask(cx, |d| d.health_for_datasets(&datasets));' \
+  '' \
+  geode-blotter a_new_snapshots_datasets_move_the_chip
+
+# The blotter observes Diagnostics; answered with nothing, a report after
+# delivery never reaches the header.
+run_mutation "tile health: the blotter refreshes on a health change" \
+  crates/geode-blotter/src/tile.rs \
+  '                .refresh(cx, |d| d.health_for_datasets(&datasets))' \
+  '                .refresh(cx, |_| None)' \
+  geode-blotter a_failed_source_of_a_delivered_dataset_shows_the_chip
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

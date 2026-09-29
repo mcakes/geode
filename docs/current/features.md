@@ -245,6 +245,15 @@ column's grouping level, a mixed value, or a NULL value leaves it absent, and
 a row holding no registered context column (an `lhu` subtotal, say) opens the
 plain tile picker.
 
+The header is the shared 22 px strip. The view, grouping, state chips
+(`pinned`, `unscoped`, `filtered`, a tile as-of), the frame's `AS OF` warning
+and the in-flight `…` sit on the left and clip when the tile is too narrow.
+Dataset times now sit in the header's right cluster with the health chip,
+which covers the datasets of the tile's current snapshot; the notice sits
+before them. The chip's question moves with each delivered snapshot: a view
+over other datasets drops a chip for the old ones at once. The blotter has no
+`⋯` menu.
+
 "Edit column in view…" and "Edit column in schema…" list the blotter's
 planned non-tree columns with the cursor's column highlighted
 (`TileContent::tile_columns`). Hidden columns and dimensions folded into the
@@ -745,9 +754,10 @@ binds nowhere shows an empty lane.
 
 The header is the shared 22 px strip; its health chip is the worst health
 over the series' sources. The header shows the range and the frequency as two
-triggers, `1y ▾` and `1d ▾`; an absolute range shows its dates, `2025-09-26 – 2026-09-26 ▾`. Each
-trigger opens its own menu under it and stays filled while that menu (or, for
-the range, the dates editor) is up; a second click closes it. `r` and the range
+triggers, `1y ▾` and `1d ▾`; an absolute range shows its dates,
+`2025-09-26 – 2026-09-26 ▾`. Each trigger opens its own menu under it and
+stays filled while that menu (or, for the range, the dates editor) is up; a
+second click closes it. `r` and the range
 trigger open the range menu: the seven presets written out with their short
 labels, then `Custom dates…` (`c`). `f` and the frequency trigger open the
 frequency menu: the six frequencies with their short labels. Short labels are
