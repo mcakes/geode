@@ -1763,6 +1763,23 @@ way its cell paints it (`cell_text` formats the nine textual columns the text
 filter searches). The scoped build is cheaper than the unscoped one because
 it prepares half the rows.
 
+**Bind once (2026-09-28).** `apply_scope` now binds the scope once
+(`Scope::bind`: row-independent refusals, constants, the textual column list
+and the lower-cased needle) and evaluates each line through `BoundScope`;
+`expiry` reads an ISO date instead of the painted month code. Same fixture and
+command, same machine, load average (1 min) 6.4 → 5.8:
+
+| Benchmark | Run 1 | Run 2 |
+|---|---|---|
+| `grid_build_1000` (unscoped, reference) | 1.70 ms (1.6964; 1.6934–1.6994) | 1.71 ms (1.7092; 1.7034–1.7165) |
+| `apply_scope_1000` | 891 µs (891.37; 886.30–896.26) | 910 µs (909.50; 896.42–927.02) |
+| `grid_build_1000_scoped` | 702 µs (702.38; 696.72–706.59) | 701 µs (700.86; 691.28–712.98) |
+| `scope/expr_evaluate_row` (core) | 561 ns (561.40; 558.85–563.80) | — |
+
+`apply_scope_1000` roughly halves (1.93 → 0.90 ms, about 0.9 µs per line): the
+per-row bind, `textual` list and needle lower-casing were the bulk of the gap
+to the evaluator. A scoped rebuild is now about 1.6 ms.
+
 Earlier runs of the same benches during a load spike are not comparable and
 are recorded only as a warning: at load 34–43 `apply_scope_1000` read
 5.67 ms and the scoped build 806 µs; at load 34 → 129 they read 11.3 ms and
