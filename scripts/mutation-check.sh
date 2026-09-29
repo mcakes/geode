@@ -22906,6 +22906,29 @@ run_mutation "row menu: the press is not consumed" \
   '        let col = self.pressed?;' \
   geode-blotter a_right_press_moves_the_cursor_and_names_the_column
 
+# A cursor row scrolled out paints no longer: its anchor clears, or `g .`
+# hangs the menu beside whatever row sits at the old point.
+run_mutation "row menu: a scrolled-out cursor row keeps its anchor" \
+  crates/geode-blotter/src/delegate.rs \
+  '            self.cursor_anchor.set(None);' \
+  '            let _ = &self.cursor_anchor;' \
+  geode-blotter the_anchor_clears_when_the_cursor_row_scrolls_out
+
+# A right press beside the cells is one at the cursor's column.
+run_mutation "row menu: a right press beside the cells opens nothing" \
+  crates/geode-blotter/src/delegate.rs \
+  '                    cx.emit(CellPointer::Context { row: row_ix, col });' \
+  '                    let _ = (row_ix, col);' \
+  geode-blotter a_right_press_beside_the_cells_opens_the_rows_context
+
+# The row bubbles after a cell's right press; reporting it again at the old
+# cursor column overwrites the pressed column.
+run_mutation "row menu: a cell's right press is reported twice" \
+  crates/geode-blotter/src/delegate.rs \
+  '                    if std::mem::take(&mut d.context_reported) {' \
+  '                    if false {' \
+  geode-blotter a_right_press_moves_the_cursor_and_names_the_column
+
 run_mutation "context: a repeated context column is emitted twice" \
   crates/geode-core/src/view.rs \
   '                && !out.iter().any(|u| u.name == name);' \

@@ -208,6 +208,9 @@ pub struct BlotterDelegate {
     /// at prepaint by a canvas `render_tr` puts in that row alone: where
     /// `g .` hangs the row menu. `None` until the cursor row first paints.
     cursor_anchor: Rc<Cell<Option<(f32, f32)>>>,
+    /// Set by a cell's right press and taken by its row's, which bubbles
+    /// after it, so a press on a cell is not reported twice.
+    context_reported: bool,
 }
 
 /// The name column `col_ix` carries a `Colour::Named` of, if it does.
@@ -273,6 +276,7 @@ impl BlotterDelegate {
             drag_origin: None,
             fitted: FittedWidths::new(),
             cursor_anchor: Rc::new(Cell::new(None)),
+            context_reported: false,
         }
     }
 
@@ -1078,7 +1082,8 @@ impl BlotterDelegate {
         .when(!gutter, |el| {
             el.on_mouse_down(
                 MouseButton::Right,
-                cx.listener(move |_, _: &MouseDownEvent, _, cx| {
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                    this.delegate_mut().context_reported = true;
                     cx.emit(CellPointer::Context {
                         row: row_ix,
                         col: col_ix,
@@ -1291,6 +1296,11 @@ impl TableDelegate for BlotterDelegate {
         _window: &mut Window,
         _cx: &mut Context<TableState<Self>>,
     ) {
+        // A cursor row outside the window paints no longer, so its last
+        // anchor would point at whatever row sits there now.
+        if !visible_range.contains(&self.cursor.row) {
+            self.cursor_anchor.set(None);
+        }
         self.refill_window(visible_range);
     }
 
@@ -1369,6 +1379,20 @@ impl TableDelegate for BlotterDelegate {
                         shift: e.modifiers.shift,
                         gutter: false,
                     });
+                }),
+            )
+            // A right press there, likewise, is one at the cursor's column.
+            // A cell that already reported it set `context_reported`; the
+            // row clears it, since it bubbles last.
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                    let d = this.delegate_mut();
+                    if std::mem::take(&mut d.context_reported) {
+                        return;
+                    }
+                    let col = d.cursor.col;
+                    cx.emit(CellPointer::Context { row: row_ix, col });
                 }),
             )
     }

@@ -3281,6 +3281,15 @@ mod tests {
     fn delivered_with_a_dimension(
         cx: &mut gpui::TestAppContext,
     ) -> (Harness, gpui::VisualTestContext) {
+        delivered_flat(cx, &[("L1", "SPX"), ("L2", "NDX")])
+    }
+
+    /// [`delivered_with_a_dimension`]'s view over a root and one `lhu` row
+    /// per `(lhu, underlying_ref)` pair.
+    fn delivered_flat(
+        cx: &mut gpui::TestAppContext,
+        rows: &[(&str, &str)],
+    ) -> (Harness, gpui::VisualTestContext) {
         let text = "[flat]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n\
                     [[flat.columns]]\nname = \"underlying_ref\"\nkind = \"dimension\"\n\
                     [[flat.columns]]\nname = \"delta01\"\n";
@@ -3295,21 +3304,26 @@ mod tests {
             summable: n == "delta01",
             mixed_flag: None,
         };
+        let column = |values: Vec<&str>| {
+            TestColumn::Dict(
+                std::iter::once(None)
+                    .chain(values.into_iter().map(|v| Some(v.to_string())))
+                    .collect(),
+            )
+        };
+        let n = rows.len() + 1;
         let snapshot = Snapshot::for_tests(
             vec![
-                (
-                    meta("lhu"),
-                    TestColumn::Dict(vec![None, Some("L1".into()), Some("L2".into())]),
-                ),
+                (meta("lhu"), column(rows.iter().map(|r| r.0).collect())),
                 (
                     meta("underlying_ref"),
-                    TestColumn::Dict(vec![None, Some("SPX".into()), Some("NDX".into())]),
+                    column(rows.iter().map(|r| r.1).collect()),
                 ),
-                (meta("row_depth"), TestColumn::I32(vec![0, 1, 1])),
                 (
-                    meta("delta01"),
-                    TestColumn::F64(vec![Some(9.0), Some(5.0), Some(4.0)]),
+                    meta("row_depth"),
+                    TestColumn::I32((0..n).map(|i| i32::from(i > 0)).collect()),
                 ),
+                (meta("delta01"), TestColumn::F64(vec![Some(1.0); n])),
             ],
             1,
         );
@@ -3462,6 +3476,65 @@ mod tests {
             near(at, row),
             "the anchor follows the cursor row: {at:?} vs {row:?}"
         );
+    }
+
+    /// A cursor row scrolled out of the table's window paints no longer, so
+    /// its last anchor would hang `g .`'s menu beside another row: it clears,
+    /// and the shell falls back to the tile's corner.
+    #[gpui::test]
+    fn the_anchor_clears_when_the_cursor_row_scrolls_out(cx: &mut gpui::TestAppContext) {
+        let names: Vec<(String, String)> = (0..80)
+            .map(|i| (format!("L{i:02}"), format!("U{i:02}")))
+            .collect();
+        let rows: Vec<(&str, &str)> = names
+            .iter()
+            .map(|(l, u)| (l.as_str(), u.as_str()))
+            .collect();
+        let (h, mut cx) = delivered_flat(cx, &rows);
+        let anchor = |h: &Harness, cx: &mut gpui::VisualTestContext| {
+            cx.run_until_parked();
+            h.tile
+                .read_with(cx, |t, cx| {
+                    t.table().read(cx).delegate().dimension_context()
+                })
+                .unwrap()
+                .anchor
+        };
+        assert!(anchor(&h, &mut cx).is_some(), "row 0 painted");
+        h.tile.update(&mut cx, |t, cx| {
+            t.table().update(cx, |t, cx| t.scroll_to_row(79, cx))
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("blotter-row-0").is_none(),
+            "sanity: the cursor row scrolled out"
+        );
+        assert_eq!(anchor(&h, &mut cx), None);
+    }
+
+    /// A right press on a row outside its cells (the trailing filler) is a
+    /// right press at the cursor's column, as a left press there is a press.
+    #[gpui::test]
+    fn a_right_press_beside_the_cells_opens_the_rows_context(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered_with_a_dimension(cx);
+        let row = centre_bounds(&mut cx, "blotter-row-2");
+        let last = centre_bounds(&mut cx, "blotter-cell-2-2");
+        let at = gpui::point(row.right() - px(2.), row.center().y);
+        assert!(
+            at.x > last.right(),
+            "sanity: the point is beside every cell"
+        );
+        cx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(at, MouseButton::Right, Modifiers::none());
+        let cursor = h.tile.read_with(&cx, |t, cx| {
+            let d = t.table().read(cx).delegate();
+            (d.cursor.row, d.cursor.col)
+        });
+        assert_eq!(cursor, (2, 0), "the row, at the cursor's column");
+        let ctx = press_context(&h, &mut cx).expect("the row's context");
+        assert_eq!(ctx.get("underlying_ref"), Some("NDX"));
+        assert_eq!(press_context(&h, &mut cx), None, "reported once");
+        release_the_table_menu(&mut cx);
     }
 
     /// A drag whose press landed outside every cell and gutter (the
