@@ -25904,6 +25904,14 @@ run_mutation "timeseries header: a slot chip fits the 22 px strip" \
   'const SWATCH_TARGET: f32 = 30.0;' \
   geode-timeseries a_slot_chip_fits_inside_the_header
 
+# The left slot clips instead of growing: without a zero minimum width a
+# long left side pushes the health chip and `⋯` off the tile.
+run_mutation "tile header: an overlong left side leaves the cluster on the tile" \
+  crates/geode-tile/src/header.rs \
+  '    let slot = h_flex().min_w_0().overflow_hidden();' \
+  '    let slot = h_flex();' \
+  geode-tile an_overlong_left_side_leaves_the_cluster_inside_the_header
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

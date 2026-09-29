@@ -1,8 +1,9 @@
 //! The header strip every tile paints: one height, the shared stack marker
-//! first, the module's own left side, a flexible spacer, and a right cluster
-//! in a fixed order — status, notices, times, health, `⋯`. The frame formats
-//! nothing: every string arrives prepared, and a time run's stale flag is
-//! the only thing a tile decides per frame.
+//! first, the module's own left side taking the free width (clipped when it
+//! runs out), and a right cluster that never shrinks, in a fixed order —
+//! status, notices, times, health, `⋯`. The frame formats nothing: every
+//! string arrives prepared, and a time run's stale flag is the only thing a
+//! tile decides per frame.
 //!
 //! [`HealthWatch`] is the health half each tile keeps: the last
 //! `DiagVersions::sources` it read from the shared [`Diagnostics`] and the
@@ -161,14 +162,19 @@ impl Cluster<'_> {
     }
 }
 
-/// The strip: marker, the module's left side, a spacer, the cluster. The
-/// caller adds its own debug selector (and the blotter its mono face).
+/// The strip: marker, the module's left side (flexible, clipped), the
+/// cluster (fixed). The caller adds its own debug selector (and the blotter
+/// its mono face).
 pub fn frame(
     marker: Option<Stateful<Div>>,
     left: impl IntoElement,
     cluster: Cluster<'_>,
     theme: &Theme,
 ) -> Div {
+    // The left side takes the free width and clips when it runs out; the
+    // cluster never shrinks, so health and `⋯` stay on the tile however
+    // long a view name, chip row or attribute list grows.
+    let slot = h_flex().min_w_0().overflow_hidden();
     h_flex()
         .w_full()
         .h(scale::design(HEADER_HEIGHT))
@@ -180,9 +186,8 @@ pub fn frame(
         .border_b_1()
         .border_color(theme.border)
         .children(marker)
-        .child(left)
-        .child(div().flex_1())
-        .child(paint_cluster(cluster, theme))
+        .child(slot.flex_1().items_center().child(left))
+        .child(paint_cluster(cluster, theme).flex_none())
 }
 
 fn paint_cluster(c: Cluster<'_>, theme: &Theme) -> Div {
@@ -486,6 +491,9 @@ mod tests {
         /// what the shell's click-to-focus would see.
         parent: Rc<Cell<u32>>,
         times: Vec<TimeRun>,
+        /// How many fixed-width runs the left side carries: enough of them
+        /// overflow a narrow header.
+        left_runs: usize,
     }
 
     fn plain_time() -> TimeRun {
@@ -523,8 +531,16 @@ mod tests {
                     parent.set(parent.get() + 1)
                 })
                 .child(
-                    frame(None, div().child("left"), cluster, cx.theme())
-                        .debug_selector(|| "strip".into()),
+                    frame(
+                        None,
+                        h_flex().gap_3().child("left").children(
+                            (0..self.left_runs)
+                                .map(|i| div().flex_none().child(format!("left run {i}"))),
+                        ),
+                        cluster,
+                        cx.theme(),
+                    )
+                    .debug_selector(|| "strip".into()),
                 )
         }
     }
@@ -548,6 +564,7 @@ mod tests {
                 presses,
                 parent: Rc::new(Cell::new(0)),
                 times: vec![plain_time()],
+                left_runs: 0,
             }
         });
         (view, diagnostics, presses, vcx)
@@ -700,5 +717,31 @@ mod tests {
             (h - scale::design_px(HEADER_HEIGHT, rem)).abs() < 0.5,
             "{h}"
         );
+    }
+
+    /// A left side wider than the tile clips; the cluster — the health chip
+    /// and `⋯` — stays inside the header.
+    #[gpui::test]
+    fn an_overlong_left_side_leaves_the_cluster_inside_the_header(cx: &mut TestAppContext) {
+        let (view, diagnostics, _, vcx) = open_strip(cx);
+        view.update(vcx, |s, cx| {
+            s.left_runs = 40;
+            cx.notify();
+        });
+        vcx.simulate_resize(gpui::size(gpui::px(480.0), gpui::px(300.0)));
+        show_failure(&view, &diagnostics, vcx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let strip = vcx.debug_bounds("strip").expect("the strip is painted");
+        for s in ["tile-health-3", "strip-menu"] {
+            let b = vcx
+                .debug_bounds(s)
+                .unwrap_or_else(|| panic!("{s} is painted"));
+            assert!(
+                b.left() >= strip.left() && b.right() <= strip.right(),
+                "{s} at {b:?} escapes the header {strip:?}"
+            );
+        }
     }
 }
