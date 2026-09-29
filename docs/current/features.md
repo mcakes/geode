@@ -394,6 +394,12 @@ policy rows (`:auto hold`, `:auto rebase`, `:auto replace`) fall back to their
 `:` verbs when unbound, and the other rows to an empty lane. A disabled row's
 reason becomes the notice.
 
+The header is the [shared frame](#shared-tile-interaction): kind badge,
+underlying and attributes on the left; then the state, incomplete rows, echo,
+upload error and the upload prompt, the notice, the source time (`HH:MM:SS
+stale` in the warning text tone once stale), the health chip and `⋯`. The
+header's health chip covers the panel's dataset.
+
 A panel opened through an add (palette, tile picker, `open_with`, duplicate)
 with no underlying opens the underlying picker at once; a restored panel does
 not. Every panel kind accepts `underlying_ref` from the cursor's dimension

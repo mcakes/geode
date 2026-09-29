@@ -14033,10 +14033,10 @@ run_mutation "mdmenu: a greyed row is a notice, not a dispatch" \
 # propagation opens a menu on an unfocused tile; the host's bubble-phase
 # click counter detects it.
 run_mutation "mdmenu: the ⋯ click does not stop propagation" \
-  crates/geode-marketdata/src/header.rs \
-  '                    tile.update(cx, |t, cx| t.toggle_menu(window, cx))' \
-  '                    cx.stop_propagation();
-                    tile.update(cx, |t, cx| t.toggle_menu(window, cx))' \
+  crates/geode-tile/src/header.rs \
+  '            on_press(window, cx);' \
+  '            cx.stop_propagation();
+            on_press(window, cx);' \
   geode-marketdata a_menu_button_click_still_reaches_the_tiles_own_listeners
 
 # Find closes the popup before handling any variant. This shell-owned action
@@ -25818,6 +25818,26 @@ run_mutation "tile header: a stale run paints its stale label" \
   '            .child(t.text().clone())' \
   '            .child(t.label.clone())' \
   geode-tile a_stale_run_paints_its_stale_label
+
+# The panel's observer asks about its dataset; skipped, a failed source
+# never reaches the header.
+run_mutation "tile health: market-data refreshes on a health change" \
+  crates/geode-marketdata/src/tile.rs \
+  '            if this
+                .health
+                .refresh(cx, |d| d.health_for_datasets(&[dataset]))' \
+  '            if false
+                && this
+                    .health
+                    .refresh(cx, |d| d.health_for_datasets(&[dataset]))' \
+  geode-marketdata a_degraded_panel_source_shows_the_chip_and_recovery_clears_it
+
+# The chip is gated on the sources version, which a description bumps.
+run_mutation "tile health: market-data asks about its own dataset" \
+  crates/geode-marketdata/src/tile.rs \
+  '            let dataset = this.spec.dataset.as_str();' \
+  '            let dataset = "dividend_schedule";' \
+  geode-marketdata a_degraded_panel_source_shows_the_chip_and_recovery_clears_it
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
