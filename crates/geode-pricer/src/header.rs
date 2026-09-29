@@ -633,6 +633,9 @@ mod tests {
         let h = prepare(HeaderInputs {
             sheet: &s,
             notice: Some("sheet 'book' was not found; opened empty".into()),
+            standing: None,
+            hidden: 0,
+            unscoped: false,
             prompt: Some("remove 'old'? (y/n)".into()),
             save: Some("not saved".into()),
             settings: &settings(false),
