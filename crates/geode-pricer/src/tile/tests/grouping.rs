@@ -8,6 +8,7 @@
 //! grouping; the session round trip.
 
 use super::*;
+use crate::grid::GridRowKind;
 use geode_core::groupings::GroupingSlots;
 
 /// [SPX 5000 C, NDX 4000 P, CS(SPX 4800 C, SPX 5200 C)].
@@ -315,4 +316,309 @@ fn the_cursor_follows_its_line_across_a_regroup(cx: &mut gpui::TestAppContext) {
     );
     activate(&h, &mut vcx, None);
     assert_eq!(cursor_text(&h, &vcx).as_deref(), Some("NDX Z26 4000 P"));
+}
+
+/// [SPX Z26 4000 P, CAL(SPX H27 5000 C, SPX Z26 5000 C), SPX H27 4000 P]:
+/// under `expiry` the calendar splits across both dates.
+const CALENDAR: [&str; 3] = ["SPX Z26 4000 P", "SPX Z26/H27 5000 CAL", "SPX H27 4000 P"];
+
+/// The footer's split-package and grouping-row refusals.
+const SPLIT_TEXT: &str = "split package: edit its legs";
+const GROUP_TEXT: &str = "a grouping row: edit its lines";
+
+/// A distinct npv per line (`1 + i`), so no two lines cancel and a doubled
+/// line reads differently from a single one.
+fn price_distinctly(h: &Harness, vcx: &mut VisualTestContext) {
+    for b in h.prices() {
+        h.deliver(
+            vcx,
+            PriceOutcome {
+                key: b.key,
+                tag: b.tag,
+                submitted: std::time::Instant::now(),
+                results: b
+                    .lines
+                    .iter()
+                    .enumerate()
+                    .map(|(i, l)| (l.id, l.revision, Ok(result(1.0 + i as f64))))
+                    .collect(),
+            },
+        );
+    }
+}
+
+fn npv_total(h: &Harness, vcx: &VisualTestContext) -> Option<String> {
+    h.tile.read_with(vcx, |t, _| {
+        t.totals
+            .iter()
+            .find(|c| c.label.as_ref() == "npv")
+            .map(|c| c.text.to_string())
+    })
+}
+
+fn npv(h: &Harness, vcx: &VisualTestContext, row: usize) -> f64 {
+    h.cell(vcx, row, "npv").parse().unwrap()
+}
+
+/// The grid rows painting a split package.
+fn split_rows(h: &Harness, vcx: &VisualTestContext) -> Vec<usize> {
+    h.tile.read_with(vcx, |t, _| {
+        t.model
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| matches!(r.kind, GridRowKind::Package { split: true, .. }))
+            .map(|(i, _)| i)
+            .collect()
+    })
+}
+
+fn cursor_to_row(h: &Harness, vcx: &mut VisualTestContext, row: usize) {
+    h.tile.update(vcx, |t, cx| {
+        t.set_cursor_row(row);
+        t.sync_cursor(cx);
+    });
+}
+
+fn set_scope(h: &Harness, vcx: &mut VisualTestContext, expr: &str) {
+    let scope = geode_core::scope::Scope {
+        expression: Some(geode_core::scope::parse_expr(expr).unwrap()),
+        ..Default::default()
+    };
+    h.frame.update(vcx, |f, cx| {
+        f.shared_mut().set_scope(scope);
+        cx.notify();
+    });
+}
+
+fn clipboard(vcx: &mut VisualTestContext) -> Option<String> {
+    vcx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
+}
+
+/// A package split across expiry nodes is read-only through every key
+/// route: `i` (the cell editor), `d d`, `g u` — each refuses with the
+/// split footer and writes nothing. Its leg on its own stays editable.
+#[gpui::test]
+fn a_split_package_refuses_edits_with_the_split_footer(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &CALENDAR);
+    h.command(&mut vcx, "group expiry").unwrap();
+    h.dispatch(&mut vcx, "expand_all", None);
+    let splits = split_rows(&h, &vcx);
+    assert_eq!(splits.len(), 2, "the calendar under both dates");
+    goto_column(&h, &mut vcx, "qty");
+    cursor_to_row(&h, &mut vcx, splits[1]);
+    h.dispatch(&mut vcx, "edit", None);
+    assert!(
+        h.tile.read_with(&vcx, |t, _| t.editor.is_none()),
+        "no editor"
+    );
+    assert_eq!(h.footer(&vcx).as_deref(), Some(SPLIT_TEXT));
+    let len = h.sheet_len(&vcx);
+    for verb in ["delete", "ungroup"] {
+        h.dispatch(&mut vcx, verb, None);
+        assert_eq!(h.footer(&vcx).as_deref(), Some(SPLIT_TEXT), "{verb}");
+        assert_eq!(h.sheet_len(&vcx), len, "{verb} wrote nothing");
+    }
+    assert_eq!(
+        h.command(&mut vcx, "unpackage"),
+        Err(SPLIT_TEXT.to_string())
+    );
+    // Its leg alone: the editor opens.
+    cursor_to_row(&h, &mut vcx, splits[1] + 1);
+    h.dispatch(&mut vcx, "edit", None);
+    assert!(
+        h.tile.read_with(&vcx, |t, _| t.editor.is_some()),
+        "a leg edits"
+    );
+}
+
+/// A grouping row has no line behind it: `i`, `d d`, `g p`, `g u` and
+/// `:package` refuse with the grouping-row footer, as does a `V`
+/// selection reaching one; `y y` yanks its lines' shorthand.
+#[gpui::test]
+fn a_group_row_is_read_only_and_yanks_its_lines(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &MIXED);
+    h.command(&mut vcx, "group underlying_ref").unwrap();
+    cursor_to(&h, &mut vcx, "SPX");
+    let len = h.sheet_len(&vcx);
+    h.dispatch(&mut vcx, "edit", None);
+    assert_eq!(h.footer(&vcx).as_deref(), Some(GROUP_TEXT), "i");
+    for verb in ["delete", "group", "ungroup"] {
+        h.dispatch(&mut vcx, verb, None);
+        assert_eq!(h.footer(&vcx).as_deref(), Some(GROUP_TEXT), "{verb}");
+    }
+    assert_eq!(h.command(&mut vcx, "package"), Err(GROUP_TEXT.to_string()));
+    assert_eq!(h.sheet_len(&vcx), len, "nothing written");
+    h.dispatch(&mut vcx, "yank_row", None);
+    assert_eq!(
+        clipboard(&mut vcx).as_deref(),
+        Some("SPX Z26 5000 C\n-5 SPX Z26 4800/5200 CS"),
+        "the group's lines, in sheet order"
+    );
+    // A `V` selection from a line up onto the group row refuses whole.
+    h.dispatch(&mut vcx, "toggle", None);
+    cursor_to(&h, &mut vcx, "SPX Z26 5000 C");
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.motion(&mut vcx, "up", None);
+    h.dispatch(&mut vcx, "delete", None);
+    assert_eq!(h.footer(&vcx).as_deref(), Some(GROUP_TEXT), "V d");
+    assert_eq!(h.sheet_len(&vcx), len);
+}
+
+/// A selection holding a group row and one of its descendants totals each
+/// leg once: the group row's total is its own sum, and adding the line
+/// beneath it changes nothing.
+#[gpui::test]
+fn totals_count_a_group_row_and_its_descendant_once(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &MIXED);
+    price_distinctly(&h, &mut vcx);
+    h.command(&mut vcx, "group underlying_ref").unwrap();
+    cursor_to(&h, &mut vcx, "SPX");
+    h.dispatch(&mut vcx, "toggle", None);
+    assert_eq!(
+        h.tree(&vcx),
+        ["NDX", "SPX", "SPX Z26 5000 C", "-5 SPX Z26 4800/5200 CS"]
+    );
+    let (group, line) = (npv(&h, &vcx, 1), npv(&h, &vcx, 2));
+    assert!(line.abs() > 0.5, "fixture: the line counts");
+    cursor_to(&h, &mut vcx, "SPX Z26 5000 C");
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.motion(&mut vcx, "up", None); // the SPX group and its line
+    assert_eq!(npv_total(&h, &vcx), Some(format!("{group:.2}")));
+    h.motion(&mut vcx, "up", None); // and NDX
+    let ndx = npv(&h, &vcx, 0);
+    assert_eq!(npv_total(&h, &vcx), Some(format!("{:.2}", group + ndx)));
+}
+
+/// A calendar split across two expiry nodes, both of its rows selected
+/// with everything else: each leg counts once, so the total is the two
+/// dates' sums — never the package's whole fold once per node.
+#[gpui::test]
+fn totals_count_a_split_package_per_node_legs(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &CALENDAR);
+    price_distinctly(&h, &mut vcx);
+    h.command(&mut vcx, "group expiry").unwrap();
+    h.dispatch(&mut vcx, "expand_all", None);
+    let tree = h.tree(&vcx);
+    let groups: Vec<usize> = h.tile.read_with(&vcx, |t, _| {
+        (0..t.model.rows.len())
+            .filter(|&g| t.model.rows[g].path.is_some())
+            .collect()
+    });
+    assert_eq!(groups.len(), 2, "{tree:?}");
+    let expected = npv(&h, &vcx, groups[0]) + npv(&h, &vcx, groups[1]);
+    cursor_to_row(&h, &mut vcx, tree.len() - 1);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.motion(&mut vcx, "top", None);
+    assert_eq!(npv_total(&h, &vcx), Some(format!("{expected:.2}")));
+}
+
+/// Under a grouping, sheet order is not the painted order: `shift+j` /
+/// `shift+k` refuse and move nothing.
+#[gpui::test]
+fn line_moves_refuse_under_a_grouping(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &MIXED);
+    h.command(&mut vcx, "group underlying_ref").unwrap();
+    h.dispatch(&mut vcx, "expand_all", None);
+    cursor_to(&h, &mut vcx, "SPX Z26 5000 C");
+    let before = h.tile.read_with(&vcx, |t, _| t.sheet.shorthand(0));
+    for verb in ["move_down", "move_up"] {
+        h.dispatch(&mut vcx, verb, None);
+        assert_eq!(
+            h.footer(&vcx).as_deref(),
+            Some("lines move in the flat sheet: clear the grouping first"),
+            "{verb}"
+        );
+    }
+    assert_eq!(h.tile.read_with(&vcx, |t, _| t.sheet.shorthand(0)), before);
+}
+
+/// With no grouping, a move whose neighbour the scope hides steps past it
+/// to the next shown sibling: the painted order changes, as the key says.
+#[gpui::test]
+fn a_move_steps_past_a_sibling_the_scope_hides(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "SPX Z26 4000 P", "SPX Z26 5200 C"]);
+    set_scope(&h, &mut vcx, "strike != 4000");
+    assert_eq!(h.tree(&vcx), ["SPX Z26 5000 C", "SPX Z26 5200 C"]);
+    cursor_to(&h, &mut vcx, "SPX Z26 5000 C");
+    h.dispatch(&mut vcx, "move_down", None);
+    assert_eq!(h.footer(&vcx), None);
+    assert_eq!(h.tree(&vcx), ["SPX Z26 5200 C", "SPX Z26 5000 C"]);
+    assert_eq!(cursor_text(&h, &vcx).as_deref(), Some("SPX Z26 5000 C"));
+    h.dispatch(&mut vcx, "move_up", None);
+    assert_eq!(h.tree(&vcx), ["SPX Z26 5000 C", "SPX Z26 5200 C"]);
+    // A selection slides the same way.
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "move_down", None);
+    assert_eq!(h.tree(&vcx), ["SPX Z26 5200 C", "SPX Z26 5000 C"]);
+}
+
+/// The pin and the open grouping rows ride the session record: a tile
+/// restored from it groups the same way with the same rows open (a
+/// nested open path included), and a record saved mid-load keeps them.
+#[gpui::test]
+fn the_pin_and_the_open_groups_round_trip_the_session(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &MIXED);
+    h.command(&mut vcx, "group underlying_ref strike").unwrap();
+    cursor_to(&h, &mut vcx, "SPX");
+    h.dispatch(&mut vcx, "toggle", None);
+    cursor_to(&h, &mut vcx, "5000");
+    h.dispatch(&mut vcx, "toggle", None);
+    let before = h.tree(&vcx);
+    let saved = h.serialize(&mut vcx);
+    let r = crate::session::Record::from_table(&saved);
+    assert_eq!(
+        r.pinned,
+        Some(vec!["underlying_ref".to_string(), "strike".to_string()])
+    );
+    assert_eq!(r.pinned_slot, None);
+    assert_eq!(
+        r.expanded_paths,
+        vec![
+            vec![Some("SPX".to_string())],
+            vec![Some("SPX".to_string()), Some("5000".to_string())]
+        ]
+    );
+    // Restored through the factory, from the same store.
+    let (r2, mut vcx2) = open_full(
+        cx,
+        Some(saved.clone()),
+        h.store.clone(),
+        PricerSettings::default(),
+    );
+    assert_eq!(r2.tree(&vcx2), before, "grouped and opened as it was");
+    assert!(r2.header(&vcx2).contains(&"pinned".to_string()));
+    // Mid-load, the record keeps what it was restored with.
+    let rows = h.store.get("book").unwrap();
+    h.store.set_pending(true);
+    let (r3, mut vcx3) = open_full(cx, Some(saved), h.store.clone(), PricerSettings::default());
+    let mid = crate::session::Record::from_table(&r3.serialize(&mut vcx3));
+    assert_eq!(mid.expanded_paths, r.expanded_paths, "held while loading");
+    r3.tile
+        .update(&mut vcx3, |t, cx| t.loaded(Ok(Some(rows)), cx));
+    assert_eq!(r3.tree(&vcx3), before);
+    // A slot pin is its own key.
+    slots(&r2, &mut vcx2, &[(1, &["expiry"])]);
+    r2.command(&mut vcx2, "group slot 1").unwrap();
+    let r = crate::session::Record::from_table(&r2.serialize(&mut vcx2));
+    assert_eq!((r.pinned, r.pinned_slot), (None, Some(1)));
+}
+
+/// A package split across nodes paints once per node, with one id: `j`
+/// walks every row, the second split row included, instead of snapping
+/// back to the first row that id names.
+#[gpui::test]
+fn motions_walk_past_a_split_packages_second_row(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &CALENDAR);
+    h.command(&mut vcx, "group expiry").unwrap();
+    h.dispatch(&mut vcx, "expand_all", None);
+    let rows = h.tree(&vcx).len();
+    h.motion(&mut vcx, "top", None);
+    let mut seen = vec![h.cursor(&vcx).unwrap().0];
+    for _ in 1..rows {
+        h.motion(&mut vcx, "down", None);
+        seen.push(h.cursor(&vcx).unwrap().0);
+    }
+    assert_eq!(seen, (0..rows).collect::<Vec<_>>());
+    assert_eq!(split_rows(&h, &vcx).len(), 2, "fixture: split twice");
 }

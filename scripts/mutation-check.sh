@@ -23816,8 +23816,8 @@ run_mutation "pricer select: lines_of keeps a leg twice" \
 # carries its legs, so totalling both would double them.
 run_mutation "pricer select: totals count a selected package's legs again" \
   crates/geode-pricer/src/tile/select.rs \
-  $'    fn prepare_totals(&mut self) {\n        let top = top_most(&self.sheet, &self.selected_sheet_rows());' \
-  $'    fn prepare_totals(&mut self) {\n        let top = self.selected_sheet_rows();' \
+  $'        rows.dedup();\n        top_most(&self.sheet, &rows)' \
+  $'        rows.dedup();\n        rows' \
   geode-pricer the_footer_totals_count_an_open_packages_legs_once
 
 # A line's total is a position total: its qty times the unit value.
@@ -23865,8 +23865,8 @@ run_mutation "pricer select: d removes top-down" \
 # shift+j/k slide the block as a unit: the neighbour hops the block's length.
 run_mutation "pricer select: a block move hops the neighbour one row" \
   crates/geode-pricer/src/core/select.rs \
-  '    let len = (hi - lo + 1) as isize;' \
-  '    let len = 1isize;' \
+  '            delta: -((q - lo) as isize),' \
+  '            delta: -1,' \
   geode-pricer move_plan_moves_the_neighbouring_sibling_across_the_block
 
 # `g p` over a selection including a package refuses and says why.
@@ -25740,22 +25740,22 @@ run_mutation "pricer scope: a hidden cursor falls back by index" \
 # A partly hidden package row is read-only: the editor never opens on it.
 run_mutation "pricer scope: the editor opens on a partly hidden package" \
   crates/geode-pricer/src/tile.rs \
-  $'        if self.partly_hidden(row) {\n            self.footer = Some(PARTLY_HIDDEN.into());\n            return;\n        }' \
-  $'        if false {\n            self.footer = Some(PARTLY_HIDDEN.into());\n            return;\n        }' \
+  $'        if let Some(why) = self.read_only(row) {\n            self.footer = Some(why.into());\n            return;\n        }' \
+  $'        if let Some(why) = None::<&str> {\n            self.footer = Some(why.into());\n            return;\n        }' \
   geode-pricer an_edit_on_a_partly_hidden_package_row_is_refused_with_the_footer
 
 # A selected package stands for every leg, hidden ones too: a typed
 # commit over it refuses whole.
 run_mutation "pricer scope: a selection commit writes a partly hidden package" \
   crates/geode-pricer/src/tile/select.rs \
-  $'        if self.selection_partly_hidden() {\n            self.footer = Some(PARTLY_HIDDEN.into());\n            self.sync_editor(cx);' \
-  $'        if false {\n            self.footer = Some(PARTLY_HIDDEN.into());\n            self.sync_editor(cx);' \
+  $'        if let Some(why) = self.selection_read_only() {\n            self.footer = Some(why.into());\n            self.sync_editor(cx);' \
+  $'        if let Some(why) = None::<&str> {\n            self.footer = Some(why.into());\n            self.sync_editor(cx);' \
   geode-pricer a_selection_commit_over_a_partly_hidden_package_is_refused
 
 run_mutation "pricer scope: a selection step moves a partly hidden package" \
   crates/geode-pricer/src/tile/select.rs \
-  $'        if self.selection_partly_hidden() {\n            self.footer = Some(PARTLY_HIDDEN.into());\n            self.rebuild_chrome();' \
-  $'        if false {\n            self.footer = Some(PARTLY_HIDDEN.into());\n            self.rebuild_chrome();' \
+  $'        if let Some(why) = self.selection_read_only() {\n            self.footer = Some(why.into());\n            self.rebuild_chrome();' \
+  $'        if let Some(why) = None::<&str> {\n            self.footer = Some(why.into());\n            self.rebuild_chrome();' \
   geode-pricer a_selection_step_over_a_partly_hidden_package_is_refused
 
 # Selection totals over a partly hidden package count its shown legs, as
@@ -25777,15 +25777,15 @@ run_mutation "pricer grid: a partial package's key reads every leg" \
 # the one door refuses them all.
 run_mutation "pricer scope: structural verbs ignore a partly hidden package" \
   crates/geode-pricer/src/tile/select.rs \
-  $'            .any(|r| self.partly_hidden(r))\n            .then_some(PARTLY_HIDDEN)' \
-  $'            .any(|_| false)\n            .then_some(PARTLY_HIDDEN)' \
+  '        first_refusal(targets.into_iter().map(|r| self.read_only(r)))' \
+  '        first_refusal(targets.into_iter().map(|_| None))' \
   geode-pricer row_verbs_on_a_partly_hidden_package_are_refused
 
 # A selection refuses whole when any of its rows is a partly hidden package.
 run_mutation "pricer scope: a selection's structural target is the cursor row" \
   crates/geode-pricer/src/tile/select.rs \
-  $'        let targets: Vec<usize> = if selected {\n            self.selected_sheet_rows()' \
-  $'        let targets: Vec<usize> = if false {\n            self.selected_sheet_rows()' \
+  $'        let targets: Vec<usize> = if selected {\n            if self.selection_holds_group() {' \
+  $'        let targets: Vec<usize> = if false {\n            if self.selection_holds_group() {' \
   geode-pricer selection_verbs_over_a_partly_hidden_package_refuse_whole
 
 # `g u` on a shown leg dissolves its package: the target is the parent.

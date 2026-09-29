@@ -16,6 +16,19 @@ use geode_core::grid::selection::Lost;
 use geode_core::pricing::{Instrument, Measure};
 use std::collections::BTreeMap;
 
+/// The strongest of several targets' read-only reasons: [`SPLIT`] over
+/// [`PARTLY_HIDDEN`], so a selection holding both names the grouping.
+fn first_refusal(reasons: impl Iterator<Item = Option<&'static str>>) -> Option<&'static str> {
+    let mut out = None;
+    for why in reasons.flatten() {
+        if why == SPLIT {
+            return Some(SPLIT);
+        }
+        out = out.or(Some(why));
+    }
+    out
+}
+
 /// The refusal for `v`/`V` on a row with no line behind it.
 const NO_ANCHOR: &str = "select from a line or package row";
 
@@ -119,7 +132,7 @@ impl PricerTile {
     /// a total over both would double them. An incomplete total is `—`,
     /// never a partial sum that reads as the position's.
     fn prepare_totals(&mut self) {
-        let top = top_most(&self.sheet, &self.selected_sheet_rows());
+        let top = self.selection_total_rows();
         let planned: Vec<_> = self
             .plan
             .columns
@@ -165,14 +178,49 @@ impl PricerTile {
             .collect()
     }
 
-    /// Whether the selection holds a package row the scope partly hides.
-    /// A selected package stands for every leg (`lines_of`), hidden ones
-    /// too, so a bulk write through it would reach legs no row paints:
-    /// the whole write refuses with [`PARTLY_HIDDEN`].
-    pub(crate) fn selection_partly_hidden(&self) -> bool {
-        self.selected_sheet_rows()
-            .into_iter()
-            .any(|r| self.partly_hidden(r))
+    /// Why the selection is read-only, if it is: it holds a grouping row
+    /// ([`GROUP_ROW`]), or a package row that is split ([`SPLIT`]) or that
+    /// the scope partly hides ([`PARTLY_HIDDEN`]). A selected package
+    /// stands for every leg (`lines_of`), those another node paints or the
+    /// scope hides too, so a bulk write through it would reach legs its
+    /// row does not show: the whole write refuses.
+    pub(crate) fn selection_read_only(&self) -> Option<&'static str> {
+        if self.selection_holds_group() {
+            return Some(GROUP_ROW);
+        }
+        first_refusal(
+            self.selected_sheet_rows()
+                .into_iter()
+                .map(|r| self.read_only(r)),
+        )
+    }
+
+    /// Whether the resolved selection reaches a grouping row.
+    fn selection_holds_group(&self) -> bool {
+        self.resolved.as_ref().is_some_and(|r| {
+            r.rows
+                .clone()
+                .any(|g| self.model.rows.get(g).is_some_and(|m| m.path.is_some()))
+        })
+    }
+
+    /// The rows a total or a `V` yank reaches: each selected grid row's
+    /// sheet rows (a grouping row its contents, a split package its legs
+    /// under that node; `grid_rows_under`), each once, top-most — a
+    /// grouping row selected with its own descendants, or a package with
+    /// its legs, counts every leg once.
+    pub(crate) fn selection_total_rows(&self) -> Vec<usize> {
+        let Some(r) = &self.resolved else {
+            return Vec::new();
+        };
+        let mut rows: Vec<usize> = r
+            .rows
+            .clone()
+            .flat_map(|g| self.grid_rows_under(g))
+            .collect();
+        rows.sort_unstable();
+        rows.dedup();
+        top_most(&self.sheet, &rows)
     }
 
     /// What a bulk edit reaches: the selected rows' leaf lines (a package
@@ -220,8 +268,8 @@ impl PricerTile {
             cx.notify();
             return false;
         }
-        if self.selection_partly_hidden() {
-            self.footer = Some(PARTLY_HIDDEN.into());
+        if let Some(why) = self.selection_read_only() {
+            self.footer = Some(why.into());
             self.sync_editor(cx);
             self.rebuild_chrome();
             cx.notify();
@@ -338,13 +386,16 @@ impl PricerTile {
 
     /// The one door every structural verb passes before it mutates: `d`,
     /// `shift+j`/`shift+k`, `g p` and `g u` (keys, the `.` menu, and
-    /// `:package`/`:unpackage`) refuse with [`PARTLY_HIDDEN`] when their target
-    /// includes a package the scope partly hides, since each would act on
-    /// its hidden legs too. `selected`: the verb acts on the live
-    /// selection, which then refuses as a whole — no part of it is acted
-    /// on. Otherwise the target is the cursor row; for `g u` its package
-    /// (a leg's parent). A counted `g p` takes the `count` sheet rows from
-    /// the cursor (`Edit::Group`), so it also refuses with
+    /// `:package`/`:unpackage`) refuse when their target could reach
+    /// lines its row does not paint. In order: a move while any grouping
+    /// applies ([`MOVE_GROUPED`]: sheet order is not the painted order); a
+    /// target that is a grouping row ([`GROUP_ROW`]: no line behind it); a
+    /// target package split across nodes ([`SPLIT`]) or partly hidden by
+    /// the scope ([`PARTLY_HIDDEN`]). `selected`: the verb acts on the
+    /// live selection, which then refuses as a whole — no part of it is
+    /// acted on. Otherwise the target is the cursor row; for `g u` its
+    /// package (a leg's parent). A counted `g p` takes the `count` sheet
+    /// rows from the cursor (`Edit::Group`), so it also refuses with
     /// [`HIDDEN_IN_RANGE`] when any of them is hidden: it would package a
     /// line the trader never saw. (A selection's `g p` holds only shown
     /// rows, and `group_plan` refuses a gap.) A shown leg on its own is
@@ -362,9 +413,18 @@ impl PricerTile {
         ) {
             return None;
         }
+        if matches!(verb, "move_down" | "move_up") && !self.chain.is_flat() {
+            return Some(MOVE_GROUPED);
+        }
         let targets: Vec<usize> = if selected {
+            if self.selection_holds_group() {
+                return Some(GROUP_ROW);
+            }
             self.selected_sheet_rows()
         } else {
+            if self.cursor_on_group() {
+                return Some(GROUP_ROW);
+            }
             let row = self.cursor_sheet_row()?;
             match verb {
                 "ungroup" => vec![self.sheet.parent(row).unwrap_or(row)],
@@ -378,10 +438,7 @@ impl PricerTile {
                 _ => vec![row],
             }
         };
-        targets
-            .into_iter()
-            .any(|r| self.partly_hidden(r))
-            .then_some(PARTLY_HIDDEN)
+        first_refusal(targets.into_iter().map(|r| self.read_only(r)))
     }
 
     /// `y` over a selection, which it ends. Under `V` the clipboard gets
@@ -396,7 +453,7 @@ impl PricerTile {
         };
         match r.kind {
             SelectKind::Rows => {
-                let top = top_most(&self.sheet, &self.selected_sheet_rows());
+                let top = self.selection_total_rows();
                 let text = top
                     .iter()
                     .map(|&row| self.sheet.shorthand(row))
@@ -479,7 +536,7 @@ impl PricerTile {
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         let top = top_most(&self.sheet, &self.selected_sheet_rows());
-        let edit = move_plan(&self.sheet, &top, down)?;
+        let edit = move_plan(&self.sheet, &top, down, |r| self.visibility.is_shown(r))?;
         self.apply_edit(edit, cx).map_err(|e| e.to_string())
     }
 
@@ -609,8 +666,8 @@ impl PricerTile {
         // Refused here rather than answered `None`: the single-field
         // nudge would then step the editor's text, which the commit would
         // refuse anyway.
-        if self.selection_partly_hidden() {
-            self.footer = Some(PARTLY_HIDDEN.into());
+        if let Some(why) = self.selection_read_only() {
+            self.footer = Some(why.into());
             self.rebuild_chrome();
             cx.notify();
             return Some(());

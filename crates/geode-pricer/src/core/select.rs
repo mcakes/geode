@@ -57,10 +57,17 @@ pub fn group_plan(sheet: &Sheet, top: &[usize]) -> Result<(usize, usize), &'stat
     Ok((first, count))
 }
 
-/// One `Edit::Move` that slides the whole block one sibling step: the
-/// neighbouring sibling hops across the block by its length. Every
-/// member must share a parent, or the block has no single sibling order.
-pub fn move_plan(sheet: &Sheet, top: &[usize], down: bool) -> Result<Edit, &'static str> {
+/// One `Edit::Move` that slides the whole block one SHOWN sibling step:
+/// the nearest neighbouring sibling `shown` accepts hops across the block
+/// and any hidden siblings between them, so the painted order changes as
+/// the key says. Every member must share a parent, or the block has no
+/// single sibling order.
+pub fn move_plan(
+    sheet: &Sheet,
+    top: &[usize],
+    down: bool,
+    shown: impl Fn(usize) -> bool,
+) -> Result<Edit, &'static str> {
     let Some(&first) = top.first() else {
         return Err("no row");
     };
@@ -76,21 +83,20 @@ pub fn move_plan(sheet: &Sheet, top: &[usize], down: bool) -> Result<Edit, &'sta
     let (Some(lo), Some(hi)) = (positions().min(), positions().max()) else {
         return Err("no row");
     };
-    let len = (hi - lo + 1) as isize;
+    const OFF_END: &str = "cannot move past the end";
     if down {
-        let next = *siblings.get(hi + 1).ok_or("cannot move past the end")?;
+        let q = (hi + 1..siblings.len())
+            .find(|&q| shown(siblings[q]))
+            .ok_or(OFF_END)?;
         Ok(Edit::Move {
-            row: next,
-            delta: -len,
+            row: siblings[q],
+            delta: -((q - lo) as isize),
         })
     } else {
-        let prev = *lo
-            .checked_sub(1)
-            .and_then(|p| siblings.get(p))
-            .ok_or("cannot move past the end")?;
+        let q = (0..lo).rev().find(|&q| shown(siblings[q])).ok_or(OFF_END)?;
         Ok(Edit::Move {
-            row: prev,
-            delta: len,
+            row: siblings[q],
+            delta: (hi - q) as isize,
         })
     }
 }
@@ -340,19 +346,19 @@ mod tests {
         ]);
         // block = roots 0..2; down: root 2 hops up over two siblings
         assert_eq!(
-            move_plan(&s, &[0, 1], true),
+            move_plan(&s, &[0, 1], true, |_| true),
             Ok(Edit::Move { row: 2, delta: -2 })
         );
         assert_eq!(
-            move_plan(&s, &[2, 3], true),
+            move_plan(&s, &[2, 3], true, |_| true),
             Err("cannot move past the end")
         );
         assert_eq!(
-            move_plan(&s, &[1, 2], false),
+            move_plan(&s, &[1, 2], false, |_| true),
             Ok(Edit::Move { row: 0, delta: 2 })
         );
         assert_eq!(
-            move_plan(&s, &[0, 1], false),
+            move_plan(&s, &[0, 1], false, |_| true),
             Err("cannot move past the end")
         );
     }
@@ -362,15 +368,15 @@ mod tests {
         // 0 A; 1 package (legs 2, 3); 4 B: the sibling step is a root, not a row
         let s = sheet(vec![call(5000.0, 1), callspread(-5), put(4000.0, 1)]);
         assert_eq!(
-            move_plan(&s, &[0, 1], true),
+            move_plan(&s, &[0, 1], true, |_| true),
             Ok(Edit::Move { row: 4, delta: -2 })
         );
         assert_eq!(
-            move_plan(&s, &[1, 4], false),
+            move_plan(&s, &[1, 4], false, |_| true),
             Ok(Edit::Move { row: 0, delta: 2 })
         );
         assert_eq!(
-            move_plan(&s, &[2], true),
+            move_plan(&s, &[2], true, |_| true),
             Ok(Edit::Move { row: 3, delta: -1 }),
             "a leg moves among its package's legs"
         );
@@ -381,7 +387,7 @@ mod tests {
         let s = sheet(vec![call(5000.0, 1), callspread(-5)]);
         assert_eq!(s.children(1), 2..4);
         assert_eq!(
-            move_plan(&s, &[0, 2], true),
+            move_plan(&s, &[0, 2], true, |_| true),
             Err("can't move: selection spans packages")
         );
     }

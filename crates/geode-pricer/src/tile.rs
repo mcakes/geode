@@ -28,7 +28,7 @@ use crate::delegate::{
     CellPointer, ChevronClicked, ColumnMoved, DateFieldPaint, EditorField, EditorPaint,
     SheetDelegate,
 };
-use crate::grid::GridModel;
+use crate::grid::{GridModel, GridRowKind};
 use crate::header::{self, HeaderInputs, HeaderModel};
 use crate::popup::{
     PickerPurpose, PricerPick, SheetPicker, choice_paint, render_sheet_picker, sheet_rows,
@@ -259,6 +259,21 @@ pub(crate) const MOVED: &str = "the cell moved; edit refused";
 /// this.
 pub(crate) const PARTLY_HIDDEN: &str = "package partly hidden by the scope: edit its legs";
 
+/// A package the grouping splits across nodes paints only the legs under
+/// each node (`· n of M legs`), so anything acting through one of its
+/// rows would reach legs another node paints: the same gates as
+/// [`PARTLY_HIDDEN`] refuse with this. A package both split and partly
+/// hidden reads this one.
+pub(crate) const SPLIT: &str = "split package: edit its legs";
+
+/// A grouping row has no line behind it: a cell edit on it and every
+/// structural verb whose target includes it refuse with this.
+pub(crate) const GROUP_ROW: &str = "a grouping row: edit its lines";
+
+/// `shift+j`/`shift+k` move a line among its siblings in sheet order,
+/// which a grouping does not paint: refused while any grouping applies.
+pub(crate) const MOVE_GROUPED: &str = "lines move in the flat sheet: clear the grouping first";
+
 /// An insert, put, undo or redo that lands a line the frame's scope hides
 /// says so: the line is in the sheet, pricing, but the cursor cannot rest
 /// on it, and a line that vanishes without a word reads as lost.
@@ -481,6 +496,11 @@ pub struct PricerTile {
     /// `loaded`, and what `serialize` writes meanwhile, so a session save
     /// mid-load never overwrites a good record.
     held_expanded: Option<Vec<LineId>>,
+    /// The open grouping rows' paths while a load is pending: the rollup
+    /// of the empty fallback has no group to read them from, so
+    /// `serialize` writes these meanwhile. `group_expansion` holds them
+    /// throughout (paths are values, not sheet rows); `loaded` drops this.
+    held_paths: Option<Vec<Path>>,
     /// Transient header notice (an absent document, loading).
     pub(crate) notice: Option<SharedString>,
     /// Consecutive pricing refusals. While nonzero, REFUSED overlays the header notice
@@ -662,6 +682,27 @@ fn untitled(shared: &Shared) -> String {
         .map(|n| format!("untitled-{n}"))
         .find(|name| !shared.open.borrow().contains(name) && !shared.taken(name))
         .expect("an unbounded range finds a free name")
+}
+
+/// The sibling steps from position `at` in `siblings` that pass `delta`
+/// shown siblings (its sign the direction), stepping past hidden ones;
+/// `None` when fewer than `|delta|` shown siblings lie that way.
+pub(crate) fn shown_steps(
+    siblings: &[usize],
+    at: usize,
+    delta: isize,
+    shown: impl Fn(usize) -> bool,
+) -> Option<isize> {
+    let mut left = delta.unsigned_abs();
+    let mut p = at as isize;
+    while left > 0 {
+        p += delta.signum();
+        let sib = *siblings.get(usize::try_from(p).ok()?)?;
+        if shown(sib) {
+            left -= 1;
+        }
+    }
+    Some(p - at as isize)
 }
 
 /// The flat row an insert at `place` puts its first row on.
@@ -881,6 +922,16 @@ impl PricerTile {
         };
         let unscoped = record.unscoped;
         let applied_scope = read_scope(&frame, unscoped, cx);
+        let pin = match (&record.pinned_slot, &record.pinned) {
+            (Some(n), _) => Pin::Slot(*n),
+            (None, Some(chain)) => Pin::Grouping(chain.clone()),
+            (None, None) => Pin::None,
+        };
+        let mut group_expansion = GroupExpansion::default();
+        for p in &record.expanded_paths {
+            group_expansion.open(p.clone());
+        }
+        let held_paths = loading.then(|| record.expanded_paths.clone());
         let mut this = PricerTile {
             id,
             frame,
@@ -889,11 +940,11 @@ impl PricerTile {
             visibility: Visibility::all(&sheet),
             sheet,
             expansion,
-            pin: Pin::None,
+            pin,
             requested: Vec::new(),
             view_grouping: Vec::new(),
             chain: EffectiveChain::default(),
-            group_expansion: GroupExpansion::default(),
+            group_expansion,
             rollup: Rollup::default(),
             unscoped,
             applied_scope,
@@ -906,6 +957,7 @@ impl PricerTile {
             visible: false,
             loading,
             held_expanded,
+            held_paths,
             notice: (!notices.is_empty()).then(|| notices.join("; ").into()),
             refusals: 0,
             stopped: false,
@@ -1108,8 +1160,34 @@ impl PricerTile {
                 None => self.expansion.live_ids(&self.sheet).collect(),
             },
             unscoped: self.unscoped,
+            pinned: match &self.pin {
+                Pin::Grouping(chain) => Some(chain.clone()),
+                _ => None,
+            },
+            pinned_slot: match self.pin {
+                Pin::Slot(n) => Some(n),
+                _ => None,
+            },
+            expanded_paths: match &self.held_paths {
+                Some(held) => held.clone(),
+                None => self.open_group_paths(),
+            },
         }
         .to_table()
+    }
+
+    /// Every grouping node of the current tree whose path is open, in
+    /// tree order — nested ones under a closed parent included, so a
+    /// restore reopens them as they were.
+    fn open_group_paths(&self) -> Vec<Path> {
+        self.rollup
+            .nodes
+            .iter()
+            .filter(|n| {
+                matches!(n.kind, NodeKind::Group { .. }) && self.group_expansion.is_open(&n.path)
+            })
+            .map(|n| n.path.clone())
+            .collect()
     }
 
     pub fn set_stack(&mut self, stack: Option<StackHandle>, cx: &mut Context<Self>) {
@@ -1560,14 +1638,18 @@ impl PricerTile {
             return;
         }
         self.close_editor(window, cx);
+        if self.cursor_on_group() {
+            self.footer = Some(GROUP_ROW.into());
+            return;
+        }
         let (Some(row), Some(planned)) = (
             self.cursor_sheet_row(),
             self.plan.columns.get(self.cursor.col),
         ) else {
             return;
         };
-        if self.partly_hidden(row) {
-            self.footer = Some(PARTLY_HIDDEN.into());
+        if let Some(why) = self.read_only(row) {
+            self.footer = Some(why.into());
             return;
         }
         let (line, col, kind) = (self.sheet.id(row), self.cursor.col, planned.def.kind);
@@ -1823,9 +1905,9 @@ impl PricerTile {
         let Some(row) = self.editor_row(line, col, kind, window, cx) else {
             return;
         };
-        // The scope may have changed under an open editor.
-        if self.partly_hidden(row) {
-            self.finish_commit(Err(PARTLY_HIDDEN.into()), window, cx);
+        // The scope or the grouping may have changed under an open editor.
+        if let Some(why) = self.read_only(row) {
+            self.finish_commit(Err(why.into()), window, cx);
             return;
         }
         // `editor_row` confirmed the planned column at `col`.
@@ -1977,8 +2059,8 @@ impl PricerTile {
         let Some(row) = self.editor_row(line, col, kind, window, cx) else {
             return;
         };
-        if self.partly_hidden(row) {
-            self.finish_commit(Err(PARTLY_HIDDEN.into()), window, cx);
+        if let Some(why) = self.read_only(row) {
+            self.finish_commit(Err(why.into()), window, cx);
             return;
         }
         let answer = cell::commit_date(&self.sheet, row, date);
@@ -2672,6 +2754,9 @@ impl PricerTile {
             return;
         }
         self.loading = false;
+        // The rebuild below builds the loaded tree, which lists the open
+        // grouping rows from here on.
+        self.held_paths = None;
         self.notice = None;
         let name = self.sheet.name.clone();
         match answer {
@@ -2818,6 +2903,19 @@ impl PricerTile {
                         self.sheet.shorthand(row),
                     ));
                     self.register = Some(vec![spec_of(&self.sheet, row)]);
+                } else if let Some(g) = self.cursor_row().filter(|_| self.cursor_on_group()) {
+                    // A grouping row yanks its lines, as a `V` over them.
+                    let mut rows = self.grid_rows_under(g);
+                    rows.sort_unstable();
+                    rows.dedup();
+                    let top = crate::core::select::top_most(&self.sheet, &rows);
+                    let text = top
+                        .iter()
+                        .map(|&r| self.sheet.shorthand(r))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                    self.register = Some(top.iter().map(|&r| spec_of(&self.sheet, r)).collect());
                 }
             }
             "yank_col" => {
@@ -3100,11 +3198,21 @@ impl PricerTile {
         Ok(())
     }
 
-    /// `shift+j` / `shift+k`: within the parent; the cursor follows its
-    /// line (it is keyed by id).
+    /// `shift+j` / `shift+k`: within the parent, by `delta` SHOWN
+    /// siblings — a sibling the scope hides is stepped past, so the painted
+    /// order changes as the key says rather than swapping with a line no
+    /// row shows. The cursor follows its line (it is keyed by id). Only
+    /// reached with no grouping in force (`partly_hidden_refusal`).
     fn move_row(&mut self, delta: isize, cx: &mut Context<Self>) -> Result<(), String> {
         let row = self.cursor_sheet_row().ok_or("no row")?;
-        self.apply_edit(Edit::Move { row, delta }, cx)
+        let siblings = self.sheet.siblings(row);
+        let at = siblings
+            .iter()
+            .position(|s| *s == row)
+            .expect("a row is among its siblings");
+        let steps = shown_steps(&siblings, at, delta, |r| self.visibility.is_shown(r))
+            .ok_or_else(|| EditError::MoveOffEnd.to_string())?;
+        self.apply_edit(Edit::Move { row, delta: steps }, cx)
             .map_err(|e| e.to_string())
     }
 
@@ -3201,6 +3309,10 @@ impl PricerTile {
             row.is_some_and(|r| self.sheet.is_line(r) && self.sheet.parent(r).is_none());
         let packaged =
             row.is_some_and(|r| self.sheet.is_package(r) || self.sheet.parent(r).is_some());
+        // A grouping row has no line: its structural rows say so rather
+        // than "no row".
+        let on_group = self.cursor_on_group();
+        let or_group = |why: &'static str| if on_group { GROUP_ROW } else { why };
         let action = |id: &'static str, hint: Hint, enabled: Result<(), &'static str>| {
             Row::Action(
                 ActionRow::new(PricerPick::Action(id), crate::content::action_title(id))
@@ -3221,7 +3333,7 @@ impl PricerTile {
                 if root_line {
                     Ok(())
                 } else {
-                    Err("group needs a top-level line")
+                    Err(or_group("group needs a top-level line"))
                 },
             ),
             action(
@@ -3230,7 +3342,7 @@ impl PricerTile {
                 if packaged {
                     Ok(())
                 } else {
-                    Err("not in a package")
+                    Err(or_group("not in a package"))
                 },
             ),
             Row::Separator,
@@ -3256,7 +3368,11 @@ impl PricerTile {
             action(
                 "pricer::delete",
                 Hint::chord("pricer::delete"),
-                if row.is_some() { Ok(()) } else { Err("no row") },
+                if row.is_some() {
+                    Ok(())
+                } else {
+                    Err(or_group("no row"))
+                },
             ),
             // The sheet commands' pointer forms, unbound by default: the
             // lane shows a user's binding, else the `:` verb. Only a rename
@@ -3624,6 +3740,10 @@ impl PricerTile {
         // Line ids restart per sheet: the anchor would name a new line.
         self.clear_selection();
         self.forget_steps();
+        let paths = self
+            .held_paths
+            .take()
+            .unwrap_or_else(|| self.open_group_paths());
         self.sheet = Sheet::new(&name);
         self.adopt_templates();
         self.undo.clear();
@@ -3644,6 +3764,9 @@ impl PricerTile {
         self.load_waiting = false;
         self.loading = false;
         self.load_cancelled = false;
+        // The open grouping rows stay open across the switch (their paths
+        // are values); a pending load's empty tree cannot list them.
+        self.held_paths = load.then_some(paths);
         self.resolve_plan();
         if load {
             self.start_load(cx);
@@ -4273,10 +4396,72 @@ impl PricerTile {
         }
     }
 
-    /// Whether sheet row `row` is a package the scope partly hides: its
-    /// row is read-only (`PARTLY_HIDDEN`).
-    pub(crate) fn partly_hidden(&self, row: usize) -> bool {
-        self.sheet.is_package(row) && self.visibility.is_partial(&self.sheet, row)
+    /// Why sheet row `row` is read-only, if it is: a package the
+    /// grouping splits across nodes ([`SPLIT`], which wins when it is also
+    /// partly hidden) or one the scope partly hides ([`PARTLY_HIDDEN`]).
+    /// Either paints fewer legs than it has, so an edit through its row
+    /// would reach legs that row does not show.
+    pub(crate) fn read_only(&self, row: usize) -> Option<&'static str> {
+        if !self.sheet.is_package(row) {
+            return None;
+        }
+        if self.split(row) {
+            Some(SPLIT)
+        } else if self.visibility.is_partial(&self.sheet, row) {
+            Some(PARTLY_HIDDEN)
+        } else {
+            None
+        }
+    }
+
+    /// Whether the rollup splits package `row` across grouping nodes.
+    pub(crate) fn split(&self, row: usize) -> bool {
+        self.rollup
+            .nodes
+            .iter()
+            .any(|n| matches!(n.kind, NodeKind::Package { row: r, split: true, .. } if r == row))
+    }
+
+    /// Whether the cursor rests on a grouping row.
+    pub(crate) fn cursor_on_group(&self) -> bool {
+        matches!(self.cursor.at, Some(At::Group(_)))
+            && self
+                .cursor_row()
+                .and_then(|g| self.model.rows.get(g))
+                .is_some_and(|r| r.path.is_some())
+    }
+
+    /// The sheet rows a grouping row, or any node, stands for in a total
+    /// or a yank: a group its contents; a package its own row, or, split,
+    /// only its legs under this node (the rest belong to another node's
+    /// row); a line itself. Sheet order within each package.
+    pub(crate) fn node_rows(&self, node: usize) -> Vec<usize> {
+        let Some(n) = self.rollup.nodes.get(node) else {
+            return Vec::new();
+        };
+        match &n.kind {
+            NodeKind::Group { .. } => n.children.iter().flat_map(|&c| self.node_rows(c)).collect(),
+            NodeKind::Package {
+                legs, split: true, ..
+            } => legs.clone(),
+            NodeKind::Package { row, .. } | NodeKind::Leaf { row } => vec![*row],
+        }
+    }
+
+    /// The sheet rows grid row `g` stands for: a group's or a split
+    /// package's through [`Self::node_rows`], any other row its own.
+    pub(crate) fn grid_rows_under(&self, g: usize) -> Vec<usize> {
+        let Some(r) = self.model.rows.get(g) else {
+            return Vec::new();
+        };
+        let stands_for_node = matches!(
+            r.kind,
+            GridRowKind::Group { .. } | GridRowKind::Package { split: true, .. }
+        );
+        match r.node {
+            Some(node) if stands_for_node => self.node_rows(node),
+            _ => r.row.into_iter().collect(),
+        }
     }
 
     /// Install the prepared model, refresh table layout, and reconcile editor and cursor.
