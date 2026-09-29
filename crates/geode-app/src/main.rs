@@ -1066,11 +1066,19 @@ label = "skew"
         assert_eq!(docs[0].file.to_string_lossy(), "<module:timeseries>");
     }
 
-    /// Build the complete builtin/demo keymap with the production registry and
-    /// module factories. This checks keystroke syntax as well as declared contexts
-    /// and registered action IDs; fragment validation alone does not parse keys.
-    #[gpui::test]
-    fn the_whole_production_keymap_builds_with_no_diagnostics(cx: &mut gpui::TestAppContext) {
+    /// The complete builtin/demo keymap, built as `run` builds it: the
+    /// production registry, the bridge's real module factories and their
+    /// spliced fragments. Returns the keymap with its diagnostics, the
+    /// registry and the mod alias; the temp dir holds the bridge's database.
+    fn production_keymap(
+        cx: &mut gpui::TestAppContext,
+    ) -> (
+        geode_shell::keymap::Keymap,
+        Vec<Diagnostic>,
+        ActionRegistry,
+        geode_shell::keymap::Modifiers,
+        tempfile::TempDir,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let (config, _) = ShellServices::config_and_builtin(ConfigSources {
             builtin: builtin_layer(Some(dir.path())),
@@ -1121,12 +1129,58 @@ label = "skew"
         let layered = fragments::splice(config.layered_docs("keymap"), &fragments);
         let (mod_alias, mod_diags) = mod_alias_from_config(&config);
         assert!(mod_diags.is_empty(), "{mod_diags:?}");
-        let (_keymap, keymap_diags) = build_keymap(&layered, mod_alias, &registry);
+        let (keymap, keymap_diags) = build_keymap(&layered, mod_alias, &registry);
+        (keymap, keymap_diags, registry, mod_alias, dir)
+    }
+
+    /// Build the complete builtin/demo keymap with the production registry and
+    /// module factories. This checks keystroke syntax as well as declared contexts
+    /// and registered action IDs; fragment validation alone does not parse keys.
+    #[gpui::test]
+    fn the_whole_production_keymap_builds_with_no_diagnostics(cx: &mut gpui::TestAppContext) {
+        let (_keymap, keymap_diags, _registry, _mod_alias, _dir) = production_keymap(cx);
         assert!(
             keymap_diags.is_empty(),
             "every shipped binding must name a parseable keystroke and a \
              registered action: {keymap_diags:?}"
         );
+    }
+
+    /// `g .` opens the shell's row menu from a focused blotter or pricer in
+    /// normal mode, through the production keymap: the builtin
+    /// `tile::context_menu` is registered, and both modules' shipped
+    /// fragments bind it once spliced.
+    #[gpui::test]
+    fn the_production_keymap_binds_g_dot_to_row_actions(cx: &mut gpui::TestAppContext) {
+        use geode_shell::keymap::{KeyContext, MatchResult, Matcher, parse_keystroke};
+        let (keymap, keymap_diags, registry, mod_alias, _dir) = production_keymap(cx);
+        assert!(keymap_diags.is_empty(), "{keymap_diags:?}");
+        let id = geode_shell::actions::ActionId("tile::context_menu".to_string());
+        assert_eq!(
+            registry.get(&id).map(|d| d.title.as_str()),
+            Some("Row actions\u{2026}")
+        );
+        for kind in ["blotter", "pricer"] {
+            // The stack the shell publishes over a focused `kind` tile.
+            let stack = [
+                KeyContext::new("workspace"),
+                KeyContext::new("tile"),
+                KeyContext::new(kind)
+                    .grid()
+                    .pair("mode", "normal")
+                    .counts(),
+            ];
+            let mut m = Matcher::default();
+            let g = parse_keystroke("g", mod_alias).unwrap();
+            assert_eq!(m.press(&keymap, g, &stack), MatchResult::Pending, "{kind}");
+            let dot = parse_keystroke(".", mod_alias).unwrap();
+            match m.press(&keymap, dot, &stack) {
+                MatchResult::Matched { action, .. } => {
+                    assert_eq!(action.0, "tile::context_menu", "{kind}")
+                }
+                other => panic!("{kind}: g . resolved to {other:?}"),
+            }
+        }
     }
 
     /// The production roster exposes `underlying_ref`-based launch state for

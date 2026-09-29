@@ -95,8 +95,18 @@ cargo bench -p geode-blotter   # the pure core
   grouping path (a subtotal carries only its own levels and those above), the
   shown dimension columns, then the hidden context columns the data service
   adds. A NULL, empty or mixed value is absent. The context also carries the
-  selection's rows while the cursor is inside a visual selection; `g m` opens
-  on the cursor row's values alone.
+  selection's rows while the cursor is inside a `V` (rows) selection, never a
+  `v` block; `g m` opens on the cursor row's values alone. Its `anchor` is the
+  cursor row's lower-left in window space, recorded at paint and cleared when
+  that row scrolls out of view.
+- `g .` opens the shell's row menu on that context. A right press on a cell,
+  or on a row beside its cells, emits `CellPointer::Context`; the tile then
+  keeps the cursor and selection when the row is inside a `V` selection, and
+  otherwise clears the selection and moves the cursor there, as a plain
+  press does. `press_context` answers that row's context once, with `first`
+  set to the pressed column when it is a dimension the row carries (a press
+  beside the cells uses the cursor's column). A filler row below the data
+  opens nothing.
 - `tile_columns` reports the plan's non-tree columns and the cursor's column
   for the shell's edit-column actions; the tree column is never active, and
   derived view columns are flagged so Schema can leave them out.

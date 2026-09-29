@@ -10,6 +10,7 @@ pub mod following;
 pub mod motion;
 pub mod notice;
 
-/// The menu and popover live in the shell (it paints the row menu over
-/// any tile); re-exported so module code keeps naming `geode_tile::menu`.
+/// The menu and popover live in the shell (it paints the row menu over a
+/// tile whose module answers `dimension_context` or `press_context`);
+/// re-exported so module code keeps naming `geode_tile::menu`.
 pub use geode_shell::{menu, popover};

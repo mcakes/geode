@@ -234,6 +234,19 @@ column's grouping level, a mixed value, or a NULL value leaves it absent, and
 a row holding no registered context column (an `lhu` subtotal, say) opens the
 plain tile picker.
 
+`g .` opens the shell's [row menu](shell.md#row-menu) on the cursor row,
+hung just under it: a section per value in the row's context (`underlying_ref
+· SPX`) listing the panels that open on it. When the cursor row has
+scrolled out of view the menu hangs at the tile's top-left instead. A
+right-click on a row's cell, or on the row beside its cells, opens the same
+menu at the pointer, the clicked column's section first when that column is
+a dimension the row carries (a click beside the cells counts as the
+cursor's column). Blank space below the data opens nothing. A right-click
+inside a `V` row selection keeps the cursor and the selection; anywhere
+else it clears any selection and moves the cursor to the clicked row first.
+A row with nothing to offer (an `lhu` subtotal, say) shows `no actions for
+this row` instead.
+
 "Edit column in view…" and "Edit column in schema…" list the blotter's
 planned non-tree columns with the cursor's column highlighted
 (`TileContent::tile_columns`). Hidden columns and dimensions folded into the
@@ -1096,12 +1109,17 @@ Normal-mode keys:
 | `shift+j` / `shift+k` | Move the row within its parent |
 | `g p` / `g u` | Group the cursor row and the next `count − 1` roots into a custom package / ungroup |
 | `g m` | Open a panel on the cursor row's underlying |
+| `g .` | Open the row menu on the cursor row |
 | `.` | Open the action menu |
 | `shift+v` / `v` | Select rows / a block of cells from the cursor (see [Selection](#selection-2)) |
 
 `g m` opens a panel on the cursor row's underlying, as the `underlying_ref`
 context column the market-data panels accept: a line's or leg's own, a
-package's when its legs share one; otherwise the plain tile picker.
+package's when its legs share one; otherwise the plain tile picker. `g .`
+opens the shell's [row menu](shell.md#row-menu) on the same context, at the
+tile's top-left (the pricer records no row anchor); a line with no single
+underlying shows `no actions for this row`. A right-click opens no row
+menu in the pricer.
 
 The action menu offers repricing, grouping, ungrouping, undo, redo, deletion,
 the sheet verbs (Open sheet…, Rename sheet…, New sheet, Remove sheet…; see
@@ -1318,8 +1336,8 @@ column as each row's handle.
 
 **Verbs.** In visual mode the verbs are single keys; the doubled normal-mode
 forms (`y y`, `y c`, `d d`) are not bound there, nor are `p`, `shift+p`,
-`u`, `ctrl+r`, `o`, `shift+o`, `n`, `shift+n`, `space`, the `z` folds, `g m`
-and `.` (the palette still reaches them). A verb that refuses keeps the
+`u`, `ctrl+r`, `o`, `shift+o`, `n`, `shift+n`, `space`, the `z` folds, `g m`,
+`g .` and `.` (the palette still reaches them). A verb that refuses keeps the
 selection and says why in the footer; a success notice goes to the header.
 
 - `y` ends the selection. Under `V` it copies the shorthand of the top-most
