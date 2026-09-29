@@ -4,6 +4,70 @@
 use super::*;
 
 #[gpui::test]
+fn completion_navigation_keeps_the_highlight_visible(cx: &mut gpui::TestAppContext) {
+    let (mut services, _) = services_with_recorder();
+    let mut recorder = crate::module::recording::RecordingFactory::new("rec");
+    recorder.completions = (0..12).map(|i| format!("command{i:02}")).collect();
+    let mut roster = crate::module::ModuleRoster::new();
+    roster.add(Box::new(recorder));
+    services.roster = roster;
+    let (window, mut cx) = open_shell(cx, services);
+    cx.simulate_keystrokes("ctrl-v :");
+    let shell = shell_of(&window, &mut cx);
+
+    for (keys, selected, selector) in [
+        (
+            "down down down down down down down down",
+            8,
+            "completion-row-8",
+        ),
+        ("ctrl-n ctrl-n ctrl-n", 11, "completion-row-11"),
+        ("down", 0, "completion-row-0"),
+        ("ctrl-p", 11, "completion-row-11"),
+        ("up", 10, "completion-row-10"),
+        ("tab", 11, "completion-row-11"),
+    ] {
+        cx.simulate_keystrokes(keys);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(
+            shell.read_with(&cx, |s, _| s.command_line.as_ref().unwrap().highlighted),
+            selected
+        );
+        let row = cx
+            .debug_bounds(selector)
+            .expect("selected completion is rendered");
+        let viewport = cx
+            .debug_bounds("completion-list")
+            .expect("completion viewport");
+        assert!(
+            row.top() >= viewport.top() && row.bottom() <= viewport.bottom(),
+            "selected row {row:?} must be fully visible in {viewport:?}"
+        );
+        assert!(
+            viewport.size.height < row.size.height * 12.0,
+            "the popup stays capped instead of expanding to fit all candidates"
+        );
+    }
+
+    // Editing re-ranks from the first result; reopening starts at the top too.
+    for keys in ["backspace", "escape :"] {
+        cx.simulate_keystrokes(keys);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(
+            shell.read_with(&cx, |s, _| s.command_line.as_ref().unwrap().highlighted),
+            0
+        );
+        let row = cx.debug_bounds("completion-row-0").unwrap();
+        let viewport = cx.debug_bounds("completion-list").unwrap();
+        assert!(row.top() >= viewport.top() && row.bottom() <= viewport.bottom());
+    }
+}
+
+#[gpui::test]
 fn colon_opens_the_command_line_and_enter_runs_the_line_on_the_occupant(
     cx: &mut gpui::TestAppContext,
 ) {
@@ -17,6 +81,11 @@ fn colon_opens_the_command_line_and_enter_runs_the_line_on_the_occupant(
     assert!(
         cx.debug_bounds("command-line").is_some(),
         "the strip painted"
+    );
+    assert!(
+        cx.debug_bounds("completion-row-0").is_some()
+            && cx.debug_bounds("completion-row-1").is_some(),
+        "the occupant's suggestions appear immediately, before typing"
     );
     cx.simulate_input("unpin");
     cx.simulate_keystrokes("enter");

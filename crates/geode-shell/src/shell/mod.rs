@@ -530,6 +530,8 @@ pub struct ShellView {
     /// mutated by `handle_command_line_key`/`on_command_line_changed` and
     /// painted by `commandline_view::render`.
     command_line: Option<CommandLine>,
+    /// Completion viewport, retained across renders and reset on each prompt open.
+    command_scroll: ScrollHandle,
     /// The scope bar's text input. Each focused edit updates the frame inside
     /// one undo session. The stable entity preserves cursor, selection, and
     /// focus across renders.
@@ -1298,6 +1300,7 @@ impl ShellView {
             palette_input,
             command_input,
             command_line: None,
+            command_scroll: ScrollHandle::new(),
             dialog_input,
             desk_dir,
             user_dir,

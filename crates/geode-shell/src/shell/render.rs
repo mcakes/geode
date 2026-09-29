@@ -772,6 +772,7 @@ impl Render for ShellView {
                     el.child(commandline_view::render(
                         line,
                         &self.command_input,
+                        &self.command_scroll,
                         rect,
                         rem_size,
                         cx,
