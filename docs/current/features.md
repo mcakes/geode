@@ -213,15 +213,15 @@ persisted by the tile.
 
 The tile's grouping is, in order of precedence: a `:group <columns>` pin; a
 `:group slot <n>` pin (the view's own grouping while that slot is empty);
-the frame's active slot; the view's own `grouping`. `:group none` pins the
-empty grouping: the view with no grouping levels, a single total row, as a
-view without `grouping` shows. `none` is reserved beside `slot` — it is
-never read as a column, and `:group none <anything>` is refused. A bare
-`:group` refuses with `group needs columns, \`slot N\` or \`none\``.
-`:group` completes the groupable dimensions, `none` and `slot`. While a pin
-holds, a frame grouping change or slot switch does not regroup the tile;
-`:unpin` follows the frame again at once. The pin is saved as `pinned` (an
-empty array for `none`) or `pinned_slot`.
+the frame's active slot; the view's own `grouping`. The blotter always
+groups: an empty grouping would be one grand-total row, so `:group none`
+(the pricer's flat-sheet pin), and `none` anywhere in a column list, is
+refused with `the blotter always groups: :group takes columns or \`slot
+N\``. A bare `:group` refuses with `group needs columns or \`slot N\``.
+`:group` completes the groupable dimensions and `slot`. While a pin holds,
+a frame grouping change or slot switch does not regroup the tile; `:unpin`
+follows the frame again at once. The pin is saved as `pinned` or
+`pinned_slot`.
 
 The `DataTable` delegate paints a prepared row model. Rendering does not
 recompile columns or format the whole dataset. Each delivered snapshot builds
@@ -279,8 +279,8 @@ The header is the shared 22 px strip. The view, grouping, state chips
 (`pinned`, `unscoped`, `filtered`, a tile as-of), the frame's `AS OF` warning
 and the in-flight `…` sit on the left and clip when the tile is too narrow.
 The grouping reads as its levels joined by ` / `, or a muted `ungrouped` for
-no levels (a view without `grouping`, or `:group none`); the tile's title
-reads `view · ungrouped` likewise, never a dangling `view · `.
+no levels (a view without `grouping`); the tile's title reads `view ·
+ungrouped` likewise, never a dangling `view · `.
 Dataset times sit in the header's right cluster with the health chip,
 which covers the datasets of the tile's current snapshot; the notice sits
 before them. The chip's question moves with each delivered snapshot: a view
@@ -1245,8 +1245,8 @@ as `ctrl+k` available.
 
 The `:` verbs change only this tile: `view <name>`, `shift spot|vol <n>|clear`,
 `spot <underlying> <level>|clear`, `price`, `refresh <duration>|off|default`,
-`package [n]`, `unpackage`, `group <columns>`, `group slot <n>`, `group none`, `unpin`,
-`e <sheet>`, `new`, `name <sheet>`, and `rm <sheet>`.
+`package [n]`, `unpackage`, `group <columns>`, `group slot <n>`,
+`group none`, `unpin`, `e <sheet>`, `new`, `name <sheet>`, and `rm <sheet>`.
 `view`, `refresh`, `shift`, `spot`, `package`, `unpackage`, and `name` (and
 the menu's view rows) are refused while the sheet is still loading, because
 the loaded document would replace what they set. `group` and `unpin` are
@@ -1491,8 +1491,9 @@ the tile follows the frame again at once. `:group` takes columns separated
 by spaces or commas and completes the groupable ones, `none` and `slot`; a
 bare `:group` refuses with `group needs columns, \`slot N\` or \`none\``,
 and `:group slot <n>` on an empty slot with `slot n is empty`. The pin is
-saved as `pinned` (an empty array for `none`) or `pinned_slot`. The frame observer regroups before the tile answers the frame's
-flip barrier, so a grouping change paints in step with the other tiles.
+saved as `pinned` (an empty array for `none`) or `pinned_slot`. The frame
+observer regroups before the tile answers the frame's flip barrier, so a
+grouping change paints in step with the other tiles.
 
 The chain's levels are the `pricer` dataset's groupable columns and the
 derived dimensions over them (see

@@ -116,8 +116,9 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 - `:group` whose every level `effective_chain` drops refuses and pins
   nothing (`:group 2` is not a count). `:group none` is the empty chain
   (`Pin::Grouping(vec![])`, session `pinned = []`), exempt from that
-  refusal: the flat sheet pinned, a muted `ungrouped` in the header. `y y` and `V y` on a split package
-  row yank that node's legs (`grid_rows_under`), as the row shows them.
+  refusal: the flat sheet pinned, a muted `ungrouped` in the header.
+  `y y` and `V y` on a split package row yank that node's legs
+  (`grid_rows_under`), as the row shows them.
 - Completion never runs in render; the tile refreshes it on every text change,
   history step, commit and reload, and a Tab at a moved caret re-ranks first.
   A completion write is one range replace (one undo step) whose own `Change`

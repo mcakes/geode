@@ -154,8 +154,7 @@ that exception.
 
 Move between tiles with `mod+h/j/k/l` for left/down/up/right, or click the
 tile you want. In the pinned tile, run `:unpin` to make its grouping follow the
-frame again. `:group none` pins a tile to no grouping at all — the view's
-single total row in a blotter, the flat sheet in a pricer — until `:unpin`. Press `ctrl+3` to return both to underlying-first grouping.
+frame again. Press `ctrl+3` to return both to underlying-first grouping.
 
 This distinction repeats throughout Geode: **shared actions coordinate views;
 tile commands let one view answer a different question.** A `:` command
@@ -259,9 +258,10 @@ so.
 The sheet follows the shared grouping too: press `ctrl+3` and its lines
 gather under underlying rows that sum their lines. `:group underlying_ref,
 expiry` pins the pricer's own grouping and `:unpin` follows the frame
-again, as in a blotter; the header lists the levels and strikes through any
-the sheet cannot group by. A grouping row is read-only: edit the lines
-under it. Lines only move (`shift+j`/`shift+k`) in the flat sheet, so clear
+again, as in a blotter. Unlike a blotter, a pricer takes `:group none`:
+it pins the flat sheet. The header lists the levels and strikes through
+any the sheet cannot group by. A grouping
+row is read-only: edit the lines under it. Lines only move (`shift+j`/`shift+k`) in the flat sheet, so clear
 the grouping first. To build a custom package from lines, use `g p` (or
 `:package [n]`); `g u` or `:unpackage` takes it apart.
 

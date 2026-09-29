@@ -26400,9 +26400,11 @@ run_mutation "pricer grouping: :group pins a chain that groups by nothing" \
   '                if false {' \
   geode-pricer a_group_with_no_groupable_level_refuses
 
-# `:group none` pins the empty grouping in both modules: it parses to the
-# empty pin, is exempt from the pricer's no-groupable-column refusal,
-# round-trips the session as `pinned = []`, and reads `ungrouped`.
+# The pricer's `:group none` pins the empty chain: it parses to the empty
+# pin, `none` is never a column, it is exempt from the no-groupable-column
+# refusal, round-trips the session as `pinned = []`, and reads `ungrouped`.
+# The blotter refuses it (an empty grouping is one grand-total row); a
+# flat view titles `view · ungrouped`.
 run_mutation "pricer grouping: :group none is refused as grouping by nothing" \
   crates/geode-pricer/src/tile.rs \
   '                if effective.kept.is_empty() && !chain.is_empty() {' \
@@ -26434,25 +26436,25 @@ run_mutation "pricer grouping: the header omits ungrouped under :group none" \
   '            ungrouped: false,' \
   geode-pricer group_none_pins_the_flat_sheet_until_unpin
 
-run_mutation "blotter grouping: :group none parses as a column named none" \
+run_mutation "pricer grouping: none inside a column list is taken as a column" \
+  crates/geode-pricer/src/core/commands.rs \
+  '            if chain.iter().any(|c| c == "none") {' \
+  '            if false {' \
+  geode-pricer group_none_parses_to_the_empty_pin_and_is_reserved
+
+run_mutation "blotter grouping: :group none is accepted as a column" \
   crates/geode-blotter/src/core/commands.rs \
-  '                    None => Ok(Command::Group(Vec::new())),' \
-  '                    None => Ok(Command::Group(vec!["none".into()])),' \
-  geode-blotter group_none_parses_to_the_empty_pin_and_is_reserved
+  '                    if columns.iter().any(|c| c == "none") {' \
+  '                    if false {' \
+  geode-blotter group_none_is_refused_and_the_tile_keeps_following
 
-run_mutation "blotter grouping: an empty pinned array restores as no pin" \
-  crates/geode-blotter/src/tile.rs \
-  '            Some(t) if t.get("pinned").and_then(|v| v.as_array()).is_some() => Pin::Grouping(' \
-  '            Some(t) if t.get("pinned").and_then(|v| v.as_array()).is_some_and(|a| !a.is_empty()) => Pin::Grouping(' \
-  geode-blotter a_group_none_pin_round_trips_through_the_session
-
-run_mutation "blotter grouping: an empty grouping titles with a dangling separator" \
+run_mutation "blotter grouping: a flat view titles with a dangling separator" \
   crates/geode-blotter/src/tile.rs \
   '    if grouping.is_empty() {
         "ungrouped".to_string()' \
   '    if false {
         "ungrouped".to_string()' \
-  geode-blotter an_empty_grouping_titles_as_ungrouped
+  geode-blotter a_flat_view_titles_as_ungrouped
 
 # `y y` / `V y` on a split package row yank that node's legs.
 run_mutation "pricer grouping: y y on a split row yanks the whole package" \

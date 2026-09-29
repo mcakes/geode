@@ -81,7 +81,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
 ];
 
 /// The grouping as the header and title read it: levels joined by ` / `,
-/// or `ungrouped` for no levels (a flat view, or `:group none`), so the
+/// or `ungrouped` for no levels (a view without `grouping`), so the
 /// title never ends in a dangling `view · `.
 fn grouping_text(grouping: &[String]) -> String {
     if grouping.is_empty() {
@@ -91,8 +91,6 @@ fn grouping_text(grouping: &[String]) -> String {
     }
 }
 
-/// The tile's grouping override. `Grouping(vec![])` is `:group none`: the
-/// view with no levels, pinned like any chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pin {
     None,
@@ -2934,8 +2932,8 @@ mod tests {
         );
     }
 
-    /// A flat view (no `grouping`) and a `:group none` pin read the same:
-    /// `view · ungrouped`, never a dangling `view · `.
+    /// A flat view (no `grouping`) reads `view · ungrouped`, never a
+    /// dangling `view · `.
     #[test]
     fn an_empty_grouping_titles_as_ungrouped() {
         assert_eq!(
@@ -2948,95 +2946,59 @@ mod tests {
         );
     }
 
-    /// `:group none` pins the empty grouping through the command door: the
-    /// tile queries the view with no levels, reads `view · ungrouped`, and
-    /// a frame slot change does not regroup it; `:unpin` follows the
-    /// frame's active slot again at once.
+    /// A view without `grouping` queries no levels and reads `flat ·
+    /// ungrouped` in the title and a muted `ungrouped` in the header, not
+    /// a dangling `flat · `. Before its first query the title is the view
+    /// name alone.
     #[gpui::test]
-    fn group_none_flattens_the_tile_ignores_the_frame_and_unpin_follows_again(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let (h, mut vcx) = open(cx);
+    fn a_flat_view_titles_as_ungrouped(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_with_views(
+            cx,
+            None,
+            views_from("[flat]\ndataset = \"d\"\n[[flat.columns]]\nname = \"delta01\"\n"),
+        );
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.title()).as_ref(), "flat");
         h.tile.update(&mut vcx, |t, cx| t.set_visible(true, cx));
         let p = next_query(&h.requests);
-        assert_eq!(
-            p.grouping.as_deref(),
-            Some(&["lhu".to_string(), "underlying_ref".into()][..]),
-            "grouped by the view before the pin"
-        );
-
-        h.tile.update_in(&mut vcx, |t, window, cx| {
-            t.command("group none", window, cx).unwrap()
-        });
-        let p = next_query(&h.requests);
-        assert_eq!(
-            p.grouping.as_deref(),
-            Some(&[][..] as &[String]),
-            "no grouping levels"
-        );
+        assert_eq!(p.grouping.as_deref(), Some(&[][..] as &[String]));
         h.tile.read_with(&vcx, |t, _| {
-            assert_eq!(t.pin, Pin::Grouping(Vec::new()));
-            assert_eq!(t.title().as_ref(), "tree · ungrouped");
+            assert_eq!(t.title().as_ref(), "flat · ungrouped");
             assert_eq!(t.grouping_label.as_ref(), "ungrouped");
         });
+    }
 
+    /// The blotter always groups: `:group none` through the command door
+    /// is refused, pins nothing and sends no query; the tile keeps
+    /// following the frame.
+    #[gpui::test]
+    fn group_none_is_refused_and_the_tile_keeps_following(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.tile.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        let _ = next_query(&h.requests);
+        for line in ["group none", "group lhu none"] {
+            let got = h
+                .tile
+                .update_in(&mut vcx, |t, window, cx| t.command(line, window, cx));
+            assert_eq!(
+                got,
+                Err(crate::core::commands::GROUP_NONE_REFUSED.to_string()),
+                "{line}"
+            );
+            assert_eq!(h.tile.read_with(&vcx, |t, _| t.pin.clone()), Pin::None);
+        }
+        assert!(
+            h.requests.recv_timeout(Duration::from_millis(200)).is_err(),
+            "a refusal queries nothing"
+        );
         h.frame.update(&mut vcx, |f, cx| {
             f.shared_mut().set_active_slot(Some(2));
             cx.notify();
-        });
-        assert!(
-            h.requests.recv_timeout(Duration::from_millis(200)).is_err(),
-            "a `none`-pinned tile does not follow the frame's slot"
-        );
-
-        h.tile.update_in(&mut vcx, |t, window, cx| {
-            t.command("unpin", window, cx).unwrap()
         });
         let p = next_query(&h.requests);
         assert_eq!(
             p.grouping.as_deref(),
             Some(&["underlying_ref".to_string(), "lhu".into()][..]),
-            "unpinned: the frame's active slot at once"
-        );
-        assert_eq!(
-            h.tile.read_with(&vcx, |t, _| t.title()).as_ref(),
-            "tree · underlying_ref / lhu"
-        );
-    }
-
-    /// A `none` pin is written as an empty `pinned` array, and the factory's
-    /// restore path reads that back as the empty pin, not as "no pin": the
-    /// restored tile queries flat and ignores a frame slot change.
-    #[gpui::test]
-    fn a_group_none_pin_round_trips_through_the_session(cx: &mut gpui::TestAppContext) {
-        let (h, mut vcx) = open(cx);
-        h.tile.update_in(&mut vcx, |t, window, cx| {
-            t.command("group none", window, cx).unwrap()
-        });
-        let state = h.tile.read_with(&vcx, |t, cx| t.serialize(cx));
-        assert_eq!(
-            state.get("pinned").and_then(|v| v.as_array()).map(Vec::len),
-            Some(0),
-            "{state:?}"
-        );
-
-        let (h2, mut vcx2) = open_with(cx, Some(&state));
-        assert_eq!(
-            h2.tile.read_with(&vcx2, |t, _| t.pin.clone()),
-            Pin::Grouping(Vec::new())
-        );
-        h2.tile.update(&mut vcx2, |t, cx| t.set_visible(true, cx));
-        let p = next_query(&h2.requests);
-        assert_eq!(p.grouping.as_deref(), Some(&[][..] as &[String]));
-        h2.frame.update(&mut vcx2, |f, cx| {
-            f.shared_mut().set_active_slot(Some(2));
-            cx.notify();
-        });
-        assert!(
-            h2.requests
-                .recv_timeout(Duration::from_millis(200))
-                .is_err(),
-            "the restored pin still ignores the frame"
+            "still following the frame"
         );
     }
 

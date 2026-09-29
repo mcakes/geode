@@ -58,6 +58,8 @@ pub const REFUSED_LIVE: &str = ":asof live pins this tile; Return to live (palet
 pub const REFUSED_GROUP_SAVE: &str =
     "saving a slot is in the Groupings dialog (palette: Edit groupings…)";
 
+pub const GROUP_NONE_REFUSED: &str = "the blotter always groups: :group takes columns or `slot N`";
+
 fn slot(arg: Option<&str>, what: &str) -> Result<u8, String> {
     arg.and_then(|a| a.parse::<u8>().ok())
         .filter(|n| (1..=9).contains(n))
@@ -88,25 +90,20 @@ pub fn parse(line: &str) -> Result<Command, String> {
         "group" => {
             let mut words = rest.split_whitespace();
             match words.next() {
-                None => Err("group needs columns, `slot N` or `none`".into()),
+                None => Err("group needs columns or `slot N`".into()),
                 Some("slot") => slot(words.next(), "group slot").map(Command::GroupSlot),
                 Some("save") => Ok(Command::Refused(REFUSED_GROUP_SAVE)),
-                // `none` pins the empty grouping: the view with no levels,
-                // whatever the frame's grouping becomes.
-                Some("none") => match words.next() {
-                    None => Ok(Command::Group(Vec::new())),
-                    Some(_) => Err("group none takes nothing more".into()),
-                },
                 Some(_) => {
                     let columns: Vec<String> = rest
                         .split(|c: char| c == ',' || c.is_whitespace())
                         .filter(|s| !s.is_empty())
                         .map(str::to_string)
                         .collect();
+                    // An empty grouping would be one grand-total row, not the
+                    // trader's "ungrouped"; `none` stays reserved (the
+                    // pricer's `:group none`) so it is never read as a column.
                     if columns.iter().any(|c| c == "none") {
-                        return Err(
-                            "`none` is reserved: `:group none` alone ungroups this tile".into()
-                        );
+                        return Err(GROUP_NONE_REFUSED.into());
                     }
                     Ok(Command::Group(columns))
                 }
@@ -221,11 +218,10 @@ pub fn completions(line: &str, cursor: usize, vocab: &Vocabulary) -> Vec<String>
         ["sort", _, "abs"] => vec!["asc".into(), "desc".into()],
         ["group"] => {
             let mut v = vocab.dimensions.clone();
-            v.extend(["none", "slot"].map(String::from));
+            v.push("slot".into());
             v
         }
         ["group", "slot"] => (1..=9).map(|n| n.to_string()).collect(),
-        ["group", "none", ..] => Vec::new(),
         ["group", ..] => vocab.dimensions.clone(),
         ["filter"] => {
             let mut v = vocab.dimensions.clone();
@@ -401,7 +397,7 @@ mod tests {
         assert!(names("sort clear ").is_empty());
         assert_eq!(
             names("group "),
-            vec!["book", "lhu", "none", "slot"],
+            vec!["book", "lhu", "slot"],
             "group completes dimensions (book, lhu), never the delta01 measure"
         );
         assert_eq!(names("group lhu,"), vec!["book", "lhu"]);
@@ -435,37 +431,33 @@ mod tests {
         assert_eq!(completions(line, cursor, &v), vec!["clear", "délta"]);
     }
 
-    /// `:group none` pins the empty grouping: the view with no levels.
-    /// `none` is reserved beside `slot`, never a column, and takes nothing
-    /// after it; completion offers it beside `slot`.
+    /// The blotter always groups: `:group none` in any form is refused
+    /// (an empty grouping is one grand-total row), and `none` is never
+    /// read as a column. Completion does not offer it.
     #[test]
-    fn group_none_parses_to_the_empty_pin_and_is_reserved() {
-        assert_eq!(parse("group none").unwrap(), Command::Group(Vec::new()));
-        assert_eq!(parse("group  none ").unwrap(), Command::Group(Vec::new()));
-        assert_eq!(
-            parse("group none lhu").unwrap_err(),
-            "group none takes nothing more"
-        );
-        assert!(
-            parse("group lhu none")
-                .unwrap_err()
-                .contains("`none` is reserved"),
-            "`none` is never a column name"
-        );
+    fn group_none_is_refused_and_never_a_column() {
+        for line in [
+            "group none",
+            "group  none ",
+            "group none lhu",
+            "group lhu none",
+            "group lhu,none",
+        ] {
+            assert_eq!(parse(line), Err(GROUP_NONE_REFUSED.to_string()), "{line}");
+        }
         assert_eq!(
             parse("group").unwrap_err(),
-            "group needs columns, `slot N` or `none`"
+            "group needs columns or `slot N`"
         );
         assert_eq!(
             completions("group ", 6, &vocab()),
-            vec!["book", "lhu", "none", "slot"]
+            vec!["book", "lhu", "slot"]
         );
-        assert!(completions("group none ", 11, &vocab()).is_empty());
     }
 
     /// Grouping and filtering offer dimensions absent from the displayed
     /// columns. Sorting offers only the column vocabulary. `group` also
-    /// offers its `slot` and `none` subcommands.
+    /// offers its `slot` subcommand.
     #[test]
     fn group_and_drop_complete_dimensions_not_measures() {
         let vocab = Vocabulary {
@@ -475,7 +467,7 @@ mod tests {
         };
         assert_eq!(
             completions("group ", 6, &vocab),
-            vec!["book", "currency", "none", "slot"]
+            vec!["book", "currency", "slot"]
         );
         assert_eq!(
             completions("sort ", 5, &vocab),
@@ -522,7 +514,7 @@ mod tests {
         assert_eq!(completions("asof ", 5, &vocab()), vec!["clear", "live"]);
         assert_eq!(
             completions("group ", 6, &vocab()),
-            vec!["book", "lhu", "none", "slot"],
+            vec!["book", "lhu", "slot"],
             "`save` is no longer offered after `group`"
         );
     }
