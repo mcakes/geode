@@ -402,8 +402,8 @@ pub struct ShellView {
     /// reload) — see the `fontsize` module doc.
     font_size: FontSize,
     /// The configured `/`-find style (`[ui] find_style`). Resolved at startup,
-    /// on reload, and by the settings control. Dialog filtering does not read
-    /// this field; updating it changes the stored setting only.
+    /// on reload, and by the settings control. Each new `/` prompt chooses
+    /// the tile's Vim event stream or the shared Fzf picker from this value.
     find_style: FindStyle,
     focus_handle: FocusHandle,
     /// State for the open command palette, or `None`. Each open rebuilds the
@@ -532,6 +532,8 @@ pub struct ShellView {
     command_line: Option<CommandLine>,
     /// Completion viewport, retained across renders and reset on each prompt open.
     command_scroll: ScrollHandle,
+    fuzzy_find: Option<Entity<crate::fuzzyfind::FuzzyFind>>,
+    fuzzy_find_subscriptions: Vec<gpui::Subscription>,
     /// The scope bar's text input. Each focused edit updates the frame inside
     /// one undo session. The stable entity preserves cursor, selection, and
     /// focus across renders.
@@ -1301,6 +1303,8 @@ impl ShellView {
             command_input,
             command_line: None,
             command_scroll: ScrollHandle::new(),
+            fuzzy_find: None,
+            fuzzy_find_subscriptions: Vec::new(),
             dialog_input,
             desk_dir,
             user_dir,

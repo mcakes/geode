@@ -191,6 +191,16 @@ impl TileContent for MarketDataContent {
     fn find(&self, event: FindEvent, window: &mut Window, cx: &mut App) {
         self.tile.update(cx, |t, cx| t.find(event, window, cx))
     }
+    fn start_fuzzy_find(
+        &self,
+        results: gpui::WeakEntity<geode_shell::fuzzyfind::FuzzyFind>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> bool {
+        self.tile
+            .update(cx, |t, cx| t.start_fuzzy_find(results, window, cx));
+        true
+    }
     fn deliver(&self, delivery: Delivery, _window: &mut Window, cx: &mut App) {
         match delivery {
             Delivery::Query(outcome) => self.tile.update(cx, |t, cx| t.deliver(outcome, cx)),

@@ -43,7 +43,7 @@ use gpui::prelude::*;
 use gpui::{
     App, ClipboardItem, Context, ElementId, Entity, IntoElement, SharedString, Window, div,
 };
-use gpui_component::table::{DataTable, TableEvent, TableState};
+use gpui_component::table::{DataTable, TableDelegate as _, TableEvent, TableState};
 use gpui_component::{ActiveTheme as _, Sizable as _, Size, h_flex, v_flex};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -193,6 +193,10 @@ pub struct BlotterTile {
     /// next delivery follows something the trader did and clears it.
     restored_view_refusal: Option<String>,
     find: Option<FindState>,
+    fuzzy_find: Option<gpui::WeakEntity<geode_shell::fuzzyfind::FuzzyFind>>,
+    find_cache: Option<Arc<crate::search::Prepared>>,
+    find_task: Option<gpui::Task<()>>,
+    find_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// This tile's view query under the flip barrier (see
     /// `geode_tile::following`), with the grouping each result was asked
     /// under. Promotion compares only counters this tile follows (`Followed`),
@@ -242,6 +246,8 @@ impl BlotterTile {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        cx.on_release(|tile, _| tile.cancel_find_preparation())
+            .detach();
         let restored_name = restored.and_then(|t| t.get("view").and_then(|v| v.as_str()));
         // A restored view over a computed dataset exists but is a module's
         // to show: the fallback below applies as for a missing view, and
@@ -492,6 +498,10 @@ impl BlotterTile {
             error: restored_view_computed.clone().map(Notice::danger),
             restored_view_refusal: restored_view_computed,
             find: None,
+            fuzzy_find: None,
+            find_cache: None,
+            find_task: None,
+            find_cancel: None,
             following: FollowingQuery::new(),
             pressed: None,
         }
@@ -749,6 +759,7 @@ impl BlotterTile {
             self.prepare_header(cx);
         }
         self.delivered_at = Some(Instant::now());
+        self.refresh_fuzzy_find(true, cx);
     }
 
     /// Rebuild the prepared header from the delegate's snapshot. The health
@@ -785,6 +796,7 @@ impl BlotterTile {
                 "view '{}' is not configured",
                 self.view_name
             )));
+            self.fail_fuzzy_find(format!("View '{}' is not configured", self.view_name), cx);
             // No query goes out, so no delivery will ever consume a
             // refusal pending from the record; the unconfigured view is
             // the tile's whole story now.
@@ -834,6 +846,7 @@ impl BlotterTile {
                 // following tile waits out `FLIP_DEADLINE`. `acted` stays
                 // set: redefining the name bumps the config version, which
                 // is the retry.
+                self.fail_fuzzy_find(message.clone(), cx);
                 self.error = Some(Notice::danger(message));
                 // Supersede any query still in flight: its outcome is for the
                 // previous scope and must not paint over this error.
@@ -849,10 +862,19 @@ impl BlotterTile {
                 return;
             }
         };
+        let searching = self
+            .fuzzy_find
+            .as_ref()
+            .and_then(|results| results.upgrade())
+            .is_some_and(|r| r.read(cx).is_active());
         let max_depth = self.table.update(cx, |t, _| {
             let d = t.delegate_mut();
             d.expansion.prune_to(grouping.len());
-            d.depth_bound(grouping.len()).max(1)
+            if searching {
+                grouping.len().max(1)
+            } else {
+                d.depth_bound(grouping.len()).max(1)
+            }
         });
         let submitted = Instant::now();
         let tag = self.following.begin(versions, submitted);
@@ -875,6 +897,7 @@ impl BlotterTile {
             // attempt costs nothing and re-reports the same kind. The last
             // snapshot stays.
             self.error = Some(Notice::danger(format!("query refused: {refusal}")));
+            self.fail_fuzzy_find(format!("Search failed: {refusal}"), cx);
         }
         self.following.submitted(
             queued.is_ok(),
@@ -931,7 +954,10 @@ impl BlotterTile {
             // header keeps what it says. The reshow asks again.
             Delivered::Superseded => {}
             // The last good snapshot stays; the failure has already arrived.
-            Delivered::Failed(e) => self.error = Some(Notice::danger(e)),
+            Delivered::Failed(e) => {
+                self.fail_fuzzy_find(e.clone(), cx);
+                self.error = Some(Notice::danger(e));
+            }
         }
         cx.notify();
     }
@@ -1554,30 +1580,239 @@ impl BlotterTile {
         )
     }
 
+    pub(crate) fn start_fuzzy_find(
+        &mut self,
+        results: gpui::WeakEntity<geode_shell::fuzzyfind::FuzzyFind>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.fuzzy_find = Some(results.clone());
+        if let Some(results) = results.upgrade() {
+            let session = results.entity_id();
+            cx.observe(&results, move |tile, results, cx| {
+                if tile
+                    .fuzzy_find
+                    .as_ref()
+                    .is_some_and(|r| r.entity_id() == session)
+                    && !results.read(cx).is_active()
+                {
+                    tile.cancel_find_preparation();
+                    cx.notify();
+                }
+            })
+            .detach();
+            cx.observe_release(&results, move |tile, _, cx| {
+                if tile
+                    .fuzzy_find
+                    .as_ref()
+                    .is_some_and(|r| r.entity_id() == session)
+                {
+                    tile.cancel_find_preparation();
+                    cx.notify();
+                }
+            })
+            .detach();
+            results.update(cx, |results, cx| {
+                results.set_table(
+                    Vec::new(),
+                    |_, _, _| div().into_any_element(),
+                    |_, _, _| div().into_any_element(),
+                    window,
+                    cx,
+                )
+            });
+        }
+        cx.notify();
+        let complete =
+            self.table
+                .read(cx)
+                .delegate()
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| {
+                    self.find_cache.as_ref().is_some_and(|cache| {
+                        cache.complete && Arc::ptr_eq(&cache.snapshot, snapshot)
+                    }) || snapshot.grouping().is_empty()
+                        || (0..snapshot.rows())
+                            .any(|row| snapshot.tree().depth(row) == snapshot.grouping().len())
+                });
+        self.refresh_fuzzy_find(complete, cx);
+        if !complete {
+            self.requery(cx);
+        }
+    }
+
+    fn cancel_find_preparation(&mut self) {
+        if let Some(cancelled) = self.find_cancel.take() {
+            cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.find_task = None;
+    }
+
+    fn fail_fuzzy_find(&mut self, message: String, cx: &mut Context<Self>) {
+        self.cancel_find_preparation();
+        if let Some(results) = &self.fuzzy_find {
+            let _ = results.update(cx, |results, cx| results.fail(message, cx));
+        }
+    }
+
+    fn refresh_fuzzy_find(&mut self, complete: bool, cx: &mut Context<Self>) {
+        let Some(results) = self
+            .fuzzy_find
+            .as_ref()
+            .and_then(|results| results.upgrade())
+            .filter(|r| r.read(cx).is_active())
+        else {
+            return;
+        };
+        self.cancel_find_preparation();
+        let delegate = self.table.read(cx).delegate();
+        let (Some(snapshot), Some(plan)) = (&delegate.snapshot, &delegate.plan) else {
+            return;
+        };
+        if let Some(cached) = &self.find_cache
+            && cached.matches(snapshot, plan, delegate.sort.as_ref())
+            && (!complete || cached.complete)
+        {
+            self.install_fuzzy_find(&results, cached.clone(), !cached.complete, cx);
+            return;
+        }
+        let snapshot = snapshot.clone();
+        let plan = plan.clone();
+        let sort = delegate.sort.clone();
+        // Install every loaded parent and leaf in final display order. Search
+        // text is independent: only visible labels are needed for first paint.
+        let display = Arc::new(crate::search::display(
+            snapshot,
+            plan,
+            sort,
+            &delegate.shown,
+            complete,
+        ));
+        self.install_fuzzy_find(&results, display.clone(), true, cx);
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.find_cancel = Some(cancelled.clone());
+        self.find_task = Some(cx.spawn(async move |tile, cx| {
+            let worker_cancel = cancelled.clone();
+            let prepared = cx
+                .background_executor()
+                .spawn(
+                    async move { crate::search::prepare(&display, &worker_cancel).map(Arc::new) },
+                )
+                .await;
+            if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+            if let Some(prepared) = prepared {
+                let _ = tile.update(cx, |tile, cx| {
+                    let Some(results) = tile
+                        .fuzzy_find
+                        .as_ref()
+                        .and_then(|r| r.upgrade())
+                        .filter(|r| r.read(cx).is_active())
+                    else {
+                        return;
+                    };
+                    if let Some(retired) = tile.find_cache.replace(prepared.clone()) {
+                        // Releasing hundreds of thousands of labels is work too.
+                        cx.background_executor()
+                            .spawn(async move {
+                                drop(retired);
+                            })
+                            .detach();
+                    }
+                    tile.install_fuzzy_find(&results, prepared, !complete, cx);
+                });
+            }
+        }));
+    }
+
+    fn install_fuzzy_find(
+        &self,
+        results: &Entity<geode_shell::fuzzyfind::FuzzyFind>,
+        prepared: Arc<crate::search::Prepared>,
+        expanding: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let delegate = self.table.read(cx).delegate();
+        let columns = (0..delegate.columns_count(cx))
+            .map(|ix| delegate.column(ix, cx))
+            .collect();
+        let paint = prepared.clone();
+        let table = self.table.clone();
+        let header_table = self.table.clone();
+        let cells = RefCell::new(std::collections::HashMap::new());
+        let tile = cx.entity().downgrade();
+        results.update(cx, |results, cx| {
+            results.update_table(
+                columns,
+                move |col, window, cx| {
+                    header_table.update(cx, |table, cx| {
+                        table
+                            .delegate_mut()
+                            .render_th(col, window, cx)
+                            .into_any_element()
+                    })
+                },
+                move |find_row, col, cx| {
+                    let row = find_row.source_row();
+                    let mut cells = cells.borrow_mut();
+                    let cell = cells.entry((row, col)).or_insert_with(|| {
+                        crate::core::cache::cell(
+                            &paint.snapshot,
+                            &paint.plan,
+                            paint.rows[row] as usize,
+                            col,
+                        )
+                    });
+                    table.update(cx, |table, cx| {
+                        table.delegate_mut().render_find_cell(
+                            cell.as_ref(),
+                            col,
+                            paint.snapshot.tree().depth(paint.rows[row] as usize),
+                            find_row,
+                            cx,
+                        )
+                    })
+                },
+                cx,
+            );
+            results.set_expanding(expanding, cx);
+            results.replace_index(
+                prepared.index.clone(),
+                move |ix, query, _, cx| {
+                    let row = prepared.rows[ix];
+                    tile.update(cx, |tile, cx| {
+                        let origin = tile.table.read(cx).delegate().cursor.row;
+                        tile.with_delegate(cx, |d| d.reveal_find_row(&prepared.snapshot, row))?;
+                        let mut find = FindState::begin(FindStyle::Vim, origin);
+                        find.committed(query);
+                        tile.find = Some(find);
+                        tile.table.update(cx, |table, cx| table.refresh(cx));
+                        tile.sync_cursor(cx);
+                        cx.notify();
+                        Ok(())
+                    })
+                    .map_err(|_| "The tile is closed".to_string())?
+                },
+                cx,
+            );
+        });
+    }
+
     pub fn find(&mut self, event: FindEvent, cx: &mut Context<Self>) {
         match event {
             FindEvent::Changed(query) => {
                 if self.find.is_none() {
                     let origin = self.table.read(cx).delegate().cursor.row;
-                    self.find = Some(FindState::begin(self.find_style.get(), origin));
+                    // The shell owns the setting. FindEvent is the Vim path;
+                    // Fzf uses start_fuzzy_find and never narrows this delegate.
+                    self.find = Some(FindState::begin(FindStyle::Vim, origin));
                 }
-                let style = self.find_style.get();
-                // Fzf matches against the full `visible` row list on every change.
-                // Reusing `shown` would misinterpret positions after narrowing and
-                // prevent a shortened query from restoring excluded matches. Vim
-                // uses `shown_texts` because its hits are cursor positions.
-                let texts = if style == FindStyle::Fzf {
-                    self.table.read(cx).delegate().visible_texts()
-                } else {
-                    self.table.read(cx).delegate().shown_texts()
-                };
+                let texts = self.table.read(cx).delegate().shown_texts();
                 let find = self.find.as_mut().unwrap();
                 let hit = find.changed(&texts, &query);
-                let narrowed = find.narrowed.clone();
                 self.with_delegate(cx, |d| {
-                    if style == FindStyle::Fzf {
-                        d.set_narrowed(narrowed);
-                    }
                     if let Some(row) = hit {
                         let len = d.shown.len();
                         d.cursor.to_row(row, len);
@@ -1974,19 +2209,29 @@ impl gpui::Render for BlotterTile {
             );
         }
 
+        let search = self
+            .fuzzy_find
+            .as_ref()
+            .and_then(|r| r.upgrade())
+            .filter(|r| r.read(cx).is_active());
         v_flex()
             .size_full()
             .debug_selector(|| format!("tile-content-{}", self.tile.0))
             .child(header)
             .child(
-                div().flex_1().min_h_0().w_full().child(
-                    DataTable::new(&self.table)
+                div().flex_1().min_h_0().w_full().child(match &search {
+                    Some(results) => results.clone().into_any_element(),
+                    None => DataTable::new(&self.table)
                         .with_size(Size::XSmall)
                         .bordered(false)
-                        .stripe(false),
-                ),
+                        .stripe(false)
+                        .into_any_element(),
+                }),
             )
-            .child(footer)
+            .when(search.is_some(), |el| {
+                el.pb(scale::design(geode_shell::fuzzyfind::FOOTER_HEIGHT))
+            })
+            .when(search.is_none(), |el| el.child(footer))
     }
 }
 
@@ -4192,7 +4437,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn find_jumps_under_vim_and_narrows_under_fzf(cx: &mut gpui::TestAppContext) {
+    fn vim_find_events_jump_and_restore_without_narrowing(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = open(cx);
         h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
         let p = next_query(&h.requests);
@@ -4213,50 +4458,548 @@ mod tests {
             "back to the origin"
         );
 
+        // A lagging factory setting cannot override the shell's choice of path.
         h.tile
             .update(&mut cx, |t, _| t.find_style.set(FindStyle::Fzf));
         h.tile
-            .update(&mut cx, |t, cx| t.find(FindEvent::Changed("l".into()), cx));
-        assert_eq!(
-            h.tile
-                .read_with(&cx, |t, cx| t.table().read(cx).delegate().shown.clone()),
-            vec![1, 2]
-        );
-        // Each Fzf keystroke matches the full visible row list, rather than
-        // the previous keystroke's narrowed positions.
-        h.tile
             .update(&mut cx, |t, cx| t.find(FindEvent::Changed("l2".into()), cx));
-        assert_eq!(
-            h.tile
-                .read_with(&cx, |t, cx| t.table().read(cx).delegate().shown.clone()),
-            vec![2],
-            "narrows further to just L2, not L1"
+        assert_eq!(shown_rows(&h, &cx), vec![0, 1, 2]);
+        assert_eq!(cursor_row(&h, &cx), 2);
+    }
+
+    fn fzf_snapshot(count: usize) -> Arc<Snapshot> {
+        let meta = |name: &str| ColumnMeta {
+            name: name.into(),
+            attribution_by_depth: vec![Attribution::Additive; 3],
+            scope_semantics: ScopeSemantics::Direct,
+            summable: false,
+            mixed_flag: None,
+        };
+        Arc::new(Snapshot::for_tests(
+            vec![
+                (
+                    meta("lhu"),
+                    TestColumn::Dict(
+                        std::iter::once(None)
+                            .chain((0..=count).map(|_| Some("L1".into())))
+                            .collect(),
+                    ),
+                ),
+                (
+                    meta("underlying_ref"),
+                    TestColumn::Dict(
+                        vec![None, None]
+                            .into_iter()
+                            .chain((0..count).map(|i| Some(format!("Contract{i:06}"))))
+                            .collect(),
+                    ),
+                ),
+                (
+                    meta("row_depth"),
+                    TestColumn::I32(
+                        vec![0, 1]
+                            .into_iter()
+                            .chain(std::iter::repeat_n(2, count))
+                            .collect(),
+                    ),
+                ),
+                (meta("delta01"), TestColumn::F64(vec![Some(5.0); count + 2])),
+            ],
+            2,
+        ))
+    }
+
+    #[gpui::test]
+    fn fzf_open_large_snapshot(cx: &mut gpui::TestAppContext) {
+        use geode_shell::fuzzyfind::FuzzyFind;
+        let count = std::env::var("GEODE_FZF_TEST_ROWS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(100_000);
+        assert!(count > 0);
+        let last_label = format!("Contract{:06}", count - 1);
+        let snapshot = fzf_snapshot(count);
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |tile, cx| {
+            tile.apply(snapshot, vec!["lhu".into(), "underlying_ref".into()], cx)
+        });
+        let results = cx.new(|_| FuzzyFind::default());
+        let started = Instant::now();
+        h.tile.update_in(&mut cx, |tile, window, cx| {
+            tile.start_fuzzy_find(results.downgrade(), window, cx)
+        });
+        let opened = started.elapsed();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let painted = started.elapsed();
+        // Every row is available before the search worker runs, not just the
+        // old tree's visible rows. Parents and descendants share the final order.
+        results.update(&mut cx, |r, cx| {
+            use geode_shell::vimnav::NavCommand;
+            r.navigate(NavCommand::Move(1), cx);
+            assert_eq!(r.selected_item().unwrap().label(), "L1");
+            r.navigate(NavCommand::Move(1), cx);
+            assert_eq!(r.selected_item().unwrap().label(), "Contract000000");
+            r.navigate(NavCommand::Bottom, cx);
+            assert_eq!(r.selected_item().unwrap().label(), last_label);
+            r.navigate(NavCommand::Top, cx);
+        });
+        cx.run_until_parked();
+        eprintln!(
+            "Fzf {count} descendants: open {opened:?}, first paint {painted:?}, complete {:?}",
+            started.elapsed()
         );
+        let cached = h
+            .tile
+            .read_with(&cx, |tile, _| tile.find_cache.clone().unwrap());
+        results.update(&mut cx, |results, cx| results.close(cx));
+        let results = cx.new(|_| FuzzyFind::default());
+        let reopened = Instant::now();
+        h.tile.update_in(&mut cx, |tile, window, cx| {
+            tile.start_fuzzy_find(results.downgrade(), window, cx)
+        });
+        eprintln!("Fzf warm reopen: {:?}", reopened.elapsed());
+        assert_eq!(
+            results.read_with(&cx, |r, _| r.context().1),
+            format!("{} matches", count + 2)
+        );
+        assert!(h.tile.read_with(&cx, |tile, _| Arc::ptr_eq(
+            tile.find_cache.as_ref().unwrap(),
+            &cached
+        )));
+        results.update(&mut cx, |results, cx| {
+            results.set_query(last_label.clone(), cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            results.read_with(&cx, |r, _| r.selected_item().unwrap().label().to_string()),
+            last_label
+        );
+    }
+
+    #[gpui::test]
+    fn fzf_gutter_stays_aligned_when_search_reveals_more_digits_of_rows(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use geode_shell::{
+            fuzzyfind::FuzzyFind,
+            linenumbers::{LineNumbers, UiSettings, gutter_px},
+            vimnav::NavCommand,
+        };
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |tile, cx| {
+            tile.apply(
+                fzf_snapshot(1_000),
+                vec!["lhu".into(), "underlying_ref".into()],
+                cx,
+            )
+        });
+        act(&h, &mut cx, "motion::right");
+        let before_rows = shown_rows(&h, &cx);
+        assert!(before_rows.len() < 100);
+        for mode in [LineNumbers::On, LineNumbers::Relative] {
+            cx.update(|_, cx| cx.set_global(UiSettings { line_numbers: mode }));
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            let gutter = cx.debug_bounds("blotter-gutter-1").unwrap();
+            let chevron = cx.debug_bounds("blotter-chevron-1").unwrap();
+            let cell = cx.debug_bounds("blotter-cell-1-0").unwrap();
+            act(&h, &mut cx, "blotter::expand_all");
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            assert_eq!(shown_rows(&h, &cx).len(), 1_002);
+            assert_eq!(
+                cx.debug_bounds("blotter-gutter-1").unwrap(),
+                gutter,
+                "normal expansion keeps the compact gutter"
+            );
+            assert_eq!(
+                cx.debug_bounds("blotter-cell-1-0").unwrap(),
+                cell,
+                "normal expansion does not push numeric columns right"
+            );
+            assert_eq!(
+                cx.debug_bounds("blotter-chevron-1").unwrap().origin.x,
+                chevron.origin.x
+            );
+            act(&h, &mut cx, "motion::bottom");
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            assert!(
+                cx.debug_bounds("blotter-gutter-1001").unwrap().size.width
+                    >= px(gutter_px(mode, 1_002))
+            );
+            assert_eq!(
+                cx.debug_bounds("blotter-cell-1001-0").unwrap().size.width,
+                cell.size.width,
+                "large visible numbers do not move numeric columns"
+            );
+            act(&h, &mut cx, "motion::top");
+            act(&h, &mut cx, "blotter::collapse_all");
+            cx.run_until_parked();
+            let results = cx.new(|_| FuzzyFind::default());
+            h.tile.update_in(&mut cx, |tile, window, cx| {
+                tile.start_fuzzy_find(results.downgrade(), window, cx)
+            });
+            // Check both first paint and index completion: revealing 1,000
+            // descendants must not preallocate four digits in the gutter.
+            for ready in [false, true] {
+                if ready {
+                    cx.run_until_parked();
+                }
+                cx.update(|window, cx| {
+                    let _ = window.draw(cx);
+                });
+                let search = cx.debug_bounds("find-gutter-1").unwrap();
+                assert_eq!(search.origin.x, gutter.origin.x, "{mode:?}, ready={ready}");
+                assert_eq!(
+                    search.size.width, gutter.size.width,
+                    "{mode:?}, ready={ready}"
+                );
+                assert_eq!(
+                    cx.debug_bounds("find-chevron-1").unwrap().origin.x,
+                    chevron.origin.x
+                );
+            }
+            results.update(&mut cx, |r, cx| r.navigate(NavCommand::Bottom, cx));
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            assert!(
+                cx.debug_bounds("find-gutter-1001").unwrap().size.width
+                    >= px(gutter_px(mode, 1_002)),
+                "large visible numbers still have room"
+            );
+            results.update(&mut cx, |r, cx| {
+                r.navigate(NavCommand::Top, cx);
+                r.toggle_selected_branch(cx);
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            assert_eq!(
+                cx.debug_bounds("find-gutter-0").unwrap().size.width,
+                gutter.size.width,
+                "folding to one row releases space for offscreen large numbers"
+            );
+            results.update(&mut cx, |r, cx| r.set_query("Contract000000".into(), cx));
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            assert_eq!(
+                cx.debug_bounds("find-gutter-1").unwrap().size.width,
+                gutter.size.width
+            );
+            results.update(&mut cx, |r, cx| r.close(cx));
+            cx.run_until_parked();
+            assert_eq!(shown_rows(&h, &cx), before_rows);
+        }
+    }
+
+    #[gpui::test]
+    fn fzf_empty_query_preserves_expanded_tree_geometry(cx: &mut gpui::TestAppContext) {
+        use geode_shell::{
+            fuzzyfind::FuzzyFind,
+            linenumbers::{LineNumbers, UiSettings},
+        };
+        let (h, mut cx) = delivered(cx);
+        let mut columns = snapshot_columns();
+        if let TestColumn::Dict(labels) = &mut columns[0].1 {
+            for label in labels.iter_mut().flatten() {
+                *label = format!("{label} — a long group name to exercise the narrow tree column");
+            }
+        }
+        h.tile.update(&mut cx, |tile, cx| {
+            tile.apply(
+                Arc::new(Snapshot::for_tests(columns, 2)),
+                vec!["lhu".into(), "underlying_ref".into()],
+                cx,
+            )
+        });
+        act(&h, &mut cx, "blotter::expand_all");
+        act(&h, &mut cx, "motion::right");
+        for mode in [LineNumbers::Off, LineNumbers::On, LineNumbers::Relative] {
+            cx.update(|_, cx| cx.set_global(UiSettings { line_numbers: mode }));
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            let before: Vec<_> = (0..4)
+                .map(|row| {
+                    (
+                        cx.debug_bounds(
+                            [
+                                "blotter-cell-0-0",
+                                "blotter-cell-1-0",
+                                "blotter-cell-2-0",
+                                "blotter-cell-3-0",
+                            ][row],
+                        )
+                        .unwrap(),
+                        cx.debug_bounds(
+                            [
+                                "blotter-chevron-0",
+                                "blotter-chevron-1",
+                                "blotter-chevron-2",
+                                "blotter-chevron-3",
+                            ][row],
+                        )
+                        .unwrap(),
+                    )
+                })
+                .collect();
+            let results = cx.new(|_| FuzzyFind::default());
+            h.tile.update_in(&mut cx, |tile, window, cx| {
+                tile.start_fuzzy_find(results.downgrade(), window, cx)
+            });
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            for (row, (cell, chevron)) in before.into_iter().enumerate() {
+                let search_cell = cx
+                    .debug_bounds(
+                        [
+                            "find-cell-0-0",
+                            "find-cell-1-0",
+                            "find-cell-2-0",
+                            "find-cell-3-0",
+                        ][row],
+                    )
+                    .unwrap();
+                let search_chevron = cx
+                    .debug_bounds(
+                        [
+                            "find-chevron-0",
+                            "find-chevron-1",
+                            "find-chevron-2",
+                            "find-chevron-3",
+                        ][row],
+                    )
+                    .unwrap();
+                assert_eq!(search_cell, cell, "{mode:?} row {row} cell");
+                assert_eq!(
+                    search_chevron.origin.x, chevron.origin.x,
+                    "{mode:?} row {row} disclosure left"
+                );
+                assert_eq!(
+                    search_chevron.right(),
+                    chevron.right(),
+                    "{mode:?} row {row} label start"
+                );
+            }
+            results.update(&mut cx, |r, cx| r.close(cx));
+            cx.run_until_parked();
+        }
+    }
+
+    #[gpui::test]
+    fn fzf_chevrons_fold_only_search_and_line_numbers_follow_settings(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use geode_shell::{
+            fuzzyfind::FuzzyFind,
+            linenumbers::{LineNumbers, UiSettings},
+            vimnav::NavCommand,
+        };
+        let (h, mut cx) = delivered(cx);
+        cx.update(|_, cx| {
+            cx.set_global(UiSettings {
+                line_numbers: LineNumbers::On,
+            })
+        });
+        let before = shown_rows(&h, &cx);
+        let origin = cursor_row(&h, &cx);
+        let results = cx.new(|_| FuzzyFind::default());
+        h.tile.update_in(&mut cx, |tile, window, cx| {
+            tile.start_fuzzy_find(results.downgrade(), window, cx)
+        });
+        results.update(&mut cx, |r, cx| r.set_query("spx".into(), cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let gutter = cx
+            .debug_bounds("find-gutter-2")
+            .expect("matched leaf has a line number");
+        assert!(gutter.size.width > px(0.));
+        let chevron = cx
+            .debug_bounds("find-chevron-1")
+            .expect("retained parent has a chevron");
+        cx.simulate_mouse_down(chevron.center(), MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_up(chevron.center(), MouseButton::Left, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("find-result-2").is_none(),
+            "fold hides the matched descendant"
+        );
+        assert!(
+            results.read_with(&cx, |r, _| r.is_active()),
+            "chevron does not confirm a pick"
+        );
+        assert_eq!(shown_rows(&h, &cx), before);
+        assert_eq!(cursor_row(&h, &cx), origin);
+        results.update(&mut cx, |r, cx| {
+            r.navigate(NavCommand::Bottom, cx);
+            r.toggle_selected_branch(cx);
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            cx.set_global(UiSettings {
+                line_numbers: LineNumbers::Off,
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(cx.debug_bounds("find-gutter-2").unwrap().size.width, px(0.));
+        results.update(&mut cx, |r, cx| r.close(cx));
+        assert_eq!(shown_rows(&h, &cx), before);
+        assert_eq!(cursor_row(&h, &cx), origin);
+    }
+
+    #[gpui::test]
+    fn fzf_reopen_survives_old_session_release_and_input_during_preparation(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use geode_shell::fuzzyfind::FuzzyFind;
+        let (h, mut cx) = delivered(cx);
+        let first = cx.new(|_| FuzzyFind::default());
+        h.tile.update_in(&mut cx, |tile, window, cx| {
+            tile.start_fuzzy_find(first.downgrade(), window, cx)
+        });
+        first.update(&mut cx, |results, cx| results.close(cx));
+        let second = cx.new(|_| FuzzyFind::default());
+        h.tile.update_in(&mut cx, |tile, window, cx| {
+            tile.start_fuzzy_find(second.downgrade(), window, cx)
+        });
+        second.update(&mut cx, |r, cx| r.set_query("sx".into(), cx));
+        drop(first);
+        cx.run_until_parked();
+        assert_eq!(
+            second.read_with(&cx, |r, _| r.selected_item().unwrap().label().to_string()),
+            "SPX"
+        );
+        assert_eq!(second.read_with(&cx, |r, _| r.context().1), "1 matches");
+        second.update(&mut cx, |r, cx| r.close(cx));
+        cx.run_until_parked();
+        assert!(h.tile.read_with(&cx, |tile, _| tile.find_task.is_none()));
+    }
+
+    #[gpui::test]
+    fn fzf_rebuilds_the_index_after_snapshot_replacement(cx: &mut gpui::TestAppContext) {
+        use geode_shell::fuzzyfind::FuzzyFind;
+        let (h, mut cx) = delivered(cx);
+        let results = cx.new(|_| FuzzyFind::default());
+        h.tile.update_in(&mut cx, |tile, window, cx| {
+            tile.start_fuzzy_find(results.downgrade(), window, cx)
+        });
+        results.update(&mut cx, |r, cx| r.set_query("sx".into(), cx));
+        cx.run_until_parked();
+        let old = results.read_with(&cx, |r, _| r.selected_item().unwrap());
+        let mut columns = snapshot_columns();
+        columns[1].1 = TestColumn::Dict(vec![None, None, None, Some("NDX".into())]);
+        let replacement = Arc::new(Snapshot::for_tests(columns, 2));
+        h.tile.update(&mut cx, |tile, cx| {
+            tile.apply(
+                replacement.clone(),
+                vec!["lhu".into(), "underlying_ref".into()],
+                cx,
+            )
+        });
+        results.update(&mut cx, |r, cx| r.set_query("nx".into(), cx));
+        cx.run_until_parked();
+        assert_eq!(
+            results.read_with(&cx, |r, _| r.selected_item().unwrap().label().to_string()),
+            "NDX"
+        );
+        assert!(h.tile.read_with(&cx, |tile, _| Arc::ptr_eq(
+            &tile.find_cache.as_ref().unwrap().snapshot,
+            &replacement
+        )));
+        assert!(
+            cx.update(|window, cx| old.reveal("sx", window, cx))
+                .is_err(),
+            "a stale result cannot reveal a different row"
+        );
+    }
+
+    #[gpui::test]
+    fn fzf_searches_collapsed_descendants_without_narrowing_the_tree(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use geode_shell::fuzzyfind::FuzzyFind;
+        let (h, mut cx) = delivered(cx);
+        let before = shown_rows(&h, &cx);
+        let origin = cursor_row(&h, &cx);
+        let results = cx.new(|_| FuzzyFind::default());
+        h.tile.update_in(&mut cx, |tile, window, cx| {
+            tile.start_fuzzy_find(results.downgrade(), window, cx)
+        });
+        results.update(&mut cx, |results, cx| results.set_query("sx".into(), cx));
+        cx.run_until_parked();
+        let item = results.read_with(&cx, |results, _| results.selected_item().unwrap());
+        assert_eq!(item.label(), "SPX");
+        assert_eq!(item.path(), "L1");
+        assert_eq!(shown_rows(&h, &cx), before);
+        assert_eq!(cursor_row(&h, &cx), origin);
+        // Dropping the shell-owned session is cancellation; nothing to undo.
+        drop(results);
+        assert_eq!(shown_rows(&h, &cx), before);
+        assert_eq!(cursor_row(&h, &cx), origin);
+        cx.update(|window, cx| item.reveal("sx", window, cx))
+            .unwrap();
+        assert_eq!(shown_rows(&h, &cx), vec![0, 1, 3, 2]);
+        assert_eq!(cursor_row(&h, &cx), 2);
+    }
+
+    #[gpui::test]
+    fn fzf_loads_the_full_tree_and_keeps_the_query_while_waiting(cx: &mut gpui::TestAppContext) {
+        use geode_shell::fuzzyfind::FuzzyFind;
+        let (h, mut cx) = open(cx);
         h.tile
-            .update(&mut cx, |t, cx| t.find(FindEvent::Changed("l".into()), cx));
-        assert_eq!(
-            h.tile
-                .read_with(&cx, |t, cx| t.table().read(cx).delegate().shown.clone()),
-            vec![1, 2],
-            "a shortened query widens back out, not stuck within the prior narrow"
-        );
-        h.tile.update(&mut cx, |t, cx| {
-            t.find(FindEvent::Committed("l".into()), cx)
+            .update(&mut cx, |tile, cx| tile.set_visible(true, cx));
+        let original = next_query(&h.requests);
+        assert_eq!(original.max_depth, 1);
+        let results = cx.new(|_| FuzzyFind::default());
+        h.tile.update_in(&mut cx, |tile, window, cx| {
+            tile.start_fuzzy_find(results.downgrade(), window, cx)
         });
-        assert_eq!(
-            h.tile
-                .read_with(&cx, |t, cx| t.table().read(cx).delegate().shown.clone()),
-            vec![1, 2],
-            "Enter keeps it"
+        let search = next_query(&h.requests);
+        assert_eq!(search.max_depth, 2, "search requests every grouping level");
+        results.update(&mut cx, |results, cx| results.set_query("sx".into(), cx));
+        cx.run_until_parked();
+        assert!(results.read_with(&cx, |results, _| results.selected_item().is_none()));
+        deliver(&h, &mut cx, original.tag, Ok(snapshot2()));
+        assert!(
+            results.read_with(&cx, |results, _| results.selected_item().is_none()),
+            "stale request cannot populate results"
         );
-        h.tile.update(&mut cx, |t, cx| {
-            t.dispatch(&ActionId("blotter::escape".into()), None, cx)
-        });
+        deliver(&h, &mut cx, search.tag, Ok(snapshot()));
+        cx.run_until_parked();
         assert_eq!(
-            h.tile
-                .read_with(&cx, |t, cx| t.table().read(cx).delegate().shown.clone()),
-            vec![0, 1, 2]
+            shown_rows(&h, &cx),
+            vec![0, 1, 2],
+            "fetching descendants does not expand them"
         );
+        let item = results.read_with(&cx, |results, _| results.selected_item().unwrap());
+        assert_eq!(item.label(), "SPX");
+        cx.update(|window, cx| item.reveal("sx", window, cx))
+            .unwrap();
+        assert_eq!(cursor_row(&h, &cx), 2);
     }
 
     #[gpui::test]

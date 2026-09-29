@@ -773,6 +773,7 @@ impl Render for ShellView {
                         line,
                         &self.command_input,
                         &self.command_scroll,
+                        self.fuzzy_find.as_ref(),
                         rect,
                         rem_size,
                         cx,

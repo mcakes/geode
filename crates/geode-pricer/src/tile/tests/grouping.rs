@@ -18,6 +18,167 @@ const MIXED: [&str; 3] = [
     "-5 SPX Z26 4800/5200 CS",
 ];
 
+#[gpui::test]
+fn fzf_finds_closed_group_and_package_descendants_and_reveals_only_on_pick(
+    cx: &mut gpui::TestAppContext,
+) {
+    use geode_shell::fuzzyfind::FuzzyFind;
+    let (h, mut vcx) = open_seeded(cx, &MIXED);
+    h.command(&mut vcx, "group underlying_ref expiry").unwrap();
+    h.dispatch(&mut vcx, "collapse_all", None);
+    let before = h.tree(&vcx);
+    let cursor = h.cursor(&vcx);
+    let results = vcx.new(|_| FuzzyFind::default());
+    vcx.update(|window, cx| {
+        h.tile.update(cx, |tile, cx| {
+            tile.start_fuzzy_find(results.downgrade(), window, cx)
+        })
+    });
+    results.update(&mut vcx, |results, cx| {
+        results.set_query("spx 5200".into(), cx)
+    });
+    vcx.run_until_parked();
+    assert_eq!(
+        h.tree(&vcx),
+        before,
+        "search does not expand groups or packages"
+    );
+    assert_eq!(h.cursor(&vcx), cursor, "search does not move the cursor");
+    let picked = results.read_with(&vcx, |results, _| results.selected_item().unwrap());
+    assert!(picked.path().contains("SPX"));
+    // Prefer the individual leg to its package when selecting its exact shorthand.
+    let leg_label = h.tile.read_with(&vcx, |tile, _| {
+        (0..tile.sheet.len())
+            .map(|r| tile.sheet.shorthand(r))
+            .find(|s| s.contains("5200") && !s.contains('/'))
+            .unwrap()
+    });
+    results.update(&mut vcx, |results, cx| {
+        results.set_query(leg_label.clone(), cx)
+    });
+    vcx.run_until_parked();
+    let picked = results.read_with(&vcx, |results, _| results.selected_item().unwrap());
+    assert_eq!(picked.label(), leg_label);
+    vcx.update(|window, cx| picked.reveal(&leg_label, window, cx))
+        .unwrap();
+    assert_eq!(cursor_text(&h, &vcx).as_deref(), Some(leg_label.as_str()));
+    assert!(h.tree(&vcx).len() > before.len());
+    assert!(
+        !h.tree(&vcx).iter().any(|label| label == "NDX Z26 4000 P"),
+        "unrelated groups stay closed"
+    );
+}
+
+#[gpui::test]
+fn fzf_keeps_native_header_columns_and_restores_tree(cx: &mut gpui::TestAppContext) {
+    use geode_shell::fuzzyfind::FuzzyFind;
+    let (h, mut vcx) = open_seeded(cx, &MIXED);
+    h.draw(&mut vcx);
+    let header = vcx.debug_bounds("pricer-header-5").unwrap();
+    let column_header = vcx.debug_bounds("pricer-th-1").unwrap();
+    let value = vcx.debug_bounds("pricer-cell-0-1").unwrap();
+    let before = h.tree(&vcx);
+    let cursor = h.cursor(&vcx);
+    let results = vcx.new(|_| FuzzyFind::default());
+    h.tile.update_in(&mut vcx, |tile, window, cx| {
+        tile.start_fuzzy_find(results.downgrade(), window, cx)
+    });
+    results.update(&mut vcx, |results, cx| results.set_query("spx".into(), cx));
+    vcx.run_until_parked();
+    h.draw(&mut vcx);
+    h.draw(&mut vcx);
+    assert_eq!(
+        vcx.debug_bounds("pricer-header-5").unwrap(),
+        header,
+        "tile header does not move or disappear"
+    );
+    assert_eq!(
+        vcx.debug_bounds("pricer-th-1")
+            .expect("search uses the original column header renderer"),
+        column_header,
+        "column header geometry is preserved"
+    );
+    let found = vcx
+        .debug_bounds("find-cell-0-1")
+        .expect("numeric cell stays visible");
+    assert_eq!(
+        found.origin.x, value.origin.x,
+        "numeric column retains its alignment"
+    );
+    assert_eq!(
+        found.size, value.size,
+        "column width and row density are retained"
+    );
+    assert!(
+        vcx.debug_bounds("pricer-cell-0-1").is_none(),
+        "only the search table paints"
+    );
+    assert_eq!(h.cursor(&vcx), cursor);
+    results.update(&mut vcx, |results, cx| results.close(cx));
+    vcx.run_until_parked();
+    h.draw(&mut vcx);
+    assert!(
+        vcx.debug_bounds("fuzzy-find").is_none(),
+        "dismissal works even while a view handle is retained"
+    );
+    assert!(vcx.debug_bounds("pricer-cell-0-1").is_some());
+    assert_eq!(h.tree(&vcx), before);
+    assert_eq!(h.cursor(&vcx), cursor);
+}
+
+#[gpui::test]
+fn fzf_native_table_scrolls_and_pointer_picks_without_moving_the_tree(
+    cx: &mut gpui::TestAppContext,
+) {
+    use geode_shell::fuzzyfind::{FuzzyFind, Pick};
+    let lines: Vec<_> = (0..80)
+        .map(|i| format!("SPX Z26 {} C", 4000 + i * 5))
+        .collect();
+    let lines: Vec<_> = lines.iter().map(String::as_str).collect();
+    let (h, mut vcx) = open_seeded(cx, &lines);
+    let cursor = h.cursor(&vcx);
+    let results = vcx.new(|_| FuzzyFind::default());
+    h.tile.update_in(&mut vcx, |tile, window, cx| {
+        tile.start_fuzzy_find(results.downgrade(), window, cx)
+    });
+    let picked = Rc::new(RefCell::new(None));
+    let _subscription = vcx.update(|_, cx| {
+        let picked = picked.clone();
+        cx.subscribe(&results, move |results, _: &Pick, cx| {
+            *picked.borrow_mut() = results
+                .read(cx)
+                .selected_item()
+                .map(|item| item.label().to_string());
+        })
+    });
+    results.update(&mut vcx, |results, cx| {
+        results.navigate(NavCommand::Move(40), cx)
+    });
+    h.draw(&mut vcx);
+    h.draw(&mut vcx);
+    let row = vcx
+        .debug_bounds("find-result-40")
+        .expect("keyboard selection stays rendered");
+    let viewport = vcx.debug_bounds("fuzzy-find").unwrap();
+    assert!(row.top() >= viewport.top() && row.bottom() <= viewport.bottom());
+    vcx.simulate_mouse_down(
+        row.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    vcx.simulate_mouse_up(
+        row.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    assert_eq!(picked.borrow().as_deref(), Some("SPX Z26 4200 C"));
+    assert_eq!(
+        h.cursor(&vcx),
+        cursor,
+        "only committing a pick may change the tree cursor"
+    );
+}
+
 /// Fill frame slots `(n, chain)`, as a groupings reload does.
 fn slots(h: &Harness, vcx: &mut VisualTestContext, filled: &[(u8, &[&str])]) {
     let mut s = GroupingSlots::default();

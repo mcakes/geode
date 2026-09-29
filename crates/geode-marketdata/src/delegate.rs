@@ -650,6 +650,58 @@ fn selection_tint(theme: &Theme) -> Div {
 }
 
 impl MatrixDelegate {
+    pub(crate) fn render_find_cell(
+        &self,
+        model: &MatrixModel,
+        find_row: &geode_shell::fuzzyfind::FindRow<'_>,
+        col: usize,
+        cx: &App,
+    ) -> gpui::AnyElement {
+        let Some(row) = model.rows.get(find_row.source_row()) else {
+            return div().into_any_element();
+        };
+        let model_col = self.model_col(col);
+        let cell = model_col.and_then(|col| row.cells.get(col));
+        let text = cell.map_or_else(|| row.label.clone(), |cell| cell.text.clone());
+        let paint = cell_paint(
+            cx.theme(),
+            cell.is_some_and(|cell| cell.sent),
+            cell.is_some_and(|cell| cell.edited),
+            row.state,
+        );
+        let el = div()
+            .size_full()
+            .flex()
+            .items_center()
+            .font_family(fonts::MONO)
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_color(paint.text)
+            .when(model_col.is_some(), |el| el.justify_end())
+            .when_some(paint.fill, |el, fill| el.bg(fill))
+            .when(paint.strike, |el| el.line_through())
+            .when(self.closes_slice_block(col), |el| {
+                el.border_r_1().border_color(cx.theme().border)
+            });
+        if model_col.is_none() {
+            let indices: Vec<_> = find_row
+                .indices()
+                .iter()
+                .copied()
+                .filter(|ix| *ix < text.chars().count())
+                .collect();
+            el.child(find_row.gutter(cx))
+                .child(geode_shell::palette::highlighted_title(
+                    &text,
+                    &indices,
+                    cx.theme().foreground,
+                ))
+                .into_any_element()
+        } else {
+            el.child(text).into_any_element()
+        }
+    }
+
     /// Paint a prepared cell or its active editor. Normal cell text is cloned
     /// from SharedString; date and choice editors share prepared paint. Debug
     /// selectors identify coordinates without formatting cell values.

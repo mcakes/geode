@@ -67,7 +67,7 @@ use gpui::{
     KeyDownEvent, SharedString, Window, div,
 };
 use gpui_component::input::{InputEvent, InputState};
-use gpui_component::table::{DataTable, TableEvent, TableState};
+use gpui_component::table::{DataTable, TableDelegate as _, TableEvent, TableState};
 use gpui_component::{ActiveTheme as _, Sizable as _, Size, Theme, h_flex, v_flex};
 use std::cell::Cell as StdCell;
 use std::collections::BTreeMap;
@@ -542,6 +542,7 @@ pub struct MarketDataTile {
     /// confirmation state can also select insert mode.
     editor: Option<Editing>,
     find: Option<FindState>,
+    fuzzy_find: Option<gpui::WeakEntity<geode_shell::fuzzyfind::FuzzyFind>>,
     /// The one line the header says about the last thing that went wrong
     /// or is not built yet. `SharedString` rather than `String`: `render`
     /// clones it, and a `String` clone is an allocation per frame.
@@ -892,6 +893,7 @@ impl MarketDataTile {
             table,
             editor: None,
             find: None,
+            fuzzy_find: None,
             notice: None,
             stale_after,
             header: HeaderModel {
@@ -3947,6 +3949,98 @@ impl MarketDataTile {
         }
     }
 
+    pub(crate) fn start_fuzzy_find(
+        &mut self,
+        results: gpui::WeakEntity<geode_shell::fuzzyfind::FuzzyFind>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_popup_with_window(window, cx);
+        self.fuzzy_find = Some(results.clone());
+        if let Some(results) = results.upgrade() {
+            cx.observe(&results, |_, results, cx| {
+                if !results.read(cx).is_active() {
+                    cx.notify();
+                }
+            })
+            .detach();
+            cx.observe_release(&results, |_, _, cx| cx.notify())
+                .detach();
+        }
+        cx.notify();
+        let delegate = self.table.read(cx).delegate();
+        let columns = (0..delegate.columns_count(cx))
+            .map(|ix| delegate.column(ix, cx))
+            .collect();
+        let table = self.table.clone();
+        let model = self.model.clone();
+        let header_table = self.table.clone();
+        let _ = results.update(cx, |results, cx| {
+            results.set_table(
+                columns,
+                move |col, window, cx| {
+                    header_table.update(cx, |table, cx| {
+                        table
+                            .delegate_mut()
+                            .render_th(col, window, cx)
+                            .into_any_element()
+                    })
+                },
+                move |row, col, cx| {
+                    table.update(cx, |table, cx| {
+                        table.delegate().render_find_cell(&model, row, col, cx)
+                    })
+                },
+                window,
+                cx,
+            )
+        });
+        let items = self
+            .model
+            .rows
+            .iter()
+            .map(|row| row.label.to_string())
+            .enumerate()
+            .map(|(row, label)| {
+                let identity = self.model.rows[row].label.clone();
+                let document = self.model.key.clone();
+                let tile = cx.entity().downgrade();
+                geode_shell::fuzzyfind::FindItem::new(
+                    format!("{document:?}:{identity}"),
+                    label,
+                    "",
+                    move |query, _, cx| {
+                        tile.update(cx, |tile, cx| {
+                            if tile.model.key != document {
+                                return Err("The document changed. Search again.".to_string());
+                            }
+                            let row = tile
+                                .model
+                                .rows
+                                .iter()
+                                .position(|r| r.label == identity)
+                                .ok_or_else(|| {
+                                    "This row is no longer available. Search again.".to_string()
+                                })?;
+                            let origin = tile.cursor;
+                            tile.set_cursor_row(row);
+                            tile.clamp_cursor();
+                            tile.find = Some(FindState {
+                                origin,
+                                committed: (!query.is_empty()).then(|| query.to_string()),
+                            });
+                            tile.sync_cursor(cx);
+                            cx.notify();
+                            Ok(())
+                        })
+                        .map_err(|_| "The tile is closed".to_string())?
+                    },
+                )
+            })
+            .collect();
+        let _ = results.update(cx, |results, cx| results.replace_items(items, cx));
+    }
+
     /// Close popups at the find entry point. Find is shell-routed and bypasses the tile
     /// dispatch guard; use the focus-aware closer so a picker can be dismissed without
     /// blurring the shell field now receiving query text.
@@ -4807,12 +4901,19 @@ impl gpui::Render for MarketDataTile {
 
         // Render the prepared delegate through DataTable. min_h_0 lets the body shrink
         // inside flex layout so scrolling does not push the header out of view.
-        let body = div().flex_1().min_h_0().w_full().child(
-            DataTable::new(&self.table)
+        let search = self
+            .fuzzy_find
+            .as_ref()
+            .and_then(|r| r.upgrade())
+            .filter(|r| r.read(cx).is_active());
+        let body = div().flex_1().min_h_0().w_full().child(match &search {
+            Some(results) => results.clone().into_any_element(),
+            None => DataTable::new(&self.table)
                 .with_size(Size::XSmall)
                 .bordered(false)
-                .stripe(false),
-        );
+                .stripe(false)
+                .into_any_element(),
+        });
 
         // A pointer press anywhere on the tile cancels an armed `:upload`
         // confirm (the door's capture-phase press; the press still does
@@ -4823,22 +4924,28 @@ impl gpui::Render for MarketDataTile {
         confirm::cancel_on_press(root, self.pending_upload.is_some(), &tile)
             .child(header)
             .child(body)
+            .when(search.is_some(), |el| {
+                el.pb(scale::design(geode_shell::fuzzyfind::FOOTER_HEIGHT))
+            })
             // The extent readout, only while a selection is live — the
             // strip's own `aggregate-extent` element, with no totals: a
             // vol or forward ladder does not add up.
-            .when_some(self.selection_extent.as_ref(), |el, extent| {
-                el.child(
-                    h_flex()
-                        .w_full()
-                        .h(scale::design(FOOTER_HEIGHT))
-                        .items_center()
-                        .px_2()
-                        .text_xs()
-                        .border_t_1()
-                        .border_color(theme.border)
-                        .child(aggregates::strip(Some(extent), &[], &[], theme)),
-                )
-            })
+            .when_some(
+                self.selection_extent.as_ref().filter(|_| search.is_none()),
+                |el, extent| {
+                    el.child(
+                        h_flex()
+                            .w_full()
+                            .h(scale::design(FOOTER_HEIGHT))
+                            .items_center()
+                            .px_2()
+                            .text_xs()
+                            .border_t_1()
+                            .border_color(theme.border)
+                            .child(aggregates::strip(Some(extent), &[], &[], theme)),
+                    )
+                },
+            )
     }
 }
 
@@ -7601,6 +7708,39 @@ edits = [["2026-11-20", "-1", 9.5]]
             h.tile.read_with(&vcx, |t, _| t.cursor()),
             Cursor::Cell { row: 0, col: 0 },
             "escape restores the origin"
+        );
+    }
+
+    #[gpui::test]
+    fn fzf_picks_a_row_without_incremental_cursor_movement(cx: &mut gpui::TestAppContext) {
+        use geode_shell::fuzzyfind::FuzzyFind;
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+        let results = vcx.new(|_| FuzzyFind::default());
+        assert!(vcx.update(|window, cx| h.content.start_fuzzy_find(
+            results.downgrade(),
+            window,
+            cx
+        )));
+        results.update(&mut vcx, |results, cx| results.set_query("1120".into(), cx));
+        vcx.run_until_parked();
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            Cursor::Cell { row: 0, col: 0 }
+        );
+        let item = results.read_with(&vcx, |results, _| results.selected_item().unwrap());
+        vcx.update(|window, cx| item.reveal("1120", window, cx))
+            .unwrap();
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            Cursor::Cell { row: 1, col: 0 }
+        );
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.draft().is_empty()),
+            "search never edits the document"
         );
     }
     // ---- Cell editing ------------------------------------------------

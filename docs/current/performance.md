@@ -158,3 +158,55 @@ results, fixture construction, hardware, toolchain, discarded approaches, and
 rerun variance to [`docs/perf.md`](../perf.md), which is the chronological
 measurement log. State what the number includes and excludes. Do not turn a
 microbenchmark into an end-to-end claim.
+
+## Blotter search opening
+
+`cargo test -p geode-blotter fzf_open_large_snapshot -- --nocapture` exercises
+opening `/` over 100,000 descendants, first paint, full indexing, and reopening
+with the cached index. Timings are diagnostic, with no wall-clock assertion.
+The test verifies that parents and the last descendant are navigable before
+indexing, that the last descendant remains searchable afterward, and that
+reopening reuses the prepared dataset. Set `GEODE_FZF_TEST_ROWS=1500000` to
+exercise 1.5 million descendants.
+
+Display now uses all loaded rows immediately instead of a 64-row preview.
+The snapshot supplies a shared depth-first row order prepared on the query
+worker (four bytes per reachable row). A local sort reuses the table's order
+when fully expanded, otherwise computes the sorted full order on opening.
+The initial search order is an implicit range, avoiding a second identity
+permutation allocation for all rows on the UI thread. Only visible labels and
+cells are formatted; full search indexing and search
+topology preparation run in the background. Visible chevrons use the existing
+snapshot tree until the search topology is ready. Missing grouping levels still require a database query.
+
+On the development build measured on 2026-09-29, opening over 1.5 million
+descendants with the ranked-tree presentation took 35 ms and first paint 68 ms,
+while indexing completed at 3.97 seconds. All loaded parents and leaves were
+already available before the worker completed. These are headless fixture
+timings, not release-app latency;
+see [the performance log](../perf.md) for details and earlier measurements.
+
+## Search typing
+
+Fzf ranking stores row indices, calculates highlights only for visible rows,
+and narrows from the last completed candidate set when a single-word query is
+extended. Backspacing, other edits, multi-word queries, and dataset replacement
+use the full index. A reusable score-only matcher handles ASCII words with the
+same ordering as the original matcher; Unicode and multi-word queries retain
+the original scorer after a cheap rejection filter. All results remain available
+for navigation. Tree results retain each ancestor once, with sibling branches
+ordered by their strongest match. The worker links nodes in match-discovery
+order and traverses those links, avoiding a second sort of all results. Folding
+also runs on the worker and retains the direct-match candidates for narrowing.
+
+An optimized ranking-only measurement over 1.5 million synthetic rows on
+2026-09-29 reduced broad prefix queries from 395–1,261 ms to 15–20 ms. Refining
+`149` to `1499` took 8–9 ms, versus 513 ms for the original full scan. These
+measurements exclude index construction, input dispatch, and rendering; broad
+multi-word searches that survive the rejection filter can still cost more.
+With hierarchy ordering included, a subsequent run measured 27 ms for broad
+prefixes and 8.9 ms for `1499`; these likewise exclude input and rendering.
+Fixture and measurement details are in [the performance log](../perf.md).
+The ignored `fzf_rank_large_index` test provides the same query sequence for
+future diagnostic runs with `cargo test --release -p geode-shell
+fzf_rank_large_index -- --ignored --nocapture`.

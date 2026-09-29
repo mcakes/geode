@@ -237,6 +237,84 @@ impl Default for BlotterDelegate {
 }
 
 impl BlotterDelegate {
+    pub(crate) fn render_find_cell(
+        &mut self,
+        cell: Option<&crate::core::cache::CachedCell>,
+        col: usize,
+        depth: usize,
+        find_row: &geode_shell::fuzzyfind::FindRow<'_>,
+        cx: &App,
+    ) -> gpui::AnyElement {
+        let kind = self
+            .plan
+            .as_ref()
+            .and_then(|p| p.columns.get(col))
+            .map(|c| c.kind);
+        let theme = cx.theme();
+        let el = div()
+            .size_full()
+            .flex()
+            .items_center()
+            .px_1()
+            .font_family(fonts::MONO)
+            .when(kind == Some(ColumnKind::Measure), |el| el.justify_end());
+        let el = if kind == Some(ColumnKind::Tree) {
+            el.pl(px(0.))
+                .child(find_row.compact_gutter(cx))
+                .child(div().w(px(depth as f32 * INDENT)).flex_shrink_0())
+                .child(
+                    find_row
+                        .disclosure(px(CHEVRON_PX), "·", cx)
+                        .justify_start()
+                        .flex_shrink_1(),
+                )
+        } else {
+            el
+        };
+        let Some(cell) = cell else {
+            return el.into_any_element();
+        };
+        if cell.attribution == Attribution::NonAttributable {
+            return el.into_any_element();
+        }
+        let colour = if find_row.is_context()
+            || cell.mixed
+            || cell.attribution == Attribution::DeterminedNonAdditive
+        {
+            theme.muted_foreground
+        } else {
+            match (self.colour_kind(col), cell.sign) {
+                (Some(ColourKind::Sign), Some(Sign::Negative)) => theme.chart_bearish,
+                (Some(ColourKind::Sign), Some(Sign::Positive)) => theme.chart_bullish,
+                (Some(ColourKind::Named), sign) => self
+                    .themed_cell_colour(col, theme)
+                    .map_or(theme.foreground, |c| c.for_sign(sign)),
+                _ => theme.foreground,
+            }
+        };
+        let el = el.text_color(colour);
+        let el = if kind == Some(ColumnKind::Tree) {
+            let indices: Vec<_> = find_row
+                .indices()
+                .iter()
+                .copied()
+                .filter(|ix| *ix < cell.text.chars().count())
+                .collect();
+            el.child(geode_shell::palette::highlighted_title(
+                &cell.text,
+                &indices,
+                geode_shell::shell::listrow::row_paint(theme).accent,
+            ))
+        } else {
+            el.child(SharedString::from(cell.text.clone()))
+        };
+        el.when(
+            cell.attribution == Attribution::DeterminedNonAdditive,
+            |el| el.child(div().pl_1().child(DETERMINED_MARK)),
+        )
+        .into_any_element()
+    }
+
     pub fn new() -> Self {
         BlotterDelegate {
             snapshot: None,
@@ -435,14 +513,15 @@ impl BlotterDelegate {
             })
     }
 
-    /// The gutter's width in px for the current mode and row count —
-    /// `0` when off. Read by `column` (the tree column widens by it, so
-    /// the tree text keeps its own room) and by `render_td` (the gutter
-    /// element's own width). Depends on `shown.len()`'s digit count, so
-    /// a table growing past a power of ten widens on its next
-    /// `TableState::refresh`, which every reflatten already triggers.
+    /// Space for the numbers actually painted. Expanding offscreen descendants
+    /// does not move the tree; scrolling to larger numbers gives them room.
     pub fn gutter_px(&self) -> f32 {
-        geode_shell::linenumbers::gutter_px(self.line_numbers, self.shown.len())
+        let window = self.cache.window();
+        geode_shell::linenumbers::window_gutter_px(
+            self.line_numbers,
+            window.start.min(self.shown.len())..window.end.min(self.shown.len()),
+            self.cursor.row,
+        )
     }
 
     /// Rebuild `numbers` for the cache's current window if anything it
@@ -850,6 +929,34 @@ impl BlotterDelegate {
             .collect()
     }
 
+    pub(crate) fn reveal_find_row(
+        &mut self,
+        snapshot: &Arc<Snapshot>,
+        row: u32,
+    ) -> Result<(), String> {
+        let (Some(current), Some(plan)) = (&self.snapshot, &self.plan) else {
+            return Err("The tree is not available".into());
+        };
+        // Results are refreshed with each applied snapshot. A stale pointer pick
+        // must never interpret a positional row against a different snapshot.
+        if !Arc::ptr_eq(current, snapshot) || row as usize >= snapshot.rows() {
+            return Err("The tree changed. Search again.".into());
+        }
+        let path = path_of(snapshot, plan, row as usize);
+        for depth in 1..path.len() {
+            self.expansion.open(path[..depth].to_vec());
+        }
+        self.narrowed = None;
+        self.reflatten();
+        let position = self
+            .shown
+            .iter()
+            .position(|&r| r == row)
+            .ok_or_else(|| "This row is no longer in the tree".to_string())?;
+        self.cursor.to_row(position, self.shown.len());
+        Ok(())
+    }
+
     pub fn depth_bound(&self, grouping_len: usize) -> usize {
         depth_bound(&self.expansion, grouping_len)
     }
@@ -1196,13 +1303,12 @@ impl TableDelegate for BlotterDelegate {
             } else {
                 sort
             },
-            // The tree column carries the line-number gutter (below),
-            // so it widens by the gutter's width rather than giving up
-            // its own text room to it.
+            // Reserve the compact gutter, independent of expansion and scroll.
+            // Larger visible numbers use label space, keeping numeric columns fixed.
             width: px({
                 let width = self.fitted.get(&c.name).copied().unwrap_or(c.width);
                 if c.kind == ColumnKind::Tree {
-                    width + self.gutter_px()
+                    width + geode_shell::linenumbers::gutter_px(self.line_numbers, 0)
                 } else {
                     width
                 }
@@ -1467,8 +1573,8 @@ impl TableDelegate for BlotterDelegate {
                 .unwrap_or("·");
             let indent = px(depth as f32 * INDENT);
             let chevron_states = self.chevron_states(theme);
-            // The gutter precedes indentation and uses the shown row count to size
-            // its right-aligned text. It is outside the column plan, so navigation,
+            // The gutter precedes indentation and fits only the painted numbers,
+            // keeping offscreen descendants from widening its right-aligned text. It is outside the column plan, so navigation,
             // sort, and yank do not treat it as a column. The cursor row uses full
             // foreground and, in relative mode, its absolute number; other rows use
             // muted text. `ensure_numbers` prepares strings only when its stamp changes.

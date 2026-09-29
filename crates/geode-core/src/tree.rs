@@ -20,6 +20,7 @@
 use crate::snapshot::{DictCodes, Snapshot};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::sync::Arc;
 
 pub const NO_PARENT: u32 = u32::MAX;
 
@@ -31,6 +32,7 @@ pub struct TreeIndex {
     child_start: Vec<u32>,
     children: Vec<u32>,
     roots: Vec<u32>,
+    depth_first: Arc<[u32]>,
     unplaced: u32,
 }
 
@@ -143,12 +145,26 @@ impl TreeIndex {
                 fill[p as usize] += 1;
             }
         }
+        // Keep the complete display order with the immutable snapshot. Search
+        // can share it immediately instead of walking millions of rows on open.
+        fn visit(row: u32, starts: &[u32], children: &[u32], out: &mut Vec<u32>) {
+            out.push(row);
+            let row = row as usize;
+            for &child in &children[starts[row] as usize..starts[row + 1] as usize] {
+                visit(child, starts, children, out);
+            }
+        }
+        let mut depth_first = Vec::with_capacity(n);
+        for &root in &roots {
+            visit(root, &child_start, &children, &mut depth_first);
+        }
         TreeIndex {
             parent,
             depth,
             child_start,
             children,
             roots,
+            depth_first: depth_first.into(),
             unplaced,
         }
     }
@@ -191,6 +207,12 @@ impl TreeIndex {
     /// result lists every row.
     pub fn roots(&self) -> &[u32] {
         &self.roots
+    }
+
+    /// All reachable parents and leaves in depth-first sibling order. Prepared
+    /// on the query worker and shared without copying for fully expanded views.
+    pub fn depth_first_rows(&self) -> Arc<[u32]> {
+        self.depth_first.clone()
     }
 
     /// Rows whose parent was not in the result, attached to the first
@@ -333,6 +355,7 @@ mod tests {
             let t = snap.tree();
             assert_eq!(t.len(), 8);
             assert_eq!(t.roots(), &[0], "dict={dict}");
+            assert_eq!(&*t.depth_first_rows(), &[0, 1, 3, 7, 5, 2, 4, 6]);
             assert_eq!(t.children(0), &[1, 2], "dict={dict}");
             assert_eq!(t.children(1), &[3, 5], "L1's underlyings, dict={dict}");
             assert_eq!(t.children(2), &[4, 6], "L2's underlyings, dict={dict}");
