@@ -6,9 +6,13 @@
 //! its package's chevron lane and its full shorthand; a bare line its
 //! shorthand alone, on the edge the legs' text shares.
 //!
-//! No row paints a ground of its own: the tree column carries the
+//! A grouping row paints a chevron and its value at medium weight
+//! (`pricer-group-{row}`), and is the only row with a ground of its own
+//! (`Paints::group_ground`, set by `render_tr`), so its text, cells and
+//! gutter take the group palette floored on that ground. Every other row
+//! leaves the ground to the table: the tree column carries a package's
 //! structure, and hover and selection are the table's row grounds, which
-//! per-row or per-cell fills would obscure.
+//! further per-row or per-cell fills would obscure.
 
 use crate::grid::{GridModel, GridRowKind};
 use crate::paint::{CellColour, Paints, cell_colour};
@@ -27,9 +31,9 @@ use geode_tile::colour::{ColourCache, Resolved as ColourResolved};
 use geode_widgets::datefield::{self, DateTimeField, SegmentPaint, SegmentText};
 use gpui::prelude::*;
 use gpui::{
-    App, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, Hsla, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, SharedString, Stateful, TextAlign, WeakEntity,
-    Window, div, px, relative,
+    App, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, FontWeight, Hsla,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, SharedString, Stateful, TextAlign,
+    WeakEntity, Window, div, px, relative,
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::table::{Column, ColumnFixed, TableDelegate, TableState};
@@ -273,7 +277,15 @@ pub struct SheetDelegate {
     /// says `Loading sheet…` rather than inviting an `o` the tile would
     /// refuse.
     pub(crate) loading: bool,
-    chevron: Option<(control::ControlInputs, control::ControlPaint)>,
+    /// The chevron's pointer states, cached per rest paint: `[line
+    /// palette, group palette]` (a group row's chevron rests in the group
+    /// muted paint, floored on its ground).
+    chevron: [Option<(control::ControlInputs, control::ControlPaint)>; 2],
+    /// Named column colours floored on the group grounds, keyed by the
+    /// resolved colour and the group ground they were floored under: a
+    /// group row paints few distinct colours, so a linear memo keeps the
+    /// floor out of every frame.
+    group_named: Vec<(Hsla, Hsla, Hsla)>,
     /// The tile's open cell editor, a read-only mirror of the tile's.
     pub(crate) editor: Option<EditorPaint>,
     /// The typeahead's rows call back into the tile; a dropped tile
@@ -344,7 +356,8 @@ impl SheetDelegate {
             selected: None,
             paints: Paints::derive(theme),
             loading: false,
-            chevron: None,
+            chevron: [None, None],
+            group_named: Vec::new(),
             editor: None,
             tile,
             line_numbers: LineNumbers::Off,
@@ -421,14 +434,31 @@ impl SheetDelegate {
         let Some(row) = model.rows.get(row_ix) else {
             return self.paints.own;
         };
+        let group = matches!(row.kind, GridRowKind::Group { .. });
         let Some(cell) = row.cells.get(plan_col) else {
-            return self.paints.own;
+            return if group {
+                self.paints.group_own
+            } else {
+                self.paints.own
+            };
         };
-        let base = self.paints.text(cell.state);
         let colour = model
             .columns
             .get(plan_col)
             .map_or(&Colour::None, |c| &c.colour);
+        if group {
+            let base = self.paints.group_text(cell.state);
+            return match cell_colour(colour, cell.state, cell.sign) {
+                CellColour::State => base,
+                CellColour::Bearish => self.paints.group_bearish,
+                CellColour::Bullish => self.paints.group_bullish,
+                CellColour::Named(sign) => match self.themed_cell_colour(plan_col, theme) {
+                    Some(c) => self.on_group(c.for_sign(Some(sign))),
+                    None => base,
+                },
+            };
+        }
+        let base = self.paints.text(cell.state);
         match cell_colour(colour, cell.state, cell.sign) {
             CellColour::State => base,
             CellColour::Bearish => theme.chart_bearish,
@@ -436,6 +466,33 @@ impl SheetDelegate {
             CellColour::Named(sign) => self
                 .themed_cell_colour(plan_col, theme)
                 .map_or(base, |c| c.for_sign(Some(sign))),
+        }
+    }
+
+    /// A named column colour on a group row: floored on the group ground
+    /// and the hover and selected grounds that replace it, memoised.
+    fn on_group(&mut self, c: Hsla) -> Hsla {
+        let ground = self.paints.group_ground;
+        if let Some((.., out)) = self
+            .group_named
+            .iter()
+            .find(|(input, at, _)| *input == c && *at == ground)
+        {
+            return *out;
+        }
+        self.group_named.retain(|(_, at, _)| *at == ground);
+        let out = self.paints.floor_on_group(c);
+        self.group_named.push((c, ground, out));
+        out
+    }
+
+    /// The ground `render_tr` paints under grid row `row`: a group row's
+    /// own, `None` for every other row (and a filler row past the model),
+    /// whose ground is the table's.
+    pub(crate) fn row_ground(&self, row: usize) -> Option<Hsla> {
+        match self.model.rows.get(row)?.kind {
+            GridRowKind::Group { .. } => Some(self.paints.group_ground),
+            _ => None,
         }
     }
 
@@ -526,13 +583,16 @@ impl SheetDelegate {
     }
 
     /// The gutter's text paint on grid row `row`: the row's own paint on
-    /// the cursor row, muted elsewhere. Every row shares the line palette
-    /// (no row has a ground of its own), so the row's kind does not enter.
+    /// the cursor row, muted elsewhere — the group palette on a group
+    /// row, which has a ground of its own, the line palette on every
+    /// other.
     pub(crate) fn gutter_paint(&self, row: usize) -> Hsla {
-        if self.cursor.is_some_and(|(r, _)| r == row) {
-            self.paints.own
-        } else {
-            self.paints.muted
+        let on_cursor = self.cursor.is_some_and(|(r, _)| r == row);
+        match (on_cursor, self.row_ground(row).is_some()) {
+            (true, false) => self.paints.own,
+            (false, false) => self.paints.muted,
+            (true, true) => self.paints.group_own,
+            (false, true) => self.paints.group_muted,
         }
     }
 
@@ -557,20 +617,22 @@ impl SheetDelegate {
     }
 
     /// Derive chevron pointer states against row_hover, the background the table paints
-    /// under the pointer. The chevron's rest text is the row palette's muted paint,
-    /// already floored on that hover ground.
-    fn chevron_states(&mut self, theme: &Theme) -> control::ControlPaint {
-        let inputs = control::ControlInputs::new(
-            theme,
-            control::Rest::Bare,
-            self.paints.row_hover,
-            self.paints.muted,
-        );
-        match &self.chevron {
+    /// under the pointer. The chevron's rest text is its row palette's muted paint
+    /// (the group palette's on a group row), already floored on that hover ground.
+    fn chevron_states(&mut self, theme: &Theme, group: bool) -> control::ControlPaint {
+        let rest = if group {
+            self.paints.group_muted
+        } else {
+            self.paints.muted
+        };
+        let inputs =
+            control::ControlInputs::new(theme, control::Rest::Bare, self.paints.row_hover, rest);
+        let slot = &mut self.chevron[usize::from(group)];
+        match slot {
             Some((have, paint)) if *have == inputs => *paint,
             _ => {
                 let paint = control::control_paint(&inputs);
-                self.chevron = Some((inputs, paint));
+                *slot = Some((inputs, paint));
                 paint
             }
         }
@@ -674,9 +736,10 @@ impl TableDelegate for SheetDelegate {
             .child(column.name)
     }
 
-    /// The row keeps only its press door: no row paints a ground of its
-    /// own (see the module doc). A filler row past the model reports
-    /// nothing.
+    /// A group row's ground (`row_ground`; no other row paints one, see
+    /// the module doc) and the row's press door. A filler row past the
+    /// model paints and reports nothing. The table's hover and selected
+    /// grounds replace the row's, as they replace the table's own.
     ///
     /// A press on the row outside every cell (the table's trailing filler)
     /// is still a click on that row: it reports a press at the cursor's
@@ -690,7 +753,9 @@ impl TableDelegate for SheetDelegate {
         _window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> Stateful<Div> {
-        let row = div().id(("row", row_ix));
+        let row = div()
+            .id(("row", row_ix))
+            .when_some(self.row_ground(row_ix), |el, g| el.bg(g));
         if row_ix >= self.model.rows.len() {
             return row;
         }
@@ -835,9 +900,15 @@ impl SheetDelegate {
             let el = base
                 .pl(scale::design(depth as f32 * INDENT))
                 .gap(scale::design(TREE_GAP));
+            let group = matches!(row.kind, GridRowKind::Group { .. });
             let (slot, text_paint) = match row.kind {
-                GridRowKind::Package { open, .. } => {
-                    let states = self.chevron_states(cx.theme());
+                GridRowKind::Package { open, .. } | GridRowKind::Group { open, .. } => {
+                    let states = self.chevron_states(cx.theme(), group);
+                    let rest = if group {
+                        paints.group_muted
+                    } else {
+                        paints.muted
+                    };
                     let chevron = div()
                         .id(("pricer-chevron", row_ix))
                         .size_full()
@@ -845,7 +916,7 @@ impl SheetDelegate {
                         .items_center()
                         .justify_center()
                         .rounded(radius)
-                        .text_color(paints.muted)
+                        .text_color(rest)
                         .pointer_states(states)
                         .debug_selector(|| format!("pricer-chevron-{row_ix}"))
                         // Recorded, not stopped: the tree cell reports
@@ -868,7 +939,8 @@ impl SheetDelegate {
                             cx.emit(ChevronClicked(row_ix));
                         }))
                         .child(if open { "▾" } else { "▸" });
-                    (slot.child(chevron), paints.own)
+                    let text = if group { paints.group_own } else { paints.own };
+                    (slot.child(chevron), text)
                 }
                 GridRowKind::Leg { last } => (
                     slot.text_color(paints.muted)
@@ -905,7 +977,14 @@ impl SheetDelegate {
                         .overflow_hidden()
                         .text_ellipsis()
                         .text_color(text_paint)
-                        .debug_selector(|| format!("pricer-tree-text-{row_ix}"))
+                        .when(group, |el| el.font_weight(FontWeight::MEDIUM))
+                        .debug_selector(move || {
+                            if group {
+                                format!("pricer-group-{row_ix}")
+                            } else {
+                                format!("pricer-tree-text-{row_ix}")
+                            }
+                        })
                         .child(row.text.clone()),
                 )
                 .children(note)

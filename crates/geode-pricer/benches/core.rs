@@ -1,15 +1,17 @@
 //! Parsing, edits and undo, result installation, storage conversion, scope
-//! evaluation, and grid preparation for 1,000 shorthand entries. Every tenth entry is a two-leg
-//! package, so the sheet contains 1,200 rows. These benchmarks measure local
-//! model work, excluding pricing execution, database I/O, and painting.
+//! evaluation, the rollup tree, and grid preparation for 1,000 shorthand entries. Every
+//! tenth entry is a two-leg package, so the sheet contains 1,200 rows. These benchmarks
+//! measure local model work, excluding pricing execution, database I/O, and painting.
 //! Budgets and reference measurements are in `docs/current/performance.md`.
 
 use chrono::Utc;
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use geode_core::clock::Clock;
 use geode_core::dimensions::DerivedDimensions;
+use geode_core::expansion::Expansion as GroupExpansion;
 use geode_core::pricing::{Currency, Measure, PriceResult};
 use geode_core::scope::{Scope, parse_expr};
+use geode_pricer::core::rollup::{self, EffectiveChain, effective_chain};
 use geode_pricer::core::{
     ColumnPlan, Edit, Expansion, LineId, OwnShifts, Place, RowSpec, Sheet, TemplateSet, Views,
     Visibility, apply_scope, from_rows, parse, to_rows,
@@ -41,10 +43,38 @@ fn texts(n: usize) -> Vec<String> {
         .collect()
 }
 
+/// `n` entries over four underlyings and three expiries, so a grouping
+/// has nodes to make: every tenth a callspread, every twentieth (in its
+/// place) a Z26/H27 calendar, which `expiry` splits across two nodes.
+fn grouped_texts(n: usize) -> Vec<String> {
+    const UNDS: [&str; 4] = ["SPX", "NDX", "SX5E", "RTY"];
+    const EXPS: [&str; 3] = ["Z26", "H27", "M27"];
+    (0..n)
+        .map(|i| {
+            let und = UNDS[i % 4];
+            let exp = EXPS[(i / 4) % 3];
+            let k = 4000 + (i % 400) * 5;
+            match i % 20 {
+                19 => format!("{und} Z26/H27 {k} CAL"),
+                9 => format!("-{} {und} {exp} {k}/{} CS", 1 + i % 4, k + 100),
+                _ => format!(
+                    "{} {und} {exp} {k} {}",
+                    if i % 3 == 0 { -1 } else { 1 + (i % 5) as i64 },
+                    if i % 2 == 0 { "C" } else { "P" }
+                ),
+            }
+        })
+        .collect()
+}
+
 fn sheet(n: usize) -> Sheet {
+    sheet_of(&texts(n))
+}
+
+fn sheet_of(texts: &[String]) -> Sheet {
     let mut s = Sheet::new("bench");
     let templates = TemplateSet::builtin();
-    let rows: Vec<RowSpec> = texts(n)
+    let rows: Vec<RowSpec> = texts
         .iter()
         .map(|t| parse(t, &templates).expect("bench text parses"))
         .collect();
@@ -164,12 +194,21 @@ fn bench(c: &mut Criterion) {
     let views = Views::builtin();
     let plan = ColumnPlan::build(views.get("vanilla").expect("bundled"));
     let visibility = Visibility::all(&s);
+    let flat = rollup::build(
+        &s,
+        &visibility,
+        &EffectiveChain::default(),
+        &DerivedDimensions::default(),
+        Clock::utc(),
+    );
+    let no_groups = GroupExpansion::default();
     g.bench_function("grid_build_1000", |b| {
         b.iter(|| {
             black_box(GridModel::build(
                 &s,
+                &flat,
+                &no_groups,
                 &expansion,
-                &visibility,
                 &plan,
                 Clock::utc(),
             ))
@@ -199,12 +238,58 @@ fn bench(c: &mut Criterion) {
     g.bench_function("apply_scope_1000", |b| {
         b.iter(|| black_box(apply_scope(&s, &scope, &dims, Clock::utc()).expect("applies")))
     });
+    let scoped_flat = rollup::build(&s, &scoped, &EffectiveChain::default(), &dims, Clock::utc());
     g.bench_function("grid_build_1000_scoped", |b| {
         b.iter(|| {
             black_box(GridModel::build(
                 &s,
+                &scoped_flat,
+                &no_groups,
                 &expansion,
-                &scoped,
+                &plan,
+                Clock::utc(),
+            ))
+        })
+    });
+
+    // Regrouping: 1,000 priced entries over four underlyings and three
+    // expiries under `[underlying_ref, expiry, position_ref]` — the tree,
+    // then the grid with every group and package open, each group row
+    // summing and reading unanimity over its legs. The tile does both on
+    // every rebuild under a grouping (budget: 8 ms together).
+    let mut s = sheet_of(&grouped_texts(1_000));
+    let answers: Vec<(LineId, u64, Result<PriceResult, String>)> = (0..s.len())
+        .filter(|r| s.is_line(*r))
+        .map(|r| {
+            let mut p = PriceResult::zero(Currency::USD);
+            p.set(Measure::Npv, false, 12.5);
+            p.set(Measure::Delta01, false, 0.5);
+            (s.id(r), s.revision(r), Ok(p))
+        })
+        .collect();
+    s.deliver_all(answers, Utc::now());
+    let levels: Vec<String> = ["underlying_ref", "expiry", "position_ref"]
+        .iter()
+        .map(|l| l.to_string())
+        .collect();
+    let chain = effective_chain(&levels, &dims);
+    assert_eq!(chain.kept.len(), 3, "every level groups");
+    let visibility = Visibility::all(&s);
+    g.bench_function("rollup_1000", |b| {
+        b.iter(|| black_box(rollup::build(&s, &visibility, &chain, &dims, Clock::utc())))
+    });
+    let tree = rollup::build(&s, &visibility, &chain, &dims, Clock::utc());
+    let mut groups = GroupExpansion::default();
+    groups.open_all();
+    let mut expansion = Expansion::default();
+    expansion.open_all(&s);
+    g.bench_function("grid_build_1000_grouped", |b| {
+        b.iter(|| {
+            black_box(GridModel::build(
+                &s,
+                &tree,
+                &groups,
+                &expansion,
                 &plan,
                 Clock::utc(),
             ))

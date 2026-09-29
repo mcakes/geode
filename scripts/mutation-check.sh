@@ -21737,8 +21737,8 @@ run_mutation "timeseries colour picker: removing the target closes the picker" \
 # Column 0 paints only a package's template token.
 run_mutation "pricer grid: a package's tag is its search text" \
   crates/geode-pricer/src/grid.rs \
-  '                    SharedString::new_static(template.token()),' \
-  '                    package_search(sheet, r, None).into(),' \
+  '            tag: SharedString::new_static(template.token()),' \
+  '            tag: package_search(sheet, r, None).into(),' \
   geode-pricer rows_follow_the_expansion_and_carry_depth_ids_tags_and_search_keys
 
 # Find reads the unpainted search key, not the painted tag. Anchored on
@@ -25200,15 +25200,15 @@ run_mutation "pricer plan: move_column reorders" \
 # leg would hang from a tee and the package would never close.
 run_mutation "pricer grid: the last leg takes the corner" \
   crates/geode-pricer/src/grid.rs \
-  '                        last: !(r + 1..sheet.children(p).end).any(|l| visibility.is_shown(l)),' \
-  '                        last: false,' \
+  '                            self.line(child, row, GridRowKind::Leg { last: i == last });' \
+  '                            self.line(child, row, GridRowKind::Leg { last: false });' \
   geode-pricer the_last_leg_of_every_package_takes_the_corner_connector
 
 # A package row's note counts its own legs.
 run_mutation "pricer grid: a package counts its legs" \
   crates/geode-pricer/src/grid.rs \
-  '                    let total = sheet.children(r).len();' \
-  '                    let total = 0;' \
+  '        let total = sheet.children(r).len();' \
+  '        let total = 0;' \
   geode-pricer the_tree_text_is_prepared_per_row_kind
 
 # One leg reads "1 leg", not "1 legs".
@@ -25238,8 +25238,8 @@ run_mutation "pricer grid: a custom package's key has its strikes" \
 # shares the same string, so this anchor leaves search intact).
 run_mutation "pricer grid: a leg's text is its shorthand" \
   crates/geode-pricer/src/grid.rs \
-  $'                        SharedString::default(),\n                        s.clone(),' \
-  $'                        SharedString::default(),\n                        SharedString::default(),' \
+  '            text: s.clone(),' \
+  '            text: SharedString::default(),' \
   geode-pricer the_tree_text_is_prepared_per_row_kind
 
 # Tee for every leg but the last, corner for the last.
@@ -25261,8 +25261,8 @@ run_mutation "pricer tree: a leg's connector sits in its parent's slot" \
 # included; only the cursor row takes the own paint.
 run_mutation "pricer gutter: a package row is muted off the cursor" \
   crates/geode-pricer/src/delegate.rs \
-  $'            self.paints.own\n        } else {\n            self.paints.muted' \
-  $'            self.paints.own\n        } else {\n            self.paints.own' \
+  '            (false, false) => self.paints.muted,' \
+  '            (false, false) => self.paints.own,' \
   geode-pricer the_tree_column_paints_connectors_a_chip_and_a_leg_count
 
 
@@ -25661,8 +25661,8 @@ run_mutation "pricer scope: a refusal keeps the last narrowing" \
 # under a row whose legs are partly hidden is a plausible wrong total.
 run_mutation "pricer grid: a partial package aggregates every leg" \
   crates/geode-pricer/src/grid.rs \
-  '                let legs = visibility.shown_legs(sheet, r);' \
-  '                let legs: Vec<usize> = sheet.children(r).collect();' \
+  '        let subset = partial.then(|| (legs, sheet.fold_legs(legs.iter().copied())));' \
+  $'        let all: Vec<usize> = sheet.children(r).collect();\n        let subset = partial.then(|| (all.as_slice(), sheet.fold_legs(all.iter().copied())));' \
   geode-pricer a_partly_hidden_package_paints_its_shown_legs_aggregate_and_note
 
 # A typed usize::MAX count refuses instead of overflowing.
@@ -25690,8 +25690,8 @@ run_mutation "pricer scope: the observer applies the frame's scope" \
 # or out of a scope over a measure.
 run_mutation "pricer scope: a rebuild re-applies the scope" \
   crates/geode-pricer/src/tile.rs \
-  $'        self.apply_visibility();\n        let model = Rc::new(GridModel::build(' \
-  $'        let model = Rc::new(GridModel::build(' \
+  $'        self.apply_visibility();\n        self.rollup = rollup::build(' \
+  $'        self.rollup = rollup::build(' \
   geode-pricer a_delivery_reevaluates_the_scope
 
 # `:unscoped` reads no frame scope.

@@ -90,13 +90,17 @@ fn resolve<'a>(
 /// Resolve `chain` against the `pricer` dataset: a level it cannot group
 /// by (a column it lacks, a measure, a derived dimension over either or
 /// over a synthetic key) is dropped, as is every level after a structural
-/// one (`position_ref` / `instrument_ref`).
+/// one (`position_ref` / `instrument_ref`) and a level already kept (a
+/// repeat would only nest each node under an identical parent; the
+/// Groupings dialog refuses one, but `:group` and a hand-edited slot
+/// can still name it).
 pub fn effective_chain(chain: &[String], dims: &DerivedDimensions) -> EffectiveChain {
     let groupable = pricer_dataset().groupable_columns();
     let mut out = EffectiveChain::default();
     let mut ended = false;
     for name in chain {
-        match (ended, resolve(name, &groupable, dims)) {
+        let repeat = out.kept.contains(name);
+        match (ended || repeat, resolve(name, &groupable, dims)) {
             (false, Some(level)) => {
                 ended = matches!(level, Level::Positions | Level::Instruments);
                 out.kept.push(name.clone());
@@ -733,6 +737,21 @@ mod tests {
         let c = effective_chain(&levels, &d);
         assert_eq!(c.kept, vec!["index"]);
         assert_eq!(c.dropped, vec!["desk_pos", "region"]);
+    }
+
+    /// A level named twice groups once: the repeat is reported dropped
+    /// (the header strikes it through), not a second level whose every
+    /// node has one child reading the same value as its parent.
+    #[test]
+    fn a_repeated_level_is_dropped() {
+        let c = chain(&["underlying_ref", "expiry", "underlying_ref"]);
+        assert_eq!(c.kept, vec!["underlying_ref", "expiry"]);
+        assert_eq!(c.dropped, vec!["underlying_ref"]);
+        let s = sheet();
+        assert_eq!(
+            roll(&s, &["underlying_ref", "underlying_ref"]),
+            roll(&s, &["underlying_ref"])
+        );
     }
 
     /// A scope hiding one CS leg: the CS sits under its node with its one

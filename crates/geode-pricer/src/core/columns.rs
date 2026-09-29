@@ -669,7 +669,15 @@ pub enum CellState {
     Stale,
     /// A failed row's result cells and status (paints danger text).
     Failed,
+    /// A grouping row's ungrouped dimension whose legs disagree, or where
+    /// some legs have a value and others none: [`MIXED`] (paints muted).
+    Mixed,
 }
+
+/// What a grouping row's ungrouped dimension paints where its legs are
+/// not unanimous. Never an arbitrary leg's value: a plausible wrong strike
+/// is worse than a word that says there is none.
+pub const MIXED: &str = "mixed";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CellText {
@@ -856,6 +864,97 @@ pub fn subset_cell_text(
         ColumnKind::PricedAt => priced_at(folded.priced_at, clock),
         ColumnKind::Status => status(&folded.state),
         _ => cell_text(sheet, package, def, format, clock),
+    }
+}
+
+/// What `row` (a line) reads for `def` as a grouping row's unanimity
+/// compares it: its [`cell_text`], except `template`, which a leg reads as
+/// its package's token (the value it groups and scopes by, `SheetRow`'s
+/// rule), where its own cell is blank.
+pub fn leg_reading(
+    sheet: &Sheet,
+    row: usize,
+    def: &ColumnDef,
+    format: &ColumnFormat,
+    clock: geode_core::clock::Clock,
+) -> CellText {
+    if def.kind == ColumnKind::Template
+        && let Some(package) = sheet.parent(row)
+    {
+        return cell_text(sheet, package, def, format, clock);
+    }
+    cell_text(sheet, row, def, format, clock)
+}
+
+/// A grouping row's cell for `def` over its `legs` (every shown line
+/// beneath it), `folded` their [`Sheet::fold_legs`] and `readings` each
+/// leg's [`leg_reading`] for this column, in any order:
+///
+/// - a measure: the legs' sum × qty, through the one `number` a package's
+///   fold paints by (unlike local currencies paint `—`, the `_usd` twin
+///   sums);
+/// - `status` and `priced_at`: the fold's, as a package row's;
+/// - `qty`: the leg count;
+/// - `position_ref` / `instrument_ref`: blank — a group is no position;
+/// - every other column (a dimension): the legs' value where unanimous,
+///   [`MIXED`] where they differ or some have none, blank where none do
+///   (the blotter's unanimity rule).
+///
+/// The grouped column itself is the caller's: it shows the node's value.
+pub fn group_cell_text<'a>(
+    def: &ColumnDef,
+    format: &ColumnFormat,
+    legs: usize,
+    folded: &Folded,
+    readings: impl IntoIterator<Item = &'a CellText>,
+    clock: geode_core::clock::Clock,
+) -> CellText {
+    match def.kind {
+        ColumnKind::Measure { measure, usd } => {
+            number(&folded.state, folded.result.as_ref(), measure, usd, format)
+        }
+        ColumnKind::PricedAt => priced_at(folded.priced_at, clock),
+        ColumnKind::Status => status(&folded.state),
+        ColumnKind::Qty => own(legs.to_string()),
+        ColumnKind::PositionRef | ColumnKind::InstrumentRef => blank(),
+        _ => unanimous(readings),
+    }
+}
+
+/// One value when every reading has the same one; [`MIXED`] when two
+/// differ or a blank sits beside a value; blank when all are blank. The
+/// value keeps `Inherited` only when every reading inherits it.
+fn unanimous<'a>(readings: impl IntoIterator<Item = &'a CellText>) -> CellText {
+    let mut value: Option<&CellText> = None;
+    let (mut blanks, mut differ, mut inherited) = (false, false, true);
+    for r in readings {
+        if r.state == CellState::Blank {
+            blanks = true;
+            continue;
+        }
+        inherited &= r.state == CellState::Inherited;
+        match value {
+            None => value = Some(r),
+            Some(v) if v.text != r.text => differ = true,
+            Some(_) => {}
+        }
+    }
+    match value {
+        None => blank(),
+        Some(_) if blanks || differ => CellText {
+            text: MIXED.into(),
+            state: CellState::Mixed,
+            sign: None,
+        },
+        Some(v) => CellText {
+            text: v.text.clone(),
+            state: if inherited {
+                CellState::Inherited
+            } else {
+                CellState::Own
+            },
+            sign: None,
+        },
     }
 }
 

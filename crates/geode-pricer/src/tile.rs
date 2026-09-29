@@ -13,6 +13,7 @@ use crate::core::commands::{self, Command, ShiftField};
 use crate::core::complete::{Completion, Inputs, Write};
 use crate::core::edit::{Edit, EditError, Undo};
 use crate::core::entry::{history, landing_place, next_place, place_for, target_label};
+use crate::core::rollup::{self, EffectiveChain, Rollup};
 use crate::core::sheet::{Delivered, LineId, Refresh, Sheet};
 use crate::core::shorthand::parse;
 use crate::core::shorthand::render_expiry;
@@ -37,6 +38,7 @@ use crate::store::Loaded;
 use chrono::Utc;
 use geode_core::clock::Clock;
 use geode_core::document::DocumentRows;
+use geode_core::expansion::Expansion as GroupExpansion;
 use geode_core::grid::selection::{Resolved, SelectKind, Selection};
 use geode_core::pricing::{PriceLine, PriceOutcome, PriceParams};
 use geode_core::query::{QueryKey, QueryOutcome};
@@ -392,6 +394,14 @@ pub struct PricerTile {
     pub(crate) shared: Rc<Shared>,
     pub(crate) sheet: Sheet,
     pub(crate) expansion: Expansion,
+    /// The grouping chain after dropping what `pricer` cannot group by:
+    /// empty (the flat sheet) until the tile follows a grouping.
+    pub(crate) chain: EffectiveChain,
+    /// Which grouping nodes are open, by path. Packages keep `expansion`.
+    pub(crate) group_expansion: GroupExpansion,
+    /// The tree the model was last flattened from: `GridRow::node`
+    /// indexes it.
+    pub(crate) rollup: Rollup,
     /// `:unscoped`: this tile ignores the frame's scope. Session key
     /// `unscoped`, as the blotter's.
     unscoped: bool,
@@ -827,6 +837,9 @@ impl PricerTile {
             visibility: Visibility::all(&sheet),
             sheet,
             expansion,
+            chain: EffectiveChain::default(),
+            group_expansion: GroupExpansion::default(),
+            rollup: Rollup::default(),
             unscoped,
             applied_scope,
             scope_refusal: None,
@@ -4003,10 +4016,18 @@ impl PricerTile {
     /// a load changes what a scope over a measure or `status` matches.
     pub(crate) fn rebuild(&mut self, cx: &mut Context<Self>) {
         self.apply_visibility();
+        self.rollup = rollup::build(
+            &self.sheet,
+            &self.visibility,
+            &self.chain,
+            &self.shared.dims.borrow(),
+            self.clock,
+        );
         let model = Rc::new(GridModel::build(
             &self.sheet,
+            &self.rollup,
+            &self.group_expansion,
             &self.expansion,
-            &self.visibility,
             &self.plan,
             self.clock,
         ));
@@ -6263,6 +6284,104 @@ pub(crate) mod tests {
             assert_eq!(d.gutter_paint(0), d.paints.own, "the cursor row");
             assert_eq!(d.gutter_paint(1), d.paints.muted, "the package row");
             assert_eq!(d.gutter_paint(2), d.paints.muted, "a leg");
+        });
+    }
+
+    /// A grouping row paints its value (`pricer-group-{row}`, medium
+    /// weight) behind a chevron at its own depth, its lines one indent in;
+    /// it is the only row with a ground (`row_ground`, which `render_tr`
+    /// paints), and its cells and gutter take the group palette floored
+    /// on that ground. The chain is set on the tile directly: following
+    /// the frame's grouping is the tile's own route, tested there.
+    #[gpui::test]
+    fn a_grouping_row_paints_a_chevron_its_label_and_its_own_ground(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(
+            cx,
+            &[
+                "SPX Z26 5000 C",
+                "NDX Z26 4000 P",
+                "-5 SPX Z26 4800/5200 CS",
+            ],
+        );
+        h.tile.update_in(&mut vcx, |t, _, cx| {
+            t.chain = rollup::effective_chain(&["underlying_ref".into()], &Default::default());
+            t.group_expansion.open_all();
+            t.rebuild(cx);
+        });
+        h.draw(&mut vcx);
+        // ▾ NDX, its line, ▾ SPX, its line, the CS.
+        assert_eq!(
+            h.tree(&vcx),
+            [
+                "NDX",
+                "NDX Z26 4000 P",
+                "SPX",
+                "SPX Z26 5000 C",
+                "-5 SPX Z26 4800/5200 CS"
+            ]
+        );
+        for sel in [
+            "pricer-group-0",
+            "pricer-chevron-0",
+            "pricer-group-2",
+            "pricer-chevron-2",
+            "pricer-chevron-4",
+            "pricer-tree-text-1",
+        ] {
+            assert!(vcx.debug_bounds(sel).is_some(), "{sel} is painted");
+        }
+        for sel in [
+            "pricer-group-1",
+            "pricer-group-4",
+            "pricer-tree-text-0",
+            "pricer-chevron-1",
+            "pricer-chip-0",
+            "pricer-note-0",
+        ] {
+            assert!(vcx.debug_bounds(sel).is_none(), "{sel} is not painted");
+        }
+        let group = vcx.debug_bounds("pricer-chevron-2").unwrap();
+        let line = vcx.debug_bounds("pricer-tree-text-3").unwrap();
+        let package = vcx.debug_bounds("pricer-chevron-4").unwrap();
+        assert!(
+            group.center().x < package.center().x && group.right() <= line.left(),
+            "the group's chevron one lane out from its rows: {group:?} {package:?} {line:?}"
+        );
+        h.tile.read_with(&vcx, |t, cx| {
+            let d = t.table.read(cx).delegate();
+            let grounds: Vec<bool> = (0..5).map(|r| d.row_ground(r).is_some()).collect();
+            assert_eq!(
+                grounds,
+                [true, false, true, false, false],
+                "group rows only"
+            );
+            assert_eq!(d.row_ground(0), Some(d.paints.group_ground));
+            assert_eq!(d.gutter_paint(1), d.paints.muted, "a line off the cursor");
+        });
+        let strike = h.tile.read_with(&vcx, |t, _| {
+            t.plan
+                .columns
+                .iter()
+                .position(|c| c.def.name == "strike")
+                .unwrap()
+        });
+        h.tile.update_in(&mut vcx, |t, _, cx| {
+            let theme = cx.theme().clone();
+            t.table.update(cx, |table, _| {
+                let d = table.delegate_mut();
+                assert_eq!(
+                    d.text_colour(2, strike, &theme),
+                    d.paints.group_muted,
+                    "`mixed` on the SPX group: muted, floored on the group ground"
+                );
+                assert_eq!(d.text_colour(0, strike, &theme), d.paints.group_own);
+                assert_eq!(d.text_colour(1, strike, &theme), d.paints.own, "a line");
+                assert_eq!(
+                    d.gutter_paint(2),
+                    d.paints.group_muted,
+                    "the group's gutter"
+                );
+            });
         });
     }
 

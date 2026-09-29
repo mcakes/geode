@@ -1,7 +1,8 @@
 //! Prepared grid-row text colours, recomputed on theme changes.
-//! CellState selects own, muted stale/inherited, or failure text. Package rows share
-//! the line palette: the tree column carries the structure, so no row paints a ground
-//! of its own. A package's template chip takes the neutral chip pair (`chip_fill`,
+//! CellState selects own, muted stale/inherited/mixed, or failure text. Package rows
+//! share the line palette: the tree column carries their structure. Grouping rows are
+//! the one row with a ground of its own (`group_ground`) and so a palette of their own,
+//! floored on it. A package's template chip takes the neutral chip pair (`chip_fill`,
 //! `chip_text`). GridModel remains independent of the theme.
 //!
 //! Row text is adjusted against its base background and the table's hover and selection
@@ -90,6 +91,24 @@ pub struct Paints {
     /// fill reads differently on each) and the text floored on every one.
     pub date_active_text: Hsla,
     pub date_typing_text: Hsla,
+    /// Opaque: `secondary` composited over the table ground — a grouping
+    /// row's own ground, the only row ground the pricer paints (the
+    /// blotter's group rows have none; spec §9 assumed one, so the pricer
+    /// takes this one). Hover and selection replace it as they replace a
+    /// line's.
+    pub group_ground: Hsla,
+    /// A grouping row's text, each floored on its ground and on the hover
+    /// and selected grounds: the state paints (own, muted `mixed` /
+    /// stale / inherited, danger), and a `sign` column's bearish and
+    /// bullish, which on a line are the theme's chart tokens as they are.
+    pub group_own: Hsla,
+    pub group_muted: Hsla,
+    pub group_danger: Hsla,
+    pub group_bearish: Hsla,
+    pub group_bullish: Hsla,
+    /// `group_ground`, hover and selected: what a group row's text is
+    /// floored on.
+    group_grounds: [Rgb; 3],
 }
 
 impl Paints {
@@ -105,7 +124,16 @@ impl Paints {
         // than panic on a theme change.
         let chip_fill = chip.fill.unwrap_or(theme.secondary);
         let chip_grounds = line.map(|g| over(chip_fill, g));
+        let group_ground = over(theme.secondary, ground);
+        let group = [group_ground, hover, selected];
         Paints {
+            group_ground: to_hsla(group_ground),
+            group_grounds: group,
+            group_own: floor_on_all(theme.foreground, &group),
+            group_muted: floor_on_all(theme.muted_foreground, &group),
+            group_danger: floor_on_all(danger, &group),
+            group_bearish: floor_on_all(theme.chart_bearish, &group),
+            group_bullish: floor_on_all(theme.chart_bullish, &group),
             own: floor_on_all(theme.foreground, &line),
             muted: floor_on_all(theme.muted_foreground, &line),
             danger: floor_on_all(danger, &line),
@@ -138,9 +166,25 @@ impl Paints {
         ]
     }
 
+    /// `c` floored on a group row's three grounds, as the group palette
+    /// is: for a colour the palette cannot prepare (a view's named column
+    /// colour).
+    pub fn floor_on_group(&self, c: Hsla) -> Hsla {
+        floor_on_all(c, &self.group_grounds)
+    }
+
+    /// [`Paints::text`] on a grouping row's ground.
+    pub fn group_text(&self, state: CellState) -> Hsla {
+        match state {
+            CellState::Stale | CellState::Inherited | CellState::Mixed => self.group_muted,
+            CellState::Failed => self.group_danger,
+            CellState::Own | CellState::Blank => self.group_own,
+        }
+    }
+
     pub fn text(&self, state: CellState) -> Hsla {
         match state {
-            CellState::Stale | CellState::Inherited => self.muted,
+            CellState::Stale | CellState::Inherited | CellState::Mixed => self.muted,
             CellState::Failed => self.danger,
             CellState::Own | CellState::Blank => self.own,
         }
@@ -224,6 +268,18 @@ mod tests {
                     ),
                 ]
                 .into_iter()
+                // A grouping row's text on its own ground; hover and
+                // selected (which replace it) below.
+                .chain(
+                    [
+                        ("group own", p.group_own),
+                        ("group muted", p.group_muted),
+                        ("group danger", p.group_danger),
+                        ("group bearish", p.group_bearish),
+                        ("group bullish", p.group_bullish),
+                    ]
+                    .map(|(label, text)| (label, text, to_rgb(p.group_ground))),
+                )
                 .chain(
                     Paints::row_grounds(theme)
                         .into_iter()
@@ -234,6 +290,18 @@ mod tests {
                                     (leak(format!("{label} on {which}")), text, bg)
                                 })
                                 .into_iter()
+                                .chain(
+                                    [
+                                        ("group own", p.group_own),
+                                        ("group muted", p.group_muted),
+                                        ("group danger", p.group_danger),
+                                        ("group bearish", p.group_bearish),
+                                        ("group bullish", p.group_bullish),
+                                    ]
+                                    .map(|(label, text)| {
+                                        (leak(format!("{label} on {which}")), text, bg)
+                                    }),
+                                )
                                 .chain([
                                     (
                                         leak(format!("chip on {which}")),
@@ -261,10 +329,11 @@ mod tests {
                 }
             });
         }
-        // Eighteen pairs a theme (six on the row's own ground, six on each
-        // of hover and selected) over at least forty bundled themes.
+        // Thirty-three pairs a theme (six line paints and five group
+        // paints, each on its row's own ground, on hover and on selected)
+        // over at least forty bundled themes.
         assert!(
-            checked >= 18 * 40,
+            checked >= 33 * 40,
             "every bundled theme was swept ({checked})"
         );
         assert!(
@@ -345,6 +414,13 @@ mod tests {
             assert_eq!(p.text(CellState::Stale), p.muted);
             assert_eq!(p.text(CellState::Inherited), p.muted);
             assert_eq!(p.text(CellState::Failed), p.danger);
+            assert_eq!(p.text(CellState::Mixed), p.muted, "`mixed` is muted");
+            assert_eq!(p.group_text(CellState::Own), p.group_own);
+            assert_eq!(p.group_text(CellState::Blank), p.group_own);
+            assert_eq!(p.group_text(CellState::Mixed), p.group_muted);
+            assert_eq!(p.group_text(CellState::Stale), p.group_muted);
+            assert_eq!(p.group_text(CellState::Inherited), p.group_muted);
+            assert_eq!(p.group_text(CellState::Failed), p.group_danger);
         });
     }
 }
