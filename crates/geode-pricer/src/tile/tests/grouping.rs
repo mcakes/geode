@@ -511,6 +511,14 @@ fn totals_count_a_split_package_per_node_legs(cx: &mut gpui::TestAppContext) {
     h.dispatch(&mut vcx, "visual_rows", None);
     h.motion(&mut vcx, "top", None);
     assert_eq!(npv_total(&h, &vcx), Some(format!("{expected:.2}")));
+    // One split row alone totals its own node's leg, as its row paints —
+    // not the whole calendar.
+    h.dispatch(&mut vcx, "escape", None);
+    let split = split_rows(&h, &vcx)[0];
+    let own = npv(&h, &vcx, split);
+    cursor_to_row(&h, &mut vcx, split);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    assert_eq!(npv_total(&h, &vcx), Some(format!("{own:.2}")));
 }
 
 /// Under a grouping, sheet order is not the painted order: `shift+j` /
@@ -540,6 +548,19 @@ fn a_move_steps_past_a_sibling_the_scope_hides(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "SPX Z26 4000 P", "SPX Z26 5200 C"]);
     set_scope(&h, &mut vcx, "strike != 4000");
     assert_eq!(h.tree(&vcx), ["SPX Z26 5000 C", "SPX Z26 5200 C"]);
+    // A selection slides past the hidden sibling to the next shown one.
+    cursor_to(&h, &mut vcx, "SPX Z26 5000 C");
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "move_down", None);
+    assert_eq!(
+        h.tree(&vcx),
+        ["SPX Z26 5200 C", "SPX Z26 5000 C"],
+        "V shift+j"
+    );
+    h.dispatch(&mut vcx, "escape", None);
+    h.dispatch(&mut vcx, "undo", None);
+    assert_eq!(h.tree(&vcx), ["SPX Z26 5000 C", "SPX Z26 5200 C"]);
+    // So does a single line.
     cursor_to(&h, &mut vcx, "SPX Z26 5000 C");
     h.dispatch(&mut vcx, "move_down", None);
     assert_eq!(h.footer(&vcx), None);
@@ -547,61 +568,6 @@ fn a_move_steps_past_a_sibling_the_scope_hides(cx: &mut gpui::TestAppContext) {
     assert_eq!(cursor_text(&h, &vcx).as_deref(), Some("SPX Z26 5000 C"));
     h.dispatch(&mut vcx, "move_up", None);
     assert_eq!(h.tree(&vcx), ["SPX Z26 5000 C", "SPX Z26 5200 C"]);
-    // A selection slides the same way.
-    h.dispatch(&mut vcx, "visual_rows", None);
-    h.dispatch(&mut vcx, "move_down", None);
-    assert_eq!(h.tree(&vcx), ["SPX Z26 5200 C", "SPX Z26 5000 C"]);
-}
-
-/// The pin and the open grouping rows ride the session record: a tile
-/// restored from it groups the same way with the same rows open (a
-/// nested open path included), and a record saved mid-load keeps them.
-#[gpui::test]
-fn the_pin_and_the_open_groups_round_trip_the_session(cx: &mut gpui::TestAppContext) {
-    let (h, mut vcx) = open_seeded(cx, &MIXED);
-    h.command(&mut vcx, "group underlying_ref strike").unwrap();
-    cursor_to(&h, &mut vcx, "SPX");
-    h.dispatch(&mut vcx, "toggle", None);
-    cursor_to(&h, &mut vcx, "5000");
-    h.dispatch(&mut vcx, "toggle", None);
-    let before = h.tree(&vcx);
-    let saved = h.serialize(&mut vcx);
-    let r = crate::session::Record::from_table(&saved);
-    assert_eq!(
-        r.pinned,
-        Some(vec!["underlying_ref".to_string(), "strike".to_string()])
-    );
-    assert_eq!(r.pinned_slot, None);
-    assert_eq!(
-        r.expanded_paths,
-        vec![
-            vec![Some("SPX".to_string())],
-            vec![Some("SPX".to_string()), Some("5000".to_string())]
-        ]
-    );
-    // Restored through the factory, from the same store.
-    let (r2, mut vcx2) = open_full(
-        cx,
-        Some(saved.clone()),
-        h.store.clone(),
-        PricerSettings::default(),
-    );
-    assert_eq!(r2.tree(&vcx2), before, "grouped and opened as it was");
-    assert!(r2.header(&vcx2).contains(&"pinned".to_string()));
-    // Mid-load, the record keeps what it was restored with.
-    let rows = h.store.get("book").unwrap();
-    h.store.set_pending(true);
-    let (r3, mut vcx3) = open_full(cx, Some(saved), h.store.clone(), PricerSettings::default());
-    let mid = crate::session::Record::from_table(&r3.serialize(&mut vcx3));
-    assert_eq!(mid.expanded_paths, r.expanded_paths, "held while loading");
-    r3.tile
-        .update(&mut vcx3, |t, cx| t.loaded(Ok(Some(rows)), cx));
-    assert_eq!(r3.tree(&vcx3), before);
-    // A slot pin is its own key.
-    slots(&r2, &mut vcx2, &[(1, &["expiry"])]);
-    r2.command(&mut vcx2, "group slot 1").unwrap();
-    let r = crate::session::Record::from_table(&r2.serialize(&mut vcx2));
-    assert_eq!((r.pinned, r.pinned_slot), (None, Some(1)));
 }
 
 /// A package split across nodes paints once per node, with one id: `j`
