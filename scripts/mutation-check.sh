@@ -27119,6 +27119,49 @@ run_mutation "tile header: a queued page open expires the notice" \
   '' \
   geode-shell a_queued_page_open_clears_the_notice_and_records_the_action
 
+# ---- Fuzzy find (the tile-local fzf picker) ----
+
+# A match's ancestors are emitted once each: without the `seen` guard every
+# match under a shared branch walks it again and the branch repeats.
+run_mutation "fuzzy find: ranking keeps each ancestor once" \
+  crates/geode-shell/src/fuzzyfind/tree.rs \
+  '            while at != NONE && !seen[at as usize] {' \
+  '            while at != NONE {' \
+  geode-shell fzf_ranks_branches_by_best_match_and_keeps_each_ancestor_once
+
+# Siblings are linked in best-match order by walking discovery in reverse;
+# walking it forward puts the weakest branch first.
+run_mutation "fuzzy find: siblings order by their best match" \
+  crates/geode-shell/src/fuzzyfind/tree.rs \
+  '        for &row in included.iter().rev() {' \
+  '        for &row in included.iter() {' \
+  geode-shell fzf_ranks_branches_by_best_match_and_keeps_each_ancestor_once
+
+# A folded result hides its descendants; an empty hidden range shows them.
+run_mutation "fuzzy find: a folded row hides its descendants" \
+  crates/geode-shell/src/fuzzyfind/tree.rs \
+  '                row + 1..nodes[row].end as usize' \
+  '                0..0' \
+  geode-shell fzf_ranks_branches_by_best_match_and_keeps_each_ancestor_once
+
+# The pick is carried by identity across a re-rank; resetting it to the first
+# row lands the trader on a different result when loaded rows reorder.
+run_mutation "fuzzy find: a pick survives a re-rank by identity" \
+  crates/geode-shell/src/fuzzyfind.rs \
+  '            .and_then(|id| self.ranked.iter().position(|row| self.items.id(row) == id))' \
+  '            .and(Some(0))' \
+  geode-shell fzf_preserves_a_pick_by_identity_when_loaded_results_reorder
+
+# Only the latest query's ranking installs; a superseded ranking arriving
+# late would paint results for text no longer in the prompt.
+run_mutation "fuzzy find: only the latest query's ranking installs" \
+  crates/geode-shell/src/fuzzyfind.rs \
+  '                if this.revision.load(Ordering::Relaxed) == revision
+                    && let Some((matches, ordered, hits, visible)) = ranked' \
+  '                if true
+                    && let Some((matches, ordered, hits, visible)) = ranked' \
+  geode-shell fzf_keeps_input_responsive_and_only_applies_the_latest_query
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

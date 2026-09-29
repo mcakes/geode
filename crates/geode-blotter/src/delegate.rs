@@ -911,24 +911,6 @@ impl BlotterDelegate {
             .collect()
     }
 
-    /// Tree text of every un-narrowed visible row, matching the positional
-    /// domain accepted by `set_narrowed`. Match against this full list on
-    /// every search edit: using the previous subset would misinterpret its
-    /// indices and prevent backspace from restoring excluded rows.
-    pub fn visible_texts(&self) -> Vec<String> {
-        let (Some(snapshot), Some(plan)) = (&self.snapshot, &self.plan) else {
-            return Vec::new();
-        };
-        self.visible
-            .iter()
-            .map(|&r| {
-                plan.tree_text(snapshot, r as usize)
-                    .unwrap_or("")
-                    .to_string()
-            })
-            .collect()
-    }
-
     pub(crate) fn reveal_find_row(
         &mut self,
         snapshot: &Arc<Snapshot>,
