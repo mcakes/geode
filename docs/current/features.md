@@ -969,7 +969,10 @@ dense header: the sheet name (a control: see [sheets by pointer](#sheets-by-poin
 while lines are stale, `N failed` in danger text while any line's last answer
 was a failure, `pricer <name>`, the last priced time, which reads `stale` once
 it is older than the shell's `stale_after`, and a `⋯` button at the trailing
-edge that opens and closes the action menu (the pointer's `.`). A pending load
+edge that opens and closes the action menu (the pointer's `.`). The header is
+the [shared frame](#shared-tile-interaction): notices paint after the status
+items, and the health chip sits between the time and `⋯`. The health chip
+covers `pricer_sheets` only (see the pricer README's limits). A pending load
 paints `loading…` muted in the header and `Loading sheet…` in the empty table;
 an empty loaded sheet says `No lines — press o to add one`. A pricer this
 binary lacks is named in danger text with its recovery (`set [pricing]

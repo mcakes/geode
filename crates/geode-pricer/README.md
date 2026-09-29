@@ -38,7 +38,7 @@ The tile:
 | `grid` | The prepared `GridModel`, rebuilt on change. |
 | `paint` | The per-theme paint memo, floored to a readable ratio. |
 | `delegate` | The table delegate: cells and their column colors (sign, named), the connector tree column (indent; a package's chevron, template chip, summary and muted leg count; a leg's `├`/`└` connector and shorthand; a bare line's shorthand), editor, expiry date field. |
-| `header` | The prepared header row (notices as `geode_tile::notice::Notice`), the sheet name control and rename field, and the footer. |
+| `header` | The prepared header row and the footer. Paints through `geode_tile::header::frame`: the sheet name control (and rename field) with its view and shift chips on the left; the `:rm` prompt, `N pricing…`, `N failed` and the pricer label as cluster status; the save notice then the tile notice, the priced time, the health chip (the `pricer_sheets` dataset only — see Known limitations) and `⋯` from the shared cluster. |
 | `popup` | The typeahead, the entry bar's completion list, the sheet picker (`sheet_rows`, `SheetPicker`), and `PricerPick` (what a menu row does). The menu, popup geometry, the `:rm` confirm and the header notices paint through `geode-tile`. |
 | `session` | The tile's session record, including `:autosize`'s fitted widths (`column_widths`, read leniently). |
 | `content` | The factory, keymap fragment (verbs, field keys and the menu's pick and close keys; the grid motions and the menu steps are the shell's shared `motion::*` bindings), actions, the retired motion ids' renames (`RENAMED_ACTIONS`), settings, and the read-only `UnderlyingSource` seam. |
@@ -398,6 +398,9 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 
 ## Known limitations
 
+- The health chip covers the sheet store's dataset only: the pricer behind
+  the pricing door reads no dataset today. A pricer that reads market-data
+  datasets must declare them and the tile adds them to its question.
 - Column widths are fixed pixels and do not follow font size. The defaults
   fit the tested samples at the largest font step and leave more space at
   smaller steps. `:autosize` (or the palette's "Autosize columns") fits

@@ -25839,6 +25839,28 @@ run_mutation "tile health: market-data asks about its own dataset" \
   '            let dataset = "dividend_schedule";' \
   geode-marketdata a_degraded_panel_source_shows_the_chip_and_recovery_clears_it
 
+# A new tile asks at once; without it a tile opened on a failed store is
+# silent until the next health change.
+run_mutation "tile health: the pricer asks when it opens" \
+  crates/geode-pricer/src/tile.rs \
+  '        health.reask(cx, |d| d.health_for_datasets(&[PRICER_SHEETS_DATASET]));' \
+  '' \
+  geode-pricer a_tile_opened_after_its_source_failed_shows_the_chip_at_once
+
+# The observer re-asks on a health change.
+run_mutation "tile health: the pricer refreshes on a health change" \
+  crates/geode-pricer/src/tile.rs \
+  '                .refresh(cx, |d| d.health_for_datasets(&[PRICER_SHEETS_DATASET]))' \
+  '                .refresh(cx, |d| d.health_for_datasets(&["cvi_params"]))' \
+  geode-pricer a_failed_sheet_store_source_shows_the_chip_and_recovery_clears_it
+
+# End to end in the app: the chip's click reaches the page.
+run_mutation "tile header: a chip click opens the page in the app" \
+  crates/geode-tile/src/header.rs \
+  '                d.request_diagnostics_page();' \
+  '' \
+  geode-app a_health_chip_click_opens_the_diagnostics_page
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

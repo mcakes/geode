@@ -2486,6 +2486,90 @@ role = "key"
         );
     }
 
+    /// The whole route: a real health report on the shell's `Diagnostics`
+    /// reaches a hosted pricer tile's header, and a real click on the chip
+    /// opens the diagnostics page through the shell's drain.
+    #[gpui::test]
+    fn a_health_chip_click_opens_the_diagnostics_page(cx: &mut gpui::TestAppContext) {
+        use geode_shell::module::recording::{PageRecorded, RecordingPageFactory};
+        let mut services = test_shell_services_with_a_pricer_tile();
+        let page = RecordingPageFactory::new("diagnostics");
+        let log = page.log();
+        let page_view = page.view();
+        services.pages.add(Box::new(page));
+        let window = open_pricer_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        assert_eq!(
+            shell.read_with(&vcx, |s, _| s.open_page_kind_for_test()),
+            None,
+            "fixture: no page is open before the click"
+        );
+        let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+        diagnostics.update(&mut vcx, |d, cx| {
+            d.describe_source(
+                "sheets_src",
+                geode_shell::diagnostics::SourceSummary::for_dataset("pricer_sheets"),
+            );
+            d.note_health(
+                "sheets_src",
+                geode_shell::diagnostics::Health::Failed {
+                    reason: "disk full".into(),
+                },
+                "disk full".into(),
+                std::time::SystemTime::UNIX_EPOCH,
+            );
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let at = vcx
+            .debug_bounds("tile-health-1")
+            .expect("the pricer tile paints its chip")
+            .center();
+        vcx.simulate_event(gpui::MouseDownEvent {
+            position: at,
+            modifiers: gpui::Modifiers::default(),
+            button: gpui::MouseButton::Left,
+            click_count: 1,
+            first_mouse: false,
+        });
+        vcx.simulate_event(gpui::MouseUpEvent {
+            position: at,
+            modifiers: gpui::Modifiers::default(),
+            button: gpui::MouseButton::Left,
+            click_count: 1,
+        });
+        vcx.run_until_parked();
+        // Right after the click, parked: the page is open AND holds focus.
+        // `open_page`'s `prevent_default` does nothing on this route (the
+        // chip's own mouse-down already ran), so focus is the fact to pin.
+        assert!(log.borrow().contains(&PageRecorded::Visible(true)));
+        assert_eq!(
+            shell.read_with(&vcx, |s, _| s.open_page_kind_for_test()),
+            Some("diagnostics"),
+            "the page is open"
+        );
+        assert!(
+            vcx.update(|window, cx| {
+                page_view
+                    .borrow()
+                    .as_ref()
+                    .expect("the page was created")
+                    .read(cx)
+                    .is_focused(window)
+            }),
+            "the page holds focus after a chip click"
+        );
+    }
+
     /// The palette's `Edit column in view…` reads the focused pricer tile's
     /// columns and opens the Views column picker over the pricer's view.
     #[gpui::test]

@@ -16,7 +16,7 @@ use crate::core::entry::{history, landing_place, next_place, place_for, target_l
 use crate::core::sheet::{Delivered, LineId, Refresh, Sheet};
 use crate::core::shorthand::parse;
 use crate::core::shorthand::render_expiry;
-use crate::core::storage::{from_rows, rows_from_snapshot, to_rows};
+use crate::core::storage::{PRICER_SHEETS_DATASET, from_rows, rows_from_snapshot, to_rows};
 use crate::core::template::Template;
 use crate::core::tree::Expansion;
 use crate::core::undo::UndoStack;
@@ -43,6 +43,7 @@ use geode_data::{DataHandle, Refusal};
 use geode_shell::actions::ActionId;
 use geode_shell::choice::{ChoiceList, DEFAULT_CAP};
 use geode_shell::colfit::{FitMetrics, FittedWidths, NOTHING_TO_FIT};
+use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::FrameRef;
 use geode_shell::keymap::{Binding, KeyContext};
 use geode_shell::linenumbers::{LineNumbers, UiSettings};
@@ -54,6 +55,7 @@ use geode_shell::vimfind::{FindDirection, find_match};
 use geode_shell::vimnav::NavCommand;
 use geode_tile::confirm::{self, Confirm, ConfirmHost};
 use geode_tile::following::{self, FrameDoor};
+use geode_tile::header::HealthWatch;
 use geode_tile::menu::{self, ActionRow, Hint, Menu, MenuHost, MenuIds, Row};
 use geode_widgets::datefield::{DateTimeField, FieldKey, Precision, Segment, route};
 use gpui::prelude::*;
@@ -447,6 +449,11 @@ pub struct PricerTile {
     title: SharedString,
     /// The header `⋯` tooltip's selector, built once from the tile id.
     menu_tip: SharedString,
+    /// The header `⋯` control's debug selector, built once.
+    menu_selector: SharedString,
+    /// The header's health half: the sheet store's dataset, re-asked when
+    /// source health or descriptions move.
+    health: HealthWatch,
     stack: Option<StackHandle>,
     pub(crate) clock: Clock,
     /// What `p`/`shift+p` put: the last `y y`, `d d`, or `y`/`d` over a
@@ -572,9 +579,11 @@ fn fallback(name: &str, record: &Record) -> Sheet {
 impl PricerTile {
     /// `pub(crate)`: it takes the factory's crate-private [`Shared`];
     /// the shell reaches a tile only through `PricerFactory::create`.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         id: TileId,
         frame: FrameRef,
+        diagnostics: Entity<Diagnostics>,
         data: DataHandle,
         shared: Rc<Shared>,
         restored: Option<&toml::Table>,
@@ -753,6 +762,21 @@ impl PricerTile {
             this.confirm = None;
         })
         .detach();
+        // The sheet store's dataset. The pricer behind the pricing door reads
+        // no dataset today; one that does must be added to this question.
+        // Asked once now, so a tile opened after a failure shows the chip
+        // before any further diagnostics notification.
+        let mut health = HealthWatch::new(diagnostics.clone(), id);
+        health.reask(cx, |d| d.health_for_datasets(&[PRICER_SHEETS_DATASET]));
+        cx.observe(&diagnostics, |this, _, cx| {
+            if this
+                .health
+                .refresh(cx, |d| d.health_for_datasets(&[PRICER_SHEETS_DATASET]))
+            {
+                cx.notify();
+            }
+        })
+        .detach();
 
         let cursor = Cursor {
             line: record.cursor,
@@ -794,6 +818,8 @@ impl PricerTile {
             header: HeaderModel::default(),
             title: SharedString::default(),
             menu_tip: format!("tip-pricer-menu-button-{}", id.0).into(),
+            menu_selector: SharedString::new_static("pricer-menu-button"),
+            health,
             stack: None,
             clock: app_clock(cx),
             register: None,
@@ -915,6 +941,13 @@ impl PricerTile {
             .is_some_and(|e| e.focus_handle(cx).is_focused(window));
         let confirm = self.confirm.as_ref().is_some_and(|c| c.holds_focus(window));
         entry || editor || confirm
+    }
+
+    /// The header's health chip, if a source feeding the sheet store's
+    /// dataset is unhealthy.
+    #[cfg(test)]
+    pub(crate) fn health_chip(&self) -> Option<&geode_tile::header::HealthChip> {
+        self.health.chip()
     }
 
     /// The open date field, if the editor is one.
@@ -4407,6 +4440,8 @@ impl gpui::Render for PricerTile {
                 tile: &tile,
                 menu_open: self.menu.is_some(),
                 menu_tip: self.menu_tip.clone(),
+                menu_selector: self.menu_selector.clone(),
+                health: self.health.chip(),
                 confirm: self.confirm.as_ref(),
                 name_tip: self.name_tip.clone(),
                 rename: self.rename_field.as_ref(),
@@ -4426,7 +4461,7 @@ impl gpui::Render for PricerTile {
                         div()
                             .absolute()
                             .right_0()
-                            .top(scale::design(header::HEADER_HEIGHT))
+                            .top(scale::design(geode_tile::header::HEADER_HEIGHT))
                             .child(menu::render_menu(
                                 m,
                                 &MenuIds::new("pricer-menu", "pricer-menu-row"),
@@ -4547,9 +4582,10 @@ pub(crate) mod tests {
     use geode_core::scopes::SavedScopes;
     use geode_data::{DataHandle, Request};
     use geode_shell::actions::ActionId;
-    use geode_shell::diagnostics::Diagnostics;
+    use geode_shell::diagnostics::{Diagnostics, Health, SourceSummary};
     use geode_shell::frame::{Frame, FrameRef};
     use geode_shell::module::{Delivery, ModuleFactory, TileContent};
+    use geode_shell::shell::chip;
     use geode_shell::tiling::TileId;
     use geode_shell::tiling::WorkspaceIx;
     use geode_widgets::datefield::Segment;
@@ -4557,6 +4593,7 @@ pub(crate) mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::sync::mpsc::Receiver;
+    use std::time::SystemTime;
 
     pub(crate) const TILE: u64 = 5;
 
@@ -5705,6 +5742,96 @@ pub(crate) mod tests {
             title
         });
         assert_eq!(title, "Pricer · untitled-1");
+    }
+
+    fn fail_sheets(h: &Harness, vcx: &mut VisualTestContext, health: Health) {
+        h.diagnostics.update(vcx, |d, cx| {
+            d.describe_source(
+                "sheets_src",
+                SourceSummary::for_dataset(PRICER_SHEETS_DATASET),
+            );
+            d.note_health(
+                "sheets_src",
+                health,
+                "disk full".into(),
+                SystemTime::UNIX_EPOCH,
+            );
+            cx.notify();
+        });
+        vcx.run_until_parked();
+    }
+
+    /// A real health report on the shared entity reaches the header through
+    /// the tile's own observer; another dataset's source never does.
+    #[gpui::test]
+    fn a_failed_sheet_store_source_shows_the_chip_and_recovery_clears_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.describe_source("cvi_src", SourceSummary::for_dataset("cvi_params"));
+            d.note_health(
+                "cvi_src",
+                Health::Failed {
+                    reason: "torn".into(),
+                },
+                "torn".into(),
+                SystemTime::UNIX_EPOCH,
+            );
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        assert!(h.tile.read_with(&vcx, |t, _| t.health_chip().is_none()));
+        fail_sheets(
+            &h,
+            &mut vcx,
+            Health::Failed {
+                reason: "disk full".into(),
+            },
+        );
+        let (word, tone, title) = h.tile.read_with(&vcx, |t, _| {
+            let c = t.health_chip().expect("a chip");
+            (c.word().to_string(), c.tone(), c.title().to_string())
+        });
+        assert_eq!(word, "failed");
+        assert_eq!(tone, chip::Tone::Danger);
+        assert_eq!(title, "sheets_src: disk full");
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(vcx.debug_bounds("tile-health-5").is_some());
+        fail_sheets(&h, &mut vcx, Health::Ok);
+        assert!(h.tile.read_with(&vcx, |t, _| t.health_chip().is_none()));
+    }
+
+    /// A tile created while its source is already failed asks at once.
+    #[gpui::test]
+    fn a_tile_opened_after_its_source_failed_shows_the_chip_at_once(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        fail_sheets(
+            &h,
+            &mut vcx,
+            Health::Failed {
+                reason: "disk full".into(),
+            },
+        );
+        let (factory, frame, diagnostics) =
+            (h.factory.clone(), h.frame.clone(), h.diagnostics.clone());
+        let second = vcx.update(|window, cx| {
+            factory.create(
+                TileId(TILE + 1),
+                None,
+                FrameRef::new(frame.clone(), WorkspaceIx::FIRST),
+                diagnostics.clone(),
+                window,
+                cx,
+            )
+        });
+        let tile = second.view.downcast::<PricerTile>().unwrap();
+        assert_eq!(
+            tile.read_with(&vcx, |t, _| t.health_chip().map(|c| c.word().to_string())),
+            Some("failed".to_string())
+        );
     }
 
     pub(crate) fn centre_of(
