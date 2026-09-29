@@ -37,3 +37,5 @@ pub fn init(cx: &mut gpui::App) {
         .map(|key| gpui::KeyBinding::new(key, gpui::NoAction, CONTEXT)),
     );
 }
+
+mod search;

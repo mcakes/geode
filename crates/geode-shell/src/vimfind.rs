@@ -25,9 +25,9 @@ use geode_core::config::{Config, Layer};
 use crate::keymap::{Keystroke, Modifiers};
 
 /// Find behavior selected by `app.toml`'s `[ui] find_style`: vim-style
-/// selection movement or fzf-style filtering. Default is Vim. This setting is
-/// shared with module-owned find implementations; the helper drivers below do
-/// not define the current shell dialogs' filtering behavior.
+/// selection movement or a ranked Fzf picker. Default is Vim. The shell chooses
+/// the behavior for each new tile prompt; Fzf results are owned by `fuzzyfind`.
+/// The helper drivers below do not define shell dialogs' filtering behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FindStyle {
     #[default]

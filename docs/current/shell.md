@@ -185,8 +185,53 @@ keyboard route.
 
 The per-tile `:` command line is local to that tile. It may change the tile's
 query, presentation, cursor, or draft. Frame-wide and application-wide
-commands belong in the action registry and palette. `/` is likewise routed to
-the focused occupant through `FindEvent`.
+commands belong in the action registry and palette. The existing `[ui]
+find_style` setting chooses each new `/` prompt's behavior. Vim routes
+incremental `FindEvent`s to the occupant. Fzf opens a tile-local ranked results
+table through `TileContent::start_fuzzy_find`: the occupant supplies labels,
+ancestor paths, and reveal callbacks; the shell owns query input and selection.
+Exact, prefix, and contiguous label matches rank ahead of looser fuzzy matches.
+The tile keeps its header and uses its normal table columns, widths, numeric
+formatting, and row density. Tree results retain matches and their ancestors,
+each parent once, with sibling branches ranked by their strongest match.
+Context-only ancestors are muted; their numeric totals remain unchanged.
+Rows retain their original indentation and chevrons. Blotter search uses the
+normal cell's disclosure alignment, flex shrinking, and direct label layout,
+including blank grand-total cells and leaf markers. Both normal and search
+gutters size to the painted numbers, with a two-digit minimum. Expansion does
+not preallocate digit space for offscreen descendants. The tree column reserves
+only that compact minimum; larger visible numbers use some label space without
+moving the numeric columns. Line numbers follow the
+On / Relative / Off setting and address the displayed rows, including parents.
+Column headers
+use the tile's original renderer, preserving typography, alignment, colors,
+and separators. The selected
+row's ancestor path and direct-match count appear above the prompt. Numeric values
+provide context; names and ancestor paths are the search keys.
+Search text is prepared once per dataset. Ranking runs off the UI thread;
+query revisions cancel obsolete work and prevent stale results being accepted.
+Single-word extensions rescore the last completed query's candidates; edits,
+backspace, multi-word queries, and dataset replacement search the full index.
+Results retain only row indices. Match positions are calculated for visible
+rows and cached in the table, so a broad match does not allocate highlights
+for every row or free millions of highlight buffers on the UI thread.
+Up/Down or Ctrl-N/P select any displayed row. Clicking a chevron or pressing Tab
+folds the selected branch in the search view only; editing the query reopens
+matching branches. Enter or a row click reveals the selected row in the tree, and Escape
+or leaving the tile cancels without moving the tree. No matches keeps the
+prompt open. The table virtualizes results and scrolls to keyboard selection.
+
+Blotter, pricer, and market-data implement Fzf search. Tree searches include
+collapsed descendants within the current scope. The blotter requests the full
+grouping depth when necessary. Every loaded parent and leaf is displayed together
+in full tree order, using labels prepared only for visible rows. Search text is
+indexed on a worker; completing that index does not change the empty-query
+display order. Queries entered during preparation wait for the complete index.
+The index is reused while the snapshot, column plan, and
+sort are unchanged; closing the prompt cancels pending preparation. Searching does not expand the tree; choosing a result
+opens its ancestors and restores the normal tree with that row active. Pricer
+results also include legs inside closed packages. Unsupported tiles retain
+their existing find behavior.
 
 ## Focus
 

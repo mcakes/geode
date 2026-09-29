@@ -24,6 +24,7 @@ pub fn render(
     line: &CommandLine,
     input: &Entity<InputState>,
     scroll: &ScrollHandle,
+    fuzzy_find: Option<&Entity<crate::fuzzyfind::FuzzyFind>>,
     tile: Rect,
     rem_size: Pixels,
     cx: &App,
@@ -61,6 +62,41 @@ pub fn render(
     }
 
     let mut layer = div().absolute().left_0().top_0().size_full().child(strip);
+    if let Some(results) = fuzzy_find {
+        if results.read(cx).has_table() {
+            let (path, status) = results.read(cx).context();
+            let context_height = scale::design_px(crate::fuzzyfind::CONTEXT_HEIGHT, rem_size);
+            return layer.child(
+                h_flex()
+                    .absolute()
+                    .left(px(tile.x + 1.0))
+                    .top(px(strip_top - context_height))
+                    .w(px((tile.w - 2.0).max(0.0)))
+                    .h(px(context_height))
+                    .px_2()
+                    .gap_3()
+                    .bg(theme.background)
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .text_color(theme.muted_foreground)
+                    .text_xs()
+                    .debug_selector(|| "find-context".into())
+                    .child(div().flex_1().min_w_0().truncate().child(path))
+                    .child(div().flex_shrink_0().child(status)),
+            );
+        }
+        // The search surface temporarily occupies this tile; the underlying
+        // tree keeps its expansion, selection, and scroll until a result is picked.
+        return layer.child(
+            div()
+                .absolute()
+                .left(px(tile.x + 1.0))
+                .top(px(tile.y + 1.0))
+                .w(px((tile.w - 2.0).max(0.0)))
+                .h(px((strip_top - tile.y - 1.0).max(0.0)))
+                .child(results.clone()),
+        );
+    }
     if line.prompt == Prompt::Command && !line.candidates.is_empty() {
         let rows = line.candidates.len().min(MAX_ROWS);
         // Account for p_1 on both edges and the physical border hairlines.

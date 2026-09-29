@@ -217,6 +217,17 @@ pub trait TileContent {
     /// Enter instead of choosing arbitrarily.
     fn completions(&self, line: &str, cursor: usize, cx: &App) -> Vec<String>;
     fn find(&self, event: FindEvent, window: &mut Window, cx: &mut App);
+    /// Begin Fzf search without moving the tree's cursor or expansion. Populate
+    /// `results` now or after loading descendants. Keep only a weak handle so
+    /// closing the prompt ends the session. Unsupported tiles retain Vim find.
+    fn start_fuzzy_find(
+        &self,
+        _results: gpui::WeakEntity<crate::fuzzyfind::FuzzyFind>,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> bool {
+        false
+    }
     /// Handle an asynchronous outcome routed to this tile. Match [`Delivery`]
     /// exhaustively so adding an outcome requires every occupant to handle or
     /// explicitly ignore it.
@@ -885,6 +896,7 @@ pub mod recording {
         Dispatch(TileId, ActionId, Option<u32>),
         Command(TileId, String),
         Find(TileId, FindEvent),
+        FindPick(TileId, String),
         Visible(TileId, bool),
         /// `closed` reached this tile: its occupant is being removed.
         Closed(TileId),
@@ -1146,6 +1158,34 @@ pub mod recording {
         }
         fn find(&self, event: FindEvent, _: &mut Window, _: &mut App) {
             self.log.borrow_mut().push(Recorded::Find(self.tile, event));
+        }
+        fn start_fuzzy_find(
+            &self,
+            results: gpui::WeakEntity<crate::fuzzyfind::FuzzyFind>,
+            _: &mut Window,
+            cx: &mut App,
+        ) -> bool {
+            let items = self
+                .completions
+                .iter()
+                .map(|label| {
+                    let log = self.log.clone();
+                    let tile = self.tile;
+                    let picked = label.clone();
+                    crate::fuzzyfind::FindItem::new(
+                        label.clone(),
+                        label.clone(),
+                        "Parent",
+                        move |_, _, _| {
+                            log.borrow_mut()
+                                .push(Recorded::FindPick(tile, picked.clone()));
+                            Ok(())
+                        },
+                    )
+                })
+                .collect();
+            let _ = results.update(cx, |results, cx| results.replace_items(items, cx));
+            true
         }
         fn deliver(&self, delivery: Delivery, _: &mut Window, _: &mut App) {
             match delivery {

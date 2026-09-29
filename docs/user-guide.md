@@ -116,6 +116,17 @@ With the top-level underlying rows visible, press `/`, type `SPX`, and press
 Enter. Use `n` to move to the next match. Find helps you navigate the blotter;
 it does not narrow the data used to calculate its totals.
 
+The **Find style** setting controls this behavior. **Vim** jumps between
+matches in the tree. **Fzf** temporarily shows matches together with their
+ancestors, ranking branches by their best match, including rows inside collapsed
+groups. It keeps the normal columns, numeric totals, indentation, chevrons, and
+your line-number setting. Context-only parents appear muted. Click a chevron or
+press Tab to fold a branch in this search view; editing the query reopens matches.
+Use Up/Down or Ctrl-N/P to choose a displayed row;
+Enter returns to the tree, opens the chosen row's ancestors, and selects it.
+Escape leaves your original tree position and expansion unchanged. The selected
+row's parent path appears above the prompt to help distinguish repeated labels.
+
 Now narrow the shared scope:
 
 1. Press `mod+p` to open the dimension picker.

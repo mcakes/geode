@@ -129,6 +129,18 @@ pub fn gutter_px(mode: LineNumbers, len: usize) -> f32 {
     }
 }
 
+/// Space for numbers in the painted window, independent of the total row count.
+/// Relative mode also includes the selected row's absolute number when visible.
+pub fn window_gutter_px(mode: LineNumbers, visible: std::ops::Range<usize>, cursor: usize) -> f32 {
+    let largest = [visible.start, visible.end.saturating_sub(1), cursor]
+        .into_iter()
+        .filter(|row| visible.contains(row))
+        .filter_map(|row| gutter_number(mode, row, cursor))
+        .max()
+        .unwrap_or(0);
+    gutter_px(mode, largest)
+}
+
 /// Write `[ui] line_numbers` into `<user_dir>/app.toml`, preserving every
 /// other table, key and comment — `config_write::edit`'s contract, the
 /// same door `vimfind`/`fontsize`/`tileadd` persist through.
@@ -182,6 +194,31 @@ mod tests {
         assert_eq!(LineNumbers::Off.next(), LineNumbers::On);
         assert_eq!(LineNumbers::On.next(), LineNumbers::Relative);
         assert_eq!(LineNumbers::Relative.next(), LineNumbers::Off);
+    }
+
+    #[test]
+    fn compact_gutter_fits_visible_numbers_and_relative_cursor() {
+        assert_eq!(window_gutter_px(LineNumbers::Off, 999..1_020, 1_000), 0.);
+        assert_eq!(
+            window_gutter_px(LineNumbers::On, 0..20, 0),
+            gutter_px(LineNumbers::On, 20)
+        );
+        assert_eq!(
+            window_gutter_px(LineNumbers::On, 990..1_010, 1_000),
+            gutter_px(LineNumbers::On, 1_010)
+        );
+        assert_eq!(
+            window_gutter_px(LineNumbers::Relative, 990..1_010, 1_000),
+            gutter_px(LineNumbers::On, 1_001)
+        );
+        assert_eq!(
+            window_gutter_px(LineNumbers::Relative, 990..1_000, 1_010),
+            gutter_px(LineNumbers::On, 20)
+        );
+        assert_eq!(
+            window_gutter_px(LineNumbers::On, 0..0, 0),
+            gutter_px(LineNumbers::On, 0)
+        );
     }
 
     #[test]

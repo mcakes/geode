@@ -3,7 +3,7 @@
 //! events go to that occupant; command completion and execution use its vocabulary.
 //! Errors remain inline until a text edit or successful close.
 
-use gpui::{Context, Focusable as _, KeyDownEvent, ScrollHandle, Window};
+use gpui::{AppContext as _, Context, Focusable as _, KeyDownEvent, ScrollHandle, Window};
 
 use crate::commandline::{self, CommandLine, Prompt};
 use crate::module::FindEvent;
@@ -31,6 +31,28 @@ impl ShellView {
         self.command_scroll = ScrollHandle::new();
         self.command_input
             .update(cx, |input, cx| input.set_value("", window, cx));
+        if let Some(results) = self.fuzzy_find.take() {
+            results.update(cx, |results, cx| results.close(cx));
+        }
+        self.fuzzy_find_subscriptions.clear();
+        if prompt == Prompt::Find && self.find_style == crate::vimfind::FindStyle::Fzf {
+            let results = cx.new(|_| crate::fuzzyfind::FuzzyFind::default());
+            if self.occupants[&tile]
+                .content
+                .start_fuzzy_find(results.downgrade(), window, cx)
+            {
+                self.fuzzy_find_subscriptions
+                    .push(cx.observe(&results, |_, _, cx| cx.notify()));
+                self.fuzzy_find_subscriptions.push(cx.subscribe_in(
+                    &results,
+                    window,
+                    |shell, _, _: &crate::fuzzyfind::Pick, window, cx| {
+                        shell.commit_fuzzy_find(window, cx);
+                    },
+                ));
+                self.fuzzy_find = Some(results);
+            }
+        }
         // set_value does not emit a change event; populate suggestions on open.
         if prompt == Prompt::Command {
             self.on_command_line_changed(window, cx);
@@ -46,6 +68,10 @@ impl ShellView {
     /// command Input still owns keyboard focus.
     fn close_command_line(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.command_line = None;
+        if let Some(results) = self.fuzzy_find.take() {
+            results.update(cx, |results, cx| results.close(cx));
+        }
+        self.fuzzy_find_subscriptions.clear();
         // Restore shell focus only if this Input still owns it. A blur-driven
         // close must not steal focus back from the surface the user just selected.
         if self
@@ -59,7 +85,8 @@ impl ShellView {
         cx.notify();
     }
 
-    /// Cancel an open prompt. A find sends Cancelled to its captured occupant;
+    /// Cancel an open prompt. Vim find sends Cancelled to its captured occupant;
+    /// Fzf drops its transient picker without touching the tree.
     /// either prompt then closes. Escape and overlay-opening routes use this operation,
     /// while pointer-driven blur uses [`Self::leave_command_line`].
     pub(super) fn cancel_command_line(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -67,6 +94,7 @@ impl ShellView {
             return;
         };
         if line.prompt == Prompt::Find
+            && self.fuzzy_find.is_none()
             && let Some(o) = self.occupants.get(&line.tile)
         {
             o.content.find(FindEvent::Cancelled, window, cx);
@@ -74,13 +102,17 @@ impl ShellView {
         self.close_command_line(window, cx);
     }
 
-    /// Leave on blur: commit nonempty find text to the captured occupant,
-    /// retaining its match, but cancel empty finds and all command prompts.
+    /// Leave on blur: commit nonempty Vim find text to the captured occupant,
+    /// retaining its match, but cancel Fzf, empty finds, and command prompts.
     /// A stray focus change must not execute an unsubmitted command.
     pub(super) fn leave_command_line(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(line) = self.command_line.as_ref() else {
             return;
         };
+        if self.fuzzy_find.is_some() {
+            self.close_command_line(window, cx);
+            return;
+        }
         let text = self.command_input.read(cx).value().to_string();
         if line.prompt == Prompt::Find && !text.is_empty() {
             if let Some(o) = self.occupants.get(&line.tile) {
@@ -101,6 +133,14 @@ impl ShellView {
         };
         let (prompt, tile) = (line.prompt, line.tile);
         let text = self.command_input.read(cx).value().to_string();
+        if let Some(results) = &self.fuzzy_find {
+            results.update(cx, |results, cx| results.set_query(text, cx));
+            if let Some(line) = &mut self.command_line {
+                line.error = None;
+            }
+            cx.notify();
+            return;
+        }
         let cursor = self.command_input.read(cx).cursor();
         let Some(o) = self.occupants.get(&tile) else {
             return;
@@ -116,6 +156,26 @@ impl ShellView {
             }
         }
         cx.notify();
+    }
+
+    fn commit_fuzzy_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(results) = &self.fuzzy_find else {
+            return;
+        };
+        let state = results.read(cx);
+        let Some(item) = state.selected_item() else {
+            return;
+        };
+        let query = state.query().to_string();
+        match item.reveal(&query, window, cx) {
+            Ok(()) => self.close_command_line(window, cx),
+            Err(error) => {
+                if let Some(line) = &mut self.command_line {
+                    line.error = Some(error);
+                }
+                cx.notify();
+            }
+        }
     }
 
     /// Handle keys for an open prompt. Escape cancels and Enter submits regardless
@@ -140,6 +200,10 @@ impl ShellView {
             return true;
         }
         if key == "enter" {
+            if self.fuzzy_find.is_some() {
+                self.commit_fuzzy_find(window, cx);
+                return true;
+            }
             let text = self.command_input.read(cx).value().to_string();
             let cursor = self.command_input.read(cx).cursor();
             match prompt {
@@ -186,6 +250,20 @@ impl ShellView {
                     }
                 }
             }
+            return true;
+        }
+        if key == "tab"
+            && event.keystroke.modifiers == gpui::Modifiers::default()
+            && let Some(results) = &self.fuzzy_find
+        {
+            results.update(cx, |results, cx| results.toggle_selected_branch(cx));
+            return true;
+        }
+        if let Some(results) = &self.fuzzy_find
+            && let Some(ks) = convert_keystroke(&event.keystroke)
+            && let Some(command) = crate::listfilter::nav_command(&ks)
+        {
+            results.update(cx, |results, cx| results.navigate(command, cx));
             return true;
         }
         if prompt == Prompt::Command

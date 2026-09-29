@@ -106,7 +106,7 @@ pub fn fuzzy_match(query: &str, candidate: &str) -> Option<(u32, Vec<usize>)> {
 /// `title_len` is the lowered title's character length in `title + space + category`;
 /// contributions at or beyond it are divided by CATEGORY_DIVISOR and rounded up.
 /// Use usize::MAX when the whole candidate has title weighting.
-fn fuzzy_match_lowered(
+pub(crate) fn fuzzy_match_lowered(
     query: &str,
     candidate: &str,
     title_len: usize,
@@ -266,10 +266,10 @@ fn align(
 const ORDER_BONUS: u32 = PREFIX_BONUS;
 
 /// The bonus for matching the candidate's first character.
-const PREFIX_BONUS: u32 = 10;
+pub(crate) const PREFIX_BONUS: u32 = 10;
 
 /// The bonus for matching the first character after a separator.
-const WORD_START_BONUS: u32 = 8;
+pub(crate) const WORD_START_BONUS: u32 = 8;
 
 /// Bonus per consecutive matched pair. It exceeds WORD_START_BONUS so
 /// continuing a run beats restarting at another word boundary in a score tie.
@@ -642,7 +642,7 @@ pub struct Viewport {
 /// Render merged match spans in the supplied accent colour and bold weight.
 /// Other spans inherit ambient text style. [`highlight_runs`] supplies UTF-8 byte
 /// ranges and handles indices outside the original label's character count.
-pub(crate) fn highlighted_title(title: &str, indices: &[usize], primary: gpui::Hsla) -> StyledText {
+pub fn highlighted_title(title: &str, indices: &[usize], primary: gpui::Hsla) -> StyledText {
     let runs = highlight_runs(title, indices);
     if runs.is_empty() {
         return StyledText::new(title.to_string());

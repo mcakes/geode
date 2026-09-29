@@ -69,7 +69,7 @@ use gpui::{
     Task, Window, div,
 };
 use gpui_component::input::{InputEvent, InputState};
-use gpui_component::table::{DataTable, TableEvent, TableState};
+use gpui_component::table::{DataTable, TableDelegate as _, TableEvent, TableState};
 use gpui_component::{ActiveTheme as _, Sizable as _, Size, v_flex};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -604,6 +604,7 @@ pub struct PricerTile {
     /// `V` selection, in sheet order.
     pub(crate) register: Option<Vec<crate::core::RowSpec>>,
     find: Option<FindState>,
+    fuzzy_find: Option<gpui::WeakEntity<geode_shell::fuzzyfind::FuzzyFind>>,
     /// Latest pricing submission tag. An outcome with any other tag is dropped whole.
     pub(crate) tag: u64,
     /// `id → revision` of the latest batch. Submit when at least one stale line
@@ -1033,6 +1034,7 @@ impl PricerTile {
             clock: app_clock(cx),
             register: None,
             find: None,
+            fuzzy_find: None,
             tag: 0,
             in_flight: HashMap::new(),
             undo: UndoStack::default(),
@@ -1278,6 +1280,176 @@ impl PricerTile {
         }
         self.rebuild_chrome();
         cx.notify();
+    }
+
+    pub(crate) fn start_fuzzy_find(
+        &mut self,
+        results: gpui::WeakEntity<geode_shell::fuzzyfind::FuzzyFind>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_menu(cx);
+        self.close_entry(window, cx);
+        self.close_editor(window, cx);
+        self.close_sheet_fields(window, cx);
+        self.fuzzy_find = Some(results.clone());
+        if let Some(results) = results.upgrade() {
+            cx.observe(&results, |_, results, cx| {
+                if !results.read(cx).is_active() {
+                    cx.notify();
+                }
+            })
+            .detach();
+            cx.observe_release(&results, |_, _, cx| cx.notify())
+                .detach();
+        }
+        cx.notify();
+        let mut packages = self.expansion.clone();
+        packages.open_all(&self.sheet);
+        let mut groups = GroupExpansion::default();
+        groups.open_all();
+        let model = Rc::new(GridModel::build(
+            &self.sheet,
+            &self.rollup,
+            &groups,
+            &packages,
+            &self.plan,
+            self.clock,
+        ));
+        let targets: Vec<_> = model
+            .rows
+            .iter()
+            .filter_map(|row| row.node.map(|node| (node, row.search.clone())))
+            .collect();
+        let delegate = self.table.read(cx).delegate();
+        let columns = (0..delegate.columns_count(cx))
+            .map(|ix| delegate.column(ix, cx))
+            .collect();
+        let search_tree = Arc::new(geode_shell::fuzzyfind::FindTree::from_depths(
+            model
+                .rows
+                .iter()
+                .filter(|r| r.node.is_some())
+                .map(|r| r.depth),
+        ));
+        let mut painter = SheetDelegate::new(cx.theme(), cx.entity().downgrade());
+        painter.model = model;
+        painter.set_colours(self.shared.colours.borrow().clone());
+        let painter = std::cell::RefCell::new((
+            painter,
+            geode_shell::shell::colours::theme_signature(cx.theme()),
+        ));
+        let header_table = self.table.clone();
+        let _ = results.update(cx, |results, cx| {
+            results.set_table(
+                columns,
+                move |col, window, cx| {
+                    header_table.update(cx, |table, cx| {
+                        table
+                            .delegate_mut()
+                            .render_th(col, window, cx)
+                            .into_any_element()
+                    })
+                },
+                move |row, col, cx| {
+                    let mut paint = painter.borrow_mut();
+                    let signature = geode_shell::shell::colours::theme_signature(cx.theme());
+                    if paint.1 != signature {
+                        paint.0.set_paints(crate::paint::Paints::derive(cx.theme()));
+                        paint.1 = signature;
+                    }
+                    paint.0.render_find_cell(row, col, cx)
+                },
+                window,
+                cx,
+            )
+        });
+        let labels: std::collections::HashMap<_, _> = targets.iter().cloned().collect();
+        // Build parent links once; asking Rollup::parent for every root would
+        // scan the whole prefix repeatedly on a large flat sheet.
+        let mut parents = vec![None; self.rollup.nodes.len()];
+        for (parent, node) in self.rollup.nodes.iter().enumerate() {
+            for &child in &node.children {
+                parents[child] = Some(parent);
+            }
+        }
+        let items = targets
+            .into_iter()
+            .map(|(node, label)| {
+                let n = &self.rollup.nodes[node];
+                let at = match n.kind {
+                    NodeKind::Group { .. } => At::Group(n.path.clone()),
+                    NodeKind::Leaf { row } | NodeKind::Package { row, .. } => At::Line {
+                        id: self.sheet.id(row),
+                        within: Some(n.path.clone()),
+                    },
+                };
+                let mut ancestors = Vec::new();
+                let mut parent = parents[node];
+                while let Some(p) = parent {
+                    if let Some(label) = labels.get(&p) {
+                        ancestors.push(label.to_string());
+                    }
+                    parent = parents[p];
+                }
+                ancestors.reverse();
+                let tile = cx.entity().downgrade();
+                geode_shell::fuzzyfind::FindItem::new(
+                    format!("{at:?}"),
+                    label.to_string(),
+                    ancestors.join(" › "),
+                    move |query, _, cx| {
+                        tile.update(cx, |tile, cx| tile.reveal_find_result(&at, query, cx))
+                            .map_err(|_| "The tile is closed".to_string())?
+                    },
+                )
+            })
+            .collect();
+        let _ = results.update(cx, |results, cx| {
+            results.replace_tree_items(items, search_tree, cx)
+        });
+    }
+
+    fn reveal_find_result(
+        &mut self,
+        at: &At,
+        query: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let node = self
+            .rollup
+            .nodes
+            .iter()
+            .position(|node| match (&node.kind, at) {
+                (NodeKind::Group { .. }, At::Group(path)) => &node.path == path,
+                (
+                    NodeKind::Leaf { row } | NodeKind::Package { row, .. },
+                    At::Line { id, within },
+                ) => {
+                    self.sheet.id(*row) == *id
+                        && within.as_ref().is_none_or(|path| path == &node.path)
+                }
+                _ => false,
+            })
+            .ok_or_else(|| "This row is no longer in the tree. Search again.".to_string())?;
+        let origin = self.cursor.clone();
+        let mut parent = self.rollup.parent(node);
+        while let Some(p) = parent {
+            if let NodeKind::Package { row, .. } = self.rollup.nodes[p].kind {
+                self.expansion.set(self.sheet.id(row), true);
+            }
+            parent = self.rollup.parent(p);
+        }
+        self.land_on_node(node, cx);
+        self.rebuild(cx);
+        self.find = Some(FindState {
+            origin,
+            committed: (!query.is_empty()).then(|| query.to_string()),
+        });
+        self.sync_cursor(cx);
+        self.rebuild_chrome();
+        cx.notify();
+        Ok(())
     }
 
     /// Incremental `/` search starts each changed query from the saved origin.
@@ -5377,12 +5549,19 @@ impl gpui::Render for PricerTile {
                             )),
                     )
                 });
-        let body = div().flex_1().min_h_0().w_full().child(
-            DataTable::new(&self.table)
+        let search = self
+            .fuzzy_find
+            .as_ref()
+            .and_then(|r| r.upgrade())
+            .filter(|r| r.read(cx).is_active());
+        let body = div().flex_1().min_h_0().w_full().child(match &search {
+            Some(results) => results.clone().into_any_element(),
+            None => DataTable::new(&self.table)
                 .with_size(Size::XSmall)
                 .bordered(false)
-                .stripe(false),
-        );
+                .stripe(false)
+                .into_any_element(),
+        });
         let bar = self.entry.as_ref().map(|e| {
             header::render_entry_bar(
                 &e.input,
@@ -5410,7 +5589,10 @@ impl gpui::Render for PricerTile {
                 .child(header)
                 .children(bar)
                 .child(body)
-                .child(footer),
+                .when(search.is_some(), |el| {
+                    el.pb(scale::design(geode_shell::fuzzyfind::FOOTER_HEIGHT))
+                })
+                .when(search.is_none(), |el| el.child(footer)),
             self.confirm.is_some(),
             &tile,
         )

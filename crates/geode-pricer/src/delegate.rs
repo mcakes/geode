@@ -469,6 +469,73 @@ impl SheetDelegate {
         }
     }
 
+    /// The search table shares value formatting, colours, and tree depth, without
+    /// edit/expansion handlers belonging to the original table.
+    pub(crate) fn render_find_cell(
+        &mut self,
+        find_row: &geode_shell::fuzzyfind::FindRow<'_>,
+        col_ix: usize,
+        cx: &App,
+    ) -> gpui::AnyElement {
+        let row_ix = find_row.source_row();
+        let model = self.model.clone();
+        let Some(row) = model.rows.get(row_ix) else {
+            return div().into_any_element();
+        };
+        let el = div()
+            .size_full()
+            .flex()
+            .items_center()
+            .font_family(fonts::MONO)
+            .overflow_hidden()
+            .whitespace_nowrap();
+        if col_ix == 0 {
+            let indices: Vec<_> = find_row
+                .indices()
+                .iter()
+                .copied()
+                .filter(|ix| *ix < row.search.chars().count())
+                .collect();
+            return el
+                .text_color(if find_row.is_context() {
+                    cx.theme().muted_foreground
+                } else {
+                    cx.theme().foreground
+                })
+                .child(find_row.gutter(cx))
+                .child(
+                    div()
+                        .w(scale::design(
+                            lane_depth(row.kind, row.depth) as f32 * INDENT,
+                        ))
+                        .flex_shrink_0(),
+                )
+                .child(find_row.disclosure(scale::design(CHEVRON_SLOT), "", cx))
+                .child(div().w(scale::design(TREE_GAP)).flex_shrink_0())
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .child(geode_shell::palette::highlighted_title(
+                            &row.search,
+                            &indices,
+                            cx.theme().foreground,
+                        )),
+                )
+                .into_any_element();
+        }
+        let col = col_ix - 1;
+        let colour = if find_row.is_context() {
+            cx.theme().muted_foreground
+        } else {
+            self.text_colour(row_ix, col, cx.theme())
+        };
+        el.when(model.columns[col].right, |el| el.justify_end())
+            .text_color(colour)
+            .child(row.cells[col].text.clone())
+            .into_any_element()
+    }
+
     /// Install freshly derived paints (a theme change) and drop the group
     /// rows' named-colour memo, whose floors were taken on the old
     /// grounds: the memo is keyed by the group ground, but a theme can

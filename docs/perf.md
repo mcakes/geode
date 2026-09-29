@@ -2198,3 +2198,143 @@ virtualises), the rail and header, and the frame-time p95 with the page
 open beside a blotter under a held `j`. That painted reading, taken from
 the perf overlay with the counters reset before the hold, stays on the
 display-check list for this branch.
+
+## 2026-09-29 — Fzf typing over 1.5 million rows
+
+Measured on the local Apple Silicon macOS development workstation with
+`rustc 1.96.0 (ac68faa20 2026-05-25)`. A standalone `rustc --edition=2024 -O`
+harness compiled the actual `SearchText`, `rank_index`, and palette matcher
+functions extracted from the source before and after this change; the updated
+harness also compiled `fuzzyfind/scoring.rs`. This isolates ranking without
+rebuilding or timing the full GUI application. Hardware model was unavailable
+inside the measurement sandbox.
+
+Fixture: 1,500,000 labels `Contract {i:07}`, each with ancestor path
+`Equities › US › Book A`, normalized once before timing. Queries run in the
+order shown below. The new harness retains the previous completed result set
+and uses it only when `can_narrow` permits it. The old harness scans the whole
+index for each query, as the previous implementation did. Timing covers matching,
+sorting, and collecting results; the updated harness also drops the previous
+compact result vector when replacing it. Index preparation, input events,
+visible-row highlighting, layout, and paint are excluded.
+
+| Query | Original, one run | Updated, range of three runs | Matches |
+| --- | ---: | ---: | ---: |
+| `c` | 394.7 ms | 15.0–16.3 ms | 1,500,000 |
+| `co` | 512.5 ms | 16.7–17.3 ms | 1,500,000 |
+| `contract` | 1,260.9 ms | 17.7–19.7 ms | 1,500,000 |
+| `149` | 480.9 ms | 58.0–60.0 ms | 89,385 |
+| `1499` | 512.9 ms | 8.5–9.0 ms | 12,840 |
+| `14999` | not measured | 1.3–1.5 ms | 1,095 |
+| `contract 1499` | 1,816.6 ms | 74.5–75.2 ms | 12,840 |
+
+The initial rolling-score implementation, before the consecutive-prefix fast
+path, still took 816 ms for `contract`; the prefix bound brought that to about
+19 ms without changing scores. Differential tests compare reused scorer
+storage against the palette matcher on exhaustive short ASCII/Unicode
+candidates, separators, overlapping words, and ancestor paths. Ranking tests
+also cover source-order ties, candidate narrowing, Unicode highlight offsets,
+and cancellation. UI tests cover backspace, dataset replacement, keyboard
+selection, and native-table scrolling.
+
+The permanent ignored test `fuzzyfind::tests::fzf_rank_large_index` retains the
+fixture and query sequence for future optimized diagnostic runs. These are
+synthetic ranking measurements, not end-to-end typing latency. Unselective
+multi-word queries still use the original scorer for surviving candidates;
+the numbers above do not establish a bound for every query or dataset.
+
+## 2026-09-29 — Display parents and leaves before indexing
+
+Replaced the 64-row loaded-tree preview with a deferred label source containing
+the complete loaded row order. The immutable snapshot prepares and shares its
+depth-first order on the query worker; local sorting uses the full table order
+when available and otherwise computes the sorted full order. Visible labels
+are generated on demand. Background indexing replaces only the search data,
+preserving the initial empty-query order.
+
+`CARGO_CACHE_RUSTC_INFO=0 GEODE_FZF_TEST_ROWS=1500000 cargo test -p geode-blotter
+--lib fzf_open_large_snapshot -- --nocapture` on the same workstation/toolchain,
+unoptimized development profile:
+
+| Descendants | Open | First paint | Full index ready | Cached reopen |
+| ---: | ---: | ---: | ---: | ---: |
+| 100,000 | 31.0 ms | 59.5 ms | 360.6 ms | 26.6 ms |
+| 1,500,000 | 43.5 ms | 72.0 ms | 3,927.3 ms | 26.6 ms |
+
+Fixture: grand total, one `L1` parent, and numbered `Contract` descendants,
+initially collapsed, with one numeric column and no local sort. Preparation of
+the snapshot and tree index is excluded. Open/paint include the headless GPUI
+table. Assertions navigate to both the parent and the final descendant before
+running the search worker, then verify search and cache reuse afterward.
+
+Earlier 100k measurements of roughly 3 ms open / 5 ms first paint displayed
+only a preview and preceded the fix to reuse original column header renderers;
+they are not directly comparable full-table measurements. The new behavior
+eliminates the delayed insertion of parents instead of waiting for all search
+text to normalize before displaying them. This is not a release-app benchmark,
+and does not include queries needed to load missing descendants or the cost of
+a local sort over collapsed groups.
+
+## 2026-09-29 — Ranked tree, line numbers, and search-only folds
+
+The selected B presentation retains direct matches and each ancestor once,
+ranking sibling branches by their strongest match. Direct-match candidates are
+kept separately from context rows and folded rows, preserving query narrowing
+and match counts. The worker links siblings in discovery order and emits DFS;
+it does not sort the hierarchy a second time. Native table cells retain their
+headers, indentation, numeric formatting, line-number setting, and chevrons.
+
+Same workstation/toolchain and optimized standalone extraction method as above,
+now including the actual `FindTree` implementation. Fixture adds `Total` and
+`Book A` above the 1,500,000 contract leaves; queries and narrowing are unchanged.
+One run, with index and topology constructed before timing:
+
+| Query | Matching and ranking | Including hierarchy ordering | Direct matches |
+| --- | ---: | ---: | ---: |
+| `c` | 17.2 ms | 27.2 ms | 1,500,000 |
+| `co` | 19.4 ms | 27.1 ms | 1,500,000 |
+| `contract` | 19.6 ms | 27.2 ms | 1,500,000 |
+| `149` | 57.7 ms | 58.7 ms | 89,385 |
+| `1499` | 8.5 ms | 8.9 ms | 12,840 |
+| `contract 1499` | 75.0 ms | 75.4 ms | 12,840 |
+
+An earlier sibling-sort/hash-lookup implementation took 70–73 ms including
+hierarchy for the broad prefixes; replacing that pass with links removed most
+of the added cost. These synthetic measurements exclude input dispatch,
+visible highlighting, layout, and paint. They do not bound arbitrary multi-word
+queries or different tree shapes.
+
+The same 1.5m headless development-profile opening test measured 52.5 ms open,
+85.0 ms first paint, 4.064 s index completion, and 28.7 ms cached reopen. Building
+search topology synchronously had regressed first paint to 164 ms; it now runs
+on the indexing worker, while visible chevrons consult the snapshot's existing
+tree. Every loaded parent and leaf remains available at first paint. A fold
+made before indexing finishes remains folded during and after replacement.
+
+## 2026-09-29 — Search continuity and cold-open allocation
+
+A geometry regression test with long group labels reproduced the search text
+starting 5 px farther right than the expanded normal tree. The search renderer
+had a fixed disclosure slot and a separate truncating label container, while
+the normal table let the slot shrink alongside its direct text child. Search
+now follows the normal layout, including left-aligned disclosure glyphs, leaf
+dots, and the gutter/disclosure on the blank grand-total row. Tests compare
+resolved cell bounds and disclosure edges with numbers Off, On, and Relative.
+
+Cold-open phase instrumentation on the same 1.5m fixture found 13.7 ms spent
+preparing the display, mostly constructing the identity row permutation. The
+empty-query order now stores a row count and resolves positions directly;
+ranked results still share their explicit row vectors. This eliminates the
+12 MB identity vector at 1.5m rows and its UI-thread construction, without
+waiting for background indexing or displaying only a preview.
+
+Same unoptimized headless fixture and command as above, one run:
+
+| Descendants | Open | First paint | Full index ready | Cached reopen |
+| ---: | ---: | ---: | ---: | ---: |
+| 1,500,000 | 34.5 ms | 67.8 ms | 3,965.3 ms | 31.2 ms |
+
+The preceding ranked-tree measurement was 52.5 ms open / 85.0 ms first paint;
+the pre-ranked-tree measurement was 43.5 / 72.0 ms. These are development-build
+headless timings, not end-to-end release-app latency. The label index still
+builds on the worker after all loaded parents and leaves are displayed.

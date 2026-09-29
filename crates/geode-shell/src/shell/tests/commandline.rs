@@ -4,6 +4,165 @@
 use super::*;
 
 #[gpui::test]
+fn fzf_tab_folds_a_branch_without_changing_input_or_committing(cx: &mut gpui::TestAppContext) {
+    use crate::fuzzyfind::{FindItem, FindTree};
+    let (services, _) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    shell.update(&mut cx, |s, _| s.find_style = FindStyle::Fzf);
+    cx.simulate_keystrokes("ctrl-v /");
+    let results = shell.read_with(&cx, |s, _| s.fuzzy_find.clone().unwrap());
+    results.update(&mut cx, |r, cx| {
+        r.replace_tree_items(
+            vec![
+                FindItem::new("parent", "Parent", "", |_, _, _| Ok(())),
+                FindItem::new("child", "Child", "Parent", |_, _, _| Ok(())),
+            ],
+            std::sync::Arc::new(FindTree::from_depths([0, 1])),
+            cx,
+        )
+    });
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("down");
+    assert_eq!(
+        results.read_with(&cx, |r, _| r.selected_item().unwrap().label().to_string()),
+        "Parent"
+    );
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("down");
+    assert_eq!(
+        results.read_with(&cx, |r, _| r.selected_item().unwrap().label().to_string()),
+        "Child"
+    );
+    assert_eq!(results.read_with(&cx, |r, _| r.query().to_string()), "");
+    assert!(shell.read_with(&cx, |s, _| s.command_line.is_some()));
+    cx.simulate_keystrokes("escape");
+    assert!(!results.read_with(&cx, |r, _| r.is_active()));
+}
+
+#[gpui::test]
+fn fzf_ranks_picks_and_cancels_without_moving_the_tree(cx: &mut gpui::TestAppContext) {
+    use crate::module::recording::{Recorded, RecordingFactory};
+    let (mut services, _) = services_with_recorder();
+    let mut recorder = RecordingFactory::new("rec");
+    recorder.completions = ["Set panel list toggle", "Split right", "split", "splitter"]
+        .map(str::to_string)
+        .to_vec();
+    let log = recorder.log.clone();
+    let mut roster = crate::module::ModuleRoster::new();
+    roster.add(Box::new(recorder));
+    services.roster = roster;
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    shell.update(&mut cx, |s, _| s.find_style = FindStyle::Fzf);
+    cx.simulate_keystrokes("ctrl-v /");
+    cx.simulate_input("split");
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(cx.debug_bounds("fuzzy-find").is_some());
+    assert_eq!(
+        shell.read_with(&cx, |s, cx| s
+            .fuzzy_find
+            .as_ref()
+            .unwrap()
+            .read(cx)
+            .selected_item()
+            .unwrap()
+            .label()
+            .to_string()),
+        "split"
+    );
+    assert!(
+        !log.borrow()
+            .iter()
+            .any(|r| matches!(r, Recorded::Find(..) | Recorded::FindPick(..))),
+        "typing does not touch the tree"
+    );
+    cx.simulate_keystrokes("down enter");
+    assert!(
+        log.borrow()
+            .iter()
+            .any(|r| matches!(r, Recorded::FindPick(_, label) if label == "Split right"))
+    );
+    assert!(shell.read_with(&cx, |s, _| s.command_line.is_none()));
+
+    log.borrow_mut().clear();
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("spltr");
+    cx.run_until_parked();
+    assert!(
+        shell.read_with(&cx, |s, cx| s
+            .fuzzy_find
+            .as_ref()
+            .unwrap()
+            .read(cx)
+            .selected_item()
+            .is_some()),
+        "subsequence matching"
+    );
+    cx.simulate_keystrokes("escape");
+    assert!(log.borrow().is_empty(), "escape leaves the tile untouched");
+    assert!(shell.read_with(&cx, |s, _| s.fuzzy_find.is_none()));
+
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("zzzz");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    assert!(
+        shell.read_with(&cx, |s, _| s.command_line.is_some()),
+        "no matches stays open"
+    );
+    assert!(log.borrow().is_empty());
+    cx.simulate_keystrokes("escape");
+
+    // The setting takes effect on the next prompt; Vim still receives incremental events.
+    shell.update(&mut cx, |s, _| s.find_style = FindStyle::Vim);
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("split");
+    cx.run_until_parked();
+    assert!(shell.read_with(&cx, |s, _| s.fuzzy_find.is_none()));
+    assert!(log.borrow().iter().any(
+        |r| matches!(r, Recorded::Find(_, crate::module::FindEvent::Changed(q)) if q == "split")
+    ));
+}
+
+#[gpui::test]
+fn fzf_scrolls_to_keyboard_selection_and_accepts_pointer_picks(cx: &mut gpui::TestAppContext) {
+    use crate::module::recording::{Recorded, RecordingFactory};
+    let (mut services, _) = services_with_recorder();
+    let mut recorder = RecordingFactory::new("rec");
+    recorder.completions = (0..80).map(|i| format!("Row {i:02}")).collect();
+    let log = recorder.log.clone();
+    let mut roster = crate::module::ModuleRoster::new();
+    roster.add(Box::new(recorder));
+    services.roster = roster;
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    shell.update(&mut cx, |s, _| s.find_style = FindStyle::Fzf);
+    cx.simulate_keystrokes("ctrl-v / ctrl-f ctrl-f ctrl-f ctrl-f");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let row = cx
+        .debug_bounds("find-result-40")
+        .expect("selected row is rendered");
+    let viewport = cx.debug_bounds("find-results").unwrap();
+    assert!(row.top() >= viewport.top() && row.bottom() <= viewport.bottom());
+    cx.simulate_mouse_down(row.center(), MouseButton::Left, gpui::Modifiers::none());
+    cx.simulate_mouse_up(row.center(), MouseButton::Left, gpui::Modifiers::none());
+    assert!(
+        log.borrow()
+            .iter()
+            .any(|r| matches!(r, Recorded::FindPick(_, label) if label == "Row 40"))
+    );
+    assert!(shell.read_with(&cx, |s, _| s.command_line.is_none()));
+}
+
+#[gpui::test]
 fn completion_navigation_keeps_the_highlight_visible(cx: &mut gpui::TestAppContext) {
     let (mut services, _) = services_with_recorder();
     let mut recorder = crate::module::recording::RecordingFactory::new("rec");
