@@ -291,7 +291,7 @@ impl ModuleFactory for BlotterFactory {
         tile: TileId,
         restored: Option<&toml::Table>,
         frame: FrameRef,
-        _diagnostics: Entity<Diagnostics>,
+        diagnostics: Entity<Diagnostics>,
         window: &mut Window,
         cx: &mut App,
     ) -> TileOccupant {
@@ -299,6 +299,7 @@ impl ModuleFactory for BlotterFactory {
             BlotterTile::new(
                 tile,
                 frame,
+                diagnostics,
                 self.data.clone(),
                 self.views.clone(),
                 self.colours.clone(),

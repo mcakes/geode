@@ -22,15 +22,16 @@ use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::tips;
 use geode_tile::confirm::{self, Confirm};
-use geode_tile::notice::{self, Notice};
+use geode_tile::header::{Cluster, HealthChip, MenuTrigger, TimeRun};
+use geode_tile::notice::Notice;
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, ElementId, Entity, FontWeight, Hsla, IntoElement, SharedString, div, relative,
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme as _, Sizable as _, Theme, h_flex, v_flex};
+use std::rc::Rc;
 
-pub(crate) const HEADER_HEIGHT: f32 = 22.0;
 /// The entry bar's key context: `lib::init` reclaims `tab`/`shift-tab`
 /// in it from gpui-component's focus cycling, for completion.
 pub const ENTRY_CONTEXT: &str = "PricerEntry";
@@ -41,9 +42,17 @@ pub(crate) const PRICER_LABEL: &str = "pricer";
 
 pub(crate) struct HeaderInputs<'a> {
     pub sheet: &'a Sheet,
-    /// The tile's notice, chosen in order from a pricing submission refusal, a
-    /// transient notice, or a view fallback. `None` allows the missing-pricer notice.
+    /// The tile's notice, chosen in order from a pricing submission refusal or
+    /// a transient notice. `None` lets `standing` show.
     pub notice: Option<SharedString>,
+    /// A standing notice painted while `notice` is `None`: a refused frame
+    /// scope (danger), else the view fallback (warning). `None` allows the
+    /// missing-pricer notice.
+    pub standing: Option<Notice>,
+    /// Lines the frame's scope hides; `0` paints no chip.
+    pub hidden: usize,
+    /// `:unscoped`: the tile ignores the frame's scope.
+    pub unscoped: bool,
     /// The armed `:rm` confirm's question.
     pub prompt: Option<SharedString>,
     /// The save state's own slot (a refused save, or a failed load that
@@ -78,6 +87,10 @@ pub(crate) struct HeaderModel {
     pub prompt: Option<SharedString>,
     /// The save state (see `HeaderInputs::save`), always a warning.
     pub save: Option<Notice>,
+    /// `N hidden` while the frame's scope hides any line (muted).
+    pub hidden: Option<SharedString>,
+    /// The `unscoped` chip (warning tone) while `:unscoped` is on.
+    pub unscoped: bool,
 }
 
 pub(crate) fn prepare(i: HeaderInputs) -> HeaderModel {
@@ -102,11 +115,13 @@ pub(crate) fn prepare(i: HeaderInputs) -> HeaderModel {
     let notice = match i.notice {
         Some(n) if n.as_ref() == LOADING => Some(Notice::status(n)),
         Some(n) => Some(Notice::warning(n)),
-        None => i.settings.pricer_missing.then(|| {
-            Notice::danger(format!(
-                "pricer '{}' is not built into this binary; set [pricing] adapter and restart",
-                i.settings.pricer
-            ))
+        None => i.standing.or_else(|| {
+            i.settings.pricer_missing.then(|| {
+                Notice::danger(format!(
+                    "pricer '{}' is not built into this binary; set [pricing] adapter and restart",
+                    i.settings.pricer
+                ))
+            })
         }),
     };
     HeaderModel {
@@ -122,6 +137,8 @@ pub(crate) fn prepare(i: HeaderInputs) -> HeaderModel {
         notice,
         prompt: i.prompt,
         save: i.save.map(Notice::warning),
+        hidden: (i.hidden > 0).then(|| format!("{} hidden", i.hidden).into()),
+        unscoped: i.unscoped,
     }
 }
 
@@ -136,13 +153,17 @@ impl HeaderModel {
             self.view.to_string(),
         ];
         out.extend(self.shifts.iter().map(|s| s.to_string()));
-        out.extend(self.save.iter().map(|s| s.text().to_string()));
-        out.extend(self.notice.iter().map(|s| s.text().to_string()));
+        if self.unscoped {
+            out.push("unscoped".to_string());
+        }
+        out.extend(self.hidden.iter().map(|s| s.to_string()));
         out.extend(self.prompt.iter().map(|s| s.to_string()));
         out.extend(self.pricing.iter().map(|s| s.to_string()));
         out.extend(self.failed.iter().map(|s| s.to_string()));
         out.push(PRICER_LABEL.to_string());
         out.push(self.pricer.to_string());
+        out.extend(self.save.iter().map(|s| s.text().to_string()));
+        out.extend(self.notice.iter().map(|s| s.text().to_string()));
         out.extend(self.time.iter().map(|s| s.to_string()));
         out
     }
@@ -169,6 +190,10 @@ pub(crate) struct HeaderChrome<'a> {
     pub menu_open: bool,
     /// The `⋯` tooltip's selector, built once with the tile.
     pub menu_tip: SharedString,
+    /// The `⋯` control's debug selector, built once with the tile.
+    pub menu_selector: SharedString,
+    /// The header's health chip (the sheet store's dataset), if any.
+    pub health: Option<&'a HealthChip>,
     /// The armed `:rm` confirm: its prompt is painted through the confirm door.
     pub confirm: Option<&'a Confirm<PendingRemove>>,
     /// The sheet name's tooltip selector, built once with the tile.
@@ -177,6 +202,8 @@ pub(crate) struct HeaderChrome<'a> {
     pub rename: Option<&'a Entity<InputState>>,
     /// The open sheet picker, rendered by the tile, hung from the name.
     pub picker: Option<AnyElement>,
+    /// The `unscoped` chip's tooltip selector, built once with the tile.
+    pub unscoped_tip: SharedString,
 }
 
 /// The rename field's key context: `lib::init` reclaims `tab`/`shift-tab`
@@ -266,25 +293,17 @@ fn sheet_name(name: SharedString, c: &mut HeaderChrome, tile_id: u64, theme: &Th
 
 pub(crate) fn render(h: &HeaderModel, mut c: HeaderChrome, theme: &Theme) -> impl IntoElement {
     let muted = theme.muted_foreground;
-    let warn = chip_paint(theme, Tone::WarningText).text;
     let danger = chip_paint(theme, Tone::DangerText).text;
     let chip = chip_paint(theme, Tone::Neutral);
-    let stale = c.stale;
+    let warn_chip = chip_paint(theme, Tone::Warning);
+    let unscoped_tip = c.unscoped_tip.clone();
     let tile_id = c.tile_id.0;
     let name = sheet_name(h.name.clone(), &mut c, tile_id, theme);
-    h_flex()
-        .w_full()
-        .h(scale::design(HEADER_HEIGHT))
+    // The sheet's identity: its name and the view it is shown through, one
+    // group (closer than the groups around it), then the shift chips.
+    let left = h_flex()
         .items_center()
         .gap_3()
-        .px_2()
-        .text_sm()
-        .text_color(muted)
-        .border_b_1()
-        .border_color(theme.border)
-        .children(c.stack.and_then(|s| s.marker(theme, c.tile_id)))
-        // The sheet's identity: its name and the view it is shown
-        // through, one group (closer than the groups around it).
         .child(h_flex().gap_1p5().child(name).child(pair(
             VIEW_LABEL,
             h.view.clone(),
@@ -299,93 +318,98 @@ pub(crate) fn render(h: &HeaderModel, mut c: HeaderChrome, theme: &Theme) -> imp
                 .text_color(chip.text)
                 .child(s.clone())
         }))
-        .child(div().flex_1())
-        .when_some(h.save.as_ref(), |el, n| {
-            el.child(notice::render(n, theme).debug_selector(|| "pricer-save-notice".into()))
+        // The frame's scope over this tile: detached (`:unscoped`), or
+        // how many lines it hides. The blotter's chip and tooltip.
+        .when(h.unscoped, |el| {
+            el.child(
+                div()
+                    .id(ElementId::NamedInteger(
+                        SharedString::new_static("pricer-unscoped"),
+                        tile_id,
+                    ))
+                    .debug_selector(|| "pricer-unscoped".into())
+                    .text_color(warn_chip.text)
+                    .when_some(warn_chip.fill, |el, fill| el.bg(fill))
+                    .px_1()
+                    .rounded(theme.radius_tokens().sm)
+                    .child("unscoped")
+                    .tooltip(tips::tip_with(
+                        unscoped_tip,
+                        SharedString::new_static("Ignores the shared scope"),
+                        None,
+                        Some(SharedString::new_static(":unscoped re-attaches it")),
+                    )),
+            )
         })
-        .when_some(h.notice.as_ref(), |el, n| {
-            el.child(notice::render(n, theme).debug_selector(|| "pricer-notice".into()))
-        })
-        // The removal prompt owns the keyboard; the confirm door answers
-        // every key on it before the shell root sees one, and paints its
-        // Yes/No buttons.
-        .when_some(h.prompt.as_ref().and(c.confirm), |el, pending| {
-            el.child(confirm::prompt(
+        .when_some(h.hidden.clone(), |el, n| {
+            el.child(
+                div()
+                    .text_color(muted)
+                    .debug_selector(|| "pricer-hidden".into())
+                    .child(n),
+            )
+        });
+    let mut cluster = Cluster::new(c.tile_id);
+    // The removal prompt owns the keyboard; the confirm door answers every
+    // key on it before the shell root sees one, and paints its Yes/No.
+    if let Some(pending) = h.prompt.as_ref().and(c.confirm) {
+        cluster.status.push(
+            confirm::prompt(
                 pending,
                 c.tile,
                 move || format!("pricer-remove-confirm-{tile_id}"),
                 theme,
-            ))
-        })
-        .when_some(h.pricing.clone(), |el, p| el.child(p))
-        .when_some(h.failed.clone(), |el, f| {
-            el.child(
-                div()
-                    .text_color(danger)
-                    .debug_selector(|| "pricer-failed".into())
-                    .child(f),
             )
-        })
-        .child(pair(
-            PRICER_LABEL,
-            h.pricer.clone(),
-            muted,
-            theme.foreground,
-        ))
-        .when_some(
-            if stale {
-                h.time_stale.clone()
-            } else {
-                h.time.clone()
-            },
-            |el, t| el.child(div().when(stale, |el| el.text_color(warn)).child(t)),
-        )
-        // Toggle the action menu during capture, before its outside-click closer. A
-        // bubble-phase toggle would see the menu already closed and reopen it on the
-        // second click. Keep propagation so the shell's click-to-focus still runs.
-        //
-        // Use the same dispatch route as the menu key: cancel and blur any open field
-        // before opening the menu on the current cursor row.
-        .child(
+            .into_any_element(),
+        );
+    }
+    if let Some(p) = h.pricing.clone() {
+        cluster.status.push(div().child(p).into_any_element());
+    }
+    if let Some(f) = h.failed.clone() {
+        cluster.status.push(
             div()
-                .id(ElementId::NamedInteger(
-                    SharedString::new_static("pricer-menu-button"),
-                    tile_id,
-                ))
-                .px_1p5()
-                .rounded(theme.radius_tokens().sm)
-                .border_1()
-                .border_color(theme.border)
-                .when(c.menu_open, |d| d.bg(theme.secondary))
-                .text_color(muted)
-                .when(!c.menu_open, |d| {
-                    d.pointer_states(control::paint(
-                        theme,
-                        control::Rest::Bare,
-                        theme.background,
-                        muted,
-                    ))
-                })
-                .child("⋯")
-                .debug_selector(|| "pricer-menu-button".into())
-                .capture_any_mouse_down({
-                    let tile = c.tile.clone();
-                    move |event, window, cx| {
-                        if event.button != gpui::MouseButton::Left {
-                            return;
-                        }
-                        tile.update(cx, |t, cx| {
-                            t.dispatch(&ActionId("pricer::menu".to_string()), None, window, cx)
-                        });
-                    }
-                })
-                .tooltip(tips::tip_with(
-                    c.menu_tip,
-                    SharedString::new_static("Actions"),
-                    Some("pricer::menu"),
-                    None,
-                )),
-        )
+                .text_color(danger)
+                .debug_selector(|| "pricer-failed".into())
+                .child(f)
+                .into_any_element(),
+        );
+    }
+    cluster
+        .status
+        .push(pair(PRICER_LABEL, h.pricer.clone(), muted, theme.foreground).into_any_element());
+    cluster.notices.extend(h.save.clone());
+    cluster.notices.extend(h.notice.clone());
+    cluster.times.extend(h.time.clone().map(|label| TimeRun {
+        label,
+        stale_label: h.time_stale.clone(),
+        stale: c.stale,
+    }));
+    cluster.health = c.health;
+    // Same dispatch route as the menu key: cancel and blur any open field
+    // before opening the menu on the current cursor row.
+    cluster.menu = Some(MenuTrigger {
+        id: ElementId::NamedInteger(SharedString::new_static("pricer-menu-button"), tile_id),
+        selector: c.menu_selector,
+        tip_selector: c.menu_tip,
+        action: "pricer::menu",
+        open: c.menu_open,
+        on_press: Rc::new({
+            let tile = c.tile.clone();
+            move |window, cx| {
+                tile.update(cx, |t, cx| {
+                    t.dispatch(&ActionId("pricer::menu".to_string()), None, window, cx);
+                });
+            }
+        }),
+    });
+    geode_tile::header::frame(
+        c.stack.and_then(|s| s.marker(theme, c.tile_id)),
+        left,
+        cluster,
+        theme,
+    )
+    .debug_selector(move || format!("pricer-header-{tile_id}"))
 }
 
 /// Reserve footer height even without text so the table does not resize. Errors and
@@ -516,6 +540,7 @@ mod tests {
     use crate::core::sheet::OwnShifts;
     use crate::core::sheet::tests::{at, line, push, result, spx};
     use geode_core::pricing::OptionKind;
+    use geode_tile::notice;
 
     fn settings(missing: bool) -> PricerSettings {
         PricerSettings {
@@ -538,6 +563,9 @@ mod tests {
         let h = prepare(HeaderInputs {
             sheet: &s,
             notice: None,
+            standing: None,
+            hidden: 0,
+            unscoped: false,
             prompt: None,
             save: None,
             settings: &settings(false),
@@ -563,6 +591,9 @@ mod tests {
         let h = prepare(HeaderInputs {
             sheet: &s,
             notice: None,
+            standing: None,
+            hidden: 0,
+            unscoped: false,
             prompt: None,
             save: None,
             settings: &settings(false),
@@ -578,6 +609,9 @@ mod tests {
         let h = prepare(HeaderInputs {
             sheet: &s,
             notice: None,
+            standing: None,
+            hidden: 0,
+            unscoped: false,
             prompt: None,
             save: None,
             settings: &settings(false),
@@ -591,12 +625,38 @@ mod tests {
         );
     }
 
+    /// After the migration the notices paint after the status items: the
+    /// prompt, the counts and the pricer label, then save, then notice.
+    #[test]
+    fn notices_paint_after_the_status_items() {
+        let s = Sheet::new("book");
+        let h = prepare(HeaderInputs {
+            sheet: &s,
+            notice: Some("sheet 'book' was not found; opened empty".into()),
+            standing: None,
+            hidden: 0,
+            unscoped: false,
+            prompt: Some("remove 'old'? (y/n)".into()),
+            save: Some("not saved".into()),
+            settings: &settings(false),
+            clock: Clock::utc(),
+        });
+        let texts = h.texts();
+        let at = |s: &str| texts.iter().position(|t| t == s).unwrap();
+        assert!(at("remove 'old'? (y/n)") < at("vendor"));
+        assert!(at("vendor") < at("not saved"));
+        assert!(at("not saved") < at("sheet 'book' was not found; opened empty"));
+    }
+
     #[test]
     fn a_missing_pricer_speaks_only_when_nothing_else_does() {
         let s = Sheet::new("book");
         let h = prepare(HeaderInputs {
             sheet: &s,
             notice: None,
+            standing: None,
+            hidden: 0,
+            unscoped: false,
             prompt: None,
             save: None,
             settings: &settings(true),
@@ -616,6 +676,9 @@ mod tests {
         let h = prepare(HeaderInputs {
             sheet: &s,
             notice: Some(LOADING.into()),
+            standing: None,
+            hidden: 0,
+            unscoped: false,
             prompt: None,
             save: None,
             settings: &settings(true),
@@ -633,6 +696,9 @@ mod tests {
         let h = prepare(HeaderInputs {
             sheet: &s,
             notice: Some("sheet 'book' was not found; opened empty".into()),
+            standing: None,
+            hidden: 0,
+            unscoped: false,
             prompt: None,
             save: None,
             settings: &settings(true),

@@ -224,7 +224,7 @@ pub fn status_bar(
         // Through the chip door (`shell::chip`): `warning_foreground` over
         // the tint is the background family on a barely-tinted background
         // at the pinned rev.
-        let as_of = chip::chip_paint(theme, chip::Tone::Warning);
+        let as_of = chip::chip_paint_on(theme, chip::Tone::Warning, theme.status_bar);
         bar = bar.left(
             div()
                 .id("status-as-of")

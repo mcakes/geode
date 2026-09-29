@@ -142,6 +142,28 @@ impl ShellView {
         })
     }
 
+    /// What every action does before it routes, whether it arrived through
+    /// `dispatch` or a pointer route that stands in for one (a tile's health
+    /// chip opening a page): record `id` in the crash report's action tail,
+    /// and expire the notice, the stack list, the add-filter menu and the row
+    /// menu. A route that skipped this would leave the last refusal showing
+    /// over the page it opened and drop the action from the crash tail.
+    pub(super) fn begin_action(&mut self, id: &str) {
+        // Record every action before routing so the crash report includes ones
+        // that no handler recognizes. The tail stores hashes without allocating per key.
+        self.services
+            .action_tail
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .record(id);
+        // Notices and the stack list expire on the next action. The list handles
+        // its own bare keys before dispatch, so only external actions close it here.
+        self.notice = None;
+        self.stack_list = None;
+        self.add_filter_menu = None;
+        self.row_menu = None;
+    }
+
     /// Dispatch a resolved action from either the keymap or palette. Workspace
     /// actions go through `apply_workspace_action`; shell actions are handled
     /// here, and remaining ids reach the focused occupant with their count.
@@ -156,24 +178,11 @@ impl ShellView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Record every dispatch before routing so the crash report includes actions
-        // that no handler recognizes. The tail stores hashes without allocating per key.
-        self.services
-            .action_tail
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .record(&action.0);
+        self.begin_action(&action.0);
         // The one line every dispatched action leaves in the daily log
         // (`[log] shell = "debug"`): which action, with what count. The
         // branch that resolved it says so on its own line just before.
         tracing::debug!(target: "geode::shell", action = %action.0, count = ?count, "dispatch");
-
-        // Notices and the stack list expire on the next dispatch. The list handles
-        // its own bare keys before dispatch, so only external actions close it here.
-        self.notice = None;
-        self.stack_list = None;
-        self.add_filter_menu = None;
-        self.row_menu = None;
 
         // The palette reaches every action while a dialog is open. Refuse
         // transient tile controls here: the modal would hide them and block

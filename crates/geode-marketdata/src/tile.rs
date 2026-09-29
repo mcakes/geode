@@ -59,6 +59,7 @@ use geode_shell::vimfind::{FindDirection, find_match};
 use geode_shell::vimnav::NavCommand;
 use geode_tile::confirm::{self, Confirm, ConfirmHost};
 use geode_tile::following::{Delivered, FollowingQuery, FrameDoor, Promotion, Unanswered};
+use geode_tile::header::HealthWatch;
 use geode_tile::menu::{Menu, MenuHost, MenuIds};
 use gpui::prelude::*;
 use gpui::{
@@ -566,6 +567,12 @@ pub struct MarketDataTile {
     /// The `Behind` state run's tooltip selector (`"tip-marketdata-
     /// state-{id}"`), built once alongside `menu_tip_selector`.
     state_tip_selector: SharedString,
+    /// The `⋯` button's debug selector (`"marketdata-menu-button-{id}"`),
+    /// built once so the header's paint formats nothing.
+    menu_selector: SharedString,
+    /// The header's health half: the panel's dataset, re-asked when source
+    /// health or descriptions move.
+    health: HealthWatch,
     /// The action menu's element names, prepared once from the tile id.
     menu_ids: MenuIds,
     /// The keymap as last published, for the menu's key hints.
@@ -798,6 +805,15 @@ impl MarketDataTile {
         })
         .detach();
         cx.observe(&diagnostics, |this, _diagnostics, cx| {
+            // Health first: the picker gate below returns on every other
+            // notification.
+            let dataset = this.spec.dataset.as_str();
+            if this
+                .health
+                .refresh(cx, |d| d.health_for_datasets(&[dataset]))
+            {
+                cx.notify();
+            }
             // Refresh prepared picker rows only while the picker is open. Command
             // completions read the catalog directly, and opening requests a fresh
             // catalog.
@@ -845,6 +861,10 @@ impl MarketDataTile {
 
         let model = Rc::new(MatrixModel::empty(&spec, key.as_deref().unwrap_or(&[])));
         let title = Self::compute_title(&spec, key.as_deref());
+        // Asked once now, so a panel opened after a failure shows the chip
+        // before any further diagnostics notification.
+        let mut health = HealthWatch::new(diagnostics.clone(), id);
+        health.reask(cx, |d| d.health_for_datasets(&[spec.dataset.as_str()]));
         let mut this = MarketDataTile {
             id,
             spec,
@@ -887,6 +907,7 @@ impl MarketDataTile {
                 echo: None,
                 prompt: None,
                 time: None,
+                time_stale: None,
                 stale: false,
             },
             source_at: None,
@@ -894,6 +915,8 @@ impl MarketDataTile {
             popup: None,
             menu_tip_selector: format!("tip-marketdata-menu-button-{}", id.0).into(),
             state_tip_selector: format!("tip-marketdata-state-{}", id.0).into(),
+            menu_selector: format!("marketdata-menu-button-{}", id.0).into(),
+            health,
             menu_ids: MenuIds::new(
                 format!("marketdata-menu-{}", id.0),
                 format!("marketdata-menu-row-{}", id.0),
@@ -1000,7 +1023,7 @@ impl MarketDataTile {
         if self
             .publication
             .as_ref()
-            .is_none_or(|watch| !watch.matches(&self.spec.dataset, Some(&batch)))
+            .is_none_or(|watch| !watch.is_for(&self.spec.dataset, Some(&batch)))
         {
             self.publication = Some(self.frame.update(cx, |frame, _| {
                 frame.watch_publications(&self.spec.dataset, Some(&batch))
@@ -4565,6 +4588,13 @@ impl MarketDataTile {
         self.header.dirty
     }
 
+    /// The header's health chip, if a source feeding the panel's dataset
+    /// is unhealthy.
+    #[cfg(test)]
+    pub(crate) fn health_chip(&self) -> Option<&geode_tile::header::HealthChip> {
+        self.health.chip()
+    }
+
     /// The table this panel's body is — what a test reads the painted
     /// columns and the mirrored cursor off (`selected_row`/`selected_col`),
     /// exactly as the blotter's own tests read theirs.
@@ -4730,9 +4760,11 @@ impl gpui::Render for MarketDataTile {
             &tones,
             &tile,
             self.id.0,
+            self.menu_selector.clone(),
             self.menu_tip_selector.clone(),
             self.state_tip_selector.clone(),
             self.stack.as_ref(),
+            self.health.chip(),
         );
         // Anchor the popup at the header's right edge using a positioned sibling and
         // the wrapper's relative coordinate system.
@@ -4763,12 +4795,12 @@ impl gpui::Render for MarketDataTile {
                         Popup::Choice(_) => return el,
                     };
                     // Anchored just under the header strip, whose height
-                    // this follows (`header::HEADER_HEIGHT`).
+                    // this follows (`geode_tile::header::HEADER_HEIGHT`).
                     el.child(
                         div()
                             .absolute()
                             .right_0()
-                            .top(scale::design(header::HEADER_HEIGHT))
+                            .top(scale::design(geode_tile::header::HEADER_HEIGHT))
                             .child(popup_el),
                     )
                 });
@@ -4832,9 +4864,10 @@ mod tests {
     use geode_core::view::ColumnFormat;
     use geode_data::{DataHandle, Request};
     use geode_shell::actions::ActionId;
-    use geode_shell::diagnostics::Diagnostics;
+    use geode_shell::diagnostics::{Diagnostics, Health, SourceSummary};
     use geode_shell::frame::{FLIP_DEADLINE, Frame, FrameRef, Publish};
     use geode_shell::module::{Delivery, FindEvent, ModuleFactory, TileContent};
+    use geode_shell::shell::chip;
     use geode_shell::tiling::TileId;
     use geode_shell::tiling::WorkspaceIx;
     use gpui::{Entity, Window};
@@ -4857,11 +4890,11 @@ mod tests {
                 let theme = cx.theme();
                 let floored = FlooredTones::derive(theme);
                 let bg = ground(theme);
-                for (tone, stale) in [(Tone::Key, false), (Tone::Time, true), (Tone::Warn, false)] {
-                    let colour = tone_colour(tone, stale, theme, &floored);
+                for tone in [Tone::Key, Tone::Warn] {
+                    let colour = tone_colour(tone, theme, &floored);
                     let ratio = contrast_ratio(to_rgb(colour), bg);
                     if ratio < READABLE_RATIO {
-                        failures.push(format!("{name}: {tone:?} stale={stale} at {ratio:.2}:1"));
+                        failures.push(format!("{name}: {tone:?} at {ratio:.2}:1"));
                     }
                 }
                 // The header's dirty dot paints `tones.warn` directly (it
@@ -4907,7 +4940,7 @@ mod tests {
     use std::rc::Rc;
     use std::sync::mpsc::Receiver;
     use std::sync::{Arc, LazyLock};
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime};
 
     const TILE: u64 = 3;
     const BASE: &str = "2026-09-12T14:00:00Z";
@@ -11085,6 +11118,137 @@ edits = [["2099-01-01", "-1", 1.0]]
             h.host_clicks(),
             2,
             "the second click — the one that closes the menu — bubbles too"
+        );
+    }
+
+    fn note(h: &Harness, vcx: &mut gpui::VisualTestContext, source: &str, health: Health) {
+        h.diagnostics.update(vcx, |d, cx| {
+            d.note_health(source, health, "why".into(), SystemTime::UNIX_EPOCH);
+            cx.notify();
+        });
+        vcx.run_until_parked();
+    }
+
+    fn chip_word(h: &Harness, vcx: &gpui::VisualTestContext) -> Option<String> {
+        h.tile
+            .read_with(vcx, |t, _| t.health_chip().map(|c| c.word().to_string()))
+    }
+
+    fn chip_title(h: &Harness, vcx: &gpui::VisualTestContext) -> Option<String> {
+        h.tile
+            .read_with(vcx, |t, _| t.health_chip().map(|c| c.title().to_string()))
+    }
+
+    /// A real health report on the shared entity reaches this panel's header
+    /// through its own observer; another dataset's source never does.
+    #[gpui::test]
+    fn a_degraded_panel_source_shows_the_chip_and_recovery_clears_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.describe_source("cvi_src", SourceSummary::for_dataset("cvi_params"));
+            d.describe_source("div_src", SourceSummary::for_dataset("dividend_schedule"));
+            cx.notify();
+        });
+        note(
+            &h,
+            &mut vcx,
+            "div_src",
+            Health::Failed {
+                reason: "torn".into(),
+            },
+        );
+        assert_eq!(chip_word(&h, &vcx), None, "another panel's dataset");
+        note(
+            &h,
+            &mut vcx,
+            "cvi_src",
+            Health::Degraded {
+                reason: "late".into(),
+            },
+        );
+        assert_eq!(chip_word(&h, &vcx), Some("degraded".into()));
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.health_chip().unwrap().tone()),
+            chip::Tone::Warning
+        );
+        assert_eq!(chip_title(&h, &vcx), Some("cvi_src: late".into()));
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        // The harness tile is `TILE` (3).
+        assert!(
+            vcx.debug_bounds("tile-health-3").is_some(),
+            "the chip paints"
+        );
+        note(&h, &mut vcx, "cvi_src", Health::Ok);
+        assert_eq!(chip_word(&h, &vcx), None);
+    }
+
+    /// A report that lands before the source is described has no dataset
+    /// link yet; the description bumps the sources version and the chip
+    /// appears then.
+    #[gpui::test]
+    fn a_source_described_after_its_failure_reaches_the_chip(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        note(
+            &h,
+            &mut vcx,
+            "cvi_src",
+            Health::Failed {
+                reason: "torn".into(),
+            },
+        );
+        assert_eq!(chip_word(&h, &vcx), None);
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.describe_source("cvi_src", SourceSummary::for_dataset("cvi_params"));
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        assert_eq!(chip_word(&h, &vcx), Some("failed".into()));
+        assert_eq!(chip_title(&h, &vcx), Some("cvi_src: torn".into()));
+    }
+
+    /// A panel created while its source is already failed asks at once:
+    /// the chip is there before any further diagnostics notification.
+    #[gpui::test]
+    fn a_panel_opened_after_its_source_failed_shows_the_chip_at_once(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.describe_source("cvi_src", SourceSummary::for_dataset("cvi_params"));
+            cx.notify();
+        });
+        note(
+            &h,
+            &mut vcx,
+            "cvi_src",
+            Health::Failed {
+                reason: "torn".into(),
+            },
+        );
+        let (data, _rx) = DataHandle::for_tests();
+        let factory = MarketDataFactory::new(data, Arc::clone(&CVI), Duration::from_secs(15 * 60));
+        let (frame, diagnostics) = (h.frame.clone(), h.diagnostics.clone());
+        let second = vcx.update(|window, cx| {
+            factory.create(
+                TileId(TILE + 1),
+                None,
+                FrameRef::new(frame, WorkspaceIx::FIRST),
+                diagnostics,
+                window,
+                cx,
+            )
+        });
+        let tile = second.view.downcast::<MarketDataTile>().unwrap();
+        assert_eq!(
+            tile.read_with(&vcx, |t, _| t
+                .health_chip()
+                .map(|c| (c.word().to_string(), c.title().to_string()))),
+            Some(("failed".to_string(), "cvi_src: torn".to_string()))
         );
     }
 

@@ -73,6 +73,22 @@ has none of them.
   tile.
 - A notice is a status (muted), warning or danger line in the theme's text
   tones; which of a tile's notices shows is the tile's own precedence.
+- Every tile header is `geode_tile::header::frame`: 22 px at the design rem,
+  the stack marker first, the module's own left side, then a right cluster in
+  a fixed order — status items, notices, source times, the health chip, `⋯`.
+  Status items and notices shrink: each is one line, cut with an ellipsis
+  when it does not fit, and together they take at most half the header
+  (`TEXT_SHARE`); a cut notice shows its whole text in its tooltip. Source
+  times, the chip and `⋯` never shrink. The left side takes what remains and
+  clips, so neither a long left side nor a long notice pushes the times, the
+  chip or `⋯` off the tile — they leave it only when the tile is narrower
+  than those three alone.
+  A stale source time takes the warning text tone. The health chip appears
+  only while a source the tile reads is PendingTooLong (`pending`), Degraded
+  (`degraded`) or Failed (`failed`); its tooltip names the worst source and
+  its reason, with `+N more` for other unhealthy sources. Clicking it opens
+  the diagnostics page and never closes it; it has no key of its own — the
+  page's own binding (`mod+d`) is the keyboard route.
 
 ### Motion
 
@@ -247,6 +263,15 @@ else it clears any selection and moves the cursor to the clicked row first.
 A row with nothing to offer (an `lhu` subtotal, say) shows `no actions for
 this row` instead.
 
+The header is the shared 22 px strip. The view, grouping, state chips
+(`pinned`, `unscoped`, `filtered`, a tile as-of), the frame's `AS OF` warning
+and the in-flight `…` sit on the left and clip when the tile is too narrow.
+Dataset times sit in the header's right cluster with the health chip,
+which covers the datasets of the tile's current snapshot; the notice sits
+before them. The chip's question moves with each delivered snapshot: a view
+over other datasets drops a chip for the old ones at once. The blotter has no
+`⋯` menu.
+
 "Edit column in view…" and "Edit column in schema…" list the blotter's
 planned non-tree columns with the cursor's column highlighted
 (`TileContent::tile_columns`). Hidden columns and dimensions folded into the
@@ -397,6 +422,12 @@ kind-action rows included; `Upload`, `Rebase`, `Revert edits` and the three
 policy rows (`:auto hold`, `:auto rebase`, `:auto replace`) fall back to their
 `:` verbs when unbound, and the other rows to an empty lane. A disabled row's
 reason becomes the notice.
+
+The header is the [shared frame](#shared-tile-interaction): kind badge,
+underlying and attributes on the left; then the state, incomplete rows, echo,
+upload error and the upload prompt, the notice, the source time (`HH:MM:SS
+stale` in the warning text tone once stale), the health chip and `⋯`. The
+header's health chip covers the panel's dataset.
 
 A panel opened through an add (palette, tile picker, `open_with`, duplicate)
 with no underlying opens the underlying picker at once; a restored panel does
@@ -739,10 +770,12 @@ hints are the live keymap's and are re-resolved when the menu opens, when its
 chrome rebuilds, and when the keymap is republished; an action the keymap
 binds nowhere shows an empty lane.
 
-The header shows the range and the frequency as two triggers, `1y ▾` and
-`1d ▾`; an absolute range shows its dates, `2025-09-26 – 2026-09-26 ▾`. Each
-trigger opens its own menu under it and stays filled while that menu (or, for
-the range, the dates editor) is up; a second click closes it. `r` and the range
+The header is the shared 22 px strip; its health chip is the worst health
+over the series' sources. The header shows the range and the frequency as two
+triggers, `1y ▾` and `1d ▾`; an absolute range shows its dates,
+`2025-09-26 – 2026-09-26 ▾`. Each trigger opens its own menu under it and
+stays filled while that menu (or, for the range, the dates editor) is up; a
+second click closes it. `r` and the range
 trigger open the range menu: the seven presets written out with their short
 labels, then `Custom dates…` (`c`). `f` and the frequency trigger open the
 frequency menu: the six frequencies with their short labels. Short labels are
@@ -967,7 +1000,10 @@ dense header: the sheet name (a control: see [sheets by pointer](#sheets-by-poin
 while lines are stale, `N failed` in danger text while any line's last answer
 was a failure, `pricer <name>`, the last priced time, which reads `stale` once
 it is older than the shell's `stale_after`, and a `⋯` button at the trailing
-edge that opens and closes the action menu (the pointer's `.`). A pending load
+edge that opens and closes the action menu (the pointer's `.`). The header is
+the [shared frame](#shared-tile-interaction): notices paint after the status
+items, and the health chip sits between the time and `⋯`. The health chip
+covers `pricer_sheets` only (see the pricer README's limits). A pending load
 paints `loading…` muted in the header and `Loading sheet…` in the empty table;
 an empty loaded sheet says `No lines — press o to add one`. A pricer this
 binary lacks is named in danger text with its recovery (`set [pricing]
@@ -1308,6 +1344,111 @@ confirmed: the catalog the diagnostics entity holds is refreshed only while
 the diagnostics page is visible, so it can predate the removal. A name whose save is
 queued but not yet confirmed counts as taken: a new tile's `untitled-N` and
 `:name` skip it.
+
+### The frame's scope
+
+The tile follows its frame's scope. The sheet is not stored data, so the
+scope is evaluated in process, by `geode_core::scope::eval`, over each sheet
+line as a row of the `pricer` dataset; that evaluator is pinned to the SQL a
+blotter's query runs (see [the parity contract](data-path.md#queries-and-time-travel)),
+so a scope means the same thing on both. The scope is the frame's effective
+scope with its named expressions resolved; the pricer has no tile scope
+layer (`:filter`).
+
+A line's values are the ones its cells paint. Text columns read the painted
+text; `strike` and `barrier` read the number as typed (a percent strike reads
+its percent); a shift reads the shift its cell paints, the sheet's when the
+line has none; `qty` reads the integer. Two text columns read a scope value
+their cell does not paint, so a desk scope matches: `status` reads `fresh`
+for a fresh line (whose cell is blank), beside `pricing…` and a failure's
+text; `expiry` reads the ISO date `2026-12-18` for a dated expiry, whose cell
+paints `Z26` or `20DEC26`, and a tenor's text (`3m`) otherwise. The text
+filter therefore finds a dated expiry by `2026-12`, not by `z26`. A measure reads result ×
+qty, the position value `risk_snapshot` means by the same name, although the
+line's cell paints the per-unit result: `npv < 0` keeps a short line whose
+per-unit npv is positive. A leg's `template` is its package's token, because
+`template` is a position-grain column and a leg's position is its package; a
+bare line has none. A blank cell, a measure on an unpriced or failed line,
+and the currency of an unpriced line are NULL. NULL follows SQL: only TRUE
+keeps a line, so `npv > 0` hides an unpriced line and so does
+`not (currency = 'USD')`. The text filter searches the nine textual
+dimensions (see [configuration](configuration.md)).
+
+The scope is re-applied on every model rebuild: an edit, a price delivery, a
+load or reload, a clock change and a frame change. A scope over a measure or
+`status` moves lines in and out as prices arrive. The tile answers the
+frame's flip barrier on every frame change, whether the scope applied, was
+refused, or is ignored under `:unscoped`.
+
+What the pricer drops and what it refuses:
+
+- A dimension selection on a column `pricer` lacks (a desk-wide `book`
+  selection) is dropped, as any dataset drops a selection it cannot answer.
+  It does not blank the pricer.
+- `position_ref` and `instrument_ref` count as columns the pricer lacks,
+  directly or through a derived dimension. The sheet declares them for
+  grouping, but their values are its own `p<id>` / `i<id>`, never a desk
+  reference, so a desk scope on them could only hide every line.
+- An expression naming a column `pricer` lacks refuses the whole scope, with
+  `scope refused: 'book' is not a pricer column`. The pricer never evaluates
+  the half of `underlying_ref = 'SPX' and book = 'X'` it knows.
+- An unresolved named expression refuses with
+  `scope refused: named expression '<name>' is missing` (or `is invalid`).
+- A comparison DuckDB would reject refuses the whole scope with
+  `scope refused: <reason>`, even when only one line's value fails
+  (`underlying_ref = 5` casts every underlying to a number). A refusal that
+  depends on no line (`strike like '5%'`) is checked once before any line,
+  so an empty sheet refuses it too.
+- A refused scope hides nothing. The refusal stands in the header as a
+  danger notice while it holds, through deliveries and edits, and goes when
+  the frame's scope becomes one the pricer can honour. A transient notice
+  covers it while that notice lasts. While a view fallback notice also
+  holds, the header shows both: the refusal, ` · `, then the view notice.
+
+Hidden lines stay in the sheet: they keep pricing, saving and repricing on
+the refresh timer. The header counts them in muted text as `N hidden`, absent
+at zero. A package shows when any of its legs does. A package whose legs
+are partly hidden paints only its shown legs: its leg count reads
+`· N of M legs`, and its summary, aggregating columns, results, status,
+priced time and find key cover only those legs. A selection total counts the
+shown legs too. Painting the whole package's fold under a row whose legs are
+partly hidden would be a plausible wrong total.
+
+A partly hidden package's row is read-only. These refuse with
+`package partly hidden by the scope: edit its legs` and change nothing: `i`,
+`enter` or a double-click on its cells; a typed commit or a live step over a
+selection containing it; and the structural verbs `d`, `shift+j`/`shift+k`,
+`g p` and `g u`, from keys, the `.` menu, `:group` or `:ungroup`, because
+each would act on the hidden legs too. A selection containing one refuses
+whole. Yank, put, fold and find still work, and a shown leg edits and
+deletes as usual. A counted `g p` takes the next sheet rows, hidden ones
+included, so it refuses with `a line in that range is hidden by the scope`
+when any of them is hidden. `:unscoped` shows the whole package to edit it.
+
+When the scope hides the cursor's line, the cursor moves to the nearest
+shown line above it in sheet order, else the nearest below, not to whatever
+row slid into its index. A cursor restored from the session onto a hidden
+line recovers the same way. An open editor whose line the scope hides is
+dropped with `the line is hidden by the scope; edit dropped`.
+
+A line the trader adds can land hidden: an entry-bar insert, a put, or an
+undo or redo that restores a line the scope does not match. The line is in
+the sheet and prices, but the cursor cannot rest on it, so the footer says
+`added line is hidden by the scope (:unscoped shows it)` rather than letting
+it vanish without a word.
+
+`:unscoped` makes the tile ignore the frame's scope and show every line; the
+header paints a warning `unscoped` chip whose tooltip says it ignores the
+shared scope and that `:unscoped` re-attaches it. The flag rides the tile's
+session record, as the blotter's does. `:unscoped` again re-applies the
+frame's current scope at once.
+
+Known limitations: `shift+j`/`shift+k` on a shown line can swap it with a
+hidden sibling, which changes sheet order with no visible change; the `.`
+menu keeps `delete` and `ungroup` enabled on a partly hidden package and
+refuses on pick rather than showing them disabled; the scope is re-evaluated
+synchronously over every line on every rebuild, so its cost grows linearly
+with the sheet (1,000 lines are measured in [performance](performance.md)).
 
 ### Selection
 

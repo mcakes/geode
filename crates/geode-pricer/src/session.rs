@@ -1,8 +1,8 @@
 //! Tile session state: sheet name, view, refresh setting, cursor line ID,
-//! expanded package IDs, and `:autosize` column widths. Sheet contents are
-//! stored separately. Reading ignores wrong-typed fields, invalid refresh
-//! values, and negative IDs; valid members of a mixed expansion list are
-//! retained.
+//! expanded package IDs, `:autosize` column widths, and `:unscoped`. Sheet
+//! contents are stored separately. Reading ignores wrong-typed fields,
+//! invalid refresh values, and negative IDs; valid members of a mixed
+//! expansion list are retained.
 
 use crate::core::sheet::{LineId, Refresh};
 use crate::core::storage::{encode_refresh, parse_refresh};
@@ -17,6 +17,9 @@ pub struct Record {
     pub expanded: Vec<LineId>,
     /// `:autosize`'s fitted widths by column name (`geode_shell::colfit`).
     pub widths: FittedWidths,
+    /// `:unscoped`: the tile ignores the frame's scope (the blotter's
+    /// session key). Written only when set.
+    pub unscoped: bool,
 }
 
 fn id(v: &toml::Value) -> Option<LineId> {
@@ -41,6 +44,7 @@ impl Record {
                 .map(|a| a.iter().filter_map(id).collect())
                 .unwrap_or_default(),
             widths: widths_from_record(Some(t)),
+            unscoped: t.get("unscoped").and_then(|v| v.as_bool()).unwrap_or(false),
         }
     }
 
@@ -72,6 +76,9 @@ impl Record {
         if let Some(w) = widths_to_toml(&self.widths) {
             t.insert(SESSION_KEY.into(), w);
         }
+        if self.unscoped {
+            t.insert("unscoped".into(), toml::Value::Boolean(true));
+        }
         t
     }
 }
@@ -92,6 +99,7 @@ mod tests {
             widths: [("strike".to_string(), 92.0), ("__tree".to_string(), 64.0)]
                 .into_iter()
                 .collect(),
+            unscoped: true,
         };
         assert_eq!(Record::from_table(&r.to_table()), r);
         assert_eq!(
@@ -102,9 +110,10 @@ mod tests {
 
     #[test]
     fn a_wrong_typed_key_is_ignored_not_refused() {
-        let t: toml::Table =
-            toml::from_str("sheet = 3\ncursor = -1\nexpanded = [\"x\", 4]\nrefresh = \"soon\"")
-                .unwrap();
+        let t: toml::Table = toml::from_str(
+            "sheet = 3\ncursor = -1\nexpanded = [\"x\", 4]\nrefresh = \"soon\"\nunscoped = 1",
+        )
+        .unwrap();
         assert_eq!(
             Record::from_table(&t),
             Record {

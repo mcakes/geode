@@ -8,6 +8,11 @@
       "name": "Asciinema",
       "mode": "dark",
       "colors": {
+        "chart.1": "#26b0d7",
+        "chart.2": "#ddaf3c",
+        "chart.3": "#9d80ac",
+        "chart.4": "#70ad98",
+        "chart.5": "#cccccc",
         "accent.background": "#262829",
         "accent.foreground": "#cccccc",
         "background": "#121314",

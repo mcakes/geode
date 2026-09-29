@@ -16,11 +16,12 @@ use crate::core::entry::{history, landing_place, next_place, place_for, target_l
 use crate::core::sheet::{Delivered, LineId, Refresh, Sheet};
 use crate::core::shorthand::parse;
 use crate::core::shorthand::render_expiry;
-use crate::core::storage::{from_rows, rows_from_snapshot, to_rows};
+use crate::core::storage::{PRICER_SHEETS_DATASET, from_rows, rows_from_snapshot, to_rows};
 use crate::core::template::Template;
 use crate::core::tree::Expansion;
 use crate::core::undo::UndoStack;
 use crate::core::views::ColumnPlan;
+use crate::core::visibility::{Visibility, apply_scope};
 use crate::core::{Place, RowSpec};
 use crate::delegate::{
     CellPointer, ChevronClicked, ColumnMoved, DateFieldPaint, EditorField, EditorPaint,
@@ -39,10 +40,12 @@ use geode_core::document::DocumentRows;
 use geode_core::grid::selection::{Resolved, SelectKind, Selection};
 use geode_core::pricing::{PriceLine, PriceOutcome, PriceParams};
 use geode_core::query::{QueryKey, QueryOutcome};
+use geode_core::scope::Scope;
 use geode_data::{DataHandle, Refusal};
 use geode_shell::actions::ActionId;
 use geode_shell::choice::{ChoiceList, DEFAULT_CAP};
 use geode_shell::colfit::{FitMetrics, FittedWidths, NOTHING_TO_FIT};
+use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::FrameRef;
 use geode_shell::keymap::{Binding, KeyContext};
 use geode_shell::linenumbers::{LineNumbers, UiSettings};
@@ -54,7 +57,9 @@ use geode_shell::vimfind::{FindDirection, find_match};
 use geode_shell::vimnav::NavCommand;
 use geode_tile::confirm::{self, Confirm, ConfirmHost};
 use geode_tile::following::{self, FrameDoor};
+use geode_tile::header::HealthWatch;
 use geode_tile::menu::{self, ActionRow, Hint, Menu, MenuHost, MenuIds, Row};
+use geode_tile::notice::Notice;
 use geode_widgets::datefield::{DateTimeField, FieldKey, Precision, Segment, route};
 use gpui::prelude::*;
 use gpui::{
@@ -202,6 +207,27 @@ const ENTRY_HINT: &str = "-5 SPX DEC26 95%/105% CS";
 /// one it opened on (a view switch), or whose package cell would now open
 /// on other text (a template reload), refuses with this.
 pub(crate) const MOVED: &str = "the cell moved; edit refused";
+
+/// A package row whose legs the frame's scope partly hides paints only
+/// its shown legs, so anything acting through it would reach legs the
+/// trader cannot see: every cell edit onto it (the editor, a selection's
+/// commit or live step) and every structural verb whose target includes
+/// it (delete, move, `g p`, `g u`; `partly_hidden_refusal`) refuses with
+/// this.
+pub(crate) const PARTLY_HIDDEN: &str = "package partly hidden by the scope: edit its legs";
+
+/// An insert, put, undo or redo that lands a line the frame's scope hides
+/// says so: the line is in the sheet, pricing, but the cursor cannot rest
+/// on it, and a line that vanishes without a word reads as lost.
+pub(crate) const HIDDEN_LANDING: &str = "added line is hidden by the scope (:unscoped shows it)";
+
+/// An open editor whose line the frame's scope now hides is dropped with
+/// this, not `MOVED`: the cell did not move, the scope hid it.
+pub(crate) const SCOPE_DROPPED_EDIT: &str = "the line is hidden by the scope; edit dropped";
+
+/// A counted `g p` whose run of rows includes one the scope hides: it
+/// would package a line the trader never saw.
+pub(crate) const HIDDEN_IN_RANGE: &str = "a line in that range is hidden by the scope";
 
 /// Cell editor attached to a line identity and column kind. Rebuilds follow the
 /// target across movement and close the editor if it disappears; commit checks
@@ -368,6 +394,23 @@ pub struct PricerTile {
     pub(crate) shared: Rc<Shared>,
     pub(crate) sheet: Sheet,
     pub(crate) expansion: Expansion,
+    /// `:unscoped`: this tile ignores the frame's scope. Session key
+    /// `unscoped`, as the blotter's.
+    unscoped: bool,
+    /// The scope this tile follows, as last read from the frame
+    /// (`effective_scope`; empty while `unscoped`); `Err` when a named
+    /// expression did not resolve. The frame observer re-reads it on every
+    /// notify and rebuilds only when it changed; every rebuild re-applies
+    /// it, so a scope over a measure or `status` follows repricing.
+    applied_scope: Result<Scope, String>,
+    /// `applied_scope`'s verdict over the sheet as last built.
+    pub(crate) visibility: Visibility,
+    /// Why `applied_scope` hides nothing although it is not empty: a
+    /// column `pricer` lacks, an evaluator error, or an unresolved name.
+    /// A standing header notice while it lasts.
+    scope_refusal: Option<SharedString>,
+    /// The `unscoped` chip's tooltip selector, built once from the tile id.
+    unscoped_tip: SharedString,
     pub(crate) plan: ColumnPlan,
     pub(crate) model: Rc<GridModel>,
     pub(crate) table: Entity<TableState<SheetDelegate>>,
@@ -447,6 +490,11 @@ pub struct PricerTile {
     title: SharedString,
     /// The header `⋯` tooltip's selector, built once from the tile id.
     menu_tip: SharedString,
+    /// The header `⋯` control's debug selector, built once.
+    menu_selector: SharedString,
+    /// The header's health half: the sheet store's dataset, re-asked when
+    /// source health or descriptions move.
+    health: HealthWatch,
     stack: Option<StackHandle>,
     pub(crate) clock: Clock,
     /// What `p`/`shift+p` put: the last `y y`, `d d`, or `y`/`d` over a
@@ -531,6 +579,19 @@ pub struct PricerTile {
     pub(crate) edit_seq: u64,
 }
 
+/// The scope a tile follows: the frame's effective scope for its lane
+/// (the pricer has no tile layer), or none while `unscoped`. `Err` is an
+/// unresolved named expression, which the tile refuses as a whole.
+fn read_scope(frame: &FrameRef, unscoped: bool, cx: &App) -> Result<Scope, String> {
+    if unscoped {
+        return Ok(Scope::default());
+    }
+    frame
+        .read(cx)
+        .effective_scope(&Scope::default())
+        .map_err(|e| format!("scope refused: {e}"))
+}
+
 fn app_clock(cx: &App) -> Clock {
     cx.try_global::<geode_shell::clock::AppClock>()
         .map(|c| c.0)
@@ -572,9 +633,11 @@ fn fallback(name: &str, record: &Record) -> Sheet {
 impl PricerTile {
     /// `pub(crate)`: it takes the factory's crate-private [`Shared`];
     /// the shell reaches a tile only through `PricerFactory::create`.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         id: TileId,
         frame: FrameRef,
+        diagnostics: Entity<Diagnostics>,
         data: DataHandle,
         shared: Rc<Shared>,
         restored: Option<&toml::Table>,
@@ -696,8 +759,12 @@ impl PricerTile {
         )
         .detach();
         // Pricing does not follow frame queries, so there is no result to wait for.
-        // Arrive immediately to avoid holding other tiles behind the flip barrier.
+        // The frame's scope applies here, synchronously (a bounded pass over
+        // the sheet and one model build), and the tile then arrives at once
+        // — on every path, a refused or unchanged scope included — so it
+        // never holds other tiles behind the flip barrier.
         cx.observe(frame.entity(), |this, _, cx| {
+            this.follow_scope(cx);
             // Arrive through the tile's own handle: the observed entity alone
             // would answer for the shared lane, not this workspace's.
             let frame = this.frame.clone();
@@ -753,19 +820,43 @@ impl PricerTile {
             this.confirm = None;
         })
         .detach();
+        // The sheet store's dataset, which is local: no source loads into it,
+        // so in production this chip stays silent. The pricer behind the
+        // pricing door reads no dataset today; one that reads a dataset a
+        // source feeds must be added to this question.
+        // Asked once now, so a tile opened after a failure shows the chip
+        // before any further diagnostics notification.
+        let mut health = HealthWatch::new(diagnostics.clone(), id);
+        health.reask(cx, |d| d.health_for_datasets(&[PRICER_SHEETS_DATASET]));
+        cx.observe(&diagnostics, |this, _, cx| {
+            if this
+                .health
+                .refresh(cx, |d| d.health_for_datasets(&[PRICER_SHEETS_DATASET]))
+            {
+                cx.notify();
+            }
+        })
+        .detach();
 
         let cursor = Cursor {
             line: record.cursor,
             col: 0,
             last_row: 0,
         };
+        let unscoped = record.unscoped;
+        let applied_scope = read_scope(&frame, unscoped, cx);
         let mut this = PricerTile {
             id,
             frame,
             data,
             shared,
+            visibility: Visibility::all(&sheet),
             sheet,
             expansion,
+            unscoped,
+            applied_scope,
+            scope_refusal: None,
+            unscoped_tip: format!("tip-pricer-unscoped-{}", id.0).into(),
             plan: ColumnPlan::default(),
             model: Rc::new(GridModel::default()),
             table,
@@ -794,6 +885,8 @@ impl PricerTile {
             header: HeaderModel::default(),
             title: SharedString::default(),
             menu_tip: format!("tip-pricer-menu-button-{}", id.0).into(),
+            menu_selector: SharedString::new_static("pricer-menu-button"),
+            health,
             stack: None,
             clock: app_clock(cx),
             register: None,
@@ -917,6 +1010,13 @@ impl PricerTile {
         entry || editor || confirm
     }
 
+    /// The header's health chip, if a source feeding the sheet store's
+    /// dataset is unhealthy.
+    #[cfg(test)]
+    pub(crate) fn health_chip(&self) -> Option<&geode_tile::header::HealthChip> {
+        self.health.chip()
+    }
+
     /// The open date field, if the editor is one.
     #[cfg(test)]
     pub(crate) fn date_field(&self) -> Option<&DateTimeField> {
@@ -974,6 +1074,7 @@ impl PricerTile {
                 Some(held) => held.clone(),
                 None => self.expansion.live_ids(&self.sheet).collect(),
             },
+            unscoped: self.unscoped,
         }
         .to_table()
     }
@@ -1331,7 +1432,14 @@ impl PricerTile {
             cx,
         ) {
             Ok(()) => {
-                let id = self.sheet.id(landed_row(at));
+                let first = landed_row(at);
+                let id = self.sheet.id(first);
+                let landed = match &spec {
+                    RowSpec::Package { legs, .. } => 1 + legs.len(),
+                    _ => 1,
+                };
+                let ids: Vec<LineId> = (first..first + landed).map(|r| self.sheet.id(r)).collect();
+                self.note_hidden_landing(ids);
                 if matches!(spec, RowSpec::Package { .. }) {
                     self.expansion.set(id, true);
                 }
@@ -1424,6 +1532,10 @@ impl PricerTile {
         ) else {
             return;
         };
+        if self.partly_hidden(row) {
+            self.footer = Some(PARTLY_HIDDEN.into());
+            return;
+        }
         let (line, col, kind) = (self.sheet.id(row), self.cursor.col, planned.def.kind);
         let editor = match cell::editor_for(&self.sheet, row, kind, &planned.format) {
             Err(why) => {
@@ -1677,6 +1789,11 @@ impl PricerTile {
         let Some(row) = self.editor_row(line, col, kind, window, cx) else {
             return;
         };
+        // The scope may have changed under an open editor.
+        if self.partly_hidden(row) {
+            self.finish_commit(Err(PARTLY_HIDDEN.into()), window, cx);
+            return;
+        }
         // `editor_row` confirmed the planned column at `col`.
         let format = &self.plan.columns[col].format;
         // A package cell that would open on other text now (a template
@@ -1826,6 +1943,10 @@ impl PricerTile {
         let Some(row) = self.editor_row(line, col, kind, window, cx) else {
             return;
         };
+        if self.partly_hidden(row) {
+            self.finish_commit(Err(PARTLY_HIDDEN.into()), window, cx);
+            return;
+        }
         let answer = cell::commit_date(&self.sheet, row, date);
         self.finish_commit(answer.map(|e| e.into_iter().collect()), window, cx);
     }
@@ -2760,7 +2881,10 @@ impl PricerTile {
             | "group" | "ungroup" => {
                 if self.loading {
                     self.footer = Some("the sheet is still loading".into());
-                } else if let Some(why) = self.row_verb_refusal(verb) {
+                } else if let Some(why) = self
+                    .row_verb_refusal(verb)
+                    .or_else(|| self.partly_hidden_refusal(verb, n, self.selection.is_some()))
+                {
                     self.footer = Some(why.into());
                 } else {
                     // A live selection names the rows itself, so a count
@@ -2850,12 +2974,19 @@ impl PricerTile {
         // Select the first row reinstated by a Restore inverse. Other history steps
         // keep the cursor's existing LineId, subject to the rebuild's cursor
         // resolution.
-        let restored = self.undo.peek(redo).and_then(|u| {
-            u.inverse.iter().find_map(|e| match e {
-                Edit::Restore { rows, .. } => rows.first().map(|r| r.id),
-                _ => None,
+        let restored: Vec<LineId> = self
+            .undo
+            .peek(redo)
+            .map(|u| {
+                u.inverse
+                    .iter()
+                    .flat_map(|e| match e {
+                        Edit::Restore { rows, .. } => rows.iter().map(|r| r.id).collect(),
+                        _ => Vec::new(),
+                    })
+                    .collect()
             })
-        });
+            .unwrap_or_default();
         let stepped = if redo {
             self.undo.redo(&mut self.sheet)
         } else {
@@ -2863,7 +2994,7 @@ impl PricerTile {
         };
         match stepped {
             Ok(true) => {
-                if let Some(id) = restored {
+                if let Some(&id) = restored.first() {
                     // Open a restored leg's parent so the selected row is visible.
                     if let Some(p) = self.sheet.index_of(id).and_then(|r| self.sheet.parent(r)) {
                         self.expansion.set(self.sheet.id(p), true);
@@ -2871,6 +3002,7 @@ impl PricerTile {
                     self.cursor.line = Some(id);
                 }
                 self.after_edit(cx);
+                self.note_hidden_landing(restored);
                 Ok(())
             }
             Ok(false) => Err(if redo {
@@ -2928,6 +3060,8 @@ impl PricerTile {
             }
             at += 1;
         }
+        let ids: Vec<LineId> = (first..at).map(|r| self.sheet.id(r)).collect();
+        self.note_hidden_landing(ids);
         self.cursor.line = Some(self.sheet.id(first));
         self.rebuild(cx);
         Ok(())
@@ -3273,10 +3407,17 @@ impl PricerTile {
             }
             Command::Group(count) => {
                 self.refuse_while_loading()?;
-                self.group(count.unwrap_or(1), cx)
+                let count = count.unwrap_or(1);
+                if let Some(why) = self.partly_hidden_refusal("group", count, false) {
+                    return Err(why.into());
+                }
+                self.group(count, cx)
             }
             Command::Ungroup => {
                 self.refuse_while_loading()?;
+                if let Some(why) = self.partly_hidden_refusal("ungroup", 1, false) {
+                    return Err(why.into());
+                }
                 self.ungroup(cx)
             }
             Command::Edit(name) => self.edit_sheet(name, cx),
@@ -3296,6 +3437,15 @@ impl PricerTile {
             Command::Autosize { reset } => self
                 .autosize_columns(reset, window, cx)
                 .map_err(str::to_string),
+            Command::Unscoped => {
+                self.unscoped = !self.unscoped;
+                self.follow_scope(cx);
+                // The chip follows the toggle even when the scope read is
+                // unchanged (an empty frame scope rebuilds nothing).
+                self.rebuild_chrome();
+                cx.notify();
+                Ok(())
+            }
         }
     }
 
@@ -3883,16 +4033,112 @@ impl PricerTile {
 
     /// Model, table, chrome, notify — after every change that moves what
     /// the grid shows.
+    ///
+    /// Every rebuild re-applies the scope in force: an edit, a delivery or
+    /// a load changes what a scope over a measure or `status` matches.
     pub(crate) fn rebuild(&mut self, cx: &mut Context<Self>) {
-        self.model = Rc::new(GridModel::build(
+        self.apply_visibility();
+        let model = Rc::new(GridModel::build(
             &self.sheet,
             &self.expansion,
+            &self.visibility,
             &self.plan,
             self.clock,
         ));
+        self.recover_hidden_cursor(&model);
+        self.model = model;
         self.install_model(cx);
         self.rebuild_chrome();
         cx.notify();
+    }
+
+    /// Re-read the frame's effective scope (empty while `unscoped`) and
+    /// rebuild when it differs from the one applied — an unrelated frame
+    /// notify (a grouping, an as-of, a barrier) rebuilds nothing. The frame
+    /// observer's arrival follows on every path.
+    pub(crate) fn follow_scope(&mut self, cx: &mut Context<Self>) {
+        let scope = read_scope(&self.frame, self.unscoped, cx);
+        if scope != self.applied_scope {
+            self.applied_scope = scope;
+            self.rebuild(cx);
+        }
+    }
+
+    /// `applied_scope` over the sheet as it is now. A refusal hides
+    /// nothing and stands as a header notice until a scope the pricer can
+    /// honour replaces it.
+    fn apply_visibility(&mut self) {
+        let verdict = match &self.applied_scope {
+            Ok(scope) => apply_scope(&self.sheet, scope, &self.shared.dims.borrow(), self.clock),
+            Err(message) => Err(message.clone()),
+        };
+        match verdict {
+            Ok(v) => {
+                self.visibility = v;
+                self.scope_refusal = None;
+            }
+            Err(message) => {
+                self.visibility = Visibility::all(&self.sheet);
+                if self.scope_refusal.as_deref() != Some(message.as_str()) {
+                    self.scope_refusal = Some(message.into());
+                }
+            }
+        }
+    }
+
+    /// A cursor whose line the scope now hides goes to the nearest line
+    /// above it in sheet order that `model` shows, else the nearest below —
+    /// not to whatever row slid into its old index (`reconcile_cursor`'s
+    /// fallback for a deleted line). Sheet order, not the replaced model's
+    /// rows, so a cursor restored from a session onto a hidden line (no
+    /// previous model holds it) recovers the same way.
+    fn recover_hidden_cursor(&mut self, model: &GridModel) {
+        if self.loading {
+            return;
+        }
+        let Some(id) = self.cursor.line else {
+            return;
+        };
+        let hidden = self
+            .sheet
+            .index_of(id)
+            .is_some_and(|r| !self.visibility.is_shown(r));
+        if !hidden || model.grid_row_of(id).is_some() {
+            return;
+        }
+        let Some(at) = self.sheet.index_of(id) else {
+            return;
+        };
+        let shown: std::collections::HashSet<LineId> =
+            model.rows.iter().filter_map(|r| r.id).collect();
+        if let Some(to) = (0..at)
+            .rev()
+            .chain(at + 1..self.sheet.len())
+            .map(|r| self.sheet.id(r))
+            .find(|i| shown.contains(i))
+        {
+            self.cursor.line = Some(to);
+        }
+    }
+
+    /// Footer [`HIDDEN_LANDING`] when the scope in force hides any of
+    /// `ids`, the lines an insert, put or restore just landed. Called
+    /// after that edit's rebuild, so `visibility` has judged them.
+    fn note_hidden_landing(&mut self, ids: impl IntoIterator<Item = LineId>) {
+        let hidden = ids.into_iter().any(|id| {
+            self.sheet
+                .index_of(id)
+                .is_some_and(|r| !self.visibility.is_shown(r))
+        });
+        if hidden {
+            self.footer = Some(HIDDEN_LANDING.into());
+        }
+    }
+
+    /// Whether sheet row `row` is a package the scope partly hides: its
+    /// row is read-only (`PARTLY_HIDDEN`).
+    pub(crate) fn partly_hidden(&self, row: usize) -> bool {
+        self.sheet.is_package(row) && self.visibility.is_partial(&self.sheet, row)
     }
 
     /// Install the prepared model, refresh table layout, and reconcile editor and cursor.
@@ -3920,7 +4166,8 @@ impl PricerTile {
 
     /// Keep an open editor attached to its LineId and ColumnKind across rebuilds.
     /// Update its plan index and the cursor column together. If either target leaves
-    /// the visible grid or plan, close the editor and show MOVED.
+    /// the visible grid or plan, close the editor and show MOVED, or
+    /// SCOPE_DROPPED_EDIT when the frame's scope hid its line.
     fn follow_editor(&mut self, cx: &mut Context<Self>) {
         let Some(editor) = self.editor.as_mut() else {
             return;
@@ -3932,14 +4179,22 @@ impl PricerTile {
                 editor.set_col(c);
                 self.cursor.col = c;
             }
-            None => self.drop_orphaned_editor(cx),
+            None => {
+                let scoped = self
+                    .sheet
+                    .index_of(line)
+                    .is_some_and(|r| !self.visibility.is_shown(r));
+                self.drop_orphaned_editor(if scoped { SCOPE_DROPPED_EDIT } else { MOVED }, cx)
+            }
         }
     }
 
     /// Remove an editor whose target disappeared during a rebuild without a Window.
     /// Retain its focus handle until deferred access to the opening window can blur it.
     /// Check that it still owns focus so a newer field is not blurred.
-    fn drop_orphaned_editor(&mut self, cx: &mut Context<Self>) {
+    /// `why` is the footer: `MOVED`, or `SCOPE_DROPPED_EDIT` when the
+    /// frame's scope hid the line.
+    fn drop_orphaned_editor(&mut self, why: &'static str, cx: &mut Context<Self>) {
         // Mid-rebuild a rollback would rebuild inside the rebuild: steps
         // still in the sheet are recorded instead, so they stay undoable
         // rather than landing with no history.
@@ -3949,7 +4204,7 @@ impl PricerTile {
             self.undo.record(bulk.undo);
         }
         if self.release_editor(cx) {
-            self.footer = Some(MOVED.into());
+            self.footer = Some(why.into());
         }
     }
 
@@ -3981,11 +4236,21 @@ impl PricerTile {
         } else if self.refusals > 0 {
             Some(REFUSED.into())
         } else {
-            self.notice.clone().or_else(|| self.view_notice.clone())
+            self.notice.clone()
+        };
+        // Both stand while both hold: the refusal (danger) first, then
+        // the view fallback, so neither masks the other.
+        let standing = match (&self.scope_refusal, &self.view_notice) {
+            (Some(scope), Some(view)) => Some(Notice::danger(format!("{scope} · {view}"))),
+            (Some(scope), None) => Some(Notice::danger(scope.clone())),
+            (None, view) => view.clone().map(Notice::warning),
         };
         self.header = header::prepare(HeaderInputs {
             sheet: &self.sheet,
             notice,
+            standing,
+            hidden: self.visibility.hidden,
+            unscoped: self.unscoped,
             prompt: self.confirm.as_ref().map(|c| c.prompt_text().clone()),
             save: self.save_notice.clone(),
             settings: &settings,
@@ -4407,10 +4672,13 @@ impl gpui::Render for PricerTile {
                 tile: &tile,
                 menu_open: self.menu.is_some(),
                 menu_tip: self.menu_tip.clone(),
+                menu_selector: self.menu_selector.clone(),
+                health: self.health.chip(),
                 confirm: self.confirm.as_ref(),
                 name_tip: self.name_tip.clone(),
                 rename: self.rename_field.as_ref(),
                 picker,
+                unscoped_tip: self.unscoped_tip.clone(),
             },
             theme,
         );
@@ -4426,7 +4694,7 @@ impl gpui::Render for PricerTile {
                         div()
                             .absolute()
                             .right_0()
-                            .top(scale::design(header::HEADER_HEIGHT))
+                            .top(scale::design(geode_tile::header::HEADER_HEIGHT))
                             .child(menu::render_menu(
                                 m,
                                 &MenuIds::new("pricer-menu", "pricer-menu-row"),
@@ -4547,9 +4815,10 @@ pub(crate) mod tests {
     use geode_core::scopes::SavedScopes;
     use geode_data::{DataHandle, Request};
     use geode_shell::actions::ActionId;
-    use geode_shell::diagnostics::Diagnostics;
+    use geode_shell::diagnostics::{Diagnostics, Health, SourceSummary};
     use geode_shell::frame::{Frame, FrameRef};
     use geode_shell::module::{Delivery, ModuleFactory, TileContent};
+    use geode_shell::shell::chip;
     use geode_shell::tiling::TileId;
     use geode_shell::tiling::WorkspaceIx;
     use geode_widgets::datefield::Segment;
@@ -4557,6 +4826,7 @@ pub(crate) mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::sync::mpsc::Receiver;
+    use std::time::SystemTime;
 
     pub(crate) const TILE: u64 = 5;
 
@@ -5705,6 +5975,96 @@ pub(crate) mod tests {
             title
         });
         assert_eq!(title, "Pricer · untitled-1");
+    }
+
+    fn fail_sheets(h: &Harness, vcx: &mut VisualTestContext, health: Health) {
+        h.diagnostics.update(vcx, |d, cx| {
+            d.describe_source(
+                "sheets_src",
+                SourceSummary::for_dataset(PRICER_SHEETS_DATASET),
+            );
+            d.note_health(
+                "sheets_src",
+                health,
+                "disk full".into(),
+                SystemTime::UNIX_EPOCH,
+            );
+            cx.notify();
+        });
+        vcx.run_until_parked();
+    }
+
+    /// A real health report on the shared entity reaches the header through
+    /// the tile's own observer; another dataset's source never does.
+    #[gpui::test]
+    fn a_failed_sheet_store_source_shows_the_chip_and_recovery_clears_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.describe_source("cvi_src", SourceSummary::for_dataset("cvi_params"));
+            d.note_health(
+                "cvi_src",
+                Health::Failed {
+                    reason: "torn".into(),
+                },
+                "torn".into(),
+                SystemTime::UNIX_EPOCH,
+            );
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        assert!(h.tile.read_with(&vcx, |t, _| t.health_chip().is_none()));
+        fail_sheets(
+            &h,
+            &mut vcx,
+            Health::Failed {
+                reason: "disk full".into(),
+            },
+        );
+        let (word, tone, title) = h.tile.read_with(&vcx, |t, _| {
+            let c = t.health_chip().expect("a chip");
+            (c.word().to_string(), c.tone(), c.title().to_string())
+        });
+        assert_eq!(word, "failed");
+        assert_eq!(tone, chip::Tone::Danger);
+        assert_eq!(title, "sheets_src: disk full");
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(vcx.debug_bounds("tile-health-5").is_some());
+        fail_sheets(&h, &mut vcx, Health::Ok);
+        assert!(h.tile.read_with(&vcx, |t, _| t.health_chip().is_none()));
+    }
+
+    /// A tile created while its source is already failed asks at once.
+    #[gpui::test]
+    fn a_tile_opened_after_its_source_failed_shows_the_chip_at_once(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        fail_sheets(
+            &h,
+            &mut vcx,
+            Health::Failed {
+                reason: "disk full".into(),
+            },
+        );
+        let (factory, frame, diagnostics) =
+            (h.factory.clone(), h.frame.clone(), h.diagnostics.clone());
+        let second = vcx.update(|window, cx| {
+            factory.create(
+                TileId(TILE + 1),
+                None,
+                FrameRef::new(frame.clone(), WorkspaceIx::FIRST),
+                diagnostics.clone(),
+                window,
+                cx,
+            )
+        });
+        let tile = second.view.downcast::<PricerTile>().unwrap();
+        assert_eq!(
+            tile.read_with(&vcx, |t, _| t.health_chip().map(|c| c.word().to_string())),
+            Some("failed".to_string())
+        );
     }
 
     pub(crate) fn centre_of(
@@ -8409,6 +8769,8 @@ pub(crate) mod tests {
             "e book",
             "autosize",
             "autosize reset",
+            // Detaching reads the frame; it never writes it.
+            "unscoped",
         ];
         for word in crate::core::commands::VERBS {
             assert!(
@@ -11746,5 +12108,6 @@ pub(crate) mod tests {
         assert_eq!(h.mode(&mut vcx), "normal");
     }
 
+    mod scope;
     mod selection;
 }

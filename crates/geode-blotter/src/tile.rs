@@ -24,6 +24,7 @@ use geode_shell::actions::ActionId;
 use geode_shell::colfit::{
     FitMetrics, FittedWidths, NOTHING_TO_FIT, SESSION_KEY, widths_from_record, widths_to_toml,
 };
+use geode_shell::diagnostics::Diagnostics;
 use geode_shell::fonts;
 use geode_shell::frame::{FrameRef, FrameVersions, FrameView, PublicationWatch};
 use geode_shell::keymap::KeyContext;
@@ -36,7 +37,8 @@ use geode_shell::tiling::TileId;
 use geode_shell::tips;
 use geode_shell::vimfind::{FindDirection, FindStyle};
 use geode_tile::following::{Delivered, FollowingQuery, FrameDoor, Promotion, Unanswered};
-use geode_tile::notice::{self, Notice};
+use geode_tile::header::{Cluster, HealthWatch, TimeRun};
+use geode_tile::notice::Notice;
 use gpui::prelude::*;
 use gpui::{
     App, ClipboardItem, Context, ElementId, Entity, IntoElement, SharedString, Window, div,
@@ -50,10 +52,9 @@ use std::time::{Duration, Instant};
 
 /// After this long without a result the header shows an in-flight glyph.
 const IN_FLIGHT_AFTER: Duration = Duration::from_millis(50);
-/// Header and footer strip heights, in pixels at the design rem
-/// (`geode_shell::shell::scale`): the strips follow the font size with
-/// the text they hold. The market-data panel's header shares the 22.
-const HEADER_HEIGHT: f32 = 22.0;
+/// Footer strip height, in pixels at the design rem
+/// (`geode_shell::shell::scale`): the strip follows the font size with the
+/// text it holds. The header's is `geode_tile::header::HEADER_HEIGHT`.
 const FOOTER_HEIGHT: f32 = 20.0;
 
 /// Default for `[app] blotter.stale_after`. The app supplies the configured
@@ -151,6 +152,14 @@ pub struct BlotterTile {
     filter_tip_selector: SharedString,
     publications: Vec<PublicationWatch>,
     last_grouping: Vec<String>,
+    /// The prepared header: dataset time runs, the frame's as-of warning,
+    /// and the datasets the health question reads.
+    header: crate::header::HeaderModel,
+    /// `GroupingSlots::label_of(&last_grouping)`, prepared where
+    /// `last_grouping` is set.
+    grouping_label: SharedString,
+    /// The header's health half over `header.datasets`.
+    health: HealthWatch,
     /// [`Self::title`]'s answer, cached so a stack-list row (which reads
     /// it every frame the list is open) never formats a `String`: kept
     /// in step with `view_name`/`last_grouping` at their one assignment
@@ -209,6 +218,7 @@ impl BlotterTile {
     pub fn new(
         tile: TileId,
         frame: FrameRef,
+        diagnostics: Entity<Diagnostics>,
         data: DataHandle,
         views: Rc<RefCell<Vec<ViewSpec>>>,
         colours: Rc<RefCell<Arc<NamedColours>>>,
@@ -408,10 +418,27 @@ impl BlotterTile {
             .detach();
         cx.observe_global::<UiSettings>(|this, cx| this.on_ui_settings(cx))
             .detach();
-        // Clock changes repaint freshness readouts and the pinned as-of chip.
-        // Render reads the clock and invalidates the chip cache when needed.
-        cx.observe_global::<geode_shell::clock::AppClock>(|_this, cx| cx.notify())
-            .detach();
+        // Clock changes re-prepare the freshness readouts; render refreshes
+        // the pinned as-of chip's own cache.
+        cx.observe_global::<geode_shell::clock::AppClock>(|this, cx| {
+            this.prepare_header(cx);
+            cx.notify();
+        })
+        .detach();
+        // The header's health question is the current snapshot's datasets
+        // (none before the first delivery; `prepare_header` re-asks as each
+        // snapshot lands). A health change re-asks only when source health
+        // or descriptions moved.
+        cx.observe(&diagnostics, |this, _, cx| {
+            let datasets: Vec<&str> = this.header.datasets.iter().map(String::as_str).collect();
+            if this
+                .health
+                .refresh(cx, |d| d.health_for_datasets(&datasets))
+            {
+                cx.notify();
+            }
+        })
+        .detach();
 
         let title = Self::compute_title(&view_name, &[]);
 
@@ -441,6 +468,9 @@ impl BlotterTile {
             filter_tip_selector,
             publications: Vec::new(),
             last_grouping: Vec::new(),
+            header: Default::default(),
+            grouping_label: GroupingSlots::label_of(&[]).into(),
+            health: HealthWatch::new(diagnostics, tile),
             title,
             stack: None,
             delivered_at: None,
@@ -612,7 +642,7 @@ impl BlotterTile {
                 .publications
                 .iter()
                 .zip(datasets())
-                .all(|(watch, dataset)| watch.matches(dataset, None))
+                .all(|(watch, dataset)| watch.is_for(dataset, None))
         {
             return;
         }
@@ -702,8 +732,26 @@ impl BlotterTile {
                 )));
             }
             self.take_selection_notice(cx);
+            self.prepare_header(cx);
         }
         self.delivered_at = Some(Instant::now());
+    }
+
+    /// Rebuild the prepared header from the delegate's snapshot. The health
+    /// question moves with the snapshot's datasets: re-asked whenever they
+    /// differ from the last snapshot's, with no health change needed.
+    fn prepare_header(&mut self, cx: &mut Context<Self>) {
+        let clock = crate::header::app_clock(cx);
+        let next = match self.table.read(cx).delegate().snapshot.as_ref() {
+            Some(s) => crate::header::HeaderModel::prepare(s.provenance(), clock),
+            None => crate::header::HeaderModel::default(),
+        };
+        let moved = next.datasets != self.header.datasets;
+        self.header = next;
+        if moved {
+            let datasets: Vec<&str> = self.header.datasets.iter().map(String::as_str).collect();
+            self.health.reask(cx, |d| d.health_for_datasets(&datasets));
+        }
     }
 
     fn requery(&mut self, cx: &mut Context<Self>) {
@@ -795,6 +843,7 @@ impl BlotterTile {
         let submitted = Instant::now();
         let tag = self.following.begin(versions, submitted);
         self.last_grouping = grouping.clone();
+        self.grouping_label = GroupingSlots::label_of(&self.last_grouping).into();
         self.title = Self::compute_title(&self.view_name, &self.last_grouping);
         let key = QueryKey(self.tile.0);
         let queued = self.data.query(QueryParams {
@@ -1611,27 +1660,22 @@ impl BlotterTile {
         self.error.as_ref().map(|e| e.text().to_string())
     }
 
-    /// Freshness readouts using render's clock lookup, formatting, and
-    /// `as_of` ordering. Tests can inspect the text without a pixel reader.
+    /// Freshness readouts as the header paints them, read from the
+    /// prepared model. Tests can inspect the text without a pixel reader.
     #[cfg(test)]
-    pub(crate) fn freshness_texts(&self, cx: &App) -> Vec<String> {
-        let clock = cx
-            .try_global::<geode_shell::clock::AppClock>()
-            .map(|c| c.0)
-            .unwrap_or_else(|| geode_core::clock::Clock::machine().0);
-        let Some(snapshot) = self.table.read(cx).delegate().snapshot.clone() else {
-            return Vec::new();
-        };
-        let p = snapshot.provenance();
-        let mut datasets: Vec<_> = p.datasets.iter().collect();
-        datasets.sort_by(|a, b| a.as_of.cmp(&b.as_of));
-        datasets
-            .into_iter()
-            .map(|f| match &f.as_of {
-                Some(t) => format!("{} {}", f.dataset, short_time(t, clock)),
-                None => format!("{} \u{2014}", f.dataset),
-            })
+    pub(crate) fn freshness_texts(&self) -> Vec<String> {
+        self.header
+            .times
+            .iter()
+            .map(|t| t.label.to_string())
             .collect()
+    }
+
+    /// The header's health chip, if a source feeding one of the current
+    /// snapshot's datasets is unhealthy.
+    #[cfg(test)]
+    pub(crate) fn health_chip(&self) -> Option<&geode_tile::header::HealthChip> {
+        self.health.chip()
     }
 }
 
@@ -1657,7 +1701,7 @@ fn computed_view_refusal(view: &ViewSpec) -> String {
 
 /// Format an RFC 3339 freshness timestamp as `HH:MM` on the trader's clock.
 /// Echo malformed values intact so unexpected input cannot panic by slicing.
-fn short_time(t: &str, clock: geode_core::clock::Clock) -> String {
+pub(crate) fn short_time(t: &str, clock: geode_core::clock::Clock) -> String {
     match chrono::DateTime::parse_from_rfc3339(t) {
         Ok(at) => clock.hm(at.to_utc()),
         Err(_) => t.to_string(),
@@ -1707,10 +1751,7 @@ impl gpui::Render for BlotterTile {
         }
         // Independently hosted tiles may have no `AppClock`; use the machine
         // clock as a fallback.
-        let clock = cx
-            .try_global::<geode_shell::clock::AppClock>()
-            .map(|c| c.0)
-            .unwrap_or_else(|| geode_core::clock::Clock::machine().0);
+        let clock = crate::header::app_clock(cx);
         // A pinned instant's cached text depends on both the local date and
         // clock. Rebuild after midnight or a zone change, even if the zone
         // change leaves the date unchanged.
@@ -1727,7 +1768,6 @@ impl gpui::Render for BlotterTile {
         });
         let theme = cx.theme();
         let delegate = self.table.read(cx).delegate();
-        let snapshot = delegate.snapshot.clone();
         // Resolve chip and warning text through the shell's semantic paint
         // helper so theme foreground and fill remain a readable pair.
         let warn_chip = chip::chip_paint(theme, Tone::Warning);
@@ -1736,33 +1776,22 @@ impl gpui::Render for BlotterTile {
         let neutral_chip = chip::chip_paint(theme, Tone::Neutral);
         let warn_text = chip::chip_paint(theme, Tone::WarningText).text;
 
-        // Header strip: view · grouping · markers · freshness · AS OF · … · error
-        let mut header = h_flex()
-            .w_full()
-            .h(scale::design(HEADER_HEIGHT))
+        // Header: stack marker, then view · grouping · chips · AS OF · … on
+        // the left; the notice, dataset times and health chip in the shared
+        // cluster.
+        let mut left = h_flex()
             .items_center()
             .gap_3()
-            .px_2()
-            .text_sm()
-            .font_family(fonts::MONO)
-            .text_color(theme.muted_foreground)
-            .border_b_1()
-            .border_color(theme.border)
-            .debug_selector(|| format!("blotter-header-{}", self.tile.0));
-        // The shared stack marker appears first when the tile belongs to a
-        // stack of at least two members.
-        header = header
-            .children(self.stack.as_ref().and_then(|s| s.marker(theme, self.tile)))
             .child(
                 div()
                     .text_color(theme.foreground)
                     .child(self.view_name.clone()),
             )
-            .child(div().child(GroupingSlots::label_of(&self.last_grouping)));
+            .child(div().child(self.grouping_label.clone()));
         match &self.pin {
             Pin::None => {}
             _ => {
-                header = header.child(
+                left = left.child(
                     div()
                         .text_color(neutral_chip.text)
                         .when_some(neutral_chip.fill, |el, fill| el.bg(fill))
@@ -1773,7 +1802,7 @@ impl gpui::Render for BlotterTile {
             }
         }
         if self.unscoped {
-            header = header.child(
+            left = left.child(
                 div()
                     .id(ElementId::NamedInteger(
                         SharedString::new_static("blotter-unscoped"),
@@ -1793,7 +1822,7 @@ impl gpui::Render for BlotterTile {
             );
         }
         if !self.tile_scope.is_empty() {
-            header = header.child(
+            left = left.child(
                 div()
                     .id(ElementId::NamedInteger(
                         SharedString::new_static("blotter-filtered"),
@@ -1816,7 +1845,7 @@ impl gpui::Render for BlotterTile {
         // A pinned as-of is a neutral state chosen by the trader. Read it from
         // tile state so the chip updates immediately, before the query returns.
         if let TileAsOf::Pinned(_) = &self.tile_as_of {
-            header = header.child(
+            left = left.child(
                 div()
                     .id(ElementId::NamedInteger(
                         SharedString::new_static("blotter-asof"),
@@ -1836,48 +1865,50 @@ impl gpui::Render for BlotterTile {
                     )),
             );
         }
-        if let Some(snapshot) = &snapshot {
-            let p = snapshot.provenance();
-            let mut datasets: Vec<_> = p.datasets.iter().collect();
-            datasets.sort_by(|a, b| a.as_of.cmp(&b.as_of));
-            let now = chrono::Utc::now();
-            for f in datasets {
-                let text = match &f.as_of {
-                    Some(t) => format!("{} {}", f.dataset, short_time(t, clock)),
-                    None => format!("{} —", f.dataset),
-                };
-                let stale = self.is_stale(f.as_of.as_deref(), now);
-                header = header.child(div().when(stale, |el| el.text_color(warn_text)).child(text));
-            }
-            // Historical request provenance warns only while following the
-            // frame; a pinned tile already shows its own neutral as-of chip.
-            if matches!(self.tile_as_of, TileAsOf::Follow)
-                && let Some(req) = &p.as_of_request
-            {
-                let text = chrono::DateTime::parse_from_rfc3339(req)
-                    .map(|t| format!("AS OF {}", clock.local(t.to_utc()).format("%Y-%m-%d %H:%M")))
-                    .unwrap_or_else(|_| format!("AS OF {}", req.get(..16).unwrap_or(req)));
-                header = header.child(
-                    div()
-                        .text_color(warn_chip.text)
-                        .when_some(warn_chip.fill, |el, fill| el.bg(fill))
-                        .px_1()
-                        .rounded(theme.radius_tokens().sm)
-                        .debug_selector(|| format!("blotter-asof-frame-{}", self.tile.0))
-                        .child(text),
-                );
-            }
+        // Historical request provenance warns only while following the
+        // frame; a pinned tile already shows its own neutral as-of chip.
+        if matches!(self.tile_as_of, TileAsOf::Follow)
+            && let Some(text) = &self.header.frame_as_of
+        {
+            left = left.child(
+                div()
+                    .text_color(warn_chip.text)
+                    .when_some(warn_chip.fill, |el, fill| el.bg(fill))
+                    .px_1()
+                    .rounded(theme.radius_tokens().sm)
+                    .debug_selector(|| format!("blotter-asof-frame-{}", self.tile.0))
+                    .child(text.clone()),
+            );
         }
         if self
             .following
             .in_flight_since()
             .is_some_and(|t| t.elapsed() > IN_FLIGHT_AFTER)
         {
-            header = header.child(div().child("…"));
+            left = left.child(div().child("…"));
         }
-        if let Some(n) = &self.error {
-            header = header.child(notice::render(n, theme));
-        }
+        let now = chrono::Utc::now();
+        let mut cluster = Cluster::new(self.tile);
+        cluster.notices.extend(self.error.clone());
+        cluster.times = self
+            .header
+            .times
+            .iter()
+            .map(|t| TimeRun {
+                label: t.label.clone(),
+                stale_label: None,
+                stale: self.is_stale(t.as_of.as_deref(), now),
+            })
+            .collect();
+        cluster.health = self.health.chip();
+        let header = geode_tile::header::frame(
+            self.stack.as_ref().and_then(|s| s.marker(theme, self.tile)),
+            left,
+            cluster,
+            theme,
+        )
+        .font_family(fonts::MONO)
+        .debug_selector(|| format!("blotter-header-{}", self.tile.0));
 
         // Footer: counts and legends.
         let mut footer = h_flex()
@@ -1961,17 +1992,19 @@ mod tests {
     use geode_core::attribution::{Attribution, ScopeSemantics};
     use geode_core::config::{LayerDoc, merge_docs};
     use geode_core::groupings::GroupingSlots;
+    use geode_core::log::LogLevels;
     use geode_core::query::{QueryKey, QueryOutcome};
     use geode_core::scopes::SavedScopes;
     use geode_core::snapshot::{ColumnMeta, Freshness, Provenance, Snapshot, TestColumn};
     use geode_data::{DataHandle, Request};
     use geode_shell::actions::ActionId;
+    use geode_shell::diagnostics::{Diagnostics, Health, SourceSummary};
     use geode_shell::frame::{FLIP_DEADLINE, Frame, FrameRef, Publish};
     use geode_shell::module::{FindEvent, TileContent};
     use geode_shell::tiling::TileId;
     use geode_shell::tiling::WorkspaceIx;
     use geode_shell::vimfind::FindStyle;
-    use geode_tile::notice::Notice;
+    use geode_tile::notice::{self, Notice};
     use gpui::px;
     use gpui::{Modifiers, MouseButton};
     use std::sync::Arc;
@@ -2216,6 +2249,8 @@ mod tests {
     struct Harness {
         tile: Entity<BlotterTile>,
         frame: Entity<Frame>,
+        /// The shared diagnostics the tile observes for its health chip.
+        diagnostics: Entity<Diagnostics>,
         requests: Receiver<Request>,
         /// The tile's own handle. `DataHandle::shutdown` on it is how a
         /// test makes the next submit be REFUSED (the bridge's own
@@ -2257,11 +2292,13 @@ mod tests {
                     // `f.shared_mut()`. A test that pins must reach the tile's
                     // lane through its `FrameRef` instead.
                     let frame = cx.new(|_| Frame::new(slots(), SavedScopes::new(), None));
+                    let diagnostics = cx.new(|_| Diagnostics::new(LogLevels::default()));
                     cx.new(|cx| {
                         let tile = cx.new(|cx| {
                             BlotterTile::new(
                                 TileId(7),
                                 FrameRef::new(frame.clone(), WorkspaceIx::FIRST),
+                                diagnostics.clone(),
                                 data.clone(),
                                 Rc::new(RefCell::new(views())),
                                 Rc::new(RefCell::new(Arc::new(NamedColours::default()))),
@@ -2274,16 +2311,19 @@ mod tests {
                                 cx,
                             )
                         });
-                        Host { tile, frame }
+                        Host {
+                            tile,
+                            frame,
+                            diagnostics,
+                        }
                     })
                 })
             })
             .unwrap();
         let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
-        let (tile, frame) = window
-            .root(&mut vcx)
-            .unwrap()
-            .read_with(&vcx, |h, _| (h.tile.clone(), h.frame.clone()));
+        let (tile, frame, diagnostics) = window.root(&mut vcx).unwrap().read_with(&vcx, |h, _| {
+            (h.tile.clone(), h.frame.clone(), h.diagnostics.clone())
+        });
         vcx.update(|window, cx| {
             let _ = window.draw(cx);
         });
@@ -2291,6 +2331,7 @@ mod tests {
             Harness {
                 tile,
                 frame,
+                diagnostics,
                 requests,
                 data,
             },
@@ -2322,11 +2363,13 @@ mod tests {
             .update(|cx| {
                 cx.open_window(gpui::WindowOptions::default(), |window, cx| {
                     let frame = cx.new(|_| Frame::new(slots(), SavedScopes::new(), None));
+                    let diagnostics = cx.new(|_| Diagnostics::new(LogLevels::default()));
                     cx.new(|cx| {
                         let tile = cx.new(|cx| {
                             BlotterTile::new(
                                 TileId(7),
                                 FrameRef::new(frame.clone(), WorkspaceIx::FIRST),
+                                diagnostics.clone(),
                                 data.clone(),
                                 Rc::new(RefCell::new(views)),
                                 Rc::new(RefCell::new(Arc::new(colours))),
@@ -2339,16 +2382,19 @@ mod tests {
                                 cx,
                             )
                         });
-                        Host { tile, frame }
+                        Host {
+                            tile,
+                            frame,
+                            diagnostics,
+                        }
                     })
                 })
             })
             .unwrap();
         let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
-        let (tile, frame) = window
-            .root(&mut vcx)
-            .unwrap()
-            .read_with(&vcx, |h, _| (h.tile.clone(), h.frame.clone()));
+        let (tile, frame, diagnostics) = window.root(&mut vcx).unwrap().read_with(&vcx, |h, _| {
+            (h.tile.clone(), h.frame.clone(), h.diagnostics.clone())
+        });
         vcx.update(|window, cx| {
             let _ = window.draw(cx);
         });
@@ -2356,6 +2402,7 @@ mod tests {
             Harness {
                 tile,
                 frame,
+                diagnostics,
                 requests,
                 data,
             },
@@ -2587,11 +2634,14 @@ mod tests {
                     let colours = Rc::new(RefCell::new(Arc::new(NamedColours::default())));
                     let schema = Rc::new(RefCell::new(schema()));
                     let dims = Rc::new(RefCell::new(DerivedDimensions::default()));
+                    // One diagnostics entity, shared as in production.
+                    let diagnostics = cx.new(|_| Diagnostics::new(LogLevels::default()));
                     cx.new(|cx| {
                         let a = cx.new(|cx| {
                             BlotterTile::new(
                                 TileId(7),
                                 FrameRef::new(frame.clone(), WorkspaceIx::FIRST),
+                                diagnostics.clone(),
                                 data.clone(),
                                 views.clone(),
                                 colours.clone(),
@@ -2608,6 +2658,7 @@ mod tests {
                             BlotterTile::new(
                                 TileId(8),
                                 FrameRef::new(frame.clone(), WorkspaceIx::FIRST),
+                                diagnostics.clone(),
                                 data.clone(),
                                 views.clone(),
                                 colours.clone(),
@@ -2640,6 +2691,7 @@ mod tests {
     struct Host {
         tile: Entity<BlotterTile>,
         frame: Entity<Frame>,
+        diagnostics: Entity<Diagnostics>,
     }
     impl gpui::Render for Host {
         fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
@@ -2699,8 +2751,10 @@ mod tests {
     }
 
     /// Freshness text uses the installed `AppClock` and reflects a later zone
-    /// change. The helper mirrors render's uncached formatting; assertions use
-    /// known Tokyo/UTC times independently of `Clock` formatting.
+    /// change. The helper reads the prepared header model render paints, so
+    /// the zone change shows only if the clock observer re-prepares it;
+    /// assertions use known Tokyo/UTC times independently of `Clock`
+    /// formatting.
     #[gpui::test]
     fn the_freshness_readout_reads_the_installed_app_clock_and_follows_a_later_change(
         cx: &mut gpui::TestAppContext,
@@ -2735,7 +2789,7 @@ mod tests {
         ));
         deliver(&h, &mut cx, tag, Ok(snapshot));
 
-        let before = h.tile.read_with(&cx, |t, cx| t.freshness_texts(cx));
+        let before = h.tile.read_with(&cx, |t, _| t.freshness_texts());
         assert_eq!(
             before,
             vec!["risk 23:00".to_string()],
@@ -2746,7 +2800,7 @@ mod tests {
             cx.set_global(geode_shell::clock::AppClock(geode_core::clock::Clock::utc()))
         });
         cx.run_until_parked();
-        let after = h.tile.read_with(&cx, |t, cx| t.freshness_texts(cx));
+        let after = h.tile.read_with(&cx, |t, _| t.freshness_texts());
         assert_eq!(
             after,
             vec!["risk 14:00".to_string()],
@@ -6948,5 +7002,158 @@ mod tests {
             vec!["", "M1", "M2"],
             "unrelated data must not discard a valid staged result"
         );
+    }
+
+    fn snapshot_over(datasets: &[&str]) -> Arc<Snapshot> {
+        let meta = ColumnMeta {
+            name: "lhu".into(),
+            attribution_by_depth: vec![Attribution::Additive],
+            scope_semantics: ScopeSemantics::Direct,
+            summable: false,
+            mixed_flag: None,
+        };
+        let provenance = Provenance {
+            datasets: datasets
+                .iter()
+                .map(|d| Freshness {
+                    dataset: (*d).into(),
+                    as_of: Some("2026-09-12T14:00:00Z".into()),
+                    generation: Some(1),
+                })
+                .collect(),
+            as_of_request: None,
+        };
+        Arc::new(Snapshot::for_tests_with_provenance(
+            vec![(meta, TestColumn::Dict(vec![Some("X".into())]))],
+            1,
+            provenance,
+        ))
+    }
+
+    fn report(h: &Harness, cx: &mut gpui::VisualTestContext, source: &str, health: Health) {
+        h.diagnostics.update(cx, |d, cx| {
+            d.note_health(
+                source,
+                health,
+                "why".into(),
+                std::time::SystemTime::UNIX_EPOCH,
+            );
+            cx.notify();
+        });
+        cx.run_until_parked();
+    }
+
+    fn chip_word(h: &Harness, cx: &gpui::VisualTestContext) -> Option<String> {
+        h.tile
+            .read_with(cx, |t, _| t.health_chip().map(|c| c.word().to_string()))
+    }
+
+    /// The datasets come from the delivered snapshot's provenance; a real
+    /// health report reaches the header through the tile's own observer.
+    #[gpui::test]
+    fn a_failed_source_of_a_delivered_dataset_shows_the_chip(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.diagnostics.update(&mut cx, |d, cx| {
+            d.describe_source("risk_src", SourceSummary::for_dataset("risk"));
+            d.describe_source("other_src", SourceSummary::for_dataset("other"));
+            cx.notify();
+        });
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let tag = next_query(&h.requests).tag;
+        deliver(&h, &mut cx, tag, Ok(snapshot_over(&["risk"])));
+        report(
+            &h,
+            &mut cx,
+            "other_src",
+            Health::Failed { reason: "x".into() },
+        );
+        assert_eq!(chip_word(&h, &cx), None);
+        report(
+            &h,
+            &mut cx,
+            "risk_src",
+            Health::Failed {
+                reason: "torn".into(),
+            },
+        );
+        assert_eq!(chip_word(&h, &cx), Some("failed".into()));
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds("tile-health-7").is_some());
+        report(&h, &mut cx, "risk_src", Health::Ok);
+        assert_eq!(chip_word(&h, &cx), None);
+    }
+
+    /// A source already failed before the first snapshot shows the chip
+    /// on that delivery alone: the landing snapshot re-asks, with no
+    /// further health report to prompt the observer.
+    #[gpui::test]
+    fn a_source_failed_before_the_first_snapshot_shows_the_chip_on_delivery(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut cx) = open(cx);
+        report_described(&h, &mut cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let tag = next_query(&h.requests).tag;
+        assert_eq!(chip_word(&h, &cx), None, "no snapshot: nothing is read");
+        deliver(&h, &mut cx, tag, Ok(snapshot_over(&["risk"])));
+        assert_eq!(chip_word(&h, &cx), Some("failed".into()));
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds("tile-health-7").is_some());
+    }
+
+    fn report_described(h: &Harness, cx: &mut gpui::VisualTestContext) {
+        h.diagnostics.update(cx, |d, cx| {
+            d.describe_source("risk_src", SourceSummary::for_dataset("risk"));
+            d.note_health(
+                "risk_src",
+                Health::Failed {
+                    reason: "torn".into(),
+                },
+                "torn".into(),
+                std::time::SystemTime::UNIX_EPOCH,
+            );
+            cx.notify();
+        });
+        cx.run_until_parked();
+    }
+
+    /// A later snapshot over other datasets moves the question with it.
+    #[gpui::test]
+    fn a_new_snapshots_datasets_move_the_chip(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.diagnostics.update(&mut cx, |d, cx| {
+            d.describe_source("risk_src", SourceSummary::for_dataset("risk"));
+            d.describe_source("pnl_src", SourceSummary::for_dataset("pnl"));
+            cx.notify();
+        });
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let tag = next_query(&h.requests).tag;
+        deliver(&h, &mut cx, tag, Ok(snapshot_over(&["risk"])));
+        report(
+            &h,
+            &mut cx,
+            "risk_src",
+            Health::Failed {
+                reason: "torn".into(),
+            },
+        );
+        assert_eq!(chip_word(&h, &cx), Some("failed".into()));
+        h.tile.update(&mut cx, |t, cx| t.requery(cx));
+        let tag = next_query(&h.requests).tag;
+        deliver(&h, &mut cx, tag, Ok(snapshot_over(&["pnl"])));
+        assert_eq!(chip_word(&h, &cx), None, "risk is no longer read");
+        report(
+            &h,
+            &mut cx,
+            "pnl_src",
+            Health::Degraded {
+                reason: "late".into(),
+            },
+        );
+        assert_eq!(chip_word(&h, &cx), Some("degraded".into()));
     }
 }

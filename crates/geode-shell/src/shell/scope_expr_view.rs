@@ -813,7 +813,7 @@ fn build(
         column = column.child(
             div()
                 .text_sm()
-                .text_color(chip::chip_paint(theme, chip::Tone::DangerText).text)
+                .text_color(chip::chip_paint_on(theme, chip::Tone::DangerText, theme.popover).text)
                 .debug_selector(|| "scope-expr-error".to_string())
                 .child(err.clone()),
         );
@@ -867,7 +867,7 @@ fn staged_chips(
 ) -> AnyElement {
     let theme = cx.theme();
     let defined = shell.frame.read(cx).named_expressions();
-    let chip_fg = theme.muted_foreground;
+    let chip_fg = chip::text_on(theme.muted_foreground, Some(theme.muted), theme.popover);
     let chip_bg = theme.muted;
     // The `×` occludes the chip body, so its hover is measured against
     // the chip's rest fill on the modal panel (`popover`).
@@ -877,7 +877,7 @@ fn staged_chips(
         theme.popover,
         chip_fg,
     );
-    let broken = chip::chip_paint(theme, chip::Tone::Danger);
+    let broken = chip::chip_paint_on(theme, chip::Tone::Danger, theme.popover);
     let broken_fill = broken.fill.unwrap_or(theme.danger);
     let broken_states = control::for_chip(theme, &broken, theme.popover);
     let mut row = h_flex().gap_1().flex_wrap().items_center();

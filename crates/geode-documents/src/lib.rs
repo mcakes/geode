@@ -2,9 +2,11 @@
 //! GPUI state. The app registers each kind with the data service, which sees
 //! only `geode_core::document::DocumentKind`.
 
+pub mod chain;
 pub mod cvi;
 pub mod dividend;
 
+pub use chain::OptionChainKind;
 pub use cvi::CviKind;
 pub use dividend::DividendKind;
 
@@ -16,5 +18,9 @@ use std::sync::Arc;
 /// registry hands the same kind to several sources at once and the
 /// trait is the only thing `geode-data` sees.
 pub fn builtin_kinds() -> Vec<Arc<dyn DocumentKind>> {
-    vec![Arc::new(CviKind), Arc::new(DividendKind)]
+    vec![
+        Arc::new(CviKind),
+        Arc::new(DividendKind),
+        Arc::new(OptionChainKind),
+    ]
 }

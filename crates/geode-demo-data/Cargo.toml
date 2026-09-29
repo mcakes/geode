@@ -9,7 +9,9 @@ rand = "0.9"
 serde_json = "1.0.151"
 # Document generators return core DocumentRows; XML serialization and source
 # I/O belong to their callers. No dependency on geode-documents or geode-data.
+# geode-pricing, a calculation leaf, prices the demo option chains.
 geode-core.workspace = true
+geode-pricing.workspace = true
 chrono = "0.4.42"
 
 [lib]

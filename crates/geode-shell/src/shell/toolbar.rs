@@ -221,7 +221,7 @@ pub fn toolbar(
     let theme = cx.theme();
     // Muted/foreground for the rest (no raw colours) — the same scheme
     // `Kbd` paints its own key chips with.
-    let chip_fg = theme.muted_foreground;
+    let chip_fg = chip::text_on(theme.muted_foreground, Some(theme.muted), theme.title_bar);
     let chip_bg = theme.muted;
     let chip_radius = theme.radius;
     let glyph_radius = theme.radius_tokens().sm;
@@ -315,7 +315,7 @@ pub fn toolbar(
     // scoped by one refuses to query, so it must read as an error. Its
     // `×` pairs with the danger fill as the muted chips' `×` pairs with
     // theirs.
-    let broken = chip::chip_paint(theme, chip::Tone::Danger);
+    let broken = chip::chip_paint_on(theme, chip::Tone::Danger, theme.title_bar);
     let broken_fill = broken.fill.unwrap_or(theme.danger);
     let broken_states = control::for_chip(theme, &broken, theme.title_bar);
     for named in &model.named {
@@ -466,7 +466,7 @@ pub fn toolbar(
         // rather than `danger_foreground` over the tint by hand: that
         // token is the background family at the pinned rev, under 3:1 on
         // 31 of 44 bundled themes over its own 25% tint.
-        let impossible = chip::chip_paint(theme, chip::Tone::Danger);
+        let impossible = chip::chip_paint_on(theme, chip::Tone::Danger, theme.title_bar);
         chips_row = chips_row.child(
             chip(
                 "scope-impossible-chip".into(),
@@ -632,7 +632,7 @@ pub fn toolbar(
     // Pinned paints solid in the theme's primary (`Tone::Active`) so the
     // on state reads at a glance; unpinned is a bare verb like `+` and save.
     let (pin_fg, pin_bg, pin_states) = if pin.pinned {
-        let pinned_paint = chip::chip_paint(theme, chip::Tone::Active);
+        let pinned_paint = chip::chip_paint_on(theme, chip::Tone::Active, theme.title_bar);
         (
             pinned_paint.text,
             pinned_paint.fill,
@@ -685,7 +685,7 @@ pub fn toolbar(
                 // The as-of chip opens its picker and carries the row's warning tone.
                 // The tooltip title shows the full timestamp; the badge uses the
                 // compact label. Both strings are shared values from the cached model.
-                let as_of = chip::chip_paint(theme, chip::Tone::Warning);
+                let as_of = chip::chip_paint_on(theme, chip::Tone::Warning, theme.title_bar);
                 let as_of_states = control::for_chip(theme, &as_of, theme.title_bar);
                 let on_as_of = on_as_of.clone();
                 el.child(

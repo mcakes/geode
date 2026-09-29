@@ -14,6 +14,7 @@ Current behavior and rationale:
 |---|---|
 | `cvi` | `CviKind`: the CVI parameter document (`marketData/underlying`, `cviParams/anchorDate`, `spotRef`, `nodes/node*`, `slices/slice*` with a `term`, one `forward`/`atm`/`skew` per slice and one `param` per node). |
 | `dividend` | `DividendKind`: currency, schedule date, and dividend rows carrying ex date, announced date, pay date, amount, and status. `mint_ids` derives row labels from ex date and same-date order; ids are not carried on the wire. |
+| `chain` | `OptionChainKind`: one expiry's option chain, keyed `underlying_ref, expiry` (`marketData/underlying`, `optionChain/expiry`), with `forward`, `spotRef` and `quoteTime` attributes and one `quote` per strike carrying bid, ask and mid vols and bid and ask prices. |
 
 The parsers walk `quick_xml` events and return columnar `DocumentRows`.
 They report ragged CVI slices with both counts and collect paths for skipped
@@ -35,6 +36,20 @@ cargo bench -p geode-documents     # document parse and write
 - CVI and dividend wire tag names remain unverified against the desk's XSD.
   `SLICE_VALUES` in `src/cvi.rs` and `TAGS` in `src/dividend.rs` pair wire
   tags with column names for both parser and writer.
+- Option-chain quotes are sorted by strike at parse, and a repeated strike is
+  refused naming it, so a chain's strikes are always strictly ascending. Every
+  quote must carry all five values: vols arrive computed upstream, so a quote
+  missing one is refused rather than filled by averaging bid and ask. A
+  negative vol or price and a non-positive `spotRef` are refused as
+  impossible; zero values and crossed or locked quotes (bid vol above ask vol,
+  mid outside bid and ask) are plausible market states and pass. `quoteTime`
+  must be an RFC 3339 time and is stored as its wire text, since document
+  columns cannot be timestamps. The writer refuses anything the parser would
+  never produce (strikes not strictly ascending, a non-positive strike,
+  forward or spot reference, a negative vol or price, an expiry not spelled
+  `YYYY-MM-DD`, a blank or padded underlying, a non-RFC 3339 quote time, no
+  rows), so it emits only what the parser could have produced. `TAGS` in `src/chain.rs` pairs the quote's wire
+  tags with column names; they are unverified against any desk XSD.
 - `dividend::STATUSES` is the closed status vocabulary the dividend kind
   parses and writes. The builtin dividend panel's `status` `choices`
   (`geode-marketdata`'s `core/builtin_panels.toml`) must list the same

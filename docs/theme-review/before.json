@@ -1,0 +1,771 @@
+{
+  "Ayu Light": {
+    "name": "Ayu Light",
+    "mode": "light",
+    "colors": {
+      "background": "#FCFCFC",
+      "foreground": "#5c6166",
+      "primary.background": "#55b4d3",
+      "primary.foreground": "#FAFAFA",
+      "secondary.background": "#ECECED",
+      "secondary.foreground": "#5C6773",
+      "title_bar.background": "#ECECED",
+      "base.yellow": "#F1AD49",
+      "base.red": "#F07171",
+      "base.blue": "#55b4d3"
+    }
+  },
+  "Ayu Dark": {
+    "name": "Ayu Dark",
+    "mode": "dark",
+    "colors": {
+      "background": "#0D1016",
+      "foreground": "#B3B1AD",
+      "primary.background": "#5ac1fe",
+      "primary.foreground": "#1F2430",
+      "secondary.background": "#1F2127",
+      "secondary.foreground": "#B3B1AD",
+      "title_bar.background": "#16191F",
+      "base.yellow": "#FEB454",
+      "base.red": "#ef7177",
+      "base.blue": "#5ac1fe"
+    }
+  },
+  "TradingView Dark": {
+    "name": "TradingView Dark",
+    "mode": "dark",
+    "colors": {
+      "background": "#131722",
+      "chart.1": "#2962FF",
+      "chart.2": "#26A69A",
+      "chart.3": "#EF5350",
+      "chart.4": "#FF9800",
+      "chart.5": "#AB47BC",
+      "danger.background": "#EF5350",
+      "foreground": "#D1D4DC",
+      "primary.background": "#2962FF",
+      "primary.foreground": "#FFFFFF",
+      "secondary.background": "#1E222D",
+      "secondary.foreground": "#D1D4DC",
+      "title_bar.background": "#1E222D",
+      "warning.background": "#FF9800",
+      "base.red": "#EF5350",
+      "base.yellow": "#FFB74D",
+      "base.blue": "#2962FF"
+    }
+  },
+  "Jellybeans": {
+    "name": "Jellybeans",
+    "mode": "dark",
+    "colors": {
+      "background": "#151515",
+      "foreground": "#E8E8D3",
+      "primary.background": "#97bedc",
+      "primary.foreground": "#151515",
+      "secondary.background": "#2F2F2F",
+      "secondary.foreground": "#e8e8e8",
+      "title_bar.background": "#101010",
+      "base.red": "#e27373",
+      "base.yellow": "#ffba7b",
+      "base.blue": "#97bedc"
+    }
+  },
+  "macOS Classic Light": {
+    "name": "macOS Classic Light",
+    "mode": "light",
+    "colors": {
+      "background": "#F9F9F9",
+      "foreground": "#000000",
+      "primary.background": "#0060de",
+      "primary.foreground": "#FFFFFF",
+      "secondary.background": "#E0E0E0",
+      "secondary.foreground": "#000000",
+      "title_bar.background": "#F7F7F7",
+      "base.yellow": "#B59A00",
+      "base.red": "#d21f07",
+      "base.blue": "#0060de"
+    }
+  },
+  "macOS Classic Dark": {
+    "name": "macOS Classic Dark",
+    "mode": "dark",
+    "colors": {
+      "background": "#131313",
+      "foreground": "#DEDEDE",
+      "danger.background": "#E44A4F",
+      "primary.background": "#077CFD",
+      "primary.foreground": "#F2F9FF",
+      "secondary.background": "#353535",
+      "secondary.foreground": "#DEDEDE",
+      "title_bar.background": "#171717",
+      "base.blue": "#419CFF",
+      "base.red": "#FF5257",
+      "base.yellow": "#FFC600"
+    }
+  },
+  "Catppuccin Latte": {
+    "name": "Catppuccin Latte",
+    "mode": "light",
+    "colors": {
+      "background": "#E5E9EF",
+      "foreground": "#4c4f69",
+      "primary.background": "#7287fd",
+      "primary.foreground": "#EFF1F5",
+      "secondary.background": "#dce0e8",
+      "secondary.foreground": "#4c4f69",
+      "title_bar.background": "#DCE0E8",
+      "base.red": "#d26a53",
+      "base.yellow": "#df8e1d",
+      "base.blue": "#78acdc"
+    }
+  },
+  "Catppuccin Frappe": {
+    "name": "Catppuccin Frappe",
+    "mode": "dark",
+    "colors": {
+      "background": "#232634",
+      "foreground": "#c6d0f5",
+      "primary.background": "#8caaee",
+      "primary.foreground": "#232634",
+      "secondary.background": "#414559",
+      "secondary.foreground": "#c6d0f5",
+      "title_bar.background": "#1D202B",
+      "base.red": "#e78284",
+      "base.yellow": "#e7d682",
+      "base.blue": "#8caaee"
+    }
+  },
+  "Catppuccin Macchiato": {
+    "name": "Catppuccin Macchiato",
+    "mode": "dark",
+    "colors": {
+      "background": "#1E2030",
+      "danger.background": "#ed8796",
+      "foreground": "#cad3f5",
+      "primary.background": "#8aadf4",
+      "primary.foreground": "#24273a",
+      "secondary.background": "#363a4f",
+      "secondary.foreground": "#cad3f5",
+      "title_bar.background": "#171926",
+      "base.red": "#ed8796",
+      "base.yellow": "#eed49f",
+      "base.blue": "#8aadf4"
+    }
+  },
+  "Catppuccin Mocha": {
+    "name": "Catppuccin Mocha",
+    "mode": "dark",
+    "colors": {
+      "background": "#181825",
+      "danger.background": "#f38ba8",
+      "foreground": "#cdd6f4",
+      "primary.background": "#89b4fa",
+      "primary.foreground": "#1e1e2e",
+      "secondary.background": "#302d41",
+      "secondary.foreground": "#cdd6f4",
+      "title_bar.background": "#11111B",
+      "base.red": "#f38ba8",
+      "base.yellow": "#f9e2af",
+      "base.blue": "#89b4fa"
+    }
+  },
+  "Spaceduck": {
+    "name": "Spaceduck",
+    "mode": "dark",
+    "colors": {
+      "background": "#0F111B",
+      "foreground": "#a3a49d",
+      "primary.background": "#089CC5",
+      "primary.foreground": "#ecf0c1",
+      "secondary.background": "#242547",
+      "secondary.foreground": "#a3a49d",
+      "title_bar.background": "#141724",
+      "base.red": "#e33400",
+      "base.blue": "#00a3cc",
+      "base.yellow": "#b89c00"
+    }
+  },
+  "Alduin": {
+    "name": "Alduin",
+    "mode": "dark",
+    "colors": {
+      "background": "#1C1C1C",
+      "danger.background": "#cc241d",
+      "foreground": "#9E9E9E",
+      "primary.background": "#458588",
+      "primary.foreground": "#F0F0F0",
+      "secondary.background": "#282828",
+      "secondary.foreground": "#9E9E9E",
+      "title_bar.background": "#262626",
+      "base.blue": "#87afaf",
+      "base.red": "#8b5f61",
+      "base.yellow": "#9d906c"
+    }
+  },
+  "Gruvbox Light": {
+    "name": "Gruvbox Light",
+    "mode": "light",
+    "colors": {
+      "background": "#fbf1c7",
+      "danger.background": "#fb4934",
+      "foreground": "#3c3836",
+      "primary.background": "#d79921",
+      "primary.foreground": "#fbf1c7",
+      "secondary.background": "#EBDBB2",
+      "secondary.foreground": "#3c3836",
+      "title_bar.background": "#ebdbb2",
+      "base.red": "#fb4934",
+      "base.yellow": "#b57614",
+      "base.blue": "#076678"
+    }
+  },
+  "Gruvbox Dark": {
+    "name": "Gruvbox Dark",
+    "mode": "dark",
+    "colors": {
+      "background": "#1d2021",
+      "foreground": "#ebdbb2",
+      "primary.background": "#d79921",
+      "primary.foreground": "#282828",
+      "secondary.background": "#282828",
+      "secondary.foreground": "#ebdbb2",
+      "title_bar.background": "#252525",
+      "base.red": "#f06555",
+      "base.yellow": "#d79921",
+      "base.blue": "#458588"
+    }
+  },
+  "Harper": {
+    "name": "Harper",
+    "mode": "dark",
+    "colors": {
+      "background": "#010101",
+      "foreground": "#a8a49d",
+      "primary.background": "#B196C6",
+      "primary.foreground": "#000000",
+      "secondary.background": "#1b1b1b",
+      "secondary.foreground": "#A8A49D",
+      "title_bar.background": "#101010",
+      "base.red": "#ff5874",
+      "base.blue": "#7fb5e1",
+      "base.yellow": "#f8b63f"
+    }
+  },
+  "Mellifluous Light": {
+    "name": "Mellifluous Light",
+    "mode": "light",
+    "colors": {
+      "background": "#E7E7E7",
+      "foreground": "#383a42",
+      "primary.background": "#5A6599",
+      "primary.foreground": "#F0F0F0",
+      "secondary.background": "#d0d0d0",
+      "secondary.foreground": "#383a42",
+      "title_bar.background": "#dfdfdf",
+      "base.red": "#C95954",
+      "base.yellow": "#c98f54",
+      "base.blue": "#a8a1be"
+    }
+  },
+  "Mellifluous Dark": {
+    "name": "Mellifluous Dark",
+    "mode": "dark",
+    "colors": {
+      "background": "#1A1A1A",
+      "foreground": "#abb2bf",
+      "primary.background": "#5A6599",
+      "primary.foreground": "#ecedf4",
+      "secondary.background": "#292929",
+      "secondary.foreground": "#abb2bf",
+      "title_bar.background": "#171717",
+      "base.red": "#C95954",
+      "base.yellow": "#c98d54",
+      "base.blue": "#5481c9"
+    }
+  },
+  "Nord": {
+    "name": "Nord",
+    "mode": "dark",
+    "colors": {
+      "background": "#2E3440",
+      "chart.1": "#88C0D0",
+      "chart.2": "#81A1C1",
+      "chart.3": "#5E81AC",
+      "chart.4": "#B48EAD",
+      "chart.5": "#A3BE8C",
+      "danger.background": "#BF616A",
+      "foreground": "#D8DEE9",
+      "primary.background": "#88C0D0",
+      "primary.foreground": "#2E3440",
+      "secondary.background": "#3B4252",
+      "secondary.foreground": "#ECEFF4",
+      "title_bar.background": "#2B313C",
+      "warning.background": "#EBCB8B",
+      "base.red": "#BF616A",
+      "base.yellow": "#EBCB8B",
+      "base.blue": "#81A1C1"
+    }
+  },
+  "Bloomberg": {
+    "name": "Bloomberg",
+    "mode": "dark",
+    "colors": {
+      "background": "#000000",
+      "chart.1": "#ff8c00",
+      "chart.2": "#ffb340",
+      "chart.3": "#ffd980",
+      "chart.4": "#35c7d6",
+      "chart.5": "#3a7fd5",
+      "danger.background": "#ff3b30",
+      "foreground": "#ff9e18",
+      "primary.background": "#ff8c00",
+      "primary.foreground": "#000000",
+      "secondary.background": "#141414",
+      "secondary.foreground": "#ff9e18",
+      "title_bar.background": "#050505",
+      "warning.background": "#ffcc33",
+      "base.red": "#ff3b30",
+      "base.yellow": "#ffcc33",
+      "base.blue": "#3a7fd5"
+    }
+  },
+  "Bloomberg Modern": {
+    "name": "Bloomberg Modern",
+    "mode": "dark",
+    "colors": {
+      "background": "#0b0e14",
+      "chart.1": "#ff6f00",
+      "chart.2": "#4c8dd8",
+      "chart.3": "#26a65b",
+      "chart.4": "#b57edc",
+      "chart.5": "#3bb3c4",
+      "danger.background": "#e5484d",
+      "foreground": "#e6e6e6",
+      "primary.background": "#ff6f00",
+      "primary.foreground": "#0b0e14",
+      "secondary.background": "#161b24",
+      "secondary.foreground": "#e6e6e6",
+      "title_bar.background": "#0e121a",
+      "warning.background": "#e2a336",
+      "base.red": "#e5484d",
+      "base.yellow": "#e2a336",
+      "base.blue": "#4c8dd8"
+    }
+  },
+  "Aurora Light": {
+    "name": "Aurora Light",
+    "mode": "light",
+    "colors": {
+      "background": "#FFFFFF",
+      "chart.1": "#93C5FD",
+      "chart.2": "#3B82F6",
+      "chart.3": "#2563EB",
+      "chart.4": "#1D4ED8",
+      "chart.5": "#1E40AF",
+      "danger.background": "linear-gradient(180deg, #EF4444, #DC2626)",
+      "foreground": "#020617",
+      "primary.background": "linear-gradient(180deg, #1E293B, #0F172A)",
+      "primary.foreground": "#F8FAFC",
+      "secondary.background": "#E2E8F0",
+      "secondary.foreground": "#0F172A",
+      "title_bar.background": "linear-gradient(180deg, #FFFFFF, #F8FAFC)",
+      "warning.background": "linear-gradient(180deg, #EAB308, #CA8A04)",
+      "base.red": "red-600",
+      "base.blue": "blue-600",
+      "base.yellow": "yellow-600"
+    }
+  },
+  "Asciinema": {
+    "name": "Asciinema",
+    "mode": "dark",
+    "colors": {
+      "background": "#121314",
+      "danger.background": "#dd3c69",
+      "foreground": "#cccccc",
+      "primary.background": "#26b0d7",
+      "primary.foreground": "#ffffff",
+      "secondary.background": "#181919",
+      "secondary.foreground": "#cccccc",
+      "title_bar.background": "#181919",
+      "base.blue": "#26b0d7",
+      "base.red": "#dd3c69",
+      "base.yellow": "#ddaf3c"
+    }
+  },
+  "Tokyo Night": {
+    "name": "Tokyo Night",
+    "mode": "dark",
+    "colors": {
+      "background": "#1a1b26",
+      "foreground": "#c0caf5",
+      "primary.background": "#7aa2f7",
+      "primary.foreground": "#1a1b26",
+      "secondary.background": "#292e42",
+      "secondary.foreground": "#C0CAF5",
+      "title_bar.background": "#161720",
+      "base.red": "#f7768e",
+      "base.yellow": "#e0af68",
+      "base.blue": "#7aa2f7"
+    }
+  },
+  "Tokyo Storm": {
+    "name": "Tokyo Storm",
+    "mode": "dark",
+    "colors": {
+      "background": "#24283b",
+      "foreground": "#c0caf5",
+      "primary.background": "#7aa2f7",
+      "primary.foreground": "#24283b",
+      "secondary.background": "#292e42",
+      "secondary.foreground": "#c0caf5",
+      "title_bar.background": "#202435",
+      "base.red": "#f7768e",
+      "base.yellow": "#e0af68",
+      "base.blue": "#7aa2f7"
+    }
+  },
+  "Tokyo Moon": {
+    "name": "Tokyo Moon",
+    "mode": "dark",
+    "colors": {
+      "background": "#222436",
+      "foreground": "#c0caf5",
+      "primary.background": "#82aaff",
+      "primary.foreground": "#222436",
+      "secondary.background": "#2d3149",
+      "secondary.foreground": "#8c94b5",
+      "title_bar.background": "#1e2030",
+      "base.red": "#ff757f",
+      "base.yellow": "#ffc777",
+      "base.blue": "#82aaff"
+    }
+  },
+  "Adventure": {
+    "name": "Adventure",
+    "mode": "dark",
+    "colors": {
+      "background": "#040404",
+      "danger.background": "#d84a33",
+      "foreground": "#feffff",
+      "primary.background": "#4384ad",
+      "primary.foreground": "#feffff",
+      "secondary.background": "#171a1c",
+      "secondary.foreground": "#e4d5c7",
+      "title_bar.background": "#0f1112",
+      "base.red": "#d84a33",
+      "base.blue": "#417ab3",
+      "base.yellow": "#aa7900"
+    }
+  },
+  "Adventure Time": {
+    "name": "Adventure Time",
+    "mode": "dark",
+    "colors": {
+      "background": "#1f1d45",
+      "foreground": "#C7C7D4",
+      "primary.background": "#5f72c6",
+      "primary.foreground": "#ffffff",
+      "secondary.background": "#2e2c51",
+      "secondary.foreground": "#C7C7D4",
+      "title_bar.background": "#1c1a3e",
+      "base.red": "#a02733",
+      "base.blue": "#2b53ab",
+      "base.yellow": "#ce7837"
+    }
+  },
+  "Flexoki Light": {
+    "name": "Flexoki Light",
+    "mode": "light",
+    "colors": {
+      "background": "#FFFCF0",
+      "foreground": "#100F0F",
+      "primary.background": "#3AA99F",
+      "primary.foreground": "#FAFAFA",
+      "secondary.background": "#F2F0E5",
+      "secondary.foreground": "#100F0F",
+      "title_bar.background": "#F2F0E5",
+      "base.yellow": "#D0A215",
+      "base.red": "#D14D41",
+      "base.blue": "#4385BE"
+    }
+  },
+  "Flexoki Dark": {
+    "name": "Flexoki Dark",
+    "mode": "dark",
+    "colors": {
+      "background": "#100F0F",
+      "foreground": "#CECDC3",
+      "primary.background": "#24837B",
+      "primary.foreground": "#FFFCF0",
+      "secondary.background": "#232221",
+      "secondary.foreground": "#CECDC3",
+      "title_bar.background": "#191818",
+      "base.yellow": "#AD8301",
+      "base.red": "#AF3029",
+      "base.blue": "#205EA6"
+    }
+  },
+  "Fahrenheit": {
+    "name": "Fahrenheit",
+    "mode": "dark",
+    "colors": {
+      "background": "#000000",
+      "danger.background": "#593002",
+      "foreground": "#FFFFCE",
+      "primary.background": "#720202",
+      "primary.foreground": "#FFFFCE",
+      "secondary.background": "#202020",
+      "secondary.foreground": "#979797",
+      "title_bar.background": "#0e0e0e",
+      "base.red": "#723202",
+      "base.yellow": "#726302",
+      "base.blue": "#022d72"
+    }
+  },
+  "Everforest Light": {
+    "name": "Everforest Light",
+    "mode": "light",
+    "colors": {
+      "background": "#FEFCEE",
+      "danger.background": "#e67e80",
+      "foreground": "#5F6D75",
+      "primary.background": "#e69875",
+      "primary.foreground": "#FEFCEE",
+      "secondary.background": "#EEEADA",
+      "secondary.foreground": "#5F6D75",
+      "title_bar.background": "#F9F5E4",
+      "base.red": "#e67e80",
+      "base.yellow": "#dbbc7f",
+      "base.blue": "#7fbbb3"
+    }
+  },
+  "Everforest Dark": {
+    "name": "Everforest Dark",
+    "mode": "dark",
+    "colors": {
+      "background": "#262E34",
+      "foreground": "#d3c6aa",
+      "primary.background": "#e69875",
+      "primary.foreground": "#262E34",
+      "secondary.background": "#2E383B",
+      "secondary.foreground": "#849087",
+      "title_bar.background": "#1f262b",
+      "base.red": "#e67e80",
+      "base.yellow": "#dbbc7f",
+      "base.blue": "#7fbbb3"
+    }
+  },
+  "Molokai Light": {
+    "name": "Molokai Light",
+    "mode": "light",
+    "colors": {
+      "background": "#FEFAF9",
+      "foreground": "#0a0a0a",
+      "primary.background": "#E14774",
+      "primary.foreground": "#fafafa",
+      "secondary.background": "#E4DEDA",
+      "secondary.foreground": "#060606",
+      "title_bar.background": "#e8e3e0",
+      "base.red": "#e17047",
+      "base.yellow": "#ccac0a",
+      "base.blue": "#e16032"
+    }
+  },
+  "Molokai Dark": {
+    "name": "Molokai Dark",
+    "mode": "dark",
+    "colors": {
+      "background": "#1b1d1e",
+      "foreground": "#f8f8f2",
+      "primary.background": "#dc1860",
+      "primary.foreground": "#f8f8f2",
+      "secondary.background": "#292c2e",
+      "secondary.foreground": "#f5f5f4",
+      "title_bar.background": "#202223",
+      "base.red": "#dc1860",
+      "base.yellow": "#807607",
+      "base.blue": "#075880"
+    }
+  },
+  "Modus Operandi": {
+    "name": "Modus Operandi",
+    "mode": "light",
+    "colors": {
+      "background": "#ffffff",
+      "chart.1": "#0031a9",
+      "chart.2": "#006800",
+      "chart.3": "#a60000",
+      "chart.4": "#721045",
+      "chart.5": "#005e8b",
+      "danger.background": "#a60000",
+      "foreground": "#000000",
+      "primary.background": "#0031a9",
+      "primary.foreground": "#ffffff",
+      "secondary.background": "#e4e4e4",
+      "secondary.foreground": "#000000",
+      "title_bar.background": "#f2f2f2",
+      "warning.background": "#6f5500",
+      "base.red": "#a60000",
+      "base.yellow": "#6f5500",
+      "base.blue": "#0031a9"
+    }
+  },
+  "Modus Vivendi": {
+    "name": "Modus Vivendi",
+    "mode": "dark",
+    "colors": {
+      "background": "#000000",
+      "chart.1": "#2fafff",
+      "chart.2": "#44bc44",
+      "chart.3": "#ff5f59",
+      "chart.4": "#feacd0",
+      "chart.5": "#00d3d0",
+      "danger.background": "#ff5f59",
+      "foreground": "#ffffff",
+      "primary.background": "#2fafff",
+      "primary.foreground": "#000000",
+      "secondary.background": "#2f2f2f",
+      "secondary.foreground": "#ffffff",
+      "title_bar.background": "#1e1e1e",
+      "warning.background": "#d0bc00",
+      "base.red": "#ff5f59",
+      "base.yellow": "#d0bc00",
+      "base.blue": "#2fafff"
+    }
+  },
+  "Default Light": {
+    "name": "Default Light",
+    "mode": "light",
+    "colors": {
+      "background": "white",
+      "danger.background": "red-500",
+      "foreground": "neutral-950",
+      "primary.background": "neutral-900",
+      "primary.foreground": "neutral-50",
+      "secondary.background": "neutral-200",
+      "secondary.foreground": "neutral-900",
+      "title_bar.background": "#F8F8F8",
+      "warning.background": "yellow-500",
+      "base.red": "red-600",
+      "base.blue": "blue-600",
+      "base.yellow": "yellow-600"
+    }
+  },
+  "Default Dark": {
+    "name": "Default Dark",
+    "mode": "dark",
+    "colors": {
+      "background": "neutral-950",
+      "danger.background": "red-400",
+      "foreground": "neutral-50",
+      "primary.background": "neutral-50",
+      "primary.foreground": "neutral-900",
+      "secondary.background": "neutral-800",
+      "secondary.foreground": "neutral-50",
+      "title_bar.background": "#171717",
+      "warning.background": "yellow-400",
+      "base.red": "red-400",
+      "base.blue": "blue-400",
+      "base.yellow": "yellow-400"
+    }
+  },
+  "Twilight": {
+    "name": "Twilight",
+    "mode": "dark",
+    "colors": {
+      "background": "#141414",
+      "foreground": "#dcdcdc",
+      "primary.background": "#CDA869",
+      "primary.foreground": "#1e1e1e",
+      "secondary.background": "#262626",
+      "secondary.foreground": "#dcdcdc",
+      "title_bar.background": "#1e1e1e",
+      "base.red": "#c06d44",
+      "base.yellow": "#c2a86c",
+      "base.blue": "#44474a"
+    }
+  },
+  "Solarized Light": {
+    "name": "Solarized Light",
+    "mode": "light",
+    "colors": {
+      "background": "#FDF6E3",
+      "foreground": "#586E75",
+      "primary.background": "#586E75",
+      "primary.foreground": "#fdf6e3",
+      "secondary.background": "#EEE8D5",
+      "secondary.foreground": "#073642",
+      "title_bar.background": "#f4ecd7",
+      "base.red": "#755858",
+      "base.yellow": "#756e58",
+      "base.blue": "#586975"
+    }
+  },
+  "Solarized Dark": {
+    "name": "Solarized Dark",
+    "mode": "dark",
+    "colors": {
+      "background": "#002B36",
+      "foreground": "#fdf6e3",
+      "primary.background": "#0d667d",
+      "primary.foreground": "#fdf6e3",
+      "secondary.background": "#073642",
+      "secondary.foreground": "#fdf6e3",
+      "title_bar.background": "#09323d",
+      "base.red": "#7d2f0d",
+      "base.yellow": "#7d650d",
+      "base.blue": "#0d507d"
+    }
+  },
+  "Hybrid Light": {
+    "name": "Hybrid Light",
+    "mode": "light",
+    "colors": {
+      "background": "#E4E4E4",
+      "danger.background": "#ff5f5f",
+      "foreground": "#1c1c1c",
+      "primary.background": "#005f87",
+      "primary.foreground": "#ffffff",
+      "secondary.background": "#D0D0D0",
+      "secondary.foreground": "#1c1c1c",
+      "title_bar.background": "#D0D0D0",
+      "base.red": "#5F0000",
+      "base.yellow": "#948000",
+      "base.blue": "#00195f"
+    }
+  },
+  "Hybrid Dark": {
+    "name": "Hybrid Dark",
+    "mode": "dark",
+    "colors": {
+      "background": "#1D1F21",
+      "foreground": "#e8e8e8",
+      "primary.background": "#15678a",
+      "primary.foreground": "#e8e8e8",
+      "secondary.background": "#303336",
+      "secondary.foreground": "#e8e8e8",
+      "title_bar.background": "#242629",
+      "base.red": "#8a1515",
+      "base.yellow": "#8a7c15",
+      "base.blue": "#15678a"
+    }
+  },
+  "Kibble": {
+    "name": "Kibble",
+    "mode": "dark",
+    "colors": {
+      "background": "#0e100a",
+      "danger.background": "#e07b5c",
+      "foreground": "#f7f7f7",
+      "primary.background": "#6ce05c",
+      "primary.foreground": "#101010",
+      "secondary.background": "#22231f",
+      "secondary.foreground": "#f7f7f7",
+      "warning.background": "#e0c85c",
+      "title_bar.background": "#161712",
+      "base.red": "#C70231",
+      "base.blue": "#3449d1",
+      "base.yellow": "#c7a302"
+    }
+  }
+}

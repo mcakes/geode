@@ -824,10 +824,11 @@ role = "attribute"
     }
 
     #[test]
-    fn builtin_kinds_offers_both_kinds() {
+    fn builtin_kinds_offers_every_kind() {
         let kinds = crate::builtin_kinds();
-        assert_eq!(kinds.len(), 2);
+        assert_eq!(kinds.len(), 3);
         assert!(kinds.iter().any(|k| k.name() == NAME));
+        assert!(kinds.iter().any(|k| k.name() == crate::chain::NAME));
     }
 
     #[test]

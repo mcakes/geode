@@ -121,6 +121,15 @@ pub enum Delivered {
     },
 }
 
+/// What [`Sheet::fold_legs`] computes for a set of legs: the pricing
+/// state a package row shows over them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Folded {
+    pub result: Option<PriceResult>,
+    pub state: LineState,
+    pub priced_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug)]
 pub struct Sheet {
     pub name: String,
@@ -421,74 +430,95 @@ impl Sheet {
         Delivered::Installed
     }
 
-    /// Fold package results as `Σ qty_leg × value_leg`. Failure takes precedence over
-    /// staleness and names the first failed leg; otherwise any stale leg makes the
-    /// package stale. A result exists only for a nonempty package whose legs all have
-    /// results and none has failed. Its currency is the legs' when they agree and
-    /// [`Currency::MIXED`] when they differ: the local arrays are then sums of
-    /// unlike units, and a local cell or total over them paints a gap rather than
-    /// a plausible number. `priced_at` is the oldest present leg timestamp,
-    /// including failed attempts.
+    /// Fold every package's result from all of its legs with
+    /// [`Sheet::fold_legs`].
     pub fn fold_packages(&mut self) {
         for p in 0..self.len() {
             if !self.is_package(p) {
                 continue;
             }
-            let legs = self.children(p);
-            // An empty package has no sum.
-            let mut complete = !legs.is_empty();
-            let mut sum: Option<PriceResult> = None;
-            let mut stale = false;
-            let mut failed: Option<String> = None;
-            let mut oldest: Option<DateTime<Utc>> = None;
-            for leg in legs {
-                match &self.state[leg] {
-                    LineState::Failed(m) if failed.is_none() => {
-                        failed = Some(format!(
-                            "{}: {m}",
-                            render_line(
-                                self.qty[leg],
-                                self.instrument[leg].as_ref().expect("a leg is a line")
-                            )
-                        ));
-                    }
-                    LineState::Failed(_) => {}
-                    LineState::Stale => stale = true,
-                    LineState::Fresh => {}
+            let Folded {
+                result,
+                state,
+                priced_at,
+            } = self.fold_legs(self.children(p));
+            self.result[p] = result;
+            self.state[p] = state;
+            self.priced_at[p] = priced_at;
+        }
+    }
+
+    /// Fold `legs` (lines of one package, in sheet order) as
+    /// `Σ qty_leg × value_leg`: the one fold a package row, a package
+    /// showing only some of its legs, and a selection total share, so a
+    /// sum over a subset of legs is computed exactly as the full one.
+    ///
+    /// Failure takes precedence over staleness and names the first failed
+    /// leg; otherwise any stale leg makes the fold stale. A result exists
+    /// only for a nonempty set whose legs all have results and none has
+    /// failed. Its currency is the legs' when they agree and
+    /// [`Currency::MIXED`] when they differ: the local arrays are then sums
+    /// of unlike units, and a local cell or total over them paints a gap
+    /// rather than a plausible number. `priced_at` is the oldest present
+    /// leg timestamp, including failed attempts.
+    pub fn fold_legs(&self, legs: impl IntoIterator<Item = usize>) -> Folded {
+        // An empty set has no sum.
+        let mut any = false;
+        let mut complete = true;
+        let mut sum: Option<PriceResult> = None;
+        let mut stale = false;
+        let mut failed: Option<String> = None;
+        let mut oldest: Option<DateTime<Utc>> = None;
+        for leg in legs {
+            any = true;
+            match &self.state[leg] {
+                LineState::Failed(m) if failed.is_none() => {
+                    failed = Some(format!(
+                        "{}: {m}",
+                        render_line(
+                            self.qty[leg],
+                            self.instrument[leg].as_ref().expect("a leg is a line")
+                        )
+                    ));
                 }
-                match self.result[leg] {
-                    Some(r) => {
-                        let q = self.qty[leg] as f64;
-                        let acc = sum.get_or_insert_with(|| PriceResult::zero(r.currency));
-                        acc.add_scaled(q, &r);
-                        // The first leg names the currency; a leg in another
-                        // makes the local sum one of unlike units. Once mixed
-                        // it stays mixed: no leg's currency equals the marker.
-                        if acc.currency != r.currency {
-                            acc.currency = Currency::MIXED;
-                        }
-                    }
-                    None => complete = false,
-                }
-                oldest = match (oldest, self.priced_at[leg]) {
-                    (None, t) => t,
-                    (Some(a), Some(b)) => Some(a.min(b)),
-                    (Some(a), None) => Some(a),
-                };
+                LineState::Failed(_) => {}
+                LineState::Stale => stale = true,
+                LineState::Fresh => {}
             }
-            // An empty package has no sum (`complete` is false), so `sum` is
-            // `None` exactly when the result must be.
-            self.result[p] = if complete && failed.is_none() {
+            match self.result[leg] {
+                Some(r) => {
+                    let q = self.qty[leg] as f64;
+                    let acc = sum.get_or_insert_with(|| PriceResult::zero(r.currency));
+                    acc.add_scaled(q, &r);
+                    // The first leg names the currency; a leg in another
+                    // makes the local sum one of unlike units. Once mixed
+                    // it stays mixed: no leg's currency equals the marker.
+                    if acc.currency != r.currency {
+                        acc.currency = Currency::MIXED;
+                    }
+                }
+                None => complete = false,
+            }
+            oldest = match (oldest, self.priced_at[leg]) {
+                (None, t) => t,
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(a), None) => Some(a),
+            };
+        }
+        // An empty set has no sum (`any` is false), so `sum` is `None`
+        // exactly when the result must be.
+        Folded {
+            result: if any && complete && failed.is_none() {
                 sum
             } else {
                 None
-            };
-            self.state[p] = match failed {
+            },
+            state: match failed {
                 Some(m) => LineState::Failed(m),
                 None if stale => LineState::Stale,
                 None => LineState::Fresh,
-            };
-            self.priced_at[p] = oldest;
+            },
+            priced_at: oldest,
         }
     }
 

@@ -8,6 +8,11 @@
       "name": "Solarized Light",
       "mode": "light",
       "colors": {
+        "chart.1": "#526c80",
+        "chart.2": "#a3854d",
+        "chart.3": "#826878",
+        "chart.4": "#667c51",
+        "chart.5": "#354046",
         "accent.background": "#ebe4ce",
         "accent.foreground": "#073642",
         "background": "#FDF6E3",
@@ -151,6 +156,11 @@
       "url": "https://ethanschoonover.com/solarized",
       "mode": "dark",
       "colors": {
+        "chart.1": "#6095b5",
+        "chart.2": "#b29a58",
+        "chart.3": "#ad7c91",
+        "chart.4": "#7da28a",
+        "chart.5": "#d0c7ab",
         "accent.background": "#073945",
         "accent.foreground": "#fdf6e3",
         "background": "#002B36",

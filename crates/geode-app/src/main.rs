@@ -131,39 +131,16 @@ fn main() {
             );
 
             // Start document producers after the service installs its subscriptions.
-            // Both use the risk generator's underlying vocabulary so demo datasets share
-            // identities. Keep the bus alive until the quit hook stops its thread.
+            // The three producers (`demo_bus::demo_producers`: CVI, dividend, chain)
+            // share the risk generator's underlyings. Keep the bus alive until the
+            // quit hook stops its thread.
             let mut demo_bus = demo_feed.map(|feed| {
                 // Seed synthetic document dates from the configured application clock.
                 let today = geode_core::clock::Clock::from_config(&services.config)
                     .0
                     .today(chrono::Utc::now());
-                let underlyings = geode_demo_data::demo_underlyings();
-                let mut cvi_generator = geode_demo_data::documents::cvi::CviGenerator::new(
-                    42,
-                    underlyings.clone(),
-                    today,
-                );
-                let mut dividend_generator =
-                    geode_demo_data::documents::dividend::DividendGenerator::new(
-                        42,
-                        underlyings.clone(),
-                        today,
-                    );
-                let producers = vec![
-                    demo_bus::Producer {
-                        kind: Arc::new(geode_documents::CviKind),
-                        topic_prefix: "marketdata/cvi/",
-                        keys: underlyings.clone(),
-                        next: Box::new(move |key| cvi_generator.next_document(key)),
-                    },
-                    demo_bus::Producer {
-                        kind: Arc::new(geode_documents::DividendKind),
-                        topic_prefix: "marketdata/dividend/",
-                        keys: underlyings,
-                        next: Box::new(move |key| dividend_generator.next_document(key)),
-                    },
-                ];
+                let producers =
+                    demo_bus::demo_producers(geode_demo_data::demo_underlyings(), today);
                 demo_bus::spawn(
                     feed,
                     producers,

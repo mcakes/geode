@@ -359,6 +359,17 @@ Dataset and document watches narrow publication invalidation to consumers
 that read the affected data. The frame keeps weak watches, allowing closed
 tiles to disappear without explicit deregistration.
 
+A document watch names an encoded batch key, and it also hears every document
+under that key when the key is a shorter prefix of a multi-part key: a watch
+on `SPX` in `option_chain` fires for `SPX␟2026-10-16` and every other SPX
+expiry. Matching happens at a key-part boundary (`is_key_prefix`), so the same
+watch never fires for `SPXW␟…`. On each publish the frame looks up the batch
+and each of its key-part prefixes, so the cost grows with key arity, not with
+the number of watches. `PublicationWatch::matches` answers whether a publish
+concerns a watch and follows the same prefix rule; `PublicationWatch::is_for`
+is the exact identity test a tile uses to decide whether it can keep a watch
+or must register a new one for a different key.
+
 A scope, grouping, or as-of change opens a flip barrier. Following tiles stage
 their results until all participants answer or the deadline passes, then
 promote together. This prevents one frame from showing tiles evaluated under
@@ -487,6 +498,14 @@ summary, and closes through `page::close`, the same toggle, or any
 `workspace::switch_N`, which closes the page and then switches. A toggle
 naming a kind no factory registered logs a warning and opens nothing.
 
+A tile opens the diagnostics page by queueing `request_diagnostics_page` on
+the shared `Diagnostics` entity (its health chip does this); the shell's
+diagnostics observer drains it through `open_page`, never the toggle, so the
+request only ever opens. It begins as a dispatched action does: the crash
+report's action tail records `page::toggle_diagnostics`, and the shell's
+notice, stack list and add-filter menu expire. Under a modal it is then
+refused with the toggle's `close the dialog first` notice.
+
 While a page is open the key context stack is `page`, then the page's own
 context, then `palette` when it is open. `workspace` and `tile` are absent,
 so tile movement, dock, stack, `:`, and `/` bindings cannot fire into a
@@ -585,6 +604,15 @@ Source health remains absent until the first report, even if description or
 poll events created the source entry. Unreported sources do not contribute to
 the status summary. A changed health or detail records a transition, including
 recovery, with the most recent 16 retained per source.
+
+Each source's description carries the dataset it loads into
+(`SourceSummary.dataset`, from `SourceSpec.dataset` at attach). A tile asks
+`health_for_datasets` or `health_for_sources` for a `TileHealth`: the worst
+unhealthy source it reads by `Health::severity`, the lowest name on a tie, the
+reason (the health's own, else the source's detail) and how many other read
+sources are also unhealthy. Only described, reported sources count for the
+dataset question; Ok and Pending are silent; an unknown dataset or source is
+ignored.
 
 Config loads replace the current diagnostic batch; a clean load clears it and
 an identical load adds no history. The model retains the latest 16 changed

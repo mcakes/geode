@@ -1,10 +1,11 @@
 # geode-demo-data
 
-Seeded risk batches, CSV fixtures, and synthetic CVI and dividend documents.
-Risk batches use one vector per column; document generators return
-`geode_core::document::DocumentRows`. The only workspace dependency is
-`geode-core`. The application supplies document serialization and publishing
-through `geode-documents` and the data service.
+Seeded risk batches, CSV fixtures, and synthetic CVI, dividend and
+option-chain documents. Risk batches use one vector per column; document
+generators return `geode_core::document::DocumentRows`. The workspace
+dependencies are `geode-core` and `geode-pricing`, a calculation leaf whose
+stand-in vol model prices the option chains. The application supplies document
+serialization and publishing through `geode-documents` and the data service.
 
 See [demo and application composition](../../docs/current/features.md#demo-and-application-composition)
 for startup, caching, and ingestion ownership.
@@ -18,6 +19,7 @@ for startup, caching, and ingestion ownership.
 | `emit` | CSV header mapping, fixed-factor USD twins, file partitioning, sentinels, and deliberate missing-column and conflict fixtures. |
 | `documents::cvi` | Fixed CVI axes and per-key walks for node parameters, ATM volatility, and skew. |
 | `documents::dividend` | Per-key schedules with repeated dates, stable generated IDs, amount walks, status promotions, and appended rows. |
+| `documents::chain` | `ChainGenerator`: one option-chain document per `(underlying, expiry)`, rotating through twelve monthly expiries per underlying and priced off the latest CVI document through `geode_pricing::DemoVolModel`. |
 
 ## Risk and file fixtures
 
@@ -53,7 +55,7 @@ pairs. A zero row target currently emits one row.
 
 ## Document sequences
 
-Both document generators seed independent RNG state per key. The same seed,
+Every document generator seeds independent RNG state per key. The same seed,
 anchor date, and calls for a key reproduce its sequence, regardless of calls
 for other keys. They retain a fixed anchor date throughout their lifetime.
 
@@ -72,13 +74,35 @@ a future row. Output is sorted by ex-date and generated ID. Existing IDs and
 dates remain stable inside the generator; wire serialization and parse-time
 row identity belong to `geode-documents`.
 
+Option chains cover twelve monthly third-Friday expiries starting the month
+after the anchor. Each `next_document` call for an underlying returns its next
+expiry in rotation, keyed `[underlying, YYYY-MM-DD]`, so twelve calls cover
+the whole chain and the thirteenth wraps. The caller passes the underlying's
+latest CVI document: the generator slices it with `DemoVolModel` at the expiry
+(clamped to the CVI's first and last terms, so an expiry past the last term
+takes that term's smile) to get the forward and each strike's curve vol. That
+keeps the chain near the surface the vol viewer draws. Sixty strikes sit on
+the 1-2-5 increment nearest 0.55% of the forward, 44 below the at-the-money
+strike and 15 above, less any that would not be positive. Each strike's mid
+vol is the curve vol plus a per-strike residual that walks by at most 0.001
+per publish within ±0.005, and the mid is floored at 0.005. The half-spread
+widens in the wings and is capped at half the mid, so the bid vol stays
+positive at the floor. Bid and ask prices are Black out-of-the-money option
+prices at the expiry's own time to expiry (from the CVI anchor, never less
+than half a day), not the clamped curve date's. The quote time is the `now`
+the caller passes.
+
 ## Demo configuration
 
 The application loads [examples/demo-config](../../examples/demo-config) below
 desk and user configuration. Its files declare:
 
 - `datasets.toml`: risk column names, roles and grains, document schemas,
-  and the shared series cache.
+  and the shared series cache. Among the document schemas, `option_chain`
+  (key `underlying_ref, expiry`, axis `strike`) is filled by the generated
+  `opra_sim` source from the demo bus's `marketdata/chain/>` topics,
+  coalescing per key over 500 ms like the CVI and dividend sources. Chains
+  are subscribed only; the demo egress target does not upload them.
 - `views.toml`: the default `tree` view and a 100-column `wide` view.
 - `dimensions.toml` and `groupings.toml`: book-to-desk mapping and grouping slots.
 - `app.toml`: blotter staleness, the default series source, and pricer
@@ -87,6 +111,12 @@ desk and user configuration. Its files declare:
 `geode --demo [rows]` caches source files and its database under
 `$TMPDIR/geode-demo/<rows>-42/`. Schema changes require clearing that directory;
 existing payload tables are not migrated automatically.
+
+Chain documents for an expiry that has passed stay in the live table until the
+demo store is cleared: nothing retires them. After a month boundary a warm demo
+store therefore serves one extra, expired expiry per underlying, and a live
+`["SPX"]` prefix read reports that expiry's last source time as its freshness.
+Clear `$TMPDIR/geode-demo/<rows>-42/` to reset.
 
 ## Commands
 

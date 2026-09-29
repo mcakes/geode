@@ -640,10 +640,9 @@ run_mutation 'provenance: resolved vs requested time' \
 # incorrectly putting a draft Behind and requiring a rebase.
 run_mutation "provenance: a live document reports its partition's generation, not the dataset's" \
   crates/geode-data/src/query/read.rs \
-  '                        generation: catalog.live_generation(
+  '                        generation: catalog.live_generation_under(
                             &params.dataset,
                             &join_key(&params.document_key),
-                            None,
                         )?,' \
   '                        generation: catalog.dataset_generation(&params.dataset)?,' \
   geode-data a_live_document_request_reports_its_own_documents_freshness
@@ -3744,8 +3743,8 @@ run_mutation "asof-pin: the pinned chip paints" \
 # The provenance warning chip is suppressed while pinned.
 run_mutation "asof-pin: the frame chip hides while pinned" \
   crates/geode-blotter/src/tile.rs \
-  '            if matches!(self.tile_as_of, TileAsOf::Follow)' \
-  '            if true' \
+  '        if matches!(self.tile_as_of, TileAsOf::Follow)' \
+  '        if true' \
   geode-blotter \
   a_pinned_tile_paints_the_neutral_chip_and_hides_the_frame_one
 
@@ -5087,7 +5086,7 @@ run_mutation "publication routing: dataset watches advance" \
 
 run_mutation "publication routing: document watches advance" \
   crates/geode-shell/src/frame.rs \
-  '.get(&publish.batch)' \
+  '.get(&batch[..end])' \
   '.get("never-a-document")' \
   geode-shell publication_watches_are_exact_retained_and_reclaimed
 
@@ -6155,8 +6154,8 @@ run_mutation "diagnostics: SOURCE_HISTORY_CAP loosened from 16" \
 
 run_mutation "diagnostics: summary's LABELS silently drops degraded" \
   crates/geode-shell/src/diagnostics.rs \
-  'const LABELS: [&str; 5] = ["ok", "pending", "pending_too_long", "degraded", "failed"];' \
-  'const LABELS: [&str; 4] = ["ok", "pending", "pending_too_long", "failed"];' \
+  'const SUMMARY_LABELS: [&str; 5] = ["ok", "pending", "pending_too_long", "degraded", "failed"];' \
+  'const SUMMARY_LABELS: [&str; 4] = ["ok", "pending", "pending_too_long", "failed"];' \
   geode-shell the_summary_counts_sources_by_health_and_config_errors
 
 run_mutation "diagnostics: note_published requests a catalog regardless of watchers" \
@@ -7280,8 +7279,8 @@ run_mutation "shell: dispatch never records the dispatched action into the tail"
             .action_tail
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .record(&action.0);' \
-  '        let _ = &action.0;' \
+            .record(id);' \
+  '        let _ = id;' \
   geode-shell dispatching_three_actions_leaves_their_hashes_in_the_tail_in_order
 
 run_mutation "trim_log_files keeps one file more than asked (keep + 1, not keep)" \
@@ -10205,14 +10204,14 @@ run_mutation "document: a document with no rows is refused" \
 
 run_mutation "document query: as-of pins the resolved generation" \
   crates/geode-data/src/query/document.rs \
-  '                    (relation, format!(" and gen_id = {}", g.gen_id))' \
-  '                    (relation, String::new())' \
+  '                    [only] => format!(" and gen_id = {}", only.gen_id),' \
+  '                    [_only] => String::new(),' \
   geode-data an_as_of_document_query_reads_the_resolved_generation_from_the_archive
 
 run_mutation "document query: rows come back in axis order" \
   crates/geode-data/src/query/document.rs \
-  '.map(|a| format!("\"{a}\""))' \
-  '.rev().map(|a| format!("\"{a}\""))' \
+  '        .chain(ds.axes.iter())' \
+  '        .chain(ds.axes.iter().rev())' \
   geode-data a_live_document_query_selects_one_key_in_axis_order
 
 run_mutation "document query: a value is DeterminedNonAdditive" \
@@ -10242,22 +10241,21 @@ run_mutation 'worker: a document compile error is that key'"'"'s outcome' \
 
 run_mutation "document query: the resolved generation is this document's own" \
   crates/geode-data/src/query/document.rs \
-  '            let resolved = gens.into_iter().find(|g| g.batch == batch);' \
-  '            let resolved = gens.into_iter().next();' \
+  '                .filter(|g| is_key_prefix(&prefix, &g.batch))' \
+  '                .filter(|_| true)' \
   geode-data an_as_of_document_query_resolves_each_key_to_its_own_generation
 
 run_mutation "document query: no generation as of t is no rows, not every row" \
   crates/geode-data/src/query/document.rs \
-  '                None => (relation, " and false".to_string()),' \
-  '                None => (relation, String::new()),' \
+  '                (relation, " and false".to_string())' \
+  '                (relation, String::new())' \
   geode-data an_as_of_before_the_first_publish_compiles_and_returns_no_rows
 
 run_mutation 'service: a live document'"'"'s freshness is its own, not the dataset'"'"'s stalest' \
   crates/geode-data/src/query/read.rs \
-  '                            .live_source_time(
+  '                            .live_source_time_under(
                                 &params.dataset,
                                 &join_key(&params.document_key),
-                                None,
                             )?' \
   '                            .dataset_as_of(&params.dataset, &[])?' \
   geode-data a_live_document_request_reports_its_own_documents_freshness
@@ -11406,17 +11404,19 @@ run_mutation "demo bus: publishes every key once at start" \
   '    for producer in producers.iter_mut() {
         let keys = producer.keys.clone();
         for key in &keys {
-            if stop.load(Ordering::Relaxed) {
-                return;
+            for _ in 0..producer.startup_repeats.max(1) {
+                if stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                publish_one(
+                    &feed,
+                    &producer.kind,
+                    producer.topic_prefix,
+                    producer.next.as_mut(),
+                    key,
+                    &mut warned_full,
+                );
             }
-            publish_one(
-                &feed,
-                &producer.kind,
-                producer.topic_prefix,
-                producer.next.as_mut(),
-                key,
-                &mut warned_full,
-            );
         }
     }
 ' \
@@ -11786,7 +11786,7 @@ run_mutation "colour: contrast_ratio applies the WCAG +0.05 floor" \
 # bundled-theme tests both check this through the resolver.
 run_mutation "colour: the readability floor pulls lightness until 3:1" \
   crates/geode-core/src/colour/mod.rs \
-  '    if contrast_ratio(rgb, background) >= READABLE_RATIO {
+  '    if contrast_ratio(rgb, background) >= ratio {
         return rgb;
     }' \
   '    if true {
@@ -11797,7 +11797,7 @@ run_mutation "colour: the readability floor pulls lightness until 3:1" \
 
 run_mutation "theme: bundled themes clear 3:1 through the resolver" \
   crates/geode-core/src/colour/mod.rs \
-  '    if contrast_ratio(rgb, background) >= READABLE_RATIO {
+  '    if contrast_ratio(rgb, background) >= ratio {
         return rgb;
     }' \
   '    if true {
@@ -13595,7 +13595,8 @@ run_mutation "mdpaint: the floored tones re-derive when a theme input moves" \
 # ---- Shared status chips ---- Blotter, diagnostics and shell status chips
 # use the same colour builder. Warning foreground tokens over translucent
 # warning fills can be unreadable; the bundled-theme sweep measures contrast
-# rather than text content.
+# rather than text content. The token test separately checks which token
+# starts the correction, since the floor can repair an incorrect choice.
 run_mutation "chip: a tinted warning chip's text is foreground, not warning_foreground" \
   crates/geode-shell/src/shell/chip.rs \
   '        Tone::Warning => ChipPaint {
@@ -13607,7 +13608,7 @@ run_mutation "chip: a tinted warning chip's text is foreground, not warning_fore
             text: theme.warning_foreground,
         },' \
   geode-shell \
-  every_chip_tone_is_readable_on_every_bundled_theme
+  tones_resolve_to_their_documented_tokens
 
 # Danger chips use readable text over the composited danger tint;
 # danger_foreground can fall below the contrast floor.
@@ -13622,20 +13623,13 @@ run_mutation "chip: a tinted danger chip's text is foreground, not danger_foregr
             text: theme.danger_foreground,
         },' \
   geode-shell \
-  every_chip_tone_is_readable_on_every_bundled_theme
+  tones_resolve_to_their_documented_tokens
 
-# The text-only tones are floored. Mutated to the identity, a stale
-# dataset time or a degraded-source row paints the raw `warning`, which
-# ten bundled themes ship under 3:1 against their own background.
-run_mutation "chip: text-only tones are floored to 3:1 against the background" \
+# Filled and text-only chips use the small-text floor on their actual ground.
+run_mutation "chip: chip text is floored to 4.5:1 on the actual surface" \
   crates/geode-shell/src/shell/chip.rs \
-  '    to_hsla(readable_on(
-        to_rgb(colour),
-        to_rgb(theme.background),
-        to_rgb(theme.foreground),
-    ))' \
-  '    let _ = theme;
-    colour' \
+  '    paint.text = text_on(paint.text, paint.fill, surface);' \
+  '    let _ = surface;' \
   geode-shell \
   every_chip_tone_is_readable_on_every_bundled_theme
 
@@ -13745,14 +13739,14 @@ run_mutation "listrow: every row hover goes through paint_row" \
 # surface; colour sweeps verify both properties.
 run_mutation "control: hover text is floored over the hover fill" \
   crates/geode-shell/src/shell/control.rs \
-  '        hover_text: to_hsla(readable_on(text, hover, toward)),' \
+  '        hover_text: to_hsla(readable_text_on(text, hover)),' \
   '        hover_text: to_hsla(text),' \
   geode-shell \
   every_control_state_is_readable_on_every_bundled_theme
 
 run_mutation "control: pressed text is floored over the pressed fill" \
   crates/geode-shell/src/shell/control.rs \
-  '        pressed_text: to_hsla(readable_on(text, pressed, toward)),' \
+  '        pressed_text: to_hsla(readable_text_on(text, pressed)),' \
   '        pressed_text: to_hsla(text),' \
   geode-shell \
   every_control_state_is_readable_on_every_bundled_theme
@@ -14042,10 +14036,10 @@ run_mutation "mdmenu: a greyed row is a notice, not a dispatch" \
 # propagation opens a menu on an unfocused tile; the host's bubble-phase
 # click counter detects it.
 run_mutation "mdmenu: the ⋯ click does not stop propagation" \
-  crates/geode-marketdata/src/header.rs \
-  '                    tile.update(cx, |t, cx| t.toggle_menu(window, cx))' \
-  '                    cx.stop_propagation();
-                    tile.update(cx, |t, cx| t.toggle_menu(window, cx))' \
+  crates/geode-tile/src/header.rs \
+  '            on_press(window, cx);' \
+  '            cx.stop_propagation();
+            on_press(window, cx);' \
   geode-marketdata a_menu_button_click_still_reaches_the_tiles_own_listeners
 
 # Find closes the popup before handling any variant. This shell-owned action
@@ -16283,6 +16277,159 @@ run_mutation "app: vol slices coalesce by key" \
   '        DataEvent::VolSlices(_) => Key::Diagnostics,' \
   geode-app vol_slices_coalesce_by_key_and_a_lower_tag_never_replaces_a_higher_one
 
+# ---- Vol slice Part 2: option chains, prefix query and watch ----
+# Entry names start "vol chain" so one substring selects exactly this set
+# ("chain" alone also selects older groupings entries).
+
+run_mutation "vol chain prefix: a string prefix is not a key prefix" \
+  crates/geode-core/src/document.rs \
+  '        Some(rest) => rest.starts_with(KEY_SEPARATOR),' \
+  '        Some(_) => true,' \
+  geode-core a_key_prefix_matches_only_at_a_part_boundary
+
+run_mutation "vol chain prefix: a shorter key reads every document under it" \
+  crates/geode-data/src/query/document.rs \
+  '    let key_predicate = ds.key[..given]' \
+  '    let key_predicate = ds.key[..]' \
+  geode-data a_prefix_query_returns_every_document_under_it_in_key_then_axis_order
+
+run_mutation "vol chain prefix: as-of matches every document under the key" \
+  crates/geode-data/src/query/document.rs \
+  '                .filter(|g| is_key_prefix(&prefix, &g.batch))' \
+  '                .filter(|g| g.batch == prefix)' \
+  geode-data an_as_of_prefix_read_returns_each_document_that_existed_then
+
+run_mutation "vol chain prefix: freshness needs the separator" \
+  crates/geode-data/src/store/catalog.rs \
+  '        let under = format!("{prefix}{}", geode_core::document::KEY_SEPARATOR);' \
+  '        let under = prefix.to_string();' \
+  geode-data a_prefix_never_matches_a_longer_underlying
+
+run_mutation "vol chain prefix: the service reports prefix freshness" \
+  crates/geode-data/src/query/read.rs \
+  '                            .live_source_time_under(
+                                &params.dataset,
+                                &join_key(&params.document_key),
+                            )?' \
+  '                            .live_source_time(&params.dataset, &join_key(&params.document_key), None)?' \
+  geode-data the_service_reports_a_live_prefix_requests_freshness
+
+run_mutation "vol chain prefix: a key part holding the separator is refused" \
+  crates/geode-data/src/query/document.rs \
+  '        .find(|p| p.contains(KEY_SEPARATOR))' \
+  '        .find(|_| false)' \
+  geode-data a_key_part_holding_the_separator_is_refused
+
+run_mutation "vol chain prefix: an as-of read pins each matched generation" \
+  crates/geode-data/src/query/document.rs \
+  '                        format!(" and gen_id in ({ids})")' \
+  '                        String::new()' \
+  geode-data an_as_of_prefix_read_returns_each_document_that_existed_then
+
+run_mutation "vol chain prefix: an as-of read reports its oldest source time" \
+  crates/geode-data/src/query/document.rs \
+  '                    .min()' \
+  '                    .max()' \
+  geode-data an_as_of_prefix_read_returns_each_document_that_existed_then
+
+run_mutation "vol chain prefix: a generation only when one document matched" \
+  crates/geode-data/src/query/document.rs \
+  '                if let [only] = matched.as_slice() {' \
+  '                if let [only, ..] = matched.as_slice() {' \
+  geode-data an_as_of_prefix_read_returns_each_document_that_existed_then
+
+run_mutation "vol chain prefix: rows order by the open key parts first" \
+  crates/geode-data/src/query/document.rs \
+  '    let order = ds.key[given..]' \
+  '    let order = ds.key[arity..]' \
+  geode-data a_prefix_query_returns_every_document_under_it_in_key_then_axis_order
+
+run_mutation "vol chain prefix: a publish fires each key prefix's watch" \
+  crates/geode-shell/src/frame.rs \
+  '                .match_indices(KEY_SEPARATOR)' \
+  '                .match_indices("\u{0}\u{0}never")' \
+  geode-shell a_prefix_watch_fires_for_its_own_documents_only
+
+run_mutation "vol chain watch: is_for is exact, not a prefix match" \
+  crates/geode-shell/src/frame.rs \
+  '        self.dataset == dataset && self.batch.as_deref() == batch' \
+  '        self.dataset == dataset && self.batch.is_some() == batch.is_some()' \
+  geode-shell is_for_is_exact_where_matches_is_a_prefix
+
+run_mutation "vol chain kind: quotes are sorted by strike" \
+  crates/geode-documents/src/chain.rs \
+  '    rows.sort_by(|a, b| a.0.total_cmp(&b.0));' \
+  '    rows.sort_by(|a, b| b.0.total_cmp(&a.0));' \
+  geode-documents quotes_arrive_in_any_order_and_are_sorted_by_strike
+
+run_mutation "vol chain kind: a duplicate strike is refused" \
+  crates/geode-documents/src/chain.rs \
+  '    if let Some(w) = rows.windows(2).find(|w| w[0].0 == w[1].0) {' \
+  '    if let Some(w) = rows.windows(2).find(|_| false) {' \
+  geode-documents a_duplicate_strike_is_refused_naming_it
+
+run_mutation "vol chain kind: a negative vol or price is refused at parse" \
+  crates/geode-documents/src/chain.rs \
+  '    if v < 0.0 {
+        Err(parse_err(format!("{what} {v} is negative")))' \
+  '    if false {
+        Err(parse_err(format!("{what} {v} is negative")))' \
+  geode-documents a_negative_vol_or_price_or_non_positive_spot_ref_is_refused
+
+run_mutation "vol chain kind: a non-positive spot reference is refused at parse" \
+  crates/geode-documents/src/chain.rs \
+  'Some(positive("spotRef", number("spotRef", trimmed)?)?);' \
+  'Some(number("spotRef", trimmed)?);' \
+  geode-documents a_negative_vol_or_price_or_non_positive_spot_ref_is_refused
+
+run_mutation "vol chain kind: write refuses a negative vol or price" \
+  crates/geode-documents/src/chain.rs \
+  '        if let Some(v) = column.iter().find(|v| **v < 0.0) {' \
+  '        if let Some(v) = column.iter().find(|_| false) {' \
+  geode-documents write_refuses_what_parse_would_never_produce
+
+run_mutation "vol chain kind: write refuses a non-positive spot reference" \
+  crates/geode-documents/src/chain.rs \
+  '    if *spot_ref <= 0.0 || spot_ref.is_nan() {' \
+  '    if spot_ref.is_nan() {' \
+  geode-documents write_refuses_what_parse_would_never_produce
+
+run_mutation "vol chain generator: the half-spread is capped at half the mid" \
+  crates/geode-demo-data/src/documents.rs \
+  '        (0.0025 + 0.03 * (strike / forward - 1.0).abs()).min(mid / 2.0)' \
+  '        0.0025 + 0.03 * (strike / forward - 1.0).abs()' \
+  geode-demo-data the_half_spread_never_reaches_mid_even_at_the_floor
+
+run_mutation "vol chain generator: residuals stay within their bound" \
+  crates/geode-demo-data/src/documents.rs \
+  '                *r = (*r + step).clamp(-RESIDUAL_BOUND, RESIDUAL_BOUND);' \
+  '                *r += step;' \
+  geode-demo-data mid_sits_within_the_residual_bound_of_the_stand_in_curve
+
+run_mutation "vol chain generator: prices use the expiry's own time" \
+  crates/geode-demo-data/src/documents.rs \
+  '            let t = ((expiry - anchor).num_days() as f64).max(0.5) / 365.0;' \
+  '            let t = ((curve_date - anchor).num_days() as f64).max(0.5) / 365.0;' \
+  geode-demo-data an_expiry_past_the_cvi_prices_at_its_own_time_to_expiry
+
+run_mutation "vol chain bus: the startup burst repeats per key" \
+  crates/geode-app/src/demo_bus.rs \
+  '            for _ in 0..producer.startup_repeats.max(1) {' \
+  '            for _ in 0..1 {' \
+  geode-app the_startup_burst_publishes_every_expiry_of_every_chain
+
+run_mutation "vol chain bus: a chain with no CVI yet is skipped" \
+  crates/geode-app/src/demo_bus.rs \
+  '        .cloned()?;' \
+  '        .cloned().expect("mutant: assume a CVI");' \
+  geode-app the_chain_producer_skips_an_underlying_with_no_cvi_yet
+
+run_mutation "vol chain bus: the CVI producer stores what it publishes" \
+  crates/geode-app/src/demo_bus.rs \
+  '        .insert(key.to_string(), doc.clone());' \
+  '        .clear();' \
+  geode-app the_cvi_producer_stores_what_it_publishes
+
 # ---- Tile stacks ---- A stack paints only its active member. Focus, close,
 # move, restoration and drop operations keep that member and the stack's
 # bookkeeping consistent.
@@ -17182,22 +17329,22 @@ run_mutation "pricer core: an old revision's delivery is installed" \
 
 run_mutation "pricer core: a package sums its legs unsigned" \
   crates/geode-pricer/src/core/sheet.rs \
-  '                        let q = self.qty[leg] as f64;' \
-  '                        let q = (self.qty[leg] as f64).abs();' \
+  '                    let q = self.qty[leg] as f64;' \
+  '                    let q = (self.qty[leg] as f64).abs();' \
   geode-pricer a_package_sums_qty_times_value_over_its_legs_with_signed_quantities
 
 run_mutation "pricer core: a failed leg still sums" \
   crates/geode-pricer/src/core/sheet.rs \
-  '            self.result[p] = if complete && failed.is_none() {' \
-  '            self.result[p] = if complete {' \
+  '            result: if any && complete && failed.is_none() {' \
+  '            result: if any && complete {' \
   geode-pricer a_package_sums_qty_times_value_over_its_legs_with_signed_quantities
 
 # A local-currency sum over USD and EUR legs is a sum of unlike units: the
 # fold marks the package MIXED, and a local cell or total paints a gap.
 run_mutation "pricer core: a package over differing currencies keeps the first leg's" \
   crates/geode-pricer/src/core/sheet.rs \
-  '                        if acc.currency != r.currency {' \
-  '                        if false {' \
+  '                    if acc.currency != r.currency {' \
+  '                    if false {' \
   geode-pricer a_package_over_differing_currencies_folds_to_a_mixed_currency
 
 run_mutation "pricer totals: a mixed-currency local total is a gap" \
@@ -17370,9 +17517,9 @@ run_mutation "pricer templates: a reload leaves the open bar's history stale" \
 # The reload observer must hand the factory the configured set.
 run_mutation "pricer app: a reload hands the factory the builtin templates" \
   crates/geode-app/src/bridge.rs \
-  '            };
+  '            pricer.set_dims(dims);
             pricer.reload(views, templates, colours, refresh, stale_after, cx);' \
-  '            };
+  '            pricer.set_dims(dims);
             let _ = templates;
             pricer.reload(views, TemplateSet::builtin(), colours, refresh, stale_after, cx);' \
   geode-app a_config_reload_hands_the_pricer_factory_its_templates
@@ -20443,8 +20590,8 @@ run_mutation "pricer tile: the session record carries dead package ids" \
 # Undoing row deletion places the cursor on the restored rows.
 run_mutation "pricer tile: an undo that restores rows leaves the cursor below them" \
   crates/geode-pricer/src/tile.rs \
-  '                if let Some(id) = restored {' \
-  '                if let Some(id) = restored.filter(|_| false) {' \
+  '                if let Some(&id) = restored.first() {' \
+  '                if let Some(&id) = restored.first().filter(|_| false) {' \
   geode-pricer dd_then_u_on_an_open_package_restores_it_open_under_the_cursor
 
 # A leg restored under a closed package would put the cursor on a hidden
@@ -20540,11 +20687,9 @@ run_mutation "timeseries menu: stepping skips disabled rows" \
 # The ⋯ button toggles in the CAPTURE phase, ahead of the open menu's
 # own `on_mouse_down_out`; in the bubble phase a second click reopens.
 run_mutation "timeseries mouse: the actions button toggles in capture" \
-  crates/geode-timeseries/src/header.rs \
-  '            ))
-            .capture_any_mouse_down({' \
-  '            ))
-            .on_any_mouse_down({' \
+  crates/geode-tile/src/header.rs \
+  '        .capture_any_mouse_down(move |event, window, cx| {' \
+  '        .on_any_mouse_down(move |event, window, cx| {' \
   geode-timeseries the_actions_button_toggles_the_menu_and_a_row_click_dispatches_or_explains
 
 # The range trigger toggles in the CAPTURE phase, the `⋯` button's
@@ -20817,8 +20962,8 @@ run_mutation "pricer tile: the cursor follows a re-pointed editor" \
 # over a column that is not the one it opened on.
 run_mutation "pricer tile: an editor whose column left the plan closes" \
   crates/geode-pricer/src/tile.rs \
-  '            None => self.drop_orphaned_editor(cx),' \
-  '            None => {}' \
+  '                self.drop_orphaned_editor(if scoped { SCOPE_DROPPED_EDIT } else { MOVED }, cx)' \
+  '                let _ = scoped;' \
   geode-pricer a_view_reload_without_the_edited_column_closes_the_editor
 
 # The window-less close still blurs before the field drops.
@@ -21594,7 +21739,7 @@ run_mutation "timeseries colour picker: removing the target closes the picker" \
 run_mutation "pricer grid: a package's tag is its search text" \
   crates/geode-pricer/src/grid.rs \
   '                    SharedString::new_static(template.token()),' \
-  '                    package_search(sheet, r).into(),' \
+  '                    package_search(sheet, r, None).into(),' \
   geode-pricer rows_follow_the_expansion_and_carry_depth_ids_tags_and_search_keys
 
 # Find reads the unpainted search key, not the painted tag. Anchored on
@@ -23699,15 +23844,15 @@ run_mutation "pricer package: qty ignores whether the legs fit" \
 # A shift paints muted only when every leg inherits.
 run_mutation "pricer package: a shift reads inherited while a leg sets its own" \
   crates/geode-pricer/src/core/package.rs \
-  '        Some(pick) if sheet.children(row).all(|l| pick(sheet.shift(l)).is_none()) => {' \
-  '        Some(_) => {' \
+  '        Some(pick) if legs.iter().all(|&l| pick(sheet.shift(l)).is_none()) => CellState::Inherited,' \
+  '        Some(_) => CellState::Inherited,' \
   geode-pricer shifts_group_by_effective_value_and_mute_when_all_inherit
 
 # Shifts group by the effective value: an own 2 and an inherited 2 are one.
 run_mutation "pricer package: shifts group by the own value" \
   crates/geode-pricer/src/core/package.rs \
-  '                    .map(|l| (l, pick(sheet.shift(l)).or(sheet_value))),' \
-  '                    .map(|l| (l, pick(sheet.shift(l)))),' \
+  '                    .map(|&l| (l, pick(sheet.shift(l)).or(sheet_value))),' \
+  '                    .map(|&l| (l, pick(sheet.shift(l)))),' \
   geode-pricer shifts_group_by_effective_value_and_mute_when_all_inherit
 
 # A shift group opens for editing on the plain number, not the signed cell.
@@ -25105,11 +25250,13 @@ run_mutation "pricer dataset: declaration mirrors COLUMNS" \
   '[pricer.columns.expiry]
 type = "utf8"
 role = "dimension"
+textual = true
 grain = "instrument"
 [pricer.columns.strike]' \
   '[pricer.columns.strike]
 type = "utf8"
 role = "dimension"
+textual = true
 grain = "instrument"
 [pricer.columns.expiry]' \
   geode-pricer the_declaration_names_exactly_the_paint_vocabulary
@@ -25240,22 +25387,22 @@ run_mutation "pricer plan: move_column reorders" \
 # leg would hang from a tee and the package would never close.
 run_mutation "pricer grid: the last leg takes the corner" \
   crates/geode-pricer/src/grid.rs \
-  '                        last: sheet.children(p).end == r + 1,' \
+  '                        last: !(r + 1..sheet.children(p).end).any(|l| visibility.is_shown(l)),' \
   '                        last: false,' \
   geode-pricer the_last_leg_of_every_package_takes_the_corner_connector
 
 # A package row's note counts its own legs.
 run_mutation "pricer grid: a package counts its legs" \
   crates/geode-pricer/src/grid.rs \
-  '                    SharedString::from(leg_note(sheet.children(r).len())),' \
-  '                    SharedString::from(leg_note(0)),' \
+  '                    let total = sheet.children(r).len();' \
+  '                    let total = 0;' \
   geode-pricer the_tree_text_is_prepared_per_row_kind
 
 # One leg reads "1 leg", not "1 legs".
 run_mutation "pricer grid: one leg is singular" \
   crates/geode-pricer/src/grid.rs \
-  '    if n == 1 {' \
-  '    if false {' \
+  '        (1, 1) => "· 1 leg".to_string(),' \
+  '        (0, 1) => "· 1 leg".to_string(),' \
   geode-pricer a_one_leg_package_counts_one_leg_and_its_leg_is_last
 
 # A package summary names each strike once; a straddle would otherwise
@@ -25506,13 +25653,443 @@ run_mutation "chip: an active fill is floored against the title bar" \
   '            let fill = over(theme.primary, background);' \
   geode-shell an_active_chip_stands_out_from_the_title_bar_on_every_bundled_theme
 
-# Its text is floored against that fill; primary_foreground alone is
-# unreadable on several bundled themes.
-run_mutation "chip: active text is floored against its fill" \
-  crates/geode-shell/src/shell/chip.rs \
-  '                text: to_hsla(readable_on(to_rgb(theme.primary_foreground), fill, pole)),' \
-  '                text: theme.primary_foreground,' \
-  geode-shell every_chip_tone_is_readable_on_every_bundled_theme
+# Active text now uses the common chip floor, covered by the shared
+# chip-text mutation above.
+
+# ---- In-process scope evaluator ----
+# The evaluator copies what DuckDB does with scope_sql's predicate; the
+# parity fixture in geode-data is the detecting test for the SQL facts.
+run_mutation "scope eval: NaN orders above every number" \
+  crates/geode-core/src/scope/eval.rs \
+  '                (true, false) => Ordering::Greater,' \
+  '                (true, false) => Ordering::Less,' \
+  geode-data evaluate_agrees_with_scope_sql_on_every_operator
+
+run_mutation "scope eval: a number widens an i64 comparison to DOUBLE" \
+  crates/geode-core/src/scope/eval.rs \
+  '            ColumnType::I64 if any_num => Domain::F64,' \
+  '            ColumnType::I64 if false => Domain::F64,' \
+  geode-data evaluate_agrees_with_scope_sql_on_every_operator
+
+run_mutation "scope eval: a number casts a text column to DOUBLE" \
+  crates/geode-core/src/scope/eval.rs \
+  '            ColumnType::Utf8 if any_num => Domain::F64,' \
+  '            ColumnType::Utf8 if false => Domain::F64,' \
+  geode-data evaluate_agrees_with_scope_sql_on_every_operator
+
+run_mutation "scope eval: a derived constant folds before a literal converts" \
+  crates/geode-core/src/scope/eval.rs \
+  '        if let Some(c) = self.constant(dims) {' \
+  '        if let Some(c) = None::<bool> {' \
+  geode-data evaluate_agrees_with_scope_sql_on_every_operator
+
+run_mutation "scope eval: text to BIGINT rounds half away from zero" \
+  crates/geode-core/src/scope/eval.rs \
+  '    let r = f.round();' \
+  '    let r = f.trunc();' \
+  geode-data evaluate_agrees_with_scope_sql_on_every_operator
+
+run_mutation "scope eval: an unmapped derived selection keeps nothing before any refusal" \
+  crates/geode-core/src/scope/eval.rs \
+  '                return constant(false);
+            }
+            scopeable(ds, dims, &sel.column)?;' \
+  '            }
+            scopeable(ds, dims, &sel.column)?;' \
+  geode-data evaluate_agrees_with_scope_sql_on_every_operator
+
+run_mutation "scope eval: a text filter with no textual column folds to false" \
+  crates/geode-core/src/scope/eval.rs \
+  '        if self.text.is_some() && textual.is_empty() {' \
+  '        if false {' \
+  geode-data a_text_filter_over_a_dataset_with_no_textual_column_matches_nothing
+
+run_mutation "scope eval: like's _ matches one character" \
+  crates/geode-core/src/scope/eval.rs \
+  '        if j < p.len() && (p[j] == '\''_'\'' || (p[j] != '\''%'\'' && p[j] == v[i])) {' \
+  '        if j < p.len() && (p[j] != '\''%'\'' && p[j] == v[i]) {' \
+  geode-core like_matches_wildcards_case_insensitively_with_no_escape
+
+run_mutation "scope eval: Kleene and is UNKNOWN when neither side is FALSE" \
+  crates/geode-core/src/scope/eval.rs \
+  'fn and(a: Option<bool>, b: Option<bool>) -> Option<bool> {
+    match (a, b) {
+        (Some(false), _) | (_, Some(false)) => Some(false),
+        (Some(true), Some(true)) => Some(true),
+        _ => None,' \
+  'fn and(a: Option<bool>, b: Option<bool>) -> Option<bool> {
+    match (a, b) {
+        (Some(false), _) | (_, Some(false)) => Some(false),
+        (Some(true), Some(true)) => Some(true),
+        _ => Some(false),' \
+  geode-core and_and_or_follow_kleene_logic
+
+run_mutation "scope eval: Kleene or is UNKNOWN when neither side is TRUE" \
+  crates/geode-core/src/scope/eval.rs \
+  'fn or(a: Option<bool>, b: Option<bool>) -> Option<bool> {
+    match (a, b) {
+        (Some(true), _) | (_, Some(true)) => Some(true),
+        (Some(false), Some(false)) => Some(false),
+        _ => None,' \
+  'fn or(a: Option<bool>, b: Option<bool>) -> Option<bool> {
+    match (a, b) {
+        (Some(true), _) | (_, Some(true)) => Some(true),
+        (Some(false), Some(false)) => Some(false),
+        _ => Some(false),' \
+  geode-core and_and_or_follow_kleene_logic
+
+# ---- Pricer scope: evaluator operators, visibility, refusal ----
+# `=` holds only on equal values.
+run_mutation "scope eval: = holds on unequal values" \
+  crates/geode-core/src/scope/eval.rs \
+  '        CompareOp::Eq => ord == Ordering::Equal,' \
+  '        CompareOp::Eq => ord != Ordering::Less,' \
+  geode-data evaluate_agrees_with_scope_sql_on_every_operator
+
+# Text compares by bytes, as DuckDB's binary collation: case matters.
+run_mutation "scope eval: text compares case-insensitively" \
+  crates/geode-core/src/scope/eval.rs \
+  '            (Scalar::Text(a), Scalar::Text(b)) => a.as_bytes().cmp(b.as_bytes()),' \
+  '            (Scalar::Text(a), Scalar::Text(b)) => a.to_lowercase().cmp(&b.to_lowercase()),' \
+  geode-data evaluate_agrees_with_scope_sql_on_every_operator
+
+# `<` is strict.
+run_mutation "scope eval: < keeps the equal value" \
+  crates/geode-core/src/scope/eval.rs \
+  '        CompareOp::Lt => ord == Ordering::Less,' \
+  '        CompareOp::Lt => ord != Ordering::Greater,' \
+  geode-data evaluate_agrees_with_scope_sql_on_every_operator
+
+# like's % matches any run, the empty run at the end included.
+run_mutation "scope eval: like's trailing % needs a character" \
+  crates/geode-core/src/scope/eval.rs \
+  '    p[j..].iter().all(|c| *c == '\''%'\'')' \
+  '    p[j..].is_empty()' \
+  geode-core like_matches_wildcards_case_insensitively_with_no_escape
+
+# like is ilike: case-insensitive.
+run_mutation "scope eval: like is case-sensitive" \
+  crates/geode-core/src/scope/eval.rs \
+  '    let v: Vec<char> = value.to_lowercase().chars().collect();' \
+  '    let v: Vec<char> = value.chars().collect();' \
+  geode-core like_matches_wildcards_case_insensitively_with_no_escape
+
+# `in` is any-equal.
+run_mutation "scope eval: in needs every value equal" \
+  crates/geode-core/src/scope/eval.rs \
+  '                            Some(lits.iter().any(|l| v.cmp_sql(l) == Ordering::Equal))' \
+  '                            Some(lits.iter().all(|l| v.cmp_sql(l) == Ordering::Equal))' \
+  geode-data evaluate_agrees_with_scope_sql_on_every_operator
+
+# not over UNKNOWN is UNKNOWN: a NULL never matches under not.
+run_mutation "scope eval: not over a NULL is TRUE" \
+  crates/geode-core/src/scope/eval.rs \
+  '            Expr::Not(e) => e.eval(row, ds, dims)?.map(|v| !v),' \
+  '            Expr::Not(e) => Some(e.eval(row, ds, dims)?.map(|v| !v).unwrap_or(true)),' \
+  geode-core not_over_a_null_comparison_is_unknown_and_drops_the_row
+
+# The text filter searches only textual columns (a needle found only in a
+# number or a non-textual code matches nothing).
+run_mutation "scope eval: the text filter searches every column" \
+  crates/geode-core/src/scope/eval.rs \
+  '        let textual: Vec<&str> = ds.textual_columns().map(|c| c.name.as_str()).collect();' \
+  '        let textual: Vec<&str> = ds.columns.iter().map(|c| c.name.as_str()).collect();' \
+  geode-data evaluate_agrees_with_scope_sql_on_every_operator
+
+# A derived comparison is membership of the source value's mapping.
+run_mutation "scope eval: any mapped source is a derived member" \
+  crates/geode-core/src/scope/eval.rs \
+  '                .is_some_and(|derived| wanted_by(wanted, derived)),' \
+  '                .is_some(),' \
+  geode-data evaluate_agrees_with_scope_sql_on_every_operator
+
+# `impossible` keeps nothing, before anything else is looked at.
+run_mutation "scope eval: impossible keeps rows" \
+  crates/geode-core/src/scope/eval.rs \
+  '        if self.impossible {' \
+  '        if false {' \
+  geode-core an_impossible_scope_keeps_nothing
+
+# A WHERE clause keeps only TRUE: UNKNOWN drops the row.
+run_mutation "scope eval: UNKNOWN keeps the row" \
+  crates/geode-core/src/scope/eval.rs \
+  '        Ok(kept == Some(true))' \
+  '        Ok(kept != Some(false))' \
+  geode-core not_over_a_null_comparison_is_unknown_and_drops_the_row
+
+# A package shows when ANY of its legs matches.
+run_mutation "pricer visibility: a package needs every leg to show" \
+  crates/geode-pricer/src/core/visibility.rs \
+  '            shown[p] = legs.is_empty() || legs.clone().any(|l| shown[l]);' \
+  '            shown[p] = legs.is_empty() || legs.clone().all(|l| shown[l]);' \
+  geode-pricer an_expression_hides_non_matching_lines_and_keeps_a_package_with_any_match
+
+# A desk-wide selection on a column the pricer lacks (book) is dropped,
+# not refused: it must not blank the pricer.
+run_mutation "pricer visibility: a selection on a missing column is kept" \
+  crates/geode-pricer/src/core/visibility.rs \
+  '        .retain(|d| scope_column(ds, dims, &d.column));' \
+  '        .retain(|d| !NOT_SCOPEABLE.contains(&dims.base_column(&d.column)));' \
+  geode-pricer a_selection_on_a_column_pricer_lacks_is_dropped_not_refused
+
+# A refused scope hides nothing, even after a scope that hid lines.
+run_mutation "pricer scope: a refusal keeps the last narrowing" \
+  crates/geode-pricer/src/tile.rs \
+  '                self.visibility = Visibility::all(&self.sheet);' \
+  '                let _ = Visibility::all(&self.sheet);' \
+  geode-pricer a_refused_scope_notices_and_hides_nothing
+
+# A partly hidden package aggregates its shown legs only: the full fold
+# under a row whose legs are partly hidden is a plausible wrong total.
+run_mutation "pricer grid: a partial package aggregates every leg" \
+  crates/geode-pricer/src/grid.rs \
+  '                let legs = visibility.shown_legs(sheet, r);' \
+  '                let legs: Vec<usize> = sheet.children(r).collect();' \
+  geode-pricer a_partly_hidden_package_paints_its_shown_legs_aggregate_and_note
+
+# A typed usize::MAX count refuses instead of overflowing.
+run_mutation "pricer edit: group's end overflows" \
+  crates/geode-pricer/src/core/edit.rs \
+  '        let end = first.saturating_add(count);' \
+  '        let end = first + count;' \
+  geode-pricer a_huge_counted_group_refuses_without_overflowing
+
+run_mutation "pricer scope: the group door's range overflows" \
+  crates/geode-pricer/src/tile/select.rs \
+  '                    let taken = row..row.saturating_add(count.max(1)).min(self.sheet.len());' \
+  '                    let taken = row..(row + count.max(1)).min(self.sheet.len());' \
+  geode-pricer a_huge_counted_group_refuses_without_overflowing
+
+# The pricer's frame observer applies the scope before it arrives at the
+# flip barrier; without it a frame scope never reaches the pricer.
+run_mutation "pricer scope: the observer applies the frame's scope" \
+  crates/geode-pricer/src/tile.rs \
+  $'            this.follow_scope(cx);\n            // Arrive through' \
+  $'            // Arrive through' \
+  geode-pricer a_frame_scope_hides_lines_and_the_header_counts_them
+
+# Every rebuild re-applies the scope in force: a delivery moves a line in
+# or out of a scope over a measure.
+run_mutation "pricer scope: a rebuild re-applies the scope" \
+  crates/geode-pricer/src/tile.rs \
+  $'        self.apply_visibility();\n        let model = Rc::new(GridModel::build(' \
+  $'        let model = Rc::new(GridModel::build(' \
+  geode-pricer a_delivery_reevaluates_the_scope
+
+# `:unscoped` reads no frame scope.
+run_mutation "pricer scope: unscoped still reads the frame" \
+  crates/geode-pricer/src/tile.rs \
+  $'    if unscoped {\n        return Ok(Scope::default());\n    }\n    frame\n        .read(cx)' \
+  $'    if false {\n        return Ok(Scope::default());\n    }\n    frame\n        .read(cx)' \
+  geode-pricer unscoped_shows_every_line_and_restores_from_the_session
+
+# `:unscoped` rides the session record, as the blotter's does.
+run_mutation "pricer scope: unscoped is not written to the session" \
+  crates/geode-pricer/src/session.rs \
+  $'        if self.unscoped {\n            t.insert("unscoped"' \
+  $'        if false {\n            t.insert("unscoped"' \
+  geode-pricer unscoped_shows_every_line_and_restores_from_the_session
+
+run_mutation "pricer scope: a restored record's unscoped is ignored" \
+  crates/geode-pricer/src/session.rs \
+  '            unscoped: t.get("unscoped").and_then(|v| v.as_bool()).unwrap_or(false),' \
+  '            unscoped: t.get("unscoped-ignored").and_then(|v| v.as_bool()).unwrap_or(false),' \
+  geode-pricer a_tile_restored_unscoped_ignores_the_frame_scope
+
+# A refused scope hides nothing AND says so: silently showing every line
+# under a scope the trader set reads as a plausible scoped book.
+run_mutation "pricer scope: a refusal paints no notice" \
+  crates/geode-pricer/src/tile.rs \
+  '                    self.scope_refusal = Some(message.into());' \
+  '                    self.scope_refusal = None;' \
+  geode-pricer a_refused_scope_notices_and_hides_nothing
+
+# The header counts hidden lines.
+run_mutation "pricer scope: the header drops the hidden count" \
+  crates/geode-pricer/src/header.rs \
+  '        hidden: (i.hidden > 0).then(|| format!("{} hidden", i.hidden).into()),' \
+  '        hidden: None,' \
+  geode-pricer a_frame_scope_hides_lines_and_the_header_counts_them
+
+# A cursor on a line the scope hides goes to the nearest shown row above,
+# not to the row that slid into its old index.
+run_mutation "pricer scope: a hidden cursor falls back by index" \
+  crates/geode-pricer/src/tile.rs \
+  '        if !hidden || model.grid_row_of(id).is_some() {' \
+  '        if true {' \
+  geode-pricer the_cursor_on_a_hidden_leg_moves_to_a_visible_row
+
+# A partly hidden package row is read-only: the editor never opens on it.
+run_mutation "pricer scope: the editor opens on a partly hidden package" \
+  crates/geode-pricer/src/tile.rs \
+  $'        if self.partly_hidden(row) {\n            self.footer = Some(PARTLY_HIDDEN.into());\n            return;\n        }' \
+  $'        if false {\n            self.footer = Some(PARTLY_HIDDEN.into());\n            return;\n        }' \
+  geode-pricer an_edit_on_a_partly_hidden_package_row_is_refused_with_the_footer
+
+# A selected package stands for every leg, hidden ones too: a typed
+# commit over it refuses whole.
+run_mutation "pricer scope: a selection commit writes a partly hidden package" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'        if self.selection_partly_hidden() {\n            self.footer = Some(PARTLY_HIDDEN.into());\n            self.sync_editor(cx);' \
+  $'        if false {\n            self.footer = Some(PARTLY_HIDDEN.into());\n            self.sync_editor(cx);' \
+  geode-pricer a_selection_commit_over_a_partly_hidden_package_is_refused
+
+run_mutation "pricer scope: a selection step moves a partly hidden package" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'        if self.selection_partly_hidden() {\n            self.footer = Some(PARTLY_HIDDEN.into());\n            self.rebuild_chrome();' \
+  $'        if false {\n            self.footer = Some(PARTLY_HIDDEN.into());\n            self.rebuild_chrome();' \
+  geode-pricer a_selection_step_over_a_partly_hidden_package_is_refused
+
+# Selection totals over a partly hidden package count its shown legs, as
+# its row paints them.
+run_mutation "pricer scope: selection totals ignore the scope" \
+  crates/geode-pricer/src/tile/select.rs \
+  '        let sums = risk_totals_visible(&self.sheet, &top, &measures, &self.visibility);' \
+  '        let sums = risk_totals_visible(&self.sheet, &top, &measures, &Visibility::all(&self.sheet));' \
+  geode-pricer a_selection_total_over_a_partly_hidden_package_counts_its_shown_legs
+
+# A partly hidden package's find key reads its shown legs, as its summary.
+run_mutation "pricer grid: a partial package's key reads every leg" \
+  crates/geode-pricer/src/grid.rs \
+  "    if shown.is_none() && !text.is_empty() && !text.contains('\\n') {" \
+  "    if !text.is_empty() && !text.contains('\\n') {" \
+  geode-pricer a_partly_hidden_packages_find_key_reads_only_its_shown_legs
+
+# Structural verbs on a partly hidden package act on its hidden legs too:
+# the one door refuses them all.
+run_mutation "pricer scope: structural verbs ignore a partly hidden package" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'            .any(|r| self.partly_hidden(r))\n            .then_some(PARTLY_HIDDEN)' \
+  $'            .any(|_| false)\n            .then_some(PARTLY_HIDDEN)' \
+  geode-pricer row_verbs_on_a_partly_hidden_package_are_refused
+
+# A selection refuses whole when any of its rows is a partly hidden package.
+run_mutation "pricer scope: a selection's structural target is the cursor row" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'        let targets: Vec<usize> = if selected {\n            self.selected_sheet_rows()' \
+  $'        let targets: Vec<usize> = if false {\n            self.selected_sheet_rows()' \
+  geode-pricer selection_verbs_over_a_partly_hidden_package_refuse_whole
+
+# `g u` on a shown leg dissolves its package: the target is the parent.
+run_mutation "pricer scope: g u on a leg targets the leg" \
+  crates/geode-pricer/src/tile/select.rs \
+  '                "ungroup" => vec![self.sheet.parent(row).unwrap_or(row)],' \
+  '                "ungroup" => vec![row],' \
+  geode-pricer a_shown_leg_ungroups_nothing_but_deletes_itself
+
+# A counted `g p` reaches every root it would take as a member.
+run_mutation "pricer scope: a counted g p checks the cursor row alone" \
+  crates/geode-pricer/src/tile/select.rs \
+  '                    let taken = row..row.saturating_add(count.max(1)).min(self.sheet.len());' \
+  '                    let taken = row..row.saturating_add(1).min(self.sheet.len());' \
+  geode-pricer a_counted_group_reaching_a_partly_hidden_package_is_refused
+
+# The command door asks the same question as the keys.
+run_mutation "pricer scope: :ungroup skips the door" \
+  crates/geode-pricer/src/tile.rs \
+  $'                if let Some(why) = self.partly_hidden_refusal("ungroup", 1, false) {\n                    return Err(why.into());\n                }' \
+  $'                if let Some(_why) = None::<&str> {\n                    return Err(_why.into());\n                }' \
+  geode-pricer row_verbs_on_a_partly_hidden_package_are_refused
+
+# A counted `g p` takes the next sheet rows, hidden ones included: it
+# refuses rather than package a line the trader never saw.
+run_mutation "pricer scope: a counted g p absorbs a hidden line" \
+  crates/geode-pricer/src/tile/select.rs \
+  '                    if taken.clone().any(|r| !self.visibility.is_shown(r)) {' \
+  '                    if false {' \
+  geode-pricer a_counted_group_over_a_hidden_line_is_refused
+
+# Cursor recovery walks sheet order, so a restored cursor (no previous
+# model holds its line) recovers too; the old model's rows would not.
+run_mutation "pricer scope: a restored hidden cursor falls to row 0" \
+  crates/geode-pricer/src/tile.rs \
+  $'        let Some(at) = self.sheet.index_of(id) else {\n            return;\n        };\n        let shown' \
+  $'        let Some(at) = self.model.grid_row_of(id) else {\n            return;\n        };\n        let shown' \
+  geode-pricer a_restored_cursor_on_a_hidden_line_lands_above_it
+
+# The tile arrives at the barrier on every path, a refused scope and a
+# frame change while unscoped included.
+run_mutation "pricer scope: arrival only when a scope applied" \
+  crates/geode-pricer/src/tile.rs \
+  '            following::arrive_immediately(&mut FrameDoor::new(&frame, cx), QueryKey(this.id.0));' \
+  '            if this.scope_refusal.is_none() && !this.unscoped { following::arrive_immediately(&mut FrameDoor::new(&frame, cx), QueryKey(this.id.0)); }' \
+  geode-pricer the_tile_arrives_on_a_refused_scope_and_while_unscoped
+
+# A fresh line's status scopes as `fresh`, not its blank cell: otherwise
+# `status = 'fresh'` hides every line.
+run_mutation "pricer scope: a fresh status reads its blank cell" \
+  crates/geode-pricer/src/core/visibility.rs \
+  '            ColumnKind::Status if matches!(sheet.state(row), LineState::Fresh) => {' \
+  '            ColumnKind::Status if false => {' \
+  geode-pricer status_fresh_shows_priced_lines_and_hides_stale_ones
+
+# The synthetic keys never match a desk value: a selection on them drops
+# and an expression naming them refuses, rather than hiding every line.
+run_mutation "pricer scope: the synthetic keys are scope columns" \
+  crates/geode-pricer/src/core/visibility.rs \
+  '    ds.column(base).is_some() && !NOT_SCOPEABLE.contains(&base)' \
+  '    ds.column(base).is_some()' \
+  geode-pricer the_synthetic_keys_are_not_scope_columns
+
+run_mutation "pricer scope: a derived dimension escapes the synthetic-key rule" \
+  crates/geode-pricer/src/core/visibility.rs \
+  '    ds.column(base).is_some() && !NOT_SCOPEABLE.contains(&base)' \
+  '    ds.column(base).is_some() && !NOT_SCOPEABLE.contains(&column)' \
+  geode-pricer a_derived_dimension_over_a_synthetic_key_is_not_applicable
+
+# A dated expiry scopes by its ISO date (desk data's spelling), a tenor by
+# its text.
+run_mutation "pricer scope: a dated expiry scopes by its painted code" \
+  crates/geode-pricer/src/core/visibility.rs \
+  '                    Expiry::Date(d) => d.format("%Y-%m-%d").to_string(),' \
+  '                    Expiry::Date(d) => d.format("%d%b%y").to_string(),' \
+  geode-pricer expiry_scopes_by_iso_date_or_tenor
+
+run_mutation "pricer scope: a tenor scopes upper-cased" \
+  crates/geode-pricer/src/core/visibility.rs \
+  '                    Expiry::Tenor(t) => t.clone(),' \
+  '                    Expiry::Tenor(t) => t.to_uppercase(),' \
+  geode-pricer expiry_scopes_by_iso_date_or_tenor
+
+# A line the trader adds that the scope hides says so in the footer, at
+# every landing: the entry bar, a put, an undo or redo restore.
+run_mutation "pricer scope: a hidden landing is silent" \
+  crates/geode-pricer/src/tile.rs \
+  $'        if hidden {\n            self.footer = Some(HIDDEN_LANDING.into());' \
+  $'        if false {\n            self.footer = Some(HIDDEN_LANDING.into());' \
+  geode-pricer an_entry_bar_line_the_scope_hides_says_so
+
+run_mutation "pricer scope: an entry-bar insert skips the landing note" \
+  crates/geode-pricer/src/tile.rs \
+  $'.map(|r| self.sheet.id(r)).collect();\n                self.note_hidden_landing(ids);' \
+  $'.map(|r| self.sheet.id(r)).collect();\n                let _ = ids;' \
+  geode-pricer an_entry_bar_line_the_scope_hides_says_so
+
+run_mutation "pricer scope: a put skips the landing note" \
+  crates/geode-pricer/src/tile.rs \
+  $'        let ids: Vec<LineId> = (first..at).map(|r| self.sheet.id(r)).collect();\n        self.note_hidden_landing(ids);' \
+  $'        let ids: Vec<LineId> = (first..at).map(|r| self.sheet.id(r)).collect();\n        let _ = ids;' \
+  geode-pricer a_put_or_restore_the_scope_hides_says_so
+
+run_mutation "pricer scope: a restore skips the landing note" \
+  crates/geode-pricer/src/tile.rs \
+  '                self.note_hidden_landing(restored);' \
+  '                let _ = restored;' \
+  geode-pricer a_put_or_restore_the_scope_hides_says_so
+
+# A `dimensions` edit alone reloads the pricer, and the reload hands the
+# factory the new dimensions.
+run_mutation "pricer key: dimensions left out" \
+  crates/geode-app/src/bridge.rs \
+  '        dimensions: config.doc("dimensions").map(|d| d.value.clone()),' \
+  '        dimensions: None,' \
+  geode-app a_dimensions_reload_reaches_the_pricer
+
+run_mutation "pricer reload: dimensions not handed over" \
+  crates/geode-app/src/bridge.rs \
+  '            pricer.set_dims(dims);' \
+  '            let _ = dims;' \
+  geode-app a_dimensions_reload_reaches_the_pricer
 
 # One id, one verb. Accepting a second registration of an id would let a
 # panel's menu row dispatch whichever verb the lookup found first.
@@ -25719,6 +26296,322 @@ run_mutation "panels: a configured panel paints its own ladder format" \
   '        std::iter::repeat_with(|| CellKind::Number(spec.format.clone())).take(grid.columns.len()),' \
   '        std::iter::repeat_with(|| CellKind::Number(geode_core::view::ColumnFormat { precision: 4, ..spec.format.clone() })).take(grid.columns.len()),' \
   geode-marketdata a_user_layer_panel_paints_its_own_title_and_formats
+
+# ---- Tile header and source health -------------------------------------
+
+# One rank for every rollup; a swapped pair reorders the status bar, the
+# page's worst health and a tile's chip together.
+run_mutation "health rank: degraded outranks pending_too_long" \
+  crates/geode-core/src/health.rs \
+  '            Health::Degraded { .. } => 3,' \
+  '            Health::Degraded { .. } => 2,' \
+  geode-core severity_ranks_ok_pending_too_long_degraded_failed
+
+# The status summary counts by severity index; a clamped index files
+# failures under degraded.
+run_mutation "health rank: the summary counts under the severity index" \
+  crates/geode-shell/src/diagnostics.rs \
+  '            counts[usize::from(health.severity())] += 1;' \
+  '            counts[usize::from(health.severity()).min(3)] += 1;' \
+  geode-shell the_summary_counts_every_health_under_its_own_label
+
+# The page ranks by severity; ranking by label text calls
+# pending_too_long worse than degraded.
+run_mutation "health rank: the page ranks by severity, not label" \
+  crates/geode-diagnostics/src/model.rs \
+  '            Some(w) if w.severity() >= h.severity() => Some(w),' \
+  '            Some(w) if w.label() >= h.label() => Some(w),' \
+  geode-diagnostics the_page_ranks_health_by_the_core_severity
+
+# Ok and Pending are silent; a looser gate shows a chip for a pending CSV.
+run_mutation "tile health: Ok and Pending are silent" \
+  crates/geode-shell/src/diagnostics.rs \
+  '            if health.severity() <= silent {' \
+  '            if health.severity() < silent {' \
+  geode-shell ok_and_pending_are_silent
+
+# The dataset filter; dropped, every unhealthy source reaches every tile.
+run_mutation "tile health: a source outside the datasets is ignored" \
+  crates/geode-shell/src/diagnostics.rs \
+  '            if !reads(name, state) {' \
+  '            if false && !reads(name, state) {' \
+  geode-shell a_source_outside_the_datasets_is_ignored
+
+# The tie rule; `>=` hands a tie to the last name, not the first.
+run_mutation "tile health: a tie picks the lowest source name" \
+  crates/geode-shell/src/diagnostics.rs \
+  '                Some((_, _, w)) => health.severity() > w.severity(),' \
+  '                Some((_, _, w)) => health.severity() >= w.severity(),' \
+  geode-shell a_tie_picks_the_lowest_source_name
+
+# `others` excludes the worst source itself.
+run_mutation "tile health: others counts only the other sources" \
+  crates/geode-shell/src/diagnostics.rs \
+  '            others: unhealthy - 1,' \
+  '            others: unhealthy,' \
+  geode-shell others_counts_the_other_unhealthy_sources_only
+
+# The bridge links a source to its dataset, not its own name.
+run_mutation "tile health: the bridge links a source to its dataset" \
+  crates/geode-app/src/bridge.rs \
+  '                    dataset: source.dataset.clone(),' \
+  '                    dataset: source.name.clone(),' \
+  geode-app describing_a_source_carries_its_dataset
+
+# The shell drains a tile's page request; skipped, the chip does nothing.
+run_mutation "tile header: the shell opens a queued diagnostics page" \
+  crates/geode-shell/src/shell/mod.rs \
+  '        if pending_page {' \
+  '        if false && pending_page {' \
+  geode-shell a_queued_page_open_opens_the_diagnostics_page
+
+# Opening only: drained through the toggle, a second chip click closes it.
+run_mutation "tile header: a queued page open never closes the page" \
+  crates/geode-shell/src/shell/page.rs \
+  '        self.open_page(kind, window, cx);
+    }' \
+  '        self.toggle_page(kind, window, cx);
+    }' \
+  geode-shell a_queued_page_open_never_closes_the_page
+
+# A queued open under a modal is refused with the close-the-dialog notice;
+# without the guard the page opens behind the modal.
+run_mutation "tile header: a queued page open under a modal is refused" \
+  crates/geode-shell/src/shell/page.rs \
+  '        if self.modal_open() {
+            self.notice = Some(super::input::CLOSE_DIALOG_FIRST);' \
+  '        if false && self.modal_open() {
+            self.notice = Some(super::input::CLOSE_DIALOG_FIRST);' \
+  geode-shell a_queued_page_open_under_a_modal_is_refused
+
+# The version gate: every diagnostics notify would re-ask and re-format.
+run_mutation "tile header: health re-asks only when sources moved" \
+  crates/geode-tile/src/header.rs \
+  '        if self.seen == Some(now) {' \
+  '        if false && self.seen == Some(now) {' \
+  geode-tile refresh_asks_only_when_the_sources_version_moved
+
+# The chip's click queues the page.
+run_mutation "tile header: the chip click asks for the page" \
+  crates/geode-tile/src/header.rs \
+  '                d.request_diagnostics_page();' \
+  '' \
+  geode-tile clicking_the_health_chip_queues_the_diagnostics_page
+
+# Cluster order; the tail reversed, the chip lands left of the times.
+run_mutation "tile header: the cluster paints in order" \
+  crates/geode-tile/src/header.rs \
+  '    let mut row = h_flex().items_center().gap_3();' \
+  '    let mut row = h_flex().flex_row_reverse().items_center().gap_3();' \
+  geode-tile the_cluster_paints_in_order_and_no_chip_without_health
+
+# Failed is danger, not warning.
+run_mutation "tile header: a failed chip is the danger tone" \
+  crates/geode-tile/src/header.rs \
+  '            Health::Failed { .. } => ("failed", chip::Tone::Danger),' \
+  '            Health::Failed { .. } => ("failed", chip::Tone::Warning),' \
+  geode-tile the_chip_words_tones_and_tooltip
+
+# A stale run takes the warning text tone.
+run_mutation "tile header: a stale run is warning text" \
+  crates/geode-tile/src/header.rs \
+  '    if stale {
+        chip_paint(theme, chip::Tone::WarningText).text' \
+  '    if false {
+        chip_paint(theme, chip::Tone::WarningText).text' \
+  geode-tile a_stale_run_takes_the_warning_text_tone
+
+# The chip's press is its own: bubbling on, it would refocus the tile and
+# reach the shell root under the page it just asked for.
+run_mutation "tile header: the chip press stops at the chip" \
+  crates/geode-tile/src/header.rs \
+  '            cx.stop_propagation();
+            window.prevent_default();' \
+  '            window.prevent_default();' \
+  geode-tile clicking_the_health_chip_queues_the_diagnostics_page
+
+# The paint route reads the run's text(); painting the bare label drops a
+# module's `stale` word.
+run_mutation "tile header: a stale run paints its stale label" \
+  crates/geode-tile/src/header.rs \
+  '            .child(t.text().clone())' \
+  '            .child(t.label.clone())' \
+  geode-tile a_stale_run_paints_its_stale_label
+
+# The panel's observer asks about its dataset; skipped, a failed source
+# never reaches the header.
+run_mutation "tile health: market-data refreshes on a health change" \
+  crates/geode-marketdata/src/tile.rs \
+  '            if this
+                .health
+                .refresh(cx, |d| d.health_for_datasets(&[dataset]))' \
+  '            if false
+                && this
+                    .health
+                    .refresh(cx, |d| d.health_for_datasets(&[dataset]))' \
+  geode-marketdata a_degraded_panel_source_shows_the_chip_and_recovery_clears_it
+
+# The panel asks about its own spec's dataset; asking about another
+# panel's dataset leaves a degraded `cvi_params` source off the header.
+run_mutation "tile health: market-data asks about its own dataset" \
+  crates/geode-marketdata/src/tile.rs \
+  '            let dataset = this.spec.dataset.as_str();' \
+  '            let dataset = "dividend_schedule";' \
+  geode-marketdata a_degraded_panel_source_shows_the_chip_and_recovery_clears_it
+
+# A new tile asks at once; without it a tile opened on a failed store is
+# silent until the next health change.
+run_mutation "tile health: the pricer asks when it opens" \
+  crates/geode-pricer/src/tile.rs \
+  '        health.reask(cx, |d| d.health_for_datasets(&[PRICER_SHEETS_DATASET]));' \
+  '' \
+  geode-pricer a_tile_opened_after_its_source_failed_shows_the_chip_at_once
+
+# The observer re-asks on a health change.
+run_mutation "tile health: the pricer refreshes on a health change" \
+  crates/geode-pricer/src/tile.rs \
+  '                .refresh(cx, |d| d.health_for_datasets(&[PRICER_SHEETS_DATASET]))' \
+  '                .refresh(cx, |d| d.health_for_datasets(&["cvi_params"]))' \
+  geode-pricer a_failed_sheet_store_source_shows_the_chip_and_recovery_clears_it
+
+# End to end in the app: the chip's click reaches the page.
+run_mutation "tile header: a chip click opens the page in the app" \
+  crates/geode-tile/src/header.rs \
+  '                d.request_diagnostics_page();' \
+  '' \
+  geode-app a_health_chip_click_opens_the_diagnostics_page
+
+# A new panel asks at once; without it a panel opened on a failed source
+# is silent until the next health change.
+run_mutation "tile health: market-data asks when it opens" \
+  crates/geode-marketdata/src/tile.rs \
+  '        health.reask(cx, |d| d.health_for_datasets(&[spec.dataset.as_str()]));' \
+  '' \
+  geode-marketdata a_panel_opened_after_its_source_failed_shows_the_chip_at_once
+
+# The tile re-asks when its series change; without it a removed series'
+# failure keeps its chip.
+run_mutation "tile health: timeseries re-asks when its series change" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '        self.health.reask(cx, |d| d.health_for_sources(&sources));' \
+  '' \
+  geode-timeseries removing_the_only_series_on_a_failed_source_clears_the_chip
+
+# The observer re-asks on a health change.
+run_mutation "tile health: timeseries refreshes on a health change" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '            if this.health.refresh(cx, |d| d.health_for_sources(&sources)) {' \
+  '            if false && this.health.refresh(cx, |d| d.health_for_sources(&sources)) {' \
+  geode-timeseries the_chip_follows_the_worst_of_the_series_sources
+
+# Expressions read no source; a source slot's source is the question.
+run_mutation "tile health: timeseries asks about its source slots" \
+  crates/geode-timeseries/src/header.rs \
+  '            SlotKind::Source { source, .. } => Some(source.as_str()),' \
+  '            SlotKind::Source { .. } => None,' \
+  geode-timeseries slot_sources_are_the_source_slots_sources_once_each
+
+# One height for every header.
+run_mutation "tile header: every header is HEADER_HEIGHT tall" \
+  crates/geode-tile/src/header.rs \
+  '        .h(scale::design(HEADER_HEIGHT))' \
+  '        .h(scale::design(HEADER_HEIGHT + 4.0))' \
+  geode-timeseries the_header_is_the_shared_height
+
+# A slot chip, swatch target included, fits inside the shared strip.
+run_mutation "timeseries header: a slot chip fits the 22 px strip" \
+  crates/geode-timeseries/src/header.rs \
+  'const SWATCH_TARGET: f32 = 16.0;' \
+  'const SWATCH_TARGET: f32 = 30.0;' \
+  geode-timeseries a_slot_chip_fits_inside_the_header
+
+# The left slot clips instead of growing: without a zero minimum width a
+# long left side pushes the health chip and `⋯` off the tile.
+run_mutation "tile header: an overlong left side leaves the cluster on the tile" \
+  crates/geode-tile/src/header.rs \
+  '    let slot = h_flex().min_w_0().overflow_hidden();' \
+  '    let slot = h_flex();' \
+  geode-tile an_overlong_left_side_leaves_the_cluster_inside_the_header
+
+# The question is the snapshot's datasets; asked about nothing, the chip
+# never shows.
+run_mutation "tile health: the blotter asks about its snapshot's datasets" \
+  crates/geode-blotter/src/header.rs \
+  '        let mut datasets: Vec<String> = p.datasets.iter().map(|f| f.dataset.clone()).collect();' \
+  '        let mut datasets: Vec<String> = Vec::new();' \
+  geode-blotter a_failed_source_of_a_delivered_dataset_shows_the_chip
+
+# A new snapshot over other datasets re-asks; without it the old datasets'
+# chip survives.
+run_mutation "tile health: the blotter re-asks when a snapshot lands" \
+  crates/geode-blotter/src/tile.rs \
+  '            self.health.reask(cx, |d| d.health_for_datasets(&datasets));' \
+  '' \
+  geode-blotter a_new_snapshots_datasets_move_the_chip
+
+# The first snapshot re-asks too; without it a source already failed before
+# delivery shows no chip until the next health report.
+run_mutation "tile health: the blotter's first snapshot asks at once" \
+  crates/geode-blotter/src/tile.rs \
+  '            self.health.reask(cx, |d| d.health_for_datasets(&datasets));' \
+  '' \
+  geode-blotter a_source_failed_before_the_first_snapshot_shows_the_chip_on_delivery
+
+# The blotter observes Diagnostics; answered with nothing, a report after
+# delivery never reaches the header.
+run_mutation "tile health: the blotter refreshes on a health change" \
+  crates/geode-blotter/src/tile.rs \
+  '                .refresh(cx, |d| d.health_for_datasets(&datasets))' \
+  '                .refresh(cx, |_| None)' \
+  geode-blotter a_failed_source_of_a_delivered_dataset_shows_the_chip
+
+# The cluster's text is capped at TEXT_SHARE of the header; uncapped, a
+# long error takes every pixel the tail leaves and the left side collapses.
+run_mutation "tile header: a long notice leaves the left side its share" \
+  crates/geode-tile/src/header.rs \
+  '            .max_w(relative(TEXT_SHARE))' \
+  '            .max_w(relative(1.0))' \
+  geode-tile an_overlong_notice_cuts_and_leaves_the_tail_and_left_side
+
+# A notice in the cluster is one line cut with an ellipsis; allowed to
+# wrap, a long error runs out of the 22 px strip.
+run_mutation "tile header: a long notice stays one line" \
+  crates/geode-tile/src/notice.rs \
+  '        .truncate()' \
+  '        .overflow_hidden()' \
+  geode-tile an_overlong_notice_cuts_and_leaves_the_tail_and_left_side
+
+# A pending-too-long source has no reason of its own; without the detail
+# fallback its chip explains nothing.
+run_mutation "tile health: a reasonless state explains itself by its detail" \
+  crates/geode-shell/src/diagnostics.rs \
+  '            _ => state.detail.clone(),' \
+  '            _ => String::new(),' \
+  geode-shell pending_too_long_shows_and_explains_itself_by_its_detail
+
+# The chip's tooltip counts the other unhealthy sources.
+run_mutation "tile header: the chip prepares +N more" \
+  crates/geode-tile/src/header.rs \
+  '            more: (h.others > 0).then(|| format!("+{} more", h.others).into()),' \
+  '            more: None,' \
+  geode-tile the_chip_words_tones_and_tooltip
+
+# The header's times are prepared; without the clock observer re-preparing
+# them, a zone change repaints the old zone's times.
+run_mutation "tile header: the blotter re-prepares its times on a clock change" \
+  crates/geode-blotter/src/tile.rs \
+  '        cx.observe_global::<geode_shell::clock::AppClock>(|this, cx| {
+            this.prepare_header(cx);' \
+  '        cx.observe_global::<geode_shell::clock::AppClock>(|this, cx| {' \
+  geode-blotter the_freshness_readout_reads_the_installed_app_clock_and_follows_a_later_change
+
+# The chip's page open begins as the action does; skipped, the last refusal
+# stays up over the page it opened and the crash tail misses the open.
+run_mutation "tile header: a queued page open expires the notice" \
+  crates/geode-shell/src/shell/page.rs \
+  '        self.begin_action(&format!("page::toggle_{kind}"));' \
+  '' \
+  geode-shell a_queued_page_open_clears_the_notice_and_records_the_action
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

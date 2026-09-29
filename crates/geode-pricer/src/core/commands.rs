@@ -43,11 +43,13 @@ pub enum Command {
     Autosize {
         reset: bool,
     },
+    /// `:unscoped`: toggle whether this tile ignores the frame's scope.
+    Unscoped,
 }
 
-pub const VERBS: [&str; 12] = [
+pub const VERBS: [&str; 13] = [
     "view", "shift", "spot", "price", "refresh", "group", "ungroup", "e", "new", "name", "rm",
-    "autosize",
+    "autosize", "unscoped",
 ];
 
 const SHIFT_USAGE: &str = "usage: shift spot|vol <n>|clear";
@@ -141,6 +143,8 @@ pub fn parse(line: &str) -> Result<Command, String> {
         ["autosize"] => Ok(Command::Autosize { reset: false }),
         ["autosize", "reset"] => Ok(Command::Autosize { reset: true }),
         ["autosize", ..] => Err("usage: autosize [reset]".into()),
+        ["unscoped"] => Ok(Command::Unscoped),
+        ["unscoped", ..] => Err("usage: unscoped".into()),
         [other, ..] => Err(format!("unknown command '{other}'")),
     }
 }
@@ -261,6 +265,8 @@ mod tests {
         assert_eq!(parse("new fresh"), Ok(Command::New(Some("fresh".into()))));
         assert_eq!(parse("name fresh"), Ok(Command::Name("fresh".into())));
         assert_eq!(parse("rm old"), Ok(Command::Remove("old".into())));
+        assert_eq!(parse("unscoped"), Ok(Command::Unscoped));
+        assert_eq!(parse("unscoped now"), Err("usage: unscoped".into()));
     }
 
     #[test]

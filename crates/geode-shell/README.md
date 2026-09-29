@@ -132,9 +132,12 @@ change most often hits:
   under a modal; focus returns to the open page's handle (`focus_home`),
   not the shell root, when an overlay closes and after Escape or Enter in
   the scope field.
-- Colors go through the doors: `chip_paint` for semantic chips,
-  `row_paint` for list rows, `control::paint` for hover and pressed
-  states. Each has a sweep over every bundled theme with no exception list.
+- Colors go through the doors: `chip_paint` for semantic chips on the main
+  background, `chip_paint_on` on chrome and popovers, `row_paint` for list
+  rows, and `control::paint` for hover and pressed states. Chip and control
+  text clears 4.5:1 against its actual fill; active chip fills retain their
+  separate 3:1 floor against the title bar. Each has a sweep over every
+  bundled theme with no exception list.
 - Chrome geometry is authored at the `Medium` rem through `scale::design`;
   radii come from the theme.
 - Every gpui-kit and gpui-pre crate is `=`-pinned in the root `Cargo.toml`.
