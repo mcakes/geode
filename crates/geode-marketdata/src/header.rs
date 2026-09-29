@@ -30,9 +30,9 @@ use std::rc::Rc;
 
 /// What one prepared header run is painted as. The tone is resolved to a
 /// theme colour at paint (never a stored colour, so a theme switch needs
-/// no rebuild), and `Time` is the one tone whose colour depends on the
-/// clock — the staleness reading, which is a comparison per frame and not
-/// a format.
+/// no rebuild). `Time` is a quiet time stamp (`sent HH:MM`); the source
+/// time is the shared frame's `TimeRun`, whose stale colour is decided
+/// there, so no tone depends on the clock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Tone {
     Plain,
@@ -42,20 +42,13 @@ pub(crate) enum Tone {
 }
 
 /// One run's text colour: the theme's own secondary/primary text for the
-/// quiet tones, the floored `warning` for `Warn` (and for `Time` once the
-/// document is stale). Notices are the notice door's. Never
-/// `warning_foreground` — that is the token for text on a SOLID warning
-/// fill, and a run has no fill.
-pub(crate) fn tone_colour(
-    tone: Tone,
-    stale: bool,
-    theme: &Theme,
-    floored: &FlooredTones,
-) -> gpui::Hsla {
+/// quiet tones, the floored `warning` for `Warn`. Notices are the notice
+/// door's. Never `warning_foreground` — that is the token for text on a
+/// SOLID warning fill, and a run has no fill.
+pub(crate) fn tone_colour(tone: Tone, theme: &Theme, floored: &FlooredTones) -> gpui::Hsla {
     match tone {
         Tone::Plain => theme.muted_foreground,
         Tone::Key => theme.foreground,
-        Tone::Time if stale => floored.warn,
         Tone::Time => theme.muted_foreground,
         Tone::Warn => floored.warn,
     }
@@ -370,7 +363,7 @@ pub(crate) fn render(
             left = left.child(
                 div()
                     .font_weight(gpui::FontWeight::BOLD)
-                    .text_color(tone_colour(Tone::Key, false, theme, tones))
+                    .text_color(tone_colour(Tone::Key, theme, tones))
                     .child(u.clone()),
             );
             if h.dirty {
@@ -437,7 +430,7 @@ pub(crate) fn render(
                 .gap_1()
                 .child(
                     div()
-                        .text_color(tone_colour(Tone::Plain, false, theme, tones))
+                        .text_color(tone_colour(Tone::Plain, theme, tones))
                         .child(attr.label.clone()),
                 )
                 .child(value),
@@ -455,7 +448,7 @@ pub(crate) fn render(
                     tile_id,
                 ))
                 .debug_selector(move || format!("marketdata-state-{tile_id}"))
-                .text_color(tone_colour(*tone, false, theme, tones))
+                .text_color(tone_colour(*tone, theme, tones))
                 .child(text.clone())
                 .when(matches!(h.badge, DraftBadge::Behind { .. }), |el| {
                     el.tooltip(tips::tip_with(
@@ -475,7 +468,7 @@ pub(crate) fn render(
         status.push(
             div()
                 .debug_selector(move || format!("marketdata-incomplete-{tile_id}"))
-                .text_color(tone_colour(*tone, false, theme, tones))
+                .text_color(tone_colour(*tone, theme, tones))
                 .child(text.clone())
                 .into_any_element(),
         );
@@ -484,7 +477,7 @@ pub(crate) fn render(
         status.push(
             div()
                 .debug_selector(move || format!("marketdata-echo-{tile_id}"))
-                .text_color(tone_colour(*tone, false, theme, tones))
+                .text_color(tone_colour(*tone, theme, tones))
                 .child(text.clone())
                 .into_any_element(),
         );

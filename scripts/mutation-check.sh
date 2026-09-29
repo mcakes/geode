@@ -25832,7 +25832,8 @@ run_mutation "tile health: market-data refreshes on a health change" \
                     .refresh(cx, |d| d.health_for_datasets(&[dataset]))' \
   geode-marketdata a_degraded_panel_source_shows_the_chip_and_recovery_clears_it
 
-# The chip is gated on the sources version, which a description bumps.
+# The panel asks about its own spec's dataset; asking about another
+# panel's dataset leaves a degraded `cvi_params` source off the header.
 run_mutation "tile health: market-data asks about its own dataset" \
   crates/geode-marketdata/src/tile.rs \
   '            let dataset = this.spec.dataset.as_str();' \
@@ -25860,6 +25861,14 @@ run_mutation "tile header: a chip click opens the page in the app" \
   '                d.request_diagnostics_page();' \
   '' \
   geode-app a_health_chip_click_opens_the_diagnostics_page
+
+# A new panel asks at once; without it a panel opened on a failed source
+# is silent until the next health change.
+run_mutation "tile health: market-data asks when it opens" \
+  crates/geode-marketdata/src/tile.rs \
+  '        health.reask(cx, |d| d.health_for_datasets(&[spec.dataset.as_str()]));' \
+  '' \
+  geode-marketdata a_panel_opened_after_its_source_failed_shows_the_chip_at_once
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
