@@ -482,11 +482,24 @@ mod tests {
     struct Strip {
         watch: HealthWatch,
         presses: Rc<Cell<u32>>,
+        /// Presses that reached the strip's parent in the bubble phase —
+        /// what the shell's click-to-focus would see.
+        parent: Rc<Cell<u32>>,
+        times: Vec<TimeRun>,
+    }
+
+    fn plain_time() -> TimeRun {
+        TimeRun {
+            label: "14:00:00".into(),
+            stale_label: None,
+            stale: false,
+        }
     }
 
     impl Render for Strip {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let presses = self.presses.clone();
+            let parent = self.parent.clone();
             let mut cluster = Cluster::new(TILE);
             cluster.status.push(
                 div()
@@ -495,11 +508,7 @@ mod tests {
                     .into_any_element(),
             );
             cluster.notices.push(Notice::warning("not saved"));
-            cluster.times.push(TimeRun {
-                label: "14:00:00".into(),
-                stale_label: None,
-                stale: false,
-            });
+            cluster.times = self.times.clone();
             cluster.health = self.watch.chip();
             cluster.menu = Some(MenuTrigger {
                 id: ElementId::Name("strip-menu".into()),
@@ -509,7 +518,14 @@ mod tests {
                 open: false,
                 on_press: Rc::new(move |_, _| presses.set(presses.get() + 1)),
             });
-            frame(None, div().child("left"), cluster, cx.theme()).debug_selector(|| "strip".into())
+            div()
+                .on_mouse_down(MouseButton::Left, move |_, _, _| {
+                    parent.set(parent.get() + 1)
+                })
+                .child(
+                    frame(None, div().child("left"), cluster, cx.theme())
+                        .debug_selector(|| "strip".into()),
+                )
         }
     }
 
@@ -530,9 +546,15 @@ mod tests {
             move |_, _| Strip {
                 watch: HealthWatch::new(diagnostics, TILE),
                 presses,
+                parent: Rc::new(Cell::new(0)),
+                times: vec![plain_time()],
             }
         });
         (view, diagnostics, presses, vcx)
+    }
+
+    fn parent_presses(view: &Entity<Strip>, vcx: &mut VisualTestContext) -> u32 {
+        view.read_with(vcx, |s, _| s.parent.get())
     }
 
     fn show_failure(
@@ -611,14 +633,59 @@ mod tests {
         let at = centre(vcx, "tile-health-3");
         click(vcx, at);
         assert!(diagnostics.update(vcx, |d, _| d.take_pending_diagnostics_page()));
+        assert_eq!(
+            parent_presses(&view, vcx),
+            0,
+            "the chip's press stops at the chip: no tile focus, no shell root"
+        );
     }
 
     #[gpui::test]
     fn the_menu_trigger_runs_its_action(cx: &mut TestAppContext) {
-        let (_, _, presses, vcx) = open_strip(cx);
+        let (view, _, presses, vcx) = open_strip(cx);
         let at = centre(vcx, "strip-menu");
         click(vcx, at);
         assert_eq!(presses.get(), 1);
+        assert_eq!(
+            parent_presses(&view, vcx),
+            1,
+            "the menu press still reaches the tile's own listeners"
+        );
+    }
+
+    /// The paint route reads the run's `text()`: a stale run with a stale
+    /// label paints exactly as wide as a fresh run whose label is that text,
+    /// and wider than its own fresh label.
+    #[gpui::test]
+    fn a_stale_run_paints_its_stale_label(cx: &mut TestAppContext) {
+        let (view, _, _, vcx) = open_strip(cx);
+        view.update(vcx, |s, cx| {
+            s.times = vec![
+                TimeRun {
+                    label: "14:00:00".into(),
+                    stale_label: Some("14:00:00 stale".into()),
+                    stale: true,
+                },
+                TimeRun {
+                    label: "14:00:00 stale".into(),
+                    stale_label: None,
+                    stale: false,
+                },
+                plain_time(),
+            ];
+            cx.notify();
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let width = |vcx: &mut VisualTestContext, s: &'static str| {
+            f32::from(vcx.debug_bounds(s).unwrap().size.width)
+        };
+        let stale = width(vcx, "tile-time-3-0");
+        let worded = width(vcx, "tile-time-3-1");
+        let fresh = width(vcx, "tile-time-3-2");
+        assert!((stale - worded).abs() < 0.5, "{stale} vs {worded}");
+        assert!(stale > fresh + 0.5, "{stale} vs {fresh}");
     }
 
     #[gpui::test]

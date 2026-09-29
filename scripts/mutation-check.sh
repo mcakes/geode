@@ -25802,6 +25802,23 @@ run_mutation "tile header: a stale run is warning text" \
         chip_paint(theme, chip::Tone::WarningText).text' \
   geode-tile a_stale_run_takes_the_warning_text_tone
 
+# The chip's press is its own: bubbling on, it would refocus the tile and
+# reach the shell root under the page it just asked for.
+run_mutation "tile header: the chip press stops at the chip" \
+  crates/geode-tile/src/header.rs \
+  '            cx.stop_propagation();
+            window.prevent_default();' \
+  '            window.prevent_default();' \
+  geode-tile clicking_the_health_chip_queues_the_diagnostics_page
+
+# The paint route reads the run's text(); painting the bare label drops a
+# module's `stale` word.
+run_mutation "tile header: a stale run paints its stale label" \
+  crates/geode-tile/src/header.rs \
+  '            .child(t.text().clone())' \
+  '            .child(t.label.clone())' \
+  geode-tile a_stale_run_paints_its_stale_label
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
