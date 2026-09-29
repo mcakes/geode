@@ -25895,6 +25895,199 @@ run_mutation "pricer scope: a restore skips the landing note" \
   '                let _ = restored;' \
   geode-pricer a_put_or_restore_the_scope_hides_says_so
 
+# ---- pricer grouping: the tile follows the grouping -----------------------
+
+# Chain precedence: a pin, then a slot pin, then the frame's active slot,
+# then the planned view's own `grouping`.
+run_mutation "pricer grouping: a pinned chain is ignored" \
+  crates/geode-pricer/src/tile.rs \
+  '            Pin::Grouping(g) => g.clone(),' \
+  '            Pin::Grouping(_) => self.view_grouping.clone(),' \
+  geode-pricer the_chain_resolves_pin_then_slot_then_frame_then_view
+
+run_mutation "pricer grouping: a slot pin reads the frame's active slot" \
+  crates/geode-pricer/src/tile.rs \
+  $'                .slots()\n                .get(*n)' \
+  $'                .slots()\n                .get(frame.active_slot().unwrap_or(*n))' \
+  geode-pricer the_chain_resolves_pin_then_slot_then_frame_then_view
+
+run_mutation "pricer grouping: the frame's active slot is ignored" \
+  crates/geode-pricer/src/tile.rs \
+  $'                .active_grouping()\n                .map(<[String]>::to_vec)' \
+  $'                .active_grouping()\n                .filter(|_| false)\n                .map(<[String]>::to_vec)' \
+  geode-pricer a_frame_grouping_applies_and_then_the_tile_arrives
+
+run_mutation "pricer grouping: the view's own grouping is ignored" \
+  crates/geode-pricer/src/tile.rs \
+  '            Some(v) => (ColumnPlan::build(v), v.grouping.clone(), None),' \
+  '            Some(v) => (ColumnPlan::build(v), Vec::new(), None),' \
+  geode-pricer the_chain_resolves_pin_then_slot_then_frame_then_view
+
+# The observer rebuilds when the grouping alone changed, before it arrives.
+run_mutation "pricer grouping: a grouping-only frame change rebuilds nothing" \
+  crates/geode-pricer/src/tile.rs \
+  '        if scope_changed || grouping != self.requested {' \
+  '        if scope_changed {' \
+  geode-pricer a_frame_grouping_applies_and_then_the_tile_arrives
+
+run_mutation "pricer grouping: the observer never arrives" \
+  crates/geode-pricer/src/tile.rs \
+  '            following::arrive_immediately(&mut FrameDoor::new(&frame, cx), QueryKey(this.id.0));' \
+  '            let _ = frame;' \
+  geode-pricer a_frame_grouping_applies_and_then_the_tile_arrives
+
+# A regroup prunes group paths deeper than the new chain.
+run_mutation "pricer grouping: a regroup keeps deeper group paths" \
+  crates/geode-pricer/src/tile.rs \
+  $'        self.group_expansion\n            .prune_to(rollup::value_levels(&self.chain));' \
+  '' \
+  geode-pricer the_cursor_follows_its_line_across_a_regroup
+
+# The cursor on a line inside a closed node lands on its nearest painted
+# ancestor, not on whatever row slid into its old index.
+run_mutation "pricer grouping: the cursor falls to its old index" \
+  crates/geode-pricer/src/tile.rs \
+  '            && let Some(at) = self.painted_ancestor()' \
+  '            && let Some(at) = None::<At>' \
+  geode-pricer the_cursor_follows_its_line_across_a_regroup
+
+# A split package paints once per node under one id: the cursor keeps the
+# row it was set on.
+run_mutation "pricer grouping: a split package's second row snaps to its first" \
+  crates/geode-pricer/src/tile.rs \
+  '                Some(exact.map_or(first, |i| first + i))' \
+  '                Some(exact.map_or(first, |_| first))' \
+  geode-pricer motions_walk_past_a_split_packages_second_row
+
+# Fold verbs and the chevron act on a group row's path.
+run_mutation "pricer grouping: space leaves a group row as it was" \
+  crates/geode-pricer/src/tile.rs \
+  '                    None => self.group_expansion.toggle(path.clone()),' \
+  '                    None => self.group_expansion.is_open(&path),' \
+  geode-pricer fold_verbs_act_on_a_group_row
+
+run_mutation "pricer grouping: z shift+r opens packages only" \
+  crates/geode-pricer/src/tile.rs \
+  '                    self.group_expansion.open_all();' \
+  '' \
+  geode-pricer fold_verbs_act_on_a_group_row
+
+run_mutation "pricer grouping: a chevron on a group row does nothing" \
+  crates/geode-pricer/src/tile.rs \
+  $'        if let Some(at) = line {\n            self.cursor.at = Some(at);\n            self.tree_verb(None, cx);' \
+  $'        if let Some(at) = line.filter(|a| matches!(a, At::Line { .. })) {\n            self.cursor.at = Some(at);\n            self.tree_verb(None, cx);' \
+  geode-pricer a_chevron_click_on_a_group_row_toggles_the_group
+
+# The header strikes through every level pricer drops.
+run_mutation "pricer grouping: the header marks every level kept" \
+  crates/geode-pricer/src/header.rs \
+  '            let is_kept = kept.peek().is_some_and(|k| *k == name);' \
+  '            let is_kept = kept.peek().is_some();' \
+  geode-pricer a_dropped_level_is_struck_through_in_the_header
+
+# `:group N` pins a grouping; the package verb is `:package N`.
+run_mutation "pricer grouping: :group N still packages" \
+  crates/geode-pricer/src/core/commands.rs \
+  '        ["group", ..] => Ok(Command::Group(' \
+  $'        ["group", n] if n.parse::<usize>().is_ok() => Ok(Command::Package(n.parse().ok())),\n        ["group", ..] => Ok(Command::Group(' \
+  geode-pricer package_and_unpackage_are_the_package_verbs
+
+run_mutation "pricer grouping: :group completes nothing after a column" \
+  crates/geode-pricer/src/core/commands.rs \
+  '        ["group", ..] => groupable.to_vec(),' \
+  '        ["group", ..] => Vec::new(),' \
+  geode-pricer completions_offer_each_positions_vocabulary_unfiltered
+
+# Group rows and split packages are read-only through the existing doors.
+run_mutation "pricer grouping: i opens on a group row" \
+  crates/geode-pricer/src/tile.rs \
+  $'        if self.cursor_on_group() {\n            self.footer = Some(GROUP_ROW.into());\n            return;\n        }' \
+  $'        if false {\n            self.footer = Some(GROUP_ROW.into());\n            return;\n        }' \
+  geode-pricer a_group_row_is_read_only_and_yanks_its_lines
+
+run_mutation "pricer grouping: a structural verb acts on a group row" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'            if self.cursor_on_group() {\n                return Some(GROUP_ROW);\n            }' \
+  '' \
+  geode-pricer a_group_row_is_read_only_and_yanks_its_lines
+
+run_mutation "pricer grouping: a selection holding a group row acts" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'        let targets: Vec<usize> = if selected {\n            if self.selection_holds_group() {\n                return Some(GROUP_ROW);\n            }' \
+  $'        let targets: Vec<usize> = if selected {' \
+  geode-pricer a_group_row_is_read_only_and_yanks_its_lines
+
+run_mutation "pricer grouping: a split package edits" \
+  crates/geode-pricer/src/tile.rs \
+  $'        if self.split(row) {\n            Some(SPLIT)' \
+  $'        if false {\n            Some(SPLIT)' \
+  geode-pricer a_split_package_refuses_edits_with_the_split_footer
+
+# Totals: a group row stands for its contents, a split package for its
+# legs under that node, and each leg counts once.
+run_mutation "pricer grouping: a group row totals nothing" \
+  crates/geode-pricer/src/tile.rs \
+  '            GridRowKind::Group { .. } | GridRowKind::Package { split: true, .. }' \
+  '            GridRowKind::Package { split: true, .. }' \
+  geode-pricer totals_count_a_group_row_and_its_descendant_once
+
+run_mutation "pricer grouping: a split package totals its whole fold per node" \
+  crates/geode-pricer/src/tile.rs \
+  '            GridRowKind::Group { .. } | GridRowKind::Package { split: true, .. }' \
+  '            GridRowKind::Group { .. }' \
+  geode-pricer totals_count_a_split_package_per_node_legs
+
+run_mutation "pricer grouping: totals count a group row's descendant again" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'        rows.sort_unstable();\n        rows.dedup();\n        top_most(&self.sheet, &rows)' \
+  $'        rows.sort_unstable();\n        top_most(&self.sheet, &rows)' \
+  geode-pricer totals_count_a_group_row_and_its_descendant_once
+
+# Line movement: refused under a grouping; past hidden siblings without.
+run_mutation "pricer grouping: shift+j moves under a grouping" \
+  crates/geode-pricer/src/tile/select.rs \
+  '        if matches!(verb, "move_down" | "move_up") && !self.chain.is_flat() {' \
+  '        if matches!(verb, "move_down" | "move_up") && false {' \
+  geode-pricer line_moves_refuse_under_a_grouping
+
+run_mutation "pricer grouping: a move swaps with a hidden sibling" \
+  crates/geode-pricer/src/tile.rs \
+  '        let steps = shown_steps(&siblings, at, delta, |r| self.visibility.is_shown(r))' \
+  '        let steps = shown_steps(&siblings, at, delta, |_| true)' \
+  geode-pricer a_move_steps_past_a_sibling_the_scope_hides
+
+run_mutation "pricer grouping: a selection move swaps with a hidden sibling" \
+  crates/geode-pricer/src/tile/select.rs \
+  '        let edit = move_plan(&self.sheet, &top, down, |r| self.visibility.is_shown(r))?;' \
+  '        let edit = move_plan(&self.sheet, &top, down, |_| true)?;' \
+  geode-pricer a_move_steps_past_a_sibling_the_scope_hides
+
+# Session: the pin and the open grouping rows round-trip, held mid-load,
+# NULL apart from the empty string.
+run_mutation "pricer grouping: a restored pin is dropped" \
+  crates/geode-pricer/src/tile.rs \
+  '            (None, Some(chain)) => Pin::Grouping(chain.clone()),' \
+  '            (None, Some(_)) => Pin::None,' \
+  geode-pricer the_pin_and_the_open_groups_round_trip_the_session
+
+run_mutation "pricer grouping: restored group paths stay closed" \
+  crates/geode-pricer/src/tile.rs \
+  $'        for p in &record.expanded_paths {\n            group_expansion.open(p.clone());\n        }' \
+  '' \
+  geode-pricer the_pin_and_the_open_groups_round_trip_the_session
+
+run_mutation "pricer grouping: a mid-load save forgets the open groups" \
+  crates/geode-pricer/src/tile.rs \
+  '        let held_paths = loading.then(|| record.expanded_paths.clone());' \
+  '        let held_paths: Option<Vec<Path>> = None;' \
+  geode-pricer the_pin_and_the_open_groups_round_trip_the_session
+
+run_mutation "pricer grouping: a NULL path segment reads as empty" \
+  crates/geode-pricer/src/session.rs \
+  $'        toml::Value::Table(t) if t.get("null").and_then(|v| v.as_bool()) == Some(true) => {\n            Some(None)' \
+  $'        toml::Value::Table(t) if t.get("null").and_then(|v| v.as_bool()) == Some(true) => {\n            Some(Some(String::new()))' \
+  geode-pricer a_record_round_trips_through_its_table
+
 # A `dimensions` edit alone reloads the pricer, and the reload hands the
 # factory the new dimensions.
 run_mutation "pricer key: dimensions left out" \
