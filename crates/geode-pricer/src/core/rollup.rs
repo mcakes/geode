@@ -111,6 +111,34 @@ pub fn effective_chain(chain: &[String], dims: &DerivedDimensions) -> EffectiveC
     out
 }
 
+/// What `:group` can pin, for its completion: every groupable `pricer`
+/// column (the structural `position_ref`/`instrument_ref` included) and
+/// every derived dimension over one that is not synthetic — the names
+/// [`effective_chain`] keeps. Sorted, each once.
+pub fn groupable_vocabulary(dims: &DerivedDimensions) -> Vec<String> {
+    let groupable = pricer_dataset().groupable_columns();
+    let mut out: Vec<String> = groupable.iter().map(|c| c.to_string()).collect();
+    out.extend(
+        dims.all()
+            .filter(|d| resolve(&d.name, &groupable, dims).is_some())
+            .map(|d| d.name.clone()),
+    );
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// How many of `chain`'s kept levels are value levels (group rows):
+/// every kept level but a closing structural one. The longest group path
+/// the chain can produce, and so the regroup's `Expansion::prune_to`.
+pub fn value_levels(chain: &EffectiveChain) -> usize {
+    chain
+        .kept
+        .iter()
+        .filter(|l| *l != POSITION_REF && *l != INSTRUMENT_REF)
+        .count()
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum NodeKind {
     /// A value level's node. `level` indexes the effective chain's `kept`;
@@ -155,6 +183,16 @@ pub struct Node {
 pub struct Rollup {
     pub nodes: Vec<Node>,
     pub roots: Vec<usize>,
+}
+
+impl Rollup {
+    /// `node`'s parent, `None` at a root. Preorder puts a parent before
+    /// its children, so the scan runs backwards from `node`.
+    pub fn parent(&self, node: usize) -> Option<usize> {
+        (0..node.min(self.nodes.len()))
+            .rev()
+            .find(|&p| self.nodes[p].children.contains(&node))
+    }
 }
 
 /// A placed row with the value it reads at each value level: a shown leg,

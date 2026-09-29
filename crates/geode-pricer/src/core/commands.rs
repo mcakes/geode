@@ -27,8 +27,18 @@ pub enum Command {
     },
     Price,
     Refresh(Refresh),
-    Group(Option<usize>),
-    Ungroup,
+    /// `:package [count]` (`g p`): the cursor line and the next
+    /// `count − 1` roots become a custom package.
+    Package(Option<usize>),
+    /// `:unpackage` (`g u`): dissolve the cursor's package.
+    Unpackage,
+    /// `:group <cols…>`: pin this tile to a grouping chain (the
+    /// blotter's `Pin::Grouping`); columns split on commas or spaces.
+    Group(Vec<String>),
+    /// `:group slot N`: pin this tile to frame slot `N` (1–9).
+    GroupSlot(u8),
+    /// `:unpin`: follow the frame's grouping again.
+    Unpin,
     /// `:e <sheet>`: open another sheet in this tile.
     Edit(String),
     /// `:new [sheet]`: an empty sheet under that name, else the next
@@ -47,14 +57,28 @@ pub enum Command {
     Unscoped,
 }
 
-pub const VERBS: [&str; 13] = [
-    "view", "shift", "spot", "price", "refresh", "group", "ungroup", "e", "new", "name", "rm",
-    "autosize", "unscoped",
+pub const VERBS: [&str; 15] = [
+    "view",
+    "shift",
+    "spot",
+    "price",
+    "refresh",
+    "package",
+    "unpackage",
+    "group",
+    "unpin",
+    "e",
+    "new",
+    "name",
+    "rm",
+    "autosize",
+    "unscoped",
 ];
 
 const SHIFT_USAGE: &str = "usage: shift spot|vol <n>|clear";
 const SPOT_USAGE: &str = "usage: spot <underlying> <level>|clear";
 const REFRESH_USAGE: &str = "usage: refresh <duration>|off|default";
+const GROUP_SLOT_USAGE: &str = "group slot needs a slot number 1–9";
 
 /// A sheet name is one word (the line splits on whitespace) with no
 /// control character: the document key joins on `U+001F`, so a name
@@ -121,16 +145,37 @@ pub fn parse(line: &str) -> Result<Command, String> {
             .map(|d| Command::Refresh(Refresh::Every(d)))
             .ok_or_else(|| REFRESH_USAGE.into()),
         ["refresh", ..] => Err(REFRESH_USAGE.into()),
-        ["group"] => Ok(Command::Group(None)),
-        ["group", n] => n
+        ["package"] => Ok(Command::Package(None)),
+        ["package", n] => n
             .parse::<usize>()
             .ok()
             .filter(|n| *n >= 1)
-            .map(|n| Command::Group(Some(n)))
-            .ok_or_else(|| "usage: group [count]".into()),
-        ["group", ..] => Err("usage: group [count]".into()),
-        ["ungroup"] => Ok(Command::Ungroup),
-        ["ungroup", ..] => Err("usage: ungroup".into()),
+            .map(|n| Command::Package(Some(n)))
+            .ok_or_else(|| "usage: package [count]".into()),
+        ["package", ..] => Err("usage: package [count]".into()),
+        ["unpackage"] => Ok(Command::Unpackage),
+        ["unpackage", ..] => Err("usage: unpackage".into()),
+        // The blotter's `:group`: a bare one names nothing to pin.
+        ["group"] => Err("group needs columns or `slot N`".into()),
+        ["group", "slot", rest @ ..] => match rest {
+            [n] => n
+                .parse::<u8>()
+                .ok()
+                .filter(|n| (1..=9).contains(n))
+                .map(Command::GroupSlot)
+                .ok_or_else(|| GROUP_SLOT_USAGE.into()),
+            _ => Err(GROUP_SLOT_USAGE.into()),
+        },
+        ["group", ..] => Ok(Command::Group(
+            words[1..]
+                .iter()
+                .flat_map(|w| w.split(','))
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect(),
+        )),
+        ["unpin"] => Ok(Command::Unpin),
+        ["unpin", ..] => Err("usage: unpin".into()),
         ["e", name] => sheet_name("e", name).map(Command::Edit),
         ["e", ..] => Err("usage: e <sheet>".into()),
         ["new"] => Ok(Command::New(None)),
@@ -152,13 +197,16 @@ pub fn parse(line: &str) -> Result<Command, String> {
 /// The bare words valid at `cursor` — the position's whole vocabulary,
 /// unfiltered; the shell ranks (`TileContent::completions`). `sheets`
 /// is the known sheet names, for `:e` and `:rm`; `:name` takes a new
-/// name, so it offers none.
+/// name, so it offers none. `groupable` is what `:group` can pin: the
+/// `pricer` dataset's groupable columns and the derived dimensions over
+/// them.
 pub fn completions(
     line: &str,
     cursor: usize,
     views: &[String],
     underlyings: &[String],
     sheets: &[String],
+    groupable: &[String],
 ) -> Vec<String> {
     let mut end = cursor.min(line.len());
     while !line.is_char_boundary(end) {
@@ -182,6 +230,13 @@ pub fn completions(
         ["refresh"] => strs(&["off", "default"]),
         ["e"] | ["rm"] => sheets.to_vec(),
         ["autosize"] => strs(&["reset"]),
+        ["group"] => groupable
+            .iter()
+            .cloned()
+            .chain(["slot".to_string()])
+            .collect(),
+        ["group", "slot"] => (1..=9).map(|n| n.to_string()).collect(),
+        ["group", ..] => groupable.to_vec(),
         _ => Vec::new(),
     }
 }
@@ -199,7 +254,10 @@ mod tests {
             Ok(Command::Autosize { reset: true })
         );
         assert!(parse("autosize wide").is_err());
-        assert_eq!(completions("autosize ", 9, &[], &[], &[]), vec!["reset"]);
+        assert_eq!(
+            completions("autosize ", 9, &[], &[], &[], &[]),
+            vec!["reset"]
+        );
     }
 
     #[test]
@@ -257,9 +315,18 @@ mod tests {
             parse("refresh 500ms"),
             Ok(Command::Refresh(Refresh::Every(Duration::from_millis(500))))
         );
-        assert_eq!(parse("group"), Ok(Command::Group(None)));
-        assert_eq!(parse("group 3"), Ok(Command::Group(Some(3))));
-        assert_eq!(parse("ungroup"), Ok(Command::Ungroup));
+        assert_eq!(parse("package"), Ok(Command::Package(None)));
+        assert_eq!(parse("package 3"), Ok(Command::Package(Some(3))));
+        assert_eq!(parse("unpackage"), Ok(Command::Unpackage));
+        assert_eq!(
+            parse("group underlying_ref, expiry"),
+            Ok(Command::Group(vec![
+                "underlying_ref".into(),
+                "expiry".into()
+            ]))
+        );
+        assert_eq!(parse("group slot 2"), Ok(Command::GroupSlot(2)));
+        assert_eq!(parse("unpin"), Ok(Command::Unpin));
         assert_eq!(parse("e book"), Ok(Command::Edit("book".into())));
         assert_eq!(parse("new"), Ok(Command::New(None)));
         assert_eq!(parse("new fresh"), Ok(Command::New(Some("fresh".into()))));
@@ -297,7 +364,26 @@ mod tests {
             parse("refresh soon"),
             Err("usage: refresh <duration>|off|default".into())
         );
-        assert_eq!(parse("group 0"), Err("usage: group [count]".into()));
+        assert_eq!(parse("package 0"), Err("usage: package [count]".into()));
+        assert_eq!(parse("unpackage 2"), Err("usage: unpackage".into()));
+        // The retired package verbs are gone, not aliased: `:group 2`
+        // pins a grouping by a column named `2` (the tile refuses it),
+        // never packages two lines.
+        assert_eq!(parse("group 2"), Ok(Command::Group(vec!["2".into()])));
+        assert_eq!(parse("ungroup"), Err("unknown command 'ungroup'".into()));
+        assert_eq!(
+            parse("group"),
+            Err("group needs columns or `slot N`".into())
+        );
+        assert_eq!(
+            parse("group slot 0"),
+            Err("group slot needs a slot number 1–9".into())
+        );
+        assert_eq!(
+            parse("group slot"),
+            Err("group slot needs a slot number 1–9".into())
+        );
+        assert_eq!(parse("unpin now"), Err("usage: unpin".into()));
         assert_eq!(parse("price now"), Err("usage: price".into()));
         assert_eq!(parse("e"), Err("usage: e <sheet>".into()));
         assert_eq!(parse("e a b"), Err("usage: e <sheet>".into()));
@@ -320,8 +406,9 @@ mod tests {
         let views = vec!["vanilla".to_string(), "barrier".to_string()];
         let unds = vec!["NDX".to_string(), "SPX".to_string()];
         let sheets = vec!["alpha".to_string(), "book".to_string()];
+        let groupable = vec!["expiry".to_string(), "underlying_ref".to_string()];
         let completions = |line: &str, cursor, views: &[String], unds: &[String]| {
-            completions(line, cursor, views, unds, &sheets)
+            completions(line, cursor, views, unds, &sheets, &groupable)
         };
         assert_eq!(
             completions("", 0, &views, &unds),
@@ -349,11 +436,25 @@ mod tests {
         assert_eq!(completions("rm ", 3, &views, &unds), sheets);
         assert!(completions("name ", 5, &views, &unds).is_empty());
         assert!(completions("new ", 4, &views, &unds).is_empty());
+        assert_eq!(
+            completions("group ", 6, &views, &unds),
+            vec!["expiry", "underlying_ref", "slot"]
+        );
+        assert_eq!(
+            completions("group expiry ", 13, &views, &unds),
+            vec!["expiry", "underlying_ref"]
+        );
+        assert_eq!(
+            completions("group slot ", 11, &views, &unds),
+            (1..=9).map(|n| n.to_string()).collect::<Vec<_>>()
+        );
+        assert!(completions("package ", 8, &views, &unds).is_empty());
+        assert!(completions("unpin ", 6, &views, &unds).is_empty());
     }
 
     #[test]
     fn a_cursor_off_a_char_boundary_does_not_panic() {
-        let _ = completions("spot é", 6, &[], &[], &[]);
-        let _ = completions("spot é", 99, &[], &[], &[]);
+        let _ = completions("spot é", 6, &[], &[], &[], &[]);
+        let _ = completions("spot é", 99, &[], &[], &[], &[]);
     }
 }

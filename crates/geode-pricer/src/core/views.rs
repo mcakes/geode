@@ -124,6 +124,11 @@ pub struct ViewColumn {
 pub struct PricerView {
     pub name: String,
     pub columns: Vec<ViewColumn>,
+    /// The view's own grouping chain, the last resort of the tile's
+    /// chain resolution (a pin, then a slot pin, then the frame's active
+    /// slot come first). As written: the tile drops what `pricer` cannot
+    /// group by (`rollup::effective_chain`).
+    pub grouping: Vec<String>,
 }
 
 /// The loaded pricer views, in `views` doc order.
@@ -202,6 +207,7 @@ impl Views {
             out.views.push(PricerView {
                 name: name.clone(),
                 columns,
+                grouping: spec.grouping.clone(),
             });
         }
         (out, diags)

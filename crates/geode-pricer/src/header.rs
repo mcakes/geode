@@ -7,6 +7,7 @@
 use crate::content::PricerSettings;
 use crate::core::columns::{SHIFT, signed};
 use crate::core::complete::Completion;
+use crate::core::rollup::EffectiveChain;
 use crate::core::sheet::{LineState, Sheet};
 use crate::popup;
 use crate::tile::{LOADING, PendingRemove, PricerTile};
@@ -52,6 +53,13 @@ pub(crate) struct HeaderInputs<'a> {
     pub hidden: usize,
     /// `:unscoped`: the tile ignores the frame's scope.
     pub unscoped: bool,
+    /// The grouping chain as resolved (`requested`) and what `pricer`
+    /// keeps of it (`chain`); every level `chain` drops paints struck
+    /// through.
+    pub requested: &'a [String],
+    pub chain: &'a EffectiveChain,
+    /// `:group` / `:group slot N` pin the grouping: a `pinned` chip.
+    pub pinned: bool,
     /// The armed `:rm` confirm's question.
     pub prompt: Option<SharedString>,
     /// The save state's own slot (a refused save, or a failed load that
@@ -90,6 +98,30 @@ pub(crate) struct HeaderModel {
     pub hidden: Option<SharedString>,
     /// The `unscoped` chip (warning tone) while `:unscoped` is on.
     pub unscoped: bool,
+    /// The grouping chain in its written order, each level with whether
+    /// `pricer` keeps it: kept levels read as text joined by `›`, a
+    /// dropped one muted and struck through. Empty when nothing groups.
+    pub chain: Vec<(SharedString, bool)>,
+    /// The `pinned` chip (neutral) while the grouping is pinned.
+    pub pinned: bool,
+}
+
+/// `requested` in order, each level marked kept or dropped. `kept` is a
+/// subsequence of `requested` (`effective_chain` only drops), so a
+/// greedy match assigns a repeated name's first occurrence to the kept
+/// one and the repeat to the dropped.
+fn chain_items(requested: &[String], chain: &EffectiveChain) -> Vec<(SharedString, bool)> {
+    let mut kept = chain.kept.iter().peekable();
+    requested
+        .iter()
+        .map(|name| {
+            let is_kept = kept.peek().is_some_and(|k| *k == name);
+            if is_kept {
+                kept.next();
+            }
+            (SharedString::from(name.clone()), is_kept)
+        })
+        .collect()
 }
 
 pub(crate) fn prepare(i: HeaderInputs) -> HeaderModel {
@@ -138,6 +170,8 @@ pub(crate) fn prepare(i: HeaderInputs) -> HeaderModel {
         save: i.save.map(Notice::warning),
         hidden: (i.hidden > 0).then(|| format!("{} hidden", i.hidden).into()),
         unscoped: i.unscoped,
+        chain: chain_items(i.requested, i.chain),
+        pinned: i.pinned,
     }
 }
 
@@ -152,6 +186,16 @@ impl HeaderModel {
             self.view.to_string(),
         ];
         out.extend(self.shifts.iter().map(|s| s.to_string()));
+        out.extend(self.chain.iter().map(|(name, kept)| {
+            if *kept {
+                name.to_string()
+            } else {
+                format!("~{name}~")
+            }
+        }));
+        if self.pinned {
+            out.push("pinned".to_string());
+        }
         if self.unscoped {
             out.push("unscoped".to_string());
         }
@@ -323,6 +367,48 @@ pub(crate) fn render(h: &HeaderModel, mut c: HeaderChrome, theme: &Theme) -> imp
                 .text_color(chip.text)
                 .child(s.clone())
         }))
+        // The grouping chain: kept levels as text joined by `›`, a level
+        // `pricer` cannot group by muted and struck through; the neutral
+        // `pinned` chip while `:group` pins it (the blotter's chip).
+        .when(!h.chain.is_empty(), |el| {
+            el.child(
+                h_flex()
+                    .gap_1()
+                    .debug_selector(|| "pricer-chain".into())
+                    .children(h.chain.iter().enumerate().flat_map(|(i, (name, kept))| {
+                        let sep = (i > 0).then(|| div().text_color(muted).child("›"));
+                        let level = div()
+                            .id(ElementId::NamedInteger(
+                                SharedString::new_static("pricer-chain-level"),
+                                i as u64,
+                            ))
+                            .map(|el| {
+                                if *kept {
+                                    el.text_color(theme.foreground)
+                                } else {
+                                    el.text_color(muted)
+                                        .line_through()
+                                        .debug_selector(|| "pricer-chain-dropped".into())
+                                }
+                            })
+                            .child(name.clone());
+                        sep.into_iter()
+                            .map(IntoElement::into_any_element)
+                            .chain(std::iter::once(level.into_any_element()))
+                    })),
+            )
+        })
+        .when(h.pinned, |el| {
+            el.child(
+                div()
+                    .debug_selector(|| "pricer-pinned".into())
+                    .text_color(chip.text)
+                    .when_some(chip.fill, |el, fill| el.bg(fill))
+                    .px_1()
+                    .rounded(theme.radius_tokens().sm)
+                    .child("pinned"),
+            )
+        })
         // The frame's scope over this tile: detached (`:unscoped`), or
         // how many lines it hides. The blotter's chip and tooltip.
         .when(h.unscoped, |el| {
@@ -596,6 +682,9 @@ mod tests {
             standing: None,
             hidden: 0,
             unscoped: false,
+            requested: &[],
+            chain: &EffectiveChain::default(),
+            pinned: false,
             prompt: None,
             save: None,
             settings: &settings(false),
@@ -624,6 +713,9 @@ mod tests {
             standing: None,
             hidden: 0,
             unscoped: false,
+            requested: &[],
+            chain: &EffectiveChain::default(),
+            pinned: false,
             prompt: None,
             save: None,
             settings: &settings(false),
@@ -642,6 +734,9 @@ mod tests {
             standing: None,
             hidden: 0,
             unscoped: false,
+            requested: &[],
+            chain: &EffectiveChain::default(),
+            pinned: false,
             prompt: None,
             save: None,
             settings: &settings(false),
@@ -664,6 +759,9 @@ mod tests {
             standing: None,
             hidden: 0,
             unscoped: false,
+            requested: &[],
+            chain: &EffectiveChain::default(),
+            pinned: false,
             prompt: None,
             save: None,
             settings: &settings(true),
@@ -686,6 +784,9 @@ mod tests {
             standing: None,
             hidden: 0,
             unscoped: false,
+            requested: &[],
+            chain: &EffectiveChain::default(),
+            pinned: false,
             prompt: None,
             save: None,
             settings: &settings(true),
@@ -706,6 +807,9 @@ mod tests {
             standing: None,
             hidden: 0,
             unscoped: false,
+            requested: &[],
+            chain: &EffectiveChain::default(),
+            pinned: false,
             prompt: None,
             save: None,
             settings: &settings(true),

@@ -18136,13 +18136,13 @@ run_mutation "pricer undo: a refused inverse mid-undo clears the whole history" 
     /// Re-apply the newest undone edit.' \
   geode-pricer a_refused_inverse_mid_undo_drops_the_rest_of_both_sides
 
-run_mutation "pricer commands: group accepts a zero count" \
+run_mutation "pricer commands: package accepts a zero count" \
   crates/geode-pricer/src/core/commands.rs \
-  '        ["group", n] => n
+  '        ["package", n] => n
             .parse::<usize>()
             .ok()
             .filter(|n| *n >= 1)' \
-  '        ["group", n] => n
+  '        ["package", n] => n
             .parse::<usize>()
             .ok()' \
   geode-pricer bad_arguments_answer_the_usage
@@ -20359,7 +20359,7 @@ run_mutation "pricer entry bar: the closing press's line outlives the next press
 # The handed-on line reaches the cursor before the tree-column return.
 run_mutation "pricer entry bar: a tree-column double-click keeps the slid-up row" \
   crates/geode-pricer/src/tile.rs \
-  '                self.cursor.line = Some(id);
+  '                self.cursor.at = Some(at);
                 self.sync_cursor(cx);
                 let Some(c) = SheetDelegate::plan_col(*col) else {' \
   '                let Some(c) = SheetDelegate::plan_col(*col) else {' \
@@ -20370,7 +20370,7 @@ run_mutation "pricer entry bar: a tree-column double-click keeps the slid-up row
 # row that slid up under the pointer.
 run_mutation "pricer entry bar: a chevron press that closes the bar hands off nothing" \
   crates/geode-pricer/src/tile.rs \
-  '        self.click_anchor = self.entry.is_some().then_some(line);' \
+  '        self.click_anchor = self.entry.is_some().then(|| line.clone());' \
   '' \
   geode-pricer a_chevron_double_click_while_the_bar_is_open_keeps_the_package
 
@@ -24029,8 +24029,8 @@ run_mutation "pricer select: a table click inside the editor cancels it" \
 # live step's steps back).
 run_mutation "pricer select: a double-click inside the editor reopens it" \
   crates/geode-pricer/src/tile.rs \
-  $'                    .is_some_and(|c| self.editor_cell() == Some((*row, c)))\n                {\n                    return;\n                }\n                self.close_entry(window, cx);\n                let Some(id) = line else {' \
-  $'                    .is_some_and(|_| false)\n                {\n                    return;\n                }\n                self.close_entry(window, cx);\n                let Some(id) = line else {' \
+  $'                    .is_some_and(|c| self.editor_cell() == Some((*row, c)))\n                {\n                    return;\n                }\n                self.close_entry(window, cx);\n                let Some(at) = line else {' \
+  $'                    .is_some_and(|_| false)\n                {\n                    return;\n                }\n                self.close_entry(window, cx);\n                let Some(at) = line else {' \
   geode-pricer a_click_or_double_click_inside_the_stepped_editor_keeps_the_steps
 
 # The first `escape` with a selection live clears the selection alone.
@@ -25682,7 +25682,7 @@ run_mutation "pricer scope: the group door's range overflows" \
 # flip barrier; without it a frame scope never reaches the pricer.
 run_mutation "pricer scope: the observer applies the frame's scope" \
   crates/geode-pricer/src/tile.rs \
-  $'            this.follow_scope(cx);\n            // Arrive through' \
+  $'            this.follow_frame(cx);\n            // Arrive through' \
   $'            // Arrive through' \
   geode-pricer a_frame_scope_hides_lines_and_the_header_counts_them
 
@@ -25690,8 +25690,8 @@ run_mutation "pricer scope: the observer applies the frame's scope" \
 # or out of a scope over a measure.
 run_mutation "pricer scope: a rebuild re-applies the scope" \
   crates/geode-pricer/src/tile.rs \
-  $'        self.apply_visibility();\n        self.rollup = rollup::build(' \
-  $'        self.rollup = rollup::build(' \
+  $'        self.apply_visibility();\n        {\n            let dims = self.shared.dims.borrow();' \
+  $'        {\n            let dims = self.shared.dims.borrow();' \
   geode-pricer a_delivery_reevaluates_the_scope
 
 # `:unscoped` reads no frame scope.

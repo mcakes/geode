@@ -193,7 +193,7 @@ fn the_cursor_on_a_hidden_leg_moves_to_a_visible_row(cx: &mut gpui::TestAppConte
     assert_eq!(h.tree(&vcx).len(), 4, "A, P, the 4800 leg, B");
     assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(2), "the 4800 leg");
     let line = h.tile.read_with(&vcx, |t, _| {
-        t.cursor.line.and_then(|id| t.sheet.index_of(id))
+        t.cursor.line().and_then(|id| t.sheet.index_of(id))
     });
     assert_eq!(line, Some(2), "the cursor's line is the 4800 leg's");
 }
@@ -332,7 +332,7 @@ fn row_verbs_on_a_partly_hidden_package_are_refused(cx: &mut gpui::TestAppContex
         assert_eq!(rows(&h, &vcx), before, "`{verb}` changed nothing");
     }
     // The command door refuses the same way.
-    for line in ["ungroup", "group 2"] {
+    for line in ["unpackage", "package 2"] {
         assert_eq!(
             h.command(&mut vcx, line),
             Err("package partly hidden by the scope: edit its legs".to_string()),
@@ -400,7 +400,7 @@ fn selection_verbs_over_a_partly_hidden_package_refuse_whole(cx: &mut gpui::Test
 
 /// `2 g p` on A takes the next sheet row too; B is hidden by the scope,
 /// so the package would hold a line the trader never saw: refused, by the
-/// key and by `:group 2`.
+/// key and by `:package 2`.
 #[gpui::test]
 fn a_counted_group_over_a_hidden_line_is_refused(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "SPX Z26 4000 P", "SPX Z26 3000 P"]);
@@ -414,7 +414,7 @@ fn a_counted_group_over_a_hidden_line_is_refused(cx: &mut gpui::TestAppContext) 
     );
     assert_eq!(rows(&h, &vcx), before);
     assert_eq!(
-        h.command(&mut vcx, "group 2"),
+        h.command(&mut vcx, "package 2"),
         Err("a line in that range is hidden by the scope".to_string())
     );
     assert_eq!(rows(&h, &vcx), before);
@@ -430,7 +430,7 @@ fn a_huge_counted_group_refuses_without_overflowing(cx: &mut gpui::TestAppContex
     h.motion(&mut vcx, "down", None);
     let before = rows(&h, &vcx);
     assert_eq!(
-        h.command(&mut vcx, "group 18446744073709551615"),
+        h.command(&mut vcx, "package 18446744073709551615"),
         Err("group needs a contiguous run of top-level lines".to_string())
     );
     assert_eq!(rows(&h, &vcx), before);
@@ -441,7 +441,7 @@ fn a_huge_counted_group_refuses_without_overflowing(cx: &mut gpui::TestAppContex
         "fixture: on the 4000 line"
     );
     assert_eq!(
-        h.command(&mut vcx, "group 18446744073709551615"),
+        h.command(&mut vcx, "package 18446744073709551615"),
         Err("a line in that range is hidden by the scope".to_string())
     );
     assert!(!h.tile.read_with(&vcx, |t, _| t.undo.can_undo()));

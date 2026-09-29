@@ -338,7 +338,7 @@ impl PricerTile {
 
     /// The one door every structural verb passes before it mutates: `d`,
     /// `shift+j`/`shift+k`, `g p` and `g u` (keys, the `.` menu, and
-    /// `:group`/`:ungroup`) refuse with [`PARTLY_HIDDEN`] when their target
+    /// `:package`/`:unpackage`) refuse with [`PARTLY_HIDDEN`] when their target
     /// includes a package the scope partly hides, since each would act on
     /// its hidden legs too. `selected`: the verb acts on the live
     /// selection, which then refuses as a whole — no part of it is acted
@@ -508,7 +508,7 @@ impl PricerTile {
         }
         let id = self.sheet.id(first);
         self.expansion.set(id, true);
-        self.cursor.line = Some(id);
+        self.cursor.set_line(id);
         self.rebuild(cx);
         Ok(())
     }

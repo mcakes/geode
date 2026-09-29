@@ -13,7 +13,7 @@ use crate::core::commands::{self, Command, ShiftField};
 use crate::core::complete::{Completion, Inputs, Write};
 use crate::core::edit::{Edit, EditError, Undo};
 use crate::core::entry::{history, landing_place, next_place, place_for, target_label};
-use crate::core::rollup::{self, EffectiveChain, Rollup};
+use crate::core::rollup::{self, EffectiveChain, Node, NodeKind, Rollup};
 use crate::core::sheet::{Delivered, LineId, Refresh, Sheet};
 use crate::core::shorthand::parse;
 use crate::core::shorthand::render_expiry;
@@ -38,7 +38,7 @@ use crate::store::Loaded;
 use chrono::Utc;
 use geode_core::clock::Clock;
 use geode_core::document::DocumentRows;
-use geode_core::expansion::Expansion as GroupExpansion;
+use geode_core::expansion::{Expansion as GroupExpansion, Path};
 use geode_core::grid::selection::{Resolved, SelectKind, Selection};
 use geode_core::pricing::{PriceLine, PriceOutcome, PriceParams};
 use geode_core::query::{QueryKey, QueryOutcome};
@@ -167,14 +167,57 @@ struct FindState {
     committed: Option<String>,
 }
 
-/// Cursor anchored by line identity across edits, deliveries, and expansion changes.
-/// If the line leaves the visible grid, `last_row` supplies the fallback position.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// The tile's grouping override, as the blotter's: `:group <cols…>`
+/// pins a chain, `:group slot N` a frame slot, `:unpin` follows the
+/// frame again. Session keys `pinned` / `pinned_slot`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) enum Pin {
+    #[default]
+    None,
+    Grouping(Vec<String>),
+    Slot(u8),
+}
+
+/// What the cursor rests on: a line or package row by its `LineId`, or a
+/// grouping row by its path (a group row has no line behind it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum At {
+    /// `within`: the enclosing group path of the row it was set from. A
+    /// package split across nodes paints once per node, so the id alone
+    /// names its first row; `None` (set from an edit, a restore) takes
+    /// that first row.
+    Line {
+        id: LineId,
+        within: Option<Path>,
+    },
+    Group(Path),
+}
+
+/// Cursor anchored by line identity (or a group row's path) across edits,
+/// deliveries, expansion changes and regrouping. A target inside a closed
+/// node lands on its nearest painted ancestor; one that left the tree
+/// altogether falls back to `last_row`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Cursor {
-    pub line: Option<LineId>,
+    pub at: Option<At>,
     /// A plan column (the tree column is never a cursor target).
     pub col: usize,
     pub last_row: usize,
+}
+
+impl Cursor {
+    /// The line under the cursor; `None` on a grouping row.
+    pub fn line(&self) -> Option<LineId> {
+        match &self.at {
+            Some(At::Line { id, .. }) => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// Rest on `id`'s first painted row.
+    pub fn set_line(&mut self, id: LineId) {
+        self.at = Some(At::Line { id, within: None });
+    }
 }
 
 /// Entry bar state: insertion position, focused input, and existing sheet lines
@@ -394,8 +437,17 @@ pub struct PricerTile {
     pub(crate) shared: Rc<Shared>,
     pub(crate) sheet: Sheet,
     pub(crate) expansion: Expansion,
-    /// The grouping chain after dropping what `pricer` cannot group by:
-    /// empty (the flat sheet) until the tile follows a grouping.
+    /// The grouping override (`:group`, `:group slot N`, `:unpin`).
+    pub(crate) pin: Pin,
+    /// The chain the grouping resolved to at the last rebuild, before
+    /// dropping what `pricer` cannot group by (`read_grouping`): the
+    /// frame observer compares it to decide whether to rebuild.
+    requested: Vec<String>,
+    /// The planned view's own `grouping`, the chain's last resort; set
+    /// with the plan (`resolve_plan`).
+    view_grouping: Vec<String>,
+    /// `requested` after dropping what `pricer` cannot group by: empty
+    /// (the flat sheet) when nothing groups.
     pub(crate) chain: EffectiveChain,
     /// Which grouping nodes are open, by path. Packages keep `expansion`.
     pub(crate) group_expansion: GroupExpansion,
@@ -557,11 +609,11 @@ pub struct PricerTile {
     /// double-click lands on a different painted row; this carries the
     /// first press's line to it. Every press takes it (see `pressed`), so
     /// it lives for exactly one following press.
-    click_anchor: Option<Option<LineId>>,
+    click_anchor: Option<Option<At>>,
     /// `click_anchor`, taken by the latest press: read only by that
     /// press's own `DoubleClickedCell` (every press emits `SelectCell`
     /// first, which overwrites it).
-    pressed: Option<Option<LineId>>,
+    pressed: Option<Option<At>>,
     /// The entry bar's underlyings as last read from the factory's
     /// source, and the source revision they were read at (`None`: never
     /// read). Re-read only when the revision moves.
@@ -765,7 +817,7 @@ impl PricerTile {
         // — on every path, a refused or unchanged scope included — so it
         // never holds other tiles behind the flip barrier.
         cx.observe(frame.entity(), |this, _, cx| {
-            this.follow_scope(cx);
+            this.follow_frame(cx);
             // Arrive through the tile's own handle: the observed entity alone
             // would answer for the shared lane, not this workspace's.
             let frame = this.frame.clone();
@@ -776,7 +828,7 @@ impl PricerTile {
         cx.observe_global::<gpui_component::Theme>(|this, cx| {
             let paints = crate::paint::Paints::derive(cx.theme());
             this.table.update(cx, |t, cx| {
-                t.delegate_mut().paints = paints;
+                t.delegate_mut().set_paints(paints);
                 cx.notify();
             });
         })
@@ -823,7 +875,7 @@ impl PricerTile {
         .detach();
 
         let cursor = Cursor {
-            line: record.cursor,
+            at: record.cursor.map(|id| At::Line { id, within: None }),
             col: 0,
             last_row: 0,
         };
@@ -837,6 +889,9 @@ impl PricerTile {
             visibility: Visibility::all(&sheet),
             sheet,
             expansion,
+            pin: Pin::None,
+            requested: Vec::new(),
+            view_grouping: Vec::new(),
             chain: EffectiveChain::default(),
             group_expansion: GroupExpansion::default(),
             rollup: Rollup::default(),
@@ -1047,7 +1102,7 @@ impl PricerTile {
             sheet: Some(self.sheet.name.clone()),
             view: Some(self.sheet.view.clone()),
             refresh: Some(self.sheet.refresh),
-            cursor: self.cursor.line,
+            cursor: self.cursor.line(),
             expanded: match &self.held_expanded {
                 Some(held) => held.clone(),
                 None => self.expansion.live_ids(&self.sheet).collect(),
@@ -1103,18 +1158,19 @@ impl PricerTile {
         match event {
             FindEvent::Changed(query) => {
                 let origin = match &self.find {
-                    Some(f) => f.origin,
+                    Some(f) => f.origin.clone(),
                     None => {
                         self.find = Some(FindState {
-                            origin: self.cursor,
+                            origin: self.cursor.clone(),
                             committed: None,
                         });
-                        self.cursor
+                        self.cursor.clone()
                     }
                 };
                 let from = origin
-                    .line
-                    .and_then(|id| self.model.grid_row_of(id))
+                    .at
+                    .as_ref()
+                    .and_then(|at| self.row_at(at))
                     .unwrap_or(0);
                 if let Some(row) =
                     find_match(&self.row_labels(), from, FindDirection::Forward, &query)
@@ -1129,7 +1185,7 @@ impl PricerTile {
                     f.committed = Some(query);
                 } else if !query.is_empty() {
                     self.find = Some(FindState {
-                        origin: self.cursor,
+                        origin: self.cursor.clone(),
                         committed: Some(query),
                     });
                 }
@@ -1421,7 +1477,7 @@ impl PricerTile {
                 if matches!(spec, RowSpec::Package { .. }) {
                     self.expansion.set(id, true);
                 }
-                self.cursor.line = Some(id);
+                self.cursor.set_line(id);
                 if let Some(entry) = self.entry.as_mut() {
                     entry.history = history(&self.sheet);
                     entry.history_ix = None;
@@ -2746,13 +2802,12 @@ impl PricerTile {
             "expand_all" | "collapse_all" => {
                 if verb == "expand_all" {
                     self.expansion.open_all(&self.sheet);
+                    self.group_expansion.open_all();
                 } else {
-                    // Off a leg, the cursor lands on its package (it is
-                    // about to disappear).
-                    if let Some(p) = self.cursor_sheet_row().and_then(|r| self.sheet.parent(r)) {
-                        self.cursor.line = Some(self.sheet.id(p));
-                    }
+                    // The cursor lands on the nearest node still painted
+                    // above its row (`reconcile_cursor`).
                     self.expansion.close_all();
+                    self.group_expansion.close_all();
                 }
                 self.rebuild(cx);
                 return true;
@@ -2977,7 +3032,7 @@ impl PricerTile {
                     if let Some(p) = self.sheet.index_of(id).and_then(|r| self.sheet.parent(r)) {
                         self.expansion.set(self.sheet.id(p), true);
                     }
-                    self.cursor.line = Some(id);
+                    self.cursor.set_line(id);
                 }
                 self.after_edit(cx);
                 self.note_hidden_landing(restored);
@@ -3040,7 +3095,7 @@ impl PricerTile {
         }
         let ids: Vec<LineId> = (first..at).map(|r| self.sheet.id(r)).collect();
         self.note_hidden_landing(ids);
-        self.cursor.line = Some(self.sheet.id(first));
+        self.cursor.set_line(self.sheet.id(first));
         self.rebuild(cx);
         Ok(())
     }
@@ -3069,7 +3124,7 @@ impl PricerTile {
         .map_err(|e| e.to_string())?;
         let id = self.sheet.id(first);
         self.expansion.set(id, true);
-        self.cursor.line = Some(id);
+        self.cursor.set_line(id);
         self.rebuild(cx);
         Ok(())
     }
@@ -3125,7 +3180,7 @@ impl PricerTile {
         self.apply_edits(edits, cx).map_err(|e| e.to_string())
     }
 
-    /// `:shift`/`:spot`/`:group`/`:ungroup` edit the sheet; a pending load
+    /// `:shift`/`:spot`/`:package`/`:unpackage` edit the sheet; a pending load
     /// holds the empty fallback sheet, so an edit landed there would be
     /// lost (silently, with its undo pointing at rows that no longer
     /// exist) the moment `loaded` swaps the real document in.
@@ -3281,31 +3336,62 @@ impl PricerTile {
         }
     }
 
-    /// `space`/`z a` (`None`), `z o`, `z c` on the cursor's package — on a
-    /// leg, its package; closing from a leg lands the cursor on the
-    /// package, the blotter's `z c` rule. A line with no package does
-    /// nothing.
+    /// `space`/`z a` (`None`), `z o`, `z c` on the cursor row's node: a
+    /// grouping row's path (the group expansion), a package's `LineId`
+    /// (the package expansion) — on a line, its parent node, a leg's
+    /// package or a grouped line's group. Closing from a child lands the
+    /// cursor on the node it closed, the blotter's `z c` rule. A line at
+    /// the root does nothing. The two expansions are separate: a fold on
+    /// a group never touches a package's state, nor the reverse.
     fn tree_verb(&mut self, open: Option<bool>, cx: &mut Context<Self>) -> bool {
-        let Some(row) = self.cursor_sheet_row() else {
+        let Some(node) = self
+            .cursor_row()
+            .and_then(|g| self.model.rows.get(g))
+            .and_then(|r| r.node)
+        else {
             return true;
         };
-        let package = if self.sheet.is_package(row) {
-            row
-        } else if let Some(p) = self.sheet.parent(row) {
-            p
-        } else {
+        let target = match self.rollup.nodes.get(node).map(|n| &n.kind) {
+            Some(NodeKind::Leaf { .. }) => self.rollup.parent(node),
+            Some(_) => Some(node),
+            None => None,
+        };
+        let Some(target) = target else {
             return true;
         };
-        let id = self.sheet.id(package);
-        let now_open = match open {
-            Some(o) => {
-                self.expansion.set(id, o);
-                o
+        let n = &self.rollup.nodes[target];
+        let (now_open, at) = match &n.kind {
+            NodeKind::Group { .. } => {
+                let path = n.path.clone();
+                let now_open = match open {
+                    Some(true) => {
+                        self.group_expansion.open(path.clone());
+                        true
+                    }
+                    Some(false) => {
+                        self.group_expansion.close(&path);
+                        false
+                    }
+                    None => self.group_expansion.toggle(path.clone()),
+                };
+                (now_open, At::Group(path))
             }
-            None => self.expansion.toggle(id),
+            NodeKind::Package { row, .. } => {
+                let id = self.sheet.id(*row);
+                let within = Some(n.path.clone());
+                let now_open = match open {
+                    Some(o) => {
+                        self.expansion.set(id, o);
+                        o
+                    }
+                    None => self.expansion.toggle(id),
+                };
+                (now_open, At::Line { id, within })
+            }
+            NodeKind::Leaf { .. } => return true,
         };
         if !now_open {
-            self.cursor.line = Some(id);
+            self.cursor.at = Some(at);
         }
         self.rebuild(cx);
         true
@@ -3383,7 +3469,25 @@ impl PricerTile {
                 self.refuse_while_loading()?;
                 self.set_spot(underlying, level, cx)
             }
-            Command::Group(count) => {
+            Command::Group(chain) => {
+                self.pin = Pin::Grouping(chain);
+                self.rebuild(cx);
+                Ok(())
+            }
+            Command::GroupSlot(n) => {
+                if self.frame.read(cx).slots().get(n).is_none() {
+                    return Err(format!("slot {n} is empty"));
+                }
+                self.pin = Pin::Slot(n);
+                self.rebuild(cx);
+                Ok(())
+            }
+            Command::Unpin => {
+                self.pin = Pin::None;
+                self.rebuild(cx);
+                Ok(())
+            }
+            Command::Package(count) => {
                 self.refuse_while_loading()?;
                 let count = count.unwrap_or(1);
                 if let Some(why) = self.partly_hidden_refusal("group", count, false) {
@@ -3391,7 +3495,7 @@ impl PricerTile {
                 }
                 self.group(count, cx)
             }
-            Command::Ungroup => {
+            Command::Unpackage => {
                 self.refuse_while_loading()?;
                 if let Some(why) = self.partly_hidden_refusal("ungroup", 1, false) {
                     return Err(why.into());
@@ -3417,7 +3521,7 @@ impl PricerTile {
                 .map_err(str::to_string),
             Command::Unscoped => {
                 self.unscoped = !self.unscoped;
-                self.follow_scope(cx);
+                self.follow_frame(cx);
                 // The chip follows the toggle even when the scope read is
                 // unchanged (an empty frame scope rebuilds nothing).
                 self.rebuild_chrome();
@@ -3950,7 +4054,14 @@ impl PricerTile {
             .collect();
         unds.sort();
         unds.dedup();
-        commands::completions(line, cursor, &views, &unds, &self.shared.sheet_names())
+        commands::completions(
+            line,
+            cursor,
+            &views,
+            &unds,
+            &self.shared.sheet_names(),
+            &rollup::groupable_vocabulary(&self.shared.dims.borrow()),
+        )
     }
 
     fn set_view(&mut self, name: &str, cx: &mut Context<Self>) -> Result<(), String> {
@@ -3978,11 +4089,12 @@ impl PricerTile {
     /// silent header reads as a broken tile.
     pub(crate) fn resolve_plan(&mut self) {
         let views = self.shared.views.borrow();
-        let (plan, mut notice) = match views.get(&self.sheet.view) {
-            Some(v) => (ColumnPlan::build(v), None),
+        let (plan, grouping, mut notice) = match views.get(&self.sheet.view) {
+            Some(v) => (ColumnPlan::build(v), v.grouping.clone(), None),
             None => match views.names().next().and_then(|n| views.get(n)) {
                 Some(v) => (
                     ColumnPlan::build(v),
+                    v.grouping.clone(),
                     Some(
                         format!(
                             "view '{}' is not defined; showing '{}'",
@@ -3993,6 +4105,7 @@ impl PricerTile {
                 ),
                 None => (
                     ColumnPlan::default(),
+                    Vec::new(),
                     Some("no pricer views are defined".into()),
                 ),
             },
@@ -4002,6 +4115,7 @@ impl PricerTile {
             notice = Some(format!("view '{}' has no visible column", self.sheet.view).into());
         }
         self.plan = plan;
+        self.view_grouping = grouping;
         self.view_notice = notice;
         self.cursor.col = self
             .cursor
@@ -4014,15 +4128,28 @@ impl PricerTile {
     ///
     /// Every rebuild re-applies the scope in force: an edit, a delivery or
     /// a load changes what a scope over a measure or `status` matches.
+    ///
+    /// Every rebuild re-resolves the grouping too (`read_grouping`), and
+    /// derives the effective chain and the rollup from ONE snapshot of the
+    /// derived dimensions: a group node's `level` indexes the chain it was
+    /// built under. Group paths deeper than the new chain's value levels
+    /// are pruned (the blotter's regroup rule).
     pub(crate) fn rebuild(&mut self, cx: &mut Context<Self>) {
+        self.requested = self.read_grouping(cx);
         self.apply_visibility();
-        self.rollup = rollup::build(
-            &self.sheet,
-            &self.visibility,
-            &self.chain,
-            &self.shared.dims.borrow(),
-            self.clock,
-        );
+        {
+            let dims = self.shared.dims.borrow();
+            self.chain = rollup::effective_chain(&self.requested, &dims);
+            self.rollup = rollup::build(
+                &self.sheet,
+                &self.visibility,
+                &self.chain,
+                &dims,
+                self.clock,
+            );
+        }
+        self.group_expansion
+            .prune_to(rollup::value_levels(&self.chain));
         let model = Rc::new(GridModel::build(
             &self.sheet,
             &self.rollup,
@@ -4038,15 +4165,40 @@ impl PricerTile {
         cx.notify();
     }
 
-    /// Re-read the frame's effective scope (empty while `unscoped`) and
-    /// rebuild when it differs from the one applied — an unrelated frame
-    /// notify (a grouping, an as-of, a barrier) rebuilds nothing. The frame
+    /// Re-read the frame: first the effective scope (empty while
+    /// `unscoped`), then the grouping (`read_grouping`), and rebuild ONCE
+    /// when either differs from the one applied — an unrelated frame
+    /// notify (an as-of, a barrier) rebuilds nothing. The frame
     /// observer's arrival follows on every path.
-    pub(crate) fn follow_scope(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn follow_frame(&mut self, cx: &mut Context<Self>) {
         let scope = read_scope(&self.frame, self.unscoped, cx);
-        if scope != self.applied_scope {
+        let grouping = self.read_grouping(cx);
+        let scope_changed = scope != self.applied_scope;
+        if scope_changed {
             self.applied_scope = scope;
+        }
+        if scope_changed || grouping != self.requested {
             self.rebuild(cx);
+        }
+    }
+
+    /// The grouping chain this tile follows, by the blotter's precedence:
+    /// a pinned chain, else a pinned slot (the view's own grouping while
+    /// that slot is empty), else the frame's active slot for this tile's
+    /// lane, else the planned view's `grouping`.
+    fn read_grouping(&self, cx: &App) -> Vec<String> {
+        let frame = self.frame.read(cx);
+        match &self.pin {
+            Pin::Grouping(g) => g.clone(),
+            Pin::Slot(n) => frame
+                .slots()
+                .get(*n)
+                .map(<[String]>::to_vec)
+                .unwrap_or_else(|| self.view_grouping.clone()),
+            Pin::None => frame
+                .active_grouping()
+                .map(<[String]>::to_vec)
+                .unwrap_or_else(|| self.view_grouping.clone()),
         }
     }
 
@@ -4082,7 +4234,7 @@ impl PricerTile {
         if self.loading {
             return;
         }
-        let Some(id) = self.cursor.line else {
+        let Some(id) = self.cursor.line() else {
             return;
         };
         let hidden = self
@@ -4103,7 +4255,7 @@ impl PricerTile {
             .map(|r| self.sheet.id(r))
             .find(|i| shown.contains(i))
         {
-            self.cursor.line = Some(to);
+            self.cursor.set_line(to);
         }
     }
 
@@ -4237,6 +4389,9 @@ impl PricerTile {
             standing,
             hidden: self.visibility.hidden,
             unscoped: self.unscoped,
+            requested: &self.requested,
+            chain: &self.chain,
+            pinned: self.pin != Pin::None,
             prompt: self.confirm.as_ref().map(|c| c.prompt_text().clone()),
             save: self.save_notice.clone(),
             settings: &settings,
@@ -4268,7 +4423,99 @@ impl PricerTile {
     }
 
     pub(crate) fn cursor_row(&self) -> Option<usize> {
-        self.cursor.line.and_then(|id| self.model.grid_row_of(id))
+        self.row_at(self.cursor.at.as_ref()?)
+    }
+
+    /// The grid row `at` names in the installed model: a group row by its
+    /// path; a line's row within its recorded group path when it paints
+    /// there (a split package paints once per node), else its first.
+    pub(crate) fn row_at(&self, at: &At) -> Option<usize> {
+        match at {
+            At::Group(path) => self
+                .model
+                .rows
+                .iter()
+                .position(|r| r.path.as_ref() == Some(path)),
+            At::Line { id, within } => {
+                let first = self.model.grid_row_of(*id)?;
+                let Some(within) = within else {
+                    return Some(first);
+                };
+                let exact = self.model.rows[first..]
+                    .iter()
+                    .position(|r| r.id == Some(*id) && self.enclosing_path(r.node) == Some(within));
+                Some(exact.map_or(first, |i| first + i))
+            }
+        }
+    }
+
+    /// What the cursor rests on at grid row `row`: its line, recorded
+    /// with the node's group path, or a grouping row's path.
+    pub(crate) fn at_of_row(&self, row: usize) -> Option<At> {
+        let r = self.model.rows.get(row)?;
+        match (&r.path, r.id) {
+            (Some(path), _) => Some(At::Group(path.clone())),
+            (None, Some(id)) => Some(At::Line {
+                id,
+                within: self.enclosing_path(r.node).cloned(),
+            }),
+            (None, None) => None,
+        }
+    }
+
+    /// A package or line node's enclosing group path (a group's own path).
+    fn enclosing_path(&self, node: Option<usize>) -> Option<&Path> {
+        node.and_then(|n| self.rollup.nodes.get(n)).map(|n| &n.path)
+    }
+
+    /// Where a cursor whose target paints no row goes: the nearest
+    /// ancestor node of its target that the model paints — a leg or line
+    /// inside a closed package or group, after a fold or a regroup. A group
+    /// path the new tree lacks tries its longest painted prefix. `None`
+    /// when the target is not in the tree (deleted, hidden by the scope).
+    fn painted_ancestor(&self) -> Option<At> {
+        let rollup = &self.rollup;
+        let painted = |node: usize| {
+            self.model
+                .rows
+                .iter()
+                .position(|r| r.node == Some(node))
+                .and_then(|g| self.at_of_row(g))
+        };
+        let start = match self.cursor.at.as_ref()? {
+            At::Line { id, within } => {
+                let row = self.sheet.index_of(*id)?;
+                let holds = |n: &Node| match n.kind {
+                    NodeKind::Leaf { row: r } | NodeKind::Package { row: r, .. } => r == row,
+                    NodeKind::Group { .. } => false,
+                };
+                let held: Vec<usize> = (0..rollup.nodes.len())
+                    .filter(|&i| holds(&rollup.nodes[i]))
+                    .collect();
+                let first = *held.first()?;
+                held.iter()
+                    .copied()
+                    .find(|&i| Some(&rollup.nodes[i].path) == within.as_ref())
+                    .unwrap_or(first)
+            }
+            At::Group(path) => {
+                let group = |p: &[Option<String>]| {
+                    rollup.nodes.iter().position(|n| {
+                        matches!(n.kind, NodeKind::Group { .. }) && n.path.as_slice() == p
+                    })
+                };
+                match group(path) {
+                    Some(n) => n,
+                    None => {
+                        return (1..path.len())
+                            .rev()
+                            .filter_map(|k| group(&path[..k]))
+                            .find_map(painted);
+                    }
+                }
+            }
+        };
+        std::iter::successors(rollup.parent(start), |&n| rollup.parent(n)).find_map(painted)
     }
 
     /// The context at the cursor: the cursor row's sole underlying, as
@@ -4314,10 +4561,10 @@ impl PricerTile {
     pub(crate) fn set_cursor_row(&mut self, row: usize) {
         let rows: Vec<usize> = self.cursor_rows().collect();
         let Some(&target) = rows.iter().rev().find(|r| **r <= row).or(rows.first()) else {
-            self.cursor.line = None;
+            self.cursor.at = None;
             return;
         };
-        self.cursor.line = self.model.rows[target].id;
+        self.cursor.at = self.at_of_row(target);
         self.cursor.last_row = target;
     }
 
@@ -4328,6 +4575,11 @@ impl PricerTile {
     fn reconcile_cursor(&mut self) {
         if self.loading {
             return;
+        }
+        if self.cursor_row().is_none()
+            && let Some(at) = self.painted_ancestor()
+        {
+            self.cursor.at = Some(at);
         }
         match self.cursor_row() {
             Some(r) => self.cursor.last_row = r,
@@ -4381,24 +4633,19 @@ impl PricerTile {
         });
     }
 
-    /// Resolve a painted grid row to its LineId before closing fields.
-    fn line_at(&self, row: usize) -> Option<LineId> {
-        self.model.rows.get(row).and_then(|r| r.id)
-    }
-
-    /// Chevron activation cancels open fields, then toggles the package resolved before
-    /// the close.
+    /// Chevron activation cancels open fields, then toggles the node (a
+    /// package, or a grouping row by its path) resolved before the close.
     fn chevron_clicked(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let line = self.line_at(row);
+        let line = self.at_of_row(row);
         // The chevron stops propagation, so no `SelectCell` hands off for
         // it: closing the bar moves the table up, and the double-click's
         // second press must still resolve the package, not the row that
         // slid up. A press takes any older anchor, as `SelectCell` does.
-        self.click_anchor = self.entry.is_some().then_some(line);
+        self.click_anchor = self.entry.is_some().then(|| line.clone());
         self.close_entry(window, cx);
         self.close_editor(window, cx);
-        if let Some(id) = line {
-            self.cursor.line = Some(id);
+        if let Some(at) = line {
+            self.cursor.at = Some(at);
             self.tree_verb(None, cx);
         }
     }
@@ -4501,8 +4748,8 @@ impl PricerTile {
         {
             self.start_selection(kind);
         }
-        if let Some(id) = self.line_at(row) {
-            self.cursor.line = Some(id);
+        if let Some(at) = self.at_of_row(row) {
+            self.cursor.at = Some(at);
             if let Some(c) = col {
                 self.cursor.col = c;
             }
@@ -4524,13 +4771,13 @@ impl PricerTile {
                 // it mirrors the cursor into the table (including from
                 // inside `open_entry`'s and `begin_edit`'s own rebuilds),
                 // so only a real cell click — `SelectCell` — closes a field.
-                let line = self.line_at(*row);
+                let line = self.at_of_row(*row);
                 // Closing the bar moves the table up on screen between the
                 // two presses of one double-click: hand this press's line
                 // to the next press only, whatever row that one lands on.
                 self.pressed = self.click_anchor.take();
                 if self.entry.is_some() {
-                    self.click_anchor = Some(line);
+                    self.click_anchor = Some(line.clone());
                 }
                 // A click inside the open editor's own cell is the
                 // editor's (caret, text selection): never a cancel, which
@@ -4544,8 +4791,8 @@ impl PricerTile {
                 }
                 self.close_entry(window, cx);
                 self.close_editor(window, cx);
-                if let Some(id) = line {
-                    self.cursor.line = Some(id);
+                if let Some(at) = line {
+                    self.cursor.at = Some(at);
                     if let Some(c) = SheetDelegate::plan_col(*col) {
                         self.cursor.col = c;
                     }
@@ -4561,7 +4808,7 @@ impl PricerTile {
                 // wins: the row now under the pointer slid up there.
                 let line = match self.pressed.take() {
                     Some(line) => line,
-                    None => self.line_at(*row),
+                    None => self.at_of_row(*row),
                 };
                 // A double-click inside the open editor (a word selection
                 // there) reopens nothing: reopening would reseed the typed
@@ -4572,12 +4819,12 @@ impl PricerTile {
                     return;
                 }
                 self.close_entry(window, cx);
-                let Some(id) = line else {
+                let Some(at) = line else {
                     return;
                 };
                 // Before the tree-column return: this press's `SelectCell`
                 // moved the cursor to the row that slid up.
-                self.cursor.line = Some(id);
+                self.cursor.at = Some(at);
                 self.sync_cursor(cx);
                 let Some(c) = SheetDelegate::plan_col(*col) else {
                     self.rebuild_chrome();
@@ -6303,8 +6550,8 @@ pub(crate) mod tests {
                 "-5 SPX Z26 4800/5200 CS",
             ],
         );
+        h.command(&mut vcx, "group underlying_ref").unwrap();
         h.tile.update_in(&mut vcx, |t, _, cx| {
-            t.chain = rollup::effective_chain(&["underlying_ref".into()], &Default::default());
             t.group_expansion.open_all();
             t.rebuild(cx);
         });
@@ -6377,9 +6624,9 @@ pub(crate) mod tests {
                 assert_eq!(d.text_colour(0, strike, &theme), d.paints.group_own);
                 assert_eq!(d.text_colour(1, strike, &theme), d.paints.own, "a line");
                 assert_eq!(
-                    d.gutter_paint(2),
+                    d.gutter_paint(0),
                     d.paints.group_muted,
-                    "the group's gutter"
+                    "a group's gutter off the cursor"
                 );
             });
         });
@@ -7215,7 +7462,7 @@ pub(crate) mod tests {
             let roots: Vec<String> = t.sheet.roots().map(|r| t.sheet.shorthand(r)).collect();
             let legs = t.sheet.children(1).len();
             let new = t.sheet.roots().nth(2).unwrap();
-            (roots, legs, t.cursor.line == Some(t.sheet.id(new)))
+            (roots, legs, t.cursor.line() == Some(t.sheet.id(new)))
         });
         assert_eq!(
             roots,
@@ -8751,8 +8998,11 @@ pub(crate) mod tests {
             "spot SPX 5100",
             "price",
             "refresh 10s",
-            "group",
-            "ungroup",
+            "package",
+            "unpackage",
+            // Pinning reads the frame's slots; it never writes the frame.
+            "group underlying_ref",
+            "unpin",
             "rm gone",
             "name fresh",
             "new",
@@ -8930,8 +9180,8 @@ pub(crate) mod tests {
         let loading = Err("the sheet is still loading".to_string());
         assert_eq!(h.command(&mut vcx, "shift spot 2"), loading);
         assert_eq!(h.command(&mut vcx, "spot spx 5100"), loading);
-        assert_eq!(h.command(&mut vcx, "group"), loading);
-        assert_eq!(h.command(&mut vcx, "ungroup"), loading);
+        assert_eq!(h.command(&mut vcx, "package"), loading);
+        assert_eq!(h.command(&mut vcx, "unpackage"), loading);
         // `:view` and `:refresh` change the sheet as well: `loaded` would
         // replace what they set, so they refuse too.
         assert_eq!(h.command(&mut vcx, "view barrier"), loading);
@@ -12098,6 +12348,7 @@ pub(crate) mod tests {
         assert_eq!(h.mode(&mut vcx), "normal");
     }
 
+    mod grouping;
     mod scope;
     mod selection;
 }

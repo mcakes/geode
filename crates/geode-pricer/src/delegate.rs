@@ -469,6 +469,16 @@ impl SheetDelegate {
         }
     }
 
+    /// Install freshly derived paints (a theme change) and drop the group
+    /// rows' named-colour memo, whose floors were taken on the old
+    /// grounds: the memo is keyed by the group ground, but a theme can
+    /// change the hover or selected grounds it also floors on while
+    /// keeping that one.
+    pub(crate) fn set_paints(&mut self, paints: Paints) {
+        self.paints = paints;
+        self.group_named.clear();
+    }
+
     /// A named column colour on a group row: floored on the group ground
     /// and the hover and selected grounds that replace it, memoised.
     fn on_group(&mut self, c: Hsla) -> Hsla {
