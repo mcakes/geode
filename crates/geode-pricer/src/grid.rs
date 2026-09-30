@@ -1075,7 +1075,7 @@ mod tests {
 
     /// One line per grid row, indented by depth: a group `▾`/`▸` and its
     /// text, a package `P<row>` and its note (`split` when split), a leg
-    /// its connector and `L<row>`, a line `L<row>`.
+    /// `├` (`└` if last) and `L<row>`, a line `L<row>`.
     fn describe(m: &GridModel) -> Vec<String> {
         m.rows
             .iter()
@@ -1091,11 +1091,9 @@ mod tests {
                         r.note,
                         if split { " split" } else { "" }
                     ),
-                    GridRowKind::Leg { last } => format!(
-                        "{pad}{} L{}",
-                        crate::delegate::connector(last),
-                        r.row.unwrap()
-                    ),
+                    GridRowKind::Leg { last } => {
+                        format!("{pad}{} L{}", if last { "└" } else { "├" }, r.row.unwrap())
+                    }
                     GridRowKind::Line => format!("{pad}L{}", r.row.unwrap()),
                 }
             })

@@ -39,7 +39,7 @@ The tile:
 | `store` | The `SheetStore` seam, addressed by key/tag with `Loaded::Refused(Refusal)` for a load that never went out and `save`/`forget` returning `Result<(), Refusal>`; `MemorySheetStore` (in-memory, the tests' fake, whose `set_save_refusal`/`set_load_refusal`/`set_forget_refusal` choose the refusal kind and `set_refusing`/`set_load_refused` are `Busy` shorthands) and `DuckSheetStore` (the store `geode-app` wires: `pricer_sheets` document reads/writes over `DataHandle`, with a `known`-names cache fed from the diagnostics catalog and the store's own confirmed writes). |
 | `grid` | The prepared `GridModel`, rebuilt on change: the rollup flattened under the group and package expansions. A group row (`GridRowKind::Group`, no sheet row; `node` and `path` name it) sums its legs' fold, reads the fold's status, counts its legs and reads each other dimension's unanimity (`mixed` where legs differ or a blank sits beside a value; `core::columns::group_cell_text`); a split or partly hidden package row paints its node's legs only (`· n of M legs`). |
 | `paint` | The per-theme paint memo, floored to a readable ratio; the group palette (`group_ground` and its text, floored on it and on hover and selected). |
-| `delegate` | The table delegate: cells and their column colors (sign, named), the connector tree column (indent; a group row's chevron and medium-weight label over its own ground; a package's chevron, template chip, summary and muted leg count; a leg's `├`/`└` connector and shorthand; a bare line's shorthand), editor, expiry date field. |
+| `delegate` | The table delegate: cells and their column colors (sign, named), the connector tree column (indent; a group row's chevron and medium-weight label over its own ground; a package's chevron, template chip, summary and muted leg count; a leg's drawn connector lines and shorthand; a bare line's shorthand), editor, expiry date field. |
 | `header` | The prepared header row and the footer. Paints through `geode_tile::header::frame`: the sheet name control (and rename field) with its view and shift chips and the grouping chain (as written, dropped levels struck through, and the `pinned` chip) on the left; the `:rm` prompt, `N pricing…`, `N failed` and the pricer label as cluster status; the save notice then the tile notice, the priced time, the health chip (asked about `pricer_sheets` only, which no source feeds — see Known limitations) and `⋯` from the shared cluster. |
 | `popup` | The typeahead, the entry bar's completion list, the sheet picker (`sheet_rows`, `SheetPicker`), and `PricerPick` (what a menu row does). The menu, popup geometry, the `:rm` confirm and the header notices paint through `geode-tile`. |
 | `session` | The tile's session record, including `:autosize`'s fitted widths (`column_widths`, read leniently), the grouping pin (`pinned` / `pinned_slot`) and the open groups (`expanded_paths`, NULL as `{ null = true }`). |
@@ -345,6 +345,14 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   the line palette; the template chip takes the neutral chip pair
   (`Paints::chip_fill`, `chip_text`), its text floored on the fill over all
   three row grounds.
+- A leg's connector is drawn, not a glyph: a hairline through the centre of
+  its slot the full row height (to the stub on the package's last leg) and
+  a stub at mid-height to the slot's right edge, in `Paints::connector`
+  (`border`, opaque, floored to `NON_TEXT_RATIO` on the three row grounds).
+  The tree column has no vertical padding (`delegate::TABLE_SIZE`'s
+  horizontal padding only) so the slot spans the row, and a leg that is not
+  its package's last drops the row separator, so consecutive legs' lines
+  join with no gap.
 - A leg's connector sits in its package's chevron lane and its text starts
   where the package's chip starts, the edge a bare line's text shares. The
   tree cell lays out slot, chip, text and note with one `TREE_GAP` between

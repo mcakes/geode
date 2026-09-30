@@ -1060,8 +1060,13 @@ currencies. Both bundled views end in a `status` column, which says
 shown by color alone. Column 0 is a connector tree. A package row shows its
 chevron, its template (`CS`, `CUSTOM`) as a neutral chip, a summary of its
 legs' distinct expiries and strikes (`Z26 4800/5200`) and a muted leg count
-(`· 2 legs`). Each leg hangs from `├` (`└` on the package's last leg) under
-the package's chevron, with its full shorthand in muted text; a bare line
+(`· 2 legs`). Each leg hangs from a drawn connector under the package's
+chevron: a hairline through the full row height, joining the next leg's
+without a gap (a leg that is not its package's last drops the row separator
+below it), and a stub at mid-height toward its text; on the package's last
+leg the line stops at its stub. The lines take the `border` token floored to
+3:1 non-text contrast on the row's own, hover and selected grounds. The leg's
+full shorthand paints in muted text; a bare line
 shows its full shorthand. Every row reserves the slot, so roots share one
 leading edge, and a leg's text starts where its package's chip starts. Only
 a grouping row (see [grouping](#grouping)) carries a ground of its own; on

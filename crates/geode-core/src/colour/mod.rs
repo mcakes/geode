@@ -405,6 +405,12 @@ pub fn interpolate_hue(degrees: f32, tone: Tone, anchors: &Anchors) -> Rgb {
 /// lightness with sufficient contrast.
 pub const READABLE_RATIO: f32 = 3.0;
 
+/// Minimum contrast for a meaningful non-text graphic, such as a tree's
+/// connector lines, against every ground it paints on (WCAG 2.1 SC
+/// 1.4.11, non-text contrast). Below it the structure the graphic
+/// carries is lost.
+pub const NON_TEXT_RATIO: f32 = 3.0;
+
 /// Minimum contrast for small text, including chips and control labels.
 pub const TEXT_READABLE_RATIO: f32 = 4.5;
 

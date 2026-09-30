@@ -70,6 +70,10 @@ fn floor_on_all(c: Hsla, grounds: &[Rgb]) -> Hsla {
     c
 }
 
+// `floor_on_all` floors to `READABLE_RATIO`; the connector needs at least
+// the non-text floor from it.
+const _: () = assert!(geode_core::colour::NON_TEXT_RATIO <= READABLE_RATIO);
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Paints {
     pub own: Hsla,
@@ -84,6 +88,11 @@ pub struct Paints {
     /// over each of the row's three grounds (own, hover, selected).
     pub chip_fill: Hsla,
     pub chip_text: Hsla,
+    /// A leg's drawn connector lines: the theme's structural `border`
+    /// token, floored to the non-text contrast floor (`NON_TEXT_RATIO`)
+    /// on the leg's own ground and on the hover and selected grounds.
+    /// Legs never sit on the group ground (a group row is its own row).
+    pub connector: Hsla,
     /// The expiry date field's active segment text on its `primary` fill,
     /// and a mid-typing segment's on its `accent` fill. The field paints
     /// on the cursor row, whose ground may be the line's own, hover or
@@ -140,6 +149,9 @@ impl Paints {
             row_hover: to_hsla(hover),
             chip_fill,
             chip_text: floor_on_all(chip.text, &chip_grounds),
+            // Opaque first: `border` may be translucent, and the floor
+            // measures an opaque colour.
+            connector: floor_on_all(to_hsla(over(theme.border, ground)), &line),
             date_active_text: floor_on_all(
                 theme.primary_foreground,
                 &line.map(|g| over(theme.primary, g)),
@@ -221,7 +233,7 @@ pub(crate) fn cell_colour(colour: &Colour, state: CellState, sign: Option<Sign>)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use geode_core::colour::{READABLE_RATIO, contrast_ratio};
+    use geode_core::colour::{NON_TEXT_RATIO, READABLE_RATIO, contrast_ratio};
     use gpui_component::{ActiveTheme as _, Theme};
 
     /// A test-only label with the sweep's `&'static str` type.
@@ -238,6 +250,7 @@ mod tests {
         let (service, _) = geode_shell::theme::load_bundled();
         let mut failures = Vec::new();
         let mut checked = 0;
+        let mut worst_connector = f32::INFINITY;
         for name in service.names() {
             let entry = service.resolve(&name).unwrap().clone();
             cx.update(|cx| {
@@ -327,13 +340,29 @@ mod tests {
                         failures.push(format!("{name}: {label} at {ratio:.2}:1"));
                     }
                 }
+                // A leg's connector lines, a non-text graphic, on the
+                // leg's own ground, hover and selected. It must be
+                // opaque: the ratio is measured as painted.
+                let [hover, selected] = Paints::row_grounds(theme);
+                for (which, bg) in [("ground", ground), ("hover", hover), ("selected", selected)] {
+                    checked += 1;
+                    let ratio = contrast_ratio(to_rgb(p.connector), bg);
+                    worst_connector = worst_connector.min(ratio);
+                    if p.connector.a < 1.0 || ratio < NON_TEXT_RATIO {
+                        failures.push(format!(
+                            "{name}: connector on {which} at {ratio:.2}:1 (alpha {})",
+                            p.connector.a
+                        ));
+                    }
+                }
             });
         }
-        // Thirty-three pairs a theme (six line paints and five group
-        // paints, each on its row's own ground, on hover and on selected)
-        // over at least forty bundled themes.
+        eprintln!("worst connector contrast: {worst_connector:.2}:1");
+        // Thirty-six pairs a theme (six line paints, five group paints
+        // and the connector, each on its row's own ground, on hover and
+        // on selected) over at least forty bundled themes.
         assert!(
-            checked >= 33 * 40,
+            checked >= 36 * 40,
             "every bundled theme was swept ({checked})"
         );
         assert!(

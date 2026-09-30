@@ -2,7 +2,8 @@
 //! state, and cell editor are read-only mirrors of tile state. Column zero
 //! is a pinned connector tree the cell cursor does not enter: a package
 //! paints a chevron, its template as a neutral chip, its shorthand summary
-//! and a muted leg count; a leg its connector (`├`, `└` for the last) in
+//! and a muted leg count; a leg its drawn connector lines (a hairline the
+//! full row height, stopping at the stub on the last leg) in
 //! its package's chevron lane and its full shorthand; a bare line its
 //! shorthand alone, on the edge the legs' text shares.
 //!
@@ -37,7 +38,7 @@ use gpui::{
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::table::{Column, ColumnFixed, TableDelegate, TableState};
-use gpui_component::{ActiveTheme as _, Theme, h_flex};
+use gpui_component::{ActiveTheme as _, Size, Theme, h_flex};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -59,10 +60,50 @@ const CHEVRON_SLOT: f32 = 14.0;
 const CHIP_PAD_X: f32 = 4.0;
 const TREE_GAP: f32 = 6.0;
 
-/// A leg's connector: a tee for every leg but its package's last, which
-/// takes a corner.
-pub(crate) fn connector(last: bool) -> &'static str {
-    if last { "└" } else { "├" }
+/// The table's size, which sets its row height and cell padding. The tree
+/// column keeps this size's horizontal padding and drops its vertical
+/// padding, so the tree cell spans the full row and a leg's drawn
+/// connector joins the next leg's across the row boundary.
+pub(crate) const TABLE_SIZE: Size = Size::XSmall;
+
+/// A leg's vertical connector line: a hairline through its slot's centre
+/// from the row's top to its bottom, so consecutive legs' lines join into
+/// one; on a package's last leg it stops at the stub (mid-height), closing
+/// the package with a square corner. The slot is `relative` and spans the
+/// full row height (the tree column has no vertical padding). `px(1.)` is
+/// a hairline, not a layout size; the half-pixel margins centre it.
+fn connector_line(row_ix: usize, last: bool, colour: Hsla) -> Div {
+    div()
+        .absolute()
+        .top_0()
+        .left(relative(0.5))
+        .ml(px(-0.5))
+        .w(px(1.))
+        .map(|el| {
+            if last {
+                // To the stub's bottom edge, so the corner is square.
+                el.bottom(relative(0.5)).mb(px(-0.5))
+            } else {
+                el.bottom_0()
+            }
+        })
+        .bg(colour)
+        .debug_selector(move || format!("pricer-connector-line-{row_ix}"))
+}
+
+/// A leg's connector stub: a hairline at mid-height from the vertical
+/// line to the slot's right edge, pointing at the leg's text.
+fn connector_stub(row_ix: usize, colour: Hsla) -> Div {
+    div()
+        .absolute()
+        .top(relative(0.5))
+        .mt(px(-0.5))
+        .left(relative(0.5))
+        .ml(px(-0.5))
+        .right_0()
+        .h(px(1.))
+        .bg(colour)
+        .debug_selector(move || format!("pricer-connector-stub-{row_ix}"))
 }
 
 /// How many `TREE_GAP`s the tree cell paints: one between each pair of
@@ -742,7 +783,15 @@ impl TableDelegate for SheetDelegate {
     /// model swap goes through `install_model`.
     fn column(&self, col_ix: usize, _cx: &App) -> Column {
         let Some(c) = Self::plan_col(col_ix).and_then(|i| self.model.columns.get(i)) else {
+            let pad = TABLE_SIZE.table_cell_padding();
             return Column {
+                // Full row height (see `TABLE_SIZE`); every part of the
+                // tree cell centres itself vertically.
+                paddings: Some(gpui::Edges {
+                    top: px(0.),
+                    bottom: px(0.),
+                    ..pad
+                }),
                 key: SharedString::from(TREE_KEY),
                 name: SharedString::from(""),
                 align: TextAlign::Left,
@@ -830,8 +879,17 @@ impl TableDelegate for SheetDelegate {
         _window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> Stateful<Div> {
+        // A leg that is not its package's last drops the table's row
+        // separator: the separator takes the row's bottom pixel, which
+        // the tree cell (clipped to the row's content box) cannot paint,
+        // so it would cut the leg's connector line from the next leg's.
+        let joined = matches!(
+            self.model.rows.get(row_ix).map(|r| r.kind),
+            Some(GridRowKind::Leg { last: false })
+        );
         let row = div()
             .id(("row", row_ix))
+            .when(joined, |el| el.border_b_0())
             .when_some(self.row_ground(row_ix), |el, g| el.bg(g));
         if row_ix >= self.model.rows.len() {
             return row;
@@ -1020,9 +1078,9 @@ impl SheetDelegate {
                     (slot.child(chevron), text)
                 }
                 GridRowKind::Leg { last } => (
-                    slot.text_color(paints.muted)
-                        .debug_selector(|| format!("pricer-connector-{row_ix}"))
-                        .child(connector(last)),
+                    slot.relative()
+                        .child(connector_line(row_ix, last, paints.connector))
+                        .child(connector_stub(row_ix, paints.connector)),
                     paints.muted,
                 ),
                 GridRowKind::Line => (slot, paints.own),
@@ -1263,12 +1321,6 @@ mod tests {
             [1, 2, 3].map(Some),
             "no cursor row: absolute"
         );
-    }
-
-    #[test]
-    fn a_leg_takes_a_tee_and_the_last_leg_a_corner() {
-        assert_eq!(super::connector(false), "├");
-        assert_eq!(super::connector(true), "└");
     }
 
     /// The gaps between the tree cell's painted parts: the slot always,

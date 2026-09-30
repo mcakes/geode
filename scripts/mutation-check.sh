@@ -25436,12 +25436,44 @@ run_mutation "pricer grid: a leg's text is its shorthand" \
   '            text: SharedString::default(),' \
   geode-pricer the_tree_text_is_prepared_per_row_kind
 
-# Tee for every leg but the last, corner for the last.
-run_mutation "pricer tree: connector glyphs" \
+# A package's last leg's connector line stops at its stub; running the
+# full row height it would never close the package.
+run_mutation "pricer tree: the last leg's line stops at its stub" \
   crates/geode-pricer/src/delegate.rs \
-  '    if last { "└" } else { "├" }' \
-  '    if last { "├" } else { "└" }' \
-  geode-pricer a_leg_takes_a_tee_and_the_last_leg_a_corner
+  '                el.bottom(relative(0.5)).mb(px(-0.5))' \
+  '                el.bottom_0()' \
+  geode-pricer the_tree_column_paints_connectors_a_chip_and_a_leg_count
+
+# A leg's stub sits at mid-height, where the leg's text centres.
+run_mutation "pricer tree: the stub sits at mid-height" \
+  crates/geode-pricer/src/delegate.rs \
+  '        .top(relative(0.5))' \
+  '        .top_0()' \
+  geode-pricer the_tree_column_paints_connectors_a_chip_and_a_leg_count
+
+# The tree column has no vertical padding, so a leg's line spans the
+# full row; with the table's padding it would stop short at both ends.
+run_mutation "pricer tree: the tree cell spans the full row" \
+  crates/geode-pricer/src/delegate.rs \
+  '                    top: px(0.),' \
+  '                    top: pad.top,' \
+  geode-pricer the_tree_column_paints_connectors_a_chip_and_a_leg_count
+
+# A leg that is not its package's last drops the row separator, which
+# would otherwise cut its line from the next leg's by one pixel.
+run_mutation "pricer tree: consecutive legs' lines join" \
+  crates/geode-pricer/src/delegate.rs \
+  '            .when(joined, |el| el.border_b_0())' \
+  '            .when(false, |el| el.border_b_0())' \
+  geode-pricer the_tree_column_paints_connectors_a_chip_and_a_leg_count
+
+# The connector is floored to the non-text contrast floor, opaque; the
+# raw `border` token is faint (often translucent) on most themes.
+run_mutation "pricer paint: the connector clears the non-text floor" \
+  crates/geode-pricer/src/paint.rs \
+  '            connector: floor_on_all(to_hsla(over(theme.border, ground)), &line),' \
+  '            connector: theme.border,' \
+  geode-pricer every_pricer_paint_is_readable_on_every_bundled_theme
 
 # A leg's connector takes its parent's lane, directly under the package's
 # chevron; at its own depth it would sit one step to the right.

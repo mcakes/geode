@@ -70,7 +70,7 @@ use gpui::{
 };
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::table::{DataTable, TableDelegate as _, TableEvent, TableState};
-use gpui_component::{ActiveTheme as _, Sizable as _, Size, v_flex};
+use gpui_component::{ActiveTheme as _, Sizable as _, v_flex};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -5560,7 +5560,7 @@ impl gpui::Render for PricerTile {
         let body = div().flex_1().min_h_0().w_full().child(match &search {
             Some(results) => results.clone().into_any_element(),
             None => DataTable::new(&self.table)
-                .with_size(Size::XSmall)
+                .with_size(crate::delegate::TABLE_SIZE)
                 .bordered(false)
                 .stripe(false)
                 .into_any_element(),
@@ -7161,11 +7161,15 @@ pub(crate) mod tests {
     }
 
     /// Column 0 paints option C: the package row a chevron, a template chip,
-    /// the summary and the muted leg count; each leg a connector and its
-    /// shorthand; a bare line its shorthand alone. The legs' connectors sit
-    /// in the package chevron's lane and their text starts where the chip
-    /// starts, with line numbers off or on. That no row paints a ground is
-    /// structural (`render_tr` paints none) and not asserted here.
+    /// the summary and the muted leg count; each leg a drawn connector and
+    /// its shorthand; a bare line its shorthand alone. A leg's connector is
+    /// a 1 px vertical line through its slot's centre, the full row height
+    /// (top to mid-height on the package's last leg), and a stub at
+    /// mid-height from the line to the slot's right edge; consecutive legs'
+    /// lines meet with no gap. The lines sit in the package chevron's lane
+    /// and the legs' text starts where the chip starts, with line numbers
+    /// off or on; every part centres on its row. That no row paints a
+    /// ground is structural (`render_tr` paints none) and not asserted here.
     #[gpui::test]
     fn the_tree_column_paints_connectors_a_chip_and_a_leg_count(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "-5 SPX Z26 4800/5200 CS"]);
@@ -7173,8 +7177,12 @@ pub(crate) mod tests {
         h.dispatch(&mut vcx, "toggle", None);
         h.draw(&mut vcx);
         assert_eq!(h.tree(&vcx).len(), 4, "line, package, two legs");
-        let check = |vcx: &mut VisualTestContext, lane: &str| {
-            let bounds = |vcx: &mut VisualTestContext, sel: &'static str| {
+        let pad = crate::delegate::TABLE_SIZE.table_cell_padding();
+        let check = |vcx: &mut VisualTestContext, lane: &str, gutter: bool| {
+            let bounds = |vcx: &mut VisualTestContext, sel: &str| {
+                // `debug_bounds` takes a static selector; a test's few
+                // formatted ones are leaked.
+                let sel: &'static str = Box::leak(sel.to_owned().into_boxed_str());
                 vcx.debug_bounds(sel)
                     .unwrap_or_else(|| panic!("{sel} painted ({lane})"))
             };
@@ -7183,8 +7191,10 @@ pub(crate) mod tests {
                 "pricer-chip-1",
                 "pricer-tree-text-1",
                 "pricer-note-1",
-                "pricer-connector-2",
-                "pricer-connector-3",
+                "pricer-connector-line-2",
+                "pricer-connector-stub-2",
+                "pricer-connector-line-3",
+                "pricer-connector-stub-3",
                 "pricer-tree-text-2",
                 "pricer-tree-text-3",
                 "pricer-tree-text-0",
@@ -7194,8 +7204,9 @@ pub(crate) mod tests {
             for sel in [
                 "pricer-chip-0",
                 "pricer-note-0",
-                "pricer-connector-0",
-                "pricer-connector-1",
+                "pricer-connector-line-0",
+                "pricer-connector-line-1",
+                "pricer-connector-stub-1",
                 "pricer-chip-2",
                 "pricer-note-2",
                 "pricer-chevron-0",
@@ -7213,15 +7224,76 @@ pub(crate) mod tests {
                 chip.left() < text.left() && text.left() < note.left(),
                 "chip, summary, leg count in order ({lane}): {chip:?} {text:?} {note:?}"
             );
+            // A row's content box, read off a value cell, which keeps the
+            // table's own vertical padding: independent of the tree column.
+            let row = |vcx: &mut VisualTestContext, r: usize| {
+                let v = bounds(vcx, &format!("pricer-cell-{r}-1"));
+                (v.top() - pad.top, v.bottom() + pad.bottom)
+            };
+            let near = |a: gpui::Pixels, b: gpui::Pixels| (a - b).abs() < gpui::px(0.5);
             let chevron = bounds(vcx, "pricer-chevron-1");
-            for leg in ["pricer-connector-2", "pricer-connector-3"] {
-                let connector = bounds(vcx, leg);
+            let (top1, bottom1) = row(vcx, 1);
+            let mid1 = (top1 + bottom1) / 2.0;
+            let mut parts = vec![
+                "pricer-chevron-1",
+                "pricer-chip-1",
+                "pricer-tree-text-1",
+                "pricer-note-1",
+            ];
+            if gutter {
+                parts.push("pricer-gutter-1");
+            }
+            for sel in parts {
+                let b = bounds(vcx, sel);
                 assert!(
-                    (connector.center().x - chevron.center().x).abs() < gpui::px(1.0),
-                    "{leg} sits in the package chevron's lane ({lane}): \
-                     {connector:?} vs {chevron:?}"
+                    near(b.center().y, mid1),
+                    "{sel} centres on its row ({lane}): {b:?} vs {top1:?}..{bottom1:?}"
                 );
             }
+            let mut ends = Vec::new();
+            for (r, last) in [(2, false), (3, true)] {
+                let (top, bottom) = row(vcx, r);
+                let mid = (top + bottom) / 2.0;
+                let t = bounds(vcx, &format!("pricer-tree-text-{r}"));
+                assert!(near(t.center().y, mid), "leg {r}'s text centres ({lane})");
+                let line = bounds(vcx, &format!("pricer-connector-line-{r}"));
+                let stub = bounds(vcx, &format!("pricer-connector-stub-{r}"));
+                assert!(
+                    near(line.size.width, gpui::px(1.0)) && near(stub.size.height, gpui::px(1.0)),
+                    "row {r}: hairlines ({lane}): {line:?} {stub:?}"
+                );
+                assert!(
+                    near(line.top(), top),
+                    "row {r}: the line starts at the row's top ({lane}): {line:?} vs {top:?}"
+                );
+                // The last leg's line stops at its stub: at the stub's
+                // bottom edge, so the corner is square.
+                let end = if last { stub.bottom() } else { bottom };
+                assert!(
+                    near(line.bottom(), end),
+                    "row {r}: the line ends at {} ({lane}): {line:?} vs {end:?}",
+                    if last { "the stub" } else { "the row's bottom" }
+                );
+                assert!(
+                    near(stub.center().y, mid),
+                    "row {r}: the stub sits at mid-height ({lane}): {stub:?} vs {mid:?}"
+                );
+                assert!(
+                    near(stub.left(), line.left()) && near(stub.right(), chevron.right()),
+                    "row {r}: the stub runs from the line to the slot's right edge \
+                     ({lane}): {stub:?} {line:?} {chevron:?}"
+                );
+                assert!(
+                    (line.center().x - chevron.center().x).abs() < gpui::px(1.0),
+                    "row {r}: the line sits in the package chevron's lane ({lane}): \
+                     {line:?} vs {chevron:?}"
+                );
+                ends.push((line.top(), line.bottom()));
+            }
+            assert!(
+                near(ends[0].1, ends[1].0),
+                "leg 1's line meets leg 2's with no gap ({lane}): {ends:?}"
+            );
             for row in ["pricer-tree-text-2", "pricer-tree-text-0"] {
                 let t = bounds(vcx, row);
                 assert!(
@@ -7230,14 +7302,14 @@ pub(crate) mod tests {
                 );
             }
         };
-        check(&mut vcx, "line numbers off");
+        check(&mut vcx, "line numbers off", false);
         vcx.update(|_, cx| {
             cx.set_global(UiSettings {
                 line_numbers: LineNumbers::On,
             })
         });
         h.draw(&mut vcx);
-        check(&mut vcx, "line numbers on");
+        check(&mut vcx, "line numbers on", true);
 
         // The gutter: muted off the cursor row, a package's included (it
         // has no ground of its own any more), own on the cursor row.
