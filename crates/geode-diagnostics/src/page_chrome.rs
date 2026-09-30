@@ -58,7 +58,7 @@ pub(crate) fn rail_texts(badges: &Badges) -> [SharedString; 5] {
         SharedString::from(badges.sources.1.to_string()),
         SharedString::from(badges.datasets.to_string()),
         if errors + warnings > 0 {
-            SharedString::from(format!("{errors} · {warnings}"))
+            SharedString::from(format!("{} issues", errors + warnings))
         } else {
             SharedString::default()
         },
@@ -152,6 +152,17 @@ pub(crate) fn rail(
                 .w_full()
                 .selected(s == section)
                 .accessibility_label(s.title())
+                .tooltip(match s {
+                    Section::Sources => "Source health and activity (g s)",
+                    Section::Data => "Stored datasets and generations (g d)",
+                    Section::Config => {
+                        "Configuration and data issues, history, and effective values (g c)"
+                    }
+                    Section::Log => "Retained log records (g l)",
+                    Section::Perf => {
+                        "Timing, storage, and event delivery (g p); badge shows frame interval p95"
+                    }
+                })
                 .child(
                     h_flex()
                         .w_full()
@@ -183,6 +194,7 @@ pub(crate) fn rail(
 pub(crate) fn detail_strip(
     selector: &'static str,
     row: Option<&PreparedRow>,
+    position: SharedString,
     copy: Option<SharedString>,
     scroll: &gpui::ScrollHandle,
     cx: &mut Context<DiagnosticsPage>,
@@ -215,7 +227,7 @@ pub(crate) fn detail_strip(
                     div()
                         .text_xs()
                         .text_color(theme.muted_foreground)
-                        .child("Details"),
+                        .child(position),
                 )
                 .child(div().flex_1())
                 .when_some(copy, |el, _| {

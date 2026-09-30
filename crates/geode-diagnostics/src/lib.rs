@@ -40,6 +40,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("diagnostics::collapse", "Collapse"),
     ("diagnostics::activate", "Toggle expansion"),
     ("diagnostics::filter", "Filter"),
+    ("diagnostics::reset_filters", "Reset section filters"),
     ("diagnostics::blur", "Leave the filter"),
     ("diagnostics::sources", "Show sources"),
     ("diagnostics::data", "Show data"),
@@ -94,6 +95,7 @@ context = "diagnostics && mode == normal"
 "z c" = "diagnostics::collapse"
 "enter" = "diagnostics::activate"
 "/" = "diagnostics::filter"
+"alt-backspace" = "diagnostics::reset_filters"
 "g s" = "diagnostics::sources"
 "g d" = "diagnostics::data"
 "g c" = "diagnostics::config"

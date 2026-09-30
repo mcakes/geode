@@ -22,7 +22,11 @@ reported honestly rather than compared with a UI-frame budget.
 `geode_shell::perf::FrameHistogram` records intervals between consecutive
 `ShellView` renders during interaction. It uses fixed log buckets, saturating
 counters, no allocation, and no notification. Intervals at or above the idle
-cutoff are counted as idle gaps rather than frames.
+cutoff are counted as idle gaps rather than frames. Diagnostics labels these
+as frame intervals and shows each query stage’s sample count separately.
+The interval histogram has logarithmic bucket labels and a separate count
+above 100 ms. It does not classify render cadence against the 8 ms pure UI
+work budget; those measurements have different meanings.
 
 The `perf::toggle_overlay` action shows frame p50, p95, and maximum plus query,
 snapshot-to-paint, and combined requery latency. It has no timer and therefore

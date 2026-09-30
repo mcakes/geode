@@ -133,7 +133,10 @@ pub struct DiagnosticsPage {
     detail_scroll: gpui::ScrollHandle,
     /// [`Self::title`]'s cache, replaced only on a section change.
     title: SharedString,
-    perf: Option<model::PerfModel>,
+    perf: Option<crate::perf_view::PerformanceView>,
+    result_summary: SharedString,
+    detail_position: SharedString,
+    issue_count: usize,
     visible: bool,
     /// A page input holds focus; see `key_context`.
     insert_mode: bool,
@@ -380,6 +383,9 @@ impl DiagnosticsPage {
             detail_scroll: gpui::ScrollHandle::new(),
             title: title_for(section),
             perf: None,
+            result_summary: SharedString::default(),
+            detail_position: SharedString::default(),
+            issue_count: 0,
             visible: false,
             insert_mode: false,
             ages_timer: None,
@@ -471,6 +477,7 @@ impl DiagnosticsPage {
                     } else {
                         model::current_diagnostics(d)
                     };
+                    self.issue_count = diags.len();
                     let mut issues = prepared::diagnostics_table(&diags, self.config_history);
                     let query = filter.to_lowercase();
                     if !query.is_empty() {
@@ -502,7 +509,10 @@ impl DiagnosticsPage {
                     )
                 }
                 Section::Perf => {
-                    self.perf = Some(model::perf_model(d, &frame.requery));
+                    self.perf = Some(crate::perf_view::PerformanceView::new(&model::perf_model(
+                        d,
+                        &frame.requery,
+                    )));
                     PreparedTable::empty()
                 }
             }
@@ -604,6 +614,7 @@ impl DiagnosticsPage {
             self.sync_target_items(cx);
         }
         self.refresh_copy_text();
+        self.refresh_result_summary(cx);
         self.refresh_badges(cx);
         cx.notify();
     }
@@ -675,6 +686,16 @@ impl DiagnosticsPage {
     }
 
     fn refresh_copy_text(&mut self) {
+        let (cursor, count) = if self.showing_issues() {
+            (self.diag_cursor, self.diag_prepared.rows.len())
+        } else {
+            (self.cursor(), self.prepared.rows.len())
+        };
+        self.detail_position = if count == 0 {
+            SharedString::default()
+        } else {
+            format!("Details · row {} of {count}", cursor + 1).into()
+        };
         let text = self
             .active_row()
             .filter(|r| !r.detail.is_empty())
@@ -683,6 +704,120 @@ impl DiagnosticsPage {
             self.detail_scroll.set_offset(Default::default());
             self.copy_text = text;
         }
+    }
+
+    fn has_filters(&self) -> bool {
+        !self.filters[self.section as usize].is_empty()
+            || (self.section == Section::Log
+                && (self.log_filter.target.is_some()
+                    || self.log_filter.levels.iter().any(|on| !on)))
+    }
+
+    /// Reset only the visible section and return focus before its reset
+    /// button disappears. In Log, levels and target are also view filters.
+    pub(crate) fn reset_filters(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.section == Section::Perf {
+            return;
+        }
+        self.focus_handle.focus(window, cx);
+        self.filter_entry = None;
+        self.filters[self.section as usize].clear();
+        self.filter_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        if self.section == Section::Log {
+            self.log_filter = LogFilter::all();
+            self.select_stale = true;
+        }
+        self.rebuild(cx);
+    }
+
+    fn refresh_result_summary(&mut self, cx: &Context<Self>) {
+        let rows = &self.prepared.rows;
+        let parents = || {
+            rows.iter()
+                .filter(|r| matches!(r.kind, prepared::RowKind::Parent { .. }))
+                .count()
+        };
+        self.result_summary = match self.section {
+            Section::Sources => format!(
+                "{} of {} sources",
+                rows.len(),
+                self.diagnostics.read(cx).sources.len()
+            ),
+            Section::Data => format!(
+                "{} of {} datasets · {} rows shown",
+                parents(),
+                self.diagnostics.read(cx).datasets.len(),
+                rows.len()
+            ),
+            Section::Config if self.showing_issues() => format!(
+                "{} of {} {} issue{}",
+                self.diag_prepared.rows.len(),
+                self.issue_count,
+                if self.config_history {
+                    "historical"
+                } else {
+                    "current"
+                },
+                if self.issue_count == 1 { "" } else { "s" }
+            ),
+            Section::Config => format!(
+                "{} documents · {} values shown",
+                parents(),
+                rows.iter()
+                    .filter(|r| r.kind == prepared::RowKind::Child)
+                    .count()
+            ),
+            Section::Log => format!(
+                "{} of {} retained records · limit {}",
+                rows.iter()
+                    .filter(|r| r.kind != prepared::RowKind::Notice)
+                    .count(),
+                self.log.len(),
+                crate::log::LOG_CAP
+            ),
+            Section::Perf => String::new(),
+        }
+        .into();
+    }
+
+    fn render_results(&self, cx: &mut Context<Self>) -> AnyElement {
+        h_flex()
+            .min_h_8()
+            .flex_none()
+            .flex_wrap()
+            .gap_2()
+            .px_3()
+            .py_1()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .debug_selector(|| "diagnostics-results".to_string())
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(self.result_summary.clone()),
+            )
+            .when(self.section == Section::Log, |el| {
+                el.child(div().text_xs().child(if self.follow {
+                    "Following latest"
+                } else {
+                    "Auto-follow paused"
+                }))
+            })
+            .child(div().flex_1())
+            .when(self.has_filters(), |el| {
+                el.child(crate::page_chrome::probed(
+                    "diagnostics-reset-filters",
+                    Button::new("diagnostics-reset-filters")
+                        .ghost()
+                        .small()
+                        .label("Reset filters")
+                        .tooltip("Reset this section’s filters (Alt+Backspace)")
+                        .on_click(cx.listener(|p, _, window, cx| p.reset_filters(window, cx))),
+                ))
+            })
+            .into_any_element()
     }
 
     pub(crate) fn copy_details(&self, cx: &mut Context<Self>) {
@@ -708,6 +843,7 @@ impl DiagnosticsPage {
     pub(crate) fn set_config_values(&mut self, cx: &mut Context<Self>) {
         self.config_values = true;
         self.refresh_copy_text();
+        self.refresh_result_summary(cx);
         cx.notify();
     }
 
@@ -1010,6 +1146,7 @@ impl DiagnosticsPage {
             "log" => self.set_section(Section::Log, window, cx),
             "perf" => self.set_section(Section::Perf, window, cx),
             "copy" => self.copy_details(cx),
+            "reset_filters" => self.reset_filters(window, cx),
             "next_view" if self.section == Section::Config => self.cycle_config_view(false, cx),
             "prev_view" if self.section == Section::Config => self.cycle_config_view(true, cx),
             "next_view" | "prev_view" => {}
@@ -1304,13 +1441,18 @@ impl gpui::Render for DiagnosticsPage {
                     table: &self.table,
                     filter: self.filter_input_el(),
                     actions: self.actions.clone(),
+                    results: self.render_results(cx),
                 },
                 weak,
                 cx,
             ),
-            Section::Sources | Section::Data | Section::Log => {
-                table_el(&self.table, &self.focus_handle).into_any_element()
-            }
+            Section::Sources | Section::Data | Section::Log => v_flex()
+                .flex_1()
+                .min_h_0()
+                .min_w_0()
+                .child(self.render_results(cx))
+                .child(table_el(&self.table, &self.focus_handle))
+                .into_any_element(),
         };
         v_flex()
             .size_full()
@@ -1343,6 +1485,7 @@ impl gpui::Render for DiagnosticsPage {
                                         "diagnostics-detail"
                                     },
                                     self.active_row(),
+                                    self.detail_position.clone(),
                                     self.copy_text.clone(),
                                     &self.detail_scroll,
                                     cx,
@@ -2561,7 +2704,7 @@ mod tests {
         vcx.run_until_parked();
         assert!(
             h.page
-                .read_with(&vcx, |p, _| p.perf.as_ref().unwrap().overlay)
+                .read_with(&vcx, |p, _| p.perf.as_ref().unwrap().is_overlay_visible())
         );
     }
 
@@ -2847,6 +2990,122 @@ mod tests {
     }
 
     #[gpui::test]
+    fn reset_filters_restores_the_log_and_keeps_other_sections_filtered(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        focus_page(&h, &mut vcx);
+        dispatch(&h, &mut vcx, "diagnostics::filter");
+        vcx.simulate_input("source query");
+        vcx.run_until_parked();
+        open_log_section(&h, &mut vcx);
+        push(&h.ring, Level::INFO, "geode::shell", "keep");
+        push(&h.ring, Level::DEBUG, "geode::query", "hidden");
+        notify(&h, &mut vcx);
+        click(&mut vcx, "diagnostics-level-DEBUG");
+        h.page.update(&mut vcx, |p, cx| {
+            p.set_log_target(Some("geode::shell".into()), cx)
+        });
+        dispatch(&h, &mut vcx, "diagnostics::filter");
+        vcx.simulate_input("unmatched");
+        vcx.run_until_parked();
+        assert!(h.page.read_with(&vcx, |p, _| {
+            p.result_summary.starts_with("0 of 2 retained records")
+        }));
+        assert!(vcx.debug_bounds("diagnostics-empty").is_some());
+        click(&mut vcx, "diagnostics-reset-filters");
+        h.page.read_with(&vcx, |p, cx| {
+            assert!(!p.has_filters());
+            assert_eq!(p.log_filter, LogFilter::all());
+            assert_eq!(
+                p.target_select
+                    .read(cx)
+                    .selected_value()
+                    .as_ref()
+                    .map(|v| v.as_ref()),
+                Some(ALL_TARGETS)
+            );
+            assert_eq!(p.filters[Section::Sources as usize], "source query");
+            assert!(p.filter_input.read(cx).value().is_empty());
+            assert!(p.result_summary.starts_with("2 of 2 retained records"));
+            assert_eq!(p.detail_position.as_ref(), "Details · row 2 of 2");
+            assert!(!p.insert_mode);
+        });
+        vcx.update(|window, cx| assert!(h.page.read(cx).focus_handle.is_focused(window)));
+        assert!(vcx.debug_bounds("diagnostics-reset-filters").is_none());
+        dispatch(&h, &mut vcx, "diagnostics::sources");
+        dispatch(&h, &mut vcx, "diagnostics::reset_filters");
+        assert!(
+            h.page
+                .read_with(&vcx, |p, _| p.filters.iter().all(String::is_empty))
+        );
+    }
+
+    #[gpui::test]
+    fn result_counts_follow_config_views_and_exclude_log_loss_notices(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.page.update(&mut vcx, |p, cx| p.set_visible(true, cx));
+        note_two_config_batches(&h, &mut vcx);
+        open_config_section(&h, &mut vcx);
+        let summary = |vcx: &gpui::VisualTestContext| {
+            h.page.read_with(vcx, |p, _| p.result_summary.to_string())
+        };
+        assert_eq!(summary(&vcx), "1 of 1 current issue");
+        click(&mut vcx, "diagnostics-diag-history");
+        assert_eq!(summary(&vcx), "1 of 1 historical issue");
+        dispatch(&h, &mut vcx, "diagnostics::filter");
+        vcx.simulate_input("unmatched");
+        vcx.run_until_parked();
+        assert_eq!(summary(&vcx), "0 of 1 historical issue");
+        click(&mut vcx, "diagnostics-config-values");
+        assert_eq!(summary(&vcx), "0 documents · 0 values shown");
+        open_log_section(&h, &mut vcx);
+        for _ in 0..70 {
+            push(&h.ring, Level::INFO, "geode::shell", "message");
+        }
+        notify(&h, &mut vcx);
+        assert_eq!(h.page.read_with(&vcx, |p, _| p.prepared.rows.len()), 65);
+        assert_eq!(summary(&vcx), "64 of 64 retained records · limit 4096");
+    }
+
+    #[gpui::test]
+    fn performance_columns_stay_aligned_at_larger_text_sizes(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        dispatch(&h, &mut vcx, "diagnostics::perf");
+        for rem in [12., 20.] {
+            for width in [800., 1280.] {
+                vcx.simulate_resize(gpui::size(gpui::px(width), gpui::px(800.)));
+                vcx.update(|window, cx| {
+                    window.set_rem_size(gpui::px(rem));
+                    window.refresh();
+                    let _ = window.draw(cx);
+                });
+                let page = vcx.debug_bounds("diagnostics-performance").unwrap();
+                let overlay = vcx.debug_bounds("diagnostics-overlay-switch").unwrap();
+                assert!(overlay.left() >= page.left() && overlay.right() <= page.right());
+                let mut previous_right = page.left();
+                for label in ["Median (p50)", "p95", "Maximum", "Samples"] {
+                    let frame = vcx
+                        .debug_bounds(format!("diagnostics-metric-Frame interval-{label}").leak())
+                        .unwrap();
+                    assert!(frame.left() >= previous_right && frame.right() <= page.right());
+                    assert!(frame.size.width > gpui::px(60.));
+                    for metric in ["Query → snapshot", "Snapshot → paint"] {
+                        let row = vcx
+                            .debug_bounds(format!("diagnostics-metric-{metric}-{label}").leak())
+                            .unwrap();
+                        assert_eq!(frame.right(), row.right());
+                        assert_eq!(frame.left(), row.left());
+                    }
+                    previous_right = frame.right();
+                }
+            }
+        }
+    }
+
+    #[gpui::test]
     fn diagnostics_regions_remain_aligned_when_resized_and_zoomed(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         open_log_section(&h, &mut vcx);
@@ -2879,6 +3138,10 @@ mod tests {
                 );
                 assert!(detail.bottom() <= footer.top() + gpui::px(1.));
                 assert!(footer.bottom() <= page.bottom() + gpui::px(1.));
+                let results = vcx.debug_bounds("diagnostics-results").unwrap();
+                assert_eq!(results.left(), table.left());
+                assert_eq!(results.right(), table.right());
+                assert!(results.bottom() <= table.top());
                 let clear = vcx.debug_bounds("diagnostics-log-clear").unwrap();
                 assert!(
                     clear.right() <= page.right(),

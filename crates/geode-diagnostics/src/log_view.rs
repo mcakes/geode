@@ -105,6 +105,7 @@ pub(crate) fn toolbar(view: LogView<'_>, weak: WeakEntity<DiagnosticsPage>) -> A
                         .ghost()
                         .small()
                         .label("Clear log")
+                        .tooltip("Forget retained records; new records will continue to arrive")
                         .on_click(move |_, _window, cx| {
                             let _ = clear.update(cx, |p, cx| p.clear_log(cx));
                         }),
@@ -114,6 +115,7 @@ pub(crate) fn toolbar(view: LogView<'_>, weak: WeakEntity<DiagnosticsPage>) -> A
             h_flex()
                 .gap_1()
                 .flex_wrap()
+                .child(div().text_xs().child("Show"))
                 .children(toggles)
                 .child(div().flex_1())
                 .child(probed(

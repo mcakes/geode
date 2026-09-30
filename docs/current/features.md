@@ -919,7 +919,7 @@ current keyboard workflow using the shell's keycaps.
 | Data | One expandable row per dataset with Partitions, Latest gen, Published, Rows, Resolved, Live, and Loaded; a dataset expands to its generations, the one resolved under a historical frame as-of marked. Toolbar: filter, a chip reading `Catalog up to date` or `Refreshing catalog`, Refresh catalog, Expand all, Collapse all. |
 | Config | Three full-width views: Current issues (config and data lanes), History (prior batches newest first), and Effective values (expandable documents and their leaves, with Key, Value, and Layer from `Config::explain`). The active view owns row navigation and Copy. Search filters issue text or document keys and values; unmatched documents disappear and matches inside collapsed documents are revealed. Open config directory remains available. |
 | Log | Time with milliseconds, Lvl, Target, and Message over the retained tail. Toolbar: level toggles, a target select over the targets seen in the tail plus `All targets`, a text filter over message and target, Follow, Clear log, and Log levels. Detail: the full record with a Copy button that puts it on the clipboard. |
-| Performance | No table. Two-column metric groups for frame p50 · p95 · max with the sample count and the 8 ms budget, requery submit→snapshot with the 50 ms budget, requery snapshot→paint, and dropped events; a frame-interval histogram whose bars past the budget take the warning tone; database and DuckDB memory readouts from the catalog; and the Performance overlay switch. The region scrolls at smaller sizes. |
+| Performance | Aligned median, p95, maximum, and sample-count readouts for frame intervals, query→snapshot, and snapshot→paint, with explanations of each stage. A labeled logarithmic frame-interval histogram shows bucket ranges and counts on hover, with a separate overflow count above 100 ms. Frame cadence is not pure UI work and is not classified against the 8 ms UI budget. UI and requery targets remain explanatory guidance. Storage, DuckDB memory, dropped events, and the Performance overlay switch share the scrolling region. Missing samples show dashes and zero counts. |
 
 Keys in the page's own context: `j`/`k` move the cursor, `g g`/`G` jump,
 `ctrl+d`/`ctrl+u` move five rows and `ctrl+f`/`ctrl+b` ten, all with count
@@ -932,10 +932,20 @@ and returns to navigation; clicking a row does the same. On Performance,
 which paints no input, `/` does nothing. `g s` / `g d` / `g c` / `g l` /
 `g p` jump directly to sections. Config views cycle with `ctrl+tab` and
 `ctrl+shift+tab`. `y` copies details, `r` refreshes the catalog, `z R` /
-`z M` expand/collapse datasets, and `f` toggles Follow. Selection remains
+`z M` expand/collapse datasets, and `f` toggles Follow. `alt+backspace` or
+Reset filters clears only the visible section’s filters and returns focus
+to navigation; in Log it also enables every level and restores All targets.
+Selection remains
 on the same record through refreshes and filtering while it remains visible.
 The state-changing controls also have keyboard routes through the palette
 (Set log level…, Toggle performance overlay, Open config directory).
+
+Each table has a result strip showing visible and total item counts. Data
+counts datasets independently of expanded generation rows; Log excludes loss
+notices from record counts and shows its retention limit and follow state.
+Effective values reports the documents and leaves actually shown. The detail
+header identifies the current row’s position. These strings and Performance
+readouts are prepared when their inputs change, outside paint.
 
 Controls that change application state go through a request channel or the
 shell-actions handle, never a direct call. A Levels pick queues

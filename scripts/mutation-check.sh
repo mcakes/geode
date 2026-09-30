@@ -6937,12 +6937,23 @@ run_mutation "diagnostics perf: the overlay mirror is never read" \
   geode-diagnostics \
   perf_model_carries_buckets_overflow_and_the_overlay_mirror
 
-run_mutation "diagnostics perf: bars past the budget are not tinted" \
-  crates/geode-diagnostics/src/perf_view.rs \
-  '            (h, *bound > FRAME_BUDGET_MICROS)' \
-  '            (h, false)' \
-  geode-diagnostics \
-  bar_heights_scale_to_the_tallest_bucket_and_tint_past_the_budget
+run_mutation "diagnostics ergonomics: percentile sample counts stay distinct" \
+  crates/geode-diagnostics/src/model.rs \
+  '        samples: h.count(),' \
+  '        samples: 0,' \
+  geode-diagnostics performance_readouts_keep_sample_counts_and_overflow_separate
+
+run_mutation "diagnostics ergonomics: reset also restores log levels and target" \
+  crates/geode-diagnostics/src/page.rs \
+  '            self.log_filter = LogFilter::all();' \
+  '            self.log_filter.text.clear();' \
+  geode-diagnostics reset_filters_restores_the_log_and_keeps_other_sections_filtered
+
+run_mutation "diagnostics ergonomics: loss notices are not records" \
+  crates/geode-diagnostics/src/page.rs \
+  'r.kind != prepared::RowKind::Notice' \
+  'true' \
+  geode-diagnostics result_counts_follow_config_views_and_exclude_log_loss_notices
 
 # ---- the diagnostics page: the log tail, its filters, and the Levels popover
 

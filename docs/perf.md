@@ -2338,3 +2338,23 @@ The preceding ranked-tree measurement was 52.5 ms open / 85.0 ms first paint;
 the pre-ranked-tree measurement was 43.5 / 72.0 ms. These are development-build
 headless timings, not end-to-end release-app latency. The label index still
 builds on the worker after all loaded parents and leaves are displayed.
+
+## Diagnostics result summaries — 2026-09-30
+
+Apple M5 Pro (aarch64 macOS), Rust 1.96.0, release profile. The existing
+`log_rebuild_timing_over_a_full_tail` headless test rebuilds 4,096 retained
+records with mixed levels and representative messages, twenty times per run.
+It includes model preparation, filtering, table replacement, and chrome
+refresh; it excludes real-window layout, text painting, and GPU work.
+
+Command: `cargo test -p geode-diagnostics --release -- --ignored log_rebuild_timing --nocapture`.
+
+| Version | Median | Maximum |
+|---|---:|---:|
+| Before result counts and row-position readouts | 5.229 ms | 5.791 ms |
+| With result counts and row-position readouts | 5.057 ms | 6.228 ms |
+
+These single-run values show no material median regression; the difference is
+not evidence of a speedup. Performance-section percentile labels, histogram
+geometry, and tooltip strings are prepared on rebuild, outside render. That
+section is not included in this log-tail measurement.
