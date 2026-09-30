@@ -7324,6 +7324,65 @@ pub(crate) mod tests {
         });
     }
 
+    /// A package's legs read as one block: a leg that is not its package's
+    /// last drops the table's 1 px row separator, so its connector line
+    /// joins the next leg's; every other row keeps it — the last leg, the
+    /// package row, a bare line and a group row. A row's separator is read
+    /// off a value cell's height: the row's fixed height less the table's
+    /// vertical padding, less one pixel when the separator is there.
+    #[gpui::test]
+    fn only_a_non_last_leg_drops_the_row_separator(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(
+            cx,
+            &[
+                "SPX Z26 5000 C",
+                "NDX Z26 4000 P",
+                "-5 SPX Z26 4800/5200 CS",
+            ],
+        );
+        h.command(&mut vcx, "group underlying_ref").unwrap();
+        h.tile.update_in(&mut vcx, |t, _, cx| {
+            t.group_expansion.open_all();
+            t.rebuild(cx);
+        });
+        h.draw(&mut vcx);
+        // ▾ NDX, its line, ▾ SPX, its line, the CS; open the CS.
+        assert_eq!(h.tree(&vcx).len(), 5);
+        h.motion(&mut vcx, "down", Some(4));
+        h.dispatch(&mut vcx, "toggle", None);
+        h.draw(&mut vcx);
+        assert_eq!(h.tree(&vcx).len(), 7, "the CS open: two legs");
+        let size = crate::delegate::TABLE_SIZE;
+        let pad = size.table_cell_padding();
+        let open = size.table_row_height() - pad.top - pad.bottom;
+        let separated = |vcx: &mut VisualTestContext, r: usize| {
+            let sel: &'static str = Box::leak(format!("pricer-cell-{r}-1").into_boxed_str());
+            let h = vcx
+                .debug_bounds(sel)
+                .unwrap_or_else(|| panic!("{sel} painted"))
+                .size
+                .height;
+            assert!(
+                (h - open).abs() < gpui::px(0.5)
+                    || (h - (open - gpui::px(1.0))).abs() < gpui::px(0.5),
+                "{sel}: {h:?} is a row with or without its separator"
+            );
+            h < open - gpui::px(0.5)
+        };
+        for (r, what) in [
+            (0, "a group row"),
+            (1, "a bare line"),
+            (4, "the package row"),
+            (6, "the package's last leg"),
+        ] {
+            assert!(separated(&mut vcx, r), "{what} keeps its separator");
+        }
+        assert!(
+            !separated(&mut vcx, 5),
+            "a non-last leg drops its separator"
+        );
+    }
+
     /// A grouping row paints its value (`pricer-group-{row}`, medium
     /// weight) behind a chevron at its own depth, its lines one indent in;
     /// it is the only row with a ground (`row_ground`, which `render_tr`

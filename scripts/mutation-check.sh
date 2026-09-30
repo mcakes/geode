@@ -25467,6 +25467,21 @@ run_mutation "pricer tree: consecutive legs' lines join" \
   '            .when(false, |el| el.border_b_0())' \
   geode-pricer the_tree_column_paints_connectors_a_chip_and_a_leg_count
 
+# Only a non-last leg drops the separator; widened to every leg, the
+# package's last leg would run into the next row with no boundary.
+run_mutation "pricer tree: the last leg keeps its separator" \
+  crates/geode-pricer/src/delegate.rs \
+  '            Some(GridRowKind::Leg { last: false })' \
+  '            Some(GridRowKind::Leg { .. })' \
+  geode-pricer only_a_non_last_leg_drops_the_row_separator
+
+# Only legs drop the separator; every other row keeps its boundary.
+run_mutation "pricer tree: other rows keep their separator" \
+  crates/geode-pricer/src/delegate.rs \
+  '            .when(joined, |el| el.border_b_0())' \
+  '            .when(true, |el| el.border_b_0())' \
+  geode-pricer only_a_non_last_leg_drops_the_row_separator
+
 # The connector is floored to the non-text contrast floor, opaque; the
 # raw `border` token is faint (often translucent) on most themes.
 run_mutation "pricer paint: the connector clears the non-text floor" \

@@ -48,8 +48,10 @@ pub enum GridRowKind {
     Group { open: bool, depth: usize },
     /// A bare line, or a leg standing alone under `instrument_ref`.
     Line,
-    /// `last`: the final leg of its package in sheet order — it takes the
-    /// corner connector (`└`), every other leg the tee (`├`).
+    /// `last`: the final leg of its package in sheet order. Its drawn
+    /// connector line stops at its stub, closing the package; every other
+    /// leg's line runs the full row height and its row drops the table's
+    /// separator, so the line joins the next leg's.
     Leg { last: bool },
     /// `partial`: fewer of its legs sit under this node than it has (the
     /// scope hides some, or the grouping splits it); the row aggregates

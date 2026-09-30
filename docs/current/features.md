@@ -1062,8 +1062,10 @@ chevron, its template (`CS`, `CUSTOM`) as a neutral chip, a summary of its
 legs' distinct expiries and strikes (`Z26 4800/5200`) and a muted leg count
 (`· 2 legs`). Each leg hangs from a drawn connector under the package's
 chevron: a hairline through the full row height, joining the next leg's
-without a gap (a leg that is not its package's last drops the row separator
-below it), and a stub at mid-height toward its text; on the package's last
+without a gap, and a stub at mid-height toward its text. A package's legs
+read as one block: a leg that is not its package's last drops the row
+separator below it, so there is no separator between sibling legs, while the
+last leg, the package row, bare lines and group rows keep theirs; on the package's last
 leg the line stops at its stub. The lines take the `border` token floored to
 3:1 non-text contrast on the row's own, hover and selected grounds. The leg's
 full shorthand paints in muted text; a bare line

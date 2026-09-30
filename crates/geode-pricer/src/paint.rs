@@ -250,7 +250,6 @@ mod tests {
         let (service, _) = geode_shell::theme::load_bundled();
         let mut failures = Vec::new();
         let mut checked = 0;
-        let mut worst_connector = f32::INFINITY;
         for name in service.names() {
             let entry = service.resolve(&name).unwrap().clone();
             cx.update(|cx| {
@@ -347,7 +346,6 @@ mod tests {
                 for (which, bg) in [("ground", ground), ("hover", hover), ("selected", selected)] {
                     checked += 1;
                     let ratio = contrast_ratio(to_rgb(p.connector), bg);
-                    worst_connector = worst_connector.min(ratio);
                     if p.connector.a < 1.0 || ratio < NON_TEXT_RATIO {
                         failures.push(format!(
                             "{name}: connector on {which} at {ratio:.2}:1 (alpha {})",
@@ -357,7 +355,6 @@ mod tests {
                 }
             });
         }
-        eprintln!("worst connector contrast: {worst_connector:.2}:1");
         // Thirty-six pairs a theme (six line paints, five group paints
         // and the connector, each on its row's own ground, on hover and
         // on selected) over at least forty bundled themes.
