@@ -8,15 +8,17 @@
 //! shorthand alone, on the edge the legs' text shares.
 //!
 //! A grouping row paints a chevron and its value at medium weight
-//! (`pricer-group-{row}`), and is the only row with a ground of its own
-//! (`Paints::group_ground`, set by `render_tr`), so its text, cells and
-//! gutter take the group palette floored on that ground. Every other row
-//! leaves the ground to the table: the tree column carries a package's
-//! structure, and hover and selection are the table's row grounds, which
-//! further per-row or per-cell fills would obscure.
+//! (`pricer-group-{row}`). Two rows have a ground of their own, set by
+//! `render_tr` (`row_ground`): a grouping row (`Paints::group`) and a
+//! package leg (`Paints::leg`, a faint tint marking it as inside its
+//! package). Each row's text, cells and gutter take its palette floored on
+//! that ground. Bare lines and package rows leave the ground to the table:
+//! the tree column carries a package's structure, and hover and selection
+//! are the table's row grounds, which replace a row's own and which
+//! further per-cell fills would obscure.
 
 use crate::grid::{GridModel, GridRowKind};
-use crate::paint::{CellColour, Paints, cell_colour};
+use crate::paint::{CellColour, Paints, RowPalette, cell_colour};
 use crate::popup::{ChoicePaint, render_choice};
 use crate::tile::PricerTile;
 use geode_core::colour::{Anchors, NamedColours, Tokens};
@@ -322,11 +324,12 @@ pub struct SheetDelegate {
     /// palette, group palette]` (a group row's chevron rests in the group
     /// muted paint, floored on its ground).
     chevron: [Option<(control::ControlInputs, control::ControlPaint)>; 2],
-    /// Named column colours floored on the group grounds, keyed by the
-    /// resolved colour and the group ground they were floored under: a
-    /// group row paints few distinct colours, so a linear memo keeps the
-    /// floor out of every frame.
-    group_named: Vec<(Hsla, Hsla, Hsla)>,
+    /// Named column colours floored on a row palette's grounds (a group
+    /// row's or a leg's), keyed by the resolved colour and the row ground
+    /// they were floored under: such rows paint few distinct colours, so a
+    /// linear memo keeps the floor out of every frame. Two palettes whose
+    /// grounds coincide floor alike (hover and selected are shared).
+    ground_named: Vec<(Hsla, Hsla, Hsla)>,
     /// The tile's open cell editor, a read-only mirror of the tile's.
     pub(crate) editor: Option<EditorPaint>,
     /// The typeahead's rows call back into the tile; a dropped tile
@@ -398,7 +401,7 @@ impl SheetDelegate {
             paints: Paints::derive(theme),
             loading: false,
             chevron: [None, None],
-            group_named: Vec::new(),
+            ground_named: Vec::new(),
             editor: None,
             tile,
             line_numbers: LineNumbers::Off,
@@ -475,26 +478,23 @@ impl SheetDelegate {
         let Some(row) = model.rows.get(row_ix) else {
             return self.paints.own;
         };
-        let group = matches!(row.kind, GridRowKind::Group { .. });
+        // A group row or a leg: the palette floored on its own ground.
+        let palette = self.row_palette(row_ix);
         let Some(cell) = row.cells.get(plan_col) else {
-            return if group {
-                self.paints.group_own
-            } else {
-                self.paints.own
-            };
+            return palette.map_or(self.paints.own, |p| p.own);
         };
         let colour = model
             .columns
             .get(plan_col)
             .map_or(&Colour::None, |c| &c.colour);
-        if group {
-            let base = self.paints.group_text(cell.state);
+        if let Some(palette) = palette {
+            let base = palette.text(cell.state);
             return match cell_colour(colour, cell.state, cell.sign) {
                 CellColour::State => base,
-                CellColour::Bearish => self.paints.group_bearish,
-                CellColour::Bullish => self.paints.group_bullish,
+                CellColour::Bearish => palette.bearish,
+                CellColour::Bullish => palette.bullish,
                 CellColour::Named(sign) => match self.themed_cell_colour(plan_col, theme) {
-                    Some(c) => self.on_group(c.for_sign(Some(sign))),
+                    Some(c) => self.on_ground(palette, c.for_sign(Some(sign))),
                     None => base,
                 },
             };
@@ -577,41 +577,51 @@ impl SheetDelegate {
             .into_any_element()
     }
 
-    /// Install freshly derived paints (a theme change) and drop the group
-    /// rows' named-colour memo, whose floors were taken on the old
-    /// grounds: the memo is keyed by the group ground, but a theme can
-    /// change the hover or selected grounds it also floors on while
-    /// keeping that one.
+    /// Install freshly derived paints (a theme change) and drop the
+    /// named-colour memo, whose floors were taken on the old grounds: the
+    /// memo is keyed by the row ground, but a theme can change the hover
+    /// or selected grounds it also floors on while keeping that one.
     pub(crate) fn set_paints(&mut self, paints: Paints) {
         self.paints = paints;
-        self.group_named.clear();
+        self.ground_named.clear();
     }
 
-    /// A named column colour on a group row: floored on the group ground
-    /// and the hover and selected grounds that replace it, memoised.
-    fn on_group(&mut self, c: Hsla) -> Hsla {
-        let ground = self.paints.group_ground;
+    /// A named column colour on a row with a ground of its own: floored
+    /// on `palette`'s ground and the hover and selected grounds that
+    /// replace it, memoised. Entries for grounds the current paints no
+    /// longer hold are dropped as they are met.
+    fn on_ground(&mut self, palette: RowPalette, c: Hsla) -> Hsla {
+        let ground = palette.ground;
         if let Some((.., out)) = self
-            .group_named
+            .ground_named
             .iter()
             .find(|(input, at, _)| *input == c && *at == ground)
         {
             return *out;
         }
-        self.group_named.retain(|(_, at, _)| *at == ground);
-        let out = self.paints.floor_on_group(c);
-        self.group_named.push((c, ground, out));
+        let live = [self.paints.group.ground, self.paints.leg.ground];
+        self.ground_named.retain(|(_, at, _)| live.contains(at));
+        let out = palette.floor(c);
+        self.ground_named.push((c, ground, out));
         out
     }
 
-    /// The ground `render_tr` paints under grid row `row`: a group row's
-    /// own, `None` for every other row (and a filler row past the model),
-    /// whose ground is the table's.
-    pub(crate) fn row_ground(&self, row: usize) -> Option<Hsla> {
+    /// The palette of grid row `row` when it has a ground of its own: a
+    /// grouping row's, or a package leg's (every leg, the last included);
+    /// `None` for a bare line, a package row and a filler row past the
+    /// model, whose ground is the table's and whose text the line palette.
+    pub(crate) fn row_palette(&self, row: usize) -> Option<RowPalette> {
         match self.model.rows.get(row)?.kind {
-            GridRowKind::Group { .. } => Some(self.paints.group_ground),
-            _ => None,
+            GridRowKind::Group { .. } => Some(self.paints.group),
+            GridRowKind::Leg { .. } => Some(self.paints.leg),
+            GridRowKind::Package { .. } | GridRowKind::Line => None,
         }
+    }
+
+    /// The ground `render_tr` paints under grid row `row`: its palette's
+    /// (`row_palette`), `None` where the table's shows.
+    pub(crate) fn row_ground(&self, row: usize) -> Option<Hsla> {
+        self.row_palette(row).map(|p| p.ground)
     }
 
     /// The colour `render_th` paints column `plan_col`'s label with: a
@@ -701,16 +711,16 @@ impl SheetDelegate {
     }
 
     /// The gutter's text paint on grid row `row`: the row's own paint on
-    /// the cursor row, muted elsewhere — the group palette on a group
-    /// row, which has a ground of its own, the line palette on every
-    /// other.
+    /// the cursor row, muted elsewhere — the row's palette on a group row
+    /// or a leg, which have a ground of their own (`row_palette`), the
+    /// line palette on every other.
     pub(crate) fn gutter_paint(&self, row: usize) -> Hsla {
         let on_cursor = self.cursor.is_some_and(|(r, _)| r == row);
-        match (on_cursor, self.row_ground(row).is_some()) {
-            (true, false) => self.paints.own,
-            (false, false) => self.paints.muted,
-            (true, true) => self.paints.group_own,
-            (false, true) => self.paints.group_muted,
+        match (on_cursor, self.row_palette(row)) {
+            (true, None) => self.paints.own,
+            (false, None) => self.paints.muted,
+            (true, Some(p)) => p.own,
+            (false, Some(p)) => p.muted,
         }
     }
 
@@ -739,7 +749,7 @@ impl SheetDelegate {
     /// (the group palette's on a group row), already floored on that hover ground.
     fn chevron_states(&mut self, theme: &Theme, group: bool) -> control::ControlPaint {
         let rest = if group {
-            self.paints.group_muted
+            self.paints.group.muted
         } else {
             self.paints.muted
         };
@@ -862,8 +872,8 @@ impl TableDelegate for SheetDelegate {
             .child(column.name)
     }
 
-    /// A group row's ground (`row_ground`; no other row paints one, see
-    /// the module doc) and the row's press door. A filler row past the
+    /// A group row's or a leg's ground (`row_ground`; no other row paints
+    /// one, see the module doc) and the row's press door. A filler row past the
     /// model paints and reports nothing. The table's hover and selected
     /// grounds replace the row's, as they replace the table's own.
     ///
@@ -934,9 +944,9 @@ impl TableDelegate for SheetDelegate {
     /// on. The gutter sits OUTSIDE the tree cell, so the depth indent
     /// starts after it (one lane of numbers whatever the depth) and the
     /// cell's own contents never cover it. The row's ground (the table's
-    /// own, hover, selection) paints under it, so it takes the floored
-    /// muted paint, and the cursor row the own text paint
-    /// (`gutter_paint`).
+    /// own, a group's or a leg's, hover, selection) paints under it, so it
+    /// takes the row palette's floored muted paint, and the cursor row the
+    /// own text paint (`gutter_paint`).
     fn render_td(
         &mut self,
         row_ix: usize,
@@ -1040,7 +1050,7 @@ impl SheetDelegate {
                 GridRowKind::Package { open, .. } | GridRowKind::Group { open, .. } => {
                     let states = self.chevron_states(cx.theme(), group);
                     let rest = if group {
-                        paints.group_muted
+                        paints.group.muted
                     } else {
                         paints.muted
                     };
@@ -1074,14 +1084,14 @@ impl SheetDelegate {
                             cx.emit(ChevronClicked(row_ix));
                         }))
                         .child(if open { "▾" } else { "▸" });
-                    let text = if group { paints.group_own } else { paints.own };
+                    let text = if group { paints.group.own } else { paints.own };
                     (slot.child(chevron), text)
                 }
                 GridRowKind::Leg { last } => (
                     slot.relative()
                         .child(connector_line(row_ix, last, paints.connector))
                         .child(connector_stub(row_ix, paints.connector)),
-                    paints.muted,
+                    paints.leg.muted,
                 ),
                 GridRowKind::Line => (slot, paints.own),
             };

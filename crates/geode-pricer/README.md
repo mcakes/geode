@@ -38,7 +38,7 @@ The tile:
 |---|---|
 | `store` | The `SheetStore` seam, addressed by key/tag with `Loaded::Refused(Refusal)` for a load that never went out and `save`/`forget` returning `Result<(), Refusal>`; `MemorySheetStore` (in-memory, the tests' fake, whose `set_save_refusal`/`set_load_refusal`/`set_forget_refusal` choose the refusal kind and `set_refusing`/`set_load_refused` are `Busy` shorthands) and `DuckSheetStore` (the store `geode-app` wires: `pricer_sheets` document reads/writes over `DataHandle`, with a `known`-names cache fed from the diagnostics catalog and the store's own confirmed writes). |
 | `grid` | The prepared `GridModel`, rebuilt on change: the rollup flattened under the group and package expansions. A group row (`GridRowKind::Group`, no sheet row; `node` and `path` name it) sums its legs' fold, reads the fold's status, counts its legs and reads each other dimension's unanimity (`mixed` where legs differ or a blank sits beside a value; `core::columns::group_cell_text`); a split or partly hidden package row paints its node's legs only (`· n of M legs`). |
-| `paint` | The per-theme paint memo, floored to a readable ratio; the group palette (`group_ground` and its text, floored on it and on hover and selected). |
+| `paint` | The per-theme paint memo, floored to a readable ratio; two `RowPalette`s, each a ground and its text floored on it and on hover and selected: `group` (`secondary` over the table ground) and `leg` (`leg_ground`: the stripe token, or the faintest blend clearing `LEG_TINT_RATIO` from the line, hover and group grounds while fainter than hover). |
 | `delegate` | The table delegate: cells and their column colors (sign, named), the connector tree column (indent; a group row's chevron and medium-weight label over its own ground; a package's chevron, template chip, summary and muted leg count; a leg's drawn connector lines and shorthand; a bare line's shorthand), editor, expiry date field. |
 | `header` | The prepared header row and the footer. Paints through `geode_tile::header::frame`: the sheet name control (and rename field) with its view and shift chips and the grouping chain (as written, dropped levels struck through, and the `pinned` chip) on the left; the `:rm` prompt, `N pricing…`, `N failed` and the pricer label as cluster status; the save notice then the tile notice, the priced time, the health chip (asked about `pricer_sheets` only, which no source feeds — see Known limitations) and `⋯` from the shared cluster. |
 | `popup` | The typeahead, the entry bar's completion list, the sheet picker (`sheet_rows`, `SheetPicker`), and `PricerPick` (what a menu row does). The menu, popup geometry, the `:rm` confirm and the header notices paint through `geode-tile`. |
@@ -343,16 +343,22 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   when the query equals it case-insensitively or the highlight was moved with
   a key or a click; a pointer hover moves the highlight but does not count as
   moving it, so otherwise `enter` commits the typed text.
-- No row paints a ground of its own: the tree column carries the package
-  structure, and `render_tr` keeps only the row press door, so the table's
-  hover and selected-row fills are the only row grounds. Package rows share
-  the line palette; the template chip takes the neutral chip pair
-  (`Paints::chip_fill`, `chip_text`), its text floored on the fill over all
-  three row grounds.
+- Two rows paint a ground of their own, decided by
+  `SheetDelegate::row_palette` and painted by `render_tr`: a grouping row
+  (`Paints::group`) and every package leg (`Paints::leg`, a faint tint
+  marking it as inside its package). A leg's or group row's cells, tree
+  text, gutter and named colors take that palette; named colors are floored
+  through one memo keyed by the row ground. Bare lines and package rows
+  keep the table's ground and share the line palette; the template chip
+  takes the neutral chip pair (`Paints::chip_fill`, `chip_text`), its text
+  floored on the fill over all three row grounds. The leg tint is not held
+  apart from the selected ground (on several light themes no tint fainter
+  than hover can be).
 - A leg's connector is drawn, not a glyph: a hairline through the centre of
   its slot the full row height (to the stub on the package's last leg) and
   a stub at mid-height to the slot's right edge, in `Paints::connector`
-  (`border`, opaque, floored to `NON_TEXT_RATIO` on the three row grounds).
+  (`border`, opaque, floored to `NON_TEXT_RATIO` on the leg ground, hover
+  and selected).
   The tree column has no vertical padding (`delegate::TABLE_SIZE`'s
   horizontal padding only) so the slot spans the row, and a leg that is not
   its package's last drops the row separator, so consecutive legs' lines
@@ -372,11 +378,13 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   Relative mode measures from the cursor row and numbers absolutely with no
   cursor row. `refresh_numbers` prepares the text and width outside render,
   before every `refresh`, keyed by row count, relative cursor row and
-  mode. Gutter text uses the floored muted paint (the own text paint on the
-  cursor row, `SheetDelegate::gutter_paint`).
+  mode. Gutter text uses the row palette's floored muted paint (the own
+  text paint on the cursor row, `SheetDelegate::gutter_paint`).
 - `paint` prepares grid-row text colors and tests their contrast across
-  every bundled theme. Row text is checked against its base, hover, and
-  selection backgrounds; menu colors are `geode_tile::menu::MenuPaint`'s.
+  every bundled theme. Row text is checked against its own ground (line,
+  leg or group), hover, and selection backgrounds; a second sweep checks
+  the leg tint's distinctness (`LEG_TINT_RATIO`); menu colors are
+  `geode_tile::menu::MenuPaint`'s.
 - A view column's `color` paints as in the blotter: `sign` tints a negative
   measure bearish and a positive one bullish, a named color from
   `colors.toml` tints the column and its header (resolved through

@@ -1072,21 +1072,31 @@ read as one block: a leg that is not its package's last drops the row
 separator below it, so there is no separator between sibling legs, while the
 last leg, the package row, bare lines and group rows keep theirs; on the package's last
 leg the line stops at its stub. The lines take the `border` token floored to
-3:1 non-text contrast on the row's own, hover and selected grounds. The leg's
+3:1 non-text contrast on the leg's own, hover and selected grounds. The leg's
 full shorthand paints in muted text; a bare line
 shows its full shorthand. Every row reserves the slot, so roots share one
-leading edge, and a leg's text starts where its package's chip starts. Only
-a grouping row (see [grouping](#grouping)) carries a ground of its own; on
-every other row the table's hover and selected-row fills are the only row
-grounds. Column 0 is fixed at a width that fits a two-leg
+leading edge, and a leg's text starts where its package's chip starts. Every
+leg of a package, the last included, sits on a faint tint that marks it as
+inside its package; bare lines and package rows keep the table's ground. The
+tint is the theme's stripe token (`table_even`) where it reads at least 1.04:1
+from the table ground and from the grouping row's ground, stays fainter than
+hover and 1.04:1 apart from it; otherwise it is the faintest blend of the
+table ground, toward the foreground or away from it, that does. A leg's text,
+state colors, `sign` colors, named colors and gutter are floored on the tint
+as well as on hover and selected. On several light themes the selected ground
+sits within 1.04:1 of the tint, so selecting a leg changes its ground only
+slightly; the cursor cell's border and the gutter still mark the cursor row.
+A grouping row (see [grouping](#grouping)) carries a ground of its own too;
+the table's hover and selected-row fills replace either ground. Column 0 is fixed at a width that fits a two-leg
 call spread's package row (`▾ CS Z26 4800/5200 · 2 legs`) at the largest
 font; a longer summary ends in `…` and the leg count stays whole. Find (`/`,
 `n`, `N`) matches the shorthand column 0 paints on a line or leg; a
 package's find key is still its template form (`SPX Z26 4800/5200 CS`), and
 a custom package's is its template token, underlyings and the summary it
 paints (`CUSTOM SPX Z26 5000/4000`). A long text cell ends in `…`; a number
-never truncates. Cell text is floored to the readable ratio on the table's base,
-hover and selected-row grounds.
+never truncates. Cell text is floored to the readable ratio on its row's own
+ground (the table's base, a leg's tint or a group row's) and the hover and
+selected-row grounds.
 
 The entry bar sits between the header and the column headers. A muted label
 names where `enter` lands (`after <row>`, `into <TEMPLATE>`, `at top`,

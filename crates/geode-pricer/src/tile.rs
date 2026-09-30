@@ -7318,7 +7318,8 @@ pub(crate) mod tests {
         check(&mut vcx, "line numbers on", true);
 
         // The gutter: muted off the cursor row, a package's included (it
-        // has no ground of its own any more), own on the cursor row.
+        // has no ground of its own), own on the cursor row; a leg's in the
+        // leg palette, on the leg's own ground.
         h.motion(&mut vcx, "up", None);
         h.draw(&mut vcx);
         assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(0));
@@ -7326,7 +7327,7 @@ pub(crate) mod tests {
             let d = t.table.read(cx).delegate();
             assert_eq!(d.gutter_paint(0), d.paints.own, "the cursor row");
             assert_eq!(d.gutter_paint(1), d.paints.muted, "the package row");
-            assert_eq!(d.gutter_paint(2), d.paints.muted, "a leg");
+            assert_eq!(d.gutter_paint(2), d.paints.leg.muted, "a leg");
         });
     }
 
@@ -7389,9 +7390,161 @@ pub(crate) mod tests {
         );
     }
 
+    /// Every leg of a package paints the leg ground (`row_ground`, which
+    /// `render_tr` paints), the last leg included: a faint tint marking
+    /// the row as inside its package. A group row keeps its own ground;
+    /// a bare line, the package row and a filler row past the model
+    /// paint none, leaving the table's.
+    #[gpui::test]
+    fn every_leg_and_only_a_leg_or_group_row_paints_a_ground_of_its_own(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(
+            cx,
+            &[
+                "SPX Z26 5000 C",
+                "NDX Z26 4000 P",
+                "-5 SPX Z26 4800/5200 CS",
+            ],
+        );
+        h.command(&mut vcx, "group underlying_ref").unwrap();
+        h.tile.update_in(&mut vcx, |t, _, cx| {
+            t.group_expansion.open_all();
+            t.rebuild(cx);
+        });
+        h.draw(&mut vcx);
+        h.motion(&mut vcx, "down", Some(4));
+        h.dispatch(&mut vcx, "toggle", None);
+        h.draw(&mut vcx);
+        // ▾ NDX, its line, ▾ SPX, its line, ▾ the CS, its two legs.
+        assert_eq!(h.tree(&vcx).len(), 7, "the CS open: two legs");
+        h.tile.read_with(&vcx, |t, cx| {
+            let d = t.table.read(cx).delegate();
+            let (leg, group) = (d.paints.leg.ground, d.paints.group.ground);
+            assert_eq!(
+                (0..8).map(|r| d.row_ground(r)).collect::<Vec<_>>(),
+                [
+                    Some(group),
+                    None,
+                    Some(group),
+                    None,
+                    None,
+                    Some(leg),
+                    Some(leg),
+                    None,
+                ],
+                "group rows their ground, both legs theirs, the line, the \
+                 package row and the filler row past the model none"
+            );
+        });
+    }
+
+    /// A leg's cells, gutter and named colours take the leg palette,
+    /// floored on the leg ground: a pending status muted, a failed value
+    /// danger, a view's named colour floored — the line palette's colours
+    /// are measured on the table ground, not this one. The theme's stripe
+    /// token is set to the named colour (and hover to the foreground, so
+    /// the stripe stays fainter than hover and is used as it is): the leg
+    /// ground is that colour and every leg paint differs from its line
+    /// twin.
+    #[gpui::test]
+    fn a_legs_state_and_named_colours_are_floored_on_the_leg_ground(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "-5 SPX Z26 4800/5200 CS"]);
+        let doc = "[rose]\nhue = 10\n";
+        let (colours, diags) = NamedColours::from_doc(&geode_core::config::merge_docs(
+            "colors",
+            &[geode_core::config::LayerDoc::builtin("colors", doc).unwrap()],
+        ));
+        assert!(diags.is_empty(), "{diags:?}");
+        let view = "[vanilla]\ndataset = \"pricer\"\n\
+             [[vanilla.columns]]\nname = \"npv\"\nformat = { color = \"rose\" }\n\
+             [[vanilla.columns]]\nname = \"status\"\n";
+        reload_views(&h, &mut vcx, view, colours.clone());
+        h.motion(&mut vcx, "down", Some(1));
+        h.dispatch(&mut vcx, "toggle", None);
+        h.draw(&mut vcx);
+        assert_eq!(h.tree(&vcx).len(), 4, "the line, the CS, its two legs");
+        let rose = vcx.update(|_, cx| {
+            let theme = cx.theme();
+            geode_tile::colour::ColourCache::new()
+                .get(
+                    &colours,
+                    "rose",
+                    &geode_shell::shell::colours::anchors_from_theme(theme),
+                    &geode_shell::shell::colours::tokens_from_theme(theme),
+                )
+                .expect("rose is defined")
+                .for_sign(Some(geode_core::colour::Sign::Positive))
+        });
+        // The table reads its stripe and hover off the theme's tokens;
+        // neither feeds the colour anchors, so rose resolves the same.
+        vcx.update(|_, cx| {
+            let theme = gpui_component::Theme::global_mut(cx);
+            let foreground = theme.foreground;
+            theme.table_even = rose;
+            theme.tokens.table_even = rose.into();
+            theme.table_hover = foreground;
+            theme.tokens.table_hover = foreground.into();
+            cx.refresh_windows();
+        });
+        vcx.run_until_parked();
+        // Collapsing and reopening moves nothing: the cursor rests on the
+        // package row, off both legs.
+        let paints = h
+            .tile
+            .read_with(&vcx, |t, cx| t.table.read(cx).delegate().paints);
+        assert_eq!(paints.leg.ground, rose, "fixture: the leg ground is rose");
+        assert_ne!(paints.leg.muted, paints.muted, "fixture: muted moves");
+        assert_ne!(paints.leg.danger, paints.danger, "fixture: danger moves");
+        assert_ne!(paints.leg.floor(rose), rose, "fixture: rose moves");
+
+        assert_eq!(h.cell(&vcx, 2, "status"), "pricing…");
+        assert_eq!(text_colour(&h, &mut vcx, 2, "status"), paints.leg.muted);
+        assert_eq!(text_colour(&h, &mut vcx, 3, "status"), paints.leg.muted);
+        assert_eq!(text_colour(&h, &mut vcx, 0, "status"), paints.muted);
+        h.tile.read_with(&vcx, |t, cx| {
+            let d = t.table.read(cx).delegate();
+            assert_eq!(d.gutter_paint(3), d.paints.leg.muted, "a leg's gutter");
+            assert_eq!(d.gutter_paint(0), d.paints.muted, "a line's gutter");
+        });
+
+        // The line prices; the package fails.
+        let line = h.tile.read_with(&vcx, |t, _| t.sheet.id(0).0);
+        for b in h.prices() {
+            h.deliver(
+                &mut vcx,
+                PriceOutcome {
+                    key: b.key,
+                    tag: b.tag,
+                    submitted: std::time::Instant::now(),
+                    results: b
+                        .lines
+                        .iter()
+                        .map(|l| {
+                            let r = if l.id == line {
+                                Ok(result(12.5))
+                            } else {
+                                Err("no vol".to_string())
+                            };
+                            (l.id, l.revision, r)
+                        })
+                        .collect(),
+                },
+            );
+        }
+        assert_eq!(h.cell(&vcx, 0, "npv"), "12.50");
+        assert_eq!(
+            text_colour(&h, &mut vcx, 0, "npv"),
+            rose,
+            "a line: as resolved"
+        );
+        assert_eq!(text_colour(&h, &mut vcx, 2, "npv"), paints.leg.danger);
+        assert_eq!(text_colour(&h, &mut vcx, 1, "npv"), paints.danger);
+    }
+
     /// A grouping row paints its value (`pricer-group-{row}`, medium
     /// weight) behind a chevron at its own depth, its lines one indent in;
-    /// it is the only row with a ground (`row_ground`, which `render_tr`
+    /// it paints a ground of its own (`row_ground`, which `render_tr`
     /// paints), and its cells and gutter take the group palette floored
     /// on that ground. The chain is set on the tile directly: following
     /// the frame's grouping is the tile's own route, tested there.
@@ -7457,7 +7610,7 @@ pub(crate) mod tests {
                 [true, false, true, false, false],
                 "group rows only"
             );
-            assert_eq!(d.row_ground(0), Some(d.paints.group_ground));
+            assert_eq!(d.row_ground(0), Some(d.paints.group.ground));
             assert_eq!(d.gutter_paint(1), d.paints.muted, "a line off the cursor");
         });
         let strike = h.tile.read_with(&vcx, |t, _| {
@@ -7473,14 +7626,14 @@ pub(crate) mod tests {
                 let d = table.delegate_mut();
                 assert_eq!(
                     d.text_colour(2, strike, &theme),
-                    d.paints.group_muted,
+                    d.paints.group.muted,
                     "`mixed` on the SPX group: muted, floored on the group ground"
                 );
-                assert_eq!(d.text_colour(0, strike, &theme), d.paints.group_own);
+                assert_eq!(d.text_colour(0, strike, &theme), d.paints.group.own);
                 assert_eq!(d.text_colour(1, strike, &theme), d.paints.own, "a line");
                 assert_eq!(
                     d.gutter_paint(0),
-                    d.paints.group_muted,
+                    d.paints.group.muted,
                     "a group's gutter off the cursor"
                 );
             });
@@ -7543,14 +7696,14 @@ pub(crate) mod tests {
         let paints = h
             .tile
             .read_with(&vcx, |t, cx| t.table.read(cx).delegate().paints);
-        assert_eq!(paints.group_ground, rose, "fixture: the ground is rose");
-        assert_ne!(paints.group_muted, paints.muted, "fixture: muted moves");
-        assert_ne!(paints.group_danger, paints.danger, "fixture: danger moves");
-        assert_ne!(paints.floor_on_group(rose), rose, "fixture: rose moves");
+        assert_eq!(paints.group.ground, rose, "fixture: the ground is rose");
+        assert_ne!(paints.group.muted, paints.muted, "fixture: muted moves");
+        assert_ne!(paints.group.danger, paints.danger, "fixture: danger moves");
+        assert_ne!(paints.group.floor(rose), rose, "fixture: rose moves");
 
         // Unpriced: every status `pricing…`.
         assert_eq!(h.cell(&vcx, 2, "status"), "pricing…");
-        assert_eq!(text_colour(&h, &mut vcx, 2, "status"), paints.group_muted);
+        assert_eq!(text_colour(&h, &mut vcx, 2, "status"), paints.group.muted);
         assert_eq!(text_colour(&h, &mut vcx, 3, "status"), paints.muted);
 
         // SPX prices, NDX fails.
@@ -7577,7 +7730,7 @@ pub(crate) mod tests {
                 },
             );
         }
-        assert_eq!(text_colour(&h, &mut vcx, 0, "npv"), paints.group_danger);
+        assert_eq!(text_colour(&h, &mut vcx, 0, "npv"), paints.group.danger);
         assert_eq!(text_colour(&h, &mut vcx, 1, "npv"), paints.danger);
 
         assert_eq!(h.cell(&vcx, 2, "npv"), "12.50");
@@ -7588,7 +7741,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             text_colour(&h, &mut vcx, 2, "npv"),
-            paints.floor_on_group(rose),
+            paints.group.floor(rose),
             "the SPX group: floored on its ground"
         );
     }

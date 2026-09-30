@@ -25486,7 +25486,7 @@ run_mutation "pricer tree: other rows keep their separator" \
 # raw `border` token is faint (often translucent) on most themes.
 run_mutation "pricer paint: the connector clears the non-text floor" \
   crates/geode-pricer/src/paint.rs \
-  '            connector: floor_on_all(to_hsla(over(theme.border, ground)), &line),' \
+  '            connector: floor_on_all(to_hsla(over(theme.border, leg_ground)), &leg),' \
   '            connector: theme.border,' \
   geode-pricer every_pricer_paint_is_readable_on_every_bundled_theme
 
@@ -25502,8 +25502,8 @@ run_mutation "pricer tree: a leg's connector sits in its parent's slot" \
 # included; only the cursor row takes the own paint.
 run_mutation "pricer gutter: a package row is muted off the cursor" \
   crates/geode-pricer/src/delegate.rs \
-  '            (false, false) => self.paints.muted,' \
-  '            (false, false) => self.paints.own,' \
+  '            (false, None) => self.paints.muted,' \
+  '            (false, None) => self.paints.own,' \
   geode-pricer the_tree_column_paints_connectors_a_chip_and_a_leg_count
 
 
@@ -26632,21 +26632,92 @@ run_mutation "pricer grid: a split package sums every leg" \
 # the line palette is measured on the table ground and can fall under 3:1.
 run_mutation "pricer paint: a group row takes the line palette" \
   crates/geode-pricer/src/delegate.rs \
-  $'        if group {\n            let base = self.paints.group_text(cell.state);' \
-  $'        if false {\n            let base = self.paints.group_text(cell.state);' \
+  '        if let Some(palette) = palette {' \
+  '        if let Some(palette) = palette.filter(|p| *p == self.paints.leg) {' \
   geode-pricer a_group_rows_state_and_named_colours_are_floored_on_its_ground
 
 run_mutation "pricer paint: a group row's named colour is not floored" \
   crates/geode-pricer/src/delegate.rs \
-  '                    Some(c) => self.on_group(c.for_sign(Some(sign))),' \
+  '                    Some(c) => self.on_ground(palette, c.for_sign(Some(sign))),' \
   '                    Some(c) => c.for_sign(Some(sign)),' \
   geode-pricer a_group_rows_state_and_named_colours_are_floored_on_its_ground
 
-run_mutation "pricer paint: a failed group cell paints the line danger" \
+run_mutation "pricer paint: a failed group cell paints muted" \
   crates/geode-pricer/src/paint.rs \
-  '            CellState::Failed => self.group_danger,' \
-  '            CellState::Failed => self.danger,' \
+  $'    pub fn text(&self, state: CellState) -> Hsla {\n        match state {\n            CellState::Stale | CellState::Inherited | CellState::Mixed => self.muted,\n            CellState::Failed => self.danger,\n            CellState::Own | CellState::Blank => self.own,\n        }\n    }\n}\n\n#[derive(Debug, Clone, Copy, PartialEq)]\npub struct Paints {' \
+  $'    pub fn text(&self, state: CellState) -> Hsla {\n        match state {\n            CellState::Stale | CellState::Inherited | CellState::Mixed => self.muted,\n            CellState::Failed => self.muted,\n            CellState::Own | CellState::Blank => self.own,\n        }\n    }\n}\n\n#[derive(Debug, Clone, Copy, PartialEq)]\npub struct Paints {' \
   geode-pricer a_group_rows_state_and_named_colours_are_floored_on_its_ground
+
+# Every leg, the last included, paints the leg ground; a bare line and a
+# package row paint none. `row_palette` is the one decision `render_tr`,
+# `text_colour` and `gutter_paint` read.
+run_mutation "pricer leg tint: a leg paints no ground" \
+  crates/geode-pricer/src/delegate.rs \
+  '            GridRowKind::Leg { .. } => Some(self.paints.leg),' \
+  '            GridRowKind::Leg { last } => (!last).then_some(self.paints.leg),' \
+  geode-pricer every_leg_and_only_a_leg_or_group_row_paints_a_ground_of_its_own
+
+run_mutation "pricer leg tint: a package row and a line paint the leg ground" \
+  crates/geode-pricer/src/delegate.rs \
+  '            GridRowKind::Package { .. } | GridRowKind::Line => None,' \
+  '            GridRowKind::Package { .. } | GridRowKind::Line => Some(self.paints.leg),' \
+  geode-pricer every_leg_and_only_a_leg_or_group_row_paints_a_ground_of_its_own
+
+# A leg's cells take the leg palette, floored on the leg ground; the line
+# palette is measured on the table ground.
+run_mutation "pricer leg tint: a leg's cells take the line palette" \
+  crates/geode-pricer/src/delegate.rs \
+  '        if let Some(palette) = palette {' \
+  '        if let Some(palette) = palette.filter(|p| *p == self.paints.group) {' \
+  geode-pricer a_legs_state_and_named_colours_are_floored_on_the_leg_ground
+
+run_mutation "pricer leg tint: a leg's named colour is not floored" \
+  crates/geode-pricer/src/delegate.rs \
+  '                    Some(c) => self.on_ground(palette, c.for_sign(Some(sign))),' \
+  '                    Some(c) => c.for_sign(Some(sign)),' \
+  geode-pricer a_legs_state_and_named_colours_are_floored_on_the_leg_ground
+
+run_mutation "pricer leg tint: a leg's gutter takes the line muted" \
+  crates/geode-pricer/src/delegate.rs \
+  '            (false, Some(p)) => p.muted,' \
+  '            (false, Some(_)) => self.paints.muted,' \
+  geode-pricer a_legs_state_and_named_colours_are_floored_on_the_leg_ground
+
+# The leg palette is floored on the leg ground, not the line's.
+run_mutation "pricer leg tint: the leg palette sits on the line ground" \
+  crates/geode-pricer/src/paint.rs \
+  '            leg: RowPalette::on(theme, danger, leg_ground, [hover, selected]),' \
+  '            leg: RowPalette::on(theme, danger, ground, [hover, selected]),' \
+  geode-pricer every_leg_ground_is_a_faint_distinct_tint_on_every_bundled_theme
+
+# The stripe token is used only where it clears; taken as it is, it is
+# invisible, louder than hover or equal to the group ground on some
+# bundled themes.
+run_mutation "pricer leg tint: the stripe is used without the distinctness check" \
+  crates/geode-pricer/src/paint.rs \
+  $'    if leg_ground_clears(stripe, g) {\n        return stripe;\n    }' \
+  $'    if true {\n        return stripe;\n    }' \
+  geode-pricer every_leg_ground_is_a_faint_distinct_tint_on_every_bundled_theme
+
+run_mutation "pricer leg tint: a tint louder than hover clears" \
+  crates/geode-pricer/src/paint.rs \
+  '        && from_line < contrast_ratio(g.hover, g.line)' \
+  '        && from_line < f32::MAX' \
+  geode-pricer every_leg_ground_is_a_faint_distinct_tint_on_every_bundled_theme
+
+run_mutation "pricer leg tint: a tint equal to the group ground clears" \
+  crates/geode-pricer/src/paint.rs \
+  '        && [g.hover, g.group]' \
+  '        && [g.hover]' \
+  geode-pricer every_leg_ground_is_a_faint_distinct_tint_on_every_bundled_theme
+
+# Where hover sits too near the line ground for a tint between them, only
+# the direction away from the foreground clears.
+run_mutation "pricer leg tint: the fallback never walks away from the foreground" \
+  crates/geode-pricer/src/paint.rs \
+  '    match (faintest(foreground), faintest(away)) {' \
+  '    match (faintest(foreground), None::<Rgb>) {' \
+  geode-pricer an_indistinct_or_loud_stripe_falls_back_to_the_faintest_clearing_tint
 
 # A `dimensions` edit alone reloads the pricer, and the reload hands the
 # factory the new dimensions.
