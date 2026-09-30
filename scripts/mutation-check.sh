@@ -26719,6 +26719,36 @@ run_mutation "pricer leg tint: the selected ground is never held apart" \
   '    for hold_selected in [false] {' \
   geode-pricer every_leg_ground_is_a_faint_distinct_tint_on_every_bundled_theme
 
+# Hover replaces a leg's ground: a tint within the threshold of hover
+# (Catppuccin Frappe's stripe sits 1.012:1 from it) would hide hover on a leg.
+run_mutation "pricer leg tint: a tint beside hover clears" \
+  crates/geode-pricer/src/paint.rs \
+  '        && apart(g.hover)' \
+  '        && true' \
+  geode-pricer every_leg_ground_is_a_faint_distinct_tint_on_every_bundled_theme
+
+# With nothing clearing, the leg keeps the line ground; the foreground as
+# a ground would bury every text paint.
+run_mutation "pricer leg tint: the last resort paints the foreground" \
+  crates/geode-pricer/src/paint.rs \
+  $'    // hiding hover or posing as a group row.\n    g.line' \
+  $'    // hiding hover or posing as a group row.\n    foreground' \
+  geode-pricer an_indistinct_or_loud_stripe_falls_back_to_the_faintest_clearing_tint
+
+# A leg's tree text is muted in the leg palette, floored on the leg ground.
+run_mutation "pricer leg tint: a leg's tree text takes the line muted" \
+  crates/geode-pricer/src/delegate.rs \
+  '            Some(GridRowKind::Leg { .. }) => palette.map_or(self.paints.muted, |p| p.muted),' \
+  '            Some(GridRowKind::Leg { .. }) => self.paints.muted,' \
+  geode-pricer a_legs_state_and_named_colours_are_floored_on_the_leg_ground
+
+# The expiry field's rest and muted text on a leg take the leg palette.
+run_mutation "pricer leg tint: a leg's date field text takes the line palette" \
+  crates/geode-pricer/src/delegate.rs \
+  '            .map_or((self.paints.own, self.paints.muted), |p| (p.own, p.muted))' \
+  '            .map_or((self.paints.own, self.paints.muted), |_| (self.paints.own, self.paints.muted))' \
+  geode-pricer a_legs_state_and_named_colours_are_floored_on_the_leg_ground
+
 # Where hover sits too near the line ground for a tint between them, only
 # the direction away from the foreground clears.
 run_mutation "pricer leg tint: the fallback never walks away from the foreground" \

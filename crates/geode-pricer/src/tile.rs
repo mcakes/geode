@@ -7505,6 +7505,23 @@ pub(crate) mod tests {
         h.tile.read_with(&vcx, |t, cx| {
             let d = t.table.read(cx).delegate();
             assert_eq!(d.gutter_paint(3), d.paints.leg.muted, "a leg's gutter");
+            // The tree text `render_cell` paints: a leg's shorthand muted
+            // on its ground, the line's and the package's own.
+            assert_eq!(
+                d.tree_text_paint(2),
+                d.paints.leg.muted,
+                "a leg's tree text"
+            );
+            assert_eq!(d.tree_text_paint(3), d.paints.leg.muted, "the last leg's");
+            assert_eq!(d.tree_text_paint(0), d.paints.own, "a line's tree text");
+            assert_eq!(d.tree_text_paint(1), d.paints.own, "the package's");
+            // The expiry field's rest and muted text on a leg.
+            assert_eq!(
+                d.date_text_paints(2),
+                (d.paints.leg.own, d.paints.leg.muted),
+                "a leg's date field text"
+            );
+            assert_eq!(d.date_text_paints(0), (d.paints.own, d.paints.muted));
             assert_eq!(d.gutter_paint(0), d.paints.muted, "a line's gutter");
         });
 

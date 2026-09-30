@@ -135,9 +135,11 @@ pub(crate) fn leg_ground_clears(leg: Rgb, g: &TableGrounds, hold_selected: bool)
 /// with it: on some light themes selected sits so near the line ground,
 /// and hover so near both, that no tint fainter than hover is 1.04:1
 /// from all three. The selected row is the cursor row, which also carries
-/// the cursor cell's border and the gutter's own paint; hover has no
-/// other cue. Where nothing clears even then (no bundled theme), the
-/// faintest blend toward the foreground distinct from the line ground.
+/// the cursor cell's border (and, with line numbers on, the gutter's own
+/// paint); hover has no other cue. Where nothing clears even then (hover
+/// itself within
+/// [`LEG_TINT_RATIO`] of the line ground; no bundled theme), the line
+/// ground: no tint beats one that hides hover or reads as a group row.
 pub(crate) fn leg_ground(stripe: Rgb, g: &TableGrounds, foreground: Rgb) -> Rgb {
     let away = if relative_luminance(foreground) > relative_luminance(g.line) {
         BLACK
@@ -166,9 +168,9 @@ pub(crate) fn leg_ground(stripe: Rgb, g: &TableGrounds, foreground: Rgb) -> Rgb 
             (None, None) => {}
         }
     }
-    blends(foreground)
-        .find(|c| contrast_ratio(*c, g.line) >= LEG_TINT_RATIO)
-        .unwrap_or(foreground)
+    // Nothing clears: the leg keeps the line ground, unmarked but never
+    // hiding hover or posing as a group row.
+    g.line
 }
 
 /// The text paints of a row with a ground of its own (a grouping row, a
@@ -243,7 +245,8 @@ pub struct Paints {
     /// on the cursor row, a bare line or a leg, whose ground may be the
     /// line's, the leg's, hover or selected: each fill is composited over
     /// all four (a translucent fill reads differently on each) and the
-    /// text floored on every one.
+    /// text floored on every one. Its rest, separator and suffix text take
+    /// the row's palette (`SheetDelegate::date_text_paints`).
     pub date_active_text: Hsla,
     pub date_typing_text: Hsla,
     /// A grouping row's palette. Its ground is opaque `secondary` over
@@ -578,6 +581,17 @@ mod tests {
             "fixture: nothing clears selected"
         );
         assert!(leg_ground_clears(leg, &g, false), "{leg:?} clears the rest");
+        // Hover within the threshold of the line ground: no tint is both
+        // distinct from the line and fainter than hover, so none is used.
+        let g = grounds(0.5, 0.505, 0.3, 0.3);
+        assert!(contrast_ratio(g.hover, g.line) < LEG_TINT_RATIO, "fixture");
+        for stripe in [g.line, g.hover, grey(0.6)] {
+            assert_eq!(
+                leg_ground(stripe, &g, grey(0.95)),
+                g.line,
+                "no tint clears: the line ground"
+            );
+        }
         let g = grounds(1.0, 0.8, 0.7, 0.75);
         let stripe = over(to_hsla(grey(0.0)).opacity(0.03), g.line);
         assert!(leg_ground_clears(stripe, &g, true), "fixture clears");

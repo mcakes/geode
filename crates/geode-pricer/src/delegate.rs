@@ -264,18 +264,19 @@ fn render_date_field(
     paint: &DateFieldPaint,
     focus: &FocusHandle,
     paints: &Paints,
+    (own, muted): (Hsla, Hsla),
     theme: &Theme,
     tile: &Entity<PricerTile>,
 ) -> impl IntoElement {
     let segment_paint = SegmentPaint {
-        rest_text: paints.own,
+        rest_text: own,
         rest_fill: None,
         active_text: paints.date_active_text,
         active_fill: theme.primary,
         typing_text: paints.date_typing_text,
         typing_fill: theme.accent,
-        separator: paints.muted,
-        suffix: paints.muted,
+        separator: muted,
+        suffix: muted,
         radius: theme.radius_tokens().sm,
         flush: true,
     };
@@ -616,6 +617,25 @@ impl SheetDelegate {
             GridRowKind::Leg { .. } => Some(self.paints.leg),
             GridRowKind::Package { .. } | GridRowKind::Line => None,
         }
+    }
+
+    /// The paint of grid row `row`'s tree-column text: a leg's shorthand
+    /// muted, every other row's own, each in the row's palette
+    /// (`row_palette`) so a leg's and a group row's read on their grounds.
+    pub(crate) fn tree_text_paint(&self, row: usize) -> Hsla {
+        let palette = self.row_palette(row);
+        match self.model.rows.get(row).map(|r| r.kind) {
+            Some(GridRowKind::Leg { .. }) => palette.map_or(self.paints.muted, |p| p.muted),
+            _ => palette.map_or(self.paints.own, |p| p.own),
+        }
+    }
+
+    /// The date field's rest and muted text paints on grid row `row`: the
+    /// row's palette (a leg's, on the leg ground), else the line's. Its
+    /// segment fills are composited over the same grounds in `Paints`.
+    pub(crate) fn date_text_paints(&self, row: usize) -> (Hsla, Hsla) {
+        self.row_palette(row)
+            .map_or((self.paints.own, self.paints.muted), |p| (p.own, p.muted))
     }
 
     /// The ground `render_tr` paints under grid row `row`: its palette's
@@ -1084,16 +1104,15 @@ impl SheetDelegate {
                             cx.emit(ChevronClicked(row_ix));
                         }))
                         .child(if open { "▾" } else { "▸" });
-                    let text = if group { paints.group.own } else { paints.own };
-                    (slot.child(chevron), text)
+                    (slot.child(chevron), self.tree_text_paint(row_ix))
                 }
                 GridRowKind::Leg { last } => (
                     slot.relative()
                         .child(connector_line(row_ix, last, paints.connector))
                         .child(connector_stub(row_ix, paints.connector)),
-                    paints.leg.muted,
+                    self.tree_text_paint(row_ix),
                 ),
-                GridRowKind::Line => (slot, paints.own),
+                GridRowKind::Line => (slot, self.tree_text_paint(row_ix)),
             };
             let chip = (!row.tag.is_empty()).then(|| {
                 div()
@@ -1164,7 +1183,8 @@ impl SheetDelegate {
                     // The field's keys and clicks route through the tile;
                     // a dropped tile paints an empty cell.
                     EditorField::Date { paint, focus } => self.tile.upgrade().map(|tile| {
-                        render_date_field(paint, focus, &paints, cx.theme(), &tile)
+                        let text = self.date_text_paints(row_ix);
+                        render_date_field(paint, focus, &paints, text, cx.theme(), &tile)
                             .into_any_element()
                     }),
                 };
