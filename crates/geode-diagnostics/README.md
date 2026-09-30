@@ -20,11 +20,11 @@ The seam it sits on: [pages](../../docs/current/shell.md#pages).
 | [`prepared`](src/prepared.rs) | `PreparedTable`: the column specs and rows a section paints, with expansion and filtering applied; `cell_at` places a notice row's one cell in the widest column. Pure; `Rc`-shared with the delegate. |
 | [`table`](src/table.rs) | `SectionDelegate`, the one `TableDelegate` for every table section: paints a shared prepared table, scales column widths with the window rem, and formats nothing per paint but a parent row's expander. |
 | [`page`](src/page.rs) | `DiagnosticsPage`: the observers, the selected section, per-section cursors and filters, the expansion sets, the log tail and its filter, the target select, the Levels state, the cached badge and header strings, the ages timer, key dispatch, visibility, serialization, and the frame layout. |
-| [`page_chrome`](src/page_chrome.rs) | The header with its chips and back control, the rail with its badges, and the detail strip with the Copy button. Pointer routes; the back control and the rail rows have keyboard routes in `page` (Escape, `[`/`]`), and Copy does not (see Limits). |
-| [`config_view`](src/config_view.rs) | The Config body: the diagnostics panel (Current or History) beside the effective-values table, each with its own toolbar row and detail strip. |
+| [`page_chrome`](src/page_chrome.rs) | The breadcrumb header and Back control, native section buttons with counts, wrapped and scrollable row details with Copy, and the shell-style keyboard hints. |
+| [`config_view`](src/config_view.rs) | The Config body: Current issues, History, and Effective values share one full-width table region. Keyboard motions and Copy follow the visible view. |
 | [`log_view`](src/log_view.rs) | The Log toolbar: level toggles, the target select, the text filter, Follow, Clear, and the Levels popover. |
 | [`levels`](src/levels.rs) | The Levels popover's pure rows: the read-only default, then the known targets, then any configured target outside that list (a hand-edited `[log]` key, shown but not offered for adding), each with the effective level resolved by the longest configured prefix, spelled as `LogLevels` stores them. |
-| [`perf_view`](src/perf_view.rs) | The Perf body: stat tiles, the histogram bars (`bar_heights` is pure), the database tiles, and the overlay switch. |
+| [`perf_view`](src/perf_view.rs) | The Performance body: two-column metric groups, histogram bars (`bar_heights` is pure), storage metrics, and the overlay switch in a scrolling region. |
 | [`log`](src/log.rs) | `LogTail`, a bounded copy of the ring from the sequence at creation (4,096 records, the loss gap measured per drain), and `LogFilter` over level, target, and text. Pure. |
 
 ## Interaction
@@ -38,16 +38,25 @@ follows the cursor. The fragment binds only the page's own keys. `z o`/`z c`
 and Enter expand or collapse the cursor row where it expands (Data datasets
 and Config documents); a double-click on a row does the same, and a single
 click only selects. `/` focuses the selected section's filter input, which
-puts the page's context in `mode == insert`, and Escape there returns to
-normal mode; on Perf, which paints no input, `/` is consumed and does
-nothing. Escape in normal mode reaches the shell's `page::close`, as does
+puts the page's context in `mode == insert`. Enter keeps the filter and
+Escape restores its entry value; both return to normal mode. Clicking a row
+keeps the filter and returns focus to row navigation. On Performance, which
+paints no input, `/` is consumed and does nothing. Escape in normal mode reaches the shell's `page::close`, as does
 the header's back control through the shell-actions handle. The retired
 `diagnostics::` motion ids are registered as renames (`RENAMED_ACTIONS`).
 
-Sources filters by name and health; Data by dataset name; Config by
-`document.key` and value; Log by message and target text, plus the level
-toggles and the target select. The Log section follows new records until a
-row motion; only a bare `G` or the Follow switch resumes following, and a
+`g s`, `g d`, `g c`, `g l`, and `g p` jump directly to a section.
+Within Config, `ctrl+tab` / `ctrl+shift+tab` cycle Current issues, History,
+and Effective values. `y` copies the active row's full details in any table;
+`r` refreshes the catalog; `z R` / `z M` expand or collapse all datasets.
+
+Sources filters by name and health; Data by dataset name; Config by issue
+text or `document.key` and value; Log by message and target text, plus the
+level toggles and the target select. Configuration matching is case
+insensitive, hides unmatched documents, and reveals matches in collapsed
+documents without losing their collapse state. Selection follows row identity
+through refreshes and filtering while the selected row remains visible. The Log section follows new records until a
+row motion; a bare `G`, `f`, or the Follow switch resumes following, and a
 counted `G` jumps to that row without following. Clear forgets
 the retained records without moving the drain point.
 
@@ -95,7 +104,8 @@ cargo test -p geode-diagnostics --release -- --ignored log_rebuild_timing --noca
   focus handle, and a row click that moved focus into it would hand the
   next Escape to the table's `Cancel`, which clears the selection and
   stops there, so the page would close only on the second press. The row's
-  own click (select, double-click) still fires.
+  own click (select, double-click) still fires. The wrapper explicitly
+  focuses the page so a row click also exits a focused filter.
 - Visibility calls `Diagnostics::watch()`/`unwatch()` and notifies in the
   same update; a watch queues the initial catalog. A visible as-of change
   requests a refresh; a hidden page requests one when it is shown again.
@@ -136,23 +146,18 @@ cargo test -p geode-diagnostics --release -- --ignored log_rebuild_timing --noca
   add-a-target row, because `[log]` keeps only the known targets across a
   reload.
 - Warning and error tones come from `geode_shell::shell::chip::chip_paint`;
-  the rail's rows take `listrow::paint_row`; geometry is authored in design
-  pixels through `shell::scale`. No literal colors, radii, or unexplained
-  pixels.
+  navigation and toolbar controls use native Button variants. Geometry uses
+  relative helpers or `shell::scale`; colors and radii come from the theme.
 - The page never holds `ShellView`. Application state changes go through
   the `Diagnostics` request channels or the `ShellActions` handle, whose
   dispatch the shell defers past the page's own entity update.
 
 ## Limits
 
-Every table row has one height, so a row's detail lives in the strip below
-the table. The Config left panel is pointer-only; the keys stay with the
-effective-values table. Clear, Copy, Refresh catalog, Expand all, Collapse
-all, the level toggles, and the target select are pointer-only too: they
-have no page binding or palette action yet, unlike the Levels picks, the
-overlay switch, Open config directory, and Follow. Columns resize but do
-not move or sort. The config
-explainer shows at most 2,000 leaves per document with an omitted-count
-row, but still traverses every leaf. Stopped data threads are shown on the
-status bar, not in the Sources section. The Levels popover cannot add a
-target.
+Every table row has one height; full details wrap and scroll below it and
+can be copied. Clear log, level toggles, and target selection use the native
+controls' keyboard focus path, without dedicated page shortcuts. Columns
+resize but do not move or sort. The config explainer shows at most 2,000
+leaves per document with an omitted-count row, but still traverses every
+leaf. Stopped data threads are shown on the status bar, not in Sources.
+The Levels popover cannot add a target.

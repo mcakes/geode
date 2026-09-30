@@ -894,24 +894,27 @@ page with every frame control live, so the as-of the Data section's
 resolved markers follow is the one the toolbar shows and can change
 (subject to the pinned-workspace limit below).
 
-The header carries the title, state chips derived from the same inputs as
+The header carries a Back control, the current section beside the page title,
+and state chips derived from the same inputs as
 the status summary (worst source health with its count, config errors, data
-errors, and the catalog's arrival time or "catalog pending"), and a back
-control that dispatches `page::close`. A rail on the left lists the
-sections, each with a badge: the worst-health dot and source count, the
+errors, and the catalog's arrival time or "catalog pending"). Back dispatches
+`page::close`. A rail on the left lists the
+sections with native selected buttons and counts: the source count, the
 dataset count, config error and warning counts, the error count in the
 retained log tail, and the frame p95. A click or the bracket keys select a
 section. The content pane is the section's toolbar, its table, and a detail
-strip: the table component paints every row at one height, so a row cannot
-grow, and the strip shows the cursor row's detail lines instead.
+strip: table rows stay compact while the full details wrap and scroll below.
+Copy and `y` copy those details without truncation. Empty views explain
+whether there is no data or the filters match nothing. A footer shows the
+current keyboard workflow using the shell's keycaps.
 
 | Section | Table and toolbar |
 |---|---|
 | Sources | Source, Health (title-case label with the reason), Since (clock time and age), Shape, Last poll, Next poll, Ready, Loading. Worst reported health first by variant then name; unreported sources last, and a source known only from an ingest load gets a "no report yet" row with its loading text. Toolbar: a filter over name and health. Detail: the spec lines by shape and the health history. |
-| Data | One expandable row per dataset with Partitions, Latest gen, Published, Rows, Resolved, Live, and Loaded; a dataset expands to its generations, the one resolved under a historical frame as-of marked. Toolbar: filter, a chip reading `catalog as-of = frame` or `catalog pending`, Refresh catalog, Expand all, Collapse all. |
-| Config | Two panels. Left: the current diagnostics batch (config and data lanes) or, behind the History button, the prior batches newest first with their batch time; a click there moves only that panel's detail strip. Right, the cursor table: one expandable row per document and one row per leaf with Key, Value, and the Layer from `Config::explain`; a filter over `document.key` and value; an Open config directory button. |
-| Log | Time with milliseconds, Lvl, Target, and Message over the retained tail. Toolbar: level toggles, a target select over the targets seen in the tail plus `all`, a text filter over message and target, Follow, Clear, and Levels. Detail: the full record with a Copy button that puts it on the clipboard. |
-| Perf | No table. Stat tiles for frame p50 · p95 · max with the sample count and the 8 ms budget, requery submit→snapshot with the 50 ms budget, requery snapshot→paint, and dropped events; a frame-interval histogram whose bars past the budget take the warning tone; database and DuckDB memory tiles from the catalog; and the Performance overlay switch. |
+| Data | One expandable row per dataset with Partitions, Latest gen, Published, Rows, Resolved, Live, and Loaded; a dataset expands to its generations, the one resolved under a historical frame as-of marked. Toolbar: filter, a chip reading `Catalog up to date` or `Refreshing catalog`, Refresh catalog, Expand all, Collapse all. |
+| Config | Three full-width views: Current issues (config and data lanes), History (prior batches newest first), and Effective values (expandable documents and their leaves, with Key, Value, and Layer from `Config::explain`). The active view owns row navigation and Copy. Search filters issue text or document keys and values; unmatched documents disappear and matches inside collapsed documents are revealed. Open config directory remains available. |
+| Log | Time with milliseconds, Lvl, Target, and Message over the retained tail. Toolbar: level toggles, a target select over the targets seen in the tail plus `All targets`, a text filter over message and target, Follow, Clear log, and Log levels. Detail: the full record with a Copy button that puts it on the clipboard. |
+| Performance | No table. Two-column metric groups for frame p50 · p95 · max with the sample count and the 8 ms budget, requery submit→snapshot with the 50 ms budget, requery snapshot→paint, and dropped events; a frame-interval histogram whose bars past the budget take the warning tone; database and DuckDB memory readouts from the catalog; and the Performance overlay switch. The region scrolls at smaller sizes. |
 
 Keys in the page's own context: `j`/`k` move the cursor, `g g`/`G` jump,
 `ctrl+d`/`ctrl+u` move five rows and `ctrl+f`/`ctrl+b` ten, all with count
@@ -919,11 +922,15 @@ prefixes; `[`/`]` cycle sections; `z o`/`z c` and Enter expand or collapse
 the cursor row where it expands (Data datasets, Config documents; a
 double-click does the same, a single click only selects); `/` focuses the
 section's filter input, which puts the page in insert mode, and Escape there
-returns to normal mode. On Perf, which paints no input, `/` does nothing.
-The state-changing controls have keyboard routes through the palette (Set
-log level…, Toggle performance overlay, Open config directory) and Follow
-has `G`; the remaining toolbar controls are pointer-only for now (see the
-limits below).
+restores the entry filter and returns to normal mode. Enter keeps the filter
+and returns to navigation; clicking a row does the same. On Performance,
+which paints no input, `/` does nothing. `g s` / `g d` / `g c` / `g l` /
+`g p` jump directly to sections. Config views cycle with `ctrl+tab` and
+`ctrl+shift+tab`. `y` copies details, `r` refreshes the catalog, `z R` /
+`z M` expand/collapse datasets, and `f` toggles Follow. Selection remains
+on the same record through refreshes and filtering while it remains visible.
+The state-changing controls also have keyboard routes through the palette
+(Set log level…, Toggle performance overlay, Open config directory).
 
 Controls that change application state go through a request channel or the
 shell-actions handle, never a direct call. A Levels pick queues
@@ -975,11 +982,9 @@ selected, rewriting the Since cells in place without a rebuild; on any
 other section, or a hidden page, the timer is dropped. Every other
 timestamp comes from the last rebuild.
 
-Limits: every table row has one height, so detail lives in the strip; the
-Config left panel is pointer-only, the keys staying with the
-effective-values table, and so are Clear, Copy, Refresh catalog, Expand all,
-Collapse all, the level toggles, and the target select, which have no
-page binding or palette action yet; columns resize but do not move or sort, since no
+Limits: every table row has one height, so full details live in the scrollable
+strip. Clear log, level toggles, and target selection use native keyboard
+focus without dedicated page shortcuts. Columns resize but do not move or sort, since no
 section defines a sort order yet; the config explainer shows at most 2,000
 leaves per document with an omitted-count row but still traverses every
 leaf; stopped data threads show on the status bar, not in Sources. The page

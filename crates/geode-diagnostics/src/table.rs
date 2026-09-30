@@ -8,9 +8,9 @@ use std::rc::Rc;
 use geode_shell::fonts;
 use geode_shell::shell::{chip, scale};
 use gpui::prelude::*;
-use gpui::{App, Context, Div, Entity, SharedString, TextAlign, Window, div, px};
+use gpui::{App, Context, Div, Entity, FocusHandle, SharedString, TextAlign, Window, div, px};
 use gpui_component::table::{Column, DataTable, TableDelegate, TableState};
-use gpui_component::{ActiveTheme as _, Sizable as _, Size};
+use gpui_component::{ActiveTheme as _, Sizable as _, Size, v_flex};
 
 use crate::model::Tone;
 use crate::prepared::{PreparedTable, RowKind};
@@ -27,15 +27,21 @@ const INDENT_STEP: f32 = 12.0;
 /// the page. The capture-phase `prevent_default` runs before the
 /// bubble-phase focus transfer and suppresses it; the row's own click still
 /// fires, because gpui records the pending mouse-down independently of the
-/// default action. The wrapper fills what its panel leaves; without
+/// default action. Explicit page focus also leaves a focused filter when a
+/// row is clicked. The wrapper fills what its panel leaves; without
 /// `min_h_0` the virtualised list would take its intrinsic height and paint
 /// no rows.
-pub(crate) fn table_el(state: &Entity<TableState<SectionDelegate>>) -> Div {
+pub(crate) fn table_el(state: &Entity<TableState<SectionDelegate>>, focus: &FocusHandle) -> Div {
+    let focus = focus.clone();
     div()
+        .debug_selector(|| "diagnostics-table".to_string())
         .flex_1()
         .min_h_0()
         .w_full()
-        .capture_any_mouse_down(|_event, window, _cx| window.prevent_default())
+        .capture_any_mouse_down(move |_event, window, cx| {
+            window.prevent_default();
+            focus.focus(window, cx);
+        })
         .child(
             DataTable::new(state)
                 .with_size(Size::XSmall)
@@ -50,6 +56,8 @@ pub struct SectionDelegate {
     /// Prefix of the per-row debug selector. The Config section paints two
     /// tables at once; distinct prefixes keep their rows addressable.
     row_selector: &'static str,
+    empty_title: &'static str,
+    empty_help: &'static str,
 }
 
 impl SectionDelegate {
@@ -63,11 +71,18 @@ impl SectionDelegate {
             table: Rc::new(PreparedTable::empty()),
             rem_px: scale::DESIGN_REM,
             row_selector,
+            empty_title: "No rows",
+            empty_help: "",
         }
     }
 
     pub fn set(&mut self, table: Rc<PreparedTable>) {
         self.table = table;
+    }
+
+    pub(crate) fn set_empty(&mut self, title: &'static str, help: &'static str) {
+        self.empty_title = title;
+        self.empty_help = help;
     }
 
     /// The page keeps its own `Rc` of the table; tests read the delegate's
@@ -92,6 +107,27 @@ impl Default for SectionDelegate {
 }
 
 impl TableDelegate for SectionDelegate {
+    fn render_empty(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        v_flex()
+            .size_full()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .p_4()
+            .debug_selector(|| "diagnostics-empty".to_string())
+            .child(div().text_sm().child(self.empty_title))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(self.empty_help),
+            )
+    }
+
     fn columns_count(&self, _cx: &App) -> usize {
         self.table.columns.len()
     }

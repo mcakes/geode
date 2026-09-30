@@ -6725,9 +6725,7 @@ run_mutation "diagnostics page: a tick rebuilds the section instead of rewriting
 
 run_mutation "diagnostics page: a section change leaves the filter focused" \
   crates/geode-diagnostics/src/page.rs \
-  '        if self.holds_focus(window, cx) {
-            self.focus_handle.focus(window, cx);
-        }
+  '        self.focus_handle.focus(window, cx);
         self.levels.open = false;' \
   '        self.levels.open = false;' \
   geode-diagnostics \
@@ -6749,13 +6747,30 @@ run_mutation "diagnostics page: the rail and content column do not stretch" \
   geode-diagnostics \
   clicking_a_dataset_row_then_enter_collapses_it
 
-run_mutation "diagnostics page: the Config panels do not stretch" \
-  crates/geode-diagnostics/src/config_view.rs \
-  '        .items_stretch()
-        .child(left)' \
-  '        .child(left)' \
+run_mutation "diagnostics UX: issues motions route to the hidden values table" \
+  crates/geode-diagnostics/src/page.rs \
+  '        if self.showing_issues() {
+            self.set_diag_cursor(' \
+  '        if false {
+            self.set_diag_cursor(' \
   geode-diagnostics \
-  clicking_a_diagnostics_panel_row_moves_only_its_own_detail
+  configuration_views_route_motion_and_copy_to_the_visible_table
+
+run_mutation "diagnostics UX: clicking a filtered row leaves search focused" \
+  crates/geode-diagnostics/src/table.rs \
+  '            focus.focus(window, cx);' \
+  '            let _ = (&focus, cx);' \
+  geode-diagnostics \
+  clicking_a_filtered_row_returns_focus_to_navigation
+
+run_mutation "diagnostics UX: filter refresh loses the selected record" \
+  crates/geode-diagnostics/src/page.rs \
+  '            self.cursors[ix] = self.selected_keys[ix]
+                .as_ref()
+                .and_then(|key| self.prepared.rows.iter().position(|r| &r.key == key))' \
+  '            self.cursors[ix] = None::<usize>' \
+  geode-diagnostics \
+  filtering_keeps_the_selected_record_and_enter_returns_to_navigation
 
 run_mutation "diagnostics page: the History label never pluralizes" \
   crates/geode-diagnostics/src/page.rs \
@@ -6778,7 +6793,10 @@ run_mutation "diagnostics keymap: the bare keys lose their mode clause" \
 # it, and its `escape` then clears the selection instead of closing the page.
 run_mutation "diagnostics page: a row click hands focus to the table" \
   crates/geode-diagnostics/src/table.rs \
-  '        .capture_any_mouse_down(|_event, window, _cx| window.prevent_default())
+  '        .capture_any_mouse_down(move |_event, window, cx| {
+            window.prevent_default();
+            focus.focus(window, cx);
+        })
 ' \
   '' \
   geode-diagnostics \

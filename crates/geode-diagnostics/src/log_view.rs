@@ -59,69 +59,83 @@ pub(crate) fn toolbar(view: LogView<'_>, weak: WeakEntity<DiagnosticsPage>) -> A
             .debug_selector(move || format!("diagnostics-level-{label}"))
             .child(
                 Button::new(("diagnostics-level", ix))
-                    .xsmall()
+                    .ghost()
+                    .small()
                     .label(label)
                     .selected(view.levels_on[ix])
+                    .toggled(view.levels_on[ix])
                     .on_click(move |_, _window, cx| {
                         let _ = weak.update(cx, |p, cx| p.toggle_level(ix, cx));
                     }),
             )
     });
     let (follow, clear, open, popover) = (weak.clone(), weak.clone(), weak.clone(), weak);
-    h_flex()
+    v_flex()
         .gap_2()
-        .p_2()
-        .items_center()
-        .flex_wrap()
-        .child(h_flex().gap_1().children(toggles))
-        // The select fills its box (`size_full`), so the box is what
-        // sizes it; unboxed it would take the whole row.
+        .px_3()
+        .py_2()
         .child(
-            div().flex_none().w(scale::design(TARGET_WIDTH)).child(
-                Select::new(view.target_select)
-                    .xsmall()
-                    .placeholder("target"),
-            ),
-        )
-        .child(view.filter)
-        .child(probed(
-            "diagnostics-follow",
-            Switch::new("diagnostics-follow")
-                .xsmall()
-                .checked(view.follow)
-                .label("Follow")
-                .on_change(move |&on, _window, cx| {
-                    let _ = follow.update(cx, |p, cx| p.set_follow(on, cx));
-                }),
-        ))
-        .child(probed(
-            "diagnostics-log-clear",
-            Button::new("diagnostics-log-clear")
-                .outline()
-                .xsmall()
-                .label("Clear")
-                .on_click(move |_, _window, cx| {
-                    let _ = clear.update(cx, |p, cx| p.clear_log(cx));
-                }),
-        ))
-        .child(probed(
-            "diagnostics-levels-open",
-            Popover::new("diagnostics-levels")
-                .trigger(
-                    Button::new("diagnostics-levels-open")
-                        .outline()
-                        .xsmall()
-                        .label("Levels…"),
+            h_flex()
+                .gap_2()
+                .flex_wrap()
+                .child(view.filter)
+                // The select fills its box (`size_full`), so the box is what
+                // sizes it; unboxed it would take the whole row.
+                .child(
+                    div().flex_none().w(scale::design(TARGET_WIDTH)).child(
+                        Select::new(view.target_select)
+                            .small()
+                            .placeholder("All targets"),
+                    ),
                 )
-                .open(view.popover_open)
-                .on_open_change(move |&is_open, _window, cx| {
-                    let _ = open.update(cx, |p, cx| p.set_levels_open(is_open, cx));
-                })
-                .content({
-                    let rows = view.level_rows;
-                    move |_, _, cx| levels_popover(&rows, &popover, cx)
-                }),
-        ))
+                .child(div().flex_1())
+                .child(probed(
+                    "diagnostics-follow",
+                    Switch::new("diagnostics-follow")
+                        .small()
+                        .checked(view.follow)
+                        .label("Follow")
+                        .on_change(move |&on, _window, cx| {
+                            let _ = follow.update(cx, |p, cx| p.set_follow(on, cx));
+                        }),
+                ))
+                .child(probed(
+                    "diagnostics-log-clear",
+                    Button::new("diagnostics-log-clear")
+                        .ghost()
+                        .small()
+                        .label("Clear log")
+                        .on_click(move |_, _window, cx| {
+                            let _ = clear.update(cx, |p, cx| p.clear_log(cx));
+                        }),
+                )),
+        )
+        .child(
+            h_flex()
+                .gap_1()
+                .flex_wrap()
+                .children(toggles)
+                .child(div().flex_1())
+                .child(probed(
+                    "diagnostics-levels-open",
+                    Popover::new("diagnostics-levels")
+                        .trigger(
+                            Button::new("diagnostics-levels-open")
+                                .ghost()
+                                .small()
+                                .selected(view.popover_open)
+                                .label("Log levels…"),
+                        )
+                        .open(view.popover_open)
+                        .on_open_change(move |&is_open, _window, cx| {
+                            let _ = open.update(cx, |p, cx| p.set_levels_open(is_open, cx));
+                        })
+                        .content({
+                            let rows = view.level_rows;
+                            move |_, _, cx| levels_popover(&rows, &popover, cx)
+                        }),
+                )),
+        )
         .into_any_element()
 }
 
@@ -186,7 +200,7 @@ fn pick_button(
         .debug_selector(selector)
         .child(
             Button::new(("diagnostics-level-pick", slot))
-                .xsmall()
+                .small()
                 .ghost()
                 .label(word)
                 .selected(selected)

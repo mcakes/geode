@@ -41,6 +41,18 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("diagnostics::activate", "Toggle expansion"),
     ("diagnostics::filter", "Filter"),
     ("diagnostics::blur", "Leave the filter"),
+    ("diagnostics::sources", "Show sources"),
+    ("diagnostics::data", "Show data"),
+    ("diagnostics::config", "Show configuration"),
+    ("diagnostics::log", "Show log"),
+    ("diagnostics::perf", "Show performance"),
+    ("diagnostics::copy", "Copy row details"),
+    ("diagnostics::next_view", "Next configuration view"),
+    ("diagnostics::prev_view", "Previous configuration view"),
+    ("diagnostics::follow", "Toggle log following"),
+    ("diagnostics::refresh", "Refresh catalog"),
+    ("diagnostics::expand_all", "Expand all datasets"),
+    ("diagnostics::collapse_all", "Collapse all datasets"),
 ];
 
 /// Retired action ids and their successors: a user keymap that still names
@@ -82,6 +94,18 @@ context = "diagnostics && mode == normal"
 "z c" = "diagnostics::collapse"
 "enter" = "diagnostics::activate"
 "/" = "diagnostics::filter"
+"g s" = "diagnostics::sources"
+"g d" = "diagnostics::data"
+"g c" = "diagnostics::config"
+"g l" = "diagnostics::log"
+"g p" = "diagnostics::perf"
+"y" = "diagnostics::copy"
+"ctrl+tab" = "diagnostics::next_view"
+"ctrl+shift+tab" = "diagnostics::prev_view"
+"f" = "diagnostics::follow"
+"r" = "diagnostics::refresh"
+"z R" = "diagnostics::expand_all"
+"z M" = "diagnostics::collapse_all"
 
 [[bindings]]
 context = "diagnostics && mode == insert"

@@ -7024,6 +7024,73 @@ role = "key"
         dispatch_counts(cx, "blotter", user, &all, ids)
     }
 
+    /// The real shell matcher routes section jumps and configuration views,
+    /// while search owns its text and Enter/Escape return to the page.
+    #[gpui::test]
+    fn diagnostics_navigation_and_filter_exits_work_through_the_shell(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_grid_modules(cx);
+        let (mut services, diags) = shell_with_one_grid_tile("blotter", None);
+        assert!(diags.is_empty(), "{diags:?}");
+        let config = Config::load(&ConfigSources {
+            builtin: vec![LayerDoc::builtin("app", "name = \"example\"\n").unwrap()],
+            ..Default::default()
+        });
+        let mut pages = geode_shell::module::PageRoster::new();
+        pages.add(Box::new(DiagnosticsPageFactory::new(
+            Arc::new(Ring::new(16)),
+            config,
+        )));
+        services.pages = pages;
+        let window = open_shell_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            window.activate_window();
+            let _ = window.draw(cx);
+        });
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("alt-d");
+        vcx.run_until_parked();
+        assert!(vcx.debug_bounds("diagnostics-page").is_some());
+        vcx.simulate_keystrokes("g c");
+        vcx.run_until_parked();
+        assert!(vcx.debug_bounds("diagnostics-config-values").is_some());
+        vcx.simulate_keystrokes("ctrl-tab ctrl-tab");
+        vcx.run_until_parked();
+        assert!(
+            vcx.debug_bounds("diagnostics-row-0").is_some(),
+            "effective configuration values are visible"
+        );
+        vcx.simulate_keystrokes("/");
+        vcx.simulate_input("no-such-configuration-key");
+        vcx.run_until_parked();
+        assert!(vcx.debug_bounds("diagnostics-row-0").is_none());
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+        assert!(
+            vcx.debug_bounds("diagnostics-page").is_some(),
+            "first Escape leaves search"
+        );
+        assert!(
+            vcx.debug_bounds("diagnostics-row-0").is_some(),
+            "Escape restores the prior filter"
+        );
+        vcx.simulate_keystrokes("/");
+        vcx.simulate_input("app");
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("g p");
+        vcx.run_until_parked();
+        assert!(
+            vcx.debug_bounds("diagnostics-overlay-switch").is_some(),
+            "Enter returned to navigation"
+        );
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+        assert!(vcx.debug_bounds("diagnostics-page").is_none());
+    }
+
     /// One user override of a shared motion, under the shipped context,
     /// reaches the diagnostics page: it publishes `grid` like the tiles.
     #[gpui::test]

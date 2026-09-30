@@ -1,34 +1,25 @@
 //! The page's chrome: the header with its state chips and back control,
 //! the section rail with its badges, and the cursor row's detail strip.
-//! Pointer routes only; every action here has a keyboard route in `page`.
+//! Native controls and shell keycaps share the page's command handlers.
 
 use geode_shell::actions::ActionId;
 use geode_shell::fonts;
 use geode_shell::module::ShellActions;
-use geode_shell::shell::{chip, listrow, scale};
+use geode_shell::shell::{chip, kbd, scale};
 use gpui::prelude::*;
-use gpui::{
-    AnyElement, ClipboardItem, Context, Div, FontWeight, MouseButton, SharedString, Stateful,
-    WeakEntity, div,
-};
+use gpui::{AnyElement, Context, Div, FontWeight, SharedString, Stateful, WeakEntity, div};
 use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_component::scroll::ScrollableElement as _;
+use gpui_component::{ActiveTheme as _, Selectable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit_assets::IconName;
 
-use crate::model::{Badges, Tone, health_tone};
+use crate::model::{Badges, Tone};
 use crate::page::DiagnosticsPage;
 use crate::prepared::PreparedRow;
 use crate::section::Section;
 
-/// Header strip height, in pixels at the design rem.
-const HEADER_HEIGHT: f32 = 28.0;
-/// Rail width and row height, in pixels at the design rem.
-const RAIL_WIDTH: f32 = 120.0;
-const RAIL_ROW_HEIGHT: f32 = 24.0;
-/// The health dot's diameter, in pixels at the design rem.
-const DOT_SIZE: f32 = 7.0;
-/// Detail strip height, in pixels at the design rem: three mono lines.
-const DETAIL_HEIGHT: f32 = 64.0;
+/// Navigation width follows the shell's design-rem scale.
+const RAIL_WIDTH: f32 = 176.0;
 
 /// A model tone as a chip tone: warning and error through the chip door,
 /// anything else neutral.
@@ -84,60 +75,56 @@ pub(crate) fn rail_texts(badges: &Badges) -> [SharedString; 5] {
 /// closes the page through the shell-actions handle: `page::close` is a
 /// shell action, and the shell defers it past this listener.
 pub(crate) fn header(
+    section: Section,
     chips: &[(SharedString, Tone)],
     actions: ShellActions,
     cx: &mut Context<DiagnosticsPage>,
 ) -> AnyElement {
     let theme = cx.theme();
-    let chips: Vec<_> = chips
-        .iter()
-        .map(|(text, tone)| {
-            let paint = chip::chip_paint(theme, chip_tone(*tone));
-            div()
-                .px_1()
-                .rounded(theme.radius)
-                .text_xs()
-                .when_some(paint.fill, |el, fill| el.bg(fill))
-                .text_color(paint.text)
-                .child(text.clone())
-        })
-        .collect();
+    let chips = chips.iter().map(|(text, tone)| {
+        let paint = chip::chip_paint(theme, chip_tone(*tone));
+        div()
+            .px_1()
+            .rounded(theme.radius)
+            .text_xs()
+            .when_some(paint.fill, |el, fill| el.bg(fill))
+            .text_color(paint.text)
+            .child(text.clone())
+    });
     h_flex()
-        .h(scale::design(HEADER_HEIGHT))
+        .min_h_8()
         .flex_none()
-        .items_center()
         .gap_2()
         .px_2()
+        .py_1()
         .border_b_1()
         .border_color(theme.border)
         .debug_selector(|| "diagnostics-header".to_string())
+        .child(probed(
+            "diagnostics-back",
+            Button::new("diagnostics-back")
+                .ghost()
+                .small()
+                .icon(IconName::ChevronLeft)
+                .label("Back")
+                .tooltip("Back to workspace (Escape)")
+                .on_click(move |_, window, cx| {
+                    actions(&ActionId("page::close".into()), window, cx);
+                }),
+        ))
         .child(
             div()
                 .text_sm()
                 .font_weight(FontWeight::SEMIBOLD)
                 .child("Diagnostics"),
         )
-        .children(chips)
+        .child(div().text_color(theme.muted_foreground).child("/"))
+        .child(div().text_sm().child(section.title()))
         .child(div().flex_1())
-        .child(
-            div()
-                .id("diagnostics-back")
-                .debug_selector(|| "diagnostics-back".to_string())
-                .child(
-                    Button::new("diagnostics-back")
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::ChevronLeft)
-                        .tooltip("Close page")
-                        .on_click(move |_, window, cx| {
-                            actions(&ActionId("page::close".into()), window, cx);
-                        }),
-                ),
-        )
+        .child(h_flex().gap_1().flex_wrap().justify_end().children(chips))
         .into_any_element()
 }
 
-/// One row per section with its badge; a press selects the section.
 pub(crate) fn rail(
     section: Section,
     badges: &Badges,
@@ -146,116 +133,157 @@ pub(crate) fn rail(
     cx: &mut Context<DiagnosticsPage>,
 ) -> AnyElement {
     let theme = cx.theme();
-    let paint = listrow::row_paint(theme);
     let warning = chip::chip_paint(theme, chip::Tone::WarningText).text;
     let danger = chip::chip_paint(theme, chip::Tone::DangerText).text;
-    let muted = theme.muted_foreground;
-    let (worst, _) = &badges.sources;
-    let dot = match health_tone(worst.as_ref()) {
-        Tone::Warn => warning,
-        Tone::Error => danger,
-        Tone::Muted => muted,
-        Tone::Normal | Tone::Marked => theme.success,
-    };
-    let (errors, _) = badges.config;
     let rows = Section::ALL.into_iter().map(|s| {
         let weak = weak.clone();
         let text = texts[s as usize].clone();
-        let badge = match s {
-            Section::Sources => h_flex()
-                .gap_1()
-                .items_center()
-                .when(worst.is_some(), |el| {
-                    el.child(div().size(scale::design(DOT_SIZE)).rounded_full().bg(dot))
-                })
-                .child(div().text_color(muted).child(text)),
-            Section::Config => div()
-                .text_color(if errors > 0 { danger } else { warning })
-                .child(text),
-            Section::Log => div().text_color(danger).child(text),
-            Section::Data | Section::Perf => div().text_color(muted).child(text),
+        let tone = match s {
+            Section::Config if badges.config.0 > 0 => danger,
+            Section::Config if badges.config.1 > 0 => warning,
+            Section::Log if badges.log_errors > 0 => danger,
+            _ => theme.muted_foreground,
         };
-        let row = h_flex()
-            .id(rail_id(s))
-            .debug_selector(move || rail_id(s).to_string())
-            .h(scale::design(RAIL_ROW_HEIGHT))
-            .items_center()
-            .justify_between()
-            .px_2()
-            .text_sm()
-            .child(s.title())
-            .child(badge.text_xs())
-            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                let _ = weak.update(cx, |p, cx| p.set_section(s, window, cx));
-            });
-        listrow::paint_row(row, paint, s == section)
+        probed(
+            rail_id(s),
+            Button::new(rail_id(s))
+                .ghost()
+                .small()
+                .w_full()
+                .selected(s == section)
+                .accessibility_label(s.title())
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .child(s.title())
+                        .child(div().flex_1())
+                        .child(div().text_xs().text_color(tone).child(text)),
+                )
+                .on_click(move |_, window, cx| {
+                    let _ = weak.update(cx, |p, cx| p.set_section(s, window, cx));
+                }),
+        )
     });
     v_flex()
         .w(scale::design(RAIL_WIDTH))
         .flex_none()
         .h_full()
+        .p_2()
+        .gap_1()
+        .bg(theme.sidebar)
         .border_r_1()
         .border_color(theme.border)
         .children(rows)
         .into_any_element()
 }
 
-/// A selected row's detail lines; `copy` adds a button that puts that
-/// text on the clipboard (the log's full record). `selector` names the
-/// strip for tests: the Config section paints one per table.
+/// Wrapped, scrollable details for the active row. Copy uses the same
+/// cached text as the keyboard command, without truncation.
 pub(crate) fn detail_strip(
     selector: &'static str,
     row: Option<&PreparedRow>,
     copy: Option<SharedString>,
+    scroll: &gpui::ScrollHandle,
     cx: &mut Context<DiagnosticsPage>,
 ) -> AnyElement {
     let theme = cx.theme();
-    let lines = v_flex().flex_1().min_w_0().when_some(row, |el, row| {
-        el.children(row.detail.iter().cloned().map(|line| {
-            div()
-                .whitespace_nowrap()
-                .overflow_hidden()
-                .text_ellipsis()
-                .child(line)
-        }))
-    });
-    let lines = if row.is_none() {
-        lines.child(
-            div()
-                .text_color(theme.muted_foreground)
-                .child("select a row"),
+    // Scroll belongs to the full detail viewport; padding stays inside it.
+    // Wrapping keeps long paths and messages readable instead of ellipsizing
+    // the very text this inspector is meant to reveal.
+    let lines = v_flex().gap_1().px_3().py_2().when_some(row, |el, row| {
+        el.children(
+            row.detail
+                .iter()
+                .cloned()
+                .map(|line| div().w_full().whitespace_normal().child(line)),
         )
-    } else {
-        lines
-    };
-    h_flex()
-        .h(scale::design(DETAIL_HEIGHT))
+    });
+    v_flex()
+        .h_32()
         .flex_none()
-        .items_start()
+        .min_w_0()
         .border_t_1()
         .border_color(theme.border)
-        .px_2()
-        .py_1()
-        .font_family(fonts::MONO)
-        .text_xs()
         .debug_selector(move || selector.to_string())
-        .child(lines)
-        .when_some(copy, |el, text| {
-            el.child(
-                div()
-                    .id("diagnostics-copy")
-                    .debug_selector(|| "diagnostics-copy".to_string())
-                    .child(
+        .child(
+            h_flex()
+                .px_3()
+                .py_1()
+                .gap_2()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child("Details"),
+                )
+                .child(div().flex_1())
+                .when_some(copy, |el, _| {
+                    el.child(probed(
+                        "diagnostics-copy",
                         Button::new("diagnostics-copy")
                             .ghost()
-                            .xsmall()
+                            .small()
                             .icon(IconName::Copy)
-                            .tooltip("Copy")
-                            .on_click(move |_, _window, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
-                            }),
-                    ),
-            )
-        })
+                            .label("Copy")
+                            .tooltip("Copy row details (Y)")
+                            .on_click(cx.listener(|p, _, _, cx| p.copy_details(cx))),
+                    ))
+                }),
+        )
+        .child(
+            div()
+                .id(selector)
+                .flex_1()
+                .min_h_0()
+                .font_family(fonts::MONO)
+                .text_xs()
+                .child(lines)
+                .overflow_y_scroll()
+                .track_scroll(scroll)
+                .vertical_scrollbar(scroll),
+        )
+        .into_any_element()
+}
+
+/// Use the same keycap presentation as the shell's dialogs and menus.
+pub(crate) fn footer(
+    section: Section,
+    filtering: bool,
+    config_values: bool,
+    cx: &Context<DiagnosticsPage>,
+) -> AnyElement {
+    let hint = if filtering {
+        "`enter` Keep filter   `escape` Cancel filter"
+    } else {
+        match section {
+            Section::Sources => {
+                "`[` / `]` Sections   `/` Filter   `up` / `down` Rows   `y` Copy   `escape` Back"
+            }
+            Section::Data => {
+                "`[` / `]` Sections   `/` Filter   `enter` Expand   `r` Refresh   `y` Copy   `escape` Back"
+            }
+            Section::Config if !config_values => {
+                "`[` / `]` Sections   `ctrl+tab` Views   `/` Filter   `y` Copy   `escape` Back"
+            }
+            Section::Config => {
+                "`[` / `]` Sections   `ctrl+tab` Views   `/` Filter   `enter` Expand   `y` Copy   `escape` Back"
+            }
+            Section::Log => {
+                "`[` / `]` Sections   `/` Filter   `f` Follow   `y` Copy   `escape` Back"
+            }
+            Section::Perf => "`[` / `]` Sections   `escape` Back",
+        }
+    };
+    div()
+        .flex_none()
+        .px_3()
+        .py_1()
+        .border_t_1()
+        .border_color(cx.theme().border)
+        .text_xs()
+        .text_color(cx.theme().muted_foreground)
+        .debug_selector(|| "diagnostics-footer".to_string())
+        .child(kbd::marked(hint))
         .into_any_element()
 }

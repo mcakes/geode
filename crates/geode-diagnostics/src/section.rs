@@ -36,7 +36,7 @@ impl Section {
             Section::Data => "Data",
             Section::Config => "Config",
             Section::Log => "Log",
-            Section::Perf => "Perf",
+            Section::Perf => "Performance",
         }
     }
 

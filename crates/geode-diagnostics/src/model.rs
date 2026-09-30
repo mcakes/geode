@@ -425,6 +425,7 @@ pub struct ConfigDoc {
 /// Every loaded document with its leaves (`a.b.0.c = value [layer]`),
 /// filtered by substring over `doc.key` and value, capped per document.
 pub fn config_docs(config: &Config, filter: &str) -> Vec<ConfigDoc> {
+    let filter = filter.to_lowercase();
     config
         .doc_names()
         .filter_map(|doc_name| {
@@ -435,8 +436,10 @@ pub fn config_docs(config: &Config, filter: &str) -> Vec<ConfigDoc> {
                 .into_iter()
                 .filter(|(path, value)| {
                     filter.is_empty()
-                        || format!("{doc_name}.{path}").contains(filter)
-                        || value.contains(filter)
+                        || format!("{doc_name}.{path}")
+                            .to_lowercase()
+                            .contains(&filter)
+                        || value.to_lowercase().contains(&filter)
                 })
                 .map(|(path, value)| ConfigLeaf {
                     layer: config
@@ -447,6 +450,9 @@ pub fn config_docs(config: &Config, filter: &str) -> Vec<ConfigDoc> {
                     value,
                 })
                 .collect();
+            if !filter.is_empty() && kept.is_empty() {
+                return None;
+            }
             let omitted = kept.len().saturating_sub(MAX_LEAVES_PER_DOC);
             kept.truncate(MAX_LEAVES_PER_DOC);
             Some(ConfigDoc {
@@ -916,7 +922,10 @@ pub(crate) mod tests {
             keymap.leaves.iter().any(|l| l.key == "bindings.0.keys.j"),
             "indexed array path"
         );
+        assert!(config_docs(&config, "no-such-key").is_empty());
+        assert_eq!(config_docs(&config, "SOLARIZED").len(), 1);
         let filtered = config_docs(&config, "theme");
+        assert_eq!(filtered.len(), 1, "unmatched documents are hidden");
         assert!(filtered.iter().all(|d| {
             d.leaves
                 .iter()

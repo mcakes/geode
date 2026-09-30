@@ -168,7 +168,9 @@ pub fn sources_table(
             } else {
                 format!("{}{SINCE_SEPARATOR}{}", r.since_hms, age_text(r.since, now))
             };
-            let mut detail: Vec<SharedString> = r.detail.iter().map(|s| s.clone().into()).collect();
+            let mut detail: Vec<SharedString> = Vec::with_capacity(r.detail.len() + 2);
+            detail.push(format!("{} · {}", r.name, r.health).into());
+            detail.extend(r.detail.iter().map(|s| SharedString::from(s.clone())));
             if !r.history.is_empty() {
                 let history = r
                     .history
@@ -595,10 +597,11 @@ mod tests {
         assert_eq!(since_times, vec![rows[0].since], "aligned with the rows");
         assert_eq!(
             t.rows[0].detail.len(),
-            3,
-            "spec lines then one history line"
+            4,
+            "current health, spec lines, then history"
         );
-        assert!(t.rows[0].detail[2].contains("Ok 00:00:01"));
+        assert_eq!(t.rows[0].detail[0].as_ref(), "s · Ok");
+        assert!(t.rows[0].detail[3].contains("Ok 00:00:01"));
         let (filtered, since_times) = sources_table(&rows, now, "zzz");
         assert!(filtered.rows.is_empty());
         assert!(since_times.is_empty(), "a filtered-out row has no since");

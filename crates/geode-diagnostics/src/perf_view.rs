@@ -1,5 +1,5 @@
-//! The Perf section: stat tiles with their budgets, a frame-interval
-//! histogram as a row of themed bars, database tiles, and the overlay
+//! The Performance section: metric groups with their budgets, a frame-interval
+//! histogram as a row of themed bars, storage readouts, and the overlay
 //! switch. The page builds the model on the perf counter; this module only
 //! paints it and routes the switch back through the `Diagnostics` request
 //! channel, which the shell drains and mirrors.
@@ -8,6 +8,7 @@ use geode_shell::fonts;
 use geode_shell::shell::{chip, scale};
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, WeakEntity, div};
+use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::switch::Switch;
 use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 
@@ -48,17 +49,24 @@ fn tile(
     v_flex()
         .flex_1()
         .min_w_0()
-        .p_2()
-        .rounded(theme.radius)
-        .border_1()
-        .border_color(theme.border)
+        .py_2()
+        .gap_1()
         .child(
             div()
                 .text_xs()
                 .text_color(theme.muted_foreground)
                 .child(label),
         )
-        .child(div().text_sm().font_family(fonts::MONO).child(value))
+        .child(
+            div()
+                .text_sm()
+                .font_family(fonts::MONO)
+                .child(if value.is_empty() {
+                    "Not available".to_string()
+                } else {
+                    value
+                }),
+        )
         .child(
             div()
                 .text_xs()
@@ -109,7 +117,7 @@ pub(crate) fn render(
     let overlay = probed(
         "diagnostics-overlay-switch",
         Switch::new("diagnostics-overlay")
-            .xsmall()
+            .small()
             .checked(m.overlay)
             .label("Performance overlay")
             .on_change(move |_checked, _window, cx| {
@@ -123,68 +131,98 @@ pub(crate) fn render(
                 });
             }),
     );
-    v_flex()
-        .p_2()
-        .gap_2()
-        .child(h_flex().justify_end().child(overlay))
+    div()
+        .id("diagnostics-performance")
+        .flex_1()
+        .min_h_0()
         .child(
-            h_flex()
-                .gap_2()
-                .child(tile(
-                    "Frame p50 · p95 · max",
-                    pct(m.frame.as_ref()),
-                    format!(
-                        "n = {} · budget {} ms",
-                        m.frame_count,
-                        FRAME_BUDGET_MICROS / 1_000
-                    ),
-                    cx,
-                ))
-                .child(tile(
-                    "Requery submit→snapshot",
-                    pct(m.submit.as_ref()),
-                    format!("budget {} ms at 1M rows", REQUERY_BUDGET_MICROS / 1_000),
-                    cx,
-                ))
-                .child(tile(
-                    "Requery snapshot→paint",
-                    pct(m.paint.as_ref()),
-                    String::new(),
-                    cx,
-                ))
-                .child(tile(
-                    "Dropped events",
-                    m.dropped.to_string(),
-                    "since start".into(),
-                    cx,
-                )),
+            v_flex()
+                .p_3()
+                .gap_4()
+                .child(h_flex().justify_end().child(overlay))
+                .child(
+                    div()
+                        .grid()
+                        .grid_cols(2)
+                        .gap_4()
+                        .child(tile(
+                            "Frame p50 · p95 · max",
+                            pct(m.frame.as_ref()),
+                            format!(
+                                "n = {} · budget {} ms",
+                                m.frame_count,
+                                FRAME_BUDGET_MICROS / 1_000
+                            ),
+                            cx,
+                        ))
+                        .child(tile(
+                            "Requery submit→snapshot",
+                            pct(m.submit.as_ref()),
+                            format!("budget {} ms at 1M rows", REQUERY_BUDGET_MICROS / 1_000),
+                            cx,
+                        ))
+                        .child(tile(
+                            "Requery snapshot→paint",
+                            pct(m.paint.as_ref()),
+                            String::new(),
+                            cx,
+                        ))
+                        .child(tile(
+                            "Dropped events",
+                            m.dropped.to_string(),
+                            "since start".into(),
+                            cx,
+                        )),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(format!(
+                            "Frame interval histogram (bars past the {} ms budget tinted)",
+                            FRAME_BUDGET_MICROS / 1_000
+                        )),
+                )
+                .child(if m.frame_count == 0 {
+                    div()
+                        .h(scale::design(HISTOGRAM_HEIGHT))
+                        .flex()
+                        .items_center()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child("Frame samples appear as the app renders.")
+                        .into_any_element()
+                } else {
+                    histogram.into_any_element()
+                })
+                .child(
+                    div()
+                        .grid()
+                        .grid_cols(2)
+                        .gap_4()
+                        .child(tile(
+                            "Database",
+                            m.database.clone(),
+                            if m.database.is_empty() {
+                                "Waiting for the catalog".into()
+                            } else {
+                                format!("used {} · block {}", m.used, m.block_size)
+                            },
+                            cx,
+                        ))
+                        .child(tile(
+                            "DuckDB memory",
+                            m.memory.clone(),
+                            if m.threads.is_empty() {
+                                "Waiting for the catalog".into()
+                            } else {
+                                format!("threads {}", m.threads)
+                            },
+                            cx,
+                        )),
+                ),
         )
-        .child(
-            div()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child(format!(
-                    "Frame interval histogram (bars past the {} ms budget tinted)",
-                    FRAME_BUDGET_MICROS / 1_000
-                )),
-        )
-        .child(histogram)
-        .child(
-            h_flex()
-                .gap_2()
-                .child(tile(
-                    "Database",
-                    m.database.clone(),
-                    format!("used {} · block {}", m.used, m.block_size),
-                    cx,
-                ))
-                .child(tile(
-                    "DuckDB memory",
-                    m.memory.clone(),
-                    format!("threads {}", m.threads),
-                    cx,
-                )),
-        )
+        .overflow_y_scrollbar()
         .into_any_element()
 }
 
