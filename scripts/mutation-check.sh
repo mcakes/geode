@@ -27217,6 +27217,69 @@ run_mutation "fuzzy find: a pick survives a re-rank by identity" \
   '            .and(Some(0))' \
   geode-shell fzf_tree_folds_preserve_candidates_and_query_edits_reopen_matches
 
+# Text edit entry keeps the cell value and chooses only the initial caret.
+run_mutation "edit caret: start entry leaves the caret at the end" \
+  crates/geode-tile/src/edit.rs \
+  '            input.set_selected_range(0..0, cx);' \
+  '            input.set_selected_range(input.value().len()..input.value().len(), cx);' \
+  geode-marketdata edit_keys_place_the_caret_at_the_requested_end
+
+run_mutation "edit caret: marketdata start action opens at the end" \
+  crates/geode-marketdata/src/tile.rs \
+  'let caret = if verb == "edit_start" {
+                    EditCaret::Start' \
+  'let caret = if verb == "edit_start" {
+                    EditCaret::End' \
+  geode-marketdata edit_keys_place_the_caret_at_the_requested_end
+
+run_mutation "edit caret: marketdata normal binds I to end placement" \
+  crates/geode-marketdata/src/content.rs \
+  'context = "marketdata && mode == normal"
+[bindings.keys]
+"shift+i" = "marketdata::edit_start"' \
+  'context = "marketdata && mode == normal"
+[bindings.keys]
+"shift+i" = "marketdata::edit"' \
+  geode-marketdata edit_keys_place_the_caret_at_the_requested_end
+
+run_mutation "edit caret: marketdata visual binds I to end placement" \
+  crates/geode-marketdata/src/content.rs \
+  'context = "marketdata && mode == visual"
+[bindings.keys]
+"shift+i" = "marketdata::edit_start"' \
+  'context = "marketdata && mode == visual"
+[bindings.keys]
+"shift+i" = "marketdata::edit"' \
+  geode-marketdata edit_keys_place_the_caret_at_the_requested_end
+
+run_mutation "edit caret: pricer start action opens at the end" \
+  crates/geode-pricer/src/tile.rs \
+  'let caret = if verb == "edit_start" {
+                    EditCaret::Start' \
+  'let caret = if verb == "edit_start" {
+                    EditCaret::End' \
+  geode-pricer edit_keys_place_the_caret_at_the_requested_end
+
+run_mutation "edit caret: pricer normal binds I to end placement" \
+  crates/geode-pricer/src/content.rs \
+  'context = "pricer && mode == normal"
+[bindings.keys]
+"shift+i" = "pricer::edit_start"' \
+  'context = "pricer && mode == normal"
+[bindings.keys]
+"shift+i" = "pricer::edit"' \
+  geode-pricer edit_keys_place_the_caret_at_the_requested_end
+
+run_mutation "edit caret: pricer visual binds I to end placement" \
+  crates/geode-pricer/src/content.rs \
+  'context = "pricer && mode == visual"
+[bindings.keys]
+"shift+i" = "pricer::edit_start"' \
+  'context = "pricer && mode == visual"
+[bindings.keys]
+"shift+i" = "pricer::edit"' \
+  geode-pricer edit_keys_place_the_caret_at_the_requested_end
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

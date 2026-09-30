@@ -150,6 +150,12 @@ cargo bench -p geode-marketdata    # matrix model and draft
 
 ## Input and popup contracts
 
+`i` and Enter open the cell editor with the caret at the end of its text;
+`I` (`shift+i`, `marketdata::edit_start`) opens it at the start. Both routes
+work in normal and selection modes and share the same edit guards. Text
+attributes follow the same rule; date fields and choice pickers open as usual.
+Text placement uses `geode_tile::edit::EditCaret`.
+
 The panel reports `normal`, `visual`, `menu`, or `insert` in the shared
 `marketdata` context, with `select == rows|block` added whenever a selection is
 live. An open editor or popup outranks the selection: a selection editor is
