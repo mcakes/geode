@@ -58,6 +58,7 @@ use geode_shell::tiling::TileId;
 use geode_shell::vimfind::{FindDirection, find_match};
 use geode_shell::vimnav::NavCommand;
 use geode_tile::confirm::{self, Confirm, ConfirmHost};
+use geode_tile::edit::EditCaret;
 use geode_tile::following::{self, FrameDoor};
 use geode_tile::header::HealthWatch;
 use geode_tile::menu::{self, ActionRow, Hint, Menu, MenuHost, MenuIds, Row};
@@ -1862,7 +1863,7 @@ impl PricerTile {
 
     // ---- the cell editor ----------------------------------------------
 
-    /// `i`/`enter`/double-click: a text field on the cell's grammar
+    /// `i`/`I`/`enter`/double-click: a text field on the cell's grammar
     /// spelling, or a typeahead over its vocabulary; a cell that does not
     /// edit says why in the footer.
     ///
@@ -1870,7 +1871,7 @@ impl PricerTile {
     /// as without one, and that cell must itself be editable: a read-only
     /// cursor cell refuses with its own reason, rather than opening a
     /// field whose grammar belongs to some other selected cell.
-    fn begin_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn begin_edit(&mut self, caret: EditCaret, window: &mut Window, cx: &mut Context<Self>) {
         if self.loading {
             self.footer = Some("the sheet is still loading".into());
             return;
@@ -1941,7 +1942,7 @@ impl PricerTile {
                     notice: None,
                 });
                 let input = cx.new(|cx| InputState::new(window, cx));
-                input.update(cx, |s, cx| s.set_value(text.clone(), window, cx));
+                input.update(cx, |s, cx| caret.seed(s, text.clone(), window, cx));
                 Editor::Text {
                     line,
                     col,
@@ -3197,8 +3198,13 @@ impl PricerTile {
                 self.open_entry(verb == "add_below", window, cx);
                 return true;
             }
-            "edit" => {
-                self.begin_edit(window, cx);
+            "edit" | "edit_start" => {
+                let caret = if verb == "edit_start" {
+                    EditCaret::Start
+                } else {
+                    EditCaret::End
+                };
+                self.begin_edit(caret, window, cx);
                 self.rebuild_chrome();
                 cx.notify();
                 return true;
@@ -5448,7 +5454,7 @@ impl PricerTile {
                 self.cursor.col = c;
                 self.sync_cursor(cx);
                 self.footer = None;
-                self.begin_edit(window, cx);
+                self.begin_edit(EditCaret::End, window, cx);
                 self.rebuild_chrome();
                 cx.notify();
             }
@@ -8643,6 +8649,54 @@ pub(crate) mod tests {
     }
 
     // ---- the cell editor ----
+
+    #[gpui::test]
+    fn edit_keys_place_the_caret_at_the_requested_end(cx: &mut gpui::TestAppContext) {
+        use geode_shell::keymap::{MatchResult, Matcher, build_keymap, parse_keystroke};
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C"]);
+        let mut registry = geode_shell::actions::ActionRegistry::default();
+        geode_shell::defaults::register_builtin_actions(&mut registry);
+        h.factory.register_actions(&mut registry);
+        let doc =
+            geode_shell::keymap::fragments::fragment_doc("pricer", crate::content::DEFAULT_KEYMAP)
+                .unwrap();
+        let (keymap, diags) = build_keymap(&[doc], geode_shell::defaults::default_mod(), &registry);
+        assert!(diags.is_empty(), "{diags:?}");
+        for selection in [None, Some("visual_block"), Some("visual_rows")] {
+            if let Some(verb) = selection {
+                h.dispatch(&mut vcx, verb, None);
+            }
+            for (key, at_start) in [("shift+i", true), ("i", false), ("enter", false)] {
+                let stack = [h.tile.read_with(&vcx, |t, _| t.key_context())];
+                let ks = parse_keystroke(key, geode_shell::defaults::default_mod()).unwrap();
+                let MatchResult::Matched { action, count } =
+                    Matcher::default().press(&keymap, ks, &stack)
+                else {
+                    panic!("{selection:?} {key}: expected an edit binding");
+                };
+                assert!(vcx.update(|window, cx| h.content.dispatch(&action, count, window, cx)));
+                h.draw(&mut vcx);
+                let input = h.tile.read_with(&vcx, |t, _| {
+                    t.editor.as_ref().and_then(Editor::input).unwrap().clone()
+                });
+                assert_eq!(input.read_with(&vcx, |s, _| s.value().to_string()), "1");
+                assert_eq!(
+                    input.read_with(&vcx, |s, _| s.cursor()),
+                    if at_start { 0 } else { 1 }
+                );
+                vcx.simulate_input("7");
+                assert_eq!(
+                    editor_text(&h, &vcx).as_deref(),
+                    Some(if at_start { "71" } else { "17" })
+                );
+                h.dispatch(&mut vcx, "cancel", None);
+                assert_eq!(h.cell(&vcx, 0, "qty"), "1", "cancel keeps the cell");
+            }
+            if selection.is_some() {
+                h.dispatch(&mut vcx, "escape", None);
+            }
+        }
+    }
 
     fn editor_text(h: &Harness, vcx: &VisualTestContext) -> Option<String> {
         h.tile.read_with(vcx, |t, cx| match &t.editor {

@@ -58,6 +58,7 @@ use geode_shell::tiling::TileId;
 use geode_shell::vimfind::{FindDirection, find_match};
 use geode_shell::vimnav::NavCommand;
 use geode_tile::confirm::{self, Confirm, ConfirmHost};
+use geode_tile::edit::EditCaret;
 use geode_tile::following::{Delivered, FollowingQuery, FrameDoor, Promotion, Unanswered};
 use geode_tile::header::HealthWatch;
 use geode_tile::menu::{Menu, MenuHost, MenuIds};
@@ -752,7 +753,7 @@ impl MarketDataTile {
                     // nothing: `begin_edit` refuses while one is open.
                     if let Some(col) = this.table.read(cx).delegate().model_col(*col) {
                         this.cursor_to(*row, Some(col), cx);
-                        this.begin_edit(window, cx);
+                        this.begin_edit(EditCaret::End, window, cx);
                         // `dispatch`'s own tail: the delegate paints the
                         // editor only once `sync_cursor` has handed it over.
                         this.sync_cursor(cx);
@@ -2031,7 +2032,7 @@ impl MarketDataTile {
     ) {
         self.cursor_to_attr(i, window, cx);
         if click_count == 2 && matches!(self.cursor, Cursor::Attr(_)) {
-            self.begin_edit(window, cx);
+            self.begin_edit(EditCaret::End, window, cx);
             self.sync_cursor(cx);
             self.changed(cx);
         }
@@ -2209,8 +2210,13 @@ impl MarketDataTile {
                     false
                 }
             }
-            "edit" => {
-                self.begin_edit(window, cx);
+            "edit" | "edit_start" => {
+                let caret = if verb == "edit_start" {
+                    EditCaret::Start
+                } else {
+                    EditCaret::End
+                };
+                self.begin_edit(caret, window, cx);
                 true
             }
             "commit" => match self.popup {
@@ -2466,7 +2472,7 @@ impl MarketDataTile {
     /// CellKind chooses text, segmented date, or choice typeahead; attribute type
     /// chooses text or date. Apply the same document, draft-state, and deleted-row
     /// guards before opening any form. Editable NULL cells open empty.
-    fn begin_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn begin_edit(&mut self, caret: EditCaret, window: &mut Window, cx: &mut Context<Self>) {
         if self.editor.is_some() {
             // Already editing. `i` is not bound in insert mode, so this is
             // the palette's route in, and re-seeding would throw away what
@@ -2554,7 +2560,7 @@ impl MarketDataTile {
             )
         } else {
             let state = cx.new(|cx| InputState::new(window, cx));
-            state.update(cx, |s, cx| s.set_value(text.clone(), window, cx));
+            state.update(cx, |s, cx| caret.seed(s, text.clone(), window, cx));
             state.read(cx).focus_handle(cx).focus(window, cx);
             (EditorState::Text(state), text.to_string())
         };
@@ -2812,7 +2818,7 @@ impl MarketDataTile {
         self.rebuild_model(cx);
         if let Some(at) = self.model.rows.iter().position(|r| r.label.as_ref() == new) {
             self.cursor = Cursor::Cell { row: at, col: 0 };
-            self.begin_edit(window, cx);
+            self.begin_edit(EditCaret::End, window, cx);
         }
         true
     }
@@ -3250,7 +3256,7 @@ impl MarketDataTile {
         self.cursor = Cursor::Cell { row: at, col: 0 };
         self.notice = None;
         match self.spec.rows.identity {
-            RowIdentity::Minted => self.begin_edit(window, cx),
+            RowIdentity::Minted => self.begin_edit(EditCaret::End, window, cx),
             RowIdentity::Typed(ty) => self.begin_label_edit(at, label.into(), ty, window, cx),
         }
         Ok(())
@@ -15335,6 +15341,60 @@ edits = [["2026-11-20", "-1", 9.5]]
             .clone()
             .expect("the shell created the panel");
         (vcx, shell, tile, rx)
+    }
+
+    #[gpui::test]
+    fn edit_keys_place_the_caret_at_the_requested_end(cx: &mut gpui::TestAppContext) {
+        let (mut vcx, shell, tile, _rx) = open_in_shell(cx);
+        let tag = tile.read_with(&vcx, |t, _| t.following.tag());
+        let outcome = QueryOutcome {
+            key: QueryKey(1),
+            tag,
+            snapshot: Ok(Arc::new(cvi(BASE))),
+            submitted: Instant::now(),
+        };
+        vcx.update(|window, cx| {
+            shell.update(cx, |s, cx| s.deliver(Delivery::Query(outcome), window, cx))
+        });
+        draw(&mut vcx);
+        for selection in ["", "v", "shift-v"] {
+            // Row selections exclude the leading slice columns.
+            type_keys(&mut vcx, "home 3 l");
+            if !selection.is_empty() {
+                type_keys(&mut vcx, selection);
+            }
+            for (key, at_start) in [("shift-i", true), ("i", false), ("enter", false)] {
+                type_keys(&mut vcx, key);
+                let input = tile.read_with(&vcx, |t, _| match &t.editor {
+                    Some(Editing {
+                        state: EditorState::Text(input),
+                        ..
+                    }) => input.clone(),
+                    _ => panic!("{selection} {key}: expected a text editor"),
+                });
+                let before = input.read_with(&vcx, |s, _| s.value().to_string());
+                assert!(!before.is_empty());
+                assert_eq!(
+                    input.read_with(&vcx, |s, _| s.cursor()),
+                    if at_start { 0 } else { before.len() },
+                    "{selection} {key}"
+                );
+                vcx.simulate_input("7");
+                assert_eq!(
+                    input.read_with(&vcx, |s, _| s.value().to_string()),
+                    if at_start {
+                        format!("7{before}")
+                    } else {
+                        format!("{before}7")
+                    },
+                    "typing must insert without replacing the cell text"
+                );
+                type_keys(&mut vcx, "escape");
+            }
+            if !selection.is_empty() {
+                type_keys(&mut vcx, "escape");
+            }
+        }
     }
 
     /// Every way the upload confirm ends — `y`, a cancelling key — blurs

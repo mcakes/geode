@@ -42,6 +42,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("pricer::add_below", "Add lines below…"),
     ("pricer::add_above", "Add lines above…"),
     ("pricer::edit", "Edit cell…"),
+    ("pricer::edit_start", "Edit cell at start…"),
     ("pricer::delete", "Delete row"),
     ("pricer::undo", "Undo"),
     ("pricer::redo", "Redo"),
@@ -145,6 +146,7 @@ pub const DEFAULT_KEYMAP: &str = r#"
 [[bindings]]
 context = "pricer && mode == visual"
 [bindings.keys]
+"shift+i" = "pricer::edit_start"
 "y" = "pricer::yank"
 "d" = "pricer::delete"
 "shift+j" = "pricer::move_down"
@@ -160,6 +162,7 @@ context = "pricer && mode == visual"
 [[bindings]]
 context = "pricer && mode == normal"
 [bindings.keys]
+"shift+i" = "pricer::edit_start"
 "y y" = "pricer::yank_row"
 "y c" = "pricer::yank_col"
 "n" = "pricer::find_next"

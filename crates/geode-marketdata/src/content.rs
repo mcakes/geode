@@ -31,6 +31,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("marketdata::yank_row", "Yank row"),
     ("marketdata::yank_col", "Yank column"),
     ("marketdata::edit", "Edit cell"),
+    ("marketdata::edit_start", "Edit cell at start…"),
     ("marketdata::commit", "Commit edit"),
     ("marketdata::cancel", "Cancel edit"),
     ("marketdata::find_next", "Find next"),
@@ -111,6 +112,7 @@ pub const DEFAULT_KEYMAP: &str = r#"
 [[bindings]]
 context = "marketdata && mode == visual"
 [bindings.keys]
+"shift+i" = "marketdata::edit_start"
 "y" = "marketdata::yank"
 "d" = "marketdata::delete_row"
 "i" = "marketdata::edit"
@@ -122,6 +124,7 @@ context = "marketdata && mode == visual"
 [[bindings]]
 context = "marketdata && mode == normal"
 [bindings.keys]
+"shift+i" = "marketdata::edit_start"
 "y" = "marketdata::yank"
 "y y" = "marketdata::yank_row"
 "y c" = "marketdata::yank_col"

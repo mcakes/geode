@@ -456,6 +456,11 @@ motion returns to row 0 at the column the cursor left from; `g g`/`G` return
 to the grid at that column, uncounted to the first or last row and counted to
 row N. A live selection's motions clamp and never enter the strip.
 
+`i` and Enter open a cell or header attribute editor with the caret at the
+end of its text. `I` (`shift+i`) opens it at the start without selecting the
+text. Both routes also work over a selection and use the same edit guards;
+date fields and choice pickers open as usual.
+
 `[ui] line_numbers` adds a gutter beside the grid's pinned column: the row
 label when shown, otherwise the first value column. The column widens for the
 gutter while cursor borders, draft fills, and deletion marks stay on the data
@@ -524,7 +529,7 @@ In visual mode the verbs are single keys; the doubled normal-mode forms
   meaning and ignores the selection. It notices `bumped N cells`. Like a live
   step it is all-or-nothing: a fractional delta over a selection that
   includes an integer column writes nothing.
-- `i` or `enter` opens the editor on the cursor cell, and refuses exactly when
+- `i`, `I` or `enter` opens the editor on the cursor cell, and refuses exactly when
   that cell refuses (a deleted row, a document with nothing to edit) or is
   not a member of the selection (below); it does not look for another member.
 
@@ -1158,7 +1163,8 @@ Normal-mode keys:
 |---|---|
 | `o` | Open the entry bar under the header; `enter` adds the line below the cursor row (on a leg, the next leg; on a package, its first leg; with no cursor row, at the end; a package typed inside a package lands just after that package) and keeps the bar open for the next; `up`/`down` walk the sheet's own lines as history; `tab`/`shift+tab` complete the token at the caret; `escape` closes it |
 | `shift+o` | The same bar, but the first line lands above the cursor row (on a leg, before that leg in its package; on a package or a top-level line, before it; on the first row, `at top`; on a grouping row, `at end`); each further line lands after the one just added, so a typed run reads top to bottom |
-| `i`, `enter`, double-click | Edit the cell in place; `up`/`down` (`shift`: ten) step a number by the precision its text carries, or the expiry date field's active segment |
+| `i`, `enter`, double-click | Edit the cell in place with the caret at the end of text; `up`/`down` (`shift`: ten) step a number by the precision its text carries, or the expiry date field's active segment |
+| `I` (`shift+i`) | Edit the cell with the caret at the start of text, without selecting it; date fields and choice pickers open as usual |
 | `d d` | Delete the row (a package with its legs) |
 | `u` / `ctrl+r` | Undo / redo; 100 entries, strictly last-in first-out. A step that brings rows back puts the cursor on the first of them, and a package that was open comes back open |
 | `y y` / `y c` | Copy the shorthand of what the row shows (and remember it for `p`): a line or package its own, a grouping row its lines, a split package row its legs under that group / the column's cells |
@@ -1692,7 +1698,7 @@ A count on `d`, `shift+j`/`shift+k`, `g p` or `g u` is ignored while a
 selection is live: the selection names the rows. Motions still take a count.
 Every row verb refuses while the sheet is loading.
 
-**Edits act on lines.** `i` or `enter` opens the editor on the cursor cell,
+**Edits act on lines.** `i`, `I` or `enter` opens the editor on the cursor cell,
 which must itself be editable: a read-only cursor cell refuses with its own
 reason. An edit then reaches each selected line; a selected package stands for
 its legs whether it is open or not, and a package selected with one of its
