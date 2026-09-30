@@ -26695,8 +26695,8 @@ run_mutation "pricer leg tint: the leg palette sits on the line ground" \
 # bundled themes.
 run_mutation "pricer leg tint: the stripe is used without the distinctness check" \
   crates/geode-pricer/src/paint.rs \
-  $'    if leg_ground_clears(stripe, g) {\n        return stripe;\n    }' \
-  $'    if true {\n        return stripe;\n    }' \
+  $'        if leg_ground_clears(stripe, g, hold_selected) {\n            return stripe;\n        }' \
+  $'        if true {\n            return stripe;\n        }' \
   geode-pricer every_leg_ground_is_a_faint_distinct_tint_on_every_bundled_theme
 
 run_mutation "pricer leg tint: a tint louder than hover clears" \
@@ -26707,16 +26707,24 @@ run_mutation "pricer leg tint: a tint louder than hover clears" \
 
 run_mutation "pricer leg tint: a tint equal to the group ground clears" \
   crates/geode-pricer/src/paint.rs \
-  '        && [g.hover, g.group]' \
-  '        && [g.hover]' \
+  '        && apart(g.group)' \
+  '        && true' \
+  geode-pricer every_leg_ground_is_a_faint_distinct_tint_on_every_bundled_theme
+
+# Selected is held apart wherever a tint can clear it; dropped outright, a
+# stripe token sitting on the selected ground is used as it is.
+run_mutation "pricer leg tint: the selected ground is never held apart" \
+  crates/geode-pricer/src/paint.rs \
+  '    for hold_selected in [true, false] {' \
+  '    for hold_selected in [false] {' \
   geode-pricer every_leg_ground_is_a_faint_distinct_tint_on_every_bundled_theme
 
 # Where hover sits too near the line ground for a tint between them, only
 # the direction away from the foreground clears.
 run_mutation "pricer leg tint: the fallback never walks away from the foreground" \
   crates/geode-pricer/src/paint.rs \
-  '    match (faintest(foreground), faintest(away)) {' \
-  '    match (faintest(foreground), None::<Rgb>) {' \
+  '        match (faintest(foreground), faintest(away)) {' \
+  '        match (faintest(foreground), None::<Rgb>) {' \
   geode-pricer an_indistinct_or_loud_stripe_falls_back_to_the_faintest_clearing_tint
 
 # A `dimensions` edit alone reloads the pricer, and the reload hands the

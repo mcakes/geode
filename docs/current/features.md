@@ -1079,13 +1079,16 @@ leading edge, and a leg's text starts where its package's chip starts. Every
 leg of a package, the last included, sits on a faint tint that marks it as
 inside its package; bare lines and package rows keep the table's ground. The
 tint is the theme's stripe token (`table_even`) where it reads at least 1.04:1
-from the table ground and from the grouping row's ground, stays fainter than
-hover and 1.04:1 apart from it; otherwise it is the faintest blend of the
-table ground, toward the foreground or away from it, that does. A leg's text,
-state colors, `sign` colors, named colors and gutter are floored on the tint
-as well as on hover and selected. On several light themes the selected ground
-sits within 1.04:1 of the tint, so selecting a leg changes its ground only
-slightly; the cursor cell's border and the gutter still mark the cursor row.
+from the table ground, from hover, from the selected-row ground and from the
+grouping row's ground while staying fainter than hover; otherwise it is the
+faintest blend of the table ground, toward the foreground or away from it,
+that does. A leg's text, state colors, `sign` colors, named colors and
+gutter are floored on the tint as well as on hover and selected. On Aurora
+Light, Default Light and Modus Operandi the selected-row and hover grounds
+sit too near the table ground for any such tint, so the tint is held apart
+from hover and the group ground only, and selecting a leg changes its ground
+only slightly; the cursor cell's border and the gutter still mark the cursor
+row.
 A grouping row (see [grouping](#grouping)) carries a ground of its own too;
 the table's hover and selected-row fills replace either ground. Column 0 is fixed at a width that fits a two-leg
 call spread's package row (`▾ CS Z26 4800/5200 · 2 legs`) at the largest

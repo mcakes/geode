@@ -7508,8 +7508,8 @@ pub(crate) mod tests {
             assert_eq!(d.gutter_paint(0), d.paints.muted, "a line's gutter");
         });
 
-        // The line prices; the package fails.
-        let line = h.tile.read_with(&vcx, |t, _| t.sheet.id(0).0);
+        // The line and the first leg price; the last leg fails.
+        let last = h.tile.read_with(&vcx, |t, _| t.sheet.id(3).0);
         for b in h.prices() {
             h.deliver(
                 &mut vcx,
@@ -7521,10 +7521,10 @@ pub(crate) mod tests {
                         .lines
                         .iter()
                         .map(|l| {
-                            let r = if l.id == line {
-                                Ok(result(12.5))
-                            } else {
+                            let r = if l.id == last {
                                 Err("no vol".to_string())
+                            } else {
+                                Ok(result(12.5))
                             };
                             (l.id, l.revision, r)
                         })
@@ -7538,7 +7538,13 @@ pub(crate) mod tests {
             rose,
             "a line: as resolved"
         );
-        assert_eq!(text_colour(&h, &mut vcx, 2, "npv"), paints.leg.danger);
+        assert_eq!(h.cell(&vcx, 2, "npv"), "12.50");
+        assert_eq!(
+            text_colour(&h, &mut vcx, 2, "npv"),
+            paints.leg.floor(rose),
+            "a leg: floored on its ground"
+        );
+        assert_eq!(text_colour(&h, &mut vcx, 3, "npv"), paints.leg.danger);
         assert_eq!(text_colour(&h, &mut vcx, 1, "npv"), paints.danger);
     }
 

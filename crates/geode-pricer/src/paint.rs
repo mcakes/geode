@@ -78,7 +78,7 @@ const _: () = assert!(geode_core::colour::NON_TEXT_RATIO <= READABLE_RATIO);
 
 /// The least luminance contrast between a package leg's ground and each
 /// ground it must read apart from: the line ground beside it, the hover
-/// ground that replaces it, and a grouping row's ground. The
+/// and selected grounds that replace it, and a grouping row's ground. The
 /// measure is the one `geode_shell::shell::control`'s distinctness sweep
 /// uses (the WCAG ratio); its floor there, `DISTINCT_RATIO` (1.10), is
 /// for an interaction state that must read at a glance, which a rest
@@ -98,31 +98,28 @@ const LEG_TINT_STEP: f32 = 0.002;
 pub(crate) struct TableGrounds {
     /// The table's own ground: a bare line's and a package row's.
     pub line: Rgb,
-    /// Hover, which replaces a row's own ground under the pointer.
+    /// Hover and selected, which replace a row's own ground.
     pub hover: Rgb,
+    pub selected: Rgb,
     /// A grouping row's.
     pub group: Rgb,
 }
 
 /// Whether `leg` is a usable leg ground: at least [`LEG_TINT_RATIO`]
 /// from the line ground (else the leg is unmarked), from hover (which
-/// replaces it: equal, and hovering a leg would show nothing) and from
-/// the group ground (equal, and a leg reads as a group row); and fainter
-/// than hover from the line ground (hover is the louder signal; a tint
-/// louder than it reads as a band).
-///
-/// The selected ground is not held apart: on several bundled light
-/// themes it sits so near the line ground, and hover so near both, that
-/// no tint fainter than hover can clear it. The selected row is the
-/// cursor row, which also carries the cursor cell's border and the
-/// gutter's own paint; hover has no other cue.
-pub(crate) fn leg_ground_clears(leg: Rgb, g: &TableGrounds) -> bool {
+/// replaces it: equal, and hovering a leg would show nothing), from the
+/// group ground (equal, and a leg reads as a group row) and, when
+/// `hold_selected`, from selected (equal, and selecting a leg would show
+/// nothing); and fainter than hover from the line ground (hover is the
+/// louder signal; a tint louder than it reads as a band).
+pub(crate) fn leg_ground_clears(leg: Rgb, g: &TableGrounds, hold_selected: bool) -> bool {
     let from_line = contrast_ratio(leg, g.line);
+    let apart = |other: Rgb| contrast_ratio(leg, other) >= LEG_TINT_RATIO;
     from_line >= LEG_TINT_RATIO
         && from_line < contrast_ratio(g.hover, g.line)
-        && [g.hover, g.group]
-            .iter()
-            .all(|other| contrast_ratio(leg, *other) >= LEG_TINT_RATIO)
+        && apart(g.hover)
+        && apart(g.group)
+        && (!hold_selected || apart(g.selected))
 }
 
 /// A package leg's ground: the theme's stripe token (`stripe`, already
@@ -130,15 +127,18 @@ pub(crate) fn leg_ground_clears(leg: Rgb, g: &TableGrounds) -> bool {
 /// [`leg_ground_clears`]; otherwise the faintest blend of the line ground
 /// toward the foreground, or away from it toward the opposite pole, that
 /// does. Some themes ship a stripe token equal to or barely off the table
-/// ground, one as loud as hover, or one equal to their group ground; each
-/// would leave the leg unmarked, hover invisible on it, or the leg
-/// reading as a group row.
-/// Where no blend clears (no bundled theme), the faintest blend toward
-/// the foreground distinct from the line ground.
+/// ground, one as loud as hover, or one equal to their selected or group
+/// ground; each would leave the leg unmarked, a state invisible on it, or
+/// the leg reading as a group row.
+///
+/// Selected is held apart first and dropped only where nothing clears
+/// with it: on some light themes selected sits so near the line ground,
+/// and hover so near both, that no tint fainter than hover is 1.04:1
+/// from all three. The selected row is the cursor row, which also carries
+/// the cursor cell's border and the gutter's own paint; hover has no
+/// other cue. Where nothing clears even then (no bundled theme), the
+/// faintest blend toward the foreground distinct from the line ground.
 pub(crate) fn leg_ground(stripe: Rgb, g: &TableGrounds, foreground: Rgb) -> Rgb {
-    if leg_ground_clears(stripe, g) {
-        return stripe;
-    }
     let away = if relative_luminance(foreground) > relative_luminance(g.line) {
         BLACK
     } else {
@@ -148,20 +148,27 @@ pub(crate) fn leg_ground(stripe: Rgb, g: &TableGrounds, foreground: Rgb) -> Rgb 
         (1..=(1.0 / LEG_TINT_STEP) as usize)
             .map(move |i| over(to_hsla(toward).opacity(i as f32 * LEG_TINT_STEP), g.line))
     };
-    let faintest = |toward: Rgb| blends(toward).find(|c| leg_ground_clears(*c, g));
-    match (faintest(foreground), faintest(away)) {
-        (Some(a), Some(b)) => {
-            if contrast_ratio(a, g.line) <= contrast_ratio(b, g.line) {
-                a
-            } else {
-                b
-            }
+    for hold_selected in [true, false] {
+        if leg_ground_clears(stripe, g, hold_selected) {
+            return stripe;
         }
-        (Some(c), None) | (None, Some(c)) => c,
-        (None, None) => blends(foreground)
-            .find(|c| contrast_ratio(*c, g.line) >= LEG_TINT_RATIO)
-            .unwrap_or(foreground),
+        let faintest =
+            |toward: Rgb| blends(toward).find(|c| leg_ground_clears(*c, g, hold_selected));
+        match (faintest(foreground), faintest(away)) {
+            (Some(a), Some(b)) => {
+                return if contrast_ratio(a, g.line) <= contrast_ratio(b, g.line) {
+                    a
+                } else {
+                    b
+                };
+            }
+            (Some(c), None) | (None, Some(c)) => return c,
+            (None, None) => {}
+        }
     }
+    blends(foreground)
+        .find(|c| contrast_ratio(*c, g.line) >= LEG_TINT_RATIO)
+        .unwrap_or(foreground)
 }
 
 /// The text paints of a row with a ground of its own (a grouping row, a
@@ -269,6 +276,7 @@ impl Paints {
             &TableGrounds {
                 line: ground,
                 hover,
+                selected,
                 group: group_ground,
             },
             to_rgb(theme.foreground),
@@ -454,17 +462,23 @@ mod tests {
     /// theme: at least [`LEG_TINT_RATIO`] from the line ground, fainter
     /// than hover, and at least [`LEG_TINT_RATIO`] from hover and the
     /// group ground, so hovering a leg still shows and a leg never reads
-    /// as a group row. Some themes' stripe token
-    /// fails this (it equals the table ground, is as loud as hover, or
-    /// equals another ground): the fallback must supply one, and the count
-    /// of such themes pins that it is needed.
+    /// as a group row; and from selected on every theme but the pinned
+    /// few whose selected and hover grounds leave no room for a tint.
+    /// Some themes' stripe token fails this (it equals the table ground,
+    /// is as loud as hover, or equals another ground): the fallback must
+    /// supply one, and the count of such themes pins that it is needed.
     #[gpui::test]
     fn every_leg_ground_is_a_faint_distinct_tint_on_every_bundled_theme(
         cx: &mut gpui::TestAppContext,
     ) {
+        // Selected within ~1.07:1 of the line ground and hover within
+        // ~1.12:1: a tint 1.04:1 from both line and selected on the same
+        // side lands past hover.
+        const SELECTED_TOO_NEAR: [&str; 3] = ["Aurora Light", "Default Light", "Modus Operandi"];
         cx.update(gpui_component::init);
         let (service, _) = geode_shell::theme::load_bundled();
         let (mut failures, mut fallbacks, mut themes) = (Vec::new(), 0, 0);
+        let mut near_selected = Vec::new();
         for name in service.names() {
             let entry = service.resolve(&name).unwrap().clone();
             cx.update(|cx| {
@@ -472,12 +486,12 @@ mod tests {
                 let theme = cx.theme();
                 let p = Paints::derive(theme);
                 let line = over(theme.table, to_rgb(theme.background));
-                let [hover, _] = Paints::row_grounds(theme);
+                let [hover, selected] = Paints::row_grounds(theme);
                 let group = to_rgb(p.group.ground);
                 let leg = to_rgb(p.leg.ground);
                 themes += 1;
                 let stripe = over(*theme.tokens.table_even, line);
-                let apart = [("hover", hover), ("group", group)];
+                let apart = [("hover", hover), ("group", group), ("selected", selected)];
                 if contrast_ratio(stripe, line) < LEG_TINT_RATIO
                     || contrast_ratio(stripe, line) >= contrast_ratio(hover, line)
                     || apart
@@ -496,7 +510,12 @@ mod tests {
                 }
                 for (which, g) in apart {
                     let r = contrast_ratio(leg, g);
-                    if r < LEG_TINT_RATIO {
+                    if r >= LEG_TINT_RATIO {
+                        continue;
+                    }
+                    if which == "selected" {
+                        near_selected.push(name.to_string());
+                    } else {
                         failures.push(format!("{name}: leg {r:.3}:1 from {which}"));
                     }
                 }
@@ -508,6 +527,11 @@ mod tests {
             "indistinct leg grounds:\n{}",
             failures.join("\n")
         );
+        near_selected.sort();
+        assert_eq!(
+            near_selected, SELECTED_TOO_NEAR,
+            "only the pinned themes leave the leg within reach of selected"
+        );
         assert!(
             fallbacks > 0,
             "no bundled theme needs the fallback — the pinned tokens changed"
@@ -515,33 +539,48 @@ mod tests {
     }
 
     /// The fallback's own contract, on grounds a theme could ship: a
-    /// stripe equal to the line ground, to hover or to the group ground
-    /// gives way to the faintest blend that clears, on light
+    /// stripe equal to the line ground, to hover, to selected or to the
+    /// group ground gives way to the faintest blend that clears, on light
     /// and dark, and in the direction away from the foreground when hover
-    /// sits too near the line ground for a tint between them.
+    /// sits too near the line ground for a tint between them. Where
+    /// selected leaves no room, it alone is let go.
     #[test]
     fn an_indistinct_or_loud_stripe_falls_back_to_the_faintest_clearing_tint() {
         let grey = |v: f32| Rgb { r: v, g: v, b: v };
-        let grounds = |line: f32, hover: f32, group: f32| TableGrounds {
+        let grounds = |line: f32, hover: f32, selected: f32, group: f32| TableGrounds {
             line: grey(line),
             hover: grey(hover),
+            selected: grey(selected),
             group: grey(group),
         };
         for (g, fg) in [
-            (grounds(1.0, 0.9, 0.93), grey(0.1)),
-            (grounds(0.12, 0.2, 0.18), grey(0.9)),
-            (grounds(0.12, 0.16, 0.3), grey(0.9)),
+            (grounds(1.0, 0.9, 0.85, 0.93), grey(0.1)),
+            (grounds(0.12, 0.2, 0.25, 0.18), grey(0.9)),
+            (grounds(0.12, 0.14, 0.3, 0.3), grey(0.9)),
         ] {
-            for stripe in [g.line, g.hover, g.group] {
+            for stripe in [g.line, g.hover, g.selected, g.group] {
                 let leg = leg_ground(stripe, &g, fg);
-                assert!(leg_ground_clears(leg, &g), "{leg:?} clears on {g:?}");
+                assert!(leg_ground_clears(leg, &g, true), "{leg:?} clears on {g:?}");
                 let r = contrast_ratio(leg, g.line);
                 assert!(r < LEG_TINT_RATIO + 0.02, "faint: {r:.3}:1 on {g:?}");
             }
         }
-        let g = grounds(1.0, 0.8, 0.75);
+        // Hover 1.13:1 off white, selected 1.07:1 on the same side: no
+        // tint clears all three, so selected is let go.
+        let g = grounds(1.0, 0.94, 0.965, 0.8);
+        let leg = leg_ground(g.line, &g, grey(0.1));
+        assert!(
+            !(1..=500).any(|i| leg_ground_clears(
+                over(to_hsla(grey(0.0)).opacity(i as f32 * 0.002), g.line),
+                &g,
+                true
+            )),
+            "fixture: nothing clears selected"
+        );
+        assert!(leg_ground_clears(leg, &g, false), "{leg:?} clears the rest");
+        let g = grounds(1.0, 0.8, 0.7, 0.75);
         let stripe = over(to_hsla(grey(0.0)).opacity(0.03), g.line);
-        assert!(leg_ground_clears(stripe, &g), "fixture clears");
+        assert!(leg_ground_clears(stripe, &g, true), "fixture clears");
         assert_eq!(
             leg_ground(stripe, &g, grey(0.1)),
             stripe,
