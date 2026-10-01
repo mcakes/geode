@@ -37,6 +37,10 @@ pub enum Tone {
     /// reporting a failed source, a blotter's query error. `theme.danger`
     /// floored the same way.
     DangerText,
+    /// Info-toned TEXT or glyph on the surface, no fill — a tile header's
+    /// visual-selection mode icon. `theme.info` floored the same way, so it
+    /// stays apart from the warning-toned edit icon beside it.
+    InfoText,
     /// A user-selected state with no hazard, such as a pinned grouping or a
     /// tile filter. Uses `secondary_foreground` on `secondary`, reserving
     /// warning colour for states that need attention. Text is adjusted only
@@ -86,6 +90,10 @@ pub fn chip_paint_on(theme: &Theme, tone: Tone, surface: Hsla) -> ChipPaint {
         Tone::DangerText => ChipPaint {
             fill: None,
             text: theme.danger,
+        },
+        Tone::InfoText => ChipPaint {
+            fill: None,
+            text: theme.info,
         },
         Tone::Neutral => ChipPaint {
             fill: Some(theme.secondary),
@@ -146,11 +154,12 @@ mod tests {
     use geode_core::colour::READABLE_RATIO;
     use gpui_component::ActiveTheme as _;
 
-    const TONES: [Tone; 6] = [
+    const TONES: [Tone; 7] = [
         Tone::Warning,
         Tone::Danger,
         Tone::WarningText,
         Tone::DangerText,
+        Tone::InfoText,
         Tone::Neutral,
         Tone::Active,
     ];
@@ -292,7 +301,7 @@ mod tests {
             let danger = chip_paint(theme, Tone::Danger);
             assert_eq!(danger.fill, Some(theme.danger.opacity(FILL_ALPHA)));
             assert_eq!(danger.text, theme.foreground);
-            for tone in [Tone::WarningText, Tone::DangerText] {
+            for tone in [Tone::WarningText, Tone::DangerText, Tone::InfoText] {
                 let text = chip_paint(theme, tone);
                 assert_eq!(text.fill, None);
                 assert!(is_readable(theme, &text));

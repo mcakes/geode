@@ -3980,3 +3980,26 @@ fn a_slot_chip_fits_inside_the_header(cx: &mut gpui::TestAppContext) {
         );
     }
 }
+
+/// The header's mode icon follows the key context's own mode: the series
+/// picker opened by `add` holds the keys (`insert`), so the edit icon shows
+/// until `cancel` (`esc` in insert) closes it. The tile has no selection,
+/// so never the visual icon.
+#[gpui::test]
+fn the_header_shows_the_edit_icon_while_a_field_holds_the_keys(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    assert_eq!(TILE, 7, "the selectors below name tile 7");
+    let shown = |h: &Harness, vcx: &mut gpui::VisualTestContext| {
+        h.draw(vcx);
+        (
+            vcx.debug_bounds("tile-mode-edit-7").is_some(),
+            vcx.debug_bounds("tile-mode-visual-7").is_some(),
+        )
+    };
+    assert_eq!(shown(&h, &mut vcx), (false, false), "normal: no cue");
+    h.dispatch(&mut vcx, "add", None);
+    assert_eq!(h.key_context_mode(&mut vcx), "insert", "fixture");
+    assert_eq!(shown(&h, &mut vcx), (true, false), "the picker types");
+    h.dispatch(&mut vcx, "cancel", None);
+    assert_eq!(shown(&h, &mut vcx), (false, false), "esc closed it");
+}

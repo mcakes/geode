@@ -75,7 +75,8 @@ has none of them.
   tones; which of a tile's notices shows is the tile's own precedence.
 - Every tile header is `geode_tile::header::frame`: 22 px at the design rem,
   the stack marker first, the module's own left side, then a right cluster in
-  a fixed order — status items, notices, source times, the health chip, `⋯`.
+  a fixed order — the mode icon, status items, notices, source times, the
+  health chip, `⋯`.
   Status items and notices shrink: each is one line, cut with an ellipsis
   when it does not fit, and together they take at most half the header
   (`TEXT_SHARE`); a cut notice shows its whole text in its tooltip. Source
@@ -89,6 +90,17 @@ has none of them.
   its reason, with `+N more` for other unhealthy sources. Clicking it opens
   the diagnostics page and never closes it; it has no key of its own — the
   page's own binding (`mod+d`) is the keyboard route.
+- The mode icon is a bare glyph, no fill, at the header's text size: a
+  pencil in the floored warning text tone while the tile is in edit mode, a
+  dashed selection square in the floored info text tone while it is in
+  visual mode, nothing in normal mode or while the action menu is up. Each
+  module reads it from the same `mode` its key context publishes (`insert`
+  is edit), so the icon and the keys cannot disagree: the pricer and market
+  data show both, the blotter only visual (it has no field), the timeseries
+  tile only edit (while its add, expression, dates or color popup holds the
+  keys; it has no selection). Its tooltip names the mode (`Editing`,
+  `Visual selection`) and that `esc` leaves it. Both colors clear 4.5:1
+  against the background on every bundled theme.
 
 ### Motion
 

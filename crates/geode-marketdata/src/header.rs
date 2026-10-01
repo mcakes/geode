@@ -20,7 +20,7 @@ use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::tips;
 use geode_tile::confirm::{self, Confirm};
-use geode_tile::header::{Cluster, HealthChip, MenuTrigger, TimeRun};
+use geode_tile::header::{Cluster, HealthChip, MenuTrigger, Mode, TimeRun};
 use geode_tile::notice::{self, Notice};
 use gpui::prelude::*;
 use gpui::{AnyElement, ElementId, Entity, FocusHandle, Hsla, SharedString, div, rems};
@@ -324,8 +324,9 @@ impl HeaderModel {
 /// the confirm prompt as cluster status; then the notice, the time, the
 /// health chip and `⋯` from the shared cluster. The attribute cursor and
 /// editor are passed separately from prepared values; `menu_open` keeps the
-/// action button's selected fill. A pending upload prompt is the confirm
-/// door's: it holds the keyboard and answers its keys.
+/// action button's selected fill; `mode` (the key context's own) paints the
+/// cluster's mode icon. A pending upload prompt is the confirm door's: it
+/// holds the keyboard and answers its keys.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render(
     h: &HeaderModel,
@@ -342,6 +343,7 @@ pub(crate) fn render(
     state_tip_selector: SharedString,
     stack: Option<&StackHandle>,
     health: Option<&HealthChip>,
+    mode: Mode,
 ) -> impl IntoElement {
     let muted = theme.muted_foreground;
     let mut left = h_flex().items_center().gap_3();
@@ -517,6 +519,7 @@ pub(crate) fn render(
     // prepared), the health chip, `⋯`. The trigger toggles in the capture
     // phase and lets the press bubble on so the shell still focuses the tile.
     let mut cluster = Cluster::new(TileId(tile_id));
+    cluster.mode = mode;
     cluster.status = status;
     cluster.notices.extend(h.notice.clone());
     cluster.times.extend(h.time.clone().map(|label| TimeRun {

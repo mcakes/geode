@@ -15164,14 +15164,20 @@ run_mutation "blotter motion: the tile routes the shared motions" \
 # publishing the flag takes no motion key at all.
 run_mutation "blotter motion: the key context publishes grid" \
   crates/geode-blotter/src/tile.rs \
-  'KeyContext::new("blotter").grid()' \
-  'KeyContext::new("blotter")' \
+  '        let mut ctx = KeyContext::new("blotter")
+            .grid()
+            .pair' \
+  '        let mut ctx = KeyContext::new("blotter")
+            .pair' \
   geode-blotter the_key_context_publishes_the_grid_flag
 
 run_mutation "motion e2e: a shared override reaches the blotter" \
   crates/geode-blotter/src/tile.rs \
-  'KeyContext::new("blotter").grid()' \
-  'KeyContext::new("blotter")' \
+  '        let mut ctx = KeyContext::new("blotter")
+            .grid()
+            .pair' \
+  '        let mut ctx = KeyContext::new("blotter")
+            .pair' \
   geode-app a_shared_motion_override_reaches_each_grid_tile
 
 # An old user binding on a retired id must bind its shared successor, not
@@ -27399,6 +27405,57 @@ run_mutation "edit caret: pricer visual binds I to end placement" \
 [bindings.keys]
 "shift+i" = "pricer::edit"' \
   geode-pricer edit_keys_place_the_caret_at_the_requested_end
+
+# The header's mode icon: edit paints the edit icon, visual its own.
+run_mutation "tile header: edit mode paints the edit icon" \
+  crates/geode-tile/src/header.rs \
+  '        Mode::Edit => (IconName::Pencil, "tile-mode-edit", "tip-tile-mode-edit"),' \
+  '        Mode::Edit => return None,' \
+  geode-tile the_mode_icon_paints_per_mode_ahead_of_the_cluster
+
+run_mutation "tile header: visual mode paints the visual icon, not the edit one" \
+  crates/geode-tile/src/header.rs \
+  '            "tile-mode-visual",
+            "tip-tile-mode-visual",' \
+  '            "tile-mode-edit",
+            "tip-tile-mode-visual",' \
+  geode-tile the_mode_icon_paints_per_mode_ahead_of_the_cluster
+
+# A menu is its own surface: reading it as edit would show a false cue.
+run_mutation "tile header: insert alone reads as edit" \
+  crates/geode-tile/src/header.rs \
+  '            "insert" => Mode::Edit,' \
+  '            "insert" | "menu" => Mode::Edit,' \
+  geode-tile the_header_reads_insert_as_edit_and_visual_as_visual
+
+# The icon leads the cluster: after the status it would move with its text.
+run_mutation "tile header: the mode icon paints ahead of the cluster text" \
+  crates/geode-tile/src/header.rs \
+  '        .children(mode)
+        .children(text)' \
+  '        .children(text)
+        .children(mode)' \
+  geode-tile the_mode_icon_paints_per_mode_ahead_of_the_cluster
+
+# The raw tokens, unfloored: faint on the themes that ship them faint.
+run_mutation "tile header: the mode icon colors are floored" \
+  crates/geode-tile/src/header.rs \
+  '    Some(chip_paint(theme, tone).text)' \
+  '    Some(if tone == chip::Tone::InfoText { theme.info } else { theme.warning })' \
+  geode-tile the_mode_icon_colors_clear_the_floor_on_every_bundled_theme
+
+# Module wiring: the header reads the key context's own mode.
+run_mutation "marketdata header: the mode icon reads the key context's mode" \
+  crates/geode-marketdata/src/tile.rs \
+  '            geode_tile::header::Mode::from_key_mode(self.mode()),' \
+  '            geode_tile::header::Mode::Normal,' \
+  geode-marketdata the_header_shows_the_mode_icon_while_editing_or_selecting
+
+run_mutation "pricer header: the mode icon reads the key context's mode" \
+  crates/geode-pricer/src/tile.rs \
+  '                mode: geode_tile::header::Mode::from_key_mode(self.mode()),' \
+  '                mode: geode_tile::header::Mode::Normal,' \
+  geode-pricer the_header_shows_the_mode_icon_while_editing_or_selecting
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

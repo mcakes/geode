@@ -154,7 +154,9 @@ pub fn tip_key(
 /// The content: title, then the chord as `Kbd` chips (one per
 /// keystroke of a sequence), then the detail line, muted.
 /// Selectors: `{selector}` on the root, `{selector}-title` on the title,
-/// `{selector}-chord-{ctrl+k}` on each chip — what the hover tests read.
+/// `{selector}-chord-{ctrl+k}` on each chip, `{selector}-detail` on the
+/// detail line — what the hover tests read. A backtick-quoted key in the
+/// detail paints as a chip (`shell::kbd::marked`).
 pub(crate) fn render_tip(model: &TipModel, selector: SharedString, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let chord_row = model.chord.as_ref().map(|keys| {
@@ -194,7 +196,19 @@ pub(crate) fn render_tip(model: &TipModel, selector: SharedString, cx: &App) -> 
                 .when_some(chord_row, |el, row| el.child(row)),
         )
         .when_some(model.detail.clone(), |el, d| {
-            el.child(div().text_xs().text_color(theme.muted_foreground).child(d))
+            // A detail naming keys in backticks paints them as chips.
+            let line = div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .debug_selector({
+                    let selector = selector.clone();
+                    move || format!("{selector}-detail")
+                });
+            el.child(if d.contains('`') {
+                line.child(crate::shell::kbd::marked(&d))
+            } else {
+                line.child(d)
+            })
         })
         .into_any_element()
 }

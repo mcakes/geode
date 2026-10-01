@@ -386,17 +386,25 @@ impl TimeseriesTile {
 
     // ---- what the shell reads ----------------------------------------
 
+    /// The key context's `mode`, and the header's mode icon read from it:
+    /// `insert` while a popup with a field (add, expression, dates, color)
+    /// holds the keys, `normal` otherwise. The tile has no selection.
+    fn mode(&self) -> &'static str {
+        if self.popup.as_ref().is_some_and(Popup::is_insert) {
+            "insert"
+        } else {
+            "normal"
+        }
+    }
+
     /// Add, expression, dates-editor, and color editors use insert routing.
     /// Fieldless series/menu lists keep normal mode with their popup pair, and a
     /// menu adds a `menu` pair naming its kind. Actual focus ownership is checked
     /// separately, including color-picker descendants.
     pub fn key_context(&self) -> KeyContext {
-        let mode = if self.popup.as_ref().is_some_and(Popup::is_insert) {
-            "insert"
-        } else {
-            "normal"
-        };
-        let mut ctx = KeyContext::new("timeseries").pair("mode", mode).counts();
+        let mut ctx = KeyContext::new("timeseries")
+            .pair("mode", self.mode())
+            .counts();
         // The series list and the menus hold no field and take j/k: the
         // shared menu steps reach them through `tilelist`. The tile never
         // publishes `grid`, so no grid motion shadows its own h/l or g/G.
@@ -1188,6 +1196,7 @@ impl Render for TimeseriesTile {
                 },
                 self.menu_selector.clone(),
                 self.health.chip(),
+                geode_tile::header::Mode::from_key_mode(self.mode()),
             ))
             .when_some(popup, |el, popup_el| {
                 el.child(

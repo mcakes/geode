@@ -1866,3 +1866,35 @@ fn a_shift_press_with_the_entry_bar_open_closes_it_and_selects(cx: &mut gpui::Te
         "y acts on the block"
     );
 }
+
+/// The header's mode icon follows the key context's own mode: the cell
+/// editor opened by `edit` (`i`) shows the edit icon until `cancel` (`esc`
+/// in insert); `visual_rows` (`V`) shows the visual icon until `escape`
+/// clears the selection. Each arrives by the id the keys send.
+#[gpui::test]
+fn the_header_shows_the_mode_icon_while_editing_or_selecting(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    assert_eq!(TILE, 5, "the selectors below name tile 5");
+    let shown = |h: &Harness, vcx: &mut VisualTestContext| {
+        h.draw(vcx);
+        (
+            vcx.debug_bounds("tile-mode-edit-5").is_some(),
+            vcx.debug_bounds("tile-mode-visual-5").is_some(),
+        )
+    };
+    assert_eq!(shown(&h, &mut vcx), (false, false), "normal: no cue");
+    goto_column(&h, &mut vcx, "strike");
+    h.dispatch(&mut vcx, "edit", None);
+    assert_eq!(h.mode(&mut vcx), "insert", "fixture: the editor is open");
+    assert_eq!(shown(&h, &mut vcx), (true, false), "editing");
+    h.dispatch(&mut vcx, "cancel", None);
+    assert_eq!(shown(&h, &mut vcx), (false, false), "esc left the editor");
+    h.dispatch(&mut vcx, "visual_rows", None);
+    assert_eq!(shown(&h, &mut vcx), (false, true), "selecting");
+    h.dispatch(&mut vcx, "escape", None);
+    assert_eq!(
+        shown(&h, &mut vcx),
+        (false, false),
+        "esc cleared the selection"
+    );
+}

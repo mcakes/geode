@@ -18,10 +18,16 @@ gpui_kit_assets::icon_assets!(
     [
         // The scope bar's save chip and the frame readout's workspace pin
         // glyph (`shell::toolbar`).
-        Save, Pin,
+        Save,
+        Pin,
         // The diagnostics page's sidebar button (`Activity`) and its log
         // detail copy button (`Copy`, `geode_diagnostics::page_chrome`).
-        Activity, Copy,
+        Activity,
+        Copy,
+        // A tile header's mode icon: edit (`Pencil`) and visual selection
+        // (`SquareDashedMousePointer`, `geode_tile::header`).
+        Pencil,
+        SquareDashedMousePointer,
     ]
 );
 
@@ -59,6 +65,8 @@ mod tests {
             IconName::Pin,
             IconName::Activity,
             IconName::Copy,
+            IconName::Pencil,
+            IconName::SquareDashedMousePointer,
         ] {
             let path = icon.path();
             let bytes = AppAssets.load(&path).unwrap();

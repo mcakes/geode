@@ -1,7 +1,8 @@
 //! The header strip every tile paints: one height, the shared stack marker
 //! first, the module's own left side taking the free width (clipped when it
-//! runs out), and a right cluster in a fixed order — status, notices, times,
-//! health, `⋯`. Status and notices are text of any length: they shrink, one
+//! runs out), and a right cluster in a fixed order — the mode icon, status,
+//! notices, times, health, `⋯`. The mode icon shows only while the tile is
+//! in edit or visual mode ([`Mode`]). Status and notices are text of any length: they shrink, one
 //! line each and cut with an ellipsis, within at most [`TEXT_SHARE`] of the
 //! header; times, health and `⋯` never shrink. The frame formats nothing: every
 //! string arrives prepared, and a time run's stale flag is the only thing a
@@ -27,7 +28,8 @@ use gpui::{
     AnyElement, App, Div, ElementId, Entity, Hsla, MouseButton, SharedString, Stateful, Window,
     div, relative,
 };
-use gpui_component::{Theme, h_flex};
+use gpui_component::{Icon, Sizable as _, Theme, h_flex};
+use gpui_kit_assets::IconName;
 
 use crate::notice::{self, Notice};
 
@@ -48,6 +50,56 @@ const NOTICE_TIP: &str = "tip-tile-notice";
 /// The page's own action, named in the chip's tooltip: its binding is the
 /// chip's keyboard route. The chip has no key of its own.
 const DIAGNOSTICS_ACTION: &str = "page::toggle_diagnostics";
+
+/// What the tile's keys are doing, as its header shows it: an icon at the
+/// head of the cluster while a field holds the keys ([`Mode::Edit`]) or a
+/// selection is live ([`Mode::Visual`]), nothing otherwise. A module derives
+/// it from the same `mode` its key context publishes
+/// ([`Mode::from_key_mode`]), so the cue cannot disagree with the keys.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Mode {
+    #[default]
+    Normal,
+    Edit,
+    Visual,
+}
+
+impl Mode {
+    /// The header's reading of a key context's `mode` value: `insert` is
+    /// [`Mode::Edit`], `visual` is [`Mode::Visual`]; `normal` and `menu`
+    /// (an open action menu is its own surface) show nothing.
+    pub fn from_key_mode(mode: &str) -> Mode {
+        match mode {
+            "insert" => Mode::Edit,
+            "visual" => Mode::Visual,
+            _ => Mode::Normal,
+        }
+    }
+}
+
+/// The mode tooltip's detail: the key that leaves edit and visual alike.
+pub const LEAVE_HINT: &str = "`esc` leaves";
+
+/// The mode tooltip's title and detail, `None` in normal mode.
+pub fn mode_tip(mode: Mode) -> Option<(&'static str, &'static str)> {
+    match mode {
+        Mode::Normal => None,
+        Mode::Edit => Some(("Editing", LEAVE_HINT)),
+        Mode::Visual => Some(("Visual selection", LEAVE_HINT)),
+    }
+}
+
+/// The mode icon's color, `None` in normal mode: edit the floored warning
+/// text tone, visual the floored info text tone — two hues, each clearing
+/// the readable floor against the header's ground on every bundled theme.
+pub fn mode_color(mode: Mode, theme: &Theme) -> Option<Hsla> {
+    let tone = match mode {
+        Mode::Normal => return None,
+        Mode::Edit => chip::Tone::WarningText,
+        Mode::Visual => chip::Tone::InfoText,
+    };
+    Some(chip_paint(theme, tone).text)
+}
 
 /// One source time in the cluster: its label prepared, `stale` decided per
 /// frame. A module that says `stale` in words prepares `stale_label`; one
@@ -150,6 +202,8 @@ pub struct MenuTrigger {
 /// The right-hand cluster, assembled per paint from prepared parts.
 pub struct Cluster<'a> {
     pub tile: TileId,
+    /// The tile's mode, painted as an icon ahead of everything else.
+    pub mode: Mode,
     /// What only one module has (the pricer's prompt and counts, market-data's
     /// state), built each paint from prepared strings.
     pub status: Vec<AnyElement>,
@@ -165,6 +219,7 @@ impl Cluster<'_> {
     pub fn new(tile: TileId) -> Self {
         Cluster {
             tile,
+            mode: Mode::Normal,
             status: Vec::new(),
             notices: Vec::new(),
             times: Vec::new(),
@@ -184,6 +239,7 @@ pub fn frame(
     theme: &Theme,
 ) -> Div {
     let tile = cluster.tile.0;
+    let mode = mode_icon(cluster.mode, tile, theme);
     let (text, tail) = paint_cluster(cluster, theme);
     // The left side has no basis of its own: it takes what the cluster
     // leaves and clips. The cluster's text takes its natural width up to
@@ -208,6 +264,7 @@ pub fn frame(
                 .debug_selector(move || format!("tile-header-left-{tile}"))
                 .child(left),
         )
+        .children(mode)
         .children(text)
         .child(tail.flex_none())
 }
@@ -251,6 +308,41 @@ fn paint_cluster(c: Cluster<'_>, theme: &Theme) -> (Option<Stateful<Div>>, Div) 
     row = row.children(c.health.map(|h| health_chip(h, theme)));
     row = row.children(c.menu.map(|m| menu_button(m, theme)));
     (text, row)
+}
+
+/// The mode icon: a bare glyph in its mode's color, no fill, at the
+/// header's text size, never shrinking. Ids and selectors derive from the
+/// tile; the tooltip selector is shared, as only one tooltip shows at once.
+fn mode_icon(mode: Mode, tile: u64, theme: &Theme) -> Option<Stateful<Div>> {
+    let (icon, name, tip) = match mode {
+        Mode::Normal => return None,
+        Mode::Edit => (IconName::Pencil, "tile-mode-edit", "tip-tile-mode-edit"),
+        Mode::Visual => (
+            IconName::SquareDashedMousePointer,
+            "tile-mode-visual",
+            "tip-tile-mode-visual",
+        ),
+    };
+    let (title, detail) = mode_tip(mode)?;
+    let color = mode_color(mode, theme)?;
+    Some(
+        div()
+            .id(ElementId::NamedInteger(
+                SharedString::new_static(name),
+                tile,
+            ))
+            .flex_none()
+            .flex()
+            .items_center()
+            .debug_selector(move || format!("{name}-{tile}"))
+            .child(Icon::new(icon).small().text_color(color))
+            .tooltip(tips::tip_with(
+                SharedString::new_static(tip),
+                SharedString::new_static(title),
+                None,
+                Some(SharedString::new_static(detail)),
+            )),
+    )
 }
 
 fn health_chip(h: &HealthChip, theme: &Theme) -> Stateful<Div> {
@@ -540,6 +632,7 @@ mod tests {
         /// overflow a narrow header.
         left_runs: usize,
         notice: Notice,
+        mode: Mode,
     }
 
     fn plain_time() -> TimeRun {
@@ -555,6 +648,7 @@ mod tests {
             let presses = self.presses.clone();
             let parent = self.parent.clone();
             let mut cluster = Cluster::new(TILE);
+            cluster.mode = self.mode;
             cluster.status.push(
                 div()
                     .debug_selector(|| "strip-status".into())
@@ -612,6 +706,7 @@ mod tests {
                 times: vec![plain_time()],
                 left_runs: 0,
                 notice: Notice::warning("not saved"),
+                mode: Mode::Normal,
             }
         });
         (view, diagnostics, presses, vcx)
@@ -850,5 +945,118 @@ mod tests {
             left.size.width > strip.size.width * 0.1,
             "the notice collapsed the left side: {left:?} of {strip:?}"
         );
+    }
+
+    #[test]
+    fn the_header_reads_insert_as_edit_and_visual_as_visual() {
+        assert_eq!(Mode::from_key_mode("insert"), Mode::Edit);
+        assert_eq!(Mode::from_key_mode("visual"), Mode::Visual);
+        assert_eq!(Mode::from_key_mode("normal"), Mode::Normal);
+        assert_eq!(
+            Mode::from_key_mode("menu"),
+            Mode::Normal,
+            "an open action menu is its own surface: no cue"
+        );
+    }
+
+    fn set_mode(view: &Entity<Strip>, vcx: &mut VisualTestContext, mode: Mode) {
+        view.update(vcx, |s, cx| {
+            s.mode = mode;
+            cx.notify();
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+    }
+
+    /// Edit paints the edit icon, visual the visual icon — each alone —
+    /// and normal paints neither. The icon leads the cluster: it sits
+    /// before the status, which leads everything else.
+    #[gpui::test]
+    fn the_mode_icon_paints_per_mode_ahead_of_the_cluster(cx: &mut TestAppContext) {
+        let (view, _, _, vcx) = open_strip(cx);
+        let painted = |vcx: &mut VisualTestContext| {
+            (
+                vcx.debug_bounds("tile-mode-edit-3").is_some(),
+                vcx.debug_bounds("tile-mode-visual-3").is_some(),
+            )
+        };
+        set_mode(&view, vcx, Mode::Normal);
+        assert_eq!(painted(vcx), (false, false), "normal: no cue");
+        set_mode(&view, vcx, Mode::Edit);
+        assert_eq!(painted(vcx), (true, false), "edit: the edit icon alone");
+        let order =
+            ["tile-header-left-3", "tile-mode-edit-3", "strip-status"].map(|s| centre(vcx, s).x);
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "{order:?}");
+        set_mode(&view, vcx, Mode::Visual);
+        assert_eq!(painted(vcx), (false, true), "visual: the visual icon alone");
+        let icon = centre(vcx, "tile-mode-visual-3").x;
+        let status = centre(vcx, "strip-status").x;
+        assert!(icon < status, "{icon:?} vs {status:?}");
+    }
+
+    /// Hovering the icon names the mode and the key that leaves it.
+    #[gpui::test]
+    fn hovering_the_mode_icon_names_the_mode(cx: &mut TestAppContext) {
+        let (view, _, _, vcx) = open_strip(cx);
+        set_mode(&view, vcx, Mode::Visual);
+        let at = centre(vcx, "tile-mode-visual-3");
+        vcx.simulate_mouse_move(at, MouseButton::Left, gpui::Modifiers::none());
+        vcx.executor()
+            .advance_clock(std::time::Duration::from_millis(600));
+        vcx.run_until_parked();
+        assert!(vcx.debug_bounds("tip-tile-mode-visual-title").is_some());
+        assert!(vcx.debug_bounds("tip-tile-mode-visual-detail").is_some());
+        assert_eq!(
+            mode_tip(Mode::Visual),
+            Some(("Visual selection", LEAVE_HINT))
+        );
+        assert_eq!(mode_tip(Mode::Edit), Some(("Editing", LEAVE_HINT)));
+        assert_eq!(LEAVE_HINT, "`esc` leaves");
+    }
+
+    /// Each icon takes its tone's floored colour — edit the warning text
+    /// tone, visual the info text tone — and both clear the readable floor
+    /// against the header's ground on every bundled theme.
+    #[gpui::test]
+    fn the_mode_icon_colors_clear_the_floor_on_every_bundled_theme(cx: &mut TestAppContext) {
+        use geode_core::colour::{TEXT_READABLE_RATIO, contrast_ratio};
+        use geode_shell::shell::colours::{over, to_rgb};
+        cx.update(gpui_component::init);
+        let (service, _) = geode_shell::theme::load_bundled();
+        let mut worst: Option<(f32, String)> = None;
+        let mut failures = Vec::new();
+        let mut themes = 0;
+        for name in service.names() {
+            let entry = service.resolve(&name).unwrap().clone();
+            cx.update(|cx| {
+                Theme::global_mut(cx).apply_config(&entry);
+                let theme = cx.theme();
+                themes += 1;
+                assert_eq!(mode_color(Mode::Normal, theme), None);
+                for (mode, tone) in [
+                    (Mode::Edit, chip::Tone::WarningText),
+                    (Mode::Visual, chip::Tone::InfoText),
+                ] {
+                    let color = mode_color(mode, theme).expect("a mode has a color");
+                    assert_eq!(color, chip_paint(theme, tone).text, "{name}: {mode:?}");
+                    let ground = to_rgb(theme.background);
+                    let ratio = contrast_ratio(over(color, ground), ground);
+                    if ratio < TEXT_READABLE_RATIO {
+                        failures.push(format!("{name}: {mode:?} at {ratio:.2}:1"));
+                    }
+                    if worst.as_ref().is_none_or(|(w, _)| ratio < *w) {
+                        worst = Some((ratio, format!("{name} {mode:?}")));
+                    }
+                }
+            });
+        }
+        assert!(themes >= 40, "the sweep saw {themes} themes");
+        assert!(
+            failures.is_empty(),
+            "faint mode icons:\n{}",
+            failures.join("\n")
+        );
+        eprintln!("worst mode icon contrast: {worst:?}");
     }
 }
