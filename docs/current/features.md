@@ -170,6 +170,10 @@ default widths. Each tile runs one method for both doors.
   and the pricer measure the rows in their windows, as the blotter does: the
   rows the table last asked to see. A wider value in a row that was never on
   screen, or in a collapsed package's legs, does not widen its column.
+- **One-row tiles.** All three grids paint only the rows their window holds,
+  and the table never reports a visible range of one row. A tile squeezed to
+  exactly one row's height and scrolled away from its last window can paint
+  that row blank until a scroll or a data change refills it.
 - **Nothing to fit.** When there are no rows to measure, `:autosize` refuses
   with "nothing loaded to fit" and keeps the widths it already has. This
   covers a blotter with no snapshot or an empty result, a panel with no

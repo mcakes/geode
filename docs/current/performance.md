@@ -79,7 +79,7 @@ the measurement log for fixture and hardware details.
 | Timeseries chart model | 500,000 buckets × four slots | 259 µs |
 | Blotter fully expanded flatten | 720,881 result nodes | 1.18 ms |
 | Blotter selection summary | 720,881 rows, every measure column | 1.20 ms |
-| Market-data pivot build | 20 × 30 CVI grid | 285 µs |
+| Market-data pivot build | 20 × 30 CVI grid: the `MatrixIndex` | 120 µs |
 | Market-data flat build | 10,000 × five values: the `MatrixIndex` (labels and row facts, no cell text) | 586 µs |
 | Market-data window fill | 40 × five values | 17.7 µs |
 | Market-data cell patch | 10,000 × five values: one-cell window refill | 105 ns |
