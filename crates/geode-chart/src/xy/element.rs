@@ -47,7 +47,7 @@ use crate::core::view::View;
 use crate::core::{DASH, GAP, Rect, TICK_GAP, design_px};
 use crate::paint::{
     Ink, LINE_WIDTH, MAX_STROKE_SEGMENTS, Scratch, SideAxis, axis_index, axis_of, bounds_of,
-    decimated_points, note_chrome_rebuild, note_rebuild, paint_grid, paint_x_axis, paint_y_axis,
+    decimated_points, note_chrome_rebuild, note_rebuild, paint_pane_frame, paint_x_axis,
     pane_index, side_scale_of, stroke_points, stroke_segments, y_tick_hint,
 };
 
@@ -292,23 +292,11 @@ impl XyElement {
         cx: &mut App,
     ) {
         let plot = rects.plot;
-        if plot.w <= 0.0 || plot.h <= 0.0 {
-            return;
-        }
         let bounds = ctx.bounds;
         let left = &ctx.sides[axis_index(axis_of(pane, Side::Left))];
         let right = &ctx.sides[axis_index(axis_of(pane, Side::Right))];
-
-        // One grid, not two overlaid ones: the left side's y ticks when the
-        // pane has a left scale, else the right's.
-        let grid = if left.scale.is_some() { left } else { right };
-        paint_grid(plot, ctx.x_ticks, grid, bounds, ctx.ink, window);
-
-        if let (Some(r), Some(s)) = (rects.left_axis, left.scale) {
-            paint_y_axis(r, &s, left, Side::Left, bounds, ctx.ink, window, cx);
-        }
-        if let (Some(r), Some(s)) = (rects.right_axis, right.scale) {
-            paint_y_axis(r, &s, right, Side::Right, bounds, ctx.ink, window, cx);
+        if !paint_pane_frame(rects, ctx.x_ticks, left, right, bounds, ctx.ink, window, cx) {
+            return;
         }
 
         let model = &*self.model;

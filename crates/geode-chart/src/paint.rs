@@ -13,6 +13,7 @@ use gpui_component::plot::{AxisLabelSide, AxisText, Grid, PlotAxis};
 
 use crate::core::axis::{Axis, Pane, Side};
 use crate::core::decimate::decimate;
+use crate::core::layout::PaneRects;
 use crate::core::marks::Segment;
 use crate::core::scale::LinearScale;
 use crate::core::time::Tick;
@@ -185,6 +186,42 @@ pub(crate) fn paint_y_axis(
         }))
         .stroke(ink.line)
         .paint(&bounds_of(r, bounds), window, cx);
+}
+
+/// A pane's frame, under whatever the element paints in it: the grid and
+/// the y axis of each side that has both a column and a scale. Returns
+/// whether the pane has area; with none, nothing is painted and the caller
+/// paints nothing either.
+///
+/// The grid takes the x ticks of the shared axis and the y ticks of
+/// whichever side the pane has, the left when it has both: one grid, not
+/// two overlaid ones. A left axis line sits at the right edge of its rect
+/// (the plot's left edge) with its labels right-aligned inside it; a right
+/// axis line at the left edge of its own rect, labels left.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_pane_frame(
+    rects: &PaneRects,
+    x_ticks: &[Tick],
+    left: &SideAxis,
+    right: &SideAxis,
+    bounds: Bounds<Pixels>,
+    ink: Ink,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    let plot = rects.plot;
+    if plot.w <= 0.0 || plot.h <= 0.0 {
+        return false;
+    }
+    let grid = if left.scale.is_some() { left } else { right };
+    paint_grid(plot, x_ticks, grid, bounds, ink, window);
+    if let (Some(r), Some(s)) = (rects.left_axis, left.scale) {
+        paint_y_axis(r, &s, left, Side::Left, bounds, ink, window, cx);
+    }
+    if let (Some(r), Some(s)) = (rects.right_axis, right.scale) {
+        paint_y_axis(r, &s, right, Side::Right, bounds, ink, window, cx);
+    }
+    true
 }
 
 /// The one shared x axis, under the lowest pane. A tick's `x` is in layout

@@ -47,8 +47,8 @@ use crate::core::view::View;
 use crate::core::{DASH, GAP, MAX_DENSITY_QUADS, Rect, TICK_GAP, design_px};
 use crate::paint::{
     Ink, Scratch, SideAxis, axis_index, axis_of, bounds_of, dashed_horizontal, inside,
-    note_chrome_rebuild, note_rebuild, paint_grid, paint_x_axis, paint_y_axis, pane_index,
-    side_scale_of, stroke_polyline, y_tick_hint,
+    note_chrome_rebuild, note_rebuild, paint_pane_frame, paint_x_axis, pane_index, side_scale_of,
+    stroke_polyline, y_tick_hint,
 };
 
 thread_local! {
@@ -229,27 +229,11 @@ impl ChartElement {
         cx: &mut App,
     ) {
         let plot = rects.plot;
-        if plot.w <= 0.0 || plot.h <= 0.0 {
-            return;
-        }
         let bounds = ctx.bounds;
         let left = &ctx.sides[axis_index(axis_of(pane, Side::Left))];
         let right = &ctx.sides[axis_index(axis_of(pane, Side::Right))];
-
-        // Grid: the x ticks of the shared axis, the y ticks of whichever
-        // side the pane has (left wins when it has both — one grid, not
-        // two overlaid ones).
-        let grid = if left.scale.is_some() { left } else { right };
-        paint_grid(plot, ctx.x_ticks, grid, bounds, ctx.ink, window);
-
-        // Axes. A left axis line sits at the RIGHT edge of its rect (the
-        // plot's left edge) with its labels right-aligned inside it; a
-        // right axis line at the left edge of its own rect, labels left.
-        if let (Some(r), Some(s)) = (rects.left_axis, left.scale) {
-            paint_y_axis(r, &s, left, Side::Left, bounds, ctx.ink, window, cx);
-        }
-        if let (Some(r), Some(s)) = (rects.right_axis, right.scale) {
-            paint_y_axis(r, &s, right, Side::Right, bounds, ctx.ink, window, cx);
+        if !paint_pane_frame(rects, ctx.x_ticks, left, right, bounds, ctx.ink, window, cx) {
+            return;
         }
 
         let model = &*self.model;
