@@ -19017,10 +19017,31 @@ run_mutation "chart kit: a sub-pixel period is solid" \
 # length is a degenerate segment in the stroke path.
 run_mutation "chart kit: a rangeless point has no bar" \
   crates/geode-chart/src/core/marks.rs \
-  '        if lo[i].is_finite() && hi[i].is_finite() && lo[i] != hi[i] {' \
-  '        if lo[i].is_finite() && hi[i].is_finite() {' \
+  '        if let Some((from, to)) = bar.filter(|(from, to)| from != to) {' \
+  '        if let Some((from, to)) = bar {' \
   geode-chart \
   a_point_with_no_range_is_a_diamond_alone
+
+# A quote with one side missing runs its bar from the mid to the end
+# that is there. Drawn as a diamond alone it looks like a quote with no
+# spread.
+run_mutation "chart kit: a one-sided quote paints a half bar" \
+  crates/geode-chart/src/core/marks.rs \
+  '            (true, false) if m.is_finite() => Some((m, l)),
+            (false, true) if m.is_finite() => Some((m, h)),' \
+  '            (true, false) | (false, true) => None,' \
+  geode-chart \
+  a_one_sided_quote_is_a_half_bar_from_its_mid
+
+# A half bar runs from the mid. An end with no mid and no other end has
+# nothing to run to: unguarded, its bar carries a NaN into the stroke
+# path.
+run_mutation "chart kit: a lone end with no mid has no bar" \
+  crates/geode-chart/src/core/marks.rs \
+  '            (true, false) if m.is_finite() => Some((m, l)),' \
+  '            (true, false) => Some((m, l)),' \
+  geode-chart \
+  a_lone_end_at_the_mid_or_without_a_mid_has_no_bar
 
 # A point with no mid has no diamond; the rest of the slot still paints.
 # Unguarded, its four edges carry a NaN into the stroke path.
@@ -19263,14 +19284,28 @@ run_mutation "chart xy: a point is read only near one" \
 # drawn.
 run_mutation "chart xy: a missing mid still reads its range" \
   crates/geode-chart/src/xy/element.rs \
-  '            } else {
-                NONE.to_string()
-            };' \
-  '            } else {
-                return NONE.to_string();
-            };' \
+  '            if !paints(m, l, h) {' \
+  '            if !m.is_finite() {' \
   geode-chart \
   a_point_with_a_range_and_no_mid_reads_its_range
+
+# A quote with one side missing reads a dash in that side's place. Read
+# as its mid alone it passes for a quote with no spread.
+run_mutation "chart xy: a one-sided quote reads its missing side as a dash" \
+  crates/geode-chart/src/xy/element.rs \
+  '            if has_range(l, h) || one_sided {' \
+  '            if has_range(l, h) {' \
+  geode-chart \
+  a_one_sided_quote_reads_a_dash_for_its_missing_side
+
+# A point with no mark reads a bare dash. Read anyway, an end with no
+# mid shows a value where nothing is drawn.
+run_mutation "chart xy: a point that paints nothing reads a dash" \
+  crates/geode-chart/src/xy/element.rs \
+  '            if !paints(m, l, h) {' \
+  '            if false {' \
+  geode-chart \
+  a_one_sided_quote_reads_a_dash_for_its_missing_side
 
 # A delta title is finer than a tick label: one decimal at least.
 run_mutation "chart xy: a delta title reads one decimal" \
@@ -19336,8 +19371,8 @@ run_mutation "chart xy: the nearest quote wins across slots" \
 # to, and it does not shadow a painted neighbour within the radius.
 run_mutation "chart xy: a snap candidate must paint" \
   crates/geode-chart/src/xy/element.rs \
-  '        let paints = |(i, _): &(usize, f32)| mid[*i].is_finite() || has_range(lo[*i], hi[*i]);' \
-  '        let paints = |(i, _): &(usize, f32)| mid[*i].is_finite() || has_range(lo[*i], hi[*i]) || true;' \
+  '        let painted = |(i, _): &(usize, f32)| paints(mid[*i], lo[*i], hi[*i]);' \
+  '        let painted = |_: &(usize, f32)| true;' \
   geode-chart \
   a_point_that_paints_nothing_is_not_a_snap_candidate
 
