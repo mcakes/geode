@@ -284,9 +284,6 @@ pub(crate) fn stroke_points(pts: &[Point], width: f32) -> Option<Path<Pixels>> {
 }
 
 /// One stroke path over independent segments.
-// No caller until the xy element paints its dashed lines and point marks;
-// the allow goes when it does.
-#[allow(dead_code)]
 pub(crate) fn stroke_segments(segments: &[Segment], width: f32) -> Option<Path<Pixels>> {
     if segments.is_empty() {
         return None;
