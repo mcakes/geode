@@ -18891,6 +18891,30 @@ run_mutation "chart kit: a zero-span view has no ticks" \
   geode-chart \
   a_zero_span_view_maps_to_the_plot_edge_and_has_no_ticks
 
+# A narrow plot asks for a step as wide as its view, which can have one
+# multiple in the view or none. The step goes down the 1-2-5 ladder until
+# two fall in it; without that an axis shows one label, or no label.
+run_mutation "chart kit: a narrow axis keeps two labels" \
+  crates/geode-chart/src/core/linear.rs \
+  '            if values.len() >= MIN_X_TICKS {
+                break;
+            }' \
+  '            if true {
+                break;
+            }' \
+  geode-chart \
+  a_view_no_tick_of_the_first_step_falls_in_still_has_two_labels
+
+# Ticks from a finer step are labelled with that step's decimals. At the
+# first step's decimals two of them round to one label.
+run_mutation "chart kit: a finer step labels with its own decimals" \
+  crates/geode-chart/src/core/linear.rs \
+  '            step = finer;
+            axis.ticks_at(step, &mut values);' \
+  '            axis.ticks_at(finer, &mut values);' \
+  geode-chart \
+  a_finer_step_labels_with_its_own_decimals
+
 # A delta axis labels the trader's ladder when three or more rungs fit.
 # If the ladder never applies, the axis reads 1-2-5 steps of delta in place
 # of the rungs a trader looks for.
