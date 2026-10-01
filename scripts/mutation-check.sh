@@ -25916,8 +25916,8 @@ run_mutation "pricer scope: a refusal keeps the last narrowing" \
 # under a row whose legs are partly hidden is a plausible wrong total.
 run_mutation "pricer grid: a partial package aggregates every leg" \
   crates/geode-pricer/src/grid.rs \
-  '        let subset = partial.then(|| (legs, sheet.fold_legs(legs.iter().copied())));' \
-  $'        let all: Vec<usize> = sheet.children(r).collect();\n        let subset = partial.then(|| (all.as_slice(), sheet.fold_legs(all.iter().copied())));' \
+  '                let subset = self.src.sheet.fold_legs(shown.iter().copied());' \
+  '                let subset = self.src.sheet.fold_legs(self.src.sheet.children(*r));' \
   geode-pricer a_partly_hidden_package_paints_its_shown_legs_aggregate_and_note
 
 # A typed usize::MAX count refuses instead of overflowing.
@@ -26076,8 +26076,8 @@ run_mutation "pricer scope: a counted g p absorbs a hidden line" \
 # model holds its line) recovers too; the old model's rows would not.
 run_mutation "pricer scope: a restored hidden cursor falls to row 0" \
   crates/geode-pricer/src/tile.rs \
-  $'        let Some(at) = self.sheet.index_of(id) else {\n            return;\n        };\n        let shown' \
-  $'        let Some(at) = self.model.grid_row_of(id) else {\n            return;\n        };\n        let shown' \
+  $'        let Some(at) = self.sheet.index_of(id) else {\n            return;\n        };\n        if let Some(to)' \
+  $'        let Some(at) = self.model.grid_row_of(id) else {\n            return;\n        };\n        if let Some(to)' \
   geode-pricer a_restored_cursor_on_a_hidden_line_lands_above_it
 
 # The tile arrives at the barrier on every path, a refused scope and a
@@ -26210,8 +26210,8 @@ run_mutation "pricer grouping: the cursor falls to its old index" \
 # row it was set on.
 run_mutation "pricer grouping: a split package's second row snaps to its first" \
   crates/geode-pricer/src/tile.rs \
-  '            .position(|r| r.id == Some(id) && self.enclosing_path(r.node) == Some(within))' \
-  '            .position(|r| r.id == Some(id))' \
+  '            .find(|&g| self.enclosing_path(self.model.node(g)) == Some(within))' \
+  '            .find(|_| true)' \
   geode-pricer motions_walk_past_a_split_packages_second_row
 
 # Fold verbs and the chevron act on a group row's path.
@@ -26436,8 +26436,8 @@ run_mutation "pricer grouping: a V edit of the grouped value loses its anchor" \
 
 run_mutation "pricer grouping: a split package counts as painted once" \
   crates/geode-pricer/src/tile.rs \
-  '        rows.next().is_none().then_some(first)' \
-  '        Some(first)' \
+  '        (self.model.paints(id) == 1)' \
+  '        (self.model.paints(id) >= 1)' \
   geode-pricer a_split_rows_cursor_keeps_its_node_across_a_shorter_regroup
 
 # Find searches every row the grid would paint with every group open, in
@@ -26627,8 +26627,8 @@ run_mutation "pricer grid: a group row reads a value beside a blank" \
 # A group sums every leg under it; summing some is a plausible wrong total.
 run_mutation "pricer grid: a group row sums its first leg only" \
   crates/geode-pricer/src/grid.rs \
-  '        let folded = self.sheet.fold_legs(legs.iter().copied());' \
-  '        let folded = self.sheet.fold_legs(legs.iter().take(1).copied());' \
+  '                let folded = self.src.sheet.fold_legs(legs.iter().copied());' \
+  '                let folded = self.src.sheet.fold_legs(legs.iter().take(1).copied());' \
   geode-pricer a_group_row_sums_its_legs_and_reads_unanimity
 
 # Over unlike currencies a group's local sum is `—`, not the USD figure
@@ -26643,8 +26643,8 @@ run_mutation "pricer grid: a mixed-currency group's local sum reads its USD sum"
 # each date node counts the calendar twice.
 run_mutation "pricer grid: a split package sums every leg" \
   crates/geode-pricer/src/grid.rs \
-  '        let subset = partial.then(|| (legs, sheet.fold_legs(legs.iter().copied())));' \
-  '        let subset = (partial && !split).then(|| (legs, sheet.fold_legs(legs.iter().copied())));' \
+  $'                partial: true,\n                ..\n            }) => {' \
+  $'                partial: true,\n                split: false,\n                ..\n            }) => {' \
   geode-pricer a_split_package_reads_n_of_m_legs_under_each_node
 
 # A group row paints from the group palette, floored on its own ground:
@@ -27613,6 +27613,66 @@ run_mutation "grid-window: md autofit measures every row in the window" \
   '        let rows = self.window.window();' \
   '        let rows = { let w = self.window.window(); w.start..w.end.min(w.start + 1) };' \
   geode-marketdata autosize_fits_every_row_survives_a_model_install_and_resets
+
+run_mutation "grid-window: pricer row_of names the first painted row" \
+  crates/geode-pricer/src/grid.rs \
+  '            let e = self.row_of.entry(id).or_insert((g, 0));' \
+  '            let e = self.row_of.entry(id).or_insert((0, 0));' \
+  geode-pricer row_of_is_the_first_painted_row_of_a_line
+
+run_mutation "grid-window: pricer window cells are the formatter's" \
+  crates/geode-pricer/src/grid.rs \
+  '            _ => cell_text(sheet, self.index.sheet_row(g)?, c.def, &c.format, clock),' \
+  '            _ => CellText { text: String::new(), state: CellState::Blank, sign: None },' \
+  geode-pricer the_window_paints_what_the_formatter_formats
+
+run_mutation "grid-window: pricer a group row reads its ancestors' values" \
+  crates/geode-pricer/src/grid.rs \
+  '            at = self.index.parent(a);' \
+  '            at = None;' \
+  geode-pricer a_group_row_shows_its_ancestors_grouped_values
+
+run_mutation "grid-window: pricer yank_col formats every row" \
+  crates/geode-pricer/src/tile.rs \
+  '                let text = (0..model.len())' \
+  '                let text = (0..model.len().min(geode_tile::grid::FIRST_WINDOW))' \
+  geode-pricer yank_col_includes_rows_off_screen
+
+run_mutation "grid-window: pricer an install refills the window" \
+  crates/geode-pricer/src/tile.rs \
+  '            t.delegate_mut().refill_window(src);' \
+  '            let _ = src;' \
+  geode-pricer a_column_move_refills_the_pricer_window
+
+run_mutation "grid-window: pricer a block TSV formats every row" \
+  crates/geode-pricer/src/tile/select.rs \
+  '                for g in r.rows.clone() {' \
+  '                for g in r.rows.clone().take(geode_tile::grid::FIRST_WINDOW) {' \
+  geode-pricer y_over_a_block_includes_rows_off_screen
+
+run_mutation "grid-window: pricer the window follows the table's range" \
+  crates/geode-pricer/src/delegate.rs \
+  '            self.fill_window(visible_range.start..end, tile.read(cx).fill_source());' \
+  '            let _ = (end, &tile);' \
+  geode-pricer a_scroll_moves_the_pricer_window_without_a_rebuild
+
+run_mutation "grid-window: pricer an editor paints on a window miss" \
+  crates/geode-pricer/src/delegate.rs \
+  '        match editing {' \
+  '        match editing.filter(|_| self.window.get(row_ix, plan_col).is_some()) {' \
+  geode-pricer the_pricer_editor_paints_on_a_cell_the_window_lacks
+
+run_mutation "grid-window: pricer autofit measures every row in the window" \
+  crates/geode-pricer/src/delegate.rs \
+  '        let rows = self.window.window();' \
+  '        let rows = { let w = self.window.window(); w.start..w.end.min(w.start + 1) };' \
+  geode-pricer autosize_measures_the_pricer_window_not_the_sheet
+
+run_mutation "grid-window: pricer a collapse after a scroll refills the tail" \
+  crates/geode-tile/src/grid.rs \
+  '        Some(len.saturating_sub(asked.len().max(1))..len)' \
+  '        None' \
+  geode-pricer a_collapse_to_one_row_after_a_scroll_paints_the_row
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

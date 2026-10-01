@@ -1,5 +1,5 @@
 //! Parsing, edits and undo, result installation, storage conversion, scope
-//! evaluation, the rollup tree, and grid preparation for 1,000 shorthand entries. Every
+//! evaluation, the rollup tree, the grid index and window fills for 1,000 shorthand entries. Every
 //! tenth entry is a two-leg package, so the sheet contains 1,200 rows. These benchmarks
 //! measure local model work, excluding pricing execution, database I/O, and painting.
 //! Budgets and reference measurements are in `docs/current/performance.md`.
@@ -16,7 +16,8 @@ use geode_pricer::core::{
     ColumnPlan, Edit, Expansion, LineId, OwnShifts, Place, RowSpec, Sheet, TemplateSet, Views,
     Visibility, apply_scope, from_rows, parse, to_rows,
 };
-use geode_pricer::grid::GridModel;
+use geode_pricer::grid::{CellPass, FillSource, GridIndex};
+use geode_tile::grid::WindowCache;
 use std::hint::black_box;
 
 /// `n` shorthand entries with varied quantity, option kind, and strike.
@@ -182,9 +183,10 @@ fn bench(c: &mut Criterion) {
         })
     });
 
-    // A full grid rebuild with every package open and every line answered.
-    // The tile performs this preparation after edits, deliveries, and
-    // expansion changes.
+    // A full grid index rebuild with every package open and every line
+    // answered. The tile performs this preparation after edits,
+    // deliveries, and expansion changes; measure cells are formatted
+    // only by the window fills below.
     let mut s = sheet(1_000);
     let answers: Vec<(LineId, u64, Result<PriceResult, String>)> = (0..s.len())
         .filter(|r| s.is_line(*r))
@@ -217,7 +219,7 @@ fn bench(c: &mut Criterion) {
     let no_groups = GroupExpansion::default();
     g.bench_function("grid_build_1000", |b| {
         b.iter(|| {
-            black_box(GridModel::build(
+            black_box(GridIndex::build(
                 &s,
                 &flat,
                 &no_groups,
@@ -234,7 +236,7 @@ fn bench(c: &mut Criterion) {
         b.iter(|| {
             let chain = effective_chain(&[], &no_levels);
             let tree = rollup::build(&s, &visibility, &chain, &no_levels, Clock::utc());
-            black_box(GridModel::build(
+            black_box(GridIndex::build(
                 &s,
                 &tree,
                 &no_groups,
@@ -244,22 +246,27 @@ fn bench(c: &mut Criterion) {
             ))
         })
     });
-    // What paint reads per frame today: 40 rows' prepared cells. After the
-    // windowed slice this name measures a cold window fill of 40 rows.
-    let built = GridModel::build(&s, &flat, &no_groups, &expansion, &plan, Clock::utc());
+    // A cold window fill of 40 rows: what a scroll or an install formats.
+    let index = GridIndex::build(&s, &flat, &no_groups, &expansion, &plan, Clock::utc());
     g.bench_function("window_fill_40", |b| {
         b.iter(|| {
-            let mut n = 0usize;
-            for row in &built.rows[..40] {
-                for cell in &row.cells {
-                    n += black_box(cell.text.clone()).len();
-                }
-            }
-            black_box(n)
+            let mut window = WindowCache::default();
+            let mut pass = CellPass::new(
+                FillSource {
+                    sheet: &s,
+                    rollup: &flat,
+                    plan: &plan,
+                    clock: Clock::utc(),
+                },
+                &index,
+            );
+            window.set_window(0..40, index.columns.len(), |g, c| pass.cell(g, c));
+            black_box(window.window().len())
         })
     });
     // A delivery that moves no line in or out of the tree, as the tile runs
-    // it today: install, scope, chain, rollup, whole grid.
+    // it at this stage: install, scope, chain, rollup, the grid index, and
+    // a 40-row window fill.
     {
         let mut s = sheet(1_000);
         let batch = answers_for(&s);
@@ -279,14 +286,20 @@ fn bench(c: &mut Criterion) {
                         .expect("the empty scope applies");
                     let chain = effective_chain(&[], &dims);
                     let tree = rollup::build(&s, &visibility, &chain, &dims, Clock::utc());
-                    black_box(GridModel::build(
-                        &s,
-                        &tree,
-                        &no_groups,
-                        &expansion,
-                        &plan,
-                        Clock::utc(),
-                    ))
+                    let index =
+                        GridIndex::build(&s, &tree, &no_groups, &expansion, &plan, Clock::utc());
+                    let mut window = WindowCache::default();
+                    let mut pass = CellPass::new(
+                        FillSource {
+                            sheet: &s,
+                            rollup: &tree,
+                            plan: &plan,
+                            clock: Clock::utc(),
+                        },
+                        &index,
+                    );
+                    window.set_window(0..40, index.columns.len(), |g, c| pass.cell(g, c));
+                    black_box(window.window().len())
                 },
                 BatchSize::SmallInput,
             )
@@ -319,7 +332,7 @@ fn bench(c: &mut Criterion) {
     let scoped_flat = rollup::build(&s, &scoped, &EffectiveChain::default(), &dims, Clock::utc());
     g.bench_function("grid_build_1000_scoped", |b| {
         b.iter(|| {
-            black_box(GridModel::build(
+            black_box(GridIndex::build(
                 &s,
                 &scoped_flat,
                 &no_groups,
@@ -332,9 +345,10 @@ fn bench(c: &mut Criterion) {
 
     // Regrouping: 1,000 priced entries over four underlyings and three
     // expiries under `[underlying_ref, expiry, position_ref]` — the tree,
-    // then the grid with every group and package open, each group row
-    // summing and reading unanimity over its legs. The tile does both on
-    // every rebuild under a grouping (budget: 8 ms together).
+    // then the grid index with every group and package open; a group row
+    // sums and reads unanimity over its legs only when a window fill
+    // reaches it. The tile does both on every rebuild under a grouping
+    // (budget: 8 ms together).
     let mut s = sheet_of(&grouped_texts(1_000));
     let answers: Vec<(LineId, u64, Result<PriceResult, String>)> = (0..s.len())
         .filter(|r| s.is_line(*r))
@@ -363,7 +377,7 @@ fn bench(c: &mut Criterion) {
     expansion.open_all(&s);
     g.bench_function("grid_build_1000_grouped", |b| {
         b.iter(|| {
-            black_box(GridModel::build(
+            black_box(GridIndex::build(
                 &s,
                 &tree,
                 &groups,
@@ -378,7 +392,7 @@ fn bench(c: &mut Criterion) {
     g.bench_function("rebuild_1000_grouped", |b| {
         b.iter(|| {
             let tree = rollup::build(&s, &visibility, &chain, &dims, Clock::utc());
-            black_box(GridModel::build(
+            black_box(GridIndex::build(
                 &s,
                 &tree,
                 &groups,
@@ -388,16 +402,21 @@ fn bench(c: &mut Criterion) {
             ))
         })
     });
-    let built = GridModel::build(&s, &tree, &groups, &expansion, &plan, Clock::utc());
+    let index = GridIndex::build(&s, &tree, &groups, &expansion, &plan, Clock::utc());
     g.bench_function("window_fill_40_grouped", |b| {
         b.iter(|| {
-            let mut n = 0usize;
-            for row in &built.rows[..40] {
-                for cell in &row.cells {
-                    n += black_box(cell.text.clone()).len();
-                }
-            }
-            black_box(n)
+            let mut window = WindowCache::default();
+            let mut pass = CellPass::new(
+                FillSource {
+                    sheet: &s,
+                    rollup: &tree,
+                    plan: &plan,
+                    clock: Clock::utc(),
+                },
+                &index,
+            );
+            window.set_window(0..40, index.columns.len(), |g, c| pass.cell(g, c));
+            black_box(window.window().len())
         })
     });
     {
@@ -414,14 +433,20 @@ fn bench(c: &mut Criterion) {
                         .expect("the empty scope applies");
                     let chain = effective_chain(&levels, &dims);
                     let tree = rollup::build(&s, &visibility, &chain, &dims, Clock::utc());
-                    black_box(GridModel::build(
-                        &s,
-                        &tree,
-                        &groups,
-                        &expansion,
-                        &plan,
-                        Clock::utc(),
-                    ))
+                    let index =
+                        GridIndex::build(&s, &tree, &groups, &expansion, &plan, Clock::utc());
+                    let mut window = WindowCache::default();
+                    let mut pass = CellPass::new(
+                        FillSource {
+                            sheet: &s,
+                            rollup: &tree,
+                            plan: &plan,
+                            clock: Clock::utc(),
+                        },
+                        &index,
+                    );
+                    window.set_window(0..40, index.columns.len(), |g, c| pass.cell(g, c));
+                    black_box(window.window().len())
                 },
                 BatchSize::SmallInput,
             )

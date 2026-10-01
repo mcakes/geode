@@ -115,9 +115,10 @@ changes still rebuild.
 - A timeseries view move keeps at most one statistics request in flight and
   asks for the latest window when it answers, so statistics refresh at the
   query's own rate during a pan rather than being interrupted by each event.
-- A pricer grid model is rebuilt on edit, delivery, expansion, view, clock or
-  entry change, never in render; paints are a per-theme memo. Every rebuild
-  first re-evaluates the frame's scope over every line (`apply_scope`),
+- A pricer grid index is rebuilt on edit, delivery, expansion, view, clock or
+  entry change, never in render; measure cells are formatted only for the
+  window (`CellPass`), and paints are a per-theme memo. Every rebuild first
+  re-evaluates the frame's scope over every line (`apply_scope`),
   synchronously on the UI thread; the two together are the 8 ms budget.
 - Config dialogs derive rows at each render, key-handling, and click-resolution
   call site; they do not retain a row cache. Small row sets have measured costs

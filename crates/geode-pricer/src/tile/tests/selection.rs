@@ -318,6 +318,30 @@ fn y_over_a_block_copies_its_columns_as_tsv_and_keeps_the_register(cx: &mut gpui
     assert!(h.tile.read_with(&vcx, |t, _| t.register.is_none()));
 }
 
+/// A block `y` over rows the table no longer shows still copies them: the
+/// TSV is formatted on demand, never read from the painted window.
+#[gpui::test]
+fn y_over_a_block_includes_rows_off_screen(cx: &mut gpui::TestAppContext) {
+    let texts: Vec<String> = (0..100)
+        .map(|i| format!("{} SPX Z26 {} C", i + 1, 4000 + i * 5))
+        .collect();
+    let lines: Vec<&str> = texts.iter().map(String::as_str).collect();
+    let (h, mut vcx) = open_seeded(cx, &lines);
+    h.draw(&mut vcx);
+    goto_column(&h, &mut vcx, "qty");
+    h.dispatch(&mut vcx, "visual_block", None);
+    h.motion(&mut vcx, "bottom", None);
+    h.draw(&mut vcx);
+    assert_eq!(h.painted(&vcx, 0, "qty"), None, "row 0 is off screen");
+    h.dispatch(&mut vcx, "yank", None);
+    let clip = vcx
+        .update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
+        .unwrap();
+    let rows: Vec<&str> = clip.lines().skip(1).collect();
+    assert_eq!(rows.len(), 100);
+    assert_eq!((rows[0], rows[99]), ("1", "100"));
+}
+
 #[gpui::test]
 fn d_over_rows_deletes_them_in_one_undo_entry(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &BOOK);

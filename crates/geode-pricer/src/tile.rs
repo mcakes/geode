@@ -1,9 +1,9 @@
 //! Line-pricer tile state and prepared rendering models.
 //!
-//! The tile owns one `Sheet`, an `Rc<GridModel>` installed into a `DataTable`, and prepared
+//! The tile owns one `Sheet`, an `Rc<GridIndex>` installed into a `DataTable`, and prepared
 //! header/footer state. Request-changing edits use apply_edit or apply_edits to record
 //! undo; deliveries use deliver and refresh ticks use tick. These paths rebuild and
-//! install the model on change, outside rendering.
+//! install the index on change, and refill the delegate's window, outside rendering.
 
 use crate::content::{PricerSettings, Shared};
 use crate::core::cell::{self, CellEditor};
@@ -28,7 +28,7 @@ use crate::delegate::{
     CellPointer, ChevronClicked, ColumnMoved, DateFieldPaint, EditorField, EditorPaint,
     SheetDelegate,
 };
-use crate::grid::{GridModel, GridRowKind};
+use crate::grid::{CellPass, FillSource, GridIndex, GridRowKind};
 use crate::header::{self, HeaderInputs, HeaderModel};
 use crate::popup::{
     PickerPurpose, PricerPick, SheetPicker, choice_paint, render_sheet_picker, sheet_rows,
@@ -491,8 +491,8 @@ pub struct PricerTile {
     /// line landing in a closed group paints and takes the cursor rather
     /// than vanishing. Consumed by that rebuild.
     reveal: Vec<LineId>,
-    /// The tree the model was last flattened from: `GridRow::node`
-    /// indexes it.
+    /// The tree the model was last flattened from: `GridIndex::node`
+    /// indexes it, and every window fill reads it (`fill_source`).
     pub(crate) rollup: Rollup,
     /// `:unscoped`: this tile ignores the frame's scope. Session key
     /// `unscoped`, as the blotter's.
@@ -512,7 +512,7 @@ pub struct PricerTile {
     /// The `unscoped` chip's tooltip selector, built once from the tile id.
     unscoped_tip: SharedString,
     pub(crate) plan: ColumnPlan,
-    pub(crate) model: Rc<GridModel>,
+    pub(crate) model: Rc<GridIndex>,
     pub(crate) table: Entity<TableState<SheetDelegate>>,
     pub(crate) cursor: Cursor,
     pub(crate) visible: bool,
@@ -1002,7 +1002,7 @@ impl PricerTile {
             scope_refusal: None,
             unscoped_tip: format!("tip-pricer-unscoped-{}", id.0).into(),
             plan: ColumnPlan::default(),
-            model: Rc::new(GridModel::default()),
+            model: Rc::new(GridIndex::default()),
             table,
             cursor,
             visible: false,
@@ -1310,7 +1310,7 @@ impl PricerTile {
         packages.open_all(&self.sheet);
         let mut groups = GroupExpansion::default();
         groups.open_all();
-        let model = Rc::new(GridModel::build(
+        let model = Rc::new(GridIndex::build(
             &self.sheet,
             &self.rollup,
             &groups,
@@ -1319,8 +1319,7 @@ impl PricerTile {
             self.clock,
         ));
         let targets: Vec<_> = model
-            .rows
-            .iter()
+            .trees()
             .filter_map(|row| row.node.map(|node| (node, row.search.clone())))
             .collect();
         let delegate = self.table.read(cx).delegate();
@@ -1328,14 +1327,11 @@ impl PricerTile {
             .map(|ix| delegate.column(ix, cx))
             .collect();
         let search_tree = Arc::new(geode_shell::fuzzyfind::FindTree::from_depths(
-            model
-                .rows
-                .iter()
-                .filter(|r| r.node.is_some())
-                .map(|r| r.depth),
+            model.trees().filter(|r| r.node.is_some()).map(|r| r.depth),
         ));
         let mut painter = SheetDelegate::new(cx.theme(), cx.entity().downgrade());
         painter.model = model;
+        painter.fill_all(self.fill_source());
         painter.set_colours(self.shared.colours.borrow().clone());
         let painter = std::cell::RefCell::new((
             painter,
@@ -3156,13 +3152,12 @@ impl PricerTile {
             }
             "yank_col" => {
                 let col = self.cursor.col;
-                let text = self
-                    .model
-                    .rows
-                    .iter()
-                    .map(|r| {
-                        r.cells
-                            .get(col)
+                let model = Rc::clone(&self.model);
+                let mut pass = CellPass::new(self.fill_source(), &model);
+                // Every row, on screen or not, formatted on demand.
+                let text = (0..model.len())
+                    .map(|g| {
+                        pass.cell(g, col)
                             .map(|c| c.text.to_string())
                             .unwrap_or_default()
                     })
@@ -3326,7 +3321,7 @@ impl PricerTile {
 
     /// The sheet row under the cursor.
     pub(crate) fn cursor_sheet_row(&self) -> Option<usize> {
-        self.cursor_row().and_then(|r| self.model.rows[r].row)
+        self.cursor_row().and_then(|r| self.model.sheet_row(r))
     }
 
     /// `d d` removes the cursor row as an undoable edit and copies it into the
@@ -3714,11 +3709,7 @@ impl PricerTile {
     /// the root does nothing. The two expansions are separate: a fold on
     /// a group never touches a package's state, nor the reverse.
     fn tree_verb(&mut self, open: Option<bool>, cx: &mut Context<Self>) -> bool {
-        let Some(node) = self
-            .cursor_row()
-            .and_then(|g| self.model.rows.get(g))
-            .and_then(|r| r.node)
-        else {
+        let Some(node) = self.cursor_row().and_then(|g| self.model.node(g)) else {
             return true;
         };
         let target = match self.rollup.nodes.get(node).map(|n| &n.kind) {
@@ -3788,9 +3779,7 @@ impl PricerTile {
     /// target), else 0.
     fn target_index(&self, nodes: &[usize], g: usize) -> usize {
         self.model
-            .rows
-            .get(g)
-            .and_then(|r| r.node)
+            .node(g)
             .and_then(|n| nodes.iter().position(|&t| t == n))
             .unwrap_or(0)
     }
@@ -4591,7 +4580,7 @@ impl PricerTile {
         for id in std::mem::take(&mut self.reveal) {
             self.open_groups_of(id);
         }
-        let model = Rc::new(GridModel::build(
+        let model = Rc::new(GridIndex::build(
             &self.sheet,
             &self.rollup,
             &self.group_expansion,
@@ -4691,7 +4680,7 @@ impl PricerTile {
     /// fallback for a deleted line). Sheet order, not the replaced model's
     /// rows, so a cursor restored from a session onto a hidden line (no
     /// previous model holds it) recovers the same way.
-    fn recover_hidden_cursor(&mut self, model: &GridModel) {
+    fn recover_hidden_cursor(&mut self, model: &GridIndex) {
         if self.loading {
             return;
         }
@@ -4708,13 +4697,11 @@ impl PricerTile {
         let Some(at) = self.sheet.index_of(id) else {
             return;
         };
-        let shown: std::collections::HashSet<LineId> =
-            model.rows.iter().filter_map(|r| r.id).collect();
         if let Some(to) = (0..at)
             .rev()
             .chain(at + 1..self.sheet.len())
             .map(|r| self.sheet.id(r))
-            .find(|i| shown.contains(i))
+            .find(|i| model.grid_row_of(*i).is_some())
         {
             self.cursor.set_line(to);
         }
@@ -4765,8 +4752,7 @@ impl PricerTile {
         matches!(self.cursor.at, Some(At::Group(_)))
             && self
                 .cursor_row()
-                .and_then(|g| self.model.rows.get(g))
-                .is_some_and(|r| r.path.is_some())
+                .is_some_and(|g| self.model.path(g).is_some())
     }
 
     /// The sheet rows a grouping row, or any node, stands for in a total
@@ -4789,20 +4775,32 @@ impl PricerTile {
     /// The sheet rows grid row `g` stands for: a group's or a split
     /// package's through [`Self::node_rows`], any other row its own.
     pub(crate) fn grid_rows_under(&self, g: usize) -> Vec<usize> {
-        let Some(r) = self.model.rows.get(g) else {
+        let Some(kind) = self.model.kind(g) else {
             return Vec::new();
         };
         let stands_for_node = matches!(
-            r.kind,
+            kind,
             GridRowKind::Group { .. } | GridRowKind::Package { split: true, .. }
         );
-        match r.node {
+        match self.model.node(g) {
             Some(node) if stands_for_node => self.node_rows(node),
-            _ => r.row.into_iter().collect(),
+            _ => self.model.sheet_row(g).into_iter().collect(),
         }
     }
 
-    /// Install the prepared model, refresh table layout, and reconcile editor and cursor.
+    /// What a window fill reads: the sheet, the rollup the installed index
+    /// was built from, the plan and the display clock.
+    pub(crate) fn fill_source(&self) -> FillSource<'_> {
+        FillSource {
+            sheet: &self.sheet,
+            rollup: &self.rollup,
+            plan: &self.plan,
+            clock: self.clock,
+        }
+    }
+
+    /// Install the prepared model, refresh table layout, refill the
+    /// delegate's window, and reconcile editor and cursor.
     pub(crate) fn install_model(&mut self, cx: &mut Context<Self>) {
         let model = Rc::clone(&self.model);
         let loading = self.loading;
@@ -4810,6 +4808,7 @@ impl PricerTile {
         // here, so the delegate sees the new definitions with the model
         // planned under them.
         let colours = self.shared.colours.borrow().clone();
+        let src = self.fill_source();
         self.table.update(cx, |t, cx| {
             t.delegate_mut().model = model;
             t.delegate_mut().loading = loading;
@@ -4817,6 +4816,7 @@ impl PricerTile {
             // Before `refresh`, which re-reads the tree column's width.
             t.delegate_mut().refresh_numbers();
             t.refresh(cx);
+            t.delegate_mut().refill_window(src);
         });
         // Resolve the editor by LineId and ColumnKind before cursor synchronization, so
         // a moved column keeps the editor and cursor aligned.
@@ -4936,7 +4936,7 @@ impl PricerTile {
         });
         self.title = format!("Pricer · {}", self.sheet.name).into();
         self.footer_text = self.footer.clone().or_else(|| {
-            let row = self.cursor_row().and_then(|r| self.model.rows[r].row)?;
+            let row = self.cursor_row().and_then(|r| self.model.sheet_row(r))?;
             match self.sheet.state(row) {
                 crate::core::LineState::Failed(m) => Some(m.clone().into()),
                 _ => None,
@@ -4956,7 +4956,7 @@ impl PricerTile {
 
     /// Grid rows a cursor may sit on.
     pub(crate) fn cursor_rows(&self) -> impl Iterator<Item = usize> + '_ {
-        0..self.model.rows.len()
+        0..self.model.len()
     }
 
     pub(crate) fn cursor_row(&self) -> Option<usize> {
@@ -4972,11 +4972,7 @@ impl PricerTile {
     /// group row on its old path.
     pub(crate) fn row_at(&self, at: &At) -> Option<usize> {
         match at {
-            At::Group(path) => self
-                .model
-                .rows
-                .iter()
-                .position(|r| r.path.as_ref() == Some(path)),
+            At::Group(path) => self.model.trees().position(|r| r.path == Some(path)),
             At::Line { id, within } => {
                 let first = self.model.grid_row_of(*id)?;
                 let Some(within) = within else {
@@ -5000,11 +4996,9 @@ impl PricerTile {
                 else {
                     return Some(first);
                 };
-                let inside = self.model.rows.iter().position(|r| {
-                    r.id == Some(*id)
-                        && self
-                            .enclosing_path(r.node)
-                            .is_some_and(|p| p.starts_with(&within[..k]))
+                let inside = self.model.rows_of(*id).find(|&g| {
+                    self.enclosing_path(self.model.node(g))
+                        .is_some_and(|p| p.starts_with(&within[..k]))
                 });
                 Some(inside.unwrap_or(group))
             }
@@ -5014,31 +5008,23 @@ impl PricerTile {
     /// The row painting `id` when exactly one row paints it: anything
     /// but a split package with more than one of its nodes painted.
     fn only_row(&self, id: LineId) -> Option<usize> {
-        let mut rows = self
-            .model
-            .rows
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| r.id == Some(id))
-            .map(|(g, _)| g);
-        let first = rows.next()?;
-        rows.next().is_none().then_some(first)
+        (self.model.paints(id) == 1)
+            .then(|| self.model.grid_row_of(id))
+            .flatten()
     }
 
     /// The row painting `id` within group path `within`, exactly.
     fn exact_row(&self, id: LineId, within: &Path) -> Option<usize> {
         self.model
-            .rows
-            .iter()
-            .position(|r| r.id == Some(id) && self.enclosing_path(r.node) == Some(within))
+            .rows_of(id)
+            .find(|&g| self.enclosing_path(self.model.node(g)) == Some(within))
     }
 
     /// The painted grouping row whose path is `path`.
     fn group_row(&self, path: &[Option<String>]) -> Option<usize> {
         self.model
-            .rows
-            .iter()
-            .position(|r| r.path.as_deref() == Some(path))
+            .trees()
+            .position(|r| r.path.map(Vec::as_slice) == Some(path))
     }
 
     /// A selection anchor's row: `row_at` without its group fallback — an
@@ -5067,8 +5053,8 @@ impl PricerTile {
     /// What the cursor rests on at grid row `row`: its line, recorded
     /// with the node's group path, or a grouping row's path.
     pub(crate) fn at_of_row(&self, row: usize) -> Option<At> {
-        let r = self.model.rows.get(row)?;
-        match (&r.path, r.id) {
+        let r = self.model.tree(row)?;
+        match (r.path, r.id) {
             (Some(path), _) => Some(At::Group(path.clone())),
             (None, Some(id)) => Some(At::Line {
                 id,
@@ -5092,8 +5078,7 @@ impl PricerTile {
         let rollup = &self.rollup;
         let painted = |node: usize| {
             self.model
-                .rows
-                .iter()
+                .trees()
                 .position(|r| r.node == Some(node))
                 .and_then(|g| self.at_of_row(g))
         };
@@ -5140,9 +5125,7 @@ impl PricerTile {
         let g = self.cursor_row()?;
         let u = self
             .model
-            .rows
-            .get(g)
-            .and_then(|r| r.row)
+            .sheet_row(g)
             .and_then(|row| self.sheet.sole_underlying(row));
         Some(match u {
             Some(u) => geode_core::context::DimensionContext::of(&[("underlying_ref", &u)]),
@@ -5273,8 +5256,8 @@ impl PricerTile {
     /// A header drag dropped: reorder the open tile's plan. The cursor
     /// names its column by vocabulary name across the move so it stays on
     /// what the trader was looking at rather than whatever slid into its
-    /// slot; the grid model is built from the plan, so the rebuild
-    /// permutes every row's cells. The order never reaches the view: the
+    /// slot; the grid index is built from the plan, so the rebuild
+    /// refills the window under the new order. The order never reaches the view: the
     /// next `resolve_plan` (a view change, a reload) restores the view's.
     fn column_moved(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
         let under_cursor = self.plan.columns.get(self.cursor.col).map(|c| c.def.name);
@@ -5977,13 +5960,13 @@ pub(crate) mod tests {
         /// Every painted row's search key (its shorthand).
         pub fn tree(&self, vcx: &VisualTestContext) -> Vec<String> {
             self.tile.read_with(vcx, |t, _| {
-                t.model.rows.iter().map(|r| r.search.to_string()).collect()
+                t.model.trees().map(|r| r.search.to_string()).collect()
             })
         }
         /// Every painted row's column-0 tag.
         pub fn tags(&self, vcx: &VisualTestContext) -> Vec<String> {
             self.tile.read_with(vcx, |t, _| {
-                t.model.rows.iter().map(|r| r.tag.to_string()).collect()
+                t.model.trees().map(|r| r.tag.to_string()).collect()
             })
         }
         /// The planned columns' vocabulary names, in order.
@@ -6002,16 +5985,45 @@ pub(crate) mod tests {
                     .collect()
             })
         }
-        /// One cell's painted text, by grid row and vocabulary name.
+        /// One cell's text, by grid row and vocabulary name. Formatted on
+        /// demand, and checked against the painted window whenever the
+        /// cell is in it, so stale paint cannot hide behind this read.
         pub fn cell(&self, vcx: &VisualTestContext, row: usize, column: &str) -> String {
-            self.tile.read_with(vcx, |t, _| {
+            self.tile.read_with(vcx, |t, cx| {
                 let c = t
                     .model
                     .columns
                     .iter()
                     .position(|c| c.name == column)
                     .expect("column");
-                t.model.rows[row].cells[c].text.to_string()
+                let fresh = CellPass::new(t.fill_source(), &t.model).cell(row, c);
+                let window = &t.table.read(cx).delegate().window;
+                if window.window().contains(&row) {
+                    assert_eq!(
+                        window.get(row, c),
+                        fresh.as_ref(),
+                        "the painted cell ({row}, {column}) is stale"
+                    );
+                }
+                fresh.map(|c| c.text.to_string()).expect("a grid cell")
+            })
+        }
+        /// The window cell the table paints at (`row`, `column`); `None`
+        /// off screen.
+        pub fn painted(&self, vcx: &VisualTestContext, row: usize, column: &str) -> Option<String> {
+            self.tile.read_with(vcx, |t, cx| {
+                let c = t
+                    .model
+                    .columns
+                    .iter()
+                    .position(|c| c.name == column)
+                    .expect("column");
+                t.table
+                    .read(cx)
+                    .delegate()
+                    .window
+                    .get(row, c)
+                    .map(|c| c.text.to_string())
             })
         }
         pub fn header(&self, vcx: &VisualTestContext) -> Vec<String> {
@@ -7095,7 +7107,7 @@ pub(crate) mod tests {
         let texts = |vcx: &mut VisualTestContext| -> Vec<String> {
             h.tile.read_with(vcx, |t, cx| {
                 let d = t.table.read(cx).delegate();
-                (0..t.model.rows.len())
+                (0..t.model.len())
                     .map(|r| d.gutter_text(r).map(|s| s.to_string()).unwrap_or_default())
                     .collect()
             })
@@ -7870,6 +7882,163 @@ pub(crate) mod tests {
             clip.as_deref(),
             Some("5000\n4800/5200\n4000"),
             "the package's strike lists its legs'"
+        );
+    }
+
+    /// `n` bare lines whose qty is their 1-based position.
+    fn numbered(n: usize) -> Vec<String> {
+        (0..n)
+            .map(|i| format!("{} SPX Z26 {} C", i + 1, 4000 + i * 5))
+            .collect()
+    }
+
+    /// `yank_col` copies every row of the column, on screen or not.
+    #[gpui::test]
+    fn yank_col_includes_rows_off_screen(cx: &mut gpui::TestAppContext) {
+        let texts = numbered(100);
+        let lines: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let (h, mut vcx) = open_seeded(cx, &lines);
+        h.draw(&mut vcx);
+        assert_eq!(h.painted(&vcx, 99, "qty"), None, "row 99 is off screen");
+        let qty = h
+            .columns(&vcx)
+            .iter()
+            .position(|c| c == "qty")
+            .expect("qty") as u32;
+        if qty > 0 {
+            h.motion(&mut vcx, "right", Some(qty));
+        }
+        assert_eq!(h.cursor(&vcx), Some((0, qty as usize)), "on qty");
+        h.dispatch(&mut vcx, "yank_col", None);
+        let text = vcx
+            .update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
+            .expect("yanked");
+        assert_eq!(text.lines().count(), 100);
+        assert_eq!(text.lines().last(), Some("100"));
+    }
+
+    /// Moving a column rebuilds; the window refills under the new order
+    /// without any new table report.
+    #[gpui::test]
+    fn a_column_move_refills_the_pricer_window(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &WIDE_QTY);
+        h.draw(&mut vcx);
+        let before = h.painted(&vcx, 0, "qty");
+        assert_eq!(before.as_deref(), Some("-1234567890"));
+        h.tile.update(&mut vcx, |t, cx| t.column_moved(0, 2, cx));
+        assert_ne!(h.columns(&vcx)[0], "qty", "the move took");
+        assert_eq!(
+            h.painted(&vcx, 0, "qty"),
+            before,
+            "the same value under its moved column"
+        );
+        h.cell(&vcx, 0, "qty");
+    }
+
+    /// A drawn table fills the window for the rows it shows; a scroll
+    /// moves the window to the table's new range without rebuilding the
+    /// index.
+    #[gpui::test]
+    fn a_scroll_moves_the_pricer_window_without_a_rebuild(cx: &mut gpui::TestAppContext) {
+        let texts = numbered(200);
+        let lines: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let (h, mut vcx) = open_seeded(cx, &lines);
+        h.draw(&mut vcx);
+        let window = h
+            .tile
+            .read_with(&vcx, |t, cx| t.table.read(cx).delegate().window.window());
+        assert!(window.start == 0 && window.end < 200, "{window:?}");
+        assert_eq!(h.painted(&vcx, 0, "qty").as_deref(), Some("1"));
+        assert_eq!(h.painted(&vcx, 199, "qty"), None, "off screen");
+        let builds = crate::grid::builds();
+        h.motion(&mut vcx, "bottom", None);
+        h.draw(&mut vcx);
+        assert_eq!(crate::grid::builds(), builds, "a scroll never rebuilds");
+        assert_eq!(
+            h.painted(&vcx, 199, "qty").as_deref(),
+            Some("200"),
+            "the last row is prepared"
+        );
+        assert_eq!(h.painted(&vcx, 0, "qty"), None, "the first row left");
+        assert_eq!(h.cell(&vcx, 199, "qty"), "200");
+    }
+
+    /// Scrolled to the bottom of a long grouped sheet, collapsing to the
+    /// one group row still paints it: the recorded range lies past the new
+    /// end, and the table never reports a one-row range to fill it.
+    #[gpui::test]
+    fn a_collapse_to_one_row_after_a_scroll_paints_the_row(cx: &mut gpui::TestAppContext) {
+        let texts = numbered(100);
+        let lines: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let (h, mut vcx) = open_seeded(cx, &lines);
+        h.command(&mut vcx, "group underlying_ref").unwrap();
+        h.dispatch(&mut vcx, "expand_all", None);
+        assert_eq!(h.tree(&vcx).len(), 101);
+        h.draw(&mut vcx);
+        h.motion(&mut vcx, "bottom", None);
+        h.draw(&mut vcx);
+        assert!(h.painted(&vcx, 100, "qty").is_some(), "scrolled to the end");
+        assert_eq!(
+            h.painted(&vcx, 0, "qty"),
+            None,
+            "the group row is off screen"
+        );
+        h.dispatch(&mut vcx, "collapse_all", None);
+        assert_eq!(h.tree(&vcx), ["SPX"]);
+        let want = h.cell(&vcx, 0, "npv");
+        let qty = h.cell(&vcx, 0, "qty");
+        assert_eq!(h.painted(&vcx, 0, "qty").as_ref(), Some(&qty));
+        h.draw(&mut vcx);
+        assert_eq!(h.painted(&vcx, 0, "qty").as_ref(), Some(&qty));
+        assert_eq!(h.cell(&vcx, 0, "npv"), want);
+    }
+
+    /// An open editor paints on a cell the window lacks: the editor
+    /// branch never reads the window.
+    #[gpui::test]
+    fn the_pricer_editor_paints_on_a_cell_the_window_lacks(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "edit", None);
+        assert_eq!(h.mode(&mut vcx), "insert");
+        h.draw(&mut vcx);
+        h.tile.update(&mut vcx, |t, cx| {
+            t.table.update(cx, |t, _| t.delegate_mut().window.clear())
+        });
+        h.draw(&mut vcx);
+        let col = h.tile.read_with(&vcx, |t, _| t.cursor.col);
+        let name = h.columns(&vcx)[col].clone();
+        assert_eq!(h.painted(&vcx, 0, &name), None, "the window lacks the cell");
+        assert!(
+            vcx.debug_bounds(Box::leak(
+                format!("pricer-editor-0-{}", col + 1).into_boxed_str()
+            ))
+            .is_some(),
+            "the editor still paints"
+        );
+    }
+
+    /// `:autosize` measures the rows on screen: a wider value off screen
+    /// does not widen its column.
+    #[gpui::test]
+    fn autosize_measures_the_pricer_window_not_the_sheet(cx: &mut gpui::TestAppContext) {
+        let mut texts = numbered(200);
+        texts[199] = "-1234567890 SPX Z26 5000 C".to_string();
+        let lines: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let (h, mut vcx) = open_seeded(cx, &lines);
+        h.draw(&mut vcx);
+        let default = width_of_column(&h, &vcx, "qty");
+        h.command(&mut vcx, "autosize").unwrap();
+        let fitted = width_of_column(&h, &vcx, "qty");
+        assert!(
+            fitted < default + 1.0,
+            "the wide qty is off screen: {fitted}"
+        );
+        h.motion(&mut vcx, "bottom", None);
+        h.draw(&mut vcx);
+        h.command(&mut vcx, "autosize").unwrap();
+        assert!(
+            width_of_column(&h, &vcx, "qty") > default,
+            "on screen, it widens"
         );
     }
 

@@ -4,7 +4,7 @@
 //! ground of their own and so a [`RowPalette`] floored on it: a grouping row
 //! (`Paints::group`) and a package leg (`Paints::leg`, a faint tint marking the row as
 //! inside its package, [`leg_ground`]). A package's template chip takes the neutral
-//! chip pair (`chip_fill`, `chip_text`). GridModel remains independent of the theme.
+//! chip pair (`chip_fill`, `chip_text`). The grid index and its window remain independent of the theme.
 //!
 //! Row text is adjusted against its base background and the table's hover and selection
 //! backgrounds, which replace that base. The bundled-theme test checks these prepared

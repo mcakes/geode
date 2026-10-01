@@ -37,14 +37,14 @@ The tile:
 | Module | Holds |
 |---|---|
 | `store` | The `SheetStore` seam, addressed by key/tag with `Loaded::Refused(Refusal)` for a load that never went out and `save`/`forget` returning `Result<(), Refusal>`; `MemorySheetStore` (in-memory, the tests' fake, whose `set_save_refusal`/`set_load_refusal`/`set_forget_refusal` choose the refusal kind and `set_refusing`/`set_load_refused` are `Busy` shorthands) and `DuckSheetStore` (the store `geode-app` wires: `pricer_sheets` document reads/writes over `DataHandle`, with a `known`-names cache fed from the diagnostics catalog and the store's own confirmed writes). |
-| `grid` | The prepared `GridModel`, rebuilt on change: the rollup flattened under the group and package expansions. A group row (`GridRowKind::Group`, no sheet row; `node` and `path` name it) sums its legs' fold, reads the fold's status, counts its legs and reads each other dimension's unanimity (`mixed` where legs differ or a blank sits beside a value; `core::columns::group_cell_text`); a split or partly hidden package row paints its node's legs only (`· n of M legs`). |
+| `grid` | `GridIndex`, rebuilt on structural change: the rollup flattened under the group and package expansions, one row of tree-column facts per painted row (kind, sheet row, id, node, path, depth, tag, text, note, search) and `row_of`. `CellPass` formats the measure cells a window shows: a group row (`GridRowKind::Group`) sums its legs' fold and reads unanimity (`group_cell_text`) only when filled; a split or partly hidden package row paints its node's legs only (`· n of M legs`). |
 | `paint` | The per-theme paint memo, floored to a readable ratio; two `RowPalette`s, each a ground and its text floored on it and on hover and selected: `group` (`secondary` over the table ground) and `leg` (`leg_ground`: the stripe token, or the faintest blend clearing `LEG_TINT_RATIO` from the line, hover, selected and group grounds while fainter than hover; selected is let go only where nothing clears it). |
 | `delegate` | The table delegate: cells and their column colors (sign, named), the connector tree column (indent; a group row's chevron and medium-weight label over its own ground; a package's chevron, template chip, summary and muted leg count; a leg's drawn connector lines and shorthand; a bare line's shorthand), editor, expiry date field. |
 | `header` | The prepared header row and the footer. Paints through `geode_tile::header::frame`: the sheet name control (and rename field) with its view and shift chips and the grouping chain (as written, dropped levels struck through, and the `pinned` chip) on the left; the `:rm` prompt, `N pricing…`, `N failed` and the pricer label as cluster status; the save notice then the tile notice, the priced time, the health chip (asked about `pricer_sheets` only, which no source feeds — see Known limitations) and `⋯` from the shared cluster. |
 | `popup` | The typeahead, the entry bar's completion list, the sheet picker (`sheet_rows`, `SheetPicker`), and `PricerPick` (what a menu row does). The menu, popup geometry, the `:rm` confirm and the header notices paint through `geode-tile`. |
 | `session` | The tile's session record, including `:autosize`'s fitted widths (`column_widths`, read leniently), the grouping pin (`pinned` / `pinned_slot`) and the open groups (`expanded_paths`, NULL as `{ null = true }`). |
 | `content` | The factory, keymap fragment (verbs, field keys and the menu's pick and close keys; the grid motions and the menu steps are the shell's shared `motion::*` bindings), actions, the retired motion ids' renames (`RENAMED_ACTIONS`), settings, and the read-only `UnderlyingSource` seam. |
-| `tile` | `PricerTile`: modes (a key context that publishes `grid`, and `tilelist` while the action menu is open so the shared menu steps reach it), verbs, repricing, write-behind, load. Every `motion::*` id runs as one verb through `geode_tile::motion`, so it closes an open field or menu first like any other verb. `tile_columns` reports the plan's columns under the sheet's view with the cursor's column active, so the shell's `Edit column in view…` opens the Views dialog there. The frame observer re-reads the frame's effective scope (the empty scope under `:unscoped`), rebuilds when it changed, then the grouping chain (`read_grouping`: pin, slot pin, the frame's active slot, the view's own), rebuilds when either changed, then answers the flip barrier on every path; `rebuild` is the one build site — the scope, then `effective_chain` and `rollup::build` under one dimensions borrow, the group expansion pruned, then `GridModel::build` — keeps a refusal as a standing header notice, and moves a cursor whose line the scope hid to the nearest shown line above (else below) in sheet order. The cursor is an `At` (a line within its group path, or a group path), so a split package's second row and a group row keep their place across a rebuild. |
+| `tile` | `PricerTile`: modes (a key context that publishes `grid`, and `tilelist` while the action menu is open so the shared menu steps reach it), verbs, repricing, write-behind, load. Every `motion::*` id runs as one verb through `geode_tile::motion`, so it closes an open field or menu first like any other verb. `tile_columns` reports the plan's columns under the sheet's view with the cursor's column active, so the shell's `Edit column in view…` opens the Views dialog there. The frame observer re-reads the frame's effective scope (the empty scope under `:unscoped`), rebuilds when it changed, then the grouping chain (`read_grouping`: pin, slot pin, the frame's active slot, the view's own), rebuilds when either changed, then answers the flip barrier on every path; `rebuild` is the one build site — the scope, then `effective_chain` and `rollup::build` under one dimensions borrow, the group expansion pruned, then `GridIndex::build`, then the window refill — keeps a refusal as a standing header notice, and moves a cursor whose line the scope hid to the nearest shown line above (else below) in sheet order. The cursor is an `At` (a line within its group path, or a group path), so a split package's second row and a group row keep their place across a rebuild. |
 | `tile::select` | `partly_hidden_refusal`, the one door every structural verb (`d`, `shift+j`/`shift+k`, `g p`, `g u`, and `:package`/`:unpackage`) passes before it mutates — a group row (`GROUP_ROW`), a split package (`SPLIT`), a partly hidden one, a move or counted `g p` under a value grouping (`MOVE_GROUPED`, `PACKAGE_GROUPED`); the `V`/`v` selection's state doors (start, clear, re-resolve, footer extent and totals), the selection verbs, the one-typed-value commit, and the live step (`bulk_step`, `settle_bulk`, `take_back_steps`). |
 
 The application uses `DuckSheetStore`: sheets are `pricer_sheets` documents in
@@ -107,7 +107,7 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 - A line never vanishes into a closed group: an insert, put, undo or redo
   queues its landed ids in `reveal`, and the next `rebuild` opens every group
   enclosing them between the rollup and the grid (`open_groups_of`), so
-  `GridModel::build` keeps its one call site. Find searches
+  `GridIndex::build` keeps its one call site. Find searches
   `grid::find_targets` — every row the grid would paint with every group
   open, in rollup preorder, keyed as those rows' `search` — and a match
   opens its groups (`land_on_node`).
@@ -482,8 +482,10 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 - Column widths are fixed pixels and do not follow font size. The defaults
   fit the tested samples at the largest font step and leave more space at
   smaller steps. `:autosize` (or the palette's "Autosize columns") fits
-  every column to the visible grid rows at the current rem size, so a
-  collapsed package's legs are not measured. It refuses with "nothing loaded
+  every column to its header and the rows in the window — the rows the
+  table last asked to see — at the current rem size, so a wider value in a
+  row never on screen, or a collapsed package's legs, is not measured. It
+  refuses with "nothing loaded
   to fit" while the sheet loads or has no rows. It stores the widths by
   vocabulary name (`__tree` for the tree) in the session record. A font
   change does not rescale fitted widths; run `:autosize` again. A fitted
@@ -493,7 +495,7 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   on the open tile only. A drag lands in the delegate's `move_column` hook,
   which emits `ColumnMoved` (plan indices) for the tile to apply to its
   `ColumnPlan`; the cursor re-finds its column by name and the rebuild
-  permutes every row's cells. A view change or reload rebuilds the plan from
+  refills the window under the new order. A view change or reload rebuilds the plan from
   the view, restoring its order. A released resize handle reports
   `ColumnWidthsChanged`, and the tile records the width under the column's
   vocabulary name beside the `:autosize` fits, since the refresh every

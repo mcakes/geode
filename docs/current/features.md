@@ -167,10 +167,9 @@ default widths. Each tile runs one method for both doors.
   its window cache, which holds the window the table last asked to see.
   Formatting a whole snapshot would break the UI budget, so a wider value in a
   row that was never on screen does not widen its column. Market data measures
-  the rows in its window, as the blotter does: the rows the table last asked
-  to see. A wider value in a row that was never on screen does not widen its
-  column. The pricer measures every visible grid row, so the legs of a
-  collapsed package are not measured.
+  and the pricer measure the rows in their windows, as the blotter does: the
+  rows the table last asked to see. A wider value in a row that was never on
+  screen, or in a collapsed package's legs, does not widen its column.
 - **Nothing to fit.** When there are no rows to measure, `:autosize` refuses
   with "nothing loaded to fit" and keeps the widths it already has. This
   covers a blotter with no snapshot or an empty result, a panel with no
