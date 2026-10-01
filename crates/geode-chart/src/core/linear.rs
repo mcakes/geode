@@ -161,9 +161,10 @@ fn ladder_rungs(scale: LinearX, view: View, plot: Rect, tick_gap_px: f32, out: &
 const MIN_X_TICKS: usize = 2;
 
 /// How many steps down the 1-2-5 ladder [`x_ticks`] goes to reach
-/// [`MIN_X_TICKS`]. The step asked for is under a view and a quarter wide
-/// and two steps down divide it by four at least, so two reach it; the rest
-/// is room for a tick that rounding puts just outside an edge.
+/// [`MIN_X_TICKS`]. The step asked for is under one and a quarter views
+/// wide, and two steps down divide it by four at least: under half a view,
+/// which has two multiples in it. The rest is room for a tick that rounding
+/// puts just outside an edge.
 const FINER_STEPS: usize = 4;
 
 /// The largest tick index (a tick's value over the step) ticks are counted
@@ -203,9 +204,9 @@ fn countable(view: View, step: f64) -> bool {
 ///
 /// A narrow plot asks for a step as wide as its view, and such a step can
 /// have one multiple in the view or none. The step then goes down the 1-2-5
-/// ladder, [`FINER_STEPS`] at most, until two ticks fall in the view; the
-/// labels take the decimals of the step used. A view too narrow for its
-/// values to count ticks in keeps the ticks it has.
+/// ladder, four steps at most, until two ticks fall in the view; the labels
+/// take the decimals of the step used. A view too narrow for its values to
+/// count ticks in keeps the ticks it has.
 pub fn x_ticks(
     scale: LinearX,
     view: View,

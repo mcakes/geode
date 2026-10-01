@@ -1,8 +1,8 @@
 //! The gpui-dependent chart kit: what every element shares once it has a
 //! window. Rebuild counters, one pane side's resolved y axis, the theme
 //! colors a frame paints its chrome in, grid and axis painters, and stroke
-//! builders with the ceiling on what one stroke path holds. `core` holds the
-//! window-free geometry these are built from.
+//! builders with the ceiling on what a path of separate segments holds.
+//! `core` holds the window-free geometry these are built from.
 
 use std::cell::Cell;
 
@@ -60,11 +60,14 @@ pub(crate) const LINE_WIDTH: f32 = 1.5;
 /// at the design rem. One constant so every chart's tooltip sits alike.
 pub(crate) const TOOLTIP_GAP: f32 = 8.0;
 
-/// The most segments one stroke path is built from. gpui tessellates a
-/// path into vertex buffers indexed by `u16`, and a segment takes four
-/// vertices, so the build fails past 16,384 segments and the shape is
-/// absent, not truncated. The cap keeps headroom under that ceiling; a
-/// caller with more thins its marks or strokes a plain polyline instead.
+/// The most separate segments `stroke_segments` builds one path from.
+/// gpui tessellates a path into vertex buffers indexed by `u16`, and a
+/// segment takes four vertices, so the build fails past 16,384 segments
+/// and the shape is absent, not truncated. The cap keeps headroom under
+/// that ceiling; a caller with more thins its marks or strokes a plain
+/// polyline instead. `stroke_points` has no cap of its own: decimation
+/// bounds a polyline's points, and one of more than some sixteen thousand
+/// separate runs meets the same limit and is absent.
 pub const MAX_STROKE_SEGMENTS: usize = 12_000;
 
 /// One pane side's resolved y axis: the scale over that side's VISIBLE

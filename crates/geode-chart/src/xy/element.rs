@@ -4,12 +4,13 @@
 //! element's current bounds. Each pane paints its grid and axes, then every
 //! visible slot the view shows something of: a line as a solid or dashed
 //! stroke, a points slot as a diamond per point with a vertical bar over its
-//! range. One x axis sits below the lowest pane.
+//! range, or from its mid to the one end it has. One x axis sits below the
+//! lowest pane.
 //!
-//! The crosshair sits on a painted quoted point when the cursor is within a
-//! few pixels of one and otherwise follows the cursor; its tooltip reads
-//! every visible slot at that x, a line between its knots and a points slot
-//! at the point the crosshair is on. Resolving it is, per slot, a binary
+//! The crosshair sits on a quoted point that has a mark when the cursor is
+//! within a few pixels of one and otherwise follows the cursor; its tooltip
+//! reads every visible slot at that x, a line between its knots and a points
+//! slot at the point the crosshair is on. Resolving it is, per slot, a binary
 //! search and a walk over the points within the snap radius, and allocates
 //! nothing; building the tooltip formats a row per slot.
 //!
@@ -31,9 +32,10 @@
 //! A line's path follows decimated output: up to two extrema per finite run
 //! per pixel column, plus breaks, and a dashed line's dashes are bounded by
 //! the plot rectangle. A points slot carries up to five segments for every
-//! point in view. One path holds [`MAX_STROKE_SEGMENTS`] at most: a points
-//! slot with more marks than that paints every k-th point and the last, and
-//! a dashed line with more dashes than that is stroked solid.
+//! point in view. A path of separate segments holds [`MAX_STROKE_SEGMENTS`]
+//! at most: a points slot whose points in view, at five segments each, come
+//! to more than that paints every k-th point and the last, and a dashed line
+//! with more dashes than that is stroked solid.
 
 use std::sync::Arc;
 
@@ -268,11 +270,12 @@ impl XyElement {
     /// no finite x.
     ///
     /// It sits on a quoted point when one is within [`SNAP`] of the cursor
-    /// and otherwise glides with the cursor. The candidates are the
-    /// painted points of the visible points slots of both panes, since the
-    /// line spans both and the tooltip reads every slot; the nearest in
-    /// pixels wins. A line is read between its knots, so its knots are
-    /// never snapped to.
+    /// and otherwise glides with the cursor. The candidates are the points
+    /// in view of the visible points slots of both panes whose values give
+    /// them a mark, since the line spans both panes and the tooltip reads
+    /// every slot; the nearest in pixels wins. A point a thinned slot
+    /// leaves unpainted is a candidate all the same. A line is read
+    /// between its knots, so its knots are never snapped to.
     ///
     /// A view with no span paints every point at one x, so the line sits
     /// there whatever the cursor's x.
@@ -302,15 +305,16 @@ impl XyElement {
     }
 
     /// The point of `slot` the crosshair may sit on, as its x and its
-    /// pixel x: the nearest to pixel `cursor_x` among the points the chart
-    /// paints of the slot, when that is within `radius` pixels. `None` for
-    /// a line. `under` is the x under the cursor.
+    /// pixel x: the nearest to pixel `cursor_x` among the slot's points in
+    /// view whose values give them a mark ([`paints`]), when that is within
+    /// `radius` pixels. `None` for a line. `under` is the x under the
+    /// cursor.
     ///
     /// The search runs outward from `under`, both ways, through the slot's
     /// view window. A point past the plot's edge is outside the window and
-    /// one with neither a mid nor a range paints no mark, so neither is a
-    /// candidate, and neither hides a painted neighbour that is in reach.
-    /// Each walk ends at the first point that paints or the first beyond
+    /// one with neither a mid nor a range has no mark, so neither is a
+    /// candidate, and neither hides a marked neighbour that is in reach.
+    /// Each walk ends at the first point with a mark or the first beyond
     /// the radius, so the work is bounded by the points within the radius.
     fn snap_candidate(
         &self,
