@@ -2378,3 +2378,43 @@ The leaf result includes 20 matching generations and their dataset headings.
 The previous filter returned no rows for that query, so its timing is not a
 valid comparison. The equivalent empty and dataset-name cases show no material
 regression; these single runs do not establish a speedup.
+
+## Windowed grid models: before — 2026-10-01
+
+Apple M5 Pro, 18 cores, rustc 1.96.0 (ac68faa20 2026-05-25), bench profile.
+Load average at start: 4.69 12.38 11.52 (the recorded run; one-minute load
+2.79–4.79 throughout). Binaries kept as `bench-grid/{matrix,core,blotter}-before`
+for alternating runs against the windowed build.
+
+An earlier run of the same binaries began at load 18.09 21.70 13.72 (one-minute
+load falling to 4.67 by its end, system indexing daemons busy); its medians are
+given beside the recorded ones and agree within 2%.
+
+`window_fill_*` before bodies read the same cells' prepared text (the per-frame
+paint cost); `delivery_to_window_values_10000x5` and
+`deliver_unchanged_structure_1000*` are the end-to-end comparisons.
+
+| Benchmark | Before median | Earlier run (load 18 → 5) |
+|---|---:|---:|
+| `marketdata_core/model_build_pivot_20x30` | 207.89 µs | 210.61 µs |
+| `marketdata_core/model_build_values_10000x5` | 5.4305 ms | 5.4841 ms |
+| `marketdata_core/model_build_values_10000x5_100_rows_spliced` | 5.7479 ms | 5.8184 ms |
+| `marketdata_core/window_fill_40x5` | 175.00 ns | 176.74 ns |
+| `marketdata_core/delivery_to_window_values_10000x5` | 5.4664 ms | 5.4702 ms |
+| `marketdata_core/one_cell_edit_values_10000x5` | 173.97 ns | 174.82 ns |
+| `marketdata_core/session_tick_values_10000x5` | 6.4126 ms | 6.3766 ms |
+| `marketdata_core/patch_cell_pivot_20x30` | 86.770 ns | 87.036 ns |
+| `marketdata_core/patch_cell_values_10000x5` | 116.05 ns | 112.67 ns |
+| `marketdata_core/draft_rebase_1000_edits` | 2.0607 ms | 2.0842 ms |
+| `pricer_core/grid_build_1000` | 1.0502 ms | 1.0551 ms |
+| `pricer_core/grid_build_1000_scoped` | 437.17 µs | 442.41 µs |
+| `pricer_core/grid_build_1000_grouped` | 1.7773 ms | 1.7941 ms |
+| `pricer_core/window_fill_40` | 502.76 ns | 498.64 ns |
+| `pricer_core/window_fill_40_grouped` | 499.58 ns | 496.21 ns |
+| `pricer_core/deliver_unchanged_structure_1000` | 1.2330 ms | 1.2501 ms |
+| `pricer_core/deliver_unchanged_structure_1000_grouped` | 2.1642 ms | 2.1908 ms |
+| `pricer_core/rebuild_1000_flat` | 1.1006 ms | 1.0907 ms |
+| `pricer_core/rebuild_1000_grouped` | 2.0104 ms | 2.0376 ms |
+| `blotter_core/cache_fill_40x7_133_rows` | 32.033 µs | 31.950 µs |
+| `blotter_core/cache_fill_40x7_137k_rows` | 33.188 µs | 33.652 µs |
+| `blotter_core/cache_fill_40x7_729k_rows` | 38.318 µs | 38.783 µs |

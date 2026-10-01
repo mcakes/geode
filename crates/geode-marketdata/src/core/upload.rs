@@ -891,4 +891,102 @@ role = "attribute"
         }
         assert_eq!(echo_differs(&CVI, &sent, &echoed), 1);
     }
+
+    /// Every case the golden covers: the builtin panels over drafts that
+    /// reach each row state and value source, as `{:?}` prints the result.
+    fn golden_cases() -> String {
+        let mut out = String::new();
+        let mut case = |name: &str, spec: &PanelSpec, doc: &DocumentRows, draft: &Draft| {
+            let (snapshot, model) = built(spec, doc, draft);
+            let sent = assemble(&snapshot, spec, &model, draft);
+            out.push_str(&format!("== {name}\n{sent:?}\n"));
+        };
+        let cvi = fixture_cvi_rows();
+        let dividend = fixture_dividend_rows();
+        case("cvi clean", &CVI, &cvi, &Draft::default());
+        case("dividend clean", &DIVIDEND, &dividend, &Draft::default());
+
+        let mut d = Draft::default();
+        d.set(
+            (1, 3),
+            ("B".into(), "amount".into()),
+            Value::F64(1.5),
+            &at(BASE),
+        );
+        d.delete_row("C", &at(BASE));
+        d.insert_row("new-1".into(), Some("A".into()), &at(BASE));
+        for (column, value) in [
+            ("ex", Value::Date(date(2026, 11, 20))),
+            ("announced", Value::Date(date(2026, 10, 15))),
+            ("pay", Value::Date(date(2026, 12, 1))),
+            ("amount", Value::F64(0.75)),
+            ("status", Value::Utf8("estimated".into())),
+        ] {
+            assert!(d.set_row_cell("new-1", column, value));
+        }
+        d.insert_row("new-2".into(), Some("new-1".into()), &at(BASE));
+        for (column, value) in [
+            ("ex", Value::Date(date(2026, 11, 27))),
+            ("announced", Value::Date(date(2026, 10, 16))),
+            ("pay", Value::Date(date(2026, 12, 2))),
+            ("amount", Value::F64(-0.0)),
+            ("status", Value::Utf8("declared".into())),
+        ] {
+            assert!(d.set_row_cell("new-2", column, value));
+        }
+        d.set_attr("currency", Value::Utf8("EUR".into()), &at(BASE));
+        case("dividend edit delete chain attr", &DIVIDEND, &dividend, &d);
+
+        let mut d = Draft::default();
+        d.insert_row("new-1".into(), Some("A".into()), &at(BASE));
+        assert!(d.set_row_cell("new-1", "amount", Value::F64(0.5)));
+        case("dividend incomplete insert", &DIVIDEND, &dividend, &d);
+
+        let mut d = Draft::default();
+        d.set(
+            (0, 4),
+            ("2026-10-16".into(), "-1".into()),
+            Value::F64(0.25),
+            &at(BASE),
+        );
+        d.set(
+            (1, 0),
+            ("2026-11-20".into(), "fwd".into()),
+            Value::F64(4531.0),
+            &at(BASE),
+        );
+        d.delete_row("2026-10-16", &at(BASE));
+        d.insert_row("2026-12-18".into(), Some("2026-11-20".into()), &at(BASE));
+        for (column, value) in [
+            ("fwd", 4600.0),
+            ("atm", 0.2),
+            ("skew", -1.0),
+            ("-20", 0.7),
+            ("-1", 0.8),
+            ("3.5", 0.9),
+        ] {
+            assert!(d.set_row_cell("2026-12-18", column, Value::F64(value)));
+        }
+        case("cvi edit slice delete insert", &CVI, &cvi, &d);
+        out
+    }
+
+    /// Upload output for the builtin panels, byte for byte, against the
+    /// file recorded before the windowed index replaced the prepared rows.
+    /// A difference is a change to what a desk publishes, never noise.
+    /// `GEODE_RECORD_UPLOAD_GOLDEN=1` rewrites the file (Task 1 only).
+    #[test]
+    fn upload_output_matches_the_recorded_golden() {
+        let text = golden_cases();
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/core/testdata/upload_golden.txt"
+        );
+        if std::env::var_os("GEODE_RECORD_UPLOAD_GOLDEN").is_some() {
+            std::fs::write(path, &text).expect("write the golden");
+            return;
+        }
+        let golden = std::fs::read_to_string(path).expect("the golden is checked in");
+        assert_eq!(text, golden);
+    }
 }

@@ -86,6 +86,19 @@ fn sheet_of(texts: &[String]) -> Sheet {
     s
 }
 
+/// Every line of `s` answered at its current revision: npv 12.5, delta 0.5.
+fn answers_for(s: &Sheet) -> Vec<(LineId, u64, Result<PriceResult, String>)> {
+    (0..s.len())
+        .filter(|r| s.is_line(*r))
+        .map(|r| {
+            let mut p = PriceResult::zero(Currency::USD);
+            p.set(Measure::Npv, false, 12.5);
+            p.set(Measure::Delta01, false, 0.5);
+            (s.id(r), s.revision(r), Ok(p))
+        })
+        .collect()
+}
+
 fn bench(c: &mut Criterion) {
     let templates = TemplateSet::builtin();
     let mut g = c.benchmark_group("pricer_core");
@@ -231,6 +244,54 @@ fn bench(c: &mut Criterion) {
             ))
         })
     });
+    // What paint reads per frame today: 40 rows' prepared cells. After the
+    // windowed slice this name measures a cold window fill of 40 rows.
+    let built = GridModel::build(&s, &flat, &no_groups, &expansion, &plan, Clock::utc());
+    g.bench_function("window_fill_40", |b| {
+        b.iter(|| {
+            let mut n = 0usize;
+            for row in &built.rows[..40] {
+                for cell in &row.cells {
+                    n += black_box(cell.text.clone()).len();
+                }
+            }
+            black_box(n)
+        })
+    });
+    // A delivery that moves no line in or out of the tree, as the tile runs
+    // it today: install, scope, chain, rollup, whole grid.
+    {
+        let mut s = sheet(1_000);
+        let batch = answers_for(&s);
+        s.deliver_all(batch.clone(), Utc::now());
+        let mut expansion = Expansion::default();
+        expansion.open_all(&s);
+        let dims = DerivedDimensions::default();
+        let empty = Scope::default();
+        let now = Utc::now();
+        g.bench_function("deliver_unchanged_structure_1000", |b| {
+            b.iter_batched(
+                || batch.clone(),
+                |batch| {
+                    s.mark_all_stale();
+                    s.deliver_all(batch, now);
+                    let visibility = apply_scope(&s, &empty, &dims, Clock::utc())
+                        .expect("the empty scope applies");
+                    let chain = effective_chain(&[], &dims);
+                    let tree = rollup::build(&s, &visibility, &chain, &dims, Clock::utc());
+                    black_box(GridModel::build(
+                        &s,
+                        &tree,
+                        &no_groups,
+                        &expansion,
+                        &plan,
+                        Clock::utc(),
+                    ))
+                },
+                BatchSize::SmallInput,
+            )
+        });
+    }
 
     // The scope the tile applies on every rebuild: a three-term expression
     // and a text filter over every line of the priced, opened sheet above.
@@ -327,6 +388,45 @@ fn bench(c: &mut Criterion) {
             ))
         })
     });
+    let built = GridModel::build(&s, &tree, &groups, &expansion, &plan, Clock::utc());
+    g.bench_function("window_fill_40_grouped", |b| {
+        b.iter(|| {
+            let mut n = 0usize;
+            for row in &built.rows[..40] {
+                for cell in &row.cells {
+                    n += black_box(cell.text.clone()).len();
+                }
+            }
+            black_box(n)
+        })
+    });
+    {
+        let batch = answers_for(&s);
+        let empty = Scope::default();
+        let now = Utc::now();
+        g.bench_function("deliver_unchanged_structure_1000_grouped", |b| {
+            b.iter_batched(
+                || batch.clone(),
+                |batch| {
+                    s.mark_all_stale();
+                    s.deliver_all(batch, now);
+                    let visibility = apply_scope(&s, &empty, &dims, Clock::utc())
+                        .expect("the empty scope applies");
+                    let chain = effective_chain(&levels, &dims);
+                    let tree = rollup::build(&s, &visibility, &chain, &dims, Clock::utc());
+                    black_box(GridModel::build(
+                        &s,
+                        &tree,
+                        &groups,
+                        &expansion,
+                        &plan,
+                        Clock::utc(),
+                    ))
+                },
+                BatchSize::SmallInput,
+            )
+        });
+    }
 
     g.finish();
 }

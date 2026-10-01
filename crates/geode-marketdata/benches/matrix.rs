@@ -211,6 +211,26 @@ fn bench(c: &mut Criterion) {
         b.iter(|| black_box(MatrixModel::build(&flat, &SCHEDULE, &clean).expect("a flat document")))
     });
 
+    // What paint reads per frame today: 40 rows × five prepared texts
+    // cloned out of the built model. After the windowed slice this name
+    // measures a cold `WindowCache` fill of the same 40 × 5 cells.
+    let built = MatrixModel::build(&flat, &SCHEDULE, &clean).expect("a flat document");
+    g.bench_function("window_fill_40x5", |b| {
+        b.iter(|| {
+            let mut n = 0usize;
+            for row in &built.rows[..40] {
+                for cell in &row.cells {
+                    n += black_box(cell.text.clone()).len();
+                }
+            }
+            black_box(n)
+        })
+    });
+    // A delivery as far as a paintable window: today the whole build.
+    g.bench_function("delivery_to_window_values_10000x5", |b| {
+        b.iter(|| black_box(MatrixModel::build(&flat, &SCHEDULE, &clean).expect("a flat document")))
+    });
+
     // 1,000 edits over the flat shape, then rebased onto the same labels.
     // The cells are 1,000 distinct rows of the schedule, whose labels are
     // distinct by construction, so every edit resolves and nothing is
@@ -232,6 +252,36 @@ fn bench(c: &mut Criterion) {
     }
     g.bench_function("draft_rebase_1000_edits", |b| {
         b.iter(|| black_box(draft.rebase(&model)))
+    });
+
+    // One committed cell, end to end: the draft write and the re-prepare.
+    let edit_cell = (5_000, 2);
+    let edit_labels = model.label_of(edit_cell);
+    let mut edit_draft = Draft::default();
+    let mut edited = MatrixModel::build(&flat, &SCHEDULE, &edit_draft).expect("a flat document");
+    let mut v = 0.0;
+    g.bench_function("one_cell_edit_values_10000x5", |b| {
+        b.iter(|| {
+            v += 1.0;
+            edit_draft.set(
+                edit_cell,
+                (edit_labels.0.to_string(), edit_labels.1.to_string()),
+                Value::F64(v),
+                &base(),
+            );
+            black_box(edited.patch_cell(edit_cell.0, edit_cell.1, &flat, &SCHEDULE, &edit_draft))
+        })
+    });
+    // The 500 ms session tick's group capture: today a clean build of
+    // the base, then the capture over it.
+    let mut tick_draft = draft.clone();
+    g.bench_function("session_tick_values_10000x5", |b| {
+        b.iter(|| {
+            let base_model =
+                MatrixModel::build(&flat, &SCHEDULE, &Draft::default()).expect("a flat document");
+            tick_draft.capture_groups(&base_model);
+            black_box(&tick_draft);
+        })
     });
 
     // Measure re-preparing one edited cell on each model shape. Reuse
