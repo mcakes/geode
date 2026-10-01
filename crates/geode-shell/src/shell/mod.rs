@@ -52,7 +52,7 @@ use std::time::Instant;
 
 use gpui::prelude::*;
 use gpui::{
-    Context, Entity, EventEmitter, FocusHandle, Focusable as _, ScrollHandle,
+    Context, Entity, EventEmitter, FocusHandle, Focusable as _, ScrollHandle, SharedString,
     UniformListScrollHandle, Window,
 };
 use gpui_component::input::{InputEvent, InputState};
@@ -616,9 +616,9 @@ pub struct ShellView {
     /// at the end of every `ensure_occupants`, the same lifecycle
     /// `pending_tiles`/`unplaced_records` follow.
     stack_sent: HashMap<TileId, Option<(usize, usize)>>,
-    /// Status notice for a refused stack action, such as `"not in a stack"`.
+    /// Status notice, such as a refused stack action's `"not in a stack"`.
     /// Cleared at the start of the next dispatch.
-    notice: Option<&'static str>,
+    notice: Option<SharedString>,
     /// The transient stack-member list, or
     /// `None` when closed — `open_stack_list`'s own contract, the same
     /// "nothing survives a close/reopen" shape `palette`/`command_line`
@@ -1383,7 +1383,11 @@ impl ShellView {
             // A same-kind refusal's notice names a kind lower in the stack; once
             // the stack is empty that kind no longer exists, so the notice must
             // not linger describing a dialog nothing points to.
-            if self.notice.is_some_and(dialog::is_already_open_notice) {
+            if self
+                .notice
+                .as_deref()
+                .is_some_and(dialog::is_already_open_notice)
+            {
                 self.notice = None;
             }
             self.return_focus_from_overlay(window, cx);

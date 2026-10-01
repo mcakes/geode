@@ -99,14 +99,14 @@ fn the_same_domain_is_refused_with_its_own_notice(cx: &mut gpui::TestAppContext)
     dispatch_action(&shell, "config::views", &mut cx);
     assert_eq!(domains(&shell, &cx), vec![Domain::Views, Domain::Colors]);
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.notice),
+        shell.read_with(&cx, |s, _| s.notice.clone()).as_deref(),
         Some("views is already open underneath")
     );
     // Asking for the domain already on top does nothing and says nothing.
     shell.update(&mut cx, |s, _| s.notice = None);
     dispatch_action(&shell, "config::colors", &mut cx);
     assert_eq!(domains(&shell, &cx), vec![Domain::Views, Domain::Colors]);
-    assert_eq!(shell.read_with(&cx, |s, _| s.notice), None);
+    assert_eq!(shell.read_with(&cx, |s, _| s.notice.clone()), None);
 }
 
 /// Three deep: each pop reveals its own dialog, and a covered domain cannot be
@@ -129,7 +129,7 @@ fn three_object_dialogs_pop_in_order(cx: &mut gpui::TestAppContext) {
         vec![Domain::Views, Domain::Colors, Domain::Scopes]
     );
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.notice),
+        shell.read_with(&cx, |s, _| s.notice.clone()).as_deref(),
         Some("colors is already open underneath")
     );
 

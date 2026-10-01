@@ -3545,7 +3545,7 @@ fn scope_save_current_stacks_over_views_without_touching_it(cx: &mut gpui::TestA
     dispatch_action(&shell, "scope::save_current", &mut cx);
     cx.run_until_parked();
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.notice),
+        shell.read_with(&cx, |s, _| s.notice.clone()).as_deref(),
         Some(objectdialog::Domain::Scopes.already_open_notice())
     );
     assert_eq!(shell.read_with(&cx, |s, _| s.modals.len()), 3);

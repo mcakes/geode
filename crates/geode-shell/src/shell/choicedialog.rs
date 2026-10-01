@@ -572,7 +572,7 @@ pub fn open_columns(
         .and_then(|t| view.occupants.get(&t))
         .and_then(|o| o.content.tile_columns(cx));
     let Some(mut tile) = tile else {
-        view.notice = Some(NO_TILE_COLUMNS);
+        view.notice = Some(NO_TILE_COLUMNS.into());
         cx.notify();
         return;
     };
@@ -595,7 +595,7 @@ pub fn open_columns(
         return;
     }
     let Some(state) = ChoiceDialogState::columns(domain, &tile) else {
-        view.notice = Some(NO_SCHEMA_COLUMNS);
+        view.notice = Some(NO_SCHEMA_COLUMNS.into());
         cx.notify();
         return;
     };
@@ -695,13 +695,13 @@ fn commit(shell: &mut ShellView, pick: Pick, window: &mut Window, cx: &mut Conte
                 (changed, slot.is_none_or(|n| f.slots().get(n).is_some()))
             });
             if !changed && !still_there {
-                shell.notice = Some(SLOT_GONE);
+                shell.notice = Some(SLOT_GONE.into());
             }
             shell.close_modal(window, cx);
         }
         Pick::Scope(name) => {
             if shell.load_saved_scope(&name, cx).is_err() {
-                shell.notice = Some(SCOPE_GONE);
+                shell.notice = Some(SCOPE_GONE.into());
             }
             shell.close_modal(window, cx);
         }

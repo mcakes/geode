@@ -3299,12 +3299,12 @@ run_mutation "page: closing an overlay over a page returns focus to the page" \
 run_mutation "page: page::close under a modal is refused" \
   crates/geode-shell/src/shell/input.rs \
   '            if self.modal_open() {
-                self.notice = Some(CLOSE_DIALOG_FIRST);
+                self.notice = Some(CLOSE_DIALOG_FIRST.into());
                 return;
             }
             if self.page_open() {' \
   '            if false {
-                self.notice = Some(CLOSE_DIALOG_FIRST);
+                self.notice = Some(CLOSE_DIALOG_FIRST.into());
                 return;
             }
             if self.page_open() {' \
@@ -6457,7 +6457,7 @@ run_mutation "diagnostics: NEW-1 — summary omits the data error count" \
 run_mutation "shell page: a toggle under a modal opens the page beneath the dialog" \
   crates/geode-shell/src/shell/input.rs \
   '            if self.modal_open() {
-                self.notice = Some(CLOSE_DIALOG_FIRST);
+                self.notice = Some(CLOSE_DIALOG_FIRST.into());
                 return;
             }
             let kind = kind.to_string();' \
@@ -16626,7 +16626,7 @@ run_mutation "occupants: a tile is framed by its own workspace" \
 
 run_mutation "stack pull: a refusal leaves a notice" \
   crates/geode-shell/src/shell/input.rs \
-  '                self.notice = Some(NO_TILE_THAT_WAY);' \
+  '                self.notice = Some(NO_TILE_THAT_WAY.into());' \
   '                {}' \
   geode-shell \
   a_stack_split_or_pull_with_nothing_to_act_on_leaves_a_notice
@@ -27059,9 +27059,9 @@ run_mutation "tile header: a queued page open never closes the page" \
 run_mutation "tile header: a queued page open under a modal is refused" \
   crates/geode-shell/src/shell/page.rs \
   '        if self.modal_open() {
-            self.notice = Some(super::input::CLOSE_DIALOG_FIRST);' \
+            self.notice = Some(super::input::CLOSE_DIALOG_FIRST.into());' \
   '        if false && self.modal_open() {
-            self.notice = Some(super::input::CLOSE_DIALOG_FIRST);' \
+            self.notice = Some(super::input::CLOSE_DIALOG_FIRST.into());' \
   geode-shell a_queued_page_open_under_a_modal_is_refused
 
 # The version gate: every diagnostics notify would re-ask and re-format.

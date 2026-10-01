@@ -358,7 +358,7 @@ fn g_m_on_a_row_with_no_context_column_opens_the_plain_picker(cx: &mut gpui::Tes
         "{:?}",
         dialog_target(&shell, &vcx)
     );
-    assert_eq!(shell.read_with(&vcx, |s, _| s.notice), None);
+    assert_eq!(shell.read_with(&vcx, |s, _| s.notice.clone()), None);
 }
 
 /// A roster where no kind accepts anything registers no context column, so
@@ -387,5 +387,5 @@ fn g_m_with_no_accepting_kind_opens_the_plain_picker(cx: &mut gpui::TestAppConte
         "{:?}",
         dialog_target(&shell, &vcx)
     );
-    assert_eq!(shell.read_with(&vcx, |s, _| s.notice), None);
+    assert_eq!(shell.read_with(&vcx, |s, _| s.notice.clone()), None);
 }

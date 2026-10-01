@@ -252,7 +252,7 @@ fn picking_a_slot_emptied_under_the_picker_says_so(cx: &mut gpui::TestAppContext
     assert_eq!(frame.read_with(&vcx, |f, _| f.shared().active_slot()), None);
     assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
     assert_eq!(
-        shell.read_with(&vcx, |s, _| s.notice),
+        shell.read_with(&vcx, |s, _| s.notice.clone()).as_deref(),
         Some(crate::shell::choicedialog::SLOT_GONE)
     );
 }

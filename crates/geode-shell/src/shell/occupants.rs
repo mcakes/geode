@@ -455,7 +455,7 @@ impl ShellView {
             self.session_dirty = true;
         }
         let Some((index, _)) = self.services.workspaces.active().stack_position(tile) else {
-            self.notice = Some(super::input::NOT_IN_A_STACK);
+            self.notice = Some(super::input::NOT_IN_A_STACK.into());
             cx.notify();
             return;
         };

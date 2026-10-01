@@ -186,7 +186,7 @@ fn g_dot_on_a_row_with_no_actions_says_so(cx: &mut gpui::TestAppContext) {
         draw(&mut vcx);
         assert!(row_menu_titles(&shell, &vcx).is_none());
         assert_eq!(
-            shell.read_with(&vcx, |s, _| s.notice),
+            shell.read_with(&vcx, |s, _| s.notice.clone()).as_deref(),
             Some(crate::shell::row_menu::NO_ROW_ACTIONS)
         );
     }
@@ -204,8 +204,27 @@ fn g_m_on_a_row_with_only_an_action_column_shows_the_notice(cx: &mut gpui::TestA
     vcx.simulate_keystrokes("g m");
     draw(&mut vcx);
     assert_eq!(
-        shell.read_with(&vcx, |s, _| s.notice),
+        shell.read_with(&vcx, |s, _| s.notice.clone()).as_deref(),
         Some(crate::shell::input::NO_MODULE_OPENS)
+    );
+}
+
+/// The shell notice carries text built at run time (an action reporting the
+/// URL it opened), not only a `&'static str` constant, and it paints.
+#[gpui::test]
+fn a_dynamic_notice_paints_its_text(cx: &mut gpui::TestAppContext) {
+    let f = fixture(Some(spx_p7()));
+    let (window, mut vcx) = open_shell(cx, f.services);
+    let shell = shell_of(&window, &mut vcx);
+    shell.update(&mut vcx, |s, cx| {
+        s.notice = Some(format!("opened {}", "nemo://position/P7").into());
+        cx.notify();
+    });
+    draw(&mut vcx);
+    assert!(vcx.debug_bounds("shell-notice").is_some());
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.notice.clone()).as_deref(),
+        Some("opened nemo://position/P7")
     );
 }
 
@@ -371,7 +390,7 @@ fn a_right_press_on_a_tile_without_press_context_opens_nothing(cx: &mut gpui::Te
     draw(&mut vcx);
     assert!(shell.read_with(&vcx, |s, _| s.row_menu.is_none()));
     assert_eq!(
-        shell.read_with(&vcx, |s, _| s.notice),
+        shell.read_with(&vcx, |s, _| s.notice.clone()).as_deref(),
         None,
         "no notice on a press either"
     );

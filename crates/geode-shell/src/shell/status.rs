@@ -173,8 +173,12 @@ pub fn status_bar(
     }
     if let Some(message) = notice {
         // Shell action refusals stay muted and clear on the next dispatch.
+        // One line, ellipsized: a notice can carry dynamic text (a URL)
+        // longer than the left region has room for.
         bar = bar.left(
             div()
+                .min_w_0()
+                .truncate()
                 .text_color(theme.muted_foreground)
                 .debug_selector(|| "shell-notice".to_string())
                 .child(message.to_string()),

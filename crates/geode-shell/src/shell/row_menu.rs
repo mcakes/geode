@@ -7,7 +7,7 @@
 //! palette opening.
 
 use geode_core::context::DimensionContext;
-use gpui::{Context, Pixels, Point, Window};
+use gpui::{Context, Pixels, Point, SharedString, Window};
 
 use super::ShellView;
 use crate::defaults::AddPlacement;
@@ -72,8 +72,8 @@ impl ActionCx<'_, '_> {
     }
 
     /// Show `text` as the shell's status notice.
-    pub fn notice(&mut self, text: &'static str) {
-        self.shell.notice = Some(text);
+    pub fn notice(&mut self, text: impl Into<SharedString>) {
+        self.shell.notice = Some(text.into());
         self.cx.notify();
     }
 }
@@ -98,7 +98,7 @@ impl ShellView {
         }
         let rows = menu_rows(&context, &self.services.roster);
         if rows.is_empty() {
-            self.notice = Some(NO_ROW_ACTIONS);
+            self.notice = Some(NO_ROW_ACTIONS.into());
             cx.notify();
             return;
         }
