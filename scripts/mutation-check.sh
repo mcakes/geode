@@ -3299,12 +3299,12 @@ run_mutation "page: closing an overlay over a page returns focus to the page" \
 run_mutation "page: page::close under a modal is refused" \
   crates/geode-shell/src/shell/input.rs \
   '            if self.modal_open() {
-                self.notice = Some(CLOSE_DIALOG_FIRST);
+                self.notice = Some(CLOSE_DIALOG_FIRST.into());
                 return;
             }
             if self.page_open() {' \
   '            if false {
-                self.notice = Some(CLOSE_DIALOG_FIRST);
+                self.notice = Some(CLOSE_DIALOG_FIRST.into());
                 return;
             }
             if self.page_open() {' \
@@ -6455,7 +6455,7 @@ run_mutation "diagnostics: NEW-1 — summary omits the data error count" \
 run_mutation "shell page: a toggle under a modal opens the page beneath the dialog" \
   crates/geode-shell/src/shell/input.rs \
   '            if self.modal_open() {
-                self.notice = Some(CLOSE_DIALOG_FIRST);
+                self.notice = Some(CLOSE_DIALOG_FIRST.into());
                 return;
             }
             let kind = kind.to_string();' \
@@ -16645,7 +16645,7 @@ run_mutation "occupants: a tile is framed by its own workspace" \
 
 run_mutation "stack pull: a refusal leaves a notice" \
   crates/geode-shell/src/shell/input.rs \
-  '                self.notice = Some(NO_TILE_THAT_WAY);' \
+  '                self.notice = Some(NO_TILE_THAT_WAY.into());' \
   '                {}' \
   geode-shell \
   a_stack_split_or_pull_with_nothing_to_act_on_leaves_a_notice
@@ -23270,6 +23270,21 @@ run_mutation "row menu: an unpaintable menu stays open" \
   '        if false {' \
   geode-shell a_row_menu_with_nowhere_to_hang_is_dropped
 
+# A set UrlOpener takes the URL; skipping it hands a test's URL to the OS.
+run_mutation "nemo seam: open_url skips the test opener" \
+  crates/geode-shell/src/shell/row_menu.rs \
+  '        if let Some(opener) = self.cx.try_global::<crate::dimension::UrlOpener>() {' \
+  '        if let Some(opener) = None::<&crate::dimension::UrlOpener> {' \
+  geode-shell an_action_opens_its_url_through_the_opener
+
+# Without an opener the app must hand the URL to the OS; the test
+# platform records what reached it.
+run_mutation "nemo seam: the app never opens the url" \
+  crates/geode-shell/src/shell/row_menu.rs \
+  '            self.cx.open_url(url);' \
+  '            let _ = url;' \
+  geode-shell without_an_opener_the_app_opens_the_url
+
 # A reload must reach the underlying list, or a desk edit to it waits for
 # a restart.
 run_mutation "pricer app: a reload leaves the underlying list stale" \
@@ -27078,9 +27093,9 @@ run_mutation "tile header: a queued page open never closes the page" \
 run_mutation "tile header: a queued page open under a modal is refused" \
   crates/geode-shell/src/shell/page.rs \
   '        if self.modal_open() {
-            self.notice = Some(super::input::CLOSE_DIALOG_FIRST);' \
+            self.notice = Some(super::input::CLOSE_DIALOG_FIRST.into());' \
   '        if false && self.modal_open() {
-            self.notice = Some(super::input::CLOSE_DIALOG_FIRST);' \
+            self.notice = Some(super::input::CLOSE_DIALOG_FIRST.into());' \
   geode-shell a_queued_page_open_under_a_modal_is_refused
 
 # The version gate: every diagnostics notify would re-ask and re-format.
@@ -27407,6 +27422,44 @@ run_mutation "edit caret: pricer visual binds I to end placement" \
 [bindings.keys]
 "shift+i" = "pricer::edit"' \
   geode-pricer edit_keys_place_the_caret_at_the_requested_end
+
+run_mutation "nemo: ids are not encoded" \
+  crates/geode-nemo/src/lib.rs \
+  '    format!("{prefix}{}", utf8_percent_encode(id, ID))' \
+  '    format!("{prefix}{id}")' \
+  geode-nemo ids_are_percent_encoded_as_one_path_segment
+
+run_mutation "nemo: unreserved characters are encoded too" \
+  crates/geode-nemo/src/lib.rs \
+  "const ID: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');" \
+  "const ID: &AsciiSet = NON_ALPHANUMERIC;" \
+  geode-nemo a_plain_id_is_appended
+
+# Startup registers Nemo's row actions; the bridge's end-to-end tests go
+# through the same `add_dimension_actions`.
+run_mutation "nemo: the actions are never registered" \
+  crates/geode-app/src/main.rs \
+  '        roster.add_action(action);' \
+  '        let _ = action;' \
+  geode-app a_right_press_opens_the_rows_position_in_nemo
+
+# The pressed row is opened, not the selection riding in the context.
+run_mutation "nemo: the selection's first row is opened" \
+  crates/geode-nemo/src/lib.rs \
+  '        let id = ctx.get(self.column).filter(|s| !s.is_empty())?;' \
+  '        let id = ctx.selection.first().and_then(|r| r.iter().find(|(c, _)| c == self.column).map(|(_, v)| v.as_str())).or(ctx.get(self.column)).filter(|s| !s.is_empty())?;' \
+  geode-app nemo_opens_the_pressed_row_not_the_selection
+
+# The notice says what Geode did, in exactly these words.
+run_mutation "nemo: the notice claims a launch" \
+  crates/geode-nemo/src/lib.rs \
+  '        acx.notice(format!("opened {url}"));' \
+  '        acx.notice(format!("launched {url}"));' \
+  geode-app a_right_press_opens_the_rows_position_in_nemo
 
 # The header's mode icon: edit paints the edit icon, visual its own.
 run_mutation "tile header: edit mode paints the edit icon" \

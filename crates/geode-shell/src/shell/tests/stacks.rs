@@ -182,7 +182,7 @@ fn a_stack_verb_on_a_plain_tile_leaves_a_notice_the_next_action_clears(
         let _ = window.draw(cx);
     });
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.notice),
+        shell.read_with(&cx, |s, _| s.notice.clone()).as_deref(),
         Some("not in a stack")
     );
     assert!(
@@ -193,7 +193,7 @@ fn a_stack_verb_on_a_plain_tile_leaves_a_notice_the_next_action_clears(
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    assert_eq!(shell.read_with(&cx, |s, _| s.notice), None);
+    assert_eq!(shell.read_with(&cx, |s, _| s.notice.clone()), None);
 }
 
 #[gpui::test]
@@ -272,7 +272,7 @@ fn a_stack_split_or_pull_with_nothing_to_act_on_leaves_a_notice(cx: &mut gpui::T
         let _ = window.draw(cx);
     });
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.notice),
+        shell.read_with(&cx, |s, _| s.notice.clone()).as_deref(),
         Some("not in a stack")
     );
     for chord in ["alt-shift-h", "alt-shift-j", "alt-shift-k", "alt-shift-l"] {
@@ -281,7 +281,7 @@ fn a_stack_split_or_pull_with_nothing_to_act_on_leaves_a_notice(cx: &mut gpui::T
             let _ = window.draw(cx);
         });
         assert_eq!(
-            shell.read_with(&cx, |s, _| s.notice),
+            shell.read_with(&cx, |s, _| s.notice.clone()).as_deref(),
             Some("no tile that way"),
             "{chord}"
         );
@@ -501,7 +501,7 @@ fn pick_on_a_plain_tile_refuses_with_the_notice(cx: &mut gpui::TestAppContext) {
     });
     assert!(shell.read_with(&cx, |s, _| s.stack_list.is_none()));
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.notice),
+        shell.read_with(&cx, |s, _| s.notice.clone()).as_deref(),
         Some("not in a stack")
     );
 }

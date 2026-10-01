@@ -200,7 +200,7 @@ impl ShellView {
                     | "frame::pin_workspace"
             ) || action.0.starts_with("workspace::switch_"))
         {
-            self.notice = Some(CLOSE_DIALOG_FIRST);
+            self.notice = Some(CLOSE_DIALOG_FIRST.into());
             return;
         }
         // A page covers the tile surface: it cannot host a `:` line, find,
@@ -208,12 +208,12 @@ impl ShellView {
         // cannot see. The palette reaches these ids over a page as the
         // keymap does, so the refusal lives here, not in a context.
         if self.page_open() && refused_over_a_page(&action.0) {
-            self.notice = Some(CLOSE_PAGE_FIRST);
+            self.notice = Some(CLOSE_PAGE_FIRST.into());
             return;
         }
         if let Some(kind) = action.0.strip_prefix("page::toggle_") {
             if self.modal_open() {
-                self.notice = Some(CLOSE_DIALOG_FIRST);
+                self.notice = Some(CLOSE_DIALOG_FIRST.into());
                 return;
             }
             let kind = kind.to_string();
@@ -226,7 +226,7 @@ impl ShellView {
             // did not come from. The modal route consumes Escape first, so
             // only the palette reaches this id over a dialog.
             if self.modal_open() {
-                self.notice = Some(CLOSE_DIALOG_FIRST);
+                self.notice = Some(CLOSE_DIALOG_FIRST.into());
                 return;
             }
             if self.page_open() {
@@ -256,7 +256,7 @@ impl ShellView {
                 self.session_dirty = true;
                 self.note_keyboard_focus_move(window, cx);
             } else {
-                self.notice = Some(NOT_IN_A_STACK);
+                self.notice = Some(NOT_IN_A_STACK.into());
             }
             return;
         }
@@ -278,7 +278,7 @@ impl ShellView {
                 self.session_dirty = true;
                 self.note_keyboard_focus_move(window, cx);
             } else {
-                self.notice = Some(NOT_IN_A_STACK);
+                self.notice = Some(NOT_IN_A_STACK.into());
             }
             return;
         }
@@ -288,7 +288,7 @@ impl ShellView {
             if self.services.workspaces.active_mut().pull(dir) {
                 self.session_dirty = true;
             } else {
-                self.notice = Some(NO_TILE_THAT_WAY);
+                self.notice = Some(NO_TILE_THAT_WAY.into());
             }
             return;
         }
@@ -308,14 +308,14 @@ impl ShellView {
                 self.session_dirty = true;
                 self.note_keyboard_focus_move(window, cx);
             } else {
-                self.notice = Some(NOT_IN_A_STACK);
+                self.notice = Some(NOT_IN_A_STACK.into());
             }
             return;
         }
         if action.0 == "stack::pick" {
             match self.services.workspaces.active().focused_tile() {
                 Some(tile) => self.open_stack_list(tile, window, cx),
-                None => self.notice = Some(NOT_IN_A_STACK),
+                None => self.notice = Some(NOT_IN_A_STACK.into()),
             }
             return;
         }
@@ -530,7 +530,7 @@ impl ShellView {
                     })
                     .collect();
                 if kinds.is_empty() {
-                    self.notice = Some(NO_MODULE_OPENS);
+                    self.notice = Some(NO_MODULE_OPENS.into());
                     cx.notify();
                 } else {
                     let accepted: Vec<&str> = kinds
@@ -571,7 +571,7 @@ impl ShellView {
                 None => Err(crate::colfit::NO_TABLE),
             };
             if let Err(refusal) = result {
-                self.notice = Some(refusal);
+                self.notice = Some(refusal.into());
             }
             cx.notify();
         } else if action.0 == "log::level" {

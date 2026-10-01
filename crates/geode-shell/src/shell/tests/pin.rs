@@ -101,7 +101,7 @@ fn switching_and_pinning_are_refused_behind_a_dialog(cx: &mut gpui::TestAppConte
             let _ = window.draw(cx);
         });
         assert_eq!(
-            shell.read_with(&vcx, |s, _| s.notice),
+            shell.read_with(&vcx, |s, _| s.notice.clone()).as_deref(),
             Some(crate::shell::input::CLOSE_DIALOG_FIRST),
             "{id} must be refused with the notice"
         );

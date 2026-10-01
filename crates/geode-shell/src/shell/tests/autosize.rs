@@ -41,7 +41,7 @@ fn the_autosize_action_reaches_only_the_focused_tile(cx: &mut gpui::TestAppConte
     assert_eq!(tiles.len(), 2);
     dispatch_action(&shell, "tile::autosize_columns", &mut vcx);
     assert_eq!(autosized(&log.borrow()), vec![(focused, false)]);
-    assert_eq!(shell.read_with(&vcx, |s, _| s.notice), None);
+    assert_eq!(shell.read_with(&vcx, |s, _| s.notice.clone()), None);
 
     let other = *tiles.iter().find(|t| **t != focused).unwrap();
     shell.update(&mut vcx, |s, _| {
@@ -73,7 +73,7 @@ fn autosize_on_a_tile_without_a_table_shows_the_refusal(cx: &mut gpui::TestAppCo
     assert_eq!(kind, Some(crate::module::placeholder::PLACEHOLDER_KIND));
     dispatch_action(&shell, "tile::autosize_columns", &mut vcx);
     assert_eq!(
-        shell.read_with(&vcx, |s, _| s.notice),
+        shell.read_with(&vcx, |s, _| s.notice.clone()).as_deref(),
         Some(crate::colfit::NO_TABLE)
     );
     assert!(autosized(&log.borrow()).is_empty());
@@ -87,7 +87,7 @@ fn autosize_with_no_focused_tile_shows_the_refusal(cx: &mut gpui::TestAppContext
     let shell = shell_of(&window, &mut vcx);
     dispatch_action(&shell, "tile::autosize_columns", &mut vcx);
     assert_eq!(
-        shell.read_with(&vcx, |s, _| s.notice),
+        shell.read_with(&vcx, |s, _| s.notice.clone()).as_deref(),
         Some(crate::colfit::NO_TABLE)
     );
 }

@@ -278,7 +278,7 @@ plain tile picker.
 
 `g .` opens the shell's [row menu](shell.md#row-menu) on the cursor row,
 hung just under it: a section per value that some panel or action takes
-(`underlying_ref · SPX`) listing the panels that open on it. When the cursor row has
+(`underlying_ref · SPX`) listing the panels and actions that open on it. When the cursor row has
 scrolled out of view the menu hangs at the tile's top-left instead. A
 right-click on a row's cell, or on the row beside its cells, opens the same
 menu at the pointer, the clicked column's section first when that column is
@@ -288,6 +288,14 @@ inside a `V` row selection keeps the cursor and the selection; anywhere
 else it clears any selection and moves the cursor to the clicked row first.
 A row with nothing to offer (an `lhu` subtotal, say) shows `no actions for
 this row` instead.
+
+A row carrying a single `position_ref` or `instrument_ref` (from the grouping
+path, a shown column, or the hidden context column) gets an "Open in Nemo" row in that column's section.
+Picking it opens `nemo://position/<id>` or `nemo://instrument/<id>` (the id
+percent-encoded) through the OS and shows `opened <url>` in the status bar;
+it opens the row the menu was opened on, never the rest of a selection. A
+subtotal whose rows hold several positions has no single `position_ref`, so
+it offers no Nemo row.
 
 The header is the shared 22 px strip. The view, grouping, state chips
 (`pinned`, `unscoped`, `filtered`, a tile as-of), the frame's `AS OF` warning
@@ -2018,7 +2026,8 @@ ready for the first frame.
 
 `geode-app` is the composition root. It loads configuration, initializes GPUI
 and logging, builds registries, creates the data service and bridge, registers
-module factories, installs globals, and opens the window. Cross-layer policy
+module factories and the row menu's actions (Open in Nemo, from
+`geode-nemo`), installs globals, and opens the window. Cross-layer policy
 that depends on the assembled binary belongs here; feature behavior does not.
 
 ## Testing and performance

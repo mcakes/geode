@@ -47,7 +47,7 @@ sessions from 14:30 to 21:00 UTC, without holiday or daylight-saving rules.
 
 | Module | Holds |
 |---|---|
-| `main` | Startup composition: logging, config, registry and keymap, roster, service, and window. Pure argument parsing and user-path resolution; `config_dirs` reads the environment. |
+| `main` | Startup composition: logging, config, registry and keymap, roster (module factories, then the row menu's actions: `add_dimension_actions` registers `geode-nemo`'s two Open in Nemo actions), service, and window. Pure argument parsing and user-path resolution; `config_dirs` reads the environment. |
 | `bridge` | Service setup and module factories (loads `panels` against the registered document kinds and kind actions and builds one market-data factory per accepted panel; refused panels, including one named after another module's kind, become composition diagnostics in the shell's config section), window event routing (including stopped data threads, and the handle's `Busy`-refusal total read on each drained event into `Diagnostics`), catalog refresh/retry (a `Stopped` refusal drops the demand), and forwarding view reloads to the data service (a refused hand-off is a diagnostic). |
 | `events` | Coalesced pending state with a one-slot wakeup channel. Retains publication book unions and highest-tagged query results; upload outcomes have separate `(tile key, tag)` entries; local-write outcomes never coalesce. |
 | `demo` | `--demo`: the temp directory, the emitted sources, the compiled-in demo config layer. |

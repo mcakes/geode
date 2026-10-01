@@ -200,7 +200,7 @@ fn picking_a_scope_removed_under_the_picker_says_so(cx: &mut gpui::TestAppContex
     assert_eq!(scope_text(&frame, &vcx), None);
     assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
     assert_eq!(
-        shell.read_with(&vcx, |s, _| s.notice),
+        shell.read_with(&vcx, |s, _| s.notice.clone()).as_deref(),
         Some(crate::shell::choicedialog::SCOPE_GONE)
     );
 }

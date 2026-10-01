@@ -605,11 +605,15 @@ mixed the derived cell is blank, not marked.
 
 **Context columns.** A query can also carry columns the view does not show,
 so the shell can read one row's value of each (the dimension context behind
-`g m`). `ViewSpec::context` holds them. It is runtime-only, never read from
-config, and validation ignores it. The data service fills it on a copy of the
-view for every query, from the list set with `DataHandle::set_context_columns`;
-`geode-app` publishes `ModuleRoster::context_columns` (the union of every
-factory's `accepts`) there at startup. `ViewSpec::context_dimensions` keeps a
+`g m` and the row menu). `ViewSpec::context` holds them. It is runtime-only,
+never read from config, and validation ignores it. The data service fills it
+on a copy of the view for every query, from the list set with
+`DataHandle::set_context_columns`; `geode-app` publishes
+`ModuleRoster::context_columns` there at startup: the union of every
+factory's `accepts`, then every registered action's `column`, each once in
+first-mention order. Today that is `underlying_ref` from the market-data
+kinds, then `position_ref` and `instrument_ref` from the Nemo actions.
+`ViewSpec::context_dimensions` keeps a
 listed column only when the primary dataset declares it as a key or a
 dimension, the dataset is not a document or series dataset, and the view
 neither groups by it, nor shows it, nor derives it, nor takes it off a join;
@@ -624,7 +628,10 @@ it; it is in the snapshot. The cost is per query: when a measure aggregate
 already reads the column's grain the pair's two aggregates ride that scan;
 otherwise the grain gets its own `dim_<table>` CTE: one more scan of that
 table and one more join to the spine, shared by every column read at that
-grain.
+grain. A column is read at the coarsest declared grain that carries it
+alongside the grouping, so `position_ref` usually costs a position-grain
+scan, and `instrument_ref` an instrument-grain scan, unless a shown measure
+already reads that grain.
 
 ## Retention and maintenance
 

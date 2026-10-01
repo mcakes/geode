@@ -365,9 +365,20 @@ fn add_bridge_modules(roster: &mut ModuleRoster, bridge: &bridge::Bridge) {
     }
     roster.add(Box::new(bridge.timeseries.clone()));
     roster.add(Box::new(bridge.pricer.clone()));
-    // Last, once every factory (and, from Part 2, every dimension action)
-    // is registered: each row then carries the values they open on.
+    // Dimension actions: Open in Nemo on a position or an instrument.
+    add_dimension_actions(roster);
+    // Last, once every factory and every dimension action is registered:
+    // each row then carries the values they open on.
     bridge.handle.set_context_columns(roster.context_columns());
+}
+
+/// The row menu's dimension actions: Open in Nemo on a position or an
+/// instrument. Its own function so the bridge's end-to-end tests register
+/// exactly what startup registers.
+fn add_dimension_actions(roster: &mut ModuleRoster) {
+    for action in geode_nemo::actions() {
+        roster.add_action(action);
+    }
 }
 
 /// Every builtin config doc: the shell's keymap, the pricer's two bundled
@@ -1158,8 +1169,9 @@ label = "skew"
     }
 
     /// The production roster exposes `underlying_ref`-based launch state for
-    /// every accepted panel (the builtin CVI and dividend here), names that
-    /// column in `context_columns`, and startup hands that list to the data
+    /// every accepted panel (the builtin CVI and dividend here), registers
+    /// the two Open in Nemo row actions, names every column those open on
+    /// in `context_columns`, and startup hands that list to the data
     /// handle. Exercising startup's registration path checks that shared
     /// factory forwarding preserves `accepts` and `launch_state`.
     #[gpui::test]
@@ -1190,7 +1202,8 @@ label = "skew"
             .filter(|k| roster.factory(k).is_some_and(|f| spx.offers(f.accepts())))
             .collect();
         assert_eq!(accepting, vec!["cvi", "dividend"]);
-        assert_eq!(roster.context_columns(), vec!["underlying_ref".to_string()]);
+        let ids: Vec<&str> = roster.actions().iter().map(|a| a.id()).collect();
+        assert_eq!(ids, vec!["nemo::open_position", "nemo::open_instrument"]);
         for kind in ["cvi", "dividend"] {
             let f = roster.factory(kind).unwrap();
             assert_eq!(f.accepts(), &["underlying_ref"], "{kind}");
@@ -1203,8 +1216,13 @@ label = "skew"
         }
         assert_eq!(
             bridge.handle.context_columns(),
-            vec!["underlying_ref".to_string()],
-            "startup hands the roster's context columns to the data service"
+            vec![
+                "underlying_ref".to_string(),
+                "position_ref".into(),
+                "instrument_ref".into()
+            ],
+            "startup hands the roster's context columns, Nemo's among them, \
+             to the data service"
         );
     }
 

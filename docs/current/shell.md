@@ -157,11 +157,23 @@ A crate adds a row by implementing `dimension::DimensionAction`: `id`,
 `title`, the `column` whose section it sits in, `available` (enabled, or
 disabled with the reason its row shows; enabled by default) and `run`.
 `geode-app` registers it with `ModuleRoster::add_action` in
-`add_bridge_modules` (none are registered yet), before the roster's
-`context_columns` are published, so each row carries the action's column. `run` gets the menu's context and
-an `ActionCx`, after the menu has closed: `open_tile(kind, state)` splits a
-tile beside the focused one, as `g m` does, and `notice(text)` sets the
-status notice.
+`add_bridge_modules` (through `add_dimension_actions`), before the roster's
+`context_columns` are published, so each row carries the action's column.
+`run` gets the menu's context and an `ActionCx`, after the menu has closed:
+`open_tile(kind, state)` splits a tile beside the focused one, as `g m`
+does; `open_url(url)` hands a URL to the OS (`App::open_url`), or to the
+`dimension::UrlOpener` global's function when one is set, as tests set it;
+and `notice(text)` sets the status notice. The notice takes any text, so an
+action can report what it did, not only a fixed refusal. Nothing reports
+whether a handler took a URL, so a notice says only what Geode did.
+
+Two actions are registered, both from `geode-nemo` and both titled "Open in
+Nemo": `nemo::open_position` on `position_ref`, opening
+`nemo://position/<id>`, and `nemo::open_instrument` on `instrument_ref`,
+opening `nemo://instrument/<id>`. The id is percent-encoded as one path
+segment (RFC 3986 unreserved characters pass). Each opens the target row's
+value only, ignoring any selection riding in the context, and sets the
+notice `opened <url>`.
 
 ## Actions and keyboard routing
 
