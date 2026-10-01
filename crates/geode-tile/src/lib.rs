@@ -8,6 +8,7 @@ pub mod colour;
 pub mod confirm;
 pub mod edit;
 pub mod following;
+pub mod grid;
 pub mod header;
 pub mod motion;
 pub mod notice;

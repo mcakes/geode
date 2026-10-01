@@ -27502,6 +27502,45 @@ run_mutation "pricer header: the mode icon reads the key context's mode" \
   '                mode: geode_tile::header::Mode::Normal,' \
   geode-pricer the_header_shows_the_mode_icon_while_editing_or_selecting
 
+# Windowed grid models: the shared window keeps the overlap, a new width
+# clears it, reads outside it are blank, a one-cell refill is one cell, and
+# an invalidation refills the recorded range clamped to the rows.
+run_mutation "grid-window: tile a window move keeps the overlap" \
+  crates/geode-tile/src/grid.rs \
+  '            if old.contains(&r) {' \
+  '            if false {' \
+  geode-tile a_move_keeps_the_overlap_and_fills_only_entering_rows
+
+run_mutation "grid-window: tile a column-count change clears the window" \
+  crates/geode-tile/src/grid.rs \
+  '        if cols != self.cols {' \
+  '        if false {' \
+  geode-tile a_column_count_change_clears_the_window
+
+run_mutation "grid-window: tile get outside the window is none" \
+  crates/geode-tile/src/grid.rs \
+  '        let i = row.checked_sub(self.start).filter(|&i| i < self.rows)?;' \
+  '        let i = Some(row).filter(|&i| i < self.rows)?;' \
+  geode-tile get_outside_the_window_is_none
+
+run_mutation "grid-window: tile refill_cell touches one cell" \
+  crates/geode-tile/src/grid.rs \
+  '        self.cells[i * self.cols + col] = fill();' \
+  '        self.cells[i * self.cols] = fill();' \
+  geode-tile refill_cell_touches_one_cell
+
+run_mutation "grid-window: tile a refill is clamped to the rows" \
+  crates/geode-tile/src/grid.rs \
+  '        let end = asked.end.min(len);' \
+  '        let end = asked.end;' \
+  geode-tile a_request_refills_its_range_clamped_to_the_rows
+
+run_mutation "grid-window: tile the first window fills before any report" \
+  crates/geode-tile/src/grid.rs \
+  '        let asked = self.asked.clone().unwrap_or(0..self.first);' \
+  '        let asked = self.asked.clone().unwrap_or(0..0);' \
+  geode-tile before_any_report_the_first_window_is_filled
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
