@@ -27624,7 +27624,7 @@ run_mutation "grid-window: pricer window cells are the formatter's" \
   crates/geode-pricer/src/grid.rs \
   '            _ => cell_text(sheet, self.index.sheet_row(g)?, c.def, &c.format, clock),' \
   '            _ => CellText { text: String::new(), state: CellState::Blank, sign: None },' \
-  geode-pricer the_window_paints_what_the_formatter_formats
+  geode-pricer cells_carry_the_core_text_and_state
 
 run_mutation "grid-window: pricer a group row reads its ancestors' values" \
   crates/geode-pricer/src/grid.rs \

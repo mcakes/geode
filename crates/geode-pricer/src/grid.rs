@@ -1425,6 +1425,26 @@ mod tests {
             index.text(outer).cloned(),
             "the enclosing group's value"
         );
+
+        // Under `underlying_ref` the legs' unanimity agrees by construction;
+        // under `qty` it does not: a group's qty cell otherwise counts its
+        // legs, so the nested group must read its parent's value instead.
+        let (r, m) = grouped(&s, &["qty", "expiry"], &all_open(), &Expansion::default());
+        let qty = col("qty");
+        let nested: Vec<usize> = (0..m.len())
+            .filter(|&g| matches!(m.kind(g), Some(GridRowKind::Group { depth: 1, .. })))
+            .collect();
+        assert!(!nested.is_empty(), "{:?}", describe(&m));
+        for g in nested {
+            let parent = m.parent(g).expect("enclosed");
+            assert_eq!(
+                cell(&s, &r, &m, g, "qty").0,
+                m.text(parent).expect("a label").to_string(),
+                "row {g}: {:?}",
+                describe(&m)
+            );
+            assert_eq!(cells(&s, &r, &plan, &m, g)[qty].state, CellState::Own);
+        }
     }
 
     /// `[underlying_ref]`: group rows in value order, each group's lines
