@@ -198,6 +198,13 @@ pub(crate) enum At {
     Group(Path),
 }
 
+/// What moved since the last build: the structure, or prices alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Change {
+    Structure,
+    Prices,
+}
+
 /// Cursor anchored by line identity (or a group row's path) across edits,
 /// deliveries, expansion changes and regrouping. A target inside a closed
 /// node lands on its nearest painted ancestor; one that left the tree
@@ -2832,7 +2839,7 @@ impl PricerTile {
         // is still stale — an edit landed mid-flight, or a line the cancel
         // cut off — is resubmitted.
         self.in_flight.clear();
-        self.rebuild(cx);
+        self.reprice(cx);
         self.submit(cx);
     }
 
@@ -2877,7 +2884,7 @@ impl PricerTile {
     /// tick).
     fn reprice_all(&mut self, cx: &mut Context<Self>) {
         self.sheet.mark_all_stale();
-        self.rebuild(cx);
+        self.reprice(cx);
         self.submit(cx);
     }
 
@@ -4562,6 +4569,22 @@ impl PricerTile {
     /// built under. Group paths deeper than the new chain's value levels
     /// are pruned (the blotter's regroup rule).
     pub(crate) fn rebuild(&mut self, cx: &mut Context<Self>) {
+        self.rebuild_as(Change::Structure, cx);
+    }
+
+    /// Prices arrived (`deliver`, `reprice_all`): the scope and the tree are
+    /// re-derived, because a price can move a line in or out of the scope or
+    /// between groups. When the new tree equals the old one exactly, only the
+    /// window is refilled and the index stands.
+    pub(crate) fn reprice(&mut self, cx: &mut Context<Self>) {
+        self.rebuild_as(Change::Prices, cx);
+    }
+
+    fn rebuild_as(&mut self, change: Change, cx: &mut Context<Self>) {
+        // The tree this index was flattened from, held for the comparison.
+        // A landed line (`reveal`) opens groups, which is structure.
+        let before = (change == Change::Prices && self.reveal.is_empty())
+            .then(|| (self.chain.clone(), std::mem::take(&mut self.rollup)));
         self.requested = self.read_grouping(cx);
         self.apply_visibility();
         {
@@ -4579,6 +4602,25 @@ impl PricerTile {
             .prune_to(rollup::value_levels(&self.chain));
         for id in std::mem::take(&mut self.reveal) {
             self.open_groups_of(id);
+        }
+        // Exact equality of the effective chain and the whole rollup (values,
+        // labels, legs, split/partial, children, roots). Anything else
+        // rebuilds; a NaN group value compares unequal and rebuilds too.
+        let same = change == Change::Prices
+            && before.is_some_and(|(chain, rollup)| chain == self.chain && rollup == self.rollup);
+        if same {
+            // Prices moved, nothing else: the index stands; re-prepare the
+            // cells on screen.
+            let src = self.fill_source();
+            self.table.update(cx, |t, cx| {
+                t.delegate_mut().refill_window(src);
+                cx.notify();
+            });
+            // Totals read the sheet: re-resolve the selection over the new prices.
+            self.sync_cursor(cx);
+            self.rebuild_chrome();
+            cx.notify();
+            return;
         }
         let model = Rc::new(GridIndex::build(
             &self.sheet,
@@ -7961,6 +8003,206 @@ pub(crate) mod tests {
         );
         assert_eq!(h.painted(&vcx, 0, "qty"), None, "the first row left");
         assert_eq!(h.cell(&vcx, 199, "qty"), "200");
+    }
+
+    // ---- refill-only delivery ----
+
+    fn grid_builds() -> usize {
+        crate::grid::builds()
+    }
+
+    /// Prices that move nothing in or out of the tree refill the window and
+    /// keep the index; the cursor stays on its line.
+    #[gpui::test]
+    fn a_delivery_with_unchanged_structure_refills_without_rebuilding(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &["1 SPX Z26 5000 C", "2 SPX Z26 4000 P"]);
+        h.visible(&mut vcx, true);
+        let first = h.prices().pop().expect("a batch");
+        h.answer(&mut vcx, &first, 12.5);
+        h.motion(&mut vcx, "down", None);
+        let at = h.tile.read_with(&vcx, |t, _| t.cursor.at.clone());
+        assert!(at.is_some());
+        h.dispatch(&mut vcx, "price", None);
+        let batch = h.prices().pop().expect("a reprice");
+        let before = grid_builds();
+        h.answer(&mut vcx, &batch, 99.25);
+        assert_eq!(grid_builds(), before, "no index rebuild");
+        assert_eq!(
+            h.painted(&vcx, 0, "npv").as_deref(),
+            Some(h.cell(&vcx, 0, "npv").as_str())
+        );
+        assert!(
+            h.cell(&vcx, 0, "npv").contains("99"),
+            "the new price paints"
+        );
+        assert!(h.cell(&vcx, 1, "npv").contains("99"), "on every row");
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor.at.clone()), at);
+        assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(1));
+    }
+
+    /// A delivery that satisfies a scope over a measure adds rows, and one
+    /// that fails it removes them: both rebuild. A delivery that keeps
+    /// them in scope refills, and the cursor stays on its line.
+    #[gpui::test]
+    fn a_delivery_that_changes_scope_rebuilds(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["1 SPX Z26 5000 C", "2 SPX Z26 4000 P"]);
+        h.visible(&mut vcx, true);
+        h.frame.update(&mut vcx, |f, cx| {
+            f.shared_mut().set_scope(geode_core::scope::Scope {
+                expression: Some(geode_core::scope::parse_expr("npv > 10").unwrap()),
+                ..Default::default()
+            });
+            cx.notify();
+        });
+        assert_eq!(h.tree(&vcx).len(), 0, "nothing priced, nothing shown");
+        let batch = h.prices().pop().expect("a batch");
+        let before = grid_builds();
+        h.answer(&mut vcx, &batch, 12.5);
+        assert!(grid_builds() > before, "the structure changed");
+        assert_eq!(h.tree(&vcx).len(), 2);
+        h.dispatch(&mut vcx, "price", None);
+        let batch = h.prices().pop().expect("a reprice");
+        let before = grid_builds();
+        h.answer(&mut vcx, &batch, 5.0);
+        assert!(grid_builds() > before, "the lines left the scope");
+        assert_eq!(h.tree(&vcx).len(), 0);
+        h.dispatch(&mut vcx, "price", None);
+        let batch = h.prices().pop().expect("a reprice");
+        h.answer(&mut vcx, &batch, 20.0);
+        assert_eq!(h.tree(&vcx).len(), 2, "back in scope");
+        h.motion(&mut vcx, "down", None);
+        let at = h.tile.read_with(&vcx, |t, _| t.cursor.at.clone());
+        h.dispatch(&mut vcx, "price", None);
+        let batch = h.prices().pop().expect("a reprice");
+        let before = grid_builds();
+        h.answer(&mut vcx, &batch, 30.0);
+        assert_eq!(grid_builds(), before, "still in scope: a refill");
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor.at.clone()), at);
+    }
+
+    /// Grouped by status, a result that moves a line from `stale` to `ok`
+    /// moves it between groups: rebuild. The cursor follows its line.
+    #[gpui::test]
+    fn a_delivery_that_moves_a_line_between_status_groups_rebuilds(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["1 SPX Z26 5000 C", "2 SPX Z26 4000 P"]);
+        h.visible(&mut vcx, true);
+        h.command(&mut vcx, "group status").unwrap();
+        h.dispatch(&mut vcx, "expand_all", None);
+        let groups_before = h.tree(&vcx);
+        assert_eq!(
+            groups_before.len(),
+            3,
+            "one open status group: {groups_before:?}"
+        );
+        h.motion(&mut vcx, "bottom", None);
+        let line = h.tile.read_with(&vcx, |t, _| t.sheet.id(1));
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor.line()), Some(line));
+        let batch = h.prices().pop().expect("a batch");
+        let before = grid_builds();
+        h.answer(&mut vcx, &batch, 12.5);
+        assert!(grid_builds() > before);
+        let tree = h.tree(&vcx);
+        assert_ne!(tree, groups_before, "the lines moved group");
+        assert_eq!(tree.len(), 3, "one open status group: {tree:?}");
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor.line()),
+            Some(line),
+            "the cursor follows its line into the new group"
+        );
+        assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(2));
+    }
+
+    /// Grouped by a derived dimension over `status`, a result moves the
+    /// lines from the NULL group to a labelled one: the rollup's group
+    /// values differ, so the delivery rebuilds. The next tick returns them
+    /// (stale is NULL again): rebuild again.
+    #[gpui::test]
+    fn a_delivery_that_regroups_under_a_derived_dimension_rebuilds(cx: &mut gpui::TestAppContext) {
+        use geode_core::config::{LayerDoc, merge_docs};
+        use geode_core::dimensions::DerivedDimensions;
+        let (h, mut vcx) = open_seeded(cx, &["1 SPX Z26 5000 C", "2 SPX Z26 4000 P"]);
+        h.visible(&mut vcx, true);
+        let doc = merge_docs(
+            "dimensions",
+            &[LayerDoc::builtin(
+                "dimensions",
+                "[health]\nfrom = \"status\"\n[health.values]\nlive = [\"fresh\"]\n",
+            )
+            .unwrap()],
+        );
+        let (dims, diags) = DerivedDimensions::from_doc(&doc);
+        assert!(diags.is_empty(), "{diags:?}");
+        h.factory.set_dims(dims);
+        h.command(&mut vcx, "group health").unwrap();
+        h.dispatch(&mut vcx, "expand_all", None);
+        let groups_before = h.tree(&vcx);
+        assert_eq!(groups_before.len(), 3, "{groups_before:?}");
+        let batch = h.prices().pop().expect("a batch");
+        let before = grid_builds();
+        h.answer(&mut vcx, &batch, 12.5);
+        assert!(grid_builds() > before, "NULL → live is a regroup");
+        assert_ne!(h.tree(&vcx), groups_before);
+        assert_eq!(h.tree(&vcx)[0], "live");
+        let before = grid_builds();
+        h.dispatch(&mut vcx, "price", None);
+        assert!(grid_builds() > before, "marked stale: back to NULL");
+        assert_eq!(h.tree(&vcx)[0], "—");
+        let batch = h.prices().pop().expect("a reprice");
+        let before = grid_builds();
+        h.answer(&mut vcx, &batch, 13.5);
+        assert!(grid_builds() > before, "live again");
+        assert_eq!(h.tree(&vcx)[0], "live");
+    }
+
+    /// A line landed through the entry bar rebuilds, and the price that
+    /// answers it afterwards leaves the cursor on it.
+    #[gpui::test]
+    fn a_landed_line_rebuilds_and_its_price_keeps_the_cursor(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["1 SPX Z26 5000 C", "2 SPX Z26 4000 P"]);
+        h.visible(&mut vcx, true);
+        let batch = h.prices().pop().expect("a batch");
+        h.answer(&mut vcx, &batch, 12.5);
+        h.dispatch(&mut vcx, "add_below", None);
+        typed(&h, &mut vcx, "SPX Z26 3000 P");
+        let before = grid_builds();
+        h.dispatch(&mut vcx, "commit", None);
+        assert!(grid_builds() > before, "a landing is structure");
+        assert_eq!(h.tree(&vcx).len(), 3);
+        let landed = h.tile.read_with(&vcx, |t, _| t.cursor.line());
+        assert_eq!(landed, h.tile.read_with(&vcx, |t, _| Some(t.sheet.id(1))));
+        let batch = h.prices().pop().expect("the landed line prices");
+        h.answer(&mut vcx, &batch, 7.0);
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor.line()), landed);
+        assert!(h.cell(&vcx, 1, "npv").contains('7'));
+    }
+
+    /// The refill path re-resolves a live selection: its totals follow the prices.
+    #[gpui::test]
+    fn a_delivery_under_a_selection_updates_its_totals(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["1 SPX Z26 5000 C", "2 SPX Z26 4000 P"]);
+        h.visible(&mut vcx, true);
+        let batch = h.prices().pop().expect("a batch");
+        h.answer(&mut vcx, &batch, 12.5);
+        h.dispatch(&mut vcx, "visual_rows", None);
+        h.motion(&mut vcx, "down", None);
+        let totals = |h: &Harness, vcx: &VisualTestContext| {
+            h.tile.read_with(vcx, |t, _| {
+                t.totals
+                    .iter()
+                    .map(|c| format!("{c:?}"))
+                    .collect::<Vec<_>>()
+            })
+        };
+        let before = totals(&h, &vcx);
+        assert!(!before.is_empty(), "a selection totals");
+        h.dispatch(&mut vcx, "price", None);
+        let batch = h.prices().pop().expect("a reprice");
+        let builds = grid_builds();
+        h.answer(&mut vcx, &batch, 50.0);
+        assert_eq!(grid_builds(), builds, "the refill path");
+        assert_ne!(totals(&h, &vcx), before);
     }
 
     /// Scrolled to the bottom of a long grouped sheet, collapsing to the

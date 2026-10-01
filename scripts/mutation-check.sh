@@ -27640,8 +27640,8 @@ run_mutation "grid-window: pricer yank_col formats every row" \
 
 run_mutation "grid-window: pricer an install refills the window" \
   crates/geode-pricer/src/tile.rs \
-  '            t.delegate_mut().refill_window(src);' \
-  '            let _ = src;' \
+  $'            t.refresh(cx);\n            t.delegate_mut().refill_window(src);' \
+  $'            t.refresh(cx);\n            let _ = src;' \
   geode-pricer a_column_move_refills_the_pricer_window
 
 run_mutation "grid-window: pricer a block TSV formats every row" \
@@ -27673,6 +27673,30 @@ run_mutation "grid-window: pricer a collapse after a scroll refills the tail" \
   '        Some(len.saturating_sub(asked.len().max(1))..len)' \
   '        None' \
   geode-pricer a_collapse_to_one_row_after_a_scroll_paints_the_row
+
+run_mutation "grid-window: pricer unchanged structure keeps the index" \
+  crates/geode-pricer/src/tile.rs \
+  '        let same = change == Change::Prices' \
+  '        let same = false' \
+  geode-pricer a_delivery_with_unchanged_structure_refills_without_rebuilding
+
+run_mutation "grid-window: pricer a changed rollup rebuilds" \
+  crates/geode-pricer/src/tile.rs \
+  '            && before.is_some_and(|(chain, rollup)| chain == self.chain && rollup == self.rollup);' \
+  '            && before.is_some();' \
+  geode-pricer a_delivery_that_changes_scope_rebuilds
+
+run_mutation "grid-window: pricer a refill-only delivery repaints the window" \
+  crates/geode-pricer/src/tile.rs \
+  '                t.delegate_mut().refill_window(src);' \
+  '                let _ = src;' \
+  geode-pricer a_delivery_with_unchanged_structure_refills_without_rebuilding
+
+run_mutation "grid-window: pricer a refill-only delivery refreshes totals" \
+  crates/geode-pricer/src/tile.rs \
+  $'            // Totals read the sheet: re-resolve the selection over the new prices.\n            self.sync_cursor(cx);' \
+  '            // Totals read the sheet: re-resolve the selection over the new prices.' \
+  geode-pricer a_delivery_under_a_selection_updates_its_totals
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

@@ -265,8 +265,9 @@ fn bench(c: &mut Criterion) {
         })
     });
     // A delivery that moves no line in or out of the tree, as the tile runs
-    // it at this stage: install, scope, chain, rollup, the grid index, and
-    // a 40-row window fill.
+    // it: install, scope, chain, rollup, the structural comparison against
+    // the tree the index was built from, and a 40-row window refill. The
+    // index stands.
     {
         let mut s = sheet(1_000);
         let batch = answers_for(&s);
@@ -276,6 +277,12 @@ fn bench(c: &mut Criterion) {
         let dims = DerivedDimensions::default();
         let empty = Scope::default();
         let now = Utc::now();
+        let visibility =
+            apply_scope(&s, &empty, &dims, Clock::utc()).expect("the empty scope applies");
+        let chain0 = effective_chain(&[], &dims);
+        let tree0 = rollup::build(&s, &visibility, &chain0, &dims, Clock::utc());
+        let index = GridIndex::build(&s, &tree0, &no_groups, &expansion, &plan, Clock::utc());
+        let mut window = WindowCache::default();
         g.bench_function("deliver_unchanged_structure_1000", |b| {
             b.iter_batched(
                 || batch.clone(),
@@ -286,9 +293,11 @@ fn bench(c: &mut Criterion) {
                         .expect("the empty scope applies");
                     let chain = effective_chain(&[], &dims);
                     let tree = rollup::build(&s, &visibility, &chain, &dims, Clock::utc());
-                    let index =
-                        GridIndex::build(&s, &tree, &no_groups, &expansion, &plan, Clock::utc());
-                    let mut window = WindowCache::default();
+                    assert!(
+                        chain == chain0 && tree == tree0,
+                        "the structure is unchanged"
+                    );
+                    window.clear();
                     let mut pass = CellPass::new(
                         FillSource {
                             sheet: &s,
@@ -423,6 +432,12 @@ fn bench(c: &mut Criterion) {
         let batch = answers_for(&s);
         let empty = Scope::default();
         let now = Utc::now();
+        let visibility =
+            apply_scope(&s, &empty, &dims, Clock::utc()).expect("the empty scope applies");
+        let chain0 = effective_chain(&levels, &dims);
+        let tree0 = rollup::build(&s, &visibility, &chain0, &dims, Clock::utc());
+        let index = GridIndex::build(&s, &tree0, &groups, &expansion, &plan, Clock::utc());
+        let mut window = WindowCache::default();
         g.bench_function("deliver_unchanged_structure_1000_grouped", |b| {
             b.iter_batched(
                 || batch.clone(),
@@ -433,9 +448,11 @@ fn bench(c: &mut Criterion) {
                         .expect("the empty scope applies");
                     let chain = effective_chain(&levels, &dims);
                     let tree = rollup::build(&s, &visibility, &chain, &dims, Clock::utc());
-                    let index =
-                        GridIndex::build(&s, &tree, &groups, &expansion, &plan, Clock::utc());
-                    let mut window = WindowCache::default();
+                    assert!(
+                        chain == chain0 && tree == tree0,
+                        "the structure is unchanged"
+                    );
+                    window.clear();
                     let mut pass = CellPass::new(
                         FillSource {
                             sheet: &s,

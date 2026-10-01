@@ -713,6 +713,7 @@ impl<'a> CellPass<'a> {
                 partial: true,
                 ..
             }) => {
+                // Unused here; bound so the subset-fold mutation's whole-package replacement compiles.
                 let _ = r;
                 let subset = self.src.sheet.fold_legs(shown.iter().copied());
                 RowFold::Subset { folded: subset }

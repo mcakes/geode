@@ -115,11 +115,17 @@ changes still rebuild.
 - A timeseries view move keeps at most one statistics request in flight and
   asks for the latest window when it answers, so statistics refresh at the
   query's own rate during a pan rather than being interrupted by each event.
-- A pricer grid index is rebuilt on edit, delivery, expansion, view, clock or
-  entry change, never in render; measure cells are formatted only for the
-  window (`CellPass`), and paints are a per-theme memo. Every rebuild first
-  re-evaluates the frame's scope over every line (`apply_scope`),
-  synchronously on the UI thread; the two together are the 8 ms budget.
+- A pricer grid index is rebuilt on edit, structural delivery, expansion,
+  view, clock or entry change, never in render; measure cells are formatted
+  only for the window (`CellPass`), and paints are a per-theme memo. Every
+  rebuild first re-evaluates the frame's scope over every line
+  (`apply_scope`), synchronously on the UI thread; the two together are the
+  8 ms budget.
+- A price delivery whose effective chain and rollup are exactly unchanged
+  refills only the window: no index rebuild. Any difference, a landed line,
+  or a NaN group value rebuilds. The scope and the rollup are still
+  re-derived on every delivery, because a price can move a line in or out of
+  the scope or between groups.
 - Config dialogs derive rows at each render, key-handling, and click-resolution
   call site; they do not retain a row cache. Small row sets have measured costs
   in the tens of microseconds. Keybinding resolution repeatedly scans bindings
