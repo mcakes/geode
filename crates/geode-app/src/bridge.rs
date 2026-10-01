@@ -603,6 +603,12 @@ pub struct Bridge {
     /// Whether the service started with a position service: `positions.toml`
     /// named one and its adapter resolved. Fixed for the run, since
     /// `positions.toml` is restart-required.
+    // Read only by tests until the Move LHU action is registered against it;
+    // that change removes this attribute (an unfulfilled `expect` fails).
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read when the Move LHU action is registered")
+    )]
     pub positions_configured: bool,
 }
 
