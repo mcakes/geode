@@ -4,6 +4,9 @@
 //! (continuous); its centre is where the point paints.
 
 use super::Rect;
+// A tick is the kit's, shared with the linear axis; named here too for the
+// callers that reach it beside the time ticks.
+pub use super::Tick;
 use super::view::View;
 use chrono::{DateTime, Datelike, FixedOffset, TimeDelta, TimeZone, Timelike, Utc};
 
@@ -201,12 +204,6 @@ impl Unit {
             Unit::Year => 365.0 * 86_400.0,
         }
     }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Tick {
-    pub x: f32,
-    pub label: String,
 }
 
 /// Fewest ticks an axis is worth painting: below this the chooser keeps

@@ -6,6 +6,7 @@
 //! Callers must change `version` whenever model contents change, so cached
 //! scales, labels and paths cannot outlive their inputs.
 
+use std::cmp::Ordering;
 use std::sync::Arc;
 
 use gpui::{Hsla, SharedString};
@@ -91,8 +92,10 @@ impl SlotKind {
             return;
         }
         let mut order: Vec<usize> = (0..n).filter(|i| xs[*i].is_finite()).collect();
-        // Stable, so points sharing an x keep their order.
-        order.sort_by(|a, b| xs[*a].total_cmp(&xs[*b]));
+        // Stable, so points sharing an x keep their order. Compared as
+        // numbers, not bit patterns: the xs are finite here, and `0.0` and
+        // `-0.0` are one x, which a total order would put apart.
+        order.sort_by(|a, b| xs[*a].partial_cmp(&xs[*b]).unwrap_or(Ordering::Equal));
         for column in columns.iter_mut().flatten() {
             let kept: Vec<f64> = order.iter().map(|i| column[*i]).collect();
             **column = kept;
@@ -177,17 +180,29 @@ impl XySlot {
     /// The index of the point whose x is nearest `u`; `None` for a slot
     /// with no points or a `u` that is not a number.
     pub fn nearest(&self, u: f64) -> Option<usize> {
-        let n = self.len();
-        if n == 0 || u.is_nan() {
+        self.nearest_in((0, self.len()), u)
+    }
+
+    /// The index, among the points `[start, end)` of `window`, of the one
+    /// whose x is nearest `u`, the lower of two as near. `None` for an
+    /// empty window or a `u` that is not a number. A window past the
+    /// slot's end is cut to it.
+    ///
+    /// Among points sharing the nearest x the index is the first of them
+    /// when `u` is at or below that x and the last when it is above.
+    pub fn nearest_in(&self, window: (usize, usize), u: f64) -> Option<usize> {
+        let end = window.1.min(self.len());
+        let start = window.0;
+        if start >= end || u.is_nan() {
             return None;
         }
-        let xs = &self.xs()[..n];
-        let i = xs.partition_point(|x| *x < u);
-        if i == 0 {
-            return Some(0);
+        let xs = self.xs();
+        let i = start + xs[start..end].partition_point(|x| *x < u);
+        if i == start {
+            return Some(start);
         }
-        if i == n {
-            return Some(n - 1);
+        if i == end {
+            return Some(end - 1);
         }
         Some(if xs[i] - u < u - xs[i - 1] { i } else { i - 1 })
     }
@@ -288,8 +303,7 @@ impl XyModel {
     }
 
     pub fn y_format_of(&self, axis: Axis) -> YFormat {
-        let i = Axis::ALL.iter().position(|a| *a == axis).unwrap_or(0);
-        self.y_format[i]
+        self.y_format[axis.index()]
     }
 
     fn uses(&self, pane: Pane, side: Side) -> bool {
@@ -526,6 +540,21 @@ mod tests {
     }
 
     #[test]
+    fn zeros_of_either_sign_are_equal_xs_and_keep_their_order() {
+        // In order as it came: nothing moves.
+        let l = built(line(Axis::Left, &[0.0, -0.0], &[1.0, 2.0]));
+        assert_eq!(l.len(), 2);
+        assert!(l.xs()[0].is_sign_positive() && l.xs()[1].is_sign_negative());
+        assert_eq!(l.values_in((0, 2)).collect::<Vec<_>>(), [1.0, 2.0]);
+        // Out of order elsewhere, so the slot is sorted: the two zeros are
+        // one x and stay as they came, the positive one first.
+        let l = built(line(Axis::Left, &[1.0, 0.0, -0.0], &[9.0, 1.0, 2.0]));
+        assert_eq!(l.xs(), [0.0, 0.0, 1.0]);
+        assert!(l.xs()[0].is_sign_positive() && l.xs()[1].is_sign_negative());
+        assert_eq!(l.values_in((0, 3)).collect::<Vec<_>>(), [1.0, 2.0, 9.0]);
+    }
+
+    #[test]
     fn a_clean_slot_is_left_as_it_came() {
         let l = line(
             Axis::Left,
@@ -559,6 +588,40 @@ mod tests {
         // The x beyond the shared length is not part of the range.
         let m = model(vec![line(Axis::Left, &[1.0, 2.0, 9.0], &[10.0, 20.0])]);
         assert_eq!(m.full(), (1.0, 2.0));
+    }
+
+    #[test]
+    fn nearest_in_a_window_looks_no_further_than_the_window() {
+        let l = line(Axis::Left, &[1.0, 2.0, 4.0, 8.0], &[0.0; 4]);
+        // The whole slot's nearest to 7 is the knot at 8; a window that
+        // stops short of it answers with its own last knot.
+        assert_eq!(l.nearest(7.0), Some(3));
+        assert_eq!(l.nearest_in((0, 3), 7.0), Some(2));
+        assert_eq!(l.nearest_in((1, 3), 0.0), Some(1), "its own first knot");
+        assert_eq!(l.nearest_in((1, 3), 2.9), Some(1));
+        assert_eq!(l.nearest_in((1, 3), 3.1), Some(2));
+        assert_eq!(
+            l.nearest_in((1, 3), 3.0),
+            Some(1),
+            "the lower of two as near"
+        );
+        assert_eq!(l.nearest_in((2, 2), 4.0), None, "an empty window");
+        assert_eq!(l.nearest_in((3, 1), 4.0), None);
+        assert_eq!(l.nearest_in((0, 4), f64::NAN), None);
+        // A window past the slot's end is cut to it.
+        assert_eq!(l.nearest_in((2, 99), 100.0), Some(3));
+        assert_eq!(l.nearest_in((7, 99), 100.0), None);
+        // A run of equal xs: its first from at or below, its last from above.
+        let p = points(
+            Axis::Left,
+            &[1.0, 2.0, 2.0, 2.0, 3.0],
+            &[0.0; 5],
+            &[0.0; 5],
+            &[0.0; 5],
+        );
+        assert_eq!(p.nearest_in((0, 5), 1.9), Some(1));
+        assert_eq!(p.nearest_in((0, 5), 2.0), Some(1));
+        assert_eq!(p.nearest_in((0, 5), 2.1), Some(3));
     }
 
     #[test]

@@ -31,6 +31,28 @@ pub enum AxisMode {
 impl Axis {
     pub const ALL: [Axis; 4] = [Axis::Left, Axis::Right, Axis::BottomLeft, Axis::BottomRight];
 
+    /// The one axis a `(pane, side)` pair names.
+    pub fn of(pane: Pane, side: Side) -> Axis {
+        match (pane, side) {
+            (Pane::Upper, Side::Left) => Axis::Left,
+            (Pane::Upper, Side::Right) => Axis::Right,
+            (Pane::Lower, Side::Left) => Axis::BottomLeft,
+            (Pane::Lower, Side::Right) => Axis::BottomRight,
+        }
+    }
+
+    /// The axis's position in [`Axis::ALL`]: the index of whatever is
+    /// kept one per axis, an element's side scales and a model's y formats
+    /// alike.
+    pub fn index(self) -> usize {
+        match self {
+            Axis::Left => 0,
+            Axis::Right => 1,
+            Axis::BottomLeft => 2,
+            Axis::BottomRight => 3,
+        }
+    }
+
     pub fn pane(self) -> Pane {
         match self {
             Axis::Left | Axis::Right => Pane::Upper,
@@ -74,6 +96,17 @@ impl Axis {
     }
 }
 
+impl Pane {
+    /// The pane's position among an element's per-pane state: the upper
+    /// pane first.
+    pub fn index(self) -> usize {
+        match self {
+            Pane::Upper => 0,
+            Pane::Lower => 1,
+        }
+    }
+}
+
 impl AxisMode {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -108,5 +141,15 @@ mod tests {
         assert_eq!(Axis::BottomRight.letter(), "BR");
         assert_eq!(AxisMode::parse("time"), Some(AxisMode::Continuous));
         assert_eq!(AxisMode::parse("wall"), None);
+    }
+
+    #[test]
+    fn an_axis_is_indexed_in_all_order_and_named_by_its_pane_and_side() {
+        for (i, axis) in Axis::ALL.into_iter().enumerate() {
+            assert_eq!(axis.index(), i, "{axis:?}");
+            assert_eq!(Axis::of(axis.pane(), axis.side()), axis);
+        }
+        assert_eq!(Pane::Upper.index(), 0);
+        assert_eq!(Pane::Lower.index(), 1);
     }
 }

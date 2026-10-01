@@ -12,13 +12,12 @@ use gpui::{
 use gpui_component::ActiveTheme;
 use gpui_component::plot::{AxisLabelSide, AxisText, Grid, PlotAxis};
 
-use crate::core::axis::{Axis, Pane, Side};
+use crate::core::axis::Side;
 use crate::core::decimate::decimate;
 use crate::core::layout::PaneRects;
 use crate::core::marks::Segment;
 use crate::core::scale::LinearScale;
-use crate::core::time::Tick;
-use crate::core::{Point, Rect, Y_TICK_GAP, design_px};
+use crate::core::{Point, Rect, Tick, Y_TICK_GAP, design_px};
 
 thread_local! {
     /// Per THREAD, not per process: the counter is read as a delta
@@ -197,16 +196,29 @@ pub(crate) fn paint_y_axis(
         .paint(&bounds_of(r, bounds), window, cx);
 }
 
+/// The side whose y ticks a pane's grid follows, given the pane's left
+/// side: the left when it has a scale, whatever the right has, and
+/// otherwise the right. One grid, not two overlaid ones, and of two axes
+/// the left is the one read first; ruled on the right's ticks beside a
+/// scaled left axis, the grid's lines would meet none of the left's
+/// labels.
+pub(crate) fn grid_side(left: &SideAxis) -> Side {
+    if left.scale.is_some() {
+        Side::Left
+    } else {
+        Side::Right
+    }
+}
+
 /// A pane's frame, under whatever the element paints in it: the grid and
 /// the y axis of each side that has both a column and a scale. Returns
 /// whether the pane has area; with none, nothing is painted and the caller
 /// paints nothing either.
 ///
-/// The grid takes the x ticks of the shared axis and the y ticks of
-/// whichever side the pane has, the left when it has both: one grid, not
-/// two overlaid ones. A left axis line sits at the right edge of its rect
-/// (the plot's left edge) with its labels right-aligned inside it; a right
-/// axis line at the left edge of its own rect, labels left.
+/// The grid takes the x ticks of the shared axis and the y ticks of the
+/// side [`grid_side`] names. A left axis line sits at the right edge of
+/// its rect (the plot's left edge) with its labels right-aligned inside
+/// it; a right axis line at the left edge of its own rect, labels left.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_pane_frame(
     rects: &PaneRects,
@@ -222,7 +234,10 @@ pub(crate) fn paint_pane_frame(
     if plot.w <= 0.0 || plot.h <= 0.0 {
         return false;
     }
-    let grid = if left.scale.is_some() { left } else { right };
+    let grid = match grid_side(left) {
+        Side::Left => left,
+        Side::Right => right,
+    };
     paint_grid(plot, x_ticks, grid, bounds, ink, window);
     if let (Some(r), Some(s)) = (rects.left_axis, left.scale) {
         paint_y_axis(r, &s, left, Side::Left, bounds, ink, window, cx);
@@ -250,34 +265,6 @@ pub(crate) fn paint_x_axis(
         }))
         .stroke(ink.line)
         .paint(&bounds_of(x_axis, bounds), window, cx);
-}
-
-pub(crate) fn pane_index(pane: Pane) -> usize {
-    match pane {
-        Pane::Upper => 0,
-        Pane::Lower => 1,
-    }
-}
-
-/// The one [`Axis`] a `(pane, side)` pair names.
-pub(crate) fn axis_of(pane: Pane, side: Side) -> Axis {
-    match (pane, side) {
-        (Pane::Upper, Side::Left) => Axis::Left,
-        (Pane::Upper, Side::Right) => Axis::Right,
-        (Pane::Lower, Side::Left) => Axis::BottomLeft,
-        (Pane::Lower, Side::Right) => Axis::BottomRight,
-    }
-}
-
-/// An axis's slot in an element's four [`SideAxis`] — its position in
-/// `Axis::ALL`.
-pub(crate) fn axis_index(axis: Axis) -> usize {
-    match axis {
-        Axis::Left => 0,
-        Axis::Right => 1,
-        Axis::BottomLeft => 2,
-        Axis::BottomRight => 3,
-    }
 }
 
 pub(crate) fn side_scale_of(side: Side, left: &SideAxis, right: &SideAxis) -> Option<LinearScale> {
@@ -421,6 +408,16 @@ pub(crate) fn dashed_horizontal(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_grid_follows_the_left_side_when_it_has_a_scale_and_else_the_right() {
+        let scaled = SideAxis {
+            scale: Some(LinearScale::new((0.0, 1.0), 0.0, 100.0)),
+            ..SideAxis::default()
+        };
+        assert_eq!(grid_side(&scaled), Side::Left);
+        assert_eq!(grid_side(&SideAxis::default()), Side::Right);
+    }
 
     #[test]
     fn a_percentile_line_is_dashed_at_dash_and_gap() {

@@ -39,16 +39,15 @@ use gpui_component::plot::tooltip::{CrossLine, Tooltip, TooltipState};
 use gpui_component::plot::{IntoPlot, PathCaches, Plot, PlotLabel, ShapeKey};
 
 use super::model::ChartModel;
-use crate::core::axis::{Pane, Side};
+use crate::core::axis::{Axis, Pane, Side};
 use crate::core::layout::{Layout, PaneRects};
 use crate::core::scale::{LinearScale, axis_domain, fmt_tick, fmt_value};
 use crate::core::time::{Crosshair, Tick, TimeScale, ticks};
 use crate::core::view::View;
 use crate::core::{DASH, GAP, MAX_DENSITY_QUADS, Rect, TICK_GAP, design_px};
 use crate::paint::{
-    Ink, Scratch, SideAxis, TOOLTIP_GAP, axis_index, axis_of, bounds_of, dashed_horizontal, inside,
-    note_chrome_rebuild, note_rebuild, paint_pane_frame, paint_x_axis, pane_index, side_scale_of,
-    stroke_polyline, y_tick_hint,
+    Ink, Scratch, SideAxis, TOOLTIP_GAP, bounds_of, dashed_horizontal, inside, note_chrome_rebuild,
+    note_rebuild, paint_pane_frame, paint_x_axis, side_scale_of, stroke_polyline, y_tick_hint,
 };
 
 thread_local! {
@@ -98,7 +97,7 @@ struct Buffers {
     scratch: Scratch,
     chrome_key: Option<u64>,
     x_ticks: Vec<Tick>,
-    /// Indexed by [`axis_index`]; `Axis::ALL` order.
+    /// Indexed by [`Axis::index`]; `Axis::ALL` order.
     sides: [SideAxis; 4],
 }
 
@@ -195,7 +194,7 @@ impl ChartElement {
             (Pane::Lower, layout.lower),
         ] {
             for side in [Side::Left, Side::Right] {
-                let axis = &mut sides[axis_index(axis_of(pane, side))];
+                let axis = &mut sides[Axis::of(pane, side).index()];
                 axis.clear();
                 let Some(rects) = rects else { continue };
                 let plot = rects.plot;
@@ -230,15 +229,15 @@ impl ChartElement {
     ) {
         let plot = rects.plot;
         let bounds = ctx.bounds;
-        let left = &ctx.sides[axis_index(axis_of(pane, Side::Left))];
-        let right = &ctx.sides[axis_index(axis_of(pane, Side::Right))];
+        let left = &ctx.sides[Axis::of(pane, Side::Left).index()];
+        let right = &ctx.sides[Axis::of(pane, Side::Right).index()];
         if !paint_pane_frame(rects, ctx.x_ticks, left, right, bounds, ctx.ink, window, cx) {
             return;
         }
 
         let model = &*self.model;
         let view = self.view;
-        let pane_ix = pane_index(pane);
+        let pane_ix = pane.index();
         let scale = ctx.scale;
         let visible = ctx.visible;
 
@@ -514,11 +513,7 @@ impl Plot for ChartElement {
     ) -> Option<TooltipState> {
         let layout = self.layout(bounds);
         let (x, y) = (position.x.as_f32(), position.y.as_f32());
-        let plot = [Some(layout.upper), layout.lower]
-            .into_iter()
-            .flatten()
-            .map(|p| p.plot)
-            .find(|p| p.contains(x, y))?;
+        let (_, plot) = layout.plot_at(x, y)?;
         let scale = self.model.time_scale();
         let index = Crosshair::at(x, &scale, self.view, plot)?;
         Some(TooltipState::new(

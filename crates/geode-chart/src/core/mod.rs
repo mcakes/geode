@@ -92,6 +92,14 @@ impl Point {
     }
 }
 
+/// One tick of an x axis, time or linear: its pixel x in layout space and
+/// its label.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Tick {
+    pub x: f32,
+    pub label: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

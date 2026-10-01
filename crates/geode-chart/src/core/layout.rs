@@ -1,6 +1,7 @@
 //! One or two panes with aligned plot columns, optional density strips
 //! and one shared x axis beneath the lowest pane.
 
+use super::axis::Pane;
 use super::{AXIS_WIDTH, DENSITY_STRIP, PANE_GAP, Rect, X_AXIS_HEIGHT, design_px};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -90,6 +91,17 @@ impl Layout {
 
     pub fn lowest_bottom(&self) -> f32 {
         self.x_axis.y
+    }
+
+    /// The pane whose plot holds `(x, y)`, and that plot. `None` on an axis
+    /// column, the density strip, the gap between the panes, the x axis, or
+    /// outside the chart. A plot's left and top edges are inside it and its
+    /// right and bottom edges are not, as [`Rect::contains`] has it.
+    pub fn plot_at(&self, x: f32, y: f32) -> Option<(Pane, Rect)> {
+        [(Pane::Upper, Some(self.upper)), (Pane::Lower, self.lower)]
+            .into_iter()
+            .filter_map(|(pane, rects)| Some((pane, rects?.plot)))
+            .find(|(_, plot)| plot.contains(x, y))
     }
 }
 
@@ -241,6 +253,50 @@ mod tests {
         assert!(lower.left_axis.is_none());
         assert_eq!(l.x_axis.x, l.upper.plot.x);
         assert_eq!(l.x_axis.w, l.upper.plot.w);
+    }
+
+    #[test]
+    fn a_point_is_in_the_plot_of_the_pane_that_holds_it_or_in_none() {
+        let l = Layout::solve(
+            B,
+            LayoutOptions {
+                lower_left: true,
+                upper_right: true,
+                density: true,
+                ..o()
+            },
+        );
+        let upper = l.upper.plot;
+        let lower = l.lower.unwrap().plot;
+        let x = upper.x + upper.w * 0.4;
+        assert_eq!(
+            l.plot_at(x, upper.y + upper.h * 0.5),
+            Some((Pane::Upper, upper))
+        );
+        assert_eq!(
+            l.plot_at(x, lower.y + lower.h * 0.5),
+            Some((Pane::Lower, lower))
+        );
+        // The left and top edges are in; the right and bottom are not.
+        assert_eq!(l.plot_at(upper.x, upper.y), Some((Pane::Upper, upper)));
+        assert_eq!(l.plot_at(upper.right(), upper.y), None);
+        assert_eq!(l.plot_at(x, upper.bottom()), None);
+        // Neither plot: the gap between the panes, an axis column, the
+        // density strip, the x axis and outside the chart.
+        assert_eq!(l.plot_at(x, (upper.bottom() + lower.y) / 2.0), None);
+        let axis = l.upper.left_axis.unwrap();
+        assert_eq!(l.plot_at(axis.x + 1.0, axis.y + 1.0), None);
+        let strip = l.upper.density.unwrap();
+        assert_eq!(l.plot_at(strip.x + 1.0, strip.y + 1.0), None);
+        assert_eq!(l.plot_at(x, l.x_axis.y + 1.0), None);
+        assert_eq!(l.plot_at(-5.0, 10.0), None);
+        // One pane: nothing below it is a plot.
+        let one = Layout::solve(B, o());
+        assert_eq!(
+            one.plot_at(x, 10.0).map(|(pane, _)| pane),
+            Some(Pane::Upper)
+        );
+        assert_eq!(one.plot_at(x, one.x_axis.y + 1.0), None);
     }
 
     #[test]

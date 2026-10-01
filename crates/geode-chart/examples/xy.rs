@@ -34,9 +34,8 @@
 
 use std::sync::Arc;
 
-use geode_chart::core::linear::XFormat;
 use geode_chart::core::palette::Palette;
-use geode_chart::xy::{SlotKind, Style, XAxis, XyElement, XyModel, XySlot, YFormat};
+use geode_chart::xy::{SlotKind, Style, XAxis, XFormat, XyElement, XyModel, XySlot, YFormat};
 use geode_chart::{Axis, View};
 use gpui::{App, Context, Hsla, KeyDownEvent, Render, Window, div, prelude::*};
 use gpui_component::{ActiveTheme, Root};

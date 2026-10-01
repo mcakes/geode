@@ -45,7 +45,7 @@ use gpui_component::plot::tooltip::{CrossLine, Tooltip, TooltipState};
 use gpui_component::plot::{IntoPlot, PathCaches, Plot, ShapeKey};
 
 use super::model::{SlotKind, Style, XyModel, XySlot, YFormat};
-use crate::core::axis::{Pane, Side};
+use crate::core::axis::{Axis, Pane, Side};
 use crate::core::layout::{Layout, PaneRects};
 use crate::core::linear::{LinearX, XFormat, delta_label_with, step_decimals, x_ticks};
 use crate::core::marks::{
@@ -54,13 +54,12 @@ use crate::core::marks::{
 use crate::core::scale::{
     LinearScale, axis_domain, fmt_percent, fmt_tick, fmt_value, unsigned_zero,
 };
-use crate::core::time::Tick;
 use crate::core::view::View;
-use crate::core::{DASH, GAP, Rect, TICK_GAP, design_px};
+use crate::core::{DASH, GAP, Rect, TICK_GAP, Tick, design_px};
 use crate::paint::{
-    Ink, LINE_WIDTH, MAX_STROKE_SEGMENTS, Scratch, SideAxis, TOOLTIP_GAP, axis_index, axis_of,
-    bounds_of, decimated_points, note_chrome_rebuild, note_rebuild, paint_pane_frame, paint_x_axis,
-    pane_index, side_scale_of, stroke_points, stroke_segments, y_tick_hint,
+    Ink, LINE_WIDTH, MAX_STROKE_SEGMENTS, Scratch, SideAxis, TOOLTIP_GAP, bounds_of,
+    decimated_points, note_chrome_rebuild, note_rebuild, paint_pane_frame, paint_x_axis,
+    side_scale_of, stroke_points, stroke_segments, y_tick_hint,
 };
 
 /// Element-state key of the reused buffers, within this element's scope.
@@ -103,28 +102,17 @@ fn paints(mid: f64, lo: f64, hi: f64) -> bool {
     mid.is_finite() || has_range(lo, hi)
 }
 
-/// The index among `xs[start..end]` of the x nearest `u`, the lower of two
-/// as near. `None` for an empty window or a `u` that is not a number.
-fn nearest_within(xs: &[f64], (start, end): (usize, usize), u: f64) -> Option<usize> {
-    if start >= end || u.is_nan() {
-        return None;
-    }
-    let i = start + xs[start..end].partition_point(|x| *x < u);
-    if i == start {
-        return Some(start);
-    }
-    if i == end {
-        return Some(end - 1);
-    }
-    Some(if xs[i] - u < u - xs[i - 1] { i } else { i - 1 })
-}
-
 /// One slot's readout at `u`. A line is read between its knots. A points
 /// slot shows the nearest of its points in `window` when that lies within
 /// `tol` of `u`: `mid  lo / hi`, with a dash in place of a mid or of one
 /// end it does not have, and the mid alone when it has neither end or its
 /// ends meet. A dash alone when the slot has nothing there, or a point
 /// that paints no mark.
+///
+/// Of several points at the nearest x the one read is the first that
+/// paints a mark, which is where the crosshair snaps: read by index
+/// alone, a point with no quote would show a dash beside the mark of the
+/// point it shares an x with. Two painted points at one x read the first.
 ///
 /// The tooltip passes the slot's view window, so a point just past the
 /// plot's edge, which is not painted, is not read from a cursor at the
@@ -141,19 +129,27 @@ pub(crate) fn readout(
             .line_value_at(u)
             .map_or_else(|| NONE.to_string(), |v| fmt_y(v, format)),
         SlotKind::Points { xs, mid, lo, hi } => {
-            let Some(i) = nearest_within(xs, window, u) else {
+            let Some(nearest) = slot.nearest_in(window, u) else {
                 return NONE.to_string();
             };
+            let x = xs[nearest];
             // Asked as "is it near", so a tolerance that is not a number
             // accepts no point instead of every point.
-            let near = (xs[i] - u).abs() <= tol;
+            let near = (x - u).abs() <= tol;
             if !near {
                 return NONE.to_string();
             }
-            let (m, l, h) = (mid[i], lo[i], hi[i]);
-            if !paints(m, l, h) {
+            // The run of points at that x, within the window, from its
+            // first: `nearest` is the run's first or its last.
+            let (start, end) = (window.0, window.1.min(slot.len()));
+            let first = start + xs[start..nearest].partition_point(|v| *v < x);
+            let painted = (first..end)
+                .take_while(|i| xs[*i] == x)
+                .find(|i| paints(mid[*i], lo[*i], hi[*i]));
+            let Some(i) = painted else {
                 return NONE.to_string();
-            }
+            };
+            let (m, l, h) = (mid[i], lo[i], hi[i]);
             let read = |v: f64| {
                 if v.is_finite() {
                     fmt_y(v, format)
@@ -203,7 +199,7 @@ pub(crate) struct Buffers {
     px: [Vec<f32>; 4],
     chrome_key: Option<u64>,
     x_ticks: Vec<Tick>,
-    /// Indexed by [`axis_index`]; `Axis::ALL` order.
+    /// Indexed by [`Axis::index`]; `Axis::ALL` order.
     sides: [SideAxis; 4],
 }
 
@@ -400,8 +396,8 @@ impl XyElement {
             (Pane::Lower, layout.lower),
         ] {
             for side in [Side::Left, Side::Right] {
-                let axis_id = axis_of(pane, side);
-                let axis = &mut sides[axis_index(axis_id)];
+                let axis_id = Axis::of(pane, side);
+                let axis = &mut sides[axis_id.index()];
                 axis.clear();
                 let Some(rects) = rects else { continue };
                 let plot = rects.plot;
@@ -530,8 +526,8 @@ impl XyElement {
     ) {
         let plot = rects.plot;
         let bounds = ctx.bounds;
-        let left = &ctx.sides[axis_index(axis_of(pane, Side::Left))];
-        let right = &ctx.sides[axis_index(axis_of(pane, Side::Right))];
+        let left = &ctx.sides[Axis::of(pane, Side::Left).index()];
+        let right = &ctx.sides[Axis::of(pane, Side::Right).index()];
         if !paint_pane_frame(rects, ctx.x_ticks, left, right, bounds, ctx.ink, window, cx) {
             return;
         }
@@ -549,7 +545,7 @@ impl XyElement {
             bounds: bounds_of(plot, bounds),
         };
         window.with_content_mask(Some(mask), |window| {
-            let caches = PathCaches::for_paint((SHAPES, pane_index(pane)), window, cx);
+            let caches = PathCaches::for_paint((SHAPES, pane.index()), window, cx);
             caches.update(cx, |caches, _| {
                 for (k, slot) in model.slots.iter().enumerate() {
                     if !slot.visible || slot.axis.pane() != pane {
@@ -647,11 +643,7 @@ impl Plot for XyElement {
     ) -> Option<TooltipState> {
         let layout = self.layout(bounds);
         let (x, y) = (position.x.as_f32(), position.y.as_f32());
-        let plot = [Some(layout.upper), layout.lower]
-            .into_iter()
-            .flatten()
-            .map(|p| p.plot)
-            .find(|p| p.contains(x, y))?;
+        let (_, plot) = layout.plot_at(x, y)?;
         let (u, line_x) = self.crosshair_x(x, plot)?;
         // The index is the chosen x's bit pattern, so `tooltip` reads at
         // exactly the x chosen here, a snapped point's x as stored, rather
@@ -693,7 +685,6 @@ impl Plot for XyElement {
 mod tests {
     use super::*;
     use crate::core::Point;
-    use crate::core::axis::Axis;
     use crate::paint::{chrome_rebuilds, rebuilds};
     use crate::xy::model::XAxis;
     use gpui::{Context, Entity, IntoElement, Render, div, prelude::*, size};
@@ -1977,6 +1968,63 @@ mod tests {
             "20.00%  20.00% / —",
             "the missing side shows though the other has no spread"
         );
+    }
+
+    #[test]
+    fn a_run_of_equal_xs_reads_the_point_the_crosshair_snapped_to() {
+        let nan = f64::NAN;
+        let view = View {
+            lo: 0.85,
+            hi: 1.15,
+            min_span: 0.001,
+        };
+        // Two points at 1.0. In the first chain the earlier one has no
+        // quote and the later a mid; in the second both have a mid; in the
+        // third neither has anything.
+        let run = |mids: [f64; 2]| {
+            chain_of(
+                1,
+                &[0.9, 1.0, 1.0, 1.1],
+                &[0.2, mids[0], mids[1], 0.3],
+                &[nan; 4],
+                &[nan; 4],
+            )
+        };
+        for reversed in [false, true] {
+            let x = XAxis {
+                format: XFormat::Price,
+                reversed,
+            };
+            let model = |mids| XyModel::new(1, x, [YFormat::Percent; 4], 0.7, vec![run(mids)]);
+            let case = format!("reversed={reversed}");
+
+            let m = model([nan, 0.25]);
+            let e = XyElement::new(m.clone(), view, 12.0, "w");
+            let on_point = e.scale().x_of(1.0, view, WIDE);
+            for off in [-3.0, 3.0] {
+                let (u, line_x) = e.crosshair_x(on_point + off, WIDE).expect("in the plot");
+                assert_eq!((u, line_x), (1.0, on_point), "{case}, {off} px off");
+                let (_, rows) = e.tooltip_rows(u, WIDE);
+                assert_eq!(texts(&rows), [("s1", "25.00%")], "{case}, {off} px off");
+            }
+            // A crosshair gliding a hair to either side of the run reads
+            // the same point.
+            for u in [1.0 - 1e-7, 1.0 + 1e-7] {
+                let read = read_all(&m.slots[0], u, 1e-6, YFormat::Percent);
+                assert_eq!(read, "25.00%", "{case} at {u}");
+            }
+
+            // Two painted points at one x: the first reads.
+            let m = model([0.25, 0.26]);
+            for u in [1.0 - 1e-7, 1.0, 1.0 + 1e-7] {
+                let read = read_all(&m.slots[0], u, 1e-6, YFormat::Percent);
+                assert_eq!(read, "25.00%", "{case} at {u}");
+            }
+
+            // No point of the run paints: nothing to read.
+            let m = model([nan, nan]);
+            assert_eq!(read_all(&m.slots[0], 1.0, 1e-6, YFormat::Percent), "—");
+        }
     }
 
     /// One quoted point, so a view with no span.

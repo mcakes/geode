@@ -2,10 +2,9 @@
 //! strike-like axes of a slice chart use it; `reversed` runs the axis right
 //! to left, for call delta, so strike still increases left to right.
 
-use super::Rect;
 use super::scale::{LinearScale, fmt_percent, fmt_tick};
-use super::time::Tick;
 use super::view::View;
+use super::{Rect, Tick};
 
 /// How an x value is labelled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -80,7 +79,7 @@ impl LinearX {
 
 /// The decimals a label needs to tell ticks `step` apart, six at most. The
 /// nudge keeps a step stored a hair under a power of ten (`0.01 * 100`) from
-/// taking a decimal it does not need. None for a step that is not a
+/// taking a decimal it does not need. Zero for a step that is not a
 /// positive number.
 pub(crate) fn step_decimals(step: f64) -> usize {
     if !step.is_finite() || step <= 0.0 {
