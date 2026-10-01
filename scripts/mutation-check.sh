@@ -16633,8 +16633,8 @@ run_mutation "occupants: a tile leaving keeps a painted tile's input focused" \
 
 run_mutation "occupants: a tile is framed by its own workspace" \
   crates/geode-shell/src/shell/occupants.rs \
-  '            let frame = FrameRef::new(self.frame.clone(), ws);' \
-  '            let frame = FrameRef::new(self.frame.clone(), self.services.workspaces.active_ix());' \
+  '            let frame = FrameRef::for_tile(self.frame.clone(), ws, *id);' \
+  '            let frame = FrameRef::for_tile(self.frame.clone(), self.services.workspaces.active_ix(), *id);' \
   geode-shell \
   a_tile_restored_into_a_hidden_workspace_is_framed_by_it
 

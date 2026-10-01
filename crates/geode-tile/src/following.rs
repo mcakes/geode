@@ -397,9 +397,11 @@ pub fn arrive_immediately(barrier: &mut impl Barrier, key: QueryKey) -> bool {
 mod tests {
     use super::*;
     use geode_core::groupings::GroupingSlots;
+    use geode_core::link::Group;
+    use geode_core::scope::Scope;
     use geode_core::scopes::SavedScopes;
     use geode_shell::frame::{FLIP_DEADLINE, Frame};
-    use geode_shell::tiling::WorkspaceIx;
+    use geode_shell::tiling::{TileId, WorkspaceIx};
     use gpui::AppContext as _;
     use std::cell::Cell;
     use std::rc::Rc;
@@ -864,6 +866,44 @@ mod tests {
         cx.update(|cx| {
             let door = FrameDoor::new(&tile, cx);
             assert_eq!(door.current(), pinned);
+        });
+    }
+
+    /// A tile that follows a link group answers the barrier with the
+    /// group's scope generation. Reading its workspace's lane instead would
+    /// hand it an identity for a scope it does not query under: it would
+    /// requery on lane edits it never reads and sit still when its group
+    /// moved.
+    #[gpui::test]
+    fn the_door_reads_a_followers_group_scope(cx: &mut gpui::TestAppContext) {
+        let frame = cx.update(|cx| cx.new(|_| fresh_frame()));
+        let ws = WorkspaceIx::FIRST;
+        let id = TileId(7);
+        frame.update(cx, |f, _| assert!(f.follow(id, Some(Group::A))));
+        let tile = FrameRef::for_tile(frame.clone(), ws, id);
+        let workspace = FrameRef::new(frame.clone(), ws);
+        assert_eq!(tile.tile(), Some(id));
+        assert_eq!(workspace.tile(), None);
+        let wrote = tile.update(cx, |f, _| {
+            f.set_scope(Scope::one("underlying_ref", "SPX.Z"))
+        });
+        assert!(wrote);
+        let (group, lane) = frame.update(cx, |f, _| {
+            assert_eq!(
+                f.group_scope(Group::A).sole("underlying_ref"),
+                Some("SPX.Z"),
+                "a follower's handle writes its group"
+            );
+            assert!(f.view(ws).scope().is_empty(), "and not its lane");
+            (
+                f.group_scope_gens()[Group::A.index()],
+                f.view(ws).versions().scope,
+            )
+        });
+        assert_ne!(group, lane);
+        cx.update(|cx| {
+            assert_eq!(FrameDoor::new(&tile, cx).current().scope, group);
+            assert_eq!(FrameDoor::new(&workspace, cx).current().scope, lane);
         });
     }
 }

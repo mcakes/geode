@@ -10,6 +10,11 @@
 //! and publications stay frame-wide. Lane generations all come from one
 //! counter, so a number names exactly one value in any lane.
 //!
+//! A tile may follow one of four link groups. Its reading
+//! (`Frame::view_for`) takes the scope and scope generation from the group
+//! and everything else from its workspace's lane; group scope generations
+//! come from the same counter as the lanes'.
+//!
 //! Every mutation bumps exactly the counters it affects, so a tile can
 //! compare the fields it follows against the ones it last acted on with
 //! one integer compare each — a pinned tile ignores `grouping`, an
@@ -17,12 +22,14 @@
 //! datasets/documents a consumer reads; other counters retain their contracts.
 
 pub use crate::frame_ref::FrameRef;
+use crate::link::{GroupLane, Links};
 use crate::perf::RequeryStats;
 use crate::scopebar::{self, ScopeBarModel};
-use crate::tiling::WorkspaceIx;
+use crate::tiling::{TileId, WorkspaceIx};
 use geode_core::config::Layer;
 use geode_core::document::{KEY_SEPARATOR, is_key_prefix};
 use geode_core::groupings::GroupingSlots;
+use geode_core::link::{Group, Membership};
 use geode_core::named::NamedExpressions;
 use geode_core::query::{AsOf, QueryKey};
 use geode_core::scope::{Expr, Scope};
@@ -234,8 +241,12 @@ pub struct Frame {
     shared: Lane,
     /// One lane per pinned workspace. Ordered so session writes are stable.
     pinned: BTreeMap<WorkspaceIx, Lane>,
-    /// Source of every lane's scope/grouping/as-of generation; also advanced
-    /// by pin and unpin, which makes it the session writer's dirty signal.
+    /// Link groups: each group's scope and which tile follows or emits
+    /// into which.
+    links: Links,
+    /// Source of every lane's scope/grouping/as-of generation and every
+    /// link group's scope generation; also advanced by pin, unpin and a
+    /// membership change, which makes it the session writer's dirty signal.
     generation: u64,
     slots: GroupingSlots,
     /// Publishes in arrival order, newest first, capped at [`RECENT_PUBLISHES`].
@@ -271,6 +282,7 @@ impl Frame {
         Frame {
             shared: Lane::default(),
             pinned: BTreeMap::new(),
+            links: Links::default(),
             generation: 0,
             slots,
             recent_publishes: VecDeque::new(),
@@ -299,10 +311,18 @@ impl Frame {
         }
     }
 
+    /// The group `tile` follows and that group's lane; `None` for a view
+    /// bound to no tile and for a tile that follows its workspace.
+    fn followed(&self, tile: Option<TileId>) -> Option<(Group, &GroupLane)> {
+        let group = self.links.following(tile?)?;
+        Some((group, self.links.group(group)))
+    }
+
     pub fn view(&self, ws: WorkspaceIx) -> FrameView<'_> {
         FrameView {
             frame: self,
             lane: self.lane(Some(ws)),
+            group: None,
         }
     }
 
@@ -310,6 +330,28 @@ impl Frame {
         FrameViewMut {
             frame: self,
             ws: Some(ws),
+            tile: None,
+        }
+    }
+
+    /// One tile's reading: its workspace's lane, with the scope and scope
+    /// generation of the link group it follows, when it follows one.
+    pub fn view_for(&self, ws: WorkspaceIx, tile: TileId) -> FrameView<'_> {
+        FrameView {
+            frame: self,
+            lane: self.lane(Some(ws)),
+            group: self.followed(Some(tile)),
+        }
+    }
+
+    /// One tile's writable view: `set_scope` and `clear_scope` write the
+    /// link group it follows, when it follows one; every other write is
+    /// its workspace lane's.
+    pub fn view_mut_for(&mut self, ws: WorkspaceIx, tile: TileId) -> FrameViewMut<'_> {
+        FrameViewMut {
+            frame: self,
+            ws: Some(ws),
+            tile: Some(tile),
         }
     }
 
@@ -319,6 +361,7 @@ impl Frame {
         FrameView {
             frame: self,
             lane: &self.shared,
+            group: None,
         }
     }
 
@@ -326,7 +369,44 @@ impl Frame {
         FrameViewMut {
             frame: self,
             ws: None,
+            tile: None,
         }
+    }
+
+    pub fn membership(&self, tile: TileId) -> Membership {
+        self.links.membership(tile)
+    }
+
+    /// Follow a link group, or the workspace again with `None`. Advances
+    /// the generation (the session writer's dirty signal) when it changes
+    /// something; the tile's next `versions()` differs in `scope`, which is
+    /// what makes it requery.
+    pub fn follow(&mut self, tile: TileId, group: Option<Group>) -> bool {
+        let changed = self.links.follow(tile, group);
+        if changed {
+            fresh(&mut self.generation);
+        }
+        changed
+    }
+
+    /// Emit into a link group, or into none. Advances the generation when
+    /// it changes something.
+    pub fn emit(&mut self, tile: TileId, group: Option<Group>) -> bool {
+        let changed = self.links.emit(tile, group);
+        if changed {
+            fresh(&mut self.generation);
+        }
+        changed
+    }
+
+    pub fn group_scope(&self, group: Group) -> &Scope {
+        &self.links.group(group).scope
+    }
+
+    /// Each group's scope generation, in `Group::ALL` order: what the shell
+    /// compares to see that a group's scope moved.
+    pub fn group_scope_gens(&self) -> [u64; 4] {
+        self.links.scope_gens()
     }
 
     /// Give `ws` its own lane, copied from the shared one. `false` when it
@@ -626,11 +706,15 @@ impl Frame {
 }
 
 /// One workspace's reading of the frame: shared state through `Deref`,
-/// selection state from the lane the workspace resolves to.
+/// selection state from the lane the workspace resolves to. A view built
+/// for a tile that follows a link group (`Frame::view_for`) reads the scope
+/// and its generation from that group instead.
 #[derive(Clone, Copy)]
 pub struct FrameView<'a> {
     frame: &'a Frame,
     lane: &'a Lane,
+    /// The followed link group and its lane; `None` reads the lane's scope.
+    group: Option<(Group, &'a GroupLane)>,
 }
 
 impl Deref for FrameView<'_> {
@@ -641,9 +725,16 @@ impl Deref for FrameView<'_> {
 }
 
 impl<'a> FrameView<'a> {
+    /// The link group this view's tile follows, if any.
+    pub fn following(&self) -> Option<Group> {
+        self.group.map(|(g, _)| g)
+    }
+
+    /// A follower's `scope` is its group's generation, so a lane scope
+    /// edit it does not read is not a change to it, and a group change is.
     pub fn versions(&self) -> FrameVersions {
         FrameVersions {
-            scope: self.lane.scope_gen,
+            scope: self.group.map_or(self.lane.scope_gen, |(_, g)| g.scope_gen),
             grouping: self.lane.grouping_gen,
             as_of: self.lane.as_of_gen,
             ..self.frame.versions
@@ -651,7 +742,7 @@ impl<'a> FrameView<'a> {
     }
 
     /// `versions` with `data` narrowed to `watches` (see `PublicationWatch`).
-    /// Scope/grouping/as-of and flip identity are this lane's, unchanged.
+    /// Scope/grouping/as-of and flip identity are this view's, unchanged.
     /// Watches must come from this frame and remain alive with the consumer.
     pub fn versions_for<'w>(
         &self,
@@ -667,8 +758,10 @@ impl<'a> FrameView<'a> {
         }
     }
 
+    /// The scope this view queries under: the followed group's, else the
+    /// lane's.
     pub fn scope(&self) -> &'a Scope {
-        &self.lane.scope
+        self.group.map_or(&self.lane.scope, |(_, g)| &g.scope)
     }
 
     pub fn active_slot(&self) -> Option<u8> {
@@ -686,6 +779,8 @@ impl<'a> FrameView<'a> {
     /// Whether top-level expression term `i` still equals `expected`: the
     /// check [`FrameViewMut::replace_expression_term`] makes, for a caller
     /// that must refuse before doing anything else (writing a definition).
+    /// Reads the workspace lane even through a follower's view: it serves
+    /// the scope bar, which shows the workspace.
     pub fn expression_term_is(&self, i: usize, expected: &Expr) -> bool {
         self.lane
             .scope
@@ -695,23 +790,33 @@ impl<'a> FrameView<'a> {
             .is_some_and(|t| t == expected)
     }
 
-    /// Compose the lane scope with the tile layer through `Scope::and_then`,
-    /// then fold in every named expression it references. A missing or
-    /// invalid name is an error the caller shows instead of querying:
-    /// skipping it would widen the scope and produce plausible wrong totals.
+    /// Compose this view's scope (the followed group's, else the lane's)
+    /// with the tile layer through `Scope::and_then`, then fold in every
+    /// named expression it references. A follower's lane scope is not
+    /// composed in: the group replaces it. A missing or invalid name is an
+    /// error the caller shows instead of querying: skipping it would widen
+    /// the scope and produce plausible wrong totals.
     pub fn effective_scope(&self, tile: &Scope) -> Result<Scope, String> {
-        self.lane.scope.and_then(tile).resolve(&self.frame.named)
+        self.scope().and_then(tile).resolve(&self.frame.named)
     }
 
     /// Return cached scope-bar labels for versions excluding flip, the configured
     /// clock, and today's date on that clock. Clock/date changes invalidate labels
     /// even without a frame mutation, covering zone reloads and midnight.
     /// The caller supplies cached time inputs; this method reads no global clock.
+    ///
+    /// The bar shows the workspace, so this is asked of a workspace's view
+    /// only: a follower's view would describe its group's scope under the
+    /// workspace's controls.
     pub fn bar_model(
         &self,
         clock: geode_core::clock::Clock,
         today: chrono::NaiveDate,
     ) -> Rc<ScopeBarModel> {
+        debug_assert!(
+            self.group.is_none(),
+            "the scope bar model was asked of a view that follows a link group"
+        );
         // `flip` alone never changes what the bar shows — keyed out here
         // (rather than relying on it happening to already match) so a
         // flip costs a refcount bump like any other unrelated notify,
@@ -733,11 +838,14 @@ impl<'a> FrameView<'a> {
 }
 
 /// One workspace's writable frame. The lane is resolved per call, so a
-/// pin or unpin through `DerefMut` redirects later calls at once.
+/// pin or unpin through `DerefMut` redirects later calls at once; so is the
+/// link group a bound tile follows.
 pub struct FrameViewMut<'a> {
     frame: &'a mut Frame,
     /// `None` addresses the shared lane explicitly.
     ws: Option<WorkspaceIx>,
+    /// The tile this view answers for; `None` is the workspace itself.
+    tile: Option<TileId>,
 }
 
 impl Deref for FrameViewMut<'_> {
@@ -758,10 +866,11 @@ impl<'a> FrameViewMut<'a> {
         FrameView {
             frame: &*self.frame,
             lane: self.frame.lane(self.ws),
+            group: self.frame.followed(self.tile),
         }
     }
 
-    // Reads answer for this lane, so a lane read through a mutable view
+    // Reads answer as `view()` does, so a read through a mutable view
     // never needs a separate `view()` call.
 
     pub fn versions(&self) -> FrameVersions {
@@ -776,7 +885,7 @@ impl<'a> FrameViewMut<'a> {
     }
 
     pub fn scope(&self) -> &Scope {
-        &self.frame.lane(self.ws).scope
+        self.view().scope()
     }
 
     pub fn active_slot(&self) -> Option<u8> {
@@ -828,7 +937,25 @@ impl<'a> FrameViewMut<'a> {
 
     /// Replace the scope, pushing its outgoing value and clearing redo.
     /// An equal value returns false without changing history or versions.
+    /// Through the view of a tile that follows a link group, this replaces
+    /// the group's scope instead; a group keeps no history.
     pub fn set_scope(&mut self, scope: Scope) -> bool {
+        // A follower's scope is its group's: writing the lane would change
+        // what the scope bar shows and leave the tile reading the old value.
+        if let Some(g) = self.tile.and_then(|t| self.frame.links.following(t)) {
+            let Frame {
+                links, generation, ..
+            } = &mut *self.frame;
+            return links.set_scope(g, scope, generation);
+        }
+        self.set_lane_scope(scope)
+    }
+
+    /// `set_scope` for the workspace lane, whatever the view's tile
+    /// follows. The scope bar's edits derive the new scope from the lane's
+    /// and go through here: sent to a followed group they would overwrite
+    /// its scope with an edited copy of the lane's.
+    fn set_lane_scope(&mut self, scope: Scope) -> bool {
         let lane = self.lane();
         if lane.scope == scope {
             return false;
@@ -839,12 +966,15 @@ impl<'a> FrameViewMut<'a> {
         true
     }
 
+    /// Empty the scope `set_scope` writes: the followed group's, else the
+    /// lane's.
     pub fn clear_scope(&mut self) -> bool {
         self.set_scope(Scope::default())
     }
 
     /// Start or replace a session, capturing the current scope and redo stack.
-    /// Nothing is pushed until the first actual session edit.
+    /// Nothing is pushed until the first actual session edit. Sessions edit
+    /// the workspace lane even through a follower's view.
     pub fn begin_scope_session(&mut self) {
         let lane = self.lane();
         lane.scope_session = Some(ScopeSession {
@@ -857,6 +987,7 @@ impl<'a> FrameViewMut<'a> {
     /// Replace the scope and bump its version on an actual change. An open
     /// session pushes its base only once, even if other edits move the stack.
     /// Without a session, each change pushes the outgoing scope and clears redo.
+    /// Edits the workspace lane even through a follower's view.
     pub fn set_scope_in_session(&mut self, scope: Scope) -> bool {
         let lane = self.lane();
         if lane.scope == scope {
@@ -898,6 +1029,7 @@ impl<'a> FrameViewMut<'a> {
     }
 
     /// Undo one scope edit. An empty stack returns false without a version bump.
+    /// Edits the workspace lane even through a follower's view.
     pub fn undo_scope(&mut self) -> bool {
         let lane = self.lane();
         let Some(previous) = lane.scope_undo.pop() else {
@@ -911,6 +1043,7 @@ impl<'a> FrameViewMut<'a> {
 
     /// Redo one scope edit. An ordinary edit or the first mutation of a new
     /// session clears this stack; later mutations in an open session do not.
+    /// Edits the workspace lane even through a follower's view.
     pub fn redo_scope(&mut self) -> bool {
         let lane = self.lane();
         let Some(next) = lane.scope_redo.pop() else {
@@ -924,7 +1057,8 @@ impl<'a> FrameViewMut<'a> {
 
     /// Remove every selection for a column through the undoable `set_scope`
     /// path. Preserve other fields, including `impossible`. Return false when
-    /// there is no matching selection.
+    /// there is no matching selection. Edits the workspace lane even through
+    /// a follower's view.
     pub fn drop_dimension(&mut self, column: &str) -> bool {
         let mut s = self.lane().scope.clone();
         let before = s.dimensions.len();
@@ -932,11 +1066,12 @@ impl<'a> FrameViewMut<'a> {
         if s.dimensions.len() == before {
             return false;
         }
-        self.set_scope(s)
+        self.set_lane_scope(s)
     }
 
     /// Remove named expression `name` from the scope through the undoable
     /// `set_scope` path. Return false when the scope does not name it.
+    /// Edits the workspace lane even through a follower's view.
     pub fn drop_named(&mut self, name: &str) -> bool {
         let mut s = self.lane().scope.clone();
         let before = s.named.len();
@@ -944,14 +1079,15 @@ impl<'a> FrameViewMut<'a> {
         if s.named.len() == before {
             return false;
         }
-        self.set_scope(s)
+        self.set_lane_scope(s)
     }
 
     /// Remove top-level expression term `i` (`Expr::conjuncts` order)
     /// through the undoable `set_scope` path; the remaining terms are
     /// rebuilt as a left-folded `and` chain, and removing the last one
     /// leaves no expression. Out of range (including no expression)
-    /// returns false and changes nothing.
+    /// returns false and changes nothing. Like every term edit, it edits
+    /// the workspace lane even through a follower's view.
     pub fn drop_expression_term(&mut self, i: usize) -> bool {
         self.edit_expression_term(i, None, None, None)
             .unwrap_or(false)
@@ -1019,11 +1155,12 @@ impl<'a> FrameViewMut<'a> {
         {
             s.named.push(name.to_string());
         }
-        Ok(self.set_scope(s))
+        Ok(self.set_lane_scope(s))
     }
 
     /// Remove the whole expression layer through the undoable `set_scope`
-    /// path; false (and no history entry) when there is none.
+    /// path; false (and no history entry) when there is none. Edits the
+    /// workspace lane even through a follower's view.
     pub fn clear_expression(&mut self) -> bool {
         let lane = self.lane();
         if lane.scope.expression.is_none() {
@@ -1031,18 +1168,19 @@ impl<'a> FrameViewMut<'a> {
         }
         let mut s = lane.scope.clone();
         s.expression = None;
-        self.set_scope(s)
+        self.set_lane_scope(s)
     }
 
     /// Set (or clear, with `None`/whitespace-only) the scope's text
     /// filter — an undoable edit like `drop_dimension`, going through the
     /// ordinary (non-session) `set_scope` path. `begin_scope_session`/
     /// `set_scope_in_session` is the coalescing alternative a live text
-    /// field drives per keystroke.
+    /// field drives per keystroke. Edits the workspace lane even through a
+    /// follower's view.
     pub fn set_text(&mut self, text: Option<String>) -> bool {
         let mut s = self.lane().scope.clone();
         s.text = text.filter(|t| !t.trim().is_empty());
-        self.set_scope(s)
+        self.set_lane_scope(s)
     }
 
     /// `Some(n)` activates a filled slot; `None` returns following tiles
@@ -1089,14 +1227,15 @@ impl<'a> FrameViewMut<'a> {
     /// Save this lane's scope in memory, replace the pending scope write, and
     /// bump saved_scopes. Validate the object name and reject reserved action
     /// names to prevent collisions when registering `scope::<name>` actions.
-    /// An existing name is overwritten; an empty scope is accepted.
+    /// An existing name is overwritten; an empty scope is accepted. The
+    /// scope saved is the workspace lane's even through a follower's view.
     pub fn save_scope(&mut self, name: &str) -> Result<(), String> {
         let name = geode_core::config::check_object_name(name)
             .map_err(|_| format!("'{}' is not a usable scope name", name.trim()))?;
         if geode_core::scopes::RESERVED_NAMES.contains(&name) {
             return Err(format!("'{name}' is reserved"));
         }
-        let scope = self.scope().clone();
+        let scope = self.frame.lane(self.ws).scope.clone();
         self.frame
             .saved_scopes
             .insert(name.to_string(), scope.clone());
@@ -1108,7 +1247,7 @@ impl<'a> FrameViewMut<'a> {
     /// Load a saved scope by name, going through `set_scope` so it's
     /// undoable like any other scope change. `Err` when no scope by that
     /// name exists; `Ok(false)` when it exists but is already the current
-    /// scope.
+    /// scope. Loads into the workspace lane even through a follower's view.
     pub fn load_scope(&mut self, name: &str) -> Result<bool, String> {
         let scope = self
             .frame
@@ -1116,7 +1255,7 @@ impl<'a> FrameViewMut<'a> {
             .get(name)
             .cloned()
             .ok_or_else(|| format!("no saved scope '{name}'"))?;
-        Ok(self.set_scope(scope))
+        Ok(self.set_lane_scope(scope))
     }
 
     /// Clear undo and redo without changing scope or ending an open session.
@@ -1127,7 +1266,7 @@ impl<'a> FrameViewMut<'a> {
         lane.scope_redo.clear();
     }
 
-    /// Replace the barrier with this lane's scope/grouping/as-of identity and
+    /// Replace the barrier with this view's scope/grouping/as-of identity and
     /// these tile keys. An empty key set clears it without bumping flip.
     /// No version changes or notifications are emitted here.
     ///
@@ -1186,8 +1325,9 @@ pub fn persist_scope_to_user_config(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tiling::WorkspaceIx;
+    use crate::tiling::{TileId, WorkspaceIx};
     use geode_core::clock::Clock;
+    use geode_core::link::Group;
     use geode_core::scope::{DimensionSelection, Scope};
 
     fn ws(n: u8) -> WorkspaceIx {
@@ -2278,5 +2418,192 @@ mod tests {
 
         assert!(f.replace_named_expressions(named("[liq]\nexpression = \"npv > 5\"\n")));
         assert_eq!(f.shared().versions().config, v1.config + 1);
+    }
+
+    #[test]
+    fn a_followers_scope_is_the_groups_and_everything_else_its_workspaces() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.shared_mut().set_scope(book_scope("b1"));
+        f.shared_mut().set_active_slot(Some(1));
+        let tile = TileId(7);
+        assert!(f.follow(tile, Some(Group::A)));
+        f.view_mut_for(ws(1), tile)
+            .set_scope(Scope::one("underlying_ref", "SPX.Z"));
+
+        let follower = f.view_for(ws(1), tile);
+        let lane = f.view(ws(1));
+        assert_eq!(follower.following(), Some(Group::A));
+        assert_eq!(follower.scope().sole("underlying_ref"), Some("SPX.Z"));
+        assert_eq!(
+            lane.scope(),
+            &book_scope("b1"),
+            "the lane kept its own scope"
+        );
+        assert_eq!(follower.active_slot(), lane.active_slot());
+        assert_eq!(follower.as_of(), lane.as_of());
+        let (fv, lv) = (follower.versions(), lane.versions());
+        assert_ne!(fv.scope, lv.scope);
+        assert_eq!((fv.grouping, fv.as_of), (lv.grouping, lv.as_of));
+        // Another tile in the same workspace follows nothing.
+        assert_eq!(f.view_for(ws(1), TileId(8)).scope(), &book_scope("b1"));
+        assert_eq!(f.view_for(ws(1), TileId(8)).following(), None);
+    }
+
+    #[test]
+    fn a_followers_effective_scope_composes_the_group_with_the_tiles_own() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.shared_mut().set_scope(book_scope("b1"));
+        let tile = TileId(7);
+        f.follow(tile, Some(Group::B));
+        f.view_mut_for(ws(1), tile)
+            .set_scope(Scope::one("underlying_ref", "NDX"));
+        let eff = f
+            .view_for(ws(1), tile)
+            .effective_scope(&book_scope("b2"))
+            .unwrap();
+        assert_eq!(eff.sole("underlying_ref"), Some("NDX"));
+        assert_eq!(
+            eff.sole("book"),
+            Some("b2"),
+            "the lane's b1 is not composed in"
+        );
+    }
+
+    #[test]
+    fn group_scope_generations_are_unique_across_groups_and_lanes() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.pin(ws(2));
+        let (a, b) = (TileId(1), TileId(2));
+        f.follow(a, Some(Group::A));
+        f.follow(b, Some(Group::B));
+        f.shared_mut().set_scope(book_scope("b1"));
+        f.view_mut(ws(2)).set_scope(book_scope("b2"));
+        f.view_mut_for(ws(1), a)
+            .set_scope(Scope::one("underlying_ref", "SPX.Z"));
+        f.view_mut_for(ws(1), b)
+            .set_scope(Scope::one("underlying_ref", "NDX"));
+        let mut gens = vec![
+            f.shared().versions().scope,
+            f.view(ws(2)).versions().scope,
+            f.view_for(ws(1), a).versions().scope,
+            f.view_for(ws(1), b).versions().scope,
+        ];
+        gens.sort();
+        gens.dedup();
+        assert_eq!(gens.len(), 4, "one number names one scope anywhere");
+        assert_eq!(
+            f.group_scope_gens()[Group::A.index()],
+            f.view_for(ws(1), a).versions().scope
+        );
+    }
+
+    #[test]
+    fn follow_and_emit_advance_the_generation_only_when_they_change_something() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let tile = TileId(7);
+        let g0 = f.generation();
+        assert!(f.follow(tile, Some(Group::A)));
+        assert!(f.generation() > g0);
+        let g1 = f.generation();
+        assert!(!f.follow(tile, Some(Group::A)), "already following A");
+        assert_eq!(f.generation(), g1);
+        assert!(f.emit(tile, Some(Group::B)));
+        assert_eq!(
+            f.membership(tile),
+            geode_core::link::Membership {
+                follow: Some(Group::A),
+                emit: Some(Group::B)
+            }
+        );
+        assert!(f.follow(tile, None));
+        assert!(f.emit(tile, None));
+        assert!(f.membership(tile).is_empty());
+    }
+
+    #[test]
+    fn a_follow_changes_the_tiles_scope_generation_and_nothing_else() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.shared_mut().set_scope(book_scope("b1"));
+        let tile = TileId(7);
+        let before = f.view_for(ws(1), tile).versions();
+        f.follow(tile, Some(Group::C));
+        let after = f.view_for(ws(1), tile).versions();
+        assert_ne!(
+            after.scope, before.scope,
+            "the tile now reads the group's (empty) scope"
+        );
+        assert_eq!(
+            (after.grouping, after.as_of, after.data, after.config),
+            (before.grouping, before.as_of, before.data, before.config)
+        );
+    }
+
+    #[test]
+    fn an_equal_group_scope_is_not_a_write_and_clear_empties_it() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let tile = TileId(7);
+        f.follow(tile, Some(Group::A));
+        assert!(
+            f.view_mut_for(ws(1), tile)
+                .set_scope(Scope::one("underlying_ref", "SPX.Z"))
+        );
+        let generation = f.view_for(ws(1), tile).versions().scope;
+        assert!(
+            !f.view_mut_for(ws(1), tile)
+                .set_scope(Scope::one("underlying_ref", "SPX.Z"))
+        );
+        assert_eq!(f.view_for(ws(1), tile).versions().scope, generation);
+        assert!(f.view_mut_for(ws(1), tile).clear_scope());
+        assert!(f.group_scope(Group::A).is_empty());
+        assert_eq!(
+            f.shared().scope(),
+            &Scope::default(),
+            "the lane was never written"
+        );
+    }
+
+    /// Set and clear are the only scope verbs a follower's view sends to
+    /// its group. Each of the scope bar's other verbs names the workspace
+    /// lane: landing in the group instead would requery every follower for
+    /// a chip the bar removed, and leave the bar showing the old lane.
+    #[test]
+    fn the_scope_bars_other_verbs_edit_the_lane_through_a_followers_view() {
+        let mut saved = SavedScopes::new();
+        saved.insert("desk".to_string(), book_scope("b9"));
+        let mut f = Frame::new(slots(), saved, None);
+        let mut lane = expr_scope("a = 1 and b = 2");
+        lane.dimensions = book_scope("b1").dimensions;
+        lane.named = vec!["liq".into()];
+        f.shared_mut().set_scope(lane);
+        let tile = TileId(7);
+        f.follow(tile, Some(Group::A));
+        let group = Scope::one("underlying_ref", "SPX.Z");
+        f.view_mut_for(ws(1), tile).set_scope(group.clone());
+        let group_gen = f.group_scope_gens()[Group::A.index()];
+
+        let mut v = f.view_mut_for(ws(1), tile);
+        assert!(v.set_text(Some("x".into())));
+        assert!(v.drop_dimension("book"));
+        assert!(v.drop_named("liq"));
+        assert!(v.drop_expression_term(0));
+        assert!(v.clear_expression());
+        v.save_scope("mine").unwrap();
+        assert_eq!(v.load_scope("desk"), Ok(true));
+
+        assert_eq!(f.group_scope(Group::A), &group, "no verb reached the group");
+        assert_eq!(f.group_scope_gens()[Group::A.index()], group_gen);
+        assert_eq!(f.shared().scope(), &book_scope("b9"), "the lane loaded");
+        let text_only = Scope {
+            text: Some("x".into()),
+            ..Scope::default()
+        };
+        assert_eq!(
+            f.saved_scopes().get("mine"),
+            Some(&text_only),
+            "the lane's scope was saved, each earlier verb having edited it"
+        );
+        assert!(f.view_mut_for(ws(1), tile).undo_scope());
+        assert_eq!(f.shared().scope(), &text_only, "undo walks the lane");
+        assert_eq!(f.group_scope(Group::A), &group);
     }
 }

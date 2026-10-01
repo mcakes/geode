@@ -285,7 +285,9 @@ impl ShellView {
                 .workspaces
                 .workspace_of(*id)
                 .unwrap_or_else(|| self.services.workspaces.active_ix());
-            let frame = FrameRef::new(self.frame.clone(), ws);
+            // Bound to the tile as well, so the link group it follows
+            // decides the scope it reads.
+            let frame = FrameRef::for_tile(self.frame.clone(), ws, *id);
             let occupant = match factory {
                 Some(f) => f.create(
                     *id,
