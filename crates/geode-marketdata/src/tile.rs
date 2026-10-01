@@ -7944,6 +7944,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         // A query that brings rows from far down the document into view.
         results.update(&mut vcx, |results, cx| results.set_query("D29".into(), cx));
         vcx.run_until_parked();
+        find.borrow().painted.borrow_mut().clear();
         let positions = find_positions(&mut vcx, 300);
         let rows = held(&find);
         assert_eq!(
@@ -7973,6 +7974,7 @@ edits = [["2026-11-20", "-1", 9.5]]
             modifiers: gpui::Modifiers::default(),
             touch_phase: gpui::TouchPhase::Moved,
         });
+        find.borrow().painted.borrow_mut().clear();
         let scrolled = find_positions(&mut vcx, 300);
         assert!(scrolled.first() > top.first(), "scrolled: {scrolled:?}");
         assert_eq!(held(&find), scrolled, "rows scrolled out are dropped");
@@ -7987,6 +7989,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         // One match: the table never reports a one-row range.
         results.update(&mut vcx, |results, cx| results.set_query("D137".into(), cx));
         vcx.run_until_parked();
+        find.borrow().painted.borrow_mut().clear();
         assert_eq!(find_positions(&mut vcx, 300), vec![0]);
         assert_eq!(held(&find), vec![137], "the lone match is formatted");
         assert_find_paints_the_formatter(&h, &vcx, &find, &[137]);

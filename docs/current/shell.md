@@ -225,7 +225,10 @@ whenever its visible range changes and at the next layout after any result-set
 change, clamped to the rows that remain (the tail of the same height when none
 do, so a lone match is reported); before its first range it reports the first
 64 rows. Market data and the pricer format only those rows, outside paint, and
-a cell the occupant has not prepared paints blank.
+a cell the occupant has not prepared paints blank. `refresh_rows` has the table
+re-report the same rows (the pricer's price refresh), and `set_notice` puts the
+occupant's word on the results in the status line in place of the match count
+(the pricer's "Results out of date — reopen /").
 Search text is prepared once per dataset. Ranking runs off the UI thread;
 query revisions cancel obsolete work and prevent stale results being accepted.
 Single-word extensions rescore the last completed query's candidates; edits,

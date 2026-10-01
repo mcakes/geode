@@ -1359,3 +1359,74 @@ fn a_split_rows_cursor_keeps_its_node_across_a_shorter_regroup(cx: &mut gpui::Te
     assert_eq!(splits.len(), 2, "still split under both dates");
     assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(splits[1]));
 }
+
+/// A price-only delivery keeps the index `/` opened on and refills the rows
+/// it shows from the new prices before the next paint: no row keeps the
+/// price it entered view with beside rows reading the new one.
+#[gpui::test]
+fn fzf_a_price_refresh_repaints_the_shown_rows(cx: &mut gpui::TestAppContext) {
+    use geode_shell::fuzzyfind::FuzzyFind;
+    let (h, mut vcx) = open_seeded(cx, &["1 SPX Z26 5000 C", "2 SPX Z26 4000 P"]);
+    let first = h.prices().pop().expect("a batch");
+    h.answer(&mut vcx, &first, 12.5);
+    let results = vcx.new(|_| FuzzyFind::default());
+    h.tile.update_in(&mut vcx, |tile, window, cx| {
+        tile.start_fuzzy_find(results.downgrade(), window, cx)
+    });
+    vcx.run_until_parked();
+    let paint = h.tile.read_with(&vcx, |t, _| t.find_paint.clone().unwrap());
+    let npv = 1 + paint
+        .borrow()
+        .painter
+        .model
+        .columns
+        .iter()
+        .position(|c| c.name == "npv")
+        .expect("an npv column");
+    let shown = find_positions(&h, &mut vcx, 2);
+    assert_eq!(shown, vec![0, 1]);
+    let npv_painted = |g: usize| {
+        paint
+            .borrow()
+            .painter
+            .find_painted
+            .get(&(g, npv))
+            .cloned()
+            .unwrap_or_default()
+    };
+    assert!(npv_painted(0).contains("12"), "{}", npv_painted(0));
+
+    h.dispatch(&mut vcx, "price", None);
+    let batch = h.prices().pop().expect("a reprice");
+    let builds = crate::grid::builds();
+    h.answer(&mut vcx, &batch, 99.25);
+    assert_eq!(crate::grid::builds(), builds, "a price-only refresh");
+    paint.borrow_mut().painter.find_painted.clear();
+    assert_eq!(find_positions(&h, &mut vcx, 2), shown);
+    for g in shown.iter().copied() {
+        assert!(npv_painted(g).contains("99"), "row {g}: {}", npv_painted(g));
+    }
+    assert_find_paints_the_formatter(&h, &vcx, &paint, &shown);
+}
+
+/// Once the tile installs another index the find's measure cells paint
+/// blank; the status line says the results are out of date, so a blank
+/// does not read as an unpriced line.
+#[gpui::test]
+fn fzf_a_reindex_says_the_results_are_out_of_date(cx: &mut gpui::TestAppContext) {
+    use geode_shell::fuzzyfind::FuzzyFind;
+    let (h, mut vcx) = open_seeded(cx, &MIXED);
+    let results = vcx.new(|_| FuzzyFind::default());
+    h.tile.update_in(&mut vcx, |tile, window, cx| {
+        tile.start_fuzzy_find(results.downgrade(), window, cx)
+    });
+    vcx.run_until_parked();
+    h.draw(&mut vcx);
+    let status = |vcx: &VisualTestContext| results.read_with(vcx, |r, _| r.context().1);
+    assert_eq!(status(&vcx), "5 matches");
+    h.command(&mut vcx, "group underlying_ref").unwrap();
+    assert_eq!(status(&vcx), FIND_OUT_OF_DATE);
+    results.update(&mut vcx, |results, cx| results.set_query("spx".into(), cx));
+    vcx.run_until_parked();
+    assert_eq!(status(&vcx), FIND_OUT_OF_DATE, "it outlasts a new query");
+}

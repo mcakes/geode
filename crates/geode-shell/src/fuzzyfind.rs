@@ -148,6 +148,8 @@ pub struct FuzzyFind {
     active: bool,
     expanding: bool,
     table: Option<gpui::Entity<gpui_component::table::TableState<FindTable>>>,
+    /// The tile's word on the results, shown in place of the match count.
+    notice: Option<String>,
 }
 
 impl Default for FuzzyFind {
@@ -175,6 +177,7 @@ impl Default for FuzzyFind {
             active: true,
             expanding: false,
             table: None,
+            notice: None,
         }
     }
 }
@@ -486,6 +489,24 @@ impl FuzzyFind {
         self.active
     }
 
+    /// The tile's results changed under the same rows (a price refresh):
+    /// re-report the rows shown at the next layout.
+    pub fn refresh_rows(&mut self, cx: &mut Context<Self>) {
+        if let Some(table) = &self.table {
+            table.update(cx, |table, cx| {
+                table.delegate_mut().mark_stale();
+                cx.notify();
+            });
+        }
+    }
+
+    /// Put the tile's word on the results in the status line, in place of
+    /// the match count, until the session ends.
+    pub fn set_notice(&mut self, notice: impl Into<String>, cx: &mut Context<Self>) {
+        self.notice = Some(notice.into());
+        cx.notify();
+    }
+
     pub fn has_table(&self) -> bool {
         self.table.is_some()
     }
@@ -500,6 +521,8 @@ impl FuzzyFind {
             "Searching…".into()
         } else if let Some(error) = &self.error {
             error.clone()
+        } else if let Some(notice) = &self.notice {
+            notice.clone()
         } else {
             format!(
                 "{} matches",

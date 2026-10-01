@@ -185,11 +185,14 @@ measure already reads. Re-measure on an idle machine before quoting them.
 - The blotter's fuzzy `/` table does not use the row report: it formats a
   cell in its paint callback the first time the cell paints and keeps every
   cell it formatted until `/` closes.
-- The pricer's `/` cells read the live sheet through the index `/` built, so
-  a row shows the prices current when it entered view. Once the tile installs
-  another index (a regroup, a structural delivery, an expansion), the next row
-  report drops every cell and the measure columns paint blank until `/` is
-  reopened, rather than read rollup nodes and sheet rows through a stale index.
+- The pricer's `/` cells read the live sheet through the index `/` built. A
+  price-only delivery (the refill-only path) drops them and has the table
+  re-report, so the rows shown refill from the new prices before the next
+  paint. Once the tile installs another index (a regroup, a structural
+  delivery, an expansion), the next row report drops every cell and the
+  measure columns paint blank until `/` is reopened, rather than read rollup
+  nodes and sheet rows through a stale index; the status line reads "Results
+  out of date — reopen /" so a blank does not read as an unpriced line.
 - The pinned table never reports a visible range of one row; a tile scrolled
   to show a single row keeps the window it last had, so that row can paint
   blank, as the blotter's always could.

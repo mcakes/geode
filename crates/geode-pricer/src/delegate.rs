@@ -369,6 +369,11 @@ impl FindPaint {
         });
     }
 
+    /// Drop every cell; the next report refills the rows shown.
+    pub(crate) fn clear(&mut self) {
+        self.cells.clear();
+    }
+
     /// Paint one find cell, re-deriving the paints after a theme change.
     pub(crate) fn render(
         &mut self,

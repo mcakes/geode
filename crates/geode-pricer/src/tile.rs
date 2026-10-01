@@ -80,6 +80,9 @@ use std::time::{Duration, Instant};
 mod select;
 
 pub(crate) const LOADING: &str = "loading…";
+/// The `/` status once the tile has installed another index: the results'
+/// measure cells paint blank, which alone would read as unpriced lines.
+pub(crate) const FIND_OUT_OF_DATE: &str = "Results out of date — reopen /";
 
 /// Initial retry delay after a refused pricing submission. Retries run even when
 /// periodic refresh is disabled.
@@ -614,8 +617,8 @@ pub struct PricerTile {
     pub(crate) register: Option<Vec<crate::core::RowSpec>>,
     find: Option<FindState>,
     fuzzy_find: Option<gpui::WeakEntity<geode_shell::fuzzyfind::FuzzyFind>>,
-    /// The last `/` open's result cells, for tests to read.
-    #[cfg(test)]
+    /// The open `/` result table's cells: a price-only refresh drops them
+    /// so the rows shown refill from the new prices.
     pub(crate) find_paint: Option<Rc<std::cell::RefCell<crate::delegate::FindPaint>>>,
     /// Latest pricing submission tag. An outcome with any other tag is dropped whole.
     pub(crate) tag: u64,
@@ -1047,7 +1050,6 @@ impl PricerTile {
             register: None,
             find: None,
             fuzzy_find: None,
-            #[cfg(test)]
             find_paint: None,
             tag: 0,
             in_flight: HashMap::new(),
@@ -1351,10 +1353,7 @@ impl PricerTile {
             Rc::clone(&self.model),
             cx.theme(),
         )));
-        #[cfg(test)]
-        {
-            self.find_paint = Some(paint.clone());
-        }
+        self.find_paint = Some(paint.clone());
         let shown = paint.clone();
         let tile = cx.entity().downgrade();
         let header_table = self.table.clone();
@@ -4625,6 +4624,7 @@ impl PricerTile {
         if same {
             // Prices moved, nothing else: the index stands; re-prepare the
             // cells on screen.
+            self.refill_find(cx);
             let src = self.fill_source();
             self.table.update(cx, |t, cx| {
                 t.delegate_mut().refill_window(src);
@@ -4646,9 +4646,39 @@ impl PricerTile {
         ));
         self.recover_hidden_cursor(&model);
         self.model = model;
+        self.find_out_of_date(cx);
         self.install_model(cx);
         self.rebuild_chrome();
         cx.notify();
+    }
+
+    /// The open `/` results, if any.
+    fn open_find(&self, cx: &App) -> Option<Entity<geode_shell::fuzzyfind::FuzzyFind>> {
+        self.fuzzy_find
+            .as_ref()
+            .and_then(|r| r.upgrade())
+            .filter(|r| r.read(cx).is_active())
+    }
+
+    /// A price-only refresh keeps the index `/` opened on: drop its cells and
+    /// have the table re-report, so the rows shown refill from the new
+    /// prices before the next paint rather than mix old and new.
+    fn refill_find(&mut self, cx: &mut Context<Self>) {
+        let Some(results) = self.open_find(cx) else {
+            return;
+        };
+        if let Some(paint) = &self.find_paint {
+            paint.borrow_mut().clear();
+        }
+        results.update(cx, |results, cx| results.refresh_rows(cx));
+    }
+
+    /// A new index leaves `/`'s rows naming the old one's nodes: its
+    /// measure cells paint blank from here, so say why.
+    fn find_out_of_date(&mut self, cx: &mut Context<Self>) {
+        if let Some(results) = self.open_find(cx) {
+            results.update(cx, |results, cx| results.set_notice(FIND_OUT_OF_DATE, cx));
+        }
     }
 
     /// Open every group enclosing line `id` in the current rollup, root

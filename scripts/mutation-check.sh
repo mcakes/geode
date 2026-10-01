@@ -28611,6 +28611,33 @@ run_mutation "find-window: pricer a reindexed tile formats nothing through the s
   '        if false {' \
   geode-pricer fzf_paints_blank_cells_once_the_tile_reindexes
 
+# A price-only refresh drops the find's cells, so the rows shown refill
+# from the new prices instead of keeping the price they entered view with.
+run_mutation "find-window: pricer a price refresh refills the shown find rows" \
+  crates/geode-pricer/src/tile.rs \
+  '            self.refill_find(cx);
+            let src = self.fill_source();' \
+  '            let src = self.fill_source();' \
+  geode-pricer fzf_a_price_refresh_repaints_the_shown_rows
+
+# A new index says the find's results are out of date: their measure cells
+# now paint blank, which alone reads as unpriced lines.
+run_mutation "find-window: pricer a reindex says the results are out of date" \
+  crates/geode-pricer/src/tile.rs \
+  '        self.model = model;
+        self.find_out_of_date(cx);' \
+  '        self.model = model;' \
+  geode-pricer fzf_a_reindex_says_the_results_are_out_of_date
+
+# The occupant's notice takes the status line over the match count.
+run_mutation "find-window: shell a notice takes the status line" \
+  crates/geode-shell/src/fuzzyfind.rs \
+  '        } else if let Some(notice) = &self.notice {
+            notice.clone()' \
+  '        } else if let Some(notice) = None::<&String> {
+            notice.clone()' \
+  geode-pricer fzf_a_reindex_says_the_results_are_out_of_date
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

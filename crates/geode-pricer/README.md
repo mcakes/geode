@@ -114,9 +114,11 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 - A fuzzy `/` builds an all-open `GridIndex` once per open (tree labels and
   search text only) and paints its measure cells from `delegate::FindPaint`:
   a `RowCache` of the rows the find table reports, formatted there through
-  `CellPass` over the tile's live sheet. Once the tile installs another
-  index, the next report drops every cell and the measure columns paint blank
-  rather than read through a stale index.
+  `CellPass` over the tile's live sheet. A price-only delivery drops them and
+  the table re-reports, so the rows shown refill from the new prices. Once the
+  tile installs another index, the next report drops every cell and the
+  measure columns paint blank rather than read through a stale index, and the
+  find's status line says the results are out of date (`FIND_OUT_OF_DATE`).
 - `row_at` / `anchor_row` resolve a line painted exactly once to that row
   (`only_row`) wherever it now paints, so an edit or a delivery that changes
   the grouped value keeps the cursor and a `V` anchor on the line; only a
