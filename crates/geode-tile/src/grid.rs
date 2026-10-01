@@ -139,12 +139,22 @@ impl WindowRequest {
 
     /// The range to refill after an invalidation: the recorded range (or the
     /// first window before any report) clamped to the `len` rows that exist
-    /// now. `None` when no asked row exists. The record itself is kept, so a
+    /// now. When a shrink leaves no asked row, the last rows of the same
+    /// height instead: the table scrolls back onto them, but never reports a
+    /// range of one row, so a window left empty would paint a lone row blank
+    /// until something else refilled it. `None` with no rows, and before any
+    /// report when there is no first window. The record itself is kept, so a
     /// shrink followed by a regrowth refills the whole range again.
     pub fn refill_range(&self, len: usize) -> Option<Range<usize>> {
+        if len == 0 || (self.asked.is_none() && self.first == 0) {
+            return None;
+        }
         let asked = self.asked.clone().unwrap_or(0..self.first);
         let end = asked.end.min(len);
-        (asked.start < end).then_some(asked.start..end)
+        if asked.start < end {
+            return Some(asked.start..end);
+        }
+        Some(len.saturating_sub(asked.len().max(1))..len)
     }
 }
 
@@ -325,12 +335,30 @@ mod tests {
         q.record(10..40);
         assert_eq!(q.refill_range(100), Some(10..40));
         assert_eq!(q.refill_range(25), Some(10..25), "fewer rows now");
-        assert_eq!(q.refill_range(5), None, "every asked row is gone");
+        assert_eq!(
+            q.refill_range(5),
+            Some(0..5),
+            "every asked row is gone: the tail, at most the asked height"
+        );
         assert_eq!(
             q.refill_range(100),
             Some(10..40),
             "the record outlives a shrink"
         );
+    }
+
+    /// A shrink past the recorded start refills the tail of the asked
+    /// height — a lone row included, which the table never reports.
+    #[test]
+    fn a_shrink_past_the_recorded_start_refills_the_tail() {
+        let mut q = WindowRequest::default();
+        q.record(40..60);
+        assert_eq!(q.refill_range(1), Some(0..1), "a one-row document");
+        assert_eq!(q.refill_range(30), Some(10..30), "the last 20 rows");
+        assert_eq!(q.refill_range(40), Some(20..40), "start == len");
+        assert_eq!(q.refill_range(0), None, "no rows");
+        q.record(5..5);
+        assert_eq!(q.refill_range(3), Some(2..3), "an empty record: one row");
     }
 
     #[test]

@@ -27602,7 +27602,13 @@ run_mutation "grid-window: md an editor paints on a window miss" \
   $'        let Some(cell) = self.window.get(row_ix, model_col).map(Some) else {\n            return el;\n        };' \
   geode-marketdata the_editor_paints_on_a_cell_the_window_lacks
 
-run_mutation "grid-window: md autofit measures the window" \
+run_mutation "grid-window: a shrink past the recorded range refills the tail" \
+  crates/geode-tile/src/grid.rs \
+  '        Some(len.saturating_sub(asked.len().max(1))..len)' \
+  '        None' \
+  geode-marketdata a_shrink_to_one_row_after_a_scroll_paints_the_row
+
+run_mutation "grid-window: md autofit measures every row in the window" \
   crates/geode-marketdata/src/delegate.rs \
   '        let rows = self.window.window();' \
   '        let rows = { let w = self.window.window(); w.start..w.end.min(w.start + 1) };' \

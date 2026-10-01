@@ -13474,6 +13474,34 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert_eq!(h.painted(&vcx, 0, 0), None, "the first row left the window");
     }
 
+    /// Scrolled to the bottom of a long document, a one-row redelivery
+    /// still paints its row: the recorded range lies past the new end, and
+    /// the table never reports a one-row range to fill it.
+    #[gpui::test]
+    fn a_shrink_to_one_row_after_a_scroll_paints_the_row(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_flat(cx);
+        h.command(&mut vcx, "key SPX.Z").expect("a valid key");
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().expect("one request").tag;
+        h.deliver(&mut vcx, tag, Arc::new(schedule_of(200)));
+        draw(&mut vcx);
+        h.motion(&mut vcx, "bottom", None);
+        draw(&mut vcx);
+        assert!(h.painted(&vcx, 199, 0).is_some(), "scrolled to the end");
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(test_fixtures::schedule_snapshot_at(
+                &[("D1", "2026-12-18", 1.25, "declared")],
+                NEWER,
+            )),
+        );
+        assert_eq!(h.rows(&vcx), 1);
+        assert_eq!(h.painted(&vcx, 0, 0).as_deref(), Some("2026-12-18"));
+        draw(&mut vcx);
+        assert_eq!(h.painted(&vcx, 0, 0).as_deref(), Some("2026-12-18"));
+    }
+
     /// A redelivery that leaves the reported range unchanged still repaints:
     /// the install refills the recorded range itself.
     #[gpui::test]
