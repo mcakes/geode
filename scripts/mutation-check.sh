@@ -18777,10 +18777,11 @@ run_mutation "chart: the density bound is not enforced" \
 # ---- Chart kit and the xy element ----
 #
 # The kit entries cover what both chart elements share: the view's minimum
-# span, the linear x scale and its ticks, and the stroke geometry of dashes
-# and point marks. The xy entries cover the slot model, the element's caches
-# and paint geometry, and the crosshair and its tooltip. Cache entries
-# observe rebuild counters, as the time chart's do.
+# span, the linear x scale with its ticks and its zoom and pan orientation,
+# the stroke geometry of dashes and point marks, and the side a pane's grid
+# follows. The xy entries cover the slot model, the element's caches and
+# paint geometry, and the crosshair and its tooltip. Cache entries observe
+# rebuild counters, as the time chart's do.
 
 # A view zooms down to its own minimum span, in its own units. Floored
 # at the two-unit default instead, a moneyness range a fraction of a unit
@@ -19064,6 +19065,18 @@ run_mutation "chart kit: the mark stride fits the cap" \
   geode-chart \
   the_stride_is_the_smallest_whose_marks_fit_the_cap
 
+# A pane has one grid, on the left axis's ticks when the left has a
+# scale. On the right's ticks beside a scaled left axis, its lines meet
+# none of the left's labels.
+run_mutation "chart kit: the grid follows the left axis first" \
+  crates/geode-chart/src/paint.rs \
+  '    if left.scale.is_some() {
+        Side::Left' \
+  '    if false {
+        Side::Left' \
+  geode-chart \
+  the_grid_follows_the_left_side_when_it_has_a_scale_and_else_the_right
+
 # A point whose x is not finite is dropped at construction. Kept, it
 # sits among the xs the window and the nearest point are binary searches
 # over.
@@ -19078,10 +19091,34 @@ run_mutation "chart xy: a slot's non-finite x is dropped" \
 # the binary searches over them answer with the wrong window.
 run_mutation "chart xy: an unsorted slot is sorted" \
   crates/geode-chart/src/xy/model.rs \
-  '        order.sort_by(|a, b| xs[*a].total_cmp(&xs[*b]));' \
+  '        order.sort_by(|a, b| xs[*a].partial_cmp(&xs[*b]).unwrap_or(Ordering::Equal));' \
   '        order.sort_by(|a, b| a.cmp(b));' \
   geode-chart \
   unsorted_points_are_put_in_x_order
+
+# Zeros of either sign are one x and keep the order they came in. A
+# total order puts the negative zero first and reorders two points that
+# share an x.
+run_mutation "chart xy: zeros of either sign are one x" \
+  crates/geode-chart/src/xy/model.rs \
+  '        order.sort_by(|a, b| xs[*a].partial_cmp(&xs[*b]).unwrap_or(Ordering::Equal));' \
+  '        order.sort_by(|a, b| xs[*a].total_cmp(&xs[*b]));' \
+  geode-chart \
+  zeros_of_either_sign_are_equal_xs_and_keep_their_order
+
+# The nearest point is sought among the points of the window it is asked
+# over. Sought over the whole slot, a quote just past the plot's edge
+# answers for a cursor at the edge.
+run_mutation "chart xy: the nearest point is sought inside the window" \
+  crates/geode-chart/src/xy/model.rs \
+  '        let end = window.1.min(self.len());
+        let start = window.0;
+        if start >= end || u.is_nan() {' \
+  '        let end = self.len();
+        let start = 0;
+        if window.0 >= window.1.min(end) || u.is_nan() {' \
+  geode-chart \
+  nearest_in_a_window_looks_no_further_than_the_window
 
 # A line's window takes one knot beyond each edge of the view. Cut at
 # the knots in view, the line stops short of the plot's edges, and a view
@@ -19120,8 +19157,8 @@ run_mutation "chart xy: a gap is not bridged" \
 # the right axis is labelled in the left axis's format.
 run_mutation "chart xy: each axis reads its own y format" \
   crates/geode-chart/src/xy/model.rs \
-  '        self.y_format[i]' \
-  '        self.y_format[i * 0]' \
+  '        self.y_format[axis.index()]' \
+  '        self.y_format[0]' \
   geode-chart \
   each_axis_reads_its_own_y_format
 
@@ -19274,18 +19311,40 @@ run_mutation "chart xy: a huge points slot still paints" \
 # if it were quoted there.
 run_mutation "chart xy: a point is read only near one" \
   crates/geode-chart/src/xy/element.rs \
-  '            let near = (xs[i] - u).abs() <= tol;' \
+  '            let near = (x - u).abs() <= tol;' \
   '            let near = true;' \
   geode-chart \
   a_readout_reads_a_line_between_knots_and_a_point_only_near_one
+
+# The crosshair snaps to the painted point of a run of equal xs, and the
+# row reads that point. Read at the run's first index alone, a point with
+# no quote shows a dash beside the mark it shares an x with.
+run_mutation "chart xy: the readout follows the snap on equal xs" \
+  crates/geode-chart/src/xy/element.rs \
+  '                .take_while(|i| xs[*i] == x)
+                .find(|i| paints(mid[*i], lo[*i], hi[*i]));' \
+  '                .take(1)
+                .find(|i| paints(mid[*i], lo[*i], hi[*i]));' \
+  geode-chart \
+  a_run_of_equal_xs_reads_the_point_the_crosshair_snapped_to
+
+# Two painted points at one x read the first, from whichever side the
+# crosshair comes. Read from the nearest index, the row changes as the
+# cursor crosses the x.
+run_mutation "chart xy: two painted points at one x read the first" \
+  crates/geode-chart/src/xy/element.rs \
+  '            let first = start + xs[start..nearest].partition_point(|v| *v < x);' \
+  '            let first = nearest;' \
+  geode-chart \
+  a_run_of_equal_xs_reads_the_point_the_crosshair_snapped_to
 
 # A quote with a bid and an ask and no mid paints its bar and reads
 # `—  lo / hi`. A bare dash would say nothing is quoted where the bar is
 # drawn.
 run_mutation "chart xy: a missing mid still reads its range" \
   crates/geode-chart/src/xy/element.rs \
-  '            if !paints(m, l, h) {' \
-  '            if !m.is_finite() {' \
+  '                .find(|i| paints(mid[*i], lo[*i], hi[*i]));' \
+  '                .find(|i| mid[*i].is_finite());' \
   geode-chart \
   a_point_with_a_range_and_no_mid_reads_its_range
 
@@ -19302,8 +19361,8 @@ run_mutation "chart xy: a one-sided quote reads its missing side as a dash" \
 # mid shows a value where nothing is drawn.
 run_mutation "chart xy: a point that paints nothing reads a dash" \
   crates/geode-chart/src/xy/element.rs \
-  '            if !paints(m, l, h) {' \
-  '            if false {' \
+  '                .find(|i| paints(mid[*i], lo[*i], hi[*i]));' \
+  '                .next();' \
   geode-chart \
   a_one_sided_quote_reads_a_dash_for_its_missing_side
 
