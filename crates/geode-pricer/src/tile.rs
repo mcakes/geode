@@ -8082,8 +8082,9 @@ pub(crate) mod tests {
         assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor.at.clone()), at);
     }
 
-    /// Grouped by status, a result that moves a line from `stale` to `ok`
-    /// moves it between groups: rebuild. The cursor follows its line.
+    /// Grouped by status, a result that moves the lines from "pricing…" to
+    /// `fresh` moves them between groups: rebuild. The cursor follows its
+    /// line.
     #[gpui::test]
     fn a_delivery_that_moves_a_line_between_status_groups_rebuilds(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &["1 SPX Z26 5000 C", "2 SPX Z26 4000 P"]);
