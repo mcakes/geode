@@ -158,6 +158,15 @@ pub fn data_setup(
     diagnostics.extend(d);
     let (egress, d) = geode_data::egress::resolve(egress_specs, &adapters);
     diagnostics.extend(d);
+    // Resolve the one position service the same way: an unknown adapter, or
+    // one without a position side, configures none, with a diagnostic.
+    let (positions_spec, d) = config
+        .doc("positions")
+        .map(geode_core::positions::from_doc)
+        .unwrap_or_default();
+    diagnostics.extend(d);
+    let (positions, d) = geode_data::positions::resolve(positions_spec, &adapters);
+    diagnostics.extend(d);
     let (colours, colour_diags) = config
         .doc(geode_core::config::COLORS_DOC)
         .map(NamedColours::from_doc)
@@ -256,7 +265,7 @@ pub fn data_setup(
             pricer,
             vol,
             egress,
-            positions: None,
+            positions,
         },
         views,
         dimensions,
@@ -591,6 +600,10 @@ pub struct Bridge {
     /// skipped from the first one. `None` when the factory's config is
     /// unknown: the first reload then always applies.
     pub pricer_key: Option<PricerConfigKey>,
+    /// Whether the service started with a position service: `positions.toml`
+    /// named one and its adapter resolved. Fixed for the run, since
+    /// `positions.toml` is restart-required.
+    pub positions_configured: bool,
 }
 
 /// One factory per accepted panel. Only the first ships the shared
@@ -664,6 +677,7 @@ pub fn start(
             })
             .collect(),
     );
+    let positions_configured = setup.config.positions.is_some();
     let handle = DataService::spawn(setup.config, sink);
     // Both factories receive the same startup colors and later reload updates.
     let timeseries = Rc::new(geode_timeseries::content::TimeseriesFactory::new(
@@ -718,6 +732,7 @@ pub fn start(
         sources,
         local_datasets,
         pricer_key: Some(pricer_key),
+        positions_configured,
     }
 }
 
@@ -1761,6 +1776,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            positions_configured: false,
             underlyings,
         }
     }
@@ -4590,6 +4606,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Rc::new(["pricer_sheets".to_string()].into_iter().collect()),
             pricer_key: None,
+            positions_configured: false,
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -4695,6 +4712,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            positions_configured: false,
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -4792,6 +4810,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            positions_configured: false,
             underlyings: Default::default(),
         };
 
@@ -4908,6 +4927,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            positions_configured: false,
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -4966,6 +4986,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            positions_configured: false,
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -5024,6 +5045,7 @@ role = "key"
             )),
             pricer: test_pricer(&handle),
             pricer_key: None,
+            positions_configured: false,
             underlyings: Default::default(),
             handle,
             factory,
@@ -5087,6 +5109,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            positions_configured: false,
             underlyings: Default::default(),
         };
 
@@ -5177,6 +5200,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            positions_configured: false,
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -5246,6 +5270,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            positions_configured: false,
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -5310,6 +5335,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            positions_configured: false,
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -5407,6 +5433,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            positions_configured: false,
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -5500,6 +5527,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            positions_configured: false,
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -5560,6 +5588,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            positions_configured: false,
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -5705,6 +5734,7 @@ role = "key"
             )],
             local_datasets: Default::default(),
             pricer_key: None,
+            positions_configured: false,
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -5767,6 +5797,7 @@ role = "key"
             )],
             local_datasets: Default::default(),
             pricer_key: None,
+            positions_configured: false,
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -6406,6 +6437,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            positions_configured: false,
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));

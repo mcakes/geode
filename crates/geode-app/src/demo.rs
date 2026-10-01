@@ -229,7 +229,8 @@ pub fn ensure_emitted(dir: &Path, rows: usize) -> std::io::Result<PathBuf> {
 /// `demo_bus`, coalescing updates per key over 500 ms. Chains are never
 /// uploaded, so the egress target names only CVI and dividends. `demo_kdb`
 /// and `demo_rest` fetch the `series` dataset; the former offers a
-/// catalogue and the latter requires entered identities.
+/// catalogue and the latter requires entered identities. The position
+/// service is `demo_positions`, which rewrites the risk CSVs in place.
 pub fn layer(source_dir: &Path) -> Vec<LayerDoc> {
     let sources = format!(
         "config_version = 1\n[demo]\ndataset = \"risk_snapshot\"\npaths = [{:?}]\n\
@@ -256,6 +257,9 @@ pub fn layer(source_dir: &Path) -> Vec<LayerDoc> {
          [sophis.documents]\ncvi_params = \"marketdata/cvi/{key}\"\n\
          dividend_schedule = \"marketdata/dividend/{key}\"\n"
         .to_string();
+    // Moves go to the demo position system, which rewrites the risk CSVs
+    // the `demo` source polls (`DemoPositions`).
+    let positions = format!("[service]\nadapter = \"{DEMO_POSITIONS}\"\n");
     let docs = [
         (
             "app",
@@ -274,6 +278,7 @@ pub fn layer(source_dir: &Path) -> Vec<LayerDoc> {
             "groupings",
             include_str!("../../../examples/demo-config/groupings.toml").to_string(),
         ),
+        ("positions", positions),
         ("sources", sources),
         (
             "views",
@@ -301,6 +306,7 @@ mod tests {
                 "dimensions",
                 "egress",
                 "groupings",
+                "positions",
                 "sources",
                 "views"
             ]
@@ -309,6 +315,31 @@ mod tests {
         let paths = sources.table["demo"]["paths"].as_array().unwrap();
         assert_eq!(paths[0].as_str(), Some("/tmp/geode-demo/100-42/src/*.csv"));
         assert_eq!(sources.table["demo"]["poll_interval"].as_str(), Some("2s"));
+    }
+
+    /// The demo `positions` doc names `demo_positions`, reads without
+    /// diagnostics and resolves against the demo position adapter.
+    #[test]
+    fn the_demo_layers_positions_doc_names_demo_positions_and_resolves() {
+        let src = std::path::Path::new("/tmp/geode-demo/100-42/src");
+        let config = geode_core::config::Config::load(&geode_core::config::ConfigSources {
+            builtin: layer(src),
+            ..geode_core::config::ConfigSources::default()
+        });
+        assert!(config.diagnostics.is_empty(), "{:?}", config.diagnostics);
+        let (spec, d) = geode_core::positions::from_doc(config.doc("positions").unwrap());
+        assert!(d.is_empty(), "{d:?}");
+        assert_eq!(
+            spec,
+            Some(geode_core::positions::PositionsSpec {
+                adapter: DEMO_POSITIONS.to_string()
+            })
+        );
+        let mut adapters = geode_data::adapter::AdapterRegistry::default();
+        adapters.register(std::sync::Arc::new(DemoPositions::new(src.to_path_buf())));
+        let (kept, d) = geode_data::positions::resolve(spec.clone(), &adapters);
+        assert!(d.is_empty(), "{d:?}");
+        assert_eq!(kept, spec);
     }
 
     /// The `sophis` target preserves both document kinds and their per-key
@@ -551,7 +582,8 @@ mod demo_config_integration {
         vol_models
     }
 
-    /// Registers the demo bus required by the `sophis` egress target.
+    /// Registers the demo bus required by the `sophis` egress target, and
+    /// the demo position service `positions.toml` names, as `main.rs` does.
     ///
     /// Keep the returned feed alive through `data_setup`: egress resolution
     /// upgrades a weak sender reference, and a dropped feed makes the
@@ -563,7 +595,46 @@ mod demo_config_integration {
         let mut adapters = geode_data::adapter::AdapterRegistry::default();
         let (adapter, feed) = geode_data::adapter::ChannelAdapter::new("demo_bus");
         adapters.register(adapter);
+        adapters.register(std::sync::Arc::new(DemoPositions::new(
+            "/tmp/geode-demo/100000-42/src".into(),
+        )));
         (adapters, feed)
+    }
+
+    /// `Bridge::positions_configured` is whether `positions.toml`'s service
+    /// survived resolution: the demo layer names `demo_positions`, so it is
+    /// configured when that adapter is registered and not when it is absent.
+    #[gpui::test]
+    fn the_bridge_says_whether_a_position_service_is_configured(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::load(&ConfigSources {
+            builtin: layer(&dir.path().join("src")),
+            ..ConfigSources::default()
+        });
+        let (with, _feed) = test_adapters();
+        let (bus, _bus_feed) = geode_data::adapter::ChannelAdapter::new("demo_bus");
+        let mut without = geode_data::adapter::AdapterRegistry::default();
+        without.register(bus);
+        for (i, (adapters, expected)) in [(with, true), (without, false)].into_iter().enumerate() {
+            let setup = crate::bridge::data_setup(
+                &config,
+                dir.path().join(format!("geode-{i}.duckdb")),
+                adapters,
+                test_pricers(),
+                test_vol_models(),
+            )
+            .unwrap();
+            let bridge = cx.update(|cx| {
+                crate::bridge::start(
+                    setup,
+                    geode_shell::vimfind::FindStyle::default(),
+                    std::time::Duration::from_secs(60),
+                    cx,
+                )
+            });
+            assert_eq!(bridge.positions_configured, expected);
+            bridge.handle.shutdown();
+        }
     }
 
     /// The demo documents produce a usable data-service configuration
@@ -598,6 +669,13 @@ mod demo_config_integration {
         // Setup must carry the resolved egress target into the service config.
         assert_eq!(setup.config.egress.len(), 1);
         assert_eq!(setup.config.egress[0].name, "sophis");
+        // And the resolved position service.
+        assert_eq!(
+            setup.config.positions,
+            Some(geode_core::positions::PositionsSpec {
+                adapter: DEMO_POSITIONS.to_string()
+            })
+        );
         // Each document dataset must match its registered kind's columns.
         // A mismatch would fail the subscribed source's discovery health
         // when the service opens.

@@ -107,6 +107,11 @@ fn main() {
                 // catalogue and manual-identity discovery.
                 adapters.register(demo_series::DemoSeries::new("demo_kdb", 42, true));
                 adapters.register(demo_series::DemoSeries::new("demo_rest", 42, false));
+                // The demo position service rewrites the risk CSVs the demo
+                // source polls; the demo layer's `positions.toml` names it.
+                if let Some(root) = &demo_root {
+                    adapters.register(Arc::new(demo::DemoPositions::new(root.join("src"))));
+                }
                 (Some(feed), adapters)
             } else {
                 (None, geode_data::adapter::AdapterRegistry::default())
