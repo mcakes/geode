@@ -47,8 +47,6 @@ const MIN_SPAN: f64 = 0.01;
 struct Demo {
     model: Arc<XyModel>,
     view: View,
-    /// Whether the x axis is the reversed call-delta axis.
-    delta: bool,
     focus: gpui::FocusHandle,
 }
 
@@ -273,21 +271,25 @@ impl Render for Demo {
             .p_4()
             .on_key_down(cx.listener(move |this, e: &KeyDownEvent, _, cx| {
                 let full = this.model.full();
-                // A reversed axis paints higher x to the left, so "left on
-                // screen" is a pan toward higher x there.
-                let left = if this.model.x.reversed { 0.1 } else { -0.1 };
+                // The view pans and zooms in x values. The model's scale
+                // turns "right on screen" and "the middle of the plot" into
+                // them, whichever way the axis runs.
+                let scale = this.model.x.scale();
+                let right = 0.1 * scale.pan_sign();
+                let centre = scale.about(0.5);
                 match e.keystroke.key.as_str() {
-                    "h" => this.view.pan(left, full),
-                    "l" => this.view.pan(-left, full),
-                    "=" | "+" => this.view.zoom(1.25, 0.5, full),
-                    "-" => this.view.zoom(0.8, 0.5, full),
+                    "h" => this.view.pan(-right, full),
+                    "l" => this.view.pan(right, full),
+                    "=" | "+" => this.view.zoom(1.25, centre, full),
+                    "-" => this.view.zoom(0.8, centre, full),
                     "0" => this.view.reset(full),
                     "r" => {
                         // The x units change with the axis, so the model is
                         // rebuilt under a new version and the view starts
-                        // again over the new range.
-                        this.delta = !this.delta;
-                        this.model = model(cx, this.delta, this.model.version + 1);
+                        // again over the new range. The delta axis is the
+                        // reversed one.
+                        let delta = !this.model.x.reversed;
+                        this.model = model(cx, delta, this.model.version + 1);
                         this.view = View::with_min_span(this.model.full(), MIN_SPAN);
                     }
                     _ => return,
@@ -314,7 +316,6 @@ fn main() {
                 Demo {
                     view: View::with_min_span(model.full(), MIN_SPAN),
                     model,
-                    delta: false,
                     focus,
                 }
             });

@@ -1,5 +1,6 @@
 //! Pure hit testing over a solved chart layout: plot, divider, or outside.
-//! Plot hits include the horizontal fraction used to anchor zoom.
+//! Plot hits include the pixel fraction across the plot, which an element
+//! maps to its zoom anchor.
 //!
 //! The divider grab band spans the full chart width, including axis columns,
 //! and extends DIVIDER_MARGIN design pixels into each adjacent plot. It takes
@@ -16,9 +17,11 @@ pub const DIVIDER_MARGIN: f32 = 3.0;
 /// What sits under a pointer.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Hit {
-    /// Inside a pane's plot rect. `fraction` is the horizontal position
-    /// across the plot, `0` at its left edge and `1` at its right — the
-    /// `about` a zoom keeps still.
+    /// Inside a pane's plot rect. `fraction` is the pixel fraction across
+    /// the plot, `0` at its left edge and `1` at its right. An element
+    /// maps it to the `about` a zoom keeps still: the time chart uses it
+    /// as it is, and a linear axis, which may run right to left, goes
+    /// through `LinearX::about`.
     Plot { pane: Pane, fraction: f32 },
     /// On the band between the two panes.
     Divider,

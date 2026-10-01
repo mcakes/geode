@@ -224,9 +224,7 @@ impl XyElement {
     }
 
     pub(crate) fn scale(&self) -> LinearX {
-        LinearX {
-            reversed: self.model.x.reversed,
-        }
+        self.model.x.scale()
     }
 
     /// The layout at a zero origin: paths are cached origin-free and

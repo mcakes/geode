@@ -51,6 +51,31 @@ impl LinearX {
         let t = if self.reversed { 1.0 - t } else { t };
         view.lo + t * view.span()
     }
+
+    /// The `about` [`View::zoom`] takes for a cursor `fraction` of the way
+    /// across the plot from its left edge (the fraction a plot hit
+    /// carries). A view zooms in value space, where `about` runs from
+    /// `view.lo`; on a reversed axis `view.lo` is the plot's right edge.
+    /// Handed the pixel fraction as it is, a reversed axis zooms about the
+    /// mirror point and the value under the cursor slides away.
+    pub fn about(self, fraction: f64) -> f64 {
+        if self.reversed {
+            1.0 - fraction
+        } else {
+            fraction
+        }
+    }
+
+    /// The sign a pan takes so that it runs the way it does on screen:
+    /// `view.pan(f * pan_sign(), full)` moves the window `f` of its width
+    /// to the right on screen, and `view.pan(-f * pan_sign(), full)` is a
+    /// drag to the right by `f` of the plot, the picture following the
+    /// pointer. A view pans in value space, and on a reversed axis higher
+    /// values lie to the left: without the sign a drag there moves the
+    /// picture against the pointer.
+    pub fn pan_sign(self) -> f64 {
+        if self.reversed { -1.0 } else { 1.0 }
+    }
 }
 
 /// The decimals a label needs to tell ticks `step` apart, six at most. The
@@ -199,6 +224,56 @@ mod tests {
         );
         assert_eq!(r.x_of(1.2, view, PLOT), 100.0);
         assert!((r.value_at(r.x_of(0.93, view, PLOT), view, PLOT) - 0.93).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_zoom_about_the_cursor_keeps_the_value_under_it_on_both_orientations() {
+        let full = (0.5, 1.5);
+        for reversed in [false, true] {
+            let s = LinearX { reversed };
+            for fraction in [0.0f32, 0.3, 0.85] {
+                let mut view = View::with_min_span((0.8, 1.2), 0.01);
+                let x = PLOT.x + PLOT.w * fraction;
+                let under = s.value_at(x, view, PLOT);
+                view.zoom(2.0, s.about(fraction as f64), full);
+                assert!((view.span() - 0.2).abs() < 1e-12, "it zoomed: {view:?}");
+                let after = s.value_at(x, view, PLOT);
+                assert!(
+                    (after - under).abs() < 1e-6,
+                    "reversed={reversed} at {fraction}: {under} became {after}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_drag_right_moves_the_picture_right_on_both_orientations() {
+        let full = (0.5, 1.5);
+        for reversed in [false, true] {
+            let s = LinearX { reversed };
+            let mut view = View::with_min_span((0.8, 1.2), 0.01);
+            // The value under a pixel, then a drag of 40 px to the right:
+            // the same value sits 40 px further right.
+            let x = PLOT.x + 150.0;
+            let grabbed = s.value_at(x, view, PLOT);
+            let dragged = 40.0 / PLOT.w as f64;
+            view.pan(-dragged * s.pan_sign(), full);
+            let moved = s.x_of(grabbed, view, PLOT);
+            assert!(
+                (moved - (x + 40.0)).abs() < 1e-3,
+                "reversed={reversed}: {x} became {moved}"
+            );
+            // A pan right by a tenth moves the window right on screen: the
+            // value at the plot's right edge comes a tenth of the way in.
+            let mut view = View::with_min_span((0.8, 1.2), 0.01);
+            let edge = s.value_at(PLOT.right(), view, PLOT);
+            view.pan(0.1 * s.pan_sign(), full);
+            let came_in = s.x_of(edge, view, PLOT);
+            assert!(
+                (came_in - (PLOT.right() - 0.1 * PLOT.w)).abs() < 1e-3,
+                "reversed={reversed}: {came_in}"
+            );
+        }
     }
 
     #[test]

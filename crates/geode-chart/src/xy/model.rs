@@ -12,7 +12,7 @@ use gpui::{Hsla, SharedString};
 
 use crate::core::axis::{Axis, Pane, Side};
 use crate::core::layout::LayoutOptions;
-use crate::core::linear::XFormat;
+use crate::core::linear::{LinearX, XFormat};
 use crate::core::view::View;
 
 /// How a y axis labels its values.
@@ -37,6 +37,18 @@ pub struct XAxis {
     pub format: XFormat,
     /// Runs the axis right to left.
     pub reversed: bool,
+}
+
+impl XAxis {
+    /// The x scale the element paints with. A host maps its pointer
+    /// through the same one (`value_at`, `about`, `pan_sign`), so its zoom
+    /// and pan cannot disagree with the picture about which way the axis
+    /// runs.
+    pub fn scale(&self) -> LinearX {
+        LinearX {
+            reversed: self.reversed,
+        }
+    }
 }
 
 /// What a slot paints. Every array of a slot is one column of the same
@@ -335,6 +347,17 @@ mod tests {
 
     fn model(slots: Vec<XySlot>) -> Arc<XyModel> {
         XyModel::new(1, XAxis::default(), [YFormat::Plain; 4], 0.7, slots)
+    }
+
+    #[test]
+    fn an_x_axis_hands_out_the_scale_it_runs_on() {
+        for reversed in [false, true] {
+            let x = XAxis {
+                format: XFormat::Price,
+                reversed,
+            };
+            assert_eq!(x.scale(), LinearX { reversed });
+        }
     }
 
     #[test]
