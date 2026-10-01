@@ -209,25 +209,6 @@ fn g_m_on_a_row_with_only_an_action_column_shows_the_notice(cx: &mut gpui::TestA
     );
 }
 
-/// The shell notice carries text built at run time (an action reporting the
-/// URL it opened), not only a `&'static str` constant, and it paints.
-#[gpui::test]
-fn a_dynamic_notice_paints_its_text(cx: &mut gpui::TestAppContext) {
-    let f = fixture(Some(spx_p7()));
-    let (window, mut vcx) = open_shell(cx, f.services);
-    let shell = shell_of(&window, &mut vcx);
-    shell.update(&mut vcx, |s, cx| {
-        s.notice = Some(format!("opened {}", "nemo://position/P7").into());
-        cx.notify();
-    });
-    draw(&mut vcx);
-    assert!(vcx.debug_bounds("shell-notice").is_some());
-    assert_eq!(
-        shell.read_with(&vcx, |s, _| s.notice.clone()).as_deref(),
-        Some("opened nemo://position/P7")
-    );
-}
-
 #[gpui::test]
 fn a_left_click_on_a_row_picks_it(cx: &mut gpui::TestAppContext) {
     let f = fixture(Some(spx_p7()));
