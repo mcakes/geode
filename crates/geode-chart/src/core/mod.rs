@@ -1,12 +1,15 @@
-//! Window-free chart geometry, time labels, decimation and palette values.
+//! Window-free chart geometry, time and linear x labels, decimation and
+//! palette values.
 //!
 //! Geometry operates over slices and values. Decimation reuses a caller-owned
-//! buffer; time ticks allocate candidate vectors and formatted labels.
+//! buffer; time ticks allocate candidate vectors and formatted labels, and
+//! `linear` does the same for a strike-like x axis.
 
 pub mod axis;
 pub mod decimate;
 pub mod hit;
 pub mod layout;
+pub mod linear;
 pub mod palette;
 pub mod scale;
 pub mod time;
