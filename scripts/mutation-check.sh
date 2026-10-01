@@ -18709,7 +18709,7 @@ run_mutation "chart: the palette skips the floor" \
 # not fail, it SERVES — last frame's path at this frame's coordinates —
 # so each of these is only visible through `rebuilds()`/`chrome_rebuilds()`.
 run_mutation "chart: the path key ignores the view" \
-  crates/geode-chart/src/element.rs \
+  crates/geode-chart/src/timeseries/element.rs \
   '                    let key = ShapeKey::new((model.version, slot.number, pane as u8, view.key()))' \
   '                    let key = ShapeKey::new((model.version, slot.number, pane as u8, (0u64, 0u64)))' \
   geode-chart \
@@ -18720,7 +18720,7 @@ run_mutation "chart: the path key ignores the view" \
 # dashed lines stay where the LAST view put them while the polylines
 # they annotate move under them.
 run_mutation "chart: the percentile key ignores its y" \
-  crates/geode-chart/src/element.rs \
+  crates/geode-chart/src/timeseries/element.rs \
   '                        let key = ShapeKey::new((model.version, slot.number, j))
                             .f32(y)' \
   '                        let key = ShapeKey::new((model.version, slot.number, j))
@@ -18734,7 +18734,7 @@ run_mutation "chart: the percentile key ignores its y" \
 # before the cache `get` is what makes "never built" mean "never
 # painted across the other pane or the x-axis strip".
 run_mutation "chart: an out-of-pane percentile is still built" \
-  crates/geode-chart/src/element.rs \
+  crates/geode-chart/src/timeseries/element.rs \
   '                        let y = scale_y.y(*value);
                         if !inside(y, plot) {' \
   '                        let y = scale_y.y(*value);
@@ -18748,7 +18748,7 @@ run_mutation "chart: an out-of-pane percentile is still built" \
 # render thread pays ~2M comparisons at the 500,000-point cap, with
 # every painted pixel identical.
 run_mutation "chart: the chrome is re-derived every frame" \
-  crates/geode-chart/src/element.rs \
+  crates/geode-chart/src/timeseries/element.rs \
   '            let warm = b.chrome_key == Some(chrome_key);' \
   '            let warm = false;' \
   geode-chart \
@@ -18758,7 +18758,7 @@ run_mutation "chart: the chrome is re-derived every frame" \
 # move_to/line_to pair per dash. One dash is a solid line — which is
 # what a series line looks like.
 run_mutation "chart: the dashes are one solid line" \
-  crates/geode-chart/src/element.rs \
+  crates/geode-chart/src/timeseries/element.rs \
   '    (width / period).ceil() as usize' \
   '    1' \
   geode-chart \
@@ -18768,7 +18768,7 @@ run_mutation "chart: the dashes are one solid line" \
 # visible density slots can stall rendering while remaining visually correct;
 # the test checks the work budget rather than pixel values.
 run_mutation "chart: the density bound is not enforced" \
-  crates/geode-chart/src/element.rs \
+  crates/geode-chart/src/timeseries/element.rs \
   '                        if *painted >= MAX_DENSITY_QUADS {' \
   '                        if false {' \
   geode-chart \

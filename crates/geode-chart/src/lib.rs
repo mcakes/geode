@@ -1,18 +1,18 @@
-//! Reusable chart preparation and painting for the timeseries viewer.
+//! Chart preparation and painting: a kit and one element per chart type.
 //!
-//! `core` is window-free geometry over slices; `model` is the immutable
-//! input a caller prepares when data or presentation changes; `element`
-//! paints it through gpui-component's `Plot` trait. Series identities, source
-//! access and shell state belong to the caller; the rem scale is a parameter.
+//! `core` is window-free geometry over slices: scales, layout, the view
+//! window, hit testing, decimation and palette values. Each chart type is a
+//! module holding its immutable model and the element that paints it
+//! through gpui-component's `Plot` trait; `timeseries` is the time-axis line
+//! chart. Data identities, source access and shell state belong to the
+//! caller; the rem scale is a parameter.
 
 pub mod core;
-pub mod element;
-pub mod model;
+pub mod timeseries;
 
 pub use crate::core::MAX_DENSITY_QUADS;
 pub use crate::core::axis::{Axis, AxisMode, Pane, Side};
 pub use crate::core::hit::{Hit, divider_band, hit_test};
 pub use crate::core::layout::Layout;
 pub use crate::core::view::View;
-pub use element::{ChartElement, chrome_rebuilds, density_quads, rebuilds};
-pub use model::{ChartModel, ChartSlot};
+pub use timeseries::element::{chrome_rebuilds, rebuilds};

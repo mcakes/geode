@@ -5,7 +5,7 @@
 //! mode and frequency step. Missing result slots get one NaN per bucket;
 //! results for removed slots are ignored.
 
-use geode_chart::{ChartModel, ChartSlot};
+use geode_chart::timeseries::{ChartModel, ChartSlot};
 use geode_core::series::SeriesResult;
 use gpui::Hsla;
 

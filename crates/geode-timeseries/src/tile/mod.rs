@@ -20,7 +20,8 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Offset as _, Utc};
 use geode_chart::core::palette::Palette;
-use geode_chart::{Axis, AxisMode, ChartElement, ChartModel};
+use geode_chart::timeseries::{ChartElement, ChartModel};
+use geode_chart::{Axis, AxisMode};
 use geode_core::colour::NamedColours;
 use geode_core::query::{AsOf, QueryKey};
 use geode_core::series::{Frequency, SeriesOutcome, SeriesResult, SlotKind};

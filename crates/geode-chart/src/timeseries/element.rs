@@ -41,6 +41,7 @@ use gpui_component::plot::{
     AxisLabelSide, AxisText, Grid, IntoPlot, PathCaches, Plot, PlotAxis, PlotLabel, ShapeKey,
 };
 
+use super::model::ChartModel;
 use crate::core::axis::{Axis, Pane, Side};
 use crate::core::decimate::decimate;
 use crate::core::layout::{Layout, PaneRects};
@@ -48,7 +49,6 @@ use crate::core::scale::{LinearScale, axis_domain, fmt_tick, fmt_value};
 use crate::core::time::{Crosshair, Tick, TimeScale, ticks};
 use crate::core::view::View;
 use crate::core::{DASH, GAP, MAX_DENSITY_QUADS, Point, Rect, TICK_GAP, Y_TICK_GAP, design_px};
-use crate::model::ChartModel;
 
 thread_local! {
     /// Per THREAD, not per process: the counter is read as a delta
@@ -513,7 +513,7 @@ impl ChartElement {
     }
 
     /// Every visible slot, in slot order — the tooltip's readout rows.
-    fn visible_slots(&self) -> impl Iterator<Item = &crate::model::ChartSlot> {
+    fn visible_slots(&self) -> impl Iterator<Item = &super::model::ChartSlot> {
         self.model.slots.iter().filter(|s| s.visible)
     }
 
@@ -861,7 +861,7 @@ fn dashed_horizontal(x0: f32, x1: f32, y: f32, dash: f32, gap: f32) -> Option<Pa
 mod tests {
     use super::*;
     use crate::core::axis::AxisMode;
-    use crate::model::ChartSlot;
+    use crate::timeseries::model::ChartSlot;
     use gpui::{Context, Entity, Render, div, prelude::*};
 
     struct Host {

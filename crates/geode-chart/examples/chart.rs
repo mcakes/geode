@@ -11,9 +11,10 @@
 
 use std::sync::Arc;
 
+use geode_chart::View;
 use geode_chart::core::axis::{Axis, AxisMode};
 use geode_chart::core::palette::Palette;
-use geode_chart::{ChartElement, ChartModel, ChartSlot, View};
+use geode_chart::timeseries::{ChartElement, ChartModel, ChartSlot};
 use gpui::{App, Context, KeyDownEvent, Render, Window, div, prelude::*};
 use gpui_component::{ActiveTheme, Root};
 
