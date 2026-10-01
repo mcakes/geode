@@ -13,9 +13,8 @@
 //!   includes model version, view, bounds size and rem. Changing one of
 //!   these inputs derives the chart chrome again.
 //! * [`PathCaches`] caches decimation, dashing and tessellation, one path
-//!   per slot. A key includes model version, slot number, pane, view and
-//!   plot geometry; the rem reaches it through the plot geometry, which the
-//!   axis columns and the x-axis strip make a function of it.
+//!   per slot. A key includes model version, slot number, pane, view, plot
+//!   geometry and rem, which sizes the dashes and the markers.
 //!
 //! Callers must bump [`XyModel::version`] whenever model contents change:
 //! the keys do not independently include every model field.
@@ -41,7 +40,7 @@ use crate::core::linear::{LinearX, x_ticks};
 use crate::core::marks::{
     Clip, MARKER_R, SEGMENTS_PER_MARK, Segment, dash_polyline, mark_stride, point_marks, strided,
 };
-use crate::core::scale::{LinearScale, axis_domain, fmt_tick};
+use crate::core::scale::{LinearScale, axis_domain, fmt_percent, fmt_tick};
 use crate::core::time::Tick;
 use crate::core::view::View;
 use crate::core::{DASH, GAP, Rect, TICK_GAP, design_px};
@@ -137,7 +136,7 @@ impl XyElement {
     fn y_label(format: YFormat) -> impl Fn(f64, f64) -> String {
         move |v, step| match format {
             YFormat::Plain => fmt_tick(v, step),
-            YFormat::Percent => format!("{}%", fmt_tick(v * 100.0, step * 100.0)),
+            YFormat::Percent => fmt_percent(v, step),
         }
     }
 
@@ -332,6 +331,7 @@ impl XyElement {
                         .f32(plot.y)
                         .f32(plot.w)
                         .f32(plot.h)
+                        .f32(self.rem_px)
                         .finish();
                     let path = caches.slot(k).get(key, bounds.origin, || {
                         note_rebuild();
@@ -752,10 +752,89 @@ mod tests {
             nhi - nlo < hi - lo,
             "the wings left the view, so the domain tightened"
         );
+        // Lowest: the chain's low at 1.00, 0.2 - 0.005. Highest: the dashed
+        // curve one knot past either edge, at 0.988 and 1.012, where it is
+        // 0.2 + 0.012² + 0.01; the knots inside the view stop at 0.2101.
+        // Padded by a twentieth of that span.
+        let (raw_lo, raw_hi) = (0.195, 0.210144);
+        let pad = 0.0007572;
+        assert!((nlo - (raw_lo - pad)).abs() < 1e-9, "{nlo}");
+        assert!((nhi - (raw_hi + pad)).abs() < 1e-9, "{nhi}");
         assert!(
             narrow.side_domain(Pane::Lower, Side::Right).is_none(),
             "no slot on that side"
         );
+    }
+
+    #[test]
+    fn a_marker_sits_at_the_pixel_x_the_line_gives_the_same_value() {
+        // A curve and one quote on its middle knot, a quarter of the way
+        // along the view, on a plot that starts at neither x = 0 nor y = 0.
+        let plot = Rect::new(44.0, 10.0, 400.0, 200.0);
+        let y = LinearScale::new((0.0, 2.0), plot.y, plot.bottom());
+        let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+        for (reversed, want_x) in [(false, 144.0), (true, 344.0)] {
+            let slot = |number, kind| XySlot {
+                number,
+                label: format!("s{number}").into(),
+                color: gpui::red(),
+                axis: Axis::Left,
+                visible: true,
+                style: Style::Solid,
+                kind,
+            };
+            let m = XyModel::new(
+                1,
+                XAxis {
+                    format: XFormat::Price,
+                    reversed,
+                },
+                [YFormat::Plain; 4],
+                0.7,
+                vec![
+                    slot(
+                        1,
+                        SlotKind::Line {
+                            xs: vec![0.8, 0.9, 1.2],
+                            ys: vec![0.5, 1.0, 1.5],
+                        },
+                    ),
+                    slot(
+                        2,
+                        SlotKind::Points {
+                            xs: vec![0.9],
+                            mid: vec![1.0],
+                            lo: vec![0.8],
+                            hi: vec![1.2],
+                        },
+                    ),
+                ],
+            );
+            let e = XyElement::new(m.clone(), View::with_min_span((0.8, 1.2), 0.01), 12.0, "i");
+            let mut b = Buffers::default();
+            e.line_points(&m.slots[0], plot, &y, &mut b);
+            assert_eq!(b.scratch.pts.len(), 3, "reversed={reversed}");
+            let knot = b.scratch.pts[1];
+            assert!(near(knot.x, want_x), "reversed={reversed}: {knot:?}");
+            assert!(e.shape(&m.slots[1], plot, &y, &mut b).is_some());
+            // The bar, then the diamond's four edges from its left tip.
+            assert_eq!(b.segments.len(), 5, "reversed={reversed}");
+            let (bar_from, bar_to) = b.segments[0];
+            let (left_tip, top_tip) = b.segments[1];
+            let case = format!("reversed={reversed}: {:?}", b.segments);
+            assert!(near(bar_from.x, knot.x) && near(bar_to.x, knot.x), "{case}");
+            assert!(
+                near(bar_from.y, y.y(0.8)) && near(bar_to.y, y.y(1.2)),
+                "{case}"
+            );
+            assert!(near(top_tip.x, knot.x), "{case}");
+            assert!(near(left_tip.x, knot.x - MARKER_R), "{case}");
+            assert!(
+                near(left_tip.y, knot.y),
+                "the quote is on the curve: {case}"
+            );
+            assert!(near(top_tip.y, knot.y - MARKER_R), "{case}");
+        }
     }
 
     #[test]

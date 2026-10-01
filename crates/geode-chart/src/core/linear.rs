@@ -3,7 +3,7 @@
 //! to left, for call delta, so strike still increases left to right.
 
 use super::Rect;
-use super::scale::{LinearScale, fmt_tick};
+use super::scale::{LinearScale, fmt_percent, fmt_tick};
 use super::time::Tick;
 use super::view::View;
 
@@ -94,7 +94,7 @@ pub fn delta_label_with(delta: f64, decimals: usize) -> String {
 pub fn fmt_x(value: f64, step: f64, format: XFormat) -> String {
     match format {
         XFormat::Price => fmt_tick(value, step),
-        XFormat::Percent => format!("{}%", fmt_tick(value * 100.0, step * 100.0)),
+        XFormat::Percent => fmt_percent(value, step),
         XFormat::Fixed(n) => {
             let decimals = (n as usize).max(step_decimals(step));
             format!("{value:.decimals$}")

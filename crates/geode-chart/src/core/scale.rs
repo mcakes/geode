@@ -104,6 +104,12 @@ pub fn fmt_tick(value: f64, step: f64) -> String {
     format!("{value:.decimals$}")
 }
 
+/// A ratio's tick label as a percent, with the decimals its step needs in
+/// percent: `0.205` at a step of `0.005` reads `20.5%`.
+pub fn fmt_percent(value: f64, step: f64) -> String {
+    format!("{}%", fmt_tick(value * 100.0, step * 100.0))
+}
+
 /// A readout value: 2 decimals from 100 up, 4 from 1 up, 6 below.
 pub fn fmt_value(value: f64) -> String {
     if value.is_nan() {
@@ -205,6 +211,16 @@ mod tests {
         assert_eq!(fmt_tick(1250.0, 250.0), "1250");
         assert_eq!(fmt_tick(0.05, 0.05), "0.05");
         assert_eq!(fmt_tick(-0.5, 0.5), "-0.5");
+    }
+
+    #[test]
+    fn a_percent_label_carries_the_decimals_of_its_step_in_percent() {
+        assert_eq!(fmt_percent(0.2, 0.05), "20%");
+        assert_eq!(fmt_percent(0.205, 0.005), "20.5%");
+        assert_eq!(fmt_percent(1.1, 0.1), "110%");
+        assert_eq!(fmt_percent(0.07, 0.01), "7%");
+        assert_eq!(fmt_percent(0.0, 0.05), "0%");
+        assert_eq!(fmt_percent(-0.05, 0.05), "-5%");
     }
 
     #[test]
