@@ -78,21 +78,20 @@ the measurement log for fixture and hardware details.
 | Blotter fully expanded flatten | 720,881 result nodes | 1.18 ms |
 | Blotter selection summary | 720,881 rows, every measure column | 1.20 ms |
 | Market-data pivot build | 20 × 30 CVI grid | 285 µs |
-| Market-data flat build | 10,000 × five values | 8.18 ms |
-| Market-data cell patch | 10,000 × five values | 116 ns |
+| Market-data flat build | 10,000 × five values: the `MatrixIndex` (labels and row facts, no cell text) | 586 µs |
+| Market-data window fill | 40 × five values | 17.7 µs |
+| Market-data cell patch | 10,000 × five values: one-cell window refill | 105 ns |
 | Line-pricer sheet shift + undo | 1,000 entries / 1,200 sheet rows | 1.52 ms |
 | Line-pricer single cell edit + undo | 1,000 entries / 1,200 sheet rows | 6.66 µs |
-| Line-pricer grid build | 1,000 entries / 1,200 sheet rows, every package open, each package row's `/`-joined leg values | 1.42 ms |
+| Line-pricer grid build | 1,000 entries / 1,200 sheet rows, every package open: the `GridIndex`, no measure text | 271 µs |
+| Line-pricer window fill | 40 rows | 29.2 µs |
 | Line-pricer scope apply | 1,000 entries / 1,200 sheet rows, three-term expression plus text filter, half hidden | 1.92 ms |
-| Line-pricer scoped grid build | the same sheet under that scope | 692 µs |
-| Line-pricer flat rebuild | 1,000 entries / 1,200 sheet rows, every package open: the empty-chain rollup plus the grid build, as the tile runs it | 1.68 ms |
-| Line-pricer grouped rebuild | 1,000 entries over four underlyings × three expiries under `[underlying_ref, expiry, position_ref]`, every group and package open: rollup plus grid | 3.15 ms (rollup 335 µs) |
+| Line-pricer scoped grid build | the same sheet under that scope | 114 µs |
+| Line-pricer flat rebuild | 1,000 entries / 1,200 sheet rows, every package open: the empty-chain rollup plus the index, as the tile runs it, before its window fill | 343 µs |
+| Line-pricer grouped rebuild | 1,000 entries over four underlyings × three expiries under `[underlying_ref, expiry, position_ref]`, every group and package open: rollup plus index, before its window fill (a cold grouped 40-row fill adds 206 µs) | 610 µs |
+| Line-pricer refill-only delivery | 1,000 entries / 1,200 sheet rows, structure unchanged | 241 µs |
 | In-process scope evaluation | one row, three-term expression plus text filter | 570 ns |
 | Scope expression suggestion refresh | 20,000 cached values, ranked and capped at 50 | 6.82 ms |
-
-The flat 10,000-row market-data build sits at the UI budget boundary. Ordinary
-cell commits use the constant-time patch path; deliveries and structural row
-changes still rebuild.
 
 ## Cache and allocation contracts
 
@@ -163,8 +162,12 @@ changes still rebuild.
   pipeline. Concurrent staging is on hold until the real path and a network
   share are measured.
 - CI compiles benchmarks but has no stable regression baseline.
-- Opening market data's `/` fuzzy result table formats every cell of the
-  document once, so its rows paint from prepared text.
+- A fuzzy `/` open formats every find row once (market-data's whole document,
+  the pricer's all-open sheet) so the result table paints prepared text;
+  measured costs are the whole-document fills.
+- The pinned table never reports a visible range of one row; a tile scrolled
+  to show a single row keeps the window it last had, so that row can paint
+  blank, as the blotter's always could.
 
 ## Recording a measurement
 
