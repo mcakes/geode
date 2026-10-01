@@ -54,6 +54,13 @@ pub(crate) fn note_chrome_rebuild() {
 /// a hairline is a hairline).
 pub(crate) const LINE_WIDTH: f32 = 1.5;
 
+/// The most segments one stroke path is built from. gpui tessellates a
+/// path into vertex buffers indexed by `u16`, and a segment takes four
+/// vertices, so the build fails past 16,384 segments and the shape is
+/// absent, not truncated. The cap keeps headroom under that ceiling; a
+/// caller with more thins its marks or strokes a plain polyline instead.
+pub const MAX_STROKE_SEGMENTS: usize = 12_000;
+
 /// One pane side's resolved y axis: the scale over that side's VISIBLE
 /// values and the ticks it paints, labels already formatted.
 ///
@@ -283,8 +290,15 @@ pub(crate) fn stroke_points(pts: &[Point], width: f32) -> Option<Path<Pixels>> {
     builder.build().ok()
 }
 
-/// One stroke path over independent segments.
+/// One stroke path over independent segments, [`MAX_STROKE_SEGMENTS`] of
+/// them at most: past gpui's vertex ceiling the build fails and there is no
+/// path at all, so a caller bounds what it passes.
 pub(crate) fn stroke_segments(segments: &[Segment], width: f32) -> Option<Path<Pixels>> {
+    debug_assert!(
+        segments.len() <= MAX_STROKE_SEGMENTS,
+        "{} segments are past the stroke cap",
+        segments.len()
+    );
     if segments.is_empty() {
         return None;
     }

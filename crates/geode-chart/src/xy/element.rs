@@ -24,8 +24,10 @@
 //! paths before painting, and its grid and axis interfaces collect vectors.
 //! A line's path follows decimated output: up to two extrema per finite run
 //! per pixel column, plus breaks, and a dashed line's dashes are bounded by
-//! the plot rectangle. A points slot is not decimated: its path carries up
-//! to five segments for every point in view.
+//! the plot rectangle. A points slot carries up to five segments for every
+//! point in view. One path holds [`MAX_STROKE_SEGMENTS`] at most: a points
+//! slot with more marks than that paints every k-th point and the last, and
+//! a dashed line with more dashes than that is stroked solid.
 
 use std::sync::Arc;
 
@@ -36,15 +38,17 @@ use super::model::{SlotKind, Style, XyModel, XySlot, YFormat};
 use crate::core::axis::{Pane, Side};
 use crate::core::layout::{Layout, PaneRects};
 use crate::core::linear::{LinearX, x_ticks};
-use crate::core::marks::{Clip, MARKER_R, Segment, dash_polyline, point_marks};
+use crate::core::marks::{
+    Clip, MARKER_R, SEGMENTS_PER_MARK, Segment, dash_polyline, mark_stride, point_marks, strided,
+};
 use crate::core::scale::{LinearScale, axis_domain, fmt_tick};
 use crate::core::time::Tick;
 use crate::core::view::View;
 use crate::core::{DASH, GAP, Rect, TICK_GAP, design_px};
 use crate::paint::{
-    Ink, LINE_WIDTH, Scratch, SideAxis, axis_index, axis_of, bounds_of, decimated_points,
-    note_chrome_rebuild, note_rebuild, paint_grid, paint_x_axis, paint_y_axis, pane_index,
-    side_scale_of, stroke_points, stroke_segments, y_tick_hint,
+    Ink, LINE_WIDTH, MAX_STROKE_SEGMENTS, Scratch, SideAxis, axis_index, axis_of, bounds_of,
+    decimated_points, note_chrome_rebuild, note_rebuild, paint_grid, paint_x_axis, paint_y_axis,
+    pane_index, side_scale_of, stroke_points, stroke_segments, y_tick_hint,
 };
 
 /// Element-state key of the reused buffers, within this element's scope.
@@ -236,7 +240,13 @@ impl XyElement {
                             clip,
                             &mut b.segments,
                         );
-                        stroke_segments(&b.segments, LINE_WIDTH)
+                        if b.segments.len() > MAX_STROKE_SEGMENTS {
+                            // More dashes than one path holds: the line
+                            // solid, never no line.
+                            stroke_points(&b.scratch.pts, LINE_WIDTH)
+                        } else {
+                            stroke_segments(&b.segments, LINE_WIDTH)
+                        }
                     }
                 }
             }
@@ -248,7 +258,10 @@ impl XyElement {
                 px_mid.clear();
                 px_lo.clear();
                 px_hi.clear();
-                for i in start..end {
+                // More marks than one path holds are thinned evenly, the
+                // last point kept, rather than the slot going unpainted.
+                let stride = mark_stride(end - start, SEGMENTS_PER_MARK, MAX_STROKE_SEGMENTS);
+                for i in strided(start, end, stride) {
                     px_x.push(scale.x_of(xs[i], self.view, plot));
                     px_mid.push(y.y(mid[i]));
                     px_lo.push(y.y(lo[i]));
@@ -826,6 +839,92 @@ mod tests {
                 s.len()
             );
         }
+    }
+
+    #[test]
+    fn a_points_slot_past_the_stroke_cap_is_thinned_not_dropped() {
+        // 20,000 quoted points in view: 100,000 segments unthinned, six
+        // times what one path can hold.
+        let n = 20_000usize;
+        let xs: Vec<f64> = (0..n).map(|i| 1.0 + i as f64 * 1e-4).collect();
+        let mid: Vec<f64> = xs.iter().map(|x| 1.0 + 0.5 * (x * 3.0).sin()).collect();
+        let m = XyModel::new(
+            1,
+            XAxis::default(),
+            [YFormat::Plain; 4],
+            0.7,
+            vec![XySlot {
+                number: 1,
+                label: "chain".into(),
+                color: gpui::red(),
+                axis: Axis::Left,
+                visible: true,
+                style: Style::Solid,
+                kind: SlotKind::Points {
+                    lo: mid.iter().map(|v| v - 0.05).collect(),
+                    hi: mid.iter().map(|v| v + 0.05).collect(),
+                    xs,
+                    mid,
+                },
+            }],
+        );
+        let plot = Rect::new(44.0, 0.0, 400.0, 200.0);
+        let y = LinearScale::new((0.0, 2.0), plot.y, plot.bottom());
+        let view = View::with_min_span(m.full(), 0.01);
+        assert_eq!(m.slots[0].window(view), (0, n), "every point is in view");
+        let e = XyElement::new(m.clone(), view, 12.0, "g");
+        let mut b = Buffers::default();
+        assert!(
+            e.shape(&m.slots[0], plot, &y, &mut b).is_some(),
+            "the slot paints"
+        );
+        let segments = b.segments.len();
+        assert!(segments <= MAX_STROKE_SEGMENTS, "{segments}");
+        assert!(
+            segments > MAX_STROKE_SEGMENTS / 2,
+            "thinned no further than the cap asks: {segments}"
+        );
+        // The first and the last point are both among those kept: their
+        // diamonds' outer tips sit a marker radius past the plot's edges.
+        let left = b.segments.iter().map(|(a, _)| a.x).fold(f32::MAX, f32::min);
+        let right = b.segments.iter().map(|(a, _)| a.x).fold(f32::MIN, f32::max);
+        assert!((left - (plot.x - MARKER_R)).abs() < 0.01, "{left}");
+        assert!((right - (plot.right() + MARKER_R)).abs() < 0.01, "{right}");
+    }
+
+    #[test]
+    fn a_dashed_line_with_too_many_dashes_is_stroked_solid_not_dropped() {
+        // Two knots a pixel column swinging the plot's whole height: the
+        // decimated line is some 800 spans of 200 px, about 23,000 dashes.
+        let n = 800usize;
+        let xs: Vec<f64> = (0..n).map(|i| 1.0 + i as f64 * 1e-3).collect();
+        let ys: Vec<f64> = (0..n).map(|i| if i % 2 == 0 { 0.0 } else { 2.0 }).collect();
+        let m = XyModel::new(
+            1,
+            XAxis::default(),
+            [YFormat::Plain; 4],
+            0.7,
+            vec![XySlot {
+                number: 1,
+                label: "noise".into(),
+                color: gpui::red(),
+                axis: Axis::Left,
+                visible: true,
+                style: Style::Dashed,
+                kind: SlotKind::Line { xs, ys },
+            }],
+        );
+        let plot = Rect::new(44.0, 0.0, 400.0, 200.0);
+        let y = LinearScale::new((0.0, 2.0), plot.y, plot.bottom());
+        let e = XyElement::new(m.clone(), View::with_min_span(m.full(), 0.01), 12.0, "h");
+        let mut b = Buffers::default();
+        let path = e.shape(&m.slots[0], plot, &y, &mut b);
+        assert!(
+            b.segments.len() > MAX_STROKE_SEGMENTS,
+            "the fixture's dashes are past the cap: {}",
+            b.segments.len()
+        );
+        assert!(path.is_some(), "a line past the cap is solid, never absent");
     }
 
     #[test]

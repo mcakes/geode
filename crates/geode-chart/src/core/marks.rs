@@ -194,6 +194,38 @@ pub fn point_marks(
     (bars, markers)
 }
 
+/// The most segments [`point_marks`] emits for one point: its bar and the
+/// four edges of its diamond.
+pub const SEGMENTS_PER_MARK: usize = 5;
+
+/// The stride that thins `points` marks of `per_point` segments each to at
+/// most `cap` segments: the smallest for which the points [`strided`] keeps
+/// fit, one when they all do. The last point is always kept, so two is the
+/// fewest a stride leaves of many; a cap that cannot hold two points gets
+/// the stride that keeps exactly the first and the last.
+pub fn mark_stride(points: usize, per_point: usize, cap: usize) -> usize {
+    if per_point == 0 {
+        return 1;
+    }
+    let fit = cap / per_point;
+    if points <= fit {
+        return 1;
+    }
+    if fit < 2 {
+        return (points - 1).max(1);
+    }
+    // A stride of `k` keeps `ceil((points - 1) / k) + 1` points.
+    (points - 1).div_ceil(fit - 1)
+}
+
+/// The indices of `[start, end)` a stride keeps: every `stride`-th from
+/// `start`, and the last. A stride of zero is a stride of one.
+pub fn strided(start: usize, end: usize, stride: usize) -> impl Iterator<Item = usize> {
+    let stride = stride.max(1);
+    let last = (end > start && !(end - 1 - start).is_multiple_of(stride)).then(|| end - 1);
+    (start..end).step_by(stride).chain(last)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -637,5 +669,64 @@ mod tests {
         assert_eq!((bars, markers), (0, 1));
         assert_eq!(out.len(), 4);
         assert!(finite(&out), "{out:?}");
+    }
+
+    /// How many points a stride keeps, counted the way a painter walks them.
+    fn kept(points: usize, stride: usize) -> usize {
+        strided(0, points, stride).count()
+    }
+
+    #[test]
+    fn a_stride_keeps_every_kth_point_and_the_last() {
+        assert_eq!(strided(3, 10, 3).collect::<Vec<_>>(), [3, 6, 9]);
+        assert_eq!(strided(3, 11, 3).collect::<Vec<_>>(), [3, 6, 9, 10]);
+        assert_eq!(strided(0, 5, 1).collect::<Vec<_>>(), [0, 1, 2, 3, 4]);
+        assert_eq!(strided(0, 2, 100).collect::<Vec<_>>(), [0, 1]);
+        assert_eq!(strided(7, 8, 100).collect::<Vec<_>>(), [7]);
+        assert_eq!(strided(4, 4, 3).count(), 0);
+        assert_eq!(strided(5, 4, 3).count(), 0, "an inverted range is empty");
+        assert_eq!(
+            strided(0, 3, 0).collect::<Vec<_>>(),
+            [0, 1, 2],
+            "no stride is a stride of one"
+        );
+    }
+
+    #[test]
+    fn the_stride_is_the_smallest_whose_marks_fit_the_cap() {
+        // Five segments a point against 12,000: 2,400 points fit.
+        assert_eq!(mark_stride(0, 5, 12_000), 1);
+        assert_eq!(mark_stride(1, 5, 12_000), 1);
+        assert_eq!(mark_stride(2_400, 5, 12_000), 1, "exactly the cap");
+        assert_eq!(mark_stride(2_401, 5, 12_000), 2, "one point over it");
+        // Every 10th would keep 2,400 and the last: one too many.
+        assert_eq!(mark_stride(24_000, 5, 12_000), 11, "ten times over it");
+        assert_eq!(kept(24_000, 11), 2_183);
+        for cap in [10, 11, 37, 100, 12_000] {
+            for per_point in [1, 4, 5] {
+                for points in (0..300).chain([2_399, 2_400, 2_401, 9_999, 120_000]) {
+                    let k = mark_stride(points, per_point, cap);
+                    let case = format!("{points} points, {per_point} each, cap {cap}: stride {k}");
+                    assert!(k >= 1, "{case}");
+                    if cap / per_point < 2 {
+                        continue;
+                    }
+                    assert!(kept(points, k) * per_point <= cap, "{case}");
+                    assert!(k == 1 || kept(points, k - 1) * per_point > cap, "{case}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_cap_under_two_points_keeps_the_two_ends() {
+        // The last point is always kept, so two is the fewest a stride can
+        // leave of many; a cap that cannot hold two gets those two.
+        for cap in [0, 4, 5, 9] {
+            let k = mark_stride(100, 5, cap);
+            assert_eq!(strided(0, 100, k).collect::<Vec<_>>(), [0, 99], "cap {cap}");
+        }
+        assert_eq!(mark_stride(1, 5, 0), 1);
+        assert_eq!(mark_stride(100, 0, 0), 1, "marks of no segments always fit");
     }
 }
