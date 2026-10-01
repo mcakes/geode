@@ -407,11 +407,18 @@ impl FuzzyFind {
 
     /// Install the tile's columns and its original header and cell presentation. The tile renders this
     /// entity in its table body, keeping its own header and original table alive.
+    ///
+    /// `on_rows` receives the source rows ([`FindRow::source_row`]) shown now, in display order: when
+    /// the table's visible range changes, and at the next layout after any result-set change (typing,
+    /// a fold, new items), the range clamped to the rows that remain. The tile formats those rows
+    /// there and nowhere else; `render_cell` only reads what it prepared. It runs at table layout,
+    /// never inside the tile's own update, so it may read the tile.
     pub fn set_table(
         &mut self,
         columns: Vec<gpui_component::table::Column>,
         render_header: impl Fn(usize, &mut Window, &mut App) -> gpui::AnyElement + 'static,
         render_cell: impl Fn(&FindRow<'_>, usize, &mut App) -> gpui::AnyElement + 'static,
+        on_rows: impl Fn(&[usize], &mut App) + 'static,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -426,6 +433,7 @@ impl FuzzyFind {
             columns,
             Rc::new(render_header),
             Rc::new(render_cell),
+            Rc::new(on_rows),
             cx.entity().downgrade(),
         );
         self.table = Some(cx.new(|cx| {
@@ -456,6 +464,8 @@ impl FuzzyFind {
                     Rc::new(render_header),
                     Rc::new(render_cell),
                 );
+                // New columns may change what the tile prepares per row.
+                table.delegate_mut().mark_stale();
                 table.refresh(cx);
                 cx.notify();
             });
@@ -510,6 +520,7 @@ impl FuzzyFind {
                 d.items = self.items.clone();
                 d.clear_highlights();
                 d.ranked = self.ranked.clone();
+                d.mark_stale();
                 d.message = self.error.clone().unwrap_or_else(|| {
                     if self.loading || self.pending || self.expanding {
                         "Searching…"

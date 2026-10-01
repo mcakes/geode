@@ -2477,3 +2477,35 @@ one-cell refill is about 4 ns slower (85 → 89 ns), within the spread of the
 round pair. No blotter `cache_fill` shape regressed: after was faster than
 before in both rounds, by 1–12 µs, a spread comparable to the rounds' own
 difference.
+
+## Fuzzy `/` result table: visible rows only — 2026-10-01
+
+Apple M5 Pro, 18 cores, rustc 1.96.0 (ac68faa20 2026-05-25), bench profile.
+`marketdata_core/find_open_cells_values_10000x5` measures the cells a `/` open
+on the 10,000 × five-value schedule prepares before its first frame paints.
+Before, that was every row into a `WindowCache` (`0..10_000`, 50,000
+`md_cell` calls). After, it is the find table's first window (rows `0..64`,
+reported before the table measures its range) into a `RowCache`, then the 40
+rows it shows, all already held (320 `md_cell` calls). The before binary
+(`bench-find/matrix-before`, built from the same bench with the old body) and
+the after binary were run alternately over two rounds, before then after,
+then after then before. Both share one Criterion baseline, so the printed
+medians are compared, not the "change:" lines.
+
+The machine was heavily loaded by other sessions' builds: one-minute load
+28.50 at the first run, 26.70, 22.83 and 21.16 between runs, 15.81 at the end
+(37.81 during the very first, discarded, before run, which measured 7.48 ms).
+
+| Run | Before | After |
+|---|---:|---:|
+| Round 1 (before, after) | 7.9808 ms | 52.678 µs |
+| Round 2 (after, before) | 7.5263 ms | 53.439 µs |
+
+Headless model work only: no table layout, no paint, no text shaping, and not
+the `FindItem` construction or search-text build a `/` open also performs
+(neither changed). The real first frame also formats the 64-row first window
+before the table's first range report drops the rows it does not show; a
+scroll then formats only the rows entering view. The pricer's open drops its
+all-open `fill_all` the same way; it has no bench of its own (its `GridIndex`
+build for `/`, tree labels only, is unchanged and `pricer_core/grid_build_1000`
+covers it).

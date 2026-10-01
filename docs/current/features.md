@@ -404,7 +404,8 @@ reported, refilled over that range on every install. A one-cell commit refills
 that one window cell; editing a
 Sent draft rebuilds to clear sent styling throughout the grid. Yank, a
 selection's TSV and find format through `MatrixIndex::format_cell` on demand,
-so they include rows off screen.
+so they include rows off screen. A fuzzy `/` result table formats only the
+rows it shows, through `MatrixIndex::md_cell`, as the table reports them.
 
 Edits live in a `Draft` whose `DocumentBase` contains source time and an
 optional store generation. Different source times indicate different data;

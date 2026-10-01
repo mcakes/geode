@@ -219,7 +219,13 @@ Column headers
 use the tile's original renderer, preserving typography, alignment, colors,
 and separators. The selected
 row's ancestor path and direct-match count appear above the prompt. Numeric values
-provide context; names and ancestor paths are the search keys.
+provide context; names and ancestor paths are the search keys. The results
+table tells the occupant which source rows it shows (`set_table`'s `on_rows`)
+whenever its visible range changes and at the next layout after any result-set
+change, clamped to the rows that remain (the tail of the same height when none
+do, so a lone match is reported); before its first range it reports the first
+64 rows. Market data and the pricer format only those rows, outside paint, and
+a cell the occupant has not prepared paints blank.
 Search text is prepared once per dataset. Ranking runs off the UI thread;
 query revisions cancel obsolete work and prevent stale results being accepted.
 Single-word extensions rescore the last completed query's candidates; edits,

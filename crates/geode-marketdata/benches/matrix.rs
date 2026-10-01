@@ -1,8 +1,9 @@
 //! Pure model costs for a CVI pivot (20 terms × 30 nodes) and a flat
 //! schedule (10,000 rows × five value columns).
 //!
-//! Measure index builds, window fills and one-cell refills, builds with 100
-//! inserted rows, and rebase with 1,000 cell edits plus optional row inserts.
+//! Measure index builds, window fills, the cells a fuzzy `/` open prepares,
+//! one-cell refills, builds with 100 inserted rows, and rebase with 1,000
+//! cell edits plus optional row inserts.
 //! Cell commits refill one window cell; deliveries and structural edits
 //! rebuild the index. These operations spend UI-thread time before painting;
 //! current budgets and measurement conditions are documented in
@@ -19,7 +20,7 @@ use geode_marketdata::core::matrix::{MatrixIndex, refill_cell};
 use geode_marketdata::core::spec::{
     Columns, HeaderAttr, PanelSpec, RowAxis, RowIdentity, RowLabel, ValueColumn, builtin_panel,
 };
-use geode_tile::grid::WindowCache;
+use geode_tile::grid::{FIRST_WINDOW, RowCache, WindowCache};
 use std::hint::black_box;
 use std::sync::{Arc, LazyLock};
 
@@ -223,6 +224,23 @@ fn bench(c: &mut Criterion) {
                 index.md_cell(&clean, r, c)
             });
             black_box(window.window().len())
+        })
+    });
+    // The cells a fuzzy `/` open prepares on the 10,000-row panel before
+    // its first frame paints: the result table's first window (64 rows,
+    // reported before the table measures its range), then the 40 rows it
+    // shows, which are already held.
+    let first: Vec<usize> = (0..FIRST_WINDOW).collect();
+    let shown: Vec<usize> = (0..40).collect();
+    g.bench_function("find_open_cells_values_10000x5", |b| {
+        b.iter(|| {
+            let mut cells = RowCache::default();
+            for rows in [&first, &shown] {
+                cells.set_rows(rows, index.columns.len(), |r, c| {
+                    index.md_cell(&clean, r, c)
+                });
+            }
+            black_box(cells.len())
         })
     });
     // A delivery as far as a paintable window: the index build, then one

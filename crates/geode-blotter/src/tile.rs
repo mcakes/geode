@@ -1623,6 +1623,9 @@ impl BlotterTile {
                     Vec::new(),
                     |_, _, _| div().into_any_element(),
                     |_, _, _| div().into_any_element(),
+                    // Blotter cells come from its prepared snapshot through
+                    // `update_table`'s painter, not from a row report.
+                    |_, _| {},
                     window,
                     cx,
                 )

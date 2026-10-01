@@ -20,11 +20,12 @@
 //! are the table's row grounds, which replace a row's own and which
 //! further per-cell fills would obscure.
 
+use crate::core::columns::CellState;
 use crate::grid::{CellPass, FillSource, GridCell, GridIndex, GridRowKind};
 use crate::paint::{CellColour, Paints, RowPalette, cell_colour};
 use crate::popup::{ChoicePaint, render_choice};
 use crate::tile::PricerTile;
-use geode_core::colour::{Anchors, NamedColours, Tokens};
+use geode_core::colour::{Anchors, NamedColours, Sign, Tokens};
 use geode_core::grid::selection::{Resolved, SelectKind};
 use geode_core::view::Colour;
 use geode_shell::colfit::{FitMetrics, FittedWidths};
@@ -34,7 +35,7 @@ use geode_shell::shell::colours::{anchors_from_theme, theme_signature, tokens_fr
 use geode_shell::shell::control::{self, PointerStates as _};
 use geode_shell::shell::scale;
 use geode_tile::colour::{ColourCache, Resolved as ColourResolved};
-use geode_tile::grid::{FIRST_WINDOW, WindowCache, WindowRequest};
+use geode_tile::grid::{FIRST_WINDOW, RowCache, WindowCache, WindowRequest};
 use geode_widgets::datefield::{self, DateTimeField, SegmentPaint, SegmentText};
 use gpui::prelude::*;
 use gpui::{
@@ -313,6 +314,83 @@ fn render_date_field(
         ))
 }
 
+/// What a fuzzy `/` result table paints from: a painter over the all-open
+/// index `/` built, and the measure cells of the rows the find table last
+/// reported ([`FindPaint::show`]), formatted there through [`CellPass`]
+/// over the tile's live sheet. The paint callback only reads it; a row it
+/// does not hold paints blank measure cells.
+pub(crate) struct FindPaint {
+    pub(crate) painter: SheetDelegate,
+    /// The theme the painter's paints were derived under.
+    signature: [Hsla; 28],
+    cells: RowCache<GridCell>,
+    /// The tile's index when `/` opened. The find index's rows name rollup
+    /// nodes and sheet rows as that build saw them; once the tile installs
+    /// another index they may name others, so the measure cells paint
+    /// blank rather than read through a stale index. A price-only refresh
+    /// keeps the tile's index, and so the find's cells read the new prices
+    /// as rows enter view.
+    opened_on: Rc<GridIndex>,
+    /// Cells formatted, ever; each `/` open starts a new `FindPaint`.
+    #[cfg(test)]
+    pub(crate) fills: usize,
+}
+
+impl FindPaint {
+    pub(crate) fn new(painter: SheetDelegate, opened_on: Rc<GridIndex>, theme: &Theme) -> Self {
+        FindPaint {
+            painter,
+            signature: theme_signature(theme),
+            cells: RowCache::default(),
+            opened_on,
+            #[cfg(test)]
+            fills: 0,
+        }
+    }
+
+    /// Hold exactly the reported grid `rows`: keep those already
+    /// formatted, format the rest from `src`, drop the others. When the
+    /// tile's index is no longer the one `/` opened on, hold nothing.
+    pub(crate) fn show(&mut self, rows: &[usize], tile_model: &Rc<GridIndex>, src: FillSource<'_>) {
+        if !Rc::ptr_eq(tile_model, &self.opened_on) {
+            self.cells.clear();
+            return;
+        }
+        let model = Rc::clone(&self.painter.model);
+        let mut pass = CellPass::new(src, &model);
+        #[cfg(test)]
+        let fills = &mut self.fills;
+        self.cells.set_rows(rows, model.columns.len(), |g, c| {
+            #[cfg(test)]
+            {
+                *fills += 1;
+            }
+            pass.cell(g, c)
+        });
+    }
+
+    /// Paint one find cell, re-deriving the paints after a theme change.
+    pub(crate) fn render(
+        &mut self,
+        find_row: &geode_shell::fuzzyfind::FindRow<'_>,
+        col: usize,
+        cx: &App,
+    ) -> gpui::AnyElement {
+        let signature = theme_signature(cx.theme());
+        if self.signature != signature {
+            self.painter.set_paints(Paints::derive(cx.theme()));
+            self.signature = signature;
+        }
+        self.painter
+            .render_find_cell(&self.cells, find_row, col, cx)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cells(&self) -> &RowCache<GridCell> {
+        &self.cells
+    }
+}
+
 pub struct SheetDelegate {
     /// The grid index shared with the tile; installs replace it.
     pub(crate) model: Rc<GridIndex>,
@@ -392,6 +470,10 @@ pub struct SheetDelegate {
     colours: Arc<NamedColours>,
     colour_cache: ColourCache,
     theme_inputs: Option<([Hsla; 28], Anchors, Tokens)>,
+    /// The text each painted find measure cell carried, by (grid row,
+    /// table column), as `render_find_cell` put it into the element.
+    #[cfg(test)]
+    pub(crate) find_painted: std::collections::HashMap<(usize, usize), String>,
 }
 
 /// The name column `plan_col` carries a `Colour::Named` of, if it does.
@@ -431,6 +513,8 @@ impl SheetDelegate {
             colours: Arc::new(NamedColours::default()),
             colour_cache: ColourCache::new(),
             theme_inputs: None,
+            #[cfg(test)]
+            find_painted: Default::default(),
         }
     }
 
@@ -491,13 +575,26 @@ impl SheetDelegate {
     /// A row the model lacks, and a cell the window lacks, is the own
     /// paint.
     pub(crate) fn text_colour(&mut self, row_ix: usize, plan_col: usize, theme: &Theme) -> Hsla {
+        let cell = self.window.get(row_ix, plan_col).map(|c| (c.state, c.sign));
+        self.colour_of(row_ix, plan_col, cell, theme)
+    }
+
+    /// [`Self::text_colour`] over a cell's `(state, sign)` read from
+    /// wherever it was prepared: the window, or a find table's rows.
+    fn colour_of(
+        &mut self,
+        row_ix: usize,
+        plan_col: usize,
+        cell: Option<(CellState, Option<Sign>)>,
+        theme: &Theme,
+    ) -> Hsla {
         let model = Rc::clone(&self.model);
         if row_ix >= model.len() {
             return self.paints.own;
         }
         // A group row or a leg: the palette floored on its own ground.
         let palette = self.row_palette(row_ix);
-        let Some(&GridCell { state, sign, .. }) = self.window.get(row_ix, plan_col) else {
+        let Some((state, sign)) = cell else {
             return palette.map_or(self.paints.own, |p| p.own);
         };
         let colour = model
@@ -528,9 +625,12 @@ impl SheetDelegate {
     }
 
     /// The search table shares value formatting, colours, and tree depth, without
-    /// edit/expansion handlers belonging to the original table.
+    /// edit/expansion handlers belonging to the original table. Measure
+    /// cells come from `cells`, the rows the find table last reported; a
+    /// row it does not hold paints blank.
     pub(crate) fn render_find_cell(
         &mut self,
+        cells: &RowCache<GridCell>,
         find_row: &geode_shell::fuzzyfind::FindRow<'_>,
         col_ix: usize,
         cx: &App,
@@ -583,19 +683,18 @@ impl SheetDelegate {
                 .into_any_element();
         }
         let col = col_ix - 1;
+        let cell = cells.get(row_ix, col);
+        let text = cell.map(|c| c.text.clone()).unwrap_or_default();
+        #[cfg(test)]
+        self.find_painted.insert((row_ix, col_ix), text.to_string());
         let colour = if find_row.is_context() {
             cx.theme().muted_foreground
         } else {
-            self.text_colour(row_ix, col, cx.theme())
+            self.colour_of(row_ix, col, cell.map(|c| (c.state, c.sign)), cx.theme())
         };
         el.when(model.columns[col].right, |el| el.justify_end())
             .text_color(colour)
-            .child(
-                self.window
-                    .get(row_ix, col)
-                    .map(|c| c.text.clone())
-                    .unwrap_or_default(),
-            )
+            .child(text)
             .into_any_element()
     }
 
@@ -687,13 +786,6 @@ impl SheetDelegate {
         let mut pass = CellPass::new(src, &model);
         self.window
             .set_window(range, model.columns.len(), |g, c| pass.cell(g, c));
-    }
-
-    /// The find table's painter: every row of its all-open index, once per `/` open.
-    pub(crate) fn fill_all(&mut self, src: FillSource<'_>) {
-        self.window.clear();
-        let n = self.model.len();
-        self.fill_window(0..n, src);
     }
 
     /// Fit the tree column and every plan column to its header and the

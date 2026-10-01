@@ -71,6 +71,10 @@ cargo bench -p geode-marketdata    # matrix index, window fill and draft
   paints. Yank, a selection's TSV, find and the editors format on demand
   through `MatrixIndex::format_cell`, so they cover rows off screen and can
   never format differently from the window.
+- A fuzzy `/` result table paints from `delegate::FindCells`: the index and
+  draft as `/` opened them, and a `RowCache` of the rows the find table
+  reports, formatted there through `MatrixIndex::md_cell`. Rows no longer
+  reported are dropped, so it holds about a screenful.
 - Model installation pairs the delegate update with `TableState::refresh` so
   cached headers follow the document. In CVI, table column 0 is a fixed row label
   outside the cursor grid. Dividend hides its row identity: column 0 is the first

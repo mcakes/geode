@@ -28276,8 +28276,10 @@ run_mutation "grid-window: tile a window move keeps the overlap" \
 
 run_mutation "grid-window: tile a column-count change clears the window" \
   crates/geode-tile/src/grid.rs \
-  '        if cols != self.cols {' \
-  '        if false {' \
+  '        if cols != self.cols {
+            self.clear();' \
+  '        if false {
+            self.clear();' \
   geode-tile a_column_count_change_clears_the_window
 
 run_mutation "grid-window: tile get outside the window is none" \
@@ -28477,6 +28479,137 @@ run_mutation "grid-window: pricer a refill-only delivery refreshes totals" \
   $'            // Totals read the sheet: re-resolve the selection over the new prices.\n            self.sync_cursor(cx);' \
   '            // Totals read the sheet: re-resolve the selection over the new prices.' \
   geode-pricer a_delivery_under_a_selection_updates_its_totals
+
+# ---- Fuzzy find: the result table formats only the rows it shows ----
+
+# A result-set change must re-report the shown rows: the pinned table
+# reports nothing for an unchanged range, so without the mark a new ranking
+# paints rows the tile never prepared.
+run_mutation "find-window: shell a result-set change marks the rows stale" \
+  crates/geode-shell/src/fuzzyfind.rs \
+  '                d.ranked = self.ranked.clone();
+                d.mark_stale();' \
+  '                d.ranked = self.ranked.clone();' \
+  geode-shell fzf_table_reports_the_painted_rows_after_every_result_change
+
+# The stale re-report runs at the next layout, before the frame's cells.
+run_mutation "find-window: shell the stale re-report runs at layout" \
+  crates/geode-shell/src/fuzzyfind/table.rs \
+  '        if self.stale {
+            self.report(cx);' \
+  '        if false {
+            self.report(cx);' \
+  geode-shell fzf_table_reports_the_painted_rows_after_every_result_change
+
+# The same mutation seen by each module: a narrowing to one match (a range
+# the table never reports) leaves the lone match unformatted.
+run_mutation "find-window: md the lone match is formatted" \
+  crates/geode-shell/src/fuzzyfind/table.rs \
+  '        if self.stale {
+            self.report(cx);' \
+  '        if false {
+            self.report(cx);' \
+  geode-marketdata fzf_formats_only_the_rows_it_paints
+
+run_mutation "find-window: pricer the lone match is formatted" \
+  crates/geode-shell/src/fuzzyfind/table.rs \
+  '        if self.stale {
+            self.report(cx);' \
+  '        if false {
+            self.report(cx);' \
+  geode-pricer fzf_formats_only_the_rows_it_paints
+
+# A range the table reports (a scroll) reaches the tile.
+run_mutation "find-window: shell a reported range reaches the tile" \
+  crates/geode-shell/src/fuzzyfind/table.rs \
+  '        self.asked = Some(range);
+        self.report(cx);' \
+  '        self.asked = Some(range);' \
+  geode-shell fzf_table_reports_the_painted_rows_after_every_result_change
+
+# The re-report is clamped to the rows that remain.
+run_mutation "find-window: shell a re-report clamps to the rows left" \
+  crates/geode-shell/src/fuzzyfind/table.rs \
+  '    let end = asked.end.min(len);' \
+  '    let end = asked.end;' \
+  geode-shell a_re_report_clamps_the_asked_range_and_falls_back_to_the_tail
+
+# With none of the asked range left, the tail of its height is reported.
+run_mutation "find-window: shell a re-report past the rows reports the tail" \
+  crates/geode-shell/src/fuzzyfind/table.rs \
+  '    Some(len.saturating_sub(asked.len().max(1))..len)' \
+  '    None' \
+  geode-shell a_re_report_clamps_the_asked_range_and_falls_back_to_the_tail
+
+# Before the table's first range, the first window is reported.
+run_mutation "find-window: shell the first report covers the first window" \
+  crates/geode-shell/src/fuzzyfind/table.rs \
+  '    let asked = asked.cloned().unwrap_or(0..FIRST_WINDOW);' \
+  '    let asked = asked.cloned().unwrap_or(0..1);' \
+  geode-shell a_re_report_clamps_the_asked_range_and_falls_back_to_the_tail
+
+# A row cache keeps only the reported rows: without the replacement the
+# rows scrolled out stay, and the cache grows with every scroll.
+run_mutation "find-window: tile a row cache drops rows no longer reported" \
+  crates/geode-tile/src/grid.rs \
+  '        self.spare = std::mem::replace(&mut self.rows, next);' \
+  '        self.rows.extend(next);' \
+  geode-tile a_row_cache_keeps_reported_rows_fills_entering_ones_and_drops_the_rest
+
+run_mutation "find-window: md rows scrolled out are dropped" \
+  crates/geode-tile/src/grid.rs \
+  '        self.spare = std::mem::replace(&mut self.rows, next);' \
+  '        self.rows.extend(next);' \
+  geode-marketdata fzf_formats_only_the_rows_it_paints
+
+# A row still reported keeps its cells; only entering rows are formatted.
+run_mutation "find-window: tile a row cache fills only entering rows" \
+  crates/geode-tile/src/grid.rs \
+  '                .remove(&r)' \
+  '                .remove(&usize::MAX)' \
+  geode-tile a_row_cache_keeps_reported_rows_fills_entering_ones_and_drops_the_rest
+
+run_mutation "find-window: pricer only the rows scrolling in are formatted" \
+  crates/geode-tile/src/grid.rs \
+  '                .remove(&r)' \
+  '                .remove(&usize::MAX)' \
+  geode-pricer fzf_formats_only_the_rows_it_paints
+
+# Market data formats the reported rows, not the whole document.
+run_mutation "find-window: md the open formats only the reported rows" \
+  crates/geode-marketdata/src/delegate.rs \
+  '        cells.set_rows(rows, model.columns.len(), |r, c| {' \
+  '        cells.set_rows(&(0..model.len()).collect::<Vec<_>>(), model.columns.len(), |r, c| {' \
+  geode-marketdata fzf_formats_only_the_rows_it_paints
+
+# A value cell paints its prepared text: a miss is blank, never the label.
+run_mutation "find-window: md a find value cell paints the formatter's text" \
+  crates/geode-marketdata/src/delegate.rs \
+  '            Some(_) => cell.map(|c| c.text.clone()).unwrap_or_default(),' \
+  '            Some(_) => row.label.clone(),' \
+  geode-marketdata fzf_formats_only_the_rows_it_paints
+
+# The pricer formats the reported rows, not its whole all-open index.
+run_mutation "find-window: pricer the open formats only the reported rows" \
+  crates/geode-pricer/src/delegate.rs \
+  '        self.cells.set_rows(rows, model.columns.len(), |g, c| {' \
+  '        self.cells.set_rows(&(0..model.len()).collect::<Vec<_>>(), model.columns.len(), |g, c| {' \
+  geode-pricer fzf_formats_only_the_rows_it_paints
+
+# A measure cell reads its plan column; the tree column sits at table 0.
+run_mutation "find-window: pricer a find measure cell paints the formatter's text" \
+  crates/geode-pricer/src/delegate.rs \
+  '        let cell = cells.get(row_ix, col);' \
+  '        let cell = cells.get(row_ix, col_ix);' \
+  geode-pricer fzf_formats_only_the_rows_it_paints
+
+# Once the tile installs another index, nothing is formatted through the
+# one `/` opened on: its nodes and sheet rows may now name others.
+run_mutation "find-window: pricer a reindexed tile formats nothing through the stale index" \
+  crates/geode-pricer/src/delegate.rs \
+  '        if !Rc::ptr_eq(tile_model, &self.opened_on) {' \
+  '        if false {' \
+  geode-pricer fzf_paints_blank_cells_once_the_tile_reindexes
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

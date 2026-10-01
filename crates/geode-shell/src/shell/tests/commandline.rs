@@ -820,3 +820,115 @@ fn clicking_the_filter_input_cancels_an_open_command_line(cx: &mut gpui::TestApp
         log.borrow()
     );
 }
+
+/// The last row report the `/` result table made.
+fn last_find_rows(log: &std::cell::RefCell<Vec<crate::module::recording::Recorded>>) -> Vec<usize> {
+    use crate::module::recording::Recorded;
+    log.borrow()
+        .iter()
+        .rev()
+        .find_map(|r| match r {
+            Recorded::FindRows(_, rows) => Some(rows.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// Display positions the result table painted, in order, after a draw.
+fn painted_positions(cx: &mut gpui::VisualTestContext, rows: usize) -> Vec<usize> {
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    (0..rows)
+        .filter(|i| {
+            let selector: &'static str = Box::leak(format!("find-result-{i}").into_boxed_str());
+            cx.debug_bounds(selector).is_some()
+        })
+        .collect()
+}
+
+/// A module that formats only shown rows hears, through the table's row
+/// report, exactly the source rows painted: on open, after each query
+/// (the table itself reports nothing when its range is unchanged), after
+/// a narrowing to one match (a range the table never reports), and after
+/// a real wheel scroll.
+#[gpui::test]
+fn fzf_table_reports_the_painted_rows_after_every_result_change(cx: &mut gpui::TestAppContext) {
+    use crate::module::recording::RecordingFactory;
+    let (mut services, _) = services_with_recorder();
+    let mut recorder = RecordingFactory::new("rec");
+    recorder.completions = (0..200).map(|i| format!("Row {i:03}")).collect();
+    recorder.find_table = true;
+    let labels = recorder.completions.clone();
+    let log = recorder.log.clone();
+    let mut roster = crate::module::ModuleRoster::new();
+    roster.add(Box::new(recorder));
+    services.roster = roster;
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    shell.update(&mut cx, |s, _| s.find_style = FindStyle::Fzf);
+    cx.simulate_keystrokes("ctrl-v /");
+    cx.run_until_parked();
+
+    let shown = painted_positions(&mut cx, 200);
+    assert!(
+        shown.len() > 1 && shown.len() < 100,
+        "one screenful paints: {shown:?}"
+    );
+    assert_eq!(shown, (0..shown.len()).collect::<Vec<_>>());
+    assert_eq!(
+        last_find_rows(&log),
+        shown,
+        "the open reports the painted rows"
+    );
+
+    // A new ranking under the same range: the table reports no range.
+    cx.simulate_input("Row 1");
+    cx.run_until_parked();
+    let shown = painted_positions(&mut cx, 200);
+    let rows = last_find_rows(&log);
+    assert_eq!(rows.len(), shown.len(), "{rows:?}");
+    assert!(
+        rows.iter().all(|&r| labels[r].starts_with("Row 1")),
+        "the report follows the ranking: {rows:?}"
+    );
+
+    // One match: a range of one row is never reported by the table.
+    cx.simulate_input("37");
+    cx.run_until_parked();
+    assert_eq!(painted_positions(&mut cx, 200), vec![0]);
+    assert_eq!(
+        last_find_rows(&log),
+        vec![137],
+        "the lone match is reported"
+    );
+
+    // Back to everything, then a real wheel scroll down the table.
+    for _ in 0.."Row 137".len() {
+        cx.simulate_keystrokes("backspace");
+    }
+    cx.run_until_parked();
+    let top = painted_positions(&mut cx, 200);
+    assert_eq!(
+        last_find_rows(&log),
+        top,
+        "the whole set again, from the top"
+    );
+    let bounds = cx.debug_bounds("fuzzy-find").expect("the table paints");
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position: bounds.center(),
+        delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-600.))),
+        modifiers: gpui::Modifiers::default(),
+        touch_phase: gpui::TouchPhase::Moved,
+    });
+    let scrolled = painted_positions(&mut cx, 200);
+    assert!(
+        scrolled.first() > top.first(),
+        "the wheel scrolled: {scrolled:?}"
+    );
+    assert_eq!(
+        last_find_rows(&log),
+        scrolled,
+        "the scrolled rows are reported"
+    );
+}

@@ -614,6 +614,9 @@ pub struct PricerTile {
     pub(crate) register: Option<Vec<crate::core::RowSpec>>,
     find: Option<FindState>,
     fuzzy_find: Option<gpui::WeakEntity<geode_shell::fuzzyfind::FuzzyFind>>,
+    /// The last `/` open's result cells, for tests to read.
+    #[cfg(test)]
+    pub(crate) find_paint: Option<Rc<std::cell::RefCell<crate::delegate::FindPaint>>>,
     /// Latest pricing submission tag. An outcome with any other tag is dropped whole.
     pub(crate) tag: u64,
     /// `id → revision` of the latest batch. Submit when at least one stale line
@@ -1044,6 +1047,8 @@ impl PricerTile {
             register: None,
             find: None,
             fuzzy_find: None,
+            #[cfg(test)]
+            find_paint: None,
             tag: 0,
             in_flight: HashMap::new(),
             undo: UndoStack::default(),
@@ -1336,14 +1341,22 @@ impl PricerTile {
         let search_tree = Arc::new(geode_shell::fuzzyfind::FindTree::from_depths(
             model.trees().filter(|r| r.node.is_some()).map(|r| r.depth),
         ));
+        // The result table formats only the measure cells of the rows it
+        // shows, as it reports them; its paint only reads them.
         let mut painter = SheetDelegate::new(cx.theme(), cx.entity().downgrade());
         painter.model = model;
-        painter.fill_all(self.fill_source());
         painter.set_colours(self.shared.colours.borrow().clone());
-        let painter = std::cell::RefCell::new((
+        let paint = Rc::new(std::cell::RefCell::new(crate::delegate::FindPaint::new(
             painter,
-            geode_shell::shell::colours::theme_signature(cx.theme()),
-        ));
+            Rc::clone(&self.model),
+            cx.theme(),
+        )));
+        #[cfg(test)]
+        {
+            self.find_paint = Some(paint.clone());
+        }
+        let shown = paint.clone();
+        let tile = cx.entity().downgrade();
         let header_table = self.table.clone();
         let _ = results.update(cx, |results, cx| {
             results.set_table(
@@ -1356,14 +1369,15 @@ impl PricerTile {
                             .into_any_element()
                     })
                 },
-                move |row, col, cx| {
-                    let mut paint = painter.borrow_mut();
-                    let signature = geode_shell::shell::colours::theme_signature(cx.theme());
-                    if paint.1 != signature {
-                        paint.0.set_paints(crate::paint::Paints::derive(cx.theme()));
-                        paint.1 = signature;
+                move |row, col, cx| paint.borrow_mut().render(row, col, cx),
+                // Table layout, after render: the tile is not borrowed.
+                move |rows, cx| {
+                    if let Some(tile) = tile.upgrade() {
+                        let tile = tile.read(cx);
+                        shown
+                            .borrow_mut()
+                            .show(rows, &tile.model, tile.fill_source());
                     }
-                    paint.0.render_find_cell(row, col, cx)
                 },
                 window,
                 cx,

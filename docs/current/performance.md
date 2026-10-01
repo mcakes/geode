@@ -83,6 +83,7 @@ the measurement log for fixture and hardware details.
 | Market-data flat build | 10,000 × five values: the `MatrixIndex` (labels and row facts, no cell text) | 586 µs |
 | Market-data window fill | 40 × five values | 17.7 µs |
 | Market-data cell patch | 10,000 × five values: one-cell window refill | 105 ns |
+| Market-data `/` open cells | 10,000 × five values: the find table's first window (64 rows) then its 40 shown rows, into a `RowCache` | 53 µs |
 | Line-pricer sheet shift + undo | 1,000 entries / 1,200 sheet rows | 1.52 ms |
 | Line-pricer single cell edit + undo | 1,000 entries / 1,200 sheet rows | 6.66 µs |
 | Line-pricer grid build | 1,000 entries / 1,200 sheet rows, every package open: the `GridIndex`, no measure text | 271 µs |
@@ -108,6 +109,14 @@ measure already reads. Re-measure on an idle machine before quoting them.
 
 - A blotter formats the visible window into the shared
   `geode_tile::grid::WindowCache` rather than formatting in `render_td`.
+- A fuzzy `/` result table in market data and the pricer formats only the
+  rows it shows. The shell's find table reports them (`set_table`'s
+  `on_rows`) on each range the table reports and at the next layout after
+  every result-set change; the module formats them into a
+  `geode_tile::grid::RowCache` keyed by document row, keeping rows still
+  shown and dropping the rest, so it holds about a screenful. Before the
+  table's first report it reports the first 64 rows. The paint callback only
+  reads; a miss paints blank.
 - A market-data delivery, structural edit or bulk step builds a `MatrixIndex`
   (labels and row facts, no cell text) and refills only the window the table
   last reported; a one-cell commit refills one window cell. The session tick
@@ -173,9 +182,14 @@ measure already reads. Re-measure on an idle machine before quoting them.
   pipeline. Concurrent staging is on hold until the real path and a network
   share are measured.
 - CI compiles benchmarks but has no stable regression baseline.
-- A fuzzy `/` open formats every find row once (market-data's whole document,
-  the pricer's all-open sheet) so the result table paints prepared text;
-  measured costs are the whole-document fills.
+- The blotter's fuzzy `/` table does not use the row report: it formats a
+  cell in its paint callback the first time the cell paints and keeps every
+  cell it formatted until `/` closes.
+- The pricer's `/` cells read the live sheet through the index `/` built, so
+  a row shows the prices current when it entered view. Once the tile installs
+  another index (a regroup, a structural delivery, an expansion), the next row
+  report drops every cell and the measure columns paint blank until `/` is
+  reopened, rather than read rollup nodes and sheet rows through a stale index.
 - The pinned table never reports a visible range of one row; a tile scrolled
   to show a single row keeps the window it last had, so that row can paint
   blank, as the blotter's always could.

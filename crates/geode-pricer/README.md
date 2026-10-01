@@ -111,6 +111,12 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   `grid::find_targets` — every row the grid would paint with every group
   open, in rollup preorder, keyed as those rows' `search` — and a match
   opens its groups (`land_on_node`).
+- A fuzzy `/` builds an all-open `GridIndex` once per open (tree labels and
+  search text only) and paints its measure cells from `delegate::FindPaint`:
+  a `RowCache` of the rows the find table reports, formatted there through
+  `CellPass` over the tile's live sheet. Once the tile installs another
+  index, the next report drops every cell and the measure columns paint blank
+  rather than read through a stale index.
 - `row_at` / `anchor_row` resolve a line painted exactly once to that row
   (`only_row`) wherever it now paints, so an edit or a delivery that changes
   the grouped value keeps the cursor and a `V` anchor on the line; only a

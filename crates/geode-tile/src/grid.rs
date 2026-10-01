@@ -7,11 +7,14 @@
 //! row still in view. [`WindowRequest`] remembers the range the table last
 //! asked for: the pinned gpui-component 0.6.2 table reports a range only
 //! when it changes and never one of length zero or one, so after an
-//! invalidation the module refills the recorded range itself.
+//! invalidation the module refills the recorded range itself. A fuzzy
+//! `/` result table shows a ranking, not a range: its module keeps a
+//! [`RowCache`] of the rows the find table reports instead.
 //!
 //! Pure: no element, entity or window. The cell type stays each module's
 //! own; colors stay resolved at paint, so a theme change never invalidates.
 
+use std::collections::HashMap;
 use std::ops::Range;
 
 /// Rows a window prepares before its table has reported any range. A grid
@@ -114,6 +117,88 @@ impl<C> WindowCache<C> {
             return;
         };
         self.cells[i * self.cols + col] = fill();
+    }
+}
+
+/// Prepared cells for a set of rows that need not be contiguous, keyed by
+/// document row: what a fuzzy `/` result table shows, whose rows are a
+/// ranking rather than a range. [`RowCache::set_rows`] keeps the rows still
+/// reported, prepares the rows entering and drops the rest, so the cache
+/// holds one screenful however far the results scroll. A row it does not
+/// hold reads as `None`, which paints blank.
+#[derive(Debug, Clone)]
+pub struct RowCache<C> {
+    cols: usize,
+    rows: HashMap<usize, Box<[Option<C>]>>,
+    /// The previous report's map, reused by the next, so a steady scroll
+    /// allocates no map once the report has reached its size.
+    spare: HashMap<usize, Box<[Option<C>]>>,
+}
+
+impl<C> Default for RowCache<C> {
+    fn default() -> Self {
+        RowCache {
+            cols: 0,
+            rows: HashMap::new(),
+            spare: HashMap::new(),
+        }
+    }
+}
+
+impl<C> RowCache<C> {
+    /// Hold exactly `rows`, `cols` cells a row. A row already held keeps
+    /// its cells; `fill(row, col)` runs only for rows entering. A different
+    /// `cols` clears the cache first, so a cell prepared for another column
+    /// layout is never shown. A row repeated in `rows` is prepared once.
+    pub fn set_rows(
+        &mut self,
+        rows: &[usize],
+        cols: usize,
+        mut fill: impl FnMut(usize, usize) -> Option<C>,
+    ) {
+        if cols != self.cols {
+            self.rows.clear();
+            self.cols = cols;
+        }
+        let mut next = std::mem::take(&mut self.spare);
+        next.clear();
+        for &r in rows {
+            if next.contains_key(&r) {
+                continue;
+            }
+            let cells = self
+                .rows
+                .remove(&r)
+                .unwrap_or_else(|| (0..cols).map(|c| fill(r, c)).collect());
+            next.insert(r, cells);
+        }
+        self.spare = std::mem::replace(&mut self.rows, next);
+        self.spare.clear();
+    }
+
+    /// The prepared cell at (`row`, `col`); `None` for a blank cell and for
+    /// any row the last report did not hold.
+    pub fn get(&self, row: usize, col: usize) -> Option<&C> {
+        self.rows.get(&row)?.get(col)?.as_ref()
+    }
+
+    /// Whether `row` is held.
+    pub fn contains(&self, row: usize) -> bool {
+        self.rows.contains_key(&row)
+    }
+
+    /// How many rows are held.
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    /// Drop every row.
+    pub fn clear(&mut self) {
+        self.rows.clear();
     }
 }
 
@@ -386,5 +471,35 @@ mod tests {
         }
         assert_eq!(w.get(9, 0).map(String::as_str), Some("new90"));
         assert_eq!(w.window(), 0..10);
+    }
+
+    #[test]
+    fn a_row_cache_keeps_reported_rows_fills_entering_ones_and_drops_the_rest() {
+        let mut w = RowCache::default();
+        let filled = std::cell::RefCell::new(Vec::new());
+        let fill = |r: usize, c: usize| {
+            filled.borrow_mut().push((r, c));
+            text(r, c)
+        };
+        w.set_rows(&[7, 3, 90], 2, fill);
+        assert_eq!(filled.borrow().len(), 6);
+        assert_eq!(w.len(), 3);
+        filled.borrow_mut().clear();
+        w.set_rows(&[3, 4, 3], 2, fill);
+        assert_eq!(
+            *filled.borrow(),
+            vec![(4, 0), (4, 1)],
+            "3 kept, 4 entered once"
+        );
+        assert_eq!(w.len(), 2, "7 and 90 dropped");
+        assert_eq!(w.get(7, 0), None);
+        assert!(!w.contains(90));
+        assert_eq!(w.get(3, 1).map(String::as_str), Some("r3c1"));
+        assert_eq!(w.get(4, 2), None, "past the last column");
+        filled.borrow_mut().clear();
+        w.set_rows(&[3], 1, fill);
+        assert_eq!(*filled.borrow(), vec![(3, 0)], "a new width refills");
+        w.clear();
+        assert!(w.is_empty());
     }
 }

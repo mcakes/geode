@@ -913,6 +913,9 @@ pub mod recording {
         Launched(TileId),
         /// `autosize_columns(reset)` reached this tile.
         Autosize(TileId, bool),
+        /// The `/` result table reported these source rows as shown
+        /// ([`RecordingFactory::find_table`]).
+        FindRows(TileId, Vec<usize>),
     }
 
     pub struct RecordingFactory {
@@ -979,6 +982,10 @@ pub mod recording {
         /// When set, every occupant publishes `grid`, standing in for a grid
         /// tile so a shell test can prove the shared motions reach it.
         pub grid: bool,
+        /// When set, `/` installs a one-column result table (`set_table`)
+        /// that the occupant's view paints, and logs each row report as
+        /// [`Recorded::FindRows`] — a module that formats only shown rows.
+        pub find_table: bool,
     }
 
     impl RecordingFactory {
@@ -998,6 +1005,7 @@ pub mod recording {
                 tile_columns: Rc::new(RefCell::new(None)),
                 edit_on_launch: false,
                 grid: false,
+                find_table: false,
             }
         }
     }
@@ -1016,16 +1024,24 @@ pub mod recording {
         /// sits on the dispatch path a keystroke bubbles up through the
         /// shell's own root listener.
         input: Option<Entity<InputState>>,
+        /// The `/` results a table-hosting occupant paints in its body.
+        find: Option<gpui::WeakEntity<crate::fuzzyfind::FuzzyFind>>,
     }
 
     impl Render for RecordingView {
-        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let find = self
+                .find
+                .as_ref()
+                .and_then(|f| f.upgrade())
+                .filter(|f| f.read(cx).is_active());
             div()
                 .size_full()
                 .track_focus(&self.focus)
                 .debug_selector(|| format!("tile-content-{}", self.tile.0))
                 .child(format!("rec {}", self.tile.0))
                 .children(self.input.as_ref().map(Input::new))
+                .children(find)
         }
     }
 
@@ -1066,6 +1082,8 @@ pub mod recording {
         edit_on_launch: bool,
         /// Shared with [`RecordingFactory::grid`].
         grid: bool,
+        /// Shared with [`RecordingFactory::find_table`].
+        find_table: bool,
     }
 
     impl TileContent for RecordingContent {
@@ -1162,9 +1180,36 @@ pub mod recording {
         fn start_fuzzy_find(
             &self,
             results: gpui::WeakEntity<crate::fuzzyfind::FuzzyFind>,
-            _: &mut Window,
+            window: &mut Window,
             cx: &mut App,
         ) -> bool {
+            if self.find_table {
+                let labels = Rc::new(self.completions.clone());
+                let log = self.log.clone();
+                let tile = self.tile;
+                let _ = results.update(cx, |results, cx| {
+                    results.set_table(
+                        vec![gpui_component::table::Column::new("label", "Label")],
+                        |_, _, _| div().child("Label").into_any_element(),
+                        move |row, _, _| {
+                            div()
+                                .child(labels[row.source_row()].clone())
+                                .into_any_element()
+                        },
+                        move |rows, _| {
+                            log.borrow_mut()
+                                .push(Recorded::FindRows(tile, rows.to_vec()))
+                        },
+                        window,
+                        cx,
+                    )
+                });
+                let find = results.clone();
+                self.view.update(cx, |view, cx| {
+                    view.find = Some(find);
+                    cx.notify();
+                });
+            }
             let items = self
                 .completions
                 .iter()
@@ -1368,6 +1413,7 @@ pub mod recording {
                 tile,
                 focus,
                 input: None,
+                find: None,
             });
             TileOccupant {
                 kind: self.kind,
@@ -1387,6 +1433,7 @@ pub mod recording {
                     tile_columns: self.tile_columns.clone(),
                     edit_on_launch: self.edit_on_launch,
                     grid: self.grid,
+                    find_table: self.find_table,
                 }),
             }
         }
