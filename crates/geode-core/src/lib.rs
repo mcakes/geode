@@ -21,6 +21,7 @@ pub mod named;
 pub mod nudge;
 pub mod panel;
 pub mod panic;
+pub mod positions;
 pub mod pricing;
 pub mod query;
 pub mod schema;
