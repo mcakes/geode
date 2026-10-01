@@ -3,7 +3,7 @@
 //! rows and aggregates; render reads cached text, glyphs, and selection state.
 //! Theme and gutter presentation use separate memos to avoid repeated work.
 
-use crate::core::cache::{FormatCache, cell};
+use crate::core::cache::{CachedCell, cell};
 use crate::core::cursor::{Cursor, find_by_path, restore_by_path};
 use crate::core::expansion::{depth_bound, path_of};
 use crate::core::flatten::{SortOrder, SortSpec, flatten};
@@ -23,6 +23,7 @@ use geode_shell::shell::aggregates::{AggregateCell, CellPaint};
 use geode_shell::shell::colours::{anchors_from_theme, theme_signature, tokens_from_theme};
 use geode_shell::shell::control::{self, PointerStates as _};
 use geode_tile::colour::{ColourCache, Resolved as ColourResolved};
+use geode_tile::grid::{WindowCache, WindowRequest};
 use gpui::prelude::*;
 use gpui::{
     App, ClickEvent, Context, Div, EventEmitter, Hsla, IntoElement, MouseButton, MouseDownEvent,
@@ -138,7 +139,7 @@ pub struct BlotterDelegate {
     /// this is what lets the tile tell the trader why, rather than
     /// leaving a bare reorder for them to puzzle out.
     pub dropped_sort: Option<String>,
-    pub cache: FormatCache,
+    pub cache: WindowCache<CachedCell>,
     pub narrowed: Option<Vec<usize>>,
     pub unplaced: usize,
     /// Whether any painted cell carried the dagger, for the footer.
@@ -146,8 +147,9 @@ pub struct BlotterDelegate {
     pub semi_joined: Vec<String>,
     /// Last window requested by the table, retained even when fewer rows
     /// remain. Invalidation refills this range because an unchanged numeric
-    /// range may produce no table callback; see `invalidate_cells`.
-    requested_window: Range<usize>,
+    /// range may produce no table callback; see `invalidate_cells`. No first
+    /// window: before the table reports, nothing is filled.
+    requested: WindowRequest,
     /// The tree column's disclosure glyph for each *shown* row in
     /// `cache`'s current window, aligned index-for-index with it
     /// (`glyphs[i]` is `cache.window().start + i`) — resolved once per
@@ -337,12 +339,12 @@ impl BlotterDelegate {
             anchor_hint: 0,
             sort: None,
             dropped_sort: None,
-            cache: FormatCache::default(),
+            cache: WindowCache::default(),
             narrowed: None,
             unplaced: 0,
             any_determined: false,
             semi_joined: Vec::new(),
-            requested_window: 0..0,
+            requested: WindowRequest::default(),
             glyphs: Vec::new(),
             line_numbers: LineNumbers::Off,
             numbers: Vec::new(),
@@ -853,20 +855,17 @@ impl BlotterDelegate {
     /// regrouping, narrowing, or moving columns may leave that range equal,
     /// so waiting for another callback would leave cells blank indefinitely.
     ///
-    /// Refill `requested_window`, not the cache's clamped range: the pinned
+    /// Refill `requested`, not the cache's clamped range: the pinned
     /// `TableState::update_visible_range_if_need` does not record ranges of
     /// length zero or one. When rows return, its recorded range may still
     /// match, producing no callback. `fill_window` preserves the original
     /// request so the cache can widen again without a new table event.
     fn invalidate_cells(&mut self) {
-        let w = self.requested_window.clone();
-        self.cache.invalidate();
+        let w = self.requested.refill_range(self.shown.len());
+        self.cache.clear();
         self.glyphs.clear();
-        if !w.is_empty() {
-            let end = w.end.min(self.shown.len());
-            if w.start < end {
-                self.fill_window(w.start..end);
-            }
+        if let Some(w) = w {
+            self.fill_window(w);
         }
     }
 
@@ -997,14 +996,14 @@ impl BlotterDelegate {
     /// Invalidation refills through `fill_window` without changing this
     /// request, even when fewer rows are temporarily available.
     pub fn refill_window(&mut self, window: Range<usize>) {
-        self.requested_window = window.clone();
+        self.requested.record(window.clone());
         self.fill_window(window);
     }
 
     /// Fill the cache for a window of *shown* rows, without recording it
     /// as the requested window — used only by `invalidate_cells`'s own
     /// (possibly clamped-down) refill, so that refill can never shrink
-    /// `requested_window` itself.
+    /// `requested` itself.
     fn fill_window(&mut self, window: Range<usize>) {
         let (Some(snapshot), Some(plan)) = (&self.snapshot, &self.plan) else {
             return;
@@ -1820,7 +1819,7 @@ mod tests {
         assert!(d.cache.get(5, 0).is_some(), "sanity: row 5 is cached");
         // The table shrinks to one row: `TableState` never records the
         // new range (`len() <= 1`), so no `visible_rows_changed` follows
-        // — `requested_window` stays `0..10` throughout.
+        // — `requested` stays `0..10` throughout.
         d.apply_snapshot(snapshot_with_rows(1), &flat_view(), &flat_grouping());
         // Rows return. `TableState` sees the same range it last recorded
         // and does not call `visible_rows_changed`. `invalidate_cells`
@@ -2172,7 +2171,7 @@ mod tests {
     fn any_determined_reflects_the_whole_window_not_just_newly_entered_rows() {
         // A determined cell that stays cached across a scroll must keep
         // `any_determined` true even when nothing newly entered is
-        // itself determined — `FormatCache::set_window` keeps
+        // itself determined — `WindowCache::set_window` keeps
         // overlapping rows without re-invoking the fill closure, so a
         // delta-only computation (only rows the closure actually ran
         // for) would wrongly drop the flag.

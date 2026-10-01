@@ -1,13 +1,12 @@
-//! Formatted cell text and display metadata for a visible row window.
-//! The delegate fills this cache on window changes and snapshot delivery,
-//! outside `render_td`. Overlapping rows are reused until invalidated;
-//! callers must invalidate when the snapshot, row order, or plan changes.
+//! The blotter's cell formatter and the cell it prepares. The delegate
+//! fills a `geode_tile::grid::WindowCache<CachedCell>` with these for the
+//! window the table reports and on snapshot delivery, outside `render_td`;
+//! callers invalidate when the snapshot, row order or plan changes.
 
 use crate::core::format::{Sign, format_number};
 use crate::core::plan::{ColumnKind, ColumnPlan};
 use geode_core::attribution::Attribution;
 use geode_core::snapshot::Snapshot;
-use std::ops::Range;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,53 +25,6 @@ pub struct CachedCell {
 /// (the compiler's unanimity rule). A word rather than a glyph: it is read
 /// as text, and it must not look like a value or like a blank.
 pub const MIXED: &str = "mixed";
-
-#[derive(Debug, Default)]
-pub struct FormatCache {
-    start: usize,
-    cols: usize,
-    /// `rows[i]` is visible row `start + i`; each holds `cols` cells.
-    rows: Vec<Vec<Option<CachedCell>>>,
-}
-
-impl FormatCache {
-    pub fn invalidate(&mut self) {
-        self.rows.clear();
-    }
-
-    pub fn window(&self) -> Range<usize> {
-        self.start..self.start + self.rows.len()
-    }
-
-    /// Move the window, keeping overlapping rows and filling the rest.
-    pub fn set_window(
-        &mut self,
-        window: Range<usize>,
-        cols: usize,
-        mut fill: impl FnMut(usize, usize) -> Option<CachedCell>,
-    ) {
-        if cols != self.cols {
-            self.rows.clear();
-            self.cols = cols;
-        }
-        let old = self.window();
-        let mut rows: Vec<Vec<Option<CachedCell>>> = Vec::with_capacity(window.len());
-        for r in window.clone() {
-            if old.contains(&r) {
-                rows.push(std::mem::take(&mut self.rows[r - old.start]));
-            } else {
-                rows.push((0..cols).map(|c| fill(r, c)).collect());
-            }
-        }
-        self.start = window.start;
-        self.rows = rows;
-    }
-
-    pub fn get(&self, row: usize, col: usize) -> Option<&CachedCell> {
-        let i = row.checked_sub(self.start)?;
-        self.rows.get(i)?.get(col)?.as_ref()
-    }
-}
 
 /// Format one snapshot cell for display. Missing columns and NULL values
 /// return `None`. In particular, compiler-supplied NULL for a
@@ -150,7 +102,7 @@ mod tests {
 
     #[test]
     fn a_window_move_refills_only_the_rows_that_entered() {
-        let mut c = FormatCache::default();
+        let mut c = geode_tile::grid::WindowCache::<CachedCell>::default();
         let fills = Cell::new(0);
         let fill = |r: usize, _c: usize| {
             fills.set(fills.get() + 1);
@@ -168,7 +120,7 @@ mod tests {
         assert_eq!(fills.get(), 30, "five new rows, two columns");
         assert_eq!(c.get(14, 0).map(|x| &*x.text), Some("r14"));
         assert!(c.get(4, 0).is_none(), "left the window");
-        c.invalidate();
+        c.clear();
         assert!(c.get(7, 0).is_none());
         c.set_window(5..15, 2, fill);
         assert_eq!(fills.get(), 50, "everything refilled after invalidation");

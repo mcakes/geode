@@ -96,8 +96,8 @@ changes still rebuild.
 
 ## Cache and allocation contracts
 
-- A blotter formats the visible window into a cache rather than formatting in
-  `render_td`.
+- A blotter formats the visible window into the shared
+  `geode_tile::grid::WindowCache` rather than formatting in `render_td`.
 - A market-data delivery or structural edit builds a `MatrixModel`; an
   ordinary cell commit patches it.
 - `ChartKey` contains everything timeseries chart preparation reads. Cursor

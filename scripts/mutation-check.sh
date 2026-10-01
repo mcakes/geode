@@ -3647,7 +3647,7 @@ run_mutation "cache: a NULL measure is None, never a number" \
   cells_honour_the_read_paths_opinions
 
 run_mutation "cache: a window move keeps overlapping rows" \
-  crates/geode-blotter/src/core/cache.rs \
+  crates/geode-tile/src/grid.rs \
   '            if old.contains(&r) {' \
   '            if false {' \
   geode-blotter \
@@ -4005,25 +4005,23 @@ run_mutation "delegate: apply_snapshot invalidates the cache even without narrow
 
 run_mutation "delegate: invalidate_cells also clears the cached tree glyphs" \
   crates/geode-blotter/src/delegate.rs \
-  '        self.cache.invalidate();
+  '        self.cache.clear();
         self.glyphs.clear();
-        if !w.is_empty() {' \
-  '        self.cache.invalidate();
-        if !w.is_empty() {' \
+        if let Some(w) = w {' \
+  '        self.cache.clear();
+        if let Some(w) = w {' \
   geode-blotter \
   invalidate_cells_clears_stale_glyphs_when_shown_shrinks_past_the_old_window
 
 run_mutation "delegate: invalidate_cells refills the window it had" \
   crates/geode-blotter/src/delegate.rs \
   '        self.glyphs.clear();
-        if !w.is_empty() {
-            let end = w.end.min(self.shown.len());
-            if w.start < end {
-                self.fill_window(w.start..end);
-            }
+        if let Some(w) = w {
+            self.fill_window(w);
         }
     }' \
   '        self.glyphs.clear();
+        let _ = w;
     }' \
   geode-blotter \
   a_regroup_that_keeps_the_window_refills_it_immediately
@@ -4031,9 +4029,9 @@ run_mutation "delegate: invalidate_cells refills the window it had" \
 run_mutation "delegate: invalidate_cells refills the requested window, not the shrunken cache window" \
   crates/geode-blotter/src/delegate.rs \
   '    fn invalidate_cells(&mut self) {
-        let w = self.requested_window.clone();' \
+        let w = self.requested.refill_range(self.shown.len());' \
   '    fn invalidate_cells(&mut self) {
-        let w = self.cache.window();' \
+        let w = { let c = self.cache.window(); let end = c.end.min(self.shown.len()); (c.start < end).then_some(c.start..end) };' \
   geode-blotter \
   a_window_shrunk_by_an_empty_snapshot_grows_back_when_rows_return
 

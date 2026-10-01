@@ -166,7 +166,7 @@ default widths. Each tile runs one method for both doors.
 - **What is measured.** Market data measures every row of its prepared
   model. The pricer measures every visible grid row, so the legs of a
   collapsed package are not measured. The blotter measures only the header
-  and the rows in its format cache, which holds the window the table last
+  and the rows in its window cache, which holds the window the table last
   asked to see. Formatting a whole snapshot would break the UI budget, so a
   wider value in a row that was never on screen does not widen its column.
 - **Nothing to fit.** When there are no rows to measure, `:autosize` refuses
@@ -239,8 +239,8 @@ follows the frame again at once. The pin is saved as `pinned` or
 The `DataTable` delegate paints a prepared row model. Rendering does not
 recompile columns or format the whole dataset. Each delivered snapshot builds
 a candidate column plan so presentation changes are recognized even when the
-column names and indices are unchanged. The format cache holds the visible
-window; named colors reuse resolved base and sign variants until their
+column names and indices are unchanged. The shared window cache holds the
+visible window; named colors reuse resolved base and sign variants until their
 definitions or theme inputs change.
 
 Publication watches are scoped to the datasets the view reads. Global frame
