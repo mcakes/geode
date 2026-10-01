@@ -517,6 +517,18 @@ pub(crate) fn snapshot_of_at(
     doc: &geode_core::document::DocumentRows,
     as_of: &str,
 ) -> Snapshot {
+    snapshot_of_nulled(spec, doc, as_of, &[])
+}
+
+/// [`snapshot_of_at`] with the value column named in each `(column, row)`
+/// of `nulls` NULL on that row — a document value the store holds as NULL,
+/// which a `DocumentRows` cannot carry.
+pub(crate) fn snapshot_of_nulled(
+    spec: &PanelSpec,
+    doc: &geode_core::document::DocumentRows,
+    as_of: &str,
+    nulls: &[(&str, usize)],
+) -> Snapshot {
     use geode_core::document::{Column, Value};
     let n = doc.rows();
     let column = |col: &Column| match col {
@@ -540,11 +552,18 @@ pub(crate) fn snapshot_of_at(
             .iter()
             .map(|(name, col)| (meta(name, Attribution::Additive), column(col))),
     );
-    columns.extend(
-        doc.values
-            .iter()
-            .map(|(name, col)| (meta(name, Attribution::DeterminedNonAdditive), column(col))),
-    );
+    columns.extend(doc.values.iter().map(|(name, col)| {
+        let mut col = column(col);
+        for (_, row) in nulls.iter().filter(|(c, _)| c == name) {
+            match &mut col {
+                TestColumn::F64(v) => v[*row] = None,
+                TestColumn::Dict(v) => v[*row] = None,
+                TestColumn::Date(v) => v[*row] = None,
+                _ => panic!("no NULL for this fixture column"),
+            }
+        }
+        (meta(name, Attribution::DeterminedNonAdditive), col)
+    }));
     columns.extend(
         doc.attributes
             .iter()

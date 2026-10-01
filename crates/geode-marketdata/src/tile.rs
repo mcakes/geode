@@ -1709,6 +1709,12 @@ impl MarketDataTile {
 
     // ---- the model ---------------------------------------------------
 
+    /// The draft the installed index is painted with — what the delegate
+    /// fills its window from when the table reports a new range.
+    pub(crate) fn painted_draft(&self) -> &Draft {
+        &self.draft
+    }
+
     /// The snapshot on screen: the draft's own base generation while one
     /// is retained, else the newest delivered.
     fn painted_snapshot(&self) -> Option<Arc<Snapshot>> {
@@ -1759,9 +1765,10 @@ impl MarketDataTile {
     }
 
     /// Share the current index with the delegate, then refresh cached columns
-    /// and headers, refill the window and drop find's search text before
-    /// synchronizing the cursor. An index swap can change the node ladder or
-    /// gutter width; replacing only the delegate's index would leave
+    /// and headers, refill the window over the range the table last reported
+    /// (an unchanged range is never re-reported) and drop find's search text
+    /// before synchronizing the cursor. An index swap can change the node
+    /// ladder or gutter width; replacing only the delegate's index would leave
     /// TableState painting stale headers and widths. Sharing the index clones
     /// its Rc.
     fn install_model(&mut self, cx: &mut Context<Self>) {
@@ -1770,7 +1777,7 @@ impl MarketDataTile {
         self.table.update(cx, |t, cx| {
             t.delegate_mut().model = model;
             t.refresh(cx);
-            t.delegate_mut().fill_whole(draft);
+            t.delegate_mut().refill_window(draft);
         });
         self.search_text = None;
         self.sync_cursor(cx);
@@ -4200,8 +4207,9 @@ impl MarketDataTile {
         }
     }
 
-    /// Fit every column to its header and every row's prepared text
-    /// (`reset`: drop the fitted widths), then refresh so the table
+    /// Fit every column to its header and the prepared text of the rows in
+    /// the window — what the table last showed (`reset`: drop the fitted
+    /// widths), then refresh so the table
     /// re-reads `column()`. The one route behind both `:autosize` and the
     /// shell's `tile::autosize_columns`; measured on the UI thread at the
     /// window's current rem, never in render. The widths persist in the
@@ -5142,6 +5150,17 @@ mod tests {
 
     /// [`document_of`] over a caller-supplied provenance.
     fn document_with(terms: &[&str], nodes: &[f64], provenance: Provenance) -> Snapshot {
+        document_forward(terms, nodes, provenance, 4500.0)
+    }
+
+    /// [`document_with`] with the first term's `forward` at `forward`
+    /// (later terms keep their `+ 10` per term step from it).
+    fn document_forward(
+        terms: &[&str],
+        nodes: &[f64],
+        provenance: Provenance,
+        forward: f64,
+    ) -> Snapshot {
         let mut cells: Vec<(String, f64, f64)> = Vec::new();
         let mut slices: Vec<(f64, f64, f64)> = Vec::new();
         for (t, term) in terms.iter().enumerate() {
@@ -5149,7 +5168,7 @@ mod tests {
                 let i = cells.len() + 1;
                 cells.push(((*term).to_string(), *node, i as f64 / 10.0));
                 slices.push((
-                    4500.0 + 10.0 * t as f64,
+                    forward + 10.0 * t as f64,
                     0.18 + 0.01 * t as f64,
                     -1.0 - 0.1 * t as f64,
                 ));
@@ -5202,6 +5221,11 @@ mod tests {
 
     fn cvi(as_of: &str) -> Snapshot {
         document_of(&TERMS, &NODES, as_of)
+    }
+
+    /// [`cvi`] with the first term's forward at `forward`.
+    fn cvi_with_forward(as_of: &str, forward: f64) -> Snapshot {
+        document_forward(&TERMS, &NODES, provenance(as_of), forward)
     }
 
     /// [`cvi`] as the data tier delivers it for a HISTORICAL request:
@@ -5606,25 +5630,35 @@ mod tests {
         fn header_texts(&self, vcx: &gpui::VisualTestContext) -> Vec<String> {
             self.tile.read_with(vcx, |t, _| t.header_texts())
         }
-        /// One cell as painted: its text and whether it reads as an edit.
+        /// One cell as a reader sees it: its text and whether it reads as
+        /// an edit. Read on demand, and checked against the painted window
+        /// whenever the cell is in it.
         fn cell(&self, vcx: &gpui::VisualTestContext, row: usize, col: usize) -> (String, bool) {
-            self.tile.read_with(vcx, |t, _| {
+            self.tile.read_with(vcx, |t, cx| {
+                assert_window_paints(t, cx, row, col);
                 let c = t.cell_at(row, col);
                 (c.text.to_string(), c.edited)
             })
         }
-        /// Every cell's text along one row, and down one column.
+        /// Every cell's text along one row, and down one column, each
+        /// checked against the window as [`Self::cell`] is.
         fn row_texts(&self, vcx: &gpui::VisualTestContext, row: usize) -> Vec<String> {
-            self.tile.read_with(vcx, |t, _| {
+            self.tile.read_with(vcx, |t, cx| {
                 (0..t.model().columns.len())
-                    .map(|c| t.model().format_cell(t.draft(), row, c).to_string())
+                    .map(|c| {
+                        assert_window_paints(t, cx, row, c);
+                        t.model().format_cell(t.draft(), row, c).to_string()
+                    })
                     .collect()
             })
         }
         fn col_texts(&self, vcx: &gpui::VisualTestContext, col: usize) -> Vec<String> {
-            self.tile.read_with(vcx, |t, _| {
+            self.tile.read_with(vcx, |t, cx| {
                 (0..t.model().len())
-                    .map(|r| t.model().format_cell(t.draft(), r, col).to_string())
+                    .map(|r| {
+                        assert_window_paints(t, cx, r, col);
+                        t.model().format_cell(t.draft(), r, col).to_string()
+                    })
                     .collect()
             })
         }
@@ -5727,6 +5761,21 @@ mod tests {
                 })
             })
         }
+    }
+
+    /// The window paints what a reader sees: inside the window's rows the
+    /// prepared cell equals the one prepared on demand from the live index
+    /// and draft. Rows off screen are not prepared and not checked.
+    fn assert_window_paints(t: &MarketDataTile, cx: &App, row: usize, col: usize) {
+        let window = &t.table().read(cx).delegate().window;
+        if !window.window().contains(&row) {
+            return;
+        }
+        assert_eq!(
+            window.get(row, col),
+            t.model().md_cell(t.draft(), row, col).as_ref(),
+            "the painted cell ({row}, {col}) is stale"
+        );
     }
 
     fn draw(vcx: &mut gpui::VisualTestContext) {
@@ -13380,6 +13429,101 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert_eq!(width_of_column(&h2, &vcx2, "status"), fitted);
         assert_eq!(width_of_column(&h2, &vcx2, "amount"), default_amount);
         assert_eq!(h2.headers(&vcx2).len(), h.headers(&vcx).len());
+    }
+
+    // ---- The window follows the table -------------------------------
+
+    /// `n` schedule rows with distinct labels `D{i}` and dates, amount `i`.
+    fn schedule_rows(n: usize) -> Vec<(&'static str, &'static str, f64, &'static str)> {
+        (0..n)
+            .map(|i| {
+                let label: &'static str = Box::leak(format!("D{i}").into_boxed_str());
+                let date: &'static str = Box::leak(
+                    format!("{:04}-01-{:02}", 2027 + i / 28, i % 28 + 1).into_boxed_str(),
+                );
+                (label, date, i as f64, "declared")
+            })
+            .collect()
+    }
+
+    fn schedule_of(n: usize) -> Snapshot {
+        test_fixtures::schedule_snapshot(&schedule_rows(n))
+    }
+
+    /// A drawn table fills the window for the rows it shows, and only those.
+    #[gpui::test]
+    fn the_table_report_fills_only_its_range(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_flat(cx);
+        h.with_flat_document_with(&mut vcx, schedule_of(200));
+        draw(&mut vcx);
+        let window = h
+            .tile
+            .read_with(&vcx, |t, cx| t.table().read(cx).delegate().window.window());
+        assert!(window.start == 0 && window.end < 200, "{window:?}");
+        assert!(h.painted(&vcx, 0, 0).is_some());
+        assert_eq!(h.painted(&vcx, 199, 0), None, "off screen is not prepared");
+    }
+
+    /// A redelivery that leaves the reported range unchanged still repaints:
+    /// the install refills the recorded range itself.
+    #[gpui::test]
+    fn a_redelivery_in_an_unchanged_range_repaints_the_window(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        let tag = h.with_document_tagged(&mut vcx);
+        draw(&mut vcx);
+        let before = h.painted(&vcx, 0, 0);
+        h.deliver(&mut vcx, tag, Arc::new(cvi_with_forward(NEWER, 4600.0)));
+        assert_ne!(h.painted(&vcx, 0, 0), before);
+        assert_eq!(h.painted(&vcx, 0, 0).as_deref(), Some("4600.00"));
+    }
+
+    /// One row: the table never reports a range of length one, and the
+    /// first window still paints it.
+    #[gpui::test]
+    fn a_one_row_document_paints_without_a_table_report(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_flat(cx);
+        h.with_flat_document_with(
+            &mut vcx,
+            test_fixtures::schedule_snapshot(&[("D1", "2026-12-18", 1.25, "declared")]),
+        );
+        draw(&mut vcx);
+        assert!(h.painted(&vcx, 0, 0).is_some());
+    }
+
+    /// An open editor paints in its cell even when the window lacks that
+    /// cell. The first draw records the table's range, so the second one
+    /// (same range) brings no report that would refill the cleared window.
+    #[gpui::test]
+    fn the_editor_paints_on_a_cell_the_window_lacks(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "edit", None);
+        draw(&mut vcx);
+        h.tile.update(&mut vcx, |t, cx| {
+            t.table().update(cx, |t, _| t.delegate_mut().window.clear())
+        });
+        draw(&mut vcx);
+        assert_eq!(h.painted(&vcx, 0, 0), None, "the window lacks the cell");
+        assert!(
+            vcx.debug_bounds("marketdata-editor-0-1").is_some(),
+            "the editor still paints"
+        );
+    }
+
+    /// `:autosize` measures the rows on screen: a wider value off screen does not widen.
+    #[gpui::test]
+    fn autosize_measures_the_window_not_the_document(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_flat(cx);
+        let mut doc = schedule_rows(200);
+        doc[199].3 = LONG_STATUS;
+        h.with_flat_document_with(&mut vcx, test_fixtures::schedule_snapshot(&doc));
+        draw(&mut vcx);
+        let default = width_of_column(&h, &vcx, "status");
+        h.command(&mut vcx, "autosize").unwrap();
+        assert!(
+            width_of_column(&h, &vcx, "status") < default + 1.0,
+            "the long status is off screen"
+        );
     }
 
     // ---- Row insertion and deletion ----------------------------------

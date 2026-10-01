@@ -27584,6 +27584,30 @@ run_mutation "grid-window: md yank col formats every row" \
   '                    Yank::Col => (0..self.model.len().min(geode_tile::grid::FIRST_WINDOW))' \
   geode-marketdata yank_col_includes_rows_off_screen
 
+run_mutation "grid-window: md the table report fills its range" \
+  crates/geode-marketdata/src/delegate.rs \
+  '            self.fill_window(visible_range.start..end, tile.read(cx).painted_draft());' \
+  '            let _ = (end, &tile);' \
+  geode-marketdata the_table_report_fills_only_its_range
+
+run_mutation "grid-window: md an install refills the requested range" \
+  crates/geode-marketdata/src/tile.rs \
+  '            t.delegate_mut().refill_window(draft);' \
+  '            let _ = draft;' \
+  geode-marketdata a_redelivery_in_an_unchanged_range_repaints_the_window
+
+run_mutation "grid-window: md an editor paints on a window miss" \
+  crates/geode-marketdata/src/delegate.rs \
+  '        let cell = self.window.get(row_ix, model_col);' \
+  $'        let Some(cell) = self.window.get(row_ix, model_col).map(Some) else {\n            return el;\n        };' \
+  geode-marketdata the_editor_paints_on_a_cell_the_window_lacks
+
+run_mutation "grid-window: md autofit measures the window" \
+  crates/geode-marketdata/src/delegate.rs \
+  '        let rows = self.window.window();' \
+  '        let rows = { let w = self.window.window(); w.start..w.end.min(w.start + 1) };' \
+  geode-marketdata autosize_fits_every_row_survives_a_model_install_and_resets
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

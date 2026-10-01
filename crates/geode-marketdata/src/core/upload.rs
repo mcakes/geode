@@ -462,7 +462,7 @@ mod tests {
     use super::*;
     use crate::core::test_fixtures::{
         BASE, CVI, CVI_NODES, CVI_TERMS, DIVIDEND, at, date, fixture_cvi_rows,
-        fixture_dividend_rows, snapshot_of,
+        fixture_dividend_rows, snapshot_of, snapshot_of_nulled,
     };
     use geode_core::config::{LayerDoc, merge_docs};
     use geode_core::document::{Column, Value};
@@ -974,6 +974,92 @@ role = "attribute"
             assert!(d.set_row_cell("2026-12-18", column, Value::F64(value)));
         }
         case("cvi edit slice delete insert", &CVI, &cvi, &d);
+
+        // A pivot edit on a row an insert above has shifted: 2026-11-20 is
+        // painted at index 2 but its cells keep `cell_ref` row 1.
+        let mut d = Draft::default();
+        d.insert_row("2026-11-01".into(), Some("2026-10-16".into()), &at(BASE));
+        for (column, value) in [
+            ("fwd", 4520.0),
+            ("atm", 0.185),
+            ("skew", -1.05),
+            ("-20", 0.15),
+            ("-1", 0.25),
+            ("3.5", 0.35),
+        ] {
+            assert!(d.set_row_cell("2026-11-01", column, Value::F64(value)));
+        }
+        d.set(
+            (1, 5),
+            ("2026-11-20".into(), "3.5".into()),
+            Value::F64(0.95),
+            &at(BASE),
+        );
+        d.set(
+            (1, 1),
+            ("2026-11-20".into(), "atm".into()),
+            Value::F64(0.21),
+            &at(BASE),
+        );
+        case("cvi edit below an insert", &CVI, &cvi, &d);
+
+        // A top-anchored insert (`after = None`) on each builtin panel, with
+        // an edit on a document row it shifts.
+        let mut d = Draft::default();
+        d.insert_row("2026-09-18".into(), None, &at(BASE));
+        for (column, value) in [
+            ("fwd", 4505.0),
+            ("atm", 0.17),
+            ("skew", -1.2),
+            ("-20", 0.05),
+            ("-1", 0.06),
+            ("3.5", 0.07),
+        ] {
+            assert!(d.set_row_cell("2026-09-18", column, Value::F64(value)));
+        }
+        case("cvi top insert", &CVI, &cvi, &d);
+
+        let mut d = Draft::default();
+        d.insert_row("new-1".into(), None, &at(BASE));
+        for (column, value) in [
+            ("ex", Value::Date(date(2026, 9, 11))),
+            ("announced", Value::Date(date(2026, 7, 1))),
+            ("pay", Value::Date(date(2026, 9, 25))),
+            ("amount", Value::F64(1.1)),
+            ("status", Value::Utf8("paid".into())),
+        ] {
+            assert!(d.set_row_cell("new-1", column, value));
+        }
+        d.set(
+            (1, 3),
+            ("B".into(), "amount".into()),
+            Value::F64(1.4),
+            &at(BASE),
+        );
+        case("dividend top insert", &DIVIDEND, &dividend, &d);
+
+        // A NULL document value: B's announced date. Uploaded as it
+        // stands, then with the draft supplying it.
+        let snapshot = Arc::new(snapshot_of_nulled(
+            &DIVIDEND,
+            &dividend,
+            BASE,
+            &[("announced_date", 1)],
+        ));
+        let null_case = |out: &mut String, name: &str, draft: &Draft| {
+            let model = MatrixIndex::build(&snapshot, &DIVIDEND, draft).unwrap();
+            let sent = assemble(&snapshot, &DIVIDEND, &model, draft);
+            out.push_str(&format!("== {name}\n{sent:?}\n"));
+        };
+        null_case(&mut out, "dividend null value", &Draft::default());
+        let mut d = Draft::default();
+        d.set(
+            (1, 1),
+            ("B".into(), "announced".into()),
+            Value::Date(date(2026, 11, 2)),
+            &at(BASE),
+        );
+        null_case(&mut out, "dividend null value edited", &d);
         out
     }
 

@@ -163,12 +163,14 @@ default widths. Each tile runs one method for both doors.
   to 2.5–40 rem: at least about three characters, and never so wide that one
   long cell pushes the other columns off-screen. The fit runs once on the UI
   thread and never in render.
-- **What is measured.** Market data measures the header and the rows in its
-  window cache, which an install fills over the whole document. The pricer measures every visible grid row, so the legs of a
-  collapsed package are not measured. The blotter measures only the header
-  and the rows in its window cache, which holds the window the table last
-  asked to see. Formatting a whole snapshot would break the UI budget, so a
-  wider value in a row that was never on screen does not widen its column.
+- **What is measured.** The blotter measures only the header and the rows in
+  its window cache, which holds the window the table last asked to see.
+  Formatting a whole snapshot would break the UI budget, so a wider value in a
+  row that was never on screen does not widen its column. Market data measures
+  the rows in its window, as the blotter does: the rows the table last asked
+  to see. A wider value in a row that was never on screen does not widen its
+  column. The pricer measures every visible grid row, so the legs of a
+  collapsed package are not measured.
 - **Nothing to fit.** When there are no rows to measure, `:autosize` refuses
   with "nothing loaded to fit" and keeps the widths it already has. This
   covers a blotter with no snapshot or an empty result, a panel with no
@@ -386,7 +388,9 @@ rows are disabled and the tile answers "not built yet". A refused panel is
 not a tile kind; a saved tile of that kind restores as a placeholder and its
 session record is kept for a later restart. `MatrixIndex` (labels, row states
 and row sources, no cell text) is rebuilt on a delivery, structural edit or
-selection bulk step. A one-cell commit refills that one window cell; editing a
+selection bulk step. The delegate's window holds the rows the table last
+reported, refilled over that range on every install. A one-cell commit refills
+that one window cell; editing a
 Sent draft rebuilds to clear sent styling throughout the grid. Yank, a
 selection's TSV and find format through `MatrixIndex::format_cell` on demand,
 so they include rows off screen.
