@@ -115,8 +115,8 @@ impl ShellView {
     /// An accepted candidate updates shell settings, rebuilds affected frame
     /// state, and advances the frame's config revision. View-related changes
     /// emit `ConfigReloaded` before frame notifications. Source, dataset, egress,
-    /// panels and pricing-adapter differences from startup require a restart;
-    /// returning to those baselines clears the restart message.
+    /// positions, panels, pricing-adapter and vol-model differences from startup
+    /// require a restart; returning to those baselines clears the restart message.
     pub(super) fn apply_reload(&mut self, mut new_config: Config, cx: &mut Context<Self>) {
         let (mod_alias, mod_diags) = mod_alias_from_config(&new_config);
         // Retain compiled module fragments between builtins and desk/user layers.
@@ -210,6 +210,7 @@ impl ShellView {
                 ("sources", &self.sources_baseline),
                 ("datasets", &self.datasets_baseline),
                 ("egress", &self.egress_baseline),
+                ("positions", &self.positions_baseline),
                 ("panels", &self.panels_baseline),
             ]
             .into_iter()

@@ -188,8 +188,9 @@ pub enum ShellEvent {
     /// bridge forwards the new views to the data thread.
     ConfigReloaded,
     /// Restart-sensitive configuration differs from the running data engine:
-    /// sources, datasets, egress targets, or the pricing adapter. Presentation
-    /// changes such as grouping labels can still apply immediately.
+    /// sources, datasets, egress targets, the position service, panels, the
+    /// pricing adapter or the vol model. Presentation changes such as
+    /// grouping labels can still apply immediately.
     RestartRequired(String),
     /// A dimension picker (`shell::picker`) needs distinct values for one
     /// column, scoped by everything except that column's own selection
@@ -678,6 +679,11 @@ pub struct ShellView {
     /// resolved target's transport live, so `egress.toml` is restart-
     /// required exactly as `sources.toml` is.
     egress_baseline: Vec<LayerDoc>,
+    /// Same purpose as [`sources_baseline`](Self::sources_baseline), for
+    /// the `positions` doc: the position service is resolved once at
+    /// startup, so `positions.toml` is restart-required exactly as
+    /// `egress.toml` is.
+    positions_baseline: Vec<LayerDoc>,
     /// Same purpose as [`sources_baseline`](Self::sources_baseline), for
     /// the `panels` doc: panels become tile kinds once at startup, so
     /// `panels.toml` is restart-required.
@@ -1274,6 +1280,7 @@ impl ShellView {
         let sources_baseline = services.config.layered_docs("sources").to_vec();
         let datasets_baseline = services.config.layered_docs("datasets").to_vec();
         let egress_baseline = services.config.layered_docs("egress").to_vec();
+        let positions_baseline = services.config.layered_docs("positions").to_vec();
         let panels_baseline = services
             .config
             .layered_docs(geode_core::panel::PANELS_DOC)
@@ -1354,6 +1361,7 @@ impl ShellView {
             sources_baseline,
             datasets_baseline,
             egress_baseline,
+            positions_baseline,
             panels_baseline,
             pricing_baseline,
             vol_baseline,
