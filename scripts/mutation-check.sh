@@ -20442,14 +20442,34 @@ run_mutation "bridge: data_setup wires the resolved egress list into DataService
   crates/geode-app/src/bridge.rs \
   '            vol,
             egress,
-            positions: None,
+            positions,
         },' \
   '            vol,
             egress: Vec::new(),
+            positions,
+        },' \
+  geode-app \
+  the_demo_layer_produces_a_servable_data_setup
+
+# Pass the resolved position service into data_setup. None silently leaves
+# every Move LHU refused "no position service configured".
+run_mutation "bridge: data_setup wires the resolved position service into DataServiceConfig" \
+  crates/geode-app/src/bridge.rs \
+  '            egress,
+            positions,
+        },' \
+  '            egress,
             positions: None,
         },' \
   geode-app \
   the_demo_layer_produces_a_servable_data_setup
+
+# The bridge says whether a position service survived resolution.
+run_mutation "bridge: positions_configured always false" \
+  crates/geode-app/src/bridge.rs \
+  '    let positions_configured = setup.config.positions.is_some();' \
+  '    let positions_configured = false;' \
+  geode-app the_bridge_says_whether_a_position_service_is_configured
 
 # Changes to egress.toml require a restart because reload does not rebuild
 # egress workers. This mutation preserves change detection but removes the
@@ -28523,6 +28543,19 @@ run_mutation "command outcome: the drain drops the answer" \
   '                        shell.update(cx, |s, cx| s.note_command(&outcome, cx));' \
   '                        let _ = &outcome;' \
   geode-app a_command_answer_reaches_the_status_notice
+
+# The demo position simulator: all or nothing, and a strictly later sentinel.
+run_mutation "demo positions: an unknown position moves the known ones" \
+  crates/geode-app/src/demo.rs \
+  '        return Err(adapter_error(format!("unknown position {missing}")));' \
+  '        let _ = missing;' \
+  geode-app an_unknown_position_refuses_and_changes_nothing
+
+run_mutation "demo positions: the sentinel is not later" \
+  crates/geode-app/src/demo.rs \
+  '    let as_of = now.max(previous + chrono::Duration::seconds(1));' \
+  '    let as_of = now;' \
+  geode-app the_sentinel_is_strictly_later_even_within_the_same_second
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
