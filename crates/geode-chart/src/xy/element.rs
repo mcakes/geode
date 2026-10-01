@@ -89,10 +89,18 @@ fn fmt_y(v: f64, format: YFormat) -> String {
     }
 }
 
-/// Whether a point's range paints a bar: both ends finite and apart, as
-/// `core::marks::point_marks` asks of them.
+/// Whether a point's range paints a bar on its own: both ends finite and
+/// apart, as `core::marks::point_marks` asks of them.
 fn has_range(lo: f64, hi: f64) -> bool {
     lo.is_finite() && hi.is_finite() && lo != hi
+}
+
+/// Whether a point has a mark, as `core::marks::point_marks` draws it: a
+/// diamond at a finite mid, with or without a bar, or a bar over a range
+/// with no mid. One finite end with no mid has nothing to run to and
+/// paints nothing.
+fn paints(mid: f64, lo: f64, hi: f64) -> bool {
+    mid.is_finite() || has_range(lo, hi)
 }
 
 /// The index among `xs[start..end]` of the x nearest `u`, the lower of two
@@ -113,9 +121,10 @@ fn nearest_within(xs: &[f64], (start, end): (usize, usize), u: f64) -> Option<us
 
 /// One slot's readout at `u`. A line is read between its knots. A points
 /// slot shows the nearest of its points in `window` when that lies within
-/// `tol` of `u`: its mid, then `lo / hi` when it has a range, with a dash
-/// for a mid it does not have. A dash alone when the slot has nothing
-/// there.
+/// `tol` of `u`: `mid  lo / hi`, with a dash in place of a mid or of one
+/// end it does not have, and the mid alone when it has neither end or its
+/// ends meet. A dash alone when the slot has nothing there, or a point
+/// that paints no mark.
 ///
 /// The tooltip passes the slot's view window, so a point just past the
 /// plot's edge, which is not painted, is not read from a cursor at the
@@ -141,19 +150,24 @@ pub(crate) fn readout(
             if !near {
                 return NONE.to_string();
             }
-            let middle = if mid[i].is_finite() {
-                fmt_y(mid[i], format)
-            } else {
-                NONE.to_string()
+            let (m, l, h) = (mid[i], lo[i], hi[i]);
+            if !paints(m, l, h) {
+                return NONE.to_string();
+            }
+            let read = |v: f64| {
+                if v.is_finite() {
+                    fmt_y(v, format)
+                } else {
+                    NONE.to_string()
+                }
             };
-            if has_range(lo[i], hi[i]) {
-                format!(
-                    "{middle}  {} / {}",
-                    fmt_y(lo[i], format),
-                    fmt_y(hi[i], format)
-                )
+            // A quote with one side missing says so: read as its mid
+            // alone it would pass for a quote with no spread.
+            let one_sided = l.is_finite() != h.is_finite();
+            if has_range(l, h) || one_sided {
+                format!("{}  {} / {}", read(m), read(l), read(h))
             } else {
-                middle
+                read(m)
             }
         }
     }
@@ -320,9 +334,9 @@ impl XyElement {
             let x = scale.x_of(xs[i], self.view, plot);
             ((x - cursor_x).abs() <= radius).then_some((i, x))
         };
-        let paints = |(i, _): &(usize, f32)| mid[*i].is_finite() || has_range(lo[*i], hi[*i]);
-        let below = (start..split).rev().map_while(in_reach).find(paints);
-        let above = (split..end).map_while(in_reach).find(paints);
+        let painted = |(i, _): &(usize, f32)| paints(mid[*i], lo[*i], hi[*i]);
+        let below = (start..split).rev().map_while(in_reach).find(painted);
+        let above = (split..end).map_while(in_reach).find(painted);
         [below, above]
             .into_iter()
             .flatten()
@@ -678,6 +692,7 @@ impl Plot for XyElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::Point;
     use crate::core::axis::Axis;
     use crate::paint::{chrome_rebuilds, rebuilds};
     use crate::xy::model::XAxis;
@@ -1896,6 +1911,72 @@ mod tests {
         assert_eq!(read(0.951), "20.00%  19.00% / 21.00%");
         assert_eq!(read(1.05), "—", "nothing to read");
         assert_eq!(read(1.10), "—", "a range of no height is no range");
+    }
+
+    /// Quotes with a side missing, 4 px to 0.001 in [`HOLES_VIEW`] on
+    /// [`WIDE`]: 0.95 has a mid and a low, 1.00 a mid and a high, 1.05 a
+    /// low alone, 1.08 a mid alone, and 1.10 a mid with a low at the mid.
+    fn one_sided() -> Arc<XyModel> {
+        let nan = f64::NAN;
+        let slot = chain_of(
+            1,
+            &[0.95, 1.00, 1.05, 1.08, 1.10],
+            &[0.2, 0.2, nan, 0.2, 0.2],
+            &[0.19, nan, 0.19, nan, 0.2],
+            &[nan, 0.21, nan, nan, nan],
+        );
+        let y_format = [YFormat::Percent; 4];
+        XyModel::new(1, XAxis::default(), y_format, 0.7, vec![slot])
+    }
+
+    #[test]
+    fn a_one_sided_quote_paints_a_half_bar_from_its_mid() {
+        let m = one_sided();
+        let e = XyElement::new(m.clone(), HOLES_VIEW, 12.0, "u");
+        let y = LinearScale::new((0.18, 0.22), WIDE.y, WIDE.bottom());
+        let mut b = Buffers::default();
+        assert!(e.shape(&m.slots[0], WIDE, &y, &mut b).is_some());
+        // A half bar and a diamond at 0.95 and at 1.00, nothing at 1.05,
+        // and a diamond alone at 1.08 and at 1.10.
+        assert_eq!(b.segments.len(), 5 + 5 + 4 + 4, "{:?}", b.segments);
+        let at = |u: f64, v: f64| Point::new(e.scale().x_of(u, HOLES_VIEW, WIDE), y.y(v));
+        assert_eq!(b.segments[0], (at(0.95, 0.2), at(0.95, 0.19)), "down");
+        assert_eq!(b.segments[5], (at(1.00, 0.2), at(1.00, 0.21)), "up");
+    }
+
+    #[test]
+    fn a_one_sided_quote_is_a_snap_candidate_and_a_lone_end_is_not() {
+        let e = XyElement::new(one_sided(), HOLES_VIEW, 12.0, "v");
+        let scale = e.scale();
+        let at = |u: f64| scale.x_of(u, HOLES_VIEW, WIDE);
+        for painted in [0.95, 1.00, 1.08, 1.10] {
+            assert_eq!(
+                e.crosshair_x(at(painted) + 3.0, WIDE),
+                Some((painted, at(painted))),
+                "{painted}"
+            );
+        }
+        // A low with neither a mid nor a high paints nothing.
+        let x = at(1.05) + 3.0;
+        assert_eq!(
+            e.crosshair_x(x, WIDE),
+            Some((scale.value_at(x, HOLES_VIEW, WIDE), x))
+        );
+    }
+
+    #[test]
+    fn a_one_sided_quote_reads_a_dash_for_its_missing_side() {
+        let m = one_sided();
+        let read = |u: f64| read_all(&m.slots[0], u, 1e-6, YFormat::Percent);
+        assert_eq!(read(0.95), "20.00%  19.00% / —");
+        assert_eq!(read(1.00), "20.00%  — / 21.00%");
+        assert_eq!(read(1.05), "—", "an end alone paints nothing and reads so");
+        assert_eq!(read(1.08), "20.00%", "no range at all is the mid alone");
+        assert_eq!(
+            read(1.10),
+            "20.00%  20.00% / —",
+            "the missing side shows though the other has no spread"
+        );
     }
 
     /// One quoted point, so a view with no span.

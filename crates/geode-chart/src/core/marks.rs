@@ -152,11 +152,16 @@ pub fn dash_polyline(points: &[Point], dash: f32, gap: f32, clip: Clip, out: &mu
 }
 
 /// The stroke segments of a points slot, into `out` (cleared first): per
-/// point, a vertical bar from `lo` to `hi` when the range has height, and a
-/// diamond of half-diagonal `r` at `mid`. All inputs are pixels; a
-/// non-finite x skips the point, a non-finite `mid` its diamond, a
-/// non-finite `lo` or `hi` its bar. Only the shared length of the four
-/// slices is read. Returns `(bars, markers)`.
+/// point, a vertical bar and a diamond of half-diagonal `r` at `mid`. The
+/// bar runs from `lo` to `hi` when both are there. With one of them
+/// missing it runs from `mid` to the end that is there, a half bar: drawn
+/// as a diamond alone, a quote with one side missing would look like a
+/// quote with no spread. A bar of no length is not drawn, and an end with
+/// neither a mid nor the other end paints nothing.
+///
+/// All inputs are pixels; a non-finite x skips the point and a non-finite
+/// `mid` its diamond. Only the shared length of the four slices is read.
+/// Returns `(bars, markers)`.
 pub fn point_marks(
     xs: &[f32],
     mid: &[f32],
@@ -173,11 +178,17 @@ pub fn point_marks(
         if !x.is_finite() {
             continue;
         }
-        if lo[i].is_finite() && hi[i].is_finite() && lo[i] != hi[i] {
-            out.push((Point::new(x, lo[i]), Point::new(x, hi[i])));
+        let (m, l, h) = (mid[i], lo[i], hi[i]);
+        let bar = match (l.is_finite(), h.is_finite()) {
+            (true, true) => Some((l, h)),
+            (true, false) if m.is_finite() => Some((m, l)),
+            (false, true) if m.is_finite() => Some((m, h)),
+            _ => None,
+        };
+        if let Some((from, to)) = bar.filter(|(from, to)| from != to) {
+            out.push((Point::new(x, from), Point::new(x, to)));
             bars += 1;
         }
-        let m = mid[i];
         if m.is_finite() {
             let tips = [
                 Point::new(x - r, m),
@@ -645,30 +656,56 @@ mod tests {
         let nan = f32::NAN;
         let mut out = Vec::new();
         // Point 0: no mid, so a bar alone. Point 1: no x, so nothing.
-        // Point 2: no lo, so a diamond alone. Point 3 has no hi entry at all.
+        // Point 2: no lo and no hi, so a diamond alone. Point 3 has no hi
+        // entry at all.
         let (bars, markers) = point_marks(
             &[10.0, nan, 30.0, 40.0],
             &[nan, 50.0, 50.0, 50.0],
             &[55.0, 55.0, nan, 55.0],
-            &[45.0, 45.0, 45.0],
+            &[45.0, 45.0, nan],
             3.0,
             &mut out,
         );
         assert_eq!((bars, markers), (1, 1));
         assert_eq!(out.len(), 1 + 4);
-        assert!(
-            out.iter()
-                .all(|(a, b)| a.x.is_finite() && a.y.is_finite() && b.y.is_finite())
-        );
+        assert!(finite(&out), "{out:?}");
     }
 
     #[test]
-    fn a_nan_hi_skips_the_bar_and_keeps_the_diamond() {
+    fn a_one_sided_quote_is_a_half_bar_from_its_mid() {
+        let nan = f32::NAN;
         let mut out = Vec::new();
-        let (bars, markers) = point_marks(&[10.0], &[50.0], &[55.0], &[f32::NAN], 3.0, &mut out);
+        // A mid and a low alone, then a mid and a high alone.
+        let (bars, markers) = point_marks(
+            &[10.0, 20.0],
+            &[50.0, 50.0],
+            &[55.0, nan],
+            &[nan, 45.0],
+            3.0,
+            &mut out,
+        );
+        assert_eq!((bars, markers), (2, 2));
+        assert_eq!(out.len(), 2 * 5, "five segments a point at most");
+        assert_eq!(out[0], (Point::new(10.0, 50.0), Point::new(10.0, 55.0)));
+        assert_eq!(out[5], (Point::new(20.0, 50.0), Point::new(20.0, 45.0)));
+        assert!(finite(&out), "{out:?}");
+    }
+
+    #[test]
+    fn a_lone_end_at_the_mid_or_without_a_mid_has_no_bar() {
+        let nan = f32::NAN;
+        let mut out = Vec::new();
+        // The one end on the mid's own pixel: a bar of no length.
+        let (bars, markers) = point_marks(&[10.0], &[50.0], &[50.0], &[nan], 3.0, &mut out);
         assert_eq!((bars, markers), (0, 1));
         assert_eq!(out.len(), 4);
-        assert!(finite(&out), "{out:?}");
+        // An end with neither a mid nor the other end has nothing to run
+        // to: no mark at all.
+        for (lo, hi) in [(55.0, nan), (nan, 45.0)] {
+            let (bars, markers) = point_marks(&[10.0], &[nan], &[lo], &[hi], 3.0, &mut out);
+            assert_eq!((bars, markers), (0, 0), "{lo} {hi}");
+            assert!(out.is_empty(), "{out:?}");
+        }
     }
 
     /// How many points a stride keeps, counted the way a painter walks them.

@@ -156,8 +156,12 @@ impl XySlot {
         }
     }
 
-    /// Every y the slot paints within `window`: a line's values, or a
-    /// point's mid, low and high. What the slot's axis scales over.
+    /// Every value the slot holds within `window`: a line's ys, or a
+    /// points slot's mids, lows and highs, finite or not. The slot's axis
+    /// scales over them and ignores those that are not finite. Whether a
+    /// value's point paints a mark is not asked: a low or a high with
+    /// neither a mid nor the other end to run to paints nothing, and its
+    /// value still reaches the axis's domain.
     pub fn values_in(&self, window: (usize, usize)) -> impl Iterator<Item = f64> + '_ {
         let end = window.1.min(self.len());
         let start = window.0.min(end);
