@@ -17,8 +17,8 @@
 //! repeating data-dependent preparation on unchanged paints:
 //!
 //! * `Buffers` caches side scales, y ticks and labels, and x ticks. Its key
-//!   includes model version, view, bounds size and rem. Changing one of
-//!   these inputs derives the chart chrome again.
+//!   includes model version, slot count, view, bounds size and rem.
+//!   Changing one of these inputs derives the chart chrome again.
 //! * [`PathCaches`] caches decimation, dashing and tessellation, one path
 //!   per slot. A key includes model version, slot number, pane, view, plot
 //!   geometry and rem, which sizes the dashes and the markers.
@@ -580,8 +580,11 @@ impl Plot for XyElement {
         // The chrome key: everything the chrome derivation reads. A hit
         // keeps the last frame's ticks, labels and side scales, so the scan
         // of every visible value and the label formatting run on a change
-        // only, never per frame.
-        let chrome_key = ShapeKey::new((self.model.version, self.view.key()))
+        // only, never per frame. The slot count parts the empty model from
+        // a first model that shares its version: served the empty model's
+        // chrome, that model has no scales and paints nothing.
+        let slots = self.model.slots.len();
+        let chrome_key = ShapeKey::new((self.model.version, slots, self.view.key()))
             .f32(bounds.size.width.as_f32())
             .f32(bounds.size.height.as_f32())
             .f32(self.rem_px)
@@ -854,6 +857,90 @@ mod tests {
             "a moved view rebuilds every path once"
         );
         assert_eq!(chrome_rebuilds() - before_chrome, 2);
+    }
+
+    /// The path and chrome rebuilds since `mark`.
+    fn since(mark: (usize, usize)) -> (usize, usize) {
+        (rebuilds() - mark.0, chrome_rebuilds() - mark.1)
+    }
+
+    #[gpui::test]
+    fn a_new_model_version_or_a_resize_rebuilds_every_path_and_the_chrome_once(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (host, mut vcx) = open(cx, fixture(false));
+        draw(&mut vcx);
+        let mark = (rebuilds(), chrome_rebuilds());
+        // What a data delivery is: the same slots and the same view under
+        // the next version.
+        let m = fixture(false);
+        let next = XyModel::new(m.version + 1, m.x, m.y_format, m.split, m.slots.clone());
+        host.update(&mut vcx, |h, cx| {
+            h.model = next;
+            cx.notify();
+        });
+        draw(&mut vcx);
+        assert_eq!(since(mark), (5, 1), "a new version at an unchanged view");
+        // The same model in a window of another width, then another height.
+        let viewport = vcx.update(|window, _| window.viewport_size());
+        let wider = size(viewport.width + px(120.), viewport.height);
+        vcx.simulate_resize(wider);
+        draw(&mut vcx);
+        assert_eq!(since(mark), (10, 2), "an unchanged model, a wider window");
+        vcx.simulate_resize(size(wider.width, wider.height + px(90.)));
+        draw(&mut vcx);
+        assert_eq!(since(mark), (15, 3), "an unchanged model, a taller window");
+        draw(&mut vcx);
+        draw(&mut vcx);
+        assert_eq!(since(mark), (15, 3), "a further unchanged frame");
+    }
+
+    #[gpui::test]
+    fn a_rem_change_alone_re_derives_the_chrome(cx: &mut gpui::TestAppContext) {
+        let (host, mut vcx) = open(cx, fixture(false));
+        draw(&mut vcx);
+        let mark = (rebuilds(), chrome_rebuilds());
+        // The window, the model and the view stay as they are: the tick
+        // gaps and the axis columns are lengths on the rem scale.
+        // The root view sets the window's rem from the theme on every
+        // render, so the theme is where a rem change is made.
+        let rem = vcx.update(|window, _| window.rem_size());
+        vcx.update(|_, cx| gpui_component::Theme::global_mut(cx).font_size = rem + px(4.));
+        host.update(&mut vcx, |_, cx| cx.notify());
+        draw(&mut vcx);
+        assert_eq!(
+            vcx.update(|window, _| window.rem_size()),
+            rem + px(4.),
+            "the rem moved"
+        );
+        assert_eq!(since(mark).1, 1, "the chrome follows the rem");
+        draw(&mut vcx);
+        assert_eq!(since(mark).1, 1, "and then holds");
+    }
+
+    #[gpui::test]
+    fn a_first_model_at_version_zero_does_not_take_the_empty_models_chrome(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // A restored view is in place before any data: the empty model
+        // paints under it, and its chrome has no ticks and no scales.
+        let (host, mut vcx) = open(cx, XyModel::empty());
+        host.update(&mut vcx, |h, cx| {
+            h.view = View::with_min_span((0.8, 1.2), 0.01);
+            cx.notify();
+        });
+        draw(&mut vcx);
+        let mark = (rebuilds(), chrome_rebuilds());
+        // The first real model, from a builder that also counts from zero.
+        let m = fixture(false);
+        let first = XyModel::new(0, m.x, m.y_format, m.split, m.slots.clone());
+        assert_eq!(first.version, XyModel::empty().version);
+        host.update(&mut vcx, |h, cx| {
+            h.model = first;
+            cx.notify();
+        });
+        draw(&mut vcx);
+        assert_eq!(since(mark), (5, 1), "the axes are derived for the slots");
     }
 
     #[gpui::test]

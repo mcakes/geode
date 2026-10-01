@@ -205,7 +205,8 @@ impl XySlot {
 /// Everything one frame of the xy chart paints from.
 #[derive(Debug, Clone, PartialEq)]
 pub struct XyModel {
-    /// Bumped by the builder on every change; the cache key.
+    /// The cache key: 1 or more for a built model, and changed by the
+    /// builder on every change.
     pub version: u64,
     pub x: XAxis,
     /// Indexed in `Axis::ALL` order.
@@ -222,6 +223,12 @@ impl XyModel {
     /// runs through its points in x order). A slot already so is not
     /// copied. The slots are public; one edited after construction must
     /// keep its xs finite and ascending.
+    ///
+    /// A caller's versions start at 1 and change on every change to the
+    /// model, `split` included: [`XyModel::empty`] is version 0, and the
+    /// element's caches tell one model from the next by the version alone.
+    /// A version reused for other contents paints the earlier contents'
+    /// paths and axes.
     pub fn new(
         version: u64,
         x: XAxis,
@@ -253,6 +260,7 @@ impl XyModel {
         })
     }
 
+    /// A model with no slots, at version 0, which no built model takes.
     pub fn empty() -> Arc<Self> {
         Self::new(0, XAxis::default(), [YFormat::Plain; 4], 0.7, Vec::new())
     }
