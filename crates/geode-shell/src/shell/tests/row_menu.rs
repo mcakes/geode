@@ -790,3 +790,45 @@ fn no_or_escape_closes_the_confirm_and_runs_nothing(cx: &mut gpui::TestAppContex
         assert_eq!(m.depth(), 0, "{key}: no dialog left open");
     }
 }
+
+/// A position-service answer, as the app's drain hands it to the shell.
+fn lhu_outcome(count: usize, result: Result<(), String>) -> geode_core::positions::CommandOutcome {
+    geode_core::positions::CommandOutcome {
+        tag: 1,
+        count,
+        lhu: "BK003_LHU2".into(),
+        result,
+    }
+}
+
+fn noted(
+    cx: &mut gpui::TestAppContext,
+    outcome: &geode_core::positions::CommandOutcome,
+) -> Option<String> {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    shell.update(&mut vcx, |s, cx| s.note_command(outcome, cx));
+    shell.read_with(&vcx, |s, _| s.notice.as_ref().map(|n| n.to_string()))
+}
+
+#[gpui::test]
+fn an_accepted_command_reads_accepted(cx: &mut gpui::TestAppContext) {
+    let o = lhu_outcome(3, Ok(()));
+    let expected = geode_core::positions::outcome_notice(&o);
+    assert_eq!(
+        expected,
+        "moving 3 positions to LHU BK003_LHU2 \u{b7} accepted"
+    );
+    assert_eq!(noted(cx, &o), Some(expected));
+}
+
+#[gpui::test]
+fn a_refused_command_reads_refused(cx: &mut gpui::TestAppContext) {
+    let o = lhu_outcome(1, Err("unknown position P99".into()));
+    let expected = geode_core::positions::outcome_notice(&o);
+    assert_eq!(
+        expected,
+        "move to LHU BK003_LHU2 refused: unknown position P99"
+    );
+    assert_eq!(noted(cx, &o), Some(expected));
+}

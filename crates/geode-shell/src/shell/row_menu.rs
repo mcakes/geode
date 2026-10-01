@@ -9,6 +9,7 @@
 use std::rc::Rc;
 
 use geode_core::context::DimensionContext;
+use geode_core::positions::{CommandOutcome, outcome_notice};
 use geode_core::query::{AsOf, DistinctParams};
 use geode_core::scope::Scope;
 use gpui::prelude::*;
@@ -201,6 +202,15 @@ impl ActionCx<'_, '_> {
 }
 
 impl ShellView {
+    /// Show a position-service command's answer as the status notice, in
+    /// the wording the action's `sent` notice shares
+    /// (`geode_core::positions::outcome_notice`). The app's drain calls
+    /// this for every `DataEvent::Command`.
+    pub fn note_command(&mut self, outcome: &CommandOutcome, cx: &mut Context<Self>) {
+        self.notice = Some(outcome_notice(outcome).into());
+        cx.notify();
+    }
+
     /// Run the roster action at `action`'s `chosen` with `value` picked
     /// from its `ActionCx::choose_value`. Nothing when the index names no
     /// action.
