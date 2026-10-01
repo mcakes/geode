@@ -11,6 +11,7 @@
 pub mod core;
 pub mod paint;
 pub mod timeseries;
+pub mod xy;
 
 pub use crate::core::MAX_DENSITY_QUADS;
 pub use crate::core::axis::{Axis, AxisMode, Pane, Side};
