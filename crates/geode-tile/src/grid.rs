@@ -180,9 +180,23 @@ mod tests {
             fills.set(fills.get() + 1);
             text(r, c)
         };
-        w.set_window(0..4, 2, fill);
+        // Narrow first: a kept window read at a smaller stride would show
+        // cells prepared for the wider layout rather than fail outright.
         w.set_window(0..4, 3, fill);
-        assert_eq!(fills.get(), 8 + 12, "every row refilled at the new width");
+        w.set_window(0..4, 2, fill);
+        assert_eq!(
+            fills.get(),
+            12 + 8,
+            "every row refilled at the narrower width"
+        );
+        assert_eq!(w.get(3, 1).map(String::as_str), Some("r3c1"));
+        assert_eq!(w.get(3, 2), None, "the dropped column");
+        w.set_window(0..4, 3, fill);
+        assert_eq!(
+            fills.get(),
+            20 + 12,
+            "every row refilled at the wider width"
+        );
         assert_eq!(w.get(3, 2).map(String::as_str), Some("r3c2"));
         assert_eq!(w.get(0, 0).map(String::as_str), Some("r0c0"));
     }
