@@ -616,7 +616,8 @@ pub struct ShellView {
     /// at the end of every `ensure_occupants`, the same lifecycle
     /// `pending_tiles`/`unplaced_records` follow.
     stack_sent: HashMap<TileId, Option<(usize, usize)>>,
-    /// Status notice, such as a refused stack action's `"not in a stack"`.
+    /// Status notice, such as a refused stack action's `"not in a stack"`
+    /// or a row menu action's report (`opened <url>`).
     /// Cleared at the start of the next dispatch.
     notice: Option<SharedString>,
     /// The transient stack-member list, or
@@ -1743,6 +1744,14 @@ impl ShellView {
     #[cfg(any(test, feature = "test-support"))]
     pub fn open_page_kind_for_test(&self) -> Option<&'static str> {
         self.open_page_kind()
+    }
+
+    /// The status notice's text (painted under `shell-notice`), or `None`
+    /// without one — cross-crate test reach, the same door as `picker()`:
+    /// `geode-app`'s tests read what a row menu action reported.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn notice_for_test(&self) -> Option<SharedString> {
+        self.notice.clone()
     }
 
     /// The configured clock (`AppClock`), for the shell's own painters.

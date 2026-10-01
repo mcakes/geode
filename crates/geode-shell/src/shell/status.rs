@@ -75,7 +75,8 @@ pub fn status_bar(
     reload_message: Option<&str>,
     write_error_message: Option<&str>,
     restart_message: Option<&str>,
-    // Shell action refusal, cleared by the next dispatch.
+    // A shell action's refusal, or its report of what it did (a row menu
+    // action's `opened <url>`); cleared by the next dispatch.
     notice: Option<&str>,
     // Stopped data threads, prepared by `Diagnostics::note_thread_stopped`;
     // None while every data thread lives.
@@ -172,8 +173,8 @@ pub fn status_bar(
         );
     }
     if let Some(message) = notice {
-        // Shell action refusals stay muted and clear on the next dispatch.
-        // One line, ellipsized: a notice can carry dynamic text (a URL)
+        // Notices (refusals and reports) stay muted and clear on the next
+        // dispatch. One line, ellipsized: a notice can carry dynamic text (a URL)
         // longer than the left region has room for.
         bar = bar.left(
             div()

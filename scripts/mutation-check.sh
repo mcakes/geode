@@ -27420,6 +27420,32 @@ run_mutation "nemo: unreserved characters are encoded too" \
   "const ID: &AsciiSet = NON_ALPHANUMERIC;" \
   geode-nemo a_plain_id_is_appended
 
+# Startup registers Nemo's row actions; the bridge's end-to-end tests go
+# through the same `add_dimension_actions`.
+run_mutation "nemo: the actions are never registered" \
+  crates/geode-app/src/main.rs \
+  '        roster.add_action(action);' \
+  '        let _ = action;' \
+  geode-app a_right_press_opens_the_rows_position_in_nemo
+
+# The pressed row is opened, not the selection riding in the context.
+run_mutation "nemo: the selection's first row is opened" \
+  crates/geode-nemo/src/lib.rs \
+  '        let Some(id) = ctx.get(self.column) else {
+            return;
+        };' \
+  '        let Some(id) = ctx.selection.first().and_then(|r| r.iter().find(|(c, _)| c == self.column).map(|(_, v)| v.as_str())).or(ctx.get(self.column)) else {
+            return;
+        };' \
+  geode-app nemo_opens_the_pressed_row_not_the_selection
+
+# The notice says what Geode did, in exactly these words.
+run_mutation "nemo: the notice claims a launch" \
+  crates/geode-nemo/src/lib.rs \
+  '        acx.notice(format!("opened {url}"));' \
+  '        acx.notice(format!("launched {url}"));' \
+  geode-app a_right_press_opens_the_rows_position_in_nemo
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
