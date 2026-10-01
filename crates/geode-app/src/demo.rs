@@ -637,6 +637,123 @@ mod demo_config_integration {
         }
     }
 
+    /// End to end through the real service: the demo layer's `positions.toml`
+    /// resolves `DemoPositions`, `move_lhu` reaches the simulator through the
+    /// position worker and is answered `Ok`, and the demo source's next poll
+    /// ingests the rewritten partition, so the position's LHU is the target
+    /// and only the target (the partition replaced, not added to).
+    #[test]
+    fn a_move_is_ingested_as_the_new_lhu() {
+        use geode_core::positions::MoveLhuParams;
+        use geode_core::query::{DistinctParams, QueryKey};
+        use geode_core::scope::{DimensionSelection, Scope};
+        use geode_data::query::as_of::AsOf;
+        use geode_data::{DataEvent, DataService};
+        use std::sync::mpsc::Receiver;
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().unwrap();
+        let src = ensure_emitted(dir.path(), 100).unwrap();
+        let config = Config::load(&ConfigSources {
+            builtin: layer(&src),
+            ..ConfigSources::default()
+        });
+        let mut adapters = geode_data::adapter::AdapterRegistry::default();
+        let (bus, _feed) = geode_data::adapter::ChannelAdapter::new("demo_bus");
+        adapters.register(bus);
+        adapters.register(std::sync::Arc::new(DemoPositions::new(src.clone())));
+        let setup = crate::bridge::data_setup(
+            &config,
+            dir.path().join("geode.duckdb"),
+            adapters,
+            test_pricers(),
+            test_vol_models(),
+        )
+        .unwrap();
+        assert!(setup.config.positions.is_some());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = DataService::spawn(
+            setup.config,
+            std::sync::Arc::new(move |e| tx.send(e).is_ok()),
+        );
+
+        // A position of one book's file, and an LHU it does not hold.
+        let csv = std::fs::read_dir(&src)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p.to_string_lossy().ends_with("_BK003.csv"))
+            .unwrap();
+        let text = std::fs::read_to_string(csv).unwrap();
+        let mut lines = text.lines();
+        let header: Vec<&str> = lines.next().unwrap().split(',').collect();
+        let at = |name| header.iter().position(|c| *c == name).unwrap();
+        let first: Vec<&str> = lines.next().unwrap().split(',').collect();
+        let p = first[at("PositionRef")].to_string();
+        let target = "BK007_LHU2".to_string();
+        assert_ne!(first[at("LHU")], target);
+
+        // The LHU values ingested for `p`, polled until `done` holds.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut tag = 0;
+        let mut lhus_until = |rx: &Receiver<DataEvent>, done: &dyn Fn(&[String]) -> bool| loop {
+            assert!(
+                Instant::now() < deadline,
+                "timed out polling the LHU of {p}"
+            );
+            tag += 1;
+            handle
+                .distinct(DistinctParams {
+                    key: QueryKey(1),
+                    tag,
+                    column: "lhu".into(),
+                    scope: Scope {
+                        dimensions: vec![DimensionSelection {
+                            column: "position_ref".into(),
+                            values: vec![p.clone()],
+                        }],
+                        ..Scope::default()
+                    },
+                    as_of: AsOf::Live,
+                })
+                .unwrap();
+            let values = loop {
+                match rx.recv_timeout(Duration::from_secs(10)) {
+                    Ok(DataEvent::Distinct(o)) if o.tag == tag => break o.values.unwrap(),
+                    Ok(_) => continue,
+                    Err(e) => panic!("no distinct answer: {e}"),
+                }
+            };
+            let values: Vec<String> = values.into_iter().map(|(v, _)| v).collect();
+            if done(&values) {
+                break values;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        };
+
+        let before = lhus_until(&rx, &|v| !v.is_empty());
+        assert!(!before.contains(&target), "{before:?}");
+
+        handle
+            .move_lhu(MoveLhuParams {
+                tag: 1,
+                positions: vec![p.clone()],
+                lhu: target.clone(),
+            })
+            .unwrap();
+        let outcome = loop {
+            match rx.recv_timeout(Duration::from_secs(10)) {
+                Ok(DataEvent::Command(o)) => break o,
+                Ok(_) => continue,
+                Err(e) => panic!("no command answer: {e}"),
+            }
+        };
+        assert_eq!(outcome.result, Ok(()));
+
+        let after = lhus_until(&rx, &|v| v.contains(&target));
+        assert_eq!(after, vec![target], "replaced, not added to");
+        handle.shutdown();
+    }
+
     /// The demo documents produce a usable data-service configuration
     /// through the normal config loader and setup path. Typed readers must
     /// skip `config_version` headers without reporting invalid entries.
