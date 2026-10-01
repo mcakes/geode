@@ -13,6 +13,7 @@ use gpui_component::plot::{AxisLabelSide, AxisText, Grid, PlotAxis};
 
 use crate::core::axis::{Axis, Pane, Side};
 use crate::core::decimate::decimate;
+use crate::core::marks::Segment;
 use crate::core::scale::LinearScale;
 use crate::core::time::Tick;
 use crate::core::{Point, Rect, Y_TICK_GAP, design_px};
@@ -278,6 +279,22 @@ pub(crate) fn stroke_points(pts: &[Point], width: f32) -> Option<Path<Pixels>> {
         } else {
             builder.line_to(at);
         }
+    }
+    builder.build().ok()
+}
+
+/// One stroke path over independent segments.
+// No caller until the xy element paints its dashed lines and point marks;
+// the allow goes when it does.
+#[allow(dead_code)]
+pub(crate) fn stroke_segments(segments: &[Segment], width: f32) -> Option<Path<Pixels>> {
+    if segments.is_empty() {
+        return None;
+    }
+    let mut builder = PathBuilder::stroke(px(width));
+    for (a, b) in segments {
+        builder.move_to(point(px(a.x), px(a.y)));
+        builder.line_to(point(px(b.x), px(b.y)));
     }
     builder.build().ok()
 }
