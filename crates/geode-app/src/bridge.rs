@@ -1367,10 +1367,12 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             s.deliver(Delivery::VolSlices(outcome), window, cx)
                         });
                     }
-                    // A position command's answer. Nothing sends a command
-                    // yet, so nothing routes one; `geode_data::positions`
-                    // already logs it under `geode::ingest`.
-                    DataEvent::Command(_) => {}
+                    // A position command's answer becomes the status notice;
+                    // `geode_data::positions` already logs it under
+                    // `geode::ingest`.
+                    DataEvent::Command(outcome) => {
+                        shell.update(cx, |s, cx| s.note_command(&outcome, cx));
+                    }
                     // A data thread died despite containment, or the request
                     // loop never opened. Its segment and the diagnostics row
                     // stay until restart. Logging is not repeated here: the
@@ -3872,6 +3874,37 @@ role = "key"
         bridge.pricer = pricer;
         bridge.events = rx;
         (bridge, tx)
+    }
+
+    /// A position-service answer posted to the real drain becomes the
+    /// shell's status notice, in the shared wording.
+    #[gpui::test]
+    fn a_command_answer_reaches_the_status_notice(cx: &mut gpui::TestAppContext) {
+        let (handle, _rx) = DataHandle::for_tests();
+        let window = open_test_window(cx, test_shell_services());
+        let (tx, rx) = crate::events::channel();
+        let mut bridge = test_bridge(handle);
+        bridge.events = rx;
+        cx.update(|cx| attach(&bridge, window, cx));
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let outcome = geode_core::positions::CommandOutcome {
+            tag: 4,
+            count: 3,
+            lhu: "BK003_LHU2".into(),
+            result: Ok(()),
+        };
+        let expected = geode_core::positions::outcome_notice(&outcome);
+        tx.try_send(DataEvent::Command(outcome)).unwrap();
+        vcx.run_until_parked();
+        assert_eq!(
+            shell
+                .read_with(&vcx, |s, _| s.notice_for_test())
+                .map(|n| n.to_string()),
+            Some(expected)
+        );
     }
 
     /// `o`, a line, `enter` typed through the shell into its focused tile
