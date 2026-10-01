@@ -13462,6 +13462,16 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert!(window.start == 0 && window.end < 200, "{window:?}");
         assert!(h.painted(&vcx, 0, 0).is_some());
         assert_eq!(h.painted(&vcx, 199, 0), None, "off screen is not prepared");
+        // Scrolled to the last row, the window is what the table now shows,
+        // never the first window the install prepared.
+        h.motion(&mut vcx, "bottom", None);
+        draw(&mut vcx);
+        assert_eq!(
+            h.painted(&vcx, 199, 1).as_deref(),
+            Some("199.0000"),
+            "the last row is prepared"
+        );
+        assert_eq!(h.painted(&vcx, 0, 0), None, "the first row left the window");
     }
 
     /// A redelivery that leaves the reported range unchanged still repaints:
