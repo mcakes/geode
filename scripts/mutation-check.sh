@@ -28517,6 +28517,13 @@ run_mutation "action confirm: no runs the action" \
   '                Some(ConfirmAnswer::No) => yes(shell, window, cx),' \
   geode-shell no_or_escape_closes_the_confirm_and_runs_nothing
 
+# A position command's answer reaches the status notice through the drain.
+run_mutation "command outcome: the drain drops the answer" \
+  crates/geode-app/src/bridge.rs \
+  '                        shell.update(cx, |s, cx| s.note_command(&outcome, cx));' \
+  '                        let _ = &outcome;' \
+  geode-app a_command_answer_reaches_the_status_notice
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
