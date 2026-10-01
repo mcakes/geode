@@ -13,7 +13,9 @@
 //! A tile may follow one of four link groups. Its reading
 //! (`Frame::view_for`) takes the scope and scope generation from the group
 //! and everything else from its workspace's lane; group scope generations
-//! come from the same counter as the lanes'.
+//! come from the same counter as the lanes'. A tile may also emit into a
+//! group: what it posts sets the group's scope and its board of draft
+//! documents, which a `BoardWatch` follows apart from `data`.
 //!
 //! Every mutation bumps exactly the counters it affects, so a tile can
 //! compare the fields it follows against the ones it last acted on with
@@ -22,14 +24,15 @@
 //! datasets/documents a consumer reads; other counters retain their contracts.
 
 pub use crate::frame_ref::FrameRef;
+pub use crate::link::BoardWatch;
 use crate::link::{GroupLane, Links};
 use crate::perf::RequeryStats;
 use crate::scopebar::{self, ScopeBarModel};
 use crate::tiling::{TileId, WorkspaceIx};
 use geode_core::config::Layer;
-use geode_core::document::{KEY_SEPARATOR, is_key_prefix};
+use geode_core::document::{DocumentRows, KEY_SEPARATOR, is_key_prefix};
 use geode_core::groupings::GroupingSlots;
-use geode_core::link::{Group, Membership};
+use geode_core::link::{Emission, Group, Membership};
 use geode_core::named::NamedExpressions;
 use geode_core::query::{AsOf, QueryKey};
 use geode_core::scope::{Expr, Scope};
@@ -39,6 +42,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use toml_edit::value;
 
@@ -241,8 +245,8 @@ pub struct Frame {
     shared: Lane,
     /// One lane per pinned workspace. Ordered so session writes are stable.
     pinned: BTreeMap<WorkspaceIx, Lane>,
-    /// Link groups: each group's scope and which tile follows or emits
-    /// into which.
+    /// Link groups: each group's scope and board, and which tile follows
+    /// or emits into which.
     links: Links,
     /// Source of every lane's scope/grouping/as-of generation and every
     /// link group's scope generation; also advanced by pin, unpin and a
@@ -390,7 +394,9 @@ impl Frame {
     }
 
     /// Emit into a link group, or into none. Advances the generation when
-    /// it changes something.
+    /// it changes something. A tile that leaves or switches group takes
+    /// what it posted off the old group's board at once; that group's scope
+    /// stays as last written.
     pub fn emit(&mut self, tile: TileId, group: Option<Group>) -> bool {
         let changed = self.links.emit(tile, group);
         if changed {
@@ -407,6 +413,59 @@ impl Frame {
     /// compares to see that a group's scope moved.
     pub fn group_scope_gens(&self) -> [u64; 4] {
         self.links.scope_gens()
+    }
+
+    /// Record what an emitting tile answered. `true` when its group's scope
+    /// or board changed and observers should be notified. A tile that emits
+    /// into no group, or repeats its last answer, writes nothing; a board
+    /// change never moves `data`.
+    pub fn post_emission(&mut self, tile: TileId, emission: Emission) -> bool {
+        let Frame {
+            links, generation, ..
+        } = self;
+        links.post(tile, emission, generation)
+    }
+
+    /// Drop a closed tile's membership and what it posted. `true`, and the
+    /// generation advances, when it was in a group.
+    pub fn forget_tile(&mut self, tile: TileId) -> bool {
+        let changed = self.links.forget(tile);
+        if changed {
+            fresh(&mut self.generation);
+        }
+        changed
+    }
+
+    /// Drop every linked tile `live` rejects. `true`, and the generation
+    /// advances, when any was dropped.
+    pub fn retain_linked(&mut self, live: impl Fn(TileId) -> bool) -> bool {
+        let changed = self.links.retain(live);
+        if changed {
+            fresh(&mut self.generation);
+        }
+        changed
+    }
+
+    /// Watch one group's board for a dataset, or one document key (or key
+    /// prefix) in it. Registration does not notify. Board reads ignore
+    /// as-of: a draft is now.
+    pub fn watch_board(&mut self, group: Group, dataset: &str, key: Option<&str>) -> BoardWatch {
+        self.links.watch(group, dataset, key)
+    }
+
+    /// The draft on `group`'s board for this dataset and document key.
+    pub fn board_entry(
+        &self,
+        group: Group,
+        dataset: &str,
+        key: &[String],
+    ) -> Option<Arc<DocumentRows>> {
+        self.links.entry(group, dataset, key)
+    }
+
+    /// How many times `group`'s board has changed.
+    pub fn board_gen(&self, group: Group) -> u64 {
+        self.links.board_gen(group)
     }
 
     /// Give `ws` its own lane, copied from the shared one. `false` when it
@@ -1327,8 +1386,10 @@ mod tests {
     use super::*;
     use crate::tiling::{TileId, WorkspaceIx};
     use geode_core::clock::Clock;
-    use geode_core::link::Group;
+    use geode_core::document::DocumentRows;
+    use geode_core::link::{BoardEntry, Emission, Group};
     use geode_core::scope::{DimensionSelection, Scope};
+    use std::sync::Arc;
 
     fn ws(n: u8) -> WorkspaceIx {
         WorkspaceIx::new(n).unwrap()
@@ -2605,5 +2666,297 @@ mod tests {
         assert!(f.view_mut_for(ws(1), tile).undo_scope());
         assert_eq!(f.shared().scope(), &text_only, "undo walks the lane");
         assert_eq!(f.group_scope(Group::A), &group);
+    }
+
+    fn doc(key: &str) -> Arc<DocumentRows> {
+        Arc::new(DocumentRows {
+            key: vec![key.to_string()],
+            attributes: Vec::new(),
+            axes: Vec::new(),
+            values: Vec::new(),
+        })
+    }
+
+    fn draft(u: &str, rows: &Arc<DocumentRows>) -> Emission {
+        Emission {
+            scope: Some(Scope::one("underlying_ref", u)),
+            board: vec![BoardEntry {
+                dataset: "cvi_params".into(),
+                key: vec![u.to_string()],
+                rows: Arc::clone(rows),
+            }],
+        }
+    }
+
+    fn on_board(f: &Frame, g: Group, u: &str) -> Option<Arc<DocumentRows>> {
+        f.board_entry(g, "cvi_params", &[u.to_string()])
+    }
+
+    #[test]
+    fn an_emission_sets_the_groups_scope_and_posts_its_board() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let panel = TileId(1);
+        let rows = doc("SPX.Z");
+        assert!(
+            !f.post_emission(panel, draft("SPX.Z", &rows)),
+            "not emitting: nothing is written"
+        );
+        f.emit(panel, Some(Group::A));
+        assert!(f.post_emission(panel, draft("SPX.Z", &rows)));
+        assert_eq!(
+            f.group_scope(Group::A).sole("underlying_ref"),
+            Some("SPX.Z")
+        );
+        assert!(Arc::ptr_eq(
+            &on_board(&f, Group::A, "SPX.Z").unwrap(),
+            &rows
+        ));
+        assert!(
+            on_board(&f, Group::B, "SPX.Z").is_none(),
+            "another group's board is its own"
+        );
+    }
+
+    #[test]
+    fn an_unchanged_emission_writes_nothing() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let panel = TileId(1);
+        f.emit(panel, Some(Group::A));
+        let rows = doc("SPX.Z");
+        f.post_emission(panel, draft("SPX.Z", &rows));
+        let (generation, board, data) = (f.generation(), f.board_gen(Group::A), f.data_version());
+        assert!(
+            !f.post_emission(panel, draft("SPX.Z", &rows)),
+            "the same draft allocation again"
+        );
+        assert_eq!(
+            (f.generation(), f.board_gen(Group::A), f.data_version()),
+            (generation, board, data)
+        );
+        // A new allocation is a new draft: the board moves, the scope and the
+        // global data counter do not.
+        assert!(f.post_emission(panel, draft("SPX.Z", &doc("SPX.Z"))));
+        assert_eq!(
+            f.generation(),
+            generation,
+            "the scope was equal, so no generation was drawn"
+        );
+        assert_eq!(f.board_gen(Group::A), board + 1);
+        assert_eq!(
+            f.data_version(),
+            data,
+            "a draft never bumps the publish counter"
+        );
+    }
+
+    #[test]
+    fn a_scope_none_emission_leaves_the_groups_scope() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let blotter = TileId(1);
+        f.emit(blotter, Some(Group::A));
+        f.post_emission(
+            blotter,
+            Emission {
+                scope: Some(Scope::one("underlying_ref", "SPX.Z")),
+                board: vec![],
+            },
+        );
+        assert!(
+            !f.post_emission(blotter, Emission::default()),
+            "the cursor names no single value"
+        );
+        assert_eq!(
+            f.group_scope(Group::A).sole("underlying_ref"),
+            Some("SPX.Z")
+        );
+    }
+
+    #[test]
+    fn a_board_entry_leaves_when_its_emitter_stops_listing_it_leaves_or_closes() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let panel = TileId(1);
+        let rows = doc("SPX.Z");
+        let scope_only = || Emission {
+            scope: Some(Scope::one("underlying_ref", "SPX.Z")),
+            board: vec![],
+        };
+
+        f.emit(panel, Some(Group::A));
+        f.post_emission(panel, draft("SPX.Z", &rows));
+        assert!(
+            f.post_emission(panel, scope_only()),
+            "the draft was discarded or published"
+        );
+        assert!(on_board(&f, Group::A, "SPX.Z").is_none());
+
+        f.post_emission(panel, draft("SPX.Z", &rows));
+        assert!(f.emit(panel, None), "leaving the group");
+        assert!(on_board(&f, Group::A, "SPX.Z").is_none());
+        assert_eq!(
+            f.group_scope(Group::A).sole("underlying_ref"),
+            Some("SPX.Z"),
+            "the scope stays as last written"
+        );
+
+        f.emit(panel, Some(Group::A));
+        f.post_emission(panel, draft("SPX.Z", &rows));
+        assert!(f.forget_tile(panel), "closing");
+        assert!(on_board(&f, Group::A, "SPX.Z").is_none());
+        assert!(f.membership(panel).is_empty());
+    }
+
+    #[test]
+    fn switching_group_moves_nothing_until_the_next_post() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let panel = TileId(1);
+        let rows = doc("SPX.Z");
+        f.emit(panel, Some(Group::A));
+        f.post_emission(panel, draft("SPX.Z", &rows));
+        f.emit(panel, Some(Group::B));
+        assert!(on_board(&f, Group::A, "SPX.Z").is_none(), "it left A");
+        assert!(
+            on_board(&f, Group::B, "SPX.Z").is_none(),
+            "and has not posted into B yet"
+        );
+        assert!(
+            f.post_emission(panel, draft("SPX.Z", &rows)),
+            "the same emission is new to B"
+        );
+        assert!(on_board(&f, Group::B, "SPX.Z").is_some());
+    }
+
+    #[test]
+    fn the_latest_post_wins_a_key_and_a_leaving_emitter_uncovers_the_other() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let (p1, p2) = (TileId(1), TileId(2));
+        let (r1, r2) = (doc("SPX.Z"), doc("SPX.Z"));
+        f.emit(p1, Some(Group::A));
+        f.emit(p2, Some(Group::A));
+        f.post_emission(p1, draft("SPX.Z", &r1));
+        f.post_emission(p2, draft("SPX.Z", &r2));
+        assert!(
+            Arc::ptr_eq(&on_board(&f, Group::A, "SPX.Z").unwrap(), &r2),
+            "the later post"
+        );
+        f.emit(p2, None);
+        assert!(
+            Arc::ptr_eq(&on_board(&f, Group::A, "SPX.Z").unwrap(), &r1),
+            "the first emitter still lists it"
+        );
+    }
+
+    #[test]
+    fn a_board_watch_bumps_for_its_key_only_and_on_removal_too() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let panel = TileId(1);
+        f.emit(panel, Some(Group::A));
+        let spx = f.watch_board(Group::A, "cvi_params", Some("SPX.Z"));
+        let ndx = f.watch_board(Group::A, "cvi_params", Some("NDX"));
+        let any = f.watch_board(Group::A, "cvi_params", None);
+        let other_group = f.watch_board(Group::B, "cvi_params", Some("SPX.Z"));
+        let (s0, n0, a0, o0) = (
+            spx.revision(),
+            ndx.revision(),
+            any.revision(),
+            other_group.revision(),
+        );
+
+        f.post_emission(panel, draft("SPX.Z", &doc("SPX.Z")));
+        assert!(spx.revision() > s0);
+        assert!(any.revision() > a0, "a dataset-wide watch hears every key");
+        assert_eq!(ndx.revision(), n0);
+        assert_eq!(other_group.revision(), o0);
+
+        let s1 = spx.revision();
+        f.emit(panel, None);
+        assert!(spx.revision() > s1, "a removal is a change too");
+        assert!(spx.is_for(Group::A, "cvi_params", Some("SPX.Z")));
+        assert!(!spx.is_for(Group::A, "cvi_params", None));
+    }
+
+    #[test]
+    fn retaining_live_tiles_drops_the_rest_and_their_entries() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let (keep, gone) = (TileId(1), TileId(2));
+        f.follow(keep, Some(Group::A));
+        f.emit(gone, Some(Group::A));
+        f.post_emission(gone, draft("SPX.Z", &doc("SPX.Z")));
+        assert!(f.retain_linked(|t| t == keep));
+        assert_eq!(f.membership(keep).follow, Some(Group::A));
+        assert!(f.membership(gone).is_empty());
+        assert!(on_board(&f, Group::A, "SPX.Z").is_none());
+        assert!(!f.retain_linked(|t| t == keep), "nothing left to drop");
+    }
+
+    /// A closed tile that only followed is dropped as well, and dropping
+    /// advances the generation: it is the session writer's dirty signal, so
+    /// a membership that left without it would stay in the session file.
+    #[test]
+    fn retaining_live_tiles_drops_a_closed_follower_and_marks_the_session_dirty() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let (keep, gone) = (TileId(1), TileId(2));
+        f.emit(keep, Some(Group::A));
+        f.follow(gone, Some(Group::B));
+        let before = f.generation();
+        assert!(f.retain_linked(|t| t == keep));
+        assert!(f.membership(gone).is_empty());
+        assert_eq!(f.membership(keep).emit, Some(Group::A));
+        assert!(f.generation() > before);
+        let settled = f.generation();
+        assert!(!f.retain_linked(|t| t == keep));
+        assert!(!f.forget_tile(gone), "already gone");
+        assert_eq!(f.generation(), settled, "nothing dropped, nothing to save");
+        assert!(f.forget_tile(keep));
+        assert!(f.generation() > settled);
+    }
+
+    /// The shell pulls an emitter again on every notify. A repeat of its
+    /// last answer must not count as a newer post: it would retake a key
+    /// another emitter posted since, and two panels drafting the same
+    /// document would swap the board on every repaint.
+    #[test]
+    fn a_repeated_emission_does_not_retake_a_key_from_a_later_post() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let (p1, p2) = (TileId(1), TileId(2));
+        let (r1, r2) = (doc("SPX.Z"), doc("SPX.Z"));
+        f.emit(p1, Some(Group::A));
+        f.emit(p2, Some(Group::A));
+        f.post_emission(p1, draft("SPX.Z", &r1));
+        f.post_emission(p2, draft("SPX.Z", &r2));
+        let board = f.board_gen(Group::A);
+        assert!(!f.post_emission(p1, draft("SPX.Z", &r1)));
+        assert!(Arc::ptr_eq(&on_board(&f, Group::A, "SPX.Z").unwrap(), &r2));
+        assert_eq!(f.board_gen(Group::A), board);
+    }
+
+    /// A tile that follows and emits into the same group answers with the
+    /// scope it was just handed. That must not be a write, or the shell's
+    /// notify would pull the tile again and the pair would never settle.
+    #[test]
+    fn a_tile_emitting_the_scope_it_follows_writes_nothing() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let tile = TileId(1);
+        let scoped = |u: &str| Emission {
+            scope: Some(Scope::one("underlying_ref", u)),
+            board: vec![],
+        };
+        f.follow(tile, Some(Group::A));
+        f.emit(tile, Some(Group::A));
+        f.view_mut_for(ws(1), tile)
+            .set_scope(Scope::one("underlying_ref", "SPX.Z"));
+        let generation = f.generation();
+        assert!(
+            !f.post_emission(tile, scoped("SPX.Z")),
+            "the group's own scope coming back"
+        );
+        assert_eq!(f.generation(), generation);
+        assert!(f.post_emission(tile, scoped("NDX")));
+        assert_eq!(f.generation(), generation + 1, "the group moved once");
+        assert_eq!(
+            f.view_for(ws(1), tile).scope().sole("underlying_ref"),
+            Some("NDX")
+        );
+        assert!(!f.post_emission(tile, scoped("NDX")));
+        assert_eq!(f.generation(), generation + 1);
     }
 }
