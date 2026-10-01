@@ -537,3 +537,256 @@ fn without_an_opener_the_app_opens_the_url(cx: &mut gpui::TestAppContext) {
     draw(&mut vcx);
     assert_eq!(cx.opened_url().as_deref(), Some("nemo://test/P7"));
 }
+
+// ---------------------------------------------------------------------
+// Actions that choose a column value, then confirm.
+// ---------------------------------------------------------------------
+
+use crate::shell::{ACTION_KEY, choicedialog::Target};
+use geode_core::query::{AsOf, DistinctOutcome, DistinctParams};
+use geode_core::scope::Scope;
+
+type Confirmed = Rc<std::cell::RefCell<Vec<String>>>;
+
+/// Chooses an `lhu` value other than the row's own, then confirms it; a
+/// yes records the value and says so.
+struct MovingAction {
+    confirmed: Confirmed,
+}
+
+impl crate::dimension::DimensionAction for MovingAction {
+    fn id(&self) -> &'static str {
+        "test::move"
+    }
+    fn title(&self) -> gpui::SharedString {
+        "Move to LHU\u{2026}".into()
+    }
+    fn column(&self) -> &'static str {
+        "position_ref"
+    }
+    fn run(&self, ctx: &DimensionContext, acx: &mut crate::shell::row_menu::ActionCx<'_, '_>) {
+        acx.choose_value(
+            acx.action_index(),
+            ctx.clone(),
+            "lhu",
+            "Move to LHU".into(),
+            ctx.get("lhu").map(str::to_string),
+            "no LHU values to move to",
+        );
+    }
+    fn chosen(
+        &self,
+        _ctx: &DimensionContext,
+        value: &str,
+        acx: &mut crate::shell::row_menu::ActionCx<'_, '_>,
+    ) {
+        let v = value.to_string();
+        let confirmed = self.confirmed.clone();
+        acx.confirm(
+            format!("Move to LHU {value}?").into(),
+            Rc::new(move |acx| {
+                confirmed.borrow_mut().push(v.clone());
+                acx.notice(format!("confirmed {v}"));
+            }),
+        );
+    }
+}
+
+struct Moving {
+    shell: Entity<ShellView>,
+    vcx: gpui::VisualTestContext,
+    requested: Rc<std::cell::RefCell<Vec<DistinctParams>>>,
+    confirmed: Confirmed,
+}
+
+/// A shell on a row `{position_ref: P7, lhu: L1}` with [`MovingAction`]
+/// registered, after `g . enter` ran it.
+fn moving(cx: &mut gpui::TestAppContext) -> Moving {
+    let mut rec = RecordingFactory::new("rec");
+    rec.fragment = Some(ROW_FRAGMENT);
+    *rec.dimension_context.borrow_mut() = Some(DimensionContext::of(&[
+        ("position_ref", "P7"),
+        ("lhu", "L1"),
+    ]));
+    let mut services = services_with_recorders(vec![rec]);
+    let confirmed: Confirmed = Rc::default();
+    services.roster.add_action(Rc::new(MovingAction {
+        confirmed: confirmed.clone(),
+    }));
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    let requested = Rc::new(std::cell::RefCell::new(Vec::new()));
+    vcx.update(|_, cx| {
+        let requested = requested.clone();
+        cx.subscribe(&shell, move |_, e: &ShellEvent, _| {
+            if let ShellEvent::DistinctRequested(p) = e {
+                requested.borrow_mut().push(p.clone());
+            }
+        })
+        .detach();
+    });
+    vcx.simulate_keystrokes("ctrl-v");
+    draw(&mut vcx);
+    vcx.simulate_keystrokes("g . enter");
+    draw(&mut vcx);
+    Moving {
+        shell,
+        vcx,
+        requested,
+        confirmed,
+    }
+}
+
+impl Moving {
+    fn target(&self) -> Option<Target> {
+        self.shell
+            .read_with(&self.vcx, |s, _| s.choice_dialog_target())
+    }
+    fn tag(&self) -> u64 {
+        match self.target() {
+            Some(Target::ActionValue { tag, .. }) => tag,
+            other => panic!("no action value dialog: {other:?}"),
+        }
+    }
+    fn rows(&self) -> Option<Vec<String>> {
+        self.shell.read_with(&self.vcx, |s, _| {
+            s.choice_dialog.as_ref().map(|d| d.list.options().to_vec())
+        })
+    }
+    fn notice(&self) -> Option<String> {
+        self.shell
+            .read_with(&self.vcx, |s, _| s.notice.as_ref().map(|n| n.to_string()))
+    }
+    fn depth(&self) -> usize {
+        self.shell.read_with(&self.vcx, |s, _| s.modal_depth())
+    }
+    fn deliver(&mut self, tag: u64, values: Result<Vec<(&str, u64)>, String>) {
+        let values = values.map(|v| v.into_iter().map(|(s, n)| (s.to_string(), n)).collect());
+        self.shell.update(&mut self.vcx, |s, cx| {
+            s.deliver_distinct(
+                DistinctOutcome {
+                    key: ACTION_KEY,
+                    tag,
+                    column: "lhu".into(),
+                    values,
+                },
+                cx,
+            )
+        });
+        draw(&mut self.vcx);
+    }
+    fn deliver_three(&mut self) {
+        let tag = self.tag();
+        self.deliver(tag, Ok(vec![("L1", 3), ("L2", 1), ("L3", 2)]));
+    }
+}
+
+#[gpui::test]
+fn choose_value_asks_for_the_columns_values_unscoped(cx: &mut gpui::TestAppContext) {
+    let mut m = moving(cx);
+    let requested = m.requested.borrow().clone();
+    assert_eq!(requested.len(), 1, "{requested:?}");
+    let req = &requested[0];
+    assert_eq!(req.key, ACTION_KEY);
+    assert_eq!(req.column, "lhu");
+    assert_eq!(req.scope, Scope::default());
+    assert_eq!(req.as_of, AsOf::Live);
+    assert_eq!(req.tag, m.tag(), "the dialog waits on the request's tag");
+    assert!(
+        matches!(m.target(), Some(Target::ActionValue { values: None, .. })),
+        "loading"
+    );
+    assert!(
+        m.vcx.debug_bounds("action-loading").is_some(),
+        "says loading"
+    );
+    assert_eq!(
+        m.shell
+            .read_with(&m.vcx, |s, _| s.top_modal().map(|t| t.title.clone())),
+        Some("Move to LHU".into())
+    );
+}
+
+#[gpui::test]
+fn delivered_values_fill_the_dialog_without_the_excluded_one(cx: &mut gpui::TestAppContext) {
+    let mut m = moving(cx);
+    m.deliver_three();
+    assert_eq!(m.rows(), Some(vec!["L2".to_string(), "L3".to_string()]));
+    assert!(matches!(
+        m.target(),
+        Some(Target::ActionValue { values: Some(ref v), .. }) if v == &["L2", "L3"]
+    ));
+    assert!(m.vcx.debug_bounds("action-loading").is_none());
+    assert!(m.vcx.debug_bounds("action-choice-L2").is_some(), "painted");
+}
+
+#[gpui::test]
+fn a_stale_value_delivery_is_dropped(cx: &mut gpui::TestAppContext) {
+    let mut m = moving(cx);
+    let tag = m.tag();
+    let before = m.target();
+    m.deliver(tag + 1, Ok(vec![("L2", 1)]));
+    assert_eq!(m.target(), before);
+    assert_eq!(m.rows(), Some(vec![]));
+    assert_eq!(m.depth(), 1, "still open");
+}
+
+#[gpui::test]
+fn an_empty_value_list_says_so(cx: &mut gpui::TestAppContext) {
+    let mut m = moving(cx);
+    let tag = m.tag();
+    m.deliver(tag, Ok(vec![("L1", 3)]));
+    assert_eq!(m.depth(), 0, "closed");
+    assert_eq!(m.notice().as_deref(), Some("no LHU values to move to"));
+}
+
+#[gpui::test]
+fn a_failed_value_fetch_says_so(cx: &mut gpui::TestAppContext) {
+    let mut m = moving(cx);
+    let tag = m.tag();
+    m.deliver(tag, Err("boom".into()));
+    assert_eq!(m.depth(), 0, "closed");
+    assert_eq!(
+        m.notice().as_deref(),
+        Some("could not load lhu values: boom")
+    );
+}
+
+#[gpui::test]
+fn picking_a_value_asks_to_confirm_and_yes_runs(cx: &mut gpui::TestAppContext) {
+    let mut m = moving(cx);
+    m.deliver_three();
+    m.vcx.simulate_keystrokes("enter");
+    draw(&mut m.vcx);
+    // The choice list closed before the confirm opened: the confirm is the
+    // stack's only entry, never pushed over the list.
+    assert_eq!(m.depth(), 1, "the confirm replaced the choice list");
+    assert!(m.target().is_none(), "the choice state is gone");
+    assert!(
+        m.vcx
+            .debug_bounds("action-question-Move to LHU L2?")
+            .is_some(),
+        "asks"
+    );
+    assert!(m.confirmed.borrow().is_empty(), "nothing runs before yes");
+    m.vcx.simulate_keystrokes("y");
+    draw(&mut m.vcx);
+    assert_eq!(m.confirmed.borrow().as_slice(), &["L2".to_string()]);
+    assert_eq!(m.notice().as_deref(), Some("confirmed L2"));
+    assert_eq!(m.depth(), 0, "closed");
+}
+
+#[gpui::test]
+fn no_or_escape_closes_the_confirm_and_runs_nothing(cx: &mut gpui::TestAppContext) {
+    for key in ["n", "escape"] {
+        let mut m = moving(cx);
+        m.deliver_three();
+        m.vcx.simulate_keystrokes("enter");
+        draw(&mut m.vcx);
+        assert_eq!(m.depth(), 1, "{key}: confirm open");
+        m.vcx.simulate_keystrokes(key);
+        draw(&mut m.vcx);
+        assert!(m.confirmed.borrow().is_empty(), "{key}: nothing ran");
+        assert_eq!(m.depth(), 0, "{key}: no dialog left open");
+    }
+}

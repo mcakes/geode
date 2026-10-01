@@ -236,6 +236,12 @@ pub const SCOPES_KEY: QueryKey = QueryKey(u64::MAX - 3);
 /// any reply whose tag is not its column's latest.
 pub const EXPR_KEY: QueryKey = QueryKey(u64::MAX - 4);
 
+/// A row action's value choice (`ActionCx::choose_value`) submits its
+/// `Request::Distinct` under this key — one lower than `EXPR_KEY`, same
+/// reservation reasoning. [`ShellView::deliver_distinct`] routes it to the
+/// open choice dialog, which drops a reply whose tag is not its own.
+pub const ACTION_KEY: QueryKey = QueryKey(u64::MAX - 5);
+
 /// One column a dimension picker can open: every categorical
 /// column of every dataset, plus every derived dimension. `role` is
 /// `"dimension"` for a real `ColumnRole::Dimension` column, `"attribute"`
@@ -1774,7 +1780,8 @@ impl ShellView {
 
     /// Deliver a distinct-value reply from the app bridge. `EXPR_KEY` routes
     /// to the open expression field's suggestions. `SCOPES_KEY` routes
-    /// to the object dialog's Values stage. Other replies reach the dimension
+    /// to the object dialog's Values stage. `ACTION_KEY` routes to an open
+    /// action value choice. Other replies reach the dimension
     /// picker only if it is open in Values stage and both column and latest
     /// request tag match. Stale replies cause no mutation or notification.
     pub fn deliver_distinct(&mut self, outcome: DistinctOutcome, cx: &mut Context<Self>) {
@@ -1784,6 +1791,10 @@ impl ShellView {
         }
         if outcome.key == SCOPES_KEY {
             objectdialog::deliver_values(self, outcome, cx);
+            return;
+        }
+        if outcome.key == ACTION_KEY {
+            choicedialog::deliver_action_values(self, outcome, cx);
             return;
         }
         let Some(state) = self.picker.as_mut() else {

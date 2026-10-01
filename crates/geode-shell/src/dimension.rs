@@ -29,6 +29,10 @@ pub trait DimensionAction {
     }
     /// Do it. Called once the menu has closed.
     fn run(&self, ctx: &DimensionContext, acx: &mut ActionCx<'_, '_>);
+    /// A value picked from `ActionCx::choose_value`, with the context the
+    /// action ran on. Called once the choice dialog has closed. Does
+    /// nothing unless the action chooses.
+    fn chosen(&self, _ctx: &DimensionContext, _value: &str, _acx: &mut ActionCx<'_, '_>) {}
 }
 
 /// Where `ActionCx::open_url` sends a URL when set. Unset in production,
