@@ -18774,6 +18774,500 @@ run_mutation "chart: the density bound is not enforced" \
   geode-chart \
   a_frame_paints_at_most_the_density_bound
 
+# ---- Chart kit and the xy element ----
+#
+# The kit entries cover what both chart elements share: the view's minimum
+# span, the linear x scale and its ticks, and the stroke geometry of dashes
+# and point marks. The xy entries cover the slot model, the element's caches
+# and paint geometry, and the crosshair and its tooltip. Cache entries
+# observe rebuild counters, as the time chart's do.
+
+# A view zooms down to its own minimum span, in its own units. Floored
+# at the two-unit default instead, a moneyness range a fraction of a unit
+# wide never zooms at all.
+run_mutation "chart kit: a view's own min span" \
+  crates/geode-chart/src/core/view.rs \
+  '        let width = (self.span() / factor).max(self.min_span);' \
+  '        let width = (self.span() / factor).max(MIN_SPAN);' \
+  geode-chart \
+  a_view_narrows_to_its_own_min_span
+
+# Reset returns to the whole range and keeps the view's minimum span.
+# Rebuilt with the default, one reset would leave a strike axis that no
+# longer zooms.
+run_mutation "chart kit: reset keeps a view's own min span" \
+  crates/geode-chart/src/core/view.rs \
+  '        *self = Self::with_min_span(full, self.min_span);' \
+  '        *self = Self::full(full);' \
+  geode-chart \
+  reset_keeps_the_views_own_min_span
+
+# A minimum span that is not a positive finite number means no floor.
+# Stored as given, a NaN or infinite minimum widens every zoom to the whole
+# range.
+run_mutation "chart kit: a nonsense min span means none" \
+  crates/geode-chart/src/core/view.rs \
+  '            min_span: if min_span.is_finite() && min_span > 0.0 {
+                min_span
+            } else {
+                0.0
+            },' \
+  '            min_span,' \
+  geode-chart \
+  a_nonsense_min_span_means_no_floor
+
+# A domain that starts just under zero yields a tick of negative zero,
+# which formats as `-0`. Adding zero makes it positive.
+run_mutation "chart kit: a tick at zero is positive zero" \
+  crates/geode-chart/src/core/scale.rs \
+  '            let v = (k * step * 1e9).round() / 1e9 + 0.0;' \
+  '            let v = (k * step * 1e9).round() / 1e9;' \
+  geode-chart \
+  a_tick_at_zero_is_positive_zero
+
+# A negative value smaller than its format's last decimal prints as a
+# zero with a minus sign, which reads as a number that is not there.
+run_mutation "chart kit: a readout carries no signed zero" \
+  crates/geode-chart/src/core/scale.rs \
+  '    if rounded_to_zero {' \
+  '    if rounded_to_zero && false {' \
+  geode-chart \
+  a_number_that_rounds_to_zero_reads_without_a_sign
+
+# A reversed axis puts the low value on the right. Without the mirror a
+# delta axis paints low to high from the left, and the value under the
+# cursor is read from the other end.
+run_mutation "chart kit: a reversed scale mirrors x" \
+  crates/geode-chart/src/core/linear.rs \
+  '        let t = ((u - view.lo) / span) as f32;
+        let t = if self.reversed { 1.0 - t } else { t };' \
+  '        let t = ((u - view.lo) / span) as f32;' \
+  geode-chart \
+  a_value_maps_across_the_plot_and_back
+
+# A view with no span has nothing to label. Without the guard the tick
+# scale pads the empty domain to a unit either side and labels values the
+# view does not hold, all at the plot's edge.
+run_mutation "chart kit: a zero-span view has no ticks" \
+  crates/geode-chart/src/core/linear.rs \
+  '    if span.is_nan() || span <= 0.0 || !plot.w.is_finite() || plot.w <= 0.0 {' \
+  '    if !plot.w.is_finite() || plot.w <= 0.0 {' \
+  geode-chart \
+  a_zero_span_view_maps_to_the_plot_edge_and_has_no_ticks
+
+# A delta axis labels the trader's ladder when three or more rungs fit.
+# If the ladder never applies, the axis reads 1-2-5 steps of delta in place
+# of the rungs a trader looks for.
+run_mutation "chart kit: delta ticks use the ladder" \
+  crates/geode-chart/src/core/linear.rs \
+  '    if n < 3 {' \
+  '    if n < 8 {' \
+  geode-chart \
+  the_delta_axis_reads_reversed_with_trader_labels
+
+# Ticks come out in ascending pixel x whichever way the axis runs; a
+# reversed axis's are built in value order and turned round.
+run_mutation "chart kit: reversed ticks come out ascending" \
+  crates/geode-chart/src/core/linear.rs \
+  '    if scale.reversed {
+        out.reverse();
+    }' \
+  '    if false {
+        out.reverse();
+    }' \
+  geode-chart \
+  the_delta_axis_reads_reversed_with_trader_labels
+
+# A ladder rung is kept only when it sits a tick gap from every rung
+# already kept. Otherwise the 5s print over the 10s on a narrow plot.
+run_mutation "chart kit: the ladder honours the tick gap" \
+  crates/geode-chart/src/core/linear.rs \
+  '        if kept[..n].iter().all(|(k, _)| (x - k).abs() >= tick_gap_px) {' \
+  '        if kept[..n].iter().all(|(k, _)| (x - k).abs() >= 0.0) {' \
+  geode-chart \
+  delta_rungs_closer_than_the_tick_gap_give_way_by_priority
+
+# Ladder rungs are whole percents by definition. Labelled through the
+# step's decimals, a wide plot over a narrow view reads `5.0c 10.0c 25.0c`.
+run_mutation "chart kit: ladder rungs label whole" \
+  crates/geode-chart/src/core/linear.rs \
+  '        label: if ladder {
+            delta_label(v)
+        } else {
+            fmt_x(v, step, format)
+        },' \
+  '        label: fmt_x(v, step, format),' \
+  geode-chart \
+  ladder_ticks_label_whole_whatever_the_step
+
+# Off the ladder a delta label takes the decimals its step needs. In
+# whole percents a step of 0.002 reads `40c` on three ticks running.
+run_mutation "chart kit: a fine delta step takes decimals" \
+  crates/geode-chart/src/core/linear.rs \
+  '        XFormat::Delta => delta_label_with(value, step_decimals(step * 100.0).min(2)),' \
+  '        XFormat::Delta => delta_label_with(value, 0),' \
+  geode-chart \
+  a_narrow_delta_view_repeats_no_label
+
+# The dash pattern runs on from one span to the next. Restarted at every
+# span, a curve of short spans opens each on a dash and reads solid.
+run_mutation "chart kit: the dash phase carries on" \
+  crates/geode-chart/src/core/marks.rs \
+  '        phase = (phase + len) % period;' \
+  '        phase = 0.0;' \
+  geode-chart \
+  the_dash_phase_carries_round_a_corner_and_restarts_after_a_break
+
+# A gap ends a run, and the run after it opens on a whole dash. With the
+# phase carried across, a run can open in the pattern's gap and its first
+# pixels go unpainted.
+run_mutation "chart kit: the dash phase restarts after a break" \
+  crates/geode-chart/src/core/marks.rs \
+  '        if a.is_break() || b.is_break() {
+            phase = 0.0;
+            continue;
+        }' \
+  '        if a.is_break() || b.is_break() {
+            continue;
+        }' \
+  geode-chart \
+  the_dash_phase_carries_round_a_corner_and_restarts_after_a_break
+
+# The first dash visited is the first that can reach the clip. Started
+# at the span's own start, a knot far off the plot costs a walk over every
+# dash of the lead-in. The filter names the pure range test alone: the
+# polyline tests would make that walk under this mutation.
+run_mutation "chart kit: dashes start at the clip" \
+  crates/geode-chart/src/core/marks.rs \
+  '    let first = ((d0 + phase - dash) / period).ceil().max(0.0);' \
+  '    let first = ((d0 + phase - dash) / period).ceil().max(0.0) * 0.0;' \
+  geode-chart \
+  the_dash_range_starts_at_the_clip_not_at_the_spans_start
+
+# A pattern under a pixel long reads solid, so it is drawn solid: one
+# segment a span. Dashed, it is thousands of segments for the same picture.
+run_mutation "chart kit: a sub-pixel period is solid" \
+  crates/geode-chart/src/core/marks.rs \
+  '    let dashed = dash > 0.0 && gap > 0.0 && period.is_finite() && period >= 1.0;' \
+  '    let dashed = dash > 0.0 && gap > 0.0 && period.is_finite();' \
+  geode-chart \
+  a_pattern_too_fine_to_see_or_with_no_gap_is_solid
+
+# A point whose range has no height is a diamond alone. A bar of no
+# length is a degenerate segment in the stroke path.
+run_mutation "chart kit: a rangeless point has no bar" \
+  crates/geode-chart/src/core/marks.rs \
+  '        if lo[i].is_finite() && hi[i].is_finite() && lo[i] != hi[i] {' \
+  '        if lo[i].is_finite() && hi[i].is_finite() {' \
+  geode-chart \
+  a_point_with_no_range_is_a_diamond_alone
+
+# A point with no mid has no diamond; the rest of the slot still paints.
+# Unguarded, its four edges carry a NaN into the stroke path.
+run_mutation "chart kit: a NaN mark is skipped" \
+  crates/geode-chart/src/core/marks.rs \
+  '        if m.is_finite() {
+            let tips = [' \
+  '        if true {
+            let tips = [' \
+  geode-chart \
+  a_nan_or_short_array_skips_the_mark_not_the_slot
+
+# The stride is the smallest whose kept marks fit one stroke path. A
+# stride of one keeps every point, and a slot past the ceiling builds no
+# path at all.
+run_mutation "chart kit: the mark stride fits the cap" \
+  crates/geode-chart/src/core/marks.rs \
+  '    (points - 1).div_ceil(fit - 1)' \
+  '    1' \
+  geode-chart \
+  the_stride_is_the_smallest_whose_marks_fit_the_cap
+
+# A point whose x is not finite is dropped at construction. Kept, it
+# sits among the xs the window and the nearest point are binary searches
+# over.
+run_mutation "chart xy: a slot's non-finite x is dropped" \
+  crates/geode-chart/src/xy/model.rs \
+  '        let mut order: Vec<usize> = (0..n).filter(|i| xs[*i].is_finite()).collect();' \
+  '        let mut order: Vec<usize> = (0..n).collect();' \
+  geode-chart \
+  a_nan_x_is_dropped_wherever_it_sits
+
+# Points out of x order are sorted at construction. Left as they came,
+# the binary searches over them answer with the wrong window.
+run_mutation "chart xy: an unsorted slot is sorted" \
+  crates/geode-chart/src/xy/model.rs \
+  '        order.sort_by(|a, b| xs[*a].total_cmp(&xs[*b]));' \
+  '        order.sort_by(|a, b| a.cmp(b));' \
+  geode-chart \
+  unsorted_points_are_put_in_x_order
+
+# A line's window takes one knot beyond each edge of the view. Cut at
+# the knots in view, the line stops short of the plot's edges, and a view
+# between two knots shows no line at all.
+run_mutation "chart xy: a line window reaches past the view" \
+  crates/geode-chart/src/xy/model.rs \
+  '                } else {
+                    (first, last)
+                }' \
+  '                } else {
+                    (start, end)
+                }' \
+  geode-chart \
+  a_line_window_reaches_one_knot_past_each_edge_and_a_points_window_does_not
+
+# One knot is no span. A line wholly to one side of the view must offer
+# nothing, or its one knot past the edge stretches the y axis over a value
+# that is not on screen.
+run_mutation "chart xy: a line window under two knots is empty" \
+  crates/geode-chart/src/xy/model.rs \
+  '                if last - first < 2 {' \
+  '                if false {' \
+  geode-chart \
+  a_line_window_holds_two_knots_or_none
+
+# A line has no value across a gap. Read anyway, a percent row prints
+# `NaN%` where the line is not drawn.
+run_mutation "chart xy: a gap is not bridged" \
+  crates/geode-chart/src/xy/model.rs \
+  '        v.is_finite().then_some(v)' \
+  '        Some(v)' \
+  geode-chart \
+  nearest_finds_the_closest_x_and_a_line_reads_between_its_knots
+
+# The y formats are indexed by axis. Read from the first, a density on
+# the right axis is labelled in the left axis's format.
+run_mutation "chart xy: each axis reads its own y format" \
+  crates/geode-chart/src/xy/model.rs \
+  '        self.y_format[i]' \
+  '        self.y_format[i * 0]' \
+  geode-chart \
+  each_axis_reads_its_own_y_format
+
+# A path key missing the view does not fail, it serves: the last view's
+# path under this view's axes. Visible only through `rebuilds()`.
+run_mutation "chart xy: the path key ignores the view" \
+  crates/geode-chart/src/xy/element.rs \
+  '                    let key = ShapeKey::new((model.version, slot.number, pane as u8, view.key()))' \
+  '                    let key = ShapeKey::new((model.version, slot.number, pane as u8, (0u64, 0u64)))' \
+  geode-chart \
+  an_unchanged_frame_rebuilds_nothing_and_a_moved_view_rebuilds
+
+# The chrome cache keeps the scan of every visible value and the label
+# formatting off unchanged frames. Re-derived each frame, every pixel is
+# the same and the render thread pays for it.
+run_mutation "chart xy: the chrome is re-derived every frame" \
+  crates/geode-chart/src/xy/element.rs \
+  '        let warm = buffers.chrome_key == Some(chrome_key);' \
+  '        let warm = false;' \
+  geode-chart \
+  an_unchanged_frame_rebuilds_nothing_and_a_moved_view_rebuilds
+
+# A slot the view shows nothing of has no path to build and is skipped
+# before the cache is asked.
+run_mutation "chart xy: an out-of-view slot still builds" \
+  crates/geode-chart/src/xy/element.rs \
+  '                    if start >= end {' \
+  '                    if start > end {' \
+  geode-chart \
+  a_slot_outside_the_view_builds_no_path
+
+# The decimator needs ascending pixel x, so a reversed axis walks its
+# window backwards. Walked forwards, the line reaches it descending.
+run_mutation "chart xy: a reversed line is fed backwards" \
+  crates/geode-chart/src/xy/element.rs \
+  '        if scale.reversed {
+            (start..end).rev().for_each(&mut push);' \
+  '        if false {
+            (start..end).rev().for_each(&mut push);' \
+  geode-chart \
+  a_reversed_axis_feeds_the_decimator_in_ascending_pixel_order
+
+# A y axis scales over what the view shows. Scaled over the whole slot,
+# a zoom into the money leaves the smile flat against the wings' range.
+run_mutation "chart xy: the domain reads the view only" \
+  crates/geode-chart/src/xy/element.rs \
+  '                .flat_map(|s| s.values_in(s.window(view))),' \
+  '                .flat_map(|s| s.values_in((0, s.len()))),' \
+  geode-chart \
+  a_side_scales_over_what_the_view_shows_only
+
+# A quote and a curve knot at one x land on one pixel column, reversed
+# axis or not. A marker mapped unreversed sits mirrored from its curve.
+run_mutation "chart xy: a marker sits at the line's x" \
+  crates/geode-chart/src/xy/element.rs \
+  '                    px_x.push(scale.x_of(xs[i], self.view, plot));' \
+  '                    px_x.push(LinearX::default().x_of(xs[i], self.view, plot));' \
+  geode-chart \
+  a_marker_sits_at_the_pixel_x_the_line_gives_the_same_value
+
+# The polyline is in layout coordinates, so the dash clip is the plot
+# rectangle as it is. A plot-relative clip drops the dashes at the plot's
+# right edge and keeps ones under the axis column.
+run_mutation "chart xy: the dash clip is the plot in layout coordinates" \
+  crates/geode-chart/src/xy/element.rs \
+  '                            x0: plot.x,
+                            y0: plot.y,
+                            x1: plot.right(),' \
+  '                            x0: 0.0,
+                            y0: plot.y,
+                            x1: plot.w,' \
+  geode-chart \
+  a_dashed_line_zoomed_far_in_is_dashed_across_its_own_plot
+
+# More marks than one stroke path holds are thinned to fit. Unthinned,
+# the stroke builder's ceiling assertion trips in a debug build; in a
+# release build the path fails to build and the slot is absent.
+run_mutation "chart xy: a huge points slot still paints" \
+  crates/geode-chart/src/xy/element.rs \
+  '                let stride = mark_stride(end - start, SEGMENTS_PER_MARK, MAX_STROKE_SEGMENTS);' \
+  '                let stride = mark_stride(end - start, SEGMENTS_PER_MARK, usize::MAX);' \
+  geode-chart \
+  a_points_slot_past_the_stroke_cap_is_thinned_not_dropped
+
+# A points slot reads a point only within the tolerance of the
+# crosshair. Otherwise a crosshair between two quotes reads the nearer as
+# if it were quoted there.
+run_mutation "chart xy: a point is read only near one" \
+  crates/geode-chart/src/xy/element.rs \
+  '            let near = (xs[i] - u).abs() <= tol;' \
+  '            let near = true;' \
+  geode-chart \
+  a_readout_reads_a_line_between_knots_and_a_point_only_near_one
+
+# A quote with a bid and an ask and no mid paints its bar and reads
+# `—  lo / hi`. A bare dash would say nothing is quoted where the bar is
+# drawn.
+run_mutation "chart xy: a missing mid still reads its range" \
+  crates/geode-chart/src/xy/element.rs \
+  '            } else {
+                NONE.to_string()
+            };' \
+  '            } else {
+                return NONE.to_string();
+            };' \
+  geode-chart \
+  a_point_with_a_range_and_no_mid_reads_its_range
+
+# A delta title is finer than a tick label: one decimal at least.
+run_mutation "chart xy: a delta title reads one decimal" \
+  crates/geode-chart/src/xy/element.rs \
+  '        XFormat::Delta => delta_label_with(u, step_decimals(tol * 100.0).max(1)),' \
+  '        XFormat::Delta => delta_label_with(u, 0),' \
+  geode-chart \
+  a_title_names_x_in_the_axis_format
+
+# A title takes the decimals one pixel column needs. At the format's own
+# decimals alone, a zoomed view reads the same x from cursors pixels apart.
+run_mutation "chart xy: a title is as fine as a pixel column" \
+  crates/geode-chart/src/xy/element.rs \
+  'pub(crate) fn title(u: f64, format: XFormat, tol: f64) -> String {
+    unsigned_zero(match format {' \
+  'pub(crate) fn title(u: f64, format: XFormat, tol: f64) -> String {
+    let tol = tol * 0.0;
+    unsigned_zero(match format {' \
+  geode-chart \
+  a_title_is_never_coarser_than_a_pixel_column
+
+# A view with no span paints every point at one x, and the crosshair
+# sits there whatever the cursor's x. Without the branch the line follows
+# the cursor across a plot whose only mark is at its edge.
+run_mutation "chart xy: a zero-span view puts the line on its point" \
+  crates/geode-chart/src/xy/element.rs \
+  '        if span.is_nan() || span <= 0.0 {' \
+  '        if span.is_nan() && span <= 0.0 {' \
+  geode-chart \
+  a_view_with_no_span_puts_the_line_where_the_point_is_painted
+
+# The crosshair sits on a quote only within the snap radius and glides
+# between quotes. With no radius it jumps from quote to quote and a curve
+# cannot be read between them.
+run_mutation "chart xy: the crosshair snaps only within the radius" \
+  crates/geode-chart/src/xy/element.rs \
+  '            ((x - cursor_x).abs() <= radius).then_some((i, x))' \
+  '            ((x - cursor_x).abs() <= f32::INFINITY).then_some((i, x))' \
+  geode-chart \
+  the_crosshair_snaps_to_the_nearest_point_inside_a_plot_and_nowhere_else
+
+# Only what is shown can be snapped to. A hidden chain would hold the
+# crosshair on points with no mark and no tooltip row.
+run_mutation "chart xy: a hidden points slot is not a snap candidate" \
+  crates/geode-chart/src/xy/element.rs \
+  '            .filter(|s| s.visible)
+            .filter_map(|s| self.snap_candidate(s, under, cursor_x, plot, radius))' \
+  '            .filter(|_| true)
+            .filter_map(|s| self.snap_candidate(s, under, cursor_x, plot, radius))' \
+  geode-chart \
+  a_hidden_points_slot_is_not_a_snap_candidate
+
+# With quotes of two slots inside the radius the nearer wins, not the
+# one whose slot comes first in the model.
+run_mutation "chart xy: the nearest quote wins across slots" \
+  crates/geode-chart/src/xy/element.rs \
+  '            .min_by(|a, b| (a.1 - cursor_x).abs().total_cmp(&(b.1 - cursor_x).abs()));' \
+  '            .next();' \
+  geode-chart \
+  the_quote_nearest_the_cursor_wins_whichever_slot_holds_it
+
+# A point with neither a mid nor a range has no mark. It is not snapped
+# to, and it does not shadow a painted neighbour within the radius.
+run_mutation "chart xy: a snap candidate must paint" \
+  crates/geode-chart/src/xy/element.rs \
+  '        let paints = |(i, _): &(usize, f32)| mid[*i].is_finite() || has_range(lo[*i], hi[*i]);' \
+  '        let paints = |(i, _): &(usize, f32)| mid[*i].is_finite() || has_range(lo[*i], hi[*i]) || true;' \
+  geode-chart \
+  a_point_that_paints_nothing_is_not_a_snap_candidate
+
+# A quote just past the plot's edge is not painted. Snapping to it puts
+# the crosshair line outside the plot.
+run_mutation "chart xy: a quote outside the view is not a candidate" \
+  crates/geode-chart/src/xy/element.rs \
+  '        let (start, end) = slot.window(self.view);
+        let split = start + xs[start..end].partition_point(|x| *x < under);' \
+  '        let (start, end) = (0, slot.len());
+        let split = start + xs[start..end].partition_point(|x| *x < under);' \
+  geode-chart \
+  a_point_outside_the_view_is_not_a_snap_candidate
+
+# The tooltip reads a point within one pixel column of the crosshair.
+# With the whole span as the tolerance a gliding crosshair reads the
+# nearest quote wherever it is.
+run_mutation "chart xy: the tooltip reads within one pixel column" \
+  crates/geode-chart/src/xy/element.rs \
+  '                let text = readout(slot, slot.window(view), u, tol, format);' \
+  '                let text = readout(slot, slot.window(view), u, view.span(), format);' \
+  geode-chart \
+  the_tooltip_reads_every_visible_slot_in_its_own_axis_format
+
+# The tooltip hands its title the pixel column's width. Handed none, the
+# title falls back to the format's own decimals however far the view is
+# zoomed.
+run_mutation "chart xy: the tooltip title is sized to the pixel column" \
+  crates/geode-chart/src/xy/element.rs \
+  '        (title(u, self.model.x.format, tol), rows)' \
+  '        (title(u, self.model.x.format, 0.0), rows)' \
+  geode-chart \
+  the_tooltip_reads_every_visible_slot_in_its_own_axis_format
+
+# A hidden slot has no tooltip row.
+run_mutation "chart xy: the tooltip skips hidden slots" \
+  crates/geode-chart/src/xy/element.rs \
+  '            .filter(|s| s.visible)
+            .map(|slot| {' \
+  '            .filter(|_| true)
+            .map(|slot| {' \
+  geode-chart \
+  the_tooltip_reads_every_visible_slot_in_its_own_axis_format
+
+# A row reads in the format of its own slot's axis. Read in the left
+# axis's, a density on the right of a percent chart reads as a percent.
+run_mutation "chart xy: a row reads in its own axis format" \
+  crates/geode-chart/src/xy/element.rs \
+  '                let format = self.model.y_format_of(slot.axis);' \
+  '                let format = self.model.y_format_of(crate::core::axis::Axis::Left);' \
+  geode-chart \
+  the_tooltip_reads_every_visible_slot_in_its_own_axis_format
+
 # ---- Timeseries model and tile ----
 #
 # These entries cover resolution, requests, chart models, and fetch/query
