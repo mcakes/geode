@@ -21,6 +21,7 @@
 //! further per-cell fills would obscure.
 
 use crate::core::columns::CellState;
+use crate::core::sort::SortSpec;
 use crate::grid::{CellPass, FillSource, GridCell, GridIndex, GridRowKind};
 use crate::paint::{CellColour, Paints, RowPalette, cell_colour};
 use crate::popup::{ChoicePaint, render_choice};
@@ -44,7 +45,7 @@ use gpui::{
     WeakEntity, Window, div, px, relative,
 };
 use gpui_component::input::{Input, InputState};
-use gpui_component::table::{Column, ColumnFixed, TableDelegate, TableState};
+use gpui_component::table::{Column, ColumnFixed, ColumnSort, TableDelegate, TableState};
 use gpui_component::{ActiveTheme as _, Size, Theme, h_flex};
 use std::ops::Range;
 use std::rc::Rc;
@@ -176,6 +177,15 @@ pub struct ColumnMoved {
 }
 
 impl EventEmitter<ColumnMoved> for TableState<SheetDelegate> {}
+
+/// A header's sort icon clicked: the PLAN column at `0`. Emitted by the
+/// table's `perform_sort` hook; the tile owns the sort and steps it with
+/// `SortOrder::click_cycle` (the component's own three-state proposal is
+/// ignored), so the delegate changes nothing of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SortClicked(pub usize);
+
+impl EventEmitter<SortClicked> for TableState<SheetDelegate> {}
 
 /// Every mouse selection gesture a cell, the tree cell or the line-number
 /// gutter recognises, carried to the tile's `pointer`: the one door a
@@ -399,6 +409,9 @@ impl FindPaint {
 pub struct SheetDelegate {
     /// The grid index shared with the tile; installs replace it.
     pub(crate) model: Rc<GridIndex>,
+    /// The tile's sort, mirrored by `install_model`: what the header's
+    /// sort icon and label say. The tile owns it.
+    pub(crate) sort: Option<SortSpec>,
     /// The formatted measure cells on screen, filled outside render;
     /// `render_td` only reads it. A miss paints a blank cell, and an open
     /// editor on it still paints.
@@ -497,6 +510,7 @@ impl SheetDelegate {
     pub(crate) fn new(theme: &Theme, tile: WeakEntity<PricerTile>) -> Self {
         SheetDelegate {
             model: Rc::new(GridIndex::default()),
+            sort: None,
             window: WindowCache::default(),
             requested: WindowRequest::with_first(FIRST_WINDOW),
             cursor: None,
@@ -827,11 +841,18 @@ impl SheetDelegate {
                     + m.text_px(r.note)
             })),
         );
+        // Every value column's header carries the sort toggle beside its
+        // label: `Icon::size_3` (0.75rem) inside the toggle's `p(px(2.))`.
+        let sort_icon = 0.75 * m.rem_px + 4.0;
         for (col, c) in self.model.columns.iter().enumerate() {
+            let header = m.text_px(&c.label) + sort_icon;
             let cells = rows
                 .clone()
-                .filter_map(|g| self.window.get(g, col).map(|c| c.text.as_ref()));
-            out.insert(c.name.to_string(), m.fit_text(&c.label, cells));
+                .filter_map(|g| self.window.get(g, col).map(|c| m.text_px(&c.text)));
+            out.insert(
+                c.name.to_string(),
+                m.fit(std::iter::once(header).chain(cells)),
+            );
         }
         Some(out)
     }
@@ -997,15 +1018,27 @@ impl TableDelegate for SheetDelegate {
                 ..Column::default()
             };
         };
+        let own = self.sort.filter(|s| s.column == c.name);
+        // gpui-component's header arrow only knows a direction, so an
+        // absolute sort says so in the label, as the blotter's does:
+        // `npv |x|`.
+        let name = match own {
+            Some(s) if s.order.absolute() => format!("{} |x|", c.label).into(),
+            _ => c.label.clone(),
+        };
         Column {
             key: SharedString::new_static(c.name),
-            name: c.label.clone(),
+            name,
             align: if c.right {
                 TextAlign::Right
             } else {
                 TextAlign::Left
             },
-            sort: None,
+            sort: Some(match own {
+                Some(s) if s.order.descending() => ColumnSort::Descending,
+                Some(_) => ColumnSort::Ascending,
+                None => ColumnSort::Default,
+            }),
             width: px(self.fitted.get(c.name).copied().unwrap_or(c.width)),
             movable: true,
             resizable: true,
@@ -1029,6 +1062,20 @@ impl TableDelegate for SheetDelegate {
             return;
         };
         cx.emit(ColumnMoved { from, to });
+    }
+
+    /// A header's sort icon: the tree column has none (`sort: None`), and
+    /// this guard keeps a direct call from sorting by it.
+    fn perform_sort(
+        &mut self,
+        col_ix: usize,
+        _proposed: ColumnSort,
+        _window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) {
+        if let Some(col) = Self::plan_col(col_ix).filter(|&c| c < self.model.columns.len()) {
+            cx.emit(SortClicked(col));
+        }
     }
 
     fn render_th(
@@ -1611,8 +1658,11 @@ mod width_tests {
         let padding = f32::from(pad.left) + f32::from(pad.right) + CURSOR_BORDER;
         let mut failures = Vec::new();
         for c in &COLUMNS {
-            for text in [c.label.to_string(), worst_case(c)] {
-                let need = text.chars().count() as f32 * advance + padding;
+            // A header also carries the sort toggle: `Icon::size_3`
+            // (0.75rem) inside the toggle's `p(px(2.))`.
+            let toggle = 0.75 * FontSize::Large.rem_px() + 4.0;
+            for (text, extra) in [(c.label.to_string(), toggle), (worst_case(c), 0.0)] {
+                let need = text.chars().count() as f32 * advance + padding + extra;
                 if need > c.default_width {
                     failures.push(format!(
                         "{}: '{text}' needs {need:.1}px in {}px",

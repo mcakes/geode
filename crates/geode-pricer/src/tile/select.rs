@@ -206,20 +206,18 @@ impl PricerTile {
 
     /// The rows a total or a `V` yank reaches: each selected grid row's
     /// sheet rows (a grouping row its contents, a split package its legs
-    /// under that node; `grid_rows_under`), each once, top-most — a
-    /// grouping row selected with its own descendants, or a package with
-    /// its legs, counts every leg once.
+    /// under that node; `grid_rows_under`), each once in painted order
+    /// (a yank keeps what the screen shows, under a sort or a grouping),
+    /// top-most — a grouping row selected with its own descendants, or a
+    /// package with its legs, counts every leg once.
     pub(crate) fn selection_total_rows(&self) -> Vec<usize> {
         let Some(r) = &self.resolved else {
             return Vec::new();
         };
-        let mut rows: Vec<usize> = r
-            .rows
-            .clone()
-            .flat_map(|g| self.grid_rows_under(g))
-            .collect();
-        rows.sort_unstable();
-        rows.dedup();
+        let rows = first_seen(
+            r.rows.clone().flat_map(|g| self.grid_rows_under(g)),
+            self.sheet.len(),
+        );
         top_most(&self.sheet, &rows)
     }
 
@@ -419,6 +417,12 @@ impl PricerTile {
         if verb == "group" && !selected && count > 1 && self.grouped() {
             return Some(PACKAGE_GROUPED);
         }
+        if matches!(verb, "move_down" | "move_up") && self.sort.is_some() {
+            return Some(MOVE_SORTED);
+        }
+        if verb == "group" && !selected && count > 1 && self.sort.is_some() {
+            return Some(PACKAGE_SORTED);
+        }
         let targets: Vec<usize> = if selected {
             if self.selection_holds_group() {
                 return Some(GROUP_ROW);
@@ -498,7 +502,7 @@ impl PricerTile {
     }
 
     /// `d` over a `V` selection: the top-most rows go as ONE undo entry
-    /// and land in the register in sheet order. The specs are read before
+    /// and land in the register in painted order. The specs are read before
     /// any remove, since each remove shifts the indices after it; the
     /// removes run bottom-up so the earlier indices stay valid.
     pub(crate) fn delete_selection(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
@@ -979,4 +983,20 @@ impl PricerTile {
     pub(crate) fn resolved(&self) -> Option<&Resolved> {
         self.resolved.as_ref()
     }
+}
+
+/// `rows` once each, in the order first met: the painted order a yank
+/// keeps, which a sort or a grouping makes differ from sheet order. A
+/// split package's legs reach here once per node that paints them.
+pub(crate) fn first_seen(rows: impl IntoIterator<Item = usize>, universe: usize) -> Vec<usize> {
+    let mut seen = vec![false; universe];
+    rows.into_iter()
+        .filter(|&r| match seen.get_mut(r) {
+            Some(s) if !*s => {
+                *s = true;
+                true
+            }
+            _ => false,
+        })
+        .collect()
 }
