@@ -61,6 +61,11 @@ impl<C> WindowCache<C> {
     /// and still in `range` are moved, not refilled: `fill(row, col)` runs
     /// only for rows entering it. A different `cols` clears the cache first,
     /// so a cell prepared for another column layout is never shown.
+    ///
+    /// `fill` runs for every entering row in `range`, even past the
+    /// document's end: the cache does not know the document length, so the
+    /// caller clamps the range, through [`WindowRequest::refill_range`] or by
+    /// bounding what its table reports.
     pub fn set_window(
         &mut self,
         range: Range<usize>,
@@ -170,6 +175,76 @@ mod tests {
         w.set_window(0..8, 2, fill);
         assert_eq!(fills.get(), 40, "rows 0..5 entered, 5..8 kept");
         assert_eq!(w.get(7, 1).map(String::as_str), Some("r7c1"));
+    }
+
+    #[test]
+    fn the_same_range_again_fills_nothing() {
+        let mut w = WindowCache::default();
+        w.set_window(3..9, 2, text);
+        let fills = Cell::new(0);
+        w.set_window(3..9, 2, |r, c| {
+            fills.set(fills.get() + 1);
+            text(r, c)
+        });
+        assert_eq!(fills.get(), 0);
+        assert_eq!(w.get(8, 1).map(String::as_str), Some("r8c1"), "kept");
+    }
+
+    #[test]
+    fn a_disjoint_move_fills_every_row_and_keeps_none() {
+        let mut w = WindowCache::default();
+        w.set_window(0..5, 2, text);
+        let fills = Cell::new(0);
+        w.set_window(10..15, 2, |r, c| {
+            fills.set(fills.get() + 1);
+            Some(format!("new{r}{c}"))
+        });
+        assert_eq!(fills.get(), 10, "five rows, two columns, all entering");
+        assert_eq!(w.window(), 10..15);
+        assert_eq!(w.get(0, 0), None, "the old window is gone");
+        assert_eq!(w.get(12, 1).map(String::as_str), Some("new121"));
+    }
+
+    #[test]
+    fn an_empty_range_gives_an_empty_window() {
+        let mut w = WindowCache::default();
+        w.set_window(0..5, 2, text);
+        let fills = Cell::new(0);
+        w.set_window(7..7, 2, |r, c| {
+            fills.set(fills.get() + 1);
+            text(r, c)
+        });
+        assert_eq!(fills.get(), 0);
+        assert_eq!(w.window(), 7..7);
+        assert!(w.window().is_empty());
+        assert_eq!(w.get(2, 0), None);
+        assert_eq!(w.get(7, 0), None);
+    }
+
+    #[test]
+    fn a_pure_grow_fills_only_the_new_rows() {
+        let mut w = WindowCache::default();
+        w.set_window(4..8, 2, text);
+        let filled = std::cell::RefCell::new(Vec::new());
+        w.set_window(2..12, 2, |r, c| {
+            filled.borrow_mut().push(r);
+            text(r, c)
+        });
+        let mut rows = filled.into_inner();
+        rows.dedup();
+        assert_eq!(rows, vec![2, 3, 8, 9, 10, 11], "4..8 kept");
+        assert_eq!(w.window(), 2..12);
+        assert_eq!(w.get(5, 1).map(String::as_str), Some("r5c1"));
+        assert_eq!(w.get(11, 0).map(String::as_str), Some("r11c0"));
+    }
+
+    #[test]
+    fn a_request_with_no_rows_refills_nothing() {
+        assert_eq!(WindowRequest::default().refill_range(0), None);
+        let mut q = WindowRequest::with_first(FIRST_WINDOW);
+        assert_eq!(q.refill_range(0), None, "first window, no rows");
+        q.record(0..10);
+        assert_eq!(q.refill_range(0), None, "recorded, no rows");
     }
 
     #[test]
