@@ -110,19 +110,36 @@ pub fn fmt_percent(value: f64, step: f64) -> String {
     format!("{}%", fmt_tick(value * 100.0, step * 100.0))
 }
 
-/// A readout value: 2 decimals from 100 up, 4 from 1 up, 6 below.
+/// A formatted number without the minus sign of a value that rounded to
+/// zero: `-0.00` reads `0.00`. A negative value smaller than its format's
+/// last decimal otherwise prints as a zero with a sign, which reads as a
+/// number that is not there. The text is taken as formatted, so a unit
+/// after the digits (`-0.0%`) is kept; a number with any digit other than
+/// zero keeps its sign, and text with no digit is left as it came.
+pub fn unsigned_zero(mut text: String) -> String {
+    let rounded_to_zero = text.starts_with('-')
+        && text.contains('0')
+        && !text.bytes().any(|b| (b'1'..=b'9').contains(&b));
+    if rounded_to_zero {
+        text.remove(0);
+    }
+    text
+}
+
+/// A readout value: 2 decimals from 100 up, 4 from 1 up, 6 below. Never a
+/// signed zero.
 pub fn fmt_value(value: f64) -> String {
     if value.is_nan() {
         return "—".to_string();
     }
     let a = value.abs();
-    if a >= 100.0 {
+    unsigned_zero(if a >= 100.0 {
         format!("{value:.2}")
     } else if a >= 1.0 {
         format!("{value:.4}")
     } else {
         format!("{value:.6}")
-    }
+    })
 }
 
 /// The finite min/max of `values`, padded by [`DOMAIN_PAD`] of the span
@@ -230,6 +247,34 @@ mod tests {
         assert_eq!(fmt_value(12.3456789), "12.3457");
         assert_eq!(fmt_value(0.123456789), "0.123457");
         assert_eq!(fmt_value(-0.5), "-0.500000");
+    }
+
+    #[test]
+    fn a_number_that_rounds_to_zero_reads_without_a_sign() {
+        let read = |s: &str| unsigned_zero(s.to_string());
+        assert_eq!(read("-0.0%"), "0.0%");
+        assert_eq!(read("-0.00%"), "0.00%");
+        assert_eq!(read("-0.000000"), "0.000000");
+        assert_eq!(read("-0.0000"), "0.0000");
+        assert_eq!(read("-0"), "0");
+        assert_eq!(read("-0.0c"), "0.0c");
+        // A digit other than zero anywhere keeps the sign.
+        assert_eq!(read("-0.01%"), "-0.01%");
+        assert_eq!(read("-10"), "-10");
+        assert_eq!(read("-0.000001"), "-0.000001");
+        // What is not a signed zero is left as it came.
+        assert_eq!(read("0.00"), "0.00");
+        assert_eq!(read("-inf"), "-inf");
+        assert_eq!(read("—"), "—");
+        assert_eq!(read(""), "");
+    }
+
+    #[test]
+    fn a_readout_value_that_rounds_to_zero_has_no_sign() {
+        assert_eq!(fmt_value(-1e-9), "0.000000");
+        assert_eq!(fmt_value(-0.0), "0.000000");
+        assert_eq!(fmt_value(-0.0000006), "-0.000001", "a real negative");
+        assert_eq!(fmt_value(-1.00001), "-1.0000");
     }
 
     #[test]

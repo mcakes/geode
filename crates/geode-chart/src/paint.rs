@@ -55,6 +55,10 @@ pub(crate) fn note_chrome_rebuild() {
 /// a hairline is a hairline).
 pub(crate) const LINE_WIDTH: f32 = 1.5;
 
+/// The distance from the cursor to a chart's tooltip box, in design pixels
+/// at the design rem. One constant so every chart's tooltip sits alike.
+pub(crate) const TOOLTIP_GAP: f32 = 8.0;
+
 /// The most segments one stroke path is built from. gpui tessellates a
 /// path into vertex buffers indexed by `u16`, and a segment takes four
 /// vertices, so the build fails past 16,384 segments and the shape is

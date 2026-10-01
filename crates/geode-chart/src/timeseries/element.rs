@@ -46,7 +46,7 @@ use crate::core::time::{Crosshair, Tick, TimeScale, ticks};
 use crate::core::view::View;
 use crate::core::{DASH, GAP, MAX_DENSITY_QUADS, Rect, TICK_GAP, design_px};
 use crate::paint::{
-    Ink, Scratch, SideAxis, axis_index, axis_of, bounds_of, dashed_horizontal, inside,
+    Ink, Scratch, SideAxis, TOOLTIP_GAP, axis_index, axis_of, bounds_of, dashed_horizontal, inside,
     note_chrome_rebuild, note_rebuild, paint_pane_frame, paint_x_axis, pane_index, side_scale_of,
     stroke_polyline, y_tick_hint,
 };
@@ -540,7 +540,7 @@ impl Plot for ChartElement {
         let title = self.bucket_title(state.index)?;
         let top = layout.upper.plot.y;
         let mut tooltip = Tooltip::new(cursor, bounds.size)
-            .gap(px(design_px(8.0, self.rem_px)))
+            .gap(px(design_px(TOOLTIP_GAP, self.rem_px)))
             .cross_line(CrossLine::new(state.cross_line).span(top, layout.lowest_bottom() - top))
             .title(title);
         for slot in self.visible_slots() {

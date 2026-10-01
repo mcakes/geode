@@ -6,11 +6,12 @@
 //! stroke, a points slot as a diamond per point with a vertical bar over its
 //! range. One x axis sits below the lowest pane.
 //!
-//! The crosshair sits on a quoted point when the cursor is within a few
-//! pixels of one and otherwise follows the cursor; its tooltip reads every
-//! visible slot at that x, a line between its knots and a points slot at
-//! the point the crosshair is on. Resolving it is a binary search per slot
-//! and allocates nothing; building the tooltip formats a row per slot.
+//! The crosshair sits on a painted quoted point when the cursor is within a
+//! few pixels of one and otherwise follows the cursor; its tooltip reads
+//! every visible slot at that x, a line between its knots and a points slot
+//! at the point the crosshair is on. Resolving it is, per slot, a binary
+//! search and a walk over the points within the snap radius, and allocates
+//! nothing; building the tooltip formats a row per slot.
 //!
 //! State lives under the element's stable, unique ID. Two caches avoid
 //! repeating data-dependent preparation on unchanged paints:
@@ -37,7 +38,7 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, Bounds, ContentMask, ElementId, IntoElement, Path, Pixels, SharedString,
+    AnyElement, App, Bounds, ContentMask, ElementId, Hsla, IntoElement, Path, Pixels, SharedString,
     Window, point, px,
 };
 use gpui_component::plot::tooltip::{CrossLine, Tooltip, TooltipState};
@@ -46,17 +47,19 @@ use gpui_component::plot::{IntoPlot, PathCaches, Plot, ShapeKey};
 use super::model::{SlotKind, Style, XyModel, XySlot, YFormat};
 use crate::core::axis::{Pane, Side};
 use crate::core::layout::{Layout, PaneRects};
-use crate::core::linear::{LinearX, XFormat, delta_label_with, x_ticks};
+use crate::core::linear::{LinearX, XFormat, delta_label_with, step_decimals, x_ticks};
 use crate::core::marks::{
     Clip, MARKER_R, SEGMENTS_PER_MARK, Segment, dash_polyline, mark_stride, point_marks, strided,
 };
-use crate::core::scale::{LinearScale, axis_domain, fmt_percent, fmt_tick, fmt_value};
+use crate::core::scale::{
+    LinearScale, axis_domain, fmt_percent, fmt_tick, fmt_value, unsigned_zero,
+};
 use crate::core::time::Tick;
 use crate::core::view::View;
 use crate::core::{DASH, GAP, Rect, TICK_GAP, design_px};
 use crate::paint::{
-    Ink, LINE_WIDTH, MAX_STROKE_SEGMENTS, Scratch, SideAxis, axis_index, axis_of, bounds_of,
-    decimated_points, note_chrome_rebuild, note_rebuild, paint_pane_frame, paint_x_axis,
+    Ink, LINE_WIDTH, MAX_STROKE_SEGMENTS, Scratch, SideAxis, TOOLTIP_GAP, axis_index, axis_of,
+    bounds_of, decimated_points, note_chrome_rebuild, note_rebuild, paint_pane_frame, paint_x_axis,
     pane_index, side_scale_of, stroke_points, stroke_segments, y_tick_hint,
 };
 
@@ -70,63 +73,108 @@ const SHAPES: &str = "geode-xy-shapes";
 /// Farther than this from every quote, the crosshair follows the cursor.
 const SNAP: f32 = 8.0;
 
-/// The distance from the cursor to the tooltip box, in design pixels.
-const TOOLTIP_GAP: f32 = 8.0;
-
 // The crosshair's x rides in `TooltipState::index` as its bit pattern. A
 // narrower `usize` would cut it and the tooltip would read another x.
 const _: () = assert!(usize::BITS >= u64::BITS);
 
-/// A y value as its axis reads it in a readout: finer than a tick label.
+/// What a readout shows where there is no value.
+const NONE: &str = "—";
+
+/// A y value as its axis reads it in a readout: finer than a tick label,
+/// and never a signed zero.
 fn fmt_y(v: f64, format: YFormat) -> String {
     match format {
         YFormat::Plain => fmt_value(v),
-        YFormat::Percent => format!("{:.2}%", v * 100.0),
+        YFormat::Percent => unsigned_zero(format!("{:.2}%", v * 100.0)),
     }
 }
 
+/// Whether a point's range paints a bar: both ends finite and apart, as
+/// `core::marks::point_marks` asks of them.
+fn has_range(lo: f64, hi: f64) -> bool {
+    lo.is_finite() && hi.is_finite() && lo != hi
+}
+
+/// The index among `xs[start..end]` of the x nearest `u`, the lower of two
+/// as near. `None` for an empty window or a `u` that is not a number.
+fn nearest_within(xs: &[f64], (start, end): (usize, usize), u: f64) -> Option<usize> {
+    if start >= end || u.is_nan() {
+        return None;
+    }
+    let i = start + xs[start..end].partition_point(|x| *x < u);
+    if i == start {
+        return Some(start);
+    }
+    if i == end {
+        return Some(end - 1);
+    }
+    Some(if xs[i] - u < u - xs[i - 1] { i } else { i - 1 })
+}
+
 /// One slot's readout at `u`. A line is read between its knots. A points
-/// slot shows its nearest point when that lies within `tol` of `u`, as
-/// `mid  lo / hi`, or the value alone when it has no range. A dash when
-/// the slot has nothing there.
-pub(crate) fn readout(slot: &XySlot, u: f64, tol: f64, format: YFormat) -> String {
-    const NONE: &str = "—";
+/// slot shows the nearest of its points in `window` when that lies within
+/// `tol` of `u`: its mid, then `lo / hi` when it has a range, with a dash
+/// for a mid it does not have. A dash alone when the slot has nothing
+/// there.
+///
+/// The tooltip passes the slot's view window, so a point just past the
+/// plot's edge, which is not painted, is not read from a cursor at the
+/// edge. A line ignores the window.
+pub(crate) fn readout(
+    slot: &XySlot,
+    window: (usize, usize),
+    u: f64,
+    tol: f64,
+    format: YFormat,
+) -> String {
     match &slot.kind {
         SlotKind::Line { .. } => slot
             .line_value_at(u)
             .map_or_else(|| NONE.to_string(), |v| fmt_y(v, format)),
         SlotKind::Points { xs, mid, lo, hi } => {
-            let Some(i) = slot.nearest(u) else {
+            let Some(i) = nearest_within(xs, window, u) else {
                 return NONE.to_string();
             };
             // Asked as "is it near", so a tolerance that is not a number
             // accepts no point instead of every point.
             let near = (xs[i] - u).abs() <= tol;
-            if !near || !mid[i].is_finite() {
+            if !near {
                 return NONE.to_string();
             }
-            if lo[i].is_finite() && hi[i].is_finite() && lo[i] != hi[i] {
+            let middle = if mid[i].is_finite() {
+                fmt_y(mid[i], format)
+            } else {
+                NONE.to_string()
+            };
+            if has_range(lo[i], hi[i]) {
                 format!(
-                    "{}  {} / {}",
-                    fmt_y(mid[i], format),
+                    "{middle}  {} / {}",
                     fmt_y(lo[i], format),
                     fmt_y(hi[i], format)
                 )
             } else {
-                fmt_y(mid[i], format)
+                middle
             }
         }
     }
 }
 
-/// The tooltip's title: x at the crosshair, finer than a tick label.
-pub(crate) fn title(u: f64, format: XFormat) -> String {
-    match format {
-        XFormat::Price => format!("{u:.2}"),
-        XFormat::Percent => format!("{:.1}%", u * 100.0),
-        XFormat::Fixed(n) => format!("{u:.*}", n as usize + 2),
-        XFormat::Delta => delta_label_with(u, 1),
-    }
+/// The tooltip's title: x at the crosshair. `tol` is one pixel column in x
+/// units. Each format prints its own decimals, finer than a tick label, or
+/// the decimals a step of `tol` needs when that is more, so two cursor
+/// positions a pixel apart never read the same x. The column asks for six
+/// decimals at most; a tolerance that is not a positive number asks for
+/// none. Never a signed zero.
+pub(crate) fn title(u: f64, format: XFormat, tol: f64) -> String {
+    unsigned_zero(match format {
+        XFormat::Price => format!("{u:.*}", step_decimals(tol).max(2)),
+        XFormat::Percent => {
+            let decimals = step_decimals(tol * 100.0).max(1);
+            format!("{:.decimals$}%", u * 100.0)
+        }
+        XFormat::Fixed(n) => format!("{u:.*}", step_decimals(tol).max(n as usize + 2)),
+        XFormat::Delta => delta_label_with(u, step_decimals(tol * 100.0).max(1)),
+    })
 }
 
 /// Element state kept across frames: the reused buffers and the chrome of
@@ -213,14 +261,16 @@ impl XyElement {
     ///
     /// It sits on a quoted point when one is within [`SNAP`] of the cursor
     /// and otherwise glides with the cursor. The candidates are the
-    /// visible points slots of both panes, since the line spans both and
-    /// the tooltip reads every slot; a line is read between its knots, so
-    /// its knots are never snapped to. A point outside the view is not a
-    /// candidate either: it is not painted, and its x lies off the plot,
-    /// where the line would cross an axis column.
+    /// painted points of the visible points slots of both panes, since the
+    /// line spans both and the tooltip reads every slot; the nearest in
+    /// pixels wins. A line is read between its knots, so its knots are
+    /// never snapped to.
     ///
-    /// One binary search per slot and no allocation: this runs on every
-    /// pointer move.
+    /// A view with no span paints every point at one x, so the line sits
+    /// there whatever the cursor's x.
+    ///
+    /// No allocation, and per slot one binary search and a walk over the
+    /// points within the radius: this runs on every pointer move.
     pub(crate) fn crosshair_x(&self, cursor_x: f32, plot: Rect) -> Option<(f64, f32)> {
         let scale = self.scale();
         let view = self.view;
@@ -228,18 +278,85 @@ impl XyElement {
         if !under.is_finite() {
             return None;
         }
+        let span = view.span();
+        if span.is_nan() || span <= 0.0 {
+            return Some((view.lo, scale.x_of(view.lo, view, plot)));
+        }
         let radius = design_px(SNAP, self.rem_px);
         let snapped = self
             .model
             .slots
             .iter()
-            .filter(|s| s.visible && matches!(s.kind, SlotKind::Points { .. }))
-            .filter_map(|s| s.nearest(under).map(|i| s.xs()[i]))
-            .filter(|x| x.is_finite() && (view.lo..=view.hi).contains(x))
-            .map(|x| (x, scale.x_of(x, view, plot)))
-            .min_by(|a, b| (a.1 - cursor_x).abs().total_cmp(&(b.1 - cursor_x).abs()))
-            .filter(|(_, x)| (x - cursor_x).abs() <= radius);
+            .filter(|s| s.visible)
+            .filter_map(|s| self.snap_candidate(s, under, cursor_x, plot, radius))
+            .min_by(|a, b| (a.1 - cursor_x).abs().total_cmp(&(b.1 - cursor_x).abs()));
         Some(snapped.unwrap_or((under, cursor_x)))
+    }
+
+    /// The point of `slot` the crosshair may sit on, as its x and its
+    /// pixel x: the nearest to pixel `cursor_x` among the points the chart
+    /// paints of the slot, when that is within `radius` pixels. `None` for
+    /// a line. `under` is the x under the cursor.
+    ///
+    /// The search runs outward from `under`, both ways, through the slot's
+    /// view window. A point past the plot's edge is outside the window and
+    /// one with neither a mid nor a range paints no mark, so neither is a
+    /// candidate, and neither hides a painted neighbour that is in reach.
+    /// Each walk ends at the first point that paints or the first beyond
+    /// the radius, so the work is bounded by the points within the radius.
+    fn snap_candidate(
+        &self,
+        slot: &XySlot,
+        under: f64,
+        cursor_x: f32,
+        plot: Rect,
+        radius: f32,
+    ) -> Option<(f64, f32)> {
+        let SlotKind::Points { xs, mid, lo, hi } = &slot.kind else {
+            return None;
+        };
+        let (start, end) = slot.window(self.view);
+        let split = start + xs[start..end].partition_point(|x| *x < under);
+        let scale = self.scale();
+        let in_reach = |i: usize| {
+            let x = scale.x_of(xs[i], self.view, plot);
+            ((x - cursor_x).abs() <= radius).then_some((i, x))
+        };
+        let paints = |(i, _): &(usize, f32)| mid[*i].is_finite() || has_range(lo[*i], hi[*i]);
+        let below = (start..split).rev().map_while(in_reach).find(paints);
+        let above = (split..end).map_while(in_reach).find(paints);
+        [below, above]
+            .into_iter()
+            .flatten()
+            .min_by(|a, b| (a.1 - cursor_x).abs().total_cmp(&(b.1 - cursor_x).abs()))
+            .map(|(i, x)| (xs[i], x))
+    }
+
+    /// The tooltip's title and one (color, label, readout) row per visible
+    /// slot, for a crosshair at `u` over `plot`.
+    pub(crate) fn tooltip_rows(
+        &self,
+        u: f64,
+        plot: Rect,
+    ) -> (String, Vec<(Hsla, SharedString, String)>) {
+        let view = self.view;
+        // One pixel column, in x units: how near `u` a point must be to be
+        // read, and how fine the title must be. A snapped crosshair is on
+        // its point's own x. A gliding one seldom has a point this near;
+        // when it has, that point reads.
+        let tol = view.span() / plot.w as f64;
+        let rows = self
+            .model
+            .slots
+            .iter()
+            .filter(|s| s.visible)
+            .map(|slot| {
+                let format = self.model.y_format_of(slot.axis);
+                let text = readout(slot, slot.window(view), u, tol, format);
+                (slot.color, slot.label.clone(), text)
+            })
+            .collect();
+        (title(u, self.model.x.format, tol), rows)
     }
 
     fn y_label(format: YFormat) -> impl Fn(f64, f64) -> String {
@@ -544,22 +661,14 @@ impl Plot for XyElement {
         if plot.w <= 0.0 {
             return None;
         }
-        let u = f64::from_bits(state.index as u64);
-        // One pixel column, in x units: how near a point must be to be
-        // read. A snapped crosshair is on the point's own x; a gliding one
-        // has no point within the snap radius, so quotes read a dash.
-        let tol = self.view.span() / plot.w as f64;
+        let (title, rows) = self.tooltip_rows(f64::from_bits(state.index as u64), plot);
         let top = plot.y;
         let mut tooltip = Tooltip::new(cursor, bounds.size)
             .gap(px(design_px(TOOLTIP_GAP, self.rem_px)))
             .cross_line(CrossLine::new(state.cross_line).span(top, layout.lowest_bottom() - top))
-            .title(title(u, self.model.x.format));
-        for slot in self.model.slots.iter().filter(|s| s.visible) {
-            tooltip = tooltip.row(
-                slot.color,
-                slot.label.clone(),
-                SharedString::from(readout(slot, u, tol, self.model.y_format_of(slot.axis))),
-            );
+            .title(title);
+        for (color, label, text) in rows {
+            tooltip = tooltip.row(color, label, text);
         }
         Some(tooltip.into_any_element())
     }
@@ -1166,45 +1275,167 @@ mod tests {
         assert_eq!(XyElement::y_label(YFormat::Plain)(0.2, 0.05), "0.20");
     }
 
+    /// A slot's readout over all of its points, whatever the view.
+    fn read_all(slot: &XySlot, u: f64, tol: f64, format: YFormat) -> String {
+        readout(slot, (0, slot.len()), u, tol, format)
+    }
+
     #[test]
     fn a_readout_reads_a_line_between_knots_and_a_point_only_near_one() {
         let m = fixture(false);
         // The solid curve at x = 1.0005, between knots 1.000 and 1.002.
-        let line = readout(&m.slots[0], 1.0005, 0.001, YFormat::Percent);
+        let line = read_all(&m.slots[0], 1.0005, 0.001, YFormat::Percent);
         assert_eq!(line, "20.00%");
         // The chain has a point at 1.00 with mid 0.2 and a range of ±0.005.
         assert_eq!(
-            readout(&m.slots[2], 1.0, 0.001, YFormat::Percent),
+            read_all(&m.slots[2], 1.0, 0.001, YFormat::Percent),
             "20.00%  19.50% / 20.50%"
         );
         assert_eq!(
-            readout(&m.slots[2], 1.004, 0.001, YFormat::Percent),
+            read_all(&m.slots[2], 1.004, 0.001, YFormat::Percent),
             "—",
             "no point within a column"
         );
         // A point with no range reads as its value alone.
-        assert_eq!(readout(&m.slots[4], 1.0, 0.001, YFormat::Plain), "0.001000");
+        assert_eq!(
+            read_all(&m.slots[4], 1.0, 0.001, YFormat::Plain),
+            "0.001000"
+        );
         // Outside a line's own range there is nothing to read.
-        assert_eq!(readout(&m.slots[0], 5.0, 0.001, YFormat::Percent), "—");
+        assert_eq!(read_all(&m.slots[0], 5.0, 0.001, YFormat::Percent), "—");
         // Midway between the quotes at 0.96 and 0.97 the chain has nothing
         // to read, and the curve still reads between its knots: about
         // 0.2 + 0.035², which is 0.201225.
-        assert_eq!(readout(&m.slots[2], 0.965, 0.001, YFormat::Percent), "—");
+        assert_eq!(read_all(&m.slots[2], 0.965, 0.001, YFormat::Percent), "—");
         assert_eq!(
-            readout(&m.slots[0], 0.965, 0.001, YFormat::Percent),
+            read_all(&m.slots[0], 0.965, 0.001, YFormat::Percent),
             "20.12%"
         );
         // A tolerance that is not a number accepts no point.
-        assert_eq!(readout(&m.slots[2], 1.0, f64::NAN, YFormat::Percent), "—");
+        assert_eq!(read_all(&m.slots[2], 1.0, f64::NAN, YFormat::Percent), "—");
     }
 
     #[test]
     fn a_title_names_x_in_the_axis_format() {
-        assert_eq!(title(0.953, XFormat::Percent), "95.3%");
-        assert_eq!(title(7650.0, XFormat::Price), "7650.00");
-        assert_eq!(title(-0.0512, XFormat::Fixed(2)), "-0.0512");
-        assert_eq!(title(0.75, XFormat::Delta), "25.0p");
-        assert_eq!(title(0.2537, XFormat::Delta), "25.4c");
+        // A pixel column no finer than the format's own decimals.
+        assert_eq!(title(0.953, XFormat::Percent, 0.001), "95.3%");
+        assert_eq!(title(7650.0, XFormat::Price, 0.5), "7650.00");
+        assert_eq!(title(-0.0512, XFormat::Fixed(2), 0.001), "-0.0512");
+        assert_eq!(title(0.75, XFormat::Delta, 0.001), "25.0p");
+        assert_eq!(title(0.2537, XFormat::Delta, 0.001), "25.4c");
+        // No usable tolerance asks for nothing more.
+        assert_eq!(title(0.953, XFormat::Percent, 0.0), "95.3%");
+        assert_eq!(title(0.953, XFormat::Percent, f64::NAN), "95.3%");
+    }
+
+    #[test]
+    fn a_title_is_never_coarser_than_a_pixel_column() {
+        assert_eq!(title(0.95312, XFormat::Percent, 0.00001), "95.312%");
+        assert_eq!(title(7650.125, XFormat::Price, 0.001), "7650.125");
+        assert_eq!(title(-0.051234, XFormat::Fixed(2), 0.00001), "-0.05123");
+        assert_eq!(title(0.25371, XFormat::Delta, 0.00001), "25.371c");
+        // The column asks for six decimals at most.
+        assert_eq!(title(1.0, XFormat::Price, 1e-12), "1.000000");
+        assert_eq!(title(0.5, XFormat::Percent, 1e-12), "50.000000%");
+        // A fixed format's own count stands when it is the larger.
+        assert_eq!(title(0.5, XFormat::Fixed(5), 0.5), "0.5000000");
+    }
+
+    #[test]
+    fn no_readout_or_title_carries_a_signed_zero() {
+        assert_eq!(title(-0.0001, XFormat::Percent, 0.001), "0.0%");
+        assert_eq!(title(-0.00001, XFormat::Fixed(2), 0.001), "0.0000");
+        assert_eq!(title(-0.001, XFormat::Price, 0.5), "0.00");
+        assert_eq!(title(-0.0001, XFormat::Delta, 0.001), "0.0c");
+        assert_eq!(fmt_y(-0.00001, YFormat::Percent), "0.00%");
+        assert_eq!(fmt_y(-1e-9, YFormat::Plain), "0.000000");
+        // A value that does not round to zero keeps its sign.
+        assert_eq!(title(-0.001, XFormat::Percent, 0.001), "-0.1%");
+        assert_eq!(fmt_y(-0.0001, YFormat::Percent), "-0.01%");
+        assert_eq!(fmt_y(-0.5, YFormat::Plain), "-0.500000");
+    }
+
+    /// The rows' labels and readouts, without their colors.
+    fn texts(rows: &[(Hsla, SharedString, String)]) -> Vec<(&str, &str)> {
+        rows.iter()
+            .map(|(_, label, value)| (label.as_ref(), value.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn the_tooltip_reads_every_visible_slot_in_its_own_axis_format() {
+        let m = fixture(false);
+        let view = View::with_min_span(m.full(), 0.01);
+        let e = XyElement::new(m.clone(), view, 12.0, "s");
+        // On a quote: the chain and the differences read their point. The
+        // left axis is a percent; the right and the lower left are plain.
+        // A pixel column is 0.044% of moneyness: two decimals in the title.
+        let (title, rows) = e.tooltip_rows(quotes(&m.slots[2])[15], WIDE);
+        assert_eq!(title, "96.00%");
+        assert_eq!(
+            texts(&rows),
+            [
+                ("s1", "20.16%"),
+                ("s2", "21.16%"),
+                ("s3", "20.16%  19.66% / 20.66%"),
+                ("s4", "1.2016"),
+                ("s5", "0.001000"),
+            ]
+        );
+        // Midway between two quotes, eleven pixels from each: the points
+        // read a dash and the lines between their knots.
+        let scale = e.scale();
+        let midway = scale.value_at(scale.x_of(0.965, view, WIDE), view, WIDE);
+        let (title, rows) = e.tooltip_rows(midway, WIDE);
+        assert_eq!(title, "96.50%");
+        assert_eq!(
+            texts(&rows),
+            [
+                ("s1", "20.12%"),
+                ("s2", "21.12%"),
+                ("s3", "—"),
+                ("s4", "1.2012"),
+                ("s5", "—"),
+            ]
+        );
+        // A hidden slot has no row, and a row carries its slot's color.
+        let mut slots = m.slots.clone();
+        slots[1].visible = false;
+        slots[3].color = gpui::blue();
+        let hidden = XyModel::new(2, m.x, m.y_format, m.split, slots);
+        let (_, rows) = XyElement::new(hidden, view, 12.0, "s").tooltip_rows(midway, WIDE);
+        let labels: Vec<&str> = texts(&rows).iter().map(|(label, _)| *label).collect();
+        assert_eq!(labels, ["s1", "s3", "s4", "s5"]);
+        let colors: Vec<Hsla> = rows.iter().map(|(color, _, _)| *color).collect();
+        let (red, blue) = (gpui::red(), gpui::blue());
+        assert_eq!(colors, [red, red, blue, red]);
+    }
+
+    #[test]
+    fn a_point_just_outside_the_view_does_not_read() {
+        let m = fixture(false);
+        let quote = quotes(&m.slots[2])[15];
+        // The quote sits a quarter of a pixel column left of the plot.
+        let view = View {
+            lo: quote + 1e-5,
+            hi: 1.0,
+            min_span: 0.001,
+        };
+        let tol = view.span() / WIDE.w as f64;
+        let whole = "20.16%  19.66% / 20.66%";
+        assert!(view.lo - quote < tol);
+        assert_eq!(
+            read_all(&m.slots[2], view.lo, tol, YFormat::Percent),
+            whole,
+            "by distance alone it is in reach of a cursor at the edge"
+        );
+        let (_, rows) = XyElement::new(m.clone(), view, 12.0, "t").tooltip_rows(view.lo, WIDE);
+        assert_eq!(texts(&rows)[2], ("s3", "—"));
+        assert_eq!(texts(&rows)[4], ("s5", "—"));
+        // On the edge itself it is in the view, and reads.
+        let view = View { lo: quote, ..view };
+        let (_, rows) = XyElement::new(m.clone(), view, 12.0, "t").tooltip_rows(quote, WIDE);
+        assert_eq!(texts(&rows)[2], ("s3", whole));
     }
 
     /// The stored xs of a points slot.
@@ -1280,12 +1511,9 @@ mod tests {
         assert!(!chain.contains(&gliding), "no quote was chosen: {gliding}");
         assert_eq!(state.cross_line.x, cursor.x, "the line is the cursor's");
         // There the chain reads a dash and the curve between its knots.
-        let tol = view.span() / upper.w as f64;
-        assert_eq!(readout(&m.slots[2], gliding, tol, YFormat::Percent), "—");
-        assert_eq!(
-            readout(&m.slots[0], gliding, tol, YFormat::Percent),
-            "20.12%"
-        );
+        let (_, rows) = element.tooltip_rows(gliding, upper);
+        assert_eq!(texts(&rows)[2], ("s3", "—"));
+        assert_eq!(texts(&rows)[0], ("s1", "20.12%"));
 
         let axis = layout
             .upper
@@ -1297,21 +1525,35 @@ mod tests {
             "the y-axis column is not the plot"
         );
 
-        // The lower pane holds only the difference points, 0.01 apart.
+        // Without the chain the only quoted points are the lower pane's
+        // differences. The crosshair sits on one from a few pixels off it
+        // in either pane: the line spans both.
+        let slots: Vec<XySlot> = m.slots.iter().filter(|s| s.number != 3).cloned().collect();
+        let m = XyModel::new(2, m.x, m.y_format, m.split, slots);
+        let element = XyElement::new(m.clone(), view, 12.0, "probe");
+        let layout = element.layout(bounds);
+        let difference = quotes(&m.slots[3])[19];
         let lower = layout
             .lower
             .expect("a bottom-left slot opens a lower pane")
             .plot;
-        let cursor = at(lower, 0.5, 0.5);
-        let state = vcx
-            .update(|_, cx| element.tooltip_state(cursor, bounds, cx))
-            .expect("a cursor inside the lower plot resolves an x too");
-        let u = f64::from_bits(state.index as u64);
-        assert!(
-            quotes(&m.slots[4]).contains(&u),
-            "snapped to a difference point, not a curve knot: {u}"
-        );
-        assert_eq!(state.cross_line.x, px(scale.x_of(u, view, lower)));
+        let mut hovered = None;
+        for (pane, plot) in [("lower", lower), ("upper", layout.upper.plot)] {
+            let on_point = scale.x_of(difference, view, plot);
+            let cursor = point(px(on_point + 4.0), px(plot.y + plot.h * 0.5));
+            let state = vcx
+                .update(|_, cx| element.tooltip_state(cursor, bounds, cx))
+                .expect("a cursor inside either plot resolves an x");
+            assert_eq!(
+                f64::from_bits(state.index as u64),
+                difference,
+                "{pane}: snapped to the difference point as stored"
+            );
+            assert_eq!(state.cross_line.x, px(on_point), "{pane}");
+            assert_ne!(state.cross_line.x, cursor.x, "{pane}");
+            hovered = Some((state, cursor));
+        }
+        let (state, cursor) = hovered.expect("both panes were hovered");
 
         let built = vcx.update(|window, cx| {
             element
@@ -1432,5 +1674,207 @@ mod tests {
             Some((scale.value_at(x, view, WIDE), x)),
             "the line stays in the plot, on the cursor"
         );
+    }
+
+    #[test]
+    fn a_quote_past_the_edge_does_not_hide_the_next_one_inside_the_plot() {
+        let m = fixture(false);
+        // Seven pixels a quote: 0.96 sits two pixels left of the plot and
+        // 0.97 five inside it. A cursor on the plot's first pixel is
+        // nearer the one outside.
+        let view = View {
+            lo: 0.963,
+            hi: 2.263,
+            min_span: 0.001,
+        };
+        let e = XyElement::new(m.clone(), view, 12.0, "o");
+        let scale = e.scale();
+        let chain = quotes(&m.slots[2]);
+        let outside = scale.x_of(chain[15], view, WIDE);
+        let inside = scale.x_of(chain[16], view, WIDE);
+        let x = WIDE.x + 1.0;
+        assert!(
+            outside < WIDE.x && x - outside < inside - x && inside - x < design_px(SNAP, 12.0),
+            "the fixture's geometry: {outside} {x} {inside}"
+        );
+        assert_eq!(e.crosshair_x(x, WIDE), Some((chain[16], inside)));
+    }
+
+    /// A points slot on the left axis with the given columns.
+    fn chain_of(number: u16, xs: &[f64], mid: &[f64], lo: &[f64], hi: &[f64]) -> XySlot {
+        XySlot {
+            number,
+            label: format!("s{number}").into(),
+            color: gpui::red(),
+            axis: Axis::Left,
+            visible: true,
+            style: Style::Solid,
+            kind: SlotKind::Points {
+                xs: xs.to_vec(),
+                mid: mid.to_vec(),
+                lo: lo.to_vec(),
+                hi: hi.to_vec(),
+            },
+        }
+    }
+
+    #[test]
+    fn the_quote_nearest_the_cursor_wins_whichever_slot_holds_it() {
+        // Two chains whose quotes at 0.960 and 0.962 sit ten pixels apart,
+        // so both are inside the radius of a cursor between them.
+        let view = View {
+            lo: 0.9,
+            hi: 1.0824,
+            min_span: 0.001,
+        };
+        let chain = |number: u16, x: f64| {
+            chain_of(number, &[0.91, x, 1.05], &[0.2; 3], &[0.19; 3], &[0.21; 3])
+        };
+        for reversed in [false, true] {
+            for (first, second) in [(0.960, 0.962), (0.962, 0.960)] {
+                let x = XAxis {
+                    format: XFormat::Price,
+                    reversed,
+                };
+                let slots = vec![chain(1, first), chain(2, second)];
+                let m = XyModel::new(1, x, [YFormat::Plain; 4], 0.7, slots);
+                let e = XyElement::new(m, view, 12.0, "p");
+                let scale = e.scale();
+                let low = scale.x_of(0.960, view, WIDE);
+                let high = scale.x_of(0.962, view, WIDE);
+                let case = format!("reversed={reversed}, the first slot quotes {first}");
+                assert!(((low - high).abs() - 10.0).abs() < 0.1, "{case}");
+                // Three pixels from one and seven from the other.
+                assert_eq!(
+                    e.crosshair_x(low + 0.3 * (high - low), WIDE),
+                    Some((0.960, low)),
+                    "{case}"
+                );
+                assert_eq!(
+                    e.crosshair_x(low + 0.7 * (high - low), WIDE),
+                    Some((0.962, high)),
+                    "{case}"
+                );
+            }
+        }
+    }
+
+    /// A chain with holes, 4 px to 0.001 in [`HOLES_VIEW`] on [`WIDE`]:
+    /// 0.950 has no quote at all and 0.951 beside it is whole; 1.00 has a
+    /// range and no mid; 1.05 has nothing; 1.10 has no mid and a range of
+    /// no height.
+    fn holes() -> Arc<XyModel> {
+        let nan = f64::NAN;
+        let slot = chain_of(
+            1,
+            &[0.90, 0.950, 0.951, 1.00, 1.05, 1.10],
+            &[0.2, nan, 0.2, nan, nan, nan],
+            &[0.19, nan, 0.19, 0.19, nan, 0.2],
+            &[0.21, nan, 0.21, 0.21, nan, 0.2],
+        );
+        let y_format = [YFormat::Percent; 4];
+        XyModel::new(1, XAxis::default(), y_format, 0.7, vec![slot])
+    }
+
+    const HOLES_VIEW: View = View {
+        lo: 0.9,
+        hi: 1.128,
+        min_span: 0.001,
+    };
+
+    #[test]
+    fn a_point_that_paints_nothing_is_not_a_snap_candidate() {
+        let e = XyElement::new(holes(), HOLES_VIEW, 12.0, "q");
+        let scale = e.scale();
+        let at = |u: f64| scale.x_of(u, HOLES_VIEW, WIDE);
+        let glide = |x: f32| Some((scale.value_at(x, HOLES_VIEW, WIDE), x));
+        // Neither a mid nor a range, or a range of no height: no mark.
+        for unpainted in [1.05, 1.10] {
+            let x = at(unpainted) - 3.0;
+            assert_eq!(e.crosshair_x(x, WIDE), glide(x), "{unpainted}");
+        }
+        // A range with no mid paints its bar.
+        assert_eq!(e.crosshair_x(at(1.00) + 3.0, WIDE), Some((1.00, at(1.00))));
+        // Two pixels from the hole at 0.950 and six from the whole quote
+        // at 0.951: the hole does not shadow its neighbour.
+        assert_eq!(
+            e.crosshair_x(at(0.950) - 2.0, WIDE),
+            Some((0.951, at(0.951)))
+        );
+    }
+
+    #[test]
+    fn a_point_with_a_range_and_no_mid_reads_its_range() {
+        let m = holes();
+        let read = |u: f64| read_all(&m.slots[0], u, 1e-6, YFormat::Percent);
+        assert_eq!(read(1.00), "—  19.00% / 21.00%");
+        assert_eq!(read(0.951), "20.00%  19.00% / 21.00%");
+        assert_eq!(read(1.05), "—", "nothing to read");
+        assert_eq!(read(1.10), "—", "a range of no height is no range");
+    }
+
+    /// One quoted point, so a view with no span.
+    fn one_point() -> (Arc<XyModel>, View) {
+        let slot = chain_of(1, &[1.0], &[0.2], &[0.19], &[0.21]);
+        let y_format = [YFormat::Percent; 4];
+        let m = XyModel::new(1, XAxis::default(), y_format, 0.7, vec![slot]);
+        let view = View::with_min_span(m.full(), 0.01);
+        assert_eq!(view.span(), 0.0);
+        (m, view)
+    }
+
+    #[test]
+    fn a_view_with_no_span_puts_the_line_where_the_point_is_painted() {
+        let (m, view) = one_point();
+        let e = XyElement::new(m, view, 12.0, "r");
+        let marker = e.scale().x_of(1.0, view, WIDE);
+        for fx in [0.0, 0.3, 0.9] {
+            assert_eq!(
+                e.crosshair_x(WIDE.x + WIDE.w * fx, WIDE),
+                Some((1.0, marker)),
+                "at {fx}"
+            );
+        }
+        // And there the one point reads.
+        let (title, rows) = e.tooltip_rows(1.0, WIDE);
+        assert_eq!(title, "1.00");
+        assert_eq!(texts(&rows), [("s1", "20.00%  19.00% / 21.00%")]);
+    }
+
+    #[gpui::test]
+    fn a_cursor_between_the_panes_or_a_view_with_no_x_has_no_crosshair(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let m = fixture(false);
+        let bounds = Bounds::new(point(px(0.), px(0.)), size(px(1000.), px(600.)));
+        let view = View::with_min_span(m.full(), 0.01);
+        let state_at = |cx: &mut gpui::TestAppContext, view: View, at: gpui::Point<Pixels>| {
+            let element = XyElement::new(m.clone(), view, 12.0, "probe");
+            cx.update(|cx| element.tooltip_state(at, bounds, cx))
+        };
+        let layout = XyElement::new(m.clone(), view, 12.0, "probe").layout(bounds);
+        let upper = layout.upper.plot;
+        let lower = layout.lower.expect("the fixture has a lower pane").plot;
+        assert!(lower.y > upper.bottom(), "the panes are parted");
+        let x = px(upper.x + upper.w * 0.37);
+        let inside = point(x, px(upper.y + upper.h * 0.5));
+        assert!(state_at(cx, view, inside).is_some(), "this x resolves");
+        let between = point(x, px((upper.bottom() + lower.y) / 2.0));
+        assert!(
+            state_at(cx, view, between).is_none(),
+            "the gap between the panes is neither plot"
+        );
+        for bound in ["lo", "hi"] {
+            let mut broken = view;
+            if bound == "lo" {
+                broken.lo = f64::NAN;
+            } else {
+                broken.hi = f64::NAN;
+            }
+            assert!(
+                state_at(cx, broken, inside).is_none(),
+                "a view whose {bound} is not a number has no x under the cursor"
+            );
+        }
     }
 }
