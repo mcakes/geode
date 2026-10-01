@@ -28498,6 +28498,25 @@ run_mutation "positions: one position is called positions" \
   $'    let _ = n;\n    "positions"' \
   geode-core notices_name_one_position_and_many_positions
 
+# An action's value choice applies only the reply to its own request.
+run_mutation "action choose: a stale delivery fills the dialog" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '    if outcome.tag != *tag || outcome.column != *column {' \
+  '    if outcome.column != *column {' \
+  geode-shell a_stale_value_delivery_is_dropped
+
+run_mutation "action choose: the excluded value is offered" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '                .filter(|value| exclude.as_ref() != Some(value))' \
+  '                .filter(|_| exclude.is_some() || true)' \
+  geode-shell delivered_values_fill_the_dialog_without_the_excluded_one
+
+run_mutation "action confirm: no runs the action" \
+  crates/geode-shell/src/shell/row_menu.rs \
+  '                Some(ConfirmAnswer::No) => no(shell, window, cx),' \
+  '                Some(ConfirmAnswer::No) => yes(shell, window, cx),' \
+  geode-shell no_or_escape_closes_the_confirm_and_runs_nothing
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
