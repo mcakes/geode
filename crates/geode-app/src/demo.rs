@@ -4,10 +4,193 @@
 //! row count and seed. The compiled-in demo layer sits below desk and user
 //! configuration, which can override its source and view definitions.
 
+use chrono::{DateTime, SecondsFormat, Timelike, Utc};
 use geode_core::config::LayerDoc;
+use geode_data::adapter::{Adapter, AdapterError, Egress, PositionCommands, Subscription};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 const SEED: u64 = 42;
+
+/// The demo position service's adapter name, as `positions.toml` names it.
+pub(crate) const DEMO_POSITIONS: &str = "demo_positions";
+
+/// The demo position system: rewrites the risk CSVs under `dir` so the
+/// next ingest sees the move. Same stem, later sentinel `as_of`: the poller
+/// replaces the partition rather than adding one.
+pub(crate) struct DemoPositions {
+    dir: PathBuf,
+}
+
+impl DemoPositions {
+    pub(crate) fn new(dir: PathBuf) -> Self {
+        DemoPositions { dir }
+    }
+}
+
+impl Adapter for DemoPositions {
+    fn name(&self) -> &'static str {
+        DEMO_POSITIONS
+    }
+    fn subscription(&self) -> Option<Box<dyn Subscription>> {
+        None
+    }
+    fn egress(&self) -> Option<Box<dyn Egress>> {
+        None
+    }
+    fn positions(&self) -> Option<Box<dyn PositionCommands>> {
+        Some(Box::new(Simulator {
+            dir: self.dir.clone(),
+        }))
+    }
+}
+
+/// One command handle over the demo source directory.
+struct Simulator {
+    dir: PathBuf,
+}
+
+impl PositionCommands for Simulator {
+    fn move_lhu(&mut self, positions: &[String], lhu: &str) -> Result<(), AdapterError> {
+        move_lhu_in(&self.dir, positions, lhu, Utc::now())
+    }
+}
+
+/// The risk CSVs' source spellings (`geode-demo-data`'s `SOURCE_NAMES`).
+const POSITION_REF_COLUMN: &str = "PositionRef";
+const LHU_COLUMN: &str = "LHU";
+
+/// One file a move rewrites: its new CSV text and its new sentinel JSON.
+struct Rewrite {
+    csv: PathBuf,
+    text: String,
+    sentinel: PathBuf,
+    sentinel_json: String,
+}
+
+fn adapter_error(message: String) -> AdapterError {
+    AdapterError { message }
+}
+
+/// `path` with `suffix` appended to its file name (`x.csv` → `x.csv.done`).
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(suffix);
+    PathBuf::from(s)
+}
+
+/// Write `text` to `path` through `{path}.tmp` and a rename, so the poller
+/// never reads a half-written file. The temp name does not match `*.csv`.
+fn replace_file(path: &Path, text: &str) -> Result<(), AdapterError> {
+    let tmp = with_suffix(path, ".tmp");
+    std::fs::write(&tmp, text)
+        .and_then(|()| std::fs::rename(&tmp, path))
+        .map_err(|e| adapter_error(format!("cannot write {}: {e}", path.display())))
+}
+
+/// The sentinel beside `csv` with its `as_of` advanced to
+/// `max(now, previous + 1s)`, whole seconds, keeping its other fields.
+fn advanced_sentinel(csv: &Path, now: DateTime<Utc>) -> Result<(PathBuf, String), AdapterError> {
+    let sentinel = with_suffix(csv, ".done");
+    let unreadable = |e: &dyn std::fmt::Display| {
+        adapter_error(format!("cannot read {}: {e}", sentinel.display()))
+    };
+    let text = std::fs::read_to_string(&sentinel).map_err(|e| unreadable(&e))?;
+    let mut doc: serde_json::Value = serde_json::from_str(&text).map_err(|e| unreadable(&e))?;
+    let previous = doc
+        .get("as_of")
+        .and_then(|v| v.as_str())
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .ok_or_else(|| unreadable(&"no RFC 3339 'as_of'"))?
+        .with_timezone(&Utc);
+    // Whole seconds first: the sentinel is written at second precision, so
+    // a sub-second `now` would print as a time no later than `previous`.
+    let now = now.with_nanosecond(0).unwrap_or(now);
+    let as_of = now.max(previous + chrono::Duration::seconds(1));
+    doc["as_of"] = serde_json::Value::String(as_of.to_rfc3339_opts(SecondsFormat::Secs, true));
+    let json = serde_json::to_string_pretty(&doc).map_err(|e| unreadable(&e))?;
+    Ok((sentinel, json))
+}
+
+/// Move every one of `positions` to LHU `lhu` in the risk CSVs under `dir`,
+/// all or nothing: a position no CSV holds refuses the whole move,
+/// `unknown position {p}` naming the first, before anything is written.
+///
+/// Each affected file keeps its name (the same batch), with only the `LHU`
+/// field of the moved positions' rows changed, then its sentinel is
+/// rewritten with a strictly later `as_of`, so the poller replaces that
+/// partition. CSV before sentinel: discovery holds a CSV newer than its
+/// sentinel as pending. The emitted CSVs carry no quoting (`emit.rs`), so a
+/// line splits on `,`.
+fn move_lhu_in(
+    dir: &Path,
+    positions: &[String],
+    lhu: &str,
+    now: DateTime<Utc>,
+) -> Result<(), AdapterError> {
+    let unreadable = |path: &Path, e: std::io::Error| {
+        adapter_error(format!("cannot read {}: {e}", path.display()))
+    };
+    let mut csvs: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map_err(|e| unreadable(dir, e))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "csv"))
+        .collect();
+    csvs.sort();
+
+    let wanted: HashSet<&str> = positions.iter().map(String::as_str).collect();
+    let mut found: HashSet<&str> = HashSet::new();
+    let mut rewrites = Vec::new();
+    for csv in csvs {
+        let text = std::fs::read_to_string(&csv).map_err(|e| unreadable(&csv, e))?;
+        let mut lines = text.split_inclusive('\n');
+        let Some(header) = lines.next() else {
+            continue;
+        };
+        let columns: Vec<&str> = header.trim_end_matches(['\r', '\n']).split(',').collect();
+        let index = |name| columns.iter().position(|c| *c == name);
+        let (Some(p), Some(l)) = (index(POSITION_REF_COLUMN), index(LHU_COLUMN)) else {
+            continue;
+        };
+        let mut out = String::with_capacity(text.len());
+        out.push_str(header);
+        let mut changed = false;
+        for line in lines {
+            let body = line.trim_end_matches(['\r', '\n']);
+            let mut fields: Vec<&str> = body.split(',').collect();
+            if let Some(position) = fields.get(p).and_then(|f| wanted.get(*f))
+                && l < fields.len()
+            {
+                found.insert(*position);
+                if fields[l] != lhu {
+                    fields[l] = lhu;
+                    out.push_str(&fields.join(","));
+                    out.push_str(&line[body.len()..]);
+                    changed = true;
+                    continue;
+                }
+            }
+            out.push_str(line);
+        }
+        if changed {
+            let (sentinel, sentinel_json) = advanced_sentinel(&csv, now)?;
+            rewrites.push(Rewrite {
+                csv,
+                text: out,
+                sentinel,
+                sentinel_json,
+            });
+        }
+    }
+    if let Some(missing) = positions.iter().find(|p| !found.contains(p.as_str())) {
+        return Err(adapter_error(format!("unknown position {missing}")));
+    }
+    for r in rewrites {
+        replace_file(&r.csv, &r.text)?;
+        replace_file(&r.sentinel, &r.sentinel_json)?;
+    }
+    Ok(())
+}
 
 pub fn demo_dir(rows: usize) -> PathBuf {
     std::env::temp_dir()
@@ -482,5 +665,174 @@ mod demo_config_integration {
                 "'{name}' must be categorical: {categorical:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod demo_positions_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    /// A tiny emitted demo directory: one business date, every book.
+    fn emitted() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let batch = geode_demo_data::generate(&geode_demo_data::GeneratorConfig {
+            rows: 100,
+            seed: SEED,
+            business_dates: 1,
+        });
+        let mut opts = geode_demo_data::EmitOptions::new(dir.path());
+        opts.leave_one_pending = false;
+        geode_demo_data::emit_directory(&batch, &opts).unwrap();
+        dir
+    }
+
+    /// Every file in `dir` by name.
+    fn files(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .map(|p| {
+                (
+                    p.file_name().unwrap().to_string_lossy().into_owned(),
+                    std::fs::read(&p).unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    /// The one CSV whose name ends in `suffix`.
+    fn csv_ending(dir: &Path, suffix: &str) -> String {
+        let names: Vec<String> = files(dir)
+            .into_keys()
+            .filter(|n| n.ends_with(suffix))
+            .collect();
+        assert_eq!(names.len(), 1, "{names:?}");
+        names[0].clone()
+    }
+
+    fn column(header: &str, name: &str) -> usize {
+        header.split(',').position(|c| c == name).unwrap()
+    }
+
+    /// The distinct `PositionRef`s of a CSV, in file order.
+    fn positions_in(text: &str) -> Vec<String> {
+        let mut lines = text.lines();
+        let p = column(lines.next().unwrap(), "PositionRef");
+        let mut out: Vec<String> = Vec::new();
+        for line in lines {
+            let v = line.split(',').nth(p).unwrap().to_string();
+            if !out.contains(&v) {
+                out.push(v);
+            }
+        }
+        out
+    }
+
+    fn as_of(dir: &Path, sentinel: &str) -> DateTime<Utc> {
+        let text = std::fs::read_to_string(dir.join(sentinel)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        DateTime::parse_from_rfc3339(doc["as_of"].as_str().unwrap())
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    fn now() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-10-01T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn a_move_rewrites_the_lhu_of_those_positions_only() {
+        let dir = emitted();
+        let name = csv_ending(dir.path(), "_BK003.csv");
+        let before = std::fs::read_to_string(dir.path().join(&name)).unwrap();
+        let sentinel = format!("{name}.done");
+        let as_of_before = as_of(dir.path(), &sentinel);
+        let held = positions_in(&before);
+        assert!(held.len() >= 3, "{held:?}");
+        let moved = vec![held[0].clone(), held[1].clone()];
+
+        move_lhu_in(dir.path(), &moved, "BK007_LHU2", now()).unwrap();
+
+        let after = std::fs::read_to_string(dir.path().join(&name)).unwrap();
+        let (b, a): (Vec<&str>, Vec<&str>) = (before.lines().collect(), after.lines().collect());
+        assert_eq!(a.len(), b.len());
+        assert_eq!(a[0], b[0], "the header is unchanged");
+        let p = column(b[0], "PositionRef");
+        let l = column(b[0], "LHU");
+        let mut rewritten = 0;
+        for (old, new) in b.iter().zip(&a).skip(1) {
+            let old_f: Vec<&str> = old.split(',').collect();
+            let new_f: Vec<&str> = new.split(',').collect();
+            if moved.iter().any(|m| m == old_f[p]) {
+                rewritten += 1;
+                assert_eq!(new_f[l], "BK007_LHU2", "{new}");
+                for (i, (o, n)) in old_f.iter().zip(&new_f).enumerate() {
+                    if i != l {
+                        assert_eq!(o, n, "only LHU changes: {new}");
+                    }
+                }
+            } else {
+                assert_eq!(old, new, "an unmoved row is byte-identical");
+            }
+        }
+        assert!(rewritten >= 2);
+        assert_eq!(after.ends_with('\n'), before.ends_with('\n'));
+        assert!(as_of(dir.path(), &sentinel) > as_of_before);
+    }
+
+    #[test]
+    fn a_position_in_a_split_book_is_moved_in_its_own_file() {
+        let dir = emitted();
+        let name = csv_ending(dir.path(), "_BK000_part1.csv");
+        let text = std::fs::read_to_string(dir.path().join(&name)).unwrap();
+        let p = positions_in(&text)[0].clone();
+        let before = files(dir.path());
+
+        move_lhu_in(dir.path(), &[p], "BK000_LHU3", now()).unwrap();
+
+        let after = files(dir.path());
+        assert_eq!(
+            after.keys().collect::<Vec<_>>(),
+            before.keys().collect::<Vec<_>>(),
+            "no file appears or disappears"
+        );
+        let changed: Vec<&String> = before.keys().filter(|k| before[*k] != after[*k]).collect();
+        assert_eq!(changed, vec![&name, &format!("{name}.done")]);
+    }
+
+    #[test]
+    fn an_unknown_position_refuses_and_changes_nothing() {
+        let dir = emitted();
+        let name = csv_ending(dir.path(), "_BK003.csv");
+        let text = std::fs::read_to_string(dir.path().join(&name)).unwrap();
+        let real = positions_in(&text)[0].clone();
+        let before = files(dir.path());
+
+        let err =
+            move_lhu_in(dir.path(), &[real, "P99".to_string()], "BK007_LHU2", now()).unwrap_err();
+
+        assert_eq!(err.message, "unknown position P99");
+        assert_eq!(files(dir.path()), before, "every file is byte-identical");
+    }
+
+    #[test]
+    fn the_sentinel_is_strictly_later_even_within_the_same_second() {
+        let dir = emitted();
+        let name = csv_ending(dir.path(), "_BK003.csv");
+        let text = std::fs::read_to_string(dir.path().join(&name)).unwrap();
+        let p = positions_in(&text)[0].clone();
+        let sentinel = format!("{name}.done");
+        // Mid-second, so a sub-second `now` cannot pass for "later".
+        let now = now() + chrono::Duration::milliseconds(700);
+
+        move_lhu_in(dir.path(), std::slice::from_ref(&p), "BK007_LHU2", now).unwrap();
+        let first = as_of(dir.path(), &sentinel);
+        move_lhu_in(dir.path(), std::slice::from_ref(&p), "BK007_LHU1", now).unwrap();
+        let second = as_of(dir.path(), &sentinel);
+
+        assert!(second > first, "{second} > {first}");
     }
 }
