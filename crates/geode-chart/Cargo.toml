@@ -30,7 +30,11 @@ proptest = "1"
 name = "decimate"
 harness = false
 
-# Exclude the example from the built-in benchmark harness.
+# Exclude the examples from the built-in benchmark harness.
 [[example]]
 name = "chart"
+bench = false
+
+[[example]]
+name = "xy"
 bench = false
