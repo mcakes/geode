@@ -86,6 +86,11 @@ the measurement log for fixture and hardware details.
 | In-process scope evaluation | one row, three-term expression plus text filter | 570 ns |
 | Scope expression suggestion refresh | 20,000 cached values, ranked and capped at 50 | 6.82 ms |
 
+Production view queries also carry the roster's context columns
+(`underlying_ref`, `position_ref`, `instrument_ref`; see
+[context columns](data-path.md)), which the view requery row above does not
+set; the `query_context` bench group measures a view with and without them.
+
 The flat 10,000-row market-data build sits at the UI budget boundary. Ordinary
 cell commits use the constant-time patch path; deliveries and structural row
 changes still rebuild.
