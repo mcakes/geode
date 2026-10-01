@@ -1,7 +1,8 @@
 //! The gpui-dependent chart kit: what every element shares once it has a
 //! window. Rebuild counters, one pane side's resolved y axis, the theme
 //! colors a frame paints its chrome in, grid and axis painters, and stroke
-//! builders. `core` holds the window-free geometry these are built from.
+//! builders with the ceiling on what one stroke path holds. `core` holds the
+//! window-free geometry these are built from.
 
 use std::cell::Cell;
 
@@ -31,7 +32,8 @@ thread_local! {
     static CHROME_REBUILDS: Cell<usize> = const { Cell::new(0) };
 }
 
-/// Polyline and percentile path rebuilds on this thread since it started.
+/// Data path rebuilds on this thread since it started: one for every path
+/// an element built on a cache miss.
 pub fn rebuilds() -> usize {
     REBUILDS.with(|c| c.get())
 }
@@ -51,8 +53,8 @@ pub(crate) fn note_chrome_rebuild() {
     CHROME_REBUILDS.with(|c| c.set(c.get() + 1));
 }
 
-/// The polyline's stroke width, in device pixels (not on the rem scale:
-/// a hairline is a hairline).
+/// A data stroke's width, in device pixels (not on the rem scale: a
+/// hairline is a hairline).
 pub(crate) const LINE_WIDTH: f32 = 1.5;
 
 /// The distance from the cursor to a chart's tooltip box, in design pixels
@@ -72,8 +74,8 @@ pub const MAX_STROKE_SEGMENTS: usize = 12_000;
 /// Every field is a function of the chrome key's inputs alone, so the
 /// whole thing is derived on a chrome miss and only then — the scale in
 /// particular is a scan of every visible value of every slot on the
-/// side, which at the 500,000-point cap is the one piece of O(n) work
-/// that could otherwise land on the render thread every frame.
+/// side, the one piece of O(n) work that could otherwise land on the
+/// render thread every frame.
 #[derive(Default, Clone)]
 pub(crate) struct SideAxis {
     pub(crate) scale: Option<LinearScale>,
@@ -107,7 +109,7 @@ impl SideAxis {
 }
 
 /// The two `Vec`s the decimation path reuses: the plot-relative x of
-/// every visible bucket, and the decimated points it produces. Kept
+/// every visible point, and the decimated points it produces. Kept
 /// together so one `mem::take` moves both.
 #[derive(Default)]
 pub(crate) struct Scratch {
@@ -118,8 +120,11 @@ pub(crate) struct Scratch {
 /// The theme colors one frame paints its chrome in, read once.
 #[derive(Clone, Copy)]
 pub(crate) struct Ink {
+    /// Grid rules and axis lines.
     pub(crate) line: Hsla,
+    /// Tick labels.
     pub(crate) text: Hsla,
+    /// The fill behind a strip an element paints beside its plot.
     pub(crate) strip: Hsla,
 }
 
@@ -296,8 +301,10 @@ pub(crate) fn bounds_of(r: Rect, bounds: Bounds<Pixels>) -> Bounds<Pixels> {
 }
 
 /// Decimate `values` at the plot-relative, ascending `scratch.xs` into
-/// `scratch.pts`, then rewrite those points in layout coordinates
-/// (`plot.x + x`, `y.y(value)`). Breaks stay breaks.
+/// `scratch.pts`. The points are left in layout coordinates, the ones `plot`
+/// itself is in (`plot.x + x`, `y.y(value)`), not plot-relative ones: a
+/// caller that clips or dashes them does so against `plot` as it is. Breaks
+/// stay breaks.
 pub(crate) fn decimated_points(plot: Rect, y: &LinearScale, values: &[f64], scratch: &mut Scratch) {
     let Scratch { xs, pts } = scratch;
     decimate(xs, values, plot.w.max(1.0) as usize, pts);
@@ -351,7 +358,7 @@ pub(crate) fn stroke_segments(segments: &[Segment], width: f32) -> Option<Path<P
     builder.build().ok()
 }
 
-/// The decimated polyline of one series, stroked at [`LINE_WIDTH`].
+/// The decimated polyline of one slot's values, stroked at [`LINE_WIDTH`].
 pub(crate) fn stroke_polyline(
     plot: Rect,
     y: &LinearScale,

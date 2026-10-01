@@ -1902,7 +1902,7 @@ per-cell `paint_quad` past about 5,000 quads (10,000 cost 42 ms). The
 model bounds nothing — `MAX_BINS` is 200 and a tile may hold many
 slots — so the element counts the bars it paints across both panes and
 stops at `MAX_DENSITY_QUADS` = 2,000 per frame, in slot order
-(`geode_chart::density_quads()` is the counter;
+(`geode_chart::timeseries::density_quads()` is the counter;
 `a_frame_paints_at_most_the_density_bound` pins it). Unmeasured on a
 real window, like everything else painted here.
 

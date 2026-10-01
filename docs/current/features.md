@@ -774,11 +774,20 @@ identity, and pointer handling, while supplying their own labels, controls,
 and activation behavior. The dates editor uses separate date-field rows;
 the expression editor renders inline below the header in the tile body.
 
-`geode-chart` is independent of series and shell concepts. Its pure core owns
-scales, axes, layout, viewport, crosshair, hit-testing, decimation, and palette
-derivation. `ChartElement` paints an immutable `ChartModel` through
-gpui-component's plot surface. Paths and chrome are cached by the values that
-affect them; cursor movement does not rebuild the data model.
+`geode-chart` is independent of series and shell concepts. It is a kit and
+one element per chart type. The kit's window-free core owns scales, axes,
+layout, the view window, time and linear x ticks, mark geometry, hit-testing,
+decimation, and palette derivation; its paint half owns the pane frame, the
+axis painters and the stroke builders the elements share.
+`timeseries::ChartElement` paints an immutable `ChartModel`: polylines over a
+session or continuous time axis, with percentile rules and density bars.
+`xy::XyElement` paints an immutable `XyModel`: lines, solid or dashed, and
+point marks with a range bar over a linear x axis that can run reversed, with
+a crosshair that snaps to a quoted point. Both paint through gpui-component's
+plot surface in up to two panes. Paths and chrome are cached by the values
+that affect them; cursor movement does not rebuild the data model. The
+timeseries tile hosts the time chart; no tile hosts the xy element, whose
+only consumer is its example window.
 
 The header's `⋯` button, a chip's right-click, and `.` open the action menu.
 It offers popup openers, actions for the selected slot, `Frequency…`, toggles,

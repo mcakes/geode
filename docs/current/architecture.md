@@ -65,10 +65,12 @@ the registered document kinds and kind actions; a kind action's behavior is
 code in the module that dispatches it.
 
 Reusable presentation is kept below features. `geode-widgets` holds shared
-stateful controls; `geode-chart` holds chart preparation and painting. Wire
-formats live in `geode-documents`. Calculation crates are leaves reached
-through request and outcome values, so linking a calculator into the process
-does not let a module call it directly.
+stateful controls; `geode-chart` holds chart preparation and painting. It is
+a kit and one element per chart type, never one per module: an element
+borrows the kit and owns its model and paint, and a module prepares that
+element's model. Wire formats live in `geode-documents`. Calculation crates
+are leaves reached through request and outcome values, so linking a
+calculator into the process does not let a module call it directly.
 
 ## Runtime ownership
 
