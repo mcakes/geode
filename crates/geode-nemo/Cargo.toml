@@ -1,0 +1,22 @@
+[package]
+name = "geode-nemo"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+# Row actions that hand a position or instrument to Nemo, the desk's pricing
+# app, by URL. Registered on the roster by geode-app; the shell runs them.
+[dependencies]
+geode-core.workspace = true
+geode-shell.workspace = true
+gpui.workspace = true
+percent-encoding = "2.3"
+
+[dev-dependencies]
+# Match the workspace test features so crate-local tests share its dependency graph.
+geode-core = { workspace = true, features = ["test-support"] }
+geode-shell = { workspace = true, features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }

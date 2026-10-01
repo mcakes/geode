@@ -27404,6 +27404,22 @@ run_mutation "edit caret: pricer visual binds I to end placement" \
 "shift+i" = "pricer::edit"' \
   geode-pricer edit_keys_place_the_caret_at_the_requested_end
 
+run_mutation "nemo: ids are not encoded" \
+  crates/geode-nemo/src/lib.rs \
+  '    format!("{prefix}{}", utf8_percent_encode(id, ID))' \
+  '    format!("{prefix}{id}")' \
+  geode-nemo ids_are_percent_encoded_as_one_path_segment
+
+run_mutation "nemo: unreserved characters are encoded too" \
+  crates/geode-nemo/src/lib.rs \
+  "const ID: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');" \
+  "const ID: &AsciiSet = NON_ALPHANUMERIC;" \
+  geode-nemo a_plain_id_is_appended
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

@@ -2654,6 +2654,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "geode-nemo"
+version = "0.1.0"
+dependencies = [
+ "geode-core",
+ "geode-shell",
+ "gpui-pre",
+ "percent-encoding",
+]
+
+[[package]]
 name = "geode-pricer"
 version = "0.1.0"
 dependencies = [
