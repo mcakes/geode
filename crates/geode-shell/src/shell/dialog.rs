@@ -127,7 +127,7 @@ pub(crate) fn can_open(view: &mut ShellView, kind: DialogKind) -> bool {
         return true;
     };
     if at + 1 < view.modals.len() {
-        view.notice = Some(kind.already_open_notice());
+        view.notice = Some(kind.already_open_notice().into());
     }
     false
 }
@@ -148,7 +148,7 @@ pub(crate) fn can_open_object(view: &mut ShellView, domain: Domain) -> bool {
             .filter_map(|m| m.parked_object.as_ref())
             .any(|parked| parked.state.domain == domain);
     if covered {
-        view.notice = Some(domain.already_open_notice());
+        view.notice = Some(domain.already_open_notice().into());
         return false;
     }
     true

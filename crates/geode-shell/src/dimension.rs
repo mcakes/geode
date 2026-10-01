@@ -31,6 +31,16 @@ pub trait DimensionAction {
     fn run(&self, ctx: &DimensionContext, acx: &mut ActionCx<'_, '_>);
 }
 
+/// Where `ActionCx::open_url` sends a URL when set. Unset in production,
+/// so the OS opens it (`App::open_url`); a test sets one to record the
+/// URLs an action opened.
+pub struct UrlOpener(pub std::rc::Rc<OpenUrl>);
+
+/// What a [`UrlOpener`] calls with each URL.
+pub type OpenUrl = dyn Fn(&str, &mut gpui::App);
+
+impl gpui::Global for UrlOpener {}
+
 /// What a row menu row does when picked.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RowPick {

@@ -71,6 +71,8 @@ the measurement log for fixture and hardware details.
 |---|---|---:|
 | Warm database reopen | populated demo store | 5.0 ms |
 | View requery | 1,000,000 rows, no text filter, depth two | 2.51 ms |
+| View requery, no context columns | 1,000,000 rows, underlying-grain measures only, depth two | 20.5 ms |
+| View requery, roster's context columns | the same view with `underlying_ref`, `position_ref`, `instrument_ref` | 35.0 ms |
 | Series query | four slots plus ratio, daily over one year | 9.56 ms |
 | Series query with stats | two minute slots over one month | 14.5 ms |
 | Chart path rebuild | 500,000 points into 1,600 columns | 1.51 ms |
@@ -89,6 +91,15 @@ the measurement log for fixture and hardware details.
 | Line-pricer grouped rebuild | 1,000 entries over four underlyings × three expiries under `[underlying_ref, expiry, position_ref]`, every group and package open: rollup plus grid | 3.15 ms (rollup 335 µs) |
 | In-process scope evaluation | one row, three-term expression plus text filter | 570 ns |
 | Scope expression suggestion refresh | 20,000 cached values, ranked and capped at 50 | 6.82 ms |
+
+Production view queries also carry the roster's context columns
+(`underlying_ref`, `position_ref`, `instrument_ref`; see
+[context columns](data-path.md)), which the view requery row above does not
+set; the `query_context` bench group measures a view with and without them. Those
+two rows were recorded on a heavily loaded machine, so read them as a ratio
+rather than as reference figures: on this shape the three context columns cost
+about 70% more, mostly the position- and instrument-grain scans no shown
+measure already reads. Re-measure on an idle machine before quoting them.
 
 The flat 10,000-row market-data build sits at the UI budget boundary. Ordinary
 cell commits use the constant-time patch path; deliveries and structural row

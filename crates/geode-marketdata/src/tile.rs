@@ -953,18 +953,7 @@ impl MarketDataTile {
     /// the active field's navigation or nudge behavior; the shell prevents typed digits
     /// from becoming count prefixes despite counts() remaining enabled.
     pub fn key_context(&self) -> KeyContext {
-        let mode = if self.pending_upload.is_some()
-            || self.editor.is_some()
-            || matches!(self.popup, Some(Popup::Picker(_) | Popup::Choice(_)))
-        {
-            "insert"
-        } else if matches!(self.popup, Some(Popup::Menu(_))) {
-            "menu"
-        } else if self.selection.is_some() {
-            "visual"
-        } else {
-            "normal"
-        };
+        let mode = self.mode();
         let mut ctx = KeyContext::new("marketdata").grid().pair("mode", mode);
         // The action menu holds j/k while open: the shared menu steps reach
         // it through this flag, and `mode == menu` keeps the grid's motions
@@ -982,6 +971,25 @@ impl MarketDataTile {
             );
         }
         ctx.counts()
+    }
+
+    /// The key context's `mode`, and the header's mode icon read from it:
+    /// `insert` while the editor, picker, choice field, or upload prompt
+    /// holds the keys, `menu` while the action menu is up, `visual` while a
+    /// selection is live, `normal` otherwise.
+    pub(crate) fn mode(&self) -> &'static str {
+        if self.pending_upload.is_some()
+            || self.editor.is_some()
+            || matches!(self.popup, Some(Popup::Picker(_) | Popup::Choice(_)))
+        {
+            "insert"
+        } else if matches!(self.popup, Some(Popup::Menu(_))) {
+            "menu"
+        } else if self.selection.is_some() {
+            "visual"
+        } else {
+            "normal"
+        }
     }
 
     /// Whether this tile's editor, picker, choice field, or upload confirmation
@@ -4865,6 +4873,7 @@ impl gpui::Render for MarketDataTile {
             self.state_tip_selector.clone(),
             self.stack.as_ref(),
             self.health.chip(),
+            geode_tile::header::Mode::from_key_mode(self.mode()),
         );
         // Anchor the popup at the header's right edge using a positioned sibling and
         // the wrapper's relative coordinate system.

@@ -37,6 +37,8 @@ geode-marketdata = { path = "../geode-marketdata" }
 geode-timeseries.workspace = true
 # The bridge routes pricing and local-sheet outcomes to this factory.
 geode-pricer.workspace = true
+# Row menu actions registered at the composition root: Open in Nemo.
+geode-nemo.workspace = true
 geode-diagnostics = { path = "../geode-diagnostics" }
 geode-demo-data = { path = "../geode-demo-data" }
 # Register concrete document parsers at the application boundary. Demo producers

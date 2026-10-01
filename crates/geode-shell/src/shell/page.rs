@@ -154,7 +154,7 @@ impl ShellView {
     ) {
         self.begin_action(&format!("page::toggle_{kind}"));
         if self.modal_open() {
-            self.notice = Some(super::input::CLOSE_DIALOG_FIRST);
+            self.notice = Some(super::input::CLOSE_DIALOG_FIRST.into());
             cx.notify();
             return;
         }

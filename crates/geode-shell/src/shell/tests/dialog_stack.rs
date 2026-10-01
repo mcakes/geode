@@ -135,7 +135,7 @@ fn a_kind_already_in_the_stack_is_refused(cx: &mut gpui::TestAppContext) {
         kinds(&shell, &mut vcx),
         vec![DialogKind::Object, DialogKind::Settings]
     );
-    assert_eq!(shell.read_with(&vcx, |s, _| s.notice), None);
+    assert_eq!(shell.read_with(&vcx, |s, _| s.notice.clone()), None);
 
     dispatch_action(&shell, "config::views", &mut vcx);
     assert_eq!(
@@ -143,7 +143,7 @@ fn a_kind_already_in_the_stack_is_refused(cx: &mut gpui::TestAppContext) {
         vec![DialogKind::Object, DialogKind::Settings]
     );
     assert_eq!(
-        shell.read_with(&vcx, |s, _| s.notice),
+        shell.read_with(&vcx, |s, _| s.notice.clone()).as_deref(),
         Some(crate::shell::objectdialog::Domain::Views.already_open_notice())
     );
     assert_eq!(

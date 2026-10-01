@@ -165,7 +165,7 @@ fn a_tile_without_columns_gets_a_notice_and_no_list(cx: &mut gpui::TestAppContex
     shell.read_with(&cx, |s, _| {
         assert!(s.choice_dialog.is_none());
         assert!(s.object_dialog.is_none());
-        assert_eq!(s.notice, Some(NO_TILE_COLUMNS));
+        assert_eq!(s.notice.as_deref(), Some(NO_TILE_COLUMNS));
     });
 }
 
@@ -180,7 +180,10 @@ fn a_covered_views_dialog_refuses_before_the_list_opens(cx: &mut gpui::TestAppCo
             s.choice_dialog.is_none(),
             "no list for a dialog that cannot open"
         );
-        assert_eq!(s.notice, Some(Domain::Views.already_open_notice()));
+        assert_eq!(
+            s.notice.as_deref(),
+            Some(Domain::Views.already_open_notice())
+        );
         assert_eq!(s.top_kind(), Some(DialogKind::Object));
     });
 }

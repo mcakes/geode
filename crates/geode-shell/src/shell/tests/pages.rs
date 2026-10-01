@@ -133,7 +133,7 @@ fn toggle_under_a_modal_is_refused(cx: &mut gpui::TestAppContext) {
     shell.read_with(&cx, |s, _| {
         assert!(s.modal_open());
         assert!(!s.page_open());
-        assert_eq!(s.notice, Some(CLOSE_DIALOG_FIRST));
+        assert_eq!(s.notice.as_deref(), Some(CLOSE_DIALOG_FIRST));
     });
 }
 
@@ -153,7 +153,7 @@ fn page_close_under_a_modal_is_refused(cx: &mut gpui::TestAppContext) {
     shell.read_with(&cx, |s, _| {
         assert!(s.modal_open());
         assert!(s.page_open(), "refused: still open");
-        assert_eq!(s.notice, Some(CLOSE_DIALOG_FIRST));
+        assert_eq!(s.notice.as_deref(), Some(CLOSE_DIALOG_FIRST));
     });
     assert!(
         !log.borrow()
@@ -296,18 +296,18 @@ fn layout_edits_are_refused_while_a_page_is_open(cx: &mut gpui::TestAppContext) 
             "tile::add's picker did not open: refused over the page"
         );
         assert!(s.page_open());
-        assert_eq!(s.notice, Some(CLOSE_PAGE_FIRST));
+        assert_eq!(s.notice.as_deref(), Some(CLOSE_PAGE_FIRST));
     });
     dispatch_action(&shell, "workspace::close_tile", &mut cx);
     shell.read_with(&cx, |s, _| {
         assert!(s.page_open());
-        assert_eq!(s.notice, Some(CLOSE_PAGE_FIRST));
+        assert_eq!(s.notice.as_deref(), Some(CLOSE_PAGE_FIRST));
     });
     assert_eq!(tiles(&shell, &cx), 1, "the unseen tile still exists");
     dispatch_action(&shell, "dock::toggle_left", &mut cx);
     shell.read_with(&cx, |s, _| {
         assert!(s.page_open());
-        assert_eq!(s.notice, Some(CLOSE_PAGE_FIRST));
+        assert_eq!(s.notice.as_deref(), Some(CLOSE_PAGE_FIRST));
         assert!(
             !s.services
                 .workspaces
@@ -320,7 +320,9 @@ fn layout_edits_are_refused_while_a_page_is_open(cx: &mut gpui::TestAppContext) 
     });
     // Refused, not routed to the page either.
     dispatch_action(&shell, "stack::next", &mut cx);
-    shell.read_with(&cx, |s, _| assert_eq!(s.notice, Some(CLOSE_PAGE_FIRST)));
+    shell.read_with(&cx, |s, _| {
+        assert_eq!(s.notice.as_deref(), Some(CLOSE_PAGE_FIRST))
+    });
     // The switch is exempt: it closes the page and switches.
     dispatch_action(&shell, "workspace::switch_2", &mut cx);
     shell.read_with(&cx, |s, _| {
@@ -958,7 +960,7 @@ fn a_queued_page_open_under_a_modal_is_refused(cx: &mut gpui::TestAppContext) {
     shell.read_with(&cx, |s, _| {
         assert!(s.modal_open());
         assert!(!s.page_open());
-        assert_eq!(s.notice, Some(CLOSE_DIALOG_FIRST));
+        assert_eq!(s.notice.as_deref(), Some(CLOSE_DIALOG_FIRST));
     });
 }
 
@@ -975,7 +977,11 @@ fn a_queued_page_open_clears_the_notice_and_records_the_action(cx: &mut gpui::Te
     dispatch_action(&shell, "page::toggle_diagnostics", &mut cx);
     dispatch_action(&shell, "workspace::close_tile", &mut cx);
     shell.read_with(&cx, |s, _| {
-        assert_eq!(s.notice, Some(CLOSE_PAGE_FIRST), "a refusal is showing");
+        assert_eq!(
+            s.notice.as_deref(),
+            Some(CLOSE_PAGE_FIRST),
+            "a refusal is showing"
+        );
     });
     let diagnostics = shell.read_with(&cx, |s, _| s.diagnostics().clone());
     diagnostics.update(&mut cx, |d, cx| {

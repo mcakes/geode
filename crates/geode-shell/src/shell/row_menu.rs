@@ -7,7 +7,7 @@
 //! palette opening.
 
 use geode_core::context::DimensionContext;
-use gpui::{Context, Pixels, Point, Window};
+use gpui::{Context, Pixels, Point, SharedString, Window};
 
 use super::ShellView;
 use crate::defaults::AddPlacement;
@@ -16,7 +16,7 @@ use crate::menu::{Menu, MenuHost};
 use crate::tiling::TileId;
 
 /// Status notice: the row names no value any kind or action takes.
-pub(crate) const NO_ROW_ACTIONS: &str = "no actions for this row";
+pub const NO_ROW_ACTIONS: &str = "no actions for this row";
 
 /// The open row menu.
 pub struct RowMenu {
@@ -72,9 +72,20 @@ impl ActionCx<'_, '_> {
     }
 
     /// Show `text` as the shell's status notice.
-    pub fn notice(&mut self, text: &'static str) {
-        self.shell.notice = Some(text);
+    pub fn notice(&mut self, text: impl Into<SharedString>) {
+        self.shell.notice = Some(text.into());
         self.cx.notify();
+    }
+
+    /// Hand `url` to the OS (or to a test's [`crate::dimension::UrlOpener`]).
+    /// Nothing reports whether a handler took it; say only what Geode did.
+    pub fn open_url(&mut self, url: &str) {
+        if let Some(opener) = self.cx.try_global::<crate::dimension::UrlOpener>() {
+            let open = opener.0.clone();
+            open(url, self.cx);
+        } else {
+            self.cx.open_url(url);
+        }
     }
 }
 
@@ -98,7 +109,7 @@ impl ShellView {
         }
         let rows = menu_rows(&context, &self.services.roster);
         if rows.is_empty() {
-            self.notice = Some(NO_ROW_ACTIONS);
+            self.notice = Some(NO_ROW_ACTIONS.into());
             cx.notify();
             return;
         }

@@ -1004,18 +1004,24 @@ impl BlotterTile {
         showable_in(&self.schema.borrow(), view)
     }
 
+    /// The key context's `mode`, and the header's mode icon read from it:
+    /// `visual` while a selection is live, `normal` otherwise. The blotter
+    /// has no field of its own, so never `insert`.
+    fn mode(&self, cx: &App) -> &'static str {
+        if self.table.read(cx).delegate().selection.is_some() {
+            "visual"
+        } else {
+            "normal"
+        }
+    }
+
     pub fn key_context(&self, cx: &App) -> KeyContext {
         let d = self.table.read(cx).delegate();
         // `grid` is the flag the shell's shared motion bindings are written
         // under: without it no motion key reaches the blotter.
-        let mut ctx = KeyContext::new("blotter").grid().pair(
-            "mode",
-            if d.selection.is_some() {
-                "visual"
-            } else {
-                "normal"
-            },
-        );
+        let mut ctx = KeyContext::new("blotter")
+            .grid()
+            .pair("mode", self.mode(cx));
         if let Some(s) = &d.selection {
             ctx = ctx.pair(
                 "select",
@@ -2144,6 +2150,7 @@ impl gpui::Render for BlotterTile {
         }
         let now = chrono::Utc::now();
         let mut cluster = Cluster::new(self.tile);
+        cluster.mode = geode_tile::header::Mode::from_key_mode(self.mode(cx));
         cluster.notices.extend(self.error.clone());
         cluster.times = self
             .header
@@ -3587,6 +3594,29 @@ mod tests {
         assert_eq!(extent(&mut cx), (false, Some("2 rows × 2 cols".into())));
         act(&h, &mut cx, "blotter::escape");
         assert_eq!(extent(&mut cx), (true, None));
+    }
+
+    /// The header's mode icon follows the key context's own mode. The test
+    /// dispatches the action ids the default keys send:
+    /// `blotter::visual_rows` shows the visual icon until `blotter::escape`
+    /// clears the selection. The blotter has no edit mode, so no edit icon.
+    #[gpui::test]
+    fn the_header_shows_the_visual_icon_while_selecting(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        let shown = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            (
+                cx.debug_bounds("tile-mode-edit-7").is_some(),
+                cx.debug_bounds("tile-mode-visual-7").is_some(),
+            )
+        };
+        assert_eq!(shown(&mut cx), (false, false), "normal: no cue");
+        act(&h, &mut cx, "blotter::visual_rows");
+        assert_eq!(shown(&mut cx), (false, true), "selecting");
+        act(&h, &mut cx, "blotter::escape");
+        assert_eq!(shown(&mut cx), (false, false), "esc cleared the selection");
     }
 
     /// The keyboard's own `SelectRow` echo (`sync_cursor` →

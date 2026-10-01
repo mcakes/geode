@@ -23,7 +23,7 @@ use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::tips;
 use geode_tile::confirm::{self, Confirm};
-use geode_tile::header::{Cluster, HealthChip, MenuTrigger, TimeRun};
+use geode_tile::header::{Cluster, HealthChip, MenuTrigger, Mode, TimeRun};
 use geode_tile::notice::Notice;
 use gpui::prelude::*;
 use gpui::{
@@ -250,6 +250,9 @@ pub(crate) struct HeaderChrome<'a> {
     pub health: Option<&'a HealthChip>,
     /// The armed `:rm` confirm: its prompt is painted through the confirm door.
     pub confirm: Option<&'a Confirm<PendingRemove>>,
+    /// The tile's mode, read from the key context's own decision
+    /// (`PricerTile::mode`), painted as the cluster's mode icon.
+    pub mode: Mode,
     /// The sheet name's tooltip selector, built once with the tile.
     pub name_tip: SharedString,
     /// The open rename field, painted in the sheet name's place.
@@ -456,6 +459,7 @@ pub(crate) fn render(h: &HeaderModel, mut c: HeaderChrome, theme: &Theme) -> imp
             )
         });
     let mut cluster = Cluster::new(c.tile_id);
+    cluster.mode = c.mode;
     // The removal prompt owns the keyboard; the confirm door answers every
     // key on it before the shell root sees one, and paints its Yes/No.
     if let Some(pending) = h.prompt.as_ref().and(c.confirm) {

@@ -154,7 +154,9 @@ pub fn tip_key(
 /// The content: title, then the chord as `Kbd` chips (one per
 /// keystroke of a sequence), then the detail line, muted.
 /// Selectors: `{selector}` on the root, `{selector}-title` on the title,
-/// `{selector}-chord-{ctrl+k}` on each chip — what the hover tests read.
+/// `{selector}-chord-{ctrl+k}` on each chip, `{selector}-detail` on the
+/// detail line — what the hover tests read. A backtick-quoted key in the
+/// detail paints as a chip (`shell::kbd::marked`).
 pub(crate) fn render_tip(model: &TipModel, selector: SharedString, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let chord_row = model.chord.as_ref().map(|keys| {
@@ -194,7 +196,19 @@ pub(crate) fn render_tip(model: &TipModel, selector: SharedString, cx: &App) -> 
                 .when_some(chord_row, |el, row| el.child(row)),
         )
         .when_some(model.detail.clone(), |el, d| {
-            el.child(div().text_xs().text_color(theme.muted_foreground).child(d))
+            // A detail naming keys in backticks paints them as chips.
+            let line = div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .debug_selector({
+                    let selector = selector.clone();
+                    move || format!("{selector}-detail")
+                });
+            el.child(if d.contains('`') {
+                line.child(crate::shell::kbd::marked(&d))
+            } else {
+                line.child(d)
+            })
         })
         .into_any_element()
 }
@@ -280,5 +294,41 @@ mod tests {
         let m = TipModel::resolve("Remove book", None, None, &[]);
         assert_eq!(m.chord, None);
         assert_eq!(m.detail, None);
+    }
+
+    struct TipHost(TipModel);
+
+    impl gpui::Render for TipHost {
+        fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+            render_tip(&self.0, SharedString::new_static("tip-probe"), cx)
+        }
+    }
+
+    /// A detail naming a key in backticks paints that key as a `Kbd`
+    /// chip; a detail without backticks is plain text and paints none.
+    #[gpui::test]
+    fn a_backticked_detail_key_paints_as_a_chip(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let mut painted = |detail: &'static str| {
+            let model = TipModel {
+                title: "Probe".into(),
+                chord: None,
+                detail: Some(SharedString::new_static(detail)),
+            };
+            let (_, vcx) = cx.add_window_view(move |_, _| TipHost(model));
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            (
+                vcx.debug_bounds("tip-probe-detail").is_some(),
+                vcx.debug_bounds("kbd:escape").is_some(),
+            )
+        };
+        assert_eq!(painted("`escape` leaves"), (true, true));
+        assert_eq!(
+            painted("escape leaves"),
+            (true, false),
+            "no backticks: plain text, no chip"
+        );
     }
 }
