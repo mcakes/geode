@@ -18832,6 +18832,22 @@ run_mutation "chart kit: a tick at zero is positive zero" \
   geode-chart \
   a_tick_at_zero_is_positive_zero
 
+# Past 2^53 a tick's index plus one can round back to the index. The
+# walk ends there; unguarded it never reaches its last index and hangs
+# the UI thread on a flat series near 6e15. The test walks on a thread of
+# its own with a two-second limit, so this mutant fails by timeout and
+# the run moves on.
+run_mutation "chart kit: the tick walk ends at float resolution" \
+  crates/geode-chart/src/core/scale.rs \
+  '            if next == k {
+                break;
+            }' \
+  '            if false {
+                break;
+            }' \
+  geode-chart \
+  the_tick_walk_ends_where_f64_cannot_count_the_ticks
+
 # A negative value smaller than its format's last decimal prints as a
 # zero with a minus sign, which reads as a number that is not there.
 run_mutation "chart kit: a readout carries no signed zero" \

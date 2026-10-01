@@ -191,7 +191,8 @@ fn finer_step(step: f64) -> f64 {
 /// Whether ticks `step` apart can be counted across `view`: the step is a
 /// positive number, and the view's values are not so far from zero for
 /// their span that one tick's index is the next one's too. There the tick
-/// walk cannot advance.
+/// walk ends at the first tick it cannot step past, so a finer step has no
+/// second tick to add.
 fn countable(view: View, step: f64) -> bool {
     step > 0.0 && step.is_finite() && view.lo.abs().max(view.hi.abs()) / step < MAX_TICK_INDEX
 }

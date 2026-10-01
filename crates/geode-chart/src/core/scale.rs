@@ -76,7 +76,9 @@ impl LinearScale {
     }
 
     /// The multiples of `step` inside `[lo, hi]`, into `out` (cleared
-    /// first). None for a step that is not a positive number.
+    /// first). It yields no ticks for a step that is not a positive number.
+    /// Where the values are so far from zero for the step that `f64` cannot
+    /// count the ticks, the walk ends at the first it cannot step past.
     pub fn ticks_at(&self, step: f64, out: &mut Vec<f64>) {
         out.clear();
         if step <= 0.0 || !step.is_finite() {
@@ -91,7 +93,15 @@ impl LinearScale {
             // the tick never reads `-0`.
             let v = (k * step * 1e9).round() / 1e9 + 0.0;
             out.push(v);
-            k += 1.0;
+            // Past 2^53 an index plus one can round back to the index: the
+            // walk would never reach `last` and would push ticks until
+            // memory ran out, on the UI thread. It ends there with the
+            // ticks it has.
+            let next = k + 1.0;
+            if next == k {
+                break;
+            }
+            k = next;
         }
     }
 
@@ -212,6 +222,50 @@ mod tests {
         let mut out = vec![1.0];
         s.ticks(0, &mut out);
         assert!(out.is_empty());
+    }
+
+    /// The y ticks of a side holding `values`, at `hint`: the domain, the
+    /// scale and the walk as an element runs them. The walk runs on a
+    /// thread of its own and is given two seconds, so a walk that does not
+    /// end fails the test instead of hanging the suite.
+    fn ticks_of(values: &[f64], hint: usize) -> Vec<f64> {
+        let (done, walked) = std::sync::mpsc::channel();
+        let side = values.to_vec();
+        std::thread::spawn(move || {
+            let domain = axis_domain(side.into_iter()).expect("finite values");
+            let mut out = Vec::new();
+            LinearScale::new(domain, 0.0, 100.0).ticks(hint, &mut out);
+            let _ = done.send(out);
+        });
+        walked
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap_or_else(|_| panic!("the tick walk did not end: {values:?} at {hint}"))
+    }
+
+    #[test]
+    fn the_tick_walk_ends_where_f64_cannot_count_the_ticks() {
+        // Values so far from zero for their spread that a tick's index is
+        // past 2^53, where adding one to it can leave it as it was.
+        let cases: [&[f64]; 3] = [
+            // A flat series, padded by a unit either side.
+            &[6e15, 6e15],
+            &[5e15, 5e15 + 1.0],
+            &[1.2e16, 1.2e16 + 4.0],
+        ];
+        for values in cases {
+            for hint in [5, 8] {
+                let ticks = ticks_of(values, hint);
+                assert!(
+                    ticks.len() <= 3 * hint,
+                    "{values:?} at {hint}: {} ticks",
+                    ticks.len()
+                );
+                assert!(ticks.iter().all(|t| t.is_finite()), "{ticks:?}");
+            }
+        }
+        // A walk that can count is not cut short: the padded domain is
+        // -0.5 to 10.5, in steps of 5.
+        assert_eq!(ticks_of(&[0.0, 10.0], 5), [0.0, 5.0, 10.0]);
     }
 
     #[test]
