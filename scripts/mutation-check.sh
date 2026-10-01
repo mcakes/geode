@@ -18845,6 +18845,42 @@ run_mutation "chart kit: a reversed scale mirrors x" \
   geode-chart \
   a_value_maps_across_the_plot_and_back
 
+# A zoom keeps the value under the cursor still. A view zooms in value
+# space, so on a reversed axis the pixel fraction is mirrored first;
+# unmirrored, the zoom runs about the point opposite the cursor.
+run_mutation "chart kit: a reversed axis zooms about the mirrored fraction" \
+  crates/geode-chart/src/core/linear.rs \
+  '        if self.reversed {
+            1.0 - fraction
+        } else {' \
+  '        if false {
+            1.0 - fraction
+        } else {' \
+  geode-chart \
+  a_zoom_about_the_cursor_keeps_the_value_under_it_on_both_orientations
+
+# A drag moves the picture with the pointer. On a reversed axis higher
+# values lie to the left, so the pan's sign turns; unturned, the picture
+# moves against the drag.
+run_mutation "chart kit: a reversed axis pans the other way" \
+  crates/geode-chart/src/core/linear.rs \
+  '        if self.reversed { -1.0 } else { 1.0 }' \
+  '        1.0' \
+  geode-chart \
+  a_drag_right_moves_the_picture_right_on_both_orientations
+
+# A host maps its pointer through the scale the axis hands out. One that
+# ignores the axis's direction sends a reversed chart's host the forward
+# mapping.
+run_mutation "chart xy: the axis hands out its own scale" \
+  crates/geode-chart/src/xy/model.rs \
+  '        LinearX {
+            reversed: self.reversed,
+        }' \
+  '        LinearX { reversed: false }' \
+  geode-chart \
+  an_x_axis_hands_out_the_scale_it_runs_on
+
 # A view with no span has nothing to label. Without the guard the tick
 # scale pads the empty domain to a unit either side and labels values the
 # view does not hold, all at the plot's edge.
