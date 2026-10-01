@@ -28,7 +28,7 @@ use geode_core::query::{AsOf, QueryKey};
 use geode_core::scope::{Expr, Scope};
 use geode_core::scopes::SavedScopes;
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
@@ -128,16 +128,20 @@ impl FrameVersions {
     }
 }
 
-/// Coordinates arrivals for one `(scope, grouping, as_of)` generation.
-/// Tiles hold staged results until all requested keys arrive or a sweep
-/// releases the expired barrier. A timeout permits ready tiles to advance
-/// while slow tiles still show older data. Opening another barrier replaces
-/// this one, and arrivals for its old identity cannot satisfy the new one.
+/// Coordinates arrivals for one flip. Each awaited key carries the
+/// `(scope, grouping, as_of)` identity its tile will answer under: tiles in
+/// one flip can read different scopes (a tile following a link group reads
+/// the group's), and one shared identity would leave such a tile's arrival
+/// unmatched and hold every flip to its deadline. Tiles hold staged results
+/// until all keys arrive or a sweep releases the expired barrier. A timeout
+/// permits ready tiles to advance while slow tiles still show older data.
+/// Opening another barrier replaces this one, and an arrival under a key's
+/// old identity cannot satisfy the new one.
 #[derive(Debug)]
 struct FlipBarrier {
-    /// Captured counters; only scope/grouping/as-of participate in identity.
-    versions: FrameVersions,
-    awaiting: HashSet<QueryKey>,
+    /// Captured counters per key; only scope/grouping/as-of participate in
+    /// identity.
+    awaiting: HashMap<QueryKey, FrameVersions>,
     opened: Instant,
 }
 
@@ -538,25 +542,30 @@ impl Frame {
         self.versions.config += 1;
     }
 
-    fn matches(b: &FlipBarrier, v: FrameVersions) -> bool {
-        b.versions.same_flip_identity(v)
+    /// Whether `b` still waits for `key` under the identity `versions`
+    /// carries. A key is matched against its own captured identity only.
+    fn awaits(b: &FlipBarrier, key: QueryKey, versions: FrameVersions) -> bool {
+        b.awaiting
+            .get(&key)
+            .is_some_and(|opened| opened.same_flip_identity(versions))
     }
 
     /// Whether an open barrier is waiting for `key` at `versions` —
     /// `false` once nothing is open, once `key` already arrived, or once
-    /// a later mutation replaced the barrier with one over different
-    /// versions (a stale outcome from before the replacement must not
-    /// satisfy it).
+    /// a later mutation replaced the barrier with one that awaits `key`
+    /// under different versions (a stale outcome from before the
+    /// replacement must not satisfy it).
     pub fn barrier_wants(&self, key: QueryKey, versions: FrameVersions) -> bool {
         self.barrier
             .as_ref()
-            .is_some_and(|b| Self::matches(b, versions) && b.awaiting.contains(&key))
+            .is_some_and(|b| Self::awaits(b, key, versions))
     }
 
     /// `key`'s outcome for `versions` arrived — a failed outcome counts
     /// too (`geode-blotter`'s `deliver`: one broken tile must never hold
-    /// the rest open). `true` exactly when this arrival emptied the
-    /// barrier, which also bumps `flip` via `release`;
+    /// the rest open). An arrival under an identity other than the one
+    /// `key` was opened with changes nothing. `true` exactly when this
+    /// arrival emptied the barrier, which also bumps `flip` via `release`;
     /// the caller uses the return value to promote its own staged
     /// snapshot right away rather than waiting for its own
     /// `on_frame_changed` to see the bump.
@@ -564,7 +573,7 @@ impl Frame {
         let Some(b) = self.barrier.as_mut() else {
             return false;
         };
-        if !Self::matches(b, versions) {
+        if !Self::awaits(b, key, versions) {
             return false;
         }
         b.awaiting.remove(&key);
@@ -574,6 +583,21 @@ impl Frame {
         } else {
             false
         }
+    }
+
+    /// Replace the barrier with these keys, each under its own identity. An
+    /// empty set clears it without bumping flip. No version changes or
+    /// notifications are emitted here.
+    pub fn open_flip_each(
+        &mut self,
+        keys: impl IntoIterator<Item = (QueryKey, FrameVersions)>,
+        now: Instant,
+    ) {
+        let awaiting: HashMap<QueryKey, FrameVersions> = keys.into_iter().collect();
+        self.barrier = (!awaiting.is_empty()).then_some(FlipBarrier {
+            awaiting,
+            opened: now,
+        });
     }
 
     /// Past [`FLIP_DEADLINE`], release whatever arrived so far rather
@@ -1111,17 +1135,9 @@ impl<'a> FrameViewMut<'a> {
     /// tiles unaffected by the changed inputs can then self-arrive immediately.
     /// Shell observer registration precedes occupant registration to enforce this.
     pub fn open_flip(&mut self, keys: impl IntoIterator<Item = QueryKey>, now: Instant) {
-        let awaiting: HashSet<QueryKey> = keys.into_iter().collect();
-        if awaiting.is_empty() {
-            self.frame.barrier = None;
-            return;
-        }
         let versions = self.versions();
-        self.frame.barrier = Some(FlipBarrier {
-            versions,
-            awaiting,
-            opened: now,
-        });
+        self.frame
+            .open_flip_each(keys.into_iter().map(|k| (k, versions)), now);
     }
 }
 
@@ -2056,6 +2072,49 @@ mod tests {
         });
         assert!(!f2.barrier_open());
     }
+
+    #[test]
+    fn a_barrier_holds_each_key_to_its_own_identity() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.shared_mut().set_scope(book_scope("b1"));
+        let lane = f.shared().versions();
+        // A second identity: same grouping and as-of, another scope number.
+        let other = FrameVersions {
+            scope: lane.scope + 100,
+            ..lane
+        };
+        let (k1, k2) = (QueryKey(1), QueryKey(2));
+        f.open_flip_each([(k1, lane), (k2, other)], Instant::now());
+
+        assert!(f.barrier_wants(k1, lane));
+        assert!(
+            !f.barrier_wants(k1, other),
+            "k1 was opened under the lane's identity"
+        );
+        assert!(f.barrier_wants(k2, other));
+        assert!(!f.barrier_wants(k2, lane));
+
+        assert!(
+            !f.arrived(k2, lane),
+            "an arrival under the wrong identity is not an arrival"
+        );
+        assert!(f.barrier_wants(k2, other), "and leaves the key awaited");
+        assert!(!f.arrived(k1, lane), "one of two has arrived");
+        assert!(f.arrived(k2, other), "the last arrival releases");
+        assert!(!f.barrier_open());
+    }
+
+    #[test]
+    fn an_empty_key_set_clears_the_barrier_without_a_flip() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let v = f.shared().versions();
+        f.open_flip_each([(QueryKey(1), v)], Instant::now());
+        let flip = f.shared().versions().flip;
+        f.open_flip_each(std::iter::empty(), Instant::now());
+        assert!(!f.barrier_open());
+        assert_eq!(f.shared().versions().flip, flip);
+    }
+
     #[test]
     fn publication_watches_are_exact_retained_and_reclaimed() {
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
