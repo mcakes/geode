@@ -682,7 +682,7 @@ impl SheetDelegate {
                         .child(geode_shell::palette::highlighted_title(
                             row.search,
                             &indices,
-                            cx.theme().foreground,
+                            geode_shell::shell::listrow::row_paint(cx.theme()).accent,
                         )),
                 )
                 .into_any_element();
@@ -1523,6 +1523,27 @@ mod tests {
         assert_eq!(super::tree_gaps(false, false), 1, "slot, text");
         assert_eq!(super::tree_gaps(true, false), 2);
         assert_eq!(super::tree_gaps(true, true), 3, "slot, chip, text, note");
+    }
+
+    /// The find table's match run takes the list-row accent every other
+    /// fuzzy surface highlights with (the blotter's find, the palette,
+    /// pickers); a plain `foreground` run is invisible on its own text.
+    #[test]
+    fn find_highlights_take_the_list_row_accent() {
+        let text = include_str!("delegate.rs");
+        // Spelled in two parts so the scan does not find itself.
+        let needle = ["highlighted_", "title("].concat();
+        let calls: Vec<&str> = text
+            .match_indices(needle.as_str())
+            .map(|(at, _)| &text[at..(at + 200).min(text.len())])
+            .collect();
+        assert!(!calls.is_empty(), "the scan found no highlight call");
+        for window in calls {
+            assert!(
+                window.contains("row_paint("),
+                "a find highlight bypasses RowPaint::accent:\n{window}"
+            );
+        }
     }
 
     #[test]

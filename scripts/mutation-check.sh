@@ -21117,8 +21117,8 @@ run_mutation "pricer entry bar: a tree-column double-click keeps the slid-up row
   crates/geode-pricer/src/tile.rs \
   '                self.cursor.at = Some(at);
                 self.sync_cursor(cx);
-                let Some(c) = SheetDelegate::plan_col(*col) else {' \
-  '                let Some(c) = SheetDelegate::plan_col(*col) else {' \
+                if group {' \
+  '                if group {' \
   geode-pricer a_tree_column_double_click_while_the_bar_is_open_keeps_that_row
 
 # A chevron stops propagation, so no SelectCell hands off for it: without
@@ -28637,6 +28637,28 @@ run_mutation "find-window: shell a notice takes the status line" \
   '        } else if let Some(notice) = None::<&String> {
             notice.clone()' \
   geode-pricer fzf_a_reindex_says_the_results_are_out_of_date
+
+# A double-click on a group row toggles it; the edit route it would
+# otherwise take only refuses on a row with no editable cell.
+run_mutation "pricer tile: a double-click on a group row toggles it" \
+  crates/geode-pricer/src/tile.rs \
+  '                let group = matches!(at, At::Group(_));' \
+  '                let group = false;' \
+  geode-pricer a_double_click_on_a_group_row_toggles_it
+
+# The pricer's and market data's find tables highlight the match run in the
+# list-row accent, as every other fuzzy surface does.
+run_mutation "find-window: pricer match run takes the list-row accent" \
+  crates/geode-pricer/src/delegate.rs \
+  '                            geode_shell::shell::listrow::row_paint(cx.theme()).accent,' \
+  '                            cx.theme().foreground,' \
+  geode-pricer find_highlights_take_the_list_row_accent
+
+run_mutation "find-window: market data match run takes the list-row accent" \
+  crates/geode-marketdata/src/delegate.rs \
+  '                    geode_shell::shell::listrow::row_paint(cx.theme()).accent,' \
+  '                    cx.theme().foreground,' \
+  geode-marketdata find_highlights_take_the_list_row_accent
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

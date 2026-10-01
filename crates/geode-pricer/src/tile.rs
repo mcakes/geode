@@ -5511,10 +5511,19 @@ impl PricerTile {
                 let Some(at) = line else {
                     return;
                 };
+                // A group row has no editable cell: a double-click
+                // anywhere on it is `space`, as on a blotter row.
+                let group = matches!(at, At::Group(_));
                 // Before the tree-column return: this press's `SelectCell`
                 // moved the cursor to the row that slid up.
                 self.cursor.at = Some(at);
                 self.sync_cursor(cx);
+                if group {
+                    self.tree_verb(None, cx);
+                    self.rebuild_chrome();
+                    cx.notify();
+                    return;
+                }
                 let Some(c) = SheetDelegate::plan_col(*col) else {
                     self.rebuild_chrome();
                     cx.notify();
@@ -7907,6 +7916,34 @@ pub(crate) mod tests {
             vec![crate::core::LineId(2)],
             "the session carries the open package"
         );
+    }
+
+    /// A double-click anywhere on a group row is `space` on it, as on a
+    /// blotter row: a group row has no editable cell, so the edit route a
+    /// line's double-click takes would only refuse.
+    #[gpui::test]
+    fn a_double_click_on_a_group_row_toggles_it(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "NDX Z26 4000 P"]);
+        h.command(&mut vcx, "group underlying_ref").unwrap();
+        h.draw(&mut vcx);
+        assert_eq!(h.tree(&vcx), ["NDX", "SPX"], "groups start closed");
+        for sel in ["pricer-cell-1-3", "pricer-cell-1-0"] {
+            click(&mut vcx, sel, 1);
+            click(&mut vcx, sel, 2);
+            assert_eq!(
+                h.tree(&vcx),
+                ["NDX", "SPX", "SPX Z26 5000 C"],
+                "{sel}: a double-click opens the group"
+            );
+            assert!(
+                h.tile.read_with(&vcx, |t, _| t.editor.is_none()),
+                "{sel}: no editor opens on a group row"
+            );
+            assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(1), "{sel}");
+            click(&mut vcx, sel, 1);
+            click(&mut vcx, sel, 2);
+            assert_eq!(h.tree(&vcx), ["NDX", "SPX"], "{sel}: and closes it again");
+        }
     }
 
     #[gpui::test]
