@@ -54,13 +54,13 @@ impl MarketDataTile {
                     self.notice = Some("select from a grid cell".into());
                     return;
                 };
-                let (Some(r), Some(c)) = (self.model.rows.get(row), self.model.columns.get(col))
+                let (Some(r), Some(c)) = (self.model.label(row), self.model.columns.get(col))
                 else {
                     return;
                 };
                 self.selection = Some(Selection {
                     kind,
-                    anchor_row: r.label.clone(),
+                    anchor_row: r.clone(),
                     anchor_col: c.clone(),
                 });
             }
@@ -87,7 +87,7 @@ impl MarketDataTile {
             Cursor::Cell { row, col } => sel.resolve_with(
                 (row, col),
                 self.model.columns.len(),
-                |label| self.model.rows.iter().position(|r| &r.label == label),
+                |label| self.model.row_of(label),
                 |name| self.model.columns.iter().position(|c| c == name),
             ),
             // Unreachable: every door into the strip (`cursor_to_attr`)
@@ -203,15 +203,17 @@ impl MarketDataTile {
             .collect();
         out.push(header.join("\t"));
         for row in r.rows.clone() {
-            let m = self.model.rows.get(row)?;
+            let label_text = self.model.label(row)?;
+            // Every selected row, on screen or not, formatted on demand.
+            let cells: Vec<SharedString> = r
+                .cols
+                .clone()
+                .map(|c| self.model.format_cell(&self.draft, row, c))
+                .collect();
             let line: Vec<&str> = label
-                .then(|| m.label.as_ref())
+                .then(|| label_text.as_ref())
                 .into_iter()
-                .chain(
-                    r.cols
-                        .clone()
-                        .filter_map(|c| m.cells.get(c).map(|cell| cell.text.as_ref())),
-                )
+                .chain(cells.iter().map(|c| c.as_ref()))
                 .collect();
             out.push(line.join("\t"));
         }
@@ -255,7 +257,7 @@ impl MarketDataTile {
             .map(|r| {
                 r.rows
                     .clone()
-                    .filter_map(|i| self.model.rows.get(i).map(|m| m.label.to_string()))
+                    .filter_map(|i| self.model.label(i).map(|l| l.to_string()))
                     .collect()
             })
             .unwrap_or_default();
@@ -297,16 +299,18 @@ impl MarketDataTile {
         }
         let n = writes.len();
         for (cell, (row_label, col_label), value) in writes {
-            let row = &self.model.rows[cell.0];
-            match row.state {
-                RowState::Inserted => {
+            match self.model.state(cell.0) {
+                Some(RowState::Inserted) => {
                     self.draft.set_row_cell(&row_label, &col_label, value);
                 }
-                RowState::Document | RowState::Deleted => {
-                    let cell_ref = row.cells[cell.1].cell_ref;
+                Some(RowState::Document | RowState::Deleted) => {
+                    let Some(cell_ref) = self.model.cell_ref(cell) else {
+                        continue;
+                    };
                     self.draft
                         .set(cell_ref, (row_label, col_label), value, &base);
                 }
+                None => {}
             }
         }
         Ok(n)
@@ -329,7 +333,7 @@ impl MarketDataTile {
         let mut skips = Skips::default();
         let mut values = Vec::new();
         for (row, col) in self.selection_cells() {
-            if self.model.rows[row].state == RowState::Deleted {
+            if self.model.state(row) == Some(RowState::Deleted) {
                 skips.add(Skip::Deleted);
                 continue;
             }
@@ -435,8 +439,11 @@ impl MarketDataTile {
         // The editor follows its own cell by label: the rebuild keeps rows
         // in place (a step never inserts or drops one), and a grid that
         // moved anyway seeds nothing rather than another cell's value.
-        let text = (self.model.label_of(cell) == labels)
-            .then(|| self.model.rows[cell.0].cells[cell.1].text.to_string());
+        let text = (self.model.label_of(cell) == labels).then(|| {
+            self.model
+                .format_cell(&self.draft, cell.0, cell.1)
+                .to_string()
+        });
         if let Some(text) = &text {
             state.update(cx, |s, cx| s.set_value(text.clone(), window, cx));
         }
@@ -548,7 +555,7 @@ impl MarketDataTile {
         let mut skips = Skips::default();
         let mut writes = Vec::new();
         for (row, col) in self.selection_cells() {
-            if self.model.rows[row].state == RowState::Deleted {
+            if self.model.state(row) == Some(RowState::Deleted) {
                 skips.add(Skip::Deleted);
                 continue;
             }
@@ -560,11 +567,13 @@ impl MarketDataTile {
             // Every draft change rebuilds the model, so no production
             // route is known to reach this; it guards the notice against
             // claiming cells the trader will not find edited.
-            if self.model.rows[row].state == RowState::Inserted
-                && !matches!(
-                    self.draft.row_state(self.model.rows[row].label.as_ref()),
-                    Some(RowEdit::Inserted { .. })
-                )
+            if self.model.state(row) == Some(RowState::Inserted)
+                && !self.model.label(row).is_some_and(|l| {
+                    matches!(
+                        self.draft.row_state(l.as_ref()),
+                        Some(RowEdit::Inserted { .. })
+                    )
+                })
             {
                 skips.add(Skip::Moved);
                 continue;
@@ -598,14 +607,12 @@ impl MarketDataTile {
         let mut n = 0;
         for ((row, col), value) in writes {
             let labels = self.model.label_of((row, col));
-            let m = &self.model.rows[row];
-            let written = match m.state {
-                RowState::Inserted => {
+            let written = match (self.model.state(row), self.model.cell_ref((row, col))) {
+                (Some(RowState::Inserted), _) => {
                     self.draft
                         .set_row_cell(labels.0.as_ref(), labels.1.as_ref(), value)
                 }
-                RowState::Document => {
-                    let cell_ref = m.cells[col].cell_ref;
+                (Some(RowState::Document), Some(cell_ref)) => {
                     self.draft.set(
                         cell_ref,
                         (labels.0.to_string(), labels.1.to_string()),
@@ -614,8 +621,8 @@ impl MarketDataTile {
                     );
                     true
                 }
-                // Filtered above; never written.
-                RowState::Deleted => false,
+                // Deleted rows are filtered above; never written.
+                _ => false,
             };
             // Judged above, so a refused write here is a broken
             // invariant; it is still counted as skipped rather than

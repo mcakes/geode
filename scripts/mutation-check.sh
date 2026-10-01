@@ -12389,12 +12389,7 @@ run_mutation "matrix: a hole in the pivot is an error, not a zero" \
                         spec.rows.column
                     ));
                 }' \
-  '                None => cells.push(cell_of(
-                    Some(Value::F64(0.0)),
-                    (ri, slice_columns + ci),
-                    &column_kinds[slice_columns + ci],
-                    draft,
-                )),' \
+  '                None => index.at.push(first),' \
   geode-marketdata \
   a_missing_cell_is_a_hole_and_the_error_names_the_pair
 
@@ -12568,7 +12563,7 @@ run_mutation "mdtile: serialize writes the draft" \
 # shifted-ordinal guard.
 run_mutation "mdtile: a capture only counts the draft's true base" \
   crates/geode-marketdata/src/tile.rs \
-  '        if base_of(&base) != draft.base {' \
+  '        if base_of(base) != draft.base {' \
   '        if false {' \
   geode-marketdata \
   rebase_still_refuses_a_same_day_group_when_the_base_was_never_delivered
@@ -12804,7 +12799,7 @@ run_mutation "mdedit: a committed edit closes the editor" \
 # checks that an omitted axis is None.
 run_mutation "mdedit: bump walks the cursor's row by default" \
   crates/geode-marketdata/src/tile.rs \
-  '            BumpAxis::Row => (self.model.slice_columns..self.model.rows[row].cells.len())
+  '            BumpAxis::Row => (self.model.slice_columns..self.model.columns.len())
                 .filter_map(|ci| {
                     if !matches!(self.model.kind_of(ci), Some(CellKind::Number(_))) {
                         skipped += 1;
@@ -12814,8 +12809,8 @@ run_mutation "mdedit: bump walks the cursor's row by default" \
                         .map(|v| ((row, ci), v, self.column_type(ci)))
                 })
                 .collect(),' \
-  '            BumpAxis::Row => (0..self.model.rows.len())
-                .filter(|&ri| self.model.rows[ri].state != RowState::Deleted)
+  '            BumpAxis::Row => (0..self.model.len())
+                .filter(|&ri| self.model.state(ri) != Some(RowState::Deleted))
                 .filter_map(|ri| {
                     self.current_numeric(ri, col)
                         .map(|v| ((ri, col), v, self.column_type(col)))
@@ -12944,7 +12939,7 @@ run_mutation "mdsel: y over a selection copies a header line first" \
 # selection over the wrong rows.
 run_mutation "mdsel: the anchor row is found by its label" \
   crates/geode-marketdata/src/tile/select.rs \
-  '                |label| self.model.rows.iter().position(|r| &r.label == label),' \
+  '                |label| self.model.row_of(label),' \
   '                |_| Some(0),' \
   geode-marketdata \
   an_anchor_row_that_disappears_clears_the_selection_with_a_notice
@@ -13215,7 +13210,7 @@ run_mutation "final: a pinned blotter promotes the stage a replaced barrier left
 # Rebasing against an empty first delivery drops every restored edit.
 run_mutation "final: a restored draft waits for a model that can resolve it" \
   crates/geode-marketdata/src/tile.rs \
-  '        if self.unresolved_restore && !self.model.rows.is_empty() {' \
+  '        if self.unresolved_restore && !self.model.is_empty() {' \
   '        if self.unresolved_restore {' \
   geode-marketdata \
   a_restored_draft_survives_an_empty_first_delivery
@@ -15314,8 +15309,8 @@ run_mutation "matrix: a slice label colliding with an axis label is refused" \
 # A row bump walks the ladder and skips the term's own forward/atm/skew.
 run_mutation "mdbump: a row bump skips the slice cells" \
   crates/geode-marketdata/src/tile.rs \
-  '            BumpAxis::Row => (self.model.slice_columns..self.model.rows[row].cells.len())' \
-  '            BumpAxis::Row => (0..self.model.rows[row].cells.len())' \
+  '            BumpAxis::Row => (self.model.slice_columns..self.model.columns.len())' \
+  '            BumpAxis::Row => (0..self.model.columns.len())' \
   geode-marketdata a_row_bump_skips_the_slice_cells_and_a_column_bump_on_fwd_moves_every_term
 
 # ---- Shift-arrow routing ---- The panel reclaims shift-arrow from the
@@ -15398,7 +15393,7 @@ run_mutation "mdauto: the policy fires only on a real transition, never a redeli
 # against its empty label map would discard every edit.
 run_mutation "mdauto: an empty new document never auto-rebases a draft away" \
   crates/geode-marketdata/src/tile.rs \
-  '                    if !clean.rows.is_empty() {' \
+  '                    if !clean.is_empty() {' \
   '                    if true {' \
   geode-marketdata \
   an_empty_new_document_never_auto_rebases_a_draft_away
@@ -15532,8 +15527,8 @@ run_mutation "tile: a flat commit parses by the column's declared type" \
 # the model showing the document value while the draft holds the edit.
 run_mutation "matrix: patch_cell re-prepares the cell" \
   crates/geode-marketdata/src/core/matrix.rs \
-  '        self.rows[row].cells[col] = cell_of(value, (doc_row, col), kind, draft);' \
-  '        let _ = cell_of(value, (doc_row, col), kind, draft);' \
+  '    window.refill_cell(cell.0, cell.1, || index.md_cell(draft, cell.0, cell.1));' \
+  '    let _ = (window, index, draft, cell);' \
   geode-marketdata patch_cell_matches_a_rebuild
 
 # Text cells commit their trimmed text. Refusing the path leaves an
@@ -15577,8 +15572,8 @@ run_mutation "tile: an empty text commit is allowed where the column is optional
 # comparison detects the allocation while painted values remain equal.
 run_mutation "tile: a commit patches the model in place" \
   crates/geode-marketdata/src/tile.rs \
-  '            t.delegate_mut().model = Rc::new(MatrixModel::default());' \
-  '            let _ = t.delegate_mut();' \
+  '            t.delegate_mut().refill_cell(draft, cell);' \
+  '            let _ = (t.delegate_mut(), draft, cell);' \
   geode-marketdata a_cell_commit_patches_the_model_in_place
 
 # Space and shift-space step choice cells through their options with
@@ -15772,7 +15767,7 @@ run_mutation "tile: o inserts after the cursor row" \
 # label order can reverse the requested placement.
 run_mutation "tile: shift+o on an inserted row takes its anchor" \
   crates/geode-marketdata/src/tile.rs \
-  '        } else if self.model.rows[row].state == RowState::Inserted {' \
+  '        } else if self.model.state(row) == Some(RowState::Inserted) {' \
   '        } else if false {' \
   geode-marketdata o_inserts_a_minted_row_and_dd_deletes
 
@@ -15782,7 +15777,7 @@ run_mutation "tile: shift+o on an inserted row takes its anchor" \
 # editor.
 run_mutation "tile: a duplicate typed label is refused" \
   crates/geode-marketdata/src/tile.rs \
-  '        if self.model.rows.iter().any(|r| r.label.as_ref() == new) {' \
+  '        if self.model.row_of(&new).is_some() {' \
   '        if false {' \
   geode-marketdata o_on_a_typed_axis_opens_the_label_editor
 
@@ -15975,18 +15970,8 @@ run_mutation "mdhide: a hidden row label withholds the label column" \
 # opaque labels instead makes visible statuses and dates unfindable.
 run_mutation "mdhide: find searches the painted cells under a hidden label" \
   crates/geode-marketdata/src/tile.rs \
-  '        if self.spec.rows.shown() {
-            self.model
-                .rows
-                .iter()
-                .map(|r| r.label.to_string())
-                .collect()' \
-  '        if true {
-            self.model
-                .rows
-                .iter()
-                .map(|r| r.label.to_string())
-                .collect()' \
+  '            let text = if self.spec.rows.shown() {' \
+  '            let text = if true {' \
   geode-marketdata a_hidden_row_label_withholds_the_label_column
 
 # ---- Shared keymap across document factories ----
@@ -27538,6 +27523,66 @@ run_mutation "grid-window: tile the first window fills before any report" \
   '        let asked = self.asked.clone().unwrap_or(0..self.first);' \
   '        let asked = self.asked.clone().unwrap_or(0..0);' \
   geode-tile before_any_report_the_first_window_is_filled
+
+run_mutation "grid-window: md serialize captures groups without a build" \
+  crates/geode-marketdata/src/tile.rs \
+  '        draft.capture_groups(&self.model);' \
+  $'        if let Ok(m) = MatrixIndex::build(base, &self.spec, &Draft::default()) {\n            draft.capture_groups(&m);\n        }' \
+  geode-marketdata serialize_captures_groups_without_building
+
+run_mutation "grid-window: md a one-cell commit does not rebuild" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if was_sent {' \
+  '        if true {' \
+  geode-marketdata a_cell_commit_patches_the_model_in_place
+
+run_mutation "grid-window: md leaving Sent repaints every cell" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if was_sent {' \
+  '        if false {' \
+  geode-marketdata a_cell_commit_on_a_sent_draft_repaints_every_cell_unsent
+
+run_mutation "grid-window: md label lookup uses the index" \
+  crates/geode-marketdata/src/core/matrix.rs \
+  '            self.label_index.entry(r.label.clone()).or_insert(i);' \
+  '            self.label_index.entry(r.label.clone()).or_insert(0);' \
+  geode-marketdata label_lookup_and_uniqueness_use_the_index
+
+run_mutation "grid-window: md find text is built once per index build" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.search_text.is_none() {' \
+  '        if true {' \
+  geode-marketdata find_builds_its_text_once_per_index_build
+
+run_mutation "grid-window: md a one-cell edit refreshes its row's find text" \
+  crates/geode-marketdata/src/tile.rs \
+  '            text[row] = row_search_text(&self.model, &self.draft, row);' \
+  '            let _ = (text, row);' \
+  geode-marketdata find_after_a_cell_edit_finds_the_new_value_under_a_hidden_label
+
+run_mutation "grid-window: md the window paints format_cell" \
+  crates/geode-marketdata/src/core/matrix.rs \
+  '            text: text_of(&x),
+            edited: x.edited,
+            sent: x.sent,
+            state: self.states[r],' \
+  '            text: SharedString::default(),
+            edited: x.edited,
+            sent: x.sent,
+            state: self.states[r],' \
+  geode-marketdata the_window_paints_the_same_text_as_format_cell
+
+run_mutation "grid-window: md an inserted cell's value comes from its row edit" \
+  crates/geode-marketdata/src/core/matrix.rs \
+  '                let value = cells.and_then(|c| c.get(label.as_ref())).cloned();' \
+  '                let value: Option<Value> = None;' \
+  geode-marketdata upload_output_matches_the_recorded_golden
+
+run_mutation "grid-window: md yank col formats every row" \
+  crates/geode-marketdata/src/tile.rs \
+  '                    Yank::Col => (0..self.model.len())' \
+  '                    Yank::Col => (0..self.model.len().min(geode_tile::grid::FIRST_WINDOW))' \
+  geode-marketdata yank_col_includes_rows_off_screen
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

@@ -5,7 +5,7 @@
 #![cfg(test)]
 
 use crate::core::draft::{DocumentBase, Draft};
-use crate::core::matrix::MatrixModel;
+use crate::core::matrix::MatrixIndex;
 use crate::core::spec::{
     Columns, PanelSpec, RowAxis, RowIdentity, RowLabel, ValueColumn, builtin_panel,
 };
@@ -139,7 +139,7 @@ pub(crate) static SCHEDULE: LazyLock<Arc<PanelSpec>> = LazyLock::new(|| {
 /// row. `ex_date` is a real `Date32` column (`TestColumn::Date`) — a flat
 /// panel's `ex_date` is a typed `Value::Date` CELL, not a row label
 /// (unlike a pivot's axis columns, which read a document date as ISO
-/// text through a dictionary), so `MatrixModel::build` must read it as
+/// text through a dictionary), so `MatrixIndex::build` must read it as
 /// one.
 pub(crate) fn schedule_snapshot(rows: &[(&str, &str, f64, &str)]) -> Snapshot {
     schedule_snapshot_at(rows, BASE)
@@ -407,11 +407,11 @@ pub(crate) fn dividend_snapshot_at(
 /// A [`DIVIDEND`] model whose rows carry exactly the given `dividend_id`
 /// labels — for the rebase-guard tests, which key a cell edit by a
 /// same-date ordinal (`2026-09-18#2`) and need only the row IDENTITY, not
-/// any particular dates or amount. Built with `MatrixModel::build`, not by
+/// any particular dates or amount. Built with `MatrixIndex::build`, not by
 /// hand, so this exercises the same `RowState::Document` labelling a real
 /// delivery would; every row shares one ex date so a caller who wants a
 /// same-day GROUP need only vary the labels' `#n` suffixes.
-pub(crate) fn flat_model(labels: &[&str]) -> MatrixModel {
+pub(crate) fn flat_model(labels: &[&str]) -> MatrixIndex {
     let rows: Vec<(&str, &str, &str, &str, f64, &str)> = labels
         .iter()
         .map(|&label| {
@@ -426,7 +426,8 @@ pub(crate) fn flat_model(labels: &[&str]) -> MatrixModel {
         })
         .collect();
     let snapshot = dividend_snapshot(&rows);
-    MatrixModel::build(&snapshot, &DIVIDEND, &Draft::default()).expect("a valid dividend fixture")
+    MatrixIndex::build(&Arc::new(snapshot), &DIVIDEND, &Draft::default())
+        .expect("a valid dividend fixture")
 }
 
 /// A flat panel with one `F64` and one `I64` value column — cheap to add as a `const`, and the one shape neither

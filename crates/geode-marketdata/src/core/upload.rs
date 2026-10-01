@@ -10,7 +10,7 @@
 //! values for upstream publication.
 
 use crate::core::draft::{Draft, parse_attr};
-use crate::core::matrix::{MatrixModel, RowModel, RowState, read_flat_value};
+use crate::core::matrix::{MatrixIndex, RowState, RowView, read_flat_value};
 use crate::core::spec::{Columns, HeaderAttr, PanelSpec, RowIdentity, ValueColumn};
 use geode_core::document::{Column, DocumentRows, Value};
 use geode_core::schema::ColumnType;
@@ -36,7 +36,7 @@ use geode_core::snapshot::Snapshot;
 pub fn assemble(
     snapshot: &Snapshot,
     spec: &PanelSpec,
-    model: &MatrixModel,
+    model: &MatrixIndex,
     draft: &Draft,
 ) -> Result<DocumentRows, String> {
     let attributes = spec
@@ -44,14 +44,13 @@ pub fn assemble(
         .iter()
         .map(|attr| attribute(snapshot, attr, draft))
         .collect::<Result<Vec<_>, _>>()?;
-    let rows: Vec<&RowModel> = model
-        .rows
-        .iter()
+    let rows: Vec<RowView<'_>> = model
+        .rows()
         .filter(|r| r.state != RowState::Deleted)
         .collect();
     let (axes, values) = match &spec.columns {
-        Columns::Values(cols) => flat(spec, cols, &rows)?,
-        Columns::Axis(axis) => long(snapshot, spec, axis, model, &rows)?,
+        Columns::Values(cols) => flat(spec, cols, model, draft, &rows)?,
+        Columns::Axis(axis) => long(snapshot, spec, axis, model, draft, &rows)?,
     };
     if axes.first().is_none_or(|(_, c)| c.is_empty()) {
         return Err("nothing to upload: every row is deleted".to_string());
@@ -68,8 +67,14 @@ pub fn assemble(
 type Laid = (Vec<(String, Column)>, Vec<(String, Column)>);
 
 /// The flat shape: one document row per painted row, one value column per
-/// [`ValueColumn`] in spec order (the model's cells are in that order).
-fn flat(spec: &PanelSpec, cols: &[ValueColumn], rows: &[&RowModel]) -> Result<Laid, String> {
+/// [`ValueColumn`] in spec order (the index's columns are in that order).
+fn flat(
+    spec: &PanelSpec,
+    cols: &[ValueColumn],
+    model: &MatrixIndex,
+    draft: &Draft,
+    rows: &[RowView<'_>],
+) -> Result<Laid, String> {
     let mut axis = empty_column(&spec.rows.column, row_axis_type(spec))?;
     let mut values = cols
         .iter()
@@ -84,7 +89,8 @@ fn flat(spec: &PanelSpec, cols: &[ValueColumn], rows: &[&RowModel]) -> Result<La
             Some(&row_axis(spec, label)?),
         )?;
         for (ci, (name, column)) in values.iter_mut().enumerate() {
-            put(column, label, name, cell(row, ci))?;
+            let v = model.value_at(draft, row.index, ci);
+            put(column, label, name, v.as_ref())?;
         }
     }
     Ok((vec![(spec.rows.column.to_string(), axis)], values))
@@ -97,8 +103,9 @@ fn long(
     snapshot: &Snapshot,
     spec: &PanelSpec,
     axis: &str,
-    model: &MatrixModel,
-    rows: &[&RowModel],
+    model: &MatrixIndex,
+    draft: &Draft,
+    rows: &[RowView<'_>],
 ) -> Result<Laid, String> {
     // A slice value the document did not carry is not in the model, so
     // it has nothing to write — and an upload without it is a different
@@ -153,14 +160,16 @@ fn long(
                 Some(&row_value),
             )?;
             put(&mut column_axis, label, axis, Some(column_value))?;
+            let v = model.value_at(draft, row.index, model.slice_columns + ci);
             put(
                 &mut value,
                 label,
                 &format!("{value_name} at {axis}={column_label}"),
-                cell(row, model.slice_columns + ci),
+                v.as_ref(),
             )?;
             for (si, (sv, column)) in spec.slice_values.iter().zip(&mut slices).enumerate() {
-                put(column, label, &sv.column, cell(row, si))?;
+                let v = model.value_at(draft, row.index, si);
+                put(column, label, &sv.column, v.as_ref())?;
             }
         }
     }
@@ -203,10 +212,6 @@ fn attribute(
         ));
     }
     Ok((attr.column.to_string(), value))
-}
-
-fn cell(row: &RowModel, col: usize) -> Option<&Value> {
-    row.cells.get(col).and_then(|c| c.value.as_ref())
 }
 
 /// The row axis's declared type: a minted label is text.
@@ -462,6 +467,7 @@ mod tests {
     use geode_core::config::{LayerDoc, merge_docs};
     use geode_core::document::{Column, Value};
     use geode_core::schema::SchemaSpec;
+    use std::sync::Arc;
 
     /// The two shipped datasets as `geode-documents` declares them — the
     /// shape `DocumentRows::validate` holds an assembled upload to. Copied
@@ -543,9 +549,9 @@ role = "attribute"
         assert_eq!(doc.validate(ds), Ok(()), "{}", spec.kind);
     }
 
-    fn built(spec: &PanelSpec, doc: &DocumentRows, draft: &Draft) -> (Snapshot, MatrixModel) {
-        let snapshot = snapshot_of(spec, doc);
-        let model = MatrixModel::build(&snapshot, spec, draft).unwrap();
+    fn built(spec: &PanelSpec, doc: &DocumentRows, draft: &Draft) -> (Arc<Snapshot>, MatrixIndex) {
+        let snapshot = Arc::new(snapshot_of(spec, doc));
+        let model = MatrixIndex::build(&snapshot, spec, draft).unwrap();
         (snapshot, model)
     }
 
@@ -559,8 +565,8 @@ role = "attribute"
             (&CVI, fixture_cvi_rows()),
             (&DIVIDEND, fixture_dividend_rows()),
         ] {
-            let snapshot = snapshot_of(spec, &doc);
-            let model = MatrixModel::build(&snapshot, spec, &Draft::default()).unwrap();
+            let snapshot = Arc::new(snapshot_of(spec, &doc));
+            let model = MatrixIndex::build(&snapshot, spec, &Draft::default()).unwrap();
             let assembled = assemble(&snapshot, spec, &model, &Draft::default()).unwrap();
             assert_eq!(assembled, doc, "{}", spec.kind);
             assert_valid(spec, &assembled);
@@ -974,7 +980,8 @@ role = "attribute"
     /// Upload output for the builtin panels, byte for byte, against the
     /// file recorded before the windowed index replaced the prepared rows.
     /// A difference is a change to what a desk publishes, never noise.
-    /// `GEODE_RECORD_UPLOAD_GOLDEN=1` rewrites the file (Task 1 only).
+    /// `GEODE_RECORD_UPLOAD_GOLDEN=1` re-records the file after a deliberate
+    /// change to the published format.
     #[test]
     fn upload_output_matches_the_recorded_golden() {
         let text = golden_cases();

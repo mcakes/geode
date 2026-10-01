@@ -98,8 +98,9 @@ changes still rebuild.
 
 - A blotter formats the visible window into the shared
   `geode_tile::grid::WindowCache` rather than formatting in `render_td`.
-- A market-data delivery or structural edit builds a `MatrixModel`; an
-  ordinary cell commit patches it.
+- A market-data delivery, structural edit or bulk step builds a `MatrixIndex`
+  (labels and row facts, no cell text); a one-cell commit refills one window
+  cell. The session tick builds nothing.
 - `ChartKey` contains everything timeseries chart preparation reads. Cursor
   movement and fetch-state changes reuse value vectors. Per-slot visibility
   changes rebuild the model; theme and named-color changes can trigger that
@@ -154,6 +155,9 @@ changes still rebuild.
   pipeline. Concurrent staging is on hold until the real path and a network
   share are measured.
 - CI compiles benchmarks but has no stable regression baseline.
+- The market-data window is filled over the whole document on every install,
+  so a delivery still formats every cell once. Opening `/`'s fuzzy result
+  table formats every cell once more, so its rows paint from prepared text.
 
 ## Recording a measurement
 
