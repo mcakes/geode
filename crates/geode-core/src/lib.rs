@@ -16,6 +16,7 @@ pub mod format;
 pub mod grid;
 pub mod groupings;
 pub mod health;
+pub mod link;
 pub mod log;
 pub mod named;
 pub mod nudge;

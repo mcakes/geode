@@ -55,6 +55,31 @@ impl Scope {
             && self.named.is_empty()
     }
 
+    /// A scope selecting one value of one dimension and nothing else.
+    pub fn one(column: &str, value: &str) -> Scope {
+        Scope {
+            dimensions: vec![DimensionSelection {
+                column: column.to_string(),
+                values: vec![value.to_string()],
+            }],
+            ..Scope::default()
+        }
+    }
+
+    /// The single value this scope selects for `column`: `None` when the
+    /// column is unconstrained, selects several values, or the scope is
+    /// impossible. Other dimensions and any expression are not consulted.
+    pub fn sole(&self, column: &str) -> Option<&str> {
+        if self.impossible {
+            return None;
+        }
+        let d = self.dimensions.iter().find(|d| d.column == column)?;
+        match d.values.as_slice() {
+            [one] => Some(one.as_str()),
+            _ => None,
+        }
+    }
+
     /// Compose scope layers. Selections on the same dimension intersect;
     /// expressions combine with AND. Inner text replaces outer text when set.
     /// Disjoint selections set `impossible` and retain the dimension name:
@@ -734,6 +759,36 @@ grain = "underlying"
                 ..Scope::default()
             }
             .is_empty()
+        );
+    }
+
+    #[test]
+    fn one_builds_a_single_value_selection_and_sole_reads_it_back() {
+        let s = Scope::one("underlying_ref", "SPX.Z");
+        assert_eq!(s.dimensions.len(), 1);
+        assert_eq!(s.sole("underlying_ref"), Some("SPX.Z"));
+        assert_eq!(s.sole("book"), None, "another column is not selected");
+        assert_eq!(Scope::default().sole("underlying_ref"), None);
+        let two = Scope {
+            dimensions: vec![DimensionSelection {
+                column: "underlying_ref".into(),
+                values: vec!["SPX.Z".into(), "NDX".into()],
+            }],
+            ..Scope::default()
+        };
+        assert_eq!(
+            two.sole("underlying_ref"),
+            None,
+            "several values name no single one"
+        );
+        let impossible = Scope {
+            impossible: true,
+            ..Scope::one("underlying_ref", "SPX.Z")
+        };
+        assert_eq!(
+            impossible.sole("underlying_ref"),
+            None,
+            "an impossible scope selects nothing"
         );
     }
 }
