@@ -72,9 +72,10 @@ pub fn delta_label(delta: f64) -> String {
 /// [`delta_label`] with `decimals` places of a percent, trailing zeros kept
 /// so one axis reads at one precision: `0.505` at one decimal is `49.5p`.
 /// The bare number marks the money only when the delta rounds to exactly 50
-/// at that precision (`50.0` at one decimal).
+/// at that precision (`50.0` at one decimal). Six decimals at most.
 pub fn delta_label_with(delta: f64, decimals: usize) -> String {
-    let unit = 10f64.powi(decimals.min(6) as i32);
+    let decimals = decimals.min(6);
+    let unit = 10f64.powi(decimals as i32);
     let pct = (delta * 100.0 * unit).round() / unit;
     if pct == 50.0 {
         format!("{pct:.decimals$}")
@@ -87,14 +88,15 @@ pub fn delta_label_with(delta: f64, decimals: usize) -> String {
 
 /// One x value as its axis labels it. `step` is the tick step, which sets
 /// the decimals: a price or percent takes what the step needs, a fixed
-/// format at least its own count and more when the step needs them (six at
-/// most), a delta none, one or two places of a percent.
+/// format its own count or what the step needs if that is more (the step
+/// asks for six at most; a larger count of its own is honoured), a delta
+/// none, one or two places of a percent.
 pub fn fmt_x(value: f64, step: f64, format: XFormat) -> String {
     match format {
         XFormat::Price => fmt_tick(value, step),
         XFormat::Percent => format!("{}%", fmt_tick(value * 100.0, step * 100.0)),
         XFormat::Fixed(n) => {
-            let decimals = (n as usize).max(step_decimals(step)).min(6);
+            let decimals = (n as usize).max(step_decimals(step));
             format!("{value:.decimals$}")
         }
         XFormat::Delta => delta_label_with(value, step_decimals(step * 100.0).min(2)),
@@ -404,6 +406,17 @@ mod tests {
     }
 
     #[test]
+    fn ladder_ticks_label_whole_whatever_the_step() {
+        // 2000 px at a 40 px gap over 0.22 of delta: the 1-2-5 step would be
+        // 0.005, whose labels carry a decimal. The rungs are whole percents
+        // by definition and read so.
+        assert_eq!(
+            delta_labels(false, (0.04, 0.26), 2000.0),
+            ["5c", "10c", "25c"]
+        );
+    }
+
+    #[test]
     fn delta_labels_take_the_decimals_the_step_needs() {
         assert_eq!(delta_label_with(0.505, 1), "49.5p");
         assert_eq!(delta_label_with(0.495, 1), "49.5c");
@@ -418,6 +431,11 @@ mod tests {
             fmt_x(0.41, 0.01, XFormat::Delta),
             "41c",
             "a step of exactly 0.01 reads whole"
+        );
+        assert_eq!(
+            fmt_x(0.41, 0.01 * (1.0 - 1e-12), XFormat::Delta),
+            "41c",
+            "nor does a step stored a hair under it"
         );
         assert_eq!(fmt_x(0.405, 0.005, XFormat::Delta), "40.5c");
         assert_eq!(fmt_x(0.4995, 0.0005, XFormat::Delta), "49.95c");
@@ -463,6 +481,8 @@ mod tests {
         // The asked-for decimals are the floor, six the ceiling.
         assert_eq!(fmt_x(1.5, 0.5, XFormat::Fixed(2)), "1.50");
         assert_eq!(fmt_x(0.123456789, 1e-9, XFormat::Fixed(2)), "0.123457");
+        // Only the step's share is capped: more decimals asked for are given.
+        assert_eq!(fmt_x(0.123456789, 0.5, XFormat::Fixed(8)), "0.12345679");
     }
 
     #[test]

@@ -62,6 +62,17 @@ fn clip_span(a: Point, b: Point, clip: Clip) -> Option<(f64, f64)> {
     (t0 <= t1).then_some((t0, t1))
 }
 
+/// The indices `(first, last)` of the dashes that can reach the distance
+/// range `[d0, d1]` along a span entered at `phase`: dash `k` is on over
+/// `[k * period - phase, k * period - phase + dash)`. `first` is what lets a
+/// long off-clip lead-in be skipped rather than walked; `last < first` means
+/// none.
+fn dash_range(d0: f64, d1: f64, phase: f64, dash: f64, period: f64) -> (f64, f64) {
+    let first = ((d0 + phase - dash) / period).ceil().max(0.0);
+    let last = ((d1 + phase) / period).floor();
+    (first, last)
+}
+
 /// How many times coarser than the float grid at the span's far end the
 /// shorter of dash and gap must be for a dash to be placed along it.
 const DASH_RESOLUTION: f64 = 64.0;
@@ -77,7 +88,7 @@ const DASH_RESOLUTION: f64 = 64.0;
 /// The arithmetic is f64, which places dashes correctly along spans far
 /// past what f32 can hold (1e14 px). Where even f64 cannot resolve the
 /// pattern at the span's length, the clipped part of that span is drawn as
-/// one solid segment.
+/// one solid segment, itself only as exact as f64 is at the span's ends.
 ///
 /// The line is solid, one segment per span, when there is no pattern to
 /// draw: `dash` or `gap` is zero, negative or NaN, the period is not
@@ -121,14 +132,11 @@ pub fn dash_polyline(points: &[Point], dash: f32, gap: f32, clip: Clip, out: &mu
                     out.push((along(a, b, t0), along(a, b, t1)));
                 }
             } else {
-                // Dash `k` is on over `[start, start + dash)` with
-                // `start = k * period - phase`. Only the dashes that reach
-                // `[d0, d1]` are visited, each placed from its own index:
-                // walking a running distance forward by float additions
-                // strands the rest of the span once a step rounds to no
-                // movement.
-                let first = ((d0 + phase - dash) / period).ceil().max(0.0);
-                let last = ((d1 + phase) / period).floor();
+                // Only the dashes that reach `[d0, d1]` are visited, each
+                // placed from its own index: walking a running distance
+                // forward by float additions strands the rest of the span
+                // once a step rounds to no movement.
+                let (first, last) = dash_range(d0, d1, phase, dash, period);
                 let count = (last - first + 1.0).max(0.0) as usize;
                 for i in 0..count {
                     let start = (first + i as f64) * period - phase;
@@ -344,6 +352,11 @@ mod tests {
             dash_polyline(&pts, dash, gap, ALL, &mut out);
             assert_eq!(out, solid, "dash {dash}, gap {gap}");
         }
+        // No gap is solid like any other solid: a span that leaves the clip
+        // keeps its own ends, not the clipped ones.
+        let through = [Point::new(-50.0, 100.0), Point::new(450.0, 100.0)];
+        dash_polyline(&through, 4.0, 0.0, PLOT, &mut out);
+        assert_eq!(out, [(through[0], through[1])]);
         // Solid is one segment per span whatever the clip.
         let elsewhere = Clip {
             x0: 500.0,
@@ -427,6 +440,19 @@ mod tests {
     }
 
     #[test]
+    fn the_dash_range_starts_at_the_clip_not_at_the_spans_start() {
+        // 1e14 px of lead-in at a 10 px period: the first dash visited is
+        // number 1e13, and 41 indices cover the 400 px on the plot.
+        assert_eq!(
+            dash_range(1e14, 1e14 + 400.0, 0.0, 6.0, 10.0),
+            (1e13, 1e13 + 40.0)
+        );
+        // A whole short span, and one entered mid-gap.
+        assert_eq!(dash_range(0.0, 100.0, 0.0, 4.0, 7.0), (0.0, 14.0));
+        assert_eq!(dash_range(0.0, 5.0, 5.0, 4.0, 7.0), (1.0, 1.0));
+    }
+
+    #[test]
     fn a_span_past_the_reach_of_f32_stays_bounded_and_finite() {
         let mut out = Vec::new();
         // One end at 1e14: the dash arithmetic is f64, which still places
@@ -444,6 +470,16 @@ mod tests {
             near(out[39].0, 390.0, 100.0) && near(out[39].1, 396.0, 100.0),
             "{:?}",
             out[39]
+        );
+        // The far end first: the 1e14 px of lead-in are skipped, not walked.
+        let pts = [Point::new(-1e14, 100.0), Point::new(400.0, 100.0)];
+        dash_polyline(&pts, 6.0, 4.0, PLOT, &mut out);
+        assert!((40..=42).contains(&out.len()), "{}", out.len());
+        assert!(finite(&out));
+        assert!(
+            out.iter()
+                .all(|(a, b)| a.x >= 0.0 && b.x <= 400.0 && b.x > a.x),
+            "{out:?}"
         );
         // One end at 1e30: f64 cannot place a 10 px pattern along that, so
         // the part on the plot is one solid segment.
