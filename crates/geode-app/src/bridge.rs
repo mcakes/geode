@@ -3305,6 +3305,211 @@ role = "key"
         }
     }
 
+    /// A real blotter hosted in the shell, restored from a session whose
+    /// one tile shows view `view` (declared by `views_toml`), with its
+    /// first query answered by a snapshot of `columns`. `roster` adds what
+    /// the test hosts beside the blotter before the keymap is built.
+    struct ShellBlotter {
+        vcx: gpui::VisualTestContext,
+        tile: Entity<geode_blotter::tile::BlotterTile>,
+        shell: Entity<ShellView>,
+    }
+
+    /// A [`ShellBlotter`] snapshot column's metadata: additive at both
+    /// depths, direct scope, summable only for `delta01`.
+    fn shell_blotter_meta(n: &str) -> geode_core::snapshot::ColumnMeta {
+        use geode_core::attribution::{Attribution, ScopeSemantics};
+        geode_core::snapshot::ColumnMeta {
+            name: n.into(),
+            attribution_by_depth: vec![Attribution::Additive; 2],
+            scope_semantics: ScopeSemantics::Direct,
+            summable: n == "delta01",
+            mixed_flag: None,
+        }
+    }
+
+    fn shell_blotter(
+        cx: &mut gpui::TestAppContext,
+        views_toml: &str,
+        view: &str,
+        roster_hook: impl FnOnce(&mut ModuleRoster),
+        columns: Vec<(
+            geode_core::snapshot::ColumnMeta,
+            geode_core::snapshot::TestColumn,
+        )>,
+    ) -> ShellBlotter {
+        let (handle, rx) = DataHandle::for_tests();
+        let views = geode_core::view::ViewSpec::from_doc(&geode_core::config::merge_docs(
+            "views",
+            &[LayerDoc::builtin("views", views_toml).unwrap()],
+        ))
+        .0;
+        let tiles = BlotterTiles::default();
+        let mut services = test_shell_services();
+        let mut roster = ModuleRoster::new();
+        roster.add(Box::new(KeepingBlotter {
+            factory: BlotterFactory::new(
+                handle,
+                views,
+                NamedColours::default(),
+                SchemaSpec::default(),
+                DerivedDimensions::default(),
+                FindStyle::default(),
+                Duration::from_secs(900),
+            ),
+            tiles: tiles.clone(),
+        }));
+        roster_hook(&mut roster);
+        roster.register_actions(&mut services.registry);
+        let (fragments, diags) = roster.keymap_fragments();
+        assert!(diags.is_empty(), "{diags:?}");
+        let layered = geode_shell::keymap::fragments::splice(
+            &[LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap()],
+            &fragments,
+        );
+        let (keymap, diags) = build_keymap(&layered, services.mod_alias, &services.registry);
+        assert!(diags.is_empty(), "{diags:?}");
+        services.keymap = keymap;
+        services.roster = roster;
+        let mut table = geode_shell::session::to_toml(
+            &Workspaces::new(),
+            &TileRecords::new(),
+            None,
+            &geode_shell::session::PinnedRecords::new(),
+            &geode_shell::palette_usage::PaletteUsage::new(),
+            &geode_shell::session::PageRecords::new(),
+        );
+        let ws1: toml::Table = format!(
+            r#"
+            focused = 1
+            [node]
+            kind = "leaf"
+            id = 1
+            [tiles.1]
+            module = "blotter"
+            [tiles.1.state]
+            view = "{view}"
+        "#
+        )
+        .parse()
+        .unwrap();
+        if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
+            ws_table.insert("1".to_string(), toml::Value::Table(ws1));
+        }
+        let restored = geode_shell::session::from_toml(&table).unwrap();
+        assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+        services.workspaces = restored.workspaces;
+        services.restored_tiles = restored.tiles;
+
+        cx.update(gpui_component::init);
+        cx.update(geode_blotter::init);
+        let window = open_shell_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let tile = tiles.borrow()[0].clone();
+
+        let tag = loop {
+            match rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the tile asks for its rows")
+            {
+                geode_data::Request::Query(p) => break p.tag,
+                _ => continue,
+            }
+        };
+        let snap = Arc::new(geode_core::snapshot::Snapshot::for_tests(columns, 1));
+        tile.update(&mut vcx, |t, cx| {
+            t.deliver(
+                geode_core::query::QueryOutcome {
+                    key: QueryKey(1),
+                    tag,
+                    snapshot: Ok(snap),
+                    submitted: std::time::Instant::now(),
+                },
+                cx,
+            )
+        });
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        ShellBlotter { vcx, tile, shell }
+    }
+
+    impl ShellBlotter {
+        /// A right press (down and up) on the painted cell `selector`.
+        fn right_press(&mut self, selector: &'static str) {
+            let at = self
+                .vcx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} is painted"))
+                .center();
+            self.vcx
+                .simulate_mouse_down(at, gpui::MouseButton::Right, gpui::Modifiers::none());
+            self.vcx
+                .simulate_mouse_up(at, gpui::MouseButton::Right, gpui::Modifiers::none());
+            self.vcx.run_until_parked();
+            self.vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+
+        /// Type `keys` (a mouse-opened surface takes typed keys), then draw.
+        fn type_keys(&mut self, keys: &str) {
+            self.vcx.simulate_keystrokes(keys);
+            self.vcx.run_until_parked();
+            self.vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+
+        /// The tile's selection kind and rows, and its cursor row.
+        fn selection_and_cursor(
+            &self,
+        ) -> (
+            geode_core::grid::selection::SelectKind,
+            std::ops::Range<usize>,
+            usize,
+        ) {
+            self.tile.read_with(&self.vcx, |t, cx| {
+                let d = t.table().read(cx).delegate();
+                let r = d.resolved.clone().expect("a V selection");
+                (r.kind, r.rows, d.cursor.row)
+            })
+        }
+
+        /// gpui-component's table holds the menu it builds on every right
+        /// press in a cycle only its next right press breaks: press once
+        /// more and close the window in the same update, so the deferred
+        /// rebuild never runs (as the blotter's `release_the_table_menu`).
+        fn close(mut self) {
+            let at = self
+                .vcx
+                .debug_bounds("blotter-cell-0-0")
+                .expect("the root row is painted")
+                .center();
+            self.vcx.update(|window, cx| {
+                window.dispatch_event(
+                    gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                        button: gpui::MouseButton::Right,
+                        position: at,
+                        modifiers: gpui::Modifiers::none(),
+                        click_count: 1,
+                        first_mouse: false,
+                    }),
+                    cx,
+                );
+                window.remove_window();
+            });
+            self.vcx.run_until_parked();
+        }
+    }
+
     /// A pointer-started selection must retain tile focus. Click a painted
     /// cell, then type `j` through the shell's keymap and focus routing;
     /// the resulting extension proves the next key reaches the blotter.
@@ -3469,159 +3674,43 @@ role = "key"
     /// row (spec ruling 6), never the cursor row.
     #[gpui::test]
     fn a_right_press_on_a_blotter_cell_opens_the_pressed_rows_menu(cx: &mut gpui::TestAppContext) {
-        use geode_core::attribution::{Attribution, ScopeSemantics};
         use geode_core::grid::selection::SelectKind;
-        use geode_core::snapshot::{ColumnMeta, Snapshot, TestColumn};
-        let (handle, rx) = DataHandle::for_tests();
-        let views = geode_core::view::ViewSpec::from_doc(&geode_core::config::merge_docs(
-            "views",
-            &[LayerDoc::builtin(
-                "views",
-                "[flat]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n\
-                 [[flat.columns]]\nname = \"underlying_ref\"\nkind = \"dimension\"\n\
-                 [[flat.columns]]\nname = \"delta01\"\n",
-            )
-            .unwrap()],
-        ))
-        .0;
-        let tiles = BlotterTiles::default();
-        let mut services = test_shell_services();
-        let mut roster = ModuleRoster::new();
-        roster.add(Box::new(KeepingBlotter {
-            factory: BlotterFactory::new(
-                handle,
-                views,
-                NamedColours::default(),
-                SchemaSpec::default(),
-                DerivedDimensions::default(),
-                FindStyle::default(),
-                Duration::from_secs(900),
-            ),
-            tiles: tiles.clone(),
-        }));
+        use geode_core::snapshot::TestColumn;
         let mut rec = RecordingFactory::new("rec");
         rec.accepts = &["underlying_ref"];
         let log = rec.log.clone();
-        roster.add(Box::new(rec));
-        roster.register_actions(&mut services.registry);
-        let (fragments, diags) = roster.keymap_fragments();
-        assert!(diags.is_empty(), "{diags:?}");
-        let layered = geode_shell::keymap::fragments::splice(
-            &[LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap()],
-            &fragments,
-        );
-        let (keymap, diags) = build_keymap(&layered, services.mod_alias, &services.registry);
-        assert!(diags.is_empty(), "{diags:?}");
-        services.keymap = keymap;
-        services.roster = roster;
-        let mut table = geode_shell::session::to_toml(
-            &Workspaces::new(),
-            &TileRecords::new(),
-            None,
-            &geode_shell::session::PinnedRecords::new(),
-            &geode_shell::palette_usage::PaletteUsage::new(),
-            &geode_shell::session::PageRecords::new(),
-        );
-        let ws1: toml::Table = r#"
-            focused = 1
-            [node]
-            kind = "leaf"
-            id = 1
-            [tiles.1]
-            module = "blotter"
-            [tiles.1.state]
-            view = "flat"
-        "#
-        .parse()
-        .unwrap();
-        if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
-            ws_table.insert("1".to_string(), toml::Value::Table(ws1));
-        }
-        let restored = geode_shell::session::from_toml(&table).unwrap();
-        assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
-        services.workspaces = restored.workspaces;
-        services.restored_tiles = restored.tiles;
-
-        cx.update(gpui_component::init);
-        cx.update(geode_blotter::init);
-        let window = open_shell_window(cx, services);
-        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
-        vcx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-        let tile = tiles.borrow()[0].clone();
-
-        // Answer the tile's first query: root; L1 (SPX); L2 (NDX).
-        let tag = loop {
-            match rx
-                .recv_timeout(Duration::from_secs(5))
-                .expect("the tile asks for its rows")
-            {
-                geode_data::Request::Query(p) => break p.tag,
-                _ => continue,
-            }
-        };
-        let meta = |n: &str| ColumnMeta {
-            name: n.into(),
-            attribution_by_depth: vec![Attribution::Additive; 2],
-            scope_semantics: ScopeSemantics::Direct,
-            summable: n == "delta01",
-            mixed_flag: None,
-        };
         let dict = |a: &str, b: &str| TestColumn::Dict(vec![None, Some(a.into()), Some(b.into())]);
-        let snap = Arc::new(Snapshot::for_tests(
+        // The tile's first query is answered: root; L1 (SPX); L2 (NDX).
+        let mut f = shell_blotter(
+            cx,
+            FLAT_VIEW,
+            "flat",
+            |roster| roster.add(Box::new(rec)),
             vec![
-                (meta("lhu"), dict("L1", "L2")),
-                (meta("underlying_ref"), dict("SPX", "NDX")),
-                (meta("row_depth"), TestColumn::I32(vec![0, 1, 1])),
+                (shell_blotter_meta("lhu"), dict("L1", "L2")),
+                (shell_blotter_meta("underlying_ref"), dict("SPX", "NDX")),
                 (
-                    meta("delta01"),
+                    shell_blotter_meta("row_depth"),
+                    TestColumn::I32(vec![0, 1, 1]),
+                ),
+                (
+                    shell_blotter_meta("delta01"),
                     TestColumn::F64(vec![Some(9.0), Some(5.0), Some(4.0)]),
                 ),
             ],
-            1,
-        ));
-        tile.update(&mut vcx, |t, cx| {
-            t.deliver(
-                geode_core::query::QueryOutcome {
-                    key: QueryKey(1),
-                    tag,
-                    snapshot: Ok(snap),
-                    submitted: std::time::Instant::now(),
-                },
-                cx,
-            )
-        });
-        vcx.run_until_parked();
-        vcx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
+        );
 
         // `V` on SPX, then `j` to NDX: rows 1..3 selected, cursor on NDX.
-        vcx.simulate_keystrokes("j shift-v j");
-        vcx.run_until_parked();
-        let (kind, rows, cursor) = tile.read_with(&vcx, |t, cx| {
-            let d = t.table().read(cx).delegate();
-            let r = d.resolved.clone().expect("a V selection");
-            (r.kind, r.rows, d.cursor.row)
-        });
-        assert_eq!((kind, rows, cursor), (SelectKind::Rows, 1..3, 2));
+        f.vcx.simulate_keystrokes("j shift-v j");
+        f.vcx.run_until_parked();
+        assert_eq!(f.selection_and_cursor(), (SelectKind::Rows, 1..3, 2));
 
         // Right-press SPX's underlying_ref cell, inside the selection.
-        let at = vcx
-            .debug_bounds("blotter-cell-1-1")
-            .expect("SPX's underlying_ref cell is painted")
-            .center();
-        vcx.simulate_mouse_down(at, gpui::MouseButton::Right, gpui::Modifiers::none());
-        vcx.simulate_mouse_up(at, gpui::MouseButton::Right, gpui::Modifiers::none());
-        vcx.run_until_parked();
-        vcx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
+        f.right_press("blotter-cell-1-1");
 
         // A mouse-opened surface takes typed keys: `enter` picks Open Rec.
-        vcx.simulate_keystrokes("enter");
-        vcx.run_until_parked();
+        f.vcx.simulate_keystrokes("enter");
+        f.vcx.run_until_parked();
         let launched: Vec<_> = log
             .borrow()
             .iter()
@@ -3636,117 +3725,25 @@ role = "key"
             vec![Some(expected)],
             "the press opened the pressed row's menu (SPX), not the cursor row's (NDX)"
         );
-
-        // gpui-component's table holds the menu it builds on every right
-        // press in a cycle only its next right press breaks: press once
-        // more and close the window in the same update, so the deferred
-        // rebuild never runs (as the blotter's `release_the_table_menu`).
-        let at = vcx
-            .debug_bounds("blotter-cell-0-0")
-            .expect("the root row is painted")
-            .center();
-        vcx.update(|window, cx| {
-            window.dispatch_event(
-                gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
-                    button: gpui::MouseButton::Right,
-                    position: at,
-                    modifiers: gpui::Modifiers::none(),
-                    click_count: 1,
-                    first_mouse: false,
-                }),
-                cx,
-            );
-            window.remove_window();
-        });
-        vcx.run_until_parked();
+        f.close();
     }
 
-    /// A real blotter hosted in the shell with the row actions startup
-    /// registers (`add_dimension_actions`: Open in Nemo), a
-    /// recording [`geode_shell::dimension::UrlOpener`], and one delivered
-    /// snapshot grouped by `lhu`: root; L1 over P7 and P8; L2 over P9; L3
-    /// over P6. `position_ref` is a HIDDEN unanimity column (the view shows
-    /// only `underlying_ref` and `delta01`) with its `position_ref#mixed`
-    /// flag, as the compiler emits a context column: mixed on the root and
-    /// L1, single on L2 and L3.
-    struct NemoBlotter {
-        vcx: gpui::VisualTestContext,
-        tile: Entity<geode_blotter::tile::BlotterTile>,
-        shell: Entity<ShellView>,
-        opened: Rc<RefCell<Vec<String>>>,
-    }
+    /// The view both row-menu end-to-end fixtures restore: grouped by
+    /// `lhu`, showing `underlying_ref` and `delta01`.
+    const FLAT_VIEW: &str = "[flat]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n\
+                             [[flat.columns]]\nname = \"underlying_ref\"\nkind = \"dimension\"\n\
+                             [[flat.columns]]\nname = \"delta01\"\n";
 
-    fn nemo_blotter(cx: &mut gpui::TestAppContext) -> NemoBlotter {
-        use geode_core::attribution::{Attribution, ScopeSemantics};
-        use geode_core::snapshot::{ColumnMeta, Snapshot, TestColumn};
-        let (handle, rx) = DataHandle::for_tests();
-        let views = geode_core::view::ViewSpec::from_doc(&geode_core::config::merge_docs(
-            "views",
-            &[LayerDoc::builtin(
-                "views",
-                "[flat]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n\
-                 [[flat.columns]]\nname = \"underlying_ref\"\nkind = \"dimension\"\n\
-                 [[flat.columns]]\nname = \"delta01\"\n",
-            )
-            .unwrap()],
-        ))
-        .0;
-        let tiles = BlotterTiles::default();
-        let mut services = test_shell_services();
-        let mut roster = ModuleRoster::new();
-        roster.add(Box::new(KeepingBlotter {
-            factory: BlotterFactory::new(
-                handle,
-                views,
-                NamedColours::default(),
-                SchemaSpec::default(),
-                DerivedDimensions::default(),
-                FindStyle::default(),
-                Duration::from_secs(900),
-            ),
-            tiles: tiles.clone(),
-        }));
-        // The same call `add_bridge_modules` makes.
-        crate::add_dimension_actions(&mut roster);
-        roster.register_actions(&mut services.registry);
-        let (fragments, diags) = roster.keymap_fragments();
-        assert!(diags.is_empty(), "{diags:?}");
-        let layered = geode_shell::keymap::fragments::splice(
-            &[LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap()],
-            &fragments,
-        );
-        let (keymap, diags) = build_keymap(&layered, services.mod_alias, &services.registry);
-        assert!(diags.is_empty(), "{diags:?}");
-        services.keymap = keymap;
-        services.roster = roster;
-        let mut table = geode_shell::session::to_toml(
-            &Workspaces::new(),
-            &TileRecords::new(),
-            None,
-            &geode_shell::session::PinnedRecords::new(),
-            &geode_shell::palette_usage::PaletteUsage::new(),
-            &geode_shell::session::PageRecords::new(),
-        );
-        let ws1: toml::Table = r#"
-            focused = 1
-            [node]
-            kind = "leaf"
-            id = 1
-            [tiles.1]
-            module = "blotter"
-            [tiles.1.state]
-            view = "flat"
-        "#
-        .parse()
-        .unwrap();
-        if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
-            ws_table.insert("1".to_string(), toml::Value::Table(ws1));
-        }
-        let restored = geode_shell::session::from_toml(&table).unwrap();
-        assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
-        services.workspaces = restored.workspaces;
-        services.restored_tiles = restored.tiles;
-
+    /// A [`ShellBlotter`] with the row actions startup registers
+    /// (`add_dimension_actions`: Open in Nemo), a recording
+    /// [`geode_shell::dimension::UrlOpener`] (the returned list), and one
+    /// delivered snapshot grouped by `lhu`: root; L1 over P7 and P8; L2 over
+    /// P9; L3 over P6. `position_ref` is a HIDDEN unanimity column (the view
+    /// shows only `underlying_ref` and `delta01`) with its
+    /// `position_ref#mixed` flag, as the compiler emits a context column:
+    /// mixed on the root and L1, single on L2 and L3.
+    fn nemo_blotter(cx: &mut gpui::TestAppContext) -> (ShellBlotter, Rc<RefCell<Vec<String>>>) {
+        use geode_core::snapshot::{ColumnMeta, TestColumn};
         let opened: Rc<RefCell<Vec<String>>> = Rc::default();
         let sink = opened.clone();
         cx.update(|cx| {
@@ -3754,38 +3751,16 @@ role = "key"
                 sink.borrow_mut().push(url.to_string())
             })))
         });
-        cx.update(gpui_component::init);
-        cx.update(geode_blotter::init);
-        let window = open_shell_window(cx, services);
-        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
-        vcx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
-            root.view().clone().downcast::<ShellView>().unwrap()
-        });
-        let tile = tiles.borrow()[0].clone();
-
-        let tag = loop {
-            match rx
-                .recv_timeout(Duration::from_secs(5))
-                .expect("the tile asks for its rows")
-            {
-                geode_data::Request::Query(p) => break p.tag,
-                _ => continue,
-            }
-        };
-        let meta = |n: &str| ColumnMeta {
-            name: n.into(),
-            attribution_by_depth: vec![Attribution::Additive; 2],
-            scope_semantics: ScopeSemantics::Direct,
-            summable: n == "delta01",
-            mixed_flag: None,
-        };
+        let meta = shell_blotter_meta;
         let dict = |v: [Option<&str>; 4]| {
             TestColumn::Dict(v.iter().map(|s| s.map(String::from)).collect())
         };
-        let snap = Arc::new(Snapshot::for_tests(
+        let f = shell_blotter(
+            cx,
+            FLAT_VIEW,
+            "flat",
+            // The same call `add_bridge_modules` makes.
+            crate::add_dimension_actions,
             vec![
                 (
                     meta("lhu"),
@@ -3813,82 +3788,8 @@ role = "key"
                     TestColumn::Bool(vec![Some(true), Some(true), Some(false), Some(false)]),
                 ),
             ],
-            1,
-        ));
-        tile.update(&mut vcx, |t, cx| {
-            t.deliver(
-                geode_core::query::QueryOutcome {
-                    key: QueryKey(1),
-                    tag,
-                    snapshot: Ok(snap),
-                    submitted: std::time::Instant::now(),
-                },
-                cx,
-            )
-        });
-        vcx.run_until_parked();
-        vcx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-        NemoBlotter {
-            vcx,
-            tile,
-            shell,
-            opened,
-        }
-    }
-
-    impl NemoBlotter {
-        /// A right press (down and up) on the painted cell `selector`.
-        fn right_press(&mut self, selector: &'static str) {
-            let at = self
-                .vcx
-                .debug_bounds(selector)
-                .unwrap_or_else(|| panic!("{selector} is painted"))
-                .center();
-            self.vcx
-                .simulate_mouse_down(at, gpui::MouseButton::Right, gpui::Modifiers::none());
-            self.vcx
-                .simulate_mouse_up(at, gpui::MouseButton::Right, gpui::Modifiers::none());
-            self.vcx.run_until_parked();
-            self.vcx.update(|window, cx| {
-                let _ = window.draw(cx);
-            });
-        }
-
-        /// Type `keys` (a mouse-opened surface takes typed keys), then draw.
-        fn type_keys(&mut self, keys: &str) {
-            self.vcx.simulate_keystrokes(keys);
-            self.vcx.run_until_parked();
-            self.vcx.update(|window, cx| {
-                let _ = window.draw(cx);
-            });
-        }
-
-        /// Break gpui-component's right-press menu cycle and close the
-        /// window, as the Part 2 test does: press once more and close in
-        /// the same update, so the deferred rebuild never runs.
-        fn close(mut self) {
-            let at = self
-                .vcx
-                .debug_bounds("blotter-cell-0-0")
-                .expect("the root row is painted")
-                .center();
-            self.vcx.update(|window, cx| {
-                window.dispatch_event(
-                    gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
-                        button: gpui::MouseButton::Right,
-                        position: at,
-                        modifiers: gpui::Modifiers::none(),
-                        click_count: 1,
-                        first_mouse: false,
-                    }),
-                    cx,
-                );
-                window.remove_window();
-            });
-            self.vcx.run_until_parked();
-        }
+        );
+        (f, opened)
     }
 
     /// Right press on L2's `delta01` (a measure, so no leading column):
@@ -3898,10 +3799,10 @@ role = "key"
     /// action's own notice.
     #[gpui::test]
     fn a_right_press_opens_the_rows_position_in_nemo(cx: &mut gpui::TestAppContext) {
-        let mut f = nemo_blotter(cx);
+        let (mut f, opened) = nemo_blotter(cx);
         f.right_press("blotter-cell-2-2");
         f.type_keys("enter");
-        assert_eq!(*f.opened.borrow(), vec!["nemo://position/P9".to_string()]);
+        assert_eq!(*opened.borrow(), vec!["nemo://position/P9".to_string()]);
         assert!(
             f.vcx.debug_bounds("shell-notice").is_some(),
             "the notice is painted"
@@ -3920,7 +3821,7 @@ role = "key"
     /// `enter` that would pick a row opens nothing.
     #[gpui::test]
     fn a_subtotal_over_two_positions_offers_no_nemo_row(cx: &mut gpui::TestAppContext) {
-        let mut f = nemo_blotter(cx);
+        let (mut f, opened) = nemo_blotter(cx);
         f.right_press("blotter-cell-1-2");
         assert_eq!(
             f.shell
@@ -3930,7 +3831,7 @@ role = "key"
             "the press reached the shell, which found no row to offer"
         );
         f.type_keys("enter");
-        assert_eq!(*f.opened.borrow(), Vec::<String>::new());
+        assert_eq!(*opened.borrow(), Vec::<String>::new());
         f.close();
     }
 
@@ -3940,18 +3841,18 @@ role = "key"
     #[gpui::test]
     fn nemo_opens_the_pressed_row_not_the_selection(cx: &mut gpui::TestAppContext) {
         use geode_core::grid::selection::SelectKind;
-        let mut f = nemo_blotter(cx);
+        let (mut f, opened) = nemo_blotter(cx);
         // `V` on L3, then `k` to L2: rows 2..4 selected, cursor on L2.
         f.type_keys("j j j shift-v k");
-        let (kind, rows, cursor) = f.tile.read_with(&f.vcx, |t, cx| {
-            let d = t.table().read(cx).delegate();
-            let r = d.resolved.clone().expect("a V selection");
-            (r.kind, r.rows, d.cursor.row)
-        });
-        assert_eq!((kind, rows, cursor), (SelectKind::Rows, 2..4, 2));
+        assert_eq!(f.selection_and_cursor(), (SelectKind::Rows, 2..4, 2));
         f.right_press("blotter-cell-3-2");
+        assert_eq!(
+            f.selection_and_cursor(),
+            (SelectKind::Rows, 2..4, 2),
+            "a press inside the selection keeps it and leaves the cursor on L2"
+        );
         f.type_keys("enter");
-        assert_eq!(*f.opened.borrow(), vec!["nemo://position/P6".to_string()]);
+        assert_eq!(*opened.borrow(), vec!["nemo://position/P6".to_string()]);
         f.close();
     }
 
