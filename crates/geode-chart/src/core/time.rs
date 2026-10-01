@@ -408,6 +408,7 @@ fn candidates(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::view::MIN_SPAN;
     const PLOT: Rect = Rect::new(100.0, 0.0, 1000.0, 100.0);
     const DAY: i64 = 86_400_000_000;
     // Mon..Fri, then Mon (a weekend gap).
@@ -448,9 +449,30 @@ mod tests {
     #[test]
     fn visible_is_the_index_window_the_view_intersects() {
         let s = TimeScale::Session { buckets: &BUCKETS };
-        assert_eq!(s.visible(View { lo: 0.0, hi: 6.0 }), (0, 6));
-        assert_eq!(s.visible(View { lo: 1.5, hi: 3.5 }), (1, 4));
-        assert_eq!(s.visible(View { lo: 2.0, hi: 3.0 }), (2, 3));
+        assert_eq!(
+            s.visible(View {
+                lo: 0.0,
+                hi: 6.0,
+                min_span: MIN_SPAN
+            }),
+            (0, 6)
+        );
+        assert_eq!(
+            s.visible(View {
+                lo: 1.5,
+                hi: 3.5,
+                min_span: MIN_SPAN
+            }),
+            (1, 4)
+        );
+        assert_eq!(
+            s.visible(View {
+                lo: 2.0,
+                hi: 3.0,
+                min_span: MIN_SPAN
+            }),
+            (2, 3)
+        );
         let c = TimeScale::Continuous {
             buckets: &BUCKETS,
             step_us: DAY,
@@ -458,20 +480,29 @@ mod tests {
         assert_eq!(
             c.visible(View {
                 lo: 0.5 * DAY as f64,
-                hi: 5.0 * DAY as f64
+                hi: 5.0 * DAY as f64,
+                min_span: MIN_SPAN,
             }),
             (0, 5)
         );
         assert_eq!(
             c.visible(View {
                 lo: 5.5 * DAY as f64,
-                hi: 6.5 * DAY as f64
+                hi: 6.5 * DAY as f64,
+                min_span: MIN_SPAN,
             }),
             (5, 5),
             "the gap holds no bucket"
         );
         let e = TimeScale::Session { buckets: &[] };
-        assert_eq!(e.visible(View { lo: 0.0, hi: 1.0 }), (0, 0));
+        assert_eq!(
+            e.visible(View {
+                lo: 0.0,
+                hi: 1.0,
+                min_span: MIN_SPAN
+            }),
+            (0, 0)
+        );
     }
 
     #[test]
@@ -489,7 +520,11 @@ mod tests {
             "left of the plot snaps to the first"
         );
         assert_eq!(Crosshair::at(PLOT.right() + 50.0, &s, v, PLOT), Some(5));
-        let zoomed = View { lo: 2.0, hi: 4.0 };
+        let zoomed = View {
+            lo: 2.0,
+            hi: 4.0,
+            min_span: MIN_SPAN,
+        };
         assert_eq!(
             Crosshair::at(PLOT.x + 1.0, &s, zoomed, PLOT),
             Some(2),
@@ -573,7 +608,11 @@ mod tests {
         // a wide plot fits days
         let unit = ticks(
             &s,
-            View { lo: 0.0, hi: 10.0 },
+            View {
+                lo: 0.0,
+                hi: 10.0,
+                min_span: MIN_SPAN,
+            },
             Rect::new(0.0, 0.0, 1200.0, 100.0),
             64.0,
             0,
@@ -672,7 +711,11 @@ mod tests {
         assert_eq!(
             ticks(
                 &TimeScale::Session { buckets: &[] },
-                View { lo: 0.0, hi: 1.0 },
+                View {
+                    lo: 0.0,
+                    hi: 1.0,
+                    min_span: MIN_SPAN
+                },
                 Rect::new(0.0, 0.0, 400.0, 100.0),
                 64.0,
                 0,
@@ -696,7 +739,11 @@ mod tests {
         ] {
             ticks(
                 &s,
-                View { lo, hi },
+                View {
+                    lo,
+                    hi,
+                    min_span: MIN_SPAN,
+                },
                 Rect::new(0.0, 0.0, w, 100.0),
                 64.0,
                 0,
