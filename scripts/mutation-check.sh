@@ -23251,6 +23251,21 @@ run_mutation "row menu: an unpaintable menu stays open" \
   '        if false {' \
   geode-shell a_row_menu_with_nowhere_to_hang_is_dropped
 
+# A set UrlOpener takes the URL; skipping it hands a test's URL to the OS.
+run_mutation "nemo seam: open_url skips the test opener" \
+  crates/geode-shell/src/shell/row_menu.rs \
+  '        if let Some(opener) = self.cx.try_global::<crate::dimension::UrlOpener>() {' \
+  '        if let Some(opener) = None::<&crate::dimension::UrlOpener> {' \
+  geode-shell an_action_opens_its_url_through_the_opener
+
+# Without an opener the app must hand the URL to the OS. `return` also
+# skips the counter that follows the call, so the test sees 0.
+run_mutation "nemo seam: the app never opens the url" \
+  crates/geode-shell/src/shell/row_menu.rs \
+  '            self.cx.open_url(url);' \
+  '            return;' \
+  geode-shell without_an_opener_the_app_opens_the_url
+
 # A reload must reach the underlying list, or a desk edit to it waits for
 # a restart.
 run_mutation "pricer app: a reload leaves the underlying list stale" \

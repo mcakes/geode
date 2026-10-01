@@ -479,3 +479,76 @@ fn a_pick_cancels_a_chord_prefix_typed_while_open(cx: &mut gpui::TestAppContext)
     draw(&mut vcx);
     assert_eq!(noops(), 1, "the prefix did not survive the pick");
 }
+
+/// Opens `nemo://test/{value}` for its column and reports it, as a real
+/// action would.
+struct OpeningAction;
+
+impl crate::dimension::DimensionAction for OpeningAction {
+    fn id(&self) -> &'static str {
+        "test::open"
+    }
+    fn title(&self) -> gpui::SharedString {
+        "Open elsewhere".into()
+    }
+    fn column(&self) -> &'static str {
+        "position_ref"
+    }
+    fn run(&self, ctx: &DimensionContext, acx: &mut crate::shell::row_menu::ActionCx<'_, '_>) {
+        let url = format!(
+            "nemo://test/{}",
+            ctx.get("position_ref").unwrap_or_default()
+        );
+        acx.open_url(&url);
+        acx.notice(format!("opened {url}"));
+    }
+}
+
+fn opening_fixture(context: DimensionContext) -> ShellServices {
+    let mut rec = RecordingFactory::new("rec");
+    rec.fragment = Some(ROW_FRAGMENT);
+    *rec.dimension_context.borrow_mut() = Some(context);
+    let mut services = services_with_recorders(vec![rec]);
+    services.roster.add_action(Rc::new(OpeningAction));
+    services
+}
+
+#[gpui::test]
+fn an_action_opens_its_url_through_the_opener(cx: &mut gpui::TestAppContext) {
+    let opened: Rc<std::cell::RefCell<Vec<String>>> = Rc::default();
+    let sink = opened.clone();
+    cx.update(|cx| {
+        cx.set_global(crate::dimension::UrlOpener(Rc::new(move |url, _| {
+            sink.borrow_mut().push(url.to_string())
+        })))
+    });
+    let (window, mut vcx) = open_shell(
+        cx,
+        opening_fixture(DimensionContext::of(&[("position_ref", "P7")])),
+    );
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("ctrl-v");
+    draw(&mut vcx);
+    vcx.simulate_keystrokes("g . enter");
+    draw(&mut vcx);
+    assert_eq!(opened.borrow().as_slice(), &["nemo://test/P7".to_string()]);
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.notice.clone()).as_deref(),
+        Some("opened nemo://test/P7")
+    );
+}
+
+#[gpui::test]
+fn without_an_opener_the_app_opens_the_url(cx: &mut gpui::TestAppContext) {
+    crate::shell::row_menu::APP_OPENS.with(|c| c.set(0));
+    let (window, mut vcx) = open_shell(
+        cx,
+        opening_fixture(DimensionContext::of(&[("position_ref", "P7")])),
+    );
+    let _shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("ctrl-v");
+    draw(&mut vcx);
+    vcx.simulate_keystrokes("g . enter");
+    draw(&mut vcx);
+    assert_eq!(crate::shell::row_menu::APP_OPENS.with(|c| c.get()), 1);
+}
