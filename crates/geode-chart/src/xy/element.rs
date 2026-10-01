@@ -647,6 +647,90 @@ mod tests {
         );
     }
 
+    /// A quoted chain over 1.0..1.1 and, when asked for, a curve over
+    /// 0.5..0.6 on the same axis, in the given stroke.
+    fn chain_beside_a_curve(version: u64, curve: Option<Style>) -> Arc<XyModel> {
+        let slot = |number, style, kind| XySlot {
+            number,
+            label: format!("s{number}").into(),
+            color: gpui::red(),
+            axis: Axis::Left,
+            visible: true,
+            style,
+            kind,
+        };
+        let mut slots = vec![slot(
+            1,
+            Style::Solid,
+            SlotKind::Points {
+                xs: vec![1.0, 1.05, 1.1],
+                mid: vec![0.2, 0.21, 0.22],
+                lo: vec![0.195, 0.205, 0.215],
+                hi: vec![0.205, 0.215, 0.225],
+            },
+        )];
+        if let Some(style) = curve {
+            slots.push(slot(
+                2,
+                style,
+                SlotKind::Line {
+                    xs: vec![0.5, 0.55, 0.6],
+                    ys: vec![5.0, 6.0, 7.0],
+                },
+            ));
+        }
+        XyModel::new(version, XAxis::default(), [YFormat::Plain; 4], 0.7, slots)
+    }
+
+    /// A view that holds the chain of `chain_beside_a_curve` and lies
+    /// wholly to the right of its curve.
+    const CHAIN_ONLY: View = View {
+        lo: 0.9,
+        hi: 1.2,
+        min_span: 0.001,
+    };
+
+    #[test]
+    fn a_line_wholly_outside_the_view_neither_scales_its_side_nor_has_a_shape() {
+        let alone = XyElement::new(chain_beside_a_curve(1, None), CHAIN_ONLY, 12.0, "e");
+        let (lo, hi) = alone.side_domain(Pane::Upper, Side::Left).unwrap();
+        // The chain's own 0.195..0.225, padded by a twentieth of its span.
+        assert!((lo - 0.1935).abs() < 1e-12 && (hi - 0.2265).abs() < 1e-12);
+        let plot = Rect::new(44.0, 0.0, 400.0, 200.0);
+        let y = LinearScale::new((lo, hi), plot.y, plot.bottom());
+        for style in [Style::Solid, Style::Dashed] {
+            let m = chain_beside_a_curve(1, Some(style));
+            let e = XyElement::new(m.clone(), CHAIN_ONLY, 12.0, "f");
+            assert_eq!(
+                e.side_domain(Pane::Upper, Side::Left),
+                Some((lo, hi)),
+                "{style:?}: a curve value that is not on screen is not on the axis"
+            );
+            let mut b = Buffers::default();
+            assert!(
+                e.shape(&m.slots[1], plot, &y, &mut b).is_none(),
+                "{style:?}: the view shows nothing of the curve"
+            );
+            assert!(e.shape(&m.slots[0], plot, &y, &mut b).is_some());
+        }
+    }
+
+    #[gpui::test]
+    fn a_line_wholly_outside_the_view_counts_no_rebuild(cx: &mut gpui::TestAppContext) {
+        let (host, mut vcx) = open(cx, chain_beside_a_curve(1, Some(Style::Solid)));
+        let mark = rebuilds();
+        host.update(&mut vcx, |h, cx| {
+            h.view = CHAIN_ONLY;
+            cx.notify();
+        });
+        draw(&mut vcx);
+        assert_eq!(
+            rebuilds() - mark,
+            1,
+            "the chain; the curve's one knot past the edge is no path"
+        );
+    }
+
     #[test]
     fn a_side_scales_over_what_the_view_shows_only() {
         let m = fixture(false);

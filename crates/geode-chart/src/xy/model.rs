@@ -39,19 +39,53 @@ pub struct XAxis {
     pub reversed: bool,
 }
 
+/// What a slot paints. Every array of a slot is one column of the same
+/// points, and `xs` is finite and ascending: the window, the nearest point
+/// and a line's value are all binary searches over it. [`XyModel::new`]
+/// makes that so; a slot edited afterwards must keep it so.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SlotKind {
-    /// A polyline through `(xs[i], ys[i])`. `xs` ascending; a `NaN` in
-    /// `ys` is a gap.
+    /// A polyline through `(xs[i], ys[i])`. A `NaN` in `ys` is a gap.
     Line { xs: Vec<f64>, ys: Vec<f64> },
     /// A marker at `mid` and a vertical bar from `lo` to `hi` per point.
-    /// `xs` ascending.
     Points {
         xs: Vec<f64>,
         mid: Vec<f64>,
         lo: Vec<f64>,
         hi: Vec<f64>,
     },
+}
+
+impl SlotKind {
+    /// Cut the arrays to their shared length, drop every point whose x is
+    /// not finite, and put the rest in ascending x, equal xs in the order
+    /// they came. A slot that is already so is checked in one pass and
+    /// left untouched.
+    fn normalise(&mut self) {
+        let mut columns = match self {
+            SlotKind::Line { xs, ys } => [Some(xs), Some(ys), None, None],
+            SlotKind::Points { xs, mid, lo, hi } => [Some(xs), Some(mid), Some(lo), Some(hi)],
+        };
+        let n = columns.iter().flatten().map(|c| c.len()).min().unwrap_or(0);
+        for column in columns.iter_mut().flatten() {
+            column.truncate(n);
+        }
+        let Some(xs) = columns[0].as_deref() else {
+            return;
+        };
+        let clean = xs.first().is_none_or(|x| x.is_finite())
+            && xs.windows(2).all(|w| w[1].is_finite() && w[0] <= w[1]);
+        if clean {
+            return;
+        }
+        let mut order: Vec<usize> = (0..n).filter(|i| xs[*i].is_finite()).collect();
+        // Stable, so points sharing an x keep their order.
+        order.sort_by(|a, b| xs[*a].total_cmp(&xs[*b]));
+        for column in columns.iter_mut().flatten() {
+            let kept: Vec<f64> = order.iter().map(|i| column[*i]).collect();
+            **column = kept;
+        }
+    }
 }
 
 /// One series slot as the chart paints it.
@@ -89,14 +123,23 @@ impl XySlot {
 
     /// `[start, end)` of the points the view shows. A line takes one knot
     /// more on each side, so it runs to the plot's edges and beyond rather
-    /// than stopping at its last visible knot.
+    /// than stopping at its last visible knot. A line window of one knot is
+    /// empty instead: one knot is no span, so a line wholly to one side of
+    /// the view offers nothing to paint and nothing to scale over.
     pub fn window(&self, view: View) -> (usize, usize) {
         let n = self.len();
         let xs = &self.xs()[..n];
         let start = xs.partition_point(|x| *x < view.lo);
         let end = xs.partition_point(|x| *x <= view.hi).max(start);
         match self.kind {
-            SlotKind::Line { .. } => (start.saturating_sub(1), (end + 1).min(n)),
+            SlotKind::Line { .. } => {
+                let (first, last) = (start.saturating_sub(1), (end + 1).min(n));
+                if last - first < 2 {
+                    (start, start)
+                } else {
+                    (first, last)
+                }
+            }
             SlotKind::Points { .. } => (start, end),
         }
     }
@@ -115,10 +158,11 @@ impl XySlot {
         a.iter().chain(b).chain(c).copied()
     }
 
-    /// The index of the point whose x is nearest `u`.
+    /// The index of the point whose x is nearest `u`; `None` for a slot
+    /// with no points or a `u` that is not a number.
     pub fn nearest(&self, u: f64) -> Option<usize> {
         let n = self.len();
-        if n == 0 {
+        if n == 0 || u.is_nan() {
             return None;
         }
         let xs = &self.xs()[..n];
@@ -172,21 +216,30 @@ pub struct XyModel {
 }
 
 impl XyModel {
+    /// Build a model, normalising every slot on the way in: its arrays are
+    /// cut to their shared length, a point whose x is not finite is
+    /// dropped, and points out of x order are sorted into it (a line then
+    /// runs through its points in x order). A slot already so is not
+    /// copied. The slots are public; one edited after construction must
+    /// keep its xs finite and ascending.
     pub fn new(
         version: u64,
         x: XAxis,
         y_format: [YFormat; 4],
         split: f32,
-        slots: Vec<XySlot>,
+        mut slots: Vec<XySlot>,
     ) -> Arc<Self> {
         let mut lo = f64::INFINITY;
         let mut hi = f64::NEG_INFINITY;
-        for slot in slots.iter().filter(|s| s.visible) {
-            for x in &slot.xs()[..slot.len()] {
-                if x.is_finite() {
-                    lo = lo.min(*x);
-                    hi = hi.max(*x);
-                }
+        for slot in slots.iter_mut() {
+            slot.kind.normalise();
+            if !slot.visible {
+                continue;
+            }
+            // Finite and ascending now: the ends are the extremes.
+            if let (Some(first), Some(last)) = (slot.xs().first(), slot.xs().last()) {
+                lo = lo.min(*first);
+                hi = hi.max(*last);
             }
         }
         let full = if lo <= hi { (lo, hi) } else { (0.0, 0.0) };
@@ -310,13 +363,192 @@ mod tests {
     fn a_slot_outside_the_view_has_an_empty_window() {
         let view = View::with_min_span((2.0, 3.0), 0.01);
         let l = line(Axis::Left, &[0.8, 1.2], &[0.3, 0.2]);
-        // A line off to one side still offers its nearest knot, so a view
-        // just past its end does not cut the line short; values_in of that
-        // window is what the y domain reads.
-        assert_eq!(l.window(view), (1, 2));
+        // One knot past the view's edge is all a line off to one side has
+        // to offer, and one knot is no span: nothing of it can paint, so
+        // nothing of it reaches the y domain either.
+        for view in [view, View::with_min_span((0.1, 0.5), 0.01)] {
+            let (start, end) = l.window(view);
+            assert_eq!(start, end, "{view:?}");
+            assert_eq!(l.values_in((start, end)).count(), 0, "{view:?}");
+        }
         let p = points(Axis::Left, &[0.8, 1.2], &[0.3; 2], &[0.3; 2], &[0.3; 2]);
         assert_eq!(p.window(view), (2, 2));
         assert_eq!(p.values_in(p.window(view)).count(), 0);
+    }
+
+    #[test]
+    fn a_line_window_holds_two_knots_or_none() {
+        // A view between two knots, with no knot inside it: the span from
+        // one to the other crosses the plot, so both are the window.
+        let l = line(Axis::Left, &[0.8, 1.0, 1.2], &[0.3, 0.2, 0.25]);
+        let between = View::with_min_span((1.05, 1.1), 0.01);
+        assert_eq!(l.window(between), (1, 3));
+        assert_eq!(
+            l.values_in(l.window(between)).collect::<Vec<_>>(),
+            [0.2, 0.25]
+        );
+        // A view that just reaches the last knot still has the span to it.
+        assert_eq!(l.window(View::with_min_span((1.2, 3.0), 0.01)), (1, 3));
+        // A line of one knot has no span, wherever the view is.
+        let one = line(Axis::Left, &[1.0], &[0.3]);
+        let around = View::with_min_span((0.5, 1.5), 0.01);
+        let (start, end) = one.window(around);
+        assert_eq!(start, end);
+        assert_eq!(one.values_in((start, end)).count(), 0);
+        // A point alone in view is still a point.
+        let p = points(Axis::Left, &[1.0], &[0.3], &[0.3], &[0.3]);
+        assert_eq!(p.window(around), (0, 1));
+    }
+
+    /// The one slot of a model built from `slot`, as construction left it.
+    fn built(slot: XySlot) -> XySlot {
+        model(vec![slot]).slots[0].clone()
+    }
+
+    #[test]
+    fn a_point_with_no_x_is_dropped_and_the_rest_still_paint() {
+        let m = model(vec![points(
+            Axis::Left,
+            &[0.7, f64::NAN, 1.1],
+            &[0.3, 0.4, 0.5],
+            &[0.29, 0.39, 0.49],
+            &[0.31, 0.41, 0.51],
+        )]);
+        let p = &m.slots[0];
+        assert_eq!(p.len(), 2);
+        assert_eq!(p.xs(), [0.7, 1.1]);
+        assert_eq!(m.full(), (0.7, 1.1));
+        let window = p.window(View::with_min_span(m.full(), 0.01));
+        assert_eq!(window, (0, 2), "the point past the NaN is in view");
+        let mut v: Vec<f64> = p.values_in(window).collect();
+        v.sort_by(f64::total_cmp);
+        assert_eq!(v, [0.29, 0.3, 0.31, 0.49, 0.5, 0.51], "each array in step");
+        assert_eq!(p.nearest(1.0), Some(1));
+    }
+
+    #[test]
+    fn a_nan_x_is_dropped_wherever_it_sits() {
+        let nan = f64::NAN;
+        for (xs, ys, want_xs, want_ys) in [
+            (
+                [nan, 1.0, 2.0],
+                [10.0, 20.0, 30.0],
+                [1.0, 2.0],
+                [20.0, 30.0],
+            ),
+            (
+                [1.0, nan, 2.0],
+                [10.0, 20.0, 30.0],
+                [1.0, 2.0],
+                [10.0, 30.0],
+            ),
+            (
+                [1.0, 2.0, nan],
+                [10.0, 20.0, 30.0],
+                [1.0, 2.0],
+                [10.0, 20.0],
+            ),
+            (
+                [1.0, f64::INFINITY, 2.0],
+                [10.0, 20.0, 30.0],
+                [1.0, 2.0],
+                [10.0, 30.0],
+            ),
+        ] {
+            let l = built(line(Axis::Left, &xs, &ys));
+            assert_eq!(l, line(Axis::Left, &want_xs, &want_ys), "{xs:?}");
+            let full = View::with_min_span((0.0, 3.0), 0.01);
+            assert_eq!(l.window(full), (0, 2), "{xs:?}");
+            assert_eq!(l.values_in((0, 2)).collect::<Vec<_>>(), want_ys, "{xs:?}");
+            assert_eq!(l.nearest(1.9), Some(1), "{xs:?}");
+            assert_eq!(l.line_value_at(1.5), Some((want_ys[0] + want_ys[1]) / 2.0));
+        }
+    }
+
+    #[test]
+    fn unsorted_points_are_put_in_x_order() {
+        let l = built(line(Axis::Left, &[1.2, 0.8, 1.0], &[3.0, 1.0, 2.0]));
+        assert_eq!(l, line(Axis::Left, &[0.8, 1.0, 1.2], &[1.0, 2.0, 3.0]));
+        assert_eq!(l.nearest(0.95), Some(1));
+        assert_eq!(l.window(View::with_min_span((0.9, 1.1), 0.01)), (0, 3));
+        // Every array moves with its x, a NaN x goes on the way, and equal
+        // xs keep the order they came in.
+        let p = built(points(
+            Axis::Left,
+            &[2.0, 1.0, f64::NAN, 1.0],
+            &[20.0, 10.0, 0.0, 11.0],
+            &[19.0, 9.0, 0.0, 10.5],
+            &[21.0, 12.0, 0.0, 11.5],
+        ));
+        let want = points(
+            Axis::Left,
+            &[1.0, 1.0, 2.0],
+            &[10.0, 11.0, 20.0],
+            &[9.0, 10.5, 19.0],
+            &[12.0, 11.5, 21.0],
+        );
+        assert_eq!(p, want);
+    }
+
+    #[test]
+    fn a_clean_slot_is_left_as_it_came() {
+        let l = line(
+            Axis::Left,
+            &[0.8, 1.0, 1.0, 1.2],
+            &[1.0, f64::MAX, 2.0, 3.0],
+        );
+        let p = points(Axis::Right, &[0.8, 1.2], &[0.3; 2], &[0.2; 2], &[0.4; 2]);
+        let buffer = l.xs().as_ptr();
+        let m = model(vec![l.clone(), p.clone()]);
+        assert_eq!(m.slots, [l.clone(), p]);
+        // Moved in, not rebuilt: the same allocation.
+        let m = model(vec![l]);
+        assert_eq!(m.slots[0].xs().as_ptr(), buffer);
+    }
+
+    #[test]
+    fn mismatched_arrays_are_cut_to_the_shortest() {
+        let l = built(line(Axis::Left, &[1.0, 2.0, 3.0], &[10.0, 20.0]));
+        assert_eq!(l, line(Axis::Left, &[1.0, 2.0], &[10.0, 20.0]));
+        let p = built(points(
+            Axis::Left,
+            &[1.0, 2.0, 3.0],
+            &[0.3; 3],
+            &[0.2; 2],
+            &[0.4; 4],
+        ));
+        assert_eq!(
+            p,
+            points(Axis::Left, &[1.0, 2.0], &[0.3; 2], &[0.2; 2], &[0.4; 2])
+        );
+        // The x beyond the shared length is not part of the range.
+        let m = model(vec![line(Axis::Left, &[1.0, 2.0, 9.0], &[10.0, 20.0])]);
+        assert_eq!(m.full(), (1.0, 2.0));
+    }
+
+    #[test]
+    fn nearest_has_no_answer_for_an_x_that_is_not_a_number() {
+        let l = line(Axis::Left, &[1.0, 2.0, 4.0], &[10.0, 20.0, 40.0]);
+        assert_eq!(l.nearest(f64::NAN), None);
+        assert_eq!(l.nearest(f64::INFINITY), Some(2));
+        assert_eq!(l.nearest(f64::NEG_INFINITY), Some(0));
+    }
+
+    #[test]
+    fn each_axis_reads_its_own_y_format() {
+        for percent in 0..4 {
+            let mut y_format = [YFormat::Plain; 4];
+            y_format[percent] = YFormat::Percent;
+            let m = XyModel::new(1, XAxis::default(), y_format, 0.7, Vec::new());
+            for (i, axis) in Axis::ALL.into_iter().enumerate() {
+                let want = if i == percent {
+                    YFormat::Percent
+                } else {
+                    YFormat::Plain
+                };
+                assert_eq!(m.y_format_of(axis), want, "percent at {percent}, {axis:?}");
+            }
+        }
     }
 
     #[test]
