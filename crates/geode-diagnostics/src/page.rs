@@ -2990,6 +2990,63 @@ mod tests {
     }
 
     #[gpui::test]
+    fn data_filter_input_reveals_collapsed_leaves_and_reset_restores_expansion(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.page.update(&mut vcx, |p, cx| p.set_visible(true, cx));
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            let risk = crate::model::tests::dataset_catalog();
+            let mut vol = risk.clone();
+            vol.name = "vol".into();
+            vol.partitions[0].book = Some("US_BANKS".into());
+            d.set_catalog(
+                snapshot_with(geode_core::query::AsOf::Live, vec![risk, vol]),
+                SystemTime::now(),
+            );
+            cx.notify();
+        });
+        open_data_section(&h, &mut vcx);
+        click(&mut vcx, "diagnostics-collapse-all");
+        assert_eq!(h.page.read_with(&vcx, |p, _| p.prepared.rows.len()), 2);
+        dispatch(&h, &mut vcx, "diagnostics::filter");
+        vcx.simulate_input("eu_tech");
+        vcx.run_until_parked();
+        h.page.read_with(&vcx, |p, _| {
+            assert_eq!(p.result_summary.as_ref(), "1 of 2 datasets · 3 rows shown");
+            assert_eq!(p.prepared.rows[0].key, "risk");
+            assert_eq!(p.prepared.rows[0].kind, RowKind::Parent { expanded: true });
+            assert!(
+                p.prepared.rows[1..]
+                    .iter()
+                    .all(|r| r.cells[0].text.contains("EU_TECH"))
+            );
+            assert_eq!(
+                p.collapsed_datasets,
+                BTreeSet::from(["risk".into(), "vol".into()])
+            );
+        });
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        assert!(!h.page.read_with(&vcx, |p, _| p.insert_mode));
+        dispatch(&h, &mut vcx, "motion::down");
+        dispatch(&h, &mut vcx, "diagnostics::copy");
+        let copied = vcx.read(|cx| cx.read_from_clipboard().unwrap().text().unwrap());
+        assert!(copied.contains("gen 1") && copied.contains("archive"));
+        click(&mut vcx, "diagnostics-reset-filters");
+        h.page.read_with(&vcx, |p, _| {
+            assert_eq!(p.result_summary.as_ref(), "2 of 2 datasets · 2 rows shown");
+            assert!(
+                p.prepared
+                    .rows
+                    .iter()
+                    .all(|r| r.kind == RowKind::Parent { expanded: false })
+            );
+        });
+        vcx.update(|window, cx| assert!(h.page.read(cx).focus_handle.is_focused(window)));
+    }
+
+    #[gpui::test]
     fn reset_filters_restores_the_log_and_keeps_other_sections_filtered(
         cx: &mut gpui::TestAppContext,
     ) {

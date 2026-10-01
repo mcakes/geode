@@ -2358,3 +2358,23 @@ These single-run values show no material median regression; the difference is
 not evidence of a speedup. Performance-section percentile labels, histogram
 geometry, and tooltip strings are prepared on rebuild, outside render. That
 section is not included in this log-tail measurement.
+
+## Diagnostics Data leaf filtering — 2026-09-30
+
+Apple M5 Pro (aarch64 macOS), Rust 1.96.0, release profile. The pure
+`data_filter_timing_over_a_catalog` fixture has 20 datasets with 200 generation
+rows each. Each case runs twenty times. This measures `prepared::data_table`
+only, excluding catalog-model construction, GPUI updates, layout, and paint.
+
+Command: `cargo test -p geode-diagnostics --release data_filter_timing_over_a_catalog -- --ignored --nocapture`.
+
+| Query | Visible rows | Before median / maximum | After median / maximum |
+|---|---:|---:|---:|
+| Empty | 4,020 | 0.971 / 1.733 ms | 0.943 / 1.642 ms |
+| Dataset name (`dataset`) | 4,020 | 0.815 / 0.894 ms | 0.789 / 0.877 ms |
+| Leaf label (`p100`) | 40 | Unsupported | 0.204 / 0.237 ms |
+
+The leaf result includes 20 matching generations and their dataset headings.
+The previous filter returned no rows for that query, so its timing is not a
+valid comparison. The equivalent empty and dataset-name cases show no material
+regression; these single runs do not establish a speedup.

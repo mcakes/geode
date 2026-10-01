@@ -6838,6 +6838,25 @@ run_mutation "diagnostics page: hiding leaves the Levels popover open" \
 
 # ---- the diagnostics page: data rows and badges
 
+run_mutation "diagnostics leaf filter: dataset-only matching drops leaves" \
+  crates/geode-diagnostics/src/prepared.rs \
+  '        if !dataset_matches && children.peek().is_none() {' \
+  '        if !dataset_matches {' \
+  geode-diagnostics data_filter_matches_leaf_fields_and_preserves_dataset_context
+
+run_mutation "diagnostics leaf filter: unrelated siblings remain visible" \
+  crates/geode-diagnostics/src/prepared.rs \
+  '            .filter(|c| dataset_matches || partition_matches(c, &query))' \
+  '            .filter(|c| dataset_matches || !query.is_empty() || partition_matches(c, &query))' \
+  geode-diagnostics data_filter_matches_leaf_fields_and_preserves_dataset_context
+
+run_mutation "diagnostics leaf filter: collapsed datasets hide matching leaves" \
+  crates/geode-diagnostics/src/prepared.rs \
+  '        let expanded = !query.is_empty() || !collapsed.contains(&r.name);' \
+  '        let expanded = !collapsed.contains(&r.name);' \
+  geode-diagnostics data_filter_input_reveals_collapsed_leaves_and_reset_restores_expansion
+
+
 run_mutation "diagnostics data: sources sorted best-first instead of worst-first" \
   crates/geode-diagnostics/src/model.rs \
   '    reported.sort_by(|a, b| rank(b.1).cmp(&rank(a.1)).then_with(|| a.0.cmp(b.0)));' \
