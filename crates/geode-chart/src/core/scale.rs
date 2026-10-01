@@ -80,8 +80,10 @@ impl LinearScale {
         let last = (self.hi / step).floor();
         let mut k = first;
         while k <= last {
-            // Round to the step's own decimals so 0.1 * 3 reads 0.3.
-            let v = (k * step * 1e9).round() / 1e9;
+            // Round to the step's own decimals so 0.1 * 3 reads 0.3. Adding
+            // zero turns the `-0.0` of a `lo` just under zero into `0.0`, so
+            // the tick never reads `-0`.
+            let v = (k * step * 1e9).round() / 1e9 + 0.0;
             out.push(v);
             k += 1.0;
         }
@@ -181,6 +183,19 @@ mod tests {
         let mut out = vec![1.0];
         s.ticks(0, &mut out);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn a_tick_at_zero_is_positive_zero() {
+        // `lo` within one step below zero: `ceil(-0.5)` is `-0.0`, and a
+        // negative zero would format as `-0`.
+        let s = LinearScale::new((-0.05, 0.3), 0.0, 200.0);
+        assert_eq!(s.step_for(4), 0.1);
+        let mut out = Vec::new();
+        s.ticks(4, &mut out);
+        assert_eq!(out[0], 0.0);
+        assert!(out[0].is_sign_positive(), "{:?}", out[0]);
+        assert_eq!(fmt_tick(out[0], 0.1), "0.0");
     }
 
     #[test]

@@ -203,9 +203,33 @@ mod tests {
         assert!((v.span() - 0.01).abs() < 1e-12, "{v:?}");
         // The default is unchanged: two units.
         assert_eq!(View::full((0.0, 100.0)).min_span, MIN_SPAN);
-        // A nonsense minimum means no minimum, not a panic or a NaN window.
-        let mut v = View::with_min_span(full, f64::NAN);
-        v.zoom(1e9, 0.5, full);
-        assert!(v.lo.is_finite() && v.hi.is_finite() && v.hi >= v.lo);
+    }
+
+    #[test]
+    fn reset_keeps_the_views_own_min_span() {
+        let full = (0.8, 1.2);
+        let mut v = View::with_min_span(full, 0.01);
+        v.zoom(4.0, 0.5, full);
+        v.reset(full);
+        assert_eq!((v.lo, v.hi), full);
+        assert_eq!(v.min_span, 0.01);
+        for _ in 0..40 {
+            v.zoom(2.0, 0.5, full);
+        }
+        assert!((v.span() - 0.01).abs() < 1e-12, "{v:?}");
+    }
+
+    #[test]
+    fn a_nonsense_min_span_means_no_floor() {
+        // "None" is no floor at all, not a view that never zooms: the window
+        // narrows well past what the default two-unit floor would allow.
+        for nonsense in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
+            let mut v = View::with_min_span(FULL, nonsense);
+            v.zoom(1e3, 0.5, FULL);
+            assert!(v.lo.is_finite() && v.hi.is_finite(), "{nonsense}: {v:?}");
+            assert!((v.span() - 0.1).abs() < 1e-9, "{nonsense}: {v:?}");
+            assert!(v.span() < MIN_SPAN);
+            assert_eq!(v.min_span, 0.0, "{nonsense}");
+        }
     }
 }
