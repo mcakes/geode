@@ -23258,12 +23258,12 @@ run_mutation "nemo seam: open_url skips the test opener" \
   '        if let Some(opener) = None::<&crate::dimension::UrlOpener> {' \
   geode-shell an_action_opens_its_url_through_the_opener
 
-# Without an opener the app must hand the URL to the OS. `return` also
-# skips the counter that follows the call, so the test sees 0.
+# Without an opener the app must hand the URL to the OS; the test
+# platform records what reached it.
 run_mutation "nemo seam: the app never opens the url" \
   crates/geode-shell/src/shell/row_menu.rs \
   '            self.cx.open_url(url);' \
-  '            return;' \
+  '            let _ = url;' \
   geode-shell without_an_opener_the_app_opens_the_url
 
 # A reload must reach the underlying list, or a desk edit to it waits for

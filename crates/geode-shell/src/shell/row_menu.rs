@@ -85,17 +85,8 @@ impl ActionCx<'_, '_> {
             open(url, self.cx);
         } else {
             self.cx.open_url(url);
-            // After the call: a skipped `open_url` must not count.
-            #[cfg(test)]
-            APP_OPENS.with(|c| c.set(c.get() + 1));
         }
     }
-}
-
-#[cfg(test)]
-thread_local! {
-    /// Counts `open_url` calls that fell through to `App::open_url`.
-    pub(crate) static APP_OPENS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 impl ShellView {

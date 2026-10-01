@@ -533,6 +533,11 @@ fn an_action_opens_its_url_through_the_opener(cx: &mut gpui::TestAppContext) {
     draw(&mut vcx);
     assert_eq!(opened.borrow().as_slice(), &["nemo://test/P7".to_string()]);
     assert_eq!(
+        cx.opened_url(),
+        None,
+        "the opener took it; the OS never saw it"
+    );
+    assert_eq!(
         shell.read_with(&vcx, |s, _| s.notice.clone()).as_deref(),
         Some("opened nemo://test/P7")
     );
@@ -540,7 +545,6 @@ fn an_action_opens_its_url_through_the_opener(cx: &mut gpui::TestAppContext) {
 
 #[gpui::test]
 fn without_an_opener_the_app_opens_the_url(cx: &mut gpui::TestAppContext) {
-    crate::shell::row_menu::APP_OPENS.with(|c| c.set(0));
     let (window, mut vcx) = open_shell(
         cx,
         opening_fixture(DimensionContext::of(&[("position_ref", "P7")])),
@@ -550,5 +554,5 @@ fn without_an_opener_the_app_opens_the_url(cx: &mut gpui::TestAppContext) {
     draw(&mut vcx);
     vcx.simulate_keystrokes("g . enter");
     draw(&mut vcx);
-    assert_eq!(crate::shell::row_menu::APP_OPENS.with(|c| c.get()), 1);
+    assert_eq!(cx.opened_url().as_deref(), Some("nemo://test/P7"));
 }
