@@ -31,51 +31,31 @@ use std::sync::Arc;
 
 use chrono::{DateTime, FixedOffset, Utc};
 use gpui::{
-    AnyElement, App, Bounds, ContentMask, ElementId, Hsla, IntoElement, Path, PathBuilder, Pixels,
-    SharedString, TextAlign, Window, fill, point, px, size,
+    AnyElement, App, Bounds, ContentMask, ElementId, IntoElement, Path, Pixels, SharedString,
+    TextAlign, Window, fill, point, px, size,
 };
-use gpui_component::ActiveTheme;
 use gpui_component::plot::label::Text;
 use gpui_component::plot::tooltip::{CrossLine, Tooltip, TooltipState};
-use gpui_component::plot::{
-    AxisLabelSide, AxisText, Grid, IntoPlot, PathCaches, Plot, PlotAxis, PlotLabel, ShapeKey,
-};
+use gpui_component::plot::{IntoPlot, PathCaches, Plot, PlotLabel, ShapeKey};
 
 use super::model::ChartModel;
-use crate::core::axis::{Axis, Pane, Side};
-use crate::core::decimate::decimate;
+use crate::core::axis::{Pane, Side};
 use crate::core::layout::{Layout, PaneRects};
 use crate::core::scale::{LinearScale, axis_domain, fmt_tick, fmt_value};
 use crate::core::time::{Crosshair, Tick, TimeScale, ticks};
 use crate::core::view::View;
-use crate::core::{DASH, GAP, MAX_DENSITY_QUADS, Point, Rect, TICK_GAP, Y_TICK_GAP, design_px};
+use crate::core::{DASH, GAP, MAX_DENSITY_QUADS, Rect, TICK_GAP, design_px};
+use crate::paint::{
+    Ink, Scratch, SideAxis, axis_index, axis_of, bounds_of, dashed_horizontal, inside,
+    note_chrome_rebuild, note_rebuild, paint_grid, paint_x_axis, paint_y_axis, pane_index,
+    side_scale_of, stroke_polyline, y_tick_hint,
+};
 
 thread_local! {
-    /// Per THREAD, not per process: the counter is read as a delta
-    /// across a few frames, and two window tests running in parallel on
-    /// their own threads would otherwise each see the other's paints.
-    /// Windows on the same UI thread contribute to the same counter.
-    static REBUILDS: Cell<usize> = const { Cell::new(0) };
-    /// The same, for the chrome derivation (the four side scales, their
-    /// ticks and labels, the x ticks) — the O(n) work that is invisible
-    /// to [`REBUILDS`] because it never touches a path.
-    static CHROME_REBUILDS: Cell<usize> = const { Cell::new(0) };
-    /// The same, for density bars actually painted — the one per-frame
-    /// cost with no cache behind it and a bound instead
-    /// ([`MAX_DENSITY_QUADS`]).
+    /// Per THREAD, like the kit's rebuild counters, for density bars
+    /// actually painted — the one per-frame cost with no cache behind it
+    /// and a bound instead ([`MAX_DENSITY_QUADS`]).
     static DENSITY_QUADS: Cell<usize> = const { Cell::new(0) };
-}
-
-/// Polyline and percentile path rebuilds on this thread since it started.
-pub fn rebuilds() -> usize {
-    REBUILDS.with(|c| c.get())
-}
-
-/// How many times the chrome — the side scales, the y ticks and their
-/// labels, the x ticks — was derived on this thread since it started.
-/// A frame that changed nothing must not move this either.
-pub fn chrome_rebuilds() -> usize {
-    CHROME_REBUILDS.with(|c| c.get())
 }
 
 /// How many density bars were painted on this thread since it started.
@@ -83,14 +63,6 @@ pub fn chrome_rebuilds() -> usize {
 /// charts or paint calls on this thread contribute to the same total.
 pub fn density_quads() -> usize {
     DENSITY_QUADS.with(|c| c.get())
-}
-
-fn note_rebuild() {
-    REBUILDS.with(|c| c.set(c.get() + 1));
-}
-
-fn note_chrome_rebuild() {
-    CHROME_REBUILDS.with(|c| c.set(c.get() + 1));
 }
 
 fn note_density_quad() {
@@ -105,9 +77,6 @@ const LINES: &str = "geode-chart-lines";
 const PERCENTILES: &str = "geode-chart-percentiles";
 /// Most percentile lines one slot reserves cache slots for.
 const MAX_PERCENTILES: usize = 8;
-/// The polyline's stroke width, in device pixels (not on the rem scale:
-/// a hairline is a hairline).
-const LINE_WIDTH: f32 = 1.5;
 /// Opacity of a density bar's fill.
 const BAR_OPACITY: f32 = 0.45;
 /// A percentile tag's right edge, inside the plot's right edge, how far
@@ -122,38 +91,6 @@ const TAG_INSET: f32 = 2.0;
 const TAG_LIFT: f32 = 11.0;
 const TAG_DROP: f32 = 2.0;
 
-/// One pane side's resolved y axis: the scale over that side's VISIBLE
-/// values and the ticks it paints, labels already formatted.
-///
-/// Every field is a function of the chrome key's inputs alone, so the
-/// whole thing is derived on a chrome miss and only then — the scale in
-/// particular is a scan of every visible value of every slot on the
-/// side, which at the 500,000-point cap is the one piece of O(n) work
-/// that could otherwise land on the render thread every frame.
-#[derive(Default, Clone)]
-struct SideAxis {
-    scale: Option<LinearScale>,
-    ticks: Vec<f64>,
-    labels: Vec<SharedString>,
-}
-
-impl SideAxis {
-    fn clear(&mut self) {
-        self.scale = None;
-        self.ticks.clear();
-        self.labels.clear();
-    }
-}
-
-/// The two `Vec`s the decimation path reuses: the plot-relative x of
-/// every visible bucket, and the decimated points it produces. Kept
-/// together so one `mem::take` moves both.
-#[derive(Default)]
-struct Scratch {
-    xs: Vec<f32>,
-    pts: Vec<Point>,
-}
-
 /// Element state kept across frames under the element id: the reused
 /// decimation buffers, and the chrome of the last chrome key.
 #[derive(Default)]
@@ -163,14 +100,6 @@ struct Buffers {
     x_ticks: Vec<Tick>,
     /// Indexed by [`axis_index`]; `Axis::ALL` order.
     sides: [SideAxis; 4],
-}
-
-/// The theme colours one frame paints its chrome in, read once.
-#[derive(Clone, Copy)]
-struct Ink {
-    line: Hsla,
-    text: Hsla,
-    strip: Hsla,
 }
 
 /// Everything one frame's painters share, so a pane's painter takes one
@@ -241,11 +170,6 @@ impl ChartElement {
         axis_domain(values).map(|d| LinearScale::new(d, plot.y, plot.bottom()))
     }
 
-    /// About how many y ticks a pane of `h` pixels is worth.
-    fn y_tick_hint(&self, h: f32) -> usize {
-        (h / design_px(Y_TICK_GAP, self.rem_px)).max(2.0) as usize
-    }
-
     /// Derive the whole chrome for this layout: the x ticks and, per
     /// pane side, the scale, its ticks and their labels. Called on a
     /// chrome-key MISS only.
@@ -281,14 +205,7 @@ impl ChartElement {
                 let Some(s) = self.side_scale(pane, side, plot, visible) else {
                     continue;
                 };
-                let hint = self.y_tick_hint(plot.h);
-                let step = s.step_for(hint);
-                s.ticks(hint, &mut axis.ticks);
-                for i in 0..axis.ticks.len() {
-                    let v = axis.ticks[i];
-                    axis.labels.push(SharedString::from(fmt_tick(v, step)));
-                }
-                axis.scale = Some(s);
+                axis.fill(s, y_tick_hint(plot.h, self.rem_px), fmt_tick);
             }
         }
     }
@@ -321,20 +238,9 @@ impl ChartElement {
 
         // Grid: the x ticks of the shared axis, the y ticks of whichever
         // side the pane has (left wins when it has both — one grid, not
-        // two overlaid ones). The two collects allocate the line vectors
-        // required by `Grid`.
+        // two overlaid ones).
         let grid = if left.scale.is_some() { left } else { right };
-        let gx: Vec<Pixels> = ctx.x_ticks.iter().map(|t| px(t.x - plot.x)).collect();
-        let gy: Vec<Pixels> = grid
-            .scale
-            .map(|s| grid.ticks.iter().map(|v| px(s.y(*v) - plot.y)).collect())
-            .unwrap_or_default();
-        Grid::new()
-            .x(gx)
-            .y(gy)
-            .stroke(ctx.ink.line)
-            .dash_array(&[px(4.), px(2.)])
-            .paint(&bounds_of(plot, bounds), window);
+        paint_grid(plot, ctx.x_ticks, grid, bounds, ctx.ink, window);
 
         // Axes. A left axis line sits at the RIGHT edge of its rect (the
         // plot's left edge) with its labels right-aligned inside it; a
@@ -535,14 +441,7 @@ impl Plot for ChartElement {
         let scale = self.model.time_scale();
         let view = self.view;
         let visible = scale.visible(view);
-        let ink = {
-            let theme = cx.theme();
-            Ink {
-                line: theme.border,
-                text: theme.muted_foreground,
-                strip: theme.background,
-            }
-        };
+        let ink = Ink::read(cx);
 
         // The chrome key: everything the chrome derivation reads. A hit
         // keeps the last frame's ticks, labels and side scales, so the
@@ -609,18 +508,8 @@ impl Plot for ChartElement {
             );
         }
 
-        // The one shared x axis, under the lowest pane. A tick's `x` is
-        // in layout space and the axis rect starts at the plot's left
-        // edge, so the label's own offset is `t.x - x_axis.x`.
-        let x_axis = layout.x_axis;
-        PlotAxis::new()
-            .x(px(0.))
-            .x_label(x_ticks.iter().map(|t| {
-                AxisText::new(t.label.clone(), px(t.x - x_axis.x), ink.text)
-                    .align(TextAlign::Center)
-            }))
-            .stroke(ink.line)
-            .paint(&bounds_of(x_axis, bounds), window, cx);
+        // The one shared x axis, under the lowest pane.
+        paint_x_axis(layout.x_axis, &x_ticks, bounds, ink, window, cx);
 
         buffers.update(cx, |b, _| {
             b.scratch = scratch;
@@ -682,73 +571,6 @@ impl Plot for ChartElement {
     }
 }
 
-/// One pane side's axis line and its prepared tick labels.
-#[allow(clippy::too_many_arguments)]
-fn paint_y_axis(
-    r: Rect,
-    s: &LinearScale,
-    axis: &SideAxis,
-    side: Side,
-    bounds: Bounds<Pixels>,
-    ink: Ink,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let (line_x, label_side, align) = match side {
-        Side::Left => (r.w, AxisLabelSide::Start, TextAlign::Right),
-        Side::Right => (0.0, AxisLabelSide::End, TextAlign::Left),
-    };
-    PlotAxis::new()
-        .x_axis(false)
-        .y_axis(true)
-        .y(px(line_x))
-        .y_label_side(label_side)
-        .y_label(axis.ticks.iter().zip(axis.labels.iter()).map(|(v, label)| {
-            AxisText::new(label.clone(), px(s.y(*v) - r.y), ink.text).align(align)
-        }))
-        .stroke(ink.line)
-        .paint(&bounds_of(r, bounds), window, cx);
-}
-
-fn pane_index(pane: Pane) -> usize {
-    match pane {
-        Pane::Upper => 0,
-        Pane::Lower => 1,
-    }
-}
-
-/// The one [`Axis`] a `(pane, side)` pair names.
-fn axis_of(pane: Pane, side: Side) -> Axis {
-    match (pane, side) {
-        (Pane::Upper, Side::Left) => Axis::Left,
-        (Pane::Upper, Side::Right) => Axis::Right,
-        (Pane::Lower, Side::Left) => Axis::BottomLeft,
-        (Pane::Lower, Side::Right) => Axis::BottomRight,
-    }
-}
-
-/// An axis's slot in [`Buffers::sides`] — its position in `Axis::ALL`.
-fn axis_index(axis: Axis) -> usize {
-    match axis {
-        Axis::Left => 0,
-        Axis::Right => 1,
-        Axis::BottomLeft => 2,
-        Axis::BottomRight => 3,
-    }
-}
-
-fn side_scale_of(side: Side, left: &SideAxis, right: &SideAxis) -> Option<LinearScale> {
-    match side {
-        Side::Left => left.scale,
-        Side::Right => right.scale,
-    }
-}
-
-/// Whether a y coordinate is inside a pane's plot rect, ends included.
-fn inside(y: f32, plot: Rect) -> bool {
-    y.is_finite() && y >= plot.y && y <= plot.bottom()
-}
-
 /// Where a percentile tag's text TOP sits for a line at `y`: lifted
 /// clear of its own line, or dropped below it when the lift would leave
 /// the pane. A percentile at the very top of the lower pane would
@@ -763,18 +585,10 @@ fn tag_y(y: f32, plot: Rect) -> f32 {
     }
 }
 
-/// A layout rect (zero origin) as window bounds.
-fn bounds_of(r: Rect, bounds: Bounds<Pixels>) -> Bounds<Pixels> {
-    Bounds::new(
-        bounds.origin + point(px(r.x), px(r.y)),
-        size(px(r.w), px(r.h)),
-    )
-}
-
 /// The decimated polyline of one slot, built at a zero origin: `xs` is
 /// refilled plot-relative (the decimator's columns are pixel columns
-/// from the plot's left edge), decimated into `pts`, then walked into a
-/// stroke with a new subpath after every `BREAK`.
+/// from the plot's left edge), then the kit decimates it into `pts` and
+/// walks them into a stroke with a new subpath after every `BREAK`.
 #[allow(clippy::too_many_arguments)]
 fn polyline(
     scale: &TimeScale,
@@ -785,82 +599,20 @@ fn polyline(
     visible: (usize, usize),
     scratch: &mut Scratch,
 ) -> Option<Path<Pixels>> {
-    let Scratch { xs, pts } = scratch;
     let end = visible.1.min(values.len());
     let start = visible.0.min(end);
-    xs.clear();
+    scratch.xs.clear();
     for i in start..end {
-        xs.push(scale.x_of(i, view, plot) - plot.x);
+        scratch.xs.push(scale.x_of(i, view, plot) - plot.x);
     }
-    decimate(xs, &values[start..end], plot.w.max(1.0) as usize, pts);
-    if pts.is_empty() {
-        return None;
-    }
-    let mut builder = PathBuilder::stroke(px(LINE_WIDTH));
-    let mut move_next = true;
-    for p in pts.iter() {
-        if p.is_break() {
-            move_next = true;
-            continue;
-        }
-        let at = point(px(plot.x + p.x), px(y.y(p.y as f64)));
-        if move_next {
-            builder.move_to(at);
-            move_next = false;
-        } else {
-            builder.line_to(at);
-        }
-    }
-    builder.build().ok()
-}
-
-/// How many dashes a horizontal run of `width` carries at `dash` on and
-/// `gap` off. A dashless pattern is one solid segment; a run with no
-/// width has none at all.
-pub fn dash_count(width: f32, dash: f32, gap: f32) -> usize {
-    if width <= 0.0 || width.is_nan() {
-        return 0;
-    }
-    if dash <= 0.0 {
-        return 1;
-    }
-    let period = dash + gap.max(0.0);
-    if period <= 0.0 {
-        return 1;
-    }
-    (width / period).ceil() as usize
-}
-
-/// A dashed horizontal line from `x0` to `x1` at `y`, one `move_to`/
-/// `line_to` pair per dash.
-fn dashed_horizontal(x0: f32, x1: f32, y: f32, dash: f32, gap: f32) -> Option<Path<Pixels>> {
-    let width = x1 - x0;
-    let count = dash_count(width, dash, gap);
-    if count == 0 {
-        return None;
-    }
-    let (on, period) = if dash <= 0.0 {
-        (width, width)
-    } else {
-        (dash, dash + gap.max(0.0))
-    };
-    let mut builder = PathBuilder::stroke(px(1.));
-    for k in 0..count {
-        let start = x0 + k as f32 * period;
-        let end = (start + on).min(x1);
-        if end <= start {
-            continue;
-        }
-        builder.move_to(point(px(start), px(y)));
-        builder.line_to(point(px(end), px(y)));
-    }
-    builder.build().ok()
+    stroke_polyline(plot, y, &values[start..end], scratch)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::axis::AxisMode;
+    use crate::core::axis::{Axis, AxisMode};
+    use crate::paint::{chrome_rebuilds, rebuilds};
     use crate::timeseries::model::ChartSlot;
     use gpui::{Context, Entity, Render, div, prelude::*};
 
@@ -1241,17 +993,5 @@ mod tests {
                 .is_some()
         });
         assert!(built, "the tooltip renders over a bucket the model has");
-    }
-
-    #[test]
-    fn a_percentile_line_is_dashed_at_dash_and_gap() {
-        assert_eq!(dash_count(100.0, 4.0, 3.0), 15, "ceil(100 / 7)");
-        assert_eq!(dash_count(7.0, 4.0, 3.0), 1);
-        assert_eq!(dash_count(0.0, 4.0, 3.0), 0);
-        assert_eq!(
-            dash_count(10.0, 0.0, 3.0),
-            1,
-            "no dash length: one solid segment"
-        );
     }
 }

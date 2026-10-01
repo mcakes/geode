@@ -18758,7 +18758,7 @@ run_mutation "chart: the chrome is re-derived every frame" \
 # move_to/line_to pair per dash. One dash is a solid line — which is
 # what a series line looks like.
 run_mutation "chart: the dashes are one solid line" \
-  crates/geode-chart/src/timeseries/element.rs \
+  crates/geode-chart/src/paint.rs \
   '    (width / period).ceil() as usize' \
   '    1' \
   geode-chart \
