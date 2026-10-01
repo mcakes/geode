@@ -26533,7 +26533,7 @@ run_mutation "blotter grouping: a flat view titles with a dangling separator" \
 run_mutation "pricer grouping: y y on a split row yanks the whole package" \
   crates/geode-pricer/src/tile.rs \
   '                    let mut rows = self.grid_rows_under(g);' \
-  $'                    let mut rows = match self.model.rows[g].row {\n                        Some(r) => vec![r],\n                        None => self.grid_rows_under(g),\n                    };' \
+  $'                    let mut rows = match self.model.sheet_row(g) {\n                        Some(r) => vec![r],\n                        None => self.grid_rows_under(g),\n                    };' \
   geode-pricer a_yank_on_a_split_package_row_yanks_its_nodes_legs
 
 run_mutation "pricer grouping: V y on a split row yanks the whole package" \
