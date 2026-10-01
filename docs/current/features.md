@@ -99,7 +99,8 @@ has none of them.
   data show both, the blotter only visual (it has no field), the timeseries
   tile only edit (while its add, expression, dates or color popup holds the
   keys; it has no selection). Its tooltip names the mode (`Editing`,
-  `Visual selection`) and that `esc` leaves it. Both colors clear 4.5:1
+  `Visual selection`) and that `escape` leaves it. The tooltip names the
+  default leaving key, `escape`, not a rebound one. Both colors clear 4.5:1
   against the background on every bundled theme.
 
 ### Motion

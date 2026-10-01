@@ -27451,6 +27451,32 @@ run_mutation "marketdata header: the mode icon reads the key context's mode" \
   '            geode_tile::header::Mode::Normal,' \
   geode-marketdata the_header_shows_the_mode_icon_while_editing_or_selecting
 
+run_mutation "blotter header: the mode icon reads the key context's mode" \
+  crates/geode-blotter/src/tile.rs \
+  '        cluster.mode = geode_tile::header::Mode::from_key_mode(self.mode(cx));' \
+  '        cluster.mode = geode_tile::header::Mode::Normal;' \
+  geode-blotter the_header_shows_the_visual_icon_while_selecting
+
+run_mutation "timeseries header: the mode icon reads the key context's mode" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '                geode_tile::header::Mode::from_key_mode(self.mode()),' \
+  '                geode_tile::header::Mode::Normal,' \
+  geode-timeseries the_header_shows_the_edit_icon_while_a_field_holds_the_keys
+
+# A tooltip detail's backticked keys paint as chips; plain text never does.
+run_mutation "tips: a backticked detail paints its keys as chips" \
+  crates/geode-shell/src/tips.rs \
+  "            el.child(if d.contains('\`') {" \
+  '            el.child(if false {' \
+  geode-shell a_backticked_detail_key_paints_as_a_chip
+
+# Edit and visual icons must read as two modes.
+run_mutation "tile header: edit and visual icons take different colors" \
+  crates/geode-tile/src/header.rs \
+  '        Mode::Visual => chip::Tone::InfoText,' \
+  '        Mode::Visual => chip::Tone::WarningText,' \
+  geode-tile the_mode_icon_colors_clear_the_floor_on_every_bundled_theme
+
 run_mutation "pricer header: the mode icon reads the key context's mode" \
   crates/geode-pricer/src/tile.rs \
   '                mode: geode_tile::header::Mode::from_key_mode(self.mode()),' \

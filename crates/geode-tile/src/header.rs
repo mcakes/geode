@@ -2,9 +2,9 @@
 //! first, the module's own left side taking the free width (clipped when it
 //! runs out), and a right cluster in a fixed order — the mode icon, status,
 //! notices, times, health, `⋯`. The mode icon shows only while the tile is
-//! in edit or visual mode ([`Mode`]). Status and notices are text of any length: they shrink, one
-//! line each and cut with an ellipsis, within at most [`TEXT_SHARE`] of the
-//! header; times, health and `⋯` never shrink. The frame formats nothing: every
+//! in edit or visual mode ([`Mode`]). Status and notices are text of any
+//! length: they shrink, one line each and cut with an ellipsis, within at
+//! most [`TEXT_SHARE`] of the header; times, health and `⋯` never shrink. The frame formats nothing: every
 //! string arrives prepared, and a time run's stale flag is the only thing a
 //! tile decides per frame.
 //!
@@ -77,8 +77,10 @@ impl Mode {
     }
 }
 
-/// The mode tooltip's detail: the key that leaves edit and visual alike.
-pub const LEAVE_HINT: &str = "`esc` leaves";
+/// The mode tooltip's detail: the default key that leaves edit and visual
+/// alike, spelled `escape` as every binding spells it so its chip reads ⎋.
+/// A static hint: a rebound leaving key is not reflected here.
+pub const LEAVE_HINT: &str = "`escape` leaves";
 
 /// The mode tooltip's title and detail, `None` in normal mode.
 pub fn mode_tip(mode: Mode) -> Option<(&'static str, &'static str)> {
@@ -1007,17 +1009,22 @@ mod tests {
         vcx.run_until_parked();
         assert!(vcx.debug_bounds("tip-tile-mode-visual-title").is_some());
         assert!(vcx.debug_bounds("tip-tile-mode-visual-detail").is_some());
+        assert!(
+            vcx.debug_bounds("kbd:escape").is_some(),
+            "the detail's key paints as the escape chip"
+        );
         assert_eq!(
             mode_tip(Mode::Visual),
             Some(("Visual selection", LEAVE_HINT))
         );
         assert_eq!(mode_tip(Mode::Edit), Some(("Editing", LEAVE_HINT)));
-        assert_eq!(LEAVE_HINT, "`esc` leaves");
+        assert_eq!(LEAVE_HINT, "`escape` leaves");
     }
 
-    /// Each icon takes its tone's floored colour — edit the warning text
-    /// tone, visual the info text tone — and both clear the readable floor
-    /// against the header's ground on every bundled theme.
+    /// Each icon takes its tone's floored color — edit the warning text
+    /// tone, visual the info text tone — both clear the readable floor
+    /// against the header's ground, and the two differ, on every bundled
+    /// theme.
     #[gpui::test]
     fn the_mode_icon_colors_clear_the_floor_on_every_bundled_theme(cx: &mut TestAppContext) {
         use geode_core::colour::{TEXT_READABLE_RATIO, contrast_ratio};
@@ -1026,6 +1033,7 @@ mod tests {
         let (service, _) = geode_shell::theme::load_bundled();
         let mut worst: Option<(f32, String)> = None;
         let mut failures = Vec::new();
+        let mut same = Vec::new();
         let mut themes = 0;
         for name in service.names() {
             let entry = service.resolve(&name).unwrap().clone();
@@ -1034,6 +1042,11 @@ mod tests {
                 let theme = cx.theme();
                 themes += 1;
                 assert_eq!(mode_color(Mode::Normal, theme), None);
+                let edit = mode_color(Mode::Edit, theme);
+                let visual = mode_color(Mode::Visual, theme);
+                if edit == visual {
+                    same.push(name.to_string());
+                }
                 for (mode, tone) in [
                     (Mode::Edit, chip::Tone::WarningText),
                     (Mode::Visual, chip::Tone::InfoText),
@@ -1057,6 +1070,7 @@ mod tests {
             "faint mode icons:\n{}",
             failures.join("\n")
         );
+        assert!(same.is_empty(), "edit and visual share a color: {same:?}");
         eprintln!("worst mode icon contrast: {worst:?}");
     }
 }

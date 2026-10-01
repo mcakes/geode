@@ -1867,10 +1867,11 @@ fn a_shift_press_with_the_entry_bar_open_closes_it_and_selects(cx: &mut gpui::Te
     );
 }
 
-/// The header's mode icon follows the key context's own mode: the cell
-/// editor opened by `edit` (`i`) shows the edit icon until `cancel` (`esc`
-/// in insert); `visual_rows` (`V`) shows the visual icon until `escape`
-/// clears the selection. Each arrives by the id the keys send.
+/// The header's mode icon follows the key context's own mode. The test
+/// dispatches the action ids the default keys send: the cell editor opened
+/// by `pricer::edit` shows the edit icon until `pricer::cancel`;
+/// `pricer::visual_rows` shows the visual icon until `pricer::escape`
+/// clears the selection.
 #[gpui::test]
 fn the_header_shows_the_mode_icon_while_editing_or_selecting(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &BOOK);

@@ -295,4 +295,40 @@ mod tests {
         assert_eq!(m.chord, None);
         assert_eq!(m.detail, None);
     }
+
+    struct TipHost(TipModel);
+
+    impl gpui::Render for TipHost {
+        fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+            render_tip(&self.0, SharedString::new_static("tip-probe"), cx)
+        }
+    }
+
+    /// A detail naming a key in backticks paints that key as a `Kbd`
+    /// chip; a detail without backticks is plain text and paints none.
+    #[gpui::test]
+    fn a_backticked_detail_key_paints_as_a_chip(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let mut painted = |detail: &'static str| {
+            let model = TipModel {
+                title: "Probe".into(),
+                chord: None,
+                detail: Some(SharedString::new_static(detail)),
+            };
+            let (_, vcx) = cx.add_window_view(move |_, _| TipHost(model));
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            (
+                vcx.debug_bounds("tip-probe-detail").is_some(),
+                vcx.debug_bounds("kbd:escape").is_some(),
+            )
+        };
+        assert_eq!(painted("`escape` leaves"), (true, true));
+        assert_eq!(
+            painted("escape leaves"),
+            (true, false),
+            "no backticks: plain text, no chip"
+        );
+    }
 }

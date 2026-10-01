@@ -3981,9 +3981,10 @@ fn a_slot_chip_fits_inside_the_header(cx: &mut gpui::TestAppContext) {
     }
 }
 
-/// The header's mode icon follows the key context's own mode: the series
-/// picker opened by `add` holds the keys (`insert`), so the edit icon shows
-/// until `cancel` (`esc` in insert) closes it. The tile has no selection,
+/// The header's mode icon follows the key context's own mode. The test
+/// dispatches the action ids the default keys send: the series picker
+/// opened by `timeseries::add` holds the keys (`insert`), so the edit icon
+/// shows until `timeseries::cancel` closes it. The tile has no selection,
 /// so never the visual icon.
 #[gpui::test]
 fn the_header_shows_the_edit_icon_while_a_field_holds_the_keys(cx: &mut gpui::TestAppContext) {

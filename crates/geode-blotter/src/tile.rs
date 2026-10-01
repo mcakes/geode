@@ -3596,9 +3596,10 @@ mod tests {
         assert_eq!(extent(&mut cx), (true, None));
     }
 
-    /// The header's mode icon follows the key context's own mode: `V`
-    /// (`visual_rows`) shows the visual icon until `esc` (`escape`) clears
-    /// the selection. The blotter has no edit mode, so no edit icon ever.
+    /// The header's mode icon follows the key context's own mode. The test
+    /// dispatches the action ids the default keys send:
+    /// `blotter::visual_rows` shows the visual icon until `blotter::escape`
+    /// clears the selection. The blotter has no edit mode, so no edit icon.
     #[gpui::test]
     fn the_header_shows_the_visual_icon_while_selecting(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = delivered(cx);

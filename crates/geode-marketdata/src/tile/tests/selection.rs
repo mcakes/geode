@@ -1802,10 +1802,11 @@ fn arrows_nudge_the_text_once_a_delivery_drops_the_selection(cx: &mut gpui::Test
     assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
 }
 
-/// The header's mode icon follows the key context's own mode: the cell
-/// editor opened by `edit` (`i`) shows the edit icon until `cancel` (`esc`
-/// in insert); `visual_block` (`v`) shows the visual icon until `escape`
-/// clears the selection. Each arrives by the id the keys send.
+/// The header's mode icon follows the key context's own mode. The test
+/// dispatches the action ids the default keys send: the cell editor opened
+/// by `marketdata::edit` shows the edit icon until `marketdata::cancel`;
+/// `marketdata::visual_block` shows the visual icon until
+/// `marketdata::escape` clears the selection.
 #[gpui::test]
 fn the_header_shows_the_mode_icon_while_editing_or_selecting(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);

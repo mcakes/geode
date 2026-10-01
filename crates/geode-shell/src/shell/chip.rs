@@ -39,7 +39,8 @@ pub enum Tone {
     DangerText,
     /// Info-toned TEXT or glyph on the surface, no fill — a tile header's
     /// visual-selection mode icon. `theme.info` floored the same way, so it
-    /// stays apart from the warning-toned edit icon beside it.
+    /// reads apart from the warning-toned edit icon (pinned by the header's
+    /// bundled-theme sweep).
     InfoText,
     /// A user-selected state with no hazard, such as a pinned grouping or a
     /// tile filter. Uses `secondary_foreground` on `secondary`, reserving
