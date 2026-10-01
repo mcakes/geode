@@ -72,7 +72,13 @@ impl LinearScale {
         if count_hint == 0 {
             return;
         }
-        let step = Self::nice_step(self.hi - self.lo, count_hint);
+        self.ticks_at(Self::nice_step(self.hi - self.lo, count_hint), out);
+    }
+
+    /// The multiples of `step` inside `[lo, hi]`, into `out` (cleared
+    /// first). None for a step that is not a positive number.
+    pub fn ticks_at(&self, step: f64, out: &mut Vec<f64>) {
+        out.clear();
         if step <= 0.0 || !step.is_finite() {
             return;
         }

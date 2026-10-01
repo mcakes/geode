@@ -157,11 +157,56 @@ fn ladder_rungs(scale: LinearX, view: View, plot: Rect, tick_gap_px: f32, out: &
     out.sort_by(f64::total_cmp);
 }
 
+/// The fewest labels an axis reads as a scale: one label says where a value
+/// is and not how far apart two are.
+const MIN_X_TICKS: usize = 2;
+
+/// How many steps down the 1-2-5 ladder [`x_ticks`] goes to reach
+/// [`MIN_X_TICKS`]. The step asked for is under a view and a quarter wide
+/// and two steps down divide it by four at least, so two reach it; the rest
+/// is room for a tick that rounding puts just outside an edge.
+const FINER_STEPS: usize = 4;
+
+/// The largest tick index (a tick's value over the step) ticks are counted
+/// at: `f64` holds every integer below it exactly.
+const MAX_TICK_INDEX: f64 = 9.0e15;
+
+/// The 1-2-5 step next below `step`, itself a 1-2-5 step: 5 gives 2, 2
+/// gives 1, 1 gives 0.5. Not a number for a step that is not a positive
+/// number.
+fn finer_step(step: f64) -> f64 {
+    // The nudge keeps a step stored a hair under a power of ten in its own
+    // decade.
+    let magnitude = 10f64.powf((step.log10() + 1e-9).floor());
+    let residual = step / magnitude;
+    if residual > 3.5 {
+        2.0 * magnitude
+    } else if residual > 1.5 {
+        magnitude
+    } else {
+        0.5 * magnitude
+    }
+}
+
+/// Whether ticks `step` apart can be counted across `view`: the step is a
+/// positive number, and the view's values are not so far from zero for
+/// their span that one tick's index is the next one's too. There the tick
+/// walk cannot advance.
+fn countable(view: View, step: f64) -> bool {
+    step > 0.0 && step.is_finite() && view.lo.abs().max(view.hi.abs()) / step < MAX_TICK_INDEX
+}
+
 /// Ticks for the view into `out` (cleared first), in ascending pixel x; none
 /// for a view with no span or a plot with no finite width. 1-2-5 steps,
 /// labelled with the decimals the step needs. A delta axis instead labels
 /// the rungs of [`DELTA_LADDER`] that fit at `tick_gap_px`, as whole
 /// percents, when at least three do.
+///
+/// A narrow plot asks for a step as wide as its view, and such a step can
+/// have one multiple in the view or none. The step then goes down the 1-2-5
+/// ladder, [`FINER_STEPS`] at most, until two ticks fall in the view; the
+/// labels take the decimals of the step used. A view too narrow for its
+/// values to count ticks in keeps the ticks it has.
 pub fn x_ticks(
     scale: LinearX,
     view: View,
@@ -176,14 +221,26 @@ pub fn x_ticks(
         return;
     }
     let hint = ((plot.w / tick_gap_px.max(1.0)) as usize).max(2);
-    let step = LinearScale::nice_step(span, hint);
+    let mut step = LinearScale::nice_step(span, hint);
     let mut values: Vec<f64> = Vec::new();
     if format == XFormat::Delta {
         ladder_rungs(scale, view, plot, tick_gap_px, &mut values);
     }
     let ladder = !values.is_empty();
     if !ladder {
-        LinearScale::new((view.lo, view.hi), 0.0, 1.0).ticks(hint, &mut values);
+        let axis = LinearScale::new((view.lo, view.hi), 0.0, 1.0);
+        axis.ticks(hint, &mut values);
+        for _ in 0..FINER_STEPS {
+            if values.len() >= MIN_X_TICKS {
+                break;
+            }
+            let finer = finer_step(step);
+            if !countable(view, finer) {
+                break;
+            }
+            step = finer;
+            axis.ticks_at(step, &mut values);
+        }
     }
     out.extend(values.into_iter().map(|v| Tick {
         x: scale.x_of(v, view, plot),
@@ -611,6 +668,138 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn a_view_no_tick_of_the_first_step_falls_in_still_has_two_labels() {
+        // 180 px at a 64 px gap asks for two ticks over 0.45 of delta: a
+        // step of 0.5, and no multiple of 0.5 lies in the view. Only two
+        // ladder rungs fit, so the ladder does not label it either.
+        let mut out = Vec::new();
+        x_ticks(
+            LinearX { reversed: true },
+            View::with_min_span((0.54, 0.99), 0.0),
+            plot(180.0),
+            64.0,
+            XFormat::Delta,
+            &mut out,
+        );
+        assert_eq!(labels(&out), ["20p", "40p"], "a step of 0.2");
+        assert!(out[0].x < out[1].x);
+    }
+
+    #[test]
+    fn a_finer_step_labels_with_its_own_decimals() {
+        // 180 px over 0.016: a step of 0.01 has the one tick 0.02 in view.
+        // The step below it, 0.005, has three, and two decimals cannot tell
+        // them apart.
+        let mut out = Vec::new();
+        x_ticks(
+            LinearX::default(),
+            View::with_min_span((0.012, 0.028), 0.0),
+            plot(180.0),
+            64.0,
+            XFormat::Fixed(2),
+            &mut out,
+        );
+        assert_eq!(labels(&out), ["0.015", "0.020", "0.025"]);
+    }
+
+    #[test]
+    fn a_narrow_plot_keeps_at_least_two_labels() {
+        let cases: [(XFormat, &[(f64, f64)]); 4] = [
+            // Strikes.
+            (
+                XFormat::Price,
+                &[(7030.0, 7790.0), (5100.0, 9400.0), (96.0, 143.0)],
+            ),
+            // Moneyness.
+            (
+                XFormat::Percent,
+                &[(0.83, 1.17), (0.54, 0.99), (1.02, 1.46)],
+            ),
+            // Log-moneyness.
+            (
+                XFormat::Fixed(2),
+                &[(-0.23, 0.14), (0.012, 0.028), (-0.46, -0.03)],
+            ),
+            (
+                XFormat::Delta,
+                &[(0.54, 0.99), (0.31, 0.69), (0.02, 0.46), (0.52, 0.74)],
+            ),
+        ];
+        let mut out = Vec::new();
+        for (format, views) in cases {
+            for &view in views {
+                for reversed in [false, true] {
+                    for w in [150.0, 180.0, 220.0] {
+                        let plot = Rect::new(44.0, 0.0, w, 200.0);
+                        x_ticks(
+                            LinearX { reversed },
+                            View::with_min_span(view, 0.0),
+                            plot,
+                            64.0,
+                            format,
+                            &mut out,
+                        );
+                        let case = format!("{format:?} {view:?} reversed {reversed} on {w} px");
+                        let l = labels(&out);
+                        assert!(l.len() >= 2, "{case}: {l:?}");
+                        assert!(out.windows(2).all(|t| t[1].x > t[0].x), "{case}: {out:?}");
+                        assert!(l.windows(2).all(|t| t[0] != t[1]), "{case}: {l:?}");
+                        assert!(
+                            out.iter().all(|t| t.x >= plot.x && t.x <= plot.right()),
+                            "{case}: {out:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_view_too_narrow_to_count_ticks_in_returns_what_it_has() {
+        // Three float steps wide at 2^50: the values cannot tell ticks of
+        // a finer step apart, so none is tried, and the call returns.
+        let lo = 2f64.powi(50) + 0.625;
+        let view = View::with_min_span((lo, lo + 0.375), 0.0);
+        assert!(!countable(view, 0.05));
+        assert!(countable(view, 0.2));
+        assert!(!countable(view, 0.0) && !countable(view, f64::NAN));
+        assert!(!countable(view, f64::INFINITY));
+        let mut out = Vec::new();
+        for format in [XFormat::Price, XFormat::Fixed(2)] {
+            x_ticks(
+                LinearX::default(),
+                view,
+                plot(180.0),
+                64.0,
+                format,
+                &mut out,
+            );
+            assert!(out.len() <= 4, "{out:?}");
+        }
+    }
+
+    #[test]
+    fn the_step_below_a_1_2_5_step_is_the_next_on_the_ladder() {
+        for (step, finer) in [
+            (10.0, 5.0),
+            (5.0, 2.0),
+            (2.0, 1.0),
+            (1.0, 0.5),
+            (0.5, 0.2),
+            (0.2, 0.1),
+            (0.1, 0.05),
+            (2000.0, 1000.0),
+            (1e-7, 5e-8),
+        ] {
+            let got = finer_step(step);
+            assert!(
+                (got - finer).abs() <= finer * 1e-9,
+                "{step}: {got} for {finer}"
+            );
         }
     }
 
