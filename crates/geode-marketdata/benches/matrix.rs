@@ -1,11 +1,12 @@
 //! Pure model costs for a CVI pivot (20 terms × 30 nodes) and a flat
 //! schedule (10,000 rows × five value columns).
 //!
-//! Measure full builds, individual cell patches, builds with 100 inserted
-//! rows, and rebase with 1,000 cell edits plus optional row inserts. Cell
-//! commits patch prepared data; deliveries and structural edits rebuild it.
-//! These operations spend UI-thread time before painting; current budgets
-//! and measurement conditions are documented in `docs/current/performance.md`.
+//! Measure index builds, window fills and one-cell refills, builds with 100
+//! inserted rows, and rebase with 1,000 cell edits plus optional row inserts.
+//! Cell commits refill one window cell; deliveries and structural edits
+//! rebuild the index. These operations spend UI-thread time before painting;
+//! current budgets and measurement conditions are documented in
+//! `docs/current/performance.md`.
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use geode_core::attribution::{Attribution, ScopeSemantics};
@@ -14,10 +15,11 @@ use geode_core::schema::ColumnType;
 use geode_core::snapshot::{ColumnMeta, Freshness, Provenance, Snapshot, TestColumn};
 use geode_core::view::ColumnFormat;
 use geode_marketdata::core::draft::{DocumentBase, Draft};
-use geode_marketdata::core::matrix::MatrixModel;
+use geode_marketdata::core::matrix::{MatrixIndex, refill_cell};
 use geode_marketdata::core::spec::{
     Columns, HeaderAttr, PanelSpec, RowAxis, RowIdentity, RowLabel, ValueColumn, builtin_panel,
 };
+use geode_tile::grid::WindowCache;
 use std::hint::black_box;
 use std::sync::{Arc, LazyLock};
 
@@ -200,15 +202,40 @@ fn bench(c: &mut Criterion) {
     let cvi_panel = builtin_panel("cvi");
     let mut g = c.benchmark_group("marketdata_core");
 
-    let sketch = cvi(20, 30);
+    let sketch = Arc::new(cvi(20, 30));
     let clean = Draft::default();
     g.bench_function("model_build_pivot_20x30", |b| {
-        b.iter(|| black_box(MatrixModel::build(&sketch, &cvi_panel, &clean).expect("a full grid")))
+        b.iter(|| black_box(MatrixIndex::build(&sketch, &cvi_panel, &clean).expect("a full grid")))
     });
 
-    let flat = schedule(10_000);
+    let flat = Arc::new(schedule(10_000));
     g.bench_function("model_build_values_10000x5", |b| {
-        b.iter(|| black_box(MatrixModel::build(&flat, &SCHEDULE, &clean).expect("a flat document")))
+        b.iter(|| black_box(MatrixIndex::build(&flat, &SCHEDULE, &clean).expect("a flat document")))
+    });
+
+    // What a window costs to paint from cold: 40 rows × five cells
+    // formatted into a fresh `WindowCache` through the one formatter.
+    let index = MatrixIndex::build(&flat, &SCHEDULE, &clean).expect("a flat document");
+    g.bench_function("window_fill_40x5", |b| {
+        b.iter(|| {
+            let mut window = WindowCache::default();
+            window.set_window(0..40, index.columns.len(), |r, c| {
+                index.md_cell(&clean, r, c)
+            });
+            black_box(window.window().len())
+        })
+    });
+    // A delivery as far as a paintable window: the index build, then one
+    // window of cells.
+    g.bench_function("delivery_to_window_values_10000x5", |b| {
+        b.iter(|| {
+            let index = MatrixIndex::build(&flat, &SCHEDULE, &clean).expect("a flat document");
+            let mut window = WindowCache::default();
+            window.set_window(0..40, index.columns.len(), |r, c| {
+                index.md_cell(&clean, r, c)
+            });
+            black_box(window.window().len())
+        })
     });
 
     // 1,000 edits over the flat shape, then rebased onto the same labels.
@@ -218,10 +245,10 @@ fn bench(c: &mut Criterion) {
     // repeatedly rather than on a fresh clone per iteration: it is
     // idempotent (the same labels resolve to the same cells every time),
     // so this measures the rebase and not a clone of a 1,000-entry map.
-    let model = MatrixModel::build(&flat, &SCHEDULE, &clean).expect("a flat document");
+    let model = MatrixIndex::build(&flat, &SCHEDULE, &clean).expect("a flat document");
     let mut draft = Draft::default();
     for i in 0..1_000 {
-        let cell = (i % model.rows.len(), i % model.columns.len());
+        let cell = (i % model.len(), i % model.columns.len());
         let labels = model.label_of(cell);
         draft.set(
             cell,
@@ -234,12 +261,46 @@ fn bench(c: &mut Criterion) {
         b.iter(|| black_box(draft.rebase(&model)))
     });
 
+    // One committed cell, end to end: the draft write and the one-cell
+    // window refill.
+    let edit_cell = (5_000, 2);
+    let edit_labels = model.label_of(edit_cell);
+    let mut edit_draft = Draft::default();
+    let edited = MatrixIndex::build(&flat, &SCHEDULE, &edit_draft).expect("a flat document");
+    let mut edit_window = WindowCache::default();
+    edit_window.set_window(4_980..5_020, edited.columns.len(), |r, c| {
+        edited.md_cell(&edit_draft, r, c)
+    });
+    let mut v = 0.0;
+    g.bench_function("one_cell_edit_values_10000x5", |b| {
+        b.iter(|| {
+            v += 1.0;
+            edit_draft.set(
+                edit_cell,
+                (edit_labels.0.to_string(), edit_labels.1.to_string()),
+                Value::F64(v),
+                &base(),
+            );
+            refill_cell(&mut edit_window, &edited, &edit_draft, edit_cell);
+            black_box(edit_window.get(edit_cell.0, edit_cell.1).is_some())
+        })
+    });
+    // The 500 ms session tick's group capture: over the installed index,
+    // with no build.
+    let mut tick_draft = draft.clone();
+    g.bench_function("session_tick_values_10000x5", |b| {
+        b.iter(|| {
+            tick_draft.capture_groups(&model);
+            black_box(&tick_draft);
+        })
+    });
+
     // Measure re-preparing one edited cell on each model shape. Reuse
-    // the same cell and draft edit to isolate steady-state patch cost.
+    // the same cell and draft edit to isolate steady-state refill cost.
     let pivot_cell = (1, 5);
-    let pivot_labels = MatrixModel::build(&sketch, &cvi_panel, &Draft::default())
-        .unwrap()
-        .label_of(pivot_cell);
+    let pivot_index =
+        MatrixIndex::build(&sketch, &cvi_panel, &Draft::default()).expect("a full grid");
+    let pivot_labels = pivot_index.label_of(pivot_cell);
     let mut pivot_draft = Draft::default();
     pivot_draft.set(
         pivot_cell,
@@ -247,17 +308,14 @@ fn bench(c: &mut Criterion) {
         Value::F64(42.0),
         &base(),
     );
-    let mut pivot_patched =
-        MatrixModel::build(&sketch, &cvi_panel, &pivot_draft).expect("a full grid, edit painted");
+    let mut pivot_window = WindowCache::default();
+    pivot_window.set_window(0..pivot_index.len(), pivot_index.columns.len(), |r, c| {
+        pivot_index.md_cell(&pivot_draft, r, c)
+    });
     g.bench_function("patch_cell_pivot_20x30", |b| {
         b.iter(|| {
-            black_box(pivot_patched.patch_cell(
-                pivot_cell.0,
-                pivot_cell.1,
-                &sketch,
-                &cvi_panel,
-                &pivot_draft,
-            ))
+            refill_cell(&mut pivot_window, &pivot_index, &pivot_draft, pivot_cell);
+            black_box(pivot_window.get(pivot_cell.0, pivot_cell.1).is_some())
         })
     });
 
@@ -270,17 +328,14 @@ fn bench(c: &mut Criterion) {
         Value::F64(7.0),
         &base(),
     );
-    let mut flat_patched =
-        MatrixModel::build(&flat, &SCHEDULE, &flat_draft).expect("a flat document, edit painted");
+    let mut flat_window = WindowCache::default();
+    flat_window.set_window(4_980..5_020, model.columns.len(), |r, c| {
+        model.md_cell(&flat_draft, r, c)
+    });
     g.bench_function("patch_cell_values_10000x5", |b| {
         b.iter(|| {
-            black_box(flat_patched.patch_cell(
-                flat_cell.0,
-                flat_cell.1,
-                &flat,
-                &SCHEDULE,
-                &flat_draft,
-            ))
+            refill_cell(&mut flat_window, &model, &flat_draft, flat_cell);
+            black_box(flat_window.get(flat_cell.0, flat_cell.1).is_some())
         })
     });
 
@@ -289,13 +344,13 @@ fn bench(c: &mut Criterion) {
     // splicing across the full schedule.
     let mut rows_draft = Draft::default();
     for i in 0..100 {
-        let anchor = model.rows[i * 100].label.to_string();
+        let anchor = model.label(i * 100).expect("a row").to_string();
         rows_draft.insert_row(format!("new-{}", i + 1), Some(anchor), &base());
     }
     g.bench_function("model_build_values_10000x5_100_rows_spliced", |b| {
         b.iter(|| {
             black_box(
-                MatrixModel::build(&flat, &SCHEDULE, &rows_draft)
+                MatrixIndex::build(&flat, &SCHEDULE, &rows_draft)
                     .expect("a flat document with rows spliced in"),
             )
         })
@@ -304,7 +359,7 @@ fn bench(c: &mut Criterion) {
     // Rebase 1,000 cell edits plus 100 inserted rows onto matching labels.
     let mut mixed_draft = Draft::default();
     for i in 0..1_000 {
-        let cell = (i % model.rows.len(), i % model.columns.len());
+        let cell = (i % model.len(), i % model.columns.len());
         let labels = model.label_of(cell);
         mixed_draft.set(
             cell,
@@ -314,7 +369,7 @@ fn bench(c: &mut Criterion) {
         );
     }
     for i in 0..100 {
-        let anchor = model.rows[i * 100].label.to_string();
+        let anchor = model.label(i * 100).expect("a row").to_string();
         mixed_draft.insert_row(format!("new-{}", i + 1), Some(anchor), &base());
     }
     g.bench_function("draft_rebase_1000_edits_100_rows", |b| {

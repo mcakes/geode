@@ -1,5 +1,5 @@
 //! Parsing, edits and undo, result installation, storage conversion, scope
-//! evaluation, the rollup tree, and grid preparation for 1,000 shorthand entries. Every
+//! evaluation, the rollup tree, the grid index and window fills for 1,000 shorthand entries. Every
 //! tenth entry is a two-leg package, so the sheet contains 1,200 rows. These benchmarks
 //! measure local model work, excluding pricing execution, database I/O, and painting.
 //! Budgets and reference measurements are in `docs/current/performance.md`.
@@ -16,7 +16,8 @@ use geode_pricer::core::{
     ColumnPlan, Edit, Expansion, LineId, OwnShifts, Place, RowSpec, Sheet, TemplateSet, Views,
     Visibility, apply_scope, from_rows, parse, to_rows,
 };
-use geode_pricer::grid::GridModel;
+use geode_pricer::grid::{CellPass, FillSource, GridIndex};
+use geode_tile::grid::WindowCache;
 use std::hint::black_box;
 
 /// `n` shorthand entries with varied quantity, option kind, and strike.
@@ -84,6 +85,19 @@ fn sheet_of(texts: &[String]) -> Sheet {
     })
     .expect("insert");
     s
+}
+
+/// Every line of `s` answered at its current revision: npv 12.5, delta 0.5.
+fn answers_for(s: &Sheet) -> Vec<(LineId, u64, Result<PriceResult, String>)> {
+    (0..s.len())
+        .filter(|r| s.is_line(*r))
+        .map(|r| {
+            let mut p = PriceResult::zero(Currency::USD);
+            p.set(Measure::Npv, false, 12.5);
+            p.set(Measure::Delta01, false, 0.5);
+            (s.id(r), s.revision(r), Ok(p))
+        })
+        .collect()
 }
 
 fn bench(c: &mut Criterion) {
@@ -169,9 +183,10 @@ fn bench(c: &mut Criterion) {
         })
     });
 
-    // A full grid rebuild with every package open and every line answered.
-    // The tile performs this preparation after edits, deliveries, and
-    // expansion changes.
+    // A full grid index rebuild with every package open and every line
+    // answered. The tile performs this preparation after edits,
+    // deliveries, and expansion changes; measure cells are formatted
+    // only by the window fills below.
     let mut s = sheet(1_000);
     let answers: Vec<(LineId, u64, Result<PriceResult, String>)> = (0..s.len())
         .filter(|r| s.is_line(*r))
@@ -204,7 +219,7 @@ fn bench(c: &mut Criterion) {
     let no_groups = GroupExpansion::default();
     g.bench_function("grid_build_1000", |b| {
         b.iter(|| {
-            black_box(GridModel::build(
+            black_box(GridIndex::build(
                 &s,
                 &flat,
                 &no_groups,
@@ -221,7 +236,7 @@ fn bench(c: &mut Criterion) {
         b.iter(|| {
             let chain = effective_chain(&[], &no_levels);
             let tree = rollup::build(&s, &visibility, &chain, &no_levels, Clock::utc());
-            black_box(GridModel::build(
+            black_box(GridIndex::build(
                 &s,
                 &tree,
                 &no_groups,
@@ -231,6 +246,74 @@ fn bench(c: &mut Criterion) {
             ))
         })
     });
+    // A cold window fill of 40 rows: what a scroll or an install formats.
+    let index = GridIndex::build(&s, &flat, &no_groups, &expansion, &plan, Clock::utc());
+    g.bench_function("window_fill_40", |b| {
+        b.iter(|| {
+            let mut window = WindowCache::default();
+            let mut pass = CellPass::new(
+                FillSource {
+                    sheet: &s,
+                    rollup: &flat,
+                    plan: &plan,
+                    clock: Clock::utc(),
+                },
+                &index,
+            );
+            window.set_window(0..40, index.columns.len(), |g, c| pass.cell(g, c));
+            black_box(window.window().len())
+        })
+    });
+    // A delivery that moves no line in or out of the tree, as the tile runs
+    // it: install, scope, chain, rollup, the structural comparison against
+    // the tree the index was built from, and a 40-row window refill. The
+    // index stands.
+    {
+        let mut s = sheet(1_000);
+        let batch = answers_for(&s);
+        s.deliver_all(batch.clone(), Utc::now());
+        let mut expansion = Expansion::default();
+        expansion.open_all(&s);
+        let dims = DerivedDimensions::default();
+        let empty = Scope::default();
+        let now = Utc::now();
+        let visibility =
+            apply_scope(&s, &empty, &dims, Clock::utc()).expect("the empty scope applies");
+        let chain0 = effective_chain(&[], &dims);
+        let tree0 = rollup::build(&s, &visibility, &chain0, &dims, Clock::utc());
+        let index = GridIndex::build(&s, &tree0, &no_groups, &expansion, &plan, Clock::utc());
+        let mut window = WindowCache::default();
+        g.bench_function("deliver_unchanged_structure_1000", |b| {
+            b.iter_batched(
+                || batch.clone(),
+                |batch| {
+                    s.mark_all_stale();
+                    s.deliver_all(batch, now);
+                    let visibility = apply_scope(&s, &empty, &dims, Clock::utc())
+                        .expect("the empty scope applies");
+                    let chain = effective_chain(&[], &dims);
+                    let tree = rollup::build(&s, &visibility, &chain, &dims, Clock::utc());
+                    assert!(
+                        chain == chain0 && tree == tree0,
+                        "the structure is unchanged"
+                    );
+                    window.clear();
+                    let mut pass = CellPass::new(
+                        FillSource {
+                            sheet: &s,
+                            rollup: &tree,
+                            plan: &plan,
+                            clock: Clock::utc(),
+                        },
+                        &index,
+                    );
+                    window.set_window(0..40, index.columns.len(), |g, c| pass.cell(g, c));
+                    black_box(window.window().len())
+                },
+                BatchSize::SmallInput,
+            )
+        });
+    }
 
     // The scope the tile applies on every rebuild: a three-term expression
     // and a text filter over every line of the priced, opened sheet above.
@@ -258,7 +341,7 @@ fn bench(c: &mut Criterion) {
     let scoped_flat = rollup::build(&s, &scoped, &EffectiveChain::default(), &dims, Clock::utc());
     g.bench_function("grid_build_1000_scoped", |b| {
         b.iter(|| {
-            black_box(GridModel::build(
+            black_box(GridIndex::build(
                 &s,
                 &scoped_flat,
                 &no_groups,
@@ -271,9 +354,10 @@ fn bench(c: &mut Criterion) {
 
     // Regrouping: 1,000 priced entries over four underlyings and three
     // expiries under `[underlying_ref, expiry, position_ref]` — the tree,
-    // then the grid with every group and package open, each group row
-    // summing and reading unanimity over its legs. The tile does both on
-    // every rebuild under a grouping (budget: 8 ms together).
+    // then the grid index with every group and package open; a group row
+    // sums and reads unanimity over its legs only when a window fill
+    // reaches it. The tile does both on every rebuild under a grouping
+    // (budget: 8 ms together).
     let mut s = sheet_of(&grouped_texts(1_000));
     let answers: Vec<(LineId, u64, Result<PriceResult, String>)> = (0..s.len())
         .filter(|r| s.is_line(*r))
@@ -302,7 +386,7 @@ fn bench(c: &mut Criterion) {
     expansion.open_all(&s);
     g.bench_function("grid_build_1000_grouped", |b| {
         b.iter(|| {
-            black_box(GridModel::build(
+            black_box(GridIndex::build(
                 &s,
                 &tree,
                 &groups,
@@ -317,7 +401,7 @@ fn bench(c: &mut Criterion) {
     g.bench_function("rebuild_1000_grouped", |b| {
         b.iter(|| {
             let tree = rollup::build(&s, &visibility, &chain, &dims, Clock::utc());
-            black_box(GridModel::build(
+            black_box(GridIndex::build(
                 &s,
                 &tree,
                 &groups,
@@ -327,6 +411,64 @@ fn bench(c: &mut Criterion) {
             ))
         })
     });
+    let index = GridIndex::build(&s, &tree, &groups, &expansion, &plan, Clock::utc());
+    g.bench_function("window_fill_40_grouped", |b| {
+        b.iter(|| {
+            let mut window = WindowCache::default();
+            let mut pass = CellPass::new(
+                FillSource {
+                    sheet: &s,
+                    rollup: &tree,
+                    plan: &plan,
+                    clock: Clock::utc(),
+                },
+                &index,
+            );
+            window.set_window(0..40, index.columns.len(), |g, c| pass.cell(g, c));
+            black_box(window.window().len())
+        })
+    });
+    {
+        let batch = answers_for(&s);
+        let empty = Scope::default();
+        let now = Utc::now();
+        let visibility =
+            apply_scope(&s, &empty, &dims, Clock::utc()).expect("the empty scope applies");
+        let chain0 = effective_chain(&levels, &dims);
+        let tree0 = rollup::build(&s, &visibility, &chain0, &dims, Clock::utc());
+        let index = GridIndex::build(&s, &tree0, &groups, &expansion, &plan, Clock::utc());
+        let mut window = WindowCache::default();
+        g.bench_function("deliver_unchanged_structure_1000_grouped", |b| {
+            b.iter_batched(
+                || batch.clone(),
+                |batch| {
+                    s.mark_all_stale();
+                    s.deliver_all(batch, now);
+                    let visibility = apply_scope(&s, &empty, &dims, Clock::utc())
+                        .expect("the empty scope applies");
+                    let chain = effective_chain(&levels, &dims);
+                    let tree = rollup::build(&s, &visibility, &chain, &dims, Clock::utc());
+                    assert!(
+                        chain == chain0 && tree == tree0,
+                        "the structure is unchanged"
+                    );
+                    window.clear();
+                    let mut pass = CellPass::new(
+                        FillSource {
+                            sheet: &s,
+                            rollup: &tree,
+                            plan: &plan,
+                            clock: Clock::utc(),
+                        },
+                        &index,
+                    );
+                    window.set_window(0..40, index.columns.len(), |g, c| pass.cell(g, c));
+                    black_box(window.window().len())
+                },
+                BatchSize::SmallInput,
+            )
+        });
+    }
 
     g.finish();
 }

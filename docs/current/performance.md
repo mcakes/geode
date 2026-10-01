@@ -79,16 +79,19 @@ the measurement log for fixture and hardware details.
 | Timeseries chart model | 500,000 buckets × four slots | 259 µs |
 | Blotter fully expanded flatten | 720,881 result nodes | 1.18 ms |
 | Blotter selection summary | 720,881 rows, every measure column | 1.20 ms |
-| Market-data pivot build | 20 × 30 CVI grid | 285 µs |
-| Market-data flat build | 10,000 × five values | 8.18 ms |
-| Market-data cell patch | 10,000 × five values | 116 ns |
+| Market-data pivot build | 20 × 30 CVI grid: the `MatrixIndex` | 120 µs |
+| Market-data flat build | 10,000 × five values: the `MatrixIndex` (labels and row facts, no cell text) | 586 µs |
+| Market-data window fill | 40 × five values | 17.7 µs |
+| Market-data cell patch | 10,000 × five values: one-cell window refill | 105 ns |
 | Line-pricer sheet shift + undo | 1,000 entries / 1,200 sheet rows | 1.52 ms |
 | Line-pricer single cell edit + undo | 1,000 entries / 1,200 sheet rows | 6.66 µs |
-| Line-pricer grid build | 1,000 entries / 1,200 sheet rows, every package open, each package row's `/`-joined leg values | 1.42 ms |
+| Line-pricer grid build | 1,000 entries / 1,200 sheet rows, every package open: the `GridIndex`, no measure text | 271 µs |
+| Line-pricer window fill | 40 rows | 29.2 µs |
 | Line-pricer scope apply | 1,000 entries / 1,200 sheet rows, three-term expression plus text filter, half hidden | 1.92 ms |
-| Line-pricer scoped grid build | the same sheet under that scope | 692 µs |
-| Line-pricer flat rebuild | 1,000 entries / 1,200 sheet rows, every package open: the empty-chain rollup plus the grid build, as the tile runs it | 1.68 ms |
-| Line-pricer grouped rebuild | 1,000 entries over four underlyings × three expiries under `[underlying_ref, expiry, position_ref]`, every group and package open: rollup plus grid | 3.15 ms (rollup 335 µs) |
+| Line-pricer scoped grid build | the same sheet under that scope | 114 µs |
+| Line-pricer flat rebuild | 1,000 entries / 1,200 sheet rows, every package open: the empty-chain rollup plus the index, as the tile runs it, before its window fill | 343 µs |
+| Line-pricer grouped rebuild | 1,000 entries over four underlyings × three expiries under `[underlying_ref, expiry, position_ref]`, every group and package open: rollup plus index, before its window fill (a cold grouped 40-row fill adds 206 µs) | 610 µs |
+| Line-pricer refill-only delivery | 1,000 entries / 1,200 sheet rows, structure unchanged | 241 µs |
 | In-process scope evaluation | one row, three-term expression plus text filter | 570 ns |
 | Scope expression suggestion refresh | 20,000 cached values, ranked and capped at 50 | 6.82 ms |
 
@@ -101,16 +104,14 @@ rather than as reference figures: on this shape the three context columns cost
 about 70% more, mostly the position- and instrument-grain scans no shown
 measure already reads. Re-measure on an idle machine before quoting them.
 
-The flat 10,000-row market-data build sits at the UI budget boundary. Ordinary
-cell commits use the constant-time patch path; deliveries and structural row
-changes still rebuild.
-
 ## Cache and allocation contracts
 
-- A blotter formats the visible window into a cache rather than formatting in
-  `render_td`.
-- A market-data delivery or structural edit builds a `MatrixModel`; an
-  ordinary cell commit patches it.
+- A blotter formats the visible window into the shared
+  `geode_tile::grid::WindowCache` rather than formatting in `render_td`.
+- A market-data delivery, structural edit or bulk step builds a `MatrixIndex`
+  (labels and row facts, no cell text) and refills only the window the table
+  last reported; a one-cell commit refills one window cell. The session tick
+  builds nothing.
 - `ChartKey` contains everything timeseries chart preparation reads. Cursor
   movement and fetch-state changes reuse value vectors. Per-slot visibility
   changes rebuild the model; theme and named-color changes can trigger that
@@ -124,10 +125,17 @@ changes still rebuild.
 - A timeseries view move keeps at most one statistics request in flight and
   asks for the latest window when it answers, so statistics refresh at the
   query's own rate during a pan rather than being interrupted by each event.
-- A pricer grid model is rebuilt on edit, delivery, expansion, view, clock or
-  entry change, never in render; paints are a per-theme memo. Every rebuild
-  first re-evaluates the frame's scope over every line (`apply_scope`),
-  synchronously on the UI thread; the two together are the 8 ms budget.
+- A pricer grid index is rebuilt on edit, structural delivery, expansion,
+  view, clock or entry change, never in render; measure cells are formatted
+  only for the window (`CellPass`), and paints are a per-theme memo. Every
+  rebuild first re-evaluates the frame's scope over every line
+  (`apply_scope`), synchronously on the UI thread; the two together are the
+  8 ms budget.
+- A price delivery whose effective chain and rollup are exactly unchanged
+  refills only the window: no index rebuild. Any difference, a landed line,
+  or a NaN group value rebuilds. The scope and the rollup are still
+  re-derived on every delivery, because a price can move a line in or out of
+  the scope or between groups.
 - Config dialogs derive rows at each render, key-handling, and click-resolution
   call site; they do not retain a row cache. Small row sets have measured costs
   in the tens of microseconds. Keybinding resolution repeatedly scans bindings
@@ -165,6 +173,12 @@ changes still rebuild.
   pipeline. Concurrent staging is on hold until the real path and a network
   share are measured.
 - CI compiles benchmarks but has no stable regression baseline.
+- A fuzzy `/` open formats every find row once (market-data's whole document,
+  the pricer's all-open sheet) so the result table paints prepared text;
+  measured costs are the whole-document fills.
+- The pinned table never reports a visible range of one row; a tile scrolled
+  to show a single row keeps the window it last had, so that row can paint
+  blank, as the blotter's always could.
 
 ## Recording a measurement
 

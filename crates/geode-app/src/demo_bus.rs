@@ -782,7 +782,7 @@ mod tests {
         use geode_data::query::as_of::AsOf;
         use geode_data::{DataEvent, DataService, PricerRegistry, VolModelRegistry};
         use geode_marketdata::core::upload::{assemble, echo_differs};
-        use geode_marketdata::core::{Draft, MatrixModel, builtin_panel};
+        use geode_marketdata::core::{Draft, MatrixIndex, builtin_panel};
         use std::sync::mpsc::Receiver;
 
         let dividend = builtin_panel("dividend");
@@ -884,10 +884,10 @@ mod tests {
         // The panel's own route: a clean model of the base, an inserted
         // row under the FIRST document row carrying the LATEST ex date,
         // then the painted model and the assembled upload.
-        let clean = MatrixModel::build(&base, &dividend, &Draft::default()).unwrap();
-        let first_label = clean.rows[0].label.to_string();
+        let clean = MatrixIndex::build(&base, &dividend, &Draft::default()).unwrap();
+        let first_label = clean.label(0).expect("a row").to_string();
         let mut draft = Draft::default();
-        let label = draft.mint_label(|l| clean.rows.iter().any(|r| r.label.as_ref() == l));
+        let label = draft.mint_label(|l| clean.row_of(l).is_some());
         // Stamp the insert against the delivered generation the clean model
         // was built from, exactly as the panel does.
         let stamp = clean.base.clone().unwrap_or_default();
@@ -902,7 +902,7 @@ mod tests {
         ] {
             assert!(draft.set_row_cell(&label, column, value), "{column}");
         }
-        let painted = MatrixModel::build(&base, &dividend, &draft).unwrap();
+        let painted = MatrixIndex::build(&base, &dividend, &draft).unwrap();
         let sent = assemble(&base, &dividend, &painted, &draft).expect("assembles");
         let Column::Date(sent_ex) = &sent.values[0].1 else {
             panic!("ex_date is a date column");
@@ -913,7 +913,7 @@ mod tests {
         );
 
         let echoed = round_trip(&service, &rx, 2, sent.clone());
-        let clean = MatrixModel::build(&echoed, &dividend, &Draft::default()).unwrap();
+        let clean = MatrixIndex::build(&echoed, &dividend, &Draft::default()).unwrap();
         let delivered =
             assemble(&echoed, &dividend, &clean, &Draft::default()).expect("the echo assembles");
         let Column::Date(echo_ex) = &delivered.values[0].1 else {

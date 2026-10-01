@@ -11,7 +11,7 @@
 //! pair tells apart so it cannot re-point grid-keyed edits. Where no single
 //! generation names the read, the timestamp alone decides.
 
-use crate::core::matrix::{MatrixModel, RowState};
+use crate::core::matrix::{MatrixIndex, RowState};
 use crate::core::spec::{Columns, PanelSpec};
 use geode_core::document::Value;
 use geode_core::schema::ColumnType;
@@ -564,7 +564,7 @@ impl Draft {
     /// `base` must be a clean model of the document these edits refer to;
     /// that association is the caller's responsibility. Replace the counts
     /// rather than merging them so rebase cannot retain stale base counts.
-    pub fn capture_groups(&mut self, base: &MatrixModel) {
+    pub fn capture_groups(&mut self, base: &MatrixIndex) {
         let now = group_sizes(base);
         let mut touched: std::collections::HashSet<String> = std::collections::HashSet::new();
         for (row_label, _col_label) in self.labels.values() {
@@ -588,19 +588,14 @@ impl Draft {
     /// `model_of_newer` must be built with [`Draft::default()`]. A model with
     /// this draft would mistake inserted rows for upstream conflicts and would
     /// resolve document cells to painted positions shifted by inserts.
-    pub fn rebase(&mut self, model_of_newer: &MatrixModel) -> (usize, Vec<(String, String)>) {
+    pub fn rebase(&mut self, model_of_newer: &MatrixIndex) -> (usize, Vec<(String, String)>) {
         // The two axes are indexed separately — O(R + C), not the R × C
         // every cell pair would cost, which at a 10,000-row schedule is
         // 50,000 entries built to resolve a few hundred edits. A model's
         // grid is rectangular, so a row that exists and a column that
         // exists are a cell that exists; both maps are unique by the
         // invariant on this struct.
-        let rows: HashMap<&str, usize> = model_of_newer
-            .rows
-            .iter()
-            .enumerate()
-            .map(|(ri, row)| (row.label.as_ref(), ri))
-            .collect();
+        let rows = model_of_newer.label_index();
         let columns: HashMap<&str, usize> = model_of_newer
             .columns
             .iter()
@@ -1114,11 +1109,11 @@ pub fn group_of(label: &str) -> &str {
 /// Count document and deleted rows per label group. A deleted row still
 /// belongs to the upstream document; an inserted row has no upstream
 /// ordinal. Guard capture normally supplies a clean model.
-pub fn group_sizes(model: &MatrixModel) -> BTreeMap<String, usize> {
+pub fn group_sizes(model: &MatrixIndex) -> BTreeMap<String, usize> {
     let mut sizes = BTreeMap::new();
-    for row in &model.rows {
+    for row in model.rows() {
         if matches!(row.state, RowState::Document | RowState::Deleted) {
-            *sizes.entry(group_of(&row.label).to_string()).or_insert(0) += 1;
+            *sizes.entry(group_of(row.label).to_string()).or_insert(0) += 1;
         }
     }
     sizes
@@ -1179,11 +1174,10 @@ pub fn attr_text(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::matrix::{Cell, HeaderCell, MatrixModel, RowModel, RowState};
+    use crate::core::matrix::{HeaderCell, MatrixIndex};
     use chrono::NaiveDate;
     use geode_core::document::Value;
     use geode_core::schema::ColumnType;
-    use gpui::SharedString;
     use proptest::prelude::*;
 
     const BASE: &str = "2026-09-12T14:02:00Z";
@@ -1202,36 +1196,25 @@ mod tests {
     /// A flat model naming only the given row labels, no columns and no
     /// header — `rebase`'s row handling reads a newer model's row labels
     /// alone (see [`Draft::rebase`]'s doc comment).
-    fn flat_model_with_rows(labels: &[&str]) -> MatrixModel {
-        MatrixModel {
-            rows: labels
-                .iter()
-                .map(|label| RowModel {
-                    label: SharedString::from(*label),
-                    cells: Vec::new(),
-                    state: RowState::Document,
-                })
-                .collect(),
-            ..MatrixModel::default()
-        }
+    fn flat_model_with_rows(labels: &[&str]) -> MatrixIndex {
+        MatrixIndex::for_tests(labels, &[])
     }
 
     /// A model whose header names the given `(column, label)` pairs and
     /// nothing else — `rebase` only ever reads a model's `header`, `rows`
     /// and `columns`.
-    fn model_with_header(attrs: &[(&str, &str)]) -> MatrixModel {
-        MatrixModel {
-            header: attrs
-                .iter()
-                .map(|(c, l)| HeaderCell {
-                    column: (*c).into(),
-                    label: (*l).into(),
-                    text: "".into(),
-                    edited: false,
-                })
-                .collect(),
-            ..MatrixModel::default()
-        }
+    fn model_with_header(attrs: &[(&str, &str)]) -> MatrixIndex {
+        let mut m = MatrixIndex::for_tests(&[], &[]);
+        m.header = attrs
+            .iter()
+            .map(|(c, l)| HeaderCell {
+                column: (*c).into(),
+                label: (*l).into(),
+                text: "".into(),
+                edited: false,
+            })
+            .collect();
+        m
     }
 
     fn pair(row: &str, col: &str) -> (String, String) {
@@ -1294,39 +1277,11 @@ mod tests {
 
     /// A model with the given row and column labels and no values — the
     /// draft only ever reads a model's labels and its base.
-    fn model(rows: &[&str], cols: &[&str], base: &DocumentBase) -> MatrixModel {
-        MatrixModel {
-            key: vec!["SPX.Z".to_string()],
-            base: Some(base.clone()),
-            header: Vec::new(),
-            slice_columns: 0,
-            column_values: Vec::new(),
-            // `rebase` never reads a column's `CellKind` — only its label
-            // — so an empty vec here is honest, not a shortcut.
-            column_kinds: Vec::new(),
-            columns: cols
-                .iter()
-                .map(|c| SharedString::from(c.to_string()))
-                .collect(),
-            rows: rows
-                .iter()
-                .enumerate()
-                .map(|(r, label)| RowModel {
-                    label: SharedString::from(label.to_string()),
-                    cells: (0..cols.len())
-                        .map(|c| Cell {
-                            text: SharedString::default(),
-                            value: None,
-                            edited: false,
-                            sent: false,
-                            cell_ref: (r, c),
-                        })
-                        .collect(),
-                    state: RowState::Document,
-                })
-                .collect(),
-            pivot_index: None,
-        }
+    fn model(rows: &[&str], cols: &[&str], base: &DocumentBase) -> MatrixIndex {
+        let mut m = MatrixIndex::for_tests(rows, cols);
+        m.key = vec!["SPX.Z".to_string()];
+        m.base = Some(base.clone());
+        m
     }
 
     #[test]
@@ -1595,7 +1550,7 @@ mod tests {
     }
 
     /// `:bump` only ever reaches a `Number` cell — the tile decides that
-    /// through `MatrixModel::kind_of` before reading any value — and
+    /// through `MatrixIndex::kind_of` before reading any value — and
     /// `numeric_edit` is the door `MarketDataTile::current_numeric` reads
     /// an existing edit's CURRENT value through: `F64`/`I64` keep
     /// their own type, a `Date`/`Utf8` edit (or no edit at all) answers

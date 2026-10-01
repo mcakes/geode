@@ -1,19 +1,18 @@
-//! Prepared rows for the pricer table, flattened from the rollup tree. The tile rebuilds
-//! this model when sheet data, the scope, the grouping, either expansion, columns, or
-//! the display clock changes. Each painted row stores formatted `SharedString` cells and
-//! their `CellState`, so painting does not format cell values. A grouping row's cells
-//! sum its legs' measures and read its dimensions' unanimity (`group_cell_text`).
+//! The pricer grid's index — every row under the current expansion with its
+//! tree-column facts, and `row_of` — and the pass that formats measure cells
+//! for the rows a window shows. A group row folds its legs only when filled.
+//! Colours live in `Paints`; a theme change never refills.
 //!
-//! Colours live separately in `Paints`: a theme change replaces the palette without
-//! rebuilding these rows. The delegate paints the tree column from each row's depth,
-//! kind, tag, text and note, all prepared here. A row's shorthand is also its search
-//! key.
+//! The tile rebuilds the index when sheet data, the scope, the grouping,
+//! either expansion, columns, or the display clock changes. The delegate
+//! paints the tree column from each row's depth, kind, tag, text and note,
+//! all prepared here. A row's shorthand is also its search key.
 
 use crate::core::columns::{
     CellState, CellText, ColumnKind, cell_text, group_cell_text, leg_reading, subset_cell_text,
 };
 use crate::core::rollup::{NULL_LABEL, NodeKind, Rollup, legs_under};
-use crate::core::sheet::{LineId, RowKind, Sheet};
+use crate::core::sheet::{Folded, LineId, RowKind, Sheet};
 use crate::core::shorthand::{render_expiry, render_strike};
 use crate::core::tree::Expansion;
 use crate::core::views::ColumnPlan;
@@ -22,6 +21,7 @@ use geode_core::colour::Sign;
 use geode_core::expansion::{Expansion as GroupExpansion, Path};
 use geode_core::view::Colour;
 use gpui::SharedString;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct GridColumn {
@@ -65,7 +65,7 @@ pub enum GridRowKind {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GridCell {
     pub text: SharedString,
     pub state: CellState,
@@ -73,39 +73,85 @@ pub struct GridCell {
     pub sign: Option<Sign>,
 }
 
+/// One painted row's tree-column facts, as [`Flatten`] pushes them.
 #[derive(Debug, Clone)]
-pub struct GridRow {
+struct TreeRow {
+    kind: GridRowKind,
+    /// The sheet's flat row; `None` on a group row.
+    row: Option<usize>,
+    id: Option<LineId>,
+    /// The rollup node this row paints (every row has one).
+    node: Option<usize>,
+    /// A group row's path, its key in the group expansion; `None` on
+    /// every other row (packages expand by `LineId`).
+    path: Option<Path>,
+    depth: usize,
+    /// Tree-column tag: a package's template token (`CS`, `CUSTOM`), empty on a
+    /// line or leg.
+    tag: SharedString,
+    /// Tree-column text: a group's value as its column spells it (`—`
+    /// for NULL); a package's summary (`package_summary`); a leg's or a
+    /// bare line's full one-line shorthand (`-2 SPX Z26 5000 C`).
+    text: SharedString,
+    /// Tree-column note: a package's leg count (`· 1 leg`, `· 2 legs`;
+    /// `· 1 of 2 legs` when fewer sit under its node, split or partly
+    /// hidden), empty on a group, line or leg.
+    note: SharedString,
+    /// Find key derived from shorthand. It can match text that does not appear in
+    /// the current view's columns.
+    search: SharedString,
+    /// The enclosing group row, for a group row's grouped-column cells.
+    parent: Option<u32>,
+}
+
+/// Every painted row's tree-column facts, in parallel arrays, and where
+/// each line paints. No measure cell: [`CellPass`] formats those for the
+/// rows a window shows.
+#[derive(Debug, Clone, Default)]
+pub struct GridIndex {
+    pub columns: Vec<GridColumn>,
+    kind: Vec<GridRowKind>,
+    row: Vec<Option<usize>>,
+    id: Vec<Option<LineId>>,
+    node: Vec<Option<usize>>,
+    path: Vec<Option<Path>>,
+    depth: Vec<usize>,
+    tag: Vec<SharedString>,
+    text: Vec<SharedString>,
+    note: Vec<SharedString>,
+    search: Vec<SharedString>,
+    parent: Vec<Option<u32>>,
+    /// Line → (first painted row, how many rows paint it).
+    row_of: HashMap<LineId, (u32, u32)>,
+}
+
+/// One row's tree-column facts, borrowed from a [`GridIndex`].
+#[derive(Debug, Clone, Copy)]
+pub struct TreeRef<'a> {
     pub kind: GridRowKind,
     /// The sheet's flat row; `None` on a group row.
     pub row: Option<usize>,
     pub id: Option<LineId>,
-    /// The rollup node this row paints (every row has one).
+    /// The rollup node this row paints.
     pub node: Option<usize>,
-    /// A group row's path, its key in the group expansion; `None` on
-    /// every other row (packages expand by `LineId`).
-    pub path: Option<Path>,
+    /// A group row's path; `None` on every other row.
+    pub path: Option<&'a Path>,
     pub depth: usize,
-    /// Tree-column tag: a package's template token (`CS`, `CUSTOM`), empty on a
-    /// line or leg.
-    pub tag: SharedString,
-    /// Tree-column text: a group's value as its column spells it (`—`
-    /// for NULL); a package's summary (`package_summary`); a leg's or a
-    /// bare line's full one-line shorthand (`-2 SPX Z26 5000 C`).
-    pub text: SharedString,
-    /// Tree-column note: a package's leg count (`· 1 leg`, `· 2 legs`;
-    /// `· 1 of 2 legs` when fewer sit under its node, split or partly
-    /// hidden), empty on a group, line or leg.
-    pub note: SharedString,
-    /// Find key derived from shorthand. It can match text that does not appear in
-    /// the current view's columns.
-    pub search: SharedString,
-    pub cells: Vec<GridCell>,
+    pub tag: &'a SharedString,
+    pub text: &'a SharedString,
+    pub note: &'a SharedString,
+    pub search: &'a SharedString,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct GridModel {
-    pub columns: Vec<GridColumn>,
-    pub rows: Vec<GridRow>,
+#[cfg(test)]
+thread_local! {
+    static BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Index builds on this thread, for tests that prove a route does not build.
+#[cfg(test)]
+pub(crate) fn builds() -> usize {
+    BUILDS.with(|b| b.get())
 }
 
 fn right_aligned(kind: ColumnKind) -> bool {
@@ -225,7 +271,105 @@ fn leg_note(shown: usize, total: usize) -> String {
     }
 }
 
-impl GridModel {
+impl GridIndex {
+    fn push(&mut self, r: TreeRow) {
+        let g = self.kind.len() as u32;
+        if let Some(id) = r.id {
+            let e = self.row_of.entry(id).or_insert((g, 0));
+            e.1 += 1;
+        }
+        self.kind.push(r.kind);
+        self.row.push(r.row);
+        self.id.push(r.id);
+        self.node.push(r.node);
+        self.path.push(r.path);
+        self.depth.push(r.depth);
+        self.tag.push(r.tag);
+        self.text.push(r.text);
+        self.note.push(r.note);
+        self.search.push(r.search);
+        self.parent.push(r.parent);
+    }
+
+    pub fn len(&self) -> usize {
+        self.kind.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.kind.is_empty()
+    }
+
+    /// Row `g`'s tree-column facts.
+    pub fn tree(&self, g: usize) -> Option<TreeRef<'_>> {
+        Some(TreeRef {
+            kind: *self.kind.get(g)?,
+            row: self.row[g],
+            id: self.id[g],
+            node: self.node[g],
+            path: self.path[g].as_ref(),
+            depth: self.depth[g],
+            tag: &self.tag[g],
+            text: &self.text[g],
+            note: &self.note[g],
+            search: &self.search[g],
+        })
+    }
+
+    /// Every row's tree-column facts, in painted order.
+    pub fn trees(&self) -> impl Iterator<Item = TreeRef<'_>> + '_ {
+        (0..self.len()).filter_map(|g| self.tree(g))
+    }
+
+    pub fn kind(&self, g: usize) -> Option<GridRowKind> {
+        self.kind.get(g).copied()
+    }
+
+    pub fn sheet_row(&self, g: usize) -> Option<usize> {
+        self.row.get(g).copied().flatten()
+    }
+
+    pub fn id(&self, g: usize) -> Option<LineId> {
+        self.id.get(g).copied().flatten()
+    }
+
+    pub fn node(&self, g: usize) -> Option<usize> {
+        self.node.get(g).copied().flatten()
+    }
+
+    pub fn path(&self, g: usize) -> Option<&Path> {
+        self.path.get(g)?.as_ref()
+    }
+
+    pub fn text(&self, g: usize) -> Option<&SharedString> {
+        self.text.get(g)
+    }
+
+    /// The group row enclosing row `g`; `None` at the roots.
+    pub fn parent(&self, g: usize) -> Option<usize> {
+        self.parent.get(g).copied().flatten().map(|p| p as usize)
+    }
+
+    /// The first row painting line `id`.
+    pub fn grid_row_of(&self, id: LineId) -> Option<usize> {
+        self.row_of.get(&id).map(|&(first, _)| first as usize)
+    }
+
+    /// How many rows paint line `id`: one, or more for a split package.
+    pub fn paints(&self, id: LineId) -> usize {
+        self.row_of.get(&id).map_or(0, |&(_, n)| n as usize)
+    }
+
+    /// The rows painting line `id`, in painted order.
+    pub fn rows_of(&self, id: LineId) -> impl Iterator<Item = usize> + '_ {
+        let (first, n) = self
+            .row_of
+            .get(&id)
+            .map_or((0, 0), |&(f, n)| (f as usize, n as usize));
+        (first..self.len())
+            .filter(move |&g| self.id[g] == Some(id))
+            .take(n)
+    }
+
     /// Flatten `rollup` into painted rows: a group row, then (while
     /// `groups` has its path open) its children; a package row, then
     /// (while `packages` has it open) its legs under this node; a bare
@@ -244,7 +388,9 @@ impl GridModel {
         packages: &Expansion,
         plan: &ColumnPlan,
         clock: Clock,
-    ) -> GridModel {
+    ) -> GridIndex {
+        #[cfg(test)]
+        BUILDS.with(|b| b.set(b.get() + 1));
         let columns: Vec<GridColumn> = plan
             .columns
             .iter()
@@ -265,21 +411,14 @@ impl GridModel {
             packages,
             plan,
             clock,
-            readings: Vec::new(),
-            grouped: Vec::new(),
-            rows: Vec::with_capacity(rollup.nodes.len()),
+            out: GridIndex::default(),
+            enclosing: Vec::new(),
         };
         for &root in &rollup.roots {
             f.node(root);
         }
-        GridModel {
-            columns,
-            rows: f.rows,
-        }
-    }
-
-    pub fn grid_row_of(&self, id: LineId) -> Option<usize> {
-        self.rows.iter().position(|r| r.id == Some(id))
+        f.out.columns = columns;
+        f.out
     }
 }
 
@@ -309,7 +448,7 @@ fn group_label(
     }
 }
 
-/// Find's targets: every row [`GridModel::build`] would paint with every
+/// Find's targets: every row [`GridIndex::build`] would paint with every
 /// group open and the packages as `packages` has them, in that order
 /// (the rollup's preorder), as `(node, find key)`. The keys are the
 /// painted rows' `search`: a group's label, a package's
@@ -358,7 +497,7 @@ pub fn find_targets(
     out
 }
 
-/// The walk behind [`GridModel::build`].
+/// The walk behind [`GridIndex::build`].
 struct Flatten<'a> {
     sheet: &'a Sheet,
     rollup: &'a Rollup,
@@ -366,16 +505,9 @@ struct Flatten<'a> {
     packages: &'a Expansion,
     plan: &'a ColumnPlan,
     clock: Clock,
-    /// Each line's `leg_reading` per plan column, by sheet row, filled the
-    /// first time a painted group row reads the line: nested groups read
-    /// every leg once per level, so each is formatted once.
-    readings: Vec<Option<Box<[CellText]>>>,
-    /// The enclosing groups' columns and the cell each shows, root first:
-    /// a group row's grouped columns (its own and its ancestors') show
-    /// the node's value rather than a unanimity every leg already agrees
-    /// on by construction.
-    grouped: Vec<(&'a str, CellText)>,
-    rows: Vec<GridRow>,
+    out: GridIndex,
+    /// The enclosing group rows, root first: each pushed row's `parent`.
+    enclosing: Vec<u32>,
 }
 
 impl<'a> Flatten<'a> {
@@ -395,21 +527,7 @@ impl<'a> Flatten<'a> {
                     None => SharedString::new_static(NULL_LABEL),
                     Some(_) => self.label(column, legs.first().copied(), label),
                 };
-                let shown = match value {
-                    None => CellText {
-                        text: String::new(),
-                        state: CellState::Blank,
-                        sign: None,
-                    },
-                    Some(_) => CellText {
-                        text: text.to_string(),
-                        state: CellState::Own,
-                        sign: None,
-                    },
-                };
-                self.grouped.push((column.as_str(), shown));
-                let cells = self.group_cells(&legs);
-                self.rows.push(GridRow {
+                self.out.push(TreeRow {
                     kind: GridRowKind::Group {
                         open,
                         depth: node.depth,
@@ -423,14 +541,15 @@ impl<'a> Flatten<'a> {
                     search: text.clone(),
                     text,
                     note: SharedString::default(),
-                    cells,
+                    parent: self.enclosing.last().copied(),
                 });
+                self.enclosing.push((self.out.len() - 1) as u32);
                 if open {
                     for &child in &node.children {
                         self.node(child);
                     }
                 }
-                self.grouped.pop();
+                self.enclosing.pop();
             }
             NodeKind::Package {
                 row,
@@ -465,96 +584,17 @@ impl<'a> Flatten<'a> {
         group_label(self.sheet, self.plan, self.clock, column, first, raw)
     }
 
-    fn group_cells(&mut self, legs: &[usize]) -> Vec<GridCell> {
-        for &leg in legs {
-            self.read(leg);
-        }
-        let folded = self.sheet.fold_legs(legs.iter().copied());
-        let readings = &self.readings;
-        self.plan
-            .columns
-            .iter()
-            .enumerate()
-            .map(|(col, c)| {
-                let t = match self
-                    .grouped
-                    .iter()
-                    .rev()
-                    .find(|(name, _)| *name == c.def.name)
-                {
-                    Some((_, shown)) => shown.clone(),
-                    None => group_cell_text(
-                        c.def,
-                        &c.format,
-                        legs.len(),
-                        &folded,
-                        legs.iter().filter_map(|&leg| {
-                            readings
-                                .get(leg)
-                                .and_then(Option::as_ref)
-                                .map(|cells| &cells[col])
-                        }),
-                        self.clock,
-                    ),
-                };
-                GridCell {
-                    text: t.text.into(),
-                    state: t.state,
-                    sign: t.sign,
-                }
-            })
-            .collect()
-    }
-
-    /// Fill `leg`'s readings for every plan column, once.
-    fn read(&mut self, leg: usize) {
-        if self.readings.len() <= leg {
-            self.readings
-                .resize_with(self.sheet.len().max(leg + 1), || None);
-        }
-        if self.readings[leg].is_none() {
-            self.readings[leg] = Some(
-                self.plan
-                    .columns
-                    .iter()
-                    .map(|c| leg_reading(self.sheet, leg, c.def, &c.format, self.clock))
-                    .collect(),
-            );
-        }
-    }
-
     fn package(&mut self, node: usize, r: usize, legs: &[usize], split: bool, partial: bool) {
         let sheet = self.sheet;
         let RowKind::Package { template } = sheet.kind(r) else {
             unreachable!("a package node names a package row");
         };
-        // Fewer legs here than the package has: this node's legs and
-        // their fold, computed once for every cell of the row.
-        let subset = partial.then(|| (legs, sheet.fold_legs(legs.iter().copied())));
         let total = sheet.children(r).len();
         let summary = match partial {
             true => legs_summary(sheet, legs.iter().copied()),
             false => package_summary(sheet, r),
         };
-        let cells = self
-            .plan
-            .columns
-            .iter()
-            .map(|c| {
-                let t = match &subset {
-                    Some((legs, folded)) => {
-                        subset_cell_text(sheet, r, legs, folded, c.def, &c.format, self.clock)
-                    }
-                    None => cell_text(sheet, r, c.def, &c.format, self.clock),
-                };
-                GridCell {
-                    text: t.text.into(),
-                    state: t.state,
-                    sign: t.sign,
-                }
-            })
-            .collect();
-        self.rows.push(GridRow {
+        self.out.push(TreeRow {
             kind: GridRowKind::Package {
                 open: self.packages.is_open(sheet.id(r)),
                 partial,
@@ -569,7 +609,7 @@ impl<'a> Flatten<'a> {
             text: summary.into(),
             note: leg_note(if partial { legs.len() } else { total }, total).into(),
             search: package_search(sheet, r, partial.then_some(legs)).into(),
-            cells,
+            parent: self.enclosing.last().copied(),
         });
     }
 
@@ -577,20 +617,7 @@ impl<'a> Flatten<'a> {
         let sheet = self.sheet;
         // One shorthand, shared by the painted text and the find key.
         let s = SharedString::from(sheet.shorthand(r));
-        let cells = self
-            .plan
-            .columns
-            .iter()
-            .map(|c| {
-                let t = cell_text(sheet, r, c.def, &c.format, self.clock);
-                GridCell {
-                    text: t.text.into(),
-                    state: t.state,
-                    sign: t.sign,
-                }
-            })
-            .collect();
-        self.rows.push(GridRow {
+        self.out.push(TreeRow {
             kind,
             row: Some(r),
             id: Some(sheet.id(r)),
@@ -601,8 +628,171 @@ impl<'a> Flatten<'a> {
             text: s.clone(),
             note: SharedString::default(),
             search: s,
-            cells,
+            parent: self.enclosing.last().copied(),
         });
+    }
+}
+
+/// What a window fill reads: the sheet, the rollup the index was built
+/// from, the plan, the clock.
+#[derive(Clone, Copy)]
+pub struct FillSource<'a> {
+    pub sheet: &'a Sheet,
+    pub rollup: &'a Rollup,
+    pub plan: &'a ColumnPlan,
+    pub clock: Clock,
+}
+
+/// A row's fold, prepared once for every cell of the row.
+enum RowFold {
+    /// A group row: its legs and their fold.
+    Group { legs: Vec<usize>, folded: Folded },
+    /// A partial package row: its node's legs' fold.
+    Subset { folded: Folded },
+    /// Every other row reads its own cells.
+    Own,
+}
+
+/// One fill pass over some rows. A group row folds its legs only when it is
+/// filled; each leg's readings are memoised for this pass alone (nested
+/// groups read every leg once per level, so each is formatted once).
+pub struct CellPass<'a> {
+    src: FillSource<'a>,
+    index: &'a GridIndex,
+    /// Each leg's `leg_reading` per plan column, by sheet row.
+    readings: Vec<Option<Box<[CellText]>>>,
+    /// The last prepared row and its fold.
+    memo: Option<(usize, RowFold)>,
+}
+
+impl<'a> CellPass<'a> {
+    pub fn new(src: FillSource<'a>, index: &'a GridIndex) -> Self {
+        CellPass {
+            src,
+            index,
+            readings: Vec::new(),
+            memo: None,
+        }
+    }
+
+    /// Fill `leg`'s readings for every plan column, once per pass.
+    fn read(&mut self, leg: usize) {
+        if self.readings.len() <= leg {
+            self.readings
+                .resize_with(self.src.sheet.len().max(leg + 1), || None);
+        }
+        if self.readings[leg].is_none() {
+            self.readings[leg] = Some(
+                self.src
+                    .plan
+                    .columns
+                    .iter()
+                    .map(|c| leg_reading(self.src.sheet, leg, c.def, &c.format, self.src.clock))
+                    .collect(),
+            );
+        }
+    }
+
+    fn prepare(&mut self, g: usize) {
+        if self.memo.as_ref().is_some_and(|(at, _)| *at == g) {
+            return;
+        }
+        let node = self.index.node(g);
+        let fold = match node.map(|n| &self.src.rollup.nodes[n].kind) {
+            Some(NodeKind::Group { .. }) => {
+                let legs = legs_under(self.src.rollup, node.unwrap_or_default());
+                for &leg in &legs {
+                    self.read(leg);
+                }
+                let folded = self.src.sheet.fold_legs(legs.iter().copied());
+                RowFold::Group { legs, folded }
+            }
+            Some(NodeKind::Package {
+                row: r,
+                legs: shown,
+                partial: true,
+                ..
+            }) => {
+                // Unused here; bound so the subset-fold mutation's whole-package replacement compiles.
+                let _ = r;
+                let subset = self.src.sheet.fold_legs(shown.iter().copied());
+                RowFold::Subset { folded: subset }
+            }
+            _ => RowFold::Own,
+        };
+        self.memo = Some((g, fold));
+    }
+
+    /// The cells a group row shows for its own and enclosing groups' columns:
+    /// the group's value, not a unanimity its legs agree on by construction.
+    fn grouped_shown(&self, g: usize, name: &str) -> Option<CellText> {
+        let mut at = Some(g);
+        while let Some(a) = at {
+            if let Some(NodeKind::Group { column, value, .. }) =
+                self.index.node(a).map(|n| &self.src.rollup.nodes[n].kind)
+                && column == name
+            {
+                return Some(match value {
+                    None => CellText {
+                        text: String::new(),
+                        state: CellState::Blank,
+                        sign: None,
+                    },
+                    Some(_) => CellText {
+                        text: self
+                            .index
+                            .text(a)
+                            .map(|t| t.to_string())
+                            .unwrap_or_default(),
+                        state: CellState::Own,
+                        sign: None,
+                    },
+                });
+            }
+            at = self.index.parent(a);
+        }
+        None
+    }
+
+    /// Row `g`'s cell in plan column `col`, formatted through the column
+    /// formatters (`cell_text`, `subset_cell_text`, `group_cell_text`).
+    pub fn cell(&mut self, g: usize, col: usize) -> Option<GridCell> {
+        let c = self.src.plan.columns.get(col)?;
+        self.prepare(g);
+        let (sheet, clock) = (self.src.sheet, self.src.clock);
+        let t = match &self.memo {
+            Some((_, RowFold::Group { legs, folded })) => match self.grouped_shown(g, c.def.name) {
+                Some(shown) => shown,
+                None => group_cell_text(
+                    c.def,
+                    &c.format,
+                    legs.len(),
+                    folded,
+                    legs.iter().filter_map(|&leg| {
+                        self.readings
+                            .get(leg)
+                            .and_then(Option::as_ref)
+                            .map(|cells| &cells[col])
+                    }),
+                    clock,
+                ),
+            },
+            Some((_, RowFold::Subset { folded })) => {
+                let r = self.index.sheet_row(g)?;
+                let node = self.index.node(g)?;
+                let NodeKind::Package { legs: shown, .. } = &self.src.rollup.nodes[node].kind
+                else {
+                    return None;
+                };
+                subset_cell_text(sheet, r, shown, folded, c.def, &c.format, clock)
+            }
+            _ => cell_text(sheet, self.index.sheet_row(g)?, c.def, &c.format, clock),
+        };
+        Some(GridCell {
+            text: t.text.into(),
+            state: t.state,
+            sign: t.sign,
+        })
     }
 }
 
@@ -616,6 +806,7 @@ mod tests {
     use geode_core::clock::Clock;
     use geode_core::dimensions::DerivedDimensions;
     use geode_core::pricing::{Measure, OptionKind};
+    use geode_tile::grid::WindowCache;
 
     /// [A, P(L1, L2), B].
     fn sheet() -> Sheet {
@@ -630,54 +821,84 @@ mod tests {
         ColumnPlan::build(Views::builtin().get("vanilla").unwrap())
     }
 
-    fn build(s: &Sheet, e: &Expansion) -> GridModel {
+    fn src<'a>(s: &'a Sheet, r: &'a Rollup, plan: &'a ColumnPlan) -> FillSource<'a> {
+        FillSource {
+            sheet: s,
+            rollup: r,
+            plan,
+            clock: Clock::utc(),
+        }
+    }
+
+    /// Row `g`'s cells, formatted on demand by a fresh pass.
+    fn cells(s: &Sheet, r: &Rollup, plan: &ColumnPlan, m: &GridIndex, g: usize) -> Vec<GridCell> {
+        let mut pass = CellPass::new(src(s, r, plan), m);
+        (0..plan.columns.len())
+            .map(|c| pass.cell(g, c).expect("a planned column"))
+            .collect()
+    }
+
+    /// Row `g`'s cell texts under the vanilla plan.
+    fn texts(s: &Sheet, r: &Rollup, m: &GridIndex, g: usize) -> Vec<String> {
+        cells(s, r, &plan(), m, g)
+            .into_iter()
+            .map(|c| c.text.to_string())
+            .collect()
+    }
+
+    fn tree(m: &GridIndex, g: usize) -> TreeRef<'_> {
+        m.tree(g).unwrap_or_else(|| panic!("no row {g}"))
+    }
+
+    fn build(s: &Sheet, e: &Expansion) -> (Rollup, GridIndex) {
         build_vis(s, e, &Visibility::all(s))
     }
 
     /// The flat sheet (an empty chain) under `v`: what the tile paints
     /// with no grouping.
-    fn build_vis(s: &Sheet, e: &Expansion, v: &Visibility) -> GridModel {
+    fn build_vis(s: &Sheet, e: &Expansion, v: &Visibility) -> (Rollup, GridIndex) {
         let dims = DerivedDimensions::default();
         let r = rollup::build(s, v, &EffectiveChain::default(), &dims, Clock::utc());
-        GridModel::build(s, &r, &GroupExpansion::default(), e, &plan(), Clock::utc())
+        let m = GridIndex::build(s, &r, &GroupExpansion::default(), e, &plan(), Clock::utc());
+        (r, m)
     }
 
     #[test]
     fn rows_follow_the_expansion_and_carry_depth_ids_tags_and_search_keys() {
         let s = sheet();
-        let closed = build(&s, &Expansion::default());
-        assert_eq!(closed.rows.len(), 3);
+        let (_, closed) = build(&s, &Expansion::default());
+        assert_eq!(closed.len(), 3);
         assert_eq!(
-            closed.rows[1].kind,
+            tree(&closed, 1).kind,
             GridRowKind::Package {
                 open: false,
                 partial: false,
                 split: false,
             }
         );
-        assert_eq!(closed.rows[1].search.as_ref(), "SPX Z26 4800/5200 CS");
+        assert_eq!(tree(&closed, 1).search.as_ref(), "SPX Z26 4800/5200 CS");
         assert_eq!(
-            closed.rows[1].tag.as_ref(),
+            tree(&closed, 1).tag.as_ref(),
             "CS",
             "a package: its template token"
         );
-        assert_eq!(closed.rows[0].tag.as_ref(), "", "a line: no tag");
+        assert_eq!(tree(&closed, 0).tag.as_ref(), "", "a line: no tag");
         let mut e = Expansion::default();
         e.set(s.id(1), true);
-        let open = build(&s, &e);
-        assert_eq!(open.rows.len(), 5);
+        let (_, open) = build(&s, &e);
+        assert_eq!(open.len(), 5);
         assert_eq!(
-            open.rows[1].kind,
+            tree(&open, 1).kind,
             GridRowKind::Package {
                 open: true,
                 partial: false,
                 split: false,
             }
         );
-        assert_eq!(open.rows[2].kind, GridRowKind::Leg { last: false });
-        assert_eq!(open.rows[2].depth, 1);
-        assert_eq!(open.rows[2].tag.as_ref(), "", "a leg: no tag");
-        assert_eq!(open.rows[4].search.as_ref(), "SPX Z26 4000 P");
+        assert_eq!(tree(&open, 2).kind, GridRowKind::Leg { last: false });
+        assert_eq!(tree(&open, 2).depth, 1);
+        assert_eq!(tree(&open, 2).tag.as_ref(), "", "a leg: no tag");
+        assert_eq!(tree(&open, 4).search.as_ref(), "SPX Z26 4000 P");
         assert_eq!(open.grid_row_of(s.id(4)), Some(4));
         assert_eq!(
             open.columns.len(),
@@ -694,15 +915,15 @@ mod tests {
         let s = sheet(); // [A, P(L1, L2), B]
         let mut e = Expansion::default();
         e.set(s.id(1), true);
-        let m = build(&s, &e);
-        assert_eq!(m.rows[0].text.as_ref(), "SPX Z26 5000 C");
-        assert_eq!(m.rows[0].note.as_ref(), "", "a bare line has no note");
-        assert_eq!(m.rows[1].text.as_ref(), "Z26 4800/5200");
-        assert_eq!(m.rows[1].note.as_ref(), "· 2 legs");
-        assert_eq!(m.rows[2].text.as_ref(), "SPX Z26 4800 C");
-        assert_eq!(m.rows[3].text.as_ref(), "-1 SPX Z26 5200 C");
-        assert_eq!(m.rows[2].note.as_ref(), "", "a leg has no note");
-        assert_eq!(m.rows[4].text.as_ref(), "SPX Z26 4000 P");
+        let (_, m) = build(&s, &e);
+        assert_eq!(tree(&m, 0).text.as_ref(), "SPX Z26 5000 C");
+        assert_eq!(tree(&m, 0).note.as_ref(), "", "a bare line has no note");
+        assert_eq!(tree(&m, 1).text.as_ref(), "Z26 4800/5200");
+        assert_eq!(tree(&m, 1).note.as_ref(), "· 2 legs");
+        assert_eq!(tree(&m, 2).text.as_ref(), "SPX Z26 4800 C");
+        assert_eq!(tree(&m, 3).text.as_ref(), "-1 SPX Z26 5200 C");
+        assert_eq!(tree(&m, 2).note.as_ref(), "", "a leg has no note");
+        assert_eq!(tree(&m, 4).text.as_ref(), "SPX Z26 4000 P");
     }
 
     #[test]
@@ -714,8 +935,8 @@ mod tests {
         push(&mut s, vec![callspread(2)]);
         let mut e = Expansion::default();
         e.open_all(&s);
-        let m = build(&s, &e);
-        let kinds: Vec<GridRowKind> = m.rows.iter().map(|r| r.kind).collect();
+        let (_, m) = build(&s, &e);
+        let kinds: Vec<GridRowKind> = m.trees().map(|r| r.kind).collect();
         assert_eq!(
             kinds,
             vec![
@@ -745,11 +966,11 @@ mod tests {
         s.apply(crate::core::Edit::Remove { at: 2 }).unwrap();
         let mut e = Expansion::default();
         e.open_all(&s);
-        let m = build(&s, &e);
-        assert_eq!(m.rows.len(), 2);
-        assert_eq!(m.rows[0].note.as_ref(), "· 1 leg");
-        assert_eq!(m.rows[0].text.as_ref(), "Z26 4800");
-        assert_eq!(m.rows[1].kind, GridRowKind::Leg { last: true });
+        let (_, m) = build(&s, &e);
+        assert_eq!(m.len(), 2);
+        assert_eq!(tree(&m, 0).note.as_ref(), "· 1 leg");
+        assert_eq!(tree(&m, 0).text.as_ref(), "Z26 4800");
+        assert_eq!(tree(&m, 1).kind, GridRowKind::Leg { last: true });
     }
 
     #[test]
@@ -771,10 +992,11 @@ mod tests {
             "precondition: list form, {:?}",
             s.shorthand(0)
         );
-        let m = build(&s, &Expansion::default());
-        assert!(!m.rows[0].text.contains('\n'), "{:?}", m.rows[0].text);
-        assert_eq!(m.rows[0].text.as_ref(), "Z26 5000/4000");
-        assert_eq!(m.rows[0].note.as_ref(), "· 2 legs");
+        let (_, m) = build(&s, &Expansion::default());
+        let text = tree(&m, 0).text;
+        assert!(!text.contains('\n'), "{text:?}");
+        assert_eq!(text.as_ref(), "Z26 5000/4000");
+        assert_eq!(tree(&m, 0).note.as_ref(), "· 2 legs");
     }
 
     #[test]
@@ -791,13 +1013,14 @@ mod tests {
             id: None,
         })
         .unwrap();
-        let m = build(&s, &Expansion::default());
-        assert_eq!(m.rows[0].text.as_ref(), "Z26 5000/4000");
+        let (_, m) = build(&s, &Expansion::default());
+        let row = tree(&m, 0);
+        assert_eq!(row.text.as_ref(), "Z26 5000/4000");
         assert!(
-            m.rows[0].search.contains(m.rows[0].text.as_ref()),
+            row.search.contains(row.text.as_ref()),
             "{:?} does not find {:?}",
-            m.rows[0].search,
-            m.rows[0].text
+            row.search,
+            row.text
         );
     }
 
@@ -814,8 +1037,8 @@ mod tests {
             id: None,
         })
         .unwrap();
-        let m = build(&s, &Expansion::default());
-        assert_eq!(m.rows[0].text.as_ref(), "Z26 5000");
+        let (_, m) = build(&s, &Expansion::default());
+        assert_eq!(tree(&m, 0).text.as_ref(), "Z26 5000");
     }
 
     #[test]
@@ -826,24 +1049,15 @@ mod tests {
             .map(|r| (s.id(r), s.revision(r), Ok(result(12.5))))
             .collect();
         s.deliver_all(answers, at(0));
-        let m = build(&s, &Expansion::default());
-        let price = plan()
-            .columns
-            .iter()
-            .position(|c| c.def.name == "npv")
-            .unwrap();
-        assert_eq!(m.rows[0].cells[price].text.as_ref(), "12.50");
-        assert_eq!(m.rows[0].cells[price].state, CellState::Own);
-        let strike = plan()
-            .columns
-            .iter()
-            .position(|c| c.def.name == "strike")
-            .unwrap();
+        let (r, m) = build(&s, &Expansion::default());
+        let price = col("npv");
+        let row0 = cells(&s, &r, &plan(), &m, 0);
+        assert_eq!(row0[price].text.as_ref(), "12.50");
+        assert_eq!(row0[price].state, CellState::Own);
+        let strike = col("strike");
+        let row1 = cells(&s, &r, &plan(), &m, 1);
         assert_eq!(
-            (
-                m.rows[1].cells[strike].text.as_ref(),
-                m.rows[1].cells[strike].state
-            ),
+            (row1[strike].text.as_ref(), row1[strike].state),
             ("4800/5200", CellState::Own),
             "a package shows its legs' strikes"
         );
@@ -859,25 +1073,23 @@ mod tests {
     #[test]
     fn a_measure_cell_carries_its_sign_and_a_text_cell_none() {
         let mut s = sheet();
-        let col = |name: &str| {
-            plan()
-                .columns
-                .iter()
-                .position(|c| c.def.name == name)
-                .unwrap()
-        };
-        let before = build(&s, &Expansion::default());
-        assert_eq!(before.rows[0].cells[col("npv")].sign, None, "unpriced");
+        let (r, before) = build(&s, &Expansion::default());
+        assert_eq!(
+            cells(&s, &r, &plan(), &before, 0)[col("npv")].sign,
+            None,
+            "unpriced"
+        );
         let mut neg = result(-12.5);
         neg.set(Measure::Delta01, false, -0.5);
         neg.set(Measure::Gamma01, false, 0.0);
         s.deliver_all(vec![(s.id(0), s.revision(0), Ok(neg))], at(0));
-        let m = build(&s, &Expansion::default());
-        assert_eq!(m.rows[0].cells[col("npv")].sign, Some(Sign::Negative));
-        assert_eq!(m.rows[0].cells[col("delta01")].sign, Some(Sign::Negative));
-        assert_eq!(m.rows[0].cells[col("gamma01")].sign, Some(Sign::Zero));
-        assert_eq!(m.rows[0].cells[col("strike")].sign, None, "text");
-        assert_eq!(m.rows[0].cells[col("qty")].sign, None, "a dimension");
+        let (r, m) = build(&s, &Expansion::default());
+        let row0 = cells(&s, &r, &plan(), &m, 0);
+        assert_eq!(row0[col("npv")].sign, Some(Sign::Negative));
+        assert_eq!(row0[col("delta01")].sign, Some(Sign::Negative));
+        assert_eq!(row0[col("gamma01")].sign, Some(Sign::Zero));
+        assert_eq!(row0[col("strike")].sign, None, "text");
+        assert_eq!(row0[col("qty")].sign, None, "a dimension");
         assert_eq!(
             m.columns[col("npv")].colour,
             Colour::Sign,
@@ -917,8 +1129,8 @@ mod tests {
         let mut e = Expansion::default();
         e.set(s.id(1), true);
         let v = scoped(&s);
-        let m = build_vis(&s, &e, &v);
-        let p = &m.rows[1];
+        let (r, m) = build_vis(&s, &e, &v);
+        let p = tree(&m, 1);
         assert_eq!(p.row, Some(1));
         assert_eq!(
             p.kind,
@@ -930,24 +1142,25 @@ mod tests {
         );
         assert_eq!(p.note.as_ref(), "· 1 of 2 legs");
         assert_eq!(p.text.as_ref(), "Z26 5200", "the shown legs' summary");
-        assert_eq!(p.cells[col("strike")].text.as_ref(), "5200");
-        assert_eq!(p.cells[col("qty")].text.as_ref(), "-1", "the leg's own qty");
+        let pc = cells(&s, &r, &plan(), &m, 1);
+        assert_eq!(pc[col("strike")].text.as_ref(), "5200");
+        assert_eq!(pc[col("qty")].text.as_ref(), "-1", "the leg's own qty");
         assert_eq!(
-            p.cells[col("npv")].text.as_ref(),
+            pc[col("npv")].text.as_ref(),
             "-2.00",
             "qty × price of the shown leg, not the package's -1.00 fold"
         );
-        assert_eq!(p.cells[col("npv")].sign, Some(Sign::Negative));
-        assert_eq!(m.rows[2].row, Some(3));
+        assert_eq!(pc[col("npv")].sign, Some(Sign::Negative));
+        assert_eq!(tree(&m, 2).row, Some(3));
         assert_eq!(
-            m.rows[2].kind,
+            tree(&m, 2).kind,
             GridRowKind::Leg { last: true },
             "the last shown leg takes the corner"
         );
         // Unscoped, the same package paints its whole fold.
-        let all = build(&s, &e);
-        assert_eq!(all.rows[1].cells[col("npv")].text.as_ref(), "1.00");
-        assert_eq!(all.rows[1].note.as_ref(), "· 2 legs");
+        let (r, all) = build(&s, &e);
+        assert_eq!(texts(&s, &r, &all, 1)[col("npv")], "1.00");
+        assert_eq!(tree(&all, 1).note.as_ref(), "· 2 legs");
     }
 
     /// A partly hidden package's find key reads its shown legs, as its
@@ -957,8 +1170,8 @@ mod tests {
     fn a_partly_hidden_packages_find_key_reads_only_its_shown_legs() {
         let s = sheet();
         let v = scoped(&s);
-        let m = build_vis(&s, &Expansion::default(), &v);
-        let p = &m.rows[1];
+        let (_, m) = build_vis(&s, &Expansion::default(), &v);
+        let p = tree(&m, 1);
         assert_eq!(p.row, Some(1));
         assert!(
             !p.search.contains("4800"),
@@ -975,8 +1188,8 @@ mod tests {
             "the painted summary is findable"
         );
         // Unscoped, the key is the template form again, over every leg.
-        let all = build(&s, &Expansion::default());
-        assert!(all.rows[1].search.contains("4800"));
+        let (_, all) = build(&s, &Expansion::default());
+        assert!(tree(&all, 1).search.contains("4800"));
     }
 
     #[test]
@@ -986,8 +1199,8 @@ mod tests {
         e.set(s.id(1), true);
         let v = scoped(&s);
         assert_eq!(v.hidden, 2, "the 4800 leg and B");
-        let m = build_vis(&s, &e, &v);
-        let rows: Vec<Option<usize>> = m.rows.iter().map(|r| r.row).collect();
+        let (_, m) = build_vis(&s, &e, &v);
+        let rows: Vec<Option<usize>> = m.trees().map(|r| r.row).collect();
         assert_eq!(rows, vec![Some(0), Some(1), Some(3)]);
         assert_eq!(m.grid_row_of(s.id(4)), None);
     }
@@ -1004,9 +1217,9 @@ mod tests {
             id: None,
         })
         .unwrap();
-        let m = build(&s, &Expansion::default());
-        assert_eq!(m.rows[0].tag.as_ref(), "CUSTOM");
-        assert_eq!(m.rows[0].search.as_ref(), "CUSTOM SPX Z26 5000/4000");
+        let (_, m) = build(&s, &Expansion::default());
+        assert_eq!(tree(&m, 0).tag.as_ref(), "CUSTOM");
+        assert_eq!(tree(&m, 0).search.as_ref(), "CUSTOM SPX Z26 5000/4000");
     }
 
     // ---- grouping -------------------------------------------------------
@@ -1051,11 +1264,11 @@ mod tests {
         groups: &GroupExpansion,
         packages: &Expansion,
         plan: &ColumnPlan,
-    ) -> (rollup::Rollup, GridModel) {
+    ) -> (rollup::Rollup, GridIndex) {
         let levels: Vec<String> = levels.iter().map(|l| l.to_string()).collect();
         let chain = effective_chain(&levels, dims);
         let r = rollup::build(s, &Visibility::all(s), &chain, dims, Clock::utc());
-        let m = GridModel::build(s, &r, groups, packages, plan, Clock::utc());
+        let m = GridIndex::build(s, &r, groups, packages, plan, Clock::utc());
         (r, m)
     }
 
@@ -1064,7 +1277,7 @@ mod tests {
         levels: &[&str],
         groups: &GroupExpansion,
         packages: &Expansion,
-    ) -> (rollup::Rollup, GridModel) {
+    ) -> (rollup::Rollup, GridIndex) {
         let dims = DerivedDimensions::default();
         grouped_with(s, levels, &dims, groups, packages, &plan())
     }
@@ -1075,12 +1288,23 @@ mod tests {
         g
     }
 
+    /// The priced fixture grouped by `[underlying_ref, expiry]` under the
+    /// vanilla plan (which shows `underlying_ref`), every group and package
+    /// open.
+    fn grouped_fixture() -> (Sheet, Rollup, ColumnPlan, GroupExpansion, Expansion) {
+        let s = priced();
+        let mut packages = Expansion::default();
+        packages.open_all(&s);
+        let groups = all_open();
+        let (r, _) = grouped(&s, &["underlying_ref", "expiry"], &groups, &packages);
+        (s, r, plan(), groups, packages)
+    }
+
     /// One line per grid row, indented by depth: a group `▾`/`▸` and its
     /// text, a package `P<row>` and its note (`split` when split), a leg
     /// `├` (`└` if last) and `L<row>`, a line `L<row>`.
-    fn describe(m: &GridModel) -> Vec<String> {
-        m.rows
-            .iter()
+    fn describe(m: &GridIndex) -> Vec<String> {
+        m.trees()
             .map(|r| {
                 let pad = "  ".repeat(r.depth);
                 match r.kind {
@@ -1102,16 +1326,27 @@ mod tests {
             .collect()
     }
 
-    fn group_row<'m>(m: &'m GridModel, label: &str) -> &'m GridRow {
-        m.rows
-            .iter()
-            .find(|r| matches!(r.kind, GridRowKind::Group { .. }) && r.text.as_ref() == label)
+    /// The group row labelled `label`.
+    fn group_row(m: &GridIndex, label: &str) -> usize {
+        (0..m.len())
+            .find(|&g| {
+                matches!(m.kind(g), Some(GridRowKind::Group { .. }))
+                    && m.text(g).is_some_and(|t| t.as_ref() == label)
+            })
             .unwrap_or_else(|| panic!("no group row {label}: {:?}", describe(m)))
     }
 
-    fn cell<'m>(r: &'m GridRow, name: &str) -> (&'m str, CellState) {
-        let c = &r.cells[col(name)];
-        (c.text.as_ref(), c.state)
+    /// Row `g`'s cell in column `name` of the vanilla plan.
+    fn cell(s: &Sheet, r: &Rollup, m: &GridIndex, g: usize, name: &str) -> (String, CellState) {
+        let c = CellPass::new(src(s, r, &plan()), m)
+            .cell(g, col(name))
+            .expect("a planned column");
+        (c.text.to_string(), c.state)
+    }
+
+    /// `(text, state)` as [`cell`] returns it.
+    fn ts(text: &str, state: CellState) -> (String, CellState) {
+        (text.to_string(), state)
     }
 
     /// `names`' columns at their vocabulary defaults.
@@ -1129,6 +1364,87 @@ mod tests {
                     }
                 })
                 .collect(),
+        }
+    }
+
+    /// The window holds exactly what the formatter formats, group rows and
+    /// partial packages included.
+    #[test]
+    fn the_window_paints_what_the_formatter_formats() {
+        let (s, tree, plan, groups, packages) = grouped_fixture();
+        let index = GridIndex::build(&s, &tree, &groups, &packages, &plan, Clock::utc());
+        let mut window = WindowCache::default();
+        let mut pass = CellPass::new(src(&s, &tree, &plan), &index);
+        window.set_window(0..index.len(), index.columns.len(), |g, c| pass.cell(g, c));
+        let mut fresh = CellPass::new(src(&s, &tree, &plan), &index);
+        for g in (0..index.len()).rev() {
+            for c in 0..index.columns.len() {
+                assert_eq!(window.get(g, c).cloned(), fresh.cell(g, c), "({g}, {c})");
+            }
+        }
+    }
+
+    /// `row_of` names a line's first painted row; a split package paints twice.
+    #[test]
+    fn row_of_is_the_first_painted_row_of_a_line() {
+        let (s, tree, plan, groups, packages) = grouped_fixture();
+        let index = GridIndex::build(&s, &tree, &groups, &packages, &plan, Clock::utc());
+        let cal = s.id(5);
+        assert_eq!(index.paints(cal), 2, "the calendar splits by expiry");
+        for g in 0..index.len() {
+            if let Some(id) = index.id(g) {
+                let first = (0..index.len()).find(|&x| index.id(x) == Some(id));
+                assert_eq!(index.grid_row_of(id), first, "{id:?}");
+                assert_eq!(
+                    index.rows_of(id).count(),
+                    (0..index.len())
+                        .filter(|&x| index.id(x) == Some(id))
+                        .count()
+                );
+            }
+        }
+    }
+
+    /// A nested group row shows each enclosing group's value in that group's
+    /// column, not a unanimity over its legs.
+    #[test]
+    fn a_group_row_shows_its_ancestors_grouped_values() {
+        let (s, tree, plan, groups, packages) = grouped_fixture();
+        let index = GridIndex::build(&s, &tree, &groups, &packages, &plan, Clock::utc());
+        let und = index
+            .columns
+            .iter()
+            .position(|c| c.name == "underlying_ref")
+            .expect("shown");
+        let inner = (0..index.len())
+            .find(|&g| matches!(index.kind(g), Some(GridRowKind::Group { depth: 1, .. })))
+            .expect("a nested group");
+        let outer = index.parent(inner).expect("enclosed");
+        let mut pass = CellPass::new(src(&s, &tree, &plan), &index);
+        assert_eq!(
+            pass.cell(inner, und).map(|c| c.text),
+            index.text(outer).cloned(),
+            "the enclosing group's value"
+        );
+
+        // Under `underlying_ref` the legs' unanimity agrees by construction;
+        // under `qty` it does not: a group's qty cell otherwise counts its
+        // legs, so the nested group must read its parent's value instead.
+        let (r, m) = grouped(&s, &["qty", "expiry"], &all_open(), &Expansion::default());
+        let qty = col("qty");
+        let nested: Vec<usize> = (0..m.len())
+            .filter(|&g| matches!(m.kind(g), Some(GridRowKind::Group { depth: 1, .. })))
+            .collect();
+        assert!(!nested.is_empty(), "{:?}", describe(&m));
+        for g in nested {
+            let parent = m.parent(g).expect("enclosed");
+            assert_eq!(
+                cell(&s, &r, &m, g, "qty").0,
+                m.text(parent).expect("a label").to_string(),
+                "row {g}: {:?}",
+                describe(&m)
+            );
+            assert_eq!(cells(&s, &r, &plan, &m, g)[qty].state, CellState::Own);
         }
     }
 
@@ -1152,7 +1468,7 @@ mod tests {
                 "  L8"
             ]
         );
-        let spx = group_row(&m, "SPX");
+        let spx = tree(&m, group_row(&m, "SPX"));
         assert_eq!(
             spx.kind,
             GridRowKind::Group {
@@ -1161,14 +1477,14 @@ mod tests {
             }
         );
         assert_eq!((spx.row, spx.id), (None, None), "a group is no sheet row");
-        assert_eq!(spx.path, Some(vec![Some("SPX".to_string())]));
+        assert_eq!(spx.path, Some(&vec![Some("SPX".to_string())]));
         let node = spx.node.expect("a group row names its node");
         assert!(
             matches!(&r.nodes[node].kind, rollup::NodeKind::Group { label, .. } if label == "SPX")
         );
         assert_eq!((spx.tag.as_ref(), spx.note.as_ref()), ("", ""));
         assert_eq!(spx.search.as_ref(), "SPX", "find matches the label");
-        let p1 = &m.rows[4];
+        let p1 = tree(&m, 4);
         assert_eq!(p1.path, None, "only group rows carry a path");
         assert!(
             matches!(
@@ -1206,11 +1522,11 @@ mod tests {
             "a closed group hides its rows"
         );
         assert_eq!(
-            group_row(&m, "SPX").kind,
-            GridRowKind::Group {
+            m.kind(group_row(&m, "SPX")),
+            Some(GridRowKind::Group {
                 open: false,
                 depth: 0
-            }
+            })
         );
 
         // Two levels: the inner group one deeper, its lines deeper again.
@@ -1235,12 +1551,7 @@ mod tests {
                 "    L8"
             ]
         );
-        let c = m
-            .rows
-            .iter()
-            .filter(|r| r.text.as_ref() == "C")
-            .nth(1)
-            .unwrap();
+        let c = m.trees().filter(|r| r.text.as_ref() == "C").nth(1).unwrap();
         assert_eq!(
             c.kind,
             GridRowKind::Group {
@@ -1250,7 +1561,7 @@ mod tests {
         );
         assert_eq!(
             c.path,
-            Some(vec![Some("SPX".to_string()), Some("C".to_string())])
+            Some(&vec![Some("SPX".to_string()), Some("C".to_string())])
         );
     }
 
@@ -1261,50 +1572,83 @@ mod tests {
     #[test]
     fn a_group_row_sums_its_legs_and_reads_unanimity() {
         let s = priced();
-        let (_, m) = grouped(&s, &["underlying_ref"], &all_open(), &Expansion::default());
+        let (r, m) = grouped(&s, &["underlying_ref"], &all_open(), &Expansion::default());
         let spx = group_row(&m, "SPX");
         let npv: f64 = [0usize, 2, 3, 6, 7, 8]
             .iter()
             .map(|&r| s.qty(r) as f64 * (r as f64 + 1.0))
             .sum();
         assert_eq!(
-            cell(spx, "npv"),
-            (format!("{npv:.2}").as_str(), CellState::Own)
+            cell(&s, &r, &m, spx, "npv"),
+            ts(&format!("{npv:.2}"), CellState::Own)
         );
         assert!(
-            spx.cells[col("npv")].sign.is_some(),
+            cells(&s, &r, &plan(), &m, spx)[col("npv")].sign.is_some(),
             "a sum carries its sign"
         );
-        assert_eq!(cell(spx, "qty"), ("6", CellState::Own), "the leg count");
-        assert_eq!(cell(spx, "underlying_ref"), ("SPX", CellState::Own));
-        assert_eq!(cell(spx, "strike"), ("mixed", CellState::Mixed));
-        assert_eq!(cell(spx, "expiry"), ("mixed", CellState::Mixed));
-        assert_eq!(cell(spx, "option_type"), ("mixed", CellState::Mixed));
-        assert_eq!(cell(spx, "currency"), ("USD", CellState::Own));
         assert_eq!(
-            cell(spx, "spot_shift"),
-            ("", CellState::Blank),
+            cell(&s, &r, &m, spx, "qty"),
+            ts("6", CellState::Own),
+            "the leg count"
+        );
+        assert_eq!(
+            cell(&s, &r, &m, spx, "underlying_ref"),
+            ts("SPX", CellState::Own)
+        );
+        assert_eq!(
+            cell(&s, &r, &m, spx, "strike"),
+            ts("mixed", CellState::Mixed)
+        );
+        assert_eq!(
+            cell(&s, &r, &m, spx, "expiry"),
+            ts("mixed", CellState::Mixed)
+        );
+        assert_eq!(
+            cell(&s, &r, &m, spx, "option_type"),
+            ts("mixed", CellState::Mixed)
+        );
+        assert_eq!(cell(&s, &r, &m, spx, "currency"), ts("USD", CellState::Own));
+        assert_eq!(
+            cell(&s, &r, &m, spx, "spot_shift"),
+            ts("", CellState::Blank),
             "no leg sets one"
         );
-        assert_eq!(cell(spx, "status"), ("", CellState::Own), "every leg fresh");
+        assert_eq!(
+            cell(&s, &r, &m, spx, "status"),
+            ts("", CellState::Own),
+            "every leg fresh"
+        );
         let ndx = group_row(&m, "NDX");
         assert_eq!(
-            cell(ndx, "strike"),
-            ("5000", CellState::Own),
+            cell(&s, &r, &m, ndx, "strike"),
+            ts("5000", CellState::Own),
             "one line: unanimous"
         );
-        assert_eq!(cell(ndx, "option_type"), ("C", CellState::Own));
-        assert_eq!(cell(ndx, "qty"), ("1", CellState::Own));
-        assert_eq!(cell(ndx, "npv"), ("5.00", CellState::Own));
+        assert_eq!(
+            cell(&s, &r, &m, ndx, "option_type"),
+            ts("C", CellState::Own)
+        );
+        assert_eq!(cell(&s, &r, &m, ndx, "qty"), ts("1", CellState::Own));
+        assert_eq!(cell(&s, &r, &m, ndx, "npv"), ts("5.00", CellState::Own));
 
         // A leg repricing: the group's status and sums read the fold.
         let mut s = priced();
         s.touch(0);
-        let (_, m) = grouped(&s, &["underlying_ref"], &all_open(), &Expansion::default());
+        let (r, m) = grouped(&s, &["underlying_ref"], &all_open(), &Expansion::default());
         let spx = group_row(&m, "SPX");
-        assert_eq!(cell(spx, "status"), ("pricing…", CellState::Stale));
-        assert_eq!(cell(spx, "npv").1, CellState::Stale, "the sum is muted");
-        assert_eq!(cell(group_row(&m, "NDX"), "npv").1, CellState::Own);
+        assert_eq!(
+            cell(&s, &r, &m, spx, "status"),
+            ts("pricing…", CellState::Stale)
+        );
+        assert_eq!(
+            cell(&s, &r, &m, spx, "npv").1,
+            CellState::Stale,
+            "the sum is muted"
+        );
+        assert_eq!(
+            cell(&s, &r, &m, group_row(&m, "NDX"), "npv").1,
+            CellState::Own
+        );
     }
 
     /// A NULL beside a value is `mixed`, not the value: showing it would
@@ -1318,7 +1662,7 @@ mod tests {
         );
         let plan = plan_of(&["barrier"]);
         let dims = DerivedDimensions::default();
-        let (_, m) = grouped_with(
+        let (r, m) = grouped_with(
             &s,
             &["underlying_ref"],
             &dims,
@@ -1326,14 +1670,11 @@ mod tests {
             &Expansion::default(),
             &plan,
         );
-        let spx = group_row(&m, "SPX");
+        let spx = &cells(&s, &r, &plan, &m, group_row(&m, "SPX"))[0];
+        assert_eq!((spx.text.as_ref(), spx.state), ("mixed", CellState::Mixed));
+        let ndx = &cells(&s, &r, &plan, &m, group_row(&m, "NDX"))[0];
         assert_eq!(
-            (spx.cells[0].text.as_ref(), spx.cells[0].state),
-            ("mixed", CellState::Mixed)
-        );
-        let ndx = group_row(&m, "NDX");
-        assert_eq!(
-            (ndx.cells[0].text.as_ref(), ndx.cells[0].state),
+            (ndx.text.as_ref(), ndx.state),
             ("", CellState::Blank),
             "no leg reads one: blank"
         );
@@ -1350,7 +1691,7 @@ mod tests {
         s.deliver_all(vec![(s.id(0), s.revision(0), Ok(eur))], at(1));
         let plan = plan_of(&["npv", "npv_usd", "currency"]);
         let dims = DerivedDimensions::default();
-        let (_, m) = grouped_with(
+        let (r, m) = grouped_with(
             &s,
             &["underlying_ref"],
             &dims,
@@ -1358,8 +1699,8 @@ mod tests {
             &Expansion::default(),
             &plan,
         );
-        let spx = group_row(&m, "SPX");
-        let at = |i: usize| (spx.cells[i].text.as_ref(), spx.cells[i].state);
+        let spx = cells(&s, &r, &plan, &m, group_row(&m, "SPX"));
+        let at = |i: usize| (spx[i].text.as_ref(), spx[i].state);
         assert_eq!(at(0), ("—", CellState::Stale));
         let usd: f64 = [0usize, 2, 3, 6, 7, 8]
             .iter()
@@ -1367,9 +1708,9 @@ mod tests {
             .sum();
         assert_eq!(at(1), (format!("{usd:.2}").as_str(), CellState::Own));
         assert_eq!(at(2), ("mixed", CellState::Mixed));
-        let ndx = group_row(&m, "NDX");
+        let ndx = &cells(&s, &r, &plan, &m, group_row(&m, "NDX"))[0];
         assert_eq!(
-            (ndx.cells[0].text.as_ref(), ndx.cells[0].state),
+            (ndx.text.as_ref(), ndx.state),
             ("5.00", CellState::Own),
             "a one-currency group sums locally"
         );
@@ -1382,7 +1723,7 @@ mod tests {
         let s = priced();
         let mut packages = Expansion::default();
         packages.set(s.id(5), true);
-        let (_, m) = grouped(&s, &["expiry"], &all_open(), &packages);
+        let (r, m) = grouped(&s, &["expiry"], &all_open(), &packages);
         assert_eq!(
             describe(&m),
             [
@@ -1398,21 +1739,27 @@ mod tests {
                 "  L8"
             ]
         );
-        let cal: Vec<&GridRow> = m.rows.iter().filter(|r| r.row == Some(5)).collect();
+        let cal: Vec<usize> = (0..m.len())
+            .filter(|&g| m.sheet_row(g) == Some(5))
+            .collect();
         assert_eq!(
-            cal[0].kind,
+            tree(&m, cal[0]).kind,
             GridRowKind::Package {
                 open: true,
                 partial: true,
                 split: true
             }
         );
-        assert_eq!(cal[0].text.as_ref(), "Z26 5000", "the node's legs' summary");
-        assert_eq!(cal[1].text.as_ref(), "H27 5000");
-        for (r, leg) in [(cal[0], 7usize), (cal[1], 6)] {
+        assert_eq!(
+            tree(&m, cal[0]).text.as_ref(),
+            "Z26 5000",
+            "the node's legs' summary"
+        );
+        assert_eq!(tree(&m, cal[1]).text.as_ref(), "H27 5000");
+        for (g, leg) in [(cal[0], 7usize), (cal[1], 6)] {
             let npv = s.qty(leg) as f64 * (leg as f64 + 1.0);
             assert_eq!(
-                cell(r, "npv").0,
+                cell(&s, &r, &m, g, "npv").0,
                 format!("{npv:.2}"),
                 "the node's leg alone"
             );
@@ -1427,19 +1774,19 @@ mod tests {
     #[test]
     fn a_group_label_reads_as_its_column_and_null_as_a_dash() {
         let s = fixture();
-        let (_, m) = grouped(&s, &["expiry"], &all_open(), &Expansion::default());
-        let z26 = &m.rows[0];
+        let (r, m) = grouped(&s, &["expiry"], &all_open(), &Expansion::default());
+        let z26 = tree(&m, 0);
         assert_eq!(z26.text.as_ref(), "Z26");
         assert_eq!(
             z26.path,
-            Some(vec![Some("2026-12-18".to_string())]),
+            Some(&vec![Some("2026-12-18".to_string())]),
             "the path stays raw"
         );
-        assert_eq!(cell(z26, "expiry"), ("Z26", CellState::Own));
+        assert_eq!(cell(&s, &r, &m, 0, "expiry"), ts("Z26", CellState::Own));
 
         let barrier = plan_of(&["barrier"]);
         let dims = DerivedDimensions::default();
-        let (_, m) = grouped_with(
+        let (r, m) = grouped_with(
             &s,
             &["barrier"],
             &dims,
@@ -1447,12 +1794,10 @@ mod tests {
             &Expansion::default(),
             &barrier,
         );
-        assert_eq!(m.rows[0].text.as_ref(), "—", "no line reads a barrier");
-        assert_eq!(m.rows[0].path, Some(vec![None]));
-        assert_eq!(
-            (m.rows[0].cells[0].text.as_ref(), m.rows[0].cells[0].state),
-            ("", CellState::Blank)
-        );
+        assert_eq!(tree(&m, 0).text.as_ref(), "—", "no line reads a barrier");
+        assert_eq!(tree(&m, 0).path, Some(&vec![None]));
+        let c = &cells(&s, &r, &barrier, &m, 0)[0];
+        assert_eq!((c.text.as_ref(), c.state), ("", CellState::Blank));
 
         let dims = {
             let doc = geode_core::config::merge_docs(
@@ -1474,8 +1819,7 @@ mod tests {
             &plan(),
         );
         let labels: Vec<&str> = m
-            .rows
-            .iter()
+            .trees()
             .filter(|r| matches!(r.kind, GridRowKind::Group { .. }))
             .map(|r| r.text.as_ref())
             .collect();
@@ -1500,7 +1844,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            m.rows[4].text.as_ref(),
+            tree(&m, 4).text.as_ref(),
             "SPX Z26 4800 C",
             "the leg's own shorthand"
         );
@@ -1523,8 +1867,7 @@ mod tests {
             let (r, open) = grouped(&s, levels, &all_open(), &packages);
             let got = find_targets(&s, &r, &packages, &plan(), Clock::utc());
             let want: Vec<(usize, SharedString)> = open
-                .rows
-                .iter()
+                .trees()
                 .map(|row| (row.node.expect("every row is a node"), row.search.clone()))
                 .collect();
             assert_eq!(got, want, "{levels:?}");

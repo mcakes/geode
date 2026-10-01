@@ -230,7 +230,10 @@ fn y_over_rows_copies_a_header_and_every_painted_column_then_ends_the_selection(
         (
             t.spec.rows.column.clone(),
             m.columns.join("\t"),
-            [m.rows[0].label.to_string(), m.rows[1].label.to_string()],
+            [
+                m.label(0).unwrap().to_string(),
+                m.label(1).unwrap().to_string(),
+            ],
         )
     });
     assert_eq!(columns.split('\t').count(), 6, "every painted column");
@@ -250,6 +253,34 @@ fn y_over_rows_copies_a_header_and_every_painted_column_then_ends_the_selection(
         )
     );
     assert_eq!(h.mode(&vcx), "normal", "y consumes the selection");
+}
+
+/// `y` over a `Rows` selection copies every selected row, on screen or
+/// not: each is formatted on demand, never read from the painted window.
+#[gpui::test]
+fn a_selection_tsv_includes_rows_off_screen(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_flat(cx);
+    let rows: Vec<(String, String)> = (0..200)
+        .map(|i| {
+            (
+                format!("D{i}"),
+                format!("{:04}-01-{:02}", 2027 + i / 28, i % 28 + 1),
+            )
+        })
+        .collect();
+    let borrowed: Vec<(&str, &str, f64, &str)> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, (l, d))| (l.as_str(), d.as_str(), i as f64, "declared"))
+        .collect();
+    h.with_flat_document_with(&mut vcx, test_fixtures::schedule_snapshot(&borrowed));
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.motion(&mut vcx, "bottom", None);
+    h.dispatch(&mut vcx, "yank", None);
+    let text = clipboard(&mut vcx).expect("copied");
+    assert_eq!(text.lines().count(), 201, "a header and every row");
+    let last = text.lines().last().expect("a last row");
+    assert!(last.contains("\t199.0000\t"), "{last}");
 }
 
 /// `y` over a `Block` copies only its own columns' header and cells.
@@ -283,13 +314,13 @@ fn d_over_rows_deletes_them_in_one_draft_change_and_ends_the_selection(
     h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "delete_row", None);
     let states = h.tile.read_with(&vcx, |t, _| {
-        t.model().rows.iter().map(|r| r.state).collect::<Vec<_>>()
+        t.model().rows().map(|r| r.state).collect::<Vec<_>>()
     });
     assert_eq!(states, vec![RowState::Deleted, RowState::Deleted]);
     assert_eq!(h.mode(&vcx), "normal");
     h.command(&mut vcx, "revert").unwrap();
     let states = h.tile.read_with(&vcx, |t, _| {
-        t.model().rows.iter().map(|r| r.state).collect::<Vec<_>>()
+        t.model().rows().map(|r| r.state).collect::<Vec<_>>()
     });
     assert_eq!(
         states,
@@ -337,8 +368,7 @@ fn d_over_rows_after_closing_a_label_editor_deletes_only_the_selected_row(
     h.dispatch(&mut vcx, "delete_row", None);
     let states = h.tile.read_with(&vcx, |t, _| {
         t.model()
-            .rows
-            .iter()
+            .rows()
             .map(|r| (r.label.to_string(), r.state))
             .collect::<Vec<_>>()
     });
@@ -1588,7 +1618,7 @@ fn a_click_inside_a_row_label_editor_keeps_it_open(cx: &mut gpui::TestAppContext
     h.with_document(&mut vcx);
     h.dispatch(&mut vcx, "insert_below", None);
     assert!(h.tile.read_with(&vcx, |t, _| t.label_editor_open()));
-    let rows = h.tile.read_with(&vcx, |t, _| t.model().rows.len());
+    let rows = h.tile.read_with(&vcx, |t, _| t.model().len());
     assert_eq!(rows, 3, "two terms and the provisional row");
     let editor = format!("marketdata-editor-1-{LABEL_COL}");
     let at = centre_of(&mut vcx, &editor);
@@ -1600,7 +1630,7 @@ fn a_click_inside_a_row_label_editor_keeps_it_open(cx: &mut gpui::TestAppContext
     );
     assert_eq!(h.mode(&vcx), "insert");
     assert_eq!(
-        h.tile.read_with(&vcx, |t, _| t.model().rows.len()),
+        h.tile.read_with(&vcx, |t, _| t.model().len()),
         rows,
         "the provisional row is still there"
     );
@@ -1611,7 +1641,7 @@ fn a_click_inside_a_row_label_editor_keeps_it_open(cx: &mut gpui::TestAppContext
     click_at(&mut vcx, edge, 1);
     draw(&mut vcx);
     assert!(h.tile.read_with(&vcx, |t, _| t.label_editor_open()));
-    assert_eq!(h.tile.read_with(&vcx, |t, _| t.model().rows.len()), rows);
+    assert_eq!(h.tile.read_with(&vcx, |t, _| t.model().len()), rows);
 }
 
 /// A double-click with a selection live: the first press clears it, so

@@ -3647,7 +3647,7 @@ run_mutation "cache: a NULL measure is None, never a number" \
   cells_honour_the_read_paths_opinions
 
 run_mutation "cache: a window move keeps overlapping rows" \
-  crates/geode-blotter/src/core/cache.rs \
+  crates/geode-tile/src/grid.rs \
   '            if old.contains(&r) {' \
   '            if false {' \
   geode-blotter \
@@ -4005,25 +4005,23 @@ run_mutation "delegate: apply_snapshot invalidates the cache even without narrow
 
 run_mutation "delegate: invalidate_cells also clears the cached tree glyphs" \
   crates/geode-blotter/src/delegate.rs \
-  '        self.cache.invalidate();
+  '        self.cache.clear();
         self.glyphs.clear();
-        if !w.is_empty() {' \
-  '        self.cache.invalidate();
-        if !w.is_empty() {' \
+        if let Some(w) = w {' \
+  '        self.cache.clear();
+        if let Some(w) = w {' \
   geode-blotter \
   invalidate_cells_clears_stale_glyphs_when_shown_shrinks_past_the_old_window
 
 run_mutation "delegate: invalidate_cells refills the window it had" \
   crates/geode-blotter/src/delegate.rs \
   '        self.glyphs.clear();
-        if !w.is_empty() {
-            let end = w.end.min(self.shown.len());
-            if w.start < end {
-                self.fill_window(w.start..end);
-            }
+        if let Some(w) = w {
+            self.fill_window(w);
         }
     }' \
   '        self.glyphs.clear();
+        let _ = w;
     }' \
   geode-blotter \
   a_regroup_that_keeps_the_window_refills_it_immediately
@@ -4031,9 +4029,9 @@ run_mutation "delegate: invalidate_cells refills the window it had" \
 run_mutation "delegate: invalidate_cells refills the requested window, not the shrunken cache window" \
   crates/geode-blotter/src/delegate.rs \
   '    fn invalidate_cells(&mut self) {
-        let w = self.requested_window.clone();' \
+        let w = self.requested.refill_range(self.shown.len());' \
   '    fn invalidate_cells(&mut self) {
-        let w = self.cache.window();' \
+        let w = { let c = self.cache.window(); let end = c.end.min(self.shown.len()); (c.start < end).then_some(c.start..end) };' \
   geode-blotter \
   a_window_shrunk_by_an_empty_snapshot_grows_back_when_rows_return
 
@@ -12391,12 +12389,7 @@ run_mutation "matrix: a hole in the pivot is an error, not a zero" \
                         spec.rows.column
                     ));
                 }' \
-  '                None => cells.push(cell_of(
-                    Some(Value::F64(0.0)),
-                    (ri, slice_columns + ci),
-                    &column_kinds[slice_columns + ci],
-                    draft,
-                )),' \
+  '                None => index.at.push(first),' \
   geode-marketdata \
   a_missing_cell_is_a_hole_and_the_error_names_the_pair
 
@@ -12570,7 +12563,7 @@ run_mutation "mdtile: serialize writes the draft" \
 # shifted-ordinal guard.
 run_mutation "mdtile: a capture only counts the draft's true base" \
   crates/geode-marketdata/src/tile.rs \
-  '        if base_of(&base) != draft.base {' \
+  '        if base_of(base) != draft.base {' \
   '        if false {' \
   geode-marketdata \
   rebase_still_refuses_a_same_day_group_when_the_base_was_never_delivered
@@ -12806,7 +12799,7 @@ run_mutation "mdedit: a committed edit closes the editor" \
 # checks that an omitted axis is None.
 run_mutation "mdedit: bump walks the cursor's row by default" \
   crates/geode-marketdata/src/tile.rs \
-  '            BumpAxis::Row => (self.model.slice_columns..self.model.rows[row].cells.len())
+  '            BumpAxis::Row => (self.model.slice_columns..self.model.columns.len())
                 .filter_map(|ci| {
                     if !matches!(self.model.kind_of(ci), Some(CellKind::Number(_))) {
                         skipped += 1;
@@ -12816,8 +12809,8 @@ run_mutation "mdedit: bump walks the cursor's row by default" \
                         .map(|v| ((row, ci), v, self.column_type(ci)))
                 })
                 .collect(),' \
-  '            BumpAxis::Row => (0..self.model.rows.len())
-                .filter(|&ri| self.model.rows[ri].state != RowState::Deleted)
+  '            BumpAxis::Row => (0..self.model.len())
+                .filter(|&ri| self.model.state(ri) != Some(RowState::Deleted))
                 .filter_map(|ri| {
                     self.current_numeric(ri, col)
                         .map(|v| ((ri, col), v, self.column_type(col)))
@@ -12946,7 +12939,7 @@ run_mutation "mdsel: y over a selection copies a header line first" \
 # selection over the wrong rows.
 run_mutation "mdsel: the anchor row is found by its label" \
   crates/geode-marketdata/src/tile/select.rs \
-  '                |label| self.model.rows.iter().position(|r| &r.label == label),' \
+  '                |label| self.model.row_of(label),' \
   '                |_| Some(0),' \
   geode-marketdata \
   an_anchor_row_that_disappears_clears_the_selection_with_a_notice
@@ -13217,7 +13210,7 @@ run_mutation "final: a pinned blotter promotes the stage a replaced barrier left
 # Rebasing against an empty first delivery drops every restored edit.
 run_mutation "final: a restored draft waits for a model that can resolve it" \
   crates/geode-marketdata/src/tile.rs \
-  '        if self.unresolved_restore && !self.model.rows.is_empty() {' \
+  '        if self.unresolved_restore && !self.model.is_empty() {' \
   '        if self.unresolved_restore {' \
   geode-marketdata \
   a_restored_draft_survives_an_empty_first_delivery
@@ -13286,7 +13279,7 @@ run_mutation "final: an unbuildable delivery changes nothing but the notice" \
             }' \
   '            Err(e) => {
                 self.notice = Some(e.into());
-                MatrixModel::empty(self.spec, self.key.as_deref().unwrap_or(&[]))
+                MatrixIndex::empty(&self.spec, self.key.as_deref().unwrap_or(&[]))
             }' \
   geode-marketdata \
   a_delivery_that_cannot_be_built_changes_nothing_but_the_notice
@@ -15316,8 +15309,8 @@ run_mutation "matrix: a slice label colliding with an axis label is refused" \
 # A row bump walks the ladder and skips the term's own forward/atm/skew.
 run_mutation "mdbump: a row bump skips the slice cells" \
   crates/geode-marketdata/src/tile.rs \
-  '            BumpAxis::Row => (self.model.slice_columns..self.model.rows[row].cells.len())' \
-  '            BumpAxis::Row => (0..self.model.rows[row].cells.len())' \
+  '            BumpAxis::Row => (self.model.slice_columns..self.model.columns.len())' \
+  '            BumpAxis::Row => (0..self.model.columns.len())' \
   geode-marketdata a_row_bump_skips_the_slice_cells_and_a_column_bump_on_fwd_moves_every_term
 
 # ---- Shift-arrow routing ---- The panel reclaims shift-arrow from the
@@ -15400,7 +15393,7 @@ run_mutation "mdauto: the policy fires only on a real transition, never a redeli
 # against its empty label map would discard every edit.
 run_mutation "mdauto: an empty new document never auto-rebases a draft away" \
   crates/geode-marketdata/src/tile.rs \
-  '                    if !clean.rows.is_empty() {' \
+  '                    if !clean.is_empty() {' \
   '                    if true {' \
   geode-marketdata \
   an_empty_new_document_never_auto_rebases_a_draft_away
@@ -15534,8 +15527,8 @@ run_mutation "tile: a flat commit parses by the column's declared type" \
 # the model showing the document value while the draft holds the edit.
 run_mutation "matrix: patch_cell re-prepares the cell" \
   crates/geode-marketdata/src/core/matrix.rs \
-  '        self.rows[row].cells[col] = cell_of(value, (doc_row, col), kind, draft);' \
-  '        let _ = cell_of(value, (doc_row, col), kind, draft);' \
+  '    window.refill_cell(cell.0, cell.1, || index.md_cell(draft, cell.0, cell.1));' \
+  '    let _ = (window, index, draft, cell);' \
   geode-marketdata patch_cell_matches_a_rebuild
 
 # Text cells commit their trimmed text. Refusing the path leaves an
@@ -15579,8 +15572,8 @@ run_mutation "tile: an empty text commit is allowed where the column is optional
 # comparison detects the allocation while painted values remain equal.
 run_mutation "tile: a commit patches the model in place" \
   crates/geode-marketdata/src/tile.rs \
-  '            t.delegate_mut().model = Rc::new(MatrixModel::default());' \
-  '            let _ = t.delegate_mut();' \
+  '            t.delegate_mut().refill_cell(draft, cell);' \
+  '            let _ = (t.delegate_mut(), draft, cell);' \
   geode-marketdata a_cell_commit_patches_the_model_in_place
 
 # Space and shift-space step choice cells through their options with
@@ -15774,7 +15767,7 @@ run_mutation "tile: o inserts after the cursor row" \
 # label order can reverse the requested placement.
 run_mutation "tile: shift+o on an inserted row takes its anchor" \
   crates/geode-marketdata/src/tile.rs \
-  '        } else if self.model.rows[row].state == RowState::Inserted {' \
+  '        } else if self.model.state(row) == Some(RowState::Inserted) {' \
   '        } else if false {' \
   geode-marketdata o_inserts_a_minted_row_and_dd_deletes
 
@@ -15784,7 +15777,7 @@ run_mutation "tile: shift+o on an inserted row takes its anchor" \
 # editor.
 run_mutation "tile: a duplicate typed label is refused" \
   crates/geode-marketdata/src/tile.rs \
-  '        if self.model.rows.iter().any(|r| r.label.as_ref() == new) {' \
+  '        if self.model.row_of(&new).is_some() {' \
   '        if false {' \
   geode-marketdata o_on_a_typed_axis_opens_the_label_editor
 
@@ -15977,18 +15970,8 @@ run_mutation "mdhide: a hidden row label withholds the label column" \
 # opaque labels instead makes visible statuses and dates unfindable.
 run_mutation "mdhide: find searches the painted cells under a hidden label" \
   crates/geode-marketdata/src/tile.rs \
-  '        if self.spec.rows.shown() {
-            self.model
-                .rows
-                .iter()
-                .map(|r| r.label.to_string())
-                .collect()' \
-  '        if true {
-            self.model
-                .rows
-                .iter()
-                .map(|r| r.label.to_string())
-                .collect()' \
+  '            let text = if self.spec.rows.shown() {' \
+  '            let text = if true {' \
   geode-marketdata a_hidden_row_label_withholds_the_label_column
 
 # ---- Shared keymap across document factories ----
@@ -21126,7 +21109,7 @@ run_mutation "pricer entry bar: the double-click ignores the closing press's lin
 run_mutation "pricer entry bar: the closing press's line outlives the next press" \
   crates/geode-pricer/src/tile.rs \
   '                self.pressed = self.click_anchor.take();' \
-  '                self.pressed = self.click_anchor;' \
+  '                self.pressed = self.click_anchor.clone();' \
   geode-pricer a_later_double_click_at_the_same_spot_edits_the_row_painted_there
 
 # The handed-on line reaches the cursor before the tree-column return.
@@ -26675,8 +26658,8 @@ run_mutation "pricer scope: a refusal keeps the last narrowing" \
 # under a row whose legs are partly hidden is a plausible wrong total.
 run_mutation "pricer grid: a partial package aggregates every leg" \
   crates/geode-pricer/src/grid.rs \
-  '        let subset = partial.then(|| (legs, sheet.fold_legs(legs.iter().copied())));' \
-  $'        let all: Vec<usize> = sheet.children(r).collect();\n        let subset = partial.then(|| (all.as_slice(), sheet.fold_legs(all.iter().copied())));' \
+  '                let subset = self.src.sheet.fold_legs(shown.iter().copied());' \
+  '                let subset = self.src.sheet.fold_legs(self.src.sheet.children(*r));' \
   geode-pricer a_partly_hidden_package_paints_its_shown_legs_aggregate_and_note
 
 # A typed usize::MAX count refuses instead of overflowing.
@@ -26835,8 +26818,8 @@ run_mutation "pricer scope: a counted g p absorbs a hidden line" \
 # model holds its line) recovers too; the old model's rows would not.
 run_mutation "pricer scope: a restored hidden cursor falls to row 0" \
   crates/geode-pricer/src/tile.rs \
-  $'        let Some(at) = self.sheet.index_of(id) else {\n            return;\n        };\n        let shown' \
-  $'        let Some(at) = self.model.grid_row_of(id) else {\n            return;\n        };\n        let shown' \
+  $'        let Some(at) = self.sheet.index_of(id) else {\n            return;\n        };\n        if let Some(to)' \
+  $'        let Some(at) = self.model.grid_row_of(id) else {\n            return;\n        };\n        if let Some(to)' \
   geode-pricer a_restored_cursor_on_a_hidden_line_lands_above_it
 
 # The tile arrives at the barrier on every path, a refused scope and a
@@ -26969,8 +26952,8 @@ run_mutation "pricer grouping: the cursor falls to its old index" \
 # row it was set on.
 run_mutation "pricer grouping: a split package's second row snaps to its first" \
   crates/geode-pricer/src/tile.rs \
-  '            .position(|r| r.id == Some(id) && self.enclosing_path(r.node) == Some(within))' \
-  '            .position(|r| r.id == Some(id))' \
+  '            .find(|&g| self.enclosing_path(self.model.node(g)) == Some(within))' \
+  '            .find(|_| true)' \
   geode-pricer motions_walk_past_a_split_packages_second_row
 
 # Fold verbs and the chevron act on a group row's path.
@@ -27195,8 +27178,8 @@ run_mutation "pricer grouping: a V edit of the grouped value loses its anchor" \
 
 run_mutation "pricer grouping: a split package counts as painted once" \
   crates/geode-pricer/src/tile.rs \
-  '        rows.next().is_none().then_some(first)' \
-  '        Some(first)' \
+  '        (self.model.paints(id) == 1)' \
+  '        (self.model.paints(id) >= 1)' \
   geode-pricer a_split_rows_cursor_keeps_its_node_across_a_shorter_regroup
 
 # Find searches every row the grid would paint with every group open, in
@@ -27292,7 +27275,7 @@ run_mutation "blotter grouping: a flat view titles with a dangling separator" \
 run_mutation "pricer grouping: y y on a split row yanks the whole package" \
   crates/geode-pricer/src/tile.rs \
   '                    let mut rows = self.grid_rows_under(g);' \
-  $'                    let mut rows = match self.model.rows[g].row {\n                        Some(r) => vec![r],\n                        None => self.grid_rows_under(g),\n                    };' \
+  $'                    let mut rows = match self.model.sheet_row(g) {\n                        Some(r) => vec![r],\n                        None => self.grid_rows_under(g),\n                    };' \
   geode-pricer a_yank_on_a_split_package_row_yanks_its_nodes_legs
 
 run_mutation "pricer grouping: V y on a split row yanks the whole package" \
@@ -27386,8 +27369,8 @@ run_mutation "pricer grid: a group row reads a value beside a blank" \
 # A group sums every leg under it; summing some is a plausible wrong total.
 run_mutation "pricer grid: a group row sums its first leg only" \
   crates/geode-pricer/src/grid.rs \
-  '        let folded = self.sheet.fold_legs(legs.iter().copied());' \
-  '        let folded = self.sheet.fold_legs(legs.iter().take(1).copied());' \
+  '                let folded = self.src.sheet.fold_legs(legs.iter().copied());' \
+  '                let folded = self.src.sheet.fold_legs(legs.iter().take(1).copied());' \
   geode-pricer a_group_row_sums_its_legs_and_reads_unanimity
 
 # Over unlike currencies a group's local sum is `—`, not the USD figure
@@ -27402,8 +27385,8 @@ run_mutation "pricer grid: a mixed-currency group's local sum reads its USD sum"
 # each date node counts the calendar twice.
 run_mutation "pricer grid: a split package sums every leg" \
   crates/geode-pricer/src/grid.rs \
-  '        let subset = partial.then(|| (legs, sheet.fold_legs(legs.iter().copied())));' \
-  '        let subset = (partial && !split).then(|| (legs, sheet.fold_legs(legs.iter().copied())));' \
+  $'                partial: true,\n                ..\n            }) => {' \
+  $'                partial: true,\n                split: false,\n                ..\n            }) => {' \
   geode-pricer a_split_package_reads_n_of_m_legs_under_each_node
 
 # A group row paints from the group palette, floored on its own ground:
@@ -28281,6 +28264,219 @@ run_mutation "pricer header: the mode icon reads the key context's mode" \
   '                mode: geode_tile::header::Mode::from_key_mode(self.mode()),' \
   '                mode: geode_tile::header::Mode::Normal,' \
   geode-pricer the_header_shows_the_mode_icon_while_editing_or_selecting
+
+# Windowed grid models: the shared window keeps the overlap, a new width
+# clears it, reads outside it are blank, a one-cell refill is one cell, and
+# an invalidation refills the recorded range clamped to the rows.
+run_mutation "grid-window: tile a window move keeps the overlap" \
+  crates/geode-tile/src/grid.rs \
+  '            if old.contains(&r) {' \
+  '            if false {' \
+  geode-tile a_move_keeps_the_overlap_and_fills_only_entering_rows
+
+run_mutation "grid-window: tile a column-count change clears the window" \
+  crates/geode-tile/src/grid.rs \
+  '        if cols != self.cols {' \
+  '        if false {' \
+  geode-tile a_column_count_change_clears_the_window
+
+run_mutation "grid-window: tile get outside the window is none" \
+  crates/geode-tile/src/grid.rs \
+  '        let i = row.checked_sub(self.start).filter(|&i| i < self.rows)?;' \
+  '        let i = Some(row).filter(|&i| i < self.rows)?;' \
+  geode-tile get_outside_the_window_is_none
+
+run_mutation "grid-window: tile refill_cell touches one cell" \
+  crates/geode-tile/src/grid.rs \
+  '        self.cells[i * self.cols + col] = fill();' \
+  '        self.cells[i * self.cols] = fill();' \
+  geode-tile refill_cell_touches_one_cell
+
+run_mutation "grid-window: tile a refill is clamped to the rows" \
+  crates/geode-tile/src/grid.rs \
+  '        let end = asked.end.min(len);' \
+  '        let end = asked.end;' \
+  geode-tile a_request_refills_its_range_clamped_to_the_rows
+
+run_mutation "grid-window: tile the first window fills before any report" \
+  crates/geode-tile/src/grid.rs \
+  '        let asked = self.asked.clone().unwrap_or(0..self.first);' \
+  '        let asked = self.asked.clone().unwrap_or(0..0);' \
+  geode-tile before_any_report_the_first_window_is_filled
+
+run_mutation "grid-window: md serialize captures groups without a build" \
+  crates/geode-marketdata/src/tile.rs \
+  '        draft.capture_groups(&self.model);' \
+  $'        if let Ok(m) = MatrixIndex::build(base, &self.spec, &Draft::default()) {\n            draft.capture_groups(&m);\n        }' \
+  geode-marketdata serialize_captures_groups_without_building
+
+run_mutation "grid-window: md a one-cell commit does not rebuild" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if was_sent {' \
+  '        if true {' \
+  geode-marketdata a_cell_commit_patches_the_model_in_place
+
+run_mutation "grid-window: md leaving Sent repaints every cell" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if was_sent {' \
+  '        if false {' \
+  geode-marketdata a_cell_commit_on_a_sent_draft_repaints_every_cell_unsent
+
+run_mutation "grid-window: md label lookup uses the index" \
+  crates/geode-marketdata/src/core/matrix.rs \
+  '            self.label_index.entry(r.label.clone()).or_insert(i);' \
+  '            self.label_index.entry(r.label.clone()).or_insert(0);' \
+  geode-marketdata label_lookup_and_uniqueness_use_the_index
+
+run_mutation "grid-window: md find text is built once per index build" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.search_text.is_none() {' \
+  '        if true {' \
+  geode-marketdata find_builds_its_text_once_per_index_build
+
+run_mutation "grid-window: md a one-cell edit refreshes its row's find text" \
+  crates/geode-marketdata/src/tile.rs \
+  '            text[row] = row_search_text(&self.model, &self.draft, row);' \
+  '            let _ = (text, row);' \
+  geode-marketdata find_after_a_cell_edit_finds_the_new_value_under_a_hidden_label
+
+run_mutation "grid-window: md the window paints format_cell" \
+  crates/geode-marketdata/src/core/matrix.rs \
+  '            text: text_of(&x),
+            edited: x.edited,
+            sent: x.sent,
+            state: self.states[r],' \
+  '            text: SharedString::default(),
+            edited: x.edited,
+            sent: x.sent,
+            state: self.states[r],' \
+  geode-marketdata the_window_paints_the_same_text_as_format_cell
+
+run_mutation "grid-window: md an inserted cell's value comes from its row edit" \
+  crates/geode-marketdata/src/core/matrix.rs \
+  '                let value = cells.and_then(|c| c.get(label.as_ref())).cloned();' \
+  '                let value: Option<Value> = None;' \
+  geode-marketdata upload_output_matches_the_recorded_golden
+
+run_mutation "grid-window: md yank col formats every row" \
+  crates/geode-marketdata/src/tile.rs \
+  '                    Yank::Col => (0..self.model.len())' \
+  '                    Yank::Col => (0..self.model.len().min(geode_tile::grid::FIRST_WINDOW))' \
+  geode-marketdata yank_col_includes_rows_off_screen
+
+run_mutation "grid-window: md the table report fills its range" \
+  crates/geode-marketdata/src/delegate.rs \
+  '            self.fill_window(visible_range.start..end, tile.read(cx).painted_draft());' \
+  '            let _ = (end, &tile);' \
+  geode-marketdata the_table_report_fills_only_its_range
+
+run_mutation "grid-window: md an install refills the requested range" \
+  crates/geode-marketdata/src/tile.rs \
+  '            t.delegate_mut().refill_window(draft);' \
+  '            let _ = draft;' \
+  geode-marketdata a_redelivery_in_an_unchanged_range_repaints_the_window
+
+run_mutation "grid-window: md an editor paints on a window miss" \
+  crates/geode-marketdata/src/delegate.rs \
+  '        let cell = self.window.get(row_ix, model_col);' \
+  $'        let Some(cell) = self.window.get(row_ix, model_col).map(Some) else {\n            return el;\n        };' \
+  geode-marketdata the_editor_paints_on_a_cell_the_window_lacks
+
+run_mutation "grid-window: a shrink past the recorded range refills the tail" \
+  crates/geode-tile/src/grid.rs \
+  '        Some(len.saturating_sub(asked.len().max(1))..len)' \
+  '        None' \
+  geode-marketdata a_shrink_to_one_row_after_a_scroll_paints_the_row
+
+run_mutation "grid-window: md autofit measures every row in the window" \
+  crates/geode-marketdata/src/delegate.rs \
+  '        let rows = self.window.window();' \
+  '        let rows = { let w = self.window.window(); w.start..w.end.min(w.start + 1) };' \
+  geode-marketdata autosize_fits_every_row_survives_a_model_install_and_resets
+
+run_mutation "grid-window: pricer row_of names the first painted row" \
+  crates/geode-pricer/src/grid.rs \
+  '            let e = self.row_of.entry(id).or_insert((g, 0));' \
+  '            let e = self.row_of.entry(id).or_insert((0, 0));' \
+  geode-pricer row_of_is_the_first_painted_row_of_a_line
+
+run_mutation "grid-window: pricer window cells are the formatter's" \
+  crates/geode-pricer/src/grid.rs \
+  '            _ => cell_text(sheet, self.index.sheet_row(g)?, c.def, &c.format, clock),' \
+  '            _ => CellText { text: String::new(), state: CellState::Blank, sign: None },' \
+  geode-pricer cells_carry_the_core_text_and_state
+
+run_mutation "grid-window: pricer a group row reads its ancestors' values" \
+  crates/geode-pricer/src/grid.rs \
+  '            at = self.index.parent(a);' \
+  '            at = None;' \
+  geode-pricer a_group_row_shows_its_ancestors_grouped_values
+
+run_mutation "grid-window: pricer yank_col formats every row" \
+  crates/geode-pricer/src/tile.rs \
+  '                let text = (0..model.len())' \
+  '                let text = (0..model.len().min(geode_tile::grid::FIRST_WINDOW))' \
+  geode-pricer yank_col_includes_rows_off_screen
+
+run_mutation "grid-window: pricer an install refills the window" \
+  crates/geode-pricer/src/tile.rs \
+  $'            t.refresh(cx);\n            t.delegate_mut().refill_window(src);' \
+  $'            t.refresh(cx);\n            let _ = src;' \
+  geode-pricer a_column_move_refills_the_pricer_window
+
+run_mutation "grid-window: pricer a block TSV formats every row" \
+  crates/geode-pricer/src/tile/select.rs \
+  '                for g in r.rows.clone() {' \
+  '                for g in r.rows.clone().take(geode_tile::grid::FIRST_WINDOW) {' \
+  geode-pricer y_over_a_block_includes_rows_off_screen
+
+run_mutation "grid-window: pricer the window follows the table's range" \
+  crates/geode-pricer/src/delegate.rs \
+  '            self.fill_window(visible_range.start..end, tile.read(cx).fill_source());' \
+  '            let _ = (end, &tile);' \
+  geode-pricer a_scroll_moves_the_pricer_window_without_a_rebuild
+
+run_mutation "grid-window: pricer an editor paints on a window miss" \
+  crates/geode-pricer/src/delegate.rs \
+  '        match editing {' \
+  '        match editing.filter(|_| self.window.get(row_ix, plan_col).is_some()) {' \
+  geode-pricer the_pricer_editor_paints_on_a_cell_the_window_lacks
+
+run_mutation "grid-window: pricer autofit measures every row in the window" \
+  crates/geode-pricer/src/delegate.rs \
+  '        let rows = self.window.window();' \
+  '        let rows = { let w = self.window.window(); w.start..w.end.min(w.start + 1) };' \
+  geode-pricer autosize_measures_the_pricer_window_not_the_sheet
+
+run_mutation "grid-window: pricer a collapse after a scroll refills the tail" \
+  crates/geode-tile/src/grid.rs \
+  '        Some(len.saturating_sub(asked.len().max(1))..len)' \
+  '        None' \
+  geode-pricer a_collapse_to_one_row_after_a_scroll_paints_the_row
+
+run_mutation "grid-window: pricer unchanged structure keeps the index" \
+  crates/geode-pricer/src/tile.rs \
+  '        let same = change == Change::Prices' \
+  '        let same = false' \
+  geode-pricer a_delivery_with_unchanged_structure_refills_without_rebuilding
+
+run_mutation "grid-window: pricer a changed rollup rebuilds" \
+  crates/geode-pricer/src/tile.rs \
+  '            && before.is_some_and(|(chain, rollup)| chain == self.chain && rollup == self.rollup);' \
+  '            && before.is_some();' \
+  geode-pricer a_delivery_that_changes_scope_rebuilds
+
+run_mutation "grid-window: pricer a refill-only delivery repaints the window" \
+  crates/geode-pricer/src/tile.rs \
+  '                t.delegate_mut().refill_window(src);' \
+  '                let _ = src;' \
+  geode-pricer a_delivery_with_unchanged_structure_refills_without_rebuilding
+
+run_mutation "grid-window: pricer a refill-only delivery refreshes totals" \
+  crates/geode-pricer/src/tile.rs \
+  $'            // Totals read the sheet: re-resolve the selection over the new prices.\n            self.sync_cursor(cx);' \
+  '            // Totals read the sheet: re-resolve the selection over the new prices.' \
+  geode-pricer a_delivery_under_a_selection_updates_its_totals
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

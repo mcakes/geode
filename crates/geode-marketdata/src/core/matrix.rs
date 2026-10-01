@@ -1,8 +1,9 @@
-//! Prepared pivot or flat grids for the market-data table.
-//!
-//! Build on delivery or structural draft changes; patch individual cell
-//! edits. Cells carry formatted `SharedString`s so rendering clones text
-//! without reformatting, and the table lays out only visible rows.
+//! The market-data grid's whole-document index — labels, row states, row
+//! sources, the label map — and the one cell formatter. Built on delivery,
+//! structural edit and selection bulk step; formats nothing. The delegate's
+//! window (`geode_tile::grid::WindowCache<MdCell>`) holds the formatted text
+//! for the rows on screen; every reader of cell text (window fill, yank,
+//! find, editors) goes through [`MatrixIndex::format_cell`].
 //!
 //! `Columns::Axis` pivots one value onto a row-by-column grid with leading
 //! slice columns. `Columns::Values` lays out the declared value columns.
@@ -16,11 +17,12 @@ use geode_core::format::format_number;
 use geode_core::schema::ColumnType;
 use geode_core::snapshot::Snapshot;
 use geode_core::view::ColumnFormat;
+use geode_tile::grid::WindowCache;
 use gpui::SharedString;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-/// A column's display and editor kind, parallel to [`MatrixModel::columns`].
+/// A column's display and editor kind, parallel to [`MatrixIndex::columns`].
 /// Pivot ladder and slice columns are numeric. Flat columns use their
 /// declared type and optional choice vocabulary.
 #[derive(Debug, Clone, PartialEq)]
@@ -62,7 +64,8 @@ pub struct HeaderCell {
     pub edited: bool,
 }
 
-/// One prepared cell.
+/// One cell as a reader sees it, prepared on demand by
+/// [`MatrixIndex::cell`]; never stored.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cell {
     /// Prepared display text. A missing document value paints blank;
@@ -87,18 +90,69 @@ pub enum RowState {
     Deleted,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct RowModel {
-    pub label: SharedString,
-    pub cells: Vec<Cell>,
+/// Where a row's values come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowSource {
+    /// A document row: its base-document row (the snapshot row when flat,
+    /// the [`PivotIndex`] row under a pivot). Also its edits' key row.
+    Document(usize),
+    /// An inserted row: values live in the draft's `RowEdit::Inserted`
+    /// under the row's label.
+    Inserted,
+}
+
+/// One row as the index holds it, borrowed.
+#[derive(Debug, Clone, Copy)]
+pub struct RowView<'a> {
+    pub index: usize,
+    pub label: &'a SharedString,
     pub state: RowState,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct MatrixModel {
+/// One window cell as the delegate paints it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MdCell {
+    pub text: SharedString,
+    pub edited: bool,
+    pub sent: bool,
+    pub state: RowState,
+}
+
+/// A row while the build orders and splices it; unzipped into the index's
+/// parallel arrays at the end.
+struct IndexRow {
+    label: SharedString,
+    state: RowState,
+    source: RowSource,
+}
+
+/// One cell's reading: its value, whether the draft wrote it, its edit key.
+struct Reading<'a> {
+    value: Option<Value>,
+    edited: bool,
+    sent: bool,
+    inserted: bool,
+    cell_ref: (usize, usize),
+    kind: &'a CellKind,
+}
+
+#[cfg(test)]
+thread_local! {
+    static BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Index builds on this thread, for tests that prove a route does not build.
+#[cfg(test)]
+pub(crate) fn builds() -> usize {
+    BUILDS.with(|b| b.get())
+}
+
+/// The whole document as the grid lays it out, without any cell text.
+#[derive(Debug, Clone, Default)]
+pub struct MatrixIndex {
     /// The document key, in `document_columns()` order.
     pub key: Vec<String>,
-    /// The document generation this model was built from, from the first
+    /// The document generation this index was built from, from the first
     /// provenance dataset. Draft identity compares the whole pair: a
     /// corrected republish keeps its source time and changes only the
     /// generation.
@@ -113,9 +167,9 @@ pub struct MatrixModel {
     /// a pivot's are always `Number`, a flat panel's follow each
     /// [`ValueColumn::ty`].
     pub column_kinds: Vec<CellKind>,
-    /// How many of `columns` (and of every row's leading `cells`) are the
-    /// spec's per-slice values rather than the pivot's own ladder — what
-    /// lets a row bump skip them and the delegate rule them off.
+    /// How many of `columns` are the spec's per-slice values rather than
+    /// the pivot's own ladder — what lets a row bump skip them and the
+    /// delegate rule them off.
     pub slice_columns: usize,
     /// The column axis's own TYPED value per ladder column (parallel to
     /// `columns[slice_columns..]`), read off the column's first document
@@ -130,19 +184,28 @@ pub struct MatrixModel {
     /// axis would therefore read `Utf8` here, and the kind's own type
     /// check refuses the upload by name rather than sending a string.
     pub column_values: Vec<Value>,
-    pub rows: Vec<RowModel>,
-    /// Snapshot positions for pivot cells, retained so a cell patch does not
-    /// re-index the document. Flat grids use the base row index and spec's
-    /// column list directly.
+    /// Snapshot positions for pivot cells, so a cell is read on demand
+    /// without re-indexing the document. Flat grids use the base row index
+    /// and `flat` directly.
     pub pivot_index: Option<PivotIndex>,
+    /// Parallel per painted row.
+    labels: Vec<SharedString>,
+    states: Vec<RowState>,
+    sources: Vec<RowSource>,
+    /// Label → painted row, built with the arrays. The first row wins if a
+    /// label ever repeated, as `position` did.
+    label_index: HashMap<SharedString, usize>,
+    /// Flat panels: per column, its snapshot column and declared type.
+    flat: Vec<(usize, ColumnType)>,
+    /// The generation this index was built from: values are read from it on demand.
+    snapshot: Option<Arc<Snapshot>>,
 }
 
 /// The pivot's (grid row, ladder column) → snapshot row map, plus the
 /// snapshot columns the ladder and each slice column are read from —
-/// everything [`pivot`] had in hand when it filled the grid, kept so a
-/// patch reads the same cell of the same document the build did. Indices
-/// into the snapshot the model was built from; meaningless against any
-/// other.
+/// everything [`pivot`] had in hand when it indexed the grid, kept so every
+/// on-demand read finds the cell the build checked. Indices into the
+/// snapshot the index was built from; meaningless against any other.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PivotIndex {
     /// The one value column's snapshot index.
@@ -182,14 +245,15 @@ pub(crate) fn base_of(snapshot: &Snapshot) -> Option<DocumentBase> {
     })
 }
 
-impl MatrixModel {
+impl MatrixIndex {
     /// The [`CellKind`] a column paints and edits through, if `col` is in
     /// range.
     pub fn kind_of(&self, col: usize) -> Option<&CellKind> {
         self.column_kinds.get(col)
     }
 
-    /// Build a grid with draft values over the delivered document.
+    /// Index a grid over the delivered document, with the draft's row edits
+    /// spliced in. No cell is read or formatted: values are read on demand.
     ///
     /// Refuse missing axes or values, unreadable key/axis cells, repeated flat
     /// row labels, and malformed pivots: multiple value columns, repeated
@@ -200,21 +264,24 @@ impl MatrixModel {
     /// Compiled specs must provide unique flat and slice labels. Together with
     /// validated document identities, these let rebase resolve edits by label.
     /// Apply row edits last: deleted rows retain a marker, inserts follow their
-    /// anchors, and document cells keep their original `cell_ref` positions.
+    /// anchors, and document rows keep their document row as their source.
     pub fn build(
-        snapshot: &Snapshot,
+        snapshot: &Arc<Snapshot>,
         spec: &PanelSpec,
         draft: &Draft,
-    ) -> Result<MatrixModel, String> {
+    ) -> Result<MatrixIndex, String> {
+        #[cfg(test)]
+        BUILDS.with(|b| b.set(b.get() + 1));
         let base = base_of(snapshot);
         // An empty result is not a defect: the key may simply have no
         // document yet, or an as-of before its first publish (the
         // compiler's `and false` arm). The tile paints "no document
-        // received for <key>" off `rows.is_empty()`.
+        // received for <key>" off `is_empty()`.
         if snapshot.rows() == 0 {
-            return Ok(MatrixModel {
+            return Ok(MatrixIndex {
                 base,
-                ..MatrixModel::default()
+                snapshot: Some(Arc::clone(snapshot)),
+                ..MatrixIndex::default()
             });
         }
 
@@ -223,27 +290,28 @@ impl MatrixModel {
             .ok_or_else(|| format!("the document has no '{}' column", spec.rows.column))?;
         let key = key_of(snapshot, spec, rows_idx)?;
         let header = header_of(snapshot, spec, draft);
-        let (columns, column_kinds, slice_columns, column_values, rows, pivot_index) =
+        let (columns, column_kinds, slice_columns, column_values, flat, rows, pivot_index) =
             match &spec.columns {
                 Columns::Axis(axis) => {
                     let (columns, column_kinds, slice_columns, column_values, rows, index) =
-                        pivot(snapshot, spec, draft, rows_idx, axis)?;
+                        pivot(snapshot, spec, rows_idx, axis)?;
                     (
                         columns,
                         column_kinds,
                         slice_columns,
                         column_values,
+                        Vec::new(),
                         rows,
                         Some(index),
                     )
                 }
                 Columns::Values(_) => {
-                    let (columns, column_kinds, rows) = flatten(snapshot, spec, draft, rows_idx)?;
-                    (columns, column_kinds, 0, Vec::new(), rows, None)
+                    let (columns, column_kinds, flat, rows) = flatten(snapshot, spec, rows_idx)?;
+                    (columns, column_kinds, 0, Vec::new(), flat, rows, None)
                 }
             };
-        let rows = splice_rows(rows, draft, &columns, &column_kinds);
-        Ok(MatrixModel {
+        let rows = splice_rows(rows, draft);
+        let mut index = MatrixIndex {
             key,
             base,
             header,
@@ -251,117 +319,273 @@ impl MatrixModel {
             column_kinds,
             slice_columns,
             column_values,
-            rows,
             pivot_index,
+            flat,
+            snapshot: Some(Arc::clone(snapshot)),
+            ..MatrixIndex::default()
+        };
+        index.set_rows(rows);
+        Ok(index)
+    }
+
+    /// The "no document received" shape: the key the panel asked about
+    /// and nothing else. Distinct from a built index only in having no
+    /// rows — the tile's header says which.
+    pub fn empty(spec: &PanelSpec, key: &[String]) -> MatrixIndex {
+        // Keep the same spec-bearing interface as `build`; an empty index
+        // currently carries only the requested key.
+        let _ = spec;
+        MatrixIndex {
+            key: key.to_vec(),
+            ..MatrixIndex::default()
+        }
+    }
+
+    /// An index with the given row and column labels, document rows only,
+    /// no snapshot: what draft and header tests need.
+    #[cfg(test)]
+    pub(crate) fn for_tests(rows: &[&str], columns: &[&str]) -> MatrixIndex {
+        let mut index = MatrixIndex {
+            columns: columns
+                .iter()
+                .map(|c| SharedString::from(c.to_string()))
+                .collect(),
+            ..MatrixIndex::default()
+        };
+        index.set_rows(
+            rows.iter()
+                .enumerate()
+                .map(|(i, l)| IndexRow {
+                    label: SharedString::from(l.to_string()),
+                    state: RowState::Document,
+                    source: RowSource::Document(i),
+                })
+                .collect(),
+        );
+        index
+    }
+
+    /// The row and column labels used to identify an edit across generations.
+    /// Each out-of-range coordinate returns an empty label independently; a
+    /// cursor can outlive the index against which it was positioned.
+    pub fn label_of(&self, cell: (usize, usize)) -> (SharedString, SharedString) {
+        (
+            self.labels.get(cell.0).cloned().unwrap_or_default(),
+            self.columns.get(cell.1).cloned().unwrap_or_default(),
+        )
+    }
+
+    fn set_rows(&mut self, rows: Vec<IndexRow>) {
+        let n = rows.len();
+        self.labels.reserve_exact(n);
+        self.states.reserve_exact(n);
+        self.sources.reserve_exact(n);
+        self.label_index.reserve(n);
+        for (i, r) in rows.into_iter().enumerate() {
+            self.label_index.entry(r.label.clone()).or_insert(i);
+            self.labels.push(r.label);
+            self.states.push(r.state);
+            self.sources.push(r.source);
+        }
+    }
+
+    /// Painted rows, inserts and deleted rows included.
+    pub fn len(&self) -> usize {
+        self.labels.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.labels.is_empty()
+    }
+
+    pub fn row(&self, r: usize) -> Option<RowView<'_>> {
+        Some(RowView {
+            index: r,
+            label: self.labels.get(r)?,
+            state: self.states[r],
         })
     }
 
-    /// Reprepare one cell's text, value, edited flag, and sent flag using the
-    /// same rules as a build. A cell commit then pays for one formatter call
-    /// instead of reformatting the whole grid.
-    ///
-    /// `snapshot` must be the document used to build this model: pivot indices
-    /// and document `cell_ref`s address that snapshot. `row` is a painted
-    /// model position; its cell reference resolves any shift from inserted
-    /// rows. Inserted values come from `RowEdit.cells` by label.
-    ///
-    /// Return `false` if the position or required mapping is absent, including
-    /// an inserted row removed from the draft. The caller then rebuilds.
-    pub fn patch_cell(
-        &mut self,
-        row: usize,
-        col: usize,
-        snapshot: &Snapshot,
-        spec: &PanelSpec,
-        draft: &Draft,
-    ) -> bool {
-        let Some(kind) = self.column_kinds.get(col) else {
-            return false;
-        };
-        let Some(current) = self.rows.get(row) else {
-            return false;
-        };
-        if current.state == RowState::Inserted {
-            let Some(RowEdit::Inserted { cells, .. }) = draft.rows.get(current.label.as_ref())
-            else {
-                return false;
-            };
-            let Some(label) = self.columns.get(col) else {
-                return false;
-            };
-            self.rows[row].cells[col] =
-                inserted_cell(cells.get(label.as_ref()), (row, col), kind, draft);
-            return true;
+    pub fn rows(&self) -> impl Iterator<Item = RowView<'_>> + '_ {
+        (0..self.len()).filter_map(|r| self.row(r))
+    }
+
+    pub fn label(&self, r: usize) -> Option<&SharedString> {
+        self.labels.get(r)
+    }
+
+    pub fn state(&self, r: usize) -> Option<RowState> {
+        self.states.get(r).copied()
+    }
+
+    /// The painted row carrying `label`.
+    pub fn row_of(&self, label: &str) -> Option<usize> {
+        self.label_index.get(label).copied()
+    }
+
+    pub fn label_index(&self) -> &HashMap<SharedString, usize> {
+        &self.label_index
+    }
+
+    /// The generation this index was built from, `None` for
+    /// [`MatrixIndex::empty`].
+    pub fn snapshot(&self) -> Option<&Arc<Snapshot>> {
+        self.snapshot.as_ref()
+    }
+
+    /// A document cell's edit key, `None` on an inserted row (its values are
+    /// keyed by label) or out of range.
+    pub fn cell_ref(&self, cell: (usize, usize)) -> Option<(usize, usize)> {
+        match *self.sources.get(cell.0)? {
+            RowSource::Document(doc_row) => Some((doc_row, cell.1)),
+            RowSource::Inserted => None,
         }
-        let Some(doc_row) = current.cells.get(col).map(|c| c.cell_ref.0) else {
-            return false;
-        };
-        let value = match &self.pivot_index {
+    }
+
+    /// The document's own value at a document row, read on demand.
+    fn document_value(&self, doc_row: usize, col: usize) -> Option<Value> {
+        let snapshot = self.snapshot.as_deref()?;
+        match &self.pivot_index {
             Some(index) => match col.checked_sub(self.slice_columns) {
                 // A ladder cell: the value column at the snapshot row the
                 // build's own grid map recorded for this pair.
                 Some(ci) => {
-                    let Some(&srow) = index.at.get(doc_row * index.ladder + ci) else {
-                        return false;
-                    };
+                    let &srow = index.at.get(doc_row * index.ladder + ci)?;
                     snapshot.f64_at(index.value_idx, srow).map(Value::F64)
                 }
-                // A slice cell: read off its slice's first row, as
-                // `pivot` reads it (the whole slice was checked to
-                // agree at build time, and nothing since has changed
-                // the document).
+                // A slice cell: read off its slice's first row (the build
+                // checked the whole slice agrees).
                 None => {
-                    let (Some(&idx), Some(&first)) =
-                        (index.slice_idx.get(col), index.first_row.get(doc_row))
-                    else {
-                        return false;
-                    };
+                    let (&idx, &first) = (index.slice_idx.get(col)?, index.first_row.get(doc_row)?);
                     snapshot.f64_at(idx, first).map(Value::F64)
                 }
             },
             // The flat shape: document row `doc_row` is snapshot row
             // `doc_row`, and grid column `col` is the spec's `col`th flat
-            // column — the same resolution `flatten` made, redone for one
             // column.
             None => {
-                let Some(vc) = spec.flat_columns().get(col) else {
-                    return false;
-                };
-                let Some(idx) = snapshot.column_index(&vc.column) else {
-                    return false;
-                };
-                read_flat_value(snapshot, idx, doc_row, vc.ty)
+                let &(idx, ty) = self.flat.get(col)?;
+                read_flat_value(snapshot, idx, doc_row, ty)
             }
-        };
-        self.rows[row].cells[col] = cell_of(value, (doc_row, col), kind, draft);
-        true
-    }
-
-    /// The "no document received" shape: the key the panel asked about
-    /// and nothing else. Distinct from a built model only in having no
-    /// rows — the tile's header says which.
-    pub fn empty(spec: &PanelSpec, key: &[String]) -> MatrixModel {
-        // Keep the same spec-bearing interface as `build`; an empty model
-        // currently carries only the requested key.
-        let _ = spec;
-        MatrixModel {
-            key: key.to_vec(),
-            ..MatrixModel::default()
         }
     }
 
-    /// The row and column labels used to identify an edit across generations.
-    /// Each out-of-range coordinate returns an empty label independently; a
-    /// cursor can outlive the model against which it was positioned.
-    pub fn label_of(&self, cell: (usize, usize)) -> (SharedString, SharedString) {
-        (
-            self.rows
-                .get(cell.0)
-                .map(|r| r.label.clone())
-                .unwrap_or_default(),
-            self.columns.get(cell.1).cloned().unwrap_or_default(),
-        )
+    fn read(&self, draft: &Draft, r: usize, col: usize) -> Option<Reading<'_>> {
+        let kind = self.column_kinds.get(col)?;
+        match *self.sources.get(r)? {
+            RowSource::Inserted => {
+                let label = self.columns.get(col)?;
+                let cells = match draft.rows.get(self.labels[r].as_ref()) {
+                    Some(RowEdit::Inserted { cells, .. }) => Some(cells),
+                    _ => None,
+                };
+                let value = cells.and_then(|c| c.get(label.as_ref())).cloned();
+                // Every inserted cell is edited; its edit key is its painted
+                // position, since its values are keyed by label.
+                Some(Reading {
+                    value,
+                    edited: true,
+                    sent: draft.is_sent(),
+                    inserted: true,
+                    cell_ref: (r, col),
+                    kind,
+                })
+            }
+            RowSource::Document(doc_row) => {
+                let (value, edited) =
+                    draft_or(self.document_value(doc_row, col), (doc_row, col), draft);
+                Some(Reading {
+                    value,
+                    edited,
+                    sent: edited && draft.is_sent(),
+                    inserted: false,
+                    cell_ref: (doc_row, col),
+                    kind,
+                })
+            }
+        }
     }
+
+    /// The cell's current value: the draft's where it wrote one, else the
+    /// document's. `None` for NULL, an unfilled insert, or out of range.
+    pub fn value_at(&self, draft: &Draft, r: usize, col: usize) -> Option<Value> {
+        self.read(draft, r, col)?.value
+    }
+
+    pub fn edited_at(&self, draft: &Draft, r: usize, col: usize) -> bool {
+        self.read(draft, r, col).is_some_and(|x| x.edited)
+    }
+
+    pub fn sent_at(&self, draft: &Draft, r: usize, col: usize) -> bool {
+        self.read(draft, r, col).is_some_and(|x| x.sent)
+    }
+
+    /// The one formatter: the window, yank, find and the editors all read
+    /// cell text through here. Blank out of range or for a NULL document
+    /// value; [`UNFILLED`] for an unfilled inserted cell.
+    pub fn format_cell(&self, draft: &Draft, r: usize, col: usize) -> SharedString {
+        self.read(draft, r, col)
+            .map(|x| text_of(&x))
+            .unwrap_or_default()
+    }
+
+    /// One window cell, through [`MatrixIndex::format_cell`]'s rule.
+    pub fn md_cell(&self, draft: &Draft, r: usize, col: usize) -> Option<MdCell> {
+        let x = self.read(draft, r, col)?;
+        Some(MdCell {
+            text: text_of(&x),
+            edited: x.edited,
+            sent: x.sent,
+            state: self.states[r],
+        })
+    }
+
+    /// One cell as a reader sees it, on demand.
+    pub fn cell(&self, draft: &Draft, r: usize, col: usize) -> Option<Cell> {
+        let x = self.read(draft, r, col)?;
+        Some(Cell {
+            text: text_of(&x),
+            edited: x.edited,
+            sent: x.sent,
+            cell_ref: x.cell_ref,
+            value: x.value,
+        })
+    }
+}
+
+/// The draft's edit at `cell_ref` where there is one, else the document's value.
+fn draft_or(
+    document: Option<Value>,
+    cell_ref: (usize, usize),
+    draft: &Draft,
+) -> (Option<Value>, bool) {
+    if let Some(edited) = draft.edits.get(&cell_ref) {
+        return (Some(edited.clone()), true);
+    }
+    // Missing or unreadable document values paint blank, never zero.
+    // Typed readers can also return `None` for incompatible input.
+    (document, false)
+}
+
+/// A reading's text through [`cell_text`] and its column's kind: blank for a
+/// missing document value, [`UNFILLED`] for a missing inserted one, so
+/// pending input is distinct from a document's NULL.
+fn text_of(x: &Reading<'_>) -> SharedString {
+    match &x.value {
+        Some(v) => SharedString::from(cell_text(v, x.kind)),
+        None if x.inserted => SharedString::new_static(UNFILLED),
+        None => SharedString::default(),
+    }
+}
+
+/// Re-prepare one window cell after an edit to it, through the one formatter.
+pub fn refill_cell(
+    window: &mut WindowCache<MdCell>,
+    index: &MatrixIndex,
+    draft: &Draft,
+    cell: (usize, usize),
+) {
+    window.refill_cell(cell.0, cell.1, || index.md_cell(draft, cell.0, cell.1));
 }
 
 /// Read key columns preceding the row axis, excluding spec-named columns
@@ -564,27 +788,21 @@ fn index_grid(
 /// where the values come from.
 /// `pivot`'s own result: the column headers (slice labels then the
 /// ladder), each one's [`CellKind`] in the same order, how many of the
-/// two leading vecs are slice columns, the built rows, and the
-/// [`PivotIndex`] a later [`MatrixModel::patch_cell`] reads.
+/// two leading vecs are slice columns, the indexed rows, and the
+/// [`PivotIndex`] every on-demand read goes through.
 type PivotResult = Result<
     (
         Vec<SharedString>,
         Vec<CellKind>,
         usize,
         Vec<Value>,
-        Vec<RowModel>,
+        Vec<IndexRow>,
         PivotIndex,
     ),
     String,
 >;
 
-fn pivot(
-    snapshot: &Snapshot,
-    spec: &PanelSpec,
-    draft: &Draft,
-    rows_idx: usize,
-    axis: &str,
-) -> PivotResult {
+fn pivot(snapshot: &Snapshot, spec: &PanelSpec, rows_idx: usize, axis: &str) -> PivotResult {
     let col_idx = snapshot
         .column_index(axis)
         .ok_or_else(|| format!("the document has no '{axis}' column"))?;
@@ -694,8 +912,8 @@ fn pivot(
         std::iter::repeat_with(|| CellKind::Number(spec.format.clone())).take(grid.columns.len()),
     );
 
-    // The index a patch reads back, filled as the grid is: one entry per
-    // cell the loop below visits, in the same order.
+    // The index every on-demand read goes through, filled as the grid is:
+    // one entry per cell the loop below visits, in the same order.
     let mut index = PivotIndex {
         value_idx,
         slice_idx: slices.iter().map(|(_, idx)| *idx).collect(),
@@ -705,26 +923,14 @@ fn pivot(
     };
     let mut rows = Vec::with_capacity(grid.rows.len());
     for (ri, row_label) in grid.rows.iter().enumerate() {
-        let mut cells = Vec::with_capacity(slice_columns + grid.columns.len());
         // Every row label came out of `index_grid`'s pass over the
         // snapshot rows, so each has a first row.
         let first = first_row[ri].unwrap_or_default();
         index.first_row.push(first);
-        for (ci, (_, idx)) in slices.iter().enumerate() {
-            let value = snapshot.f64_at(*idx, first).map(Value::F64);
-            cells.push(cell_of(value, (ri, ci), &column_kinds[ci], draft));
-        }
-        for (ci, col_label) in grid.columns.iter().enumerate() {
+        for col_label in grid.columns.iter() {
             match grid.at.get(row_label).and_then(|m| m.get(col_label)) {
                 Some(&srow) => {
                     index.at.push(srow);
-                    let value = snapshot.f64_at(value_idx, srow).map(Value::F64);
-                    cells.push(cell_of(
-                        value,
-                        (ri, slice_columns + ci),
-                        &column_kinds[slice_columns + ci],
-                        draft,
-                    ));
                 }
                 None => {
                     return Err(format!(
@@ -734,10 +940,10 @@ fn pivot(
                 }
             }
         }
-        rows.push(RowModel {
+        rows.push(IndexRow {
             label: SharedString::from(row_label.clone()),
-            cells,
             state: RowState::Document,
+            source: RowSource::Document(ri),
         });
     }
     Ok((
@@ -755,7 +961,7 @@ fn pivot(
 }
 
 /// One column-axis value, typed by what the column arrived as (see
-/// [`MatrixModel::column_values`]). `index_grid` has already refused a
+/// [`MatrixIndex::column_values`]). `index_grid` has already refused a
 /// blank axis cell, so the text arm always has something to read.
 fn axis_value(snapshot: &Snapshot, idx: usize, row: usize) -> Value {
     if let Some(v) = snapshot.i64_at(idx, row) {
@@ -807,13 +1013,22 @@ pub(crate) fn read_flat_value(
 }
 
 /// `flatten`'s own result: the column headers, each one's [`CellKind`] in
-/// the same order, and the built rows.
-type FlattenResult = Result<(Vec<SharedString>, Vec<CellKind>, Vec<RowModel>), String>;
+/// the same order, each column's snapshot column and declared type, and
+/// the indexed rows.
+type FlattenResult = Result<
+    (
+        Vec<SharedString>,
+        Vec<CellKind>,
+        Vec<(usize, ColumnType)>,
+        Vec<IndexRow>,
+    ),
+    String,
+>;
 
 /// The flat shape: one row per document row, one column per
 /// [`PanelSpec::flat_columns`] entry, in the spec's own order — the paint
 /// order, not the document's column order.
-fn flatten(snapshot: &Snapshot, spec: &PanelSpec, draft: &Draft, rows_idx: usize) -> FlattenResult {
+fn flatten(snapshot: &Snapshot, spec: &PanelSpec, rows_idx: usize) -> FlattenResult {
     let flat_columns = spec.flat_columns();
     if flat_columns.is_empty() {
         return Err(format!(
@@ -870,47 +1085,36 @@ fn flatten(snapshot: &Snapshot, spec: &PanelSpec, draft: &Draft, rows_idx: usize
                 spec.rows.column
             ));
         }
-        let cells = idxs
-            .iter()
-            .zip(flat_columns.iter())
-            .zip(column_kinds.iter())
-            .enumerate()
-            .map(|(ci, ((&idx, vc), kind))| {
-                let value = read_flat_value(snapshot, idx, row, vc.ty);
-                cell_of(value, (row, ci), kind, draft)
-            })
-            .collect();
-        rows.push(RowModel {
+        rows.push(IndexRow {
             label: SharedString::from(label),
-            cells,
             state: RowState::Document,
+            source: RowSource::Document(row),
         });
     }
-    Ok((columns, column_kinds, rows))
+    let flat = idxs
+        .into_iter()
+        .zip(flat_columns.iter())
+        .map(|(idx, vc)| (idx, vc.ty))
+        .collect();
+    Ok((columns, column_kinds, flat, rows))
 }
 
-/// Apply row edits after document cells and their `cell_ref`s are built.
-/// Deleted rows remain marked in the grid. Inserted rows use their own
-/// label-keyed cells and follow their anchor, including another insert.
-/// Siblings follow draft label order; `None` or an unknown anchor places
-/// a row at the top. Unreachable anchor cycles are appended at the end.
+/// Apply row edits after the document rows are indexed. Deleted rows remain
+/// marked in the grid. Inserted rows follow their anchor, including another
+/// insert. Siblings follow draft label order; `None` or an unknown anchor
+/// places a row at the top. Unreachable anchor cycles are appended at the end.
 ///
-/// Document edit keys remain unchanged when rows shift. With no row edits,
-/// return the original rows without allocating.
-fn splice_rows(
-    rows: Vec<RowModel>,
-    draft: &Draft,
-    columns: &[SharedString],
-    column_kinds: &[CellKind],
-) -> Vec<RowModel> {
+/// Document rows keep their document row as their source when rows shift.
+/// With no row edits, return the original rows without allocating.
+fn splice_rows(rows: Vec<IndexRow>, draft: &Draft) -> Vec<IndexRow> {
     if draft.rows.is_empty() {
         return rows;
     }
-    // Every label the model will carry — the document's rows and the
+    // Every label the index will carry — the document's rows and the
     // draft's inserted ones — so an anchor can be checked against the
     // whole set; then the inserted rows grouped by anchor (the top's own
     // group apart), each group in label order (the draft's own `BTreeMap`
-    // order), and each row's cells by label for the fill below.
+    // order).
     let known: HashSet<&str> = rows
         .iter()
         .map(|r| r.label.as_ref())
@@ -920,24 +1124,24 @@ fn splice_rows(
     let mut splicer = Splicer {
         followers: HashMap::new(),
         stack: Vec::new(),
-        cells_of: HashMap::new(),
-        columns,
-        column_kinds,
-        draft,
     };
     for (label, edit) in &draft.rows {
-        if let RowEdit::Inserted { after, cells } = edit {
+        if let RowEdit::Inserted { after, .. } = edit {
             match after.as_deref() {
                 Some(a) if known.contains(a) => {
                     splicer.followers.entry(a).or_default().push(label);
                 }
                 _ => top.push(label),
             }
-            splicer.cells_of.insert(label, cells);
         }
     }
 
-    let mut out: Vec<RowModel> = Vec::with_capacity(rows.len() + splicer.cells_of.len());
+    let inserted = draft
+        .rows
+        .values()
+        .filter(|e| matches!(e, RowEdit::Inserted { .. }))
+        .count();
+    let mut out: Vec<IndexRow> = Vec::with_capacity(rows.len() + inserted);
     splicer.emit(top, &mut out);
     for mut row in rows {
         if matches!(draft.rows.get(row.label.as_ref()), Some(RowEdit::Deleted)) {
@@ -966,17 +1170,13 @@ fn splice_rows(
 }
 
 /// [`splice_rows`]'s working state: the inserted rows still waiting by
-/// anchor label, the depth-first worklist, each row's cells, and what a
-/// row's cells are built from. A struct rather than a closure so the
-/// document loop can pull a row's own group out of `followers` while the
-/// emitter is alive, which one closure borrowing both could not allow.
+/// anchor label and the depth-first worklist. A struct rather than a
+/// closure so the document loop can pull a row's own group out of
+/// `followers` while the emitter is alive, which one closure borrowing
+/// both could not allow.
 struct Splicer<'a> {
     followers: HashMap<&'a str, Vec<&'a str>>,
     stack: Vec<&'a str>,
-    cells_of: HashMap<&'a str, &'a BTreeMap<String, Value>>,
-    columns: &'a [SharedString],
-    column_kinds: &'a [CellKind],
-    draft: &'a Draft,
 }
 
 impl<'a> Splicer<'a> {
@@ -986,99 +1186,23 @@ impl<'a> Splicer<'a> {
     /// than recursion, so a long chain costs no stack frames. A row is
     /// removed from `followers` as it is placed, so nothing is emitted
     /// twice.
-    fn emit(&mut self, group: Vec<&'a str>, out: &mut Vec<RowModel>) {
+    fn emit(&mut self, group: Vec<&'a str>, out: &mut Vec<IndexRow>) {
         self.stack.extend(group.into_iter().rev());
         while let Some(label) = self.stack.pop() {
-            let at = out.len();
-            out.push(inserted_row(
-                label,
-                self.cells_of[label],
-                at,
-                self.columns,
-                self.column_kinds,
-                self.draft,
-            ));
+            out.push(IndexRow {
+                label: SharedString::from(label.to_string()),
+                state: RowState::Inserted,
+                source: RowSource::Inserted,
+            });
             if let Some(next) = self.followers.remove(label) {
                 self.stack.extend(next.into_iter().rev());
             }
         }
     }
 }
-/// One inserted row at model position `at`: a cell per column, each from
-/// the row's own `cells` by column label through [`inserted_cell`].
-fn inserted_row(
-    label: &str,
-    cells: &BTreeMap<String, Value>,
-    at: usize,
-    columns: &[SharedString],
-    column_kinds: &[CellKind],
-    draft: &Draft,
-) -> RowModel {
-    RowModel {
-        label: SharedString::from(label.to_string()),
-        cells: columns
-            .iter()
-            .zip(column_kinds)
-            .enumerate()
-            .map(|(ci, (column, kind))| {
-                inserted_cell(cells.get(column.as_ref()), (at, ci), kind, draft)
-            })
-            .collect(),
-        state: RowState::Inserted,
-    }
-}
-
-/// An inserted cell uses the draft value formatted through its column
-/// kind, or `·` when unfilled. That marker distinguishes pending input from
-/// a document's blank NULL cell. Every inserted cell is marked edited.
-fn inserted_cell(
-    value: Option<&Value>,
-    cell_ref: (usize, usize),
-    kind: &CellKind,
-    draft: &Draft,
-) -> Cell {
-    Cell {
-        text: value.map_or_else(
-            || SharedString::new_static(UNFILLED),
-            |v| SharedString::from(cell_text(v, kind)),
-        ),
-        value: value.cloned(),
-        edited: true,
-        sent: draft.is_sent(),
-        cell_ref,
-    }
-}
 
 /// What an inserted row's unfilled cell paints.
 pub const UNFILLED: &str = "·";
-
-/// One cell: the draft's value where there is an edit, `value` (already
-/// read off the document, per the caller's own rule — `f64_at` for a
-/// pivot cell, [`read_flat_value`] for a flat one) otherwise. Both are
-/// formatted through [`cell_text`] and `kind`, the column's own.
-fn cell_of(value: Option<Value>, cell_ref: (usize, usize), kind: &CellKind, draft: &Draft) -> Cell {
-    if let Some(edited) = draft.edits.get(&cell_ref) {
-        return Cell {
-            text: SharedString::from(cell_text(edited, kind)),
-            value: Some(edited.clone()),
-            edited: true,
-            sent: draft.is_sent(),
-            cell_ref,
-        };
-    }
-    // Missing or unreadable document values paint blank, never zero.
-    // Typed readers can also return `None` for incompatible input.
-    Cell {
-        text: value
-            .as_ref()
-            .map(|v| SharedString::from(cell_text(v, kind)))
-            .unwrap_or_default(),
-        value,
-        edited: false,
-        sent: false,
-        cell_ref,
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -1225,22 +1349,25 @@ mod tests {
         document(&cells)
     }
 
-    fn labels(model: &MatrixModel, row: usize) -> Vec<String> {
-        model.rows[row]
-            .cells
-            .iter()
-            .map(|c| c.text.to_string())
+    fn labels(model: &MatrixIndex, draft: &Draft, row: usize) -> Vec<String> {
+        (0..model.columns.len())
+            .map(|c| model.format_cell(draft, row, c).to_string())
             .collect()
     }
 
-    fn columns_of(model: &MatrixModel) -> Vec<String> {
+    fn provenance_base() -> DocumentBase {
+        base_of(&full_grid()).expect("the fixture carries provenance")
+    }
+
+    fn columns_of(model: &MatrixIndex) -> Vec<String> {
         model.columns.iter().map(|c| c.to_string()).collect()
     }
 
     #[test]
     fn a_pivot_puts_the_row_axis_down_the_side_and_the_column_axis_across() {
         let snap = full_grid();
-        let model = MatrixModel::build(&snap, &CVI, &Draft::default()).expect("a complete grid");
+        let model =
+            MatrixIndex::build(&Arc::new(snap), &CVI, &Draft::default()).expect("a complete grid");
 
         assert_eq!(model.key, vec!["SPX.Z".to_string()]);
         assert_eq!(
@@ -1250,7 +1377,7 @@ mod tests {
                 generation: Some(7),
             })
         );
-        assert_eq!(model.rows.len(), 2);
+        assert_eq!(model.len(), 2);
         // The slice values are the FIRST grid columns, ahead of the
         // ladder, each with its own format: a forward at two places, a
         // vol and a skew at four.
@@ -1259,16 +1386,22 @@ mod tests {
             vec!["fwd", "atm", "skew", "-20", "-1", "3.5"]
         );
         assert_eq!(model.slice_columns, 3);
-        assert_eq!(model.rows[0].label.to_string(), "2026-10-16");
-        assert_eq!(model.rows[1].label.to_string(), "2026-11-20");
+        assert_eq!(model.label(0).unwrap().to_string(), "2026-10-16");
+        assert_eq!(model.label(1).unwrap().to_string(), "2026-11-20");
         assert_eq!(
-            labels(&model, 0),
+            labels(&model, &Draft::default(), 0),
             vec!["4512.30", "0.1820", "-1.1000", "0.1000", "0.2000", "0.3000"]
         );
-        assert_eq!(model.rows[0].cells[0].value, Some(Value::F64(4512.3)));
-        assert_eq!(model.rows[0].cells[0].cell_ref, (0, 0));
+        assert_eq!(
+            model.cell(&Draft::default(), 0, 0).unwrap().value,
+            Some(Value::F64(4512.3))
+        );
+        assert_eq!(
+            model.cell(&Draft::default(), 0, 0).unwrap().cell_ref,
+            (0, 0)
+        );
 
-        let cell = &model.rows[0].cells[4];
+        let cell = &model.cell(&Draft::default(), 0, 4).unwrap();
         assert_eq!(
             cell.text.to_string(),
             "0.2000",
@@ -1283,7 +1416,7 @@ mod tests {
             "a cell carries the grid index the draft is keyed by"
         );
         assert_eq!(
-            labels(&model, 1),
+            labels(&model, &Draft::default(), 1),
             vec!["4530.75", "0.1900", "-0.9500", "0.4000", "0.5000", "0.6000"]
         );
 
@@ -1321,23 +1454,22 @@ mod tests {
             ("2026-10-16".to_string(), 3.5, Some(0.3)),
             ("2026-10-16".to_string(), -20.0, Some(0.4)),
         ];
-        let model =
-            MatrixModel::build(&document(&cells), &CVI, &Draft::default()).expect("a full grid");
+        let model = MatrixIndex::build(&Arc::new(document(&cells)), &CVI, &Draft::default())
+            .expect("a full grid");
         assert_eq!(
             model
-                .rows
-                .iter()
+                .rows()
                 .map(|r| r.label.to_string())
                 .collect::<Vec<_>>(),
             vec!["2026-11-20", "2026-10-16"]
         );
         assert_eq!(columns_of(&model), vec!["fwd", "atm", "skew", "3.5", "-20"]);
         assert_eq!(
-            labels(&model, 0),
+            labels(&model, &Draft::default(), 0),
             vec!["4530.75", "0.1900", "-0.9500", "0.1000", "0.2000"]
         );
         assert_eq!(
-            labels(&model, 1),
+            labels(&model, &Draft::default(), 1),
             vec!["4512.30", "0.1820", "-1.1000", "0.3000", "0.4000"]
         );
     }
@@ -1364,7 +1496,7 @@ mod tests {
                 (fwd, atm, skew)
             }
         });
-        let err = MatrixModel::build(&snap, &CVI, &Draft::default())
+        let err = MatrixIndex::build(&Arc::new(snap), &CVI, &Draft::default())
             .expect_err("a slice whose rows disagree is refused, never averaged");
         assert!(err.contains("2026-11-20"), "{err}");
         assert!(err.contains("forward"), "{err}");
@@ -1408,7 +1540,8 @@ mod tests {
             0,
             provenance(BASE),
         );
-        let model = MatrixModel::build(&snap, &CVI, &Draft::default()).expect("the ladder alone");
+        let model =
+            MatrixIndex::build(&Arc::new(snap), &CVI, &Draft::default()).expect("the ladder alone");
         assert_eq!(model.slice_columns, 0);
         assert_eq!(columns_of(&model), vec!["-20", "-1", "3.5"]);
     }
@@ -1436,7 +1569,7 @@ mod tests {
                 (fwd, atm, skew)
             }
         });
-        let err = MatrixModel::build(&mixed, &CVI, &Draft::default())
+        let err = MatrixIndex::build(&Arc::new(mixed), &CVI, &Draft::default())
             .expect_err("a NULL beside a value is a disagreement");
         assert!(err.contains("2026-11-20"), "{err}");
         assert!(err.contains("atm"), "{err}");
@@ -1451,11 +1584,25 @@ mod tests {
                 (fwd, atm, skew)
             }
         });
-        let model = MatrixModel::build(&all_null, &CVI, &Draft::default())
+        let model = MatrixIndex::build(&Arc::new(all_null), &CVI, &Draft::default())
             .expect("an all-NULL slice agrees with itself");
-        assert_eq!(model.rows[1].cells[2].text.to_string(), "");
-        assert_eq!(model.rows[1].cells[2].value, None);
-        assert_eq!(model.rows[0].cells[2].text.to_string(), "-1.1000");
+        assert_eq!(
+            model
+                .cell(&Draft::default(), 1, 2)
+                .unwrap()
+                .text
+                .to_string(),
+            ""
+        );
+        assert_eq!(model.cell(&Draft::default(), 1, 2).unwrap().value, None);
+        assert_eq!(
+            model
+                .cell(&Draft::default(), 0, 2)
+                .unwrap()
+                .text
+                .to_string(),
+            "-1.1000"
+        );
     }
 
     /// A slice label is a column label, and `Draft` indexes columns by
@@ -1486,12 +1633,12 @@ mod tests {
                 ..(**CVI).clone()
             })
         });
-        let err = MatrixModel::build(&full_grid(), &COLLIDING, &Draft::default())
+        let err = MatrixIndex::build(&Arc::new(full_grid()), &COLLIDING, &Draft::default())
             .expect_err("a node labelled -20 and a slice value labelled -20");
         assert!(err.contains("'-20'"), "{err}");
         assert!(err.contains("forward"), "{err}");
         assert!(
-            MatrixModel::build(&full_grid(), &CVI, &Draft::default()).is_ok(),
+            MatrixIndex::build(&Arc::new(full_grid()), &CVI, &Draft::default()).is_ok(),
             "the shipped spec's labels do not collide with its ladder"
         );
     }
@@ -1509,13 +1656,14 @@ mod tests {
             Value::F64(4600.0),
             &at(BASE),
         );
-        let model = MatrixModel::build(&full_grid(), &CVI, &draft).expect("a complete grid");
-        let cell = &model.rows[1].cells[0];
+        let model =
+            MatrixIndex::build(&Arc::new(full_grid()), &CVI, &draft).expect("a complete grid");
+        let cell = &model.cell(&draft, 1, 0).unwrap();
         assert_eq!(cell.text.to_string(), "4600.00");
         assert!(cell.edited);
         assert_eq!(model.label_of((1, 0)), ("2026-11-20".into(), "fwd".into()));
         assert!(
-            !model.rows[0].cells[0].edited,
+            !model.cell(&draft, 0, 0).unwrap().edited,
             "the other term's forward is untouched"
         );
     }
@@ -1535,7 +1683,7 @@ mod tests {
                 ));
             }
         }
-        let err = MatrixModel::build(&document(&cells), &CVI, &Draft::default())
+        let err = MatrixIndex::build(&Arc::new(document(&cells)), &CVI, &Draft::default())
             .expect_err("a hole is refused, never painted as a zero");
         assert!(err.contains("2026-11-20"), "{err}");
         assert!(err.contains("3.5"), "{err}");
@@ -1548,7 +1696,7 @@ mod tests {
             ("2026-10-16".to_string(), -20.0, Some(1.0)),
             ("2026-10-16".to_string(), -20.0, Some(2.0)),
         ];
-        let err = MatrixModel::build(&document(&cells), &CVI, &Draft::default())
+        let err = MatrixIndex::build(&Arc::new(document(&cells)), &CVI, &Draft::default())
             .expect_err("two rows for one cell: one of the two values would vanish");
         assert!(err.contains("2026-10-16") && err.contains("-20"), "{err}");
     }
@@ -1563,19 +1711,19 @@ mod tests {
             Value::F64(0.9),
             &at("2026-09-12T14:00:00Z"),
         );
-        let model = MatrixModel::build(&snap, &CVI, &draft).expect("a complete grid");
+        let model = MatrixIndex::build(&Arc::new(snap), &CVI, &draft).expect("a complete grid");
 
-        let cell = &model.rows[0].cells[4];
+        let cell = &model.cell(&draft, 0, 4).unwrap();
         assert_eq!(cell.text.to_string(), "0.9000");
         assert_eq!(cell.value, Some(Value::F64(0.9)));
         assert!(cell.edited);
         assert!(!cell.sent, "an edit is sent only once an upload said so");
         assert_eq!(
-            model.rows[0].cells[3].text.to_string(),
+            model.cell(&draft, 0, 3).unwrap().text.to_string(),
             "0.1000",
             "a neighbouring cell still paints the document"
         );
-        assert!(!model.rows[0].cells[3].edited);
+        assert!(!model.cell(&draft, 0, 3).unwrap().edited);
     }
 
     #[test]
@@ -1583,7 +1731,7 @@ mod tests {
         let snapshot = full_grid();
         let mut draft = Draft::default();
         draft.set_attr("spot_ref", Value::F64(4520.0), &at("t0"));
-        let model = MatrixModel::build(&snapshot, &CVI, &draft).unwrap();
+        let model = MatrixIndex::build(&Arc::new(snapshot), &CVI, &draft).unwrap();
         let spot = model
             .header
             .iter()
@@ -1610,10 +1758,11 @@ mod tests {
         draft.state = DraftState::Sent {
             at: "2026-09-12T14:05:00Z".into(),
         };
-        let model = MatrixModel::build(&full_grid(), &CVI, &draft).expect("a complete grid");
-        assert!(model.rows[1].cells[3].sent);
-        assert!(model.rows[1].cells[3].edited);
-        assert!(!model.rows[1].cells[4].sent);
+        let model =
+            MatrixIndex::build(&Arc::new(full_grid()), &CVI, &draft).expect("a complete grid");
+        assert!(model.cell(&draft, 1, 3).unwrap().sent);
+        assert!(model.cell(&draft, 1, 3).unwrap().edited);
+        assert!(!model.cell(&draft, 1, 4).unwrap().sent);
     }
 
     #[test]
@@ -1624,11 +1773,19 @@ mod tests {
                 cells.push((term.to_string(), node, None));
             }
         }
-        let model =
-            MatrixModel::build(&document(&cells), &CVI, &Draft::default()).expect("a full grid");
-        assert_eq!(model.rows[0].cells[3].text.to_string(), "");
+        let model = MatrixIndex::build(&Arc::new(document(&cells)), &CVI, &Draft::default())
+            .expect("a full grid");
         assert_eq!(
-            model.rows[0].cells[3].value, None,
+            model
+                .cell(&Draft::default(), 0, 3)
+                .unwrap()
+                .text
+                .to_string(),
+            ""
+        );
+        assert_eq!(
+            model.cell(&Draft::default(), 0, 3).unwrap().value,
+            None,
             "NULL and 0.0 are different answers"
         );
     }
@@ -1716,14 +1873,17 @@ mod tests {
 
     #[test]
     fn values_columns_lay_the_documents_value_columns_flat() {
-        let model = MatrixModel::build(&flat_snapshot(), &FLAT_SPEC, &Draft::default())
+        let model = MatrixIndex::build(&Arc::new(flat_snapshot()), &FLAT_SPEC, &Draft::default())
             .expect("a flat document");
-        assert_eq!(model.rows.len(), 3, "one row per document row");
+        assert_eq!(model.len(), 3, "one row per document row");
         assert_eq!(columns_of(&model), vec!["gross", "net"]);
         assert_eq!(model.key, vec!["SPX.Z".to_string()]);
-        assert_eq!(model.rows[1].label.to_string(), "2026-11-20");
-        assert_eq!(labels(&model, 1), vec!["2.50", "2.00"]);
-        assert_eq!(model.rows[1].cells[0].cell_ref, (1, 0));
+        assert_eq!(model.label(1).unwrap().to_string(), "2026-11-20");
+        assert_eq!(labels(&model, &Draft::default(), 1), vec!["2.50", "2.00"]);
+        assert_eq!(
+            model.cell(&Draft::default(), 1, 0).unwrap().cell_ref,
+            (1, 0)
+        );
         let header: Vec<(String, String, String)> = model
             .header
             .iter()
@@ -1751,17 +1911,17 @@ mod tests {
             Value::F64(9.0),
             &at(BASE),
         );
-        let model =
-            MatrixModel::build(&flat_snapshot(), &FLAT_SPEC, &draft).expect("a flat document");
-        assert_eq!(labels(&model, 2), vec!["3.50", "9.00"]);
-        assert!(model.rows[2].cells[1].edited);
-        assert!(!model.rows[2].cells[0].edited);
+        let model = MatrixIndex::build(&Arc::new(flat_snapshot()), &FLAT_SPEC, &draft)
+            .expect("a flat document");
+        assert_eq!(labels(&model, &draft, 2), vec!["3.50", "9.00"]);
+        assert!(model.cell(&draft, 2, 1).unwrap().edited);
+        assert!(!model.cell(&draft, 2, 0).unwrap().edited);
     }
 
     #[test]
     fn empty_has_no_rows_and_carries_the_key() {
-        let model = MatrixModel::empty(&CVI, &["SPX.Z".to_string()]);
-        assert!(model.rows.is_empty());
+        let model = MatrixIndex::empty(&CVI, &["SPX.Z".to_string()]);
+        assert!(model.is_empty());
         assert!(model.columns.is_empty());
         assert!(model.header.is_empty());
         assert_eq!(model.base, None);
@@ -1770,15 +1930,16 @@ mod tests {
 
     #[test]
     fn a_document_with_no_rows_builds_the_no_document_shape() {
-        let model = MatrixModel::build(&document(&[]), &CVI, &Draft::default())
+        let model = MatrixIndex::build(&Arc::new(document(&[])), &CVI, &Draft::default())
             .expect("an empty result is not an error — the key may simply be unknown");
-        assert!(model.rows.is_empty());
+        assert!(model.is_empty());
         assert!(model.columns.is_empty());
     }
 
     #[test]
     fn label_of_answers_the_row_and_column_labels_and_never_panics() {
-        let model = MatrixModel::build(&full_grid(), &CVI, &Draft::default()).expect("a full grid");
+        let model = MatrixIndex::build(&Arc::new(full_grid()), &CVI, &Draft::default())
+            .expect("a full grid");
         let (row, col) = model.label_of((1, 5));
         assert_eq!(row.to_string(), "2026-11-20");
         assert_eq!(col.to_string(), "3.5");
@@ -1793,8 +1954,12 @@ mod tests {
     fn a_repeated_row_label_is_refused_when_the_columns_are_flat() {
         // Repeated labels would merge distinct edit targets during rebase,
         // so the model must reject the document.
-        let err = MatrixModel::build(
-            &flat_snapshot_dated(&["2026-10-16", "2026-10-16", "2026-12-18"]),
+        let err = MatrixIndex::build(
+            &Arc::new(flat_snapshot_dated(&[
+                "2026-10-16",
+                "2026-10-16",
+                "2026-12-18",
+            ])),
             &FLAT_SPEC,
             &Draft::default(),
         )
@@ -1827,7 +1992,7 @@ mod tests {
                 actions: Vec::new(),
             })
         });
-        let err = MatrixModel::build(&flat_snapshot(), &PIVOTED, &Draft::default())
+        let err = MatrixIndex::build(&Arc::new(flat_snapshot()), &PIVOTED, &Draft::default())
             .expect_err("one value per cell");
         assert!(err.contains("gross") && err.contains("net"), "{err}");
         assert!(err.contains("currency"), "{err}");
@@ -1865,10 +2030,10 @@ mod tests {
             provenance(BASE),
         );
         assert!(
-            MatrixModel::build(&snap, &CVI, &Draft::default()).is_ok(),
+            MatrixIndex::build(&Arc::new(snap), &CVI, &Draft::default()).is_ok(),
             "the same document without the NULL builds"
         );
-        let err = MatrixModel::build(&holed, &CVI, &Draft::default())
+        let err = MatrixIndex::build(&Arc::new(holed), &CVI, &Draft::default())
             .expect_err("a blank axis cell identifies no row");
         assert!(err.contains("term"), "{err}");
     }
@@ -1905,7 +2070,7 @@ mod tests {
             0,
             provenance(BASE),
         );
-        let err = MatrixModel::build(&snap, &CVI, &Draft::default())
+        let err = MatrixIndex::build(&Arc::new(snap), &CVI, &Draft::default())
             .expect_err("a one-part key that reads as no parts is a lie about the document");
         assert!(err.contains("underlying_ref"), "{err}");
     }
@@ -1958,16 +2123,25 @@ mod tests {
             ("D1", "2026-12-18", 1.25, "declared"),
             ("D2", "2027-03-19", 0.5, "estimated"),
         ]);
-        let model = MatrixModel::build(&snapshot, &SCHEDULE, &Draft::default()).unwrap();
+        let model = MatrixIndex::build(&Arc::new(snapshot), &SCHEDULE, &Draft::default()).unwrap();
         assert_eq!(model.columns, ["ex", "amount", "status"]);
         assert!(matches!(model.column_kinds[0], CellKind::Date));
         assert!(matches!(model.column_kinds[1], CellKind::Number(_)));
         assert!(matches!(model.column_kinds[2], CellKind::Choice(_)));
-        assert_eq!(model.rows[0].cells[0].text.as_ref(), "2026-12-18");
-        assert_eq!(model.rows[0].cells[1].text.as_ref(), "1.2500");
-        assert_eq!(model.rows[0].cells[2].text.as_ref(), "declared");
         assert_eq!(
-            model.rows[1].cells[0].value,
+            model.cell(&Draft::default(), 0, 0).unwrap().text.as_ref(),
+            "2026-12-18"
+        );
+        assert_eq!(
+            model.cell(&Draft::default(), 0, 1).unwrap().text.as_ref(),
+            "1.2500"
+        );
+        assert_eq!(
+            model.cell(&Draft::default(), 0, 2).unwrap().text.as_ref(),
+            "declared"
+        );
+        assert_eq!(
+            model.cell(&Draft::default(), 1, 0).unwrap().value,
             Some(Value::Date(date(2027, 3, 19)))
         );
     }
@@ -1977,7 +2151,8 @@ mod tests {
     #[test]
     fn a_flat_model_refuses_a_value_column_the_spec_does_not_list() {
         let snapshot = schedule_snapshot_with_extra_value("bonus");
-        let err = MatrixModel::build(&snapshot, &SCHEDULE, &Draft::default()).unwrap_err();
+        let err =
+            MatrixIndex::build(&Arc::new(snapshot), &SCHEDULE, &Draft::default()).unwrap_err();
         assert!(
             err.contains("'bonus'") && err.contains("does not declare"),
             "{err}"
@@ -1988,7 +2163,7 @@ mod tests {
     #[test]
     fn a_pivot_refuses_a_non_numeric_value_column() {
         let snapshot = cvi_with_text_param();
-        let err = MatrixModel::build(&snapshot, &CVI, &Draft::default()).unwrap_err();
+        let err = MatrixIndex::build(&Arc::new(snapshot), &CVI, &Draft::default()).unwrap_err();
         assert!(err.contains("numeric"), "{err}");
     }
 
@@ -2009,63 +2184,164 @@ mod tests {
             Value::Date(date(2026, 12, 20)),
             &at("t0"),
         );
-        let model = MatrixModel::build(&snapshot, &SCHEDULE, &draft).unwrap();
-        assert_eq!(model.rows[0].cells[2].text.as_ref(), "paid");
-        assert!(model.rows[0].cells[2].edited);
-        assert_eq!(model.rows[0].cells[0].text.as_ref(), "2026-12-20");
+        let model = MatrixIndex::build(&Arc::new(snapshot), &SCHEDULE, &draft).unwrap();
+        assert_eq!(model.cell(&draft, 0, 2).unwrap().text.as_ref(), "paid");
+        assert!(model.cell(&draft, 0, 2).unwrap().edited);
+        assert_eq!(
+            model.cell(&draft, 0, 0).unwrap().text.as_ref(),
+            "2026-12-20"
+        );
     }
 
-    /// A cell patch paints the same value and flags as a full rebuild.
+    /// Every window cell is exactly what `format_cell` returns, over a pivot
+    /// and a flat panel with an edit, a deleted row and an unfilled insert.
     #[test]
-    fn patch_cell_matches_a_rebuild() {
-        let snapshot = schedule_snapshot(&[
+    fn the_window_paints_the_same_text_as_format_cell() {
+        use geode_tile::grid::WindowCache;
+        let mut draft = Draft::default();
+        let base = provenance_base();
+        draft.set(
+            (0, 4),
+            ("2026-10-16".into(), "-1".into()),
+            Value::F64(0.25),
+            &base,
+        );
+        draft.delete_row("2026-11-20", &base);
+        draft.insert_row("2026-12-18".into(), Some("2026-10-16".into()), &base);
+        let snapshot = Arc::new(full_grid());
+        let index = MatrixIndex::build(&snapshot, &CVI, &draft).unwrap();
+        let mut window = WindowCache::default();
+        window.set_window(0..index.len(), index.columns.len(), |r, c| {
+            index.md_cell(&draft, r, c)
+        });
+        for r in 0..index.len() {
+            for c in 0..index.columns.len() {
+                assert_eq!(
+                    window.get(r, c).map(|m| m.text.clone()),
+                    Some(index.format_cell(&draft, r, c)),
+                    "({r}, {c})"
+                );
+            }
+        }
+        assert_eq!(
+            index.format_cell(&draft, 1, 3).as_ref(),
+            UNFILLED,
+            "the insert is unfilled"
+        );
+        assert_eq!(index.format_cell(&draft, 0, 4).as_ref(), "0.2500");
+        assert_eq!(index.state(2), Some(RowState::Deleted));
+
+        // The flat shape: a typed edit and an unfilled insert.
+        let flat = Arc::new(schedule_snapshot(&[
             ("D1", "2026-12-18", 1.25, "declared"),
             ("D2", "2027-03-19", 0.5, "estimated"),
-        ]);
+        ]));
         let mut draft = Draft::default();
-        let mut patched = MatrixModel::build(&snapshot, &SCHEDULE, &draft).unwrap();
         draft.set(
-            (1, 1),
-            ("D2".into(), "amount".into()),
-            Value::F64(0.75),
+            (1, 2),
+            ("D2".into(), "status".into()),
+            Value::Utf8("paid".into()),
             &at("t0"),
         );
-        assert!(patched.patch_cell(1, 1, &snapshot, &SCHEDULE, &draft));
-        let rebuilt = MatrixModel::build(&snapshot, &SCHEDULE, &draft).unwrap();
-        assert_eq!(patched.rows[1].cells[1], rebuilt.rows[1].cells[1]);
-        assert_eq!(patched.rows[1].cells[1].text.as_ref(), "0.7500");
-        assert_eq!(
-            patched.rows[0].cells[1], rebuilt.rows[0].cells[1],
-            "untouched cells untouched"
-        );
-        assert_eq!(patched, rebuilt, "and nothing else about the model moved");
-        // A reverted edit patches back to the document's own value: the
-        // patch reads the draft as it stands, not the cell as it was.
-        draft.revert();
-        assert!(patched.patch_cell(1, 1, &snapshot, &SCHEDULE, &draft));
-        assert_eq!(patched.rows[1].cells[1].text.as_ref(), "0.5000");
-        assert!(!patched.rows[1].cells[1].edited);
-        assert!(
-            !patched.patch_cell(9, 0, &snapshot, &SCHEDULE, &draft),
-            "out of range answers false"
-        );
-        assert!(
-            !patched.patch_cell(0, 9, &snapshot, &SCHEDULE, &draft),
-            "on either axis"
-        );
+        draft.insert_row("new-1".into(), Some("D1".into()), &at("t0"));
+        let index = MatrixIndex::build(&flat, &SCHEDULE, &draft).unwrap();
+        let mut window = WindowCache::default();
+        window.set_window(0..index.len(), index.columns.len(), |r, c| {
+            index.md_cell(&draft, r, c)
+        });
+        for r in 0..index.len() {
+            for c in 0..index.columns.len() {
+                assert_eq!(
+                    window.get(r, c).map(|m| m.text.clone()),
+                    Some(index.format_cell(&draft, r, c)),
+                    "flat ({r}, {c})"
+                );
+            }
+        }
+        assert_eq!(index.format_cell(&draft, 2, 2).as_ref(), "paid");
+        assert_eq!(index.format_cell(&draft, 1, 0).as_ref(), UNFILLED);
     }
 
-    /// The pivot's own patch: a ladder cell and a slice cell each find
+    /// A label resolves through the index to its painted row, inserts
+    /// included, and a label not in the grid resolves to nothing.
+    #[test]
+    fn label_lookup_and_uniqueness_use_the_index() {
+        let base = provenance_base();
+        let mut draft = Draft::default();
+        draft.insert_row("2026-12-18".into(), Some("2026-10-16".into()), &base);
+        let index = MatrixIndex::build(&Arc::new(full_grid()), &CVI, &draft).unwrap();
+        assert_eq!(index.row_of("2026-10-16"), Some(0));
+        assert_eq!(
+            index.row_of("2026-12-18"),
+            Some(1),
+            "the insert follows its anchor"
+        );
+        assert_eq!(index.row_of("2026-11-20"), Some(2));
+        assert_eq!(index.row_of("2027-01-15"), None);
+        assert_eq!(index.label(1).map(|l| l.as_ref()), Some("2026-12-18"));
+    }
+
+    /// A one-cell edit re-prepares that window cell to exactly what a
+    /// rebuilt index paints, and touches nothing else.
+    #[test]
+    fn patch_cell_matches_a_rebuild() {
+        use geode_tile::grid::WindowCache;
+        let snapshot = Arc::new(full_grid());
+        let spec = &CVI;
+        let index = MatrixIndex::build(&snapshot, spec, &Draft::default()).unwrap();
+        let mut draft = Draft::default();
+        let mut window = WindowCache::default();
+        window.set_window(0..index.len(), index.columns.len(), |r, c| {
+            index.md_cell(&draft, r, c)
+        });
+        let cell = (1, 4);
+        let labels = index.label_of(cell);
+        draft.set(
+            cell,
+            (labels.0.to_string(), labels.1.to_string()),
+            Value::F64(9.5),
+            &provenance_base(),
+        );
+        refill_cell(&mut window, &index, &draft, cell);
+        let rebuilt = MatrixIndex::build(&snapshot, spec, &draft).unwrap();
+        for r in 0..rebuilt.len() {
+            for c in 0..rebuilt.columns.len() {
+                assert_eq!(
+                    window.get(r, c).cloned(),
+                    rebuilt.md_cell(&draft, r, c),
+                    "({r}, {c})"
+                );
+            }
+        }
+        assert!(window.get(1, 4).is_some_and(|m| m.edited));
+        // A reverted edit refills back to the document's own value: the
+        // refill reads the draft as it stands, not the cell as it was.
+        draft.revert();
+        refill_cell(&mut window, &index, &draft, cell);
+        assert_eq!(
+            window.get(1, 4).cloned(),
+            index.md_cell(&draft, 1, 4),
+            "back to the document"
+        );
+        assert!(!window.get(1, 4).is_some_and(|m| m.edited));
+    }
+
+    /// The pivot's own refill: a ladder cell and a slice cell each find
     /// their snapshot row through the grid the build indexed — the
     /// (row, column) → snapshot row map a flat layout does not need,
     /// since there a grid row IS a snapshot row.
     #[test]
     fn patch_cell_matches_a_rebuild_under_a_pivot() {
-        let snapshot = full_grid();
+        use geode_tile::grid::WindowCache;
+        let snapshot = Arc::new(full_grid());
         let mut draft = Draft::default();
-        let mut patched = MatrixModel::build(&snapshot, &CVI, &draft).unwrap();
+        let index = MatrixIndex::build(&snapshot, &CVI, &draft).unwrap();
+        let mut window = WindowCache::default();
+        window.set_window(0..index.len(), index.columns.len(), |r, c| {
+            index.md_cell(&draft, r, c)
+        });
         // Node 3.5 of the second term: column 3 + 2 in the grid, snapshot
-        // row 5 — the last of six, so a patch that read "grid row" as
+        // row 5 — the last of six, so a read that took "grid row" as
         // "snapshot row" would land on the wrong term.
         draft.set(
             (1, 5),
@@ -2081,18 +2357,25 @@ mod tests {
             Value::F64(4600.5),
             &at("t0"),
         );
-        assert!(patched.patch_cell(1, 5, &snapshot, &CVI, &draft));
-        assert!(patched.patch_cell(0, 0, &snapshot, &CVI, &draft));
-        let rebuilt = MatrixModel::build(&snapshot, &CVI, &draft).unwrap();
-        assert_eq!(patched, rebuilt);
-        assert_eq!(patched.rows[1].cells[5].text.as_ref(), "9.0000");
-        assert_eq!(patched.rows[0].cells[0].text.as_ref(), "4600.50");
+        refill_cell(&mut window, &index, &draft, (1, 5));
+        refill_cell(&mut window, &index, &draft, (0, 0));
+        let rebuilt = MatrixIndex::build(&snapshot, &CVI, &draft).unwrap();
+        for r in 0..rebuilt.len() {
+            for c in 0..rebuilt.columns.len() {
+                assert_eq!(
+                    window.get(r, c).cloned(),
+                    rebuilt.md_cell(&draft, r, c),
+                    "({r}, {c})"
+                );
+            }
+        }
+        assert_eq!(window.get(1, 5).unwrap().text.as_ref(), "9.0000");
+        assert_eq!(window.get(0, 0).unwrap().text.as_ref(), "4600.50");
         draft.revert();
-        assert!(patched.patch_cell(1, 5, &snapshot, &CVI, &draft));
-        assert!(patched.patch_cell(0, 0, &snapshot, &CVI, &draft));
-        assert_eq!(patched.rows[1].cells[5].text.as_ref(), "0.6000");
-        assert_eq!(patched.rows[0].cells[0].text.as_ref(), "4512.30");
-        assert!(!patched.patch_cell(2, 0, &snapshot, &CVI, &draft));
+        refill_cell(&mut window, &index, &draft, (1, 5));
+        refill_cell(&mut window, &index, &draft, (0, 0));
+        assert_eq!(window.get(1, 5).unwrap().text.as_ref(), "0.6000");
+        assert_eq!(window.get(0, 0).unwrap().text.as_ref(), "4512.30");
     }
 
     /// Inserted rows follow their anchors and use label-keyed draft cells;
@@ -2110,25 +2393,25 @@ mod tests {
         d.insert_row("new-2".into(), None, &at("t0"));
         d.set_row_cell("new-1", "amount", Value::F64(2.0));
         d.delete_row("D3", &at("t0"));
-        let m = MatrixModel::build(&snapshot, &SCHEDULE, &d).unwrap();
-        let labels: Vec<_> = m.rows.iter().map(|r| r.label.to_string()).collect();
+        let m = MatrixIndex::build(&Arc::new(snapshot), &SCHEDULE, &d).unwrap();
+        let labels: Vec<_> = m.rows().map(|r| r.label.to_string()).collect();
         assert_eq!(labels, ["new-2", "D1", "new-1", "D2", "D3"]);
-        assert_eq!(m.rows[0].state, RowState::Inserted);
-        assert_eq!(m.rows[1].state, RowState::Document);
-        assert_eq!(m.rows[2].state, RowState::Inserted);
-        assert_eq!(m.rows[2].cells[1].text.as_ref(), "2.0000");
-        assert_eq!(m.rows[2].cells[1].value, Some(Value::F64(2.0)));
-        assert!(m.rows[2].cells[1].edited);
+        assert_eq!(m.state(0).unwrap(), RowState::Inserted);
+        assert_eq!(m.state(1).unwrap(), RowState::Document);
+        assert_eq!(m.state(2).unwrap(), RowState::Inserted);
+        assert_eq!(m.cell(&d, 2, 1).unwrap().text.as_ref(), "2.0000");
+        assert_eq!(m.cell(&d, 2, 1).unwrap().value, Some(Value::F64(2.0)));
+        assert!(m.cell(&d, 2, 1).unwrap().edited);
         assert_eq!(
-            m.rows[2].cells[0].text.as_ref(),
+            m.cell(&d, 2, 0).unwrap().text.as_ref(),
             "·",
             "an unfilled cell paints a dot"
         );
-        assert_eq!(m.rows[2].cells[0].value, None);
-        assert!(m.rows[2].cells[0].edited);
-        assert_eq!(m.rows[4].state, RowState::Deleted);
+        assert_eq!(m.cell(&d, 2, 0).unwrap().value, None);
+        assert!(m.cell(&d, 2, 0).unwrap().edited);
+        assert_eq!(m.state(4).unwrap(), RowState::Deleted);
         assert_eq!(
-            m.rows[4].cells[1].text.as_ref(),
+            m.cell(&d, 4, 1).unwrap().text.as_ref(),
             "0.7500",
             "a deleted row still paints the document's own cells"
         );
@@ -2141,8 +2424,8 @@ mod tests {
         // document position for it); a document row keeps the document's
         // own, which is what `Draft::edits` is keyed by — so D2, now at
         // model row 3, still says it is document row 1.
-        assert_eq!(m.rows[2].cells[1].cell_ref, (2, 1));
-        assert_eq!(m.rows[3].cells[0].cell_ref, (1, 0));
+        assert_eq!(m.cell(&d, 2, 1).unwrap().cell_ref, (2, 1));
+        assert_eq!(m.cell(&d, 3, 0).unwrap().cell_ref, (1, 0));
     }
 
     /// Several rows under one anchor land in label order; a row anchored
@@ -2159,13 +2442,14 @@ mod tests {
         d.insert_row("new-1".into(), Some("D1".into()), &at("t0"));
         d.insert_row("new-2".into(), Some("new-3".into()), &at("t0"));
         d.insert_row("new-4".into(), Some("gone".into()), &at("t0"));
-        let m = MatrixModel::build(&snapshot, &SCHEDULE, &d).unwrap();
-        let labels: Vec<_> = m.rows.iter().map(|r| r.label.to_string()).collect();
+        let m = MatrixIndex::build(&Arc::new(snapshot), &SCHEDULE, &d).unwrap();
+        let labels: Vec<_> = m.rows().map(|r| r.label.to_string()).collect();
         assert_eq!(labels, ["new-4", "D1", "new-1", "new-3", "new-2", "D2"]);
-        for (i, row) in m.rows.iter().enumerate() {
+        for row in m.rows() {
             if row.state == RowState::Inserted {
-                for (j, cell) in row.cells.iter().enumerate() {
-                    assert_eq!(cell.cell_ref, (i, j));
+                assert_eq!(m.cell_ref((row.index, 0)), None, "keyed by label");
+                for j in 0..m.columns.len() {
+                    assert_eq!(m.cell(&d, row.index, j).unwrap().cell_ref, (row.index, j));
                 }
             }
         }
@@ -2176,19 +2460,16 @@ mod tests {
     /// node missing is not a term the desk can price.
     #[test]
     fn a_pivot_inserted_row_is_incomplete_until_every_cell_is_filled() {
-        let snapshot = full_grid();
+        let snapshot = Arc::new(full_grid());
         let mut d = Draft::default();
         d.insert_row("2027-01-15".into(), Some("2026-11-20".into()), &at(BASE));
-        let m = MatrixModel::build(&snapshot, &CVI, &d).unwrap();
-        let labels: Vec<_> = m.rows.iter().map(|r| r.label.to_string()).collect();
+        let m = MatrixIndex::build(&snapshot, &CVI, &d).unwrap();
+        let labels: Vec<_> = m.rows().map(|r| r.label.to_string()).collect();
         assert_eq!(labels, ["2026-10-16", "2026-11-20", "2027-01-15"]);
-        assert_eq!(m.rows[2].state, RowState::Inserted);
-        assert_eq!(
-            m.rows[2].cells.len(),
-            6,
-            "three slice values and three nodes"
-        );
-        assert!(m.rows[2].cells.iter().all(|c| c.text.as_ref() == "·"));
+        assert_eq!(m.state(2).unwrap(), RowState::Inserted);
+        assert_eq!(m.columns.len(), 6, "three slice values and three nodes");
+        assert!((0..6).all(|c| m.format_cell(&d, 2, c).as_ref() == "·"));
+        assert!(m.cell(&d, 2, 6).is_none(), "nothing past the last column");
         assert_eq!(d.incomplete_rows(&CVI, &m.columns), 1);
         for node in ["-20", "-1", "3.5"] {
             d.set_row_cell("2027-01-15", node, Value::F64(0.2));
@@ -2202,14 +2483,14 @@ mod tests {
             d.set_row_cell("2027-01-15", slice, Value::F64(1.0));
         }
         assert_eq!(d.incomplete_rows(&CVI, &m.columns), 0);
-        let m = MatrixModel::build(&snapshot, &CVI, &d).unwrap();
+        let m = MatrixIndex::build(&snapshot, &CVI, &d).unwrap();
         assert_eq!(
-            m.rows[2].cells[0].text.as_ref(),
+            m.cell(&d, 2, 0).unwrap().text.as_ref(),
             "1.00",
             "fwd at its own format"
         );
         assert_eq!(
-            m.rows[2].cells[3].text.as_ref(),
+            m.cell(&d, 2, 3).unwrap().text.as_ref(),
             "0.2000",
             "a node at the panel's"
         );
@@ -2240,7 +2521,7 @@ mod tests {
             ]),
             ..(**FLAT_SPEC).clone()
         };
-        let m = MatrixModel::build(&flat_snapshot(), &spec, &Draft::default()).unwrap();
+        let m = MatrixIndex::build(&Arc::new(flat_snapshot()), &spec, &Draft::default()).unwrap();
         let mut d = Draft::default();
         d.insert_row("new-1".into(), None, &at(BASE));
         assert_eq!(d.incomplete_rows(&spec, &m.columns), 1);
@@ -2253,21 +2534,27 @@ mod tests {
         );
     }
 
-    /// Patch inserted values from their draft rows and shifted document
-    /// values through `cell_ref`, matching a full rebuild in both cases.
+    /// Refill inserted values from their draft rows and shifted document
+    /// values through their document row, matching a full rebuild in both
+    /// cases.
     #[test]
     fn patch_cell_matches_a_rebuild_with_rows_spliced() {
-        let snapshot = schedule_snapshot(&[
+        use geode_tile::grid::WindowCache;
+        let snapshot = Arc::new(schedule_snapshot(&[
             ("D1", "2026-12-18", 1.25, "declared"),
             ("D2", "2027-03-19", 0.5, "estimated"),
-        ]);
+        ]));
         let mut draft = Draft::default();
         draft.insert_row("new-1".into(), None, &at("t0"));
-        let mut patched = MatrixModel::build(&snapshot, &SCHEDULE, &draft).unwrap();
-        assert_eq!(patched.rows[2].label.as_ref(), "D2");
-        // D2 is model row 2 but document row 1 — its cell_ref says so, and
+        let index = MatrixIndex::build(&snapshot, &SCHEDULE, &draft).unwrap();
+        assert_eq!(index.label(2).unwrap().as_ref(), "D2");
+        let mut window = WindowCache::default();
+        window.set_window(0..index.len(), index.columns.len(), |r, c| {
+            index.md_cell(&draft, r, c)
+        });
+        // D2 is painted row 2 but document row 1 — its cell_ref says so, and
         // that is the key its edit lives under.
-        let d2_ref = patched.rows[2].cells[1].cell_ref;
+        let d2_ref = index.cell_ref((2, 1)).unwrap();
         assert_eq!(d2_ref, (1, 1));
         draft.set(
             d2_ref,
@@ -2276,21 +2563,25 @@ mod tests {
             &at("t0"),
         );
         draft.set_row_cell("new-1", "amount", Value::F64(3.0));
-        assert!(patched.patch_cell(2, 1, &snapshot, &SCHEDULE, &draft));
-        assert!(patched.patch_cell(0, 1, &snapshot, &SCHEDULE, &draft));
-        let rebuilt = MatrixModel::build(&snapshot, &SCHEDULE, &draft).unwrap();
-        assert_eq!(patched, rebuilt);
-        assert_eq!(patched.rows[2].cells[1].text.as_ref(), "0.7500");
-        assert_eq!(patched.rows[0].cells[1].text.as_ref(), "3.0000");
+        refill_cell(&mut window, &index, &draft, (2, 1));
+        refill_cell(&mut window, &index, &draft, (0, 1));
+        let rebuilt = MatrixIndex::build(&snapshot, &SCHEDULE, &draft).unwrap();
+        for r in 0..rebuilt.len() {
+            for c in 0..rebuilt.columns.len() {
+                assert_eq!(
+                    window.get(r, c).cloned(),
+                    rebuilt.md_cell(&draft, r, c),
+                    "({r}, {c})"
+                );
+            }
+        }
+        assert_eq!(window.get(2, 1).unwrap().text.as_ref(), "0.7500");
+        assert_eq!(window.get(0, 1).unwrap().text.as_ref(), "3.0000");
         assert_eq!(
-            patched.rows[1].cells[1].text.as_ref(),
+            window.get(1, 1).unwrap().text.as_ref(),
             "1.2500",
             "D1, at the inserted row's old index, is untouched"
         );
-        // An inserted row the draft no longer holds cannot be patched:
-        // the caller rebuilds.
-        draft.delete_row("new-1", &at("t0"));
-        assert!(!patched.patch_cell(0, 1, &snapshot, &SCHEDULE, &draft));
     }
 
     proptest! {
@@ -2343,19 +2634,21 @@ mod tests {
                 want_value.insert((term.clone(), column), value.expect("a value"));
             }
 
-            let model = MatrixModel::build(&document(&cells), &CVI, &Draft::default())
+            let model = MatrixIndex::build(&Arc::new(document(&cells)), &CVI, &Draft::default())
                 .expect("a complete grid pivots");
             prop_assert_eq!(
-                model.rows.iter().map(|r| r.label.to_string()).collect::<Vec<_>>(),
+                model.rows().map(|r| r.label.to_string()).collect::<Vec<_>>(),
                 want_rows.clone()
             );
             // The three slice columns lead; the ladder follows them.
             let s = model.slice_columns;
             prop_assert_eq!(s, 3);
             prop_assert_eq!(columns_of(&model)[s..].to_vec(), want_columns.clone());
-            for (i, row) in model.rows.iter().enumerate() {
-                prop_assert_eq!(row.cells.len(), s + n);
-                for (j, cell) in row.cells.iter().enumerate().skip(s) {
+            let clean = Draft::default();
+            prop_assert_eq!(model.columns.len(), s + n);
+            for i in 0..model.len() {
+                for j in s..s + n {
+                    let cell = model.cell(&clean, i, j).expect("a cell in range");
                     let want = want_value[&(want_rows[i].clone(), want_columns[j - s].clone())];
                     prop_assert_eq!(cell.value.clone(), Some(Value::F64(want)));
                     prop_assert_eq!(cell.cell_ref, (i, j));

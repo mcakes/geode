@@ -1,5 +1,8 @@
-//! Table delegate over a prepared `Rc<GridModel>` installed by the tile. Cursor, loading
-//! state, and cell editor are read-only mirrors of tile state. Column zero
+//! Table delegate over a prepared `Rc<GridIndex>` installed by the tile, and
+//! the window of measure cells it fills outside render (an install, or the
+//! table's `visible_rows_changed`); `render_td` only reads the window.
+//! Cursor, loading state, and cell editor are read-only mirrors of tile
+//! state. Column zero
 //! is a pinned connector tree the cell cursor does not enter: a package
 //! paints a chevron, its template as a neutral chip, its shorthand summary
 //! and a muted leg count; a leg its drawn connector lines (a hairline the
@@ -17,7 +20,7 @@
 //! are the table's row grounds, which replace a row's own and which
 //! further per-cell fills would obscure.
 
-use crate::grid::{GridModel, GridRowKind};
+use crate::grid::{CellPass, FillSource, GridCell, GridIndex, GridRowKind};
 use crate::paint::{CellColour, Paints, RowPalette, cell_colour};
 use crate::popup::{ChoicePaint, render_choice};
 use crate::tile::PricerTile;
@@ -31,6 +34,7 @@ use geode_shell::shell::colours::{anchors_from_theme, theme_signature, tokens_fr
 use geode_shell::shell::control::{self, PointerStates as _};
 use geode_shell::shell::scale;
 use geode_tile::colour::{ColourCache, Resolved as ColourResolved};
+use geode_tile::grid::{FIRST_WINDOW, WindowCache, WindowRequest};
 use geode_widgets::datefield::{self, DateTimeField, SegmentPaint, SegmentText};
 use gpui::prelude::*;
 use gpui::{
@@ -41,6 +45,7 @@ use gpui::{
 use gpui_component::input::{Input, InputState};
 use gpui_component::table::{Column, ColumnFixed, TableDelegate, TableState};
 use gpui_component::{ActiveTheme as _, Size, Theme, h_flex};
+use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -309,7 +314,15 @@ fn render_date_field(
 }
 
 pub struct SheetDelegate {
-    pub(crate) model: Rc<GridModel>,
+    /// The grid index shared with the tile; installs replace it.
+    pub(crate) model: Rc<GridIndex>,
+    /// The formatted measure cells on screen, filled outside render;
+    /// `render_td` only reads it. A miss paints a blank cell, and an open
+    /// editor on it still paints.
+    pub(crate) window: WindowCache<GridCell>,
+    /// The range the table last reported; before any report the first
+    /// `FIRST_WINDOW` rows (a one-row sheet never gets a report).
+    requested: WindowRequest,
     /// `(grid row, plan column)`; `None` with no cursor row.
     pub(crate) cursor: Option<(usize, usize)>,
     /// The tile's resolved selection, mirrored by `sync_cursor`: grid
@@ -386,7 +399,7 @@ pub struct SheetDelegate {
 /// A free function over the model rather than a `&self` method: the
 /// returned `&str` borrows `model` alone, leaving the delegate's other
 /// fields free for the `&mut` the colour cache needs.
-fn named_colour_of(model: &GridModel, plan_col: usize) -> Option<&str> {
+fn named_colour_of(model: &GridIndex, plan_col: usize) -> Option<&str> {
     match model.columns.get(plan_col).map(|c| &c.colour) {
         Some(Colour::Named(name)) => Some(name.as_str()),
         _ => None,
@@ -396,7 +409,9 @@ fn named_colour_of(model: &GridModel, plan_col: usize) -> Option<&str> {
 impl SheetDelegate {
     pub(crate) fn new(theme: &Theme, tile: WeakEntity<PricerTile>) -> Self {
         SheetDelegate {
-            model: Rc::new(GridModel::default()),
+            model: Rc::new(GridIndex::default()),
+            window: WindowCache::default(),
+            requested: WindowRequest::with_first(FIRST_WINDOW),
             cursor: None,
             selected: None,
             paints: Paints::derive(theme),
@@ -473,15 +488,16 @@ impl SheetDelegate {
     /// The text colour `render_cell` paints the cell at (`row_ix`,
     /// `plan_col`) with: the state paint, unless the cell is an own value
     /// in a column whose `color` says otherwise (`paint::cell_colour`).
-    /// A row or column the model lacks is the own paint.
+    /// A row the model lacks, and a cell the window lacks, is the own
+    /// paint.
     pub(crate) fn text_colour(&mut self, row_ix: usize, plan_col: usize, theme: &Theme) -> Hsla {
         let model = Rc::clone(&self.model);
-        let Some(row) = model.rows.get(row_ix) else {
+        if row_ix >= model.len() {
             return self.paints.own;
-        };
+        }
         // A group row or a leg: the palette floored on its own ground.
         let palette = self.row_palette(row_ix);
-        let Some(cell) = row.cells.get(plan_col) else {
+        let Some(&GridCell { state, sign, .. }) = self.window.get(row_ix, plan_col) else {
             return palette.map_or(self.paints.own, |p| p.own);
         };
         let colour = model
@@ -489,8 +505,8 @@ impl SheetDelegate {
             .get(plan_col)
             .map_or(&Colour::None, |c| &c.colour);
         if let Some(palette) = palette {
-            let base = palette.text(cell.state);
-            return match cell_colour(colour, cell.state, cell.sign) {
+            let base = palette.text(state);
+            return match cell_colour(colour, state, sign) {
                 CellColour::State => base,
                 CellColour::Bearish => palette.bearish,
                 CellColour::Bullish => palette.bullish,
@@ -500,8 +516,8 @@ impl SheetDelegate {
                 },
             };
         }
-        let base = self.paints.text(cell.state);
-        match cell_colour(colour, cell.state, cell.sign) {
+        let base = self.paints.text(state);
+        match cell_colour(colour, state, sign) {
             CellColour::State => base,
             CellColour::Bearish => theme.chart_bearish,
             CellColour::Bullish => theme.chart_bullish,
@@ -521,7 +537,7 @@ impl SheetDelegate {
     ) -> gpui::AnyElement {
         let row_ix = find_row.source_row();
         let model = self.model.clone();
-        let Some(row) = model.rows.get(row_ix) else {
+        let Some(row) = model.tree(row_ix) else {
             return div().into_any_element();
         };
         let el = div()
@@ -559,7 +575,7 @@ impl SheetDelegate {
                         .min_w_0()
                         .truncate()
                         .child(geode_shell::palette::highlighted_title(
-                            &row.search,
+                            row.search,
                             &indices,
                             cx.theme().foreground,
                         )),
@@ -574,7 +590,12 @@ impl SheetDelegate {
         };
         el.when(model.columns[col].right, |el| el.justify_end())
             .text_color(colour)
-            .child(row.cells[col].text.clone())
+            .child(
+                self.window
+                    .get(row_ix, col)
+                    .map(|c| c.text.clone())
+                    .unwrap_or_default(),
+            )
             .into_any_element()
     }
 
@@ -612,7 +633,7 @@ impl SheetDelegate {
     /// `None` for a bare line, a package row and a filler row past the
     /// model, whose ground is the table's and whose text the line palette.
     pub(crate) fn row_palette(&self, row: usize) -> Option<RowPalette> {
-        match self.model.rows.get(row)?.kind {
+        match self.model.kind(row)? {
             GridRowKind::Group { .. } => Some(self.paints.group),
             GridRowKind::Leg { .. } => Some(self.paints.leg),
             GridRowKind::Package { .. } | GridRowKind::Line => None,
@@ -624,7 +645,7 @@ impl SheetDelegate {
     /// (`row_palette`) so a leg's and a group row's read on their grounds.
     pub(crate) fn tree_text_paint(&self, row: usize) -> Hsla {
         let palette = self.row_palette(row);
-        match self.model.rows.get(row).map(|r| r.kind) {
+        match self.model.kind(row) {
             Some(GridRowKind::Leg { .. }) => palette.map_or(self.paints.muted, |p| p.muted),
             _ => palette.map_or(self.paints.own, |p| p.own),
         }
@@ -651,44 +672,68 @@ impl SheetDelegate {
         self.themed_cell_colour(plan_col, theme).map(|c| c.base)
     }
 
-    /// Fit the tree column and every plan column to its header and every
-    /// grid row's prepared text. The tree column measures exactly what
-    /// `render_cell` paints: the row's lane indent, the chevron slot, the
-    /// gaps between its parts (`tree_gaps`) and, when present, the chip
-    /// (its padding and tag), then the text and the note; indent, slot,
-    /// padding and gaps on the rem scale.
+    /// Clear the window and refill the range the table last asked for,
+    /// clamped to the rows that exist: the table does not re-report an
+    /// unchanged range, so an install must not wait for it.
+    pub(crate) fn refill_window(&mut self, src: FillSource<'_>) {
+        self.window.clear();
+        if let Some(range) = self.requested.refill_range(self.model.len()) {
+            self.fill_window(range, src);
+        }
+    }
+
+    fn fill_window(&mut self, range: Range<usize>, src: FillSource<'_>) {
+        let model = Rc::clone(&self.model);
+        let mut pass = CellPass::new(src, &model);
+        self.window
+            .set_window(range, model.columns.len(), |g, c| pass.cell(g, c));
+    }
+
+    /// The find table's painter: every row of its all-open index, once per `/` open.
+    pub(crate) fn fill_all(&mut self, src: FillSource<'_>) {
+        self.window.clear();
+        let n = self.model.len();
+        self.fill_window(0..n, src);
+    }
+
+    /// Fit the tree column and every plan column to its header and the
+    /// rows in the window — what the table last showed, as the blotter
+    /// measures. The tree column measures exactly what `render_cell`
+    /// paints: the row's lane indent, the chevron slot, the gaps between
+    /// its parts (`tree_gaps`) and, when present, the chip (its padding
+    /// and tag), then the text and the note; indent, slot, padding and
+    /// gaps on the rem scale.
     ///
-    /// `None` with nothing to measure: the sheet is still loading, or has
-    /// no rows.
+    /// `None` with nothing to measure: the sheet is still loading, or the
+    /// window is empty.
     pub(crate) fn fit_columns(&self, m: &FitMetrics) -> Option<FittedWidths> {
-        if self.loading || self.model.rows.is_empty() {
+        let rows = self.window.window();
+        if self.loading || rows.is_empty() {
             return None;
         }
         let design = |px: f32| px * m.rem_px / scale::DESIGN_REM;
         let mut out = FittedWidths::new();
         out.insert(
             TREE_KEY.to_string(),
-            m.fit(self.model.rows.iter().map(|r| {
+            m.fit(rows.clone().filter_map(|g| self.model.tree(g)).map(|r| {
                 let (chip, note) = (!r.tag.is_empty(), !r.note.is_empty());
                 let depth = lane_depth(r.kind, r.depth);
                 let chip_px = if chip {
-                    design(2.0 * CHIP_PAD_X) + m.text_px(&r.tag)
+                    design(2.0 * CHIP_PAD_X) + m.text_px(r.tag)
                 } else {
                     0.0
                 };
                 design(
                     depth as f32 * INDENT + CHEVRON_SLOT + tree_gaps(chip, note) as f32 * TREE_GAP,
                 ) + chip_px
-                    + m.text_px(&r.text)
-                    + m.text_px(&r.note)
+                    + m.text_px(r.text)
+                    + m.text_px(r.note)
             })),
         );
         for (col, c) in self.model.columns.iter().enumerate() {
-            let cells = self
-                .model
-                .rows
-                .iter()
-                .filter_map(|r| r.cells.get(col).map(|cell| cell.text.as_ref()));
+            let cells = rows
+                .clone()
+                .filter_map(|g| self.window.get(g, col).map(|c| c.text.as_ref()));
             out.insert(c.name.to_string(), m.fit_text(&c.label, cells));
         }
         Some(out)
@@ -701,7 +746,7 @@ impl SheetDelegate {
     /// or leave a hole where the gutter was.
     pub(crate) fn refresh_numbers(&mut self) {
         let mode = self.line_numbers;
-        let len = self.model.rows.len();
+        let len = self.model.len();
         let cursor = match mode {
             LineNumbers::Relative => self.cursor.map(|(row, _)| row),
             _ => None,
@@ -806,7 +851,27 @@ impl TableDelegate for SheetDelegate {
     }
 
     fn rows_count(&self, _cx: &App) -> usize {
-        self.model.rows.len()
+        self.model.len()
+    }
+
+    /// Record the reported range and fill it. The sheet, rollup and plan
+    /// are the tile's live ones, read (never updated) through the weak
+    /// handle: the table calls this during its layout, outside any tile
+    /// update.
+    fn visible_rows_changed(
+        &mut self,
+        visible_range: Range<usize>,
+        _window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) {
+        self.requested.record(visible_range.clone());
+        let end = visible_range.end.min(self.model.len());
+        let Some(tile) = self.tile.upgrade() else {
+            return;
+        };
+        if visible_range.start < end {
+            self.fill_window(visible_range.start..end, tile.read(cx).fill_source());
+        }
     }
 
     /// Read only on prepare and `TableState::refresh`, which is why every
@@ -914,14 +979,14 @@ impl TableDelegate for SheetDelegate {
         // the tree cell (clipped to the row's content box) cannot paint,
         // so it would cut the leg's connector line from the next leg's.
         let joined = matches!(
-            self.model.rows.get(row_ix).map(|r| r.kind),
+            self.model.kind(row_ix),
             Some(GridRowKind::Leg { last: false })
         );
         let row = div()
             .id(("row", row_ix))
             .when(joined, |el| el.border_b_0())
             .when_some(self.row_ground(row_ix), |el, g| el.bg(g));
-        if row_ix >= self.model.rows.len() {
+        if row_ix >= self.model.len() {
             return row;
         }
         row.on_mouse_down(
@@ -1026,7 +1091,7 @@ impl SheetDelegate {
         // One `Rc` clone, so `chevron_states(&mut self)` can run while a
         // row is borrowed.
         let model = Rc::clone(&self.model);
-        let Some(row) = model.rows.get(row_ix) else {
+        let Some(row) = model.tree(row_ix) else {
             return div().into_any_element();
         };
         let (active_border, radius) = {
@@ -1210,8 +1275,9 @@ impl SheetDelegate {
             // ellipsis.
             None => {
                 let colour = self.text_colour(row_ix, plan_col, cx.theme());
-                el.when_some(row.cells.get(plan_col), |el, cell| {
-                    let text = cell.text.clone();
+                // A window miss paints a blank cell.
+                let text = self.window.get(row_ix, plan_col).map(|c| c.text.clone());
+                el.when_some(text, |el, text| {
                     el.text_color(colour).map(|el| {
                         if right {
                             el.child(text)

@@ -2378,3 +2378,102 @@ The leaf result includes 20 matching generations and their dataset headings.
 The previous filter returned no rows for that query, so its timing is not a
 valid comparison. The equivalent empty and dataset-name cases show no material
 regression; these single runs do not establish a speedup.
+
+## Windowed grid models: before — 2026-10-01
+
+Apple M5 Pro, 18 cores, rustc 1.96.0 (ac68faa20 2026-05-25), bench profile.
+Load average at start: 4.69 12.38 11.52 (the recorded run; one-minute load
+2.79–4.79 throughout). Binaries kept as `bench-grid/{matrix,core,blotter}-before`
+for alternating runs against the windowed build.
+
+An earlier run of the same binaries began at load 18.09 21.70 13.72 (one-minute
+load falling to 4.67 by its end, system indexing daemons busy); its medians are
+given beside the recorded ones and agree within 2%.
+
+`window_fill_*` before bodies read the same cells' prepared text (the per-frame
+paint cost); `delivery_to_window_values_10000x5` and
+`deliver_unchanged_structure_1000*` are the end-to-end comparisons.
+
+| Benchmark | Before median | Earlier run (load 18 → 5) |
+|---|---:|---:|
+| `marketdata_core/model_build_pivot_20x30` | 207.89 µs | 210.61 µs |
+| `marketdata_core/model_build_values_10000x5` | 5.4305 ms | 5.4841 ms |
+| `marketdata_core/model_build_values_10000x5_100_rows_spliced` | 5.7479 ms | 5.8184 ms |
+| `marketdata_core/window_fill_40x5` | 175.00 ns | 176.74 ns |
+| `marketdata_core/delivery_to_window_values_10000x5` | 5.4664 ms | 5.4702 ms |
+| `marketdata_core/one_cell_edit_values_10000x5` | 173.97 ns | 174.82 ns |
+| `marketdata_core/session_tick_values_10000x5` | 6.4126 ms | 6.3766 ms |
+| `marketdata_core/patch_cell_pivot_20x30` | 86.770 ns | 87.036 ns |
+| `marketdata_core/patch_cell_values_10000x5` | 116.05 ns | 112.67 ns |
+| `marketdata_core/draft_rebase_1000_edits` | 2.0607 ms | 2.0842 ms |
+| `pricer_core/grid_build_1000` | 1.0502 ms | 1.0551 ms |
+| `pricer_core/grid_build_1000_scoped` | 437.17 µs | 442.41 µs |
+| `pricer_core/grid_build_1000_grouped` | 1.7773 ms | 1.7941 ms |
+| `pricer_core/window_fill_40` | 502.76 ns | 498.64 ns |
+| `pricer_core/window_fill_40_grouped` | 499.58 ns | 496.21 ns |
+| `pricer_core/deliver_unchanged_structure_1000` | 1.2330 ms | 1.2501 ms |
+| `pricer_core/deliver_unchanged_structure_1000_grouped` | 2.1642 ms | 2.1908 ms |
+| `pricer_core/rebuild_1000_flat` | 1.1006 ms | 1.0907 ms |
+| `pricer_core/rebuild_1000_grouped` | 2.0104 ms | 2.0376 ms |
+| `blotter_core/cache_fill_40x7_133_rows` | 32.033 µs | 31.950 µs |
+| `blotter_core/cache_fill_40x7_137k_rows` | 33.188 µs | 33.652 µs |
+| `blotter_core/cache_fill_40x7_729k_rows` | 38.318 µs | 38.783 µs |
+
+## Windowed grid models: after — 2026-10-01
+
+Apple M5 Pro, 18 cores, rustc 1.96.0 (ac68faa20 2026-05-25), bench profile.
+The before binaries (`bench-grid/{matrix,core,blotter}-before`) and the after
+binaries were run alternately, before then after for each filter, over two
+rounds. Both share one Criterion baseline, so the printed medians are
+compared, not the "change:" lines.
+
+- Round 1 began at load 9.61 5.12 4.25 (just after the bench build) and rose
+  to 18.82 during the pricer pairs (system daemons); it ended at 9.49 9.51 6.79.
+- Round 2 (recorded) began at 8.73 9.36 6.75; one-minute load fell to 4.53
+  within the first pair and stayed 1.80–5.17; it ended at 1.80 3.53 4.75.
+
+| Benchmark | Before | After | Round 1 (before / after) | What after measures |
+|---|---:|---:|---:|---|
+| `marketdata_core/model_build_values_10000x5` | 5.4128 ms | 586.01 µs | 5.4882 ms / 618.86 µs | `MatrixIndex::build`: labels and row facts, no cell text |
+| `marketdata_core/model_build_values_10000x5_100_rows_spliced` | 5.7528 ms | 898.34 µs | 5.9231 ms / 934.81 µs | the same with 100 spliced rows |
+| `marketdata_core/model_build_pivot_20x30` | 207.85 µs | 119.80 µs | 211.10 µs / 127.93 µs | the pivot index |
+| `marketdata_core/window_fill_40x5` | 175.60 ns | 17.716 µs | 177.10 ns / 18.480 µs | a cold 40 × 5 window fill (before: cloning prepared text) |
+| `marketdata_core/delivery_to_window_values_10000x5` | 5.3860 ms | 619.28 µs | 5.5953 ms / 645.80 µs | index build plus a 40 × 5 fill (before: whole build) |
+| `marketdata_core/one_cell_edit_values_10000x5` | 169.47 ns | 161.88 ns | 179.20 ns / 168.61 ns | draft write plus one window refill (before: plus `patch_cell`) |
+| `marketdata_core/patch_cell_values_10000x5` | 113.46 ns | 105.33 ns | 111.56 ns / 108.50 ns | one-cell window refill (before: `patch_cell`) |
+| `marketdata_core/patch_cell_pivot_20x30` | 85.003 ns | 89.018 ns | 87.302 ns / 91.087 ns | one-cell window refill on the pivot |
+| `marketdata_core/session_tick_values_10000x5` | 6.3419 ms | 945.18 µs | 6.5934 ms / 1.0089 ms | group capture from the installed index (before: a clean build first) |
+| `marketdata_core/draft_rebase_1000_edits` | 2.0299 ms | 1.9641 ms | 2.1667 ms / 2.1085 ms | rebase reading `label_index` |
+| `marketdata_core/draft_rebase_1000_edits_100_rows` | 2.0354 ms | 1.9640 ms | 2.1905 ms / 2.1267 ms | the same with 100 inserted rows |
+| `pricer_core/grid_build_1000` | 1.0495 ms | 271.14 µs | 1.1340 ms / 291.35 µs | `GridIndex::build` |
+| `pricer_core/grid_build_1000_scoped` | 438.19 µs | 113.75 µs | 439.55 µs / 116.01 µs | the scoped index |
+| `pricer_core/grid_build_1000_grouped` | 1.7931 ms | 308.06 µs | 1.8104 ms / 326.80 µs | the grouped index |
+| `pricer_core/rebuild_1000_flat` | 1.0782 ms | 343.39 µs | 1.2528 ms / 429.28 µs | empty-chain rollup plus the index, no window fill |
+| `pricer_core/rebuild_1000_grouped` | 2.0130 ms | 609.78 µs | 3.9650 ms / 588.73 µs | rollup plus the grouped index, no window fill |
+| `pricer_core/window_fill_40` | 500.13 ns | 29.176 µs | 498.75 ns / 37.125 µs | a cold 40-row fill |
+| `pricer_core/window_fill_40_grouped` | 504.45 ns | 205.86 µs | 497.97 ns / 338.42 µs | a cold fill whose group rows fold their legs |
+| `pricer_core/deliver_unchanged_structure_1000` | 1.2402 ms | 240.86 µs | 2.1372 ms / 327.78 µs | refill-only (before: the tile's whole rebuild) |
+| `pricer_core/deliver_unchanged_structure_1000_grouped` | 2.1724 ms | 633.29 µs | 3.5607 ms / 849.31 µs | refill-only, grouped |
+| `blotter_core/cache_fill_40x7_133_rows` | 37.086 µs | 33.922 µs | 32.185 µs / 30.896 µs | the shared `WindowCache` |
+| `blotter_core/cache_fill_40x7_137k_rows` | 40.537 µs | 36.496 µs | 44.124 µs / 32.414 µs | the shared `WindowCache` |
+| `blotter_core/cache_fill_40x7_729k_rows` | 47.560 µs | 45.219 µs | 44.653 µs / 37.202 µs | the shared `WindowCache` |
+
+Every number is headless model work: no paint, no table layout, no text
+shaping. The index builds exclude cell text entirely; the window fills
+format only the cells they name, through the module's one formatter, into a
+fresh cache. A tile's real rebuild is the index build plus one window fill
+(market data 586 µs + 17.7 µs; pricer flat 343 µs + 29 µs, grouped 610 µs +
+206 µs). The pricer's refill-only delivery still installs the answers,
+re-applies the scope, re-derives the chain and rollup and compares the tree,
+so it saves the index build, not the per-delivery scope and rollup work.
+
+Named regressions. The `window_fill_*` rows rise by two orders of magnitude
+because before they cloned text already prepared by the whole build and after
+they format from cold; the cost moved from every build to the visible window
+and is paid once per scroll or install, not per frame. The grouped pricer fill
+(206 µs; 338 µs in the loaded round) is the largest: a group row sums and
+reads unanimity over all its legs when the window reaches it. The pivot
+one-cell refill is about 4 ns slower (85 → 89 ns), within the spread of the
+round pair. No blotter `cache_fill` shape regressed: after was faster than
+before in both rounds, by 1–12 µs, a spread comparable to the rounds' own
+difference.

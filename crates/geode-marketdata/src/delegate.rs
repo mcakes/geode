@@ -8,8 +8,9 @@
 //! first value column instead. The cursor always uses model coordinates; it
 //! never enters the separate label column.
 
+use crate::core::draft::Draft;
 use crate::core::matrix::RowState;
-use crate::core::{MatrixModel, PanelSpec};
+use crate::core::{MatrixIndex, MdCell, PanelSpec};
 use crate::header;
 use crate::popup::{ChoicePaint, render_choice};
 use crate::tile::{DateFieldPaint, FlooredTones, MarketDataTile};
@@ -17,6 +18,7 @@ use geode_core::grid::selection::{Resolved, SelectKind};
 use geode_shell::colfit::{FitMetrics, FittedWidths};
 use geode_shell::fonts;
 use geode_shell::linenumbers::{GUTTER_GAP_PX, LineNumbers, gutter_number, gutter_px};
+use geode_tile::grid::{FIRST_WINDOW, WindowCache, WindowRequest};
 use gpui::prelude::*;
 use gpui::{
     App, Context, Div, Entity, EventEmitter, FocusHandle, Hsla, MouseButton, MouseDownEvent,
@@ -25,6 +27,7 @@ use gpui::{
 use gpui_component::input::{Input, InputState};
 use gpui_component::table::{Column, ColumnFixed, TableDelegate, TableState};
 use gpui_component::{ActiveTheme as _, Theme};
+use std::ops::Range;
 use std::rc::Rc;
 
 /// Default pixel widths for the label and value columns. Columns cannot be
@@ -109,16 +112,22 @@ impl EventEmitter<CellPointer> for TableState<MatrixDelegate> {}
 /// without the paired TableState::refresh. Structural model installs go through
 /// MarketDataTile::install_model so cached columns and headers stay synchronized.
 pub struct MatrixDelegate {
-    /// Prepared grid shared with the tile. Rebuilds replace it; ordinary cell
-    /// commits can patch it after the tile temporarily removes the delegate's share.
-    pub(crate) model: Rc<MatrixModel>,
+    /// The whole-document index shared with the tile; installs replace it.
+    pub(crate) model: Rc<MatrixIndex>,
+    /// The formatted cells on screen, filled outside render; `render_td`
+    /// only reads it. A miss paints a blank cell, and an open editor or
+    /// choice popup on it still paints.
+    pub(crate) window: WindowCache<MdCell>,
+    /// The range the table last reported; before any report the first
+    /// `FIRST_WINDOW` rows (a one-row document never gets a report).
+    requested: WindowRequest,
     /// The row axis's name (`term`), painted as column 0's header while
     /// `label_column` holds.
     row_axis: SharedString,
     /// Whether table column [`LABEL_COL`] is the row-label column
     /// (`spec.rows.label == Shown`). When false, every table column is a
     /// model column and the label is never painted — the row's identity
-    /// still lives on `RowModel::label` for the draft and the session.
+    /// still lives in the index's labels for the draft and the session.
     label_column: bool,
     /// The tile's cursor, mirrored. `Some((model row, model column))` —
     /// NOT a table column index — while the cursor is on a grid cell;
@@ -202,7 +211,9 @@ impl MatrixDelegate {
         tones: FlooredTones,
     ) -> MatrixDelegate {
         MatrixDelegate {
-            model: Rc::new(MatrixModel::default()),
+            model: Rc::new(MatrixIndex::default()),
+            window: WindowCache::default(),
+            requested: WindowRequest::with_first(FIRST_WINDOW),
             row_axis: SharedString::from(spec.rows.column.clone()),
             label_column: spec.rows.shown(),
             cursor: Some((0, 0)),
@@ -222,13 +233,37 @@ impl MatrixDelegate {
         }
     }
 
+    /// Clear the window and refill the range the table last asked for,
+    /// clamped to the rows that exist: the table does not re-report an
+    /// unchanged range, so an install must not wait for it.
+    pub(crate) fn refill_window(&mut self, draft: &Draft) {
+        self.window.clear();
+        if let Some(range) = self.requested.refill_range(self.model.len()) {
+            self.fill_window(range, draft);
+        }
+    }
+
+    fn fill_window(&mut self, range: Range<usize>, draft: &Draft) {
+        let model = Rc::clone(&self.model);
+        self.window.set_window(range, model.columns.len(), |r, c| {
+            model.md_cell(draft, r, c)
+        });
+    }
+
+    /// Re-prepare one cell after a one-cell commit.
+    pub(crate) fn refill_cell(&mut self, draft: &Draft, cell: (usize, usize)) {
+        let model = Rc::clone(&self.model);
+        crate::core::matrix::refill_cell(&mut self.window, &model, draft, cell);
+    }
+
     /// Fit the row-label column (when shown) and every value column to its
-    /// header and every row's prepared text. The whole model is measured:
-    /// a document grid is small and already formatted.
+    /// header and the rows in the window — what the table last showed, as
+    /// the blotter measures.
     ///
     /// `None` with no rows to measure (no document yet, or an empty one).
     pub(crate) fn fit_columns(&self, m: &FitMetrics) -> Option<FittedWidths> {
-        if self.model.rows.is_empty() {
+        let rows = self.window.window();
+        if rows.is_empty() {
             return None;
         }
         let mut out = FittedWidths::new();
@@ -237,16 +272,15 @@ impl MatrixDelegate {
                 ROW_AXIS_KEY.to_string(),
                 m.fit_text(
                     &self.row_axis,
-                    self.model.rows.iter().map(|r| r.label.as_ref()),
+                    rows.clone()
+                        .filter_map(|r| self.model.label(r).map(|l| l.as_ref())),
                 ),
             );
         }
         for (col, name) in self.model.columns.iter().enumerate() {
-            let cells = self
-                .model
-                .rows
-                .iter()
-                .filter_map(|r| r.cells.get(col).map(|c| c.text.as_ref()));
+            let cells = rows
+                .clone()
+                .filter_map(|r| self.window.get(r, col).map(|c| c.text.as_ref()));
             out.insert(name.to_string(), m.fit_text(name, cells));
         }
         Some(out)
@@ -261,7 +295,7 @@ impl MatrixDelegate {
     /// pinned column widens by it, so its own text keeps its room) and by
     /// `render_td` (the gutter's own width).
     pub(crate) fn gutter_px(&self) -> f32 {
-        gutter_px(self.line_numbers, self.model.rows.len())
+        gutter_px(self.line_numbers, self.model.len())
     }
 
     /// Rebuild numbers when the mode, row count, or relative cursor changes.
@@ -270,7 +304,7 @@ impl MatrixDelegate {
     /// number. With the cursor in the attribute strip, use absolute numbers.
     fn ensure_numbers(&mut self) {
         let mode = self.line_numbers;
-        let len = self.model.rows.len();
+        let len = self.model.len();
         let cursor = match (mode, self.cursor) {
             (LineNumbers::Relative, Some((row, _))) => row,
             _ => usize::MAX,
@@ -477,7 +511,26 @@ impl TableDelegate for MatrixDelegate {
     }
 
     fn rows_count(&self, _cx: &App) -> usize {
-        self.model.rows.len()
+        self.model.len()
+    }
+
+    /// Record the reported range and fill it. The draft is the tile's live
+    /// one, read (never updated) through the weak handle: the table calls
+    /// this during its layout, outside any tile update.
+    fn visible_rows_changed(
+        &mut self,
+        visible_range: Range<usize>,
+        _window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) {
+        self.requested.record(visible_range.clone());
+        let end = visible_range.end.min(self.model.len());
+        let Some(tile) = self.tile.upgrade() else {
+            return;
+        };
+        if visible_range.start < end {
+            self.fill_window(visible_range.start..end, tile.read(cx).painted_draft());
+        }
     }
 
     /// Supply column metadata used by table preparation and refresh. Structural
@@ -571,7 +624,7 @@ impl TableDelegate for MatrixDelegate {
         cx: &mut Context<TableState<Self>>,
     ) -> Stateful<Div> {
         let row = div().id(("row", row_ix));
-        if row_ix >= self.model.rows.len() {
+        if row_ix >= self.model.len() {
             return row;
         }
         row.on_mouse_down(
@@ -652,17 +705,18 @@ fn selection_tint(theme: &Theme) -> Div {
 impl MatrixDelegate {
     pub(crate) fn render_find_cell(
         &self,
-        model: &MatrixModel,
+        model: &MatrixIndex,
+        cells: &WindowCache<MdCell>,
         find_row: &geode_shell::fuzzyfind::FindRow<'_>,
         col: usize,
         cx: &App,
     ) -> gpui::AnyElement {
-        let Some(row) = model.rows.get(find_row.source_row()) else {
+        let Some(row) = model.row(find_row.source_row()) else {
             return div().into_any_element();
         };
         let model_col = self.model_col(col);
-        let cell = model_col.and_then(|col| row.cells.get(col));
-        let text = cell.map_or_else(|| row.label.clone(), |cell| cell.text.clone());
+        let cell = model_col.and_then(|c| cells.get(row.index, c));
+        let text = cell.map_or_else(|| row.label.clone(), |c| c.text.clone());
         let paint = cell_paint(
             cx.theme(),
             cell.is_some_and(|cell| cell.sent),
@@ -718,8 +772,7 @@ impl MatrixDelegate {
             // value-cell editors.
             let (label, state, sent) = self
                 .model
-                .rows
-                .get(row_ix)
+                .row(row_ix)
                 .map(|r| {
                     (
                         r.label.clone(),
@@ -727,7 +780,8 @@ impl MatrixDelegate {
                         // Every cell of an inserted row shares the
                         // draft's `sent`; a document row's cells vary,
                         // and its label carries no fill of its own.
-                        r.state == RowState::Inserted && r.cells.first().is_some_and(|c| c.sent),
+                        r.state == RowState::Inserted
+                            && self.window.get(row_ix, 0).is_some_and(|c| c.sent),
                     )
                 })
                 .unwrap_or((SharedString::default(), RowState::Document, false));
@@ -772,9 +826,6 @@ impl MatrixDelegate {
             .selected
             .as_ref()
             .is_some_and(|r| r.contains(row_ix, model_col));
-        let row = self.model.rows.get(row_ix);
-        let state = row.map_or(RowState::Document, |r| r.state);
-        let cell = row.and_then(|r| r.cells.get(model_col));
         let mut el = div()
             .size_full()
             .flex()
@@ -798,10 +849,12 @@ impl MatrixDelegate {
             .when(at_cursor, |el| {
                 el.border_1().border_color(theme.table_active_border)
             });
-        let Some(cell) = cell else {
+        let Some(row) = self.model.row(row_ix) else {
             return el;
         };
-        let CellPaint { fill, text, strike } = cell_paint(theme, cell.sent, cell.edited, state);
+        let cell = self.window.get(row_ix, model_col);
+        let (sent, edited) = cell.map_or((false, false), |c| (c.sent, c.edited));
+        let CellPaint { fill, text, strike } = cell_paint(theme, sent, edited, row.state);
         el = el
             .when_some(fill, |el, fill| el.bg(fill))
             .text_color(text)
@@ -813,7 +866,7 @@ impl MatrixDelegate {
         // `editor_at` borrows `self.editor`; the cell's own text is what
         // paints when there is no editor here, or no tile left to route
         // its keys to.
-        let text = cell.text.clone();
+        let text = cell.map(|c| c.text.clone()).unwrap_or_default();
         let editor = self
             .editor_at(row_ix, col_ix)
             .cloned()
@@ -1009,7 +1062,7 @@ pub(crate) mod tests {
         let tones = cx.update(|cx| FlooredTones::derive(cx.theme()));
         let d = MatrixDelegate::new(&CVI, WeakEntity::new_invalid(), 7, tones);
         assert_eq!(d.row_axis.as_ref(), "term");
-        assert!(d.model.rows.is_empty());
+        assert!(d.model.is_empty());
         assert!(d.editor.is_none());
         assert_eq!(d.cursor, Some((0, 0)));
         assert_eq!(d.tile_id, 7);

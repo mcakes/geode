@@ -6315,7 +6315,7 @@ mod tests {
     }
 
     /// A `NonAttributable` cell has no value text. Without a pixel/text reader,
-    /// the test checks the attribution in `FormatCache`, which selects the
+    /// the test checks the attribution in the window cache, which selects the
     /// no-text render arm, and verifies that the cell element has painted bounds.
     #[gpui::test]
     fn a_non_attributable_cells_element_has_no_text(cx: &mut gpui::TestAppContext) {

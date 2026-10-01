@@ -163,12 +163,17 @@ default widths. Each tile runs one method for both doors.
   to 2.5–40 rem: at least about three characters, and never so wide that one
   long cell pushes the other columns off-screen. The fit runs once on the UI
   thread and never in render.
-- **What is measured.** Market data measures every row of its prepared
-  model. The pricer measures every visible grid row, so the legs of a
-  collapsed package are not measured. The blotter measures only the header
-  and the rows in its format cache, which holds the window the table last
-  asked to see. Formatting a whole snapshot would break the UI budget, so a
-  wider value in a row that was never on screen does not widen its column.
+- **What is measured.** The blotter measures only the header and the rows in
+  its window cache, which holds the window the table last asked to see.
+  Formatting a whole snapshot would break the UI budget, so a wider value in a
+  row that was never on screen does not widen its column. Market data measures
+  and the pricer measure the rows in their windows, as the blotter does: the
+  rows the table last asked to see. A wider value in a row that was never on
+  screen, or in a collapsed package's legs, does not widen its column.
+- **One-row tiles.** All three grids paint only the rows their window holds,
+  and the table never reports a visible range of one row. A tile squeezed to
+  exactly one row's height and scrolled away from its last window can paint
+  that row blank until a scroll or a data change refills it.
 - **Nothing to fit.** When there are no rows to measure, `:autosize` refuses
   with "nothing loaded to fit" and keeps the widths it already has. This
   covers a blotter with no snapshot or an empty result, a panel with no
@@ -239,8 +244,8 @@ follows the frame again at once. The pin is saved as `pinned` or
 The `DataTable` delegate paints a prepared row model. Rendering does not
 recompile columns or format the whole dataset. Each delivered snapshot builds
 a candidate column plan so presentation changes are recognized even when the
-column names and indices are unchanged. The format cache holds the visible
-window; named colors reuse resolved base and sign variants until their
+column names and indices are unchanged. The shared window cache holds the
+visible window; named colors reuse resolved base and sign variants until their
 definitions or theme inputs change.
 
 Publication watches are scoped to the datasets the view reads. Global frame
@@ -392,9 +397,14 @@ kind becomes a new tile kind after a restart. Kind actions are registered
 code: CVI's two, reanchor and recalc forward, are not built, so their menu
 rows are disabled and the tile answers "not built yet". A refused panel is
 not a tile kind; a saved tile of that kind restores as a placeholder and its
-session record is kept for a later restart. `MatrixModel` is rebuilt on a
-delivery or structural edit. Ordinary cell commits patch it when possible;
-editing a Sent draft rebuilds to clear sent styling throughout the grid.
+session record is kept for a later restart. `MatrixIndex` (labels, row states
+and row sources, no cell text) is rebuilt on a delivery, structural edit or
+selection bulk step. The delegate's window holds the rows the table last
+reported, refilled over that range on every install. A one-cell commit refills
+that one window cell; editing a
+Sent draft rebuilds to clear sent styling throughout the grid. Yank, a
+selection's TSV and find format through `MatrixIndex::format_cell` on demand,
+so they include rows off screen.
 
 Edits live in a `Draft` whose `DocumentBase` contains source time and an
 optional store generation. Different source times indicate different data;

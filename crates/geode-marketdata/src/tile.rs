@@ -1,5 +1,5 @@
 //! Market-data document tile: requests one dataset/key/as-of through DataHandle and
-//! owns its prepared MatrixModel, draft, cursor, clipboard, find, and commands.
+//! owns its MatrixIndex, draft, cursor, clipboard, find, and commands.
 //!
 //! The tile's cursor is authoritative; MatrixDelegate mirrors it. Every model
 //! installation refreshes TableState's cached column groups so changed document axes
@@ -27,7 +27,7 @@ use crate::core::menu::{self, MenuInputs};
 use crate::core::spec::RowIdentity;
 use crate::core::{
     CellKind, Columns, DateTimeField, DocumentBase, Draft, DraftBadge, DraftState, FieldKey,
-    MatrixModel, PanelSpec, Precision, Segment, SegmentText, UpdatePolicy, attr_text, parse_attr,
+    MatrixIndex, PanelSpec, Precision, Segment, SegmentText, UpdatePolicy, attr_text, parse_attr,
     parse_cell, route,
 };
 use crate::delegate::{
@@ -493,12 +493,18 @@ pub struct MarketDataTile {
     /// whose base was never delivered has no retained base; it paints against the
     /// newest snapshot while preserving Behind state until resolved.
     base_snapshot: Option<Arc<Snapshot>>,
-    /// Share the prepared model with the delegate through Rc so ordinary paints do not
-    /// clone every row and cell. Rebuilds replace the model through install_model; cell
-    /// commits can instead release the delegate's clone, patch the uniquely owned
-    /// model, and reinstall it.
-    model: Rc<MatrixModel>,
+    /// The whole-document index, shared with the delegate through Rc. Rebuilds
+    /// replace it through install_model, which refills the delegate's window; a
+    /// one-cell commit leaves it alone and refills that one window cell.
+    model: Rc<MatrixIndex>,
     draft: Draft,
+    /// What `/` searches, one string per row, prepared on first use and dropped
+    /// by every install; a one-cell edit re-prepares its row under a hidden label.
+    search_text: Option<Vec<String>>,
+    /// How many times `search_text` was prepared, for tests that pin it to
+    /// once per index build.
+    #[cfg(test)]
+    search_builds: usize,
     /// Policy for new live generations with edits: Hold, Rebase, or Replace. Changing
     /// it does not resolve an already-Behind draft or act on a redelivery. Commands,
     /// menu rows, and actions share the setter; nondefault policy persists in the
@@ -861,7 +867,7 @@ impl MarketDataTile {
         })
         .detach();
 
-        let model = Rc::new(MatrixModel::empty(&spec, key.as_deref().unwrap_or(&[])));
+        let model = Rc::new(MatrixIndex::empty(&spec, key.as_deref().unwrap_or(&[])));
         let title = Self::compute_title(&spec, key.as_deref());
         // Asked once now, so a panel opened after a failure shows the chip
         // before any further diagnostics notification.
@@ -885,6 +891,9 @@ impl MarketDataTile {
             snapshot: None,
             base_snapshot: None,
             draft,
+            search_text: None,
+            #[cfg(test)]
+            search_builds: 0,
             policy,
             cursor: Cursor::Cell { row: 0, col: 0 },
             last_grid_col: 0,
@@ -1426,7 +1435,7 @@ impl MarketDataTile {
                     // draft for its labels alone (what `:rebase` does),
                     // and the second, below, paints the re-placed edits.
                     // A refusal of either changes nothing but the notice.
-                    let clean = match MatrixModel::build(&snapshot, &self.spec, &Draft::default()) {
+                    let clean = match MatrixIndex::build(&snapshot, &self.spec, &Draft::default()) {
                         Ok(model) => model,
                         Err(e) => {
                             self.notice = Some(e.into());
@@ -1436,7 +1445,7 @@ impl MarketDataTile {
                     // An empty new document supplies no label map for automatic rebase.
                     // Keep the draft Behind with edits intact; explicit rebase remains
                     // available.
-                    if !clean.rows.is_empty() {
+                    if !clean.is_empty() {
                         let (_, dropped) = draft.rebase(&clean);
                         if !dropped.is_empty() {
                             notice = Some(dropped_notice(&dropped).into());
@@ -1498,7 +1507,7 @@ impl MarketDataTile {
         // Validate the delivered snapshot even while Behind paints the retained base.
         // It becomes the target for rebase, so recording an unbuildable document would
         // leave the draft without a usable resolution target.
-        let built = match MatrixModel::build(&snapshot, &self.spec, &draft) {
+        let built = match MatrixIndex::build(&snapshot, &self.spec, &draft) {
             Ok(model) => model,
             Err(e) => {
                 self.notice = Some(e.into());
@@ -1506,10 +1515,11 @@ impl MarketDataTile {
             }
         };
         // With a base retained, the screen keeps the model it already has:
-        // `self.model` is by construction the model of `painted_snapshot()`
-        // under these very edits, and `on_delivered` moves only the
-        // draft's STATE, which `MatrixModel::build` never reads (it reads
-        // `edits` and `is_sent()`, and a delivery moves neither). Keeping
+        // `self.model` is by construction the index of `painted_snapshot()`
+        // under these very row edits, and `on_delivered` moves only the
+        // draft's STATE, which `MatrixIndex::build` never reads (it reads
+        // the row edits and the attributes, and a delivery moves neither;
+        // the install below refills the window from the new state). Keeping
         // it is also what makes this one build per delivery rather than
         // two — the freshly built model above is a validation of the
         // delivered generation, not a paint.
@@ -1546,7 +1556,7 @@ impl MarketDataTile {
         // Resolve restored label pairs only against a successfully built nonempty
         // document. Empty or refused deliveries leave the edits parked and visible as
         // unresolved work in the header.
-        if self.unresolved_restore && !self.model.rows.is_empty() {
+        if self.unresolved_restore && !self.model.is_empty() {
             self.unresolved_restore = false;
             // Keep a restored Behind draft parked until explicit rebase or revert.
             if !self.draft.is_behind() {
@@ -1556,7 +1566,7 @@ impl MarketDataTile {
                 // once per restore; failure leaves the draft unresolved.
                 let clean = self
                     .painted_snapshot()
-                    .and_then(|s| MatrixModel::build(&s, &self.spec, &Draft::default()).ok());
+                    .and_then(|s| MatrixIndex::build(&s, &self.spec, &Draft::default()).ok());
                 let Some(clean) = clean else {
                     self.unresolved_restore = true;
                     self.install_model(cx);
@@ -1590,7 +1600,7 @@ impl MarketDataTile {
     /// rows instead transitions the draft to Behind rather than claiming confirmation.
     fn echo_of(
         &self,
-        snapshot: &Snapshot,
+        snapshot: &Arc<Snapshot>,
         delivered: Option<&DocumentBase>,
         draft: &mut Draft,
     ) -> Result<EchoStep, String> {
@@ -1615,7 +1625,7 @@ impl MarketDataTile {
         {
             return Ok(EchoStep::Held(held.clone()));
         }
-        let clean = MatrixModel::build(snapshot, &self.spec, &Draft::default())?;
+        let clean = MatrixIndex::build(snapshot, &self.spec, &Draft::default())?;
         let held = |text: String| {
             EchoStep::Held(Echo::Differs {
                 newer: delivered.clone(),
@@ -1699,6 +1709,12 @@ impl MarketDataTile {
 
     // ---- the model ---------------------------------------------------
 
+    /// The draft the installed index is painted with — what the delegate
+    /// fills its window from when the table reports a new range.
+    pub(crate) fn painted_draft(&self) -> &Draft {
+        &self.draft
+    }
+
     /// The snapshot on screen: the draft's own base generation while one
     /// is retained, else the newest delivered.
     fn painted_snapshot(&self) -> Option<Arc<Snapshot>> {
@@ -1710,25 +1726,26 @@ impl MarketDataTile {
     /// its real base was never delivered here; keep its stored base-group sizes in that
     /// case. All capture sites share this guard before calling Draft::capture_groups.
     fn capture_groups_if_base(&self, draft: &mut Draft) {
-        let Some(base) = self.painted_snapshot() else {
+        let Some(base) = self.model.snapshot() else {
             return;
         };
         // Capture group sizes only from an exactly matching base. The source-time
         // fallback in `differs_from` cannot establish that a snapshot belongs to
         // the draft and must not replace restored group guards.
-        if base_of(&base) != draft.base {
+        if base_of(base) != draft.base {
             return;
         }
-        if let Ok(base_model) = MatrixModel::build(&base, &self.spec, &Draft::default()) {
-            draft.capture_groups(&base_model);
-        }
+        // The installed index was built from that base; group sizes read its
+        // document rows only, which a draft's inserts never are. No build:
+        // `serialize` calls this on every session tick.
+        draft.capture_groups(&self.model);
     }
 
     /// Rebuild the prepared grid. Called on a delivery and on a draft
     /// change — never from `render`.
     fn rebuild_model(&mut self, cx: &mut Context<Self>) {
         let Some(snapshot) = self.painted_snapshot() else {
-            self.model = Rc::new(MatrixModel::empty(
+            self.model = Rc::new(MatrixIndex::empty(
                 &self.spec,
                 self.key.as_deref().unwrap_or(&[]),
             ));
@@ -1736,7 +1753,7 @@ impl MarketDataTile {
             self.install_model(cx);
             return;
         };
-        match MatrixModel::build(&snapshot, &self.spec, &self.draft) {
+        match MatrixIndex::build(&snapshot, &self.spec, &self.draft) {
             Ok(model) => self.model = Rc::new(model),
             // A document that cannot be laid out as a grid (a hole, a
             // repeated pair, a missing axis) leaves the last good model
@@ -1747,17 +1764,22 @@ impl MarketDataTile {
         self.install_model(cx);
     }
 
-    /// Share the current model with the delegate, then refresh cached columns
-    /// and headers before synchronizing the cursor. A model swap can change
-    /// the node ladder or gutter width; replacing only the delegate's model
-    /// would leave TableState painting stale headers and widths.
-    /// Sharing the model clones its Rc, not its prepared cells.
+    /// Share the current index with the delegate, then refresh cached columns
+    /// and headers, refill the window over the range the table last reported
+    /// (an unchanged range is never re-reported) and drop find's search text
+    /// before synchronizing the cursor. An index swap can change the node
+    /// ladder or gutter width; replacing only the delegate's index would leave
+    /// TableState painting stale headers and widths. Sharing the index clones
+    /// its Rc.
     fn install_model(&mut self, cx: &mut Context<Self>) {
         let model = Rc::clone(&self.model);
+        let draft = &self.draft;
         self.table.update(cx, |t, cx| {
             t.delegate_mut().model = model;
             t.refresh(cx);
+            t.delegate_mut().refill_window(draft);
         });
+        self.search_text = None;
         self.sync_cursor(cx);
     }
 
@@ -1765,7 +1787,7 @@ impl MarketDataTile {
     /// this panel's whole cursor vocabulary, in one small `Copy` value.
     fn grid(&self) -> Grid {
         Grid {
-            rows: self.model.rows.len(),
+            rows: self.model.len(),
             cols: self.model.columns.len(),
             attrs: self.model.header.len(),
         }
@@ -1904,10 +1926,10 @@ impl MarketDataTile {
     /// Select a clicked cell, clamping to the grid. A row-label click changes only the
     /// row, using last_grid_col when returning from the attribute strip.
     fn cursor_to(&mut self, row: usize, col: Option<usize>, cx: &mut Context<Self>) {
-        if self.model.rows.is_empty() {
+        if self.model.is_empty() {
             return;
         }
-        let row = row.min(self.model.rows.len().saturating_sub(1));
+        let row = row.min(self.model.len().saturating_sub(1));
         let current_col = match self.cursor {
             Cursor::Cell { col, .. } => col,
             Cursor::Attr(_) => self.last_grid_col,
@@ -2459,7 +2481,7 @@ impl MarketDataTile {
     /// one; an empty base will differ from a later dated delivery, making the
     /// provenance gap visible through Behind state.
     fn edit_base(&self) -> Result<DocumentBase, String> {
-        if self.model.rows.is_empty() || self.model.columns.is_empty() {
+        if self.model.is_empty() || self.model.columns.is_empty() {
             return Err(NO_DOCUMENT.to_string());
         }
         Ok(self.model.base.clone().unwrap_or_default())
@@ -2468,7 +2490,7 @@ impl MarketDataTile {
     /// The attribute strip's own [`Self::edit_base`]: an attribute needs
     /// no row or column, only a header to belong to, which the model
     /// carries exactly when it carries any rows at all (see
-    /// `MatrixModel::build`'s early return for an empty document).
+    /// `MatrixIndex::build`'s early return for an empty document).
     fn attr_edit_base(&self) -> Result<DocumentBase, String> {
         if self.model.header.is_empty() {
             return Err(NO_DOCUMENT.to_string());
@@ -2506,12 +2528,12 @@ impl MarketDataTile {
                     return;
                 }
                 // Reject Deleted rows before creating either an editor or choice popup.
-                if self.model.rows[row].state == RowState::Deleted {
+                if self.model.state(row) == Some(RowState::Deleted) {
                     self.notice = Some(DELETED_REFUSED.into());
                     return;
                 }
                 let cell = (row, col);
-                let text = self.model.rows[row].cells[col].text.clone();
+                let text = self.model.format_cell(&self.draft, row, col);
                 let labels = self.model.label_of(cell);
                 if let Some(CellKind::Choice(options)) = self.model.kind_of(col) {
                     self.open_choice(cell, labels, &text, Arc::clone(options), window, cx);
@@ -2805,12 +2827,12 @@ impl MarketDataTile {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.model.rows.get(row).map(|r| &r.label) != Some(&label) {
+        if self.model.label(row) != Some(&label) {
             self.close_editor(window, cx);
             self.notice = Some(CELL_MOVED.into());
             return true;
         }
-        if self.model.rows.iter().any(|r| r.label.as_ref() == new) {
+        if self.model.row_of(&new).is_some() {
             // Refused with the editor open: the trader retypes, or
             // escapes to drop the provisional row.
             self.notice = Some(format!("'{new}' is already a row").into());
@@ -2824,7 +2846,7 @@ impl MarketDataTile {
         self.close_editor(window, cx);
         self.notice = None;
         self.rebuild_model(cx);
-        if let Some(at) = self.model.rows.iter().position(|r| r.label.as_ref() == new) {
+        if let Some(at) = self.model.row_of(&new) {
             self.cursor = Cursor::Cell { row: at, col: 0 };
             self.begin_edit(EditCaret::End, window, cx);
         }
@@ -2985,9 +3007,9 @@ impl MarketDataTile {
     /// post-insertion grid index. Inserted rows write RowEdit.cells by column label;
     /// Deleted rows refuse changes.
     ///
-    /// Patch the prepared cell in place after releasing the delegate's Rc clone, then
-    /// reinstall the model. Rebuild if patching fails or the draft was Sent: leaving
-    /// Sent changes state styling across the whole grid.
+    /// Write the draft, then re-prepare that one window cell; the index is not
+    /// rebuilt. Rebuild instead when the draft was Sent (every cell's sent mark
+    /// changes).
     fn commit_cell_value(
         &mut self,
         cell: (usize, usize),
@@ -3013,17 +3035,19 @@ impl MarketDataTile {
         let was_sent = self.draft.is_sent();
         // Both `Copy`, read out ahead of the match so the arms can take
         // `&mut self` (the editor's close) with no borrow of the model.
-        let (state, cell_ref) = {
-            let row = &self.model.rows[cell.0];
-            (row.state, row.cells[cell.1].cell_ref)
-        };
+        let (state, cell_ref) = (self.model.state(cell.0), self.model.cell_ref(cell));
         match state {
-            RowState::Deleted => {
+            None => {
+                self.close_editor(window, cx);
+                self.notice = Some(CELL_MOVED.into());
+                return true;
+            }
+            Some(RowState::Deleted) => {
                 self.close_editor(window, cx);
                 self.notice = Some(DELETED_REFUSED.into());
                 return true;
             }
-            RowState::Inserted => {
+            Some(RowState::Inserted) => {
                 // The identity check above proved `labels.0` is this
                 // row's label; a draft that no longer holds it as an
                 // inserted row is a grid that moved (the row was dropped
@@ -3038,7 +3062,12 @@ impl MarketDataTile {
                     return true;
                 }
             }
-            RowState::Document => {
+            Some(RowState::Document) => {
+                let Some(cell_ref) = cell_ref else {
+                    self.close_editor(window, cx);
+                    self.notice = Some(CELL_MOVED.into());
+                    return true;
+                };
                 self.draft.set(
                     cell_ref,
                     (labels.0.to_string(), labels.1.to_string()),
@@ -3057,33 +3086,21 @@ impl MarketDataTile {
         drop(self.editor.as_mut().and_then(|e| e.bulk.take()));
         self.close_editor(window, cx);
         self.notice = None;
-        let snapshot = match self.painted_snapshot() {
-            Some(snapshot) if !was_sent => snapshot,
-            // No painted snapshot is unreachable past `edit_base` (a model
-            // with rows came from one); the `Sent` case is the honest
-            // rebuild described above.
-            _ => {
-                self.rebuild_model(cx);
-                return true;
-            }
-        };
-        // Take the delegate's clone back before `make_mut` looks at the
-        // count — see the doc comment.
-        self.table.update(cx, |t, _| {
-            t.delegate_mut().model = Rc::new(MatrixModel::default());
-        });
-        let patched = Rc::make_mut(&mut self.model).patch_cell(
-            cell.0,
-            cell.1,
-            &snapshot,
-            &self.spec,
-            &self.draft,
-        );
-        if patched {
-            self.install_model(cx);
-        } else {
+        if was_sent {
+            // Leaving Sent changes every cell's sent mark: rebuild, and the
+            // install refills the window.
             self.rebuild_model(cx);
+            return true;
         }
+        // One cell changed. The index holds no cell text, so nothing in it
+        // changes: re-prepare that window cell and that row's find text.
+        let draft = &self.draft;
+        self.table.update(cx, |t, cx| {
+            t.delegate_mut().refill_cell(draft, cell);
+            cx.notify();
+        });
+        self.refresh_find_row(cell.0);
+        self.sync_cursor(cx);
         true
     }
 
@@ -3221,10 +3238,12 @@ impl MarketDataTile {
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         let (row, base) = self.row_verb_target(window, cx)?;
-        let cursor_label = self.model.rows[row].label.to_string();
-        let label = self
-            .draft
-            .mint_label(|l| self.model.rows.iter().any(|r| r.label.as_ref() == l));
+        let cursor_label = self
+            .model
+            .label(row)
+            .ok_or_else(|| NOT_A_ROW.to_string())?
+            .to_string();
+        let label = self.draft.mint_label(|l| self.model.row_of(l).is_some());
         // The anchor, and — on `shift+o` over an inserted row — the row
         // to hang off the new one afterwards. On `o`, whatever already
         // hung off the cursor row moves onto the new row FIRST, before
@@ -3233,7 +3252,7 @@ impl MarketDataTile {
             self.draft
                 .rehang_followers(Some(&cursor_label), Some(label.clone()));
             (Some(cursor_label), None)
-        } else if self.model.rows[row].state == RowState::Inserted {
+        } else if self.model.state(row) == Some(RowState::Inserted) {
             let inherited = match self.draft.row_state(&cursor_label) {
                 Some(RowEdit::Inserted { after, .. }) => after.clone(),
                 _ => None,
@@ -3242,7 +3261,8 @@ impl MarketDataTile {
         } else {
             (
                 row.checked_sub(1)
-                    .map(|above| self.model.rows[above].label.to_string()),
+                    .and_then(|above| self.model.label(above))
+                    .map(|l| l.to_string()),
                 None,
             )
         };
@@ -3251,12 +3271,7 @@ impl MarketDataTile {
             self.draft.reanchor_row(&old, Some(label.clone()));
         }
         self.rebuild_model(cx);
-        let Some(at) = self
-            .model
-            .rows
-            .iter()
-            .position(|r| r.label.as_ref() == label)
-        else {
+        let Some(at) = self.model.row_of(&label) else {
             // The rebuild refused the grid (its notice says why); the
             // draft still carries the row for the next build to place.
             return Ok(());
@@ -3320,7 +3335,11 @@ impl MarketDataTile {
     /// marking it twice.
     fn delete_row(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
         let (row, base) = self.row_verb_target(window, cx)?;
-        let label = self.model.rows[row].label.to_string();
+        let label = self
+            .model
+            .label(row)
+            .ok_or_else(|| NOT_A_ROW.to_string())?
+            .to_string();
         match self.draft.delete_row(&label, &base) {
             RowDelete::Dropped | RowDelete::Marked => {
                 self.notice = None;
@@ -3638,7 +3657,7 @@ impl MarketDataTile {
         let Cursor::Cell { row, col } = self.cursor else {
             return Err("step needs a grid cell — the cursor is in the header".to_string());
         };
-        if self.model.rows[row].state == RowState::Deleted {
+        if self.model.state(row) == Some(RowState::Deleted) {
             return Err(DELETED_REFUSED.to_string());
         }
         let Some(CellKind::Choice(options)) = self.model.kind_of(col) else {
@@ -3651,8 +3670,8 @@ impl MarketDataTile {
             // through, and `rem_euclid(0)` below would panic.
             return Err("the column declares no options".to_string());
         }
-        let current = self.model.rows[row].cells[col].text.as_ref();
-        let next = match options.iter().position(|o| o.as_str() == current) {
+        let current = self.model.format_cell(&self.draft, row, col);
+        let next = match options.iter().position(|o| o.as_str() == current.as_ref()) {
             Some(i) => (i as isize + delta).rem_euclid(len),
             None if delta > 0 => 0,
             None => len - 1,
@@ -3737,7 +3756,7 @@ impl MarketDataTile {
             return Err("bump needs a grid cell — the cursor is in the header".to_string());
         };
         // Reject a bump of a Deleted row. Column bumps skip Deleted rows individually.
-        if matches!(axis, BumpAxis::Row) && self.model.rows[row].state == RowState::Deleted {
+        if matches!(axis, BumpAxis::Row) && self.model.state(row) == Some(RowState::Deleted) {
             return Err(DELETED_REFUSED.to_string());
         }
         let mut skipped = 0usize;
@@ -3748,7 +3767,7 @@ impl MarketDataTile {
             // term's vols must not move its forward with them. A column
             // bump on a slice column still bumps that column down every
             // term, which is what a bump on `fwd` means.
-            BumpAxis::Row => (self.model.slice_columns..self.model.rows[row].cells.len())
+            BumpAxis::Row => (self.model.slice_columns..self.model.columns.len())
                 .filter_map(|ci| {
                     if !matches!(self.model.kind_of(ci), Some(CellKind::Number(_))) {
                         skipped += 1;
@@ -3763,12 +3782,9 @@ impl MarketDataTile {
                     return Err("not a numeric column".to_string());
                 }
                 let ty = self.column_type(col);
-                self.model
-                    .rows
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, r)| r.state != RowState::Deleted)
-                    .filter_map(|(ri, _)| self.current_numeric(ri, col).map(|v| ((ri, col), v, ty)))
+                (0..self.model.len())
+                    .filter(|&ri| self.model.state(ri) != Some(RowState::Deleted))
+                    .filter_map(|ri| self.current_numeric(ri, col).map(|v| ((ri, col), v, ty)))
                     .collect()
             }
         };
@@ -3790,27 +3806,14 @@ impl MarketDataTile {
         Ok(())
     }
 
-    /// A model cell's current number: the draft's own edit through
-    /// `Draft::numeric_edit` — `:bump`'s door onto it — falling back to
-    /// the model's painted value (the document's, or NULL) when there is
-    /// no edit yet. An INSERTED row's `cell_ref` is a model position, not
-    /// a document one, so `Draft::edits` is never asked about it: its
-    /// painted value IS the draft's own (`RowEdit.cells`, which is all the
-    /// model ever paints there). `None` for NULL, text, a date, or a cell
-    /// out of range — nothing to add to.
+    /// A model cell's current number: the draft's own value where one
+    /// exists, else the document's — `value_at` reads both. `None` for NULL,
+    /// text, a date, or out of range.
     pub(super) fn current_numeric(&self, row: usize, col: usize) -> Option<Value> {
-        let r = self.model.rows.get(row)?;
-        let cell = r.cells.get(col)?;
-        let edit = match r.state {
-            RowState::Inserted => None,
-            RowState::Document | RowState::Deleted => {
-                self.draft.numeric_edit(cell.cell_ref).cloned()
-            }
-        };
-        edit.or(match &cell.value {
-            Some(value @ (Value::F64(_) | Value::I64(_))) => Some(value.clone()),
-            Some(Value::Utf8(_) | Value::Date(_)) | None => None,
-        })
+        match self.model.value_at(&self.draft, row, col)? {
+            value @ (Value::F64(_) | Value::I64(_)) => Some(value),
+            Value::Utf8(_) | Value::Date(_) => None,
+        }
     }
 
     /// A model column's declared type, which picks a step's arithmetic.
@@ -3856,7 +3859,7 @@ impl MarketDataTile {
             .snapshot
             .clone()
             .ok_or_else(|| NOT_BEHIND.to_string())?;
-        let newer_model = MatrixModel::build(&snapshot, &self.spec, &Draft::default())?;
+        let newer_model = MatrixIndex::build(&snapshot, &self.spec, &Draft::default())?;
         let (_, dropped) = self.draft.rebase(&newer_model);
         self.leave_behind();
         // Cleared before the rebuild so the check below can tell "this
@@ -3902,26 +3905,30 @@ impl MarketDataTile {
     fn yank_text(&self, what: Yank) -> Option<String> {
         match self.cursor {
             Cursor::Cell { row: r, col: c } => {
-                let row = self.model.rows.get(r)?;
+                let label = self.model.label(r)?;
+                if c >= self.model.columns.len() {
+                    return None;
+                }
                 Some(match what {
-                    Yank::Cell => row.cells.get(c)?.text.to_string(),
+                    Yank::Cell => self.model.format_cell(&self.draft, r, c).to_string(),
                     Yank::Row => {
                         // The copied line is what the trader SEES: the
                         // label leads it only where the label column is
                         // painted (`RowLabel::Shown`).
-                        let label = self.spec.rows.shown().then(|| row.label.as_ref());
+                        let label = self.spec.rows.shown().then(|| label.to_string());
                         label
                             .into_iter()
-                            .chain(row.cells.iter().map(|cell| cell.text.as_ref()))
+                            .chain(
+                                (0..self.model.columns.len()).map(|col| {
+                                    self.model.format_cell(&self.draft, r, col).to_string()
+                                }),
+                            )
                             .collect::<Vec<_>>()
                             .join("\t")
                     }
-                    Yank::Col => self
-                        .model
-                        .rows
-                        .iter()
-                        .filter_map(|row| row.cells.get(c))
-                        .map(|cell| cell.text.as_ref())
+                    // Every row, on screen or not, formatted on demand.
+                    Yank::Col => (0..self.model.len())
+                        .map(|row| self.model.format_cell(&self.draft, row, c).to_string())
                         .collect::<Vec<_>>()
                         .join("\n"),
                 })
@@ -3940,26 +3947,36 @@ impl MarketDataTile {
     /// What `/` searches, one string per row: the row label where it is
     /// painted (`RowLabel::Shown`), the row's painted cell texts joined
     /// where it is not — a trader can only look for what they can see,
-    /// and a hidden `dividend_id` is not that.
-    fn row_labels(&self) -> Vec<String> {
+    /// and a hidden `dividend_id` is not that. Prepared once per index
+    /// build, on first use.
+    fn search_text(&mut self) -> &[String] {
+        if self.search_text.is_none() {
+            #[cfg(test)]
+            {
+                self.search_builds += 1;
+            }
+            let text = if self.spec.rows.shown() {
+                self.model.rows().map(|r| r.label.to_string()).collect()
+            } else {
+                (0..self.model.len())
+                    .map(|row| row_search_text(&self.model, &self.draft, row))
+                    .collect()
+            };
+            self.search_text = Some(text);
+        }
+        self.search_text.as_deref().unwrap_or_default()
+    }
+
+    /// A one-cell edit changes one row's painted text; under a hidden label
+    /// that row's search string is its cells, so re-prepare it.
+    fn refresh_find_row(&mut self, row: usize) {
         if self.spec.rows.shown() {
-            self.model
-                .rows
-                .iter()
-                .map(|r| r.label.to_string())
-                .collect()
-        } else {
-            self.model
-                .rows
-                .iter()
-                .map(|r| {
-                    r.cells
-                        .iter()
-                        .map(|c| c.text.as_ref())
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                })
-                .collect()
+            return;
+        }
+        if let Some(text) = self.search_text.as_mut()
+            && row < text.len()
+        {
+            text[row] = row_search_text(&self.model, &self.draft, row);
         }
     }
 
@@ -3988,6 +4005,13 @@ impl MarketDataTile {
             .collect();
         let table = self.table.clone();
         let model = self.model.clone();
+        // The result table paints arbitrary rows: format every cell once per
+        // `/` open, never in its paint.
+        let mut cells = geode_tile::grid::WindowCache::default();
+        cells.set_window(0..model.len(), model.columns.len(), |r, c| {
+            model.md_cell(&self.draft, r, c)
+        });
+        let cells = Rc::new(cells);
         let header_table = self.table.clone();
         let _ = results.update(cx, |results, cx| {
             results.set_table(
@@ -4002,7 +4026,9 @@ impl MarketDataTile {
                 },
                 move |row, col, cx| {
                     table.update(cx, |table, cx| {
-                        table.delegate().render_find_cell(&model, row, col, cx)
+                        table
+                            .delegate()
+                            .render_find_cell(&model, &cells, row, col, cx)
                     })
                 },
                 window,
@@ -4011,12 +4037,10 @@ impl MarketDataTile {
         });
         let items = self
             .model
-            .rows
-            .iter()
-            .map(|row| row.label.to_string())
-            .enumerate()
-            .map(|(row, label)| {
-                let identity = self.model.rows[row].label.clone();
+            .rows()
+            .map(|r| (r.index, r.label.clone()))
+            .map(|(_, identity)| {
+                let label = identity.to_string();
                 let document = self.model.key.clone();
                 let tile = cx.entity().downgrade();
                 geode_shell::fuzzyfind::FindItem::new(
@@ -4028,14 +4052,9 @@ impl MarketDataTile {
                             if tile.model.key != document {
                                 return Err("The document changed. Search again.".to_string());
                             }
-                            let row = tile
-                                .model
-                                .rows
-                                .iter()
-                                .position(|r| r.label == identity)
-                                .ok_or_else(|| {
-                                    "This row is no longer available. Search again.".to_string()
-                                })?;
+                            let row = tile.model.row_of(&identity).ok_or_else(|| {
+                                "This row is no longer available. Search again.".to_string()
+                            })?;
                             let origin = tile.cursor;
                             tile.set_cursor_row(row);
                             tile.clamp_cursor();
@@ -4079,12 +4098,12 @@ impl MarketDataTile {
                     Cursor::Cell { row, .. } => row,
                     Cursor::Attr(_) => 0,
                 };
-                let labels = self.row_labels();
                 // Every keystroke searches from the ORIGIN, not from
                 // wherever the previous one landed: that is what makes a
                 // lengthening query walk forward and a shortened one walk
                 // back (vim's incsearch).
-                if let Some(row) = find_match(&labels, origin, FindDirection::Forward, &query) {
+                let hit = find_match(self.search_text(), origin, FindDirection::Forward, &query);
+                if let Some(row) = hit {
                     self.set_cursor_row(row);
                     self.clamp_cursor();
                 }
@@ -4115,17 +4134,17 @@ impl MarketDataTile {
         let Some(query) = self.find.as_ref().and_then(|f| f.committed.clone()) else {
             return;
         };
-        let labels = self.row_labels();
-        if labels.is_empty() {
+        let len = self.search_text().len();
+        if len == 0 {
             return;
         }
         let mut at = self.cursor_row();
         for _ in 0..count.unwrap_or(1).max(1) {
             let start = match dir {
-                FindDirection::Forward => (at + 1) % labels.len(),
-                FindDirection::Backward => (at + labels.len() - 1) % labels.len(),
+                FindDirection::Forward => (at + 1) % len,
+                FindDirection::Backward => (at + len - 1) % len,
             };
-            match find_match(&labels, start, dir, &query) {
+            match find_match(self.search_text(), start, dir, &query) {
                 Some(row) => at = row,
                 None => return,
             }
@@ -4188,8 +4207,9 @@ impl MarketDataTile {
         }
     }
 
-    /// Fit every column to its header and every row's prepared text
-    /// (`reset`: drop the fitted widths), then refresh so the table
+    /// Fit every column to its header and the prepared text of the rows in
+    /// the window — what the table last showed (`reset`: drop the fitted
+    /// widths), then refresh so the table
     /// re-reads `column()`. The one route behind both `:autosize` and the
     /// shell's `tile::autosize_columns`; measured on the UI thread at the
     /// window's current rem, never in render. The widths persist in the
@@ -4486,8 +4506,16 @@ impl MarketDataTile {
     // ---- test accessors ---------------------------------------------
 
     #[cfg(test)]
-    pub(crate) fn model(&self) -> &MatrixModel {
+    pub(crate) fn model(&self) -> &MatrixIndex {
         &self.model
+    }
+
+    /// One cell as a reader sees it, through the installed index and draft.
+    #[cfg(test)]
+    pub(crate) fn cell_at(&self, row: usize, col: usize) -> crate::core::Cell {
+        self.model
+            .cell(&self.draft, row, col)
+            .expect("a cell in range")
     }
 
     #[cfg(test)]
@@ -4498,7 +4526,7 @@ impl MarketDataTile {
     /// State of a model row, or None beyond the grid.
     #[cfg(test)]
     pub(crate) fn row_state_at(&self, row: usize) -> Option<RowState> {
-        self.model.rows.get(row).map(|r| r.state)
+        self.model.state(row)
     }
 
     #[cfg(test)]
@@ -4771,11 +4799,19 @@ fn dropped_notice(dropped: &[(String, String)]) -> String {
     format!("dropped {n} edit{plural} whose rows or columns the new document lacks: {list}")
 }
 
+/// One row's painted cells joined by spaces: a hidden-label panel's search string.
+fn row_search_text(model: &MatrixIndex, draft: &Draft, row: usize) -> String {
+    (0..model.columns.len())
+        .map(|col| model.format_cell(draft, row, col))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Declared type for Number cells, shared by commit and nudge. Other CellKinds return
 /// None. Flat columns use their own ValueColumn type; pivot columns use the panel value
 /// type, with slice values handled separately. Explicit model/spec arguments permit
 /// access while the editor is mutably borrowed.
-fn declared_type(spec: &PanelSpec, model: &MatrixModel, col: usize) -> Option<ColumnType> {
+fn declared_type(spec: &PanelSpec, model: &MatrixIndex, col: usize) -> Option<ColumnType> {
     match model.kind_of(col)? {
         CellKind::Number(_) => Some(match &spec.columns {
             Columns::Axis(_) => spec.value_type,
@@ -5114,6 +5150,17 @@ mod tests {
 
     /// [`document_of`] over a caller-supplied provenance.
     fn document_with(terms: &[&str], nodes: &[f64], provenance: Provenance) -> Snapshot {
+        document_forward(terms, nodes, provenance, 4500.0)
+    }
+
+    /// [`document_with`] with the first term's `forward` at `forward`
+    /// (later terms keep their `+ 10` per term step from it).
+    fn document_forward(
+        terms: &[&str],
+        nodes: &[f64],
+        provenance: Provenance,
+        forward: f64,
+    ) -> Snapshot {
         let mut cells: Vec<(String, f64, f64)> = Vec::new();
         let mut slices: Vec<(f64, f64, f64)> = Vec::new();
         for (t, term) in terms.iter().enumerate() {
@@ -5121,7 +5168,7 @@ mod tests {
                 let i = cells.len() + 1;
                 cells.push(((*term).to_string(), *node, i as f64 / 10.0));
                 slices.push((
-                    4500.0 + 10.0 * t as f64,
+                    forward + 10.0 * t as f64,
                     0.18 + 0.01 * t as f64,
                     -1.0 - 0.1 * t as f64,
                 ));
@@ -5174,6 +5221,11 @@ mod tests {
 
     fn cvi(as_of: &str) -> Snapshot {
         document_of(&TERMS, &NODES, as_of)
+    }
+
+    /// [`cvi`] with the first term's forward at `forward`.
+    fn cvi_with_forward(as_of: &str, forward: f64) -> Snapshot {
+        document_forward(&TERMS, &NODES, provenance(as_of), forward)
     }
 
     /// [`cvi`] as the data tier delivers it for a HISTORICAL request:
@@ -5509,7 +5561,7 @@ mod tests {
             self.frame.read_with(vcx, |f, _| f.barrier_open())
         }
         fn rows(&self, vcx: &gpui::VisualTestContext) -> usize {
-            self.tile.read_with(vcx, |t, _| t.model().rows.len())
+            self.tile.read_with(vcx, |t, _| t.model().len())
         }
         /// Keymap context exposed through TileContent, including insert state for open
         /// editors, picker/choice fields, and confirmation.
@@ -5578,30 +5630,57 @@ mod tests {
         fn header_texts(&self, vcx: &gpui::VisualTestContext) -> Vec<String> {
             self.tile.read_with(vcx, |t, _| t.header_texts())
         }
-        /// One cell as painted: its text and whether it reads as an edit.
+        /// One cell as a reader sees it: its text and whether it reads as
+        /// an edit. Read on demand, and checked against the painted window
+        /// whenever the cell is in it.
         fn cell(&self, vcx: &gpui::VisualTestContext, row: usize, col: usize) -> (String, bool) {
-            self.tile.read_with(vcx, |t, _| {
-                let cell = &t.model().rows[row].cells[col];
-                (cell.text.to_string(), cell.edited)
+            self.tile.read_with(vcx, |t, cx| {
+                assert_window_paints(t, cx, row, col);
+                let c = t.cell_at(row, col);
+                (c.text.to_string(), c.edited)
             })
         }
-        /// Every cell's text along one row, and down one column.
+        /// Every cell's text along one row, and down one column, each
+        /// checked against the window as [`Self::cell`] is.
         fn row_texts(&self, vcx: &gpui::VisualTestContext, row: usize) -> Vec<String> {
-            self.tile.read_with(vcx, |t, _| {
-                t.model().rows[row]
-                    .cells
-                    .iter()
-                    .map(|c| c.text.to_string())
+            self.tile.read_with(vcx, |t, cx| {
+                (0..t.model().columns.len())
+                    .map(|c| {
+                        assert_window_paints(t, cx, row, c);
+                        t.model().format_cell(t.draft(), row, c).to_string()
+                    })
                     .collect()
             })
         }
         fn col_texts(&self, vcx: &gpui::VisualTestContext, col: usize) -> Vec<String> {
-            self.tile.read_with(vcx, |t, _| {
-                t.model()
-                    .rows
-                    .iter()
-                    .map(|r| r.cells[col].text.to_string())
+            self.tile.read_with(vcx, |t, cx| {
+                (0..t.model().len())
+                    .map(|r| {
+                        assert_window_paints(t, cx, r, col);
+                        t.model().format_cell(t.draft(), r, col).to_string()
+                    })
                     .collect()
+            })
+        }
+        /// The window cell the table paints at (`row`, `col`); `None` off screen.
+        fn painted(&self, vcx: &gpui::VisualTestContext, row: usize, col: usize) -> Option<String> {
+            self.tile.read_with(vcx, |t, cx| {
+                t.table()
+                    .read(cx)
+                    .delegate()
+                    .window
+                    .get(row, col)
+                    .map(|c| c.text.to_string())
+            })
+        }
+        fn painted_cell(
+            &self,
+            vcx: &gpui::VisualTestContext,
+            row: usize,
+            col: usize,
+        ) -> Option<crate::core::MdCell> {
+            self.tile.read_with(vcx, |t, cx| {
+                t.table().read(cx).delegate().window.get(row, col).cloned()
             })
         }
         /// Key, shown, requested, delivered — the four lines every editing
@@ -5682,6 +5761,21 @@ mod tests {
                 })
             })
         }
+    }
+
+    /// The window paints what a reader sees: inside the window's rows the
+    /// prepared cell equals the one prepared on demand from the live index
+    /// and draft. Rows off screen are not prepared and not checked.
+    fn assert_window_paints(t: &MarketDataTile, cx: &App, row: usize, col: usize) {
+        let window = &t.table().read(cx).delegate().window;
+        if !window.window().contains(&row) {
+            return;
+        }
+        assert_eq!(
+            window.get(row, col),
+            t.model().md_cell(t.draft(), row, col).as_ref(),
+            "the painted cell ({row}, {col}) is stale"
+        );
     }
 
     fn draw(vcx: &mut gpui::VisualTestContext) {
@@ -6136,11 +6230,7 @@ mod tests {
         h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
 
         let (rows, columns, chips) = h.tile.read_with(&vcx, |t, _| {
-            (
-                t.model().rows.len(),
-                t.model().columns.len(),
-                t.header_texts(),
-            )
+            (t.model().len(), t.model().columns.len(), t.header_texts())
         });
         assert_eq!(rows, 2, "two terms down the side");
         assert_eq!(
@@ -6389,7 +6479,7 @@ label = "skew"
         );
         let (rows, source) = h.tile.read_with(&vcx, |t, _| {
             (
-                t.model().rows.len(),
+                t.model().len(),
                 t.model().base.as_ref().map(|b| b.as_of.clone()),
             )
         });
@@ -6406,7 +6496,7 @@ label = "skew"
         h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
         h.deliver_err(&mut vcx, tag, "the document select failed");
         let (rows, notice) = h.tile.read_with(&vcx, |t, _| {
-            (t.model().rows.len(), t.notice().map(str::to_string))
+            (t.model().len(), t.notice().map(str::to_string))
         });
         assert_eq!(rows, 2, "last good stays on screen");
         assert_eq!(notice.as_deref(), Some("the document select failed"));
@@ -6696,7 +6786,7 @@ label = "skew"
                 t.draft().len(),
                 t.draft().state.clone(),
                 t.model().base.as_ref().map(|b| b.as_of.clone()),
-                t.model().rows.len(),
+                t.model().len(),
                 t.notice().map(str::to_string),
             )
         });
@@ -7630,9 +7720,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         h.deliver(&mut vcx, params.tag, Arc::new(cvi(BASE)));
         // `Draft::from_toml` parks every restored edit out of the grid's
         // range; without the tile's rebase it would paint nowhere.
-        let cell = h
-            .tile
-            .read_with(&vcx, |t, _| t.model().rows[1].cells[SLICE + 1].clone());
+        let cell = h.tile.read_with(&vcx, |t, _| t.cell_at(1, SLICE + 1));
         assert_eq!(cell.text.to_string(), "9.5000");
         assert!(cell.edited, "the restored edit paints as an edit");
     }
@@ -8252,8 +8340,7 @@ deleted = true
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t
                 .model()
-                .rows
-                .iter()
+                .rows()
                 .map(|r| r.label.to_string())
                 .collect::<Vec<_>>()),
             ["D1", "new-1", "new-2", "D2", "D3"],
@@ -8679,33 +8766,201 @@ deleted = true
         )
     }
 
-    /// A cell commit patches the existing prepared model. The delegate retains the same
-    /// Rc allocation, avoiding a full document rebuild per keystroke.
+    /// The session tick serializes the draft, capturing its groups from the
+    /// installed index: no index build.
+    #[gpui::test]
+    fn serialize_captures_groups_without_building(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_spec(cx, &test_fixtures::DIVIDEND, None);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(test_fixtures::dividend_snapshot(&[
+                (
+                    "2026-09-18",
+                    "2026-09-18",
+                    "2026-08-01",
+                    "2026-10-01",
+                    1.0,
+                    "declared",
+                ),
+                (
+                    "2026-09-18#2",
+                    "2026-09-18",
+                    "2026-08-01",
+                    "2026-10-01",
+                    2.0,
+                    "declared",
+                ),
+            ])),
+        );
+        h.command(&mut vcx, "bump 0.5").unwrap();
+        let before = crate::core::matrix::builds();
+        let t = vcx.update(|_, cx| h.content.serialize(cx));
+        assert_eq!(
+            crate::core::matrix::builds(),
+            before,
+            "the tick built nothing"
+        );
+        let groups = &t["drafts"]["SPX.Z"]["groups"];
+        assert_eq!(groups["2026-09-18"].as_integer(), Some(2), "{t:?}");
+    }
+
+    /// A committed cell refills its window cell; the index is not rebuilt.
     #[gpui::test]
     fn a_cell_commit_patches_the_model_in_place(cx: &mut gpui::TestAppContext) {
-        let (h, mut vcx) = open_flat(cx);
-        h.with_flat_document(&mut vcx);
-        let before = h
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        let index = h
             .tile
-            .read_with(&vcx, |t, _| t.model() as *const MatrixModel);
-        h.motion(&mut vcx, "right", Some(1));
+            .read_with(&vcx, |t, _| t.model() as *const MatrixIndex);
+        let before = crate::core::matrix::builds();
+        h.edit_one_cell(&mut vcx);
+        assert_eq!(
+            crate::core::matrix::builds(),
+            before,
+            "no rebuild for one cell"
+        );
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.model() as *const MatrixIndex),
+            index
+        );
+        let painted = h.painted_cell(&vcx, 0, 0).expect("on screen");
+        assert_eq!((painted.text.as_ref(), painted.edited), ("4505.50", true));
+        assert_eq!(h.painted(&vcx, 0, 1), Some("0.1800".to_string()));
+    }
+
+    /// Leaving Sent through a one-cell commit repaints every window cell unsent.
+    #[gpui::test]
+    fn a_cell_commit_on_a_sent_draft_repaints_every_cell_unsent(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        h.upload_ok(&mut vcx);
+        assert!(
+            h.painted_cell(&vcx, 0, 0).is_some_and(|c| c.sent),
+            "sent after the upload"
+        );
+        h.motion(&mut vcx, "down", None);
         h.dispatch(&mut vcx, "edit", None);
-        h.set_editor(&mut vcx, "2.5");
+        h.set_editor(&mut vcx, "4600");
         h.dispatch(&mut vcx, "commit", None);
-        let after = h
-            .tile
-            .read_with(&vcx, |t, _| t.model() as *const MatrixModel);
-        assert_eq!(before, after, "the model was patched, not replaced");
-        assert_eq!(h.cell(&vcx, 0, 1), ("2.5000".to_string(), true));
-        // And the delegate paints from the same, patched model.
-        let painted = h.tile.read_with(&vcx, |t, cx| {
-            let d = t.table().read(cx).delegate();
-            (
-                Rc::as_ptr(&d.model),
-                d.model.rows[0].cells[1].text.to_string(),
-            )
+        let cols = h.tile.read_with(&vcx, |t, _| t.model().columns.len());
+        for row in 0..h.rows(&vcx) {
+            for col in 0..cols {
+                assert!(
+                    !h.painted_cell(&vcx, row, col).is_some_and(|c| c.sent),
+                    "({row}, {col})"
+                );
+            }
+        }
+    }
+
+    /// An accepted upload marks every edited window cell sent.
+    #[gpui::test]
+    fn an_accepted_upload_marks_the_painted_cells_sent(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        assert!(!h.painted_cell(&vcx, 0, 0).unwrap().sent);
+        h.upload_ok(&mut vcx);
+        assert!(h.painted_cell(&vcx, 0, 0).unwrap().sent);
+    }
+
+    /// `/` prepares its text once per index build: keystrokes and a cancel
+    /// reuse it; an insert (a rebuild) prepares it again.
+    #[gpui::test]
+    fn find_builds_its_text_once_per_index_build(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        for q in ["2", "20", "202"] {
+            vcx.update(|window, cx| h.content.find(FindEvent::Changed(q.into()), window, cx));
+        }
+        vcx.update(|window, cx| h.content.find(FindEvent::Cancelled, window, cx));
+        vcx.update(|window, cx| h.content.find(FindEvent::Changed("11".into()), window, cx));
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.search_builds), 1);
+        h.dispatch(&mut vcx, "insert_below", None);
+        h.dispatch(&mut vcx, "cancel", None);
+        vcx.update(|window, cx| h.content.find(FindEvent::Changed("11".into()), window, cx));
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.search_builds), 2);
+    }
+
+    /// Under a hidden label `/` searches cell text; a value typed into a
+    /// cell is found without a rebuild.
+    #[gpui::test]
+    fn find_after_a_cell_edit_finds_the_new_value_under_a_hidden_label(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_spec(cx, &test_fixtures::HIDDEN_SCHEDULE, None);
+        h.with_flat_document_with(
+            &mut vcx,
+            test_fixtures::schedule_snapshot(&[
+                ("D1", "2026-12-18", 1.25, "declared"),
+                ("D2", "2027-03-19", 0.5, "declared"),
+            ]),
+        );
+        vcx.update(|window, cx| {
+            h.content
+                .find(FindEvent::Changed("1.25".into()), window, cx)
         });
-        assert_eq!(painted, (after, "2.5000".to_string()));
+        vcx.update(|window, cx| h.content.find(FindEvent::Cancelled, window, cx));
+        h.motion(&mut vcx, "down", None);
+        let amount = h
+            .headers(&vcx)
+            .iter()
+            .position(|n| n == "amount")
+            .expect("amount") as u32;
+        h.motion(&mut vcx, "right", Some(amount));
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "9.75");
+        h.dispatch(&mut vcx, "commit", None);
+        h.motion(&mut vcx, "up", None);
+        let before = crate::core::matrix::builds();
+        vcx.update(|window, cx| {
+            h.content
+                .find(FindEvent::Changed("9.75".into()), window, cx)
+        });
+        assert_eq!(crate::core::matrix::builds(), before, "no rebuild");
+        assert!(matches!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            Cursor::Cell { row: 1, .. }
+        ));
+    }
+
+    /// `y c` copies every row of the column, on screen or not.
+    #[gpui::test]
+    fn yank_col_includes_rows_off_screen(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_flat(cx);
+        let rows: Vec<(String, String)> = (0..200)
+            .map(|i| {
+                (
+                    format!("D{i}"),
+                    format!("{:04}-01-{:02}", 2027 + i / 28, i % 28 + 1),
+                )
+            })
+            .collect();
+        let borrowed: Vec<(&str, &str, f64, &str)> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, (l, d))| (l.as_str(), d.as_str(), i as f64, "declared"))
+            .collect();
+        h.with_flat_document_with(&mut vcx, test_fixtures::schedule_snapshot(&borrowed));
+        let amount = h
+            .headers(&vcx)
+            .iter()
+            .position(|n| n == "amount")
+            .expect("amount") as u32;
+        // The painted label column leads the headers; the cursor starts on
+        // model column 0.
+        let amount = amount - 1;
+        h.motion(&mut vcx, "right", Some(amount));
+        h.dispatch(&mut vcx, "yank_col", None);
+        let text = clipboard(&mut vcx).expect("yanked");
+        assert_eq!(text.lines().count(), 200);
+        assert_eq!(text.lines().last(), Some("199.0000"));
     }
 
     /// A grid date editor ends at the cell's right edge and occupies the width
@@ -9462,11 +9717,7 @@ deleted = true
         h.command(&mut vcx, "revert").expect("an edit to clear");
 
         let (state, rows, cell) = h.tile.read_with(&vcx, |t, _| {
-            (
-                t.draft().state.clone(),
-                t.model().rows.len(),
-                t.model().rows[0].cells[0].clone(),
-            )
+            (t.draft().state.clone(), t.model().len(), t.cell_at(0, 0))
         });
         assert_eq!(state, DraftState::Clean);
         assert_eq!(
@@ -9602,11 +9853,7 @@ deleted = true
         );
 
         let (state, rows, cell) = h.tile.read_with(&vcx, |t, _| {
-            (
-                t.draft().state.clone(),
-                t.model().rows.len(),
-                t.model().rows[0].cells[0].clone(),
-            )
+            (t.draft().state.clone(), t.model().len(), t.cell_at(0, 0))
         });
         assert!(
             matches!(state, DraftState::Behind { ref newer } if newer.as_of == NEWER),
@@ -9663,8 +9910,8 @@ deleted = true
         let (state, rows, cell, notice) = h.tile.read_with(&vcx, |t, _| {
             (
                 t.draft().state.clone(),
-                t.model().rows.len(),
-                t.model().rows[0].cells[0].clone(),
+                t.model().len(),
+                t.cell_at(0, 0),
                 t.notice().map(str::to_string),
             )
         });
@@ -9725,7 +9972,9 @@ deleted = true
             (
                 t.draft().state.clone(),
                 t.model().columns.clone(),
-                t.model().rows[0].cells.clone(),
+                (0..t.model().columns.len())
+                    .map(|c| t.cell_at(0, c))
+                    .collect::<Vec<_>>(),
             )
         });
         assert!(
@@ -9839,11 +10088,7 @@ deleted = true
         );
 
         let (state, rows, cell) = h.tile.read_with(&vcx, |t, _| {
-            (
-                t.draft().state.clone(),
-                t.model().rows.len(),
-                t.model().rows[0].cells[0].clone(),
-            )
+            (t.draft().state.clone(), t.model().len(), t.cell_at(0, 0))
         });
         assert!(
             matches!(state, DraftState::Behind { ref newer } if newer.as_of == NEWEST),
@@ -9903,8 +10148,8 @@ deleted = true
             (
                 t.draft().state.clone(),
                 t.draft().len(),
-                t.model().rows.len(),
-                t.model().rows[0].cells[0].clone(),
+                t.model().len(),
+                t.cell_at(0, 0),
             )
         });
         assert_eq!(state, DraftState::Editing, "one edit survived the rebase");
@@ -10360,9 +10605,7 @@ edits = [["2026-11-20", "-1", 9.5]]
 
         // The real document arrives on a later delivery and resolves them.
         h.deliver(&mut vcx, first, Arc::new(cvi(BASE)));
-        let cell = h
-            .tile
-            .read_with(&vcx, |t, _| t.model().rows[1].cells[SLICE + 1].clone());
+        let cell = h.tile.read_with(&vcx, |t, _| t.cell_at(1, SLICE + 1));
         assert_eq!(cell.text.to_string(), "9.5000");
         assert!(cell.edited, "the restored edit is placed by label at last");
     }
@@ -10400,9 +10643,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         );
 
         h.deliver(&mut vcx, first, Arc::new(cvi(BASE)));
-        let cell = h
-            .tile
-            .read_with(&vcx, |t, _| t.model().rows[1].cells[SLICE + 1].clone());
+        let cell = h.tile.read_with(&vcx, |t, _| t.cell_at(1, SLICE + 1));
         assert_eq!(cell.text.to_string(), "9.5000");
         assert!(cell.edited);
     }
@@ -10497,11 +10738,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         );
 
         let (state, rows, chips) = h.tile.read_with(&vcx, |t, _| {
-            (
-                t.draft().state.clone(),
-                t.model().rows.len(),
-                t.header_texts(),
-            )
+            (t.draft().state.clone(), t.model().len(), t.header_texts())
         });
         assert_eq!(
             state,
@@ -12419,8 +12656,8 @@ edits = [["2099-01-01", "-1", 1.0]]
                 t.draft().state.clone(),
                 t.draft().base.as_ref().map(|b| b.as_of.clone()),
                 t.model().base.as_ref().map(|b| b.as_of.clone()),
-                t.model().rows.len(),
-                t.model().rows[0].cells[0].clone(),
+                t.model().len(),
+                t.cell_at(0, 0),
                 t.notice().map(str::to_string),
             )
         });
@@ -12481,8 +12718,8 @@ edits = [["2099-01-01", "-1", 1.0]]
             (
                 t.draft().state.clone(),
                 t.draft().len(),
-                t.model().rows.len(),
-                t.model().rows[0].cells[0].clone(),
+                t.model().len(),
+                t.cell_at(0, 0),
                 t.notice().map(str::to_string),
             )
         });
@@ -12530,8 +12767,8 @@ edits = [["2099-01-01", "-1", 1.0]]
             (
                 t.draft().clone(),
                 t.model().base.as_ref().map(|b| b.as_of.clone()),
-                t.model().rows.len(),
-                t.model().rows[0].cells[0].clone(),
+                t.model().len(),
+                t.cell_at(0, 0),
                 t.notice().map(str::to_string),
             )
         });
@@ -12579,7 +12816,7 @@ edits = [["2099-01-01", "-1", 1.0]]
             (
                 t.draft().state.clone(),
                 t.model().base.as_ref().map(|b| b.as_of.clone()),
-                t.model().rows.len(),
+                t.model().len(),
             )
         });
         assert!(
@@ -12615,7 +12852,7 @@ edits = [["2099-01-01", "-1", 1.0]]
                 t.draft().state.clone(),
                 t.draft().base.as_ref().map(|b| b.as_of.clone()),
                 t.model().base.as_ref().map(|b| b.as_of.clone()),
-                t.model().rows[0].cells[0].clone(),
+                t.cell_at(0, 0),
             )
         });
         assert_eq!(state, DraftState::Editing, "got {state:?}");
@@ -12827,7 +13064,7 @@ auto = "discard"
             (
                 t.draft().len(),
                 t.draft().base.as_ref().map(|b| b.as_of.clone()),
-                t.model().rows[0].cells[..2].to_vec(),
+                (0..2).map(|c| t.cell_at(0, c)).collect::<Vec<_>>(),
                 t.notice().map(str::to_string),
             )
         });
@@ -12978,7 +13215,7 @@ edits = [["2026-11-20", "-1", 9.5]]
                 t.draft().state.clone(),
                 t.draft().len(),
                 t.model().base.as_ref().map(|b| b.as_of.clone()),
-                t.model().rows.len(),
+                t.model().len(),
                 t.notice().map(str::to_string),
             )
         });
@@ -13034,7 +13271,7 @@ edits = [["2026-11-20", "-1", 9.5]]
             (
                 t.draft().len(),
                 t.draft().base.as_ref().map(|b| b.as_of.clone()),
-                t.model().rows[0].cells[..2].to_vec(),
+                (0..2).map(|c| t.cell_at(0, c)).collect::<Vec<_>>(),
                 t.notice().map(str::to_string),
             )
         });
@@ -13194,12 +13431,145 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert_eq!(h2.headers(&vcx2).len(), h.headers(&vcx).len());
     }
 
+    // ---- The window follows the table -------------------------------
+
+    /// `n` schedule rows with distinct labels `D{i}` and dates, amount `i`.
+    fn schedule_rows(n: usize) -> Vec<(&'static str, &'static str, f64, &'static str)> {
+        (0..n)
+            .map(|i| {
+                let label: &'static str = Box::leak(format!("D{i}").into_boxed_str());
+                let date: &'static str = Box::leak(
+                    format!("{:04}-01-{:02}", 2027 + i / 28, i % 28 + 1).into_boxed_str(),
+                );
+                (label, date, i as f64, "declared")
+            })
+            .collect()
+    }
+
+    fn schedule_of(n: usize) -> Snapshot {
+        test_fixtures::schedule_snapshot(&schedule_rows(n))
+    }
+
+    /// A drawn table fills the window for the rows it shows, and only those.
+    #[gpui::test]
+    fn the_table_report_fills_only_its_range(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_flat(cx);
+        h.with_flat_document_with(&mut vcx, schedule_of(200));
+        draw(&mut vcx);
+        let window = h
+            .tile
+            .read_with(&vcx, |t, cx| t.table().read(cx).delegate().window.window());
+        assert!(window.start == 0 && window.end < 200, "{window:?}");
+        assert!(h.painted(&vcx, 0, 0).is_some());
+        assert_eq!(h.painted(&vcx, 199, 0), None, "off screen is not prepared");
+        // Scrolled to the last row, the window is what the table now shows,
+        // never the first window the install prepared.
+        h.motion(&mut vcx, "bottom", None);
+        draw(&mut vcx);
+        assert_eq!(
+            h.painted(&vcx, 199, 1).as_deref(),
+            Some("199.0000"),
+            "the last row is prepared"
+        );
+        assert_eq!(h.painted(&vcx, 0, 0), None, "the first row left the window");
+    }
+
+    /// Scrolled to the bottom of a long document, a one-row redelivery
+    /// still paints its row: the recorded range lies past the new end, and
+    /// the table never reports a one-row range to fill it.
+    #[gpui::test]
+    fn a_shrink_to_one_row_after_a_scroll_paints_the_row(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_flat(cx);
+        h.command(&mut vcx, "key SPX.Z").expect("a valid key");
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().expect("one request").tag;
+        h.deliver(&mut vcx, tag, Arc::new(schedule_of(200)));
+        draw(&mut vcx);
+        h.motion(&mut vcx, "bottom", None);
+        draw(&mut vcx);
+        assert!(h.painted(&vcx, 199, 0).is_some(), "scrolled to the end");
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(test_fixtures::schedule_snapshot_at(
+                &[("D1", "2026-12-18", 1.25, "declared")],
+                NEWER,
+            )),
+        );
+        assert_eq!(h.rows(&vcx), 1);
+        assert_eq!(h.painted(&vcx, 0, 0).as_deref(), Some("2026-12-18"));
+        draw(&mut vcx);
+        assert_eq!(h.painted(&vcx, 0, 0).as_deref(), Some("2026-12-18"));
+    }
+
+    /// A redelivery that leaves the reported range unchanged still repaints:
+    /// the install refills the recorded range itself.
+    #[gpui::test]
+    fn a_redelivery_in_an_unchanged_range_repaints_the_window(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        let tag = h.with_document_tagged(&mut vcx);
+        draw(&mut vcx);
+        let before = h.painted(&vcx, 0, 0);
+        h.deliver(&mut vcx, tag, Arc::new(cvi_with_forward(NEWER, 4600.0)));
+        assert_ne!(h.painted(&vcx, 0, 0), before);
+        assert_eq!(h.painted(&vcx, 0, 0).as_deref(), Some("4600.00"));
+    }
+
+    /// One row: the table never reports a range of length one, and the
+    /// first window still paints it.
+    #[gpui::test]
+    fn a_one_row_document_paints_without_a_table_report(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_flat(cx);
+        h.with_flat_document_with(
+            &mut vcx,
+            test_fixtures::schedule_snapshot(&[("D1", "2026-12-18", 1.25, "declared")]),
+        );
+        draw(&mut vcx);
+        assert!(h.painted(&vcx, 0, 0).is_some());
+    }
+
+    /// An open editor paints in its cell even when the window lacks that
+    /// cell. The first draw records the table's range, so the second one
+    /// (same range) brings no report that would refill the cleared window.
+    #[gpui::test]
+    fn the_editor_paints_on_a_cell_the_window_lacks(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "edit", None);
+        draw(&mut vcx);
+        h.tile.update(&mut vcx, |t, cx| {
+            t.table().update(cx, |t, _| t.delegate_mut().window.clear())
+        });
+        draw(&mut vcx);
+        assert_eq!(h.painted(&vcx, 0, 0), None, "the window lacks the cell");
+        assert!(
+            vcx.debug_bounds("marketdata-editor-0-1").is_some(),
+            "the editor still paints"
+        );
+    }
+
+    /// `:autosize` measures the rows on screen: a wider value off screen does not widen.
+    #[gpui::test]
+    fn autosize_measures_the_window_not_the_document(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_flat(cx);
+        let mut doc = schedule_rows(200);
+        doc[199].3 = LONG_STATUS;
+        h.with_flat_document_with(&mut vcx, test_fixtures::schedule_snapshot(&doc));
+        draw(&mut vcx);
+        let default = width_of_column(&h, &vcx, "status");
+        h.command(&mut vcx, "autosize").unwrap();
+        assert!(
+            width_of_column(&h, &vcx, "status") < default + 1.0,
+            "the long status is off screen"
+        );
+    }
+
     // ---- Row insertion and deletion ----------------------------------
 
     /// The model's row labels in painted order.
     fn row_labels(h: &Harness, vcx: &gpui::VisualTestContext) -> Vec<String> {
         h.tile.read_with(vcx, |t, _| {
-            t.model().rows.iter().map(|r| r.label.to_string()).collect()
+            t.model().rows().map(|r| r.label.to_string()).collect()
         })
     }
 
@@ -13403,8 +13773,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t
                 .model()
-                .rows
-                .iter()
+                .rows()
                 .filter(|r| r.state == RowState::Inserted)
                 .count()),
             1

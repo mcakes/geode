@@ -25,7 +25,7 @@ Current behavior and rationale:
 
 | Module | Holds |
 |---|---|
-| `core::spec`, `core::matrix` | Panel vocabulary (re-exported from `geode_core::panel`), `BUILTIN_KIND_ACTIONS`, and the builtin panels (`BUILTIN_PANELS`, `builtin_panel`); prepared grids built from a snapshot plus draft. |
+| `core::spec`, `core::matrix` | Panel vocabulary (re-exported from `geode_core::panel`), `BUILTIN_KIND_ACTIONS`, and the builtin panels (`BUILTIN_PANELS`, `builtin_panel`). `MatrixIndex`: labels, states, row sources and `label_index`, built on delivery, structural edit and bulk step; values read on demand from its own snapshot and the draft; `format_cell` is the one formatter. |
 | `core::draft` | Typed edits, label-based rebase, same-date group guards, and `DocumentBase` identity (source time plus optional store generation). |
 | `core::upload` | Typed whole-document assembly and row-order-independent echo comparison; minted labels are ignored and floats allow one ULP. |
 | `core::cursor`, `core::menu` | Grid navigation over `geode_tile::motion` (the shared rules; `step_clamped` for a live selection), with the attribute strip outside the wrap cycle, and the action list's rows (`geode_tile::menu` rows over action ids, hints as live chords). Numeric nudging and date fields are re-exported from `geode-core` and `geode-widgets`. |
@@ -34,7 +34,7 @@ Current behavior and rationale:
 | `header` | Prepared identity, attributes, draft/upload feedback, source time (and its prepared stale label), and shared date-field rendering. Paints through `geode_tile::header::frame`: kind badge, underlying and attributes on the left; state, incomplete rows, echo, upload error and the confirm prompt as cluster status; the notice, the time, the health chip (the panel's dataset) and `⋯` from the shared cluster. |
 | `tile` | `MarketDataTile`: requests one document by key through `DataHandle`, runs its document request through `geode_tile::following` (following `as_of` and its watched document's data; hiding keeps the request in flight, `closed` cancels it and answers the barrier), owns the cursor, the editor, the draft and the parked drafts per underlying. |
 | `tile::select` | The `V`/`v` grid selection: its state doors, label-anchored resolution, and every verb that takes it as operand (`y`, `d`, `:bump`, the bulk commit, the live step and its undo). |
-| `delegate` | `MatrixDelegate`, the `TableDelegate` over gpui-component's table. Holds `:autosize`'s fitted widths by column label (`__row_axis` for the row labels), which `column()` prefers over the fixed defaults. |
+| `delegate` | `MatrixDelegate`, the `TableDelegate` over gpui-component's table, and the window (`geode_tile::grid::WindowCache<MdCell>`) `render_td` reads. It fills the window for the range the table reports (`visible_rows_changed`) and refills the recorded range on every install; before any report it prepares the first `FIRST_WINDOW` rows. Holds `:autosize`'s fitted widths by column label (`__row_axis` for the row labels), which `column()` prefers over the fixed defaults. |
 | `popup` | Underlying picker and cell-choice state and rendering over `geode_tile::popover`; the action menu is `geode_tile::menu`'s. Menu/picker anchor at the header; choices anchor beneath their target cell. |
 | `content` | The `TileContent` wrapper and `MarketDataFactory`, one per accepted panel (only the first ships `DEFAULT_KEYMAP`; the rest are built `without_keymap`), plus the module's `ACTIONS`, `DEFAULT_KEYMAP` fragment (no grid motions and no menu steps: both are the shell's shared `motion::*` bindings) and the retired ids' renames (`RENAMED_ACTIONS`). |
 
@@ -42,23 +42,35 @@ Current behavior and rationale:
 
 ```sh
 cargo test -p geode-marketdata
-cargo bench -p geode-marketdata    # matrix model and draft
+cargo bench -p geode-marketdata    # matrix index, window fill and draft
 ```
 
 ## Rules this crate pins
 
 - `:autosize` and the shell's `tile::autosize_columns` run one method,
-  `MarketDataTile::autosize_columns`, which measures every prepared row.
+  `MarketDataTile::autosize_columns`, which measures the rows in the
+  window — what the table last showed — never the whole document.
   With no document or no rows, a fit refuses with "nothing loaded to fit"
   and keeps its widths. The widths persist in the session record's
   `column_widths`. On a later
   document, a label that is no longer present is ignored and a new column
   takes the default width. Columns remain non-resizable by drag.
 
-- `MatrixModel::build` refuses holes, repeats, NULL axes and more than one
-  value column under `Columns::Axis`. Structural changes rebuild the prepared
-  grid. Ordinary cell commits patch it when possible, avoiding a full schedule
-  rebuild; edits to a Sent draft rebuild to clear sent presentation throughout.
+- `MatrixIndex::build` refuses holes, repeats, NULL axes and more than one
+  value column under `Columns::Axis`. Structural changes rebuild the index; a
+  one-cell commit writes the draft and refills that one window cell; edits to a
+  Sent draft rebuild to clear sent presentation throughout. `serialize` (the
+  session tick) captures group sizes from the installed index and builds
+  nothing. `/`'s search text is prepared once per index build; a one-cell edit
+  re-prepares its row under a hidden label.
+- The delegate's window holds the rows the table last reported, filled in
+  `visible_rows_changed` and refilled over that recorded range on every
+  install (the table does not re-report an unchanged range), so painting reads
+  prepared text and a delivery formats only the rows on screen. A cell the
+  window lacks paints blank, and an open editor or choice popup on it still
+  paints. Yank, a selection's TSV, find and the editors format on demand
+  through `MatrixIndex::format_cell`, so they cover rows off screen and can
+  never format differently from the window.
 - Model installation pairs the delegate update with `TableState::refresh` so
   cached headers follow the document. In CVI, table column 0 is a fixed row label
   outside the cursor grid. Dividend hides its row identity: column 0 is the first

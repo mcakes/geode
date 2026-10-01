@@ -10,7 +10,7 @@
 //! values for upstream publication.
 
 use crate::core::draft::{Draft, parse_attr};
-use crate::core::matrix::{MatrixModel, RowModel, RowState, read_flat_value};
+use crate::core::matrix::{MatrixIndex, RowState, RowView, read_flat_value};
 use crate::core::spec::{Columns, HeaderAttr, PanelSpec, RowIdentity, ValueColumn};
 use geode_core::document::{Column, DocumentRows, Value};
 use geode_core::schema::ColumnType;
@@ -36,7 +36,7 @@ use geode_core::snapshot::Snapshot;
 pub fn assemble(
     snapshot: &Snapshot,
     spec: &PanelSpec,
-    model: &MatrixModel,
+    model: &MatrixIndex,
     draft: &Draft,
 ) -> Result<DocumentRows, String> {
     let attributes = spec
@@ -44,14 +44,13 @@ pub fn assemble(
         .iter()
         .map(|attr| attribute(snapshot, attr, draft))
         .collect::<Result<Vec<_>, _>>()?;
-    let rows: Vec<&RowModel> = model
-        .rows
-        .iter()
+    let rows: Vec<RowView<'_>> = model
+        .rows()
         .filter(|r| r.state != RowState::Deleted)
         .collect();
     let (axes, values) = match &spec.columns {
-        Columns::Values(cols) => flat(spec, cols, &rows)?,
-        Columns::Axis(axis) => long(snapshot, spec, axis, model, &rows)?,
+        Columns::Values(cols) => flat(spec, cols, model, draft, &rows)?,
+        Columns::Axis(axis) => long(snapshot, spec, axis, model, draft, &rows)?,
     };
     if axes.first().is_none_or(|(_, c)| c.is_empty()) {
         return Err("nothing to upload: every row is deleted".to_string());
@@ -68,8 +67,14 @@ pub fn assemble(
 type Laid = (Vec<(String, Column)>, Vec<(String, Column)>);
 
 /// The flat shape: one document row per painted row, one value column per
-/// [`ValueColumn`] in spec order (the model's cells are in that order).
-fn flat(spec: &PanelSpec, cols: &[ValueColumn], rows: &[&RowModel]) -> Result<Laid, String> {
+/// [`ValueColumn`] in spec order (the index's columns are in that order).
+fn flat(
+    spec: &PanelSpec,
+    cols: &[ValueColumn],
+    model: &MatrixIndex,
+    draft: &Draft,
+    rows: &[RowView<'_>],
+) -> Result<Laid, String> {
     let mut axis = empty_column(&spec.rows.column, row_axis_type(spec))?;
     let mut values = cols
         .iter()
@@ -84,7 +89,8 @@ fn flat(spec: &PanelSpec, cols: &[ValueColumn], rows: &[&RowModel]) -> Result<La
             Some(&row_axis(spec, label)?),
         )?;
         for (ci, (name, column)) in values.iter_mut().enumerate() {
-            put(column, label, name, cell(row, ci))?;
+            let v = model.value_at(draft, row.index, ci);
+            put(column, label, name, v.as_ref())?;
         }
     }
     Ok((vec![(spec.rows.column.to_string(), axis)], values))
@@ -97,8 +103,9 @@ fn long(
     snapshot: &Snapshot,
     spec: &PanelSpec,
     axis: &str,
-    model: &MatrixModel,
-    rows: &[&RowModel],
+    model: &MatrixIndex,
+    draft: &Draft,
+    rows: &[RowView<'_>],
 ) -> Result<Laid, String> {
     // A slice value the document did not carry is not in the model, so
     // it has nothing to write — and an upload without it is a different
@@ -153,14 +160,16 @@ fn long(
                 Some(&row_value),
             )?;
             put(&mut column_axis, label, axis, Some(column_value))?;
+            let v = model.value_at(draft, row.index, model.slice_columns + ci);
             put(
                 &mut value,
                 label,
                 &format!("{value_name} at {axis}={column_label}"),
-                cell(row, model.slice_columns + ci),
+                v.as_ref(),
             )?;
             for (si, (sv, column)) in spec.slice_values.iter().zip(&mut slices).enumerate() {
-                put(column, label, &sv.column, cell(row, si))?;
+                let v = model.value_at(draft, row.index, si);
+                put(column, label, &sv.column, v.as_ref())?;
             }
         }
     }
@@ -203,10 +212,6 @@ fn attribute(
         ));
     }
     Ok((attr.column.to_string(), value))
-}
-
-fn cell(row: &RowModel, col: usize) -> Option<&Value> {
-    row.cells.get(col).and_then(|c| c.value.as_ref())
 }
 
 /// The row axis's declared type: a minted label is text.
@@ -457,11 +462,12 @@ mod tests {
     use super::*;
     use crate::core::test_fixtures::{
         BASE, CVI, CVI_NODES, CVI_TERMS, DIVIDEND, at, date, fixture_cvi_rows,
-        fixture_dividend_rows, snapshot_of,
+        fixture_dividend_rows, snapshot_of, snapshot_of_nulled,
     };
     use geode_core::config::{LayerDoc, merge_docs};
     use geode_core::document::{Column, Value};
     use geode_core::schema::SchemaSpec;
+    use std::sync::Arc;
 
     /// The two shipped datasets as `geode-documents` declares them — the
     /// shape `DocumentRows::validate` holds an assembled upload to. Copied
@@ -543,9 +549,9 @@ role = "attribute"
         assert_eq!(doc.validate(ds), Ok(()), "{}", spec.kind);
     }
 
-    fn built(spec: &PanelSpec, doc: &DocumentRows, draft: &Draft) -> (Snapshot, MatrixModel) {
-        let snapshot = snapshot_of(spec, doc);
-        let model = MatrixModel::build(&snapshot, spec, draft).unwrap();
+    fn built(spec: &PanelSpec, doc: &DocumentRows, draft: &Draft) -> (Arc<Snapshot>, MatrixIndex) {
+        let snapshot = Arc::new(snapshot_of(spec, doc));
+        let model = MatrixIndex::build(&snapshot, spec, draft).unwrap();
         (snapshot, model)
     }
 
@@ -559,8 +565,8 @@ role = "attribute"
             (&CVI, fixture_cvi_rows()),
             (&DIVIDEND, fixture_dividend_rows()),
         ] {
-            let snapshot = snapshot_of(spec, &doc);
-            let model = MatrixModel::build(&snapshot, spec, &Draft::default()).unwrap();
+            let snapshot = Arc::new(snapshot_of(spec, &doc));
+            let model = MatrixIndex::build(&snapshot, spec, &Draft::default()).unwrap();
             let assembled = assemble(&snapshot, spec, &model, &Draft::default()).unwrap();
             assert_eq!(assembled, doc, "{}", spec.kind);
             assert_valid(spec, &assembled);
@@ -890,5 +896,190 @@ role = "attribute"
             v[0] = date(2026, 10, 17);
         }
         assert_eq!(echo_differs(&CVI, &sent, &echoed), 1);
+    }
+
+    /// Every case the golden covers: the builtin panels over drafts that
+    /// reach each row state and value source, as `{:?}` prints the result.
+    fn golden_cases() -> String {
+        let mut out = String::new();
+        let mut case = |name: &str, spec: &PanelSpec, doc: &DocumentRows, draft: &Draft| {
+            let (snapshot, model) = built(spec, doc, draft);
+            let sent = assemble(&snapshot, spec, &model, draft);
+            out.push_str(&format!("== {name}\n{sent:?}\n"));
+        };
+        let cvi = fixture_cvi_rows();
+        let dividend = fixture_dividend_rows();
+        case("cvi clean", &CVI, &cvi, &Draft::default());
+        case("dividend clean", &DIVIDEND, &dividend, &Draft::default());
+
+        let mut d = Draft::default();
+        d.set(
+            (1, 3),
+            ("B".into(), "amount".into()),
+            Value::F64(1.5),
+            &at(BASE),
+        );
+        d.delete_row("C", &at(BASE));
+        d.insert_row("new-1".into(), Some("A".into()), &at(BASE));
+        for (column, value) in [
+            ("ex", Value::Date(date(2026, 11, 20))),
+            ("announced", Value::Date(date(2026, 10, 15))),
+            ("pay", Value::Date(date(2026, 12, 1))),
+            ("amount", Value::F64(0.75)),
+            ("status", Value::Utf8("estimated".into())),
+        ] {
+            assert!(d.set_row_cell("new-1", column, value));
+        }
+        d.insert_row("new-2".into(), Some("new-1".into()), &at(BASE));
+        for (column, value) in [
+            ("ex", Value::Date(date(2026, 11, 27))),
+            ("announced", Value::Date(date(2026, 10, 16))),
+            ("pay", Value::Date(date(2026, 12, 2))),
+            ("amount", Value::F64(-0.0)),
+            ("status", Value::Utf8("declared".into())),
+        ] {
+            assert!(d.set_row_cell("new-2", column, value));
+        }
+        d.set_attr("currency", Value::Utf8("EUR".into()), &at(BASE));
+        case("dividend edit delete chain attr", &DIVIDEND, &dividend, &d);
+
+        let mut d = Draft::default();
+        d.insert_row("new-1".into(), Some("A".into()), &at(BASE));
+        assert!(d.set_row_cell("new-1", "amount", Value::F64(0.5)));
+        case("dividend incomplete insert", &DIVIDEND, &dividend, &d);
+
+        let mut d = Draft::default();
+        d.set(
+            (0, 4),
+            ("2026-10-16".into(), "-1".into()),
+            Value::F64(0.25),
+            &at(BASE),
+        );
+        d.set(
+            (1, 0),
+            ("2026-11-20".into(), "fwd".into()),
+            Value::F64(4531.0),
+            &at(BASE),
+        );
+        d.delete_row("2026-10-16", &at(BASE));
+        d.insert_row("2026-12-18".into(), Some("2026-11-20".into()), &at(BASE));
+        for (column, value) in [
+            ("fwd", 4600.0),
+            ("atm", 0.2),
+            ("skew", -1.0),
+            ("-20", 0.7),
+            ("-1", 0.8),
+            ("3.5", 0.9),
+        ] {
+            assert!(d.set_row_cell("2026-12-18", column, Value::F64(value)));
+        }
+        case("cvi edit slice delete insert", &CVI, &cvi, &d);
+
+        // A pivot edit on a row an insert above has shifted: 2026-11-20 is
+        // painted at index 2 but its cells keep `cell_ref` row 1.
+        let mut d = Draft::default();
+        d.insert_row("2026-11-01".into(), Some("2026-10-16".into()), &at(BASE));
+        for (column, value) in [
+            ("fwd", 4520.0),
+            ("atm", 0.185),
+            ("skew", -1.05),
+            ("-20", 0.15),
+            ("-1", 0.25),
+            ("3.5", 0.35),
+        ] {
+            assert!(d.set_row_cell("2026-11-01", column, Value::F64(value)));
+        }
+        d.set(
+            (1, 5),
+            ("2026-11-20".into(), "3.5".into()),
+            Value::F64(0.95),
+            &at(BASE),
+        );
+        d.set(
+            (1, 1),
+            ("2026-11-20".into(), "atm".into()),
+            Value::F64(0.21),
+            &at(BASE),
+        );
+        case("cvi edit below an insert", &CVI, &cvi, &d);
+
+        // A top-anchored insert (`after = None`) on each builtin panel, with
+        // an edit on a document row it shifts.
+        let mut d = Draft::default();
+        d.insert_row("2026-09-18".into(), None, &at(BASE));
+        for (column, value) in [
+            ("fwd", 4505.0),
+            ("atm", 0.17),
+            ("skew", -1.2),
+            ("-20", 0.05),
+            ("-1", 0.06),
+            ("3.5", 0.07),
+        ] {
+            assert!(d.set_row_cell("2026-09-18", column, Value::F64(value)));
+        }
+        case("cvi top insert", &CVI, &cvi, &d);
+
+        let mut d = Draft::default();
+        d.insert_row("new-1".into(), None, &at(BASE));
+        for (column, value) in [
+            ("ex", Value::Date(date(2026, 9, 11))),
+            ("announced", Value::Date(date(2026, 7, 1))),
+            ("pay", Value::Date(date(2026, 9, 25))),
+            ("amount", Value::F64(1.1)),
+            ("status", Value::Utf8("paid".into())),
+        ] {
+            assert!(d.set_row_cell("new-1", column, value));
+        }
+        d.set(
+            (1, 3),
+            ("B".into(), "amount".into()),
+            Value::F64(1.4),
+            &at(BASE),
+        );
+        case("dividend top insert", &DIVIDEND, &dividend, &d);
+
+        // A NULL document value: B's announced date. Uploaded as it
+        // stands, then with the draft supplying it.
+        let snapshot = Arc::new(snapshot_of_nulled(
+            &DIVIDEND,
+            &dividend,
+            BASE,
+            &[("announced_date", 1)],
+        ));
+        let null_case = |out: &mut String, name: &str, draft: &Draft| {
+            let model = MatrixIndex::build(&snapshot, &DIVIDEND, draft).unwrap();
+            let sent = assemble(&snapshot, &DIVIDEND, &model, draft);
+            out.push_str(&format!("== {name}\n{sent:?}\n"));
+        };
+        null_case(&mut out, "dividend null value", &Draft::default());
+        let mut d = Draft::default();
+        d.set(
+            (1, 1),
+            ("B".into(), "announced".into()),
+            Value::Date(date(2026, 11, 2)),
+            &at(BASE),
+        );
+        null_case(&mut out, "dividend null value edited", &d);
+        out
+    }
+
+    /// Upload output for the builtin panels, byte for byte, against the
+    /// file recorded before the windowed index replaced the prepared rows.
+    /// A difference is a change to what a desk publishes, never noise.
+    /// `GEODE_RECORD_UPLOAD_GOLDEN=1` re-records the file after a deliberate
+    /// change to the published format.
+    #[test]
+    fn upload_output_matches_the_recorded_golden() {
+        let text = golden_cases();
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/core/testdata/upload_golden.txt"
+        );
+        if std::env::var_os("GEODE_RECORD_UPLOAD_GOLDEN").is_some() {
+            std::fs::write(path, &text).expect("write the golden");
+            return;
+        }
+        let golden = std::fs::read_to_string(path).expect("the golden is checked in");
+        assert_eq!(text, golden);
     }
 }

@@ -1,6 +1,6 @@
 //! Market-data model preparation and draft transitions, without entities
 //! or windows. `spec` re-exports the panel vocabulary and the builtin
-//! panels; `matrix` prepares and patches display cells; `draft` stores edits
+//! panels; `matrix` indexes the grid and formats its cells; `draft` stores edits
 //! with the labels needed for rebase; `upload` assembles typed rows and
 //! compares delivered echoes.
 
@@ -23,7 +23,7 @@ pub use geode_core::nudge::nudge_text;
 pub use geode_widgets::datefield::{
     DateTimeField, FieldKey, Precision, Segment, SegmentPaint, SegmentText, route,
 };
-pub use matrix::{Cell, CellKind, MatrixModel, RowModel, cell_text};
+pub use matrix::{Cell, CellKind, MatrixIndex, MdCell, RowSource, RowView, cell_text};
 pub use spec::{
     BUILTIN_KIND_ACTIONS, BUILTIN_PANELS, Columns, KindAction, PanelSpec, builtin_kind_actions,
     builtin_panel,

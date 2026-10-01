@@ -176,7 +176,7 @@ impl PricerTile {
         };
         r.rows
             .clone()
-            .filter_map(|g| self.model.rows.get(g).and_then(|m| m.row))
+            .filter_map(|g| self.model.sheet_row(g))
             .collect()
     }
 
@@ -199,11 +199,9 @@ impl PricerTile {
 
     /// Whether the resolved selection reaches a grouping row.
     fn selection_holds_group(&self) -> bool {
-        self.resolved.as_ref().is_some_and(|r| {
-            r.rows
-                .clone()
-                .any(|g| self.model.rows.get(g).is_some_and(|m| m.path.is_some()))
-        })
+        self.resolved
+            .as_ref()
+            .is_some_and(|r| r.rows.clone().any(|g| self.model.path(g).is_some()))
     }
 
     /// The rows a total or a `V` yank reaches: each selected grid row's
@@ -476,12 +474,18 @@ impl PricerTile {
                     .collect::<Vec<_>>()
                     .join("\t");
                 let mut lines = vec![header];
+                // Every selected row, on screen or not, formatted on demand.
+                let model = Rc::clone(&self.model);
+                let mut pass = CellPass::new(self.fill_source(), &model);
                 for g in r.rows.clone() {
-                    let row = &self.model.rows[g];
                     lines.push(
                         r.cols
                             .clone()
-                            .map(|c| row.cells.get(c).map(|x| x.text.as_ref()).unwrap_or(""))
+                            .map(|c| {
+                                pass.cell(g, c)
+                                    .map(|x| x.text.to_string())
+                                    .unwrap_or_default()
+                            })
                             .collect::<Vec<_>>()
                             .join("\t"),
                     );

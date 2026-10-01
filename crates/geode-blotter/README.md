@@ -13,7 +13,7 @@ Current behavior and rationale:
 | Module | Holds |
 |---|---|
 | `core` | Column plans, expansion paths (`core::expansion`: `path_of` and `depth_bound` over `geode_core::expansion::Expansion`), visible-row traversal, cursor movement (`core::cursor`, moved by `geode_tile::motion`), find, selection summaries, cursor-row dimension context, TSV export, command parsing, and visible-window formatting without GPUI. |
-| `delegate` | `TableDelegate` adapter with prepared rows and cached cell text. Holds `:autosize`'s fitted widths by column name, which `column()` prefers over the plan's; `fit_columns` measures the header and the format cache's window only. Owns selection and paint caches; reports cell gestures and chevron clicks to the tile. |
+| `delegate` | `TableDelegate` adapter with prepared rows and cached cell text. Holds `:autosize`'s fitted widths by column name, which `column()` prefers over the plan's; `fit_columns` measures the header and the window (`geode_tile::grid::WindowCache`) only. Owns selection and paint caches; reports cell gestures and chevron clicks to the tile. |
 | `header` | The prepared header: dataset time runs (oldest first), the frame's `AS OF` warning text and the datasets its health question reads, rebuilt when a snapshot lands or the clock changes. |
 | `tile` | `BlotterTile`, the entity per tile: a key context that publishes `grid` (so the shell's shared `motion::*` keys reach it), `dispatch` routing every `motion::*` id through `geode_tile::motion`, local query overrides, requests through `DataHandle`, frame observation over `geode_tile::following`, snapshot application, the header painted through `geode_tile::header::frame` (view, grouping and chips on the left; the notice, dataset times and the health chip over its snapshot's provenance datasets in the cluster; no `⋯`: the blotter has no action menu) and footer rendering. The header notice is a `geode_tile::notice::Notice`: dropped sorts and selections are warnings, query and configuration failures danger. |
 | `content` | The `TileContent` wrapper and `BlotterFactory`, the roster entry the app builds with the data handle. |
@@ -34,8 +34,8 @@ cargo bench -p geode-blotter   # the pure core
   header and `view · ungrouped` in the title; before the first query the
   title is the view name alone.
 - `:autosize` and the shell's `tile::autosize_columns` run one method,
-  `BlotterTile::autosize_columns`. It measures only rows in the format
-  cache (the window the table last asked for), never the whole snapshot. A
+  `BlotterTile::autosize_columns`. It measures only rows in the window
+  (`geode_tile::grid::WindowCache`, the range the table last asked for), never the whole snapshot. A
   wider value outside that window does not widen the column. With no plan
   or no cached rows, a fit refuses with "nothing loaded to fit" and keeps
   its widths.
@@ -61,8 +61,8 @@ cargo bench -p geode-blotter   # the pure core
   then blanks in both directions; yank preserves the marker. Numeric dimensions
   sort numerically and display without measure scaling or rounding.
 - A `NonAttributable` cell is NULL. Read numeric columns only through
-  `f64_at`/`f64_value`; the format cache is the one place a cell becomes
-  text.
+  `f64_at`/`f64_value`; `core::cache::cell` is the one place a cell
+  becomes text.
 - The query runs on `geode_tile::following`. `Followed` names the counters
   an answer depends on (scope unless unscoped, grouping unless pinned, as-of
   unless pinned, always watched data and configuration); it decides both

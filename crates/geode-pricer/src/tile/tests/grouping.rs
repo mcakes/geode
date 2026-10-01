@@ -523,12 +523,13 @@ fn npv(h: &Harness, vcx: &VisualTestContext, row: usize) -> f64 {
 /// The grid rows painting a split package.
 fn split_rows(h: &Harness, vcx: &VisualTestContext) -> Vec<usize> {
     h.tile.read_with(vcx, |t, _| {
-        t.model
-            .rows
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| matches!(r.kind, GridRowKind::Package { split: true, .. }))
-            .map(|(i, _)| i)
+        (0..t.model.len())
+            .filter(|&g| {
+                matches!(
+                    t.model.kind(g),
+                    Some(GridRowKind::Package { split: true, .. })
+                )
+            })
             .collect()
     })
 }
@@ -661,8 +662,8 @@ fn totals_count_a_split_package_per_node_legs(cx: &mut gpui::TestAppContext) {
     h.dispatch(&mut vcx, "expand_all", None);
     let tree = h.tree(&vcx);
     let groups: Vec<usize> = h.tile.read_with(&vcx, |t, _| {
-        (0..t.model.rows.len())
-            .filter(|&g| t.model.rows[g].path.is_some())
+        (0..t.model.len())
+            .filter(|&g| t.model.path(g).is_some())
             .collect()
     });
     assert_eq!(groups.len(), 2, "{tree:?}");

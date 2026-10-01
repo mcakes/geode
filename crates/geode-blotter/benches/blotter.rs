@@ -1,5 +1,5 @@
 //! Pure-core benchmarks at 133, 135,733, and 720,881 result rows:
-//! fully expanded and collapsed flattening, a 40-row format-cache window,
+//! fully expanded and collapsed flattening, a 40-row cell window,
 //! and a 100-column plan. The largest shape also measures cursor path
 //! restoration near and far from its prior position and selection summaries
 //! over every row and measure column. These costs run on the UI thread;
@@ -7,7 +7,6 @@
 //! reference measurements are in `docs/current/performance.md`.
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use geode_blotter::core::cache::FormatCache;
 use geode_blotter::core::cache::cell;
 use geode_blotter::core::cursor::restore_by_path;
 use geode_blotter::core::expansion::path_of;
@@ -17,6 +16,7 @@ use geode_core::attribution::{Attribution, ScopeSemantics};
 use geode_core::expansion::Expansion;
 use geode_core::snapshot::{ColumnMeta, Snapshot, TestColumn};
 use geode_core::view::{ViewColumn, ViewSpec};
+use geode_tile::grid::WindowCache;
 use std::collections::BTreeMap;
 use std::hint::black_box;
 
@@ -124,7 +124,7 @@ fn bench(c: &mut Criterion) {
             format!("cache_fill_40x{}_{name}", plan.columns.len()),
             |b| {
                 b.iter(|| {
-                    let mut cache = FormatCache::default();
+                    let mut cache = WindowCache::default();
                     cache.set_window(0..40, plan.columns.len(), |r, c| {
                         cell(&snap, &plan, shown[r] as usize, c)
                     });

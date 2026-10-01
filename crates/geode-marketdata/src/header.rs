@@ -6,7 +6,7 @@
 
 use crate::core::SegmentPaint;
 use crate::core::draft::{DraftBadge, local_hhmm};
-use crate::core::matrix::{HeaderCell, MatrixModel, RowState};
+use crate::core::matrix::{HeaderCell, MatrixIndex, RowState};
 use crate::core::spec::PanelSpec;
 use crate::delegate::{CellPaint, cell_paint};
 use crate::tile::{
@@ -154,7 +154,7 @@ pub(crate) fn render_date_field(
 pub(crate) struct HeaderInputs<'a> {
     pub spec: &'a PanelSpec,
     pub key: Option<&'a [String]>,
-    pub model: &'a MatrixModel,
+    pub model: &'a MatrixIndex,
     pub badge: DraftBadge,
     pub unresolved_restore: bool,
     pub notice: Option<&'a SharedString>,
@@ -186,7 +186,7 @@ pub(crate) struct HeaderModel {
     /// suppresses this indicator because those edits are no longer unsent work.
     pub dirty: bool,
     /// A clone of `model.header` — `Rc`-cheap `SharedString`s, prepared by
-    /// [`crate::core::matrix::MatrixModel::build`] already.
+    /// [`crate::core::matrix::MatrixIndex::build`] already.
     pub attrs: Vec<HeaderCell>,
     /// The draft's badge, carried alongside `state` so `render` can tell
     /// a `Behind` state run from the other `Tone::Warn` runs (`state`'s
@@ -245,7 +245,7 @@ impl HeaderModel {
                 )),
             ),
         };
-        if i.key.is_some() && i.model.rows.is_empty() {
+        if i.key.is_some() && i.model.is_empty() {
             state = Some(if i.unresolved_restore && dirty {
                 ("edits await a document".into(), Tone::Warn)
             } else {
@@ -553,39 +553,26 @@ mod tests {
     use super::*;
     use crate::core::test_fixtures::CVI;
 
-    fn model_with_header(entries: &[(&str, &str, &str)]) -> MatrixModel {
-        MatrixModel {
-            header: entries
-                .iter()
-                .map(|(column, label, text)| HeaderCell {
-                    column: (*column).into(),
-                    label: (*label).into(),
-                    text: (*text).into(),
-                    edited: false,
-                })
-                .collect(),
-            rows: vec![crate::core::matrix::RowModel {
-                label: "row".into(),
-                cells: Vec::new(),
-                state: RowState::Document,
-            }],
-            ..MatrixModel::default()
-        }
+    fn model_with_header(entries: &[(&str, &str, &str)]) -> MatrixIndex {
+        let mut m = MatrixIndex::for_tests(&["row"], &[]);
+        m.header = entries
+            .iter()
+            .map(|(column, label, text)| HeaderCell {
+                column: (*column).into(),
+                label: (*label).into(),
+                text: (*text).into(),
+                edited: false,
+            })
+            .collect();
+        m
     }
 
-    fn model_with_rows() -> MatrixModel {
-        MatrixModel {
-            rows: vec![crate::core::matrix::RowModel {
-                label: "row".into(),
-                cells: Vec::new(),
-                state: RowState::Document,
-            }],
-            ..MatrixModel::default()
-        }
+    fn model_with_rows() -> MatrixIndex {
+        MatrixIndex::for_tests(&["row"], &[])
     }
 
     fn inputs<'a>(
-        model: &'a MatrixModel,
+        model: &'a MatrixIndex,
         key: Option<&'a [String]>,
         badge: DraftBadge,
     ) -> HeaderInputs<'a> {
@@ -715,7 +702,7 @@ mod tests {
 
     #[test]
     fn the_no_underlying_no_document_and_parked_states() {
-        let empty = MatrixModel::default();
+        let empty = MatrixIndex::default();
         let none = HeaderModel::prepare(inputs(&empty, None, DraftBadge::Clean));
         assert_eq!(none.texts(), vec!["CVI", "no underlying — load…"]);
         let key = vec!["NKY.Z".to_string()];
