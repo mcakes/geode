@@ -20442,9 +20442,11 @@ run_mutation "bridge: data_setup wires the resolved egress list into DataService
   crates/geode-app/src/bridge.rs \
   '            vol,
             egress,
+            positions: None,
         },' \
   '            vol,
             egress: Vec::new(),
+            positions: None,
         },' \
   geode-app \
   the_demo_layer_produces_a_servable_data_setup
@@ -28477,6 +28479,24 @@ run_mutation "grid-window: pricer a refill-only delivery refreshes totals" \
   $'            // Totals read the sheet: re-resolve the selection over the new prices.\n            self.sync_cursor(cx);' \
   '            // Totals read the sheet: re-resolve the selection over the new prices.' \
   geode-pricer a_delivery_under_a_selection_updates_its_totals
+
+run_mutation "positions: a move is answered twice or never" \
+  crates/geode-data/src/positions.rs \
+  '        let _ = sink(DataEvent::Command(outcome));' \
+  '        let _ = (&sink, outcome);' \
+  geode-data a_move_is_answered_once
+
+run_mutation "positions: a refusal reads as accepted" \
+  crates/geode-core/src/positions.rs \
+  '        Err(reason) => format!("move to LHU {} refused: {reason}", o.lhu),' \
+  '        Err(_) => format!("moving {} {} to LHU {} \u{b7} accepted", o.count, noun(o.count), o.lhu),' \
+  geode-core a_refusal_names_the_target_and_reason
+
+run_mutation "positions: one position is called positions" \
+  crates/geode-core/src/positions.rs \
+  '    if n == 1 { "position" } else { "positions" }' \
+  $'    let _ = n;\n    "positions"' \
+  geode-core notices_name_one_position_and_many_positions
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

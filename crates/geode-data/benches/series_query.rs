@@ -97,6 +97,7 @@ fn service() -> (
         egress: Vec::new(),
         pricer: PricerConfig::default(),
         vol: geode_data::VolConfig::default(),
+        positions: None,
     })
     .unwrap();
     (dir, service, rx, start)

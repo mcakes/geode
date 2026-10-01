@@ -256,6 +256,7 @@ pub fn data_setup(
             pricer,
             vol,
             egress,
+            positions: None,
         },
         views,
         dimensions,
@@ -1366,6 +1367,10 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             s.deliver(Delivery::VolSlices(outcome), window, cx)
                         });
                     }
+                    // A position command's answer. Nothing sends a command
+                    // yet, so nothing routes one; `geode_data::positions`
+                    // already logs it under `geode::ingest`.
+                    DataEvent::Command(_) => {}
                     // A data thread died despite containment, or the request
                     // loop never opened. Its segment and the diagnostics row
                     // stay until restart. Logging is not repeated here: the

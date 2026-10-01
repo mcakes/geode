@@ -16,6 +16,7 @@ use crate::service::{
 use crate::supervise::REQUEST_LOOP;
 use geode_core::config::{Diagnostic, Severity};
 use geode_core::dimensions::DerivedDimensions;
+use geode_core::positions::{CommandOutcome, MoveLhuParams};
 use geode_core::pricing::{LocalPublish, PriceOutcome, PriceParams};
 use geode_core::query::{
     CatalogOutcome, CatalogParams, DistinctOutcome, DistinctParams, DocumentParams, QueryKey,
@@ -78,6 +79,9 @@ pub enum Request {
     /// Document upload to an egress target, answered with DataEvent::Upload
     /// from the service thread (a refusal) or the target's worker.
     Upload(UploadParams),
+    /// Position-system command, answered with DataEvent::Command from the
+    /// service thread (a refusal) or the position worker.
+    MoveLhu(MoveLhuParams),
     /// History fetch. The service subtracts committed coverage and submits gaps
     /// to the source's fetch worker. Completion uses the identity/source pair,
     /// not the requester's key.
@@ -213,6 +217,16 @@ impl DataHandle {
     /// prevent that outcome. Admission does not acknowledge transport success.
     pub fn upload(&self, params: UploadParams) -> Result<(), Refusal> {
         self.send(Request::Upload(params))
+    }
+
+    /// Queue a Move LHU command. `Err(Busy)` means the queue was full and a
+    /// later submission can succeed; `Err(Stopped)` means the service can no
+    /// longer serve and no outcome is owed. An admitted command normally
+    /// answers one `DataEvent::Command` echoing `params.tag`, a refusal
+    /// included; worker and event-delivery failures can prevent that.
+    /// Admission does not mean the position system accepted the move.
+    pub fn move_lhu(&self, params: MoveLhuParams) -> Result<(), Refusal> {
+        self.send(Request::MoveLhu(params))
     }
 
     /// Queue a series query. `Err(Busy)` means the queue was full and a later
@@ -525,6 +539,11 @@ enum PanicAnswer {
         tag: u64,
         target: String,
     },
+    Command {
+        tag: u64,
+        count: usize,
+        lhu: String,
+    },
     Fetch {
         source: String,
         identity: String,
@@ -608,6 +627,14 @@ impl PanicAnswer {
                     key: p.key,
                     tag: p.tag,
                     target: p.target.clone(),
+                },
+            ),
+            Request::MoveLhu(p) => (
+                "move_lhu",
+                PanicAnswer::Command {
+                    tag: p.tag,
+                    count: p.positions.len(),
+                    lhu: p.lhu.clone(),
                 },
             ),
             Request::Fetch(p) => (
@@ -714,6 +741,14 @@ impl PanicAnswer {
                     key,
                     tag,
                     target,
+                    result: Err(reason),
+                }));
+            }
+            PanicAnswer::Command { tag, count, lhu } => {
+                let _ = sink(DataEvent::Command(CommandOutcome {
+                    tag,
+                    count,
+                    lhu,
                     result: Err(reason),
                 }));
             }
@@ -893,6 +928,7 @@ fn dispatch(service: &DataService, sink: &EventSink, req: Request) {
         Request::Publish(publish) => service.publish(publish),
         Request::Forget(forget) => service.forget(forget),
         Request::Upload(params) => service.upload(params),
+        Request::MoveLhu(params) => service.move_lhu(params),
         Request::Fetch(params) => service.fetch(&params),
         Request::Identities { source } => {
             if !service.identities(&source) {
@@ -952,6 +988,7 @@ mod tests {
             egress: Vec::new(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            positions: None,
         };
         let (tx, outcomes) = channel();
         let sink: EventSink = Arc::new(move |event| tx.send(event).is_ok());
@@ -1130,6 +1167,7 @@ mod tests {
                 }],
                 pricer: PricerConfig::default(),
                 vol: crate::vol::VolConfig::default(),
+                positions: None,
             },
             sink,
         );
@@ -1341,6 +1379,7 @@ mod tests {
                 egress: Vec::new(),
                 pricer: crate::pricing::PricerConfig::default(),
                 vol: crate::vol::VolConfig::default(),
+                positions: None,
             },
             sink,
         );
@@ -1410,6 +1449,7 @@ mod tests {
                 egress: Vec::new(),
                 pricer: crate::pricing::PricerConfig::default(),
                 vol: crate::vol::VolConfig::default(),
+                positions: None,
             },
             sink,
         );
@@ -1479,6 +1519,7 @@ mod tests {
                 egress: Vec::new(),
                 pricer: crate::pricing::PricerConfig::default(),
                 vol: crate::vol::VolConfig::default(),
+                positions: None,
             },
             sink,
         );
@@ -1559,6 +1600,7 @@ mod tests {
                 egress: Vec::new(),
                 pricer: crate::pricing::PricerConfig::default(),
                 vol: crate::vol::VolConfig::default(),
+                positions: None,
             },
             sink,
         );
@@ -1605,6 +1647,7 @@ mod tests {
                 egress: Vec::new(),
                 pricer: PricerConfig::missing("vendor"),
                 vol: crate::vol::VolConfig::default(),
+                positions: None,
             },
             sink,
         );
@@ -1665,6 +1708,7 @@ mod tests {
                 egress: Vec::new(),
                 pricer: PricerConfig::default(),
                 vol: crate::vol::VolConfig::missing("vendor"),
+                positions: None,
             },
             sink,
         );
@@ -1726,6 +1770,7 @@ mod tests {
                 egress: Vec::new(),
                 pricer: PricerConfig::default(),
                 vol: crate::vol::VolConfig::default(),
+                positions: None,
             },
             sink,
         );
@@ -1960,6 +2005,7 @@ mod tests {
                 egress: Vec::new(),
                 pricer: crate::pricing::PricerConfig::default(),
                 vol: crate::vol::VolConfig::default(),
+                positions: None,
             },
             sink,
         );
@@ -1999,6 +2045,7 @@ mod tests {
                 egress: Vec::new(),
                 pricer: crate::pricing::PricerConfig::default(),
                 vol: crate::vol::VolConfig::default(),
+                positions: None,
             },
             sink,
         );
@@ -2029,6 +2076,7 @@ mod tests {
             Request::Price(p) => p.key == MARKED,
             Request::VolSlices(p) => p.key == MARKED,
             Request::Upload(p) => p.key == MARKED,
+            Request::MoveLhu(p) => p.tag == MARKED.0,
             Request::Fetch(p) => p.key == MARKED,
             Request::Publish(p) => p.dataset == "marked",
             Request::Forget(f) => f.dataset == "marked",
@@ -2070,6 +2118,7 @@ mod tests {
             egress: Vec::new(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            positions: None,
         }
     }
 
@@ -2243,6 +2292,103 @@ mod tests {
             if o.key == MARKED && o.tag == 5 && o.target == "sophis"
                 && o.result.as_ref().is_err_and(|r| panicked(r, "upload")))),
             "{seen:?}"
+        );
+    }
+
+    #[test]
+    fn a_panicking_move_is_answered_on_its_tag() {
+        let (_d, h, rx) = probed(panic_marked_arms);
+        h.move_lhu(crate::positions::tests::params(
+            MARKED.0,
+            &["P1", "P2"],
+            "L7",
+        ))
+        .unwrap();
+        let seen = serves_on(&h, &rx);
+        assert!(
+            seen.iter().any(|e| matches!(e, DataEvent::Command(o)
+            if o.tag == MARKED.0 && o.count == 2 && o.lhu == "L7"
+                && o.result.as_ref().is_err_and(|r| panicked(r, "move_lhu")))),
+            "{seen:?}"
+        );
+    }
+
+    /// Without a position service, an admitted command is still answered:
+    /// the service thread's refusal arrives as one `DataEvent::Command`.
+    #[test]
+    fn without_a_position_service_a_move_is_answered_with_the_refusal() {
+        let (_d, h, rx) = probed(|_| {});
+        h.move_lhu(crate::positions::tests::params(8, &["P1"], "L7"))
+            .unwrap();
+        let seen = serves_on(&h, &rx);
+        let answers: Vec<_> = seen
+            .iter()
+            .filter_map(|e| match e {
+                DataEvent::Command(o) => Some(o.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            answers,
+            vec![CommandOutcome {
+                tag: 8,
+                count: 1,
+                lhu: "L7".into(),
+                result: Err("no position service configured".into()),
+            }]
+        );
+    }
+
+    /// The production route: `DataHandle::move_lhu` through the service
+    /// thread's `serve` loop to the position worker's adapter and back as
+    /// one `DataEvent::Command`.
+    #[test]
+    fn a_move_reaches_the_adapter_and_is_answered() {
+        let (adapters, calls, _entered, _release) = crate::positions::tests::registry();
+        let db = tempfile::tempdir().unwrap();
+        let (tx, events) = channel();
+        let sink: EventSink = Arc::new(move |event| tx.send(event).is_ok());
+        let handle = DataService::spawn(
+            DataServiceConfig {
+                adapters,
+                positions: Some(geode_core::positions::PositionsSpec {
+                    adapter: crate::positions::tests::ADAPTER.into(),
+                }),
+                ..empty_config(db.path())
+            },
+            sink,
+        );
+
+        handle
+            .move_lhu(crate::positions::tests::params(6, &["P1", "P2"], "L9"))
+            .unwrap();
+
+        let outcome = loop {
+            match events.recv_timeout(Duration::from_secs(60)).unwrap() {
+                DataEvent::Command(outcome) => break outcome,
+                DataEvent::Diagnostics(d) => panic!("{d:?}"),
+                _ => {}
+            }
+        };
+        assert_eq!(
+            outcome,
+            CommandOutcome {
+                tag: 6,
+                count: 2,
+                lhu: "L9".into(),
+                result: Ok(()),
+            }
+        );
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![(vec!["P1".to_string(), "P2".to_string()], "L9".to_string())]
+        );
+        handle.shutdown();
+        assert!(
+            events
+                .try_iter()
+                .all(|e| !matches!(e, DataEvent::Command(_))),
+            "one command, one answer"
         );
     }
 
