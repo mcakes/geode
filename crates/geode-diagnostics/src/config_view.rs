@@ -20,6 +20,7 @@ pub(crate) struct ConfigView<'a> {
     pub table: &'a Entity<TableState<SectionDelegate>>,
     pub filter: Input,
     pub actions: ShellActions,
+    pub results: AnyElement,
 }
 
 pub(crate) fn render(
@@ -103,6 +104,7 @@ pub(crate) fn render(
                         }),
                 )),
         )
+        .child(view.results)
         .child(table_el(
             if view.values {
                 view.table

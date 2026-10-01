@@ -10,13 +10,15 @@ bench = false
 # The kit tile modules are built from. `geode-shell` supplies the paint
 # doors these build on (`kbd`, `control`, `scale`, `chip`, `listrow`,
 # `colours`) and the live keymap (`tips::Chords`); `geode-core` the
-# readability floor. Never `geode-data` and never a feature module; the
+# readability floor; `gpui-kit-assets` the icon catalogue the header's
+# mode icon names. Never `geode-data` and never a feature module; the
 # shell never depends on this crate.
 [dependencies]
 geode-core.workspace = true
 geode-shell.workspace = true
 gpui.workspace = true
 gpui-component.workspace = true
+gpui-kit-assets.workspace = true
 
 # The same test features the rest of the workspace enables, so
 # `cargo test --workspace` builds `geode-shell` once.

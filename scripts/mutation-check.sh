@@ -6838,6 +6838,25 @@ run_mutation "diagnostics page: hiding leaves the Levels popover open" \
 
 # ---- the diagnostics page: data rows and badges
 
+run_mutation "diagnostics leaf filter: dataset-only matching drops leaves" \
+  crates/geode-diagnostics/src/prepared.rs \
+  '        if !dataset_matches && children.peek().is_none() {' \
+  '        if !dataset_matches {' \
+  geode-diagnostics data_filter_matches_leaf_fields_and_preserves_dataset_context
+
+run_mutation "diagnostics leaf filter: unrelated siblings remain visible" \
+  crates/geode-diagnostics/src/prepared.rs \
+  '            .filter(|c| dataset_matches || partition_matches(c, &query))' \
+  '            .filter(|c| dataset_matches || !query.is_empty() || partition_matches(c, &query))' \
+  geode-diagnostics data_filter_matches_leaf_fields_and_preserves_dataset_context
+
+run_mutation "diagnostics leaf filter: collapsed datasets hide matching leaves" \
+  crates/geode-diagnostics/src/prepared.rs \
+  '        let expanded = !query.is_empty() || !collapsed.contains(&r.name);' \
+  '        let expanded = !collapsed.contains(&r.name);' \
+  geode-diagnostics data_filter_input_reveals_collapsed_leaves_and_reset_restores_expansion
+
+
 run_mutation "diagnostics data: sources sorted best-first instead of worst-first" \
   crates/geode-diagnostics/src/model.rs \
   '    reported.sort_by(|a, b| rank(b.1).cmp(&rank(a.1)).then_with(|| a.0.cmp(b.0)));' \
@@ -6937,12 +6956,23 @@ run_mutation "diagnostics perf: the overlay mirror is never read" \
   geode-diagnostics \
   perf_model_carries_buckets_overflow_and_the_overlay_mirror
 
-run_mutation "diagnostics perf: bars past the budget are not tinted" \
-  crates/geode-diagnostics/src/perf_view.rs \
-  '            (h, *bound > FRAME_BUDGET_MICROS)' \
-  '            (h, false)' \
-  geode-diagnostics \
-  bar_heights_scale_to_the_tallest_bucket_and_tint_past_the_budget
+run_mutation "diagnostics ergonomics: percentile sample counts stay distinct" \
+  crates/geode-diagnostics/src/model.rs \
+  '        samples: h.count(),' \
+  '        samples: 0,' \
+  geode-diagnostics performance_readouts_keep_sample_counts_and_overflow_separate
+
+run_mutation "diagnostics ergonomics: reset also restores log levels and target" \
+  crates/geode-diagnostics/src/page.rs \
+  '            self.log_filter = LogFilter::all();' \
+  '            self.log_filter.text.clear();' \
+  geode-diagnostics reset_filters_restores_the_log_and_keeps_other_sections_filtered
+
+run_mutation "diagnostics ergonomics: loss notices are not records" \
+  crates/geode-diagnostics/src/page.rs \
+  'r.kind != prepared::RowKind::Notice' \
+  'true' \
+  geode-diagnostics result_counts_follow_config_views_and_exclude_log_loss_notices
 
 # ---- the diagnostics page: the log tail, its filters, and the Levels popover
 
@@ -15153,14 +15183,20 @@ run_mutation "blotter motion: the tile routes the shared motions" \
 # publishing the flag takes no motion key at all.
 run_mutation "blotter motion: the key context publishes grid" \
   crates/geode-blotter/src/tile.rs \
-  'KeyContext::new("blotter").grid()' \
-  'KeyContext::new("blotter")' \
+  '        let mut ctx = KeyContext::new("blotter")
+            .grid()
+            .pair' \
+  '        let mut ctx = KeyContext::new("blotter")
+            .pair' \
   geode-blotter the_key_context_publishes_the_grid_flag
 
 run_mutation "motion e2e: a shared override reaches the blotter" \
   crates/geode-blotter/src/tile.rs \
-  'KeyContext::new("blotter").grid()' \
-  'KeyContext::new("blotter")' \
+  '        let mut ctx = KeyContext::new("blotter")
+            .grid()
+            .pair' \
+  '        let mut ctx = KeyContext::new("blotter")
+            .pair' \
   geode-app a_shared_motion_override_reaches_each_grid_tile
 
 # An old user binding on a retired id must bind its shared successor, not
@@ -27441,6 +27477,83 @@ run_mutation "nemo: the notice claims a launch" \
   '        acx.notice(format!("opened {url}"));' \
   '        acx.notice(format!("launched {url}"));' \
   geode-app a_right_press_opens_the_rows_position_in_nemo
+
+# The header's mode icon: edit paints the edit icon, visual its own.
+run_mutation "tile header: edit mode paints the edit icon" \
+  crates/geode-tile/src/header.rs \
+  '        Mode::Edit => (IconName::Pencil, "tile-mode-edit", "tip-tile-mode-edit"),' \
+  '        Mode::Edit => return None,' \
+  geode-tile the_mode_icon_paints_per_mode_ahead_of_the_cluster
+
+run_mutation "tile header: visual mode paints the visual icon, not the edit one" \
+  crates/geode-tile/src/header.rs \
+  '            "tile-mode-visual",
+            "tip-tile-mode-visual",' \
+  '            "tile-mode-edit",
+            "tip-tile-mode-visual",' \
+  geode-tile the_mode_icon_paints_per_mode_ahead_of_the_cluster
+
+# A menu is its own surface: reading it as edit would show a false cue.
+run_mutation "tile header: insert alone reads as edit" \
+  crates/geode-tile/src/header.rs \
+  '            "insert" => Mode::Edit,' \
+  '            "insert" | "menu" => Mode::Edit,' \
+  geode-tile the_header_reads_insert_as_edit_and_visual_as_visual
+
+# The icon leads the cluster: after the status it would move with its text.
+run_mutation "tile header: the mode icon paints ahead of the cluster text" \
+  crates/geode-tile/src/header.rs \
+  '        .children(mode)
+        .children(text)' \
+  '        .children(text)
+        .children(mode)' \
+  geode-tile the_mode_icon_paints_per_mode_ahead_of_the_cluster
+
+# The raw tokens, unfloored: faint on the themes that ship them faint.
+run_mutation "tile header: the mode icon colors are floored" \
+  crates/geode-tile/src/header.rs \
+  '    Some(chip_paint(theme, tone).text)' \
+  '    Some(if tone == chip::Tone::InfoText { theme.info } else { theme.warning })' \
+  geode-tile the_mode_icon_colors_clear_the_floor_on_every_bundled_theme
+
+# Module wiring: the header reads the key context's own mode.
+run_mutation "marketdata header: the mode icon reads the key context's mode" \
+  crates/geode-marketdata/src/tile.rs \
+  '            geode_tile::header::Mode::from_key_mode(self.mode()),' \
+  '            geode_tile::header::Mode::Normal,' \
+  geode-marketdata the_header_shows_the_mode_icon_while_editing_or_selecting
+
+run_mutation "blotter header: the mode icon reads the key context's mode" \
+  crates/geode-blotter/src/tile.rs \
+  '        cluster.mode = geode_tile::header::Mode::from_key_mode(self.mode(cx));' \
+  '        cluster.mode = geode_tile::header::Mode::Normal;' \
+  geode-blotter the_header_shows_the_visual_icon_while_selecting
+
+run_mutation "timeseries header: the mode icon reads the key context's mode" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '                geode_tile::header::Mode::from_key_mode(self.mode()),' \
+  '                geode_tile::header::Mode::Normal,' \
+  geode-timeseries the_header_shows_the_edit_icon_while_a_field_holds_the_keys
+
+# A tooltip detail's backticked keys paint as chips; plain text never does.
+run_mutation "tips: a backticked detail paints its keys as chips" \
+  crates/geode-shell/src/tips.rs \
+  "            el.child(if d.contains('\`') {" \
+  '            el.child(if false {' \
+  geode-shell a_backticked_detail_key_paints_as_a_chip
+
+# Edit and visual icons must read as two modes.
+run_mutation "tile header: edit and visual icons take different colors" \
+  crates/geode-tile/src/header.rs \
+  '        Mode::Visual => chip::Tone::InfoText,' \
+  '        Mode::Visual => chip::Tone::WarningText,' \
+  geode-tile the_mode_icon_colors_clear_the_floor_on_every_bundled_theme
+
+run_mutation "pricer header: the mode icon reads the key context's mode" \
+  crates/geode-pricer/src/tile.rs \
+  '                mode: geode_tile::header::Mode::from_key_mode(self.mode()),' \
+  '                mode: geode_tile::header::Mode::Normal,' \
+  geode-pricer the_header_shows_the_mode_icon_while_editing_or_selecting
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

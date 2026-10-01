@@ -75,7 +75,8 @@ has none of them.
   tones; which of a tile's notices shows is the tile's own precedence.
 - Every tile header is `geode_tile::header::frame`: 22 px at the design rem,
   the stack marker first, the module's own left side, then a right cluster in
-  a fixed order — status items, notices, source times, the health chip, `⋯`.
+  a fixed order — the mode icon, status items, notices, source times, the
+  health chip, `⋯`.
   Status items and notices shrink: each is one line, cut with an ellipsis
   when it does not fit, and together they take at most half the header
   (`TEXT_SHARE`); a cut notice shows its whole text in its tooltip. Source
@@ -89,6 +90,18 @@ has none of them.
   its reason, with `+N more` for other unhealthy sources. Clicking it opens
   the diagnostics page and never closes it; it has no key of its own — the
   page's own binding (`mod+d`) is the keyboard route.
+- The mode icon is a bare glyph, no fill, at the header's text size: a
+  pencil in the floored warning text tone while the tile is in edit mode, a
+  dashed selection square in the floored info text tone while it is in
+  visual mode, nothing in normal mode or while the action menu is up. Each
+  module reads it from the same `mode` its key context publishes (`insert`
+  is edit), so the icon and the keys cannot disagree: the pricer and market
+  data show both, the blotter only visual (it has no field), the timeseries
+  tile only edit (while its add, expression, dates or color popup holds the
+  keys; it has no selection). Its tooltip names the mode (`Editing`,
+  `Visual selection`) and that `escape` leaves it. The tooltip names the
+  default leaving key, `escape`, not a rebound one. Both colors clear 4.5:1
+  against the background on every bundled theme.
 
 ### Motion
 
@@ -924,10 +937,10 @@ current keyboard workflow using the shell's keycaps.
 | Section | Table and toolbar |
 |---|---|
 | Sources | Source, Health (title-case label with the reason), Since (clock time and age), Shape, Last poll, Next poll, Ready, Loading. Worst reported health first by variant then name; unreported sources last, and a source known only from an ingest load gets a "no report yet" row with its loading text. Toolbar: a filter over name and health. Detail: the spec lines by shape and the health history. |
-| Data | One expandable row per dataset with Partitions, Latest gen, Published, Rows, Resolved, Live, and Loaded; a dataset expands to its generations, the one resolved under a historical frame as-of marked. Toolbar: filter, a chip reading `Catalog up to date` or `Refreshing catalog`, Refresh catalog, Expand all, Collapse all. |
+| Data | One expandable row per dataset with Partitions, Latest gen, Published, Rows, Resolved, Live, and Loaded; a dataset expands to its generations, the one resolved under a historical frame as-of marked. Toolbar: a case-insensitive filter over dataset names and generation fields (partition/book, generation ID, times, row count, live/archive status), a chip reading `Catalog up to date` or `Refreshing catalog`, Refresh catalog, Expand all, Collapse all. A dataset-name match includes all its generations; leaf-only matches retain the dataset heading and hide unmatched siblings. Filtering temporarily reveals collapsed results; clearing it restores stored expansion. Catalog totals are not narrowed by filtering. |
 | Config | Three full-width views: Current issues (config and data lanes), History (prior batches newest first), and Effective values (expandable documents and their leaves, with Key, Value, and Layer from `Config::explain`). The active view owns row navigation and Copy. Search filters issue text or document keys and values; unmatched documents disappear and matches inside collapsed documents are revealed. Open config directory remains available. |
 | Log | Time with milliseconds, Lvl, Target, and Message over the retained tail. Toolbar: level toggles, a target select over the targets seen in the tail plus `All targets`, a text filter over message and target, Follow, Clear log, and Log levels. Detail: the full record with a Copy button that puts it on the clipboard. |
-| Performance | No table. Two-column metric groups for frame p50 · p95 · max with the sample count and the 8 ms budget, requery submit→snapshot with the 50 ms budget, requery snapshot→paint, and dropped events; a frame-interval histogram whose bars past the budget take the warning tone; database and DuckDB memory readouts from the catalog; and the Performance overlay switch. The region scrolls at smaller sizes. |
+| Performance | Aligned median, p95, maximum, and sample-count readouts for frame intervals, query→snapshot, and snapshot→paint, with explanations of each stage. A labeled logarithmic frame-interval histogram shows bucket ranges and counts on hover, with a separate overflow count above 100 ms. Frame cadence is not pure UI work and is not classified against the 8 ms UI budget. UI and requery targets remain explanatory guidance. Storage, DuckDB memory, dropped events, and the Performance overlay switch share the scrolling region. Missing samples show dashes and zero counts. |
 
 Keys in the page's own context: `j`/`k` move the cursor, `g g`/`G` jump,
 `ctrl+d`/`ctrl+u` move five rows and `ctrl+f`/`ctrl+b` ten, all with count
@@ -940,10 +953,20 @@ and returns to navigation; clicking a row does the same. On Performance,
 which paints no input, `/` does nothing. `g s` / `g d` / `g c` / `g l` /
 `g p` jump directly to sections. Config views cycle with `ctrl+tab` and
 `ctrl+shift+tab`. `y` copies details, `r` refreshes the catalog, `z R` /
-`z M` expand/collapse datasets, and `f` toggles Follow. Selection remains
+`z M` expand/collapse datasets, and `f` toggles Follow. `alt+backspace` or
+Reset filters clears only the visible section’s filters and returns focus
+to navigation; in Log it also enables every level and restores All targets.
+Selection remains
 on the same record through refreshes and filtering while it remains visible.
 The state-changing controls also have keyboard routes through the palette
 (Set log level…, Toggle performance overlay, Open config directory).
+
+Each table has a result strip showing visible and total item counts. Data
+counts datasets independently of expanded generation rows; Log excludes loss
+notices from record counts and shows its retention limit and follow state.
+Effective values reports the documents and leaves actually shown. The detail
+header identifies the current row’s position. These strings and Performance
+readouts are prepared when their inputs change, outside paint.
 
 Controls that change application state go through a request channel or the
 shell-actions handle, never a direct call. A Levels pick queues

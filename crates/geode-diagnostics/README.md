@@ -24,7 +24,7 @@ The seam it sits on: [pages](../../docs/current/shell.md#pages).
 | [`config_view`](src/config_view.rs) | The Config body: Current issues, History, and Effective values share one full-width table region. Keyboard motions and Copy follow the visible view. |
 | [`log_view`](src/log_view.rs) | The Log toolbar: level toggles, the target select, the text filter, Follow, Clear, and the Levels popover. |
 | [`levels`](src/levels.rs) | The Levels popover's pure rows: the read-only default, then the known targets, then any configured target outside that list (a hand-edited `[log]` key, shown but not offered for adding), each with the effective level resolved by the longest configured prefix, spelled as `LogLevels` stores them. |
-| [`perf_view`](src/perf_view.rs) | The Performance body: two-column metric groups, histogram bars (`bar_heights` is pure), storage metrics, and the overlay switch in a scrolling region. |
+| [`perf_view`](src/perf_view.rs) | The Performance body and its prepared readouts: aligned percentile and sample-count columns, a labeled frame-interval histogram, storage metrics, and the overlay switch in a scrolling region. |
 | [`log`](src/log.rs) | `LogTail`, a bounded copy of the ring from the sequence at creation (4,096 records, the loss gap measured per drain), and `LogFilter` over level, target, and text. Pure. |
 
 ## Interaction
@@ -49,16 +49,40 @@ the header's back control through the shell-actions handle. The retired
 Within Config, `ctrl+tab` / `ctrl+shift+tab` cycle Current issues, History,
 and Effective values. `y` copies the active row's full details in any table;
 `r` refreshes the catalog; `z R` / `z M` expand or collapse all datasets.
+`alt+backspace` and Reset filters clear the visible section’s filters and
+return focus to navigation. In Log this also restores all levels and targets;
+other sections retain their filters.
 
-Sources filters by name and health; Data by dataset name; Config by issue
-text or `document.key` and value; Log by message and target text, plus the
-level toggles and the target select. Configuration matching is case
-insensitive, hides unmatched documents, and reveals matches in collapsed
+Sources filters by name and health; Data by dataset name and generation
+fields (partition/book label, generation ID, source/load time, row count,
+and live/archive status); Config by issue text or `document.key` and value;
+Log by message and target text, plus the level toggles and the target select. Data matching is case insensitive: a
+matching dataset includes all its generations; a leaf-only match shows just
+matching generations beneath their dataset. A nonempty filter temporarily
+expands results without changing the stored collapse state. Clearing it restores
+the stored expansion, and dataset totals always describe the full catalog.
+Configuration matching is case insensitive, hides unmatched documents, and
+reveals matches in collapsed
 documents without losing their collapse state. Selection follows row identity
 through refreshes and filtering while the selected row remains visible. The Log section follows new records until a
 row motion; a bare `G`, `f`, or the Follow switch resumes following, and a
 counted `G` jumps to that row without following. Clear forgets
 the retained records without moving the drain point.
+
+The result strip shows visible versus total sources, datasets, issues, or
+retained log records. Dataset counts exclude generation rows; log record
+counts exclude loss notices. Effective values reports documents and visible
+leaves, so collapsed values and omitted leaves are not counted as shown.
+Details identifies the selected row’s position. Log also names whether
+following is active and shows the retention limit.
+
+Performance labels each timing stage and its own sample count. Frame intervals
+measure time between shell renders, not pure UI work, so the 8 ms UI budget
+does not color their histogram as failures. The axis labels show logarithmic
+bucket upper bounds; hover gives ranges and counts, and samples above 100 ms
+have a separate readout. Empty timing stages show dashes and zero samples.
+Percentiles are bucket estimates, and storage values come from the last
+catalog snapshot. The page retains the existing perf invalidation limits.
 
 Three controls change application state, each through a channel the shell
 owns: a Levels pick and the overlay switch queue requests on the
@@ -113,8 +137,9 @@ cargo test -p geode-diagnostics --release -- --ignored log_rebuild_timing --noca
   registered before the page's own, so the config section rebuilds from the
   new document on the same version bump. Preserve that order.
 - Paint shares prepared tables through `Rc`. Rail texts, header chips, the
-  History label, the copy text, and the title are formatted at rebuild or
-  badge refresh, never per paint.
+  History label, result summaries, detail position, copy text, and title are
+  formatted at rebuild, selection change, or badge refresh, never per paint.
+  Performance readouts, bar heights, and tooltip text are prepared at rebuild.
 - The tail retains at most 4,096 records and reuses its drain buffer. It is
   drained on every badge refresh while the page is visible, so the Log
   badge is live from any section, and never while hidden, so a wrap during

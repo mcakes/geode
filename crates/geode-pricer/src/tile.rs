@@ -5528,6 +5528,7 @@ impl gpui::Render for PricerTile {
                 menu_selector: self.menu_selector.clone(),
                 health: self.health.chip(),
                 confirm: self.confirm.as_ref(),
+                mode: geode_tile::header::Mode::from_key_mode(self.mode()),
                 name_tip: self.name_tip.clone(),
                 rename: self.rename_field.as_ref(),
                 picker,

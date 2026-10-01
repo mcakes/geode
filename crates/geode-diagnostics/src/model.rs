@@ -532,10 +532,12 @@ pub const FRAME_BUDGET_MICROS: u64 = 8_000;
 pub const REQUERY_BUDGET_MICROS: u64 = 50_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Percentiles {
     pub p50: String,
     pub p95: String,
     pub max: String,
+    pub samples: u64,
 }
 
 fn percentiles(h: &FrameHistogram) -> Option<Percentiles> {
@@ -543,6 +545,7 @@ fn percentiles(h: &FrameHistogram) -> Option<Percentiles> {
         p50: h.percentile_micros(50.0).map(format_ms).unwrap_or_default(),
         p95: h.percentile_micros(95.0).map(format_ms).unwrap_or_default(),
         max: format_ms(h.max_micros()),
+        samples: h.count(),
     })
 }
 

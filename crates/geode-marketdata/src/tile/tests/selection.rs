@@ -1801,3 +1801,33 @@ fn arrows_nudge_the_text_once_a_delivery_drops_the_selection(cx: &mut gpui::Test
     assert_eq!(notice_of(&h, &vcx), None, "nothing refused");
     assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
 }
+
+/// The header's mode icon follows the key context's own mode. The test
+/// dispatches the action ids the default keys send: the cell editor opened
+/// by `marketdata::edit` shows the edit icon until `marketdata::cancel`;
+/// `marketdata::visual_block` shows the visual icon until
+/// `marketdata::escape` clears the selection.
+#[gpui::test]
+fn the_header_shows_the_mode_icon_while_editing_or_selecting(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    assert_eq!(TILE, 3, "the selectors below name tile 3");
+    let shown = |vcx: &mut gpui::VisualTestContext| {
+        draw(vcx);
+        (
+            vcx.debug_bounds("tile-mode-edit-3").is_some(),
+            vcx.debug_bounds("tile-mode-visual-3").is_some(),
+        )
+    };
+    assert_eq!(shown(&mut vcx), (false, false), "normal: no cue");
+    h.motion(&mut vcx, "right", Some(SLICE as u32));
+    h.dispatch(&mut vcx, "edit", None);
+    assert_eq!(h.mode(&vcx), "insert", "fixture: the editor is open");
+    assert_eq!(shown(&mut vcx), (true, false), "editing");
+    h.dispatch(&mut vcx, "cancel", None);
+    assert_eq!(shown(&mut vcx), (false, false), "esc left the editor");
+    h.dispatch(&mut vcx, "visual_block", None);
+    assert_eq!(shown(&mut vcx), (false, true), "selecting");
+    h.dispatch(&mut vcx, "escape", None);
+    assert_eq!(shown(&mut vcx), (false, false), "esc cleared the selection");
+}
