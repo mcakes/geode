@@ -9,7 +9,8 @@ use geode_core::log::Level;
 use gpui::SharedString;
 
 use crate::model::{
-    ConfigDoc, DatasetRow, DiagnosticRow, Lane, LogRow, SourceRow, Tone, age_text, health_title,
+    ConfigDoc, DatasetRow, DiagnosticRow, Lane, LogRow, PartitionRow, SourceRow, Tone, age_text,
+    health_title,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -218,17 +219,39 @@ pub const DATA_COLUMNS: [ColumnSpec; 8] = [
     col("loaded", "Loaded", 90.0),
 ];
 
+fn partition_matches(row: &PartitionRow, query: &str) -> bool {
+    [
+        row.label.as_str(),
+        row.gen_id.as_str(),
+        row.source_time.as_str(),
+        row.loaded.as_str(),
+        row.rows.as_str(),
+        row.kind,
+    ]
+    .iter()
+    .any(|text| text.to_lowercase().contains(query))
+}
+
 pub fn data_table(
     rows: &[DatasetRow],
     collapsed: &BTreeSet<String>,
     filter: &str,
 ) -> PreparedTable {
+    let query = filter.to_lowercase();
     let mut out = Vec::new();
-    for r in rows
-        .iter()
-        .filter(|r| filter.is_empty() || r.name.contains(filter))
-    {
-        let expanded = !collapsed.contains(&r.name);
+    for r in rows {
+        let dataset_matches = query.is_empty() || r.name.to_lowercase().contains(&query);
+        let mut children = r
+            .children
+            .iter()
+            .filter(|c| dataset_matches || partition_matches(c, &query))
+            .peekable();
+        if !dataset_matches && children.peek().is_none() {
+            continue;
+        }
+        // Search reveals matches without changing the saved expansion. A
+        // matching dataset keeps all children; leaf matches keep their parent.
+        let expanded = !query.is_empty() || !collapsed.contains(&r.name);
         let tone = if r.has_catalog {
             Tone::Normal
         } else {
@@ -267,7 +290,7 @@ pub fn data_table(
         if !expanded {
             continue;
         }
-        for c in &r.children {
+        for c in children {
             let tone = if c.marked { Tone::Marked } else { Tone::Normal };
             out.push(PreparedRow {
                 key: format!("{}/{}/{}", r.name, c.label, c.gen_id),
@@ -535,6 +558,88 @@ mod tests {
         );
         let filtered = data_table(&rows, &BTreeSet::new(), "vol");
         assert_eq!(filtered.rows.len(), 2);
+    }
+
+    #[test]
+    fn data_filter_matches_leaf_fields_and_preserves_dataset_context() {
+        let mut risk = dataset("risk", 2);
+        risk.children[0] = PartitionRow {
+            label: "2026-09-27 · EU_TECH".into(),
+            gen_id: "654".into(),
+            source_time: "08:12:34".into(),
+            loaded: "09:23:45".into(),
+            rows: "987".into(),
+            kind: "archive",
+            marked: true,
+        };
+        let rows = vec![risk, dataset("vol", 1)];
+        let collapsed = BTreeSet::from(["risk".to_string()]);
+        let keys = |table: &PreparedTable| {
+            table
+                .rows
+                .iter()
+                .map(|r| r.key.as_str().to_owned())
+                .collect::<Vec<_>>()
+        };
+        for query in [
+            "2026-09-27",
+            "eu_tech",
+            "654",
+            "08:12:34",
+            "09:23:45",
+            "987",
+            "ARCHIVE",
+        ] {
+            let filtered = data_table(&rows, &collapsed, query);
+            assert_eq!(
+                keys(&filtered),
+                ["risk", "risk/2026-09-27 · EU_TECH/654"],
+                "{query}"
+            );
+            assert_eq!(filtered.rows[0].kind, RowKind::Parent { expanded: true });
+            assert_eq!(filtered.parent_key_at(1), Some("risk"));
+            assert_eq!(filtered.rows[1].tone, Tone::Marked);
+            assert_eq!(
+                filtered.rows[0].cells[4].text.as_ref(),
+                "1 live · 0 archive",
+                "filtering does not narrow catalog totals"
+            );
+        }
+        let parent_match = data_table(&rows, &collapsed, "RISK");
+        assert_eq!(
+            parent_match.rows.len(),
+            3,
+            "a dataset match includes all its children"
+        );
+        assert!(data_table(&rows, &collapsed, "absent").rows.is_empty());
+        let cleared = data_table(&rows, &collapsed, "");
+        assert_eq!(keys(&cleared), ["risk", "vol", "vol/p0/0"]);
+        assert_eq!(cleared.rows[0].kind, RowKind::Parent { expanded: false });
+    }
+
+    /// Prepared-table cost only: excludes the catalog model, GPUI, and paint.
+    #[test]
+    #[ignore]
+    fn data_filter_timing_over_a_catalog() {
+        let rows: Vec<_> = (0..20)
+            .map(|i| dataset(&format!("dataset-{i}"), 200))
+            .collect();
+        let collapsed = BTreeSet::new();
+        for query in ["", "dataset", "p100"] {
+            let mut samples = Vec::new();
+            let mut visible = 0;
+            for _ in 0..20 {
+                let start = std::time::Instant::now();
+                let table = std::hint::black_box(data_table(&rows, &collapsed, query));
+                visible = table.rows.len();
+                samples.push(start.elapsed());
+            }
+            samples.sort();
+            eprintln!(
+                "data filter {query:?}, {visible} visible rows: median {:?}, max {:?} (20 datasets × 200 generations; 20 runs)",
+                samples[10], samples[19]
+            );
+        }
     }
 
     #[test]

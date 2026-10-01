@@ -53,10 +53,16 @@ and Effective values. `y` copies the active row's full details in any table;
 return focus to navigation. In Log this also restores all levels and targets;
 other sections retain their filters.
 
-Sources filters by name and health; Data by dataset name; Config by issue
-text or `document.key` and value; Log by message and target text, plus the
-level toggles and the target select. Configuration matching is case
-insensitive, hides unmatched documents, and reveals matches in collapsed
+Sources filters by name and health; Data by dataset name and generation
+fields (partition/book label, generation ID, source/load time, row count,
+and live/archive status); Config by issue text or `document.key` and value;
+Log by message and target text, plus the level toggles and the target select. Data matching is case insensitive: a
+matching dataset includes all its generations; a leaf-only match shows just
+matching generations beneath their dataset. A nonempty filter temporarily
+expands results without changing the stored collapse state. Clearing it restores
+the stored expansion, and dataset totals always describe the full catalog.
+Configuration matching is case insensitive, hides unmatched documents, and
+reveals matches in collapsed
 documents without losing their collapse state. Selection follows row identity
 through refreshes and filtering while the selected row remains visible. The Log section follows new records until a
 row motion; a bare `G`, `f`, or the Follow switch resumes following, and a
