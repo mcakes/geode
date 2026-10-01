@@ -1,5 +1,5 @@
 //! Pure-core benchmarks at 133, 135,733, and 720,881 result rows:
-//! fully expanded and collapsed flattening, a 40-row format-cache window,
+//! fully expanded and collapsed flattening, a 40-row cell window,
 //! and a 100-column plan. The largest shape also measures cursor path
 //! restoration near and far from its prior position and selection summaries
 //! over every row and measure column. These costs run on the UI thread;

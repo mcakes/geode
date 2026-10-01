@@ -160,7 +160,7 @@ pub struct BlotterDelegate {
     /// `[ui] line_numbers`, mirrored from `linenumbers::UiSettings` by the
     /// tile. `column` and `fill_window` need this value without an `App`.
     pub line_numbers: LineNumbers,
-    /// Gutter text aligned with the format-cache window. `ensure_numbers`
+    /// Gutter text aligned with the cell window. `ensure_numbers`
     /// rebuilds it when the window or mode changes, or when the cursor moves
     /// in relative mode. Painting otherwise reuses these strings.
     numbers: Vec<SharedString>,
@@ -849,7 +849,7 @@ impl BlotterDelegate {
 
     /// Clear formatted cells and glyphs together, then refill the last
     /// requested window, clamped to the rows still shown. An empty result
-    /// leaves both caches clear. All format-cache invalidation goes here.
+    /// leaves both caches clear. All cell-window invalidation goes here.
     ///
     /// The table only reports a changed numeric visible range. Sorting,
     /// regrouping, narrowing, or moving columns may leave that range equal,
@@ -1854,7 +1854,7 @@ mod tests {
     /// Off mode paints no numbers and reserves no width. Absolute mode uses
     /// one-based shown indices. Relative mode uses cursor distance except at
     /// the cursor, where it shows the absolute index. Cursor moves update
-    /// relative numbers without requiring a format-cache refill.
+    /// relative numbers without requiring a cell-window refill.
     #[test]
     fn the_gutter_follows_the_mode_and_the_cursor() {
         let mut d = BlotterDelegate::new();
