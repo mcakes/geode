@@ -27431,12 +27431,8 @@ run_mutation "nemo: the actions are never registered" \
 # The pressed row is opened, not the selection riding in the context.
 run_mutation "nemo: the selection's first row is opened" \
   crates/geode-nemo/src/lib.rs \
-  '        let Some(id) = ctx.get(self.column) else {
-            return;
-        };' \
-  '        let Some(id) = ctx.selection.first().and_then(|r| r.iter().find(|(c, _)| c == self.column).map(|(_, v)| v.as_str())).or(ctx.get(self.column)) else {
-            return;
-        };' \
+  '        let id = ctx.get(self.column).filter(|s| !s.is_empty())?;' \
+  '        let id = ctx.selection.first().and_then(|r| r.iter().find(|(c, _)| c == self.column).map(|(_, v)| v.as_str())).or(ctx.get(self.column)).filter(|s| !s.is_empty())?;' \
   geode-app nemo_opens_the_pressed_row_not_the_selection
 
 # The notice says what Geode did, in exactly these words.
