@@ -19063,6 +19063,69 @@ run_mutation "chart xy: the chrome is re-derived every frame" \
   geode-chart \
   an_unchanged_frame_rebuilds_nothing_and_a_moved_view_rebuilds
 
+# A data delivery is a new version at an unchanged view. A path key
+# without the version serves the last delivery's paths under the new
+# delivery's axes.
+run_mutation "chart xy: the path key ignores the model version" \
+  crates/geode-chart/src/xy/element.rs \
+  '                    let key = ShapeKey::new((model.version, slot.number, pane as u8, view.key()))' \
+  '                    let key = ShapeKey::new((0u64, slot.number, pane as u8, view.key()))' \
+  geode-chart \
+  a_new_model_version_or_a_resize_rebuilds_every_path_and_the_chrome_once
+
+# The chrome key carries the version too. Without it a delivery keeps
+# the last delivery's y scales and labels, and the new paths are drawn
+# against axes that describe other values.
+run_mutation "chart xy: the chrome key ignores the model version" \
+  crates/geode-chart/src/xy/element.rs \
+  '        let chrome_key = ShapeKey::new((self.model.version, slots, self.view.key()))' \
+  '        let chrome_key = ShapeKey::new((0u64, slots, self.view.key()))' \
+  geode-chart \
+  a_new_model_version_or_a_resize_rebuilds_every_path_and_the_chrome_once
+
+# Ticks and side scales are placed in the element's bounds. A chrome key
+# without them keeps the last size's tick positions after a resize.
+run_mutation "chart xy: the chrome key ignores the bounds" \
+  crates/geode-chart/src/xy/element.rs \
+  '            .f32(bounds.size.width.as_f32())
+            .f32(bounds.size.height.as_f32())
+            .f32(self.rem_px)' \
+  '            .f32(self.rem_px)' \
+  geode-chart \
+  a_new_model_version_or_a_resize_rebuilds_every_path_and_the_chrome_once
+
+# A path is built in its plot rectangle. Keyed without the plot's width,
+# a resized chart paints the last width's paths.
+run_mutation "chart xy: the path key ignores the plot width" \
+  crates/geode-chart/src/xy/element.rs \
+  '                        .f32(plot.w)
+                        .f32(plot.h)' \
+  '                        .f32(plot.h)' \
+  geode-chart \
+  a_new_model_version_or_a_resize_rebuilds_every_path_and_the_chrome_once
+
+# Tick gaps and axis columns are lengths on the rem scale. A chrome key
+# without the rem keeps the last text size's ticks under the new one.
+run_mutation "chart xy: the chrome key ignores the rem" \
+  crates/geode-chart/src/xy/element.rs \
+  '            .f32(bounds.size.height.as_f32())
+            .f32(self.rem_px)
+            .finish();' \
+  '            .f32(bounds.size.height.as_f32())
+            .finish();' \
+  geode-chart \
+  a_rem_change_alone_re_derives_the_chrome
+
+# The empty model is version 0. A first model built at version 0 under
+# the same view must not take its chrome: with no side scales nothing of
+# the model paints.
+run_mutation "chart xy: the chrome key ignores the slot count" \
+  crates/geode-chart/src/xy/element.rs \
+  '        let chrome_key = ShapeKey::new((self.model.version, slots, self.view.key()))' \
+  '        let chrome_key = ShapeKey::new((self.model.version, self.view.key()))' \
+  geode-chart \
+  a_first_model_at_version_zero_does_not_take_the_empty_models_chrome
+
 # A slot the view shows nothing of has no path to build and is skipped
 # before the cache is asked.
 run_mutation "chart xy: an out-of-view slot still builds" \
