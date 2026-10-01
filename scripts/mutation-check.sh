@@ -13279,7 +13279,7 @@ run_mutation "final: an unbuildable delivery changes nothing but the notice" \
             }' \
   '            Err(e) => {
                 self.notice = Some(e.into());
-                MatrixModel::empty(self.spec, self.key.as_deref().unwrap_or(&[]))
+                MatrixIndex::empty(&self.spec, self.key.as_deref().unwrap_or(&[]))
             }' \
   geode-marketdata \
   a_delivery_that_cannot_be_built_changes_nothing_but_the_notice
@@ -20382,7 +20382,7 @@ run_mutation "pricer entry bar: the double-click ignores the closing press's lin
 run_mutation "pricer entry bar: the closing press's line outlives the next press" \
   crates/geode-pricer/src/tile.rs \
   '                self.pressed = self.click_anchor.take();' \
-  '                self.pressed = self.click_anchor;' \
+  '                self.pressed = self.click_anchor.clone();' \
   geode-pricer a_later_double_click_at_the_same_spot_edits_the_row_painted_there
 
 # The handed-on line reaches the cursor before the tree-column return.
