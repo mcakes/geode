@@ -202,6 +202,21 @@ grouping = ["book", "model_code_placeholder"]
 name = "delta01"
 kind = "measure"
 
+# Underlying-grain measures only, grouped by neither context key, so no
+# context column is already grouped or shown: the `query_context` shape.
+[underlying_only]
+dataset = "risk_snapshot"
+grouping = ["book", "lhu"]
+[[underlying_only.columns]]
+name = "delta01"
+kind = "measure"
+[[underlying_only.columns]]
+name = "gamma01"
+kind = "measure"
+[[underlying_only.columns]]
+name = "vega01"
+kind = "measure"
+
 [shallow]
 dataset = "risk_snapshot"
 grouping = ["book"]
@@ -739,5 +754,44 @@ fn bench_carried(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_requery, bench_resolve, bench_carried);
+/// The roster's context columns (`ModuleRoster::context_columns`, which
+/// production hands to every query): a view of underlying-grain measures
+/// only, grouped by neither key, at one million rows, with the startup list
+/// set and with none. Each column is read at the coarsest grain that
+/// carries it: `underlying_ref` rides the underlying-grain measure scan,
+/// while no shown measure reads the position or instrument grain, so
+/// `position_ref` and `instrument_ref` each cost a `dim_` CTE (one more
+/// table scan and join) of their own: the worst case for these three.
+fn bench_context(c: &mut Criterion) {
+    let mut group = c.benchmark_group("query_context");
+    group.sample_size(20);
+    let rows = 1_000_000usize;
+    let (_db, _src, svc, rx, loaded) = service(rows);
+    assert!(loaded > 0, "fixture ingested nothing");
+    let startup: Vec<String> = ["underlying_ref", "position_ref", "instrument_ref"]
+        .iter()
+        .map(|c| c.to_string())
+        .collect();
+    for (label, columns) in [("no_context", Vec::new()), ("with_context", startup)] {
+        svc.set_context_columns(columns);
+        eprintln!(
+            "\n[{rows} rows ingested {loaded}] {label} result rows — underlying_only/unscoped/d2 {}",
+            requery(&svc, &rx, "underlying_only", &Scope::default(), 2),
+        );
+        group.bench_function(
+            format!("{rows}_rows_underlying_only_depth_2_{label}"),
+            |b| b.iter(|| black_box(requery(&svc, &rx, "underlying_only", &Scope::default(), 2))),
+        );
+    }
+    svc.set_context_columns(Vec::new());
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_requery,
+    bench_resolve,
+    bench_carried,
+    bench_context
+);
 criterion_main!(benches);

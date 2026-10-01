@@ -16,7 +16,7 @@ use crate::menu::{Menu, MenuHost};
 use crate::tiling::TileId;
 
 /// Status notice: the row names no value any kind or action takes.
-pub(crate) const NO_ROW_ACTIONS: &str = "no actions for this row";
+pub const NO_ROW_ACTIONS: &str = "no actions for this row";
 
 /// The open row menu.
 pub struct RowMenu {

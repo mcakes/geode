@@ -64,8 +64,10 @@ GPUI globals or provide rendering helpers.
 
 The workspace has four module-visible GPUI globals, written by the shell:
 `linenumbers::UiSettings`, `tips::Chords`, `clock::AppClock`, and
-`series::SeriesSettings`. Add another only for state that is genuinely app
-wide and module visible.
+`series::SeriesSettings`. A fifth, `dimension::UrlOpener`, is a test seam
+the shell only reads, in `ActionCx::open_url`: a test sets it to capture
+URLs, and production leaves it unset so the URL goes to the OS. Add another
+only for state that is genuinely app wide and module visible.
 
 ## Features
 

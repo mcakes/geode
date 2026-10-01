@@ -52,6 +52,13 @@ impl OpenInNemo {
             id: "nemo::open_instrument",
         }
     }
+
+    /// The URL `run` opens for `ctx`: the target row's value of this
+    /// action's column, or `None` when the row has none or an empty one.
+    fn target_url(&self, ctx: &DimensionContext) -> Option<String> {
+        let id = ctx.get(self.column).filter(|s| !s.is_empty())?;
+        Some(url(self.prefix, id))
+    }
 }
 
 impl DimensionAction for OpenInNemo {
@@ -64,12 +71,12 @@ impl DimensionAction for OpenInNemo {
     fn column(&self) -> &'static str {
         self.column
     }
-    /// The target row's value only; a selection is ignored.
+    /// The target row's value only; a selection is ignored, and an empty
+    /// value counts as absent.
     fn run(&self, ctx: &DimensionContext, acx: &mut ActionCx<'_, '_>) {
-        let Some(id) = ctx.get(self.column) else {
+        let Some(url) = self.target_url(ctx) else {
             return;
         };
-        let url = url(self.prefix, id);
         acx.open_url(&url);
         acx.notice(format!("opened {url}"));
     }
@@ -101,6 +108,29 @@ mod tests {
         assert_eq!(url(POSITION_URL, "P 7/8"), "nemo://position/P%207%2F8");
         assert_eq!(url(POSITION_URL, "a#b?c"), "nemo://position/a%23b%3Fc");
         assert_eq!(url(POSITION_URL, "é"), "nemo://position/%C3%A9");
+    }
+
+    #[test]
+    fn each_action_opens_under_its_own_prefix() {
+        assert_eq!(OpenInNemo::position().prefix, POSITION_URL);
+        assert_eq!(OpenInNemo::instrument().prefix, INSTRUMENT_URL);
+        let ctx = DimensionContext::of(&[("position_ref", "P7"), ("instrument_ref", "I9")]);
+        assert_eq!(
+            OpenInNemo::position().target_url(&ctx).as_deref(),
+            Some("nemo://position/P7")
+        );
+        assert_eq!(
+            OpenInNemo::instrument().target_url(&ctx).as_deref(),
+            Some("nemo://instrument/I9")
+        );
+    }
+
+    #[test]
+    fn an_empty_or_missing_id_opens_nothing() {
+        let empty = DimensionContext::of(&[("position_ref", "")]);
+        assert_eq!(OpenInNemo::position().target_url(&empty), None);
+        let missing = DimensionContext::of(&[("lhu", "L1")]);
+        assert_eq!(OpenInNemo::position().target_url(&missing), None);
     }
 
     #[test]

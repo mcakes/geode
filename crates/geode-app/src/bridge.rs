@@ -3926,7 +3926,7 @@ role = "key"
             f.shell
                 .read_with(&f.vcx, |s, _| s.notice_for_test())
                 .as_deref(),
-            Some("no actions for this row"),
+            Some(geode_shell::shell::row_menu::NO_ROW_ACTIONS),
             "the press reached the shell, which found no row to offer"
         );
         f.type_keys("enter");

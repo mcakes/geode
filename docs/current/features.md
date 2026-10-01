@@ -275,8 +275,8 @@ else it clears any selection and moves the cursor to the clicked row first.
 A row with nothing to offer (an `lhu` subtotal, say) shows `no actions for
 this row` instead.
 
-A row carrying a single `position_ref` or `instrument_ref` (shown, or the
-hidden context column) gets an "Open in Nemo" row in that column's section.
+A row carrying a single `position_ref` or `instrument_ref` (from the grouping
+path, a shown column, or the hidden context column) gets an "Open in Nemo" row in that column's section.
 Picking it opens `nemo://position/<id>` or `nemo://instrument/<id>` (the id
 percent-encoded) through the OS and shows `opened <url>` in the status bar;
 it opens the row the menu was opened on, never the rest of a selection. A
