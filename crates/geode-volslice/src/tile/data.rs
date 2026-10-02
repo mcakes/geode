@@ -605,11 +605,18 @@ impl VolsliceTile {
     /// The shell is removing this tile: cancel by key (the document reads
     /// and the vol batch at once), then answer any barrier still waiting on
     /// it. Runs inside the shell's occupant reconciliation, so it updates
-    /// only the frame and the data handle.
+    /// only the frame and the data handle, and its arrival is deferred: a
+    /// release notified during the shell's draw would be dropped, holding
+    /// every other tile to the barrier's deadline.
     pub fn closed(&mut self, cx: &mut Context<Self>) {
         let key = self.key();
         self.data.cancel(key);
-        self.following
-            .close(&mut FrameDoor::new(&self.frame, cx), key);
+        self.following.close(
+            &mut DeferredDoor {
+                frame: &self.frame,
+                cx,
+            },
+            key,
+        );
     }
 }

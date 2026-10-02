@@ -18,6 +18,7 @@ use geode_core::snapshot::{ColumnMeta, Snapshot, TestColumn};
 use geode_core::vol::{VolJob, VolSliceOutcome, VolSliceParams};
 use geode_data::vol::{VolConfig, evaluate};
 use geode_shell::module::Delivery;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -738,6 +739,62 @@ fn hide_keeps_the_query_and_close_cancels(cx: &mut gpui::TestAppContext) {
     assert_eq!(cancels(&h.requests()), 0, "hiding keeps the query");
     vcx.update(|_, cx| h.content.closed(cx));
     assert_eq!(cancels(&h.requests()), 1, "closing cancels by key, once");
+}
+
+impl Harness {
+    /// How many times frame observers have heard the frame since now.
+    fn frame_heard(
+        &self,
+        vcx: &mut gpui::VisualTestContext,
+    ) -> (Rc<std::cell::Cell<usize>>, gpui::Subscription) {
+        let heard = Rc::new(std::cell::Cell::new(0));
+        let count = heard.clone();
+        let sub =
+            vcx.update(|_, cx| cx.observe(&self.frame, move |_, _| count.set(count.get() + 1)));
+        (heard, sub)
+    }
+}
+
+/// A show from inside the shell's draw whose read is refused answers the
+/// open flip through a deferred arrival: the release happens and frame
+/// observers hear it, so every other tile promotes now rather than at the
+/// barrier's deadline. Inline, the release's notify falls in the draw and
+/// is dropped.
+#[gpui::test]
+fn a_refused_show_from_the_draw_releases_the_flip_to_frame_observers(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open_on(cx, launched_on("SPX.Z"));
+    h.tile.update(&mut vcx, |t, _| t.today_pin = Some(d(TODAY)));
+    h.open_flip(&mut vcx);
+    assert!(h.barrier_open(&vcx), "the flip awaits the tile");
+    let (heard, _sub) = h.frame_heard(&mut vcx);
+    h.data.fill_for_tests();
+    h.in_draw(&mut vcx, Some(true), None);
+    vcx.run_until_parked();
+    assert!(
+        h.notices(&vcx)
+            .contains(&"document request refused: the data service is busy".to_string())
+    );
+    assert!(!h.barrier_open(&vcx), "the refusal arrived");
+    assert!(heard.get() > 0, "frame observers heard the release");
+}
+
+/// A tile the shell closes from inside its draw, while the flip awaits its
+/// query, answers the flip through a deferred arrival that frame observers
+/// hear.
+#[gpui::test]
+fn a_close_from_the_draw_releases_the_flip_to_frame_observers(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_on(cx, launched_on("SPX.Z"));
+    h.show(&mut vcx);
+    assert_eq!(docs(&h.requests()).len(), 1, "a query in flight");
+    h.open_flip(&mut vcx);
+    assert!(h.barrier_open(&vcx));
+    let (heard, _sub) = h.frame_heard(&mut vcx);
+    h.close_in_draw(&mut vcx);
+    vcx.run_until_parked();
+    assert!(!h.barrier_open(&vcx), "the closing tile arrived");
+    assert!(heard.get() > 0, "frame observers heard the release");
 }
 
 /// A viewer reads a group; it posts nothing into one.

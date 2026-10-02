@@ -179,8 +179,10 @@ The footer shows the first notice and how many more stand behind it:
   notification; while following, the group's scope counts as a change. A
   change of group clears the model and moves the vol tag, so no old
   group's draft trace stays painted or lands late.
-- An arrival made from `set_visible` is deferred past the current draw,
-  where a notify to the frame would be dropped.
+- An arrival made from `set_visible` or `closed` is deferred past the
+  current draw: the shell calls both inside its render, where the release's
+  notify to the frame would be dropped and every other tile would wait for
+  the barrier's deadline.
 - The picker holds the keys in `insert` mode and publishes no `tilelist`:
   its field types `j` and `k`, which the shared list steps would claim; the
   arrows step it. The diff chooser has no field: it reports `mode == menu`

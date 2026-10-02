@@ -31796,6 +31796,28 @@ run_mutation "volslice: a built model records its underlying" \
   '        self.model_for = None;' \
   geode-volslice a_refused_batch_after_a_new_install_clears_the_old_curves
 
+# A refused show from inside the shell's draw defers its arrival: inline,
+# the release's notify falls in the draw and frame observers never hear it.
+run_mutation "volslice: a refused show from the draw arrives deferred" \
+  crates/geode-volslice/src/tile/data.rs \
+  '                self.requery_with(Arrival::Deferred, cx);' \
+  '                self.requery_with(Arrival::Now, cx);' \
+  geode-volslice a_refused_show_from_the_draw_releases_the_flip_to_frame_observers
+
+# A close from inside the shell's draw defers its arrival the same way.
+run_mutation "volslice: a close from the draw arrives deferred" \
+  crates/geode-volslice/src/tile/data.rs \
+  '        self.following.close(
+            &mut DeferredDoor {
+                frame: &self.frame,
+                cx,
+            },
+            key,
+        );' \
+  '        self.following
+            .close(&mut FrameDoor::new(&self.frame, cx), key);' \
+  geode-volslice a_close_from_the_draw_releases_the_flip_to_frame_observers
+
 run_mutation "volslice: close cancels by key" \
   crates/geode-volslice/src/tile/data.rs \
   '        self.data.cancel(key);' \
