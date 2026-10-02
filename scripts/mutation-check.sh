@@ -31818,6 +31818,19 @@ run_mutation "volslice: a close from the draw arrives deferred" \
             .close(&mut FrameDoor::new(&self.frame, cx), key);' \
   geode-volslice a_close_from_the_draw_releases_the_flip_to_frame_observers
 
+# An empty state is the muted status tone; a failure or refusal is danger.
+run_mutation "volslice: an empty state is not painted as a failure" \
+  crates/geode-volslice/src/header.rs \
+  '    let tone = if notices.clone().all(|n| is_empty_state(n)) {' \
+  '    let tone = if false {' \
+  geode-volslice the_footer_paints_the_first_notice_and_counts_the_rest
+
+run_mutation "volslice: a refusal beside an empty state is danger" \
+  crates/geode-volslice/src/header.rs \
+  '    let tone = if notices.clone().all(|n| is_empty_state(n)) {' \
+  '    let tone = if notices.clone().any(|n| is_empty_state(n)) {' \
+  geode-volslice the_footer_paints_the_first_notice_and_counts_the_rest
+
 run_mutation "volslice: close cancels by key" \
   crates/geode-volslice/src/tile/data.rs \
   '        self.data.cancel(key);' \

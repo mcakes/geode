@@ -365,6 +365,11 @@ fn the_footer_paints_the_first_notice_and_counts_the_rest(cx: &mut gpui::TestApp
         h.tile.read_with(&vcx, |t, _| t.footer_notice()),
         Some("no underlying".into())
     );
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.footer_tone()),
+        Some(geode_tile::notice::Tone::Status),
+        "an empty state, not a failure"
+    );
     let (h2, mut vcx2) = open_bound(cx, None);
     h2.show(&mut vcx2);
     h2.follow_a(&mut vcx2);
@@ -373,6 +378,11 @@ fn the_footer_paints_the_first_notice_and_counts_the_rest(cx: &mut gpui::TestApp
     assert_eq!(
         h2.tile.read_with(&vcx2, |t, _| t.footer_notice()),
         Some("no underlying in A (+1 more)".into())
+    );
+    assert_eq!(
+        h2.tile.read_with(&vcx2, |t, _| t.footer_tone()),
+        Some(geode_tile::notice::Tone::Danger),
+        "a refusal stands behind it"
     );
 }
 

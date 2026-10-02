@@ -184,10 +184,7 @@ impl VolsliceTile {
             self.strip.clear();
             self.clear_model();
             self.fetch = Fetch::Idle;
-            self.notices = vec![match following {
-                Some(g) => format!("no underlying in {}", g.letter()),
-                None => "no underlying".to_string(),
-            }];
+            self.notices = vec![crate::header::no_underlying(following)];
             let versions = self.versions(cx);
             self.following.begin(versions, Instant::now());
             self.submitted(false, Unanswered::KeepActed, arrival, cx);

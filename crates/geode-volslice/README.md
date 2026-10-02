@@ -113,7 +113,11 @@ through the same reader.
 
 ## Failure states
 
-The footer shows the first notice and how many more stand behind it:
+The footer shows the first notice and how many more stand behind it. An
+empty state alone (the first item below) is painted in the muted status
+tone the sibling modules use for an empty state; every other notice is a
+failure or a refusal, painted in the danger tone, and so is an empty state
+with another notice behind it:
 
 - `no underlying`, or `no underlying in A` while following a group whose
   scope names none or several.

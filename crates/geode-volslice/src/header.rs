@@ -9,7 +9,7 @@
 //! same action its key does, so the pointer and the keyboard cannot
 //! disagree.
 
-use geode_core::link::DraftMark;
+use geode_core::link::{DraftMark, Group};
 use geode_shell::actions::ActionId;
 use geode_shell::keymap::{Keystroke, Modifiers, parse_binding};
 use geode_shell::module::StackHandle;
@@ -19,6 +19,7 @@ use geode_shell::shell::{kbd, scale};
 use geode_shell::tiling::TileId;
 use geode_shell::tips::{self, Chords, chord_for};
 use geode_tile::header::{Cluster, HealthChip, LinkChip, Mode};
+use geode_tile::notice::{Notice, Tone as NoticeTone};
 use gpui::prelude::*;
 use gpui::{App, Div, ElementId, Entity, MouseButton, MouseDownEvent, SharedString, div};
 use gpui_component::{Theme, h_flex, v_flex};
@@ -31,6 +32,22 @@ pub(crate) const FOOTER_HEIGHT: f32 = 20.0;
 
 /// What the header shows while the tile reads no underlying.
 pub(crate) const NO_UNDERLYING: &str = "no underlying";
+
+/// The footer's empty state: the tile reads no underlying, or the group it
+/// follows names none or several. Nothing failed.
+pub(crate) fn no_underlying(following: Option<Group>) -> String {
+    match following {
+        Some(g) => format!("{NO_UNDERLYING} in {}", g.letter()),
+        None => NO_UNDERLYING.to_string(),
+    }
+}
+
+fn is_empty_state(text: &str) -> bool {
+    text == NO_UNDERLYING
+        || Group::ALL
+            .into_iter()
+            .any(|g| text == no_underlying(Some(g)))
+}
 
 /// One loaded kind's chip.
 #[derive(Clone, Debug, PartialEq)]
@@ -114,17 +131,26 @@ fn diff_text(p: Pair) -> String {
 }
 
 /// The footer's notice: the first notice, and how many more stand behind
-/// it. `None` with no notice.
+/// it. `None` with no notice. An empty state alone is said in the muted
+/// status tone the sibling modules paint an empty state in; anything else
+/// is a failure or a refusal, in the danger tone.
 pub(crate) fn footer_notice<'a>(
-    mut notices: impl Iterator<Item = &'a String>,
-) -> Option<SharedString> {
+    notices: impl Iterator<Item = &'a String> + Clone,
+) -> Option<Notice> {
+    let tone = if notices.clone().all(|n| is_empty_state(n)) {
+        NoticeTone::Status
+    } else {
+        NoticeTone::Danger
+    };
+    let mut notices = notices;
     let first = notices.next()?;
     let more = notices.count();
-    Some(if more == 0 {
+    let text: SharedString = if more == 0 {
         first.clone().into()
     } else {
         format!("{first} (+{more} more)").into()
-    })
+    };
+    Some(Notice::new(text, tone))
 }
 
 /// The footer's hint row, in order: each entry's actions (painted as keys,
@@ -312,7 +338,7 @@ pub(crate) fn render_header(
 
 /// The footer: the notice line when there is one, then the hint row.
 pub(crate) fn render_footer(
-    notice: Option<&SharedString>,
+    notice: Option<&Notice>,
     hints: &[FooterHint],
     theme: &Theme,
     tile_id: u64,
@@ -347,10 +373,7 @@ pub(crate) fn render_footer(
                     .px_2()
                     .text_xs()
                     .debug_selector(move || format!("volslice-notice-{tile_id}"))
-                    .child(
-                        geode_tile::notice::paint(n, geode_tile::notice::Tone::Danger, theme)
-                            .truncate(),
-                    ),
+                    .child(geode_tile::notice::render(n, theme).truncate()),
             )
         })
         .child(hint_row)
@@ -386,9 +409,33 @@ mod tests {
     #[test]
     fn the_footer_notice_counts_the_rest() {
         let n = ["a".to_string(), "b".to_string(), "c".to_string()];
-        assert_eq!(footer_notice(n.iter()).as_deref(), Some("a (+2 more)"));
-        assert_eq!(footer_notice(n[..1].iter()).as_deref(), Some("a"));
+        let text = |n: Option<Notice>| n.map(|n| n.text().to_string());
+        assert_eq!(
+            text(footer_notice(n.iter())).as_deref(),
+            Some("a (+2 more)")
+        );
+        assert_eq!(text(footer_notice(n[..1].iter())).as_deref(), Some("a"));
         assert_eq!(footer_notice([].iter()), None);
+    }
+
+    /// An empty state is not a failure: alone it is the status tone; any
+    /// other notice beside it, or alone, is the danger tone.
+    #[test]
+    fn an_empty_state_is_muted_and_a_failure_is_danger() {
+        let tone = |n: &[String]| footer_notice(n.iter()).map(|n| n.tone());
+        assert_eq!(tone(&[no_underlying(None)]), Some(NoticeTone::Status));
+        assert_eq!(
+            tone(&[no_underlying(Some(Group::C))]),
+            Some(NoticeTone::Status)
+        );
+        assert_eq!(
+            tone(&[no_underlying(Some(Group::A)), "refused".to_string()]),
+            Some(NoticeTone::Danger)
+        );
+        assert_eq!(
+            tone(&["no cvi curve at 2026-10-16: x".to_string()]),
+            Some(NoticeTone::Danger)
+        );
     }
 
     #[gpui::test]

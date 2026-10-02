@@ -165,7 +165,7 @@ struct Chrome {
     header_key: Option<HeaderKey>,
     strip: Vec<StripPaint>,
     strip_key: Option<StripKey>,
-    notice: Option<SharedString>,
+    notice: Option<geode_tile::notice::Notice>,
     notice_key: Option<(Vec<String>, Vec<String>)>,
     hints: Vec<FooterHint>,
     /// How many parts were rebuilt, for the test that paint formats nothing.
@@ -698,7 +698,12 @@ impl VolsliceTile {
 
     #[cfg(test)]
     pub(crate) fn footer_notice(&self) -> Option<SharedString> {
-        self.chrome.notice.clone()
+        self.chrome.notice.as_ref().map(|n| n.text().clone())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn footer_tone(&self) -> Option<geode_tile::notice::Tone> {
+        self.chrome.notice.as_ref().map(|n| n.tone())
     }
 
     /// The underlying the prepared header names.
