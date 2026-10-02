@@ -474,8 +474,9 @@ enum Yank {
 /// document per panel, and held past the draft's own life only until the
 /// shell next asks.
 struct Emitted {
-    /// The underlying the rows are for, so one underlying's rows are never
-    /// handed out as another's even over an equal draft and base.
+    /// The document key the rows are for (its first part is the
+    /// underlying), so one document's rows are never handed out as
+    /// another's even over an equal draft and base.
     key: Vec<String>,
     draft: Draft,
     /// The painted base the rows were read from, held so its allocation is
@@ -490,7 +491,7 @@ struct Emitted {
 
 impl Emitted {
     /// Whether these rows are still what the builder would assemble: the
-    /// same underlying, the same base allocation and an equal draft. The
+    /// same document key, the same base allocation and an equal draft. The
     /// index is not compared: it is replaced only when one of those moves.
     fn is_for(&self, key: &[String], snapshot: &Arc<Snapshot>, draft: &Draft) -> bool {
         self.key == key && Arc::ptr_eq(&self.snapshot, snapshot) && self.draft == *draft
@@ -1810,7 +1811,7 @@ impl MarketDataTile {
 
     /// The draft document for the board: the rows `:upload` would assemble
     /// from the painted base, the installed index and the draft, in the
-    /// same allocation until the underlying, the base or the draft moves
+    /// same allocation until the document key, the base or the draft moves
     /// (the frame reads a new allocation as a changed draft). `None` while
     /// the draft is clean, with no document, and for a draft the builder
     /// refuses.
