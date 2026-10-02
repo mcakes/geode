@@ -79,6 +79,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+mod reorder;
 mod select;
 
 pub(crate) const LOADING: &str = "loading…";
@@ -291,11 +292,6 @@ pub(crate) const SPLIT: &str = "split package: edit its legs";
 /// A grouping row has no line behind it: a cell edit on it and every
 /// structural verb whose target includes it refuse with this.
 pub(crate) const GROUP_ROW: &str = "a grouping row: edit its lines";
-
-/// `shift+j`/`shift+k` move a line among its siblings in sheet order,
-/// which a value grouping does not paint: refused while one applies
-/// (`PricerTile::grouped`).
-pub(crate) const MOVE_GROUPED: &str = "lines move in the flat sheet: clear the grouping first";
 
 /// `shift+j`/`shift+k` move a line among its siblings in sheet order,
 /// which a column sort does not paint: refused while one applies.
@@ -770,20 +766,22 @@ fn untitled(shared: &Shared) -> String {
 }
 
 /// The sibling steps from position `at` in `siblings` that pass `delta`
-/// shown siblings (its sign the direction), stepping past hidden ones;
-/// `None` when fewer than `|delta|` shown siblings lie that way.
+/// siblings `lands` accepts (its sign the direction) — shown ones, and
+/// under a value grouping those painted in the mover's own group
+/// (`PricerTile::move_lands`) — stepping past every other; `None` when
+/// fewer than `|delta|` such siblings lie that way.
 pub(crate) fn shown_steps(
     siblings: &[usize],
     at: usize,
     delta: isize,
-    shown: impl Fn(usize) -> bool,
+    lands: impl Fn(usize) -> bool,
 ) -> Option<isize> {
     let mut left = delta.unsigned_abs();
     let mut p = at as isize;
     while left > 0 {
         p += delta.signum();
         let sib = *siblings.get(usize::try_from(p).ok()?)?;
-        if shown(sib) {
+        if lands(sib) {
             left -= 1;
         }
     }
@@ -3555,11 +3553,13 @@ impl PricerTile {
         Ok(())
     }
 
-    /// `shift+j` / `shift+k`: within the parent, by `delta` SHOWN
-    /// siblings — a sibling the scope hides is stepped past, so the painted
-    /// order changes as the key says rather than swapping with a line no
-    /// row shows. The cursor follows its line (it is keyed by id). Only
-    /// reached with no grouping in force (`partly_hidden_refusal`).
+    /// `shift+j` / `shift+k`: within the parent, by `delta` siblings the
+    /// move may land beside ([`Self::move_lands`]) — a sibling the scope
+    /// hides, or under a value grouping one painted in another group, is
+    /// stepped past, so the painted order changes as the key says rather
+    /// than swapping with a line no row shows here. The cursor follows its
+    /// line (it is keyed by id and group path). Never reached under a sort
+    /// or for a split package or its leg (`partly_hidden_refusal`).
     fn move_row(&mut self, delta: isize, cx: &mut Context<Self>) -> Result<(), String> {
         let row = self.cursor_sheet_row().ok_or("no row")?;
         let siblings = self.sheet.siblings(row);
@@ -3567,8 +3567,10 @@ impl PricerTile {
             .iter()
             .position(|s| *s == row)
             .expect("a row is among its siblings");
-        let steps = shown_steps(&siblings, at, delta, |r| self.visibility.is_shown(r))
-            .ok_or_else(|| EditError::MoveOffEnd.to_string())?;
+        let steps = {
+            let (lands, edge) = self.move_lands(&[row])?;
+            shown_steps(&siblings, at, delta, lands).ok_or(edge)?
+        };
         self.apply_edit(Edit::Move { row, delta: steps }, cx)
             .map_err(|e| e.to_string())
     }

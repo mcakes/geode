@@ -12,6 +12,7 @@ pub mod dataset;
 pub mod edit;
 pub mod entry;
 pub mod package;
+pub mod reorder;
 pub mod rollup;
 pub mod select;
 pub mod sheet;

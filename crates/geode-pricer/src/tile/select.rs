@@ -417,11 +417,14 @@ impl PricerTile {
     /// The one door every structural verb passes before it mutates: `d`,
     /// `shift+j`/`shift+k`, `g p` and `g u` (keys, the `.` menu, and
     /// `:package`/`:unpackage`) refuse when their target could reach
-    /// lines its row does not paint. In order: a move while any grouping
-    /// applies ([`MOVE_GROUPED`]: sheet order is not the painted order); a
-    /// target that is a grouping row ([`GROUP_ROW`]: no line behind it); a
-    /// target package split across nodes ([`SPLIT`]) or partly hidden by
-    /// the scope ([`PARTLY_HIDDEN`]). `selected`: the verb acts on the
+    /// lines its row does not paint. In order: a counted `g p` under a
+    /// value grouping ([`PACKAGE_GROUPED`]), a move or counted `g p` under
+    /// a sort ([`MOVE_SORTED`], [`PACKAGE_SORTED`]) — sheet order is not
+    /// the painted order there (a move under a value grouping is instead
+    /// held to its own group by [`Self::move_lands`]); a target that is a grouping row
+    /// ([`GROUP_ROW`]: no line behind it); a target package split across
+    /// nodes ([`SPLIT`]) — for a move, a leg of one too — or partly hidden
+    /// by the scope ([`PARTLY_HIDDEN`]). `selected`: the verb acts on the
     /// live selection, which then refuses as a whole — no part of it is
     /// acted on. Otherwise the target is the cursor row; for `g u` its
     /// package (a leg's parent). A counted `g p` takes the `count` sheet
@@ -442,9 +445,6 @@ impl PricerTile {
             "delete" | "move_down" | "move_up" | "group" | "ungroup"
         ) {
             return None;
-        }
-        if matches!(verb, "move_down" | "move_up") && self.grouped() {
-            return Some(MOVE_GROUPED);
         }
         if verb == "group" && !selected && count > 1 && self.grouped() {
             return Some(PACKAGE_GROUPED);
@@ -477,7 +477,18 @@ impl PricerTile {
                 _ => vec![row],
             }
         };
-        first_refusal(targets.into_iter().map(|r| self.read_only(r)))
+        let moving = matches!(verb, "move_down" | "move_up");
+        first_refusal(targets.into_iter().map(|r| {
+            self.read_only(r)
+                .or_else(|| self.split_leg_refusal(r, moving))
+        }))
+    }
+
+    /// A move of a leg whose package the grouping splits: its sibling
+    /// legs paint under other groups' package rows, so its sibling order
+    /// is not one painted order ([`SPLIT`]).
+    pub(crate) fn split_leg_refusal(&self, row: usize, moving: bool) -> Option<&'static str> {
+        (moving && self.sheet.parent(row).is_some_and(|p| self.split(p))).then_some(SPLIT)
     }
 
     /// `y` over a selection, which it ends. Under `V` the clipboard gets
@@ -569,16 +580,20 @@ impl PricerTile {
     }
 
     /// `shift+j`/`shift+k` over a `V` selection: the block slides one
-    /// sibling step as a unit, as ONE move of the neighbour across it.
-    /// The selection stays: it is anchored by line id, so the rebuild
-    /// re-resolves it onto the moved lines.
+    /// sibling step as a unit, as ONE move of the neighbour across it —
+    /// under a value grouping, the next neighbour in the block's own group
+    /// ([`Self::move_lands`]). The selection stays: it is anchored by line
+    /// id, so the rebuild re-resolves it onto the moved lines.
     pub(crate) fn move_selection(
         &mut self,
         down: bool,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         let top = top_most(&self.sheet, &self.selected_sheet_rows());
-        let edit = move_plan(&self.sheet, &top, down, |r| self.visibility.is_shown(r))?;
+        let edit = {
+            let (lands, edge) = self.move_lands(&top)?;
+            move_plan(&self.sheet, &top, down, lands, edge)?
+        };
         self.apply_edit(edit, cx).map_err(|e| e.to_string())
     }
 

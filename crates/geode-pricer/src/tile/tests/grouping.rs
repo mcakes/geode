@@ -833,24 +833,138 @@ fn totals_count_a_split_package_per_node_legs(cx: &mut gpui::TestAppContext) {
     assert_eq!(npv_total(&h, &vcx), Some(format!("{own:.2}")));
 }
 
-/// Under a grouping, sheet order is not the painted order: `shift+j` /
-/// `shift+k` refuse and move nothing.
+/// SPX and NDX lines interleaved in the sheet, so each underlying's group
+/// paints lines that are not sheet neighbours.
+const INTERLEAVED: [&str; 5] = [
+    "SPX Z26 4000 P",
+    "NDX Z26 5000 C",
+    "SPX Z26 4200 P",
+    "NDX Z26 5200 C",
+    "SPX Z26 4400 P",
+];
+
+const GROUP_END: &str = "cannot move past the end of the group";
+
+/// The interleaved sheet grouped by underlying, every group open.
+const GROUPED: [&str; 7] = [
+    "NDX",
+    "NDX Z26 5000 C",
+    "NDX Z26 5200 C",
+    "SPX",
+    "SPX Z26 4000 P",
+    "SPX Z26 4200 P",
+    "SPX Z26 4400 P",
+];
+
+/// Under a value grouping `shift+j`/`shift+k` move a line among its own
+/// group's lines: the step hops the other group's lines between them in
+/// the sheet, a count steps that many group siblings, the group's end
+/// refuses, and the other group's painted order never changes. One undo
+/// restores the move.
 #[gpui::test]
-fn line_moves_refuse_under_a_grouping(cx: &mut gpui::TestAppContext) {
+fn a_grouped_move_steps_within_its_group(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &INTERLEAVED);
+    h.command(&mut vcx, "group underlying_ref").unwrap();
+    h.dispatch(&mut vcx, "expand_all", None);
+    assert_eq!(h.tree(&vcx), GROUPED);
+    cursor_to(&h, &mut vcx, "SPX Z26 4000 P");
+    h.dispatch(&mut vcx, "move_down", Some(2));
+    assert_eq!(h.footer(&vcx), None);
+    assert_eq!(
+        h.tree(&vcx),
+        [
+            "NDX",
+            "NDX Z26 5000 C",
+            "NDX Z26 5200 C",
+            "SPX",
+            "SPX Z26 4200 P",
+            "SPX Z26 4400 P",
+            "SPX Z26 4000 P",
+        ]
+    );
+    assert_eq!(cursor_text(&h, &vcx).as_deref(), Some("SPX Z26 4000 P"));
+    let tree = h.tree(&vcx);
+    h.dispatch(&mut vcx, "move_down", None);
+    assert_eq!(h.footer(&vcx).as_deref(), Some(GROUP_END));
+    assert_eq!(h.tree(&vcx), tree, "the group's end moves nothing");
+    h.dispatch(&mut vcx, "move_up", None);
+    assert_eq!(h.footer(&vcx), None);
+    assert_eq!(h.tree(&vcx)[5..], ["SPX Z26 4000 P", "SPX Z26 4400 P"]);
+    h.dispatch(&mut vcx, "undo", None);
+    h.dispatch(&mut vcx, "undo", None);
+    assert_eq!(h.tree(&vcx), GROUPED, "each move is one undo step");
+    // The NDX group's first line stops at its top.
+    cursor_to(&h, &mut vcx, "NDX Z26 5000 C");
+    h.dispatch(&mut vcx, "move_up", None);
+    assert_eq!(h.footer(&vcx).as_deref(), Some(GROUP_END));
+}
+
+/// A `V` block of a group's lines slides as one through the group's own
+/// lines, keeping its selection; a selection reaching the other group
+/// still refuses on its grouping row.
+#[gpui::test]
+fn a_grouped_block_move_stays_in_its_group(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &INTERLEAVED);
+    h.command(&mut vcx, "group underlying_ref").unwrap();
+    h.dispatch(&mut vcx, "expand_all", None);
+    cursor_to(&h, &mut vcx, "SPX Z26 4000 P");
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.motion(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "move_down", None);
+    assert_eq!(h.footer(&vcx), None);
+    assert_eq!(
+        h.tree(&vcx)[3..],
+        ["SPX", "SPX Z26 4400 P", "SPX Z26 4000 P", "SPX Z26 4200 P"]
+    );
+    assert_eq!(h.tree(&vcx)[..3], GROUPED[..3], "NDX unchanged");
+    assert!(h.tile.read_with(&vcx, |t, _| t.selection.is_some()));
+    h.dispatch(&mut vcx, "move_down", None);
+    assert_eq!(h.footer(&vcx).as_deref(), Some(GROUP_END));
+    h.dispatch(&mut vcx, "escape", None);
+    h.dispatch(&mut vcx, "undo", None);
+    assert_eq!(h.tree(&vcx), GROUPED);
+}
+
+/// A leg moves among its package's legs under a grouping, stopping at the
+/// package's end with the flat wording; a split package and a leg of one
+/// refuse with the split footer and move nothing.
+#[gpui::test]
+fn grouped_leg_moves_stay_in_the_package_and_split_ones_refuse(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &MIXED);
     h.command(&mut vcx, "group underlying_ref").unwrap();
     h.dispatch(&mut vcx, "expand_all", None);
-    cursor_to(&h, &mut vcx, "SPX Z26 5000 C");
-    let before = h.tile.read_with(&vcx, |t, _| t.sheet.shorthand(0));
-    for verb in ["move_down", "move_up"] {
-        h.dispatch(&mut vcx, verb, None);
-        assert_eq!(
-            h.footer(&vcx).as_deref(),
-            Some("lines move in the flat sheet: clear the grouping first"),
-            "{verb}"
-        );
+    let legs: Vec<usize> = h.tile.read_with(&vcx, |t, _| {
+        (0..t.model.len())
+            .filter(|&g| matches!(t.model.kind(g), Some(GridRowKind::Leg { .. })))
+            .collect()
+    });
+    assert_eq!(legs.len(), 2);
+    let first = h.tree(&vcx)[legs[0]].clone();
+    cursor_to_row(&h, &mut vcx, legs[0]);
+    h.dispatch(&mut vcx, "move_down", None);
+    assert_eq!(h.footer(&vcx), None);
+    assert_eq!(h.tree(&vcx)[legs[1]], first, "the legs swapped");
+    assert_eq!(cursor_text(&h, &vcx), Some(first));
+    h.dispatch(&mut vcx, "move_down", None);
+    assert_eq!(h.footer(&vcx).as_deref(), Some("cannot move past the end"));
+
+    let (h, mut vcx) = open_seeded(cx, &CALENDAR);
+    h.command(&mut vcx, "group expiry").unwrap();
+    h.dispatch(&mut vcx, "expand_all", None);
+    let before = h.tree(&vcx);
+    let splits = split_rows(&h, &vcx);
+    for row in [splits[0], splits[0] + 1] {
+        cursor_to_row(&h, &mut vcx, row);
+        for verb in ["move_down", "move_up"] {
+            h.dispatch(&mut vcx, verb, None);
+            assert_eq!(
+                h.footer(&vcx).as_deref(),
+                Some(SPLIT_TEXT),
+                "{verb} at {row}"
+            );
+        }
     }
-    assert_eq!(h.tile.read_with(&vcx, |t, _| t.sheet.shorthand(0)), before);
+    assert_eq!(h.tree(&vcx), before);
 }
 
 /// With no grouping, a move whose neighbour the scope hides steps past it
