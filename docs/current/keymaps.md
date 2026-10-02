@@ -323,9 +323,14 @@ insert` (the underlying picker's field) it binds `enter`, `escape` and
 `up`/`down` (`volslice::list_down`/`list_up`); under `mode == menu` (the
 difference chooser) `enter` and `escape`, its steps being the shared ones.
 The diagnostics page's fragment binds only its verbs (`[`/`]`, `z o`/`z c`,
-`enter`, `/`) under `mode == normal` and `escape` under `mode == insert`; the
-page publishes `grid` beside its mode, so the shared motions reach its cursor
-in normal mode and stay out of the focused filter.
+`enter` and `space`, `tab`/`shift+tab` for a section's views, `/`, and a key
+per toolbar control) under `mode == normal` and `escape` under `mode ==
+insert`; the page publishes `grid` beside its mode, so the shared motions
+reach its cursor in normal mode and stay out of the focused filter. Its
+`tab` reaches the page because the shell root's `GeodeShell` context reclaims
+Tab from the component `Root`'s focus cycling, and the page keeps focus on its
+own handle, so no `DataTable` context (whose `tab` selects the next column)
+is on the focus path.
 
 A fragment may name any action, not only ones its own module registers, so
 long as its context is the module's own: both the blotter's and the pricer's

@@ -1230,22 +1230,34 @@ current keyboard workflow using the shell's keycaps.
 
 Keys in the page's own context: `j`/`k` move the cursor, `g g`/`G` jump,
 `ctrl+d`/`ctrl+u` move five rows and `ctrl+f`/`ctrl+b` ten, all with count
-prefixes; `[`/`]` cycle sections; `z o`/`z c` and Enter expand or collapse
-the cursor row where it expands (Data datasets, Config documents; a
-double-click does the same, a single click only selects); `/` focuses the
-section's filter input, which puts the page in insert mode, and Escape there
-restores the entry filter and returns to normal mode. Enter keeps the filter
-and returns to navigation; clicking a row does the same. On Performance,
-which paints no input, `/` does nothing. `g s` / `g d` / `g c` / `g l` /
-`g p` jump directly to sections. Config views cycle with `ctrl+tab` and
-`ctrl+shift+tab`. `y` copies details, `r` refreshes the catalog, `z R` /
-`z M` expand/collapse datasets, and `f` toggles Follow. `alt+backspace` or
-Reset filters clears only the visible section’s filters and returns focus
-to navigation; in Log it also enables every level and restores All targets.
-Selection remains
-on the same record through refreshes and filtering while it remains visible.
-The state-changing controls also have keyboard routes through the palette
-(Set log level…, Toggle performance overlay, Open config directory).
+prefixes; `[`/`]` cycle sections; `z o`/`z c`, Enter, and Space expand or
+collapse the cursor row where it expands (Data datasets, Config documents;
+a double-click does the same, a single click only selects); `/` focuses the
+section's filter input, which puts the page in insert mode, where Space and
+every other bare key type into the filter, and Escape there restores the
+entry filter and returns to normal mode. Enter keeps the filter and returns
+to navigation; clicking a row does the same. On Performance, which paints
+no input, `/` does nothing. `g s` / `g d` / `g c` / `g l` / `g p` jump
+directly to sections. Tab and Shift+Tab step the section's views, wrapping
+(Config: Current issues, History, Effective values), as do `ctrl+tab` and
+`ctrl+shift+tab`; the other sections have no views, so there Tab is
+consumed and does nothing rather than moving focus into the chrome. `y`
+copies details, `r` refreshes the catalog, `z shift+r` / `z shift+m`
+expand/collapse all datasets, and `o` (Config) opens the config directory.
+In Log, `-` and `=` show one fewer or one more level as a minimum severity
+(ERROR always stays; a hand-picked set steps from its most verbose level
+shown and becomes contiguous), `t` / `shift+t` step the target filter
+through All targets and the tail's targets, `f` toggles Follow, `ctrl+l`
+clears the log, and `shift+l` opens the shell's Set log level… chooser,
+the keyboard route to what the Levels popover sets, since the popover's
+buttons take no keyboard focus. Escape over an open Levels popover closes
+the popover and keeps the page. `alt+backspace` or Reset filters clears only
+the visible section’s filters and returns focus to navigation; in Log it
+also enables every level and restores All targets. Selection remains on the
+same record through refreshes and filtering while it remains visible. The
+performance overlay switch's keyboard route is the context-free
+`perf::toggle_overlay` (`mod+shift+p`). Every toolbar control's tooltip
+names its key, and the footer names the current section's main keys.
 
 Each table has a result strip showing visible and total item counts. Data
 counts datasets independently of expanded generation rows; Log excludes loss

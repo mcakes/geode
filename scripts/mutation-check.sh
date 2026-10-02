@@ -32099,6 +32099,92 @@ run_mutation "volslice: close cancels by key" \
   '        let _ = &self.data;' \
   geode-volslice hide_keeps_the_query_and_close_cancels
 
+# ---- the diagnostics page: keyboard routes through the real keymap
+
+run_mutation "diagnostics keys: space does not toggle a tree row" \
+  crates/geode-diagnostics/src/lib.rs \
+  '"space" = "diagnostics::activate"' \
+  '# space unbound' \
+  geode-diagnostics space_toggles_a_dataset_row_as_enter_does
+
+run_mutation "diagnostics keys: the filter loses its space" \
+  crates/geode-diagnostics/src/lib.rs \
+  '"escape" = "diagnostics::blur"' \
+  '"escape" = "diagnostics::blur"
+"space" = "diagnostics::activate"' \
+  geode-diagnostics space_in_the_filter_types_a_space
+
+run_mutation "diagnostics keys: tab does not step the views" \
+  crates/geode-diagnostics/src/lib.rs \
+  '"tab" = "diagnostics::next_view"' \
+  '# tab unbound' \
+  geode-diagnostics tab_and_shift_tab_step_the_config_views
+
+run_mutation "diagnostics keys: shift+tab steps forward" \
+  crates/geode-diagnostics/src/lib.rs \
+  '"shift+tab" = "diagnostics::prev_view"' \
+  '"shift+tab" = "diagnostics::next_view"' \
+  geode-diagnostics tab_and_shift_tab_step_the_config_views
+
+run_mutation "diagnostics keys: reset filters spelled with a dash" \
+  crates/geode-diagnostics/src/lib.rs \
+  '"alt+backspace" = "diagnostics::reset_filters"' \
+  '"alt-backspace" = "diagnostics::reset_filters"' \
+  geode-diagnostics dataset_fold_all_and_reset_filters_take_their_shifted_and_alt_keys
+
+run_mutation "diagnostics keys: expand all spelled by case" \
+  crates/geode-diagnostics/src/lib.rs \
+  '"z shift+r" = "diagnostics::expand_all"' \
+  '"z R" = "diagnostics::expand_all"' \
+  geode-diagnostics dataset_fold_all_and_reset_filters_take_their_shifted_and_alt_keys
+
+run_mutation "diagnostics keys: o opens the config directory from any section" \
+  crates/geode-diagnostics/src/page.rs \
+  '            "open_config_dir" if self.section == Section::Config => {' \
+  '            "open_config_dir" => {' \
+  geode-diagnostics o_opens_the_config_directory_only_from_config
+
+run_mutation "diagnostics keys: minus never drops a level" \
+  crates/geode-diagnostics/src/page.rs \
+  '            (Some(ix), false) => ix.saturating_sub(1),' \
+  '            (Some(ix), false) => ix,' \
+  geode-diagnostics minus_and_equals_step_the_minimum_log_level
+
+run_mutation "diagnostics keys: equals steps from the least verbose level shown" \
+  crates/geode-diagnostics/src/page.rs \
+  '        let shown = self.log_filter.levels.iter().rposition(|on| *on);' \
+  '        let shown = self.log_filter.levels.iter().position(|on| !*on).map(|ix| ix.saturating_sub(1));' \
+  geode-diagnostics minus_and_equals_step_the_minimum_log_level
+
+run_mutation "diagnostics keys: shift+t steps forward" \
+  crates/geode-diagnostics/src/page.rs \
+  '            (at + len - 1) % len' \
+  '            (at + 1) % len' \
+  geode-diagnostics t_and_shift_t_step_the_log_target
+
+run_mutation "diagnostics keys: ctrl+l clears nothing" \
+  crates/geode-diagnostics/src/page.rs \
+  '            "clear_log" if self.section == Section::Log => self.clear_log(cx),' \
+  '            "clear_log" if self.section == Section::Log => {}' \
+  geode-diagnostics ctrl_l_clears_the_log
+
+run_mutation "diagnostics keys: shift+l opens no chooser" \
+  crates/geode-diagnostics/src/page.rs \
+  '                (self.actions)(&ActionId("log::level".into()), window, cx);' \
+  '                let _ = &self.actions;' \
+  geode-diagnostics shift_l_opens_the_level_chooser_and_escape_closes_the_popover
+
+run_mutation "diagnostics keys: escape over the popover closes the page" \
+  crates/geode-diagnostics/src/page.rs \
+  '            if self.levels.open {
+                self.set_levels_open(false, cx);
+                return true;
+            }' \
+  '            if false {
+                return true;
+            }' \
+  geode-diagnostics shift_l_opens_the_level_chooser_and_escape_closes_the_popover
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

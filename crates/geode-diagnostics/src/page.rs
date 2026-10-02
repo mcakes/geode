@@ -922,6 +922,52 @@ impl DiagnosticsPage {
         }
     }
 
+    /// Show one more (`more`) or one fewer level, as a minimum severity:
+    /// the levels from ERROR down to the next step on, the rest off. The
+    /// step counts from the most verbose level shown, so a hand-picked
+    /// set becomes the contiguous one it reaches; ERROR always stays.
+    pub(crate) fn step_min_level(&mut self, more: bool, cx: &mut Context<Self>) {
+        let last = self.log_filter.levels.len() - 1;
+        let shown = self.log_filter.levels.iter().rposition(|on| *on);
+        let next = match (shown, more) {
+            (None, _) => 0,
+            (Some(ix), true) => (ix + 1).min(last),
+            (Some(ix), false) => ix.saturating_sub(1),
+        };
+        let levels = std::array::from_fn(|ix| ix <= next);
+        if levels != self.log_filter.levels {
+            self.log_filter.levels = levels;
+            self.rebuild(cx);
+        }
+    }
+
+    /// Step the target filter through the select's items (all, then each
+    /// target in the tail), wrapping. The rebuild's sync shows the pick in
+    /// the select.
+    pub(crate) fn step_target(&mut self, backwards: bool, cx: &mut Context<Self>) {
+        let mut targets: Vec<Option<String>> = vec![None];
+        targets.extend(
+            model::log_targets(self.log.records())
+                .into_iter()
+                .map(|t| Some(t.to_string())),
+        );
+        if self.log_filter.target.is_some() && !targets.contains(&self.log_filter.target) {
+            targets.push(self.log_filter.target.clone());
+        }
+        let len = targets.len();
+        let at = targets
+            .iter()
+            .position(|t| *t == self.log_filter.target)
+            .unwrap_or(0);
+        let next = if backwards {
+            (at + len - 1) % len
+        } else {
+            (at + 1) % len
+        };
+        let target = targets.swap_remove(next);
+        self.set_log_target(target, cx);
+    }
+
     /// Follow on jumps to the last row, as `bottom` does; off leaves the
     /// cursor where it is.
     pub(crate) fn set_follow(&mut self, follow: bool, cx: &mut Context<Self>) {
@@ -1134,6 +1180,16 @@ impl DiagnosticsPage {
         if let Some(m) = motion::parse(action, count) {
             return self.apply_motion(m, cx);
         }
+        // The shell offers `page::close` (Escape, the Back button) to the
+        // page first: an open Levels popover is the topmost surface, so
+        // Escape dismisses it and the page stays.
+        if action.0 == "page::close" {
+            if self.levels.open {
+                self.set_levels_open(false, cx);
+                return true;
+            }
+            return false;
+        }
         let Some(name) = action.0.strip_prefix("diagnostics::") else {
             return false;
         };
@@ -1160,6 +1216,23 @@ impl DiagnosticsPage {
                 self.set_all_datasets_collapsed(true, cx)
             }
             "expand_all" | "collapse_all" => {}
+            "more_levels" if self.section == Section::Log => self.step_min_level(true, cx),
+            "fewer_levels" if self.section == Section::Log => self.step_min_level(false, cx),
+            "next_target" if self.section == Section::Log => self.step_target(false, cx),
+            "prev_target" if self.section == Section::Log => self.step_target(true, cx),
+            "clear_log" if self.section == Section::Log => self.clear_log(cx),
+            // The popover's level buttons take no keyboard focus, so the
+            // keyboard route is the shell's log-level chooser, which
+            // requests through the same `Diagnostics` channel.
+            "log_levels" if self.section == Section::Log => {
+                self.set_levels_open(false, cx);
+                (self.actions)(&ActionId("log::level".into()), window, cx);
+            }
+            "open_config_dir" if self.section == Section::Config => {
+                (self.actions)(&ActionId("config::open_directory".into()), window, cx);
+            }
+            "more_levels" | "fewer_levels" | "next_target" | "prev_target" | "clear_log"
+            | "log_levels" | "open_config_dir" => {}
             "expand" => self.toggle_expansion_at_cursor(Some(true), cx),
             "collapse" => self.toggle_expansion_at_cursor(Some(false), cx),
             "activate" => self.toggle_expansion_at_cursor(None, cx),
@@ -1358,6 +1431,7 @@ impl DiagnosticsPage {
                                     .ghost()
                                     .small()
                                     .label("Refresh catalog")
+                                    .tooltip("Refresh catalog (R)")
                                     .on_click(move |_, _window, cx| {
                                         let _ = refresh.update(cx, |p, cx| p.request_catalog(cx));
                                     }),
@@ -1372,6 +1446,7 @@ impl DiagnosticsPage {
                                     .ghost()
                                     .small()
                                     .label("Expand all")
+                                    .tooltip("Expand all datasets (Z Shift+R)")
                                     .on_click(move |_, _window, cx| {
                                         let _ = expand.update(cx, |p, cx| {
                                             p.set_all_datasets_collapsed(false, cx)
@@ -1388,6 +1463,7 @@ impl DiagnosticsPage {
                                     .ghost()
                                     .small()
                                     .label("Collapse all")
+                                    .tooltip("Collapse all datasets (Z Shift+M)")
                                     .on_click(move |_, _window, cx| {
                                         let _ = collapse.update(cx, |p, cx| {
                                             p.set_all_datasets_collapsed(true, cx)
@@ -1513,6 +1589,8 @@ mod tests {
     use geode_shell::tiling::WorkspaceIx;
 
     use crate::prepared::RowKind;
+
+    mod keys;
 
     struct Host {
         page: Entity<DiagnosticsPage>,
