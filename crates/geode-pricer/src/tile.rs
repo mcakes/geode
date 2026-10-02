@@ -5658,17 +5658,6 @@ impl PricerTile {
     }
 
     fn on_table_event(&mut self, event: &TableEvent, window: &mut Window, cx: &mut Context<Self>) {
-        // A grip's click and double-click are the grip's: no cursor move,
-        // no selection change, no editor. A drag released back on its own
-        // cell lands here instead of a drop, and so ends.
-        if matches!(
-            event,
-            TableEvent::SelectCell(..) | TableEvent::DoubleClickedCell(..)
-        ) && self.table.read(cx).delegate().grip_pressed
-        {
-            self.row_drag_released_outside(cx);
-            return;
-        }
         match event {
             TableEvent::SelectCell(row, col) => {
                 // A click anywhere cancels an open entry or editor, never

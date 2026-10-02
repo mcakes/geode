@@ -520,12 +520,6 @@ pub struct SheetDelegate {
     /// editor, its own cell — and so cancel the edit the press was aimed
     /// into.
     inner_press: Option<InnerPress>,
-    /// Whether the latest press in this table landed on a grip. The
-    /// table's own `SelectCell` and `DoubleClickedCell` for that press
-    /// arrive on its release; the tile drops both while this holds, so a
-    /// grip never moves the cursor, extends a selection or opens an
-    /// editor. Cleared by the next press anywhere else in the table.
-    pub(crate) grip_pressed: bool,
     /// Per grid row, whether it paints a grip: a line, a package or a
     /// leg the tile can move (`PricerTile::grip_rows`), prepared on every
     /// install. Empty under a sort.
@@ -583,7 +577,6 @@ impl SheetDelegate {
             drag_last: None,
             drag_origin: None,
             inner_press: None,
-            grip_pressed: false,
             grips: Vec::new(),
             drop_gap: None,
             colours: Arc::new(NamedColours::default()),
@@ -1249,7 +1242,6 @@ impl TableDelegate for SheetDelegate {
                     if d.inner_press.take().is_some() || d.drag_origin.is_some() {
                         return;
                     }
-                    d.grip_pressed = false;
                     let Some((_, col)) = d.cursor else {
                         return;
                     };
@@ -1578,9 +1570,10 @@ impl SheetDelegate {
     /// chevron's control paint.
     ///
     /// Its press records [`InnerPress::Grip`] (the cell and the row it
-    /// bubbles through report nothing) and `grip_pressed` (the tile drops
-    /// the table's click and double-click for it), then reports
-    /// [`RowGripPressed`]. Dragging past gpui's threshold starts a
+    /// bubbles through report nothing), then reports [`RowGripPressed`];
+    /// its click stops there, so the table's `SelectCell` and
+    /// `DoubleClickedCell` never see it (no cursor move, no selection
+    /// change, no editor). Dragging past gpui's threshold starts a
     /// [`RowDrag`]; the tile's body tracks and drops it.
     fn render_grip(&mut self, row_ix: usize, cx: &Context<TableState<Self>>) -> Stateful<Div> {
         let states = self.chevron_states(cx.theme(), false);
@@ -1609,7 +1602,6 @@ impl SheetDelegate {
                 cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                     let d = this.delegate_mut();
                     d.inner_press = Some(InnerPress::Grip);
-                    d.grip_pressed = true;
                     cx.emit(RowGripPressed(row_ix));
                 }),
             )
@@ -1657,7 +1649,6 @@ impl SheetDelegate {
                 if d.inner_press == Some(InnerPress::Grip) {
                     return;
                 }
-                d.grip_pressed = false;
                 if d.inner_press == Some(InnerPress::Chevron) {
                     cx.emit(CellPointer::Press {
                         row: row_ix,

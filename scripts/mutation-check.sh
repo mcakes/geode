@@ -27183,10 +27183,10 @@ run_mutation "pricer reorder: escape leaves a grip drag live" \
   geode-pricer escape_cancels_a_grip_drag
 
 run_mutation "pricer reorder: a grip click reaches the table" \
-  crates/geode-pricer/src/tile.rs \
-  '        ) && self.table.read(cx).delegate().grip_pressed' \
-  '        ) && false && self.table.read(cx).delegate().grip_pressed' \
-  geode-pricer a_drag_released_on_its_own_cell_does_not_click
+  crates/geode-pricer/src/delegate.rs \
+  '            .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.stop_propagation()))' \
+  '            .on_click(cx.listener(|_, _: &ClickEvent, _, _| {}))' \
+  geode-pricer a_grip_press_never_selects_moves_the_cursor_or_edits
 
 run_mutation "pricer reorder: a grip press is a cell press" \
   crates/geode-pricer/src/delegate.rs \

@@ -113,8 +113,8 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 - A grip drag's plan is prepared at the press and re-prepared on every
   install from the movers' ids, so a rebuild mid-drag never drops onto a
   stale index. The gap comes from the table's scroll geometry (uniform row
-  height), never from render. The grip's press marks `grip_pressed`, and the
-  tile drops the table's `SelectCell`/`DoubleClickedCell` while it holds.
+  height), never from render. The grip's click stops propagation, so the
+  table's `SelectCell`/`DoubleClickedCell` never see it.
 - A sort is display order only. `PricerTile::sort` names a vocabulary
   column; `rebuild_as` ranks the freshly built rollup BEFORE comparing it
   with the previous one, so a price that changes a measure sort's order
