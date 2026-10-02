@@ -31363,6 +31363,15 @@ run_mutation "chrome rows: palette open ignores recorded usage" \
   geode-shell \
   a_dispatched_item_leads_the_next_palette_open
 
+# Typing resets the selection to row 0; without the input subscription's
+# scroll, a list paged down keeps its offset and the top row is not painted.
+run_mutation "chrome rows: typing after a scroll leaves the list scrolled" \
+  crates/geode-shell/src/shell/mod.rs \
+  $'            palette.set_query(input.read(cx).value().to_string());\n            view.sync_palette_scroll();' \
+  $'            palette.set_query(input.read(cx).value().to_string());' \
+  geode-shell \
+  typing_after_a_scroll_paints_the_top_row
+
 # The blotter's `/` cells: a re-index against another display drops every
 # held cell, so no cell of the old snapshot paints under the new rows.
 run_mutation "blotter find: an install keeps the old snapshot's cells" \

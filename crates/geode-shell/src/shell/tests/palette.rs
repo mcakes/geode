@@ -1649,6 +1649,40 @@ fn the_palette_paints_only_the_visible_rows(cx: &mut gpui::TestAppContext) {
     );
 }
 
+/// Typing after a page-down returns the list to its top: the new query
+/// selects row 0, and the input subscription scrolls it back into view.
+#[gpui::test]
+fn typing_after_a_scroll_paints_the_top_row(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("ctrl-k ctrl-f ctrl-f ctrl-f");
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(
+        vcx.debug_bounds("palette-row-0").is_none(),
+        "sanity: three pages down scrolls row 0 out of the list"
+    );
+    vcx.simulate_input("e");
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let (selected, typed) = shell.read_with(&vcx, |s, _| {
+        let p = s.palette.as_ref().unwrap();
+        (p.selected(), p.filtered().len())
+    });
+    assert_eq!(selected, 0, "a query change selects the top row");
+    assert!(
+        typed > 4 * crate::palette::VISIBLE_ROWS,
+        "the query still matches more than the scrolled-to offset: {typed}"
+    );
+    let list = vcx.debug_bounds("palette-list").expect("the list paints");
+    let row = vcx
+        .debug_bounds("palette-row-0")
+        .expect("row 0 paints after typing");
+    assert!(list.intersects(&row), "row {row:?} inside {list:?}");
+}
+
 /// Paging past the viewport keeps the selected row painted inside the list.
 #[gpui::test]
 fn paging_the_palette_keeps_the_selected_row_painted(cx: &mut gpui::TestAppContext) {
