@@ -39,14 +39,18 @@
 //!
 //! `[frame]` stores the shared lane's scope, grouping slot, and as-of;
 //! `workspaces.N.frame` stores a pinned workspace's own lane in the same
-//! format, and its presence means workspace N is pinned. `[palette.usage]`
+//! format, and its presence means workspace N is pinned. `[links.<letter>]`
+//! stores one link group's scope under `scope`, in the encoding `[frame]`
+//! uses for its own (`dimensions`, `text`, `expression`, `named`); a group
+//! whose scope is empty writes no table, and an absent table reads as an
+//! empty scope. `[palette.usage]`
 //! stores usage counts and timestamps; `[pages.<kind>]` stores one opaque
 //! table per page kind (whether a page was open is not recorded). Unknown
 //! keys are ignored on read and not preserved on save.
 //!
 //! An invalid main tree or session header rejects the entire session. Docks,
-//! tile records, frame fields, palette usage, and page tables recover locally
-//! where possible;
+//! tile records, frame fields, link group scopes, palette usage, and page
+//! tables recover locally where possible;
 //! see [`from_toml`]. [`load`] returns a fresh session on read or parse failure.
 //! Neither loading nor healing rewrites the file, but subsequent saves replace
 //! it with current state, without retaining a backup.
@@ -104,6 +108,11 @@ pub type PageRecords = BTreeMap<String, toml::Table>;
 /// present here means that workspace is pinned; an absent key is unpinned.
 pub type PinnedRecords = BTreeMap<WorkspaceIx, FrameRecord>;
 
+/// Each link group's scope, in `Group::ALL` order, written as
+/// `[links.<letter>]`. An empty scope is a group nothing was written to and
+/// has no table.
+pub type GroupScopes = [Scope; 4];
+
 /// What [`load`]/[`from_toml`] hand back: the restored layout, each tile's
 /// module record, the frame's own restored state if the file had one, page
 /// state, and any non-fatal warnings accumulated healing any of it.
@@ -114,6 +123,9 @@ pub struct Restored {
     pub frame: Option<FrameRecord>,
     /// Pinned workspace lanes from `workspaces.N.frame`; empty when none is pinned.
     pub pinned: PinnedRecords,
+    /// Link group scopes from `[links.<letter>]`; empty where the file has
+    /// no table for a group.
+    pub links: GroupScopes,
     /// Palette usage from `[palette.usage]`; absent history starts empty.
     pub palette_usage: PaletteUsage,
     /// Page state from `[pages.<kind>]`; an absent table restores as empty.
@@ -134,50 +146,185 @@ pub struct FrameRecord {
     pub as_of: AsOf,
 }
 
+/// Write a scope's fields into `t`: `dimensions`, `text`, `expression` and
+/// `named`, each only when set, omitting empty dimension selections. The
+/// one scope encoding of the session file: `[frame]`, a pinned workspace's
+/// frame and a link group's `scope` all use it. `Scope::impossible` is not
+/// written.
+fn scope_to_toml(scope: &Scope, t: &mut toml::Table) {
+    let mut dims = toml::Table::new();
+    for d in scope.dimensions.iter().filter(|d| !d.values.is_empty()) {
+        dims.insert(
+            d.column.clone(),
+            toml::Value::Array(
+                d.values
+                    .iter()
+                    .map(|v| toml::Value::String(v.clone()))
+                    .collect(),
+            ),
+        );
+    }
+    // An absent dimensions table restores as an empty selection.
+    if !dims.is_empty() {
+        t.insert("dimensions".into(), toml::Value::Table(dims));
+    }
+    if let Some(text) = &scope.text {
+        t.insert("text".into(), toml::Value::String(text.clone()));
+    }
+    if let Some(e) = &scope.expression {
+        t.insert("expression".into(), toml::Value::String(e.to_string()));
+    }
+    if !scope.named.is_empty() {
+        t.insert(
+            "named".into(),
+            toml::Value::Array(
+                scope
+                    .named
+                    .iter()
+                    .map(|n| toml::Value::String(n.clone()))
+                    .collect(),
+            ),
+        );
+    }
+}
+
+/// Read the scope [`scope_to_toml`] wrote into `t`, without schema or
+/// dataset validation. Invalid expression syntax and non-array dimension
+/// entries warn, naming `what` (the table being read); other wrong-type
+/// fields and non-string dimension values are ignored. Unknown column
+/// names remain, and `Scope::impossible` resets to false.
+fn scope_from_toml(t: &toml::Table, what: &str, warnings: &mut Vec<String>) -> Scope {
+    let mut dimensions = Vec::new();
+    if let Some(dims_table) = t.get("dimensions").and_then(|v| v.as_table()) {
+        for (column, values) in dims_table {
+            let Some(arr) = values.as_array() else {
+                warnings.push(format!(
+                    "{what}: dimension '{column}' is not an array; ignored"
+                ));
+                continue;
+            };
+            let values: Vec<String> = arr
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(str::to_string)
+                .collect();
+            if !values.is_empty() {
+                dimensions.push(DimensionSelection {
+                    column: column.clone(),
+                    values,
+                });
+            }
+        }
+    }
+    let text = t
+        .get("text")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let expression = t
+        .get("expression")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .and_then(|s| match parse_expr(s) {
+            Ok(e) => Some(e),
+            Err(e) => {
+                warnings.push(format!("{what}: expression '{s}': {e}; dropped"));
+                None
+            }
+        });
+    // Names are kept without checking they are defined; the frame's
+    // `effective_scope` reports a missing one when a tile queries.
+    let mut named: Vec<String> = Vec::new();
+    match t.get("named") {
+        None => {}
+        Some(toml::Value::Array(a)) => {
+            for s in a.iter().filter_map(|v| v.as_str()) {
+                if !named.iter().any(|n| n == s) {
+                    named.push(s.to_string());
+                }
+            }
+        }
+        Some(_) => warnings.push(format!(
+            "{what}: named must be an array of strings; ignored"
+        )),
+    }
+    Scope {
+        dimensions,
+        text,
+        expression,
+        impossible: false,
+        named,
+    }
+}
+
+/// Add each link group's scope to a serialized session as
+/// `[links.<letter>]`, its `scope` in [`scope_to_toml`]'s encoding. A group
+/// whose scope encodes to nothing writes no table, and with no group to
+/// write, no `links` table at all. `true` when anything was inserted.
+///
+/// Separate from [`to_toml`] because the periodic writer compares the
+/// session without these tables: a group's scope moves with an emitting
+/// tile's cursor, and must not by itself rewrite the file.
+pub fn insert_links(root: &mut toml::Table, links: &GroupScopes) -> bool {
+    let mut table = toml::Table::new();
+    for group in Group::ALL {
+        let mut scope = toml::Table::new();
+        scope_to_toml(&links[group.index()], &mut scope);
+        if scope.is_empty() {
+            continue;
+        }
+        let mut entry = toml::Table::new();
+        entry.insert("scope".to_string(), toml::Value::Table(scope));
+        table.insert(group.as_str().to_string(), toml::Value::Table(entry));
+    }
+    if table.is_empty() {
+        return false;
+    }
+    root.insert("links".to_string(), toml::Value::Table(table));
+    true
+}
+
+/// Read `[links.<letter>]`. An absent table, or a group table with no
+/// `scope`, is an empty scope. A key that names no group, a group entry
+/// that is not a table and a `scope` that is not a table each warn and are
+/// dropped; the other groups still read.
+fn links_from_toml(value: Option<&toml::Value>, warnings: &mut Vec<String>) -> GroupScopes {
+    let mut links = GroupScopes::default();
+    let table = match value {
+        None => return links,
+        Some(toml::Value::Table(t)) => t,
+        Some(_) => {
+            warnings.push("links is not a table; ignored".to_string());
+            return links;
+        }
+    };
+    for (key, entry) in table {
+        let Some(group) = Group::parse(key) else {
+            warnings.push(format!("links.{key} names no link group; ignored"));
+            continue;
+        };
+        let Some(entry) = entry.as_table() else {
+            warnings.push(format!("links.{key} is not a table; ignored"));
+            continue;
+        };
+        match entry.get("scope") {
+            None => {}
+            Some(toml::Value::Table(scope)) => {
+                links[group.index()] =
+                    scope_from_toml(scope, &format!("links.{key}.scope"), warnings);
+            }
+            Some(_) => warnings.push(format!("links.{key}.scope is not a table; ignored")),
+        }
+    }
+    links
+}
+
 impl FrameRecord {
     /// Serialize frame fields, omitting empty dimension selections, an unset
     /// slot, and live as-of. The caller decides whether to include `[frame]`.
     pub fn to_toml(&self) -> toml::Table {
         let mut t = toml::Table::new();
-        let mut dims = toml::Table::new();
-        for d in self
-            .scope
-            .dimensions
-            .iter()
-            .filter(|d| !d.values.is_empty())
-        {
-            dims.insert(
-                d.column.clone(),
-                toml::Value::Array(
-                    d.values
-                        .iter()
-                        .map(|v| toml::Value::String(v.clone()))
-                        .collect(),
-                ),
-            );
-        }
-        // An absent dimensions table restores as an empty selection.
-        if !dims.is_empty() {
-            t.insert("dimensions".into(), toml::Value::Table(dims));
-        }
-        if let Some(text) = &self.scope.text {
-            t.insert("text".into(), toml::Value::String(text.clone()));
-        }
-        if let Some(e) = &self.scope.expression {
-            t.insert("expression".into(), toml::Value::String(e.to_string()));
-        }
-        if !self.scope.named.is_empty() {
-            t.insert(
-                "named".into(),
-                toml::Value::Array(
-                    self.scope
-                        .named
-                        .iter()
-                        .map(|n| toml::Value::String(n.clone()))
-                        .collect(),
-                ),
-            );
-        }
+        scope_to_toml(&self.scope, &mut t);
         if let Some(n) = self.active_slot {
             t.insert("slot".into(), toml::Value::Integer(n as i64));
         }
@@ -192,60 +339,7 @@ impl FrameRecord {
     /// warn; other wrong-type fields and non-string dimension values are ignored.
     /// Unknown column names remain, and `Scope::impossible` resets to false.
     pub fn from_toml(t: &toml::Table, warnings: &mut Vec<String>) -> FrameRecord {
-        let mut dimensions = Vec::new();
-        if let Some(dims_table) = t.get("dimensions").and_then(|v| v.as_table()) {
-            for (column, values) in dims_table {
-                let Some(arr) = values.as_array() else {
-                    warnings.push(format!(
-                        "frame: dimension '{column}' is not an array; ignored"
-                    ));
-                    continue;
-                };
-                let values: Vec<String> = arr
-                    .iter()
-                    .filter_map(|v| v.as_str())
-                    .map(str::to_string)
-                    .collect();
-                if !values.is_empty() {
-                    dimensions.push(DimensionSelection {
-                        column: column.clone(),
-                        values,
-                    });
-                }
-            }
-        }
-        let text = t
-            .get("text")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
-        let expression = t
-            .get("expression")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .and_then(|s| match parse_expr(s) {
-                Ok(e) => Some(e),
-                Err(e) => {
-                    warnings.push(format!("frame: expression '{s}': {e}; dropped"));
-                    None
-                }
-            });
-        // Names are kept without checking they are defined; the frame's
-        // `effective_scope` reports a missing one when a tile queries.
-        let mut named: Vec<String> = Vec::new();
-        match t.get("named") {
-            None => {}
-            Some(toml::Value::Array(a)) => {
-                for s in a.iter().filter_map(|v| v.as_str()) {
-                    if !named.iter().any(|n| n == s) {
-                        named.push(s.to_string());
-                    }
-                }
-            }
-            Some(_) => {
-                warnings.push("frame: named must be an array of strings; ignored".to_string())
-            }
-        }
+        let scope = scope_from_toml(t, "frame", warnings);
         let active_slot = match t.get("slot") {
             None => None,
             Some(v) => match v.as_integer() {
@@ -267,13 +361,7 @@ impl FrameRecord {
             },
         };
         FrameRecord {
-            scope: Scope {
-                dimensions,
-                text,
-                expression,
-                impossible: false,
-                named,
-            },
+            scope,
             active_slot,
             as_of,
         }
@@ -284,7 +372,8 @@ impl FrameRecord {
 /// under the workspace whose main or dock tree contains the ID; omit stale
 /// records. Include `[frame]` whenever `frame` is `Some`, even if its table is
 /// empty, `workspaces.N.frame` for exactly the workspaces in `pinned`, and
-/// palette usage and pages only when nonempty.
+/// palette usage and pages only when nonempty. Link group scopes are not
+/// written here: [`insert_links`] adds them.
 pub fn to_toml(
     workspaces: &Workspaces,
     tiles: &TileRecords,
@@ -452,7 +541,7 @@ pub fn to_toml(
 /// a visible empty dock remains a valid focus target.
 ///
 /// Malformed or locally dangling tile records warn and are dropped. Frame,
-/// palette, and page fields recover independently; a non-table
+/// link group, palette, and page fields recover independently; a non-table
 /// `workspaces.N.frame` warns and that workspace restores unpinned, while a
 /// table recovers its usable fields like `[frame]`; a missing version warns
 /// but still loads. Recovery does not imply schema validation of module, page,
@@ -540,6 +629,10 @@ pub fn from_toml(table: &toml::Table) -> Result<Restored, Vec<String>> {
         }
     };
 
+    // Absent group scopes are empty. A malformed entry warns and is
+    // dropped without touching the other groups.
+    let links = links_from_toml(table.get("links"), &mut warnings);
+
     // Absent usage is empty. Wrong-type palette or usage tables warn and
     // recover independently of the layout.
     let palette_usage = match table.get("palette") {
@@ -581,6 +674,7 @@ pub fn from_toml(table: &toml::Table) -> Result<Restored, Vec<String>> {
         tiles,
         frame,
         pinned,
+        links,
         palette_usage,
         pages,
         warnings,
@@ -1020,9 +1114,8 @@ fn node_from_toml(value: &toml::Value) -> Result<Node, String> {
     }
 }
 
-/// Serialize the current session without filesystem access. The periodic
-/// shell flush calls this on the UI thread, then sends the returned text to
-/// [`write_atomic`] on the background executor.
+/// [`to_toml`] as text: the session without the link groups' scopes, and
+/// without filesystem access.
 pub fn to_string_pretty(
     workspaces: &Workspaces,
     tiles: &TileRecords,
@@ -1031,8 +1124,14 @@ pub fn to_string_pretty(
     palette_usage: &PaletteUsage,
     pages: &PageRecords,
 ) -> Result<String, String> {
-    let table = to_toml(workspaces, tiles, frame, pinned, palette_usage, pages);
-    toml::to_string_pretty(&table).map_err(|e| e.to_string())
+    table_to_string(&to_toml(
+        workspaces,
+        tiles,
+        frame,
+        pinned,
+        palette_usage,
+        pages,
+    ))
 }
 
 /// Replace `path` via `crate::config_write::write_file`: create the parent
@@ -1053,19 +1152,29 @@ pub fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
     crate::config_write::write_file(path, text).map_err(std::io::Error::other)
 }
 
-/// Serialize and write synchronously. Used by the best-effort quit hook and
-/// callers that do not need the UI/background split of [`to_string_pretty`]
-/// and [`write_atomic`].
+/// Serialize a session table: [`to_toml`]'s, with or without the tables
+/// [`insert_links`] adds.
+pub fn table_to_string(table: &toml::Table) -> Result<String, String> {
+    toml::to_string_pretty(table).map_err(|e| e.to_string())
+}
+
+/// Serialize and write synchronously, link group scopes included. Used by
+/// the best-effort quit hook and callers that do not need the UI/background
+/// split of the periodic flush.
+#[allow(clippy::too_many_arguments)]
 pub fn save(
     path: &Path,
     workspaces: &Workspaces,
     tiles: &TileRecords,
     frame: Option<&FrameRecord>,
     pinned: &PinnedRecords,
+    links: &GroupScopes,
     palette_usage: &PaletteUsage,
     pages: &PageRecords,
 ) -> std::io::Result<()> {
-    let text = to_string_pretty(workspaces, tiles, frame, pinned, palette_usage, pages)
+    let mut table = to_toml(workspaces, tiles, frame, pinned, palette_usage, pages);
+    insert_links(&mut table, links);
+    let text = table_to_string(&table)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     write_atomic(path, &text)
 }
@@ -1080,6 +1189,7 @@ pub fn load(path: &Path) -> Restored {
         tiles: TileRecords::new(),
         frame: None,
         pinned: PinnedRecords::new(),
+        links: GroupScopes::default(),
         palette_usage: PaletteUsage::new(),
         pages: PageRecords::new(),
         warnings,
@@ -1420,6 +1530,136 @@ mod tests {
             warning.contains(&format!("tile {id}")) && warning.contains("emit"),
             "{warning}"
         );
+    }
+
+    fn underlying(u: &str) -> Scope {
+        Scope::one("underlying_ref", u)
+    }
+
+    /// The session table of an empty layout with these group scopes added.
+    fn session_with_links(links: &GroupScopes) -> toml::Table {
+        let mut table = session_of(&Workspaces::new(), &TileRecords::new());
+        insert_links(&mut table, links);
+        table
+    }
+
+    /// A group's scope is written under its letter in the encoding
+    /// `[frame]` uses, and read back equal: every field a scope carries,
+    /// through the file's text, which is what a restart reads.
+    #[test]
+    fn a_group_scope_round_trips_and_an_empty_one_writes_no_table() {
+        let mut links = GroupScopes::default();
+        links[Group::A.index()] = underlying("SPX.Z");
+        links[Group::C.index()] = Scope {
+            dimensions: vec![DimensionSelection {
+                column: "book".into(),
+                values: vec!["BK001".into(), "BK002".into()],
+            }],
+            text: Some("spx".into()),
+            expression: Some(parse_expr("npv > 0").unwrap()),
+            impossible: false,
+            named: vec!["us".into()],
+        };
+        let table = session_with_links(&links);
+        let written = table["links"].as_table().unwrap();
+        assert_eq!(
+            written.keys().collect::<Vec<_>>(),
+            ["a", "c"],
+            "a group with an empty scope writes no table: {written:?}"
+        );
+        // The frame's own encoding: a `[frame]` record of the same scope
+        // writes the same fields.
+        let as_frame = FrameRecord {
+            scope: links[Group::C.index()].clone(),
+            active_slot: None,
+            as_of: AsOf::Live,
+        }
+        .to_toml();
+        assert_eq!(written["c"]["scope"].as_table(), Some(&as_frame));
+
+        let text = toml::to_string_pretty(&table).unwrap();
+        assert!(text.contains("[links.a.scope.dimensions]"), "{text}");
+        let restored = from_toml(&text.parse().unwrap()).unwrap();
+        assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+        assert_eq!(restored.links, links);
+
+        // No group holds a scope: no `links` table at all, and a file
+        // without one reads four empty scopes.
+        let bare = session_with_links(&GroupScopes::default());
+        assert!(!bare.contains_key("links"), "{bare:?}");
+        assert!(!insert_links(
+            &mut toml::Table::new(),
+            &GroupScopes::default()
+        ));
+        let restored = from_toml(&bare).unwrap();
+        assert_eq!(restored.links, GroupScopes::default());
+    }
+
+    /// A malformed group entry is dropped with a warning naming it; the
+    /// groups beside it and the rest of the file still read.
+    #[test]
+    fn a_malformed_group_scope_is_dropped_with_a_warning_and_the_rest_reads() {
+        let (mut table, id) = two_unlinked_tiles();
+        let links: toml::Table = r#"
+            a = 3
+            z = { scope = { text = "spx" } }
+            [b]
+            scope = "everything"
+            [c.scope.dimensions]
+            underlying_ref = ["NDX"]
+            [d.scope]
+            expression = "npv >"
+            text = "kept"
+        "#
+        .parse()
+        .unwrap();
+        table.insert("links".into(), toml::Value::Table(links));
+
+        let restored = from_toml(&table).unwrap();
+        assert!(restored.tiles.contains_key(&id), "the layout still reads");
+        let mut expected = GroupScopes::default();
+        expected[Group::C.index()] = underlying("NDX");
+        expected[Group::D.index()] = Scope {
+            text: Some("kept".into()),
+            ..Scope::default()
+        };
+        assert_eq!(restored.links, expected);
+        let warned = |needle: &str| restored.warnings.iter().any(|w| w.contains(needle));
+        assert_eq!(restored.warnings.len(), 4, "{:?}", restored.warnings);
+        assert!(warned("links.a is not a table"), "{:?}", restored.warnings);
+        assert!(warned("links.z names no link group"));
+        assert!(warned("links.b.scope is not a table"));
+        assert!(warned("links.d.scope: expression"));
+
+        // A `links` value that is no table at all is ignored whole.
+        table.insert("links".into(), toml::Value::Integer(1));
+        let restored = from_toml(&table).unwrap();
+        assert_eq!(restored.links, GroupScopes::default());
+        assert_eq!(restored.warnings, ["links is not a table; ignored"]);
+        assert!(restored.tiles.contains_key(&id));
+    }
+
+    /// `save` is the quit hook's writer and carries the groups' scopes.
+    #[test]
+    fn save_writes_the_group_scopes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.toml");
+        let mut links = GroupScopes::default();
+        links[Group::B.index()] = underlying("SPX.Z");
+        save(
+            &path,
+            &Workspaces::new(),
+            &TileRecords::new(),
+            None,
+            &PinnedRecords::new(),
+            &links,
+            &no_usage(),
+            &no_pages(),
+        )
+        .unwrap();
+        let restored = load(&path);
+        assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+        assert_eq!(restored.links, links);
     }
 
     #[test]
@@ -1960,6 +2200,7 @@ members = [1, -4]
             &TileRecords::new(),
             None,
             &PinnedRecords::new(),
+            &GroupScopes::default(),
             &no_usage(),
             &no_pages(),
         )
@@ -1998,6 +2239,7 @@ members = [1, -4]
             &TileRecords::new(),
             None,
             &PinnedRecords::new(),
+            &GroupScopes::default(),
             &no_usage(),
             &no_pages(),
         )
@@ -2017,6 +2259,7 @@ members = [1, -4]
             &TileRecords::new(),
             None,
             &PinnedRecords::new(),
+            &GroupScopes::default(),
             &no_usage(),
             &no_pages(),
         )

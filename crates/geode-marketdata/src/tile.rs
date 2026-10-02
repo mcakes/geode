@@ -16031,6 +16031,7 @@ edits = [["2026-11-20", "-1", 9.5]]
             restored_tiles: restored.tiles,
             restored_frame: None,
             restored_pinned: Default::default(),
+            restored_links: Default::default(),
             restored_palette_usage: geode_shell::palette_usage::PaletteUsage::new(),
             log: None,
             action_tail: Arc::new(std::sync::Mutex::new(

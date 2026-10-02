@@ -598,6 +598,7 @@ fn build_shell_services(
         restored_tiles: std::collections::BTreeMap::new(),
         restored_frame: None,
         restored_pinned: Default::default(),
+        restored_links: Default::default(),
         restored_palette_usage: geode_shell::palette_usage::PaletteUsage::new(),
         log: Some(LogServices {
             ring: log_ring,
@@ -624,8 +625,8 @@ fn build_shell_services(
     (services, desk, user, bridge, diagnostics_factory)
 }
 
-/// Load layout, module records, frame state, palette usage and page state
-/// from the session file before the shell is constructed. Recovery warnings are
+/// Load layout, module records, frame state, link group scopes, palette
+/// usage and page state from the session file before the shell is constructed. Recovery warnings are
 /// logged; a missing or unreadable session starts fresh.
 fn restore_session(services: &mut ShellServices) {
     let Some(path) = &services.session_path else {
@@ -639,6 +640,7 @@ fn restore_session(services: &mut ShellServices) {
     services.restored_tiles = restored.tiles;
     services.restored_frame = restored.frame;
     services.restored_pinned = restored.pinned;
+    services.restored_links = restored.links;
     services.restored_palette_usage = restored.palette_usage;
     services.restored_pages = restored.pages;
 }

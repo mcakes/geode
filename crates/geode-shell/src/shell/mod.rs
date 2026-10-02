@@ -111,6 +111,10 @@ pub struct ShellServices {
     /// `ShellView::new` pins each workspace and fills its lane with clean
     /// scope history.
     pub restored_pinned: crate::session::PinnedRecords,
+    /// Link group scopes from `session.toml`'s `[links.<letter>]`, in
+    /// `Group::ALL` order; `ShellView::new` sets each non-empty one on its
+    /// group before any tile is linked or created.
+    pub restored_links: crate::session::GroupScopes,
     /// The palette's usage history from `session.toml`'s `[palette.usage]`
     /// table — empty for a fresh session and in every test setup that
     /// doesn't opt in. `ShellView::new` takes it as the live history.
@@ -499,10 +503,12 @@ pub struct ShellView {
     /// as-of, pin, and unpin change in any lane advances it, so it detects
     /// frame-only changes; updated before the disk write completes.
     last_frame_generation_written: u64,
-    /// The text of the last periodic snapshot handed to the writer, `None`
-    /// before the first. The frame generation also advances for state the
-    /// session does not hold (a link group's scope), so a dirty check can
-    /// produce the text already written; that snapshot is not written again.
+    /// The last periodic snapshot handed to the writer, as text WITHOUT the
+    /// link groups' scopes (`[links]`); `None` before the first. A group's
+    /// scope moves with an emitting tile's cursor and advances the frame
+    /// generation, so a dirty check can produce a snapshot that differs
+    /// from the last only there; that snapshot is not written. The file's
+    /// text carries the groups' scopes whenever a snapshot is written.
     last_session_text: Option<String>,
     /// Deferred focus restoration for paths without a `Window`, such as hot
     /// reload closing the palette. `render` consumes it before painting. Waiting
@@ -1277,6 +1283,27 @@ impl ShellView {
                 lane.set_active_slot(record.active_slot);
                 lane.set_as_of(record.as_of);
                 lane.clear_history();
+            });
+        }
+        // A group keeps its last scope across a restart. Restored before any
+        // membership is applied and before the flip baselines below are
+        // seeded, and nothing is notified: a restored follower's first
+        // query is already scoped by its group, with no emitter needed to
+        // post it again, and the restored scope is not read as a change.
+        // Lost, a follower that showed one underlying would show the whole
+        // book under the same chip.
+        if services
+            .restored_links
+            .iter()
+            .any(|scope| !scope.is_empty())
+        {
+            frame.update(cx, |f, _| {
+                for group in geode_core::link::Group::ALL {
+                    let scope = &services.restored_links[group.index()];
+                    if !scope.is_empty() {
+                        f.restore_group_scope(group, scope.clone());
+                    }
+                }
             });
         }
         // A restored tile is in its link groups before its occupant exists,

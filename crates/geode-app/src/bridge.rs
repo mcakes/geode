@@ -1611,6 +1611,7 @@ role = "key"
             restored_tiles: TileRecords::new(),
             restored_frame: None,
             restored_pinned: Default::default(),
+            restored_links: Default::default(),
             restored_palette_usage: geode_shell::palette_usage::PaletteUsage::new(),
             log: None,
             action_tail: std::sync::Arc::new(std::sync::Mutex::new(
@@ -1655,6 +1656,7 @@ role = "key"
             restored_tiles: TileRecords::new(),
             restored_frame: None,
             restored_pinned: Default::default(),
+            restored_links: Default::default(),
             restored_palette_usage: geode_shell::palette_usage::PaletteUsage::new(),
             log: None,
             action_tail: std::sync::Arc::new(std::sync::Mutex::new(

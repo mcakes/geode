@@ -1061,6 +1061,9 @@ pub mod recording {
         /// by. A log of its own, read only by the tests about restored
         /// membership; `log` records what the shell told a tile.
         pub followed_at_create: FollowLog,
+        /// The scope each occupant's frame handle read inside `create`, in
+        /// order: the scope a tile's first query is composed from.
+        pub scope_at_create: Rc<RefCell<Vec<(TileId, geode_core::scope::Scope)>>>,
         /// The frame generation each occupant's frame handle read inside
         /// `create`, in order: a test's proof that nothing wrote the frame
         /// between two occupants of one reconciliation pass.
@@ -1096,6 +1099,7 @@ pub mod recording {
                 frame_handles: Rc::new(RefCell::new(HashMap::new())),
                 followed_at_close: Rc::new(RefCell::new(Vec::new())),
                 followed_at_create: Rc::new(RefCell::new(Vec::new())),
+                scope_at_create: Rc::new(RefCell::new(Vec::new())),
                 generation_at_create: Rc::new(RefCell::new(Vec::new())),
                 repaints: Rc::new(RefCell::new(Vec::new())),
             }
@@ -1546,6 +1550,9 @@ pub mod recording {
             self.followed_at_create
                 .borrow_mut()
                 .push((tile, frame.read(cx).following()));
+            self.scope_at_create
+                .borrow_mut()
+                .push((tile, frame.read(cx).scope().clone()));
             self.generation_at_create
                 .borrow_mut()
                 .push((tile, frame.read(cx).generation()));

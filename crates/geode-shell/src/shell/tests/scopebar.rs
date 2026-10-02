@@ -42,6 +42,7 @@ fn test_services_with_ctrl_alias() -> ShellServices {
         restored_tiles: crate::session::TileRecords::new(),
         restored_frame: None,
         restored_pinned: Default::default(),
+        restored_links: Default::default(),
         restored_palette_usage: crate::palette_usage::PaletteUsage::new(),
         log: None,
         action_tail: std::sync::Arc::new(std::sync::Mutex::new(
@@ -390,6 +391,7 @@ pub(super) fn services_with_builtin_docs(docs: Vec<LayerDoc>) -> ShellServices {
         restored_tiles: crate::session::TileRecords::new(),
         restored_frame: None,
         restored_pinned: Default::default(),
+        restored_links: Default::default(),
         restored_palette_usage: crate::palette_usage::PaletteUsage::new(),
         log: None,
         action_tail: std::sync::Arc::new(std::sync::Mutex::new(

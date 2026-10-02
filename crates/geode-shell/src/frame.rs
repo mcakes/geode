@@ -419,6 +419,18 @@ impl Frame {
         &self.links.group(group).scope
     }
 
+    /// Set a group's scope from the session, drawing its generation from
+    /// the frame's counter as any group scope write does. `true` when it
+    /// changed. Crate-private: the shell restores before any tile exists,
+    /// and a module's only write to a group's scope is `set_scope` through
+    /// its own handle while it follows one.
+    pub(crate) fn restore_group_scope(&mut self, group: Group, scope: Scope) -> bool {
+        let Frame {
+            links, generation, ..
+        } = self;
+        links.set_scope(group, scope, generation)
+    }
+
     /// Each group's scope generation, in `Group::ALL` order: what the shell
     /// compares to see that a group's scope moved.
     pub fn group_scope_gens(&self) -> [u64; 4] {

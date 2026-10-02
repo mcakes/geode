@@ -397,10 +397,11 @@ fn a_follow_alone_opens_no_barrier(cx: &mut gpui::TestAppContext) {
     assert!(!frame.read_with(&vcx, |f, _| f.barrier_open()));
 }
 
-/// A group's scope lives in no session file, yet moving it advances the
-/// frame generation the writer treats as dirt. The snapshot it then takes
-/// is the text already written, and is not written again: an emitting
-/// tile's cursor would otherwise rewrite the session on every move.
+/// Moving a group's scope advances the frame generation the writer treats
+/// as dirt, but alone it writes nothing: the snapshot is compared without
+/// the groups' scopes, or an emitting tile's cursor would rewrite the
+/// session on every move. The next snapshot written for another reason
+/// carries the scope the group holds by then.
 #[gpui::test]
 fn a_group_scope_change_writes_no_session_file(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -414,22 +415,29 @@ fn a_group_scope_change_writes_no_session_file(cx: &mut gpui::TestAppContext) {
         "the baseline: the layout and the follow are written once"
     );
 
-    frame.update(&mut vcx, |f, cx| {
+    for u in ["SPX.Z", "NDX"] {
+        frame.update(&mut vcx, |f, cx| {
+            assert!(f.view_mut_for(WS1, TileId(1)).set_scope(underlying(u)));
+            cx.notify();
+        });
+        vcx.run_until_parked();
         assert!(
-            f.view_mut_for(WS1, TileId(1))
-                .set_scope(underlying("SPX.Z"))
+            shell
+                .update(&mut vcx, |s, cx| s.take_dirty_session_write(cx))
+                .is_none(),
+            "a group's scope alone writes nothing ({u})"
         );
-        cx.notify();
-    });
-    vcx.run_until_parked();
-    assert!(
-        shell
-            .update(&mut vcx, |s, cx| s.take_dirty_session_write(cx))
-            .is_none(),
-        "a group's scope is not session state"
-    );
-    // A membership change is session state and must be written:
-    // `the_session_text_carries_a_membership_change` asserts that half.
+    }
+
+    // A membership change is written, and the group's scope goes with it:
+    // the scope as it is now, not as it was at the last write.
+    follow(&frame, &mut vcx, TileId(2), Some(Group::B));
+    let text = session_text(&shell, &mut vcx).expect("a membership change is written");
+    let restored = crate::session::from_toml(&text.parse().unwrap()).unwrap();
+    assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+    let mut expected = crate::session::GroupScopes::default();
+    expected[Group::A.index()] = underlying("NDX");
+    assert_eq!(restored.links, expected, "{text}");
 }
 
 // --- The emission pull ----------------------------------------------
@@ -1138,6 +1146,127 @@ fn a_restored_follower_reads_its_group_on_its_first_frame(cx: &mut gpui::TestApp
         *at_create.borrow(),
         vec![(TileId(1), Some(Group::A))],
         "the occupant read its group from inside `create`"
+    );
+}
+
+/// `services` as a restart hands them over when the session file held
+/// group `g`'s scope naming `u`, read back through the session reader.
+fn with_restored_group(mut services: ShellServices, g: Group, u: &str) -> ShellServices {
+    let text = format!(
+        "config_version = 1\n[links.{}.scope.dimensions]\nunderlying_ref = [\"{u}\"]\n",
+        g.as_str()
+    );
+    let restored = crate::session::from_toml(&text.parse().unwrap()).unwrap();
+    assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+    services.restored_links = restored.links;
+    services
+}
+
+/// A group keeps its last scope across a restart. A restored follower's
+/// first query is composed from it, with no emitter present to post it
+/// again: restored empty, the follower would show the whole book under a
+/// chip that named one underlying before the restart.
+#[gpui::test]
+fn a_restored_follower_reads_the_saved_group_scope_on_its_first_frame(
+    cx: &mut gpui::TestAppContext,
+) {
+    let rec = RecordingFactory::new("rec");
+    let at_create = rec.scope_at_create.clone();
+    let services = with_restored_group(
+        restored(
+            services_with_recorders(vec![rec]),
+            "module = \"rec\"\nfollow = \"a\"",
+        ),
+        Group::A,
+        "SPX.Z",
+    );
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    let frame = frame_of(&shell, &vcx);
+
+    assert_eq!(
+        *at_create.borrow(),
+        vec![(TileId(1), underlying("SPX.Z"))],
+        "the occupant read the saved scope from inside `create`"
+    );
+    assert_eq!(
+        group_underlying(&frame, &vcx, Group::A).as_deref(),
+        Some("SPX.Z")
+    );
+    assert_eq!(group_underlying(&frame, &vcx, Group::B), None);
+    assert!(
+        frame.read_with(&vcx, |f, _| f.shared().scope().is_empty()),
+        "the workspace's own scope is not the group's"
+    );
+    assert!(shell.read_with(&vcx, |s, _| s.emit_subs.is_empty()));
+}
+
+/// A restored group scope is not a change: the flip baseline is seeded
+/// after it, so the first notification of the frame after a restore,
+/// whatever it is for, opens no barrier over the group's followers.
+#[gpui::test]
+fn a_restored_group_scope_opens_no_barrier_on_the_first_frame_notification(
+    cx: &mut gpui::TestAppContext,
+) {
+    let services = with_restored_group(
+        restored(test_services(), "module = \"rec\"\nfollow = \"a\""),
+        Group::A,
+        "SPX.Z",
+    );
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    let frame = frame_of(&shell, &vcx);
+    vcx.run_until_parked();
+    assert!(
+        frame.read_with(&vcx, |f, _| f.group_scope_gens()[Group::A.index()]) > 0,
+        "fixture: the restore drew the group a generation"
+    );
+    assert!(!frame.read_with(&vcx, |f, _| f.barrier_open()));
+    let notified = frame_notifications(&frame, &mut vcx);
+
+    frame.update(&mut vcx, |_, cx| cx.notify());
+    vcx.run_until_parked();
+
+    assert_eq!(notified.get(), 1, "fixture: the notification was delivered");
+    assert!(!frame.read_with(&vcx, |f, _| f.barrier_open()));
+    let (seen, now) = shell.read_with(&vcx, |s, cx| {
+        (s.last_flip_groups, s.frame().read(cx).group_scope_gens())
+    });
+    assert_eq!(seen, now);
+}
+
+/// The quit-time save writes the groups' scopes whatever the periodic
+/// writer last compared: a scope moved since the last periodic write is in
+/// the file a restart reads.
+#[gpui::test]
+fn save_session_writes_the_groups_scopes(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.toml");
+    let services = super::session::test_services_with_session(path.clone());
+    let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services);
+    follow(&frame, &mut vcx, TileId(1), Some(Group::A));
+    assert!(session_text(&shell, &mut vcx).is_some(), "the baseline");
+    frame.update(&mut vcx, |f, cx| {
+        assert!(
+            f.view_mut_for(WS1, TileId(1))
+                .set_scope(underlying("SPX.Z"))
+        );
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    assert!(session_text(&shell, &mut vcx).is_none(), "nothing periodic");
+
+    shell.read_with(&vcx, |s, cx| s.save_session(cx));
+
+    let restored = crate::session::load(&path);
+    assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+    let mut expected = crate::session::GroupScopes::default();
+    expected[Group::A.index()] = underlying("SPX.Z");
+    assert_eq!(restored.links, expected);
+    assert_eq!(
+        restored.tiles[&1].link.follow,
+        Some(Group::A),
+        "beside the membership"
     );
 }
 

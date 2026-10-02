@@ -6,6 +6,7 @@ use gpui::App;
 use std::path::PathBuf;
 
 use crate::session::{self, FrameRecord};
+use geode_core::link::Group;
 
 use super::ShellView;
 
@@ -42,6 +43,12 @@ impl ShellView {
             .collect()
     }
 
+    /// Each link group's scope, in `Group::ALL` order, for `[links]`.
+    fn group_scopes(&self, cx: &App) -> session::GroupScopes {
+        let frame = self.frame.read(cx);
+        Group::ALL.map(|group| frame.group_scope(group).clone())
+    }
+
     /// Extract a snapshot when layout dirt, serialized tile or page state,
     /// the frame generation, or palette usage differ from the last extracted
     /// snapshot.
@@ -53,9 +60,13 @@ impl ShellView {
     /// state on the next tick. Serialization failure is logged without advancing
     /// those baselines, but a layout-only change can still lose its dirty flag.
     /// No configured path or no detected change returns `None` silently, and
-    /// so does a snapshot whose text equals the last one returned: the frame
-    /// generation advances for state the session does not hold, and an
-    /// emitting tile's cursor would otherwise rewrite the file on every move.
+    /// so does a snapshot that differs from the last one returned only in a
+    /// link group's scope. The comparison is made on the text without the
+    /// `[links]` tables, and `last_session_text` holds that links-free
+    /// text: a group's scope advances the frame generation with every move
+    /// of an emitting tile's cursor, and alone must not rewrite the file.
+    /// The text returned for the file does carry the groups' scopes, so
+    /// whenever a snapshot is written for another reason they go with it.
     pub(super) fn take_dirty_session_write(&mut self, cx: &App) -> Option<(PathBuf, String)> {
         let tiles = self.current_tiles(cx);
         let pages = self.current_pages(cx);
@@ -76,26 +87,36 @@ impl ShellView {
         self.session_dirty = false;
         let path = self.services.session_path.clone()?;
         let record = self.frame_record(cx);
-        match session::to_string_pretty(
+        let mut table = session::to_toml(
             &self.services.workspaces,
             &tiles,
             Some(&record),
             &self.pinned_records(cx),
             &self.palette_usage,
             &pages,
-        ) {
-            Ok(text) => {
+        );
+        let serialized = session::table_to_string(&table).and_then(|bare| {
+            // Compared before the groups' scopes are added: see the method's
+            // doc. Unchanged, the snapshot is not written and nothing more
+            // is serialized.
+            if self.last_session_text.as_deref() == Some(bare.as_str()) {
+                return Ok(None);
+            }
+            let text = if session::insert_links(&mut table, &self.group_scopes(cx)) {
+                session::table_to_string(&table)?
+            } else {
+                bare.clone()
+            };
+            Ok(Some((bare, text)))
+        });
+        match serialized {
+            Ok(snapshot) => {
                 self.last_tiles_written = tiles;
                 self.last_pages_written = pages;
                 self.last_frame_generation_written = frame_generation;
                 self.last_palette_usage_written = self.palette_usage_version;
-                // The frame's generation also advances for state the session
-                // does not hold (a link group's scope moves with an emitter's
-                // cursor). Identical text is not written again.
-                if self.last_session_text.as_deref() == Some(text.as_str()) {
-                    return None;
-                }
-                self.last_session_text = Some(text.clone());
+                let (bare, text) = snapshot?;
+                self.last_session_text = Some(bare);
                 Some((path, text))
             }
             Err(e) => {
@@ -106,7 +127,8 @@ impl ShellView {
     }
 
     /// Synchronously save current state when a session path is configured,
-    /// regardless of the dirty flag or periodic-save baselines. The app's quit
+    /// regardless of the dirty flag or periodic-save baselines, the link
+    /// groups' scopes always included. The app's quit
     /// hook calls this as a final best-effort save; failures are logged.
     /// It does not wait for an in-flight periodic write, which may rename last.
     pub fn save_session(&self, cx: &App) {
@@ -120,6 +142,7 @@ impl ShellView {
             &self.current_tiles(cx),
             Some(&record),
             &self.pinned_records(cx),
+            &self.group_scopes(cx),
             &self.palette_usage,
             &self.current_pages(cx),
         ) {
