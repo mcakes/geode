@@ -31703,8 +31703,10 @@ run_mutation "volslice: a change of followed group is noticed" \
 run_mutation "volslice: a follow change clears the painted draft" \
   crates/geode-volslice/src/tile/data.rs \
   '        self.loaded.draft = None;
+        self.loaded_gen += 1;
         self.clear_model();' \
-  '        self.loaded.draft = None;' \
+  '        self.loaded.draft = None;
+        self.loaded_gen += 1;' \
   geode-volslice leaving_a_group_drops_the_draft_and_returns_to_the_own_underlying
 
 # Leaving a never-written group moves no version: the follow change itself
@@ -31780,20 +31782,20 @@ run_mutation "volslice: a failed fetch for a new underlying clears the picture" 
 # and keeps the loaded underlying's own.
 run_mutation "volslice: a refused batch clears another underlying's curves" \
   crates/geode-volslice/src/tile/data.rs \
-  '                if self.model_for != self.loaded_for {' \
+  '                if self.model_gen != Some(self.loaded_gen) {' \
   '                if false {' \
   geode-volslice a_refused_batch_after_a_new_install_clears_the_old_curves
 
 run_mutation "volslice: a refused batch keeps the loaded underlying's curves" \
   crates/geode-volslice/src/tile/data.rs \
-  '                if self.model_for != self.loaded_for {' \
+  '                if self.model_gen != Some(self.loaded_gen) {' \
   '                if true {' \
   geode-volslice a_refused_batch_after_a_new_install_clears_the_old_curves
 
-run_mutation "volslice: a built model records its underlying" \
+run_mutation "volslice: a built model records its documents' generation" \
   crates/geode-volslice/src/tile/data.rs \
-  '        self.model_for = self.loaded_for.clone();' \
-  '        self.model_for = None;' \
+  '        self.model_gen = Some(self.loaded_gen);' \
+  '        self.model_gen = None;' \
   geode-volslice a_refused_batch_after_a_new_install_clears_the_old_curves
 
 # A refused show from inside the shell's draw defers its arrival: inline,
@@ -31830,6 +31832,16 @@ run_mutation "volslice: a refusal beside an empty state is danger" \
   '    let tone = if notices.clone().all(|n| is_empty_state(n)) {' \
   '    let tone = if notices.clone().any(|n| is_empty_state(n)) {' \
   geode-volslice the_footer_paints_the_first_notice_and_counts_the_rest
+
+# A draft joining or leaving moves the documents' generation, so a refused
+# batch under one underlying still clears curves built with the old draft.
+run_mutation "volslice: a draft change moves the documents' generation" \
+  crates/geode-volslice/src/tile/data.rs \
+  '        if !same {
+            self.loaded_gen += 1;
+        }' \
+  '        let _ = same;' \
+  geode-volslice a_refused_batch_after_the_draft_left_clears_its_trace
 
 run_mutation "volslice: close cancels by key" \
   crates/geode-volslice/src/tile/data.rs \

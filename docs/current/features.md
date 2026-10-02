@@ -1149,19 +1149,23 @@ loaded is the notice `diff <pair>: <kind> is not loaded` rather than an
 empty lower pane.
 
 The header names the underlying whose documents are on screen, not one
-still being asked about, so a name never stands over another underlying's
-strip and curves. A refused read or batch is worded `document request
-refused: …` or `vol request refused: …`, and the next change retries. What
-stays depends on whose picture is on screen:
+still being asked about, so a document read in flight or failed never puts
+a new name over another underlying's strip and curves. The exception is
+the vol round trip after new documents install (see the limitations). A
+refused read or batch is worded `document request refused: …` or `vol
+request refused: …`, and the next change retries. What stays depends on
+whose picture is on screen:
 
 - A refused or failed read (a refused chain read fails the fetch, which
   still answers the barrier) for the underlying on screen keeps its last
   good picture. One for another underlying clears the documents, the strip
   and the curves; the header then names the underlying asked for.
-- A refused batch keeps curves built from the loaded underlying's
-  documents. Curves left from another underlying, because new documents
-  were installed just before the refusal, clear; the new strip and header
-  stay, so the next change still has a batch to ask.
+- A refused batch keeps the painted curves only when they were built from
+  exactly the documents now loaded: the same underlying, CVI document,
+  chain, and draft under the same mark. Curves built from anything else (a
+  new underlying's install, a draft that left or changed mark, a
+  publication that reinstalled the documents) clear; the strip, chips and
+  header stay, so the next change still has a batch to ask.
 
 **Session.** The tile saves its coordinate, hidden kinds, densities, split,
 and while set its underlying, active expiries, pair and view; the cursor is

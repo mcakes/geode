@@ -102,13 +102,17 @@ pub struct VolsliceTile {
     loaded: Loaded,
     /// The underlying whose documents `loaded` holds.
     loaded_for: Option<String>,
+    /// Moves on every change to `loaded` (documents installed or cleared,
+    /// a draft joining or leaving, a mark changing), so a model can be told
+    /// apart from the documents now on screen even under one underlying.
+    loaded_gen: u64,
     strip: Vec<StripRow>,
     /// The plan of the batch out under `vol_tag`: its answer is read by
     /// position against these roles.
     plan: Option<Plan>,
-    /// The underlying whose documents the painted model was built from;
-    /// `None` while the model is empty.
-    model_for: Option<String>,
+    /// The `loaded_gen` the painted model was built under; `None` while the
+    /// model is empty.
+    model_gen: Option<u64>,
     vol_tag: u64,
     model: Arc<XyModel>,
     version: u64,
@@ -271,9 +275,10 @@ impl VolsliceTile {
             last_following: None,
             loaded: Loaded::default(),
             loaded_for: None,
+            loaded_gen: 0,
             strip: Vec::new(),
             plan: None,
-            model_for: None,
+            model_gen: None,
             vol_tag: 0,
             model: XyModel::empty(),
             version: 0,

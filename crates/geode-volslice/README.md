@@ -140,10 +140,12 @@ with another notice behind it:
 - `diff <pair>: <kind> is not loaded` when a restored or kept pair names a
   kind with nothing loaded (a draft that left with its group): no
   difference is asked, and the pair stays set for when the kind returns.
-- `vol request refused: …`: the painted model stays when it was built from
-  the loaded underlying's documents, and the next change retries. Curves
-  left from another underlying (a refusal right after a new underlying's
-  documents installed) clear under the new strip.
+- `vol request refused: …`: the painted model stays only when it was
+  built from exactly the documents on screen (same underlying, CVI
+  document, chain and draft with its mark), and the next change retries.
+  Curves built from anything else (another underlying's documents, a
+  draft that since left or changed mark, a superseded publication) clear
+  under the new strip and chips.
 - `following A — set the underlying there` for `u` while following.
 
 ## Known limitations
@@ -177,8 +179,14 @@ with another notice behind it:
   draft reaches the batch only while it names the underlying whose
   documents are loaded.
 - The header names `loaded_for`, the underlying whose documents are on
-  screen, and the asked underlying only while nothing is: a change in
-  flight or a failed one never puts a new name over the old picture.
+  screen, and the asked underlying only while nothing is: a document read
+  in flight or a failed one never puts a new name over the old picture.
+  The one exception is the vol round trip after new documents install,
+  when the new name and strip stand over the old curves until the batch
+  lands (see Known limitations).
+- `loaded_gen` moves on every change to the loaded documents and the model
+  records the generation it was built under, so a refused batch clears
+  curves that no longer match what is loaded, even under one underlying.
 - Following is compared through `FrameView::following()` on every frame
   notification; while following, the group's scope counts as a change. A
   change of group clears the model and moves the vol tag, so no old

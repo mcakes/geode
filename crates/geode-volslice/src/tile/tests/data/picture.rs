@@ -114,6 +114,38 @@ fn a_failed_fetch_for_the_same_underlying_keeps_the_picture(cx: &mut gpui::TestA
     assert_eq!(h.labels(&vcx), labels, "the last good picture stays");
 }
 
+/// A draft leaving the board while the vol queue refuses: the documents on
+/// screen changed under the same underlying, so the curves built with the
+/// draft clear rather than leave a dashed trace under no draft chip.
+#[gpui::test]
+fn a_refused_batch_after_the_draft_left_clears_its_trace(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_bound(cx, None);
+    h.show(&mut vcx);
+    h.follow_a(&mut vcx);
+    let draft = cvi(&TERMS, Some(("2026-10-16", 0.01)));
+    h.post(&mut vcx, draft_of("SPX.Z", &draft, DraftMark::Editing));
+    let (doc, chains) = published();
+    let reqs = h.answer_documents(&mut vcx, &doc, &chains);
+    let first = vols(&reqs).last().map(|p| (*p).clone()).unwrap();
+    h.answer_vol(&mut vcx, &first);
+    let has_draft = |labels: Vec<String>| labels.iter().any(|l| l.starts_with("cvi draft"));
+    assert!(has_draft(h.labels(&vcx)), "{:?}", h.labels(&vcx));
+    h.data.fill_for_tests();
+    h.post(&mut vcx, scope_of("SPX.Z"));
+    let _ = h.requests();
+    assert_eq!(h.draft_label(&vcx), None, "the draft left the board");
+    assert!(
+        h.notices(&vcx)
+            .contains(&"vol request refused: the data service is busy".to_string())
+    );
+    assert_eq!(h.header_underlying(&vcx), "SPX.Z");
+    assert!(
+        !has_draft(h.labels(&vcx)),
+        "no draft trace under no draft chip: {:?}",
+        h.labels(&vcx)
+    );
+}
+
 /// A vol batch refused right after a new underlying's documents installed
 /// would leave the old curves under the new strip: the model clears, and
 /// the new strip and header stand with the refusal. A refusal for the

@@ -181,6 +181,7 @@ impl VolsliceTile {
             // old underlying is stale.
             self.loaded = Loaded::default();
             self.loaded_for = None;
+            self.loaded_gen += 1;
             self.strip.clear();
             self.clear_model();
             self.fetch = Fetch::Idle;
@@ -336,6 +337,7 @@ impl VolsliceTile {
         }
         self.loaded = Loaded::default();
         self.loaded_for = None;
+        self.loaded_gen += 1;
         self.strip.clear();
         self.clear_model();
     }
@@ -370,6 +372,7 @@ impl VolsliceTile {
             }
         };
         self.loaded_for = Some(u.clone());
+        self.loaded_gen += 1;
         self.compose_draft();
         self.restrip(cx);
         self.submit_batch(cx);
@@ -395,6 +398,9 @@ impl VolsliceTile {
             _ => false,
         };
         self.loaded.draft = next;
+        if !same {
+            self.loaded_gen += 1;
+        }
         !same
     }
 
@@ -402,7 +408,7 @@ impl VolsliceTile {
         // The tag moves so a batch still out cannot paint over the clear.
         self.vol_tag += 1;
         self.plan = None;
-        self.model_for = None;
+        self.model_gen = None;
         self.model = XyModel::empty();
         self.model_notices.clear();
     }
@@ -422,13 +428,14 @@ impl VolsliceTile {
         let params = plan.params(self.key(), self.vol_tag, Instant::now());
         match self.data.vol_slices(params) {
             Ok(()) => self.plan = Some(plan),
-            // The painted model stays while it is the loaded underlying's;
-            // the next change retries. Another underlying's (documents just
-            // installed for a new one) would sit under the new strip and
-            // header: it clears. The new documents stay, so the next change
+            // The painted model stays while it was built from the
+            // documents on screen; the next change retries. One built from
+            // other documents (another underlying's, a draft that since
+            // left, a superseded publication) would sit under the new strip
+            // and chips: it clears. The documents stay, so the next change
             // still has a batch to ask.
             Err(refusal) => {
-                if self.model_for != self.loaded_for {
+                if self.model_gen != Some(self.loaded_gen) {
                     self.clear_model();
                 }
                 self.model_notices = vec![format!("vol request refused: {refusal}")];
@@ -458,7 +465,10 @@ impl VolsliceTile {
         let narrowest = min_span(plan.coordinate, &self.loaded);
         self.version += 1;
         self.model = built.model;
-        self.model_for = self.loaded_for.clone();
+        // Every change to `loaded` either submits (moving the tag) or
+        // clears the model, so an answer under the current tag was planned
+        // from the documents now loaded.
+        self.model_gen = Some(self.loaded_gen);
         self.model_notices = built.notices;
         self.full = padded(built.full, narrowest);
         let full = self.full;
@@ -526,6 +536,7 @@ impl VolsliceTile {
         self.board = None;
         self.board_draft = None;
         self.loaded.draft = None;
+        self.loaded_gen += 1;
         self.clear_model();
         self.fetch = Fetch::Idle;
         self.following.reset();
