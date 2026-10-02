@@ -29590,6 +29590,14 @@ run_mutation "link: a pricer cursor move tells the shell" \
         }))' \
   geode-pricer a_cursor_move_tells_the_shell_the_emission_changed
 
+# A package across underlyings names no single one: it posts no scope,
+# which leaves the group's scope as it was instead of naming its first leg.
+run_mutation "link: a package across underlyings emits no scope" \
+  crates/geode-pricer/src/core/sheet.rs \
+  '                Some(_) => return None,' \
+  '                Some(_) => {}' \
+  geode-pricer a_package_across_two_underlyings_emits_no_scope
+
 # A market-data panel posts its underlying and, while its draft is not
 # clean and the upload builder assembles it, that whole document. The rows
 # are cached on the underlying, the painted base and the draft: a repeated
