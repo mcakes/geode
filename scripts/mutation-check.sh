@@ -31251,6 +31251,50 @@ run_mutation "chrome rows: render never checks the prepared key" \
   geode-shell \
   render_refuses_keybinding_rows_a_refresh_missed
 
+# A parked object dialog is not refreshed while covered; popping its cover
+# must re-key it, or the first paint shows the list from before the reload.
+run_mutation "chrome rows: a pop reveals a stale parked browse list" \
+  crates/geode-shell/src/shell/mod.rs \
+  $'        // A revealed dialog may have missed reloads while it was covered.\n        self.refresh_dialog_rows(cx);' \
+  '        // A revealed dialog may have missed reloads while it was covered.' \
+  geode-shell \
+  a_reload_under_a_covering_object_dialog_repaints_the_revealed_list
+
+# The browse rows are keyed by the config revision; a constant key keeps
+# the list a reload replaced.
+run_mutation "chrome rows: browse rows ignore the config revision" \
+  crates/geode-shell/src/shell/rows.rs \
+  '            state.refresh_rows(&self.services.config, revision);' \
+  '            state.refresh_rows(&self.services.config, 0);' \
+  geode-shell \
+  a_reload_adding_a_view_repaints_the_browse_list
+
+# The browse rows rank the dialog's own query; ranking anything else paints
+# a list the filter does not describe.
+run_mutation "chrome rows: browse rows rank an empty query" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  $'            &config_revision,\n            &self.query,' \
+  $'            &config_revision,\n            &String::new(),' \
+  geode-shell \
+  typing_reranks_browse_rows_without_re_deriving
+
+# A row click opens the object and clears the browse query; the pointer
+# path has no key wrapper, so it must re-key the list itself.
+run_mutation "chrome rows: a browse row click skips the row refresh" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  $'            state.click_opened_stage = true;\n        }\n    }\n    shell.refresh_dialog_rows(cx);' \
+  $'            state.click_opened_stage = true;\n        }\n    }' \
+  geode-shell \
+  a_filtered_row_click_opens_it_and_the_rows_stay_fresh
+
+# The browse build refuses a stale list instead of painting it.
+run_mutation "chrome rows: browse render never checks the prepared key" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  $'    #[cfg(debug_assertions)]\n    shell.assert_rows_current(cx);\n    let theme = cx.theme();' \
+  '    let theme = cx.theme();' \
+  geode-shell \
+  render_refuses_browse_rows_a_refresh_missed
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
