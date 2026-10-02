@@ -1154,7 +1154,9 @@ not saved. An unreadable value drops its key with a notice.
   headline can still pin to an expired document.
 - The flip barrier covers the two documents. The vol batch follows them, so
   the curves swap one vol round trip after the flip releases.
-- Expiry colors repeat past five active rows.
+- An expiry's color is its strip position's, cycling every five rows, not
+  its place among the active expiries. A draft that adds a term shifts every
+  row after it, so those expiries change color while the draft is loaded.
 - Keyboard zoom anchors at the view's centre, the wheel at the pointer.
 - There is no `.` action menu; the header chips and the palette carry the
   actions.

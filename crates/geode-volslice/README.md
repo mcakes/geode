@@ -141,7 +141,8 @@ The footer shows the first notice and how many more stand behind it:
 - The flip barrier covers the documents only. The vol batch is a follow-on,
   so the painted curves swap one vol round trip after the flip releases.
 - Expiry colors cycle the five chart colors by strip position, so two
-  expiries five rows apart share a color.
+  expiries five rows apart share a color, and a draft that adds a term
+  shifts the colors of the rows after it.
 - Keyboard zoom anchors at the view's centre; only the wheel anchors at the
   pointer.
 - There is no `.` action menu: the header chips are clickable and the

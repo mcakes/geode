@@ -774,9 +774,11 @@ An `option_chain` quote carries each side, its vol and its price, whole or
 not at all, and at least one side; `mid_vol` is required and finite. The
 document family has no NULL, so an absent side is NaN in both of its value
 columns, and the writer omits that side's children. Half a side or no side
-is refused naming the strike. `DocumentRows::validate` refuses NaN only on
-axes, so a one-sided quote passes it; a reader treats a NaN (or NULL)
-`bid_vol`/`bid` or `ask_vol`/`ask` pair as the side being absent.
+is refused naming the strike. `DocumentRows::validate` enforces no
+finiteness (a kind's parser refuses NaN where it must, as the CVI parser does
+on every number it reads), so a one-sided quote passes it. The slice viewer
+reads only `bid_vol` and `ask_vol`, and treats a NaN or NULL side vol as that
+side absent.
 
 ## Retention and maintenance
 
