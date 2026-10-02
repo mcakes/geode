@@ -371,6 +371,84 @@ fn log_ingest_failure(dataset: &str, batch: &str, reason: &str) {
     tracing::error!(target: "geode::ingest", "{dataset}/{batch}: {reason}");
 }
 
+/// Distinct (source, dataset, extra, missing) combinations remembered for
+/// load-note warnings. A desk's files share a few header shapes, so the key
+/// space is small; the cap bounds a feed whose headers vary without end.
+const LOAD_NOTE_CAP: usize = 256;
+
+#[derive(Debug, Default)]
+struct LoadNoteLog {
+    seen: std::collections::HashSet<(String, String, Vec<String>, Vec<String>)>,
+    capped: bool,
+}
+
+impl LoadNoteLog {
+    /// The warning one load's notes earn: one for a combination not seen
+    /// this run (column order aside), none for a repeat. At the cap, one
+    /// last warning says further combinations go unreported.
+    fn note(
+        &mut self,
+        source: &str,
+        dataset: &str,
+        notes: &crate::ingest::load::LoadNotes,
+    ) -> Option<Diagnostic> {
+        let mut extra = notes.extra_columns.clone();
+        extra.sort();
+        extra.dedup();
+        let mut missing = notes.missing_optional.clone();
+        missing.sort();
+        missing.dedup();
+        let key = (source.to_string(), dataset.to_string(), extra, missing);
+        if self.seen.contains(&key) {
+            return None;
+        }
+        if self.seen.len() >= LOAD_NOTE_CAP {
+            if self.capped {
+                return None;
+            }
+            self.capped = true;
+            return Some(load_note_warning(format!(
+                "{LOAD_NOTE_CAP} distinct load-note combinations reported; further ones are not"
+            )));
+        }
+        self.seen.insert(key);
+        Some(load_note_warning(load_note_message(dataset, notes)))
+    }
+}
+
+/// `'<file>' loaded into '<dataset>' with extra columns [a, b] ignored;
+/// optional [c] missing, read as NULL`, either half omitted when empty.
+fn load_note_message(dataset: &str, notes: &crate::ingest::load::LoadNotes) -> String {
+    let mut parts = Vec::new();
+    if !notes.extra_columns.is_empty() {
+        parts.push(format!(
+            "extra columns [{}] ignored",
+            notes.extra_columns.join(", ")
+        ));
+    }
+    if !notes.missing_optional.is_empty() {
+        parts.push(format!(
+            "optional [{}] missing, read as NULL",
+            notes.missing_optional.join(", ")
+        ));
+    }
+    format!(
+        "'{}' loaded into '{dataset}' with {}",
+        notes.file,
+        parts.join("; ")
+    )
+}
+
+fn load_note_warning(message: String) -> Diagnostic {
+    Diagnostic {
+        severity: Severity::Warning,
+        layer: None,
+        file: None,
+        message,
+        path: None,
+    }
+}
+
 /// Log source health: Failed at error, Degraded/PendingTooLong at warn,
 /// Ok at info, and Pending at debug. Callable independently so tests can
 /// verify levels through a scoped subscriber.
@@ -927,6 +1005,7 @@ impl DataService {
         let ingest_sink: IngestSink = {
             let sink = Arc::clone(&sink);
             let health_tracker = Arc::clone(&health_tracker);
+            let load_notes = std::sync::Mutex::new(LoadNoteLog::default());
             Arc::new(move |e: IngestEvent| match e {
                 IngestEvent::Started {
                     source,
@@ -945,7 +1024,15 @@ impl DataService {
                     books,
                     rows,
                     health,
+                    notes,
                 } => {
+                    // Decided before `dataset` moves into the Published event.
+                    let note = notes.as_ref().and_then(|n| {
+                        load_notes
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .note(&source, &dataset, n)
+                    });
                     tracing::info!(
                         target: "geode::ingest",
                         "published {dataset}/{batch} gen {gen_id}: {} book(s), {rows} row(s)",
@@ -998,6 +1085,11 @@ impl DataService {
                             None => true,
                         },
                     );
+                    // Health stays `Ok`: the data loaded correctly. The note is
+                    // a warning, once per distinct combination.
+                    if let Some(warning) = note {
+                        let _ = sink(DataEvent::Diagnostics(vec![warning]));
+                    }
                     // Unconditional, and after the health send: a
                     // failed load's `Health` may be deduplicated away by
                     // the tracker and never reach the shell, so
@@ -6948,6 +7040,153 @@ source_name = "NPV"
             "an unrelated clean publish must not clear a stray file's \
              still-genuine PendingTooLong"
         );
+        svc.shutdown();
+    }
+
+    fn notes(file: &str, extra: &[&str], missing: &[&str]) -> crate::ingest::load::LoadNotes {
+        crate::ingest::load::LoadNotes {
+            file: file.into(),
+            extra_columns: extra.iter().map(|s| s.to_string()).collect(),
+            missing_optional: missing.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn the_load_note_names_the_file_dataset_and_both_lists() {
+        let mut log = LoadNoteLog::default();
+        let d = log
+            .note(
+                "eod_risk",
+                "risk_snapshot",
+                &notes("risk_a.csv", &["A", "B"], &["skew01"]),
+            )
+            .unwrap();
+        assert_eq!(d.severity, Severity::Warning);
+        assert_eq!(
+            d.message,
+            "'risk_a.csv' loaded into 'risk_snapshot' with extra columns [A, B] ignored; \
+             optional [skew01] missing, read as NULL"
+        );
+        let only_missing = log
+            .note(
+                "eod_risk",
+                "risk_snapshot",
+                &notes("risk_b.csv", &[], &["skew01"]),
+            )
+            .unwrap();
+        assert_eq!(
+            only_missing.message,
+            "'risk_b.csv' loaded into 'risk_snapshot' with optional [skew01] missing, read as NULL"
+        );
+    }
+
+    #[test]
+    fn a_repeated_load_note_combination_warns_once() {
+        let mut log = LoadNoteLog::default();
+        assert!(
+            log.note("s", "d", &notes("a.csv", &["X", "Y"], &["z"]))
+                .is_some()
+        );
+        // Another file, same combination (column order aside): nothing.
+        assert!(
+            log.note("s", "d", &notes("b.csv", &["Y", "X"], &["z"]))
+                .is_none()
+        );
+        // A different combination, or another source, warns again.
+        assert!(
+            log.note("s", "d", &notes("c.csv", &["X"], &["z"]))
+                .is_some()
+        );
+        assert!(
+            log.note("t", "d", &notes("d.csv", &["X", "Y"], &["z"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn load_notes_stop_growing_at_the_cap_with_one_last_warning() {
+        let mut log = LoadNoteLog::default();
+        for i in 0..LOAD_NOTE_CAP {
+            assert!(
+                log.note("s", "d", &notes("f.csv", &[&format!("C{i}")], &[]))
+                    .is_some()
+            );
+        }
+        let last = log
+            .note("s", "d", &notes("f.csv", &["one more"], &[]))
+            .expect("the cap is announced once");
+        assert!(last.message.contains("further"), "{}", last.message);
+        assert!(
+            log.note("s", "d", &notes("f.csv", &["and another"], &[]))
+                .is_none()
+        );
+        assert_eq!(
+            log.seen.len(),
+            LOAD_NOTE_CAP,
+            "nothing remembered past the cap"
+        );
+    }
+
+    /// Real files through a directory source: a file with undeclared columns
+    /// and a missing optional column warns once; an identical second file
+    /// warns nothing; a file with a different combination warns again.
+    #[test]
+    fn extra_and_missing_optional_columns_are_one_warning_per_combination() {
+        let (_db, src, _store, _ds, emitted) = crate::ingest::load::tests_support::fixture();
+        let ready = |has_skew: bool| {
+            emitted
+                .files
+                .iter()
+                .find(|f| {
+                    f.sentinel_path.is_some() && f.columns.iter().any(|c| c == "Skew01") == has_skew
+                })
+                .expect("the generator emits both shapes")
+        };
+        let drops = tempfile::tempdir().unwrap();
+        let (_sdb, svc, rx) = directory_service(format!("{}/*.csv", drops.path().display()));
+        let land = |from: &geode_demo_data::EmittedFile, batch: &str| -> Vec<String> {
+            let csv = drops.path().join(format!("risk_2026-08-24_{batch}.csv"));
+            std::fs::write(&csv, std::fs::read(&from.csv_path).unwrap()).unwrap();
+            let done = drops
+                .path()
+                .join(format!("risk_2026-08-24_{batch}.csv.done"));
+            std::fs::write(
+                &done,
+                std::fs::read(from.sentinel_path.as_ref().unwrap()).unwrap(),
+            )
+            .unwrap();
+            let mut warnings = Vec::new();
+            let mut published = false;
+            loop {
+                match rx.recv_timeout(Duration::from_secs(60)).expect("an event") {
+                    DataEvent::Published { batch: b, .. } if b == batch => published = true,
+                    DataEvent::Diagnostics(d) => warnings.extend(
+                        d.into_iter()
+                            .filter(|d| d.severity == Severity::Warning)
+                            .map(|d| d.message),
+                    ),
+                    DataEvent::LoadEnded if published => return warnings,
+                    _ => {}
+                }
+            }
+        };
+        let first = land(ready(false), "a1");
+        assert_eq!(first.len(), 1, "{first:?}");
+        assert!(
+            first[0].starts_with(
+                "'risk_2026-08-24_a1.csv' loaded into 'risk_snapshot' with extra columns ["
+            ) && first[0].ends_with("; optional [skew01] missing, read as NULL"),
+            "{first:?}"
+        );
+        assert_eq!(
+            land(ready(false), "a2"),
+            Vec::<String>::new(),
+            "the same combination again"
+        );
+        let other = land(ready(true), "b1");
+        assert_eq!(other.len(), 1, "{other:?}");
+        assert!(!other[0].contains("optional ["), "{other:?}");
+        drop(src);
         svc.shutdown();
     }
 

@@ -66,6 +66,9 @@ pub enum IngestEvent {
         books: Vec<Option<String>>,
         rows: usize,
         health: Health,
+        /// Undeclared source columns and absent optional ones (file loads
+        /// only); the service warns once per distinct combination.
+        notes: Option<crate::ingest::load::LoadNotes>,
     },
     Failed {
         /// See `Published::source`'s doc — same reasoning, same field.
@@ -607,6 +610,7 @@ fn publish_one_document(
             books: vec![None],
             rows: published.rows,
             health: Health::Ok,
+            notes: None,
         },
         Ok(Err(reason)) => IngestEvent::Failed {
             source: job.source.clone(),
@@ -1146,6 +1150,7 @@ fn run(
                 // from the load.
                 books: loaded.partitions.clone(),
                 rows: loaded.rows,
+                notes: crate::ingest::load::LoadNotes::of(&item.candidate.csv_path, &loaded),
                 health: loaded.health,
             },
             Ok(Err(reason)) => IngestEvent::Failed {

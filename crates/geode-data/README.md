@@ -146,6 +146,9 @@ often tripped:
   further 64, `Ok` once that source's count falls below 64); `N` is the count
   at the last crossing (65, 129, …), not a live count, and holds while the
   queue drains until the clear. Local writes are not counted.
+- Load notes (`LoadNotes`: extra source columns, absent optional ones) ride
+  `IngestEvent::Published`; the service warns once per distinct combination,
+  up to 256.
 - `apply_schema` is `CREATE TABLE IF NOT EXISTS` and publish moves rows
   positionally, so open compares every existing payload table with its
   declaration (`store::drift`) and refuses a drifted dataset for the run:

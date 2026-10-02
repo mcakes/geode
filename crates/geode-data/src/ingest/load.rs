@@ -52,6 +52,34 @@ pub struct LoadOutcome {
     pub partitions: Vec<Option<String>>,
 }
 
+/// What a load carried that its dataset does not declare, and declared
+/// optional columns it did not carry. Travels out on `IngestEvent::Published`;
+/// the service turns each distinct combination into one warning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadNotes {
+    /// The CSV's file name.
+    pub file: String,
+    pub extra_columns: Vec<String>,
+    pub missing_optional: Vec<String>,
+}
+
+impl LoadNotes {
+    /// `None` when the file matched its dataset exactly.
+    pub fn of(csv_path: &Path, outcome: &LoadOutcome) -> Option<LoadNotes> {
+        if outcome.extra_columns.is_empty() && outcome.missing_optional.is_empty() {
+            return None;
+        }
+        Some(LoadNotes {
+            file: csv_path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            extra_columns: outcome.extra_columns.clone(),
+            missing_optional: outcome.missing_optional.clone(),
+        })
+    }
+}
+
 #[derive(Debug)]
 pub enum LoadError {
     Store(StoreError),
@@ -602,7 +630,7 @@ source_name = "ModelCode"
     }
 
     #[test]
-    fn a_missing_optional_column_is_silent_and_becomes_null() {
+    fn a_missing_optional_column_becomes_null_and_is_noted() {
         let f = fixture();
         let file = f
             .emitted
@@ -614,11 +642,13 @@ source_name = "ModelCode"
         assert_eq!(
             out.health,
             Health::Ok,
-            "optional absence is expected, not a warning"
+            "optional absence is not a degradation"
         );
         assert_eq!(out.missing_optional, vec!["skew01".to_string()]);
         let nulls = count(&f, "risk_snapshot_underlying_live where skew01 is null");
         assert!(nulls > 0);
+        let noted = LoadNotes::of(&file.csv_path, &out).expect("noted");
+        assert_eq!(noted.missing_optional, vec!["skew01".to_string()]);
     }
 
     #[test]

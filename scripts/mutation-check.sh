@@ -28890,6 +28890,38 @@ run_mutation "silence: a drained series never uncounts its backlog" \
   geode-data \
   documents_and_series_of_one_source_count_toward_its_backlog_and_both_drain_it
 
+# A repeated load-note combination warns once.
+run_mutation "silence: a repeated load note warns again" \
+  crates/geode-data/src/service.rs \
+  '        if self.seen.contains(&key) {' \
+  '        if false {' \
+  geode-data \
+  a_repeated_load_note_combination_warns_once
+
+# A file load's notes travel out on the published event.
+run_mutation "silence: load notes never leave the runner" \
+  crates/geode-data/src/ingest/runner.rs \
+  '                notes: crate::ingest::load::LoadNotes::of(&item.candidate.csv_path, &loaded),' \
+  '                notes: None,' \
+  geode-data \
+  extra_and_missing_optional_columns_are_one_warning_per_combination
+
+# The remembered combinations are capped.
+run_mutation "silence: load notes grow without bound" \
+  crates/geode-data/src/service.rs \
+  '        if self.seen.len() >= LOAD_NOTE_CAP {' \
+  '        if false {' \
+  geode-data \
+  load_notes_stop_growing_at_the_cap_with_one_last_warning
+
+# A missing optional column is named in the warning.
+run_mutation "silence: a missing optional column is not noted" \
+  crates/geode-data/src/service.rs \
+  '    if !notes.missing_optional.is_empty() {' \
+  '    if false {' \
+  geode-data \
+  the_load_note_names_the_file_dataset_and_both_lists
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

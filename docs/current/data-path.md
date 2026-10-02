@@ -238,6 +238,14 @@ whole file partitions. See [`publish.rs`](../../crates/geode-data/src/store/publ
 [`split.rs`](../../crates/geode-data/src/ingest/split.rs), and
 [`series.rs`](../../crates/geode-data/src/store/series.rs).
 
+Source columns the dataset does not declare are ignored and declared
+optional columns the file lacks read as NULL; the load stays `Ok`. Each
+distinct (source, dataset, extra set, missing set) combination emits one
+warning diagnostic per run — `'<file>' loaded into '<dataset>' with extra
+columns [a, b] ignored; optional [c] missing, read as NULL` — and repeats
+emit nothing. At most 256 combinations are remembered; one further warning
+says later ones go unreported.
+
 **Schema limitation:** `apply_schema` creates missing tables but does not
 migrate existing payload columns. Publication moves rows positionally, so a
 column change against an old database can fail or, for same-typed reorders,
