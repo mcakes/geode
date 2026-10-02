@@ -1,0 +1,39 @@
+[package]
+name = "geode-volslice"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+# Shared vocabulary (link groups, vol requests and outcomes) lives in
+# geode-core; geode-shell supplies hosting, geode-tile the popups and the
+# notice line, geode-chart the xy painting, and DataHandle is the module's
+# interface to geode-data.
+[dependencies]
+geode-core.workspace = true
+geode-shell.workspace = true
+geode-tile.workspace = true
+geode-chart.workspace = true
+geode-data = { path = "../geode-data" }
+gpui.workspace = true
+gpui-component.workspace = true
+chrono = "0.4.42"
+toml = "1.1.4"
+
+[dev-dependencies]
+geode-core = { workspace = true, features = ["test-support"] }
+geode-shell = { workspace = true, features = ["test-support"] }
+geode-data = { path = "../geode-data", features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }
+# The stand-in vol model and the CVI document kind, for tests that pin this
+# crate's layouts against theirs. Never normal dependencies: the module
+# computes no vol and parses no document itself.
+geode-pricing.workspace = true
+geode-documents = { path = "../geode-documents" }
+criterion = "0.8.2"
+
+[[bench]]
+name = "model_build"
+harness = false
