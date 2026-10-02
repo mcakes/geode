@@ -9041,8 +9041,10 @@ run_mutation "objectdialog: n empties a leftover browse filter before naming" \
 run_mutation "objectdialog: a mouse-confirmed delete leaves its filter text in the field" \
   crates/geode-shell/src/shell/dialog.rs \
   '                            on_yes(shell, window, cx);
+                            shell.refresh_dialog_rows(cx);
                             sync_dialog_text(shell, window, cx);' \
   '                            on_yes(shell, window, cx);
+                            shell.refresh_dialog_rows(cx);
                             let _ = window;' \
   geode-shell \
   confirming_with_the_mouse_while_filtering_empties_the_field
@@ -9138,8 +9140,8 @@ run_mutation "dialog: the filter placeholder needs / to actually filter" \
 run_mutation "dialog: a click on the frozen filter row enters filter mode" \
   crates/geode-shell/src/shell/dialog.rs \
   '                        enter_filter_by_mouse(shell);
-                        sync_dialog_text(shell, window, cx);' \
-  '                        sync_dialog_text(shell, window, cx);' \
+                        shell.refresh_dialog_rows(cx);' \
+  '                        shell.refresh_dialog_rows(cx);' \
   geode-shell clicking_the_frozen_filter_row_enters_filter_mode
 
 # The listening half of the same rule: a capture must be cancelled by the
@@ -16866,8 +16868,8 @@ run_mutation "grouping: the readout click opens the picker" \
 run_mutation "grouping: a dialog opened from a mouse-down keeps its field's focus" \
   crates/geode-shell/src/shell/dialog.rs \
   '    window.prevent_default();
-    // Dialog state is installed before this call so synchronization can choose its' \
-  '    // Dialog state is installed before this call so synchronization can choose its' \
+    // The new dialog'"'"'s state is installed: derive its rows before anything reads them.' \
+  '    // The new dialog'"'"'s state is installed: derive its rows before anything reads them.' \
   geode-shell \
   a_terms_body_edits_that_term_alone
 
