@@ -498,6 +498,11 @@ pub struct ShellView {
     /// as-of, pin, and unpin change in any lane advances it, so it detects
     /// frame-only changes; updated before the disk write completes.
     last_frame_generation_written: u64,
+    /// The text of the last periodic snapshot handed to the writer, `None`
+    /// before the first. The frame generation also advances for state the
+    /// session does not hold (a link group's scope), so a dirty check can
+    /// produce the text already written; that snapshot is not written again.
+    last_session_text: Option<String>,
     /// Deferred focus restoration for paths without a `Window`, such as hot
     /// reload closing the palette. `render` consumes it before painting. Waiting
     /// for a key event is unsafe: dropping a focused overlay can leave no live
@@ -602,6 +607,12 @@ pub struct ShellView {
     /// happen to exist yet at construction time, before any occupant
     /// does).
     last_flip_versions: FrameVersions,
+    /// Each link group's scope generation as of the last `on_frame_changed`,
+    /// in `Group::ALL` order: the other half of the flip baseline. A group
+    /// whose number moved flips its visible followers. Seeded and re-seeded
+    /// beside `last_flip_versions`, so a restored group scope or a workspace
+    /// switch is not read as a change either.
+    last_flip_groups: [u64; 4],
     /// Who lives in each tile. Created lazily in `ensure_occupants` and
     /// dropped when the tile is gone from every workspace.
     occupants: HashMap<TileId, TileOccupant>,
@@ -1262,6 +1273,7 @@ impl ShellView {
             .read(cx)
             .view(services.workspaces.active_ix())
             .versions();
+        let last_flip_groups = frame.read(cx).group_scope_gens();
 
         // The docs the data engine actually starts with — see
         // `sources_baseline`'s field doc.
@@ -1315,6 +1327,7 @@ impl ShellView {
             last_tiles_written: crate::session::TileRecords::new(),
             last_pages_written: crate::session::PageRecords::new(),
             last_frame_generation_written: 0,
+            last_session_text: None,
             pending_focus_restore: false,
             overlay_return_to_filter: false,
             divider_drag: None,
@@ -1334,6 +1347,7 @@ impl ShellView {
             line_numbers,
             default_source,
             last_flip_versions,
+            last_flip_groups,
             occupants: HashMap::new(),
             visible_tiles: HashSet::new(),
             stack_sent: HashMap::new(),
@@ -1485,24 +1499,56 @@ impl ShellView {
         // before occupants, ensuring the full key set is ready before their
         // frame callbacks run, including non-following tiles that self-arrive.
         // Visible tiles are the active workspace's, so the flip compares and
-        // opens against the active lane, not a dialog's target lane.
-        let active = self.active_frame();
-        let now_v = active.read(cx).versions();
-        let last = self.last_flip_versions;
-        if now_v.scope != last.scope || now_v.grouping != last.grouping || now_v.as_of != last.as_of
-        {
-            self.last_flip_versions = now_v;
+        // opens against the active lane, not a dialog's target lane. A link
+        // group's scope is part of what its followers show, so a change to
+        // it flips them as well.
+        let ws = self.active_ix();
+        let (lane_now, groups_now) = {
+            let f = frame.read(cx);
+            (f.view(ws).versions(), f.group_scope_gens())
+        };
+        let (last_lane, last_groups) = (self.last_flip_versions, self.last_flip_groups);
+        let lane_moved = !lane_now.same_flip_identity(last_lane);
+        let groups_moved = groups_now != last_groups;
+        if lane_moved || groups_moved {
+            self.last_flip_versions = lane_now;
+            self.last_flip_groups = groups_now;
             let mut keys = std::mem::take(&mut self.scratch_visible_keys);
             self.visible_tile_keys(&mut keys);
-            active.update(cx, |f, _| f.open_flip(keys.iter().copied(), Instant::now()));
+            frame.update(cx, |f, _| {
+                // Each visible tile answers under its own identity: a
+                // follower's scope generation is its group's, and enrolled
+                // under the lane's it could never arrive. A lane change
+                // awaits every visible tile; a group's scope change awaits
+                // only that group's followers.
+                let awaited: Vec<(QueryKey, FrameVersions)> = keys
+                    .iter()
+                    .filter_map(|key| {
+                        // A tile's query key is its tile id, the convention
+                        // every module follows.
+                        let tile = TileId(key.0);
+                        let follows = f.membership(tile).follow;
+                        let concerned = lane_moved
+                            || follows
+                                .is_some_and(|g| groups_now[g.index()] != last_groups[g.index()]);
+                        concerned.then(|| (*key, f.view_for(ws, tile).versions()))
+                    })
+                    .collect();
+                // A group with no visible follower opens nothing: opening
+                // over an empty set would clear a lane barrier that still
+                // waits on the visible tiles.
+                if lane_moved || !awaited.is_empty() {
+                    f.open_flip_each(awaited, Instant::now());
+                }
+            });
             self.scratch_visible_keys = keys;
             // The shared reload poll sweeps the deadline; no timer is needed
             // for each frame mutation.
         }
         // Refresh an open as-of dialog when publishes change. Scope, grouping,
         // and as-of edits do not rebuild rows while the user is filtering.
-        if self.as_of_dialog.is_some() && now_v.data != self.as_of_data_version {
-            self.as_of_data_version = now_v.data;
+        if self.as_of_dialog.is_some() && lane_now.data != self.as_of_data_version {
+            self.as_of_data_version = lane_now.data;
             let as_of = self.target_frame().read(cx).as_of().clone();
             let publishes: Vec<_> = frame.read(cx).recent_publishes().iter().cloned().collect();
             if let Some(state) = self.as_of_dialog.as_mut() {

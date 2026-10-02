@@ -45,6 +45,7 @@ impl ShellView {
             f.is_pinned(prev) || f.is_pinned(active)
         };
         self.last_flip_versions = self.active_frame().read(cx).versions();
+        self.last_flip_groups = self.frame.read(cx).group_scope_gens();
         if lane_changed {
             self.frame
                 .update(cx, |f, _| f.view_mut(prev).end_scope_session());

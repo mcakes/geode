@@ -52,7 +52,10 @@ impl ShellView {
     /// caller writes the file. A disk failure therefore does not retry unchanged
     /// state on the next tick. Serialization failure is logged without advancing
     /// those baselines, but a layout-only change can still lose its dirty flag.
-    /// No configured path or no detected change returns `None` silently.
+    /// No configured path or no detected change returns `None` silently, and
+    /// so does a snapshot whose text equals the last one returned: the frame
+    /// generation advances for state the session does not hold, and an
+    /// emitting tile's cursor would otherwise rewrite the file on every move.
     pub(super) fn take_dirty_session_write(&mut self, cx: &App) -> Option<(PathBuf, String)> {
         let tiles = self.current_tiles(cx);
         let pages = self.current_pages(cx);
@@ -86,6 +89,13 @@ impl ShellView {
                 self.last_pages_written = pages;
                 self.last_frame_generation_written = frame_generation;
                 self.last_palette_usage_written = self.palette_usage_version;
+                // The frame's generation also advances for state the session
+                // does not hold (a link group's scope moves with an emitter's
+                // cursor). Identical text is not written again.
+                if self.last_session_text.as_deref() == Some(text.as_str()) {
+                    return None;
+                }
+                self.last_session_text = Some(text.clone());
                 Some((path, text))
             }
             Err(e) => {

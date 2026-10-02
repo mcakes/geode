@@ -665,6 +665,7 @@ mod grouping;
 mod input;
 mod keybindings_dialog;
 mod launch;
+mod link;
 mod object_stack;
 mod objectdialog;
 mod occupants;

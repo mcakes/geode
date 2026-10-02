@@ -5062,10 +5062,8 @@ run_mutation "flip: the deadline releases" \
 
 run_mutation "flip: only scope/grouping/as-of open a barrier" \
   crates/geode-shell/src/shell/mod.rs \
-  '        if now_v.scope != last.scope || now_v.grouping != last.grouping || now_v.as_of != last.as_of
-        {' \
-  '        if now_v != last
-        {' \
+  '        let lane_moved = !lane_now.same_flip_identity(last_lane);' \
+  '        let lane_moved = lane_now != last_lane;' \
   geode-shell a_data_bump_opens_no_barrier
 
 # Targeted publication invalidation and outstanding-query barriers.
@@ -14872,8 +14870,8 @@ run_mutation "asof: open resets the scroll to the top" \
 # alone.
 run_mutation "asof: a data version bump refreshes the open dialog" \
   crates/geode-shell/src/shell/mod.rs \
-  '        if self.as_of_dialog.is_some() && now_v.data != self.as_of_data_version {' \
-  '        if false && self.as_of_dialog.is_some() && now_v.data != self.as_of_data_version {' \
+  '        if self.as_of_dialog.is_some() && lane_now.data != self.as_of_data_version {' \
+  '        if false && self.as_of_dialog.is_some() && lane_now.data != self.as_of_data_version {' \
   geode-shell \
   a_publish_while_open_adds_a_new_row
 
