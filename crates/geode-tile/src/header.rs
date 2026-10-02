@@ -853,7 +853,9 @@ mod tests {
             let _ = window.draw(cx);
         });
         let width = |vcx: &mut VisualTestContext, s: &'static str| {
-            f32::from(vcx.debug_bounds(s).unwrap().size.width)
+            let bounds = vcx.debug_bounds(s);
+            assert!(bounds.is_some(), "{s} did not paint");
+            f32::from(bounds.unwrap().size.width)
         };
         let stale = width(vcx, "tile-time-3-0-stale");
         let worded = width(vcx, "tile-time-3-1");
