@@ -157,11 +157,16 @@ persisted without validating them against this document at all: resolution,
 not the reader, is what a missing or invalid name fails against (see
 [the shared frame](shell.md#the-shared-frame)).
 
-Schema changes do not migrate an existing DuckDB database. `apply_schema`
-creates missing tables and columns needed by its own metadata, while payload
-publication remains positional. Rebuild a demo database after changing column
-membership, roles, grains, or order. A production schema migration must be an
-explicit operation.
+Schema changes do not migrate an existing DuckDB database. At open, each
+payload table is compared with the DDL its dataset declares (names, types,
+number and order of columns; DuckDB type aliases and identifier case are not
+differences). A table that differs is drift: the dataset is refused for the
+run — its sources report `Failed` with `schema drift in '<dataset>': <diff>;
+delete the table or fix the dataset`, loads into it and reads of it are
+refused, and one error diagnostic names the tables. Recover by deleting the
+drifted table (or the demo database) or by correcting `datasets.toml`, then
+restarting; `datasets` is restart-required, so drift is decided once per
+run. A table that does not exist yet is created and is never drift.
 
 Every build declares two datasets in its builtin layer: `pricer_sheets`, the
 line pricer's local document dataset, and `pricer`, its computed vocabulary
@@ -573,6 +578,7 @@ Accepted candidates update runtime state according to their inputs:
 | `expressions`, `datasets`, or `dimensions` | Rebuild named expressions; a changed or redefined entry bumps the frame's config version so a tile whose scope references it requeries |
 | `datasets` or `dimensions` | Rebuild dimension-picker columns |
 | Views, either presentation document, dimensions, or colors | Emit `ConfigReloaded` for the app bridge |
+| `app` | Emit `AppSettingsReloaded`; the bridge hands `blotter.stale_after` to the blotter and panel factories |
 | Sources, datasets, egress, positions, panels, `app.pricing.adapter`, or `app.vol.model` differing from startup | Mark restart required; return to the startup inputs to clear it |
 
 Document-change checks compare the original per-layer documents, including
@@ -584,7 +590,9 @@ Every accepted reload advances the frame's config revision and republishes
 `Chords`. `UiSettings`, `SeriesSettings`, and `AppClock` are published only
 when their values change. The view-related event is queued before any frame
 notification so the bridge refreshes factory/handle views before tiles observe
-the new revision and submit queries.
+the new revision and submit queries. `AppSettingsReloaded` is queued the same
+way, so a tile's frame flip re-arms its stale wake-up against the new
+threshold.
 
 View and derived-dimension replacements use a latest-value mailbox into the
 data service, so a full request queue cannot permanently lose a configuration
@@ -597,10 +605,11 @@ to the service. This is not an atomic update across factories and workers;
 the handle acknowledges retention, not application. See
 [view replacement](request-delivery.md#view-replacement-and-shutdown).
 
-That handler also rereads the stale threshold and factory validation schema.
-A stale-threshold-only edit does not trigger it, and dataset edits require
-restart. A later eligible reload can therefore update factory settings or
-schema before the running service is rebuilt. Presentation and color-reader
+That handler also rereads the factory validation schema. Dataset edits
+require restart, so a later eligible reload can update the factory schema
+before the running service is rebuilt. The stale threshold lives in `app` and
+reaches the blotter and panel factories through `AppSettingsReloaded`, on its
+own; the pricer reads it in its own revision observer. Presentation and color-reader
 diagnostics append to the retained data-diagnostics lane; the shell remains
 responsible for replacing the current config-diagnostics batch.
 

@@ -8,7 +8,9 @@
 //!
 //! File submissions deduplicate queued/in-flight path, size, and source time;
 //! a queued file can be promoted. Document and series queues have no dedupe,
-//! refusal, or fixed capacity. Upstream coalescing does not bound these queues.
+//! refusal, or fixed capacity; a source past `BACKLOG_DEPTH` queued jobs is
+//! reported as `<source>:backlog` health. Upstream coalescing does not bound
+//! these queues.
 //!
 //! Loads use fixed staging-table names, so concurrent file loads on the same
 //! store are unsafe. Shutdown finishes the running operation, then runs the
@@ -64,6 +66,9 @@ pub enum IngestEvent {
         books: Vec<Option<String>>,
         rows: usize,
         health: Health,
+        /// Undeclared source columns and absent optional ones (file loads
+        /// only); the service warns once per distinct combination.
+        notes: Option<crate::ingest::load::LoadNotes>,
     },
     Failed {
         /// See `Published::source`'s doc — same reasoning, same field.
@@ -108,6 +113,14 @@ pub enum IngestEvent {
     /// could not read the catalog (the load proceeds), a local sweep that
     /// panicked (the save stands).
     Diagnostic(geode_core::config::Diagnostic),
+    /// One source's queued documents and series crossed `BACKLOG_DEPTH`
+    /// (`over`, and again at each further multiple of it) or fell back below
+    /// it. Sent from the submitting thread or the runner, under the queue lock.
+    Backlog {
+        source: String,
+        queued: usize,
+        over: bool,
+    },
     /// The queue drained. Not a terminal state — more work may be submitted.
     PlanComplete,
 }
@@ -117,6 +130,12 @@ pub enum IngestEvent {
 /// Local datasets have no configured retention and are written by autosave,
 /// so without a bound every edit burst would grow the archive forever.
 pub const LOCAL_KEEP_GENERATIONS: usize = 200;
+
+/// Feed documents and series queued for one source past which the source
+/// reports `Degraded "ingest backlog N"` on its load lane under
+/// `<source>:backlog`. Queueing itself is unchanged: no capacity, refusal or
+/// coalescing.
+pub const BACKLOG_DEPTH: usize = 64;
 
 /// Nonblocking event delivery. `false` means refused; the runner continues
 /// without retrying the event. The callback can run under the queue lock and
@@ -196,10 +215,17 @@ struct Queue {
     /// before it starts, so `enqueue`'s dedupe still sees it as spoken for
     /// the entire time a poll could otherwise re-add it.
     in_flight: Option<(PathBuf, u64, DateTime<Utc>)>,
+    /// Feed documents and series queued per source (local writes and forgets
+    /// belong to no configured source and are not counted).
+    queued_per_source: std::collections::HashMap<String, usize>,
+    /// Sources whose last backlog report was `over`.
+    backlogged: std::collections::HashSet<String>,
 }
 
 pub struct IngestHandle {
     queue: Arc<(Mutex<Queue>, Condvar)>,
+    /// The runner's sink, for the backlog crossings a submit reports.
+    sink: IngestSink,
     thread: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -233,6 +259,7 @@ impl IngestRunner {
     ) -> IngestHandle {
         let queue = Arc::new((Mutex::new(Queue::default()), Condvar::new()));
         let worker_queue = Arc::clone(&queue);
+        let handle_sink = Arc::clone(&sink);
         let thread =
             crate::supervise::spawn_supervised("geode-ingest".to_string(), stop, move || {
                 run(store, schema, worker_queue, sink, load, publish)
@@ -240,6 +267,7 @@ impl IngestRunner {
             .expect("spawning the ingest thread");
         IngestHandle {
             queue,
+            sink: handle_sink,
             thread: Mutex::new(Some(thread)),
         }
     }
@@ -278,11 +306,16 @@ impl IngestHandle {
 
     /// Append a document under a short queue lock. No capacity limit, refusal,
     /// or deduplication applies here; upstream coalescing only replaces documents
-    /// that have not yet been submitted to this runner.
+    /// that have not yet been submitted to this runner. Crossing
+    /// `BACKLOG_DEPTH` for the job's source is reported here, under the lock.
     pub fn submit_document(&self, job: DocumentJob) {
         let (lock, cvar) = &*self.queue;
         let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let backlog = backlog_push(&mut q, &job.source);
         q.documents.push_back(DocumentWork::Publish(job));
+        if let Some(event) = backlog {
+            let _ = (self.sink)(event);
+        }
         cvar.notify_all();
     }
 
@@ -299,10 +332,16 @@ impl IngestHandle {
     /// Hand fetched rows to the runner. No dedupe and no refusal, as
     /// `submit_document`: the service subtracted coverage before the
     /// fetch, and `append_series` drops unchanged rows regardless.
+    /// Crossing `BACKLOG_DEPTH` for the job's source is reported here,
+    /// under the lock.
     pub fn submit_series(&self, job: SeriesJob) {
         let (lock, cvar) = &*self.queue;
         let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let backlog = backlog_push(&mut q, &job.source);
         q.series.push_back(job);
+        if let Some(event) = backlog {
+            let _ = (self.sink)(event);
+        }
         cvar.notify_all();
     }
 
@@ -414,6 +453,69 @@ fn take_work(q: &mut Queue) -> Option<Work> {
     Some(Work::File(it))
 }
 
+/// Count one queued job for `source`. Reports on crossing `BACKLOG_DEPTH` and
+/// again at each further multiple of it, so `N` tracks a growing backlog with
+/// one event per `BACKLOG_DEPTH` submissions.
+fn backlog_push(q: &mut Queue, source: &str) -> Option<IngestEvent> {
+    if source == LOCAL_SOURCE {
+        return None;
+    }
+    let n = q.queued_per_source.entry(source.to_string()).or_default();
+    *n += 1;
+    let n = *n;
+    if n > BACKLOG_DEPTH && (n - 1).is_multiple_of(BACKLOG_DEPTH) {
+        q.backlogged.insert(source.to_string());
+        return Some(IngestEvent::Backlog {
+            source: source.to_string(),
+            queued: n,
+            over: true,
+        });
+    }
+    None
+}
+
+/// Uncount one job taken for `source`; reports `over: false` when that
+/// source's count falls below `BACKLOG_DEPTH` after an `over` report. Only
+/// this source's count and flag are read, so another source's queue never
+/// clears it.
+fn backlog_pop(q: &mut Queue, source: &str) -> Option<IngestEvent> {
+    let n = match q.queued_per_source.get_mut(source) {
+        Some(n) => {
+            *n = n.saturating_sub(1);
+            *n
+        }
+        None => return None,
+    };
+    if n == 0 {
+        q.queued_per_source.remove(source);
+    }
+    if n < BACKLOG_DEPTH && q.backlogged.remove(source) {
+        return Some(IngestEvent::Backlog {
+            source: source.to_string(),
+            queued: n,
+            over: false,
+        });
+    }
+    None
+}
+
+/// The source a taken job is counted against: a feed document or a series.
+fn backlog_source(work: &Work) -> Option<&str> {
+    match work {
+        Work::Document(DocumentWork::Publish(job)) if job.source != LOCAL_SOURCE => {
+            Some(&job.source)
+        }
+        Work::Series(job) => Some(&job.source),
+        _ => None,
+    }
+}
+
+/// Why a write into `dataset` is refused before any INSERT: its tables
+/// drifted from the declaration at open (`Store::drifted`).
+fn drift_refusal(store: &Store, dataset: &str) -> Option<String> {
+    store.drifted(dataset).map(str::to_string)
+}
+
 /// Publish one owned document and report its outcome through the same
 /// generation events as files. The rows are consumed by this operation.
 fn publish_one_document(
@@ -452,6 +554,21 @@ fn publish_one_document(
         }
         return;
     };
+    if let Some(reason) = drift_refusal(store, &job.dataset) {
+        let failed = sink(IngestEvent::Failed {
+            source: job.source.clone(),
+            dataset: job.dataset.clone(),
+            batch: batch.clone(),
+            reason,
+        });
+        if !failed {
+            log_refused_event(
+                refusal_logged,
+                &format!("the drift refusal for document {}/{batch}", job.dataset),
+            );
+        }
+        return;
+    }
 
     let source_time = if job.source == LOCAL_SOURCE {
         local_source_time(store, dataset, &batch, job.source_time)
@@ -493,6 +610,7 @@ fn publish_one_document(
             books: vec![None],
             rows: published.rows,
             health: Health::Ok,
+            notes: None,
         },
         Ok(Err(reason)) => IngestEvent::Failed {
             source: job.source.clone(),
@@ -691,6 +809,9 @@ fn forget_one_document(
             "dataset '{}' is not a local dataset; only a local document can be forgotten",
             job.dataset
         )),
+        Some(_) if store.drifted(&job.dataset).is_some() => {
+            failed(drift_refusal(store, &job.dataset).unwrap_or_default())
+        }
         Some(ds) => {
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 geode_core::panic::contained(|| {
@@ -747,6 +868,15 @@ fn append_one_series(
         }
         return;
     };
+    if let Some(reason) = drift_refusal(store, &job.dataset) {
+        if !sink(failed(reason)) {
+            log_refused_event(
+                refusal_logged,
+                &format!("the drift refusal for series {pair}"),
+            );
+        }
+        return;
+    }
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         geode_core::panic::contained(|| {
             append_series(
@@ -841,6 +971,10 @@ fn run(
                 // that announces a drain.
                 if let Some(work) = take_work(&mut q) {
                     announced_idle = false;
+                    if let Some(event) = backlog_source(&work).and_then(|s| backlog_pop(&mut q, s))
+                    {
+                        let _ = sink(event);
+                    }
                     break (work, q.items.len() + q.documents.len() + q.series.len());
                 }
                 if !announced_idle {
@@ -964,6 +1098,22 @@ fn run(
             }
             continue;
         };
+        if let Some(reason) = drift_refusal(&store, &item.dataset) {
+            let failed = sink(IngestEvent::Failed {
+                source: item.source.clone(),
+                dataset: item.dataset.clone(),
+                batch: item.batch.clone(),
+                reason,
+            });
+            clear_in_flight(&queue);
+            if !failed {
+                log_refused_event(
+                    &refusal_logged,
+                    &format!("the drift refusal for {}/{}", item.dataset, item.batch),
+                );
+            }
+            continue;
+        }
 
         // Contain load panics, report the file as Failed, and continue with the next
         // job. Ordinary load errors use the same failure event.
@@ -1000,6 +1150,7 @@ fn run(
                 // from the load.
                 books: loaded.partitions.clone(),
                 rows: loaded.rows,
+                notes: crate::ingest::load::LoadNotes::of(&item.candidate.csv_path, &loaded),
                 health: loaded.health,
             },
             Ok(Err(reason)) => IngestEvent::Failed {
@@ -1165,6 +1316,7 @@ mod tests {
                 IngestEvent::Forgotten { .. } => "forgotten",
                 IngestEvent::ForgetFailed { .. } => "forget_failed",
                 IngestEvent::Diagnostic(_) => "diagnostic",
+                IngestEvent::Backlog { .. } => "backlog",
                 IngestEvent::PlanComplete => "drained",
             })
             .filter(|k| *k != "drained")
@@ -1982,12 +2134,16 @@ mod tests {
         (dir, store)
     }
 
-    /// Read the next outcome, skipping Started and idle announcements.
-    /// PlanComplete may occur before submission and between jobs.
+    /// Read the next outcome, skipping Started, backlog reports, and idle
+    /// announcements. PlanComplete may occur before submission and between
+    /// jobs; a burst past `BACKLOG_DEPTH` reports a backlog, which no job
+    /// outcome is.
     fn next_event(rx: &Receiver<IngestEvent>) -> IngestEvent {
         loop {
             match rx.recv_timeout(Duration::from_secs(60)) {
-                Ok(IngestEvent::PlanComplete) | Ok(IngestEvent::Started { .. }) => continue,
+                Ok(IngestEvent::PlanComplete)
+                | Ok(IngestEvent::Started { .. })
+                | Ok(IngestEvent::Backlog { .. }) => continue,
                 Ok(e) => return e,
                 Err(e) => panic!("no outcome event: {e}"),
             }
@@ -2008,6 +2164,199 @@ mod tests {
     /// The fixture document every test below publishes, spelled once.
     fn spx() -> geode_core::document::DocumentRows {
         cvi_doc("SPX.Z", [1., 2., 3., 4., 5., 6.])
+    }
+
+    /// Holds every publish until a test opens it, so a queue can fill behind
+    /// a busy writer. A static because `PublishFn` is a plain `fn`; only this
+    /// test uses it.
+    static BACKLOG_GATE: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+
+    fn gated_publish(
+        store: &Store,
+        req: &DocumentPublishRequest,
+    ) -> Result<DocumentPublished, StoreError> {
+        let (lock, opened) = &BACKLOG_GATE;
+        let mut open = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !*open {
+            let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) else {
+                break;
+            };
+            open = opened.wait_timeout(open, left).unwrap().0;
+        }
+        drop(open);
+        publish_document(store, req)
+    }
+
+    /// The writer is parked in the gate on the first job, so every count
+    /// below is exact: nothing is popped while the test submits. Two sources
+    /// share the queue so a shared counter would cross on the wrong one, and
+    /// one draining before the other proves a drain never clears another
+    /// source's backlog.
+    #[test]
+    fn a_source_queued_past_the_backlog_depth_is_reported_and_draining_clears_it() {
+        let (_dir, store) = document_store();
+        let (tx, rx) = channel();
+        let sink: IngestSink = Arc::new(move |e| tx.send(e).is_ok());
+        let handle = IngestRunner::spawn_with(
+            store,
+            schema_of(cvi_dataset()),
+            sink,
+            crate::supervise::unwatched(),
+            load_file,
+            gated_publish,
+        );
+        let doc = |source: &str, i: usize| DocumentJob {
+            source: source.into(),
+            ..job(
+                "cvi_params",
+                cvi_doc(&format!("{source}{i}.Z"), [1., 2., 3., 4., 5., 6.]),
+            )
+        };
+        // The writer pops the first job and parks in the gate.
+        handle.submit_document(doc("feed_a", 0));
+        loop {
+            if let IngestEvent::Started { .. } = rx.recv_timeout(Duration::from_secs(30)).unwrap() {
+                break;
+            }
+        }
+        // Interleaved so that one shared counter would cross on feed_b.
+        for i in 1..=60 {
+            handle.submit_document(doc("feed_a", i));
+        }
+        for i in 0..5 {
+            handle.submit_document(doc("feed_b", i));
+        }
+        for i in 61..=65 {
+            handle.submit_document(doc("feed_a", i));
+        }
+        let backlog_of = |e: IngestEvent| match e {
+            IngestEvent::Backlog {
+                source,
+                queued,
+                over,
+            } => Some((source, queued, over)),
+            _ => None,
+        };
+        let backlogs: Vec<(String, usize, bool)> = rx.try_iter().filter_map(backlog_of).collect();
+        assert_eq!(backlogs, vec![("feed_a".to_string(), 65, true)]);
+        // feed_b's own crossing, with feed_a still over.
+        for i in 5..65 {
+            handle.submit_document(doc("feed_b", i));
+        }
+        let backlogs: Vec<(String, usize, bool)> = rx.try_iter().filter_map(backlog_of).collect();
+        assert_eq!(backlogs, vec![("feed_b".to_string(), 65, true)]);
+        {
+            let (lock, opened) = &BACKLOG_GATE;
+            *lock.lock().unwrap() = true;
+            opened.notify_all();
+        }
+        // Queue order: feed_a 1..=60, feed_b 0..5, feed_a 61..=65, feed_b
+        // 5..65. Each source clears on its own second pop (65 → 63), and
+        // only then: feed_a after feed_a 0 and 1 published, feed_b after
+        // feed_a 0..=60 and feed_b 0 published. Read to the drain, so a
+        // missing clear fails the assertion below rather than a timeout.
+        let mut published: Vec<String> = Vec::new();
+        let mut cleared: Vec<(String, usize, usize)> = Vec::new();
+        loop {
+            match rx.recv_timeout(Duration::from_secs(60)).unwrap() {
+                IngestEvent::PlanComplete => break,
+                IngestEvent::Published { source, .. } => published.push(source),
+                IngestEvent::Backlog {
+                    source,
+                    queued,
+                    over: false,
+                } => {
+                    let before = published.iter().filter(|s| **s == source).count();
+                    let others = published.len() - before;
+                    cleared.push((source, queued, others));
+                }
+                IngestEvent::Backlog { over: true, .. } => {
+                    panic!("no backlog grows while draining")
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            cleared,
+            vec![
+                ("feed_a".to_string(), 63, 0),
+                ("feed_b".to_string(), 63, 61)
+            ],
+            "each source clears on its own count, never on the other's drain"
+        );
+        handle.shutdown();
+    }
+
+    #[test]
+    fn local_writes_are_not_counted_toward_a_backlog() {
+        let mut q = Queue::default();
+        for _ in 0..(BACKLOG_DEPTH * 2) {
+            assert!(backlog_push(&mut q, LOCAL_SOURCE).is_none());
+        }
+        assert!(q.queued_per_source.is_empty());
+    }
+
+    /// A source submitting both documents and series counts both, and
+    /// draining either kind uncounts it: a fetch-only source past the depth
+    /// clears as it drains. A handle without a runner thread, so the test
+    /// drains the queue itself through the runner's own take/uncount path.
+    #[test]
+    fn documents_and_series_of_one_source_count_toward_its_backlog_and_both_drain_it() {
+        let (tx, rx) = channel();
+        let handle = IngestHandle {
+            queue: Arc::new((Mutex::new(Queue::default()), Condvar::new())),
+            sink: Arc::new(move |e| tx.send(e).is_ok()),
+            thread: Mutex::new(None),
+        };
+        let series = |i: usize| SeriesJob {
+            source: "cvi".into(),
+            ..series_job(
+                &format!("S{i}.close"),
+                series_rows("2026-01-05T14:30:00Z", 1, 100.0),
+            )
+        };
+        // Series, one document, then series past the depth: the document
+        // is counted, and the crossing comes on a series submit.
+        for i in 0..30 {
+            handle.submit_series(series(i));
+        }
+        handle.submit_document(job("cvi_params", spx()));
+        for i in 30..64 {
+            handle.submit_series(series(i));
+        }
+        let backlogs: Vec<(String, usize, bool)> = rx
+            .try_iter()
+            .filter_map(|e| match e {
+                IngestEvent::Backlog {
+                    source,
+                    queued,
+                    over,
+                } => Some((source, queued, over)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(backlogs, vec![("cvi".to_string(), 65, true)]);
+        // The document drains first (65 → 64); the clear comes on the
+        // first series pop (64 → 63), so an uncounted series never clears.
+        let mut cleared = Vec::new();
+        let mut taken = Vec::new();
+        {
+            let mut q = handle.queue.0.lock().unwrap();
+            while let Some(work) = take_work(&mut q) {
+                taken.push(matches!(work, Work::Series(_)));
+                if let Some(IngestEvent::Backlog { queued, over, .. }) =
+                    backlog_source(&work).and_then(|s| backlog_pop(&mut q, s))
+                {
+                    cleared.push((taken.len(), queued, over));
+                }
+            }
+            assert!(q.queued_per_source.is_empty(), "every job uncounted");
+        }
+        assert_eq!(taken.iter().filter(|s| **s).count(), 64);
+        assert_eq!(cleared, vec![(2, 63, false)]);
+        assert!(taken[1], "the clearing pop is a series");
+        handle.shutdown();
     }
 
     #[test]
@@ -2039,6 +2388,61 @@ mod tests {
         }
         handle.shutdown();
         let _ = dir;
+    }
+
+    #[test]
+    fn a_document_for_a_drifted_dataset_is_refused_before_any_insert() {
+        let (_dir, mut store) = document_store();
+        store.mark_drifted("cvi_params", "schema drift in 'cvi_params': test".into());
+        let reader = store.reader().unwrap();
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema_of(cvi_dataset()));
+        handle.submit_document(job("cvi_params", spx()));
+        match next_event(&rx) {
+            IngestEvent::Failed {
+                dataset,
+                batch,
+                reason,
+                ..
+            } => {
+                assert_eq!((dataset.as_str(), batch.as_str()), ("cvi_params", "SPX.Z"));
+                assert_eq!(reason, "schema drift in 'cvi_params': test");
+            }
+            other => panic!("expected a refusal: {other:?}"),
+        }
+        let rows: i64 = reader
+            .query_row("select count(*) from cvi_params_document_live", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 0, "refused before any INSERT");
+        handle.shutdown();
+    }
+
+    #[test]
+    fn a_file_for_a_drifted_dataset_is_refused_before_any_insert() {
+        let (_db, _src, mut store, ds, plan) = harness();
+        store.mark_drifted(
+            "risk_snapshot",
+            "schema drift in 'risk_snapshot': test".into(),
+        );
+        let reader = store.reader().unwrap();
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema_of(ds));
+        handle.submit(WorkPlan {
+            items: vec![plan.items[0].clone()],
+        });
+        let events = drain(&rx, 1);
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                IngestEvent::Failed { reason, .. } if reason == "schema drift in 'risk_snapshot': test"
+            )),
+            "{events:?}"
+        );
+        let generations: i64 = reader
+            .query_row("select count(*) from file_generations", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(generations, 0, "nothing was recorded or inserted");
+        handle.shutdown();
     }
 
     /// Local publication must omit Started while still emitting Published.
@@ -2367,6 +2771,31 @@ mod tests {
                 if source == "demo_kdb" && dataset == "series" && identity == "SPX.close"),
             "{done:?}"
         );
+        handle.shutdown();
+    }
+
+    #[test]
+    fn a_series_job_for_a_drifted_dataset_is_refused_before_any_insert() {
+        let (_d, mut store, schema) = series_store();
+        store.mark_drifted("series", "schema drift in 'series': test".into());
+        let reader = store.reader().unwrap();
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema);
+        handle.submit_series(series_job(
+            "SPX.close",
+            series_rows("2026-01-05T14:30:00Z", 3, 100.0),
+        ));
+        let reason = loop {
+            match rx.recv_timeout(Duration::from_secs(30)).unwrap() {
+                IngestEvent::SeriesFailed { reason, .. } => break reason,
+                IngestEvent::SeriesAppended { .. } => panic!("appended into a drifted dataset"),
+                _ => continue,
+            }
+        };
+        assert_eq!(reason, "schema drift in 'series': test");
+        let rows: i64 = reader
+            .query_row("select count(*) from series_series", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0, "refused before any INSERT");
         handle.shutdown();
     }
 

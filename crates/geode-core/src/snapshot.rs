@@ -62,14 +62,21 @@ pub struct Provenance {
 }
 
 impl Provenance {
-    /// The earliest known input timestamp. Inputs without a timestamp are skipped;
-    /// `None` means none has one. Joined views can use this for overall freshness
-    /// while retaining each dataset's timestamp for mixed-cadence displays.
+    /// The earliest known input timestamp, compared as instants: RFC 3339
+    /// text with different offsets does not sort by time. Inputs without a
+    /// timestamp, or with one that does not parse, are never the stalest;
+    /// `None` means none has a parseable one. Joined views can use this for
+    /// overall freshness while retaining each dataset's timestamp for
+    /// mixed-cadence displays.
     pub fn stalest(&self) -> Option<&Freshness> {
         self.datasets
             .iter()
-            .filter(|f| f.as_of.is_some())
-            .min_by(|a, b| a.as_of.cmp(&b.as_of))
+            .filter_map(|f| {
+                let at = chrono::DateTime::parse_from_rfc3339(f.as_of.as_deref()?).ok()?;
+                Some((at.with_timezone(&chrono::Utc), f))
+            })
+            .min_by_key(|(at, _)| *at)
+            .map(|(_, f)| f)
     }
 }
 
@@ -1237,6 +1244,26 @@ mod tests {
             s.provenance().stalest().map(|f| f.dataset.as_str()),
             Some("implied_vol_summary")
         );
+    }
+
+    #[test]
+    fn the_stalest_input_compares_instants_not_offset_text() {
+        // 09:00+05:00 is 04:00Z: earlier than 07:00Z although its text sorts
+        // later. An unparsable time is never the stalest.
+        let fresh = |dataset: &str, as_of: &str| Freshness {
+            dataset: dataset.into(),
+            as_of: Some(as_of.into()),
+            generation: None,
+        };
+        let mut p = Provenance::default();
+        p.datasets
+            .push(fresh("london", "2026-08-30T07:00:00+00:00"));
+        p.datasets.push(fresh("garbled", "yesterday"));
+        p.datasets
+            .push(fresh("karachi", "2026-08-30T09:00:00+05:00"));
+        assert_eq!(p.stalest().map(|f| f.dataset.as_str()), Some("karachi"));
+        p.datasets.retain(|f| f.dataset == "garbled");
+        assert!(p.stalest().is_none(), "an unparsable time is never stalest");
     }
 
     #[test]

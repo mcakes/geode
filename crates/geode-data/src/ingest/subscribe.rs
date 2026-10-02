@@ -12,6 +12,12 @@
 //! key use the raw topic. A later message that parses, validates, and stamps
 //! successfully clears that topic entry; publication reports separately under
 //! the document key. A clean connection report cannot clear either failure.
+//! Messages the bounded queue refused are reported on the load lane under
+//! `<source>:queue` (`health::condition_key`): `Degraded "N messages dropped
+//! since HH:MM:SS"` while drops continue, `Ok` after `DROP_QUIET` without one.
+//! Only this receiver clears that slot, so when the subscription ends
+//! (disconnect or stop) it clears an open episode with `Ok`: no receiver, no
+//! drops.
 //!
 //! Parsed columns move into DocumentJob without per-row copies. Shutdown
 //! unsubscribes, sets the stop flag, and joins; pending coalesced documents are
@@ -22,6 +28,7 @@ use crate::health::Health;
 use crate::ingest::coalesce::Coalescer;
 use crate::ingest::runner::{DocumentJob, IngestHandle, panic_payload_message};
 use chrono::{DateTime, NaiveTime, Utc};
+use geode_core::clock::Clock;
 use geode_core::document::{DocumentKind, DocumentRows, Value, join_key};
 use geode_core::schema::{ColumnType, DatasetSpec};
 use geode_core::source_config::{SourceSpec, SourceTime};
@@ -36,6 +43,117 @@ use std::time::{Duration, Instant};
 /// Messages and disconnection wake the receiver. This bounds stop-flag checks
 /// while idle, not total shutdown latency or parser execution time.
 const MAX_WAIT: Duration = Duration::from_millis(250);
+
+/// How long a subscription must go without a new drop before its
+/// `<source>:queue` load lane reports `Ok` and the episode ends.
+pub const DROP_QUIET: Duration = Duration::from_secs(60);
+
+/// The shortest interval between two reports of a still-growing drop count:
+/// a flood updates its count about once a second, not once per message.
+const DROP_REPORT_EVERY: Duration = Duration::from_secs(1);
+
+/// What a receiver says about the messages its bounded queue refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DropReport {
+    /// `dropped` messages since `since`: the episode's first drop as this
+    /// receiver observed it (within one receive cycle, later if a parser held
+    /// the receiver).
+    Dropping { dropped: u64, since: DateTime<Utc> },
+    /// `DROP_QUIET` passed with no new drop.
+    Quiet,
+}
+
+#[derive(Debug)]
+struct Episode {
+    /// The refusal total before the episode's first drop.
+    base: u64,
+    since: DateTime<Utc>,
+    last_drop: Instant,
+    reported: u64,
+    reported_at: Instant,
+}
+
+/// One subscription's drop episodes, fed the sink's lifetime refusal total.
+/// Pure: the caller supplies both clocks.
+#[derive(Debug, Default)]
+pub(crate) struct DropEpisode {
+    seen: u64,
+    open: Option<Episode>,
+}
+
+impl DropEpisode {
+    /// A rise in `total` is read before the quiet check, so a drop that lands
+    /// as the quiet interval ends keeps the episode open rather than racing
+    /// its clear; a drop after a clear opens a new episode counted from zero.
+    pub(crate) fn observe(
+        &mut self,
+        total: u64,
+        now: Instant,
+        wall: DateTime<Utc>,
+    ) -> Option<DropReport> {
+        if total > self.seen {
+            let before = self.seen;
+            self.seen = total;
+            match self.open.as_mut() {
+                None => {
+                    self.open = Some(Episode {
+                        base: before,
+                        since: wall,
+                        last_drop: now,
+                        reported: total,
+                        reported_at: now,
+                    });
+                    return Some(DropReport::Dropping {
+                        dropped: total - before,
+                        since: wall,
+                    });
+                }
+                Some(open) => open.last_drop = now,
+            }
+        }
+        let open = self.open.as_mut()?;
+        if now.saturating_duration_since(open.last_drop) >= DROP_QUIET {
+            self.open = None;
+            return Some(DropReport::Quiet);
+        }
+        if open.reported < self.seen
+            && now.saturating_duration_since(open.reported_at) >= DROP_REPORT_EVERY
+        {
+            open.reported = self.seen;
+            open.reported_at = now;
+            return Some(DropReport::Dropping {
+                dropped: self.seen - open.base,
+                since: open.since,
+            });
+        }
+        None
+    }
+
+    /// Close the open episode, if any, when the subscription ends; whether
+    /// one was open (its `Degraded` needs clearing).
+    pub(crate) fn end(&mut self) -> bool {
+        self.open.take().is_some()
+    }
+}
+
+/// The load-lane slot a drop report fills under `key` (`<source>:queue`).
+pub(crate) fn drop_health(key: &str, report: &DropReport, clock: Clock) -> (Health, String) {
+    match report {
+        DropReport::Dropping { dropped, since } => {
+            let reason = format!("{dropped} messages dropped since {}", clock.hms(*since));
+            (
+                Health::Degraded {
+                    reason: reason.clone(),
+                },
+                format!("{key}: {reason}"),
+            )
+        }
+        DropReport::Quiet => (
+            Health::Ok,
+            format!("{key}: no drops for {}s", DROP_QUIET.as_secs()),
+        ),
+    }
+}
 
 /// What a receiver thread reports about its own documents: the batch it
 /// is filed under (the document's joined key, or the topic when the bytes
@@ -103,6 +221,7 @@ impl SubscriptionWorker {
         ingest: Arc<IngestHandle>,
         report_load: LoadReportSink,
         on_connection: HealthSink,
+        clock: Clock,
         stopped: crate::service::EventSink,
     ) -> Result<SubscriptionWorker, AdapterError> {
         let (sink, rx) = MessageSink::bounded(MESSAGE_BOUND);
@@ -122,6 +241,10 @@ impl SubscriptionWorker {
             stop: Arc::clone(&stop),
             unknown: UnknownPaths::new(spec.name.clone()),
             failed_topics: HashSet::new(),
+            refused: Arc::clone(&refused),
+            drops: DropEpisode::default(),
+            queue_key: crate::health::condition_key(&spec.name, crate::health::QUEUE),
+            clock,
         };
         let window = spec.coalesce;
         let thread = crate::supervise::spawn_supervised(
@@ -256,6 +379,12 @@ struct Receiving {
     /// parses, validates, and stamps successfully. This set has no fixed cap;
     /// wildcard subscriptions can expose arbitrarily many distinct topics.
     failed_topics: HashSet<String>,
+    /// The sink's lifetime refusal count, shared with the adapter side.
+    refused: Arc<AtomicU64>,
+    drops: DropEpisode,
+    /// `<source>:queue`, computed once.
+    queue_key: String,
+    clock: Clock,
 }
 
 impl Receiving {
@@ -274,7 +403,7 @@ impl Receiving {
                 // arrive again: the subscription was dropped or
                 // unsubscribed (`shutdown`, or an adapter that ended it).
                 // Nothing to wait for.
-                Err(RecvTimeoutError::Disconnected) => return,
+                Err(RecvTimeoutError::Disconnected) => break,
             }
             // After a message AND after a timeout: an offer that was held
             // back may be due by now, and a quiet feed is exactly when a
@@ -282,7 +411,35 @@ impl Receiving {
             for (_key, pending) in coalescer.due(Instant::now()) {
                 self.submit(pending);
             }
+            self.watch_drops();
         }
+        self.end_drops();
+    }
+
+    /// The subscription ended (disconnect or stop): with no receiver there
+    /// are no drops, and only this thread clears `<source>:queue`, so an
+    /// open episode is cleared here rather than left standing until restart.
+    fn end_drops(&mut self) {
+        if self.drops.end() {
+            (self.report_load)(
+                &self.queue_key,
+                Health::Ok,
+                format!("{}: subscription ended", self.queue_key),
+            );
+        }
+    }
+
+    /// Report a change in this subscription's drops on the load lane under
+    /// `<source>:queue`: the count and the episode's start while drops go on,
+    /// `Ok` once `DROP_QUIET` passes without one. One atomic load and two
+    /// clock reads per receive cycle.
+    fn watch_drops(&mut self) {
+        let total = self.refused.load(Ordering::Relaxed);
+        let Some(report) = self.drops.observe(total, Instant::now(), Utc::now()) else {
+            return;
+        };
+        let (health, detail) = drop_health(&self.queue_key, &report, self.clock);
+        (self.report_load)(&self.queue_key, health, detail);
     }
 
     /// Handle one message under panic containment. Report a panic as a load
@@ -465,16 +622,151 @@ mod tests {
     use crate::store::Store;
     use crate::store::catalog::Catalog;
     use crate::store::ddl::tests_support::{
-        FakeKind, PARSE_PANIC, PanickingKind, cvi_dataset, cvi_doc, d, ts,
+        FakeKind, GateKind, PARSE_PANIC, PanickingKind, cvi_dataset, cvi_doc, d, ts,
     };
-    use geode_core::document::{
-        DocumentKind, DocumentRows, ParseError, ParsedDocument, Value, WriteError,
-    };
-    use geode_core::schema::{ColumnType, SchemaSpec};
+    use geode_core::document::{DocumentKind, DocumentRows, Value};
+    use geode_core::schema::SchemaSpec;
     use geode_core::source_config::{SourceSpec, SourceTime};
     use std::sync::mpsc::Receiver;
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::{Duration, Instant};
+
+    // ---- DropEpisode (pure) -------------------------------------------
+
+    fn wall(secs: i64) -> DateTime<Utc> {
+        ts("2026-10-01T09:00:00Z") + chrono::Duration::seconds(secs)
+    }
+
+    #[test]
+    fn a_drop_episode_reports_the_first_drop_and_its_time() {
+        let t0 = Instant::now();
+        let mut e = DropEpisode::default();
+        assert_eq!(e.observe(0, t0, wall(0)), None, "no drop, no report");
+        assert_eq!(
+            e.observe(3, t0 + Duration::from_millis(250), wall(1)),
+            Some(DropReport::Dropping {
+                dropped: 3,
+                since: wall(1)
+            })
+        );
+    }
+
+    #[test]
+    fn a_growing_count_is_reported_at_most_once_a_second() {
+        let t0 = Instant::now();
+        let mut e = DropEpisode::default();
+        e.observe(1, t0, wall(0));
+        assert_eq!(e.observe(5, t0 + Duration::from_millis(400), wall(0)), None);
+        assert_eq!(
+            e.observe(9, t0 + Duration::from_millis(1000), wall(1)),
+            Some(DropReport::Dropping {
+                dropped: 9,
+                since: wall(0)
+            }),
+            "N counts from the episode's first drop, and the time stays the first drop's"
+        );
+    }
+
+    #[test]
+    fn a_drop_episode_clears_after_sixty_quiet_seconds() {
+        let t0 = Instant::now();
+        let mut e = DropEpisode::default();
+        e.observe(2, t0, wall(0));
+        assert_eq!(
+            e.observe(2, t0 + DROP_QUIET - Duration::from_millis(1), wall(59)),
+            None
+        );
+        assert_eq!(
+            e.observe(2, t0 + DROP_QUIET, wall(60)),
+            Some(DropReport::Quiet)
+        );
+        assert_eq!(
+            e.observe(2, t0 + DROP_QUIET * 2, wall(120)),
+            None,
+            "cleared once"
+        );
+    }
+
+    #[test]
+    fn a_drop_observed_as_the_quiet_interval_ends_keeps_the_episode_open() {
+        let t0 = Instant::now();
+        let mut e = DropEpisode::default();
+        e.observe(2, t0, wall(0));
+        // The counter rose between two observations; the one that finds the
+        // 60 s mark also finds the new drop, so the episode goes on.
+        assert_eq!(
+            e.observe(3, t0 + DROP_QUIET, wall(60)),
+            Some(DropReport::Dropping {
+                dropped: 3,
+                since: wall(0)
+            })
+        );
+        assert_eq!(
+            e.observe(3, t0 + DROP_QUIET + Duration::from_secs(1), wall(61)),
+            None
+        );
+        assert_eq!(
+            e.observe(3, t0 + DROP_QUIET * 2, wall(120)),
+            Some(DropReport::Quiet)
+        );
+    }
+
+    #[test]
+    fn a_drop_after_a_clear_opens_a_new_episode_counted_from_zero() {
+        let t0 = Instant::now();
+        let mut e = DropEpisode::default();
+        e.observe(4, t0, wall(0));
+        assert_eq!(
+            e.observe(4, t0 + DROP_QUIET, wall(60)),
+            Some(DropReport::Quiet)
+        );
+        assert_eq!(
+            e.observe(6, t0 + DROP_QUIET + Duration::from_secs(5), wall(65)),
+            Some(DropReport::Dropping {
+                dropped: 2,
+                since: wall(65)
+            })
+        );
+        // The second episode grows; its count is still from its own base
+        // (4), not from the subscription's lifetime total.
+        e.observe(9, t0 + DROP_QUIET + Duration::from_secs(5), wall(65));
+        assert_eq!(
+            e.observe(9, t0 + DROP_QUIET + Duration::from_secs(6), wall(66)),
+            Some(DropReport::Dropping {
+                dropped: 5,
+                since: wall(65)
+            }),
+            "a growing count in a later episode counts from that episode's base"
+        );
+    }
+
+    #[test]
+    fn drop_health_formats_the_reason_on_the_display_clock() {
+        let (health, detail) = drop_health(
+            "cvi:queue",
+            &DropReport::Dropping {
+                dropped: 12,
+                since: ts("2026-10-01T09:30:05Z"),
+            },
+            geode_core::clock::Clock::in_zone_named("Asia/Tokyo"),
+        );
+        assert_eq!(
+            health,
+            Health::Degraded {
+                reason: "12 messages dropped since 18:30:05".into()
+            }
+        );
+        assert_eq!(detail, "cvi:queue: 12 messages dropped since 18:30:05");
+        assert_eq!(
+            drop_health(
+                "cvi:queue",
+                &DropReport::Quiet,
+                geode_core::clock::Clock::utc()
+            )
+            .0,
+            Health::Ok
+        );
+    }
 
     // ---- source_time_of (pure) -----------------------------------------
 
@@ -663,6 +955,7 @@ mod tests {
             Arc::clone(&ingest),
             report_load,
             on_connection,
+            geode_core::clock::Clock::utc(),
             crate::supervise::unwatched(),
         )
         .expect("the bus is open");
@@ -1031,48 +1324,6 @@ mod tests {
         h.worker.shutdown();
     }
 
-    /// A kind that holds the receiver inside `parse` until a test lets it
-    /// go, so the subscription's queue can be filled while nothing is
-    /// draining it. Everything but `parse` is [`FakeKind`]'s.
-    struct GateKind {
-        inner: FakeKind,
-        gate: Arc<(Mutex<bool>, Condvar)>,
-    }
-
-    /// Maximum time the parser waits for the test gate. Normal execution opens
-    /// the gate after filling the queue. The timeout lets worker shutdown join
-    /// even if an earlier assertion panics before opening it.
-    const GATE_CAP: Duration = Duration::from_secs(5);
-
-    impl DocumentKind for GateKind {
-        fn name(&self) -> &'static str {
-            self.inner.name()
-        }
-
-        fn columns(&self) -> &[(&'static str, ColumnType)] {
-            self.inner.columns()
-        }
-
-        fn parse(&self, bytes: &[u8]) -> Result<ParsedDocument, ParseError> {
-            let (lock, opened) = &*self.gate;
-            let mut open = lock.lock().unwrap();
-            let deadline = Instant::now() + GATE_CAP;
-            while !*open {
-                let Some(left) = deadline.checked_duration_since(Instant::now()) else {
-                    break;
-                };
-                let (guard, _) = opened.wait_timeout(open, left).unwrap();
-                open = guard;
-            }
-            drop(open);
-            self.inner.parse(bytes)
-        }
-
-        fn write(&self, rows: &DocumentRows) -> Result<Vec<u8>, WriteError> {
-            self.inner.write(rows)
-        }
-    }
-
     #[test]
     fn a_subscription_whose_queue_fills_counts_what_it_could_not_take() {
         // A long coalescing window: this test is about the queue in front
@@ -1112,6 +1363,44 @@ mod tests {
     }
 
     #[test]
+    fn a_subscription_whose_queue_fills_reports_its_drops_under_the_queue_key() {
+        let (kind, gate) = GateKind::new();
+        let mut h = harness(Duration::from_secs(60), kind, SourceTime::Receive);
+        let body = FakeKind::message("SPX.Z", [1., 2., 3., 4., 5., 6.]);
+        wait_until("a message the subscription could not take", || {
+            h.feed.publish("cvi/SPX.Z", body.clone());
+            h.worker.refused() > 0
+        });
+        GateKind::open(&gate);
+        wait_until("a drop report", || {
+            h.reports
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(batch, _, _)| batch == "cvi:queue")
+        });
+        let (batch, health, detail) = h
+            .reports
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(batch, _, _)| batch == "cvi:queue")
+            .cloned()
+            .unwrap();
+        let Health::Degraded { reason } = health else {
+            panic!("a drop is Degraded: {health:?}")
+        };
+        let (count, time) = reason
+            .split_once(" messages dropped since ")
+            .unwrap_or_else(|| panic!("{reason}"));
+        let count: u64 = count.parse().unwrap();
+        assert!(count >= 1 && count <= h.worker.refused(), "{reason}");
+        assert_eq!(time.len(), "HH:MM:SS".len(), "{reason}");
+        assert_eq!(detail, format!("{batch}: {reason}"));
+        h.worker.shutdown();
+    }
+
+    #[test]
     fn a_receiver_that_dies_is_declared() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
@@ -1138,6 +1427,7 @@ mod tests {
             Arc::new(handle),
             Arc::new(|_: &str, _: Health, _: String| panic!("the load report fell over")),
             Arc::new(|_: ConnectionState| {}),
+            geode_core::clock::Clock::utc(),
             stop,
         )
         .expect("the bus is open");

@@ -6,6 +6,9 @@ pub mod discovery;
 pub mod sentinel;
 
 // Re-export the I/O-free configuration reader shared with the shell.
-pub use discovery::{Candidate, CandidateState, Priority, Readiness, SourceSpec, discover};
+pub use discovery::{
+    Candidate, CandidateState, Discovered, PathProblem, Priority, Readiness, SourceSpec, discover,
+    discover_all,
+};
 pub use geode_core::source_config::parse_duration;
 pub use sentinel::{Sentinel, SentinelError, parse_sentinel};

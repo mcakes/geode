@@ -230,8 +230,41 @@ pub struct DatasetState {
 pub const CONFIG_HISTORY_CAP: usize = 16;
 
 /// How many entries [`Diagnostics::data_diagnostics`] keeps, oldest
-/// first (a plain append cap, not "batches" — see that field's doc).
+/// first (an append cap, not "batches" — see that field's doc). Above it the
+/// oldest non-error is evicted before any error.
 pub const DATA_DIAGNOSTICS_CAP: usize = 256;
+
+/// Trim `entries` to `cap`, oldest first, so a flood of benign warnings
+/// cannot evict an error (schema drift, a worker failure): the oldest
+/// non-errors go first, and errors go oldest-first only once nothing else is
+/// left. Survivors keep their order. Shared by the data-diagnostics ring and
+/// the app bridge's event mailbox, so an error survives both bounds.
+pub fn trim_keeping_errors<T>(
+    entries: &mut VecDeque<T>,
+    cap: usize,
+    is_error: impl Fn(&T) -> bool,
+) {
+    let excess = entries.len().saturating_sub(cap);
+    if excess == 0 {
+        return;
+    }
+    let others = entries.iter().filter(|e| !is_error(e)).count();
+    let mut drop_others = excess.min(others);
+    let mut drop_errors = excess - drop_others;
+    entries.retain(|e| {
+        let budget = if is_error(e) {
+            &mut drop_errors
+        } else {
+            &mut drop_others
+        };
+        if *budget > 0 {
+            *budget -= 1;
+            false
+        } else {
+            true
+        }
+    });
+}
 
 /// Section-specific change counters alongside [`Diagnostics::version`], which
 /// invalidates the shared status summary. A tile compares only the counter for
@@ -550,8 +583,9 @@ impl Diagnostics {
 
     /// Append data-layer conditions, deduplicating against retained entries.
     /// Each event reports individual conditions rather than a replacement batch.
-    /// Drop the oldest entries above `DATA_DIAGNOSTICS_CAP`; bump versions only
-    /// when a new condition is appended.
+    /// Above `DATA_DIAGNOSTICS_CAP`, drop the oldest warning or info first and
+    /// an error only when the ring holds nothing but errors; bump versions
+    /// only when a new condition is appended.
     pub fn note_data_diagnostics(&mut self, diags: Vec<Diagnostic>, at: SystemTime) {
         let mut changed = false;
         for d in diags {
@@ -565,9 +599,11 @@ impl Diagnostics {
             self.data_diagnostics.push_back((at, d));
             changed = true;
         }
-        while self.data_diagnostics.len() > DATA_DIAGNOSTICS_CAP {
-            self.data_diagnostics.pop_front();
-        }
+        trim_keeping_errors(
+            &mut self.data_diagnostics,
+            DATA_DIAGNOSTICS_CAP,
+            |(_, d)| d.severity == Severity::Error,
+        );
         if changed {
             self.version += 1;
             // `config`, not `data` — despite this field's name, it is
@@ -609,13 +645,15 @@ impl Diagnostics {
     }
 
     /// The data handle's running total of `Busy` refusals. The same total
-    /// again does not bump.
+    /// again does not bump. The status bar and the performance page's
+    /// "Refused requests" row both read it.
     pub fn note_refused(&mut self, total: u64) {
         if self.refused == total {
             return;
         }
         self.refused = total;
         self.version += 1;
+        self.versions.perf += 1;
     }
 
     /// The prepared stopped segment, `None` while every data thread lives.
@@ -1733,6 +1771,41 @@ mod tests {
     }
 
     #[test]
+    fn a_flood_of_warnings_never_evicts_an_older_error() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.note_data_diagnostics(
+            vec![Diagnostic::error(
+                Layer::Builtin,
+                PathBuf::new(),
+                "schema drift in 'risk'",
+            )],
+            SystemTime::UNIX_EPOCH,
+        );
+        for i in 0..300u64 {
+            d.note_data_diagnostics(
+                vec![Diagnostic::warning(
+                    Layer::Builtin,
+                    PathBuf::new(),
+                    format!("w{i}"),
+                )],
+                SystemTime::UNIX_EPOCH + Duration::from_secs(i + 1),
+            );
+        }
+        assert_eq!(d.data_diagnostics.len(), DATA_DIAGNOSTICS_CAP);
+        assert!(
+            d.data_diagnostics
+                .iter()
+                .any(|(_, x)| x.message == "schema drift in 'risk'"),
+            "the error outlives the warnings that followed it"
+        );
+        assert_eq!(
+            d.data_diagnostics.back().unwrap().1.message,
+            "w299",
+            "newest kept at the back"
+        );
+    }
+
+    #[test]
     fn note_loading_records_the_activity_and_bumps_the_sources_version() {
         let mut d = Diagnostics::new(LogLevels::default());
         let v = d.versions().sources;
@@ -1811,6 +1884,20 @@ mod tests {
         d.note_refused(3);
         d.note_dropped(2);
         assert_eq!(d.summary().as_ref(), "2 dropped · 3 refused");
+    }
+
+    #[test]
+    fn refused_submissions_move_the_perf_version() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        let before = d.versions().perf;
+        d.note_refused(2);
+        assert_eq!(d.versions().perf, before + 1);
+        d.note_refused(2);
+        assert_eq!(
+            d.versions().perf,
+            before + 1,
+            "the same total does not bump"
+        );
     }
 
     #[test]

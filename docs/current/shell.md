@@ -925,7 +925,10 @@ ignored.
 Config loads replace the current diagnostic batch; a clean load clears it and
 an identical load adds no history. The model retains the latest 16 changed
 batches, including the current one. Data-layer conditions append separately,
-deduplicate against retained entries, and keep at most 256. Config reloads do
+deduplicate against retained entries, and keep at most 256; above that the
+oldest warning or info is evicted first, and an error only when nothing but
+errors remains, so a flood of benign warnings cannot hide schema drift or a
+worker failure. Config reloads do
 not clear them, and they have no per-condition resolution operation. The
 summary counts current config errors and retained data errors independently;
 history is excluded. Cache hits share an `Rc<str>` without copying text.

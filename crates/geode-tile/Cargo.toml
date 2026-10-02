@@ -11,9 +11,10 @@ bench = false
 # doors these build on (`kbd`, `control`, `scale`, `chip`, `listrow`,
 # `colours`) and the live keymap (`tips::Chords`); `geode-core` the
 # readability floor; `gpui-kit-assets` the icon catalogue the header's
-# mode icon names. Never `geode-data` and never a feature module; the
+# mode icon names; `chrono` the stale timer's source times. Never `geode-data` and never a feature module; the
 # shell never depends on this crate.
 [dependencies]
+chrono = "0.4.42"
 geode-core.workspace = true
 geode-shell.workspace = true
 gpui.workspace = true

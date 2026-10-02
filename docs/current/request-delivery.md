@@ -125,7 +125,7 @@ delivery, not applied to a window.
 | Fetch completion | Success clears an earlier failure for the pair. A later failure retains the earlier success as well, preserving its requery signal. |
 | Loading / load ended | One shared progress entry; later state replaces earlier state. |
 | Health / poll result | Latest entry per event kind and source. |
-| Diagnostics | Merge distinct diagnostics and retain the latest 256 in history order. |
+| Diagnostics | Merge distinct diagnostics and retain 256 in history order, trimming the oldest warnings and infos before any error (the shell ring's rule, `trim_keeping_errors`). |
 | Thread stopped | One entry per thread name. Each thread stops once, so two different threads stopping before a drain are both delivered. |
 
 Replacing a pending entry keeps its original position among pending keys.

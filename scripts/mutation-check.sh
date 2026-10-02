@@ -1742,7 +1742,7 @@ run_mutation "scheduler: ready files reach the runner" \
 run_mutation "scheduler: pending-too-long surfaces as health" \
   crates/geode-data/src/ingest/scheduler.rs \
   '            CandidateState::PendingTooLong => Health::PendingTooLong,' \
-  '            CandidateState::PendingTooLong => continue,' \
+  '            CandidateState::PendingTooLong => return None,' \
   geode-data \
   a_csv_pending_past_its_timeout_is_a_health_event
 
@@ -3473,6 +3473,9 @@ run_mutation "reload: ConfigReloaded is queued before ANY frame.update, includin
   '            if views_changed {
                 cx.emit(ShellEvent::ConfigReloaded);
             }
+            if app_changed {
+                cx.emit(ShellEvent::AppSettingsReloaded);
+            }
             if groupings_changed {
                 let slots = rebuild_slots(&self.services.config);
                 self.frame.update(cx, |f, cx| {
@@ -3482,7 +3485,10 @@ run_mutation "reload: ConfigReloaded is queued before ANY frame.update, includin
                 });
             }
 ' \
-  '            if groupings_changed {
+  '            if app_changed {
+                cx.emit(ShellEvent::AppSettingsReloaded);
+            }
+            if groupings_changed {
                 let slots = rebuild_slots(&self.services.config);
                 self.frame.update(cx, |f, cx| {
                     if f.replace_slots(slots) {
@@ -6175,8 +6181,10 @@ run_mutation "bridge: a stale Catalog outcome's tag check is disabled" \
 
 run_mutation "hot_reload: an [log] change on reload is never applied" \
   crates/geode-shell/src/shell/hot_reload.rs \
-  '            if changed("app") {' \
-  '            if false && changed("app") {' \
+  '            if app_changed {
+                let (new_levels' \
+  '            if false && app_changed {
+                let (new_levels' \
   geode-shell a_log_table_change_on_reload_applies_it_through_level_control_once
 
 # ---- Diagnostics state and navigation ---------------------------------
@@ -30444,6 +30452,484 @@ run_mutation "link: a Behind draft posts its painted base" \
   '        self.snapshot.clone()' \
   geode-marketdata a_behind_draft_posts_its_retained_base_with_the_edit
 
+# A drop directory that does not exist must not read as a healthy, empty source.
+run_mutation "silence: a missing source directory reads healthy" \
+  crates/geode-data/src/source/discovery.rs \
+  '    match std::fs::read_dir(&prefix) {' \
+  '    match std::fs::read_dir(".") {' \
+  geode-data \
+  a_missing_source_directory_is_degraded_and_clears_when_it_appears
+
+# An existing empty drop directory is normal, never a problem.
+run_mutation "silence: an empty drop directory reads as a problem" \
+  crates/geode-data/src/source/discovery.rs \
+  '        Ok(_) => None,' \
+  '        Ok(_) => Some(String::from("spurious")),' \
+  geode-data \
+  an_existing_empty_directory_is_healthy
+
+# An invalid glob is reported, not skipped.
+run_mutation "silence: an invalid source pattern is skipped" \
+  crates/geode-data/src/source/discovery.rs \
+  '                problems.push(invalid_pattern(pattern, &e));' \
+  '                let _ = &e;' \
+  geode-data \
+  an_invalid_source_pattern_is_degraded_not_skipped
+
+# The prefix is cut back to the LAST separator before the first glob character.
+run_mutation "silence: the literal prefix cuts at the first separator" \
+  crates/geode-data/src/source/discovery.rs \
+  '    match head.rfind(std::path::is_separator) {' \
+  '    match head.find(std::path::is_separator) {' \
+  geode-data \
+  literal_prefix_cuts_at_the_first_glob_character_and_back_to_a_separator
+
+# Path problems reach the scheduler's health report.
+run_mutation "silence: path problems never reach the scheduler" \
+  crates/geode-data/src/ingest/scheduler.rs \
+  '    for (h, name) in unsearched.chain(found) {' \
+  '    for (h, name) in unsearched.take(0).chain(found) {' \
+  geode-data \
+  a_missing_source_directory_is_degraded_and_clears_when_it_appears
+
+# Drift is reported, not passed as a matching table.
+run_mutation "silence: a drifted table reads as matching" \
+  crates/geode-data/src/store/drift.rs \
+  '    if differences.is_empty() {' \
+  '    if true {' \
+  geode-data \
+  reordered_same_type_columns_are_drift
+
+# Column names compare as DuckDB resolves them, without case.
+run_mutation "silence: drift compares column names with case" \
+  crates/geode-data/src/store/drift.rs \
+  '            (Some(a), Some(e)) if a.name.eq_ignore_ascii_case(&e.name) && a.ty == e.ty => {}' \
+  '            (Some(a), Some(e)) if a.name == e.name && a.ty == e.ty => {}' \
+  geode-data \
+  a_matching_table_spelled_with_aliases_and_other_case_is_not_drift
+
+# The runner refuses a write into a drifted dataset before any INSERT.
+run_mutation "silence: a document is written into a drifted dataset" \
+  crates/geode-data/src/ingest/runner.rs \
+  '    if let Some(reason) = drift_refusal(store, &job.dataset) {
+        let failed = sink(IngestEvent::Failed {' \
+  '    if let Some(reason) = None::<String> {
+        let failed = sink(IngestEvent::Failed {' \
+  geode-data \
+  a_document_for_a_drifted_dataset_is_refused_before_any_insert
+
+run_mutation "silence: a file is loaded into a drifted dataset" \
+  crates/geode-data/src/ingest/runner.rs \
+  '        if let Some(reason) = drift_refusal(&store, &item.dataset) {' \
+  '        if let Some(reason) = None::<String> {' \
+  geode-data \
+  a_file_for_a_drifted_dataset_is_refused_before_any_insert
+
+# A drifted dataset's sources report Failed and are not started.
+run_mutation "silence: a drifted dataset's sources run on" \
+  crates/geode-data/src/service.rs \
+  '            if let Some(reason) = drifted.get(&spec.dataset) {' \
+  '            if let Some(reason) = None::<&String> {' \
+  geode-data \
+  a_drifted_dataset_fails_its_sources_refuses_its_reads_and_says_so_once
+
+# A read of a drifted dataset is refused with the drift reason.
+run_mutation "silence: a document read of a drifted dataset is compiled" \
+  crates/geode-data/src/service.rs \
+  '    pub fn document(&self, params: &DocumentParams) -> Result<QueryId, StoreError> {
+        self.refuse_drifted([params.dataset.as_str()])?;' \
+  '    pub fn document(&self, params: &DocumentParams) -> Result<QueryId, StoreError> {' \
+  geode-data \
+  a_drifted_dataset_fails_its_sources_refuses_its_reads_and_says_so_once
+
+# Open never rebuilds a summary from a drifted table.
+run_mutation "silence: open rebuilds a summary from a drifted table" \
+  crates/geode-data/src/service.rs \
+  '            if drifted.contains_key(&ds.name) {
+                continue;
+            }' \
+  '            if drifted.contains_key("") {
+                continue;
+            }' \
+  geode-data \
+  a_local_publish_into_a_drifted_dataset_is_refused_unwritten
+
+# A view read of a drifted dataset is refused with the drift reason.
+run_mutation "silence: a view read of a drifted dataset is compiled" \
+  crates/geode-data/src/service.rs \
+  '            std::iter::once(spec.dataset.as_str())' \
+  '            std::iter::empty::<&str>()' \
+  geode-data \
+  a_view_or_distinct_read_of_a_drifted_dataset_is_refused_with_the_drift
+
+# A distinct read over a drifted contributor is refused, not shortened.
+run_mutation "silence: a distinct read of a drifted dataset is compiled" \
+  crates/geode-data/src/service.rs \
+  '        self.refuse_drifted(self.drifted.keys().map(String::as_str).filter(|name| {' \
+  '        self.refuse_drifted(self.drifted.keys().map(String::as_str).filter(|_| false).filter(|name| {' \
+  geode-data \
+  a_view_or_distinct_read_of_a_drifted_dataset_is_refused_with_the_drift
+
+# A series read of a drifted dataset is refused with the drift reason.
+run_mutation "silence: a series read of a drifted dataset is compiled" \
+  crates/geode-data/src/service.rs \
+  '        self.refuse_drifted([params.dataset.as_str()])?;
+        let points = params.frequency.buckets_in(params.range.0, params.range.1);' \
+  '        let points = params.frequency.buckets_in(params.range.0, params.range.1);' \
+  geode-data \
+  a_series_read_or_fetch_of_a_drifted_dataset_is_refused_with_the_drift
+
+# A fetch for a drifted dataset's source is answered with the drift reason.
+run_mutation "silence: a fetch for a drifted dataset loses the drift reason" \
+  crates/geode-data/src/service.rs \
+  '            .and_then(|s| self.drifted.get(&s.dataset))' \
+  '            .and_then(|s| self.drifted.get(&s.name))' \
+  geode-data \
+  a_series_read_or_fetch_of_a_drifted_dataset_is_refused_with_the_drift
+
+# The runner refuses a series append into a drifted dataset before any INSERT.
+run_mutation "silence: a series is appended into a drifted dataset" \
+  crates/geode-data/src/ingest/runner.rs \
+  '    if let Some(reason) = drift_refusal(store, &job.dataset) {
+        if !sink(failed(reason)) {' \
+  '    if let Some(reason) = None::<String> {
+        if !sink(failed(reason)) {' \
+  geode-data \
+  a_series_job_for_a_drifted_dataset_is_refused_before_any_insert
+
+# A drop episode ends after DROP_QUIET without a new drop.
+run_mutation "silence: a drop episode never clears" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '        if now.saturating_duration_since(open.last_drop) >= DROP_QUIET {' \
+  '        if false {' \
+  geode-data \
+  a_drop_episode_clears_after_sixty_quiet_seconds
+
+# A drop observed as the quiet interval ends keeps the episode open.
+run_mutation "silence: a drop at the quiet boundary is ignored" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '                Some(open) => open.last_drop = now,' \
+  '                Some(_) => {}' \
+  geode-data \
+  a_drop_observed_as_the_quiet_interval_ends_keeps_the_episode_open
+
+# The receiver watches its sink's refusal counter.
+run_mutation "silence: the receiver never watches its drops" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '            self.watch_drops();' \
+  '            let _ = &self.refused;' \
+  geode-data \
+  a_subscription_whose_queue_fills_reports_its_drops_under_the_queue_key
+
+# Drops are filed under <source>:queue, never the bare source or a batch.
+run_mutation "silence: drops are filed under the bare source" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '            queue_key: crate::health::condition_key(&spec.name, crate::health::QUEUE),' \
+  '            queue_key: spec.name.clone(),' \
+  geode-data \
+  a_subscription_whose_queue_fills_reports_its_drops_under_the_queue_key
+
+# The drop time is on the display clock.
+run_mutation "silence: the drop time ignores the display clock" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '            let reason = format!("{dropped} messages dropped since {}", clock.hms(*since));' \
+  '            let reason = format!("{dropped} messages dropped since {}", Clock::utc().hms(*since));' \
+  geode-data \
+  drop_health_formats_the_reason_on_the_display_clock
+
+# The perf row reads the same counter as the status bar.
+run_mutation "silence: the refused-requests row reads zero" \
+  crates/geode-diagnostics/src/model.rs \
+  '        refused: d.refused,' \
+  '        refused: 0,' \
+  geode-diagnostics \
+  perf_model_carries_the_refused_request_total
+
+# A refusal change repaints the perf section.
+run_mutation "silence: a refusal change leaves the perf section stale" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        self.refused = total;
+        self.version += 1;
+        self.versions.perf += 1;' \
+  '        self.refused = total;
+        self.version += 1;' \
+  geode-shell \
+  refused_submissions_move_the_perf_version
+
+# A growing count in a later episode counts from that episode's base.
+run_mutation "silence: a later episode's growing count ignores its base" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '                dropped: self.seen - open.base,' \
+  '                dropped: self.seen,' \
+  geode-data \
+  a_drop_after_a_clear_opens_a_new_episode_counted_from_zero
+
+# A source past the depth is reported.
+run_mutation "silence: a backlog is never reported" \
+  crates/geode-data/src/ingest/runner.rs \
+  '    if n > BACKLOG_DEPTH && (n - 1).is_multiple_of(BACKLOG_DEPTH) {' \
+  '    if false {' \
+  geode-data \
+  a_source_queued_past_the_backlog_depth_is_reported_and_draining_clears_it
+
+# A drained backlog clears.
+run_mutation "silence: a drained backlog never clears" \
+  crates/geode-data/src/ingest/runner.rs \
+  '    if n < BACKLOG_DEPTH && q.backlogged.remove(source) {' \
+  '    if false && q.backlogged.remove(source) {' \
+  geode-data \
+  a_source_queued_past_the_backlog_depth_is_reported_and_draining_clears_it
+
+# Each source has its own count.
+run_mutation "silence: one backlog count for every source" \
+  crates/geode-data/src/ingest/runner.rs \
+  '    let n = q.queued_per_source.entry(source.to_string()).or_default();' \
+  '    let n = q.queued_per_source.entry(String::new()).or_default();' \
+  geode-data \
+  a_source_queued_past_the_backlog_depth_is_reported_and_draining_clears_it
+
+# The backlog has its own lane key.
+run_mutation "silence: the backlog shares the queue lane" \
+  crates/geode-data/src/service.rs \
+  '    let key = crate::health::condition_key(source, crate::health::BACKLOG);' \
+  '    let key = crate::health::condition_key(source, crate::health::QUEUE);' \
+  geode-data \
+  a_burst_past_the_backlog_depth_degrades_the_source_until_it_drains
+
+# A taken series is uncounted, so a fetch-only source's backlog clears.
+run_mutation "silence: a drained series never uncounts its backlog" \
+  crates/geode-data/src/ingest/runner.rs \
+  '        Work::Series(job) => Some(&job.source),' \
+  '        Work::Series(_job) => None,' \
+  geode-data \
+  documents_and_series_of_one_source_count_toward_its_backlog_and_both_drain_it
+
+# A repeated load-note combination warns once.
+run_mutation "silence: a repeated load note warns again" \
+  crates/geode-data/src/service.rs \
+  '        if self.seen.contains(&key) {' \
+  '        if false {' \
+  geode-data \
+  a_repeated_load_note_combination_warns_once
+
+# A file load's notes travel out on the published event.
+run_mutation "silence: load notes never leave the runner" \
+  crates/geode-data/src/ingest/runner.rs \
+  '                notes: crate::ingest::load::LoadNotes::of(&item.candidate.csv_path, &loaded),' \
+  '                notes: None,' \
+  geode-data \
+  extra_and_missing_optional_columns_are_one_warning_per_combination
+
+# The remembered combinations are capped.
+run_mutation "silence: load notes grow without bound" \
+  crates/geode-data/src/service.rs \
+  '        if self.seen.len() >= LOAD_NOTE_CAP {' \
+  '        if false {' \
+  geode-data \
+  load_notes_stop_growing_at_the_cap_with_one_last_warning
+
+# A missing optional column is named in the warning.
+run_mutation "silence: a missing optional column is not noted" \
+  crates/geode-data/src/service.rs \
+  '    if !notes.missing_optional.is_empty() {' \
+  '    if false {' \
+  geode-data \
+  the_load_note_names_the_file_dataset_and_both_lists
+
+# A fired stale timer is recorded, so render reads stale.
+run_mutation "silence: a fired stale timer is not recorded" \
+  crates/geode-tile/src/stale.rs \
+  '                timer.fired = Some(at);' \
+  '                timer.fired = None;' \
+  geode-tile \
+  the_timer_fires_once_at_source_time_plus_threshold
+
+# Re-arming the same pair keeps the first deadline.
+run_mutation "silence: re-arming the same pair restarts the wait" \
+  crates/geode-tile/src/stale.rs \
+  '        if self.times == times && self.after == after {' \
+  '        if false {' \
+  geode-tile \
+  arming_the_same_pair_again_keeps_the_first_deadline
+
+# A new pair clears the old verdict, so a fresh delivery never reads stale.
+run_mutation "silence: a re-armed stale timer keeps its old verdict" \
+  crates/geode-tile/src/stale.rs \
+  '        self.times.clear();
+        self.fired = None;' \
+  '        self.times.clear();' \
+  geode-tile \
+  re_arming_after_a_fire_clears_the_verdict
+
+# The run's selector names the tone it paints.
+run_mutation "silence: a stale time run paints under the fresh selector" \
+  crates/geode-tile/src/header.rs \
+  '            .debug_selector(move || time_selector(tile, i, stale))' \
+  '            .debug_selector(move || time_selector(tile, i, false))' \
+  geode-tile \
+  a_stale_run_paints_its_stale_label
+
+# Market-data arms on its painted generation.
+run_mutation "silence: an idle market-data panel never arms" \
+  crates/geode-marketdata/src/tile.rs \
+  '        self.stale_timer.arm(
+            self.source_at,' \
+  '        self.stale_timer.arm(
+            None,' \
+  geode-marketdata \
+  an_idle_panel_turns_stale_without_another_event
+
+# Every mutation door re-arms, so a delivery arms.
+run_mutation "silence: market-data mutation doors never arm the stale timer" \
+  crates/geode-marketdata/src/tile.rs \
+  '        self.rebuild_chrome();
+        self.arm_stale(cx);' \
+  '        self.rebuild_chrome();' \
+  geode-marketdata \
+  an_idle_panel_turns_stale_without_another_event
+
+# Render reads the timer's verdict.
+run_mutation "silence: market-data render ignores the stale timer" \
+  crates/geode-marketdata/src/tile.rs \
+  '                || self.stale_timer.fired_for(at, self.stale_after.get())' \
+  '                || false' \
+  geode-marketdata \
+  an_idle_panel_turns_stale_without_another_event
+
+# Hiding drops the wake-up.
+run_mutation "silence: a hidden market-data panel keeps its wake-up" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if !self.visible {
+            self.stale_timer.disarm();
+            return;
+        }
+        self.stale_timer.arm(
+            self.source_at,' \
+  '        if !self.visible {
+            return;
+        }
+        self.stale_timer.arm(
+            self.source_at,' \
+  geode-marketdata \
+  a_new_delivery_rearms_and_hiding_drops_the_wake_up
+
+# A reloaded threshold arrives as a flip and re-arms.
+run_mutation "silence: a market-data flip never re-arms the stale timer" \
+  crates/geode-marketdata/src/tile.rs \
+  '            // wake-up moves to the new threshold here.
+            this.arm_stale(cx);' \
+  '            // wake-up moves to the new threshold here.' \
+  geode-marketdata \
+  a_reloaded_stale_after_moves_the_panel_wake_up
+
+# The blotter arms on its STALEST dataset.
+run_mutation "silence: the blotter arms on its freshest dataset" \
+  crates/geode-blotter/src/tile.rs \
+  '                    .map(|t| t.with_timezone(&chrono::Utc))
+                    .collect()' \
+  '                    .map(|t| t.with_timezone(&chrono::Utc))
+                    .max()
+                    .into_iter()
+                    .collect()' \
+  geode-blotter \
+  an_idle_blotter_turns_its_stalest_time_stale_without_another_event
+
+# An applied snapshot arms.
+run_mutation "silence: an applied blotter snapshot never arms" \
+  crates/geode-blotter/src/tile.rs \
+  '        self.arm_stale(cx);
+        self.delivered_at = Some(Instant::now());' \
+  '        self.delivered_at = Some(Instant::now());' \
+  geode-blotter \
+  an_idle_blotter_turns_its_stalest_time_stale_without_another_event
+
+# Render reads the timer's verdict.
+run_mutation "silence: blotter render ignores the stale timer" \
+  crates/geode-blotter/src/tile.rs \
+  '                    || self
+                        .stale_timer
+                        .fired_for(t.with_timezone(&chrono::Utc), self.stale_after.get())' \
+  '                    || false' \
+  geode-blotter \
+  an_idle_blotter_turns_its_stalest_time_stale_without_another_event
+
+run_mutation "silence: a hidden blotter keeps its wake-up" \
+  crates/geode-blotter/src/tile.rs \
+  '        if !self.visible {
+            self.stale_timer.disarm();
+            return;
+        }
+        let times = self' \
+  '        if !self.visible {
+            return;
+        }
+        let times = self' \
+  geode-blotter \
+  hiding_a_blotter_drops_its_stale_wake_up
+
+# A reloaded threshold arrives as a flip and re-arms.
+run_mutation "silence: a blotter flip never re-arms the stale timer" \
+  crates/geode-blotter/src/tile.rs \
+  '        // moves to the new threshold here.
+        self.arm_stale(cx);' \
+  '        // moves to the new threshold here.' \
+  geode-blotter \
+  a_reloaded_stale_after_moves_the_blotter_wake_up
+
+# The data-diagnostics ring evicts a warning before an error.
+run_mutation "silence: the diagnostics ring evicts its oldest error first" \
+  crates/geode-shell/src/diagnostics.rs \
+  '    let mut drop_others = excess.min(others);' \
+  '    let mut drop_others = 0;' \
+  geode-shell \
+  a_flood_of_warnings_never_evicts_an_older_error
+
+# The cap warning names the source that reached it.
+run_mutation "silence: the load-note cap warning omits its source" \
+  crates/geode-data/src/service.rs \
+  '                "source '"'"'{source}'"'"' reached {LOAD_NOTE_CAP} distinct' \
+  '                "reached {LOAD_NOTE_CAP} distinct' \
+  geode-data \
+  load_notes_stop_growing_at_the_cap_with_one_last_warning
+
+# A stale_after-only edit reaches the tiles' shared thresholds.
+run_mutation "silence: an app-only reload emits no settings event" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                cx.emit(ShellEvent::AppSettingsReloaded);' \
+  '                let _ = ();' \
+  geode-app \
+  a_stale_after_only_reload_reaches_the_tiles
+
+run_mutation "silence: the settings reload skips the blotter threshold" \
+  crates/geode-app/src/bridge.rs \
+  '                factory.set_stale_after(stale_after);' \
+  '                let _ = stale_after;' \
+  geode-app \
+  a_stale_after_only_reload_reaches_the_tiles
+
+run_mutation "silence: the settings reload skips the panel thresholds" \
+  crates/geode-app/src/bridge.rs \
+  '                    panel.set_stale_after(stale_after);' \
+  '                    let _ = panel;' \
+  geode-app \
+  a_stale_after_only_reload_reaches_the_tiles
+
+# Provenance::stalest compares instants, not RFC 3339 text.
+run_mutation "silence: stalest compares offset text" \
+  crates/geode-core/src/snapshot.rs \
+  '            .min_by_key(|(at, _)| *at)' \
+  '            .min_by_key(|(_, f)| f.as_of.clone())' \
+  geode-core \
+  the_stalest_input_compares_instants_not_offset_text
+
+# The prefix check runs only for a pattern that matched nothing.
+run_mutation "silence: a matching pattern is checked for its prefix" \
+  crates/geode-data/src/source/discovery.rs \
+  '        if !matched && let Some(reason) = prefix_problem(pattern) {' \
+  '        if let Some(reason) = prefix_problem(pattern) {' \
+  geode-data \
+  a_match_under_an_unlistable_prefix_is_not_a_path_problem
+
 # A double-click on a group row toggles it; the edit route it would
 # otherwise take only refuses on a row with no editable cell.
 run_mutation "pricer tile: a double-click on a group row toggles it" \
@@ -30668,6 +31154,31 @@ run_mutation "pricer sort: a refused selection verb restores no hold" \
   $'        self.held_order = held;\n        self.rebuild(cx);' \
   $'        let _ = held;\n        self.refresh_selection();' \
   geode-pricer a_refused_selection_verb_keeps_the_held_order
+
+# The bridge mailbox trims by the ring's rule, so an error reaches the ring.
+run_mutation "silence: the event mailbox trims an error before warnings" \
+  crates/geode-app/src/events.rs \
+  '                |d| d.severity == geode_core::config::Severity::Error,' \
+  '                |_| false,' \
+  geode-app \
+  an_error_queued_before_a_flood_of_warnings_survives_the_mailbox
+
+# Each run turns stale at its own deadline: a fired wake-up arms the next.
+run_mutation "silence: a fired stale wake-up never arms the next time" \
+  crates/geode-tile/src/stale.rs \
+  '                let next = timer.times.iter().copied().find(|t| *t > at);' \
+  '                let next: Option<DateTime<Utc>> = None;' \
+  geode-blotter \
+  an_idle_blotter_turns_its_stalest_time_stale_without_another_event
+
+# A subscription that ends clears its open drop episode.
+run_mutation "silence: an ended subscription leaves its queue Degraded" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '        self.end_drops();
+    }' \
+  '    }' \
+  geode-data \
+  a_flooded_subscription_reports_its_drops_as_degraded_source_health
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

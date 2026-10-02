@@ -83,6 +83,10 @@ pub struct DataServiceConfig {
     /// `None` means every position command is refused
     /// `no position service configured`.
     pub positions: Option<geode_core::positions::PositionsSpec>,
+    /// The display clock at open. Formats the times inside health reasons
+    /// (`N messages dropped since HH:MM:SS`); a later `[time]` reload re-zones
+    /// them on restart.
+    pub clock: geode_core::clock::Clock,
 }
 
 /// Outcomes and state changes delivered through the service's event sink.
@@ -378,6 +382,87 @@ fn log_ingest_failure(dataset: &str, batch: &str, reason: &str) {
     tracing::error!(target: "geode::ingest", "{dataset}/{batch}: {reason}");
 }
 
+/// Distinct (source, dataset, extra, missing) combinations remembered for
+/// load-note warnings. A desk's files share a few header shapes, so the key
+/// space is small; the cap bounds a feed whose headers vary without end.
+const LOAD_NOTE_CAP: usize = 256;
+
+#[derive(Debug, Default)]
+struct LoadNoteLog {
+    seen: std::collections::HashSet<(String, String, Vec<String>, Vec<String>)>,
+    capped: bool,
+}
+
+impl LoadNoteLog {
+    /// The warning one load's notes earn: one for a combination not seen
+    /// this run (column order aside), none for a repeat. At the cap, one
+    /// last warning names the source and file whose new combination hit the
+    /// cap and says further combinations go unreported.
+    fn note(
+        &mut self,
+        source: &str,
+        dataset: &str,
+        notes: &crate::ingest::load::LoadNotes,
+    ) -> Option<Diagnostic> {
+        let mut extra = notes.extra_columns.clone();
+        extra.sort();
+        extra.dedup();
+        let mut missing = notes.missing_optional.clone();
+        missing.sort();
+        missing.dedup();
+        let key = (source.to_string(), dataset.to_string(), extra, missing);
+        if self.seen.contains(&key) {
+            return None;
+        }
+        if self.seen.len() >= LOAD_NOTE_CAP {
+            if self.capped {
+                return None;
+            }
+            self.capped = true;
+            return Some(load_note_warning(format!(
+                "source '{source}' reached {LOAD_NOTE_CAP} distinct load-note combinations \
+                 ('{}' into '{dataset}'); further ones are not reported",
+                notes.file
+            )));
+        }
+        self.seen.insert(key);
+        Some(load_note_warning(load_note_message(dataset, notes)))
+    }
+}
+
+/// `'<file>' loaded into '<dataset>' with extra columns [a, b] ignored;
+/// optional [c] missing, read as NULL`, either half omitted when empty.
+fn load_note_message(dataset: &str, notes: &crate::ingest::load::LoadNotes) -> String {
+    let mut parts = Vec::new();
+    if !notes.extra_columns.is_empty() {
+        parts.push(format!(
+            "extra columns [{}] ignored",
+            notes.extra_columns.join(", ")
+        ));
+    }
+    if !notes.missing_optional.is_empty() {
+        parts.push(format!(
+            "optional [{}] missing, read as NULL",
+            notes.missing_optional.join(", ")
+        ));
+    }
+    format!(
+        "'{}' loaded into '{dataset}' with {}",
+        notes.file,
+        parts.join("; ")
+    )
+}
+
+fn load_note_warning(message: String) -> Diagnostic {
+    Diagnostic {
+        severity: Severity::Warning,
+        layer: None,
+        file: None,
+        message,
+        path: None,
+    }
+}
+
 /// Log source health: Failed at error, Degraded/PendingTooLong at warn,
 /// Ok at info, and Pending at debug. Callable independently so tests can
 /// verify levels through a scoped subscriber.
@@ -396,6 +481,20 @@ fn log_health_event(source: &str, worst: &Health, detail: &str) {
             tracing::debug!(target: "geode::ingest", "{source}: {} — {detail}", worst.label());
         }
     }
+}
+
+/// The load-lane slot an ingest backlog report fills: `<source>:backlog`,
+/// `Degraded "ingest backlog N"` while over, `Ok` once below.
+fn backlog_health(source: &str, queued: usize, over: bool) -> (String, Health, String) {
+    let key = crate::health::condition_key(source, crate::health::BACKLOG);
+    let reason = format!("ingest backlog {queued}");
+    let detail = format!("{key}: {reason}");
+    let health = if over {
+        Health::Degraded { reason }
+    } else {
+        Health::Ok
+    };
+    (key, health, detail)
 }
 
 /// Report adapter content outcomes through the shared load lane. Batch keys
@@ -729,6 +828,9 @@ pub struct DataService {
     /// Refusing them before compilation keeps configuration failures visible
     /// even when no diagnostics panel is open.
     refused_views: std::collections::BTreeMap<String, String>,
+    /// Datasets whose payload tables drifted at open, with the reason. Reads
+    /// of them are refused before compilation (`refuse_drifted`).
+    drifted: std::collections::BTreeMap<String, String>,
     /// One worker per upload target. They only answer the sink, so they
     /// stop first and depend on nothing below.
     egress: EgressWorkers,
@@ -768,19 +870,45 @@ impl DataService {
         // Captured before every closure below clones `sink` for its own
         // use, so `publish`'s refusal path can send through it directly.
         let stored_sink = Arc::clone(&sink);
-        let store = Store::open(&config.db_path)?;
+        let mut store = Store::open(&config.db_path)?;
         // A computed dataset is answered by a module in process; it owns no
         // table and so has no generation summary to rebuild.
         for ds in config.schema.datasets.iter().filter(|d| !d.computed) {
             store.apply_schema(ds)?;
+            // Decided once per run: `datasets` is restart-required, so the
+            // recovery (delete the table or fix the dataset) takes a restart.
+            if let Some(drift) = store.check_drift(ds)? {
+                store.mark_drifted(&ds.name, drift.reason());
+            }
         }
         Catalog::new(store.writer()).ensure_tables()?;
+        let drifted = store.drifted_all().clone();
+        // One error per drifted dataset, once, at open: the diagnostics page
+        // names the tables and the recovery even if no tile asks for them.
+        if !drifted.is_empty() {
+            let _ = sink(DataEvent::Diagnostics(
+                drifted
+                    .values()
+                    .map(|reason| Diagnostic {
+                        severity: Severity::Error,
+                        layer: None,
+                        file: None,
+                        message: reason.clone(),
+                        path: None,
+                    })
+                    .collect(),
+            ));
+        }
 
         // Rebuild generation summaries only for datasets with payload but no
         // summary entries. This does not validate or repair a partially populated
         // summary; repairing one requires clearing that dataset's summary before
         // reopening.
         for ds in config.schema.datasets.iter().filter(|d| !d.computed) {
+            // A drifted table's columns cannot be trusted to rebuild a summary from.
+            if drifted.contains_key(&ds.name) {
+                continue;
+            }
             let tables = crate::store::ddl::history_of(&ds.name, ds);
             let summarised: i64 = {
                 let sql = "select count(*) from generations where dataset = ?";
@@ -894,6 +1022,7 @@ impl DataService {
         let ingest_sink: IngestSink = {
             let sink = Arc::clone(&sink);
             let health_tracker = Arc::clone(&health_tracker);
+            let load_notes = std::sync::Mutex::new(LoadNoteLog::default());
             Arc::new(move |e: IngestEvent| match e {
                 IngestEvent::Started {
                     source,
@@ -912,7 +1041,15 @@ impl DataService {
                     books,
                     rows,
                     health,
+                    notes,
                 } => {
+                    // Decided before `dataset` moves into the Published event.
+                    let note = notes.as_ref().and_then(|n| {
+                        load_notes
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .note(&source, &dataset, n)
+                    });
                     tracing::info!(
                         target: "geode::ingest",
                         "published {dataset}/{batch} gen {gen_id}: {} book(s), {rows} row(s)",
@@ -965,6 +1102,11 @@ impl DataService {
                             None => true,
                         },
                     );
+                    // Health stays `Ok`: the data loaded correctly. The note is
+                    // a warning, once per distinct combination.
+                    if let Some(warning) = note {
+                        let _ = sink(DataEvent::Diagnostics(vec![warning]));
+                    }
                     // Unconditional, and after the health send: a
                     // failed load's `Health` may be deduplicated away by
                     // the tracker and never reach the shell, so
@@ -1127,6 +1269,28 @@ impl DataService {
                 // stale check that could not read the catalog, a local sweep
                 // that panicked.
                 IngestEvent::Diagnostic(d) => sink(DataEvent::Diagnostics(vec![d])),
+                // One source's queue crossed the backlog depth, or fell back
+                // below it: its own `<source>:backlog` load slot.
+                IngestEvent::Backlog {
+                    source,
+                    queued,
+                    over,
+                } => {
+                    let (key, health, detail) = backlog_health(&source, queued, over);
+                    health_tracker.report_load_and_emit(&source, &key, health, detail, |reported| {
+                        match reported {
+                            Some((worst, detail)) => {
+                                log_health_event(&source, &worst, &detail);
+                                sink(DataEvent::Health {
+                                    source: source.clone(),
+                                    worst,
+                                    detail,
+                                })
+                            }
+                            None => true,
+                        }
+                    })
+                }
                 // A drained runner also ends progress. The runner does not retry refused
                 // events; the app mailbox coalesces progress state.
                 IngestEvent::PlanComplete => sink(DataEvent::LoadEnded),
@@ -1176,6 +1340,13 @@ impl DataService {
                     },
                 );
             };
+            // A drifted dataset's sources are not started: a running scheduler
+            // or receiver would report `Ok` on the discovery lane and clear the
+            // `Failed` that must stand until a restart after the fix.
+            if let Some(reason) = drifted.get(&spec.dataset) {
+                report_unservable(reason.clone());
+                continue;
+            }
             match spec.shape(&config.schema) {
                 SourceShape::Directory => {
                     directory_sources.push(spec.clone());
@@ -1400,6 +1571,7 @@ impl DataService {
                 Arc::clone(&ingest),
                 report_load,
                 on_connection,
+                config.clock,
                 Arc::clone(&sink),
             ) {
                 Ok(worker) => subscriptions.push(worker),
@@ -1476,6 +1648,7 @@ impl DataService {
             health: Arc::clone(&health_tracker),
             diagnostics,
             refused_views,
+            drifted,
             egress,
             positions,
             subscriptions: std::sync::Mutex::new(subscriptions),
@@ -1549,6 +1722,20 @@ impl DataService {
         diagnostics
     }
 
+    /// Refuse a read of a drifted dataset before compiling it: its rows may
+    /// sit in the wrong columns, and an error naming the drift is the answer.
+    fn refuse_drifted<'a>(
+        &self,
+        datasets: impl IntoIterator<Item = &'a str>,
+    ) -> Result<(), StoreError> {
+        for name in datasets {
+            if let Some(reason) = self.drifted.get(name) {
+                return Err(StoreError::Drift(reason.clone()));
+            }
+        }
+        Ok(())
+    }
+
     /// Validate caller-owned scope before compilation so errors name its invalid
     /// columns rather than surfacing later as SQL binder failures.
     pub fn validate_scope(&self, dataset: &str, scope: &Scope) -> Vec<Diagnostic> {
@@ -1586,6 +1773,10 @@ impl DataService {
                 source: duckdb::Error::InvalidParameterName(why.clone()),
             });
         }
+        self.refuse_drifted(
+            std::iter::once(spec.dataset.as_str())
+                .chain(spec.joins.iter().map(|j| j.dataset.as_str())),
+        )?;
 
         // A grouping override is a per-query copy of the spec with its
         // grouping replaced; validation runs on the copy so an undeclared
@@ -1645,6 +1836,15 @@ impl DataService {
     /// that carries the column. The caller has already removed the
     /// column's own selection from `params.scope`.
     pub fn distinct(&self, params: &DistinctParams) -> Result<QueryId, StoreError> {
+        // The picker unions every dataset carrying the column; one drifted
+        // contributor refuses the whole answer rather than shorten it.
+        let base = self.config.dimensions.base_column(&params.column);
+        self.refuse_drifted(self.drifted.keys().map(String::as_str).filter(|name| {
+            self.config
+                .schema
+                .dataset(name)
+                .is_some_and(|ds| ds.column(base).is_some())
+        }))?;
         Ok(self.pool.submit(QueryRequest {
             key: params.key,
             tag: params.tag,
@@ -1686,6 +1886,7 @@ impl DataService {
     /// Queue a document query through the shared pool, with the same per-key
     /// supersession and cancellation behavior as view queries.
     pub fn document(&self, params: &DocumentParams) -> Result<QueryId, StoreError> {
+        self.refuse_drifted([params.dataset.as_str()])?;
         Ok(self.pool.submit(QueryRequest {
             key: params.key,
             tag: params.tag,
@@ -1860,6 +2061,7 @@ impl DataService {
     /// shared pool for per-key supersession and cancellation. A cap refusal names
     /// the frequency and span; results arrive as DataEvent::Series.
     pub fn series(&self, params: &SeriesParams) -> Result<QueryId, StoreError> {
+        self.refuse_drifted([params.dataset.as_str()])?;
         let points = params.frequency.buckets_in(params.range.0, params.range.1);
         if points > SERIES_POINT_CAP {
             return Err(StoreError::Series(cap_message(
@@ -1951,6 +2153,16 @@ impl DataService {
                 result,
             });
         };
+        if let Some(reason) = self
+            .config
+            .sources
+            .iter()
+            .find(|s| s.name == params.source)
+            .and_then(|s| self.drifted.get(&s.dataset))
+        {
+            answer(Err(reason.clone()));
+            return;
+        }
         let Some(dataset) = self.fetch_datasets.get(&params.source) else {
             answer(Err(format!(
                 "source '{}' is not a fetch source",
@@ -2172,6 +2384,19 @@ mod tests {
         DataService,
         std::sync::mpsc::Receiver<DataEvent>,
     ) {
+        service_with(|_| {})
+    }
+
+    /// `service()` with `prepare` run on the loaded store before the service
+    /// opens it, so a test can change the database open then finds.
+    fn service_with(
+        prepare: impl FnOnce(&Store),
+    ) -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        DataService,
+        std::sync::mpsc::Receiver<DataEvent>,
+    ) {
         let (db, src, store, ds, emitted) = crate::ingest::load::tests_support::fixture();
         for file in emitted.files.iter().filter(|f| f.sentinel_path.is_some()) {
             let text = std::fs::read_to_string(file.sentinel_path.as_ref().unwrap()).unwrap();
@@ -2188,6 +2413,7 @@ mod tests {
                 },
             );
         }
+        prepare(&store);
         drop(store);
 
         let mut schema = SchemaSpec::default();
@@ -2202,6 +2428,7 @@ mod tests {
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
             positions: None,
@@ -2245,6 +2472,7 @@ mod tests {
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
             positions: None,
@@ -2344,6 +2572,7 @@ mod tests {
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
             positions: None,
@@ -2404,6 +2633,7 @@ mod tests {
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
             positions: None,
@@ -2440,6 +2670,7 @@ mod tests {
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::with(Arc::new(crate::pricing::worker::tests::FakePricer {
                 asked: Default::default(),
                 delay,
@@ -2474,6 +2705,25 @@ mod tests {
             let e = rx.recv_timeout(Duration::from_secs(30)).expect("an event");
             if let Some(t) = pick(e) {
                 return t;
+            }
+        }
+    }
+
+    /// [`until`] with an overall deadline: `None` when no picked event lands
+    /// within `limit`. A source that polls every interval keeps the channel
+    /// busy, so `until`'s per-event timeout never fires on a missing event;
+    /// a test whose broken path still emits must fail on its assertion here.
+    fn until_within<T>(
+        rx: &std::sync::mpsc::Receiver<DataEvent>,
+        limit: Duration,
+        mut pick: impl FnMut(DataEvent) -> Option<T>,
+    ) -> Option<T> {
+        let deadline = Instant::now() + limit;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let e = rx.recv_timeout(remaining).ok()?;
+            if let Some(t) = pick(e) {
+                return Some(t);
             }
         }
     }
@@ -2928,6 +3178,22 @@ mod tests {
         DataService,
         std::sync::mpsc::Receiver<DataEvent>,
     ) {
+        let (dir, feed, config) = subscribed_config(kind, adapter, document);
+        let (service, rx) = DataService::open_channel(config).unwrap();
+        (dir, feed, service, rx)
+    }
+
+    /// [`subscribed_service_for`]'s configuration, for a test that opens
+    /// the service on its own sink.
+    fn subscribed_config(
+        kind: Arc<dyn geode_core::document::DocumentKind>,
+        adapter: &str,
+        document: &str,
+    ) -> (
+        tempfile::TempDir,
+        crate::adapter::ChannelFeed,
+        DataServiceConfig,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let (bus, feed) = crate::adapter::ChannelAdapter::new("demo_bus");
         let mut adapters = AdapterRegistry::default();
@@ -2947,7 +3213,7 @@ mod tests {
             coalesce: Duration::ZERO,
             ..crate::source::SourceSpec::directory("cvi", "cvi_params", Vec::new())
         };
-        let (service, rx) = DataService::open_channel(DataServiceConfig {
+        let config = DataServiceConfig {
             db_path: dir.path().join("geode.duckdb"),
             schema,
             views: Vec::new(),
@@ -2957,12 +3223,397 @@ mod tests {
             adapters,
             documents,
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
+            positions: None,
+            pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
+        };
+        (dir, feed, config)
+    }
+
+    /// The writer is held on the first document's `Loading` (the sink runs
+    /// on the runner thread, outside the queue lock), so the burst queues
+    /// behind it whatever the machine's speed: the depth is crossed by
+    /// count, not by submissions outrunning publishes.
+    #[test]
+    fn a_burst_past_the_backlog_depth_degrades_the_source_until_it_drains() {
+        let (_dir, _feed, config) = subscribed_config(
+            Arc::new(crate::store::ddl::tests_support::FakeKind::new()),
+            "demo_bus",
+            "fake_cvi",
+        );
+        let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+        let held_tx = Mutex::new(held_tx);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let sink_gate = Arc::clone(&gate);
+        let sink: EventSink = Arc::new(move |e| {
+            if matches!(e, DataEvent::Loading { .. }) {
+                let _ = held_tx.lock().unwrap().send(());
+                let (lock, opened) = &*sink_gate;
+                let mut open = lock.lock().unwrap();
+                let deadline = Instant::now() + Duration::from_secs(30);
+                while !*open {
+                    let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                        break;
+                    };
+                    open = opened.wait_timeout(open, left).unwrap().0;
+                }
+            }
+            tx.send(e).is_ok()
+        });
+        let svc = DataService::open(config, sink).unwrap();
+        let doc = |i: usize| DocumentJob {
+            source: "cvi".into(),
+            dataset: "cvi_params".into(),
+            rows: cvi_doc(&format!("K{i}.Z"), [1., 2., 3., 4., 5., 6.]),
+            source_time: Utc::now(),
+            received_at: Utc::now(),
+            bytes: 0,
+        };
+        svc.ingest.submit_document(doc(0));
+        held_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the writer holds on the first document");
+        for i in 1..=65 {
+            svc.ingest.submit_document(doc(i));
+        }
+        let (worst, detail) = until(&rx, |e| match e {
+            DataEvent::Health {
+                source,
+                worst: worst @ Health::Degraded { .. },
+                detail,
+            } => {
+                assert_eq!(source, "cvi");
+                Some((worst, detail))
+            }
+            _ => None,
+        });
+        assert_eq!(
+            worst,
+            Health::Degraded {
+                reason: "ingest backlog 65".into()
+            }
+        );
+        assert_eq!(detail, "cvi:backlog: ingest backlog 65");
+        {
+            let (lock, opened) = &*gate;
+            *lock.lock().unwrap() = true;
+            opened.notify_all();
+        }
+        until(&rx, |e| match e {
+            DataEvent::Health {
+                source,
+                worst: Health::Ok,
+                ..
+            } if source == "cvi" => Some(()),
+            _ => None,
+        });
+        svc.shutdown();
+    }
+
+    /// A real database file whose `cvi_params` live table gained a column
+    /// since it was created, opened under a subscribed `cvi` source.
+    #[test]
+    fn a_drifted_dataset_fails_its_sources_refuses_its_reads_and_says_so_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("geode.duckdb");
+        {
+            let store = Store::open(&path).unwrap();
+            store.apply_schema(&cvi_dataset()).unwrap();
+            store
+                .writer()
+                .execute_batch("alter table cvi_params_document_live add column surprise VARCHAR;")
+                .unwrap();
+        }
+        let (bus, feed) = crate::adapter::ChannelAdapter::new("demo_bus");
+        let mut adapters = AdapterRegistry::default();
+        adapters.register(bus);
+        let mut documents = DocumentRegistry::default();
+        documents.register(Arc::new(crate::store::ddl::tests_support::FakeKind::new()));
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(cvi_dataset());
+        let (service, rx) = DataService::open_channel(DataServiceConfig {
+            db_path: path,
+            schema,
+            views: Vec::new(),
+            dimensions: DerivedDimensions::default(),
+            query_workers: 1,
+            sources: vec![crate::source::SourceSpec {
+                adapter: "demo_bus".into(),
+                document: Some("fake_cvi".into()),
+                topics: vec!["cvi/>".into()],
+                coalesce: Duration::ZERO,
+                ..crate::source::SourceSpec::directory("cvi", "cvi_params", Vec::new())
+            }],
+            adapters,
+            documents,
+            egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
             positions: None,
         })
         .unwrap();
-        (dir, feed, service, rx)
+        let expected = "schema drift in 'cvi_params': 'cvi_params_document_live' column";
+        let mut errors = Vec::new();
+        let failed = until_within(&rx, Duration::from_secs(30), |e| match e {
+            DataEvent::Diagnostics(d) => {
+                errors.extend(
+                    d.into_iter()
+                        .filter(|d| d.severity == Severity::Error)
+                        .map(|d| d.message),
+                );
+                None
+            }
+            DataEvent::Health {
+                source,
+                worst: Health::Failed { reason },
+                ..
+            } => {
+                assert_eq!(source, "cvi");
+                Some(reason)
+            }
+            _ => None,
+        })
+        .expect("the drifted dataset's source reports Failed");
+        assert!(failed.starts_with(expected), "{failed}");
+        assert!(
+            failed.ends_with("; delete the table or fix the dataset"),
+            "{failed}"
+        );
+        assert_eq!(
+            errors,
+            vec![failed.clone()],
+            "one Error diagnostic, at open"
+        );
+        // The read is refused with the drift reason, not compiled.
+        let refused = service
+            .document(&DocumentParams {
+                key: QueryKey(9),
+                tag: 1,
+                submitted: Instant::now(),
+                dataset: "cvi_params".into(),
+                document_key: vec!["SPX.Z".into()],
+                as_of: AsOf::Live,
+            })
+            .unwrap_err();
+        assert_eq!(refused.to_string(), failed);
+        // Nothing subscribed: a message on the bus loads nothing.
+        feed.publish(
+            "cvi/SPX.Z",
+            crate::store::ddl::tests_support::FakeKind::message("SPX.Z", [1., 2., 3., 4., 5., 6.]),
+        );
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            if let Ok(DataEvent::Published { dataset, .. }) = rx.recv_timeout(left) {
+                panic!("published into a drifted dataset: {dataset}");
+            }
+        }
+        service.shutdown();
+    }
+
+    /// The drop report leaves the service as the SOURCE's health — the name
+    /// the app describes with its dataset — so a tile's chip shows it.
+    #[test]
+    fn a_flooded_subscription_reports_its_drops_as_degraded_source_health() {
+        use crate::store::ddl::tests_support::{FakeKind, GateKind};
+        let (kind, gate) = GateKind::new();
+        let (_dir, feed, service, rx) = subscribed_service(kind, "demo_bus");
+        let body = FakeKind::message("SPX.Z", [1., 2., 3., 4., 5., 6.]);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while service.subscriptions.lock().unwrap()[0].refused() == 0 {
+            assert!(Instant::now() < deadline, "the queue never overflowed");
+            feed.publish("cvi/SPX.Z", body.clone());
+        }
+        GateKind::open(&gate);
+        let (worst, detail) = until_within(&rx, Duration::from_secs(30), |e| match e {
+            DataEvent::Health {
+                source,
+                worst: worst @ Health::Degraded { .. },
+                detail,
+            } => {
+                assert_eq!(
+                    source, "cvi",
+                    "filed under the source, not '<source>:queue'"
+                );
+                Some((worst, detail))
+            }
+            _ => None,
+        })
+        .expect("the source reports its drops as Degraded");
+        let Health::Degraded { reason } = worst else {
+            unreachable!()
+        };
+        assert!(reason.contains(" messages dropped since "), "{reason}");
+        assert!(detail.starts_with("cvi:queue: "), "{detail}");
+        service.shutdown();
+        // Stopping the subscription ends the receiver: its open episode is
+        // cleared, not left on the chip until restart. Nothing else could
+        // turn the source Ok inside the 60 s quiet interval.
+        let cleared = until_within(&rx, Duration::from_secs(5), |e| match e {
+            DataEvent::Health {
+                source,
+                worst: Health::Ok,
+                ..
+            } if source == "cvi" => Some(()),
+            _ => None,
+        });
+        assert!(
+            cleared.is_some(),
+            "the queue Degraded clears when the subscription ends"
+        );
+    }
+
+    /// The blotter's read path: live and archive are unioned with `select *`
+    /// by position, so a view over a drifted dataset must be refused with the
+    /// drift reason rather than read values out of the wrong columns. The
+    /// picker's distinct read over the same dataset is refused the same way.
+    #[test]
+    fn a_view_or_distinct_read_of_a_drifted_dataset_is_refused_with_the_drift() {
+        let (_db, _src, service, rx) = service_with(|store| {
+            store
+                .writer()
+                .execute_batch(
+                    "alter table risk_snapshot_position_archive add column surprise VARCHAR;",
+                )
+                .unwrap();
+        });
+        let refused = service
+            .query(&params(1, "tree", &Scope::default(), AsOf::Live, 3))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.starts_with(
+                "schema drift in 'risk_snapshot': 'risk_snapshot_position_archive' column"
+            ),
+            "{refused}"
+        );
+        assert!(
+            refused.ends_with("; delete the table or fix the dataset"),
+            "{refused}"
+        );
+        let distinct = service
+            .distinct(&DistinctParams {
+                key: QueryKey(2),
+                tag: 2,
+                column: "book".into(),
+                scope: Scope::default(),
+                as_of: AsOf::Live,
+            })
+            .unwrap_err()
+            .to_string();
+        assert_eq!(distinct, refused);
+        assert!(
+            until_within(&rx, Duration::from_millis(300), |e| match e {
+                DataEvent::Query(o) => Some(o.key),
+                DataEvent::Distinct(o) => Some(o.key),
+                _ => None,
+            })
+            .is_none(),
+            "nothing was submitted to the pool"
+        );
+        service.shutdown();
+    }
+
+    /// A drifted series dataset: its fetch source reports `Failed`, a series
+    /// read is refused before compiling, and a fetch is answered with the
+    /// drift reason without asking the adapter.
+    #[test]
+    fn a_series_read_or_fetch_of_a_drifted_dataset_is_refused_with_the_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
+            store
+                .apply_schema(&crate::store::ddl::tests_support::series_dataset())
+                .unwrap();
+            store
+                .writer()
+                .execute_batch("alter table series_series add column surprise VARCHAR;")
+                .unwrap();
+        }
+        let (_dir, calls, service, rx) = fetch_service_over(dir, None, false);
+        let refused = service
+            .series(&series_params("SPX.close"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.starts_with("schema drift in 'series': 'series_series' column"),
+            "{refused}"
+        );
+        service.fetch(&fetch_params(
+            "SPX.close",
+            "2026-01-05T00:00:00Z",
+            "2026-01-06T00:00:00Z",
+        ));
+        let fetched = until_within(&rx, Duration::from_secs(30), |e| match e {
+            DataEvent::SeriesFetched { result, .. } => Some(result),
+            _ => None,
+        })
+        .expect("the fetch is answered");
+        assert_eq!(fetched, Err(refused));
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "the adapter was not asked"
+        );
+        service.shutdown();
+    }
+
+    /// A drifted local table that already holds rows and has no generation
+    /// summary: open must not try to rebuild the summary from it, and a local
+    /// publish into it is refused unwritten.
+    #[test]
+    fn a_local_publish_into_a_drifted_dataset_is_refused_unwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("geode.duckdb");
+        Store::open(&path)
+            .unwrap()
+            .writer()
+            .execute_batch(
+                "create table sheets_document_live (
+                     sheet VARCHAR, line BIGINT, qty BIGINT, batch VARCHAR, book VARCHAR,
+                     source_file_id BIGINT, source_time TIMESTAMPTZ
+                 );
+                 insert into sheets_document_live values ('old', 1, 1, 'old', NULL, 0, now());",
+            )
+            .unwrap();
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(local_dataset());
+        let (service, rx) = DataService::open_channel(DataServiceConfig {
+            db_path: path,
+            schema,
+            views: Vec::new(),
+            dimensions: DerivedDimensions::default(),
+            query_workers: 1,
+            sources: Vec::new(),
+            adapters: Default::default(),
+            documents: Default::default(),
+            egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
+            positions: None,
+            pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
+        })
+        .expect("a drifted table does not stop the service opening");
+        service.publish(LocalPublish {
+            dataset: "sheets".into(),
+            rows: sheet_rows("S1", &[1, 2]),
+        });
+        let reason = until_within(&rx, Duration::from_secs(30), |e| match e {
+            DataEvent::LocalPublishFailed { reason, .. } => Some(reason),
+            DataEvent::Published { dataset, .. } => panic!("written: {dataset}"),
+            _ => None,
+        })
+        .expect("the publish is answered");
+        assert!(reason.starts_with("schema drift in 'sheets': "), "{reason}");
+        let rows: i64 = service
+            .conn
+            .query_row("select count(*) from sheets_document_live", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 1, "only the row that was already there");
+        service.shutdown();
     }
 
     /// The next `Published`, skipping anything else.
@@ -3071,7 +3722,20 @@ mod tests {
         DataService,
         std::sync::mpsc::Receiver<DataEvent>,
     ) {
-        let dir = tempfile::tempdir().unwrap();
+        fetch_service_over(tempfile::tempdir().unwrap(), catalogue, fail_once)
+    }
+
+    /// `fetch_service_with` over a database directory the caller prepared.
+    fn fetch_service_over(
+        dir: tempfile::TempDir,
+        catalogue: Option<Vec<String>>,
+        fail_once: bool,
+    ) -> (
+        tempfile::TempDir,
+        Arc<std::sync::Mutex<Vec<crate::adapter::FetchRequest>>>,
+        DataService,
+        std::sync::mpsc::Receiver<DataEvent>,
+    ) {
         let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut adapters = AdapterRegistry::default();
         adapters.register(Arc::new(FakeFetchAdapter {
@@ -3097,6 +3761,7 @@ mod tests {
             adapters,
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
             positions: None,
@@ -3158,6 +3823,7 @@ mod tests {
             adapters,
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
             positions: None,
@@ -3228,6 +3894,7 @@ mod tests {
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
             positions: None,
@@ -3542,6 +4209,7 @@ mod tests {
                 adapters: Default::default(),
                 documents: Default::default(),
                 egress: Vec::new(),
+                clock: geode_core::clock::Clock::utc(),
                 pricer: PricerConfig::default(),
                 vol: crate::vol::VolConfig::default(),
                 positions: None,
@@ -3777,6 +4445,7 @@ mod tests {
             adapters,
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
             positions: None,
@@ -4404,6 +5073,7 @@ mod tests {
                 adapters: Default::default(),
                 documents: Default::default(),
                 egress: Vec::new(),
+                clock: geode_core::clock::Clock::utc(),
                 pricer: PricerConfig::default(),
                 vol: crate::vol::VolConfig::default(),
                 positions: None,
@@ -4440,6 +5110,7 @@ mod tests {
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
             positions: None,
@@ -4480,6 +5151,7 @@ mod tests {
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
             positions: None,
@@ -4538,6 +5210,7 @@ mod tests {
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
             positions: None,
@@ -4813,6 +5486,7 @@ mod tests {
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
             positions: None,
@@ -4884,6 +5558,7 @@ mod tests {
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
             positions: None,
@@ -4985,6 +5660,7 @@ mod tests {
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
             positions: None,
@@ -5064,6 +5740,7 @@ mod tests {
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
             positions: None,
@@ -5187,6 +5864,7 @@ source_name = "NPV"
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
             positions: None,
@@ -5272,6 +5950,7 @@ source_name = "NPV"
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
             positions: None,
@@ -5374,6 +6053,7 @@ source_name = "NPV"
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
             positions: None,
@@ -6171,6 +6851,7 @@ source_name = "NPV"
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
             positions: None,
@@ -6272,6 +6953,7 @@ source_name = "NPV"
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
             positions: None,
@@ -6368,6 +7050,7 @@ source_name = "NPV"
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
             positions: None,
@@ -6442,6 +7125,252 @@ source_name = "NPV"
         svc.shutdown();
     }
 
+    fn notes(file: &str, extra: &[&str], missing: &[&str]) -> crate::ingest::load::LoadNotes {
+        crate::ingest::load::LoadNotes {
+            file: file.into(),
+            extra_columns: extra.iter().map(|s| s.to_string()).collect(),
+            missing_optional: missing.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn the_load_note_names_the_file_dataset_and_both_lists() {
+        let mut log = LoadNoteLog::default();
+        let d = log
+            .note(
+                "eod_risk",
+                "risk_snapshot",
+                &notes("risk_a.csv", &["A", "B"], &["skew01"]),
+            )
+            .unwrap();
+        assert_eq!(d.severity, Severity::Warning);
+        assert_eq!(
+            d.message,
+            "'risk_a.csv' loaded into 'risk_snapshot' with extra columns [A, B] ignored; \
+             optional [skew01] missing, read as NULL"
+        );
+        let only_missing = log
+            .note(
+                "eod_risk",
+                "risk_snapshot",
+                &notes("risk_b.csv", &[], &["skew01"]),
+            )
+            .unwrap();
+        assert_eq!(
+            only_missing.message,
+            "'risk_b.csv' loaded into 'risk_snapshot' with optional [skew01] missing, read as NULL"
+        );
+    }
+
+    #[test]
+    fn a_repeated_load_note_combination_warns_once() {
+        let mut log = LoadNoteLog::default();
+        assert!(
+            log.note("s", "d", &notes("a.csv", &["X", "Y"], &["z"]))
+                .is_some()
+        );
+        // Another file, same combination (column order aside): nothing.
+        assert!(
+            log.note("s", "d", &notes("b.csv", &["Y", "X"], &["z"]))
+                .is_none()
+        );
+        // A different combination, or another source, warns again.
+        assert!(
+            log.note("s", "d", &notes("c.csv", &["X"], &["z"]))
+                .is_some()
+        );
+        assert!(
+            log.note("t", "d", &notes("d.csv", &["X", "Y"], &["z"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn load_notes_stop_growing_at_the_cap_with_one_last_warning() {
+        let mut log = LoadNoteLog::default();
+        for i in 0..LOAD_NOTE_CAP {
+            assert!(
+                log.note("s", "d", &notes("f.csv", &[&format!("C{i}")], &[]))
+                    .is_some()
+            );
+        }
+        let last = log
+            .note("t", "d", &notes("g.csv", &["one more"], &[]))
+            .expect("the cap is announced once");
+        assert!(last.message.contains("further"), "{}", last.message);
+        assert!(
+            last.message.contains("source 't'") && last.message.contains("'g.csv'"),
+            "the cap warning names the source and file that hit it: {}",
+            last.message
+        );
+        assert!(
+            log.note("s", "d", &notes("f.csv", &["and another"], &[]))
+                .is_none()
+        );
+        assert_eq!(
+            log.seen.len(),
+            LOAD_NOTE_CAP,
+            "nothing remembered past the cap"
+        );
+    }
+
+    /// Real files through a directory source: a file with undeclared columns
+    /// and a missing optional column warns once; an identical second file
+    /// warns nothing; a file with a different combination warns again.
+    #[test]
+    fn extra_and_missing_optional_columns_are_one_warning_per_combination() {
+        let (_db, src, _store, _ds, emitted) = crate::ingest::load::tests_support::fixture();
+        let ready = |has_skew: bool| {
+            emitted
+                .files
+                .iter()
+                .find(|f| {
+                    f.sentinel_path.is_some() && f.columns.iter().any(|c| c == "Skew01") == has_skew
+                })
+                .expect("the generator emits both shapes")
+        };
+        let drops = tempfile::tempdir().unwrap();
+        let (_sdb, svc, rx) = directory_service(format!("{}/*.csv", drops.path().display()));
+        let land = |from: &geode_demo_data::EmittedFile, batch: &str| -> Vec<String> {
+            let csv = drops.path().join(format!("risk_2026-08-24_{batch}.csv"));
+            std::fs::write(&csv, std::fs::read(&from.csv_path).unwrap()).unwrap();
+            let done = drops
+                .path()
+                .join(format!("risk_2026-08-24_{batch}.csv.done"));
+            std::fs::write(
+                &done,
+                std::fs::read(from.sentinel_path.as_ref().unwrap()).unwrap(),
+            )
+            .unwrap();
+            let mut warnings = Vec::new();
+            let mut published = false;
+            loop {
+                match rx.recv_timeout(Duration::from_secs(60)).expect("an event") {
+                    DataEvent::Published { batch: b, .. } if b == batch => published = true,
+                    DataEvent::Diagnostics(d) => warnings.extend(
+                        d.into_iter()
+                            .filter(|d| d.severity == Severity::Warning)
+                            .map(|d| d.message),
+                    ),
+                    DataEvent::LoadEnded if published => return warnings,
+                    _ => {}
+                }
+            }
+        };
+        let first = land(ready(false), "a1");
+        assert_eq!(first.len(), 1, "{first:?}");
+        assert!(
+            first[0].starts_with(
+                "'risk_2026-08-24_a1.csv' loaded into 'risk_snapshot' with extra columns ["
+            ) && first[0].ends_with("; optional [skew01] missing, read as NULL"),
+            "{first:?}"
+        );
+        assert_eq!(
+            land(ready(false), "a2"),
+            Vec::<String>::new(),
+            "the same combination again"
+        );
+        let other = land(ready(true), "b1");
+        assert_eq!(other.len(), 1, "{other:?}");
+        assert!(!other[0].contains("optional ["), "{other:?}");
+        drop(src);
+        svc.shutdown();
+    }
+
+    /// A service with one directory source, `eod_risk` over `risk_snapshot`,
+    /// polling `pattern` every 50 ms.
+    fn directory_service(
+        pattern: String,
+    ) -> (
+        tempfile::TempDir,
+        DataService,
+        std::sync::mpsc::Receiver<DataEvent>,
+    ) {
+        let db = tempfile::tempdir().unwrap();
+        let ds = crate::ingest::load::tests_support::fixture().3;
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(ds);
+        let (svc, rx) = DataService::open_channel(DataServiceConfig {
+            db_path: db.path().join("geode.duckdb"),
+            schema,
+            views: Vec::new(),
+            dimensions: DerivedDimensions::default(),
+            query_workers: 1,
+            sources: vec![crate::source::SourceSpec {
+                poll_interval: Duration::from_millis(50),
+                batch_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<batch>.+)$".into()),
+                ..crate::source::SourceSpec::directory("eod_risk", "risk_snapshot", vec![pattern])
+            }],
+            adapters: Default::default(),
+            documents: Default::default(),
+            egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
+            positions: None,
+            pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
+        })
+        .unwrap();
+        (db, svc, rx)
+    }
+
+    /// A drop directory that is not there is a degraded source, named by its
+    /// path, not a green one with no rows; it clears once the directory exists.
+    #[test]
+    fn a_missing_source_directory_is_degraded_and_clears_when_it_appears() {
+        let root = tempfile::tempdir().unwrap();
+        let drops = root.path().join("drops");
+        let (_db, svc, rx) = directory_service(format!("{}/*.csv", drops.display()));
+        let reason = until_within(&rx, Duration::from_secs(10), |e| match e {
+            DataEvent::Health {
+                source,
+                worst: Health::Degraded { reason },
+                ..
+            } => {
+                assert_eq!(source, "eod_risk");
+                Some(reason)
+            }
+            _ => None,
+        });
+        assert_eq!(
+            reason,
+            Some(format!("path '{}' not found", drops.display())),
+            "a missing drop directory must degrade its source"
+        );
+        std::fs::create_dir(&drops).unwrap();
+        let cleared = until_within(&rx, Duration::from_secs(10), |e| match e {
+            DataEvent::Health {
+                source,
+                worst: Health::Ok,
+                ..
+            } if source == "eod_risk" => Some(()),
+            _ => None,
+        });
+        assert_eq!(cleared, Some(()), "the directory appearing must clear it");
+        svc.shutdown();
+    }
+
+    #[test]
+    fn an_invalid_source_pattern_is_degraded_not_skipped() {
+        let root = tempfile::tempdir().unwrap();
+        let pattern = format!("{}/[.csv", root.path().display());
+        let (_db, svc, rx) = directory_service(pattern.clone());
+        let reason = until_within(&rx, Duration::from_secs(10), |e| match e {
+            DataEvent::Health {
+                source,
+                worst: Health::Degraded { reason },
+                ..
+            } if source == "eod_risk" => Some(reason),
+            _ => None,
+        });
+        assert!(
+            reason
+                .as_deref()
+                .is_some_and(|r| r.starts_with(&format!("invalid pattern '{pattern}': "))),
+            "{reason:?}"
+        );
+        svc.shutdown();
+    }
+
     /// Clean polls and a clean publication for one source must combine into one
     /// Ok transition at the service boundary.
     #[test]
@@ -6479,6 +7408,7 @@ source_name = "NPV"
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
             positions: None,
@@ -6554,6 +7484,7 @@ source_name = "NPV"
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
             positions: None,
@@ -6613,6 +7544,7 @@ source_name = "NPV"
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
             positions: None,
@@ -6769,6 +7701,7 @@ source_name = "NPV"
                 adapters,
                 documents: Default::default(),
                 egress: Vec::new(),
+                clock: geode_core::clock::Clock::utc(),
                 pricer: PricerConfig::default(),
                 vol: crate::vol::VolConfig::default(),
                 positions: None,

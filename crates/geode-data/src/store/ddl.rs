@@ -396,6 +396,8 @@ pub(crate) mod tests_support {
         check_kind_against,
     };
     use geode_core::schema::{ColumnType, DatasetSpec, SchemaSpec};
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::{Duration, Instant};
 
     pub(crate) fn sample_dataset() -> DatasetSpec {
         let text = r#"
@@ -833,6 +835,66 @@ role = "value"
         /// arm is already covered by the runner's own panic tests.
         fn parse(&self, _bytes: &[u8]) -> Result<ParsedDocument, ParseError> {
             panic!("{PARSE_PANIC}");
+        }
+
+        fn write(&self, rows: &DocumentRows) -> Result<Vec<u8>, WriteError> {
+            self.inner.write(rows)
+        }
+    }
+
+    /// A kind that holds the receiver inside `parse` until a test lets it
+    /// go, so the subscription's queue can be filled while nothing is
+    /// draining it. Everything but `parse` is [`FakeKind`]'s.
+    pub(crate) struct GateKind {
+        pub(crate) inner: FakeKind,
+        pub(crate) gate: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    /// Maximum time the parser waits for the test gate. Normal execution opens
+    /// the gate after filling the queue. The timeout lets worker shutdown join
+    /// even if an earlier assertion panics before opening it.
+    pub(crate) const GATE_CAP: Duration = Duration::from_secs(5);
+
+    impl GateKind {
+        pub(crate) fn new() -> (Arc<GateKind>, Arc<(Mutex<bool>, Condvar)>) {
+            let gate = Arc::new((Mutex::new(false), Condvar::new()));
+            (
+                Arc::new(GateKind {
+                    inner: FakeKind::new(),
+                    gate: Arc::clone(&gate),
+                }),
+                gate,
+            )
+        }
+
+        pub(crate) fn open(gate: &(Mutex<bool>, Condvar)) {
+            *gate.0.lock().unwrap() = true;
+            gate.1.notify_all();
+        }
+    }
+
+    impl DocumentKind for GateKind {
+        fn name(&self) -> &'static str {
+            self.inner.name()
+        }
+
+        fn columns(&self) -> &[(&'static str, ColumnType)] {
+            self.inner.columns()
+        }
+
+        fn parse(&self, bytes: &[u8]) -> Result<ParsedDocument, ParseError> {
+            let (lock, opened) = &*self.gate;
+            let mut open = lock.lock().unwrap();
+            let deadline = Instant::now() + GATE_CAP;
+            while !*open {
+                let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                    break;
+                };
+                let (guard, _) = opened.wait_timeout(open, left).unwrap();
+                open = guard;
+            }
+            drop(open);
+            self.inner.parse(bytes)
         }
 
         fn write(&self, rows: &DocumentRows) -> Result<Vec<u8>, WriteError> {

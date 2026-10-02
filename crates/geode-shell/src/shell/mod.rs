@@ -192,6 +192,11 @@ pub enum ShellEvent {
     /// Views, dimensions or groupings changed and were applied; the app
     /// bridge forwards the new views to the data thread.
     ConfigReloaded,
+    /// The `app` document changed and was applied. Queued, like
+    /// `ConfigReloaded`, before the frame's revision notification, so a
+    /// module setting the app bridge reads from it (`blotter.stale_after`)
+    /// reaches the factories before their tiles observe the reload.
+    AppSettingsReloaded,
     /// Restart-sensitive configuration differs from the running data engine:
     /// sources, datasets, egress targets, the position service, panels, the
     /// pricing adapter or the vol model. Presentation changes such as

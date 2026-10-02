@@ -236,12 +236,11 @@ impl ChannelFeed {
         queued
     }
 
-    /// How many messages this bus has refused, over its whole life and
-    /// across every feed sharing it. The producer's half of
-    /// [`MessageSink::refused`]: that one counts what a subscriber could
-    /// not take, this one what the bus itself could not take, and a demo or
-    /// a diagnostic wanting "are we dropping data" has to be able to ask
-    /// both.
+    /// How many messages this bus's inbound queue refused, over its whole
+    /// life and across every feed sharing it. These refusals happen before
+    /// topic routing, so no source owns them and no health lane reports them;
+    /// the demo publisher warns on the first. A subscription's own drops are
+    /// [`MessageSink::refused`], which its receiver reports as `<source>:queue`.
     pub fn refused(&self) -> u64 {
         self.bus.refused.load(Ordering::Relaxed)
     }

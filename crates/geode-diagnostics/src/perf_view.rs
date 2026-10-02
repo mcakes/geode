@@ -55,9 +55,10 @@ pub(crate) struct PerformanceView {
     timings: [Timing; 3],
     bars: Vec<Bar>,
     histogram_summary: SharedString,
-    resources: [(&'static str, SharedString, SharedString); 3],
+    resources: [(&'static str, SharedString, SharedString); 4],
     has_samples: bool,
     dropped: bool,
+    refused: bool,
     overlay: bool,
 }
 
@@ -65,6 +66,14 @@ impl PerformanceView {
     #[cfg(test)]
     pub(crate) fn is_overlay_visible(&self) -> bool {
         self.overlay
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resource(&self, label: &str) -> Option<&str> {
+        self.resources
+            .iter()
+            .find(|(l, _, _)| *l == label)
+            .map(|(_, value, _)| value.as_ref())
     }
 
     pub(crate) fn new(m: &PerfModel) -> Self {
@@ -157,9 +166,15 @@ impl PerformanceView {
                     m.dropped.to_string().into(),
                     "Since application start".into(),
                 ),
+                (
+                    "Refused requests",
+                    m.refused.to_string().into(),
+                    "Data requests refused because the request queue was full, since application start".into(),
+                ),
             ],
             has_samples: m.frame_count > 0,
             dropped: m.dropped > 0,
+            refused: m.refused > 0,
             overlay: m.overlay,
         }
     }
@@ -288,9 +303,15 @@ pub(crate) fn render(
                         div()
                             .font_family(fonts::MONO)
                             .text_sm()
-                            .when(*label == "Dropped events" && m.dropped, |el| {
-                                el.text_color(chip::chip_paint(theme, chip::Tone::WarningText).text)
-                            })
+                            .when(
+                                (*label == "Dropped events" && m.dropped)
+                                    || (*label == "Refused requests" && m.refused),
+                                |el| {
+                                    el.text_color(
+                                        chip::chip_paint(theme, chip::Tone::WarningText).text,
+                                    )
+                                },
+                            )
                             .child(value.clone()),
                     ),
             )
@@ -411,5 +432,15 @@ mod tests {
             ["—", "—", "—", "0"].map(SharedString::from)
         );
         assert!(empty.bars.iter().all(|b| b.height == 0.0));
+    }
+
+    #[test]
+    fn the_refused_requests_row_reads_the_status_bar_counter() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.note_refused(3);
+        let view = PerformanceView::new(&crate::model::perf_model(&d, &RequeryStats::new()));
+        assert_eq!(view.resource("Refused requests"), Some("3"));
+        assert!(view.refused);
+        assert_eq!(view.resource("Dropped events"), Some("0"));
     }
 }

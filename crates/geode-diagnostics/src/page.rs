@@ -1681,6 +1681,27 @@ mod tests {
         assert_eq!(h.page.read_with(&vcx, |p, _| p.rebuild_count), before + 1);
     }
 
+    /// The perf section repaints when the refusal counter moves.
+    #[gpui::test]
+    fn a_refused_request_reaches_the_perf_row(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.page.update(&mut vcx, |p, cx| p.set_visible(true, cx));
+        dispatch(&h, &mut vcx, "diagnostics::perf");
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.note_refused(4);
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        let row = h.page.read_with(&vcx, |p, _| {
+            p.perf
+                .as_ref()
+                .unwrap()
+                .resource("Refused requests")
+                .map(str::to_string)
+        });
+        assert_eq!(row.as_deref(), Some("4"));
+    }
+
     /// A closed page lives on for the window: its observers move their
     /// baselines and build nothing until it is shown, and the show rebuilds
     /// exactly once with everything that arrived meanwhile.

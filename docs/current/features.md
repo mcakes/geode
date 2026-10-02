@@ -84,7 +84,14 @@ has none of them.
   clips, so neither a long left side nor a long notice pushes the times, the
   chip or `⋯` off the tile — they leave it only when the tile is narrower
   than those three alone.
-  A stale source time takes the warning text tone. The health chip appears
+  A stale source time takes the warning text tone. It turns stale while the
+  tile is idle, too: market-data arms a wake-up at its source time plus
+  `stale_after`, and the blotter one per dataset time, each firing in turn so
+  every time run turns stale at its own deadline. They are re-armed by each
+  delivery, on show and on a frame flip, and dropped while hidden. A
+  reload that changes `stale_after` sets the shared threshold before the
+  frame flips, so that flip re-arms an idle tile against the new value. A newer delivery
+  clears the wake-up's verdict, so it paints fresh. The health chip appears
   only while a source the tile reads is PendingTooLong (`pending`), Degraded
   (`degraded`) or Failed (`failed`); its tooltip names the worst source and
   its reason, with `+N more` for other unhealthy sources. Clicking it opens
@@ -1079,7 +1086,7 @@ current keyboard workflow using the shell's keycaps.
 | Data | One expandable row per dataset with Partitions, Latest gen, Published, Rows, Resolved, Live, and Loaded; a dataset expands to its generations, the one resolved under a historical frame as-of marked. Toolbar: a case-insensitive filter over dataset names and generation fields (partition/book, generation ID, times, row count, live/archive status), a chip reading `Catalog up to date` or `Refreshing catalog`, Refresh catalog, Expand all, Collapse all. A dataset-name match includes all its generations; leaf-only matches retain the dataset heading and hide unmatched siblings. Filtering temporarily reveals collapsed results; clearing it restores stored expansion. Catalog totals are not narrowed by filtering. |
 | Config | Three full-width views: Current issues (config and data lanes), History (prior batches newest first), and Effective values (expandable documents and their leaves, with Key, Value, and Layer from `Config::explain`). The active view owns row navigation and Copy. Search filters issue text or document keys and values; unmatched documents disappear and matches inside collapsed documents are revealed. Open config directory remains available. |
 | Log | Time with milliseconds, Lvl, Target, and Message over the retained tail. Toolbar: level toggles, a target select over the targets seen in the tail plus `All targets`, a text filter over message and target, Follow, Clear log, and Log levels. Detail: the full record with a Copy button that puts it on the clipboard. |
-| Performance | Aligned median, p95, maximum, and sample-count readouts for frame intervals, query→snapshot, and snapshot→paint, with explanations of each stage. A labeled logarithmic frame-interval histogram shows bucket ranges and counts on hover, with a separate overflow count above 100 ms. Frame cadence is not pure UI work and is not classified against the 8 ms UI budget. UI and requery targets remain explanatory guidance. Storage, DuckDB memory, dropped events, and the Performance overlay switch share the scrolling region. Missing samples show dashes and zero counts. |
+| Performance | Aligned median, p95, maximum, and sample-count readouts for frame intervals, query→snapshot, and snapshot→paint, with explanations of each stage. A labeled logarithmic frame-interval histogram shows bucket ranges and counts on hover, with a separate overflow count above 100 ms. Frame cadence is not pure UI work and is not classified against the 8 ms UI budget. UI and requery targets remain explanatory guidance. Storage, DuckDB memory, dropped events, refused requests (both warning-toned when non-zero), and the Performance overlay switch share the scrolling region. Missing samples show dashes and zero counts. |
 
 Keys in the page's own context: `j`/`k` move the cursor, `g g`/`G` jump,
 `ctrl+d`/`ctrl+u` move five rows and `ctrl+f`/`ctrl+b` ten, all with count
@@ -1194,7 +1201,9 @@ dense header: the sheet name (a control: see [sheets by pointer](#sheets-by-poin
 (`spot +2.0%`, `vol -1.0`, spelled as the shift cells spell them), `N pricing…`
 while lines are stale, `N failed` in danger text while any line's last answer
 was a failure, `pricer <name>`, the last priced time, which reads `stale` once
-it is older than the shell's `stale_after`, and a `⋯` button at the trailing
+it is older than the shell's `stale_after` — re-evaluated on each repaint: the
+reprice timer's ticks repaint it, and with `refresh = "off"` an idle pricer's
+`stale` waits for its next repaint (known limitation) — and a `⋯` button at the trailing
 edge that opens and closes the action menu (the pointer's `.`). The header is
 the [shared frame](#shared-tile-interaction): notices paint after the status
 items, and the health chip sits between the time and `⋯`. The health chip

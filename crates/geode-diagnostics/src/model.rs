@@ -556,6 +556,8 @@ pub struct PerfModel {
     pub submit: Option<Percentiles>,
     pub paint: Option<Percentiles>,
     pub dropped: u64,
+    /// Data requests the handle refused `Busy` (the status bar's "N refused").
+    pub refused: u64,
     /// `(upper bound µs, count)` per bucket, then the overflow bucket as
     /// `(u64::MAX, overflow)`.
     pub buckets: Vec<(u64, u32)>,
@@ -600,6 +602,7 @@ pub fn perf_model(d: &Diagnostics, requery: &RequeryStats) -> PerfModel {
         submit: percentiles(requery.submit_to_snapshot()),
         paint: percentiles(requery.snapshot_to_paint()),
         dropped: d.dropped_events,
+        refused: d.refused,
         buckets,
         overflow: h.overflow(),
         database,
@@ -1018,6 +1021,13 @@ pub(crate) mod tests {
             b.sources
         );
         assert_eq!(d.summary().as_ref(), "sources 1 degraded · 2 failed");
+    }
+
+    #[test]
+    fn perf_model_carries_the_refused_request_total() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.note_refused(7);
+        assert_eq!(perf_model(&d, &RequeryStats::new()).refused, 7);
     }
 
     #[test]

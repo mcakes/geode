@@ -51,12 +51,12 @@ The ingestion boundaries have different capacity and replacement rules:
 | Boundary | Accepted work and refusal |
 |---|---|
 | `DataHandle` request channel | Bounded; `try_send` refuses `Busy` without waiting when full, and `Stopped` when the request loop has ended or admission is closed. |
-| Adapter message sink | Bounded; refused messages are counted and dropped. |
+| Adapter message sink | Bounded; refused messages are counted, dropped, and reported as `<source>:queue` health. |
 | Subscription coalescer | One pending document per key; newer documents replace it without moving its release deadline. Already submitted jobs are unaffected. |
 | Fetch worker | Up to 64 waiting requests per source; a refused fetch is reported as an outcome. |
 | Egress worker | Up to 8 waiting uploads per target, behind the one in flight; queue refusal emits an upload error naming the target. |
 | Position worker | Up to 8 waiting commands behind the one in flight; a full queue is refused `position service busy` at once, answered as a command outcome. |
-| Ingest runner | No fixed capacity. Documents and series are FIFO within their queues; files deduplicate by path, size, and source time. |
+| Ingest runner | No fixed capacity. Documents and series are FIFO within their queues; files deduplicate by path, size, and source time. A source with more than 64 queued documents and series reports `<source>:backlog` health; its `N` is the count at the last crossing (65, 129, …), held while the queue drains until the clear. |
 
 For queued files, resubmission can promote priority without adding another
 job. A catalog check immediately before loading skips work that has already
@@ -242,13 +242,23 @@ whole file partitions. See [`publish.rs`](../../crates/geode-data/src/store/publ
 [`split.rs`](../../crates/geode-data/src/ingest/split.rs), and
 [`series.rs`](../../crates/geode-data/src/store/series.rs).
 
-**Schema limitation:** `apply_schema` creates missing tables but does not
-migrate existing payload columns. Publication moves rows positionally, so a
-column change against an old database can fail or, for same-typed reorders,
-misfile values silently. Rebuild an affected demo database after changing its
-schema; production migration needs an explicit procedure. See
+Source columns the dataset does not declare are ignored and declared
+optional columns the file lacks read as NULL; the load stays `Ok`. Each
+distinct (source, dataset, extra set, missing set) combination emits one
+warning diagnostic per run — `'<file>' loaded into '<dataset>' with extra
+columns [a, b] ignored; optional [c] missing, read as NULL` — and repeats
+emit nothing. At most 256 combinations are remembered; one further warning
+names the source and file that reached the cap and says later ones go
+unreported.
+
+`apply_schema` creates missing tables but does not migrate existing payload
+columns, and publication moves rows positionally. Open therefore compares
+every existing payload table with its declaration and refuses a drifted
+dataset rather than misfiling values (see [source conditions](#source-conditions)).
+Rebuild an affected demo database after changing its schema; production
+migration needs an explicit procedure. See
 [`store/mod.rs`](../../crates/geode-data/src/store/mod.rs) and
-[`geode-data README`](../../crates/geode-data/README.md).
+[`drift.rs`](../../crates/geode-data/src/store/drift.rs).
 
 ## Document validation and storage
 
@@ -301,10 +311,21 @@ even if its bytes changed. Discovery and the runner's pre-load check share
 this rule. A committed degraded generation counts as loaded; a rolled-back
 load has no new catalog entry.
 
-Invalid glob syntax, glob traversal errors, and CSV metadata errors are
-currently skipped. Catalog lookup errors propagate to the scheduler. An
-empty discovery result therefore cannot establish that every path was
-accessible. See [`discovery.rs`](../../crates/geode-data/src/source/discovery.rs)
+A pattern that matches no file has its literal prefix checked once: the text
+before its first `*`, `?` or `[`, cut back to the last separator (a pattern
+with no glob character names a file, so its directory is checked; a relative
+pattern resolves against the working directory; `~` is not expanded). A
+missing prefix reports `Degraded` with `path '<prefix>' not found`; one that
+is not a directory or cannot be opened reports `path '<prefix>' unreadable:
+<error>`; an invalid pattern reports `invalid pattern '<pattern>': <error>`.
+A readable empty directory is healthy, because an empty drop directory is
+normal; a dated directory that does not exist yet is `Degraded`, not
+`Failed`. An escaped glob character (`[[]`, `[*]`) also ends the literal
+text, so the checked prefix is shorter than the directory the pattern names:
+when that shorter prefix exists, a missing directory below it reads as a
+healthy empty one. This is rare and errs toward silence. Glob traversal errors below a readable prefix and CSV metadata
+errors are skipped, and catalog lookup errors propagate to the
+scheduler. See [`discovery.rs`](../../crates/geode-data/src/source/discovery.rs)
 and [`sentinel.rs`](../../crates/geode-data/src/source/sentinel.rs).
 
 Adapters expose independent subscription, upload, fetch, and position-command
@@ -895,6 +916,44 @@ operation or queue drain. Local document writes omit the start event, so
 autosave does not activate progress. A poll's `ready` count is the plan size
 before runner deduplication; its next-poll time is an estimate, falling back
 to the report time if adding the interval overflows.
+
+### Source conditions
+
+Conditions that are not one file's or one document's outcome are reported
+beside those outcomes. The load-lane conditions each have their own key, so
+each is reported and cleared independently and never overwrites an unrelated
+one. A path problem shares the source's discovery slot with its stuck and
+orphaned files; one poll merges them by severity (`worst_health`: the worst
+finding wins and equal ones are listed together), and the next clean poll
+replaces the merged result. Every one reaches the status bar, the diagnostics page and a
+tile's health chip under the source's own name.
+
+| Condition | Lane | Key | Health | Reason | Clears when |
+|---|---|---|---|---|---|
+| Source path missing, unreadable, or an invalid pattern | discovery | the source | `Degraded` | `path '<prefix>' not found`, `path '<prefix>' unreadable: <error>`, `invalid pattern '<pattern>': <error>` | the prefix exists and is readable |
+| Payload schema drift at open | discovery | every source of the dataset | `Failed` | `schema drift in '<dataset>': <diff>; delete the table or fix the dataset` | a restart after the table is deleted or the dataset fixed |
+| A subscription's receiver dropping messages | load | `<source>:queue` | `Degraded` | `N messages dropped since HH:MM:SS` | 60 s pass with no new drop |
+| A source's documents and series queued past 64 | load | `<source>:backlog` | `Degraded` | `ingest backlog N` (re-reported at each further 64; `N` is the count at the last crossing, not a live count, and holds while draining) | that source's queue falls below 64 |
+
+`N` counts from the episode's first drop, and the time is when the receiver
+first observed it, on the display clock captured at open (within one receive
+cycle, later if a parser held the receiver). A growing count is re-reported
+at most once a second. The `ChannelAdapter` bus's own inbound refusals happen
+before topic routing, belong to no source, and are not reported as health.
+The `<source>:queue` clear is the receiver's own, so when a subscription
+ends (its feed disconnects or the service stops it) the receiver clears an
+open episode with `Ok` as it exits: with no receiver there are no drops.
+
+A drifted dataset is refused, not guessed at: its sources are not started (a
+running poll would clear the discovery lane), the ingest runner refuses every
+document, series, file and forget into it before any `INSERT`, and the data
+service refuses a view, document, series or distinct read of it — or a fetch
+for its source — with the same reason, before compiling anything. A drifted
+dataset reached through an optional join refuses the whole view, where an
+ordinary optional-join failure warns and is skipped: dropping the join would
+answer with a plausible but narrower result, so the refusal is deliberate.
+Open skips rebuilding a drifted dataset's generation summary. See
+[`drift.rs`](../../crates/geode-data/src/store/drift.rs).
 
 ## Limits and verification
 

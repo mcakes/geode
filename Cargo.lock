@@ -2729,6 +2729,7 @@ dependencies = [
 name = "geode-tile"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "geode-core",
  "geode-shell",
  "gpui-component",

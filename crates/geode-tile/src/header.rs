@@ -208,6 +208,18 @@ pub fn time_color(stale: bool, theme: &Theme) -> Hsla {
     }
 }
 
+/// A time run's debug selector, `tile-time-{tile}-{i}`, suffixed `-stale`
+/// while the run paints [`time_color`]'s warning tone. Both come from the one
+/// flag, so a test finding the suffixed selector reads the tone the paint
+/// route chose rather than the module's own verdict.
+pub fn time_selector(tile: u64, i: usize, stale: bool) -> String {
+    if stale {
+        format!("tile-time-{tile}-{i}-stale")
+    } else {
+        format!("tile-time-{tile}-{i}")
+    }
+}
+
 /// The health chip, prepared from a [`TileHealth`] when the answer changes.
 #[derive(Clone)]
 pub struct HealthChip {
@@ -381,9 +393,10 @@ fn paint_cluster(c: Cluster<'_>, theme: &Theme) -> (Option<Stateful<Div>>, Div) 
     let mut row = h_flex().items_center().gap_3();
     row = row.whitespace_nowrap();
     row = row.children(c.times.iter().enumerate().map(|(i, t)| {
+        let stale = t.stale;
         div()
-            .text_color(time_color(t.stale, theme))
-            .debug_selector(move || format!("tile-time-{tile}-{i}"))
+            .text_color(time_color(stale, theme))
+            .debug_selector(move || time_selector(tile, i, stale))
             .child(t.text().clone())
     }));
     row = row.children(
@@ -1276,9 +1289,11 @@ mod tests {
             let _ = window.draw(cx);
         });
         let width = |vcx: &mut VisualTestContext, s: &'static str| {
-            f32::from(vcx.debug_bounds(s).unwrap().size.width)
+            let bounds = vcx.debug_bounds(s);
+            assert!(bounds.is_some(), "{s} did not paint");
+            f32::from(bounds.unwrap().size.width)
         };
-        let stale = width(vcx, "tile-time-3-0");
+        let stale = width(vcx, "tile-time-3-0-stale");
         let worded = width(vcx, "tile-time-3-1");
         let fresh = width(vcx, "tile-time-3-2");
         assert!((stale - worded).abs() < 0.5, "{stale} vs {worded}");

@@ -114,9 +114,10 @@ impl ShellView {
     ///
     /// An accepted candidate updates shell settings, rebuilds affected frame
     /// state, and advances the frame's config revision. View-related changes
-    /// emit `ConfigReloaded` before frame notifications. Source, dataset, egress,
-    /// positions, panels, pricing-adapter and vol-model differences from startup
-    /// require a restart; returning to those baselines clears the restart message.
+    /// emit `ConfigReloaded`, and `app` changes `AppSettingsReloaded`, before
+    /// frame notifications. Source, dataset, egress, positions, panels,
+    /// pricing-adapter and vol-model differences from startup require a
+    /// restart; returning to those baselines clears the restart message.
     pub(super) fn apply_reload(&mut self, mut new_config: Config, cx: &mut Context<Self>) {
         let (mod_alias, mod_diags) = mod_alias_from_config(&new_config);
         // Retain compiled module fragments between builtins and desk/user layers.
@@ -202,6 +203,8 @@ impl ShellView {
                 || changed("dataset_presentation")
                 || changed("dimensions")
                 || changed(geode_core::config::COLORS_DOC);
+            // `app` settings the bridge hands to module factories.
+            let app_changed = changed("app");
             // Dimension picker columns depend on dataset columns and derived dimensions.
             let pickable_changed = changed("datasets") || changed("dimensions");
             // Compare with the data engine's startup inputs so reverting a change
@@ -228,7 +231,7 @@ impl ShellView {
 
             // Apply log levels without persisting them again: the candidate already
             // came from disk. Report control errors and update the diagnostics model.
-            if changed("app") {
+            if app_changed {
                 let (new_levels, log_diags) = LogLevels::from_doc(&new_config);
                 for d in &log_diags {
                     tracing::warn!(target: "geode::config", "{d}");
@@ -335,6 +338,9 @@ impl ShellView {
             // The bridge must refresh those views before tiles observe the revision.
             if views_changed {
                 cx.emit(ShellEvent::ConfigReloaded);
+            }
+            if app_changed {
+                cx.emit(ShellEvent::AppSettingsReloaded);
             }
             if groupings_changed {
                 let slots = rebuild_slots(&self.services.config);
