@@ -27142,8 +27142,8 @@ run_mutation "pricer reorder: a gap inside a package's legs is legal" \
 # The grip drag (tile::reorder, delegate).
 run_mutation "pricer reorder: the drop gap ignores the pointer's half" \
   crates/geode-pricer/src/tile/reorder.rs \
-  '        plan.snap(row, rel - rel.floor() >= 0.5)' \
-  '        plan.snap(row, false)' \
+  '        plan.target(&self.sheet, row, rel - rel.floor() >= 0.5)' \
+  '        plan.target(&self.sheet, row, false)' \
   geode-pricer a_grip_drag_moves_a_row_down_and_up
 
 run_mutation "pricer reorder: the drop line never paints" \
@@ -27217,6 +27217,54 @@ run_mutation "pricer reorder: the bottom edge never scrolls" \
   '        if self.scroll_step(cx) == 0. {' \
   '        if true {' \
   geode-pricer a_grip_drag_at_the_bottom_edge_scrolls
+
+run_mutation "pricer reorder: a drag outside a V selection keeps it" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '        let ends_selection = self.selection.is_some() && !selected;' \
+  '        let ends_selection = false;' \
+  geode-pricer dragging_a_row_outside_a_v_selection_ends_it
+
+run_mutation "pricer reorder: a drag under a v block keeps it" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '        let ends_selection = self.selection.is_some() && !selected;' \
+  '        let ends_selection = false;' \
+  geode-pricer dragging_a_row_under_a_v_block_ends_it
+
+run_mutation "pricer reorder: a sort mid-drag lets the drop land" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '            return Some(MOVE_SORTED);' \
+  '            return None;' \
+  geode-pricer a_sort_mid_drag_refuses_the_drop
+
+run_mutation "pricer reorder: a re-prepared drag skips the refusal" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '                .map_or_else(|| self.drop_plan(&m), Err)' \
+  '                .map_or_else(|| self.drop_plan(&m), |_| self.drop_plan(&m))' \
+  geode-pricer a_sort_mid_drag_refuses_the_drop
+
+run_mutation "pricer reorder: below the last row drops nowhere" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '            return plan.target(&self.sheet, len.checked_sub(1)?, true);' \
+  '            return None;' \
+  geode-pricer no_line_at_a_no_op_gap_and_below_the_last_row_is_the_end
+
+run_mutation "pricer reorder: a no-op gap is a target" \
+  crates/geode-pricer/src/core/reorder.rs \
+  '            .filter(|&gap| self.edits(sheet, gap).is_some())' \
+  '            .filter(|&gap| gap == gap)' \
+  geode-pricer a_target_is_a_legal_gap_that_moves_something
+
+run_mutation "pricer reorder: the line paints at the dragged row's own edge" \
+  crates/geode-pricer/src/core/reorder.rs \
+  '            .filter(|&gap| self.edits(sheet, gap).is_some())' \
+  '            .filter(|&gap| gap == gap)' \
+  geode-pricer no_line_at_a_no_op_gap_and_below_the_last_row_is_the_end
+
+run_mutation "pricer reorder: a grip click leaves its drag state" \
+  crates/geode-pricer/src/tile.rs \
+  '                if !cx.has_active_drag() {' \
+  '                if false {' \
+  geode-pricer a_grip_click_leaves_no_drag
 
 # Session: the pin and the open grouping rows round-trip, held mid-load,
 # NULL apart from the empty string.

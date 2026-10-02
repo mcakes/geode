@@ -228,12 +228,11 @@ pub struct RowGripPressed(pub usize);
 impl EventEmitter<RowGripPressed> for TableState<SheetDelegate> {}
 
 /// The value a grip drag carries: the table it started in (another
-/// tile's body ignores it) and the grid row grabbed. Renders as nothing:
-/// the drop line is the drag's whole feedback.
+/// tile's body ignores it; the tile holds what moves). Renders as
+/// nothing: the drop line is the drag's whole feedback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RowDrag {
     pub table: gpui::EntityId,
-    pub row: usize,
 }
 
 impl Render for RowDrag {
@@ -1607,7 +1606,7 @@ impl SheetDelegate {
             )
             // A click is the cell's no more than a press is.
             .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.stop_propagation()))
-            .on_drag(RowDrag { table, row: row_ix }, |drag, _, _, cx| {
+            .on_drag(RowDrag { table }, |drag, _, _, cx| {
                 cx.stop_propagation();
                 cx.new(|_| *drag)
             })

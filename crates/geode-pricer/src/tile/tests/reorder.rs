@@ -254,11 +254,142 @@ fn escape_cancels_a_grip_drag(cx: &mut gpui::TestAppContext) {
     let to = over_row(&mut vcx, 3, true);
     start_drag(&mut vcx, 0, to);
     assert_eq!(drop_gap(&h, &vcx), Some(4));
-    h.dispatch(&mut vcx, "escape", None);
+    key(&h, &mut vcx, "escape");
     assert_eq!(drop_gap(&h, &vcx), None);
     assert!(!vcx.update(|_, cx| cx.has_active_drag()), "the drag ended");
     up(&mut vcx, to, 1);
     assert_eq!(h.tree(&vcx), FOUR);
+}
+
+/// A real key: matched against the module's keymap fragment under the
+/// tile's own key context, then dispatched through the shell's door.
+fn key(h: &Harness, vcx: &mut VisualTestContext, key: &str) {
+    use geode_shell::keymap::{MatchResult, Matcher, build_keymap, parse_keystroke};
+    let mut registry = geode_shell::actions::ActionRegistry::default();
+    geode_shell::defaults::register_builtin_actions(&mut registry);
+    h.factory.register_actions(&mut registry);
+    let doc =
+        geode_shell::keymap::fragments::fragment_doc("pricer", crate::content::DEFAULT_KEYMAP)
+            .unwrap();
+    let (keymap, diags) = build_keymap(&[doc], geode_shell::defaults::default_mod(), &registry);
+    assert!(diags.is_empty(), "{diags:?}");
+    let stack = [h.tile.read_with(vcx, |t, _| t.key_context())];
+    let ks = parse_keystroke(key, geode_shell::defaults::default_mod()).unwrap();
+    let MatchResult::Matched { action, count } = Matcher::default().press(&keymap, ks, &stack)
+    else {
+        panic!("{key}: no binding");
+    };
+    assert!(vcx.update(|window, cx| h.content.dispatch(&action, count, window, cx)));
+    h.draw(vcx);
+}
+
+const SIX: [&str; 6] = [
+    "SPX Z26 1000 P",
+    "SPX Z26 2000 P",
+    "SPX Z26 3000 P",
+    "SPX Z26 4000 P",
+    "SPX Z26 5000 P",
+    "SPX Z26 6000 P",
+];
+
+const ROW_MOVED: &str = "selection cleared: a row moved";
+
+/// A grip drag of a row outside a live `V` selection ends the selection
+/// as the drag starts: a selection kept over painted rows would widen to
+/// take in the dragged line (and `d` would then delete it).
+#[gpui::test]
+fn dragging_a_row_outside_a_v_selection_ends_it(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &SIX);
+    h.motion(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.motion(&mut vcx, "down", None);
+    let to = over_row(&mut vcx, 1, true);
+    start_drag(&mut vcx, 5, to);
+    assert!(!selected(&h, &vcx), "ended at drag start");
+    assert_eq!(h.footer(&vcx).as_deref(), Some(ROW_MOVED));
+    assert_eq!(drop_gap(&h, &vcx), Some(2));
+    up(&mut vcx, to, 1);
+    assert_eq!(h.tree(&vcx)[2], "SPX Z26 6000 P");
+    assert!(!selected(&h, &vcx));
+}
+
+/// Any grip drag under a `v` block ends it, the anchor's own line
+/// included: a block is cells, not rows the drag could carry.
+#[gpui::test]
+fn dragging_a_row_under_a_v_block_ends_it(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &SIX);
+    h.motion(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "visual_block", None);
+    h.motion(&mut vcx, "down", Some(2));
+    let to = over_row(&mut vcx, 5, true);
+    start_drag(&mut vcx, 1, to);
+    assert!(!selected(&h, &vcx));
+    assert_eq!(h.footer(&vcx).as_deref(), Some(ROW_MOVED));
+    up(&mut vcx, to, 1);
+    assert_eq!(h.tree(&vcx)[5], "SPX Z26 2000 P");
+    assert!(!selected(&h, &vcx));
+}
+
+/// A rebuild that makes moves refused mid-drag (a sort turned on) ends
+/// the drop: no line shows and the release reorders nothing.
+#[gpui::test]
+fn a_sort_mid_drag_refuses_the_drop(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &FOUR);
+    let to = over_row(&mut vcx, 3, true);
+    start_drag(&mut vcx, 0, to);
+    assert_eq!(drop_gap(&h, &vcx), Some(4));
+    h.command(&mut vcx, "sort strike desc").unwrap();
+    held_move(&mut vcx, to);
+    assert_eq!(drop_gap(&h, &vcx), None);
+    up(&mut vcx, to, 1);
+    let roots: Vec<String> = h.tile.read_with(&vcx, |t, _| {
+        t.sheet.roots().map(|r| t.sheet.shorthand(r)).collect()
+    });
+    assert_eq!(roots, FOUR, "sheet order unchanged");
+}
+
+/// A grip click with no drag leaves no drag state behind.
+#[gpui::test]
+fn a_grip_click_leaves_no_drag(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &FOUR);
+    let at = grip(&mut vcx, 1);
+    down(&mut vcx, at, 1);
+    assert!(h.tile.read_with(&vcx, |t, _| t.row_drag.is_some()));
+    up(&mut vcx, at, 1);
+    assert!(h.tile.read_with(&vcx, |t, _| t.row_drag.is_none()));
+}
+
+/// No line at a gap that changes nothing (the dragged row's own edges);
+/// the empty body below the last row is the gap after it.
+#[gpui::test]
+fn no_line_at_a_no_op_gap_and_below_the_last_row_is_the_end(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &FOUR);
+    let own = over_row(&mut vcx, 1, true);
+    start_drag(&mut vcx, 1, own);
+    assert_eq!(drop_gap(&h, &vcx), None, "below itself");
+    let above = over_row(&mut vcx, 1, false);
+    held_move(&mut vcx, above);
+    assert_eq!(drop_gap(&h, &vcx), None, "above itself");
+    let below = h.tile.read_with(&vcx, |t, cx| {
+        let b = t
+            .table
+            .read(cx)
+            .vertical_scroll_handle
+            .0
+            .borrow()
+            .base_handle
+            .bounds();
+        gpui::point(b.center().x, b.bottom() - px(30.))
+    });
+    let last = over_row(&mut vcx, 3, true);
+    assert!(
+        below.y > last.y + px(26.),
+        "fixture: empty body below the rows"
+    );
+    held_move(&mut vcx, below);
+    assert_eq!(drop_gap(&h, &vcx), Some(4));
+    up(&mut vcx, below, 1);
+    assert_eq!(h.tree(&vcx)[3], "SPX Z26 2000 P");
 }
 
 /// A split package is a sibling in each group it paints under: dragging a

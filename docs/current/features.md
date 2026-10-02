@@ -1334,12 +1334,22 @@ promise a refusal.
 Dragging the grip moves its row; a grip on a row inside a live `V`
 selection moves the whole selection, under `move_plan`'s rule (one parent,
 one group), and a selection that would refuse the keys refuses at the press
-with the keys' footer. While the button is held a 2 px line in the theme's
+with the keys' footer. A drag of any other row while a selection is live
+(a row outside the `V` selection, or any row under a `v` block) ends the
+selection as the drag starts, with `selection cleared: a row moved`: the
+selection spans painted rows, so a row moved into or out of them would
+widen or shift it onto lines nobody picked (a following `d` would delete
+the dragged line). A grip click with no drag keeps it. While the button is held a 2 px line in the theme's
 drag-border color (the header's column-drop line) marks the nearest legal
 gap: between rows of the same sibling set (the roots, or the package's legs)
 and, under a value grouping, of the same group. Over a package's open legs
-the line snaps to the package's edge; over another group's rows, another
-package, or off the table, no line shows and a release there moves nothing.
+the line snaps to the package's edge, and the empty body below the last
+row is the gap after it. No line shows at a gap that would change nothing
+(the dragged rows' own edges), over another group's rows or another
+package, or off the table, and a release there moves nothing. A rebuild
+mid-drag re-prepares the drop against the new rows; one that makes the
+move one the keys refuse (a sort turned on, the package split or partly
+hidden) refuses the drop, so the line goes and the release moves nothing.
 Held within a row of the body's top or bottom edge, the table scrolls on
 its own and the line follows the rows passing under the still pointer.
 `escape` (any verb, in fact) ends the drag with nothing moved.

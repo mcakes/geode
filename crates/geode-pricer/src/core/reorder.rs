@@ -117,6 +117,15 @@ impl DropPlan {
             .any(|s| s.span.start == gap || s.span.end == gap)
     }
 
+    /// Where a release over grid row `row` (its lower half when `lower`)
+    /// lands: the nearest legal gap ([`Self::snap`]), unless dropping
+    /// there would leave the order as it is (an edge of the movers' own
+    /// rows) — a gap that changes nothing shows no line.
+    pub fn target(&self, sheet: &Sheet, row: usize, lower: bool) -> Option<usize> {
+        self.snap(row, lower)
+            .filter(|&gap| self.edits(sheet, gap).is_some())
+    }
+
     /// The legal gap nearest the pointer over grid row `row` (its lower
     /// half when `lower`): `None` when the row lies outside the stops'
     /// region. A tie goes the way the pointer's half leans.
@@ -343,6 +352,17 @@ mod tests {
         land(&mut s, edits);
         assert_eq!(texts(&s)[0], "SPX Z26 4 P");
         assert_eq!(flat(&s, &[0]).edits(&s, 9), None, "not a gap");
+    }
+
+    #[test]
+    fn a_target_is_a_legal_gap_that_moves_something() {
+        let s = sheet(&["SPX Z26 1 P", "SPX Z26 2 P", "SPX Z26 3 P", "SPX Z26 4 P"]);
+        let plan = flat(&s, &[1, 2]);
+        assert_eq!(plan.target(&s, 1, false), None, "above the block: in place");
+        assert_eq!(plan.target(&s, 2, true), None, "below the block: in place");
+        assert_eq!(plan.target(&s, 3, true), Some(4));
+        assert_eq!(plan.target(&s, 0, false), Some(0));
+        assert_eq!(plan.snap(1, false), Some(1), "snap alone still finds it");
     }
 
     #[test]

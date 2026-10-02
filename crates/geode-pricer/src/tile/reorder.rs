@@ -37,6 +37,11 @@ pub(crate) struct RowDragState {
     pub(crate) plan: Result<DropPlan, &'static str>,
     pub(crate) gap: Option<usize>,
     pointer: Option<Point<Pixels>>,
+    /// Whether the live selection ends when the drag starts: the grip's
+    /// row is outside a `V` selection, or a `v` block is live. Either
+    /// selection spans painted rows, and a row moved in or out of them
+    /// would widen or shift it onto lines the trader never picked.
+    ends_selection: bool,
     /// Whether the edge-scroll tick is running.
     scrolling: bool,
     _scroll: Option<Task<()>>,
@@ -177,6 +182,8 @@ impl PricerTile {
         } else {
             Ok(vec![row])
         };
+        let ends_selection = self.selection.is_some() && !selected;
+        let movers = movers.and_then(|m| self.move_refusal(&m).map_or(Ok(m), Err));
         let ids = match &movers {
             Ok(m) => m.iter().map(|&r| self.sheet.id(r)).collect(),
             Err(_) => Vec::new(),
@@ -193,15 +200,31 @@ impl PricerTile {
             plan,
             gap: None,
             pointer: None,
+            ends_selection,
             scrolling: false,
             _scroll: None,
         });
         self.mirror_drop_gap(cx);
     }
 
+    /// Why `movers` may not move now, as the keys would refuse them: a
+    /// sort ([`MOVE_SORTED`]), or a mover that is read-only (a split or
+    /// partly hidden package) or a leg of a split package ([`SPLIT`]).
+    fn move_refusal(&self, movers: &[usize]) -> Option<&'static str> {
+        if self.sort.is_some() {
+            return Some(MOVE_SORTED);
+        }
+        movers.iter().find_map(|&r| {
+            self.read_only(r)
+                .or_else(|| self.split_leg_refusal(r, true))
+        })
+    }
+
     /// After an install: a live drag's plan re-prepared against the new
     /// index (its gap re-read under the pointer), so a rebuild mid-drag
-    /// never drops onto rows that moved.
+    /// never drops onto rows that moved — and refused, so no line shows
+    /// and a release moves nothing, when the rebuild made the move one the
+    /// keys refuse (a sort turned on, a package split or partly hidden).
     pub(crate) fn refresh_row_drag(&mut self, cx: &mut Context<Self>) {
         let Some(d) = self.row_drag.as_ref() else {
             return;
@@ -210,7 +233,10 @@ impl PricerTile {
             return;
         }
         let ids = d.movers.clone();
-        let plan = self.resolve_movers(&ids).and_then(|m| self.drop_plan(&m));
+        let plan = self.resolve_movers(&ids).and_then(|m| {
+            self.move_refusal(&m)
+                .map_or_else(|| self.drop_plan(&m), Err)
+        });
         if let Some(d) = self.row_drag.as_mut() {
             d.plan = plan;
         }
@@ -232,14 +258,24 @@ impl PricerTile {
             return;
         };
         d.pointer = Some(at);
+        // The first move is the drag's start: a selection the drag would
+        // reshape ends here, not at the press (a grip click keeps it).
+        if std::mem::take(&mut d.ends_selection) && self.selection.is_some() {
+            self.clear_selection();
+            self.footer = Some(ROW_MOVED_SELECTION.into());
+            self.sync_cursor(cx);
+            self.rebuild_chrome();
+            cx.notify();
+        }
         self.update_drop_gap(cx);
         self.auto_scroll(cx);
     }
 
     /// The legal gap under the pointer, from the table's own geometry:
     /// rows are uniform, so the grid row is the pointer's offset into the
-    /// scrolled body over the row height. `None` off the body or outside
-    /// the plan's rows.
+    /// scrolled body over the row height; the empty body below the last
+    /// row is that row's lower half (the gap after it). `None` off the
+    /// body, outside the plan's rows, or at a gap that moves nothing.
     fn gap_at_pointer(&self, cx: &App) -> Option<usize> {
         let d = self.row_drag.as_ref()?;
         let at = d.pointer?;
@@ -253,10 +289,11 @@ impl PricerTile {
             return None;
         }
         let row = rel.floor() as usize;
-        if row >= self.model.len() {
-            return None;
+        let len = self.model.len();
+        if row >= len {
+            return plan.target(&self.sheet, len.checked_sub(1)?, true);
         }
-        plan.snap(row, rel - rel.floor() >= 0.5)
+        plan.target(&self.sheet, row, rel - rel.floor() >= 0.5)
     }
 
     /// The table body's viewport and its scroll offset.
@@ -423,7 +460,8 @@ impl PricerTile {
         cx.stop_active_drag(window)
     }
 
-    /// A release outside the body: no drop arrives, so the drag ends here.
+    /// A release that drops nothing (outside the body, or with no drag
+    /// started: a grip click) ends the drag state here.
     pub(crate) fn row_drag_released_outside(&mut self, cx: &mut Context<Self>) {
         if self.row_drag.take().is_some() {
             self.mirror_drop_gap(cx);

@@ -304,6 +304,10 @@ pub(crate) const PACKAGE_SORTED: &str = "a counted g p packages in sheet order: 
 /// The footer when a sort change ends a live selection.
 pub(crate) const SORT_CLEARED_SELECTION: &str = "selection cleared: the sort reordered its rows";
 
+/// The footer when a grip drag starts that would reshape the live
+/// selection (a row outside a `V` selection, any row under a `v` block).
+pub(crate) const ROW_MOVED_SELECTION: &str = "selection cleared: a row moved";
+
 /// `g p` over a `V` range that is contiguous on screen but not in the
 /// sheet, while a sort paints them together.
 pub(crate) const GROUP_SORTED: &str =
@@ -5866,6 +5870,13 @@ impl gpui::Render for PricerTile {
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| this.row_drag_released_outside(cx)),
             )
+            // Capture, so a grip's own click (which stops propagation)
+            // cannot hide it; a live drag's release is the drop's.
+            .capture_any_mouse_up(cx.listener(|this, _, _, cx| {
+                if !cx.has_active_drag() {
+                    this.row_drag_released_outside(cx);
+                }
+            }))
             .child(match &search {
                 Some(results) => results.clone().into_any_element(),
                 None => DataTable::new(&self.table)
