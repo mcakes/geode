@@ -3856,6 +3856,269 @@ role = "key"
         f.close();
     }
 
+    /// Link groups through the composition root: the roster startup builds
+    /// (`add_bridge_modules` over the bridge's shared factories), the real
+    /// blotter and pricer contents, the real drain, and the chooser's keys.
+    /// A factory registered directly in a test proves only that a module
+    /// can emit; this proves the shell startup assembles reaches each
+    /// module's `emits`, `emission` and `watch_emission`, and that the
+    /// frame handle it gives a tile reads the group that tile follows.
+    ///
+    /// The blotter (tile 1) emits into A and the pricer (tile 2) follows A
+    /// and emits into B. Moving the blotter's cursor moves A's scope, the
+    /// pricer hides the line A no longer selects, and the pricer's own
+    /// cursor line names B's scope.
+    #[gpui::test]
+    fn the_production_blotter_emits_its_cursor_underlying_into_a_group_a_pricer_follows(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use geode_core::link::{Group, Membership};
+        use geode_core::snapshot::TestColumn;
+        use geode_shell::frame::FrameRef;
+        use geode_shell::tiling::WorkspaceIx;
+
+        let (handle, rx) = DataHandle::for_tests();
+        let (mut bridge, tx) = test_bridge_with_pricer(handle.clone(), test_pricer(&handle));
+        let views = geode_core::view::ViewSpec::from_doc(&geode_core::config::merge_docs(
+            "views",
+            &[LayerDoc::builtin("views", FLAT_VIEW).unwrap()],
+        ))
+        .0;
+        bridge.factory = Rc::new(BlotterFactory::new(
+            handle,
+            views,
+            NamedColours::default(),
+            SchemaSpec::default(),
+            DerivedDimensions::default(),
+            FindStyle::default(),
+            Duration::from_secs(900),
+        ));
+
+        // The roster, actions and keymap as `build_shell_services` wires
+        // them.
+        let mut services = test_shell_services();
+        let mut roster = ModuleRoster::new();
+        crate::add_bridge_modules(&mut roster, &bridge);
+        roster.register_actions(&mut services.registry);
+        let (fragments, diags) = roster.keymap_fragments();
+        assert!(diags.is_empty(), "{diags:?}");
+        let layered = geode_shell::keymap::fragments::splice(
+            &[LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap()],
+            &fragments,
+        );
+        let (keymap, diags) = build_keymap(&layered, services.mod_alias, &services.registry);
+        assert!(diags.is_empty(), "{diags:?}");
+        services.keymap = keymap;
+        services.roster = roster;
+
+        // A session with the blotter on the left and the pricer, focused,
+        // on the right; neither is in a group.
+        let mut table = geode_shell::session::to_toml(
+            &Workspaces::new(),
+            &TileRecords::new(),
+            None,
+            &geode_shell::session::PinnedRecords::new(),
+            &geode_shell::palette_usage::PaletteUsage::new(),
+            &geode_shell::session::PageRecords::new(),
+        );
+        let ws1: toml::Table = r#"
+            focused = 2
+            [node]
+            kind = "split"
+            orientation = "horizontal"
+            ratios = [0.5, 0.5]
+            [[node.children]]
+            kind = "leaf"
+            id = 1
+            [[node.children]]
+            kind = "leaf"
+            id = 2
+            [tiles.1]
+            module = "blotter"
+            [tiles.1.state]
+            view = "flat"
+            [tiles.2]
+            module = "pricer"
+            [tiles.2.state]
+            sheet = "book"
+        "#
+        .parse()
+        .unwrap();
+        if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
+            ws_table.insert("1".to_string(), toml::Value::Table(ws1));
+        }
+        let restored = geode_shell::session::from_toml(&table).unwrap();
+        assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+        services.workspaces = restored.workspaces;
+        services.restored_tiles = restored.tiles;
+
+        cx.update(gpui_component::init);
+        cx.update(geode_blotter::init);
+        cx.update(geode_pricer::init);
+        let window = open_shell_window(cx, services);
+        cx.update(|cx| attach(&bridge, window, cx));
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        let draw = |vcx: &mut gpui::VisualTestContext| {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            vcx.run_until_parked();
+        };
+        draw(&mut vcx);
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let (blotter, pricer) = (TileId(1), TileId(2));
+        assert_eq!(
+            shell.read_with(&vcx, |s, _| (
+                s.occupant_kind(blotter),
+                s.occupant_kind(pricer)
+            )),
+            (Some("blotter"), Some("pricer"))
+        );
+        let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+
+        // The blotter's first query, answered through the drain: the root,
+        // then L1 on SPX and L2 on NDX.
+        let tag = loop {
+            match rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the blotter asks for its rows")
+            {
+                geode_data::Request::Query(p) if p.key == QueryKey(blotter.0) => break p.tag,
+                _ => continue,
+            }
+        };
+        let dict = |a: &str, b: &str| TestColumn::Dict(vec![None, Some(a.into()), Some(b.into())]);
+        let snapshot = Arc::new(geode_core::snapshot::Snapshot::for_tests(
+            vec![
+                (shell_blotter_meta("lhu"), dict("L1", "L2")),
+                (shell_blotter_meta("underlying_ref"), dict("SPX", "NDX")),
+                (
+                    shell_blotter_meta("row_depth"),
+                    TestColumn::I32(vec![0, 1, 1]),
+                ),
+                (
+                    shell_blotter_meta("delta01"),
+                    TestColumn::F64(vec![Some(9.0), Some(5.0), Some(4.0)]),
+                ),
+            ],
+            1,
+        ));
+        tx.try_send(DataEvent::Query(geode_core::query::QueryOutcome {
+            key: QueryKey(blotter.0),
+            tag,
+            snapshot: Ok(snapshot),
+            submitted: std::time::Instant::now(),
+        }))
+        .unwrap();
+        draw(&mut vcx);
+
+        // Two lines in the pricer, one per underlying; the cursor rests on
+        // the NDX line, the last typed.
+        vcx.simulate_keystrokes("o");
+        vcx.simulate_input("-5 SPX Z26 5000 C");
+        vcx.simulate_keystrokes("enter");
+        vcx.simulate_input("-5 NDX Z26 20000 C");
+        vcx.simulate_keystrokes("enter escape");
+        draw(&mut vcx);
+        assert!(
+            vcx.debug_bounds("pricer-hidden").is_none(),
+            "fixture: the workspace's empty scope hides no line"
+        );
+
+        // The chooser, by its key, on each tile in turn.
+        let link = |vcx: &mut gpui::VisualTestContext, row: &str| {
+            vcx.simulate_keystrokes("alt-u");
+            draw(vcx);
+            vcx.simulate_input(row);
+            vcx.simulate_keystrokes("enter");
+            draw(vcx);
+        };
+        let membership =
+            |vcx: &gpui::VisualTestContext, tile| frame.read_with(vcx, |f, _| f.membership(tile));
+        let group_underlying = |vcx: &gpui::VisualTestContext, g| {
+            frame.read_with(vcx, |f, _| {
+                f.group_scope(g).sole("underlying_ref").map(str::to_owned)
+            })
+        };
+        link(&mut vcx, "follow a");
+        link(&mut vcx, "emit b");
+        assert_eq!(
+            membership(&vcx, pricer),
+            Membership {
+                follow: Some(Group::A),
+                emit: Some(Group::B),
+            },
+            "the pricer's content answers `emits`, or it is offered no emit row"
+        );
+        assert_eq!(
+            group_underlying(&vcx, Group::B).as_deref(),
+            Some("NDX"),
+            "joining pulls the pricer's emission: its cursor line's underlying"
+        );
+        vcx.simulate_keystrokes("alt-h");
+        draw(&mut vcx);
+        link(&mut vcx, "emit a");
+        assert_eq!(
+            membership(&vcx, blotter),
+            Membership {
+                follow: None,
+                emit: Some(Group::A),
+            },
+            "the blotter's content answers `emits`"
+        );
+        assert_eq!(
+            group_underlying(&vcx, Group::A),
+            None,
+            "the cursor is on the root row, which names no underlying"
+        );
+
+        // Each module's header reads its chips through the frame handle
+        // the shell gave its tile: a handle bound to the workspace alone
+        // shows none.
+        for chip in [
+            "tile-link-1-A-emit",
+            "tile-link-2-A-follow",
+            "tile-link-2-B-emit",
+        ] {
+            assert!(vcx.debug_bounds(chip).is_some(), "{chip} is painted");
+        }
+
+        // The blotter's cursor moves to L1: the shell pulls its emission,
+        // A's scope names SPX, and the pricer, reading A through its own
+        // handle, hides its NDX line. `follower_reads` is a handle bound as
+        // the shell binds the pricer's.
+        let follower_reads = |vcx: &gpui::VisualTestContext| {
+            let handle = FrameRef::for_tile(frame.clone(), WorkspaceIx::FIRST, pricer);
+            vcx.read(|cx| {
+                handle
+                    .read(cx)
+                    .scope()
+                    .sole("underlying_ref")
+                    .map(str::to_owned)
+            })
+        };
+        vcx.simulate_keystrokes("j");
+        draw(&mut vcx);
+        assert_eq!(group_underlying(&vcx, Group::A).as_deref(), Some("SPX"));
+        assert_eq!(follower_reads(&vcx).as_deref(), Some("SPX"));
+        assert!(
+            vcx.debug_bounds("pricer-hidden").is_some(),
+            "the pricer applies the scope of the group it follows"
+        );
+        // And on to L2.
+        vcx.simulate_keystrokes("j");
+        draw(&mut vcx);
+        assert_eq!(group_underlying(&vcx, Group::A).as_deref(), Some("NDX"));
+        assert_eq!(follower_reads(&vcx).as_deref(), Some("NDX"));
+        assert!(
+            frame.read_with(&vcx, |f, _| f.view(WorkspaceIx::FIRST).scope().is_empty()),
+            "the workspace's own scope is untouched"
+        );
+    }
+
     /// [`test_bridge`] with `pricer` as its pricer factory, and the sender
     /// of its mailbox so a test can post data events to the real drain.
     fn test_bridge_with_pricer(
