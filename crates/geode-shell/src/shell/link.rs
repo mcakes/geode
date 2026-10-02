@@ -53,14 +53,16 @@ impl ShellView {
         });
     }
 
-    /// Whether a module occupies `tile`: the only tiles the doors below
-    /// link. A membership lives until its occupant closes or is replaced,
-    /// so one written for an id with no occupant, or for a placeholder,
-    /// would have nothing to end it.
-    fn has_module_occupant(&self, tile: TileId) -> bool {
-        self.occupants
-            .get(&tile)
-            .is_some_and(|o| o.kind != PLACEHOLDER_KIND)
+    /// Why the doors below refuse `tile`, or `None` when a module occupies
+    /// it: the only tiles they link. A membership lives until its occupant
+    /// closes or is replaced, so one written for an id with no occupant, or
+    /// for a placeholder, would have nothing to end it.
+    fn door_refusal(&self, tile: TileId) -> Option<&'static str> {
+        match self.occupants.get(&tile) {
+            None => Some("no occupant"),
+            Some(o) if o.kind == PLACEHOLDER_KIND => Some("a placeholder"),
+            Some(_) => None,
+        }
     }
 
     /// Follow `group`, or the workspace again with `None`. A tile no
@@ -74,7 +76,8 @@ impl ShellView {
         group: Option<Group>,
         cx: &mut Context<Self>,
     ) {
-        if !self.has_module_occupant(tile) {
+        if let Some(why) = self.door_refusal(tile) {
+            tracing::debug!(target: "geode::shell", "follow refused for tile {}: {why}", tile.0);
             return;
         }
         // The tile's own workspace, the one its frame handle was bound to
@@ -114,10 +117,23 @@ impl ShellView {
     /// writes the frame: call this from the shell's own handlers, never
     /// from inside an update of that tile or of the frame.
     pub(super) fn set_emit(&mut self, tile: TileId, group: Option<Group>, cx: &mut Context<Self>) {
-        if !self.has_module_occupant(tile) {
+        // Kept as defence. No test can tell from the frame that it is here:
+        // with it gone, the `emits()` filter below still turns every such
+        // request into an emit of none, which changes nothing for a tile in
+        // no group. It states the rule once for both doors, and only the
+        // reason it logs is observable.
+        if let Some(why) = self.door_refusal(tile) {
+            tracing::debug!(target: "geode::shell", "emit refused for tile {}: {why}", tile.0);
             return;
         }
         let can = self.occupants.get(&tile).is_some_and(|o| o.content.emits());
+        if group.is_some() && !can {
+            tracing::debug!(
+                target: "geode::shell",
+                "emit refused for tile {}: its module does not emit",
+                tile.0
+            );
+        }
         let group = group.filter(|_| can);
         let changed = self.frame.update(cx, |f, cx| {
             let changed = f.emit(tile, group);

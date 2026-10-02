@@ -51,6 +51,20 @@ pub fn rank(texts: &[String], query: &str) -> Vec<Ranked> {
     scored.into_iter().map(|(_, ranked)| ranked).collect()
 }
 
+/// Whether rows `a` and `b` rank level under `query`: [`rank`] would order
+/// them by natural position alone. A blank query ranks every row level, as
+/// `rank` keeps every row under one; otherwise both must match with one
+/// score, and a row the query drops is level with nothing.
+pub fn level(query: &str, a: &str, b: &str) -> bool {
+    if query.trim().is_empty() {
+        return true;
+    }
+    match (fuzzy_match(query, a), fuzzy_match(query, b)) {
+        (Some((a, _)), Some((b, _))) => a == b,
+        _ => false,
+    }
+}
+
 /// Recognize filtered-list navigation while Input owns printable text:
 /// Up/Down and Control-P/N move ±1, Control-U/D move ±5, and Control-B/F or
 /// PageUp/PageDown move ±10. Exact modifier sets are required. Callers apply
@@ -141,6 +155,22 @@ mod tests {
             vec![0, 1],
             "identical match shapes must not reorder"
         );
+    }
+
+    /// `level` answers what `rank`'s stable sort leaves to natural order:
+    /// equal scores, and every row under a blank query. A row the query
+    /// drops is not ranked at all, so it is level with nothing, another
+    /// dropped row included.
+    #[test]
+    fn rows_are_level_on_an_equal_score_or_a_blank_query() {
+        let (up, docks, left) = ("Focus up Workspace", "Focus up Docks", "Focus left");
+        assert!(level("focus up", up, docks), "identical match shapes");
+        assert!(!level("u", up, left), "both match, one at a word start");
+        assert!(!level("up", up, left), "a dropped row ties with nothing");
+        assert!(!level("zz", up, left), "nor do two dropped rows");
+        for blank in ["", " ", "   ", "\t"] {
+            assert!(level(blank, up, left), "{blank:?} ranks every row level");
+        }
     }
 
     #[test]

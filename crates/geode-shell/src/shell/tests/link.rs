@@ -241,6 +241,63 @@ fn a_group_scope_change_under_an_open_lane_barrier_keeps_the_other_tiles_awaited
     assert!(!frame.read_with(&vcx, |f, _| f.barrier_wants(QueryKey(1), enrolled)));
 }
 
+/// A lane change is a flip for every tile on screen, and whatever an open
+/// barrier awaited before it answered an older frame. The barrier is
+/// replaced, not joined: keys carried over from the workspace shown before
+/// belong to tiles that are hidden and submit nothing, so a flip that kept
+/// them would wait out its deadline for answers that never come.
+#[gpui::test]
+fn a_lane_change_replaces_the_barrier_and_drops_the_keys_it_awaited(cx: &mut gpui::TestAppContext) {
+    let (_window, mut vcx, shell, frame) = two_tiles(cx);
+    super::occupants::dispatch_and_draw(&shell, &mut vcx, "workspace::switch_2");
+    add_tile(&mut vcx);
+    let third = shell.read_with(&vcx, |s, _| {
+        s.services.workspaces.active().tree().tiles()[0]
+    });
+    super::occupants::dispatch_and_draw(&shell, &mut vcx, "workspace::switch_1");
+    settle(&frame, &mut vcx);
+
+    frame.update(&mut vcx, |f, cx| {
+        assert!(f.shared_mut().set_as_of(AsOf::At(chrono::Utc::now())));
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    let first = frame.read_with(&vcx, |f, _| f.view(WS1).versions());
+    for key in [QueryKey(1), QueryKey(2)] {
+        assert!(
+            frame.read_with(&vcx, |f, _| f.barrier_wants(key, first)),
+            "fixture: the first flip awaits workspace 1's tiles"
+        );
+    }
+
+    super::occupants::dispatch_and_draw(&shell, &mut vcx, "workspace::switch_2");
+    for key in [QueryKey(1), QueryKey(2)] {
+        assert!(
+            frame.read_with(&vcx, |f, _| f.barrier_wants(key, first)),
+            "fixture: the switch alone leaves the barrier as it was"
+        );
+    }
+    frame.update(&mut vcx, |f, cx| {
+        assert!(f.shared_mut().set_text(Some("ndx".into())));
+        cx.notify();
+    });
+    vcx.run_until_parked();
+
+    let second = frame.read_with(&vcx, |f, _| f.shared().versions());
+    assert!(
+        frame.read_with(&vcx, |f, _| f.barrier_wants(QueryKey(third.0), second)),
+        "the tile now on screen is awaited"
+    );
+    for key in [QueryKey(1), QueryKey(2)] {
+        for identity in [first, second] {
+            assert!(
+                !frame.read_with(&vcx, |f, _| f.barrier_wants(key, identity)),
+                "{key:?} was awaited by the flip this one replaced"
+            );
+        }
+    }
+}
+
 /// Group generations are frame-wide, not per workspace, so a workspace
 /// switch has nothing of theirs to re-seed. Re-seeded there, a group change
 /// whose notification is still pending when the switch happens would be
@@ -894,6 +951,11 @@ fn a_tile_that_cannot_emit_is_never_set_to_emit(cx: &mut gpui::TestAppContext) {
 /// Filling a placeholder replaces its occupant under the same tile id. The
 /// new occupant starts in no group: a membership left on the id would bind
 /// a tile the trader never linked.
+///
+/// A defence, not a reachable case: the doors and the session restore both
+/// refuse a placeholder, so the membership this test seeds through the
+/// frame has no production route onto one. The unlink on fill is kept so
+/// that a route added later cannot leave one behind.
 #[gpui::test]
 fn filling_a_placeholder_drops_the_membership_its_tile_had(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, test_services());
@@ -1341,6 +1403,76 @@ fn the_doors_refuse_a_tile_with_no_occupant(cx: &mut gpui::TestAppContext) {
     assert_eq!(notified.get(), 0);
 }
 
+/// A refused door changes nothing a trader can see, so the log is where it
+/// says so: one debug record per refusal, naming the tile and the reason.
+/// A caller that reaches a door for a tile it should not have is otherwise
+/// indistinguishable from one that never called.
+#[gpui::test]
+fn a_refused_door_logs_the_tile_and_the_reason(cx: &mut gpui::TestAppContext) {
+    use geode_core::log::{Ring, RingLayer};
+    use tracing_subscriber::layer::SubscriberExt;
+
+    let (_window, mut vcx, shell, _frame) = two_tiles(cx);
+    shell.update(&mut vcx, |s, cx| {
+        s.services
+            .workspaces
+            .split_active(crate::tiling::Orientation::Horizontal);
+        cx.notify();
+    });
+    draw(&mut vcx);
+    vcx.run_until_parked();
+    let placeholder = shell.read_with(&vcx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.occupant_kind(placeholder)),
+        Some(crate::module::placeholder::PLACEHOLDER_KIND)
+    );
+
+    let ring = Arc::new(Ring::new(64));
+    let sub = tracing_subscriber::registry().with(RingLayer::new(ring.clone()));
+    tracing::subscriber::with_default(sub, || {
+        set_follow(&shell, &mut vcx, TileId(99), Some(Group::A));
+        set_emit(&shell, &mut vcx, TileId(99), Some(Group::A));
+        set_follow(&shell, &mut vcx, placeholder, Some(Group::A));
+        set_emit(&shell, &mut vcx, placeholder, Some(Group::A));
+        // A recorder that does not emit: occupied, so the door is open,
+        // and still not set emitting.
+        set_emit(&shell, &mut vcx, TileId(1), Some(Group::A));
+        // Not refusals, and so not logged: a follow that lands, and an
+        // emit of none on a tile that cannot emit.
+        set_follow(&shell, &mut vcx, TileId(1), Some(Group::A));
+        set_emit(&shell, &mut vcx, TileId(1), None);
+    });
+
+    let mut records = Vec::new();
+    ring.drain_since(0, &mut records);
+    let refusals: Vec<&str> = records
+        .iter()
+        .filter(|r| r.target == "geode::shell" && r.level == tracing::Level::DEBUG)
+        .map(|r| r.message.as_str())
+        .filter(|m| m.contains("refused"))
+        .collect();
+    let said = |door: &str, tile: TileId, why: &str| {
+        refusals
+            .iter()
+            .filter(|m| {
+                m.contains(door) && m.contains(&format!("tile {}", tile.0)) && m.contains(why)
+            })
+            .count()
+    };
+    assert_eq!(said("follow", TileId(99), "no occupant"), 1, "{refusals:?}");
+    assert_eq!(said("emit", TileId(99), "no occupant"), 1, "{refusals:?}");
+    assert_eq!(
+        said("follow", placeholder, "placeholder"),
+        1,
+        "{refusals:?}"
+    );
+    assert_eq!(said("emit", placeholder, "placeholder"), 1, "{refusals:?}");
+    assert_eq!(said("emit", TileId(1), "does not emit"), 1, "{refusals:?}");
+    assert_eq!(refusals.len(), 5, "{refusals:?}");
+}
+
 /// The other half of `a_group_scope_change_writes_no_session_file`: who
 /// follows and emits is session state, and a change to it is written.
 #[gpui::test]
@@ -1499,6 +1631,43 @@ fn mod_u_opens_the_chooser_for_the_focused_tile_and_enter_follows(cx: &mut gpui:
         Some(Group::B)
     );
     assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
+}
+
+/// Enter commits the lit row, so what a query leaves lit decides whether a
+/// half-typed word changes the tile. On a tile following C, a prefix every
+/// follow row shares and a query of spaces both leave the row for C lit:
+/// Enter re-commits C. Lit on the first row instead, each would unfollow.
+#[gpui::test]
+fn a_shared_prefix_or_a_blank_query_then_enter_keeps_the_followed_group(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_window, mut vcx, shell, tile) = one_tile_in(cx, test_services());
+    let frame = frame_of(&shell, &vcx);
+    set_follow(&shell, &mut vcx, tile, Some(Group::C));
+
+    for typed in ["f", "follow", " ", "   "] {
+        press_mod_u(&mut vcx);
+        assert_eq!(chooser_tile(&shell, &vcx), Some(tile), "{typed:?}");
+        vcx.simulate_input(typed);
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        assert!(shell.read_with(&vcx, |s, _| !s.modal_open()), "{typed:?}");
+        assert_eq!(
+            frame.read_with(&vcx, |f, _| f.membership(tile).follow),
+            Some(Group::C),
+            "{typed:?}"
+        );
+    }
+
+    // A query that ranks one row first still moves the tile.
+    press_mod_u(&mut vcx);
+    vcx.simulate_input("follow a");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.membership(tile).follow),
+        Some(Group::A)
+    );
 }
 
 /// A tile that cannot emit (a viewer) is offered the follow rows alone.

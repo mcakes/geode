@@ -34,8 +34,9 @@ use crate::tiling::TileId;
 /// together. `every_bundled_theme_keeps_the_group_colors_readable_and_distinct`
 /// holds the four a minimum distance apart, as painted, on every bundled
 /// theme; a hue changed here without that sweep can merge two groups on a
-/// theme nobody looked at. These four are the nearest to an even spread
-/// that the sweep passes: a few degrees either way fails it.
+/// theme nobody looked at. These four pass the sweep at its separation
+/// floor (`GROUP_SEPARATION`). A group's mark always carries its letter:
+/// the color is a second cue beside it, not the identity.
 const HUES: [f32; 4] = [215.0, 25.0, 285.0, 130.0];
 
 /// A group's color under `theme`: its hue between the theme's anchors,
@@ -447,9 +448,11 @@ mod tests {
     /// and the best tuple on a 5-degree grid reaches about 0.054.
     const GROUP_SEPARATION: f32 = 0.05;
 
-    /// The bundled themes today. A theme file that fails to parse is
-    /// absent from the service without an error, so a sweep that only
-    /// counted "many" would pass with one missing.
+    /// How many bundled themes the sweep must visit. A theme file that
+    /// fails to parse yields a load warning, which the sweep asserts
+    /// empty. The count covers the other way to sweep too few: a file
+    /// left out of the bundle warns of nothing, and the loop passes over
+    /// themes that are not there.
     const BUNDLED_THEMES: usize = 44;
 
     /// The sweep measures the chip as painted (`chip::colored` over the

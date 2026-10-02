@@ -5,6 +5,12 @@
 //! ranked row when that text no longer matches. Duplicate option texts resolve to
 //! the first declared occurrence. The cap limits the painted window, not the
 //! ranked list; callers must supply a positive cap for a visible selection.
+//!
+//! One exception: [`ChoiceList::set_query_placing`] drops the row lit before and
+//! lights the top-ranked row, or a row the caller names when nothing outranks it.
+//! It serves a list whose opening row is a default the user did not choose (the
+//! link chooser), where a row kept by text would stay lit under a query typed
+//! towards another.
 
 use crate::keymap::{Keystroke, Modifiers};
 use crate::listfilter::{self, Ranked};
@@ -112,19 +118,35 @@ impl ChoiceList {
         true
     }
 
-    /// Rerank a changed query and put the highlight on `value`, or on the
-    /// top-ranked row when `value` is `None` or the query filters it out.
-    /// Unlike [`Self::set_query`] the row lit before is not kept: for a
-    /// list whose opening row is a default the user did not choose, a row
-    /// that merely survives the query must not stay lit over the one the
-    /// query ranks first. An unchanged query returns false and moves
-    /// nothing, so a highlight moved since the last change is kept.
+    /// Rerank a changed query and put the highlight on the top-ranked row,
+    /// or on `value` when nothing outranks it: it ranks level with the top
+    /// row ([`listfilter::level`]), which under a blank query every row
+    /// does. Unlike [`Self::set_query`] the row lit before is not kept: for
+    /// a list whose opening row is a default the user did not choose, a
+    /// row that merely survives the query must not stay lit over the one
+    /// the query ranks first. `value` is the row an untouched list would
+    /// commit, so a query that does not tell it from the top row leaves it
+    /// lit rather than moving to the first of the tied rows. An unchanged
+    /// query returns false and moves nothing, so a highlight moved since
+    /// the last change is kept.
     pub fn set_query_placing(&mut self, query: &str, value: Option<&str>) -> bool {
         if query == self.query {
             return false;
         }
         self.query = query.to_string();
-        self.place(value);
+        self.place(None);
+        if let Some(value) = value
+            && self
+                .highlighted_text()
+                .is_some_and(|top| listfilter::level(&self.query, top, value))
+            && let Some(at) = self
+                .ranked
+                .iter()
+                .position(|r| self.options[r.row] == value)
+        {
+            self.highlighted = at;
+            self.follow();
+        }
         true
     }
 
@@ -336,6 +358,41 @@ mod tests {
             list.highlighted_text(),
             Some("Bamboo"),
             "a named row the query filters out falls back to the top rank"
+        );
+    }
+
+    /// The named row is the one an untouched list commits. A query that
+    /// ranks it level with the top row has not chosen between them, so it
+    /// stays lit; one that ranks another row above it has.
+    #[test]
+    fn set_query_placing_keeps_a_named_row_that_ties_for_the_top_rank() {
+        let rows = ["set alpha", "set beta", "set gamma"];
+        let mut list = ChoiceList::new(opts(&rows), 12);
+        assert!(list.set_query_placing("set", Some("set gamma")));
+        assert_eq!(
+            list.ranked().iter().map(|r| r.row).collect::<Vec<_>>(),
+            [0, 1, 2],
+            "fixture: every row scores the same and keeps its natural order"
+        );
+        assert_eq!(list.highlighted_text(), Some("set gamma"), "a tie");
+        assert!(list.set_query_placing("set b", Some("set gamma")));
+        assert_eq!(
+            list.highlighted_text(),
+            Some("set beta"),
+            "a row ranked above the named one takes the highlight"
+        );
+        assert!(list.set_query_placing("  ", Some("set gamma")));
+        assert_eq!(list.highlighted_text(), Some("set gamma"), "a blank query");
+
+        // The named row past the painted window is brought into view.
+        let many: Vec<String> = (0..20).map(|i| format!("row {i:02}")).collect();
+        let mut list = ChoiceList::new(many, 4);
+        assert!(list.set_query_placing("row", Some("row 15")));
+        assert_eq!(list.highlighted_text(), Some("row 15"));
+        assert!(
+            list.painted()
+                .iter()
+                .any(|r| list.options()[r.row] == "row 15")
         );
     }
 

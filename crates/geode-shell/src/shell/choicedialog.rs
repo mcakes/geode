@@ -407,18 +407,20 @@ impl ChoiceDialogState {
     /// change, per keystroke and at commit. `false` when the text is
     /// unchanged, which moves nothing.
     ///
-    /// The link chooser lights the top-ranked row on a non-empty query and
-    /// its opening row on an empty one. Its opening row is the tile's
-    /// current follow, `follow \u{00b7} workspace` for every tile that was
-    /// never linked, and that text survives `a` and `c`: kept lit by text
-    /// it would sit over `follow \u{00b7} A` and Enter would follow
-    /// nothing. Every other target keeps the lit row by text.
+    /// The link chooser lights the row the query ranks first, or its
+    /// opening row when nothing outranks that: under a blank query, and
+    /// under one every follow row shares (`f`, `follow`), which ranks them
+    /// level. Its opening row is the tile's current follow, the
+    /// follow-workspace row for every tile that was never linked, and that
+    /// row's text survives `a` and `c`: kept lit by text it would sit over
+    /// the follow-A row and Enter would follow nothing. Lit on the first of
+    /// the level rows instead, Enter after a shared prefix would unfollow.
+    /// Every other target keeps the lit row by text.
     pub fn set_query(&mut self, query: &str) -> bool {
         match &self.target {
-            Target::LinkGroup { current, .. } => {
-                let opening = query.is_empty().then(|| link_opening_row(*current));
-                self.list.set_query_placing(query, opening)
-            }
+            Target::LinkGroup { current, .. } => self
+                .list
+                .set_query_placing(query, Some(link_opening_row(*current))),
             Target::Grouping { .. }
             | Target::TileKind { .. }
             | Target::TileKindWith { .. }
@@ -1584,27 +1586,81 @@ mod tests {
         }
     }
 
+    /// A query every follow row shares ranks them level and so chooses
+    /// none of them. The row for what the tile follows now stays lit: on
+    /// the first of the tied rows, `follow workspace`, Enter after a shared
+    /// prefix would unfollow a tile the trader meant to leave alone.
+    #[test]
+    fn a_tie_for_the_top_rank_keeps_the_current_follow_row() {
+        let follow = |g| link_pick(LinkChange::Follow(g));
+        for query in ["f", "follow", "fol", "o"] {
+            let mut state = link(true, Some(Group::C), Some(Group::A));
+            assert!(state.set_query(query));
+            assert_eq!(
+                state.list.ranked()[..5]
+                    .iter()
+                    .map(|r| r.row)
+                    .collect::<Vec<_>>(),
+                [0, 1, 2, 3, 4],
+                "fixture: {query} ranks the follow rows level, in declared order"
+            );
+            assert_eq!(state.highlighted_pick(), follow(Some(Group::C)), "{query}");
+
+            let mut unlinked = link(true, None, None);
+            assert!(unlinked.set_query(query));
+            assert_eq!(unlinked.highlighted_pick(), follow(None), "{query}");
+        }
+        // A query that ranks one row above the current one has chosen.
+        let mut state = link(true, Some(Group::C), None);
+        assert!(state.set_query("follow a"));
+        assert_eq!(state.highlighted_pick(), follow(Some(Group::A)));
+        assert!(state.set_query("emit"));
+        assert_eq!(
+            state.highlighted_pick(),
+            link_pick(LinkChange::Emit(None)),
+            "the current follow row is not among the rows `emit` ranks"
+        );
+    }
+
+    /// A query of spaces ranks every row, as an empty one does, so it lights
+    /// what an empty one does: on a tile following C, a space then Enter
+    /// leaves it following C.
+    #[test]
+    fn a_blank_query_keeps_the_current_follow_row() {
+        for query in [" ", "   ", "\t"] {
+            let mut state = link(true, Some(Group::C), None);
+            assert!(state.set_query(query));
+            assert_eq!(state.list.ranked().len(), 10, "{query:?} drops no row");
+            assert_eq!(
+                state.highlighted_pick(),
+                link_pick(LinkChange::Follow(Some(Group::C))),
+                "{query:?}"
+            );
+        }
+    }
+
     /// A highlight the trader moved after typing is theirs: re-reading the
-    /// same text at commit keeps it. The next query change lights the top
-    /// rank again, and an emptied query returns to the opening row.
+    /// same text at commit keeps it. The next query change places it again,
+    /// and an emptied query returns to the opening row.
     #[test]
     fn a_moved_highlight_is_kept_until_the_query_changes() {
         let mut state = link(false, Some(Group::C), None);
         assert!(state.set_query("follow"));
         assert_eq!(
             state.highlighted_pick(),
-            link_pick(LinkChange::Follow(None))
+            link_pick(LinkChange::Follow(Some(Group::C))),
+            "a tie keeps the current row"
         );
         state.list.nav(crate::vimnav::NavCommand::Move(1));
-        let moved = link_pick(LinkChange::Follow(Some(Group::A)));
+        let moved = link_pick(LinkChange::Follow(Some(Group::D)));
         assert_eq!(state.highlighted_pick(), moved);
         assert!(!state.set_query("follow"), "the commit's re-read");
         assert_eq!(state.highlighted_pick(), moved);
 
-        assert!(state.set_query("follow d"));
+        assert!(state.set_query("follow a"));
         assert_eq!(
             state.highlighted_pick(),
-            link_pick(LinkChange::Follow(Some(Group::D)))
+            link_pick(LinkChange::Follow(Some(Group::A)))
         );
         assert!(state.set_query(""));
         assert_eq!(
