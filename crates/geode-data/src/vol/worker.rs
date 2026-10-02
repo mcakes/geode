@@ -122,6 +122,8 @@ fn resolve<'a>(
         return Ok(Cow::Borrowed(job));
     };
     let from = format!("job {index} takes its strikes from job {of}");
+    // `of < index` guards a caller whose `earlier` holds more than the jobs
+    // before `index`: a grid must never name a job that runs after it.
     let strikes = match earlier.get(of).filter(|_| of < index) {
         None => return Err(format!("{from}, which does not run before it")),
         Some(Err(_)) => return Err(format!("{from}, which failed")),
