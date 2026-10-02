@@ -368,7 +368,8 @@ pub struct PaletteRow {
 }
 
 /// What the virtualized list closure owns: shared slices, so a paint clones
-/// four reference counts and formats nothing.
+/// four reference counts and formats no titles or highlights. Each row's
+/// `kbd` binding chips still format per paint (`shell::kbd::binding`).
 #[derive(Clone)]
 pub struct PaletteView {
     pub items: Rc<[PaletteItem]>,
@@ -834,7 +835,8 @@ pub fn render(
                         click(i, window, cx);
                     });
                     // Prepared text and highlight ranges (`PaletteState::view`):
-                    // the paint clones shared strings and formats nothing.
+                    // the paint clones shared strings and formats no titles or
+                    // highlights (the binding chips below still format).
                     let label = h_flex()
                         .gap_2()
                         .items_center()

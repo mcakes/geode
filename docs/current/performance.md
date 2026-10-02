@@ -191,8 +191,9 @@ measure already reads. Re-measure on an idle machine before quoting them.
   See the [measurement log](../perf.md).
 - The palette prepares each item's title and category once per open and its
   highlight ranges once per query, beside the cached ranking; the list is a
-  `uniform_list`, so a paint touches only the rows in view and formats
-  nothing. Selection scrolling keeps the selected row in view
+  `uniform_list`, so a paint touches only the rows in view and formats no
+  titles or highlights; each row's `kbd` binding chips still format per
+  paint. Selection scrolling keeps the selected row in view
   (`ScrollStrategy::Nearest`). Ranking and frecency are unchanged: usage
   bonuses are fixed for the open palette, and a dispatch closes it first.
 - Status-bar text is prepared where its input changes (the matcher's count,
