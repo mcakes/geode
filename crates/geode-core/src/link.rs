@@ -8,6 +8,25 @@ use std::sync::Arc;
 use crate::document::DocumentRows;
 use crate::scope::Scope;
 
+/// The column whose single value a link group's scope is named by: the
+/// underlying an emitter's cursor rests on. Emitters build their scope with
+/// [`underlying_scope`] and readers take the name back with
+/// [`underlying_of`], so the two cannot disagree on the column.
+pub const UNDERLYING: &str = "underlying_ref";
+
+/// The scope an emitter posts for a cursor on `underlying`: that one value
+/// of [`UNDERLYING`] and nothing else.
+pub fn underlying_scope(underlying: &str) -> Scope {
+    Scope::one(UNDERLYING, underlying)
+}
+
+/// The one underlying `scope` names: its sole value for [`UNDERLYING`].
+/// `None` when the scope selects no underlying or several, or is
+/// impossible.
+pub fn underlying_of(scope: &Scope) -> Option<&str> {
+    scope.sole(UNDERLYING)
+}
+
 /// One of the four fixed link groups.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Group {
@@ -109,6 +128,32 @@ mod tests {
         assert_eq!(Group::parse(""), None);
         assert_eq!(Group::parse("ab"), None, "a letter, not a prefix");
         assert_eq!(Group::parse(" a"), None, "and not trimmed");
+    }
+
+    /// What an emitter posts for an underlying reads back as that
+    /// underlying, on the one column both sides name.
+    #[test]
+    fn an_underlying_scope_names_its_underlying_and_nothing_else_does() {
+        use crate::scope::DimensionSelection;
+        let scope = underlying_scope("SPX.Z");
+        assert_eq!(scope, Scope::one("underlying_ref", "SPX.Z"));
+        assert_eq!(UNDERLYING, "underlying_ref");
+        assert_eq!(underlying_of(&scope), Some("SPX.Z"));
+        assert_eq!(underlying_of(&Scope::default()), None);
+        assert_eq!(underlying_of(&Scope::one("book", "SPX.Z")), None);
+        let several = Scope {
+            dimensions: vec![DimensionSelection {
+                column: UNDERLYING.into(),
+                values: vec!["SPX.Z".into(), "NDX".into()],
+            }],
+            ..Scope::default()
+        };
+        assert_eq!(underlying_of(&several), None, "several name no single one");
+        let impossible = Scope {
+            impossible: true,
+            ..underlying_scope("SPX.Z")
+        };
+        assert_eq!(underlying_of(&impossible), None);
     }
 
     #[test]

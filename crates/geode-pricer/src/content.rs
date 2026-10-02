@@ -456,7 +456,7 @@ impl TileContent for PricerContent {
                 .tile
                 .read(cx)
                 .cursor_underlying()
-                .map(|u| geode_core::scope::Scope::one("underlying_ref", &u)),
+                .map(|u| geode_core::link::underlying_scope(&u)),
             board: Vec::new(),
         }
     }

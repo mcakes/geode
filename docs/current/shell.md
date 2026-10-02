@@ -685,9 +685,6 @@ equals the last one it extracted: an emitting tile's cursor does not rewrite
 - No tile reads a board. Emitting panels post their drafts and the watch
   interface is exercised only by tests; nothing displays a posted draft.
 - A market-data panel does not take its underlying from a group it follows.
-- The chooser's emit rows are ranked like any others: on an emitting tile a
-  query every emit row shares (`emit`) lights `emit · none`, and Enter there
-  stops the tile emitting.
 
 ## Module hosting and delivery
 

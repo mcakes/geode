@@ -38,10 +38,9 @@ use crate::popup::{ChoicePopup, PickerRows, PickerState, Popup, render_picker};
 use geode_core::colour::{Rgb, contrast_ratio, readable_on};
 use geode_core::document::{DocumentRows, Value, split_key};
 use geode_core::grid::selection::{Resolved, SelectKind, Selection};
-use geode_core::link::{BoardEntry, Emission};
+use geode_core::link::{BoardEntry, Emission, underlying_scope};
 use geode_core::query::{DocumentParams, QueryKey, QueryOutcome};
 use geode_core::schema::ColumnType;
-use geode_core::scope::Scope;
 use geode_core::snapshot::Snapshot;
 use geode_data::DataHandle;
 use geode_shell::actions::ActionId;
@@ -1802,7 +1801,7 @@ impl MarketDataTile {
             // the panel's `accepts()` and launch path assume the same. A
             // panel over a dataset keyed first on another column would post
             // that key's value under the wrong column.
-            scope: key.first().map(|u| Scope::one("underlying_ref", u)),
+            scope: key.first().map(|u| underlying_scope(u)),
             board,
         }
     }
@@ -5143,6 +5142,7 @@ mod tests {
     use geode_core::query::{
         CatalogSnapshot, DatasetCatalog, GenerationInfo, PartitionCatalog, QueryKey, QueryOutcome,
     };
+    use geode_core::scope::Scope;
     use geode_core::scopes::SavedScopes;
     use geode_core::snapshot::{ColumnMeta, Freshness, Provenance, Snapshot, TestColumn};
     use geode_core::view::ColumnFormat;

@@ -1862,6 +1862,44 @@ fn a_shared_prefix_or_a_blank_query_then_enter_keeps_the_followed_group(
     );
 }
 
+/// The emit side of the same rule, by its keys: on a tile emitting into B,
+/// a word every emit row shares then Enter leaves it emitting into B. Lit
+/// on the first emit row instead, `emit` then Enter would stop it.
+#[gpui::test]
+fn a_shared_emit_prefix_then_enter_keeps_the_group_the_tile_emits_into(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (services, _emitter) = emitting_services(Emission::default());
+    let (_window, mut vcx, shell, tile) = one_tile_in(cx, services);
+    let frame = frame_of(&shell, &vcx);
+    set_emit(&shell, &mut vcx, tile, Some(Group::B));
+    let emitting =
+        |vcx: &gpui::VisualTestContext| frame.read_with(vcx, |f, _| f.membership(tile).emit);
+    let pick = |vcx: &mut gpui::VisualTestContext, typed: &str| {
+        press_mod_u(vcx);
+        assert_eq!(chooser_tile(&shell, vcx), Some(tile), "{typed:?}");
+        vcx.simulate_input(typed);
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        assert!(shell.read_with(vcx, |s, _| !s.modal_open()), "{typed:?}");
+    };
+
+    for typed in ["emit", "e"] {
+        pick(&mut vcx, typed);
+        assert_eq!(emitting(&vcx), Some(Group::B), "{typed:?}");
+        assert_eq!(shell.read_with(&vcx, |s, _| s.emit_subs.len()), 1);
+    }
+    // A query that ranks one row first still moves the tile.
+    pick(&mut vcx, "emit a");
+    assert_eq!(emitting(&vcx), Some(Group::A));
+    pick(&mut vcx, "emit none");
+    assert_eq!(emitting(&vcx), None, "naming the row stops it");
+    assert!(shell.read_with(&vcx, |s, _| s.emit_subs.is_empty()));
+    set_emit(&shell, &mut vcx, tile, Some(Group::B));
+    pick(&mut vcx, "none");
+    assert_eq!(emitting(&vcx), None);
+}
+
 /// A tile that cannot emit (a viewer) is offered the follow rows alone.
 #[gpui::test]
 fn a_viewer_like_tile_sees_no_emit_rows(cx: &mut gpui::TestAppContext) {

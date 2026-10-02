@@ -431,22 +431,28 @@ impl ChoiceDialogState {
     /// change, per keystroke and at commit. `false` when the text is
     /// unchanged, which moves nothing.
     ///
-    /// The link chooser lights the row the query ranks first, or its
-    /// opening row when nothing outranks that: under a blank query, and
-    /// under one every follow row shares (`f`, `follow`), which ranks them
-    /// level. Its opening row is the tile's current follow, the
-    /// follow-workspace row for every tile that was never linked, and that
-    /// row's text survives `a` and `c`: kept lit by text it would sit over
-    /// the follow-A row and Enter would follow nothing. Lit on the first of
-    /// the level rows instead, Enter after a shared prefix would unfollow.
-    /// Every other target keeps the lit row by text.
+    /// The link chooser lights the row the query ranks first, or the
+    /// tile's current row in that row's section (follow or emit) when
+    /// nothing outranks it: under a blank query, and under one every row
+    /// of a section shares (`f`, `follow`, `e`, `emit`), which ranks them
+    /// level. A tile's current follow row is follow-workspace until it is
+    /// linked, and that row's text survives `a` and `c`: kept lit by text
+    /// it would sit over the follow-A row and Enter would follow nothing.
+    /// Lit on the first of the level rows instead, Enter after a shared
+    /// prefix would unfollow, or stop the tile emitting. Every other
+    /// target keeps the lit row by text.
     pub fn set_query(&mut self, query: &str) -> bool {
         match &self.target {
-            Target::LinkGroup {
-                follows, current, ..
-            } => self
-                .list
-                .set_query_placing(query, Some(link_opening_row(*follows, *current))),
+            Target::LinkGroup { current, .. } => {
+                let current = *current;
+                self.list.set_query_placing_with(query, |top| {
+                    Some(if EMIT_ROWS.contains(&top) {
+                        current_emit_row(current)
+                    } else {
+                        current_follow_row(current)
+                    })
+                })
+            }
             Target::Grouping { .. }
             | Target::TileKind { .. }
             | Target::TileKindWith { .. }
@@ -1692,6 +1698,59 @@ mod tests {
             link_pick(LinkChange::Emit(None)),
             "the current follow row is not among the rows `emit` ranks"
         );
+    }
+
+    /// The emit rows tie as the follow rows do. A query every emit row
+    /// shares chooses none of them, so the row for what the tile emits
+    /// into now stays lit: on `emit \u{00b7} none`, the first of them, Enter
+    /// would stop a tile the trader meant to leave emitting.
+    #[test]
+    fn a_tie_for_the_top_rank_keeps_the_current_emit_row() {
+        let emit = |g| link_pick(LinkChange::Emit(g));
+        for query in ["e", "emit", "em", "mi"] {
+            let mut state = link(true, Some(Group::C), Some(Group::B));
+            assert!(state.set_query(query));
+            let top = state.list.ranked()[0].row;
+            assert_eq!(
+                state.list.options()[top],
+                EMIT[0],
+                "fixture: {query} ranks the emit rows first, in declared order"
+            );
+            assert_eq!(state.highlighted_pick(), emit(Some(Group::B)), "{query}");
+
+            let mut not_emitting = link(true, Some(Group::C), None);
+            assert!(not_emitting.set_query(query));
+            assert_eq!(not_emitting.highlighted_pick(), emit(None), "{query}");
+        }
+        // A query that ranks one row above the current one has chosen.
+        for (query, expected) in [
+            ("emit a", emit(Some(Group::A))),
+            ("emit none", emit(None)),
+            ("none", emit(None)),
+        ] {
+            let mut state = link(true, Some(Group::C), Some(Group::B));
+            assert!(state.set_query(query));
+            assert_eq!(state.highlighted_pick(), expected, "{query}");
+        }
+        // The follow side is untouched by the emit side's current row, and
+        // a tile offered only emit rows keeps its own on a blank query.
+        let mut state = link(true, Some(Group::C), Some(Group::B));
+        assert!(state.set_query("follow"));
+        assert_eq!(
+            state.highlighted_pick(),
+            link_pick(LinkChange::Follow(Some(Group::C)))
+        );
+        let mut emit_only = ChoiceDialogState::link_group(
+            TILE,
+            false,
+            true,
+            Membership {
+                follow: None,
+                emit: Some(Group::B),
+            },
+        );
+        assert!(emit_only.set_query("emit"));
+        assert_eq!(emit_only.highlighted_pick(), emit(Some(Group::B)));
     }
 
     /// A query of spaces ranks every row, as an empty one does, so it lights

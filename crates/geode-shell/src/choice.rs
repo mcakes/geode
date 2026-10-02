@@ -130,15 +130,29 @@ impl ChoiceList {
     /// query returns false and moves nothing, so a highlight moved since
     /// the last change is kept.
     pub fn set_query_placing(&mut self, query: &str, value: Option<&str>) -> bool {
+        self.set_query_placing_with(query, |_| value)
+    }
+
+    /// [`Self::set_query_placing`] for a list in sections, each with its
+    /// own row an untouched list would commit. `value` is handed the
+    /// top-ranked row's text and names the row to keep when nothing
+    /// outranks it: the row of the section the query landed in. With one
+    /// row for the whole list, a query every row of another section shares
+    /// would light the first of them, and Enter would commit a row the
+    /// user did not choose.
+    pub fn set_query_placing_with<'a>(
+        &mut self,
+        query: &str,
+        value: impl FnOnce(&str) -> Option<&'a str>,
+    ) -> bool {
         if query == self.query {
             return false;
         }
         self.query = query.to_string();
         self.place(None);
-        if let Some(value) = value
-            && self
-                .highlighted_text()
-                .is_some_and(|top| listfilter::level(&self.query, top, value))
+        if let Some(top) = self.highlighted_text()
+            && let Some(value) = value(top)
+            && listfilter::level(&self.query, top, value)
             && let Some(at) = self
                 .ranked
                 .iter()
@@ -358,6 +372,53 @@ mod tests {
             list.highlighted_text(),
             Some("Bamboo"),
             "a named row the query filters out falls back to the top rank"
+        );
+    }
+
+    /// A list in two sections names the row to keep from the top-ranked
+    /// row: a query that lands in the second section keeps that section's
+    /// row on a tie, and never the first section's.
+    #[test]
+    fn set_query_placing_with_keeps_the_row_of_the_section_the_query_lands_in() {
+        let rows = ["get alpha", "get beta", "set alpha", "set beta"];
+        let keep = |top: &str| {
+            Some(if top.starts_with("set") {
+                "set beta"
+            } else {
+                "get beta"
+            })
+        };
+        let mut list = ChoiceList::new(opts(&rows), 12);
+        assert!(list.set_query_placing_with("set", keep));
+        assert_eq!(
+            list.highlighted_text(),
+            Some("set beta"),
+            "the set rows tie"
+        );
+        assert!(list.set_query_placing_with("get", keep));
+        assert_eq!(
+            list.highlighted_text(),
+            Some("get beta"),
+            "the get rows tie"
+        );
+        assert!(list.set_query_placing_with("set a", keep));
+        assert_eq!(
+            list.highlighted_text(),
+            Some("set alpha"),
+            "a row ranked above the section's own takes the highlight"
+        );
+        assert!(list.set_query_placing_with("", keep));
+        assert_eq!(
+            list.highlighted_text(),
+            Some("get beta"),
+            "a blank query: the first row's section"
+        );
+        assert!(!list.set_query_placing_with("", keep), "unchanged");
+        assert!(list.set_query_placing_with("zzz", keep));
+        assert_eq!(
+            list.highlighted_text(),
+            None,
+            "nothing ranked, nothing asked"
         );
     }
 

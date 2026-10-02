@@ -18,9 +18,6 @@ use crate::tiling::TileId;
 /// tile, the group it follows and that group's scope generation.
 pub(super) type LinkLabelKey = (TileId, Group, u64);
 
-/// The column whose single value a group's scope is named by.
-const UNDERLYING: &str = "underlying_ref";
-
 impl ShellView {
     /// Bring the status bar's `following` label up to date with the focused
     /// tile. The label is rebuilt only when the tile, its
@@ -48,7 +45,7 @@ impl ShellView {
             return;
         }
         self.link_label = key.map(|key| {
-            let underlying = frame.group_scope(key.1).sole(UNDERLYING);
+            let underlying = geode_core::link::underlying_of(frame.group_scope(key.1));
             (key, status::following_label(key.1, underlying))
         });
     }
