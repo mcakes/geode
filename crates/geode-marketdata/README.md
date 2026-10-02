@@ -175,7 +175,9 @@ cargo bench -p geode-marketdata    # matrix index, window fill and draft
   installed index and the draft): the panel's dataset, its document key and
   the whole document's rows. The entry is posted while the draft is not
   clean, a `Behind` or `Sent` draft included, so the board holds exactly
-  what the panel paints; a clean panel and a reverted draft post no
+  what the panel paints, and it carries the draft's state as its
+  `DraftMark` (`Editing`, `Behind`, `Sent`) so a follower can tell a held or
+  sent draft from a live edit; a clean panel and a reverted draft post no
   document. A draft the builder refuses posts no document either, and the
   scope is still posted.
 - The assembled rows are cached (`Emitted`) on the document key, the painted

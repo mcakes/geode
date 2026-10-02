@@ -799,7 +799,8 @@ key, and the rows the upload builder assembles from the painted base, the
 installed index and the draft, whole, as `:upload` would send them. It is
 posted while the draft is not clean, so an `Editing`, a `Behind` and a
 `Sent` draft are all on the board: the board shows exactly what the panel
-paints. A clean panel posts no document, since a reader has the delivered
+paints. The entry carries that state as its `DraftMark`, since a follower
+cannot tell the three apart from the rows. A clean panel posts no document, since a reader has the delivered
 one. `:revert` takes the document off the board. A draft the builder
 refuses (an inserted dividend row with no amount, say) posts no document;
 the scope is still posted.

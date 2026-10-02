@@ -639,7 +639,11 @@ list of board entries. The blotter and the pricer post the cursor row's one
 underlying as a one-value `underlying_ref` scope
 (`geode_core::link::underlying_scope`); a market-data panel posts its
 underlying and, while its draft is not clean (`Editing`, `Behind` and `Sent`
-alike), its draft document (see [features](features.md)). A tile's
+alike), its draft document (see [features](features.md)). Each entry carries
+a `DraftMark` (`Editing`, `Behind` or `Sent`, with `label()` the word a
+follower shows, none for a live edit): the rows alone cannot tell a live
+edit from the old base held behind a newer document or an upload awaiting
+its echo. A tile's
 content is type-erased (`Box<dyn TileContent>` beside an `AnyView`), so the
 shell cannot observe the tile's entity. `TileContent::watch_emission(changed)`
 has the module subscribe to its own entity and call `changed`, which carries
@@ -653,10 +657,10 @@ its next change.
 A post writes only what changed:
 
 - An emission equal to the tile's last (the same scope, and board entries
-  comparing equal by allocation, `Arc::ptr_eq`) writes nothing and notifies
-  nobody, so a pull on every notification of an emitting tile is cheap. It
-  also does not retake a board key another emitter posted since, or restore
-  a scope another writer moved.
+  comparing equal by allocation, `Arc::ptr_eq`, and by mark) writes nothing
+  and notifies nobody, so a pull on every notification of an emitting tile
+  is cheap. It also does not retake a board key another emitter posted
+  since, or restore a scope another writer moved.
 - An emission with no scope leaves the group's scope as it is. The cursor
   resting on a row that names no single underlying does not clear the
   group.
@@ -676,8 +680,10 @@ shell pulls as it joins.
 
 A reader holds a `BoardWatch` (`Frame::watch_board`, for a dataset or one
 document key, or a key prefix at a part boundary) and compares its
-`revision()`; `Frame::board_entry` returns the draft and `board_gen` counts a
-board's changes. Board changes move only these revisions. They never move the
+`revision()`; `Frame::board_entry` returns the posted `BoardEntry` (its rows
+and mark) and `board_gen` counts a board's changes. A key changes when its
+entry arrives, leaves, or holds another allocation or another mark, so a
+draft falling behind or being sent moves the watch with the same rows. Board changes move only these revisions. They never move the
 frame's `data` version, so a draft edited at typing speed does not requery
 tiles that watch published data, and they are never staged behind a flip
 barrier: a draft is not a publish. Watches are held weakly and reaped at the

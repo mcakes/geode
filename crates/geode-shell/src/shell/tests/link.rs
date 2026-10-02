@@ -10,7 +10,7 @@ use crate::module::recording::{Recorded, RecordingFactory};
 use crate::shell::choicedialog::{NO_GROUP_TO_JOIN, NO_TILE_TO_LINK, TILE_GONE, Target};
 use crate::tiling::WorkspaceIx;
 use geode_core::document::DocumentRows;
-use geode_core::link::{BoardEntry, Emission, Group};
+use geode_core::link::{BoardEntry, DraftMark, Emission, Group};
 use geode_core::query::{AsOf, QueryKey};
 use geode_core::scope::Scope;
 use std::cell::{Cell, RefCell};
@@ -600,6 +600,7 @@ fn emission_for(u: &str, rows: &Arc<DocumentRows>) -> Emission {
             dataset: DRAFTS.into(),
             key: vec![u.into()],
             rows: Arc::clone(rows),
+            mark: DraftMark::Editing,
         }],
     }
 }
